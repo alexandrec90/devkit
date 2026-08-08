@@ -57,8 +57,8 @@ def windowless(python: str) -> str:
     Falls back to the given interpreter when there is no `pythonw` beside it (a
     virtualenv without one, a non-CPython build). A visible window beats no scheduler.
     """
-    candidate = Path(python).with_name("pythonw.exe")
-    return str(candidate) if candidate.is_file() else python
+    candidate = os.path.join(os.path.dirname(python), "pythonw.exe")
+    return candidate if os.path.isfile(candidate) else python
 
 
 def reconcile_command(
