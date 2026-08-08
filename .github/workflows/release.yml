@@ -34,6 +34,20 @@ permissions:
   contents: write
   pull-requests: write
 
+# One release run at a time, and never cancelled. Both halves matter, and neither was
+# here until `test_ci_workflow_contract.py` asked for the block:
+#
+#   * Serializing is the point. Two dispatches in flight — a double-clicked `prepare`,
+#     or a `tag` started while a `prepare` is still pushing — race on the same branch
+#     and the same tag. The loser fails somewhere after it has already committed and
+#     pushed, which is the one state RELEASING.md's ordering exists to avoid.
+#   * `cancel-in-progress: false` because a superseded release run is not a wasted PR
+#     run. It is mid-way through pushing a branch, opening a PR, or publishing a tag,
+#     and killing it there leaves exactly the half-applied release nothing cleans up.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest

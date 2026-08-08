@@ -654,6 +654,40 @@ def test_lint_all_does_not_rewrite_the_vendored_harness(tmp_path):
     assert not changed, f"lint-all rewrote vendored harness files: {changed}"
 
 
+def test_a_generated_project_satisfies_the_vendored_ci_contract(tmp_path):
+    """The rendered CI surface must pass the check that is vendored alongside it.
+
+    `test_ci_workflow_contract.py` requires four files, and only two of them arrive
+    vendored. The other two — `dependabot.yml` and `nightly.yml` — are rendered from
+    `templates/`, so the requirement and the thing that satisfies it live in different
+    tiers and are edited by different changes. A template that stops emitting one, or
+    emits it without a `schedule:` or without `cancel-in-progress: false`, hands the
+    new owner a repo that fails its own first CI run.
+
+    Run as a subprocess, in the generated tree: the module resolves everything off its
+    own `conftest.REPO_ROOT`, so importing it here would test devkit against devkit and
+    pass for the wrong reason.
+    """
+    import subprocess
+
+    args = make_args(parent=str(tmp_path))
+    the_plan = new_project.plan(args, registry())
+    the_plan.root.mkdir(parents=True, exist_ok=True)
+    new_project.render_tree(the_plan, dry_run=False)
+    new_project.write_package(the_plan, dry_run=False)
+    new_project.vendor_harness(the_plan, dry_run=False)
+
+    contract = "scripts/hooks/tests/test_ci_workflow_contract.py"
+    assert (the_plan.root / contract).exists(), f"{contract} was not vendored"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", contract, "-q"],
+        cwd=the_plan.root,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_generated_python_is_already_ruff_format_clean(tmp_path):
     """A new project's first `pre-commit run` must not rewrite its own files.
 

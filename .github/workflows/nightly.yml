@@ -1,0 +1,144 @@
+name: Nightly
+
+# The scheduled counterpart to the PR gate, and the only signal main gets in a week
+# with no merges.
+#
+# A gate fires on a change, so it is structurally blind to every failure that arrives
+# without one. Two of those matter here:
+#
+#   * The runner and the network. `full-suite` is the gate's substance run again on a
+#     fresh image, with the actionlint installer and `npm ci` reaching the network
+#     they reach in every session. A failure there is not devkit's code; it is devkit
+#     being unbuildable this morning, which is worth knowing before someone starts.
+#   * The toolchain moving underneath the lock. devkit has no runtime dependencies by
+#     contract, so the only Python that can break it is its `dev` group -- ruff, mypy,
+#     pytest -- and `uv.lock` pins those until Dependabot's weekly PR moves them.
+#     `unlocked-toolchain` resolves them fresh, which turns "a new ruff broke the
+#     build" from something discovered inside a bump PR into something known the
+#     morning it was published.
+#
+# `full-suite` is the shape every project gets: it is rendered from
+# `templates/core/dot-github/workflows/nightly.yml.tmpl`, and
+# `scripts/hooks/tests/test_ci_workflow_contract.py` refuses to let a project go
+# without one. `unlocked-toolchain` is devkit's own extra, the same way a consumer's
+# gate carries its own services -- devkit is the repo whose dev group *is* the product
+# surface, since a ruff release that breaks `lint-all.py` breaks it in every consumer.
+
+on:
+  schedule:
+    # 04:00 UTC. The rendered template uses 02:00, so devkit's own failure and a
+    # consumer's do not arrive in the same minute — devkit's is usually the cause.
+    - cron: "0 4 * * *"
+  # Required by the CI contract, and load-bearing: a scheduled job that cannot be
+  # started by hand can only be debugged one attempt per day.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize without cancelling. A manual dispatch during the scheduled window, or a
+# slow run overrunning into the next night, must not kill the run in flight — it is
+# the only unattended signal main gets, and a cancelled run reports no conclusion at
+# all rather than a failure.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  full-suite:
+    name: Lint + both test trees
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: `latest_devkit_tag()` shells out to `git describe --tags`,
+          # which needs the tags and a history reaching them. See pr-gate.yml.
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-python-env
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install Markdown linters
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Markdown
+        run: npm run lint:markdown
+      - name: Format
+        # First, before anything that can rewrite a file — `lint-all.py` auto-fixes by
+        # design, so running it earlier repairs drift and then reports clean.
+        run: uv run ruff format --check .
+      - name: Install actionlint
+        # No `|| true`: a silently skipped install leaves the workflow files unchecked
+        # while the job still reports green for them.
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
+            | bash -s -- latest /usr/local/bin
+      - name: Lint + typecheck via the wrapper devkit ships
+        run: uv run python scripts/lint-all.py
+      - name: Upload lint artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-lint-errors
+          path: logs/lint-errors.log
+      - name: Hook-script tests (vendored tier)
+        run: uv run python -m pytest scripts/hooks/tests/ -q
+      - name: devkit tests (generator, ports, renderer)
+        run: uv run python scripts/run-tests.py
+      - name: Upload test artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-test-failures
+          path: logs/test-failures.log
+
+  unlocked-toolchain:
+    name: Freshly resolved dev toolchain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # Deliberately NOT `./.github/actions/setup-python-env`: that action syncs from
+      # the committed uv.lock, which is the one thing this job exists to ignore.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pip install uv
+      - name: Resolve the dev group at its newest allowed versions
+        # `--upgrade` re-resolves instead of replaying the lock. The result is never
+        # committed back: a nightly that pushed a resolution would be choosing devkit's
+        # toolchain unattended, which is Dependabot's job precisely because it is
+        # reviewable.
+        run: |
+          uv lock --upgrade
+          uv sync --all-extras --all-groups
+      - name: Report what moved
+        # Into the run summary rather than the log. When this job fails, the first
+        # question is always which package changed, and a `uv.lock` diff buried under
+        # a resolver trace is the least readable place to answer it.
+        run: |
+          {
+            echo '### Resolved off-lock'
+            echo
+            echo '```'
+            git --no-pager diff --stat -- uv.lock
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Format
+        run: uv run ruff format --check .
+      - name: Lint + typecheck
+        run: uv run python scripts/lint-all.py
+      - name: Hook-script tests (vendored tier)
+        run: uv run python -m pytest scripts/hooks/tests/ -q
+      - name: devkit tests (generator, ports, renderer)
+        run: uv run python scripts/run-tests.py
+      - name: Upload artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unlocked-toolchain-artifacts
+          path: logs/

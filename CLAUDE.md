@@ -112,6 +112,51 @@ They are deliberately separate, and the distinction is load-bearing.
   action's Python version moved to the caller (each gate passes its own at every call
   site — the action's default cannot know one).
 
+## The CI surface every project has
+
+Four files, and which tier each belongs to is decided by whether its *content* varies:
+
+| File | Tier | Why |
+| --- | --- | --- |
+| `.github/workflows/dependabot-automerge.yml` | vendored | nothing in it varies |
+| `.github/actions/setup-python-env/action.yml` | vendored | its one variable moved to the caller |
+| `.github/workflows/pr-gate.yml` | template | its jobs are the project's |
+| `.github/workflows/nightly.yml` | template | same, plus the tiers too slow to gate on |
+| `.github/dependabot.yml` | template | names the ecosystems this project ships |
+
+`scripts/hooks/tests/test_ci_workflow_contract.py` is vendored alongside them and
+requires **all four to exist**, plus the settings that make an unattended run safe: a
+top-level `permissions:` block, a `concurrency:` group, `cancel-in-progress: false` on
+anything scheduled, and no action pinned to a mutable ref.
+
+That test exists because **`templates/` cannot notice an absence.** A one-shot copy has
+no way to report that a project never received a file or later deleted one, and the
+result was measurable: of six repos in this workspace, one had a nightly, five had a
+`dependabot.yml`, and two had nothing that could merge a Dependabot PR. None of those
+gaps is visible from inside the repo that has it — a missing nightly does not fail, it
+just never reports that the world moved under a branch nobody pushed to. The contract
+test does not supply the workflow; it refuses to let a project go without one, and the
+failure message carries the minimal file to add.
+
+Adding a required file therefore has a cost the vendored tier does not: an existing
+project's next `--pull` gets the *requirement* and not the render, and goes red until
+someone writes the file. That is intended, and it is the reason the required set is
+small and every entry has to earn its place.
+
+The nightly is the one worth arguing for explicitly, since a gate already runs
+everything. A gate fires on a change, so it cannot see the failures that arrive without
+one: a dependency published inside the project's version bounds, a runner image bump, an
+expired credential, a test that is flaky rather than broken. devkit's own nightly adds a
+second job — `unlocked-toolchain`, which resolves the `dev` group off-lock — because
+devkit's dev group *is* its product surface: a ruff release that breaks `lint-all.py`
+breaks it in every consumer, and the lock hides that until Dependabot's weekly PR.
+
+Deliberately **not** normalized, and each for the same reason (it encodes one project's
+economics, not a shared practice): carameli's `weekly.yml` (mutation testing, migration
+round-trip, a reliability issue comment), `sandbox-tests.yml` (a paid provider tier),
+`dependabot-lock-repair.yml` (pip-tools universal locks, which no other project uses),
+and `on-demand.yml` (an agent-fixer loop).
+
 ## The two channels
 
 devkit ships the same discipline through two mechanisms, and which one a thing belongs to
