@@ -387,14 +387,12 @@ def test_this_workstations_root_actually_runs_the_guard():
 # drifts out of shape AND when a listed one is fixed without being removed from here.
 # That second half is what stops this becoming the same silent permanent skip it exists
 # to replace.
-UNADOPTED_EXCEPTIONS = {
-    # Both ibkr_trader entries have left this list, and the ratchet's second half is
-    # what noticed each time. The worktree sibling was the slower of the two: a linked
-    # worktree checks out the same tracked files, so it carried DEVKIT_VERSION and the
-    # pre-commit config from the moment ibkr_trader adopted, and only showed up here
-    # while its anchor branch still predated the adoption commit.
-    "data-lake": "vendored, but ships no .pre-commit-config.yaml, so no gate ever runs",
-}
+# Empty, and that is the point: every registered checkout is now inside the harness.
+# Both ibkr_trader entries left first, then data-lake once it grew the
+# .pre-commit-config.yaml its entry said it lacked -- and the ratchet's second half is
+# what noticed each time, rather than the entry sitting here forever describing a state
+# that had stopped being true.
+UNADOPTED_EXCEPTIONS: dict[str, str] = {}
 
 
 @needs_live_workspace
