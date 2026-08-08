@@ -55,6 +55,10 @@ otel_http = 4318
 #
 #   carameli      slot 0 -> db 5432   matches its stack exactly
 #   ibkr_trader   slot 1 -> db 5433   matches the port pinned in its compose file
+#   (the `-b` checkouts held slots 2, 3, 5 and 7 until the ephemeral-box tier replaced
+#   them. Four permanent numbers spent on a second checkout per repo is exactly what a
+#   LEASE is for, and freeing them raised the concurrent-box ceiling from 8 to 12.)
+#
 #   carameli-b    slot 2 -> db 5434   db and minio match; app/frontend/redis/
 #                                     minio-console in its (gitignored) .env predate
 #                                     this file and are one below slot 2. Nothing
@@ -68,9 +72,5 @@ otel_http = 4318
 # approach — a full stack per worktree — which is why it needs the offsets.
 carameli = 0
 ibkr_trader = 1
-carameli-b = 2
-ibkr_trader-b = 3
 sports_betting = 4
-sports_betting-b = 5
 apt-finder = 6
-apt-finder-b = 7

@@ -239,14 +239,15 @@ def test_an_unscoped_action_applies_everywhere():
     assert in_scope(ACTIONS["lint"], "anything-at-all")
 
 
-def test_a_scoped_action_applies_to_both_halves_of_its_worktree_pair():
-    """Both halves always, because they are two checkouts of one repo — a script that
-    exists in one exists in the other, so scoping to just the primary would make the `-b`
-    picker option a guaranteed error."""
-    for name in ("carameli", "carameli-b"):
-        assert in_scope(ACTIONS["e2e"], name)
-    for name in ("ibkr_trader", "ibkr_trader-b"):
-        assert in_scope(ACTIONS["backtest"], name)
+def test_a_scoped_action_applies_to_the_checkouts_that_can_run_it():
+    """One checkout per repo now. This asserted "both halves of its worktree pair" back
+    when every repo was checked out twice; the `-b` tier is gone (ephemeral boxes give
+    unbounded concurrency instead of two), so the scope and the picker are both single
+    and `test_a_scoped_task_offers_exactly_the_checkouts_its_action_allows` is what keeps
+    them agreeing."""
+    assert in_scope(ACTIONS["e2e"], "carameli")
+    assert in_scope(ACTIONS["backtest"], "ibkr_trader")
+    assert not in_scope(ACTIONS["e2e"], "carameli-b")
 
 
 def test_an_out_of_scope_checkout_is_refused_by_name():
@@ -262,7 +263,7 @@ def test_scoping_crosses_neither_direction_between_the_two_repos():
 
 
 def test_an_in_scope_checkout_passes_the_check():
-    check_scope(ACTIONS["e2e"], "carameli-b")  # must not raise
+    check_scope(ACTIONS["e2e"], "carameli")  # must not raise
 
 
 def test_the_scoped_actions_cover_every_hoisted_project_task():

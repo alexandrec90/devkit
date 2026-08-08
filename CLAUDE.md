@@ -173,11 +173,19 @@ a real decision:
 | | Static checkout | Ephemeral box |
 | --- | --- | --- |
 | Lives in | `<workspace>/<project>` | `<workspace>/.worktrees/<box>` |
+| How many per repo | exactly one | as many as there are tasks in flight |
 | Listed in `alex-projects.code-workspace` | yes | **no** — `sweep.py` never sees it |
 | Port slot | pinned in `ports.toml` `[slots]` | leased on spawn, released on reap |
 | Managed by | `sweep.py` (`--branch` → `--ship` → `--sync`) | `worktree.py` (`new` → `provision` → `/ship` → `reconcile`) |
 | Toolchain | installed once, by hand, years ago | installed per box by `new` |
 | Use it when | a human browses the stack, or the work is long-lived | an agent has one task |
+
+There used to be a second static checkout per repo (`carameli-b`, `ibkr_trader-b`, …),
+which existed purely to let two tasks run at once. Boxes do that without a ceiling of
+two, so the `-b` tier was retired: it was spending four permanent `ports.toml` slots and
+a container set per repo on concurrency the ephemeral tier provides for free, and it was
+the sole reason the workspace needed a "which checkout owns this work" convention.
+Freeing those slots raised the concurrent-box ceiling from 8 to 12.
 
 The static tier's whole problem is that a checkout **outlives its task**. That is where
 `sweep.py`'s workload comes from: `needs-branch`, `needs-rebranch`, `spent-branch`, the
@@ -286,17 +294,21 @@ agent), and overwrite per run.
 
 ## VS Code tasks
 
-**Tasks live in the workspace file, never in a repo's `.vscode/tasks.json`.** Every repo
-is checked out twice (`carameli`/`carameli-b`), and both are folders in one multi-root
-workspace — so a task defined inside a repo is rendered once per folder: two quick-pick
-entries under one label, nothing indicating which checkout each would run in, and two
-copies that disagree as soon as the worktrees sit on different branches. devkit and both
-live repos now ship zero project-level tasks, and each one's suite fails if that changes.
+**Tasks live in the workspace file, never in a repo's `.vscode/tasks.json`.** The
+original reason was the `-b` tier: every repo was checked out twice, both folders were
+in one multi-root workspace, and a task defined inside a repo rendered once per folder —
+two quick-pick entries under one label, nothing saying which checkout each would run in,
+and two copies that disagreed the moment the worktrees sat on different branches.
+
+That tier is gone, and the rule survives it. A task defined in a repo is invisible from
+the workspace root, cannot be scoped with `Action.projects`, and drifts from its
+siblings; the workspace file is the one place that sees every checkout. devkit and both
+live repos ship zero project-level tasks, and each one's suite fails if that changes.
 
 **Project-specific is not a reason to keep a task local.** `Action.projects` in
-`devkit_project.py` scopes an action to one repo's worktree pair; the workspace pairs it
-with a two-option picker (main or `-b`). That is how carameli's Playwright run and
-ibkr_trader's backtests are defined once without pretending every checkout can run them.
+`devkit_project.py` scopes an action to the checkouts that can run it. That is how
+carameli's Playwright run and ibkr_trader's backtests are defined once without
+pretending every checkout can run them.
 The scope restricts both directions — the dispatcher refuses an out-of-scope checkout by
 name, and `--check` stops demanding the script from projects it was never meant for.
 

@@ -870,6 +870,36 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "Worktree: Reconcile — merge, reap, reclaim disk",
+			"detail": "DRY RUN by default. The unattended pass a schedule runs: reap every box whose PR has MERGED, reap unused boxes, and — when free space is at or under the floor — reap boxes whose PR is merely open (the remote holds every commit, so only the checkout is lost). NEVER touches a box holding unshipped work; it names those instead. Merging is off unless you pick it.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"scripts/notify-wrap.py",
+				"Worktree: Reconcile",
+				"--",
+				"python",
+				"scripts/worktree.py",
+				"reconcile",
+				"${input:reconcileMerge}",
+				"${input:sweepApply}"
+			],
+			"options": {
+				"cwd": "${workspaceFolder:devkit}"
+			},
+			"icon": {
+				"id": "git-merge",
+				"color": "terminal.ansiBrightGreen"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
 			"label": "Ports: Show Checkout Allocations",
 			"detail": "Print the *_HOST_PORT block for each selected checkout. Use it to rebuild .env files after worktree changes rather than picking free-looking numbers.",
 			"type": "process",
@@ -940,15 +970,11 @@
 						"minCount": 1,
 						"options": [
 							"carameli",
-							"carameli-b",
 							"ibkr_trader",
-							"ibkr_trader-b",
 							"devkit",
 							"data-lake",
 							"apt-finder",
-							"apt-finder-b",
-							"sports_betting",
-							"sports_betting-b"
+							"sports_betting"
 						]
 					}
 				]
@@ -962,15 +988,11 @@
 			"description": "Which checkout should supply the Docker override?",
 			"options": [
 				"carameli",
-				"carameli-b",
 				"ibkr_trader",
-				"ibkr_trader-b",
 				"devkit",
 				"data-lake",
 				"apt-finder",
-				"apt-finder-b",
-				"sports_betting",
-				"sports_betting-b"
+				"sports_betting"
 			],
 			"default": "carameli"
 		},
@@ -984,15 +1006,11 @@
 			"description": "Which repo should the box be cut from?",
 			"options": [
 				"carameli",
-				"carameli-b",
 				"ibkr_trader",
-				"ibkr_trader-b",
 				"devkit",
 				"data-lake",
 				"apt-finder",
-				"apt-finder-b",
-				"sports_betting",
-				"sports_betting-b"
+				"sports_betting"
 			],
 			"default": "carameli"
 		},
@@ -1055,9 +1073,9 @@
 				"separator": ",",
 				"optionGroups": [
 					{
-						"label": "Select one or both checkouts",
+						"label": "Select the checkout",
 						"minCount": 1,
-						"options": ["carameli", "carameli-b"]
+						"options": ["carameli"]
 					}
 				]
 			}
@@ -1074,9 +1092,9 @@
 				"separator": ",",
 				"optionGroups": [
 					{
-						"label": "Select one or both checkouts",
+						"label": "Select the checkout",
 						"minCount": 1,
-						"options": ["ibkr_trader", "ibkr_trader-b"]
+						"options": ["ibkr_trader"]
 					}
 				]
 			}
@@ -1102,9 +1120,7 @@
 						"minCount": 1,
 						"options": [
 							"carameli",
-							"carameli-b",
-							"ibkr_trader",
-							"ibkr_trader-b"
+							"ibkr_trader"
 						]
 					}
 				]
@@ -1423,15 +1439,11 @@
 						"minCount": 1,
 						"options": [
 							"carameli",
-							"carameli-b",
 							"ibkr_trader",
-							"ibkr_trader-b",
 							"devkit",
 							"data-lake",
 							"apt-finder",
-							"apt-finder-b",
-							"sports_betting",
-							"sports_betting-b"
+							"sports_betting"
 						]
 					}
 				]
@@ -1459,18 +1471,30 @@
 						"minCount": 1,
 						"options": [
 							"carameli",
-							"carameli-b",
 							"ibkr_trader",
-							"ibkr_trader-b",
 							"data-lake",
 							"apt-finder",
-							"apt-finder-b",
-							"sports_betting",
-							"sports_betting-b"
+							"sports_betting"
 						]
 					}
 				]
 			}
+		},
+		{
+			"id": "reconcileMerge",
+			"type": "pickString",
+			"description": "Merge green PRs, or only clean up?",
+			"options": [
+				{
+					"label": "Clean up only — merging PRs stays yours",
+					"value": "--no-merge"
+				},
+				{
+					"label": "Also squash-merge every PR whose gate is green",
+					"value": "--merge"
+				}
+			],
+			"default": "--no-merge"
 		},
 		{
 			"id": "sweepApply",

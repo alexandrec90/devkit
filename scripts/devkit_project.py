@@ -21,11 +21,13 @@ local because the projects genuinely have different test and lint pipelines.
 
 **Not every action is generic, and that is fine.** An `Action` may name the checkouts it
 applies to (`projects=`), which is what let the last project-level `.vscode/tasks.json`
-files be deleted outright. A task is duplicated once per *worktree* — carameli and
-carameli-b are two folders in one multi-root workspace, so a task defined in the repo
-appears twice in the quick-pick and you have to know which copy you clicked. Defining it
-here once with a two-option picker (main or `-b`) removes the duplicate without
-pretending a Playwright run or an IBKR backtest is something every project can do.
+files be deleted outright. Defining a task here once, rather than in the repo, keeps one
+quick-pick entry per action without pretending a Playwright run or an IBKR backtest is
+something every project can do. (This also read "a task is duplicated once per
+worktree", which was the `-b` tier's doing: every repo was checked out twice, so a
+repo-level task appeared twice with no way to tell the copies apart. That tier is gone —
+agent work lands in an ephemeral box instead — but the argument for defining tasks here
+survives it.)
 `projects` restricts both halves: the dispatcher refuses an out-of-scope checkout, and
 `--check` stops demanding the script from projects the action was never meant for.
 
@@ -73,20 +75,26 @@ class Action:
     # still has to happen inside a specific repo, like the git sync.
     owner: str = "project"
     # Which checkouts this action applies to; empty means every one of them. Naming the
-    # worktree pair (`("carameli", "carameli-b")`) is how a genuinely project-specific
-    # action lives here instead of in that repo's `.vscode/tasks.json`, where it was
-    # duplicated per worktree. Names rather than a capability probe because the workspace
-    # pickers already list checkouts by name, and a stale entry fails loudly here.
+    # checkout (`("carameli",)`) is how a genuinely project-specific action lives here
+    # instead of in that repo's `.vscode/tasks.json`. Names rather than a capability
+    # probe because the workspace pickers already list checkouts by name, and a stale
+    # entry fails loudly here.
     projects: tuple[str, ...] = ()
 
 
 PROJECT = "project"
 DEVKIT = "devkit"
 
-# The worktree pairs. Both halves of a pair always get the same action: they are two
-# checkouts of one repo, so a script that exists in one exists in the other.
-CARAMELI = ("carameli", "carameli-b")
-IBKR = ("ibkr_trader", "ibkr_trader-b")
+# Project scopes for actions that only one repo can run.
+#
+# These were worktree *pairs* -- `("carameli", "carameli-b")` -- back when every repo was
+# checked out twice so two tasks could run at once. The `-b` tier is gone: an agent's
+# work now lands in an ephemeral box (`worktree.py`), which gives unbounded concurrency
+# instead of exactly two and does not leave a checkout outliving its task. What is left
+# is a one-element scope, kept as a tuple because `Action.projects` is a tuple and a
+# second checkout of some repo may well come back.
+CARAMELI = ("carameli",)
+IBKR = ("ibkr_trader",)
 
 # Checkouts with a database and an Alembic tree. Scoped by NAME like the pairs above
 # rather than probed for the script, because `--check`'s whole job is to report a project

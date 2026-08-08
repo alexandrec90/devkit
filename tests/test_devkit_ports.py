@@ -133,7 +133,9 @@ def test_the_shipped_registry_matches_the_ports_the_stacks_publish_today():
     registry = load(REPO_ROOT)
     assert registry.ports_for("carameli", ["db"]) == {"db": 5432}
     assert registry.ports_for("ibkr_trader", ["db"]) == {"db": 5433}
-    assert registry.ports_for("carameli-b", ["db"]) == {"db": 5434}
+    # carameli-b held slot 2 (db 5434) until the `-b` tier was retired. Its slot is now
+    # free for an ephemeral box to lease, which is the whole point of freeing it.
+    assert "carameli-b" not in registry.slots
 
 
 def test_no_two_shipped_checkouts_share_a_port():
