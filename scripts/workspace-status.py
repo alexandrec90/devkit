@@ -221,7 +221,11 @@ def retired_hooks_line(root: Path, names: list[str], source: Path = REPO_ROOT) -
         return ""
     try:
         sync = load_by_path("_sync_devkit", source / "scripts" / "sync-devkit.py")
-        retired = tuple(rel.rsplit("/", 1)[-1] for rel in sync.RETIRED_PATHS)
+        # Repo-relative paths, and only the ones that could BE a hook. Matching on the
+        # basename made `README.md` a retired hook here (RETIRED_PATHS carries
+        # `.claude/skills/state-tools/README.md`) and named every checkout whose
+        # settings mention a README -- which is a markdownlint hook, wired and live.
+        retired = sync.retired_hook_paths()
         settings_rel = sync.SETTINGS_FILE
     except Exception:
         return ""
@@ -233,7 +237,8 @@ def retired_hooks_line(root: Path, names: list[str], source: Path = REPO_ROOT) -
             text = path.read_text(encoding="utf-8") if path.is_file() else ""
         except OSError:
             continue
-        hits = sorted({hook for hook in retired if hook and hook in text})
+        probe = text.replace("\\\\", "/").replace("\\", "/")
+        hits = sorted({rel.rsplit("/", 1)[-1] for rel in retired if rel in probe})
         if hits:
             offenders.append(f"{name} ({', '.join(hits)})")
     if not offenders:

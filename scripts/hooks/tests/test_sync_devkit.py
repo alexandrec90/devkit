@@ -917,6 +917,39 @@ def test_prune_settings_is_silent_when_there_is_no_settings_file(tmp_path):
     assert sh.prune_settings(tmp_path, ("scripts/hooks/branch-per-task.py",)) == []
 
 
+def test_a_live_hook_merely_mentioning_a_retired_basename_is_kept():
+    """Regression. Matching on the BASENAME made `README.md` a retired "hook", because
+    `.claude/skills/state-tools/README.md` is in RETIRED_PATHS -- and carameli wires a
+    markdownlint hook whose command lists `"README.md"` among its arguments. A pull
+    would have silently deleted that hook from its settings.
+
+    Matching on the repo-relative path is both precise and correct: a hook command
+    embeds the path (`.../scripts/hooks/branch-on-write.py`), never the bare name.
+    """
+    lint = 'markdownlint-cli2 --config .config.yaml "docs/roadmap.md" "README.md"'
+    payload = _settings(lint)
+    pruned, dropped = sh.prune_hook_commands(payload, (".claude/skills/state-tools/README.md",))
+    assert dropped == []
+    assert pruned == payload
+
+
+def test_only_scripts_can_be_retired_hooks():
+    """A retired skill, rule or test file can never be a hook command, so it must not
+    even be a candidate -- that is what keeps a name like `README.md` out of the
+    matching set in the first place."""
+    candidates = sh.retired_hook_paths(
+        (
+            "scripts/hooks/branch-on-write.py",
+            "scripts/hooks/tests/test_branch_on_write.py",
+            ".claude/skills/state-tools/README.md",
+            ".claude/skills/test-skill/write-artifacts.py",
+        )
+    )
+    assert "scripts/hooks/branch-on-write.py" in candidates
+    assert not any(c.endswith(".md") for c in candidates)
+    assert not any(c.startswith(".claude/") for c in candidates)
+
+
 def test_the_retired_branch_hooks_are_listed_so_a_pull_unwires_them():
     """Reversion check: drop these from RETIRED_PATHS and every consumer keeps a hook
     entry pointing at a file the same pull deleted."""

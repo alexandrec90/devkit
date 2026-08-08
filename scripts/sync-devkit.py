@@ -680,6 +680,25 @@ def retired_present(root: Path) -> list[str]:
 SETTINGS_FILE = ".claude/settings.json"
 
 
+def retired_hook_paths(retired: tuple[str, ...] | None = None) -> tuple[str, ...]:
+    """The retired entries that could plausibly be wired as a hook command.
+
+    `retired=None` reads `RETIRED_PATHS` **at call time**, not as a default bound when
+    this module was defined. The difference is not academic: `workspace-status.py`
+    loads this module by path and its test replaces `RETIRED_PATHS` on the loaded
+    module to prove the list is read from here rather than copied. A default captured
+    at def time silently ignores that, and the test would have been asserting nothing.
+
+    A hook command runs a Python script under `scripts/`. A retired skill, rule,
+    README or test file cannot be one, and including them is not merely wasteful --
+    it is how `README.md` came to be treated as a retired hook name. Narrowing the
+    candidate set here means the matching in `prune_hook_commands` and in
+    `workspace-status.retired_hooks_line` cannot go wrong the same way twice.
+    """
+    candidates = RETIRED_PATHS if retired is None else retired
+    return tuple(rel for rel in candidates if rel.startswith("scripts/") and rel.endswith(".py"))
+
+
 def prune_hook_commands(payload: object, retired: tuple[str, ...]) -> tuple[object, list[str]]:
     """`(settings, dropped)` with every hook command naming a retired script removed.
 
@@ -689,10 +708,17 @@ def prune_hook_commands(payload: object, retired: tuple[str, ...]) -> tuple[obje
     harmless — an event with an empty group list is a shape the harness has to parse,
     and the next reader cannot tell it from one that lost its hook by accident.
 
-    Matches on the basename, because the command is a shell string wrapping a path
-    (`python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/branch-on-write.py"`) whose
-    prefix varies per project and per platform. Nothing else in a settings file
-    mentions those basenames.
+    Matches on the **repo-relative path**, not the basename. The command is a shell
+    string wrapping a path (`python3
+    "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/branch-on-write.py"`) whose prefix varies
+    per project and per platform, but the tail is always the manifest path.
+
+    Basenames were tried first and are actively dangerous. `RETIRED_PATHS` holds
+    non-script entries too, one of which is `.claude/skills/state-tools/README.md` --
+    so `README.md` became a "retired hook", and carameli wires a markdownlint hook
+    whose command lists `"README.md"` among its arguments. This function would have
+    deleted that hook. `retired_hook_paths` narrows the candidates on top of that, so
+    a name that could never be a hook command is not even considered.
     """
     dropped: list[str] = []
     if not isinstance(payload, dict):
@@ -701,7 +727,7 @@ def prune_hook_commands(payload: object, retired: tuple[str, ...]) -> tuple[obje
     if not isinstance(hooks, dict):
         return payload, dropped
 
-    names = tuple(rel.rsplit("/", 1)[-1] for rel in retired)
+    names = retired_hook_paths(retired)
     events: dict[str, object] = {}
     for event, groups in hooks.items():
         if not isinstance(groups, list):
@@ -715,9 +741,13 @@ def prune_hook_commands(payload: object, retired: tuple[str, ...]) -> tuple[obje
             kept = []
             for entry in group["hooks"]:
                 command = entry.get("command", "") if isinstance(entry, dict) else ""
-                hit = next((n for n in names if isinstance(command, str) and n in command), "")
+                # Compared with forward slashes: a settings file written on Windows can
+                # spell the same hook `scripts\\hooks\\branch-on-write.py`, and the
+                # manifest paths are always POSIX.
+                probe = command.replace("\\", "/") if isinstance(command, str) else ""
+                hit = next((n for n in names if n in probe), "")
                 if hit:
-                    dropped.append(hit)
+                    dropped.append(hit.rsplit("/", 1)[-1])
                 else:
                     kept.append(entry)
             if kept:

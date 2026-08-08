@@ -480,3 +480,23 @@ def test_the_line_reaches_the_rendered_message():
     """A helper nothing calls is a check that reports nothing."""
     message = ws.render([], {}, "", retired="settings wire retired hooks: carameli (x.py)")
     assert "[workspace] settings wire retired hooks: carameli (x.py)" in message
+
+
+def test_a_markdownlint_hook_naming_a_readme_is_not_a_retired_hook(tmp_path):
+    """Regression. `.claude/skills/state-tools/README.md` is in RETIRED_PATHS, so
+    basename matching made `README.md` a retired hook -- and carameli's markdownlint
+    hook lists `"README.md"` among its arguments. Every checkout with a README in a
+    hook command was named, and `--pull` would have deleted that hook."""
+    _wire(
+        tmp_path,
+        "carameli",
+        'markdownlint-cli2 --config .config.yaml "docs/roadmap.md" "README.md"',
+    )
+    assert ws.retired_hooks_line(tmp_path, ["carameli"]) == ""
+
+
+def test_a_windows_spelled_hook_path_is_still_matched(tmp_path):
+    """A settings file written on Windows can spell the path with backslashes; the
+    manifest paths are always POSIX."""
+    _wire(tmp_path, "carameli", 'python3 "x\\scripts\\hooks\\branch-on-write.py"')
+    assert "branch-on-write.py" in ws.retired_hooks_line(tmp_path, ["carameli"])
