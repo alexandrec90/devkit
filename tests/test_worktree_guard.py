@@ -225,7 +225,22 @@ def test_the_deny_message_names_the_way_out():
     hook is supposed to not be."""
     message = guard.deny_message("carameli", "a.py", "/ws/.worktrees/b", "b", [])
     assert "/ship" in message
-    assert "reap b" in message
+    assert "provision b --yes" in message
+
+
+def test_the_deny_message_does_not_tell_the_agent_to_reap():
+    """It used to, and that now contradicts both `reconcile` and the /ship skill's
+    "do not clean up after yourself".
+
+    Reaping at /ship time destroys the box on the strength of the *push* rather than
+    the merge -- and if the PR step failed, the push is the one moment the work exists
+    only in the box. An instruction that races the thing that owns the lifecycle is
+    worse than no instruction.
+    """
+    message = guard.deny_message("carameli", "a.py", "/ws/.worktrees/b", "b", [])
+    assert "reap" not in message.split("Do NOT reap")[0]
+    assert "reconcile" in message
+    assert "MERGED" in message
 
 
 def test_the_block_message_gives_an_absolute_path_from_a_relative_workspace(

@@ -312,13 +312,15 @@ def deny_message(
         f"    python {devkit_worktree} provision {box} --yes",
         "",
         f"Then run every /ship step with the BOX as the working directory, because each "
-        f"one reads the repo it is run in (`cd {box_path}`), and reap it once the PR "
-        f"exists:",
-        f"    python {devkit_worktree} reap {box} --yes",
+        f"one reads the repo it is run in (`cd {box_path}`).",
         "",
-        f"Reap refuses while the box still holds unshipped work, so nothing can be "
-        f"stranded in it. For a task worth naming, `worktree.py new {project} "
-        f"--slug <topic> --yes` cuts a better-named one.",
+        "Do NOT reap the box afterwards. `worktree.py reconcile` runs on a schedule and "
+        "destroys it once its PR has actually MERGED; reaping at /ship time would do it "
+        "on the strength of the push instead, which is the one moment the work exists "
+        "only here if the PR was never created.",
+        "",
+        f"For a task worth naming, `worktree.py new {project} --slug <topic> --yes` cuts "
+        f"a better-named one.",
     ]
     if notes:
         lines += ["", *[f"note: {note}" for note in notes]]
