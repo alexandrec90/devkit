@@ -58,7 +58,6 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
-import os
 import re
 import subprocess
 import sys
@@ -94,10 +93,10 @@ Git = Callable[..., "subprocess.CompletedProcess[str]"]
 # rather than only the obvious ones: the sheer count is what makes this visible, so a
 # single unflagged call site inside a per-box loop brings the whole flicker back.
 #
-# `CREATE_NO_WINDOW` does not exist off Windows. Passing zero for `creationflags` is
-# the portable no-op and keeps each `subprocess.run` call's keyword shape explicit
-# enough for mypy to check.
-NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+# `CREATE_NO_WINDOW` does not exist off Windows. `getattr` supplies zero there, the
+# portable no-op, and keeps each `subprocess.run` call's keyword shape explicit enough
+# for mypy to check on both platforms.
+NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # --- verdicts ---------------------------------------------------------------
 # Ordered roughly by how much attention each needs.
