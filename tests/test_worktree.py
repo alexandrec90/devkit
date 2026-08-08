@@ -1380,3 +1380,75 @@ def test_reconcile_dry_run_changes_nothing(workspace, monkeypatch):
 def test_reconcile_cli_reports_and_exits_zero_on_an_empty_workspace(workspace, capsys):
     assert worktree.main(["reconcile", "--no-fetch", "--workspace", str(workspace)]) == 0
     assert "Nothing to reconcile" in capsys.readouterr().out
+
+
+# --- the scheduled pass leaves a record -------------------------------------
+
+
+def test_reconcile_writes_its_report_to_a_log(tmp_path):
+    """The scheduled run is windowless, so stdout goes nowhere. Without this the one
+    thing that destroys checkouts unattended would have no record of what it did."""
+    path = worktree.write_reconcile_log("reaped demo--x-0806", 0, root=tmp_path)
+    assert path == tmp_path / worktree.RECONCILE_LOG
+    body = path.read_text(encoding="utf-8")
+    assert "reaped demo--x-0806" in body
+    assert "exit=0" in body
+
+
+def test_the_log_is_written_on_success_too_not_only_on_failure(tmp_path):
+    """A log that only appears on failure cannot be told apart from a job that never
+    ran -- which is the failure mode a silent scheduled task actually has."""
+    worktree.write_reconcile_log("Nothing to reconcile.", 0, root=tmp_path)
+    assert (tmp_path / worktree.RECONCILE_LOG).is_file()
+
+
+def test_the_log_is_overwritten_per_run_not_appended(tmp_path):
+    worktree.write_reconcile_log("first pass", 0, root=tmp_path)
+    worktree.write_reconcile_log("second pass", 1, root=tmp_path)
+    body = (tmp_path / worktree.RECONCILE_LOG).read_text(encoding="utf-8")
+    assert "second pass" in body
+    assert "first pass" not in body
+
+
+def test_an_unwritable_log_never_fails_the_pass(tmp_path, monkeypatch):
+    """A reconcile that did its work must not report failure over a log file."""
+    monkeypatch.setattr(
+        worktree.Path, "mkdir", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only"))
+    )
+    assert worktree.write_reconcile_log("x", 0, root=tmp_path) is None
+
+
+# --- the scheduled pass opens no windows ------------------------------------
+# A process with no console of its own (pythonw.exe, which the scheduled reconcile
+# runs under) gets Windows to allocate a NEW console window per console child. One
+# pass spawns ~40 git/gh calls, so a single unflagged site is 40 flickering windows.
+
+
+def test_no_window_is_windows_only():
+    assert (sweep.NO_WINDOW != 0) is (worktree.os.name == "nt")
+
+
+def test_every_spawn_in_the_reconcile_path_suppresses_its_console():
+    """Source-level, because the symptom is only visible on a Windows desktop under
+    pythonw -- there is no runtime assertion that would have caught this, and the bug
+    it guards was shipped and noticed by a human watching windows flash."""
+    import re
+
+    for rel in ("scripts/sweep.py", "scripts/worktree.py", "scripts/worktree-guard.py"):
+        source = (worktree.REPO_ROOT / rel).read_text(encoding="utf-8")
+        calls = re.findall(r"subprocess\.run\((.*?)\n        \)", source, re.S)
+        calls += re.findall(r"subprocess\.run\((.*?)\n            \)", source, re.S)
+        for call in calls:
+            assert "NO_WINDOW" in call, f"{rel}: a subprocess.run without NO_WINDOW:\n{call}"
+
+
+def test_the_console_suppression_covers_gh_and_docker_not_only_git():
+    """git is 39 of the ~42 spawns in a pass, so a fix that only covered git would
+    look like it worked and still flash a window per box for `gh pr view` and one per
+    stack for `compose down`."""
+    source = (worktree.REPO_ROOT / "scripts" / "worktree.py").read_text(encoding="utf-8")
+    for marker in ("docker", "compose", "-v", "--remove-orphans"):
+        assert marker in source
+    gh_call = (worktree.REPO_ROOT / "scripts" / "sweep.py").read_text(encoding="utf-8")
+    gh_block = gh_call.split('["gh", *args]')[1][:300]
+    assert "NO_WINDOW" in gh_block

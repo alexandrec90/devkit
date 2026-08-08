@@ -90,3 +90,18 @@ def test_a_non_windows_machine_is_a_no_op_not_a_failure(monkeypatch, capsys):
     monkeypatch.setattr(installer.os, "name", "posix")
     assert installer.main(["--yes"]) == 0
     assert "Windows-only" in capsys.readouterr().out
+
+
+def test_the_scheduled_run_uses_the_windowless_interpreter(tmp_path):
+    """A console window stealing focus every 15 minutes gets the task deleted, which
+    silently removes the workspace's only automatic cleanup."""
+    (tmp_path / "python.exe").write_bytes(b"")
+    (tmp_path / "pythonw.exe").write_bytes(b"")
+    assert installer.windowless(str(tmp_path / "python.exe")).endswith("pythonw.exe")
+
+
+def test_a_missing_pythonw_falls_back_rather_than_breaking_the_task(tmp_path):
+    """A visible window beats no scheduler at all."""
+    lone = tmp_path / "python.exe"
+    lone.write_bytes(b"")
+    assert installer.windowless(str(lone)) == str(lone)

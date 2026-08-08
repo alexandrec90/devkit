@@ -42,6 +42,25 @@ def worktree_script(root: Path = REPO_ROOT) -> Path:
     return root / "scripts" / "worktree.py"
 
 
+def windowless(python: str) -> str:
+    """`pythonw.exe` beside `python.exe`, so the scheduled run opens no console.
+
+    A task running `python.exe` pops a console window into the foreground on every
+    fire. At a fifteen-minute interval on a desktop that is not a cosmetic
+    complaint — it steals focus while you are typing, and the natural response is to
+    delete the task, which silently removes the workspace's only automatic cleanup.
+
+    `pythonw.exe` is the same interpreter with no console allocated. Its stdout goes
+    nowhere, which is why `worktree.write_reconcile_log` exists: the pass has to leave
+    a record somewhere a person can read it.
+
+    Falls back to the given interpreter when there is no `pythonw` beside it (a
+    virtualenv without one, a non-CPython build). A visible window beats no scheduler.
+    """
+    candidate = os.path.join(os.path.dirname(python), "pythonw.exe")
+    return candidate if os.path.isfile(candidate) else python
+
+
 def reconcile_command(
     python: str,
     script: Path,
@@ -158,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     # scheduler does not necessarily share.
     workspace = (args.workspace or (REPO_ROOT.parent / "alex-projects.code-workspace")).resolve()
     command = reconcile_command(
-        sys.executable, worktree_script(), workspace, args.automerge, args.min_free_gb
+        windowless(sys.executable), worktree_script(), workspace, args.automerge, args.min_free_gb
     )
     target = install_argv(args.name, command, args.minutes)
     if not args.apply:

@@ -1060,6 +1060,7 @@ def run_provision(
                     text=True,
                     timeout=timeout,
                     check=False,
+                    creationflags=sweep.NO_WINDOW,
                 )
             else:
                 completed = subprocess.run(
@@ -1069,6 +1070,7 @@ def run_provision(
                     text=True,
                     timeout=timeout,
                     check=False,
+                    creationflags=sweep.NO_WINDOW,
                 )
         except subprocess.TimeoutExpired:
             notes.append(f"[warn] provision: {step.label} timed out after {timeout:g}s")
@@ -1161,6 +1163,7 @@ def run_steps(
                 text=True,
                 timeout=timeout,
                 check=False,
+                creationflags=sweep.NO_WINDOW,
             )
         except subprocess.TimeoutExpired:
             return ran, rendered, f"timed out after {timeout:g}s"
@@ -1201,6 +1204,7 @@ def is_tracked(repo: Path, relative: str) -> bool:
             text=True,
             timeout=30,
             check=False,
+            creationflags=sweep.NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return True
@@ -1222,6 +1226,7 @@ def compose_down(path: Path, project_name: str) -> tuple[bool, str]:
             text=True,
             timeout=300,
             check=False,
+            creationflags=sweep.NO_WINDOW,
         )
     except FileNotFoundError:
         return False, "docker is not on PATH — the stack was left running"
@@ -1630,6 +1635,38 @@ def render_survey(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+RECONCILE_LOG = "logs/reconcile.log"
+
+
+def write_reconcile_log(rendered: str, code: int, root: Path = REPO_ROOT) -> Path | None:
+    """Persist a reconcile pass to `logs/reconcile.log`. Returns the path, or None.
+
+    The scheduled run is **windowless** (`pythonw.exe`, so no console flashes up every
+    fifteen minutes), which means its stdout goes nowhere at all. Without this the one
+    thing in the workspace that destroys checkouts unattended would have no record of
+    what it did, and a run that started failing would fail in complete silence.
+
+    Overwritten per run and written on success as well as failure, per the
+    failure-artifact rule in `.claude/rules/engineering.md`: a log that only appears on
+    failure is one you cannot distinguish from a job that never ran.
+
+    Best-effort — a reconcile pass that did its work must not report failure because a
+    log file could not be written.
+    """
+    path = root / RECONCILE_LOG
+    stamp = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"# devkit worktree reconcile\n# {stamp}  exit={code}\n\n{rendered}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+    except OSError:
+        return None
+    return path
+
+
 def render_reconcile(report: dict) -> str:
     """The reconcile report: what changed, what is waiting, and what needs you.
 
@@ -1921,7 +1958,9 @@ def main(argv: list[str] | None = None) -> int:
                 fetch=args.fetch,
                 keep_stack=args.keep_stack,
             )
-            print(json.dumps(report, indent=2) if args.json else render_reconcile(report))
+            rendered = json.dumps(report, indent=2) if args.json else render_reconcile(report)
+            print(rendered)
+            write_reconcile_log(rendered, code)
             return code
 
         if args.mode == "new":
