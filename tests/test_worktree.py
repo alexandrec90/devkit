@@ -1425,7 +1425,7 @@ def test_an_unwritable_log_never_fails_the_pass(tmp_path, monkeypatch):
 
 
 def test_no_window_is_windows_only():
-    assert ("creationflags" in sweep.NO_WINDOW) is (worktree.os.name == "nt")
+    assert (sweep.NO_WINDOW != 0) is (worktree.os.name == "nt")
 
 
 def test_every_spawn_in_the_reconcile_path_suppresses_its_console():

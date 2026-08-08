@@ -1060,7 +1060,7 @@ def run_provision(
                     text=True,
                     timeout=timeout,
                     check=False,
-                    **sweep.NO_WINDOW,
+                    creationflags=sweep.NO_WINDOW,
                 )
             else:
                 completed = subprocess.run(
@@ -1070,7 +1070,7 @@ def run_provision(
                     text=True,
                     timeout=timeout,
                     check=False,
-                    **sweep.NO_WINDOW,
+                    creationflags=sweep.NO_WINDOW,
                 )
         except subprocess.TimeoutExpired:
             notes.append(f"[warn] provision: {step.label} timed out after {timeout:g}s")
@@ -1163,7 +1163,7 @@ def run_steps(
                 text=True,
                 timeout=timeout,
                 check=False,
-                **sweep.NO_WINDOW,
+                creationflags=sweep.NO_WINDOW,
             )
         except subprocess.TimeoutExpired:
             return ran, rendered, f"timed out after {timeout:g}s"
@@ -1204,7 +1204,7 @@ def is_tracked(repo: Path, relative: str) -> bool:
             text=True,
             timeout=30,
             check=False,
-            **sweep.NO_WINDOW,
+            creationflags=sweep.NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return True
@@ -1226,7 +1226,7 @@ def compose_down(path: Path, project_name: str) -> tuple[bool, str]:
             text=True,
             timeout=300,
             check=False,
-            **sweep.NO_WINDOW,
+            creationflags=sweep.NO_WINDOW,
         )
     except FileNotFoundError:
         return False, "docker is not on PATH — the stack was left running"

@@ -94,11 +94,10 @@ Git = Callable[..., "subprocess.CompletedProcess[str]"]
 # rather than only the obvious ones: the sheer count is what makes this visible, so a
 # single unflagged call site inside a per-box loop brings the whole flicker back.
 #
-# `CREATE_NO_WINDOW` does not exist off Windows, so the dict is empty there and the
-# `**` expansion is a no-op.
-NO_WINDOW: dict[str, int] = (
-    {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
-)
+# `CREATE_NO_WINDOW` does not exist off Windows. Passing zero for `creationflags` is
+# the portable no-op and keeps each `subprocess.run` call's keyword shape explicit
+# enough for mypy to check.
+NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 # --- verdicts ---------------------------------------------------------------
 # Ordered roughly by how much attention each needs.
@@ -947,7 +946,7 @@ def git_for(path: Path) -> Git:
             capture_output=True,
             text=True,
             check=False,
-            **NO_WINDOW,
+            creationflags=NO_WINDOW,
         )
 
     return git
@@ -1169,7 +1168,7 @@ def gh_for(path: Path) -> Git:
             capture_output=True,
             text=True,
             check=False,
-            **NO_WINDOW,
+            creationflags=NO_WINDOW,
         )
 
     return gh

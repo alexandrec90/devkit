@@ -175,7 +175,7 @@ def current_branch(checkout: Path) -> str:
             text=True,
             timeout=10,
             check=False,
-            **worktree.sweep.NO_WINDOW,
+            creationflags=worktree.sweep.NO_WINDOW,
         )
     except (OSError, worktree.subprocess.SubprocessError):
         return ""
