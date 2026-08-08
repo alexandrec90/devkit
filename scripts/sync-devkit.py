@@ -170,6 +170,13 @@ MANIFEST: tuple[str, ...] = (
     # Python version) moved to the caller -- each project's gate passes its own.
     ".github/workflows/dependabot-automerge.yml",
     ".github/actions/setup-python-env/action.yml",
+    # The rest of the CI surface -- `dependabot.yml`, the gate, the nightly -- cannot
+    # be vendored for the reason above, and `templates/` cannot keep them honest
+    # either: a one-shot copy has no way to notice that a project never received a
+    # file, or deleted one. This test is the half neither tier can do. It does not
+    # supply a workflow; it refuses to let a project go without one, and it reads
+    # nothing but that repo's own `.github/`, so it is portable by construction.
+    "scripts/hooks/tests/test_ci_workflow_contract.py",
 )
 
 # Exact formerly-vendored files removed by `--pull`. Skill mirrors are included because
