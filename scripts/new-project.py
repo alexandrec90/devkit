@@ -25,6 +25,7 @@ Steps, in order:
   4. vendor the harness (`sync-devkit.py --pull`) and stamp `DEVKIT_VERSION`
   5. add the parallel worktree with its own offset `.env`
   6. register the project in the shared `alex-projects.code-workspace`
+     (the one step that writes OUTSIDE the new directory; `--no-register` skips it)
   7. create the private GitHub repo and push          <- outward-facing
 """
 
@@ -196,6 +197,7 @@ class Plan:
     worktree: str | None = None
     worktree_env: dict[str, str] = field(default_factory=dict)
     remote: bool = True
+    register: bool = True
 
 
 def slugify_package(name: str) -> str:
@@ -338,6 +340,7 @@ def plan(args: argparse.Namespace, registry: devkit_ports.Registry) -> Plan:
         worktree=f"{args.name}-b" if args.worktree else None,
         worktree_env=worktree_env,
         remote=args.remote,
+        register=args.register,
     )
 
 
@@ -591,7 +594,17 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     Registration is best-effort by design: the project itself is already written and
     usable at this point, so a workspace file that has been restructured out of
     recognition is a warning to fix by hand, not a reason to fail the run.
+
+    `--no-register` is for a project that is generated to be *thrown away* — the
+    RELEASING.md acceptance test renders one per release purely to prove the tag can
+    serve its pre-commit hook ids. Registering that probe edits the real workspace
+    file: it lands in `folders` and in every scope picker, which puts a directory
+    under a temp path into `sweep.py`'s registry, and it survives the `rm -rf` that
+    ends the acceptance test.
     """
+    if not plan.register:
+        print("  skip    workspace registration (--no-register)")
+        return
     path = devkit_project.DEFAULT_WORKSPACE
     names = [plan.name] + ([plan.worktree] if plan.worktree else [])
     if dry_run:
@@ -777,6 +790,22 @@ def main(argv: list[str] | None = None) -> int:
         dest="remote",
         action="store_false",
         help="skip creating and pushing to the GitHub repo",
+    )
+    # Same picker rule again, and the same reason `--remote` exists alongside its
+    # negation: one real token in every branch.
+    register = parser.add_mutually_exclusive_group()
+    register.add_argument(
+        "--register",
+        dest="register",
+        action="store_true",
+        default=True,
+        help="add the project to the shared workspace file (the default)",
+    )
+    register.add_argument(
+        "--no-register",
+        dest="register",
+        action="store_false",
+        help="leave the shared workspace file alone (for a throwaway probe)",
     )
     # `--dry-run` is redundant with the default, and exists anyway: the VS Code task
     # picks one of these two strings, and passing "" as an argument instead would
