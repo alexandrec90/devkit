@@ -67,6 +67,7 @@ def make_args(**overrides):
         "preset": None,
         "worktree": True,
         "remote": True,
+        "register": True,
         "dry_run": True,
         **{f: False for f in new_project.FEATURES},
     }
@@ -535,6 +536,70 @@ def test_registration_is_a_warning_not_a_failure(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", broken)
     new_project.register_in_workspace(the_plan, dry_run=False)
     assert "WARNING" in capsys.readouterr().out
+
+
+def _recording_register(monkeypatch) -> list[list[str]]:
+    """Record what `register_in_workspace` would write, without a workspace file."""
+    calls: list[list[str]] = []
+
+    def fake(text: str, names: list[str]) -> str:
+        calls.append(names)
+        return text
+
+    monkeypatch.setattr(devkit_project, "register", fake)
+    return calls
+
+
+def test_no_register_never_opens_the_workspace_file(tmp_path, capsys, monkeypatch):
+    """The RELEASING.md acceptance test renders a probe it then deletes.
+
+    Registering that probe edits the *real* workspace file — `folders` plus every
+    scope picker — and the edit outlives the directory, so `sweep.py` inherits a
+    registered checkout under a temp path that no longer exists.
+    """
+    args = make_args(parent=str(tmp_path), register=False)
+    the_plan = new_project.plan(args, registry())
+    absent = tmp_path / "nowhere" / "registry.code-workspace"
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", absent)
+    calls = _recording_register(monkeypatch)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+
+    assert calls == []
+    assert not absent.exists()
+    out = capsys.readouterr().out
+    assert "--no-register" in out
+    # The discriminator: registering against a path that cannot be read warns. A
+    # silent run therefore proves the file was never opened, not merely unchanged.
+    assert "WARNING" not in out
+
+
+def test_registration_is_still_the_default(tmp_path, monkeypatch):
+    """The flag is opt-out: a real project must stay visible to `sweep.py`."""
+    args = make_args(parent=str(tmp_path))
+    the_plan = new_project.plan(args, registry())
+    workspace = tmp_path / "registry.code-workspace"
+    workspace.write_text('{"folders": []}', encoding="utf-8")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", workspace)
+    calls = _recording_register(monkeypatch)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+
+    assert calls == [[the_plan.name, the_plan.worktree]]
+
+
+def test_the_no_register_flag_is_reachable_from_the_cli(tmp_path, capsys, monkeypatch):
+    """RELEASING.md's acceptance test passes it; a renamed dest breaks that silently."""
+    monkeypatch.setattr(
+        devkit_project, "DEFAULT_WORKSPACE", tmp_path / "nowhere" / "ws.code-workspace"
+    )
+    argv = ["probe_tag", "--preset", "bare", "--parent", str(tmp_path), "--devkit-ref", "v0.1.0"]
+
+    assert new_project.main([*argv, "--no-remote", "--no-worktree", "--no-register"]) == 0
+    assert "--no-register" in capsys.readouterr().out
+
+    assert new_project.main([*argv, "--no-remote", "--no-worktree"]) == 0
+    assert "--no-register" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("features", FEATURE_MATRIX)

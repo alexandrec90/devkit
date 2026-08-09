@@ -332,6 +332,33 @@ def test_release_stages_the_tag_before_gates_and_publishes_it_afterward():
     assert "git push origin" in steps[published]["run"]
 
 
+def test_a_refused_release_pr_does_not_fail_the_prepare_phase():
+    """`gh pr create` is the last thing prepare does, and the one that can be vetoed.
+
+    "Allow GitHub Actions to create and approve pull requests" is a repo setting that
+    `permissions:` cannot override and a free-tier private repo may not be able to turn
+    on. It was off here for v0.7.0: the run bumped FALLBACK_DEVKIT_REF, committed it and
+    pushed `release/v0.7.0` — then died on the PR call and reported the whole release as
+    failed, with the one command that would finish it nowhere in the output.
+
+    So the call must be conditional, and its failure must leave the command behind in
+    the step summary.
+    """
+    yaml = _yaml()
+    parsed = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))
+    steps = parsed["jobs"]["release"]["steps"]
+    prepare = [s for s in steps if "gh pr create" in (s.get("run") or "")]
+    assert len(prepare) == 1, "expected exactly one step opening the release PR"
+    run = prepare[0]["run"]
+
+    # Bare `gh pr create` on its own line aborts the job under `bash -e`.
+    assert "if gh pr create" in run, "the PR call must be conditional, not fatal"
+    assert "GITHUB_STEP_SUMMARY" in run, "a refused PR must leave its command in the summary"
+    # Twice: the attempt, and the copy echoed into the summary for someone to paste.
+    # A summary saying only "this failed" is what made the first one expensive.
+    assert run.count("gh pr create") >= 2, "the summary must carry the command, not just the news"
+
+
 # `gh pr` verbs that WRITE. `list` and `view` are deliberately absent: they read, and
 # the default read-only token serves them.
 GH_PR_WRITES = ("create", "edit", "merge", "comment", "review", "close", "reopen", "ready")

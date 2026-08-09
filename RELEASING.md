@@ -38,6 +38,17 @@ optional — the fallback bump has to be **committed before the tag exists**.
    gh workflow run release.yml -f version=vX.Y.Z -f phase=prepare
    ```
 
+   > **The PR is the one step that may land on you.** `gh pr create` is refused when
+   > *Allow GitHub Actions to create and approve pull requests* is off — which
+   > `permissions:` cannot override, and a free-tier private repo may not be able to
+   > turn on. The run stays green and puts the exact `gh pr create` command in its
+   > **step summary**; paste it. Nothing is lost, because the bump is committed and
+   > the branch pushed before that call is made.
+   >
+   > Do not "fix" this by enabling the setting. A PR opened with `GITHUB_TOKEN`
+   > triggers no workflow run, so the release PR would arrive with no PR Gate — and
+   > step 4 below is *reading that gate's* `test-failures.log`.
+
 4. **Merge that PR — expecting exactly one red test.**
 
    > `test_fallback_devkit_ref_tracks_the_newest_tag` **will fail on the release PR**.
@@ -91,9 +102,14 @@ git ls-tree -r --name-only vX.Y.Z | grep -E 'pre-commit-hooks|precommit/'
 
 # End to end: a fresh project's commit gate must actually run.
 python scripts/new-project.py probe_tag --preset bare --parent /tmp/gen \
-  --no-remote --no-worktree --yes
+  --no-remote --no-worktree --no-register --yes
 cd /tmp/gen/probe_tag && pre-commit run --all-files
 ```
+
+> **`--no-register` is not optional here.** Without it the probe is written into
+> `alex-projects.code-workspace` — `folders` plus every scope picker — and stays
+> there after you delete the directory, leaving `sweep.py` with a registered checkout
+> under a temp path. The flag exists for exactly this command.
 
 That last command is the acceptance test. It must not print "hook not found", and
 `new-project.py` must not print the unpublished-channel warning

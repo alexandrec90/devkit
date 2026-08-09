@@ -90,22 +90,68 @@ jobs:
       # Phase 1 pushes a branch and opens a PR. It does NOT push to main: devkit's
       # own pre-push policy protects that branch, and a workflow that ignored it
       # would be asserting a rule the humans are held to does not apply to CI.
+      #
+      # The `gh pr create` is best-effort, and that is not indifference to a 403.
+      # It fails when "Allow GitHub Actions to create and approve pull requests" is
+      # off — a repo setting `permissions:` cannot override and a free-tier private
+      # repo may not be able to turn on at all. By then the bump is committed and
+      # the branch is pushed, so failing the job here reddens a release that has in
+      # fact succeeded up to its last, hand-repeatable step, and buries the one
+      # command that finishes it. So: emit that command into the step summary and
+      # let the run stay green about what it actually did.
+      #
+      # Enabling the setting is not the fix to reach for either. A PR opened with
+      # GITHUB_TOKEN triggers no workflow run, so the release PR would arrive with
+      # no PR Gate at all — and RELEASING.md step 4 requires reading that gate's
+      # uploaded test-failures.log before merging.
       - name: Prepare the release PR
         if: inputs.phase == 'prepare'
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          REPO: ${{ github.repository }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          uv run python scripts/release.py "${{ inputs.version }}" --yes
-          gh pr create --repo "${{ github.repository }}" \
-            --base main --head "release/${{ inputs.version }}" \
-            --title "Release ${{ inputs.version }}" \
-            --body "Bumps FALLBACK_DEVKIT_REF to ${{ inputs.version }} (RELEASING.md step 3).
+          uv run python scripts/release.py "$VERSION" --yes
+
+          cat > /tmp/release-pr-body.md <<EOF
+          Bumps FALLBACK_DEVKIT_REF to $VERSION (RELEASING.md step 3).
 
           Merge this, then re-run the release workflow with phase=tag to cut the tag
           on main. The tag is deliberately not created until the bump has landed:
-          tagging first leaves main with a newer tag than its own constant."
+          tagging first leaves main with a newer tag than its own constant.
+
+          ## Expect exactly one red test
+
+          \`test_fallback_devkit_ref_tracks_the_newest_tag\` will fail here — it compares
+          the constant against \`git describe --tags\`, and $VERSION does not exist yet.
+          That is the check working (RELEASING.md step 4). Nothing else may be red:
+          read the uploaded test-failures.log and confirm before merging.
+          EOF
+
+          if gh pr create --repo "$REPO" \
+            --base main --head "release/$VERSION" \
+            --title "Release $VERSION" \
+            --body-file /tmp/release-pr-body.md; then
+            exit 0
+          fi
+
+          echo "::warning::The branch is pushed; opening its PR needs one manual command (see the summary)."
+          {
+            echo "### release/$VERSION is pushed — open its PR by hand"
+            echo
+            echo "\`gh pr create\` was refused. This is expected when **Allow GitHub"
+            echo "Actions to create and approve pull requests** is off; the bump is"
+            echo "already committed and pushed, so only this last step is left:"
+            echo
+            echo '```bash'
+            echo "gh pr create --repo $REPO --base main --head release/$VERSION \\"
+            echo "  --title 'Release $VERSION' --body-file - <<'BODY'"
+            cat /tmp/release-pr-body.md
+            echo "BODY"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # The dry run above validated that the tag is new and the fallback bump is on
       # origin/main. The suite then validated that exact locally-tagged commit. Only
