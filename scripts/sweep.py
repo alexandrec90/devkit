@@ -70,8 +70,61 @@ import devkit_jsonc
 import task_branch as tb
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-# The workspace file lives beside the checkouts it lists, one level above devkit.
-DEFAULT_WORKSPACE = REPO_ROOT.parent / "alex-projects.code-workspace"
+
+WORKSPACE_FILE_NAME = "alex-projects.code-workspace"
+# Where the ephemeral tier keeps its boxes, relative to the workspace root, and the
+# separator between project and topic in a box name (`devkit--fix-thing-0810`). Defined
+# here rather than in `worktree.py` because the two resolvers below need them and
+# worktree.py imports this module, never the other way round.
+#
+# `scripts/sync-codex-hooks.py` keeps a private copy of BOXES_DIR_NAME and must: it is
+# VENDORED, and a consuming project has no `sweep.py` to import. That one is a
+# deliberate duplicate, not a miss.
+BOXES_DIR_NAME = ".worktrees"
+NAME_SEP = "--"
+
+
+def default_workspace(repo_root: Path, name: str = WORKSPACE_FILE_NAME) -> Path:
+    """The workspace registry for a checkout at `repo_root`, box or not.
+
+    The file lives beside the checkouts it lists, one level above a static checkout --
+    but a **box** sits one level deeper, under `<workspace>/.worktrees/`, so the naive
+    answer from inside one is `<workspace>/.worktrees/alex-projects.code-workspace`,
+    which nobody ever wrote.
+
+    That mattered because a box is exactly where an agent runs these scripts. Every
+    workspace-aware script had its own copy of the naive line, and five of them broke
+    there in different ways: `devkit_project.py --adopt-tasks` -- the documented way to
+    record an intentional task-block edit -- exited 2 naming a path that does not exist,
+    while `workspace-status.py` degraded to silence, which is the same failure with no
+    symptom at all. `worktree.py` was alone in resolving both, so this is its logic
+    moved down to where everything else can reach it.
+    """
+    parent = repo_root.parent
+    return (parent.parent if parent.name == BOXES_DIR_NAME else parent) / name
+
+
+def source_checkout(repo_root: Path) -> Path:
+    """The permanent checkout `repo_root` belongs to -- itself, unless it is a box.
+
+    The other half of the same problem `default_workspace` solves. A script that asks
+    "which registered checkout am I?" gets the box's name (`devkit--topic-0810`), which
+    matches nothing in the registry, and the answer is wrong in the direction that is
+    hardest to notice: `workspace-status.py` exempts devkit from its adoption check by
+    comparing each registered checkout against its own root, so from a box the
+    comparison failed and the status line at every session start reported **devkit
+    itself** as "never vendored devkit".
+
+    The project name is read off the box name rather than assumed, so this holds for a
+    box cut from any project, not just devkit's.
+    """
+    parent = repo_root.parent
+    if parent.name != BOXES_DIR_NAME:
+        return repo_root
+    return parent.parent / repo_root.name.split(NAME_SEP, 1)[0]
+
+
+DEFAULT_WORKSPACE = default_workspace(REPO_ROOT)
 
 # Checkouts in the workspace that this sweep does not manage. VanillaLand is the
 # legacy Azure DevOps monolith: different host, different PR API, `develop` base,

@@ -1501,6 +1501,64 @@ def test_a_gh_that_cannot_run_at_all_fails_open(boom):
     assert sweep.has_merged_pr(gh, "claude/x-0806") is False
 
 
+# --- resolving the workspace registry from wherever a script is run ----------
+
+
+def test_the_registry_sits_beside_a_static_checkout(tmp_path):
+    assert sweep.default_workspace(tmp_path / "devkit") == tmp_path / sweep.WORKSPACE_FILE_NAME
+
+
+def test_the_registry_is_found_from_inside_a_box(tmp_path):
+    """A box sits one level deeper, and a box is where an agent runs these scripts.
+
+    Regression: every workspace-aware script but `worktree.py` had its own naive
+    `REPO_ROOT.parent` copy, so from a box they resolved
+    `<workspace>/.worktrees/alex-projects.code-workspace` -- a path nobody wrote.
+    `devkit_project.py --adopt-tasks` exited 2 naming it; `workspace-status.py` just
+    went quiet.
+    """
+    box = tmp_path / sweep.BOXES_DIR_NAME / "devkit--topic-0810"
+    assert sweep.default_workspace(box) == tmp_path / sweep.WORKSPACE_FILE_NAME
+
+
+def test_a_static_checkout_is_its_own_source(tmp_path):
+    assert sweep.source_checkout(tmp_path / "devkit") == tmp_path / "devkit"
+
+
+def test_a_box_resolves_to_the_checkout_it_was_cut_from(tmp_path):
+    """Regression: `workspace-status.py` exempts devkit from its adoption check by
+    comparing each registered checkout against its own root. From a box that comparison
+    missed, so the session-start line reported devkit itself as "never vendored devkit".
+    """
+    box = tmp_path / sweep.BOXES_DIR_NAME / f"devkit{sweep.NAME_SEP}topic-0810"
+    assert sweep.source_checkout(box) == tmp_path / "devkit"
+
+
+def test_the_project_name_is_read_off_the_box_not_assumed(tmp_path):
+    """Project names contain hyphens, which is why the separator is two of them."""
+    box = tmp_path / sweep.BOXES_DIR_NAME / f"apt-finder{sweep.NAME_SEP}fix-thing-0810"
+    assert sweep.source_checkout(box) == tmp_path / "apt-finder"
+
+
+def test_every_workspace_aware_script_resolves_it_the_same_way():
+    """The guard on the fix: a sixth naive copy must not be written.
+
+    Scanning the source rather than importing each module, because the naive form is
+    *correct* when the script runs from the static checkout — importing it there would
+    produce the right answer and prove nothing.
+    """
+    scripts = (Path(sweep.__file__).resolve().parent).glob("*.py")
+    offenders = [
+        path.name
+        for path in scripts
+        if f'REPO_ROOT.parent / "{sweep.WORKSPACE_FILE_NAME}"' in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, (
+        f"{offenders} resolve the workspace registry naively; they break inside a box. "
+        "Use sweep.default_workspace(REPO_ROOT)."
+    )
+
+
 def test_shared_remotes_are_called_out():
     url = "https://github.com/alexandrec90/carameli.git"
     results = [

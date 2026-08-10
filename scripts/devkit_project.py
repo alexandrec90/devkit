@@ -50,8 +50,11 @@ import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # The workspace file is the project registry: it lists the checkouts and, since the
-# task de-duplication, carries the shared task block that calls this script.
-DEFAULT_WORKSPACE = REPO_ROOT.parent / "alex-projects.code-workspace"
+# task de-duplication, carries the shared task block that calls this script. Resolved
+# through `sweep` because this script is run from inside an ephemeral box as a matter
+# of course — `--adopt-tasks` is the documented way to record a task-block edit, and
+# the naive `REPO_ROOT.parent` made it exit 2 there, naming `.worktrees/<file>`.
+DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 
 # Checkouts that are not projects in this sense. VanillaLand is the legacy reference
 # monolith — it ships no harness and nothing here applies to it.
