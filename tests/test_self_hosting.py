@@ -211,13 +211,48 @@ def test_notify_scripts_are_byte_identical_to_the_template_copies():
         assert ours == theirs, f"scripts/{name} has drifted from templates/core/scripts/{name}"
 
 
+def test_setup_action_template_matches_devkits():
+    """The composite action is a template again, so the two copies must not drift.
+
+    It was vendored in v0.7.0 on the argument that its one variable — the Python
+    version — had moved to the caller. Two consumers disproved that on the first pull
+    that reached them: apt-finder's copy opened with a step cloning its private sibling
+    `data-lake` (deleted by the pull, every job then dying on `Distribution not found`),
+    and carameli installs pip-tools compiled locks with `uv pip install --system`, which
+    `uv sync --all-extras --all-groups` cannot do — there is no `uv.lock` to sync from.
+
+    What varies between projects is *how a project installs*, not which interpreter it
+    installs. So this file went back to `templates/`, and is held to devkit's own copy
+    the same way `notify.py` is: nothing renders either, so a divergence is a fix that
+    silently never reaches a generated project.
+    """
+    ours = (REPO_ROOT / ".github" / "actions" / "setup-python-env" / "action.yml").read_bytes()
+    theirs = (
+        TEMPLATES / "core" / "dot-github" / "actions" / "setup-python-env" / "action.yml"
+    ).read_bytes()
+    assert ours == theirs, (
+        ".github/actions/setup-python-env/action.yml has drifted from its templates/ copy"
+    )
+
+
+def test_the_setup_action_is_not_vendored():
+    """The ratchet on the paragraph above.
+
+    Re-adding the path to `MANIFEST` would silently replace apt-finder's and carameli's
+    install steps again, and the symptom is a red gate in someone else's repository —
+    never here. So the exclusion is asserted rather than left to the comment.
+    """
+    sync_devkit = load_script("scripts/sync-devkit.py")
+    assert ".github/actions/setup-python-env/action.yml" not in sync_devkit.MANIFEST, (
+        "the composite action is project-owned: it carries how a project installs, "
+        "which differs per project. See test_setup_action_template_matches_devkits."
+    )
+
+
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 TEMPLATE_WORKFLOWS = TEMPLATES / "core" / "dot-github" / "workflows"
 ACTIONS = REPO_ROOT / ".github" / "actions"
-# No `TEMPLATE_ACTIONS`: the composite action is vendored from `.github/actions/` now,
-# so `templates/` has none. A constant pointing at the deleted directory would glob to
-# empty forever and read as "checked" — the quiet kind of dead gate this suite exists
-# to catch.
+TEMPLATE_ACTIONS = TEMPLATES / "core" / "dot-github" / "actions"
 # `uses: owner/repo@ref`, with an optional leading `- `. Local composite actions
 # (`./.github/actions/...`) carry no ref and are deliberately not matched.
 USES_RE = re.compile(r"uses:\s+([\w.-]+/[\w.-]+)@(\S+)")
@@ -513,9 +548,13 @@ def test_every_local_composite_action_referenced_by_a_workflow_exists():
 
 
 # The GitHub Actions files devkit vendors rather than renders, and why each qualifies.
+#
+# `setup-python-env/action.yml` was here and is not any more — see
+# `test_setup_action_template_matches_devkits` for the two consumers that disproved
+# "its one variable moved to the caller". Qualifying means *nothing* in the file varies
+# per project, and how a project installs its dependencies always does.
 VENDORED_CI_FILES = {
     ".github/workflows/dependabot-automerge.yml": "no branch filter, one fixed gate title",
-    ".github/actions/setup-python-env/action.yml": "its one variable moved to the caller",
 }
 
 
