@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+"""Reopen the most recently active Claude Code sessions, one terminal tab each.
+
+Backs the workspace-level VS Code task "Agents: Resume Recent Claude Sessions".
+
+**Scope-blind on purpose.** Every other agent task in this workspace starts from a
+checkout: it asks which project, and the answer bounds what it can touch. Picking up
+yesterday's work is the opposite shape — what you want back is the last few *sessions*,
+wherever they happened to run, and a session's directory is a fact about it rather than
+a question to answer. Three of the last four may be in one repo and the fourth in an
+ephemeral box that no picker lists (boxes are absent from the workspace file by design,
+so `${input:project}` could not offer one). So this reads the transcript store, which
+knows every session's directory, and takes no project argument at all.
+
+Recency is the transcript's **mtime**, not a timestamp parsed out of it: the store
+appends to a session's file for as long as the session lives, so the file's mtime is its
+last activity, and reading it costs one syscall instead of a megabyte of JSON. Only the
+head of each transcript is parsed, for the two things the filename does not carry — the
+working directory and the opening prompt, which becomes the tab title.
+
+The tabs are laid out **oldest first**, so reading left to right walks forward through
+the day.
+
+Two kinds of transcript are deliberately skipped, and both would otherwise displace a
+real session out of the four:
+
+- **Sidechains.** A subagent's transcript is a session file like any other and is
+  written more recently than the parent that spawned it. `--resume` on one reopens a
+  subagent's context, which is never what "resume my last session" means.
+- **A directory that is gone.** A reaped box takes its checkout with it; `--resume`
+  keyed to that directory has nothing to reopen. These are reported by name rather
+  than passed over silently — a session you remember working in, missing from the
+  list, should say why.
+
+Pure helpers are unit-tested in `tests/test_resume_sessions.py`; `main` is the thin
+subprocess shell around them.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+DEFAULT_COUNT = 4
+
+# How much of a transcript to parse. The working directory and the first prompt are both
+# in its opening records; everything after that is turns, and a long session's file runs
+# to megabytes. Two limits rather than one because either can be hit first: a transcript
+# whose opening records are enormous pasted attachments, and one that opens with hundreds
+# of tiny hook lines.
+HEAD_BYTES = 262_144
+HEAD_LINES = 400
+
+TITLE_MAX = 44
+
+# The tab title reaches wt.exe, which re-parses its own command line and treats `;` as
+# the tab separator and `"` as quoting. A prompt containing either would silently
+# rearrange the window, so the title is reduced to a safe character class rather than
+# escaped. Control characters go for the same reason.
+_UNSAFE_TITLE_RE = re.compile(r'[;"\x00-\x1f]+')
+
+# Injected wrappers that are user-role records but not something anyone typed:
+# `<command-name>` for a slash command's expansion, `<local-command-stdout>` for its
+# output, `<system-reminder>` for harness context. A session whose first *typed* prompt
+# is preceded by any of these must still be titled by that prompt.
+_WRAPPED_RE = re.compile(r"<(command-[a-z-]+|local-command-[a-z]+|system-reminder)>", re.I)
+
+
+@dataclass(frozen=True)
+class Session:
+    """One resumable Claude Code session."""
+
+    session_id: str  # what `claude --resume` takes; the transcript's filename stem
+    cwd: Path  # where it ran — `--resume` only finds it from there
+    prompt: str  # its opening prompt, for the tab title
+    mtime: float  # last activity, from the transcript file
+
+
+# --- reading the transcript store -------------------------------------------
+
+
+def sessions_root(config_dir: str | None = None) -> Path:
+    """Where Claude Code keeps transcripts: `<config>/projects/<slug>/<session>.jsonl`.
+
+    `CLAUDE_CONFIG_DIR` is honoured because the CLI writing the files honours it; a
+    machine that moved its config would otherwise get "no sessions found" with no clue
+    which directory was looked in (the error names the path for the same reason).
+    """
+    base = config_dir or os.environ.get("CLAUDE_CONFIG_DIR", "")
+    return (Path(base) if base else Path.home() / ".claude") / "projects"
+
+
+def head_records(
+    path: Path, max_bytes: int = HEAD_BYTES, max_lines: int = HEAD_LINES
+) -> list[dict]:
+    """The opening JSON records of a transcript, as far as the read limits allow.
+
+    Unparseable lines are skipped rather than fatal: the store is append-only and the
+    last line of a *live* session's file can be half-written at the moment it is read.
+    """
+    records: list[dict] = []
+    read = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for count, line in enumerate(handle):
+                read += len(line)
+                if count >= max_lines or read > max_bytes:
+                    break
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(record, dict):
+                    records.append(record)
+    except OSError:
+        return []
+    return records
+
+
+def is_sidechain(records: list[dict]) -> bool:
+    """Whether these records open a subagent's transcript.
+
+    Read from the FIRST record carrying the flag, not from any of them: a parent session
+    that spawned a subagent has sidechain records of its own further in, and `any()` over
+    the head would throw the parent away along with it.
+    """
+    for record in records:
+        if "isSidechain" in record:
+            return bool(record["isSidechain"])
+    return False
+
+
+def _block_text(message: object) -> str:
+    """The typed text of a user message; "" for tool results and other non-prose."""
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return ""
+
+
+def first_prompt(records: list[dict]) -> str:
+    """The first thing a human typed in this session, or "" if there is none.
+
+    "" is what marks a session as **not worth resuming**: a transcript with no typed
+    prompt is one that was opened and abandoned, and it is written recently enough to
+    take one of the four slots from a session that has something in it.
+    """
+    for record in records:
+        if record.get("type") != "user" or record.get("isMeta") or record.get("isSidechain"):
+            continue
+        for line in _block_text(record.get("message")).splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("<") and not _WRAPPED_RE.search(stripped):
+                return stripped
+    return ""
+
+
+def parse_session(path: Path) -> Session | None:
+    """One transcript as a `Session`, or None when it is not resumable.
+
+    None covers every reason at once — unreadable, a sidechain, no working directory
+    recorded, never prompted — because each means the same thing to the caller and none
+    is worth a message of its own. A *missing directory* is the one exception, handled a
+    level up where it can be reported by name.
+    """
+    records = head_records(path)
+    if not records or is_sidechain(records):
+        return None
+    cwd = next((str(r.get("cwd") or "") for r in records if r.get("cwd")), "")
+    prompt = first_prompt(records)
+    if not cwd or not prompt:
+        return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    # The filename, not the records' `sessionId`: the filename is the key `--resume`
+    # looks up, and a transcript copied or renamed by hand would disagree.
+    return Session(session_id=path.stem, cwd=Path(cwd), prompt=prompt, mtime=mtime)
+
+
+def collect(root: Path) -> list[Session]:
+    """Every resumable session in the store, in no particular order."""
+    if not root.is_dir():
+        return []
+    found = (parse_session(path) for path in root.glob("*/*.jsonl"))
+    return [session for session in found if session is not None]
+
+
+# --- choosing which to reopen ------------------------------------------------
+
+
+def partition(sessions: list[Session]) -> tuple[list[Session], list[Session]]:
+    """Split into (live, orphaned) by whether each session's directory still exists."""
+    live = [s for s in sessions if s.cwd.is_dir()]
+    orphaned = [s for s in sessions if not s.cwd.is_dir()]
+    return live, orphaned
+
+
+def select(sessions: list[Session], count: int = DEFAULT_COUNT) -> list[Session]:
+    """The `count` most recent sessions, returned **oldest first**.
+
+    Two sorts rather than one: recency decides *which*, chronology decides the order
+    they are laid out in. A single pass would give the newest session the leftmost tab.
+    """
+    newest = sorted(sessions, key=lambda s: s.mtime, reverse=True)[: max(count, 0)]
+    return sorted(newest, key=lambda s: s.mtime)
+
+
+def tab_title(session: Session) -> str:
+    """`<directory> - <opening prompt>`, trimmed to fit a tab and safe for wt.exe."""
+    prompt = _UNSAFE_TITLE_RE.sub(" ", session.prompt).strip()
+    if len(prompt) > TITLE_MAX:
+        prompt = prompt[: TITLE_MAX - 1].rstrip() + "…"
+    name = _UNSAFE_TITLE_RE.sub(" ", session.cwd.name).strip() or "session"
+    return f"{name} - {prompt}" if prompt else name
+
+
+def describe(session: Session) -> str:
+    """One report line: when it was last active, where it ran, and what it was about."""
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(session.mtime))
+    return f"{when}  {tab_title(session)}  [{session.session_id[:8]}]"
+
+
+# --- launching ---------------------------------------------------------------
+
+
+def wt_args(sessions: list[Session], agent: str = "claude") -> list[str]:
+    """The wt.exe argument list: one tab per session, each resuming it in its own cwd.
+
+    `-w -1` forces a new window rather than tabs bolted onto whichever one has focus.
+    The `;` separators are their own tokens because wt parses its command line itself —
+    the same reason `launch-agent-tabs.ps1` builds an array rather than a string.
+    """
+    args = ["-w", "-1"]
+    for index, session in enumerate(sessions):
+        if index:
+            args.append(";")
+        args += [
+            "new-tab",
+            "--title",
+            tab_title(session),
+            "-d",
+            str(session.cwd),
+            # -NoExit keeps the tab alive after the agent exits, so a session that dies
+            # immediately still leaves its error on screen. Everything after -Command is
+            # concatenated into the one command line the tab runs.
+            "pwsh.exe",
+            "-NoLogo",
+            "-NoExit",
+            "-Command",
+            agent,
+            "--resume",
+            session.session_id,
+        ]
+    args += [";", "focus-tab", "-t", "0"]
+    return args
+
+
+def shell_lines(sessions: list[Session], agent: str = "claude") -> list[str]:
+    """The same work as one command per session, for a machine with no Windows Terminal."""
+    return [f'cd "{s.cwd}" && {agent} --resume {s.session_id}' for s in sessions]
+
+
+def find_terminal() -> str:
+    """Path to wt.exe, or "" when Windows Terminal is not installed."""
+    return shutil.which("wt.exe") or shutil.which("wt") or ""
+
+
+# --- entrypoint -------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> int:
+    # Prompts carry arrows, dashes and emoji; a Windows console is cp1252 and would
+    # raise UnicodeEncodeError mid-report rather than printing the sessions it found.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+    parser = argparse.ArgumentParser(
+        description="Reopen the most recently active Claude Code sessions, one tab each."
+    )
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=DEFAULT_COUNT,
+        help=f"how many sessions to reopen (default {DEFAULT_COUNT})",
+    )
+    parser.add_argument(
+        "--sessions-dir",
+        type=Path,
+        default=None,
+        help="transcript store to read (default ~/.claude/projects)",
+    )
+    parser.add_argument("--agent", default="claude", help="CLI to run in each tab")
+    parser.add_argument(
+        "--list", action="store_true", help="print what would be reopened, launch nothing"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="print the wt.exe command line, launch nothing"
+    )
+    args = parser.parse_args(argv)
+
+    if args.count < 1:
+        print("resume-sessions: --count must be at least 1", file=sys.stderr)
+        return 2
+
+    root = args.sessions_dir or sessions_root()
+    live, orphaned = partition(collect(root))
+    if not live:
+        print(f"resume-sessions: no resumable sessions found under {root}", file=sys.stderr)
+        return 1
+
+    selected = select(live, args.count)
+    print(f"Resuming {len(selected)} session(s), oldest tab first:")
+    for index, session in enumerate(selected, start=1):
+        print(f"  {index}. {describe(session)}")
+
+    # Only the orphans recent enough to have been candidates. Every reaped box in the
+    # store's history would otherwise be listed, and that is most of it.
+    cutoff = selected[0].mtime
+    stale = [s for s in orphaned if s.mtime >= cutoff]
+    if stale:
+        print("\nSkipped — the directory is gone (reaped box, moved checkout):")
+        for session in sorted(stale, key=lambda s: s.mtime):
+            print(f"  {describe(session)} in {session.cwd}")
+
+    if args.list:
+        return 0
+
+    terminal = find_terminal()
+    if not terminal:
+        print("\nWindows Terminal (wt.exe) not found; run these yourself:", file=sys.stderr)
+        for line in shell_lines(selected, args.agent):
+            print(f"  {line}", file=sys.stderr)
+        return 0 if args.dry_run else 1
+
+    command = wt_args(selected, args.agent)
+    if args.dry_run:
+        print("\nwt.exe " + subprocess.list2cmdline(command))
+        return 0
+    print(f"\nOpening {len(selected)} tab(s) in a new Windows Terminal window...")
+    return subprocess.run([terminal, *command], check=False).returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
