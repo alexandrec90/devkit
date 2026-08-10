@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Reopen the most recently active Claude Code sessions, one terminal tab each.
+"""Reopen the most recently active Claude or Codex sessions, one terminal tab each.
 
-Backs the workspace-level VS Code task "Agents: Resume Recent Claude Sessions".
+Backs the workspace-level VS Code task "Agents: Resume Recent Sessions".
 
 **Scope-blind on purpose.** Every other agent task in this workspace starts from a
 checkout: it asks which project, and the answer bounds what it can touch. Picking up
@@ -9,8 +9,8 @@ yesterday's work is the opposite shape — what you want back is the last few *s
 wherever they happened to run, and a session's directory is a fact about it rather than
 a question to answer. Three of the last four may be in one repo and the fourth in an
 ephemeral box that no picker lists (boxes are absent from the workspace file by design,
-so `${input:project}` could not offer one). So this reads the transcript store, which
-knows every session's directory, and takes no project argument at all.
+so `${input:project}` could not offer one). So this reads the chosen agent's transcript
+store, which knows every session's directory, and takes no project argument at all.
 
 Recency is the transcript's **mtime**, not a timestamp parsed out of it: the store
 appends to a session's file for as long as the session lives, so the file's mtime is its
@@ -24,7 +24,7 @@ the day.
 Two kinds of transcript are deliberately skipped, and both would otherwise displace a
 real session out of the four:
 
-- **Sidechains.** A subagent's transcript is a session file like any other and is
+- **Claude sidechains.** A subagent's transcript is a session file like any other and is
   written more recently than the parent that spawned it. `--resume` on one reopens a
   subagent's context, which is never what "resume my last session" means.
 - **A directory that is gone.** A reaped box takes its checkout with it; `--resume`
@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_COUNT = 4
+SUPPORTED_AGENTS = ("claude", "codex")
 
 # How much of a transcript to parse. The working directory and the first prompt are both
 # in its opening records; everything after that is turns, and a long session's file runs
@@ -73,13 +74,17 @@ _UNSAFE_TITLE_RE = re.compile(r'[;"\x00-\x1f]+')
 # is preceded by any of these must still be titled by that prompt.
 _WRAPPED_RE = re.compile(r"<(command-[a-z-]+|local-command-[a-z]+|system-reminder)>", re.I)
 
+# Codex persists these as user-role input blocks before the first thing the human
+# typed. They are context, not a useful tab title.
+_CODEX_CONTEXT_PREFIXES = ("# AGENTS.md instructions", "<environment_context>")
+
 
 @dataclass(frozen=True)
 class Session:
-    """One resumable Claude Code session."""
+    """One resumable agent session."""
 
-    session_id: str  # what `claude --resume` takes; the transcript's filename stem
-    cwd: Path  # where it ran — `--resume` only finds it from there
+    session_id: str  # what the chosen agent's resume command takes
+    cwd: Path  # where it ran — resume semantics are directory-sensitive
     prompt: str  # its opening prompt, for the tab title
     mtime: float  # last activity, from the transcript file
 
@@ -87,15 +92,17 @@ class Session:
 # --- reading the transcript store -------------------------------------------
 
 
-def sessions_root(config_dir: str | None = None) -> Path:
-    """Where Claude Code keeps transcripts: `<config>/projects/<slug>/<session>.jsonl`.
+def sessions_root(agent: str, config_dir: str | None = None) -> Path:
+    """Where the chosen agent keeps its session transcripts.
 
-    `CLAUDE_CONFIG_DIR` is honoured because the CLI writing the files honours it; a
-    machine that moved its config would otherwise get "no sessions found" with no clue
-    which directory was looked in (the error names the path for the same reason).
+    Both CLIs honour a config-home environment variable. A machine that moved either
+    store would otherwise get "no sessions found" while the sessions exist elsewhere.
     """
-    base = config_dir or os.environ.get("CLAUDE_CONFIG_DIR", "")
-    return (Path(base) if base else Path.home() / ".claude") / "projects"
+    if agent == "claude":
+        base = config_dir or os.environ.get("CLAUDE_CONFIG_DIR", "")
+        return (Path(base) if base else Path.home() / ".claude") / "projects"
+    base = config_dir or os.environ.get("CODEX_HOME", "")
+    return (Path(base) if base else Path.home() / ".codex") / "sessions"
 
 
 def head_records(
@@ -157,7 +164,7 @@ def _block_text(message: object) -> str:
     return ""
 
 
-def first_prompt(records: list[dict]) -> str:
+def claude_first_prompt(records: list[dict]) -> str:
     """The first thing a human typed in this session, or "" if there is none.
 
     "" is what marks a session as **not worth resuming**: a transcript with no typed
@@ -174,8 +181,8 @@ def first_prompt(records: list[dict]) -> str:
     return ""
 
 
-def parse_session(path: Path) -> Session | None:
-    """One transcript as a `Session`, or None when it is not resumable.
+def parse_claude_session(path: Path) -> Session | None:
+    """One Claude transcript as a `Session`, or None when it is not resumable.
 
     None covers every reason at once — unreadable, a sidechain, no working directory
     recorded, never prompted — because each means the same thing to the caller and none
@@ -186,7 +193,7 @@ def parse_session(path: Path) -> Session | None:
     if not records or is_sidechain(records):
         return None
     cwd = next((str(r.get("cwd") or "") for r in records if r.get("cwd")), "")
-    prompt = first_prompt(records)
+    prompt = claude_first_prompt(records)
     if not cwd or not prompt:
         return None
     try:
@@ -198,11 +205,52 @@ def parse_session(path: Path) -> Session | None:
     return Session(session_id=path.stem, cwd=Path(cwd), prompt=prompt, mtime=mtime)
 
 
-def collect(root: Path) -> list[Session]:
-    """Every resumable session in the store, in no particular order."""
+def codex_first_prompt(records: list[dict]) -> str:
+    """The first human input in a Codex rollout, excluding injected workspace context."""
+    for record in records:
+        if record.get("type") != "response_item":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "message":
+            continue
+        if payload.get("role") != "user" or not isinstance(payload.get("content"), list):
+            continue
+        for block in payload["content"]:
+            if not isinstance(block, dict) or block.get("type") != "input_text":
+                continue
+            text = str(block.get("text") or "").strip()
+            if not text or text.startswith(_CODEX_CONTEXT_PREFIXES):
+                continue
+            return next((line.strip() for line in text.splitlines() if line.strip()), "")
+    return ""
+
+
+def parse_codex_session(path: Path) -> Session | None:
+    """One Codex rollout as a `Session`, or None when it is not resumable."""
+    records = head_records(path)
+    meta = next((r.get("payload") for r in records if r.get("type") == "session_meta"), None)
+    if not isinstance(meta, dict):
+        return None
+    session_id = str(meta.get("id") or meta.get("session_id") or "")
+    cwd = str(meta.get("cwd") or "")
+    prompt = codex_first_prompt(records)
+    if not session_id or not cwd or not prompt:
+        return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    return Session(session_id=session_id, cwd=Path(cwd), prompt=prompt, mtime=mtime)
+
+
+def collect(root: Path, agent: str) -> list[Session]:
+    """Every resumable session for the chosen agent, in no particular order."""
     if not root.is_dir():
         return []
-    found = (parse_session(path) for path in root.glob("*/*.jsonl"))
+    if agent == "claude":
+        found = (parse_claude_session(path) for path in root.glob("*/*.jsonl"))
+    else:
+        found = (parse_codex_session(path) for path in root.rglob("rollout-*.jsonl"))
     return [session for session in found if session is not None]
 
 
@@ -244,6 +292,13 @@ def describe(session: Session) -> str:
 # --- launching ---------------------------------------------------------------
 
 
+def resume_args(agent: str, session_id: str) -> list[str]:
+    """The agent-specific CLI syntax for resuming one interactive session."""
+    if agent == "claude":
+        return [agent, "--resume", session_id]
+    return [agent, "resume", session_id]
+
+
 def wt_args(sessions: list[Session], agent: str = "claude") -> list[str]:
     """The wt.exe argument list: one tab per session, each resuming it in its own cwd.
 
@@ -268,9 +323,7 @@ def wt_args(sessions: list[Session], agent: str = "claude") -> list[str]:
             "-NoLogo",
             "-NoExit",
             "-Command",
-            agent,
-            "--resume",
-            session.session_id,
+            *resume_args(agent, session.session_id),
         ]
     args += [";", "focus-tab", "-t", "0"]
     return args
@@ -278,7 +331,10 @@ def wt_args(sessions: list[Session], agent: str = "claude") -> list[str]:
 
 def shell_lines(sessions: list[Session], agent: str = "claude") -> list[str]:
     """The same work as one command per session, for a machine with no Windows Terminal."""
-    return [f'cd "{s.cwd}" && {agent} --resume {s.session_id}' for s in sessions]
+    return [
+        f'cd "{session.cwd}" && {" ".join(resume_args(agent, session.session_id))}'
+        for session in sessions
+    ]
 
 
 def find_terminal() -> str:
@@ -297,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
 
     parser = argparse.ArgumentParser(
-        description="Reopen the most recently active Claude Code sessions, one tab each."
+        description="Reopen the most recently active Claude or Codex sessions, one tab each."
     )
     parser.add_argument(
         "--count",
@@ -309,9 +365,14 @@ def main(argv: list[str] | None = None) -> int:
         "--sessions-dir",
         type=Path,
         default=None,
-        help="transcript store to read (default ~/.claude/projects)",
+        help="transcript store to read (default: the chosen agent's config home)",
     )
-    parser.add_argument("--agent", default="claude", help="CLI to run in each tab")
+    parser.add_argument(
+        "--agent",
+        choices=SUPPORTED_AGENTS,
+        default="claude",
+        help="whose sessions to select and resume (default claude)",
+    )
     parser.add_argument(
         "--list", action="store_true", help="print what would be reopened, launch nothing"
     )
@@ -324,14 +385,14 @@ def main(argv: list[str] | None = None) -> int:
         print("resume-sessions: --count must be at least 1", file=sys.stderr)
         return 2
 
-    root = args.sessions_dir or sessions_root()
-    live, orphaned = partition(collect(root))
+    root = args.sessions_dir or sessions_root(args.agent)
+    live, orphaned = partition(collect(root, args.agent))
     if not live:
         print(f"resume-sessions: no resumable sessions found under {root}", file=sys.stderr)
         return 1
 
     selected = select(live, args.count)
-    print(f"Resuming {len(selected)} session(s), oldest tab first:")
+    print(f"Resuming {len(selected)} {args.agent.title()} session(s), oldest tab first:")
     for index, session in enumerate(selected, start=1):
         print(f"  {index}. {describe(session)}")
 
