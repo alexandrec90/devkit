@@ -37,7 +37,16 @@ import sweep
 import worktree
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_WORKSPACE = REPO_ROOT.parent / "alex-projects.code-workspace"
+# Box-aware (see `sweep.default_workspace`). This one had the quietest version of the
+# bug: a session started inside a box resolved a registry that does not exist, and this
+# hook's whole design is to stay silent when it cannot tell -- so it reported nothing,
+# in exactly the checkouts an agent works in.
+DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
+# devkit's PERMANENT checkout, which is this one unless the session is in a box. The
+# adoption and retired-hook checks below exempt the source of those files by comparing
+# paths against it -- and from a box the comparison missed, so this line reported devkit
+# itself as "never vendored devkit" at the top of every agent session.
+SOURCE_ROOT = sweep.source_checkout(REPO_ROOT)
 # Where `install-git-policy.py` puts the runtime the global hooks actually execute.
 POLICY_TARGET = Path.home() / ".devkit" / "git-hooks"
 # The workspace-root settings file that wires the cross-checkout edit guard. Not inside
@@ -147,7 +156,7 @@ ADOPTION_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
-def adoption_line(root: Path, names: list[str], source: Path = REPO_ROOT) -> str:
+def adoption_line(root: Path, names: list[str], source: Path = SOURCE_ROOT) -> str:
     """Registered checkouts that are not shaped like devkit projects; "" when all are.
 
     The gap this closes. `upgrade-project.py` classifies an unadopted checkout as
@@ -176,7 +185,7 @@ def adoption_line(root: Path, names: list[str], source: Path = REPO_ROOT) -> str
 
 
 def adoption_faults(
-    root: Path, names: list[str], source: Path = REPO_ROOT
+    root: Path, names: list[str], source: Path = SOURCE_ROOT
 ) -> list[tuple[str, str]]:
     """`[(checkout, why)]` for those missing a marker -- the data behind `adoption_line`.
 
@@ -204,7 +213,7 @@ def adoption_faults(
     return faults
 
 
-def retired_hooks_line(root: Path, names: list[str], source: Path = REPO_ROOT) -> str:
+def retired_hooks_line(root: Path, names: list[str], source: Path = SOURCE_ROOT) -> str:
     """Checkouts whose settings still wire a hook devkit has retired; "" when none do.
 
     The failure this exists for is loud in the worst way: `sync-devkit.py --pull`

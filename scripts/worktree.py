@@ -81,23 +81,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Ephemeral boxes live *beside* the checkouts, never inside one: a worktree nested in
 # a project would show up as untracked files in that project's `git status`, which is
 # the `needs-branch` verdict this whole tier exists to stop manufacturing.
-BOXES_DIR_NAME = ".worktrees"
+#
+# The name is `sweep`'s now, not this module's: resolving the workspace file from inside
+# a box needs it, and that resolution had to move somewhere every workspace-aware script
+# can import (see `sweep.default_workspace`). Re-exported rather than re-spelled so the
+# tier's own callers keep reading `worktree.BOXES_DIR_NAME`.
+BOXES_DIR_NAME = sweep.BOXES_DIR_NAME
 LEASE_FILE_NAME = "leases.json"
 
 # Separates the project from the branch topic in a box name. Two hyphens rather than
 # one because project names already contain hyphens (`apt-finder`) and the box name is
-# parsed back apart by `list`.
-NAME_SEP = "--"
+# parsed back apart by `list`. Spelled in `sweep` for the same reason as BOXES_DIR_NAME:
+# `sweep.source_checkout` parses a box name and this module imports that one.
+NAME_SEP = sweep.NAME_SEP
 
 # The workspace file sits beside the checkouts, one level above this repo — unless this
-# repo IS a box, in which case it sits one level above `.worktrees/` instead. Resolving
-# both matters because a box is exactly where an agent runs this: from inside one, the
-# naive answer is `<workspace>/.worktrees/alex-projects.code-workspace`, which does not
-# exist, and every mode exits 2 with "no workspace file at" a path nobody wrote.
-_PARENT = REPO_ROOT.parent
-DEFAULT_WORKSPACE = (
-    _PARENT.parent if _PARENT.name == BOXES_DIR_NAME else _PARENT
-) / "alex-projects.code-workspace"
+# repo IS a box, in which case it sits one level above `.worktrees/` instead. This module
+# was the only one resolving both; `sweep.default_workspace` is that logic, moved down so
+# every workspace-aware script gets it instead of its own naive copy.
+DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 
 # Verdicts that mean the work has left the box, so the box is free to destroy.
 #   spent-branch  nothing beyond the base — nothing to lose

@@ -42,7 +42,8 @@ import sweep
 import task_branch as tb
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_WORKSPACE = REPO_ROOT.parent / "alex-projects.code-workspace"
+# Box-aware (see `sweep.default_workspace`).
+DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 SYNC_SCRIPT = "scripts/sync-devkit.py"
 
 # The per-project files an upgrade moves besides the MANIFEST itself. Shown in the

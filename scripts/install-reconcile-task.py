@@ -32,6 +32,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sweep
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 TASK_NAME = "devkit-worktree-reconcile"
@@ -175,7 +178,10 @@ def main(argv: list[str] | None = None) -> int:
     # `sys.executable` is whichever interpreter installed this, which is the one that
     # will still be there in an hour. A bare `python` would resolve against a PATH the
     # scheduler does not necessarily share.
-    workspace = (args.workspace or (REPO_ROOT.parent / "alex-projects.code-workspace")).resolve()
+    # Box-aware (see `sweep.default_workspace`): the installed task carries this path
+    # verbatim, so installing from a box would have scheduled a reconcile pass pointed
+    # at a registry that does not exist -- every fifteen minutes, silently.
+    workspace = (args.workspace or sweep.default_workspace(REPO_ROOT)).resolve()
     command = reconcile_command(
         windowless(sys.executable), worktree_script(), workspace, args.automerge, args.min_free_gb
     )
