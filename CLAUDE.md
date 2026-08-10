@@ -105,12 +105,29 @@ They are deliberately separate, and the distinction is load-bearing.
 - The GitHub Actions split follows from that. `.github/workflows/pr-gate.yml` stays a
   template — its jobs are the project's (services, migrations, a frontend tier), and
   carameli's five-job gate is what a shared one would have to delete or exempt.
-  `.github/workflows/dependabot-automerge.yml` and
-  `.github/actions/setup-python-env/action.yml` are vendored, because neither has a
-  per-project value left: the auto-merge workflow carries no `branches:` filter and
-  waits on a gate titled **`PR Gate` in every project, devkit included**, and the
-  action's Python version moved to the caller (each gate passes its own at every call
-  site — the action's default cannot know one).
+  `.github/workflows/dependabot-automerge.yml` is vendored, because it has no
+  per-project value left: it carries no `branches:` filter and waits on a gate titled
+  **`PR Gate` in every project, devkit included**.
+
+  `.github/actions/setup-python-env/action.yml` was vendored alongside it in v0.7.0, on
+  the argument that its one variable — the Python version — had moved to the caller.
+  **That was wrong, and it is a template again.** Two consumers disproved it on the
+  first pull that reached them, and both failures were invisible until CI:
+
+  - apt-finder's copy opened with a step cloning its private sibling `data-lake` into
+    `../data-lake`, because `[tool.uv.sources]` declares an editable path dependency
+    there. The vendored copy deleted the step and every job died on `Distribution not
+    found` before running a check.
+  - carameli does not use `uv sync` at all. It installs pip-tools compiled locks with
+    `uv pip install --system -r requirements.txt -r requirements-dev.txt`, pins uv
+    itself to the version in that lock, and takes an `extra-packages` input its weekly
+    mutation job passes. There is no `uv.lock` for `uv sync` to read.
+
+  The lesson is worth more than the file: what varies between projects is not *which
+  interpreter* they install, it is **how they install**, and that is never shared.
+  `test_setup_action_template_matches_devkits` holds devkit's own copy and the template
+  together the way `notify.py` is held, and `test_the_setup_action_is_not_vendored` is
+  the ratchet against re-adding it.
 
 ## The CI surface every project has
 
@@ -119,7 +136,7 @@ Four files, and which tier each belongs to is decided by whether its *content* v
 | File | Tier | Why |
 | --- | --- | --- |
 | `.github/workflows/dependabot-automerge.yml` | vendored | nothing in it varies |
-| `.github/actions/setup-python-env/action.yml` | vendored | its one variable moved to the caller |
+| `.github/actions/setup-python-env/action.yml` | template | how a project installs is the project's |
 | `.github/workflows/pr-gate.yml` | template | its jobs are the project's |
 | `.github/workflows/nightly.yml` | template | same, plus the tiers too slow to gate on |
 | `.github/dependabot.yml` | template | names the ecosystems this project ships |
