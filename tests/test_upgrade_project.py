@@ -19,6 +19,21 @@ up = load_script("scripts/upgrade-project.py")
 DATE = dt.date(2026, 8, 2)
 
 
+@pytest.fixture(autouse=True)
+def artifact_elsewhere(tmp_path, monkeypatch):
+    """Keep `logs/upgrade.log` out of the real devkit checkout during a test run.
+
+    Every exit from `main` writes the artifact, so without this the suite would
+    overwrite whatever a real upgrade had left there -- with the outcome of a run
+    against a fixture workspace, which is the most misleading thing it could say."""
+    monkeypatch.setattr(up, "REPO_ROOT", tmp_path / "_artifact_root")
+
+
+def done(code: int = 0):
+    """A stand-in `upgrade_one` result, for the tests that fake the per-project work."""
+    return lambda *_a, **_kw: up.Outcome("stub", code)
+
+
 def clean(**overrides) -> sweep.State:
     """A consumer sitting on its home branch with nothing uncommitted."""
     base = {
@@ -49,7 +64,7 @@ def test_the_planned_commit_does_not_claim_a_file_count_it_cannot_know(
     It printed `0` there, which described every applied run wrongly."""
     monkeypatch.setattr(up.sweep, "inspect", lambda *_a, **_kw: clean())
     (tmp_path / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
-    assert up.upgrade_one("carameli", tmp_path, "v0.5.3") == 0
+    assert up.upgrade_one("carameli", tmp_path, "v0.5.3").code == 0
     printed = capsys.readouterr().out
     assert "<n> vendored file(s)" in printed
     assert "0 vendored file(s)" not in printed
@@ -436,7 +451,7 @@ def test_a_project_on_an_older_release_is_still_upgraded(tmp_path, capsys, monke
     monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
     monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
     monkeypatch.setattr(up, "source_at_tag", _no_worktree)
-    monkeypatch.setattr(up, "upgrade_one", lambda *_a, **_kw: 0)
+    monkeypatch.setattr(up, "upgrade_one", done())
     (tmp_path / "carameli").mkdir()
     (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
     ws = workspace(tmp_path, "carameli")
@@ -452,7 +467,7 @@ def test_one_project_refusing_does_not_stop_the_others(tmp_path, capsys, monkeyp
 
     def fake_upgrade(name, project, tag, source=None):
         seen.append(name)
-        return 1 if name == "carameli" else 0
+        return up.Outcome(name, 1 if name == "carameli" else 0)
 
     monkeypatch.setattr(up, "upgrade_one", fake_upgrade)
     monkeypatch.setattr(up, "source_at_tag", _no_worktree)
@@ -470,7 +485,7 @@ def test_the_run_reports_the_worst_outcome(tmp_path, monkeypatch):
     monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
     monkeypatch.setattr(up, "source_at_tag", _no_worktree)
     codes = iter([1, 2])
-    monkeypatch.setattr(up, "upgrade_one", lambda *_a, **_kw: next(codes))
+    monkeypatch.setattr(up, "upgrade_one", lambda *_a, **_kw: up.Outcome("stub", next(codes)))
     for name in ("carameli", "ibkr_trader"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "DEVKIT_VERSION").write_text("v0.5.2\n", encoding="utf-8")
@@ -490,7 +505,7 @@ def test_one_source_worktree_serves_the_whole_run(tmp_path, monkeypatch):
         yield tmp_path / "src"
 
     monkeypatch.setattr(up, "source_at_tag", counting_source)
-    monkeypatch.setattr(up, "upgrade_one", lambda *_a, **_kw: 0)
+    monkeypatch.setattr(up, "upgrade_one", done())
     for name in ("carameli", "ibkr_trader"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "DEVKIT_VERSION").write_text("v0.5.2\n", encoding="utf-8")
@@ -504,7 +519,7 @@ def test_a_dry_run_still_reports_a_refusal(tmp_path, monkeypatch):
     Exiting 0 over a project parked on a task branch answers "all clear" for the one
     state that is not."""
     monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
-    monkeypatch.setattr(up, "upgrade_one", lambda *_a, **_kw: 1)
+    monkeypatch.setattr(up, "upgrade_one", done(1))
     (tmp_path / "carameli").mkdir()
     (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("v0.5.2\n", encoding="utf-8")
     ws = workspace(tmp_path, "carameli")
@@ -516,7 +531,7 @@ def test_a_dry_run_never_builds_a_source_worktree(tmp_path, capsys, monkeypatch)
     monkeypatch.setattr(
         up, "source_at_tag", lambda *_a: pytest.fail("a dry run pulled from somewhere")
     )
-    monkeypatch.setattr(up, "upgrade_one", lambda *_a, **_kw: 0)
+    monkeypatch.setattr(up, "upgrade_one", done())
     (tmp_path / "carameli").mkdir()
     (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("v0.5.2\n", encoding="utf-8")
     ws = workspace(tmp_path, "carameli")
@@ -528,3 +543,260 @@ def test_a_dry_run_never_builds_a_source_worktree(tmp_path, capsys, monkeypatch)
 def _no_worktree(_devkit, _tag):
     """Stands in for `source_at_tag` when the test does not care about the source."""
     yield None
+
+
+# --- the pull is self-modifying ----------------------------------------------
+#
+# `scripts/sync-devkit.py` is itself a MANIFEST entry, so one pass runs the *old*
+# release's file list. v0.7.0 added seven entries and retired three; a single pull
+# moved 17 files, reported success, and left those ten -- and the only thing that
+# noticed was the `devkit-drift` pre-commit hook failing `git commit` afterwards, in
+# three consumers at once.
+
+
+def fake_pull(writes: list[str], returncode: int = 0):
+    """A `--pull` stand-in that rewrites the vendored puller with `writes[i]` per pass.
+
+    A repeated entry is what convergence looks like from here: the file the pull would
+    write is the file already on disk, so the next pass has nothing left to change.
+    """
+    calls: list[str] = []
+
+    def pull(project, _source):
+        text = writes[min(len(calls), len(writes) - 1)]
+        calls.append(text)
+        target = project / up.SYNC_SCRIPT
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        return subprocess.CompletedProcess(["pull"], returncode, stdout="pulled", stderr="refused")
+
+    return pull
+
+
+def vendored(root, text: str):
+    """Put a copy of the puller in `root`, the way a consumer carries one."""
+    target = root / up.SYNC_SCRIPT
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    return root
+
+
+def test_a_release_that_grew_the_manifest_is_pulled_twice(tmp_path):
+    """The second pass is the one that runs the new MANIFEST. Without it the entries
+    the release *added* are not in the list being copied, and nothing says so."""
+    project = vendored(tmp_path, "MANIFEST = old")
+    runs, divergence = up.pull_to_fixpoint(
+        project, tmp_path / "src", pull=fake_pull(["MANIFEST = new"])
+    )
+    assert len(runs) == 2
+    assert divergence == ""
+
+
+def test_a_pull_that_leaves_the_puller_alone_runs_once(tmp_path):
+    """The common case -- a release that changed no MANIFEST entry -- must not pay for
+    a second full copy of the tree."""
+    project = vendored(tmp_path, "MANIFEST = same")
+    pull = fake_pull(["MANIFEST = same"])
+    runs, divergence = up.pull_to_fixpoint(project, tmp_path / "src", pull=pull)
+    assert (len(runs), divergence) == (1, "")
+
+
+def test_a_refused_pull_is_not_retried(tmp_path):
+    """Re-running a refusal only refuses again, and the second one is not news."""
+    project = vendored(tmp_path, "MANIFEST = old")
+    pull = fake_pull(["a", "b", "c"], returncode=1)
+    runs, divergence = up.pull_to_fixpoint(project, tmp_path / "src", pull=pull)
+    assert (len(runs), divergence) == (1, "")
+
+
+def test_a_puller_that_never_settles_is_reported_rather_than_looped(tmp_path):
+    """Two repos that disagree about the manifest would pull forever. Three passes is
+    already one more than a real upgrade needs."""
+    project = vendored(tmp_path, "start")
+    pull = fake_pull(["a", "b", "c", "d"])
+    runs, divergence = up.pull_to_fixpoint(project, tmp_path / "src", pull=pull)
+    assert len(runs) == up.MAX_PULL_PASSES
+    assert "do not agree on what the MANIFEST is" in divergence
+
+
+def test_a_project_with_no_vendored_puller_reads_as_empty(tmp_path):
+    """`sync_script_bytes` is a comparison, not an assertion: an absent file is a
+    value, so a project that has never vendored does not crash the fixpoint."""
+    assert up.sync_script_bytes(tmp_path) == b""
+
+
+# --- the drift check runs here, not at commit time ---------------------------
+
+
+def upgraded(tmp_path, monkeypatch, git, *, runs, divergence="", check=None):
+    """Drive `upgrade_one` past the git plumbing, with the pull's result supplied."""
+    monkeypatch.setattr(up.sweep, "inspect", lambda *_a, **_kw: clean())
+    monkeypatch.setattr(
+        up.sweep,
+        "apply_plan",
+        lambda name, *_a, **_kw: sweep.Applied(name, up.plan(clean(), "v0.7.0")),
+    )
+    monkeypatch.setattr(up.sweep, "git_for", lambda _project: git)
+    monkeypatch.setattr(up, "pull_to_fixpoint", lambda *_a, **_kw: (runs, divergence))
+    monkeypatch.setattr(
+        up, "verify_pull", lambda *_a: check or subprocess.CompletedProcess(["check"], 0, "", "")
+    )
+    (tmp_path / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
+    return up.upgrade_one("carameli", tmp_path, "v0.7.0", source=tmp_path / "src")
+
+
+def test_drift_the_pull_left_is_refused_before_the_commit_gate_sees_it(tmp_path, monkeypatch):
+    """This is the failure as it actually happened: the commit ran, the `devkit-drift`
+    hook rejected it, and the operator got a hook id instead of a file list. Checking
+    here reports it where the tree that caused it is still the subject."""
+    git = RecordingGit()
+    outcome = upgraded(
+        tmp_path,
+        monkeypatch,
+        git,
+        runs=[subprocess.CompletedProcess(["pull"], 0, "moved 17 file(s)", "")],
+        check=subprocess.CompletedProcess(
+            ["check"], 1, "DRIFT   scripts/hooks/codex-hook-adapter.py", ""
+        ),
+    )
+    assert outcome.code == 2
+    assert "codex-hook-adapter" in outcome.detail
+    assert not any(step[0] == "commit" for step in git.calls)
+
+
+def test_a_divergent_pull_leaves_its_evidence_in_the_checkout(tmp_path, monkeypatch):
+    """Unlike a refused pull, this one already copied files. Unwinding the branch from
+    under a half-adopted tree hides what went wrong in an unattributed dirty checkout."""
+    git = RecordingGit()
+    outcome = upgraded(
+        tmp_path,
+        monkeypatch,
+        git,
+        runs=[subprocess.CompletedProcess(["pull"], 0, "moved 17 file(s)", "")],
+        divergence="never settled",
+    )
+    assert outcome.code == 2
+    assert not any(step[:2] == ("branch", "-d") for step in git.calls)
+
+
+# --- a fixer hook is not a refusal -------------------------------------------
+
+
+class CommitGit:
+    """A git whose `commit` fails, optionally rewriting the tree as a hook would."""
+
+    def __init__(self, statuses: list[str], commit_codes: list[int]):
+        self.statuses = statuses
+        self.commit_codes = iter(commit_codes)
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, *args: str):
+        self.calls.append(args)
+        if args[0] == "status":
+            # One reading per call, holding the last, so a test spells out the tree as
+            # the sequence of states the commit attempts walk it through.
+            text = self.statuses[0] if len(self.statuses) == 1 else self.statuses.pop(0)
+            return subprocess.CompletedProcess(["git", *args], 0, text, "")
+        code = next(self.commit_codes, 0) if args[0] == "commit" else 0
+        return subprocess.CompletedProcess(["git", *args], code, "", "hook said no")
+
+
+def test_a_hook_that_rewrote_the_tree_gets_one_more_commit():
+    """`sync-codex` remirrored `.claude/skills/` and failed a commit that had nothing
+    wrong with it. Staging the result and committing again is the whole convention."""
+    git = CommitGit(["M  a.py\n", "MM a.py\n"], [1, 0])
+    result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
+    assert (result.returncode, retried) == (0, True)
+    assert git.calls.count(("add", "-A")) == 1
+    assert [step for step in git.calls if step[0] == "commit"] != []
+
+
+def test_a_gate_that_refused_is_not_committed_over():
+    """A lint error the formatter cannot fix leaves the tree untouched. Retrying it
+    fails identically and reports the same thing twice."""
+    git = CommitGit(["M  a.py\n"], [1, 1])
+    result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
+    assert (result.returncode, retried) == (1, False)
+    assert ("add", "-A") not in git.calls
+    assert len([step for step in git.calls if step[0] == "commit"]) == 1
+
+
+def test_a_commit_that_worked_is_never_retried():
+    git = CommitGit(["M  a.py\n"], [0])
+    result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
+    assert (result.returncode, retried) == (0, False)
+    assert len([step for step in git.calls if step[0] == "commit"]) == 1
+
+
+def test_the_rewrite_is_detected_by_the_status_code_not_the_path_list():
+    """A fixer rewrites files that were *already staged*, so the set of changed paths
+    is identical afterwards and only the porcelain code moves. Comparing the parsed
+    paths reports "nothing changed" for the one event this exists to detect."""
+    git = CommitGit(["M  a.py\n", "MM a.py\n"], [1, 0])
+    assert up.changed_paths(git) == up.changed_paths(git)  # same path, both readings
+    git = CommitGit(["M  a.py\n", "MM a.py\n"], [1, 0])
+    _result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
+    assert retried
+
+
+# --- the failure artifact ----------------------------------------------------
+
+
+def test_a_clean_run_writes_an_empty_artifact():
+    """Empty rather than absent: a stale report is how the next reader gets sent after
+    a failure that was fixed two runs ago."""
+    assert up.artifact_body("v0.7.0", False, [up.Outcome("carameli", 0)]) == ""
+    assert up.artifact_body("v0.7.0", False, []) == ""
+
+
+def test_the_artifact_carries_each_failure_and_the_command_that_retries_it():
+    body = up.artifact_body(
+        "v0.7.0",
+        False,
+        [
+            up.Outcome("carameli", 2, "upgrade: carameli -- FAILED at `git commit`"),
+            up.Outcome("apt-finder", 1, "upgrade: apt-finder -- 3 uncommitted file(s)"),
+            up.Outcome("ibkr_trader", 0),
+        ],
+    )
+    assert "=== carameli (exit 2) ===" in body
+    assert "FAILED at `git commit`" in body
+    assert "3 uncommitted file(s)" in body
+    assert "upgrade-project.py carameli,apt-finder --yes" in body
+    assert "ibkr_trader" not in body
+
+
+def test_the_artifact_says_which_mode_produced_it():
+    """A refusal from a dry run and one from an apply need different next steps."""
+    refused = [up.Outcome("carameli", 1, "parked on a task branch")]
+    assert "(dry run)" in up.artifact_body("v0.7.0", True, refused)
+    assert "(apply)" in up.artifact_body("v0.7.0", False, refused)
+
+
+def test_a_run_that_never_reached_a_project_still_writes_one(tmp_path, monkeypatch, capsys):
+    """`no workspace file` and `devkit has no tags` are the two failures most likely
+    to be read hours later out of a task terminal nobody was watching."""
+    assert up.main(["--all", "--workspace", str(tmp_path / "missing.code-workspace")]) == 2
+    written = (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8")
+    assert "no workspace file" in written
+    assert up.ARTIFACT.as_posix() in capsys.readouterr().err
+
+
+def test_a_run_with_nothing_to_do_clears_what_the_last_one_left(tmp_path, monkeypatch):
+    """The scheduled-run case: proving the workspace is current must also retract the
+    previous run's report, or the artifact outlives the problem it describes."""
+    stale = up.write_artifact(up.REPO_ROOT, "=== carameli (exit 2) ===\nold news\n")
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli")
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    assert stale.read_text(encoding="utf-8") == ""
+
+
+def test_an_unwritable_logs_directory_does_not_fail_the_upgrade(tmp_path):
+    """The artifact is a report about the work, never a precondition for it."""
+    blocked = tmp_path / "wall"
+    blocked.write_text("not a directory", encoding="utf-8")
+    assert up.write_artifact(blocked, "anything") is None

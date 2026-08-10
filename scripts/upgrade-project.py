@@ -22,6 +22,11 @@ one PR each -- the release is one upstream revision, so adopting it everywhere i
 one operation. Each project is still upgraded on its own terms: a refusal in one
 does not stop the others, and the exit code reports the worst outcome.
 
+Every refusal and failure is written to `logs/upgrade.log` in the devkit checkout,
+overwritten per run and emptied when a run is clean. A `--all` interleaves several
+checkouts' output in one terminal, which is the shape of output that scrolls away
+before it is read.
+
 Pure and stdlib-only; every decision is an importable function tested in
 `tests/test_upgrade_project.py`.
 """
@@ -34,6 +39,7 @@ import datetime as _dt
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,6 +51,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Box-aware (see `sweep.default_workspace`).
 DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 SYNC_SCRIPT = "scripts/sync-devkit.py"
+
+# Where this run's refusals and failures are written, relative to the devkit checkout
+# (`logs/` is gitignored). An upgrade run spans several checkouts and its output is
+# interleaved; the terminal gets a status line and this path, per the failure-artifact
+# rule in `.claude/rules/engineering.md`.
+ARTIFACT = Path("logs") / "upgrade.log"
+
+# How many times `--pull` may be re-run before the disagreement is the bug -- see
+# `pull_to_fixpoint`. Two is the honest ceiling; the third only ever proves it.
+MAX_PULL_PASSES = 3
 
 # The per-project files an upgrade moves besides the MANIFEST itself. Shown in the
 # dry run so the plan names them; the commit stages with `add -A`, which is exact
@@ -378,7 +394,126 @@ def run_pull(project: Path, devkit: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) -> int:
+def sync_script_bytes(project: Path) -> bytes:
+    """The project's vendored copy of the puller, or b"" when it has none."""
+    try:
+        return (project / SYNC_SCRIPT).read_bytes()
+    except OSError:
+        return b""
+
+
+def pull_to_fixpoint(
+    project: Path,
+    source: Path,
+    passes: int = MAX_PULL_PASSES,
+    pull: Callable[[Path, Path], subprocess.CompletedProcess[str]] | None = None,
+) -> tuple[list[subprocess.CompletedProcess[str]], str]:
+    """`--pull` until the puller stops changing. `(the runs, "" or a divergence)`.
+
+    **One pull cannot adopt a release that changed the MANIFEST**, and the shortfall
+    is invisible until commit time. `scripts/sync-devkit.py` is itself a MANIFEST
+    entry, so the copy executing a pull is the copy that pull replaces: the list being
+    copied is the *old* release's, and any path the new release added to it is not in
+    it. v0.7.0 added seven entries (the Codex adapter pair, the CI contract test,
+    `dependabot-automerge.yml`, ...) and retired three more; the pull reported success
+    having moved 17 files and left those ten behind.
+
+    Nothing downstream absorbed that. `git commit` runs the `devkit-drift` pre-commit
+    hook, which compares against the *new* MANIFEST out of pre-commit's own clone of
+    the pinned rev -- so it failed the commit, in all three consumers at once, each
+    left parked on the upgrade branch holding a half-adopted release.
+
+    So: pull, and if the pull replaced the puller, pull again with the copy now in
+    place. The second pass runs the release's own MANIFEST and is where a normal
+    upgrade settles. A third that still moves it means devkit and this project
+    disagree about what the manifest is -- a bug to report, not a loop to widen.
+    """
+    runner = pull or run_pull
+    runs: list[subprocess.CompletedProcess[str]] = []
+    for _ in range(passes):
+        before = sync_script_bytes(project)
+        result = runner(project, source)
+        runs.append(result)
+        # A refused pull is the caller's to report; re-running it would only refuse
+        # again, and the second refusal is not new information.
+        if result.returncode != 0 or sync_script_bytes(project) == before:
+            return runs, ""
+    return runs, (
+        f"{SYNC_SCRIPT} still changed after {passes} pulls -- devkit and this "
+        f"project do not agree on what the MANIFEST is. Adopt by hand and report it."
+    )
+
+
+def commit_with_hook_retry(git, message: str) -> tuple[subprocess.CompletedProcess[str], bool]:
+    """`git commit`, re-staged and retried once when the commit hooks rewrote the tree.
+
+    Half of pre-commit's hooks are *fixers*: they reformat, they mirror a directory,
+    they regenerate a manifest. A fixer that changes something fails the commit with
+    "files were modified by this hook", and the convention is that you stage the
+    result and commit again -- carameli's `sync-codex` hook remirrored `.claude/skills/`
+    and stopped an upgrade that had nothing wrong with it.
+
+    An upgrade meets this more than most changes do, because it lands dozens of
+    upstream files at once through every fixer the project runs.
+
+    **Retried only when the tree actually changed during the failed attempt.** That is
+    what separates a hook that fixed something from a gate that refused something: a
+    lint error the formatter cannot fix leaves the tree exactly as it was, and
+    committing over it again would just fail twice and say so twice.
+    """
+    before = _status(git)
+    first = git("commit", "-m", message)
+    if first.returncode == 0 or _status(git) == before:
+        return first, False
+    git("add", "-A")
+    return git("commit", "-m", message), True
+
+
+def _status(git) -> str:
+    """Raw `status --porcelain`, **status codes and all**.
+
+    Deliberately not `changed_paths`, which drops the codes: a fixer hook rewrites
+    files that were already staged, so the path list is identical afterwards and only
+    the code moves (`M ` -> `MM`). Comparing the parsed paths would report "nothing
+    changed" for the one event this exists to detect.
+    """
+    result = git("status", "--porcelain")
+    return result.stdout if result.returncode == 0 else ""
+
+
+def verify_pull(project: Path, source: Path) -> subprocess.CompletedProcess[str]:
+    """`--check` after the pull: the comparison `git commit` is about to make anyway.
+
+    The `devkit-drift` pre-commit hook performs exactly this check, one step later and
+    with no way to explain itself -- the operator sees `commit -m 'Adopt devkit ...'`
+    fail with a hook id. Running it here turns that into an upgrade refusal, at the
+    point where the tree that caused it is still the subject of the sentence.
+    """
+    return subprocess.run(
+        [sys.executable, SYNC_SCRIPT, "--check", "--src", str(source)],
+        cwd=str(project),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """One checkout's exit code, and the text `logs/upgrade.log` records for it.
+
+    `upgrade_one` used to return a bare code, which served `max()` and nothing else:
+    every detail went to stderr, where a multi-project run interleaves it and the
+    scrollback then loses it. The artifact needs those same sentences, so they are
+    carried out rather than only printed.
+    """
+
+    name: str
+    code: int
+    detail: str = ""
+
+
+def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) -> Outcome:
     """Adopt `tag` in one checkout: 0 done or nothing to do, 1 refused, 2 failed.
 
     `source` is a clean devkit worktree at `tag` to pull from. **None means dry
@@ -389,11 +524,17 @@ def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) 
     The exit codes are the sweep convention (1 needs a human decision, 2 something
     broke mid-flight) so `main` can take the worst across a `--all` run.
     """
+
+    def failed(code: int, *lines: str) -> Outcome:
+        """Report to stderr and to the artifact in one act, so they cannot diverge."""
+        text = "\n".join(line.rstrip() for line in lines if line.strip())
+        print(text, file=sys.stderr)
+        return Outcome(name, code, text)
+
     state = sweep.inspect(name, project, fetch=False)
     upgrade = plan(state, tag, None)
     if upgrade.refusal:
-        print(f"upgrade: {name} -- {upgrade.refusal}", file=sys.stderr)
-        return 1
+        return failed(1, f"upgrade: {name} -- {upgrade.refusal}")
 
     previous = (project / "DEVKIT_VERSION").read_text(encoding="utf-8").strip()
     print(f"upgrade: {name} {previous} -> {tag}")
@@ -404,19 +545,35 @@ def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) 
     print(f"  4. git -C {name} commit -m {commit_message(tag, '<n>')!r}")
     print("  5. git push -u origin, then gh pr create")
     if source is None:
-        return 0
+        return Outcome(name, 0)
 
     git = sweep.git_for(project)
     applied = sweep.apply_plan(name, project, upgrade, git=git)
     if not applied.ok:
-        print(f"upgrade: FAILED at `{applied.failed}`\n{applied.error}", file=sys.stderr)
-        return 2
+        return failed(2, f"upgrade: {name} -- FAILED at `{applied.failed}`", applied.error)
 
-    pulled = run_pull(project, source)
-    print(pulled.stdout.rstrip())
+    runs, divergence = pull_to_fixpoint(project, source)
+    print("\n".join(run.stdout.rstrip() for run in runs).rstrip())
+    pulled = runs[-1]
     if pulled.returncode != 0:
-        print(pulled.stderr.rstrip(), file=sys.stderr)
-        return _abandon(git, name, upgrade.anchor, "the pull refused", code=2)
+        refusal = failed(2, f"upgrade: {name} -- the pull refused", pulled.stderr)
+        # `_abandon` decides the code -- a branch it could not unwind is worse news
+        # than the refusal that led there -- but the refusal is what the reader needs.
+        code = _abandon(git, name, upgrade.anchor, "the pull refused", code=2)
+        return Outcome(name, code, refusal.detail)
+    if divergence:
+        # Deliberately not abandoned: the tree holds a partial adoption, and dropping
+        # the branch out from under it would hide the evidence in a dirty checkout.
+        return failed(2, f"upgrade: {name} -- {divergence}")
+
+    checked = verify_pull(project, source)
+    if checked.returncode != 0:
+        return failed(
+            2,
+            f"upgrade: {name} -- the pull left drift that the commit gate will reject",
+            checked.stdout,
+            checked.stderr,
+        )
 
     changed = changed_paths(git)
     if not changed:
@@ -425,19 +582,31 @@ def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) 
         # leave no trace. Cutting a branch and walking away would litter one empty
         # `claude/devkit-upgrade-<mmdd>` per check, and `--sync` would then have to
         # reap them.
-        return _abandon(git, name, upgrade.anchor, "already current", code=0)
+        return Outcome(name, _abandon(git, name, upgrade.anchor, "already current", code=0))
 
-    for step in (
-        # Safe only because the tree was clean before the pull -- see `changed_paths`.
-        ("add", "-A"),
-        ("commit", "-m", commit_message(tag, len(changed))),
-        ("push", "-u", "origin", branch_name()),
-    ):
-        result = git(*step)
-        if result.returncode != 0:
-            print(f"upgrade: FAILED at `git {' '.join(step)}`", file=sys.stderr)
-            print((result.stderr or result.stdout).rstrip(), file=sys.stderr)
-            return 2
+    # Safe only because the tree was clean before the pull -- see `changed_paths`.
+    staged = git("add", "-A")
+    if staged.returncode != 0:
+        return failed(
+            2, f"upgrade: {name} -- FAILED at `git add -A`", staged.stderr or staged.stdout
+        )
+
+    committed, retried = commit_with_hook_retry(git, commit_message(tag, len(changed)))
+    if committed.returncode != 0:
+        return failed(
+            2,
+            f"upgrade: {name} -- FAILED at `git commit` "
+            f"({'the hooks rewrote the tree and it still failed' if retried else 'a gate refused it'})",
+            committed.stderr or committed.stdout,
+        )
+
+    pushed = git("push", "-u", "origin", branch_name())
+    if pushed.returncode != 0:
+        return failed(
+            2,
+            f"upgrade: {name} -- FAILED at `git push`",
+            pushed.stderr or pushed.stdout,
+        )
 
     url, created, error = sweep.ensure_pr(
         sweep.gh_for(project),
@@ -449,10 +618,61 @@ def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) 
         ),
     )
     if error:
-        print(f"upgrade: pushed, but the PR failed: {error}", file=sys.stderr)
-        return 2
+        return failed(2, f"upgrade: {name} -- pushed, but the PR failed: {error}")
     print(f"upgrade: PR {'opened' if created else 'already open'}: {url}")
-    return 0
+    return Outcome(name, 0)
+
+
+def artifact_body(tag: str, dry_run: bool, outcomes: list[Outcome]) -> str:
+    """The full text of `logs/upgrade.log` -- empty when nothing needs a human.
+
+    Empty on a clean run rather than absent, so a stale artifact can never send the
+    next reader after a failure that is already fixed. The header carries the command
+    that re-runs the thing that failed, because the artifact is read by whoever finds
+    it and not only by whoever started the run.
+    """
+    actionable = [outcome for outcome in outcomes if outcome.code != 0]
+    if not actionable:
+        return ""
+    names = " ".join(outcome.name for outcome in actionable)
+    lines = [
+        "# source: devkit scripts/upgrade-project.py",
+        f"# run: adopt devkit {tag} ({'dry run' if dry_run else 'apply'})",
+        f"# retry: python scripts/upgrade-project.py {','.join(o.name for o in actionable)} --yes",
+        f"# unresolved: {names}",
+        "",
+    ]
+    for outcome in actionable:
+        lines.append(f"=== {outcome.name} (exit {outcome.code}) ===")
+        lines.append(outcome.detail.strip() or "(no detail recorded)")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_artifact(root: Path, body: str) -> Path | None:
+    """Persist the report under `root`. Best-effort: an unwritable `logs/` is not
+    itself a reason to fail an upgrade that otherwise worked."""
+    path = root / ARTIFACT
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    except OSError:
+        return None
+    return path
+
+
+def _finish(tag: str, dry_run: bool, outcomes: list[Outcome]) -> int:
+    """Write the artifact, then return the worst code across the run.
+
+    Every exit from `main` goes through here, including the ones that never reach a
+    project: "devkit has no tags" and "that checkout is not in the workspace" are the
+    two failures most likely to be read hours later out of a task terminal.
+    """
+    body = artifact_body(tag, dry_run, outcomes)
+    path = write_artifact(REPO_ROOT, body)
+    if body and path is not None:
+        print(f"upgrade: details in {ARTIFACT.as_posix()}", file=sys.stderr)
+    return max((outcome.code for outcome in outcomes), default=0)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -489,26 +709,28 @@ def main(argv: list[str] | None = None) -> int:
     if not args.every and not requested:
         parser.error("name one or more checkouts to upgrade, or pass --all for every adopter")
 
+    def stopped(code: int, message: str, tag: str = "(none resolved)") -> int:
+        """A run-level failure: reported once, and to the artifact like any other."""
+        print(message, file=sys.stderr)
+        return _finish(tag, args.dry_run, [Outcome("(run)", code, message)])
+
     if not args.workspace.is_file():
-        print(f"upgrade: no workspace file at {args.workspace}", file=sys.stderr)
-        return 2
+        return stopped(2, f"upgrade: no workspace file at {args.workspace}")
     names = sweep.parse_workspace(args.workspace.read_text(encoding="utf-8"))
     unknown = [name for name in requested if name not in names]
     if unknown:
-        print(
+        return stopped(
+            2,
             f"upgrade: {', '.join(unknown)} not in {args.workspace.name}. "
             f"Known checkouts: {', '.join(names)}",
-            file=sys.stderr,
         )
-        return 2
 
     root = args.workspace.parent
     tag = latest_tag(args.devkit)
     if not tag:
         # Reported once for the run, not once per project: with --all it is the same
         # fact about devkit every time, and repeating it reads as four problems.
-        print(f"upgrade: {NO_TAG}", file=sys.stderr)
-        return 1
+        return stopped(1, f"upgrade: {NO_TAG}")
 
     # One lookup for the whole run: every project adopts the same release, and this is
     # what the per-project stamps are measured against.
@@ -523,8 +745,7 @@ def main(argv: list[str] | None = None) -> int:
             # An explicitly named checkout that cannot be a target is an operator
             # error, not a skip: they asked for something this cannot do.
             if not args.every:
-                print(f"upgrade: {name} {skip}", file=sys.stderr)
-                return 2
+                return stopped(2, f"upgrade: {name} {skip}", tag)
             print(f"upgrade: {name} -- skipped, it {skip}")
         # Before inspecting or refusing anything: an up-to-date project is the common
         # case on a scheduled run, and proving it must not depend on the project being
@@ -535,25 +756,25 @@ def main(argv: list[str] | None = None) -> int:
             todo.append(name)
 
     if not todo:
-        return 0
+        # Still written -- as an empty file, clearing whatever the last run left.
+        return _finish(tag, args.dry_run, [])
 
     if args.dry_run:
         # The refusals still count. A dry run is how a scheduled check asks "could
         # this be adopted right now", and answering 0 while a project is parked on a
         # task branch reports "all clear" for the one state that is not.
-        codes = [upgrade_one(name, root / name, tag) for name in todo]
+        outcomes = [upgrade_one(name, root / name, tag) for name in todo]
         print("\nDry run -- nothing was changed. Re-run with --yes to apply.")
-        return max(codes)
+        return _finish(tag, args.dry_run, outcomes)
 
     # One worktree for the whole run: every project adopts the same revision, and
     # it is materialised only once something is actually going to be pulled.
     try:
         with source_at_tag(args.devkit, tag) as source:
-            codes = [upgrade_one(name, root / name, tag, source) for name in todo]
+            outcomes = [upgrade_one(name, root / name, tag, source) for name in todo]
     except RuntimeError as exc:
-        print(f"upgrade: could not check devkit out at {tag}: {exc}", file=sys.stderr)
-        return 2
-    return max(codes)
+        return stopped(2, f"upgrade: could not check devkit out at {tag}: {exc}", tag)
+    return _finish(tag, args.dry_run, outcomes)
 
 
 def latest_tag(devkit: Path) -> str | None:

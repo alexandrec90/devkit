@@ -130,6 +130,43 @@ def test_an_edit_inside_a_checkout_on_its_home_branch_gets_a_box(root):
     assert decision == ("carameli", str(Path("app/main.py")))
 
 
+def test_a_cross_checkout_edit_respects_the_branch_already_checked_out(root):
+    """The same "fix PR #42" decline, reached from *outside* the checkout -- which is
+    how a workspace-level session reaches it at all.
+
+    `upgrade-project.py` leaves exactly this state when a consumer's commit gate
+    rejects an adoption: the checkout is parked on `claude/devkit-upgrade-<mmdd>`
+    holding the work, and the fix belongs on that branch. A box cut from
+    `origin/<default>` puts it where that branch and its PR never see it, and the
+    session sitting in devkit rather than in the consumer changes nothing about that.
+    """
+    assert (
+        guard.redirect_decision(
+            str(root / "carameli" / "app" / "main.py"),
+            str(root / "devkit"),
+            root,
+            PROJECTS,
+            branch_of=on_branch("claude/devkit-upgrade-0810"),
+        )
+        is None
+    )
+
+
+def test_a_cross_checkout_edit_is_boxed_when_git_will_not_name_the_branch(root):
+    """Asymmetric with the decline inside a checkout, on purpose. There, an unnameable
+    branch declines because git may simply be unavailable. From outside, silence is not
+    consent: without a name that is positively a task branch, the edit gets a box."""
+    for branch in ("", "master"):
+        decision = guard.redirect_decision(
+            str(root / "carameli" / "app" / "main.py"),
+            str(root / "devkit"),
+            root,
+            PROJECTS,
+            branch_of=on_branch(branch),
+        )
+        assert decision == ("carameli", str(Path("app/main.py"))), branch
+
+
 def test_an_edit_from_a_subdirectory_is_judged_by_the_checkouts_branch(root):
     for branch, expected in (("claude/x-0806", None), ("master", "carameli")):
         decision = guard.redirect_decision(
