@@ -58,8 +58,8 @@ jobs:
       - uses: ./.github/actions/setup-python-env
         with:
           # Explicit, the same way every generated gate passes it: the action is
-          # vendored byte-identical, so its own default cannot know a project's
-          # version. devkit's happens to match it, which is exactly why relying on
+          # copied verbatim rather than rendered, so its own default cannot know a
+          # project's version. devkit's happens to match it, which is why relying on
           # the default here would leave the convention untested in the one repo
           # that ships it.
           python-version: "3.12"

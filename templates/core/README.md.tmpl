@@ -96,7 +96,14 @@ every PR. The drift check is only meaningful when it can see devkit — if it pr
 patch/minor bumps of anything, plus majors confined to dev tooling. A major that
 touches a runtime dependency is labelled `needs-manual-merge` and waits for you.
 
-That auto-merge workflow and `.github/actions/setup-python-env/` are **vendored** from
-devkit, so `sync-devkit.py --check` compares them byte-for-byte and editing them here
-shows up as drift. Keep the gate's title `PR Gate`: the auto-merge workflow waits on it
-by name, and a rename makes the merge job inert without turning anything red.
+That auto-merge workflow is **vendored** from devkit, so `sync-devkit.py --check`
+compares it byte-for-byte and editing it here shows up as drift. Keep the gate's title
+`PR Gate`: the auto-merge workflow waits on it by name, and a rename makes the merge job
+inert without turning anything red.
+
+`.github/actions/setup-python-env/` is **yours**, by contrast. devkit shipped it through
+that same channel for one release and pulled it back out when two projects turned out to
+install in ways `uv sync` cannot express, so it now arrives from `templates/` as a
+one-shot copy: nothing compares it, and rewriting its steps to match how this project
+installs is the supported move rather than drift. What owning it costs is the other
+direction — later devkit fixes to that file never reach here.

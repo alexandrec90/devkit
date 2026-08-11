@@ -1003,7 +1003,8 @@ def test_generated_gate_installs_through_uv_and_runs_inside_it(tmp_path):
     root = generate(tmp_path, {})
     gate = (root / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
     # The sync moved into the composite action; what matters is that the gate still
-    # reaches it. The action arrives vendored, so it is byte-identical to devkit's.
+    # reaches it. The action arrives from `templates/` as a byte-identical copy of
+    # devkit's own — one-shot, so the project may rewrite these steps afterwards.
     action = (root / ".github" / "actions" / "setup-python-env" / "action.yml").read_text(
         encoding="utf-8"
     )
@@ -1018,13 +1019,17 @@ def test_generated_gate_installs_through_uv_and_runs_inside_it(tmp_path):
             raise AssertionError(f"gate step runs outside the uv env: {stripped}")
 
 
-def test_generated_gate_passes_its_own_python_version_to_the_vendored_action(tmp_path):
+def test_generated_gate_passes_its_own_python_version_to_the_composite_action(tmp_path):
     """The action is byte-identical everywhere, so its default cannot be any project's.
 
-    It used to be rendered, and its default *was* the project's version — which is why
-    the gate could leave it implicit. Vendoring it removes that: a project generated on
-    3.13 would silently provision 3.12, lock-resolve against it, and pass. So every
-    call site has to name the version, and nothing but this test says so.
+    It used to be *rendered*, and its default was then the project's version — which is
+    why the gate could leave it implicit. Copying it verbatim removes that: a project
+    generated on 3.13 would silently provision 3.12, lock-resolve against it, and pass.
+    So every call site has to name the version, and nothing but this test says so.
+
+    Verbatim-not-rendered is the property that matters here, and it outlives the tier:
+    the file was vendored for v0.7.0 and is a `templates/` copy again, and neither tier
+    ever substituted `python_version` into it.
     """
     yaml = pytest.importorskip("yaml")
     args = make_args(parent=str(tmp_path), python_version="3.13")
