@@ -625,7 +625,7 @@ def test_every_action_is_reachable_from_a_task(canonical):
 # passed over, so a task that stops writing one has to say why in this list.
 UNLOGGED_TASKS = {
     "Agents: Open Tabs (External Terminal)": "spawns terminal tabs; the window is the output",
-    "Agents: Resume Recent Claude Sessions": "same — reopens sessions in tabs, then exits",
+    "Agents: Resume Recent Sessions": "same — reopens sessions in tabs, then exits",
     "IBKR: Open Gateway VNC Viewer": "launches a GUI viewer; nothing to parse when it closes",
 }
 

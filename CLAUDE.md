@@ -380,6 +380,29 @@ way is not blocked from hoisting — write the seam. `scripts/backtest-task.py` 
 ibkr_trader exists for exactly that reason: the two Backtest tasks invoked
 `.venv\Scripts\ibkr-trader.exe` directly, which the dispatcher cannot call.
 
+### Changing a task: the live file first, then adopt
+
+`workspace-tasks.jsonc` is devkit's copy of the block, and the workspace file — which
+lives outside every repo and so cannot be vendored — is the one VS Code actually runs.
+**Edit `<workspace>/alex-projects.code-workspace`, then record it:**
+
+```bash
+python scripts/devkit_project.py --adopt-tasks   # live file -> workspace-tasks.jsonc
+python scripts/devkit_project.py --check-tasks   # verify they agree
+```
+
+**The direction is one-way and there is no flag for the other one.** Editing
+`workspace-tasks.jsonc` directly appears to work — the file is in the repo, the diff
+looks right, `test_the_live_workspace_matches_the_canonical_block` even reports drift
+and names `--adopt-tasks` as the remedy. Running it then *deletes the edit*, because it
+regenerates the canonical copy from the live file. The direction was written down only
+in a comment header inside the generated file, which is the last place someone editing
+it will look.
+
+That test is also the only thing holding the two together, and it is
+`@needs_live_workspace` — so it is skipped in CI and on any machine without the
+workspace file. A canonical block that drifts is caught locally or not at all.
+
 Conventions for the tasks themselves:
 
 - Use `"type": "process"` so VS Code monitors the process directly — that is what makes
