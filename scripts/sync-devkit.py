@@ -98,6 +98,12 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/tests/test_enforce_capped_bash.py",
     "scripts/hooks/invoke-capped.py",
     "scripts/hooks/tests/test_invoke_capped.py",
+    # The task-layer failure artifact. Vendored rather than templated because nothing
+    # in it varies: it resolves `logs/` from the cwd the task set, and the task label
+    # it is given names the file. `notify-wrap.py` is its sibling and stays a template
+    # only because it already was -- the two compose, one per concern.
+    "scripts/log-wrap.py",
+    "scripts/hooks/tests/test_log_wrap.py",
     # Branch lifecycle: default-branch auto-detected (detect_default_branch), so
     # these vendor unchanged. session-start.sh is the SessionStart entrypoint.
     "scripts/task_branch.py",

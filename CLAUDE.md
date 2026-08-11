@@ -380,6 +380,24 @@ way is not blocked from hoisting — write the seam. `scripts/backtest-task.py` 
 ibkr_trader exists for exactly that reason: the two Backtest tasks invoked
 `.venv\Scripts\ibkr-trader.exe` directly, which the dispatcher cannot call.
 
+### Changing a task: the live file first, then adopt
+
+`workspace-tasks.jsonc` is devkit's copy of the block, and the workspace file — which
+lives outside every repo and so cannot be vendored — is the one VS Code actually runs.
+**Edit `<workspace>/alex-projects.code-workspace`, then record it:**
+
+```bash
+python scripts/devkit_project.py --adopt-tasks   # live file -> workspace-tasks.jsonc
+python scripts/devkit_project.py --check-tasks   # verify they agree
+```
+
+**One-way, with no flag for the other direction.** Editing `workspace-tasks.jsonc`
+directly looks right — it is the file in the repo, the diff is clean, and the drift test
+even names `--adopt-tasks` as the remedy — and running that *deletes the edit*, because
+it regenerates the canonical copy from the live file. One test holds the pair together
+(`test_the_live_workspace_matches_the_canonical_block`) and it is
+`@needs_live_workspace`: skipped in CI, so drift is caught locally or not at all.
+
 Conventions for the tasks themselves:
 
 - Use `"type": "process"` so VS Code monitors the process directly — that is what makes
@@ -387,6 +405,16 @@ Conventions for the tasks themselves:
 - Set `"close": false` in `presentation` so the terminal stays open for review.
 - **Wrap with `notify-wrap.py`** for the completion toast; never call `notify.py` from
   inside a script. Notifications are a task-layer concern only.
+- **And with `log-wrap.py`, inside it**, so the run's output survives the terminal as
+  `logs/<slug of the task>.log` — emptied when the task passes, so it never describes a
+  failure that is already fixed. The nesting is `notify-wrap → log-wrap → the script`:
+  the toast needs only an exit code, the artifact needs the output, and the script
+  needs to know about neither. A **dispatched** task gets this for free — `plan_command`
+  in `devkit_project.py` wraps every action, and it is the only place that can, because
+  the task names a picker and nothing knows which checkout's `logs/` the failure belongs
+  in until `resolve_project` has run. A task that deliberately writes no artifact goes
+  in `UNLOGGED_TASKS` in `tests/test_devkit_project.py` with its reason; the two
+  launcher tasks are there because the window they open *is* the output.
 - Label convention: `"Domain: Title Case Action"`, and **every task carries a `detail`**
   — that is the second line in the quick-pick, and the only place a one-click action can
   state its cost or blast radius.

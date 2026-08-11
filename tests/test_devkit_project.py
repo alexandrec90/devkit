@@ -111,14 +111,30 @@ def test_registered_but_missing_directory_is_distinguished(checkouts):
 # --- command planning -------------------------------------------------------
 
 
+def inner(command: list[str]) -> list[str]:
+    """The dispatched script's own argv, with the wrapper prologues peeled off.
+
+    Every plan is now `[notify-wrap] -> log-wrap -> the script`, and the assertions
+    below are about the script: which one, in which order, with which arguments.
+    Peeling keeps them saying that instead of re-baselining a longer literal every
+    time a wrapper is added. `test_the_plan_is_wrapped_for_logging` is what holds the
+    wrapping itself in place.
+    """
+    while "--" in command:
+        command = command[command.index("--") + 1 :]
+    return command
+
+
 def test_command_runs_the_projects_own_script(checkouts):
-    command = plan_command(ACTIONS["lint"], checkouts / "alpha", [])
-    assert command == ["python", "scripts/lint-all.py"]
+    assert inner(plan_command(ACTIONS["lint"], checkouts / "alpha", [])) == [
+        "python",
+        "scripts/lint-all.py",
+    ]
 
 
 def test_fixed_action_args_come_before_caller_args(checkouts):
     command = plan_command(ACTIONS["lint-changed"], checkouts / "alpha", ["--verbose"])
-    assert command == ["python", "scripts/lint-all.py", "--changed", "--verbose"]
+    assert inner(command) == ["python", "scripts/lint-all.py", "--changed", "--verbose"]
 
 
 def test_empty_picker_tokens_are_dropped(checkouts):
@@ -127,11 +143,38 @@ def test_empty_picker_tokens_are_dropped(checkouts):
     devkit's tasks.json carries redundant-looking flags precisely to avoid this; the
     dispatcher drops empties too so a task cannot fail on an invisible argument.
     """
-    assert plan_command(ACTIONS["test"], checkouts / "alpha", ["", "-k", ""]) == [
+    assert inner(plan_command(ACTIONS["test"], checkouts / "alpha", ["", "-k", ""])) == [
         "python",
         "scripts/run-tests.py",
         "-k",
     ]
+
+
+def test_the_plan_is_wrapped_for_logging(checkouts, tmp_path):
+    """Twenty of the workspace's tasks are a dispatch, so this is what gives the task
+    list a failure artifact at all -- and the only place that can, because the task
+    names a picker and nothing knows the checkout until `resolve_project` has run."""
+    devkit_root = tmp_path / "dk"
+    (devkit_root / "scripts").mkdir(parents=True)
+    command = plan_command(ACTIONS["lint"], checkouts / "alpha", [], devkit_root)
+    assert command[:4] == [
+        "python",
+        str(devkit_root / "scripts" / "log-wrap.py"),
+        "Lint: Everything",
+        "--",
+    ]
+
+
+def test_the_wrapper_is_devkits_copy_not_the_targets(checkouts, tmp_path):
+    """A checkout that has not pulled the release adding `scripts/log-wrap.py` still
+    gets an artifact, and the wrapper that runs is the one this dispatcher was tested
+    against rather than whatever vintage the target vendored."""
+    devkit_root = tmp_path / "dk"
+    (devkit_root / "scripts").mkdir(parents=True)
+    (checkouts / "alpha" / "scripts" / "log-wrap.py").write_text("stale copy")
+    command = plan_command(ACTIONS["lint"], checkouts / "alpha", [], devkit_root)
+    assert str(devkit_root / "scripts" / "log-wrap.py") in command
+    assert "scripts/log-wrap.py" not in command
 
 
 def test_notify_wrap_is_used_when_the_project_ships_it(checkouts):
@@ -139,7 +182,18 @@ def test_notify_wrap_is_used_when_the_project_ships_it(checkouts):
     command = plan_command(ACTIONS["lint"], checkouts / "alpha", [])
     assert command[:3] == ["python", "scripts/notify-wrap.py", "Lint: Everything"]
     assert command[3] == "--"
-    assert command[4:] == ["python", "scripts/lint-all.py"]
+    assert inner(command) == ["python", "scripts/lint-all.py"]
+
+
+def test_the_toast_wraps_the_log_and_not_the_other_way_round(checkouts):
+    """Order is the contract: notify-wrap needs only an exit code, so it goes outside;
+    log-wrap needs the output, so it goes between the toast and the script. Inverted,
+    the artifact would capture the wrapper's own chatter instead of the run's."""
+    (checkouts / "alpha" / "scripts" / "notify-wrap.py").write_text("")
+    command = plan_command(ACTIONS["lint"], checkouts / "alpha", [])
+    notify = command.index("scripts/notify-wrap.py")
+    logged = next(i for i, part in enumerate(command) if part.endswith("log-wrap.py"))
+    assert notify < logged
 
 
 def test_a_project_missing_the_script_is_named(checkouts):
@@ -156,7 +210,7 @@ def test_devkit_owned_action_uses_an_absolute_path(checkouts, tmp_path):
     (devkit_root / "scripts").mkdir(parents=True)
     (devkit_root / "scripts" / "git-sync-keep.py").write_text("")
     command = plan_command(ACTIONS["sync-branch"], checkouts / "beta", [], devkit_root)
-    assert command == ["python", str(devkit_root / "scripts" / "git-sync-keep.py")]
+    assert inner(command) == ["python", str(devkit_root / "scripts" / "git-sync-keep.py")]
 
 
 def test_devkit_owned_action_works_in_a_non_conforming_checkout(checkouts, tmp_path):
@@ -218,7 +272,7 @@ def test_hook_tests_is_devkit_owned_so_every_checkout_can_run_it(checkouts, tmp_
     (devkit_root / "scripts").mkdir(parents=True)
     (devkit_root / "scripts" / "hook-tests.py").write_text("")
     command = plan_command(ACTIONS["test-hooks"], checkouts / "beta", [], devkit_root)
-    assert command[1] == str(devkit_root / "scripts" / "hook-tests.py")
+    assert inner(command)[1] == str(devkit_root / "scripts" / "hook-tests.py")
 
 
 # --- project-scoped actions -------------------------------------------------
@@ -563,6 +617,47 @@ def test_every_action_is_reachable_from_a_task(canonical):
     """
     unreachable = set(ACTIONS) - set(_dispatched_actions(canonical))
     assert not unreachable, f"actions with no task to invoke them: {sorted(unreachable)}"
+
+
+# Tasks that deliberately do not persist a failure artifact. Both launch a window and
+# exit — a Windows Terminal set, a VNC viewer — so their "output" is the thing they
+# opened, and there is no run text for anyone to read afterwards. Named here rather than
+# passed over, so a task that stops writing one has to say why in this list.
+UNLOGGED_TASKS = {
+    "Agents: Open Tabs (External Terminal)": "spawns terminal tabs; the window is the output",
+    "Agents: Resume Recent Sessions": "same — reopens sessions in tabs, then exits",
+    "IBKR: Open Gateway VNC Viewer": "launches a GUI viewer; nothing to parse when it closes",
+}
+
+
+def test_every_workspace_scoped_task_writes_a_failure_artifact(canonical):
+    """The task-file half of the artifact rule.
+
+    The other 20 tasks are a `devkit_project.py` dispatch and get theirs inside the
+    dispatcher, where the chosen checkout is finally known — see `plan_command`. These
+    run against devkit itself, so the wrapping has to be written here, and a new task
+    added without it would fail silently into a terminal nobody kept.
+    """
+    missing = []
+    for task in canonical["tasks"]:
+        args = [str(a) for a in task.get("args", ())]
+        label = task["label"]
+        if any("devkit_project.py" in a for a in args):
+            continue  # wrapped by the dispatcher
+        if any(reason in label for reason in UNLOGGED_TASKS):
+            continue
+        if not any("log-wrap.py" in a for a in args):
+            missing.append(label)
+    assert not missing, f"tasks with no failure artifact: {missing}"
+
+
+def test_the_unlogged_exceptions_are_all_real_tasks(canonical):
+    """A stale exemption is how a task quietly loses its artifact: the label is renamed,
+    the entry here stops matching anything, and nothing reports that it now exempts
+    nobody. Same ratchet the scope pickers carry."""
+    labels = {task["label"] for task in canonical["tasks"]}
+    for exempt in UNLOGGED_TASKS:
+        assert any(exempt in label for label in labels), f"{exempt} names no task"
 
 
 def test_every_task_has_a_label_and_a_detail(canonical):
