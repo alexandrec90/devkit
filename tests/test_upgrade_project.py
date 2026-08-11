@@ -282,7 +282,7 @@ def test_an_upgrade_branch_from_any_day_is_recognised():
     assert not up.is_upgrade_branch("master")
 
 
-# --- a finished upgrade branch is not an unfinished one ----------------------
+# --- a landed branch is not work in progress ---------------------------------
 
 
 def upgrade_branch(**overrides) -> sweep.State:
@@ -291,6 +291,16 @@ def upgrade_branch(**overrides) -> sweep.State:
         "branch": "claude/devkit-upgrade-0810",
         "ahead": 1,
         "upstream": "origin/claude/devkit-upgrade-0810",
+    }
+    return clean(**{**base, **overrides})
+
+
+def feature_branch(**overrides) -> sweep.State:
+    """Parked on somebody else's task branch -- the commoner half of the same state."""
+    base = {
+        "branch": "claude/catalog-foreign-manifest-0808",
+        "ahead": 6,
+        "upstream": "origin/claude/catalog-foreign-manifest-0808",
     }
     return clean(**{**base, **overrides})
 
@@ -312,35 +322,68 @@ def test_an_upgrade_branch_whose_pr_merged_is_not_an_unfinished_upgrade():
 
     It is not a corner case either: `upgrade_one` leaves every checkout it upgrades
     parked on the branch it cut, so this is the guaranteed end state of success."""
-    landed = upgrade_branch(merged_task_branches=("claude/devkit-upgrade-0810",))
-    assert up.landed_upgrade(landed)
-    assert up.refusal(landed, "v0.5.3", landed=True) == ""
+    parked = upgrade_branch(merged_task_branches=("claude/devkit-upgrade-0810",))
+    assert up.landed(parked)
+    assert up.refusal(parked, "v0.5.3", has_landed=True) == ""
+
+
+def test_a_merged_feature_branch_is_not_unrelated_work_either():
+    """The same dead end one branch-prefix away, and the commoner one: a checkout still
+    sitting on last week's merged branch was told to "upgrade from the home branch so
+    the adoption is not mixed into unrelated work" -- when the branch held no work to
+    mix into. Lived: data-lake, parked on a branch whose PR merged 2026-08-09.
+
+    Scoping this to `claude/devkit-upgrade-*` was the first fix and it was too narrow.
+    Which branch a checkout is parked on says nothing about whether it still holds
+    work."""
+    parked = feature_branch(merged_task_branches=("claude/catalog-foreign-manifest-0808",))
+    assert up.landed(parked)
+    assert up.refusal(parked, "v0.5.3", has_landed=True) == ""
 
 
 def test_an_upgrade_branch_that_really_is_unfinished_is_still_refused():
     """The other half: an open PR *is* a thing to finish, and cutting a second branch
     beside it would open a second PR for the same adoption."""
-    reason = up.refusal(upgrade_branch(), "v0.5.3", landed=False)
+    reason = up.refusal(upgrade_branch(), "v0.5.3", has_landed=False)
     assert "unfinished upgrade" in reason
     assert "has not merged" in reason
 
 
-def test_the_offline_signals_that_an_upgrade_branch_has_landed():
-    """Each is enough on its own, and none costs a network call."""
-    assert up.landed_upgrade(upgrade_branch(merged_task_branches=("claude/devkit-upgrade-0810",)))
-    # The shape a merged PR leaves once `fetch --prune` drops the tracking ref.
-    assert up.landed_upgrade(upgrade_branch(upstream="", upstream_gone=True))
-    # `sweep`'s spent-branch: nothing on it beyond the base.
-    assert up.landed_upgrade(upgrade_branch(ahead=0))
-    assert not up.landed_upgrade(upgrade_branch())
+def test_unmerged_work_on_a_feature_branch_is_still_refused():
+    reason = up.refusal(feature_branch(), "v0.5.3", has_landed=False)
+    assert "unrelated work" in reason
+    assert "unfinished upgrade" not in reason
 
 
-def test_a_squash_merged_upgrade_is_only_visible_to_github():
+def test_the_offline_signals_that_a_branch_has_landed():
+    """Each is enough on its own, and neither costs a network call."""
+    for parked in (upgrade_branch, feature_branch):
+        merged = parked(merged_task_branches=(parked().branch,))
+        assert up.landed(merged), merged.branch
+        # `sweep`'s spent-branch: nothing on it beyond the base.
+        assert up.landed(parked(ahead=0)), parked().branch
+        assert not up.landed(parked()), parked().branch
+
+
+def test_a_deleted_remote_branch_is_not_by_itself_a_merge():
+    """`upstream_gone` looks like a fourth signal and was briefly used as one. It is the
+    shape a merged PR leaves once the remote branch is deleted -- and equally the shape
+    a *closed* one leaves. With commits still ahead of the base it is `sweep.is_retired`:
+    stranded work on a branch that can never be committed to again, and walking home
+    from there would abandon it."""
+    assert not up.landed(feature_branch(upstream="", upstream_gone=True), no_pr)
+    assert not up.landed(upgrade_branch(upstream="", upstream_gone=True), no_pr)
+    # Ahead of nothing, the spent-branch signal already covers it -- no `gh` needed.
+    assert up.landed(feature_branch(ahead=0, upstream="", upstream_gone=True))
+
+
+def test_a_squash_merged_branch_is_only_visible_to_github():
     """A squash merge rewrites the commits, so neither the ancestry check nor the
-    counts can see it: the branch reads as one commit ahead of a base that already
-    holds its content. Asking GitHub is the only answer that survives it."""
-    assert not up.landed_upgrade(upgrade_branch(), no_pr)
-    assert up.landed_upgrade(upgrade_branch(), merged_pr)
+    counts can see it: the branch reads as ahead of a base that already holds its
+    content. Asking GitHub is the only answer that survives it."""
+    assert not up.landed(upgrade_branch(), no_pr)
+    assert up.landed(upgrade_branch(), merged_pr)
+    assert up.landed(feature_branch(), merged_pr)
 
 
 def test_an_unreachable_gh_leaves_the_branch_refused_rather_than_assumed_finished():
@@ -350,19 +393,22 @@ def test_an_unreachable_gh_leaves_the_branch_refused_rather_than_assumed_finishe
     def offline(*_args):
         raise OSError("gh is not on PATH")
 
-    assert not up.landed_upgrade(upgrade_branch(), offline)
+    assert not up.landed(upgrade_branch(), offline)
+    assert not up.landed(feature_branch(), offline)
 
 
-def test_only_this_scripts_own_branches_are_read_this_way():
-    """Unrelated work on a task branch is refused whatever GitHub says about it."""
-    assert not up.landed_upgrade(clean(branch="claude/thing-0801"), merged_pr)
-    assert not up.landed_upgrade(clean(), merged_pr)
+def test_a_home_branch_is_never_read_this_way():
+    """Only a task branch can be landed. A checkout already home is upgraded in place,
+    and asking GitHub about `master` would be a network call with no question behind
+    it."""
+    assert not up.landed(clean(), merged_pr)
+    assert not up.landed(clean(branch="carameli-b"), merged_pr)
 
 
-def test_a_landed_upgrade_is_cut_from_the_home_branch_not_from_the_spent_one():
+def test_a_landed_branch_is_cut_from_the_home_branch_not_from_the_spent_one():
     """Cutting today's branch off the merged one would re-propose its commits: the new
-    PR's merge base is the old base, so the diff is the last adoption plus this one."""
-    built = up.plan(upgrade_branch(ahead=0), "v0.5.3", DATE, landed=True)
+    PR's merge base is the old base, so the diff is that branch's work plus this one."""
+    built = up.plan(feature_branch(ahead=0), "v0.5.3", DATE, has_landed=True)
     assert built.steps == (
         ("checkout", "master"),
         ("merge", "--ff-only", "origin/master"),
@@ -374,38 +420,38 @@ def test_a_landed_upgrade_is_cut_from_the_home_branch_not_from_the_spent_one():
 def test_going_home_never_writes_a_merge_commit():
     """`--ff-only` or nothing: a diverged home branch is a state for a human, and the
     merge commit would otherwise land inside the upgrade's own PR."""
-    steps = up.plan(upgrade_branch(ahead=0), "v0.5.3", DATE, landed=True).steps
+    steps = up.plan(upgrade_branch(ahead=0), "v0.5.3", DATE, has_landed=True).steps
     assert [step for step in steps if step[0] == "merge"] == [
         ("merge", "--ff-only", "origin/master")
     ]
 
 
-def test_a_finished_upgrade_with_no_home_branch_is_refused_rather_than_guessed():
+def test_a_landed_branch_with_no_home_is_refused_rather_than_guessed():
     """Only a linked worktree reaches this -- git permits one checkout of a branch, so
     it cannot fall back to the default branch the way a primary worktree can."""
-    reason = up.plan(upgrade_branch(ahead=0, linked=True), "v0.5.3", DATE, landed=True).refusal
+    reason = up.plan(upgrade_branch(ahead=0, linked=True), "v0.5.3", DATE, has_landed=True).refusal
     assert "no home branch" in reason
 
 
 def test_a_parked_checkout_is_fetched_before_its_branch_is_judged(tmp_path, capsys, monkeypatch):
     """Every signal is measured against the local `origin/<default>` ref, and a checkout
-    parked since its own PR merged is exactly one that has not fetched since. Stale, it
-    reads as unfinished forever -- which is the bug, not a symptom of it.
+    parked since its branch merged is exactly one that has not fetched since. Stale, it
+    reads as work in progress forever -- which is the bug, not a symptom of it.
 
     A dry run fetches too: read-only, and an answer that differed from the apply's would
     be reporting on a different checkout than the one about to change."""
     git = RecordingGit()
-    states = iter([upgrade_branch(), upgrade_branch(ahead=0, upstream="", upstream_gone=True)])
+    states = iter([feature_branch(), feature_branch(ahead=0)])
     monkeypatch.setattr(up.sweep, "git_for", lambda _project: git)
     monkeypatch.setattr(up.sweep, "gh_for", lambda _project: no_pr)
     monkeypatch.setattr(up.sweep, "inspect", lambda *_a, **_kw: next(states))
     (tmp_path / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
 
-    assert up.upgrade_one("ibkr_trader", tmp_path, "v0.8.0").code == 0
+    assert up.upgrade_one("data-lake", tmp_path, "v0.8.0").code == 0
     assert ("fetch", "--prune", "origin") in git.calls
     printed = capsys.readouterr().out
     assert "returning home first" in printed
-    assert "git -C ibkr_trader checkout master" in printed
+    assert "git -C data-lake checkout master" in printed
 
 
 def test_a_dirty_parked_checkout_is_not_fetched_at_all(tmp_path, monkeypatch):
@@ -422,7 +468,7 @@ def test_the_plan_numbers_its_steps_in_order(tmp_path, capsys, monkeypatch):
     scheduled check reports. It numbered every git step `1.` -- invisible while there
     was only ever one of them, and three lines called `1.` the moment there were three.
     """
-    states = iter([upgrade_branch(), upgrade_branch(ahead=0, upstream="", upstream_gone=True)])
+    states = iter([upgrade_branch(), upgrade_branch(ahead=0)])
     monkeypatch.setattr(up.sweep, "git_for", lambda _project: RecordingGit())
     monkeypatch.setattr(up.sweep, "gh_for", lambda _project: no_pr)
     monkeypatch.setattr(up.sweep, "inspect", lambda *_a, **_kw: next(states))

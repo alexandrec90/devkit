@@ -22,11 +22,13 @@ checkout has no tag for -- the normal state of the hours around a release, when 
 adoption lands before the tag does -- is refused rather than pulled back to the
 older one; see `unreleased_adoption`.
 
-**And it can always run again.** A successful upgrade leaves the checkout parked on
-the branch it cut, so the *next* release finds it sitting on a `claude/devkit-upgrade-`
-branch -- which was refused as "an unfinished upgrade" whether or not that upgrade had
-finished. Once the PR merged, the remedy the refusal named no longer existed and the
-project could never adopt anything again; see `landed_upgrade`.
+**And it can always run again.** A checkout parked on a task branch used to be refused
+outright -- as "an unfinished upgrade" when this script had cut the branch, as
+"unrelated work" otherwise. Both of those describe work in progress, and a branch whose
+PR has merged is holding none: its content is in `origin/<default>` and the checkout
+merely never went home. So the remedies those refusals named did not exist, and the
+project could never adopt anything again. A landed branch is walked home instead of
+refused; see `landed`.
 
 `--all` upgrades every checkout in the workspace that has actually vendored devkit,
 one PR each -- the release is one upstream revision, so adopting it everywhere is
@@ -241,42 +243,50 @@ def pr_body(tag: str, previous: str, changed: list[str]) -> str:
     return "\n".join(lines)
 
 
-def landed_upgrade(state: sweep.State, gh: sweep.Git | None = None) -> bool:
-    """True when the upgrade branch this checkout is parked on is **finished**.
+def landed(state: sweep.State, gh: sweep.Git | None = None) -> bool:
+    """True when the task branch this checkout is parked on has **already landed**.
 
     The distinction this draws is the difference between a refusal an operator can
-    act on and one nobody can. `upgrade_one` succeeds by leaving the checkout parked
-    on the branch it cut -- deliberately, since that is what stops the next run
-    opening a second PR for the same adoption -- and nothing in this script ever
-    brings it home again. So once that PR merges the checkout is parked on a branch
-    that is *done*, and the refusal below told its reader to "ship the branch and
-    open its PR" for a PR that had already merged and a remote branch GitHub had
-    already deleted. There is no action behind that sentence, and the project could
-    never adopt another release: every subsequent run hit the same refusal.
+    act on and one nobody can. Both branch refusals below describe work in progress
+    -- "an unfinished upgrade", "unrelated work" -- and a checkout parked on a branch
+    whose PR merged is holding neither. It is holding nothing at all: the content is
+    in `origin/<default>`, and the checkout simply never went home. Told to "ship the
+    branch and open its PR" or to "upgrade from the home branch", the reader finds
+    there is nothing to ship and no work to avoid mixing into, and the project can
+    never adopt another release. Every subsequent run hits the same refusal.
 
-    Which is not a corner case. It is the guaranteed end state of every successful
-    upgrade, so this predicate is what makes the script runnable a second time.
+    **Deliberately about any task branch, not only this script's own.** Scoping it to
+    `claude/devkit-upgrade-*` fixed the case that is guaranteed -- `upgrade_one`
+    leaves every checkout it upgrades parked on the branch it cut -- and left the
+    identical dead end one branch-prefix away, for the far commoner case of a
+    checkout still sitting on last week's merged feature branch. Which branch a
+    checkout is parked on has no bearing on whether that branch still holds work.
 
-    Four signals, none of them a network call except the last, and each one enough
-    on its own:
+    Three signals, in increasing cost, each enough on its own:
 
-    - the branch is merged into `origin/<default>` (the plain case),
+    - the branch is merged into `origin/<default>`,
     - it has no commits beyond that base -- merged, or cut and never used, which is
       `sweep`'s `spent-branch`,
-    - its upstream is configured but gone, the shape a merged PR leaves once the
-      remote branch is deleted and `fetch --prune` drops the tracking ref,
     - GitHub reports a merged PR for it. The authoritative answer, and the only one
       that survives a squash merge -- which rewrites the commits, so neither the
-      ancestry checks nor the counts can see it. `has_merged_pr` fails open, so an
-      offline `gh` degrades to today's refusal rather than to a wrong upgrade.
+      ancestry check nor the counts can see it. `has_merged_pr` fails open, so an
+      offline `gh` degrades to a refusal rather than to a wrong upgrade.
 
-    All four read a state that has to be **fetched first** to mean anything: the
-    counts and `--merged` are measured against the local `origin/<default>` ref, and
-    a checkout parked since its PR merged is exactly one that has not fetched since.
+    All three read a state that has to be **fetched first** to mean anything: they are
+    measured against the local `origin/<default>` ref, and a checkout parked since its
+    PR merged is exactly one that has not fetched since.
+
+    `upstream_gone` is deliberately **not** among them, though it looks like a fourth:
+    it is the shape a merged PR leaves once the remote branch is deleted, but it is
+    equally the shape a *closed* one leaves, and the two are told apart only by
+    whether the commits reached the base. With commits still ahead it is
+    `sweep.is_retired` -- stranded work on a branch that can never be committed to
+    again -- and walking home from there would abandon it. Ahead of nothing, the
+    second signal already covers it.
     """
-    if not is_upgrade_branch(state.branch):
+    if not sweep.is_task_branch(state.branch):
         return False
-    if state.branch in state.merged_task_branches or state.upstream_gone:
+    if state.branch in state.merged_task_branches:
         return True
     if state.default_branch and state.ahead == 0:
         return True
@@ -285,11 +295,12 @@ def landed_upgrade(state: sweep.State, gh: sweep.Git | None = None) -> bool:
     return sweep.has_merged_pr(gh, state.branch)
 
 
-def refusal(state: sweep.State, tag: str | None, landed: bool = False) -> str:
+def refusal(state: sweep.State, tag: str | None, has_landed: bool = False) -> str:
     """Why this project cannot be upgraded right now, or "" when it can.
 
-    Ordered by what the operator has to do about it, cheapest first. `landed` is
-    `landed_upgrade`'s answer, passed in rather than computed so this stays pure.
+    Ordered by what the operator has to do about it, cheapest first. `has_landed` is
+    `landed`'s answer, passed in rather than computed so this stays pure -- that
+    predicate reads a fetched state and may ask GitHub.
     """
     if not state.is_git:
         return "not a git checkout"
@@ -300,11 +311,11 @@ def refusal(state: sweep.State, tag: str | None, landed: bool = False) -> str:
             f"{state.dirty} uncommitted file(s). An upgrade is its own change; "
             f"commit or ship the work in progress first"
         )
+    if has_landed:
+        # Finished, not in progress: `plan` walks it home and cuts today's branch from
+        # there. See `landed` for why refusing here is a dead end whatever the branch.
+        return ""
     if is_upgrade_branch(state.branch):
-        if landed:
-            # Finished, not unrelated: `plan` walks it home and cuts today's branch
-            # from there. See `landed_upgrade` for why refusing here is a dead end.
-            return ""
         # Not "unrelated work" -- it is this operation, half done. Sending the
         # operator home is a dead end: today's run would cut a differently dated
         # branch, so following that advice strands a branch that already holds the
@@ -324,12 +335,12 @@ def refusal(state: sweep.State, tag: str | None, landed: bool = False) -> str:
     return ""
 
 
-# What `plan` says when a finished upgrade branch has nowhere to go home to. Only a
-# linked worktree can reach this -- `home_ref` falls back to the default branch for a
-# primary one -- and guessing a branch that may not exist is worse than saying so.
+# What `plan` says when a landed branch has nowhere to go home to. Only a linked
+# worktree can reach this -- `home_ref` falls back to the default branch for a primary
+# one -- and guessing a branch that may not exist is worse than saying so.
 NO_HOME = (
-    "on {branch}, a finished upgrade, but this worktree has no home branch recorded. "
-    "Run `sweep --sync` to park it, then upgrade again"
+    "on {branch}, whose work has already merged, but this worktree has no home branch "
+    "recorded. Run `sweep --sync` to park it, then upgrade again"
 )
 
 
@@ -337,27 +348,27 @@ def plan(
     state: sweep.State,
     tag: str | None,
     today: _dt.date | None = None,
-    landed: bool = False,
+    has_landed: bool = False,
 ) -> sweep.Plan:
     """The git steps for one project's upgrade, or a refusal.
 
     The `--pull` itself is not a git step, so it is not in `steps`: it runs between
     the branch and the commit, and the commit is only meaningful if it succeeded.
 
-    A `landed` upgrade branch gets two steps in front of the usual one, because
-    today's branch must not be cut from it. Its commits are already in
-    `origin/<default>`, so cutting from there would re-propose them: the new PR's
-    merge base is the *old* base, and the diff GitHub shows is the last adoption plus
-    this one, over a main that has since moved. Going home and fast-forwarding first
-    is the same pair of steps `sweep --sync` uses, and it makes the branch this run
-    cuts a child of the release it is upgrading from.
+    A landed branch gets two steps in front of the usual one, because today's branch
+    must not be cut from it. Its commits are already in `origin/<default>`, so cutting
+    from there would re-propose them: the new PR's merge base is the *old* base, and
+    the diff GitHub shows is that branch's work plus this upgrade, over a main that
+    has since moved. Going home and fast-forwarding first is the same pair of steps
+    `sweep --sync` uses, and it makes the branch this run cuts a child of the release
+    it is upgrading from.
     """
-    reason = refusal(state, tag, landed)
+    reason = refusal(state, tag, has_landed)
     if reason:
         return sweep.Plan(refusal=reason)
     steps: list[tuple[str, ...]] = []
     anchor = state.branch
-    if landed:
+    if has_landed:
         home = sweep.home_ref(state)
         if not home:
             return sweep.Plan(refusal=NO_HOME.format(branch=state.branch))
@@ -709,26 +720,27 @@ def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) 
 
     git = sweep.git_for(project)
     state = sweep.inspect(name, project, git=git, fetch=False)
-    landed = False
-    if is_upgrade_branch(state.branch) and not state.dirty:
+    has_landed = False
+    if sweep.is_task_branch(state.branch) and not state.dirty:
         # The one state where the cheap, stale view produces a *permanent* refusal:
-        # every signal `landed_upgrade` reads is measured against the local
-        # `origin/<default>` ref, and a checkout parked since its own PR merged is
-        # precisely one that has not fetched since. `--prune` because the tracking ref
-        # GitHub deleted on merge is one of those signals. Read-only, so a dry run
-        # does it too -- a dry run that answered differently from the apply would be
-        # reporting on a different checkout than the one it is about to change.
+        # every signal `landed` reads is measured against the local `origin/<default>`
+        # ref, and a checkout parked since its branch merged is precisely one that has
+        # not fetched since. `--prune` so a deleted remote branch stops resolving.
+        # Read-only, so a dry run does it too -- a dry run that answered differently
+        # from the apply would report on a different checkout than the one it is about
+        # to change. Skipped on a dirty tree, whose refusal outranks this one and
+        # needs no network to reach.
         git("fetch", "--prune", "origin")
         state = sweep.inspect(name, project, git=git, fetch=False)
-        landed = landed_upgrade(state, sweep.gh_for(project))
-    upgrade = plan(state, tag, None, landed)
+        has_landed = landed(state, sweep.gh_for(project))
+    upgrade = plan(state, tag, None, has_landed)
     if upgrade.refusal:
         return failed(1, f"upgrade: {name} -- {upgrade.refusal}")
 
     previous = (project / "DEVKIT_VERSION").read_text(encoding="utf-8").strip()
     print(f"upgrade: {name} {previous} -> {tag}")
-    if landed:
-        print(f"  (parked on {state.branch}, whose PR has merged -- returning home first)")
+    if has_landed:
+        print(f"  (parked on {state.branch}, already merged -- returning home first)")
     numbered = 0
     for numbered, step in enumerate(upgrade.steps, start=1):
         print(f"  {numbered}. git -C {name} {' '.join(step)}")
