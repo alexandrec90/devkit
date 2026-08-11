@@ -387,6 +387,16 @@ Conventions for the tasks themselves:
 - Set `"close": false` in `presentation` so the terminal stays open for review.
 - **Wrap with `notify-wrap.py`** for the completion toast; never call `notify.py` from
   inside a script. Notifications are a task-layer concern only.
+- **And with `log-wrap.py`, inside it**, so the run's output survives the terminal as
+  `logs/<slug of the task>.log` — emptied when the task passes, so it never describes a
+  failure that is already fixed. The nesting is `notify-wrap → log-wrap → the script`:
+  the toast needs only an exit code, the artifact needs the output, and the script
+  needs to know about neither. A **dispatched** task gets this for free — `plan_command`
+  in `devkit_project.py` wraps every action, and it is the only place that can, because
+  the task names a picker and nothing knows which checkout's `logs/` the failure belongs
+  in until `resolve_project` has run. A task that deliberately writes no artifact goes
+  in `UNLOGGED_TASKS` in `tests/test_devkit_project.py` with its reason; the two
+  launcher tasks are there because the window they open *is* the output.
 - Label convention: `"Domain: Title Case Action"`, and **every task carries a `detail`**
   — that is the second line in the quick-pick, and the only place a one-click action can
   state its cost or blast radius.

@@ -195,6 +195,15 @@ ACTIONS: dict[str, Action] = {
 # when absent the command runs bare rather than failing.
 NOTIFY_WRAP = "scripts/notify-wrap.py"
 
+# The failure artifact, taken from **devkit's** checkout rather than the target's. Two
+# reasons, and the second is the load-bearing one: a checkout that has not yet pulled
+# the release adding `scripts/log-wrap.py` still gets an artifact, and the wrapper that
+# runs is the one this dispatcher was tested against rather than whatever vintage the
+# target vendored. Unconditional, unlike NOTIFY_WRAP above -- it is a MANIFEST entry of
+# devkit's own, so its absence is a broken checkout and should say so loudly instead of
+# quietly dropping every task's artifact.
+LOG_WRAP = "scripts/log-wrap.py"
+
 
 # --- pure helpers -----------------------------------------------------------
 
@@ -260,12 +269,22 @@ def check_scope(action: Action, project: str) -> None:
 def plan_command(
     action: Action, project_dir: Path, extra: list[str], devkit_root: Path = REPO_ROOT
 ) -> list[str]:
-    """The argv to run for `action`, routed through notify-wrap when available.
+    """The argv to run for `action`: the script, wrapped for logging and notification.
 
     Raises `ProjectError` when the script is missing — for a PROJECT action that is
     the conformance failure, reported by name rather than as a missing-file traceback
     from an unexpected cwd. A DEVKIT action is referenced by absolute path because it
     runs with cwd set to the *checkout*, not to devkit.
+
+    **Where every dispatched task gets its failure artifact.** Twenty of the workspace's
+    tasks are one of these, and this is the only point that can write the artifact to
+    the right place: the task names a *picker*, so until `resolve_project` has run
+    nothing knows which checkout's `logs/` a failure belongs in. Wrapping here covers
+    every action, including ones added later, without touching the workspace file.
+
+    Nesting is `notify-wrap → log-wrap → the script`, each doing one thing: the toast
+    needs only an exit code, the artifact needs the output, and the script needs
+    neither to know about it.
     """
     if action.owner == DEVKIT:
         script = devkit_root / action.script
@@ -280,9 +299,10 @@ def plan_command(
             )
         target = action.script
     inner = ["python", target, *action.args, *[a for a in extra if a]]
+    logged = ["python", str(devkit_root / LOG_WRAP), action.label, "--", *inner]
     if (project_dir / NOTIFY_WRAP).is_file():
-        return ["python", NOTIFY_WRAP, action.label, "--", *inner]
-    return inner
+        return ["python", NOTIFY_WRAP, action.label, "--", *logged]
+    return logged
 
 
 # --- registering a new project ----------------------------------------------
