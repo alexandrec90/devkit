@@ -52,13 +52,19 @@ CODEX_ROOT_PATH_RE = re.compile(r'\$\(git rev-parse --show-toplevel\)/([^"\r\n]+
 def _wires_stop_hook() -> bool:
     """True when this repo actually registers `stop.py` as a Stop hook.
 
-    The gate for every check below that reads the repo's shape off its manifest.
-    devkit itself is the case that needs it: it is the harness's source repo, not a
-    consumer of it, and its committed `.devkit.toml` is a deliberate *test
-    fixture* -- it turns on the DB and frontend tiers so the vendored suite exercises
-    them here, and describes a project shaped nothing like devkit. Asserting devkit's
-    files against that manifest would fail on a file the manifest never claimed
-    devkit has. A repo that wires the hook is making a real claim about itself.
+    The gate for every check below that reads the repo's shape off its manifest. A repo
+    that vendors these tests without wiring the hook has not adopted the tier they
+    describe, so asserting its files against a manifest nothing acts on would report a
+    failure about a tier nobody is running. Wiring the hook is the repo making a real
+    claim about itself.
+
+    This docstring used to justify the gate differently -- devkit's own `.devkit.toml`
+    being a *fixture* that "turns on the DB and frontend tiers" and describes a project
+    shaped nothing like devkit. That stopped being true when the manifest was rewritten
+    to describe devkit: both tiers are off, devkit does wire the hook, and the checks
+    below run here like anywhere else. The sentence outlived the fact by months, in a
+    file every project vendors — which is why a claim about a repo's shape belongs in
+    the assertion, where it fails, and not only in the prose above it.
     """
     try:
         settings = json.loads(SETTINGS.read_text(encoding="utf-8"))

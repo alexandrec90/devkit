@@ -4,6 +4,10 @@ The portable agent-coding harness for Claude Code / Codex, and the project gener
 that ships it. This repo is the **source of truth**: consuming projects commit a
 vendored copy of `scripts/sync-devkit.py`'s `MANIFEST` and pull changes from here.
 
+[`README.md`](README.md) says what each tool is and how to run it, and the code says
+what it does today. This file carries only what neither of those can: the decisions,
+and the failures that produced them.
+
 ## Baseline policy
 
 `.claude/rules/engineering.md` (testing, script conventions, failure artifacts, the
@@ -11,37 +15,45 @@ harness seam, the instruction-feedback loop) and `.claude/rules/authoring.md` (w
 rules and skills) apply here too — devkit vendors them *out*, so it is also the first
 place they have to hold. Everything below is what is true about devkit specifically.
 
-## Tech Stack
+## The docs are vibe-coded too
 
-| Layer | Choice |
-| --- | --- |
-| Language | Python 3.12 |
-| Runtime dependencies | **none** — stdlib only, by contract (see below) |
-| Tests | pytest |
-| Lint | ruff + mypy |
+Every file here was written by an agent, this one included. Prose is the only artifact
+in the repo with no compiler and no test, so a wrong sentence survives in a way wrong
+code cannot — and an instruction file is read as *authority*, which is what turns a
+stale paragraph into one agent talking the next one out of a correct change. That has
+already happened here. Assume it is happening now.
 
-There is no Docker stack, no database, and no frontend. That is what lets CI run with
-no service containers, and it is why `.devkit.toml` declares `[db] enabled =
-false` and `[frontend] enabled = false`.
+1. **The code decides.** Where a document and the repo disagree, the document is the
+   defect. Fix it in the same change as the work that found it; never route around it,
+   and never let it veto a change you can otherwise see is right.
+2. **Write only what stays true.** A version, a count, a fact about another repo, or a
+   restatement of something a config file already states is a claim with no owner — the
+   thing moves, the sentence does not. Name the file that owns it instead of copying
+   its current value.
+3. **`tests/test_doc_claims.py` gates the checkable half.** Every path cited in an
+   inline code span or a Markdown link has to exist, and instruction prose may pin no
+   version. It cannot tell you a rationale went stale; it does stop the *silent* rot,
+   which is the kind that accumulates. Its two exemption lists are where a deliberate
+   absence goes, with the reason, and each entry has to stay both absent and cited.
+
+## Nothing but the standard library, by contract
+
+Read the interpreter version and the dev tools off `pyproject.toml`; they are not
+worth pinning in prose. What is not readable there is that the empty runtime
+dependency list is a **constraint, not a state**: the vendored hooks run before a
+virtualenv exists, in a repo devkit does not control, so an import of anything
+installed breaks provisioning on exactly the sessions the harness exists to set up.
+
+The same contract is why there is no stack here — no database, no frontend, no
+compose file — which is what lets CI run with no service containers and why
+`.devkit.toml` turns both of those tiers off.
 
 ## devkit runs its own harness
 
-Everything devkit ships to other projects is wired up **here**, on itself:
-
-| Utility | Wired by |
-| --- | --- |
-| SessionStart provisioning | `.claude/settings.json` → `.claude/hooks/session-start.sh` |
-| Task naming | `.claude/settings.json` → `scripts/task_slug.py` |
-| Home-branch edit guard | `.claude/settings.json` → `scripts/worktree-guard.py` |
-| Auto-lint on edit | `.claude/settings.json` → `scripts/hooks/lint-fix.py` |
-| Pre-stop verification | `.claude/settings.json` → `scripts/hooks/stop.py` |
-| Lint / test wrappers | `scripts/lint-all.py`, `scripts/run-tests.py` |
-| Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log` (gitignored) |
-| VS Code tasks | `.vscode/tasks.json` |
-| Pre-commit gate | `.pre-commit-config.yaml` → `scripts/precommit/*.py` |
-| Dependency updates | `.github/dependabot.yml` |
-| Dependabot auto-merge | `.github/workflows/dependabot-automerge.yml` (vendored) |
-| PR gate | `.github/workflows/pr-gate.yml`, titled `PR Gate` like every consumer's |
+Everything devkit ships to other projects is wired up **here**, on itself: the hooks
+in `.claude/settings.json`, the lint and test wrappers they call, the pre-commit gate,
+the failure artifacts under `logs/`, and a PR gate titled `PR Gate` like every
+consumer's. The wiring is readable from those files; what matters is that it exists.
 
 This is not decoration. A hook that only runs downstream is a hook nobody tests: devkit
 shipped a `lint-fix.py` that formats on every edit and then needed a dedicated commit
@@ -51,20 +63,8 @@ hook was not wired.
 **When you change a hook script, you are changing the thing that is running you.** A
 syntax error in `stop.py` breaks the current session's Stop; a bad `lint-fix.py` blocks
 every subsequent edit. Both fail loudly and immediately, which is the point — but run
-`python scripts/run-tests.py` and `python -m pytest scripts/hooks/tests/ -q` before
-assuming a change is good.
-
-## Scripts
-
-All scripts under `scripts/` are Python, for cross-environment compatibility (local
-Windows desktop and GitHub Actions).
-
-- **Expose pure importable functions** guarded by `if __name__ == '__main__'` so pytest
-  can test the logic without spawning a subprocess.
-- Every new script ships with tests in the same change.
-- **The hook scripts are stdlib only** — no third-party packages, ever. Hooks run
-  *before* the virtualenv is active; a third-party import there breaks provisioning on
-  exactly the sessions the harness exists to set up.
+`python scripts/run-tests.py` and the vendored tree's suite
+(`python -m pytest scripts/hooks/tests/ -q`) before assuming a change is good.
 
 ## The two test trees
 
@@ -73,7 +73,7 @@ They are deliberately separate, and the distinction is load-bearing.
 - **`scripts/hooks/tests/`** — the vendored tier. It ships into every consuming project
   via `MANIFEST` and must stay **project-agnostic**: every value that varies per project
   comes from `hook.CFG` (read from that project's `.devkit.toml`), never from a
-  literal. A hardcoded path once made 12 of these fail on every generated project's
+  literal. A hardcoded path once made a dozen of these fail on every generated project's
   first CI run; `scripts/` being devkit's own `app_dir` broke another. Excluded from
   `pyproject.toml`'s `testpaths`, so it runs as its own step.
 - **`tests/`** — devkit-only (generator, port registry, renderer, sweep). Never
@@ -98,36 +98,30 @@ They are deliberately separate, and the distinction is load-bearing.
   drift it did not cause.
 - **`templates/` is a one-shot copy.** This is the whole reason the line between the
   two tiers matters: `--pull` never looks at a template again, so every fix made here
-  after a project was generated stays here. carameli's `dependabot-automerge.yml` is
-  three such fixes behind (`issues: write`, `--force` on `gh label create`, `GH_REPO`)
-  and nothing could report it. So when a file stops having a per-project value, move
-  it into `MANIFEST` rather than leaving it rendered.
-- The GitHub Actions split follows from that. `.github/workflows/pr-gate.yml` stays a
-  template — its jobs are the project's (services, migrations, a frontend tier), and
-  carameli's five-job gate is what a shared one would have to delete or exempt.
-  `.github/workflows/dependabot-automerge.yml` is vendored, because it has no
-  per-project value left: it carries no `branches:` filter and waits on a gate titled
-  **`PR Gate` in every project, devkit included**.
+  after a project was generated stays here, and nothing can report the gap. A live
+  consumer is currently several fixes behind on a template it was rendered with, and
+  only a human diffing the two files would ever know. So when a file stops having a
+  per-project value, move it into `MANIFEST` rather than leaving it rendered.
 
-  `.github/actions/setup-python-env/action.yml` was vendored alongside it in v0.7.0, on
-  the argument that its one variable — the Python version — had moved to the caller.
-  **That was wrong, and it is a template again.** Two consumers disproved it on the
-  first pull that reached them, and both failures were invisible until CI:
+### The move that has actually gone wrong is the other one
 
-  - apt-finder's copy opened with a step cloning its private sibling `data-lake` into
-    `../data-lake`, because `[tool.uv.sources]` declares an editable path dependency
-    there. The vendored copy deleted the step and every job died on `Distribution not
-    found` before running a check.
-  - carameli does not use `uv sync` at all. It installs pip-tools compiled locks with
-    `uv pip install --system -r requirements.txt -r requirements-dev.txt`, pins uv
-    itself to the version in that lock, and takes an `extra-packages` input its weekly
-    mutation job passes. There is no `uv.lock` for `uv sync` to read.
+`.github/actions/setup-python-env/action.yml` was vendored once, on the argument that
+its one variable — the interpreter version — had moved to the caller. **That was wrong,
+and it is a template again.** Two consumers disproved it on the first pull that reached
+them, and both failures were invisible until CI:
 
-  The lesson is worth more than the file: what varies between projects is not *which
-  interpreter* they install, it is **how they install**, and that is never shared.
-  `test_setup_action_template_matches_devkits` holds devkit's own copy and the template
-  together the way `notify.py` is held, and `test_the_setup_action_is_not_vendored` is
-  the ratchet against re-adding it.
+- One opens with a step cloning a private sibling repo that its editable path
+  dependency points at. The vendored copy deleted the step, and every job died on a
+  missing distribution before running a single check.
+- The other does not use the same installer at all. It installs compiled locks, pins
+  the installer itself to the version in that lock, and takes an input its mutation job
+  passes — none of which the vendored copy had.
+
+The lesson is worth more than the file: what varies between projects is not *which
+interpreter* they install, it is **how they install**, and that is never shared.
+`test_setup_action_template_matches_devkits` holds devkit's own copy and the template
+together the way `notify.py` is held, and `test_the_setup_action_is_not_vendored` is
+the ratchet against re-adding it.
 
 ## The CI surface every project has
 
@@ -141,6 +135,12 @@ Four files, and which tier each belongs to is decided by whether its *content* v
 | `.github/workflows/nightly.yml` | template | same, plus the tiers too slow to gate on |
 | `.github/dependabot.yml` | template | names the ecosystems this project ships |
 
+The automerge workflow is vendored because it has no per-project value left: it carries
+no `branches:` filter and waits on a gate titled `PR Gate` in every project, devkit
+included. The PR gate is not, and cannot be — its jobs are the project's own services,
+migrations and frontend tier, and the largest consumer's five-job gate is what a shared
+one would have to delete or exempt.
+
 `scripts/hooks/tests/test_ci_workflow_contract.py` is vendored alongside them and
 requires **all four to exist**, plus the settings that make an unattended run safe: a
 top-level `permissions:` block, a `concurrency:` group, `cancel-in-progress: false` on
@@ -148,12 +148,12 @@ anything scheduled, and no action pinned to a mutable ref.
 
 That test exists because **`templates/` cannot notice an absence.** A one-shot copy has
 no way to report that a project never received a file or later deleted one, and the
-result was measurable: of six repos in this workspace, one had a nightly, five had a
-`dependabot.yml`, and two had nothing that could merge a Dependabot PR. None of those
-gaps is visible from inside the repo that has it — a missing nightly does not fail, it
-just never reports that the world moved under a branch nobody pushed to. The contract
-test does not supply the workflow; it refuses to let a project go without one, and the
-failure message carries the minimal file to add.
+result was measurable: when the contract was written, most repos in this workspace were
+missing at least one of the four, and two had nothing that could merge a dependency-bump
+PR at all. None of those gaps is visible from inside the repo that has it — a missing
+nightly does not fail, it just never reports that the world moved under a branch nobody
+pushed to. The contract test does not supply the workflow; it refuses to let a project
+go without one, and the failure message carries the minimal file to add.
 
 Adding a required file therefore has a cost the vendored tier does not: an existing
 project's next `--pull` gets the *requirement* and not the render, and goes red until
@@ -165,14 +165,13 @@ everything. A gate fires on a change, so it cannot see the failures that arrive 
 one: a dependency published inside the project's version bounds, a runner image bump, an
 expired credential, a test that is flaky rather than broken. devkit's own nightly adds a
 second job — `unlocked-toolchain`, which resolves the `dev` group off-lock — because
-devkit's dev group *is* its product surface: a ruff release that breaks `lint-all.py`
-breaks it in every consumer, and the lock hides that until Dependabot's weekly PR.
+devkit's dev group *is* its product surface: a linter release that breaks `lint-all.py`
+breaks it in every consumer, and the lock hides that until the weekly dependency PR.
 
 Deliberately **not** normalized, and each for the same reason (it encodes one project's
-economics, not a shared practice): carameli's `weekly.yml` (mutation testing, migration
-round-trip, a reliability issue comment), `sandbox-tests.yml` (a paid provider tier),
-`dependabot-lock-repair.yml` (pip-tools universal locks, which no other project uses),
-and `on-demand.yml` (an agent-fixer loop).
+economics, not a shared practice): mutation testing and migration round-trips, a paid
+provider tier's smoke suite, lock repair for a locking scheme no other project uses, and
+an agent-fixer loop.
 
 ## The two channels
 
@@ -227,158 +226,81 @@ Use `scripts/precommit/_loader.load_by_path` rather than writing a fourth one.
   files under `templates/core/scripts/`, and a test enforces that. Fix either one and
   copy it across.
 
-## The two checkout tiers
+## Ephemeral boxes
 
-The workspace holds two kinds of checkout, and which one a piece of work belongs in is
-a real decision:
-
-| | Static checkout | Ephemeral box |
-| --- | --- | --- |
-| Lives in | `<workspace>/<project>` | `<workspace>/.worktrees/<box>` |
-| How many per repo | exactly one | as many as there are tasks in flight |
-| Listed in `alex-projects.code-workspace` | yes | **no** — `sweep.py` never sees it |
-| Port slot | pinned in `ports.toml` `[slots]` | leased on spawn, released on reap |
-| Managed by | `sweep.py` (`--branch` → `--ship` → `--sync`) | `worktree.py` (`new` → `provision` → `/ship` → `reconcile`) |
-| Toolchain | installed once, by hand, years ago | installed per box by `new` |
-| Use it when | a human browses the stack, or the work is long-lived | an agent has one task |
-
-There used to be a second static checkout per repo (`carameli-b`, `ibkr_trader-b`, …),
-which existed purely to let two tasks run at once. Boxes do that without a ceiling of
-two, so the `-b` tier was retired: it was spending four permanent `ports.toml` slots and
-a container set per repo on concurrency the ephemeral tier provides for free, and it was
-the sole reason the workspace needed a "which checkout owns this work" convention.
-Freeing those slots raised the concurrent-box ceiling from 8 to 12.
+The workspace holds two kinds of checkout: one static checkout per repo, for a human
+browsing the stack or for long-lived work, and as many ephemeral boxes under
+`<workspace>/.worktrees/` as there are agent tasks in flight. The workspace `CLAUDE.md`
+covers working in one; `README.md` covers the commands. What follows is what a change to
+`worktree.py` or `worktree-guard.py` has to preserve.
 
 The static tier's whole problem is that a checkout **outlives its task**. That is where
 `sweep.py`'s workload comes from: `needs-branch`, `needs-rebranch`, `spent-branch`, the
 anchor marker, `home_ref`, `dedupe_reaps` are every one of them a state a checkout can
 only reach by surviving the work done in it. A box cut fresh off `origin/<default>` and
-destroyed at the end cannot reach any of them.
+destroyed at the end cannot reach any of them. So the tiers differ in *when* the
+guarantee is enforced, not in what it is: the sweep **searches for** work left behind,
+whenever someone remembers to run it, while `reap` **will not free the box** until the
+work has left it. Nothing can be stranded because being stranded is what stops the
+cleanup.
 
-So the tiers differ in *when* the guarantee is enforced, not in what it is:
+Five invariants, each of which something has already violated:
 
-- `sweep.py` **searches for** work that got left behind, out of band, when someone
-  remembers to run it.
-- `worktree.py reap` **will not free the box** until the work has left it. Nothing can
-  be stranded because being stranded is what stops the cleanup.
-
-Two consequences worth keeping straight:
-
+- **`HOLD` is tested before anything that destroys.** `reconcile` is the unattended pass
+  meant for a schedule — merged PR → reap, green PR under `--merge` → squash and reap —
+  and under disk pressure it also reaps boxes whose PR is merely *open*, since every
+  commit is on the remote and what is lost is the checkout rather than the work. Work
+  that exists only in a box has to survive a merged PR, disk pressure and any age. The
+  ordering is the whole safety property, and four tests fail if it moves.
 - **`reap` is the one place in the workspace that passes `-v` to `compose down`.**
   `docker-maint.py` must never do it — its target is a static checkout whose named
   volumes hold a dev database costing hours to re-ingest. A box's volumes were created
   minutes ago by the box and are namespaced to its own `COMPOSE_PROJECT_NAME`, and
-  leaking a set per task is how the WSL2 VHDX becomes the next bottleneck. `-p <box>`
-  is passed explicitly so the scope cannot widen to the source project.
+  leaking a set per task is how the WSL2 VHDX becomes the next bottleneck. `-p <box>` is
+  passed explicitly so the scope cannot widen to the source project.
 - **A box is never registered in the workspace file.** Registering one would put it in
-  `sweep.py`'s scope, and then both tools would own its lifecycle.
+  `sweep.py`'s scope, and then both tools would own its lifecycle. The cost is that
+  nothing else can see boxes, which is why `workspace-status.py` reports them at session
+  start, split by whether each holds work or is a pure leaked slot.
+- **The guard is the one caller that skips provisioning.** A linked worktree checks out
+  tracked files only, so a fresh box has no installed toolchain and nothing else was
+  going to create one — `session-start.sh` returns early on a local machine. `worktree.py
+  new` therefore installs it, walking the same ladder in the same order. But an install
+  takes minutes and a PreToolUse hook that takes minutes is one the agent experiences as
+  a hang, so the guard passes `provision=False` and puts the `provision` command in its
+  block message instead.
+- **The guard declines in exactly two cases**: the edit is already inside a box, or the
+  checkout is already on a `claude/...` branch — the "fix PR #42" case, where something
+  deliberately checked that branch out and a fresh box would put the fix somewhere the
+  PR never sees. Anything else that would land on a home branch gets a box, because
+  landing there with no task branch under it is the agent manufacturing the exact
+  `needs-branch` backlog the sweep exists to clear.
 
-`worktree-guard.py` is what routes work into a box automatically: an Edit or Write
-that **would land on a home branch** gets a box spawned for it and the path handed
-back, rather than landing there with no task branch under it — which is the agent
-manufacturing the exact `needs-branch` backlog the sweep exists to clear. One box per
-(session, project), so the fortieth edit reuses the first's.
-
-"Would land on a home branch" covers both session shapes, and that is what let
-`branch-per-task.py` and `branch-on-write.py` be retired. Those cut a branch *inside*
-the checkout the session was in, which is the one act that makes a checkout outlive
-its task. The guard declines in exactly two cases: the edit is already inside a box,
-or the checkout is already on a `claude/...` branch — the "fix PR #42" case, where
-something deliberately checked that branch out and a fresh box would put the fix
-somewhere the PR never sees.
-
-The prompt's slug reaches the box through `scripts/task_slug.py`, keyed by **session
-id** rather than by worktree. That is the only key the two events share: the prompt
-arrives on UserPromptSubmit, the box is cut on PreToolUse, and the two run in
-different processes with different working directories. Without it every guard-cut
-box was named `ws-<8 hex of session id>` and no PR title said what it did.
-
-### `reconcile` is what makes the tier cheaper than the sweep, not merely faster
-
-`reap --all` always skipped boxes holding work — but something had to *run* it, and
-that something was a human reading the session-start line. So a merged PR left its
-box, its branch, its port slot and its volume set in place indefinitely.
-
-`worktree.py reconcile` is the unattended pass, meant for a schedule. Per box: PR
-merged → reap; PR green and `--merge` is on → squash-merge, then reap in the same
-pass; holding work → report and never touch. **`HOLD` is tested before anything that
-destroys**, so work that exists only in a box survives a merged PR, disk pressure and
-any age — the ordering is the whole safety property, and four tests fail if it moves.
-
-Disk is the second half of it. A box costs its project's whole toolchain plus, with a
-stack, a volume set, and this workstation runs short of disk. At or under
-`--min-free-gb` reconcile also reaps boxes whose PR is merely *open*: every commit is
-on the remote, so what is lost is the checkout and not the work. `free_gb` is one
-syscall; per-box sizes are behind `list --sizes` because measuring them means walking
-a `.venv` and a `node_modules` per box.
-
-### A box is not usable until it is provisioned
-
-A linked worktree checks out **tracked files only**, so a fresh box has no `.venv` and
-no `node_modules`, and nothing else was going to create them: `session-start.sh` returns
-early on a local machine, because a static checkout is provisioned once by hand and then
-never again. A box that skips this can be edited and then fails its own `/ship` — the
-lint gate runs with no ruff in the box to run it.
-
-So `worktree.py new` installs the toolchain, walking the same ladder
-`session-start.sh` does, in the same order: `[python] install_command` from
-`.devkit.toml`, else `uv.lock` → `uv sync`, else the requirements locks, else an
-editable `pyproject.toml`, plus `npm install` for a project with a frontend tier. **The
-guard hook is the one caller that passes `provision=False`** — an install is minutes and
-a PreToolUse hook that takes minutes is one the agent experiences as a hang — so the
-box it cuts carries the `worktree.py provision <box> --yes` command in its block message
-instead.
-
-### Where the tier is reachable from
-
-Three places, and they are the answer to "who would ever notice a box":
-
-- **`Worktree: New Box` / `List Boxes` / `Reap Finished Boxes`** in the workspace task
-  list. There is deliberately no reap-one-box task: a picker cannot enumerate boxes
-  created between clicks, so reaping by name stays CLI-only and the one-click shape is
-  the sweep.
-- **`workspace-status.py`** reports live boxes at every session start, split by whether
-  each is holding work (ship it) or reapable (pure leaked slot). Nothing else can: boxes
-  are absent from the workspace file by design, so the sweep cannot see them.
-- **The same status line reports a workspace root that does not run the guard.** That
-  wiring lives in `<workspace>/.claude/settings.json`, outside every repository, so no
-  test in devkit can hold it in place — and an unwired guard has no symptom at all,
-  which is why absent is reported here rather than passed over in silence.
-
-## Failure artifacts (fix from a file, not from the terminal)
-
-Any task or script whose failures an agent is expected to act on must persist the
-failure to a **parseable artifact file** under `logs/`. Never rely on streamed terminal
-output — it scrolls away and buries the signal. Keep the terminal to a status line plus
-the artifact path, put everything needed to diagnose in the file, write it on failure
-*and* on success (an empty artifact on success, so a stale run cannot mislead the next
-agent), and overwrite per run.
+The prompt's slug reaches the box through `scripts/task_slug.py`, keyed by **session id**
+rather than by worktree. That is the only key the two events share: the prompt arrives on
+UserPromptSubmit, the box is cut on PreToolUse, and the two run in different processes
+with different working directories. Without it every guard-cut box was named
+`ws-<8 hex of session id>` and no PR title said what it did.
 
 ## VS Code tasks
 
-**Tasks live in the workspace file, never in a repo's `.vscode/tasks.json`.** The
-original reason was the `-b` tier: every repo was checked out twice, both folders were
-in one multi-root workspace, and a task defined inside a repo rendered once per folder —
-two quick-pick entries under one label, nothing saying which checkout each would run in,
-and two copies that disagreed the moment the worktrees sat on different branches.
-
-That tier is gone, and the rule survives it. A task defined in a repo is invisible from
-the workspace root, cannot be scoped with `Action.projects`, and drifts from its
-siblings; the workspace file is the one place that sees every checkout. devkit and both
-live repos ship zero project-level tasks, and each one's suite fails if that changes.
+**Tasks live in the workspace file, never in a repo's `.vscode/tasks.json`.** A task
+defined in a repo is invisible from the workspace root, cannot be scoped with
+`Action.projects`, and drifts from its siblings; the workspace file is the one place that
+sees every checkout. devkit and both live repos ship zero project-level tasks, and each
+one's suite fails if that changes.
 
 **Project-specific is not a reason to keep a task local.** `Action.projects` in
-`devkit_project.py` scopes an action to the checkouts that can run it. That is how
-carameli's Playwright run and ibkr_trader's backtests are defined once without
-pretending every checkout can run them.
-The scope restricts both directions — the dispatcher refuses an out-of-scope checkout by
-name, and `--check` stops demanding the script from projects it was never meant for.
+`devkit_project.py` scopes an action to the checkouts that can run it, which is how a
+browser suite or a backtest run is defined once without pretending every checkout can run
+it. The scope restricts both directions — the dispatcher refuses an out-of-scope checkout
+by name, and `--check` stops demanding the script from projects it was never meant for.
 
 What a repo owes instead is the **CLI contract**: a `scripts/<name>.py` at the path
 `ACTIONS` names, accepting the documented arguments. A task that cannot be expressed that
 way is not blocked from hoisting — write the seam. `scripts/backtest-task.py` in
-ibkr_trader exists for exactly that reason: the two Backtest tasks invoked
-`.venv\Scripts\ibkr-trader.exe` directly, which the dispatcher cannot call.
+ibkr_trader exists for exactly that reason: its two tasks invoked a console-script
+executable directly, which the dispatcher cannot call.
 
 ### Changing a task: the live file first, then adopt
 
@@ -398,7 +320,7 @@ it regenerates the canonical copy from the live file. One test holds the pair to
 (`test_the_live_workspace_matches_the_canonical_block`) and it is
 `@needs_live_workspace`: skipped in CI, so drift is caught locally or not at all.
 
-Conventions for the tasks themselves:
+### Conventions for the tasks themselves
 
 - Use `"type": "process"` so VS Code monitors the process directly — that is what makes
   the spinner stop and the exit-code icon appear reliably.
@@ -429,12 +351,12 @@ Conventions for the tasks themselves:
   which strips empties before exec — `testScope` and `e2eMode` rely on that, and say so.
 - **A new project has to reach more than the `project` picker.** `register()` extends the
   `folders` list and that one picker; the workspace-scoped pickers — `sweepScope`,
-  `upgradeScope` — are hand-maintained and were silently skipped, so data-lake could run
-  every generic task while `--all` was the only way to sweep or upgrade it. `SCOPE_PICKERS`
-  in `tests/test_devkit_project.py` now requires each of them to cover every checkout the
-  `project` picker lists, and a deliberate omission (devkit is not a target of a devkit
-  upgrade) to carry its reason in writing. Pickers scoped by `Action.projects` are a
-  separate case and are gated separately.
+  `upgradeScope` — are hand-maintained and were silently skipped, so a newly generated
+  project could run every generic task while `--all` was the only way to sweep or upgrade
+  it. `SCOPE_PICKERS` in `tests/test_devkit_project.py` now requires each of them to
+  cover every checkout the `project` picker lists, and a deliberate omission (devkit is
+  not a target of a devkit upgrade) to carry its reason in writing. Pickers scoped by
+  `Action.projects` are a separate case and are gated separately.
 
 ## Testing
 
@@ -479,18 +401,12 @@ So: either the file is **in the `MANIFEST`**, or the dispatcher treats its absen
 an explicit, documented skip. `tests/test_dispatch_coherence.py` enforces the choice
 and requires a written reason for each exception.
 
-## The internal names are `devkit` now
+### The internal names are `devkit`
 
 `.devkit.toml`, `$DEVKIT_DIR`, `DEVKIT_VERSION`, `scripts/sync-devkit.py`, and the
-published hook ids `devkit-manifest` / `devkit-hooks-stdlib-only` / `devkit-drift`.
-
-They previously used the pre-rename `agent-harness` spelling, deferred because
-`sync-devkit.py` is **itself in the `MANIFEST`** — so renaming it changes the very path
-list the drift check compares by, and a half-applied rename fails `--check` in whichever
-repo lands second. It was done as one atomic change across devkit and every consumer
-while there was exactly one consumer and it was already 21 entries behind, which made
-its vendored copies due for wholesale replacement anyway. That window is closed now;
-treat these names as fixed.
-
-If you find the old spelling anywhere, it is a miss from that migration, not a
-deliberate holdout — fix it.
+published hook ids `devkit-manifest` / `devkit-hooks-stdlib-only` / `devkit-drift`. The
+rename from the `agent-harness` spelling had to be one atomic change across devkit and
+every consumer, because `sync-devkit.py` is **itself in the `MANIFEST`** — renaming it
+changes the very path list the drift check compares by, and a half-applied rename fails
+`--check` in whichever repo lands second. Treat these names as fixed; if you find the
+old spelling anywhere, it is a miss from that migration, not a deliberate holdout.
