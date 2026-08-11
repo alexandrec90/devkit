@@ -49,7 +49,7 @@ the same hook set the generator emits, against devkit's own scripts.
 | Auto-lint on edit | `scripts/hooks/lint-fix.py` |
 | Pre-stop verification | `scripts/hooks/stop.py` → `scripts/lint-all.py`, `scripts/run-tests.py`, both test trees |
 | Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log`, `logs/stop-verify.log` |
-| VS Code tasks | `.vscode/tasks.json` |
+| VS Code tasks | the multi-root workspace file — devkit owns no `.vscode/tasks.json`, which is the rule it prescribes |
 
 Not decoration — a hook that only runs downstream is a hook nobody tests. Wiring
 these up surfaced four bugs that had shipped to every consumer: the Stop hook passed
@@ -313,12 +313,10 @@ python scripts/new-project.py sports_betting --preset data --description "..."
 python scripts/new-project.py sports_betting --preset data --yes
 ```
 
-There is also a VS Code task, **"Project: New from devkit"**, in two places for two
-different reasons. The user-level copy in `%APPDATA%/Code/User/tasks.json` is callable
-from any window — which matters because the project it creates has no
-`.vscode/tasks.json` yet. devkit's own `.vscode/tasks.json` carries it too, alongside
-the lint/test/format tasks, so a session already open in this repo does not need to
-leave it.
+There is also a VS Code task, **"Project: New from devkit"**, in the shared workspace
+block (`workspace-tasks.jsonc` here, the multi-root workspace file live). A user-level
+copy in `%APPDATA%/Code/User/tasks.json` is callable from any window, which matters
+because a window opened on the project it creates sees no task list at all.
 
 | Preset | Features | Shaped like |
 | --- | --- | --- |
@@ -371,10 +369,11 @@ project does not have. CI's `generated-project` job renders a project of each pr
 and runs its suites, because devkit's own suite passes precisely when devkit's
 manifest is the one being hard-coded against.
 
-Note that devkit's own `.devkit.toml` is therefore a **test fixture**, not a
-description of devkit: it turns on the DB and frontend tiers so the vendored suite
-exercises them here. Checks that hold a repo to its manifest have to know that — see
-below.
+devkit's own `.devkit.toml` describes **devkit** — it held a copy of a consumer's for a
+while, which was harmless as an example and not as configuration, since these hooks now
+run here and a hook reading another project's shape acts on directories that are not
+here. So the tiers devkit does not have are off in it, and the vendored suite skips them
+locally; the `generated-project` job above is what exercises them.
 
 ### The repo contract
 
