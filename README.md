@@ -266,6 +266,14 @@ git switch --no-track -c claude/new-task origin/main
 The global pre-commit hook intentionally rejects commits while the slot is parked,
 making branch creation mandatory before new work is committed.
 
+**This is the human flow, and an agent editing here now gets a box instead.** A branch
+cut this way carries no commits yet, and `worktree-guard.py` reads exactly that — a
+`claude/...` branch with nothing on it protects no PR, so the edit is routed rather
+than allowed to land. Once the branch has a commit of its own the guard declines again,
+which is what keeps "check out PR #42 and fix it" working. If you want an agent to keep
+working *in* this checkout on a fresh branch, commit something first; if you do not
+care which directory it happens in, that is what the ephemeral tier below is for.
+
 ### Ephemeral worktrees (boxes)
 
 The section above is the *static* tier: a checkout that outlives the task, parked and

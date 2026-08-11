@@ -137,8 +137,8 @@ def owning_project(target: Path, root: Path, projects: list[str]) -> str:
     return best
 
 
-def needs_box(branch: str) -> bool:
-    """True when an edit landing on `branch` would land on a *home* branch.
+def needs_box(branch: str, protects_open_work: bool = True) -> bool:
+    """True when an edit landing on `branch` would land somewhere nothing owns.
 
     The rule that replaces `branch-on-write.py`. That hook answered the same question
     by cutting a branch in place; this one answers it by routing the edit to a box,
@@ -148,17 +148,45 @@ def needs_box(branch: str) -> bool:
 
     Two cases decline, and both are cases where someone has already made the decision:
 
-    - **already on a `claude/...` task branch.** Something deliberately put the
-      checkout there, and the commonest reason is the one `branch-on-write.py` was
-      rewritten for: "fix PR #42, it has conflicts" means checking that PR's branch
-      out and editing it. Routing to a fresh box would put the fix somewhere the PR
-      never sees.
+    - **on a `claude/...` task branch that carries commits of its own**
+      (`protects_open_work`). Something deliberately put the checkout there, and the
+      commonest reason is the one `branch-on-write.py` was rewritten for: "fix PR #42,
+      it has conflicts" means checking that PR's branch out and editing it. Routing to
+      a fresh box would put the fix somewhere the PR never sees.
     - **a branch git would not name.** Detached HEAD, or a git call that failed. The
       two are indistinguishable from here, and guessing would block edits on a machine
       where git is simply unavailable — so this declines and `sweep.py`, which is still
       running, is what catches a detached HEAD.
+
+    **A task branch with no commits of its own is not one of them**, and used to be.
+    Being a `claude/...` branch was the whole test, so the *first* session to leave one
+    checked out turned this hook off for every session afterwards — the checkout became
+    shared, unguarded space until someone parked it back on a home branch. Two sessions
+    landed in one checkout that way, and neither could see it: one inherited a branch
+    whose PR had already merged (`sweep.py` calls that state `spent-branch`), which
+    protects no PR because there is nothing left on it to protect.
+
+    So the question is not "is this a task branch" but "is there work here a box would
+    strand". `protects_open_work` answers it, and the caller resolves it lazily —
+    `branch_has_own_commits` costs a `git rev-list` and only a task branch can reach it.
     """
-    return bool(branch) and not worktree.sweep.is_task_branch(branch)
+    if not branch:
+        return False
+    if not worktree.sweep.is_task_branch(branch):
+        return True
+    return not protects_open_work
+
+
+def _git(checkout: Path, *args: str):
+    """Run git in `checkout`, capturing stdout. Never raises; never opens a window."""
+    return worktree.subprocess.run(
+        ["git", "-C", str(checkout), *args],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        creationflags=worktree.sweep.NO_WINDOW,
+    )
 
 
 def current_branch(checkout: Path) -> str:
@@ -169,17 +197,46 @@ def current_branch(checkout: Path) -> str:
     the box path and returns at the `.worktrees/` test above without reaching this.
     """
     try:
-        result = worktree.subprocess.run(
-            ["git", "-C", str(checkout), "branch", "--show-current"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-            creationflags=worktree.sweep.NO_WINDOW,
-        )
+        result = _git(checkout, "branch", "--show-current")
     except (OSError, worktree.subprocess.SubprocessError):
         return ""
     return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def branch_has_own_commits(checkout: Path) -> bool:
+    """True when `checkout`'s HEAD carries commits `origin/<default>` does not.
+
+    The signal behind `needs_box`'s `protects_open_work`: a task branch with commits of
+    its own has somewhere for an edit to belong — an open PR, or one about to exist. A
+    task branch with none is either freshly cut or already merged, and in both cases a
+    box strands nothing.
+
+    Local only, deliberately. The honest question is "has this branch got an open PR",
+    and asking GitHub would answer it exactly — but this runs in a PreToolUse hook on
+    every edit that reaches a static checkout, where a network round trip is latency the
+    agent experiences as a hang. `git rev-list` against the *already fetched*
+    `origin/<default>` costs milliseconds and agrees with the PR in every case that
+    matters; the disagreement is a branch pushed and merged since the last fetch, which
+    the next fetch resolves.
+
+    **Fails closed** — every error returns True, meaning "decline, leave the edit
+    alone". A hook that cannot read the repo must not start diverting edits into boxes
+    on the strength of a failed subprocess, and declining is what this hook did for
+    every task branch before the distinction existed.
+    """
+    try:
+        default = worktree.sweep.tb.detect_default_branch(
+            lambda *args: _git(checkout, *args), fallback="main"
+        )
+        probe = _git(checkout, "rev-list", "--count", f"origin/{default}..HEAD")
+    except (OSError, worktree.subprocess.SubprocessError, ValueError):
+        return True
+    if probe.returncode != 0:
+        return True
+    try:
+        return int(probe.stdout.strip()) > 0
+    except ValueError:
+        return True
 
 
 def redirect_decision(
@@ -188,6 +245,7 @@ def redirect_decision(
     root: Path,
     projects: list[str],
     branch_of: Callable[[Path], str] | None = None,
+    commits_of_own: Callable[[Path], bool] | None = None,
 ) -> tuple[str, str] | None:
     """`(project, path relative to that checkout)` when this edit needs its own box.
 
@@ -195,10 +253,12 @@ def redirect_decision(
 
     - a path under `.worktrees/`: the edit is already in a box, which is the whole
       point of having sent it there;
-    - a checkout already on a `claude/...` task branch — see `needs_box`. **Whether or
-      not the session is inside it**: the reason to decline is that something
-      deliberately put that branch there and a box would bypass it, and where the
-      editor happens to sit says nothing about that;
+    - a checkout on a `claude/...` task branch **that carries commits of its own** —
+      see `needs_box`. **Whether or not the session is inside it**: the reason to
+      decline is that something deliberately put that branch there and a box would
+      bypass it, and where the editor happens to sit says nothing about that. A task
+      branch with no commits of its own is not covered: it is either freshly cut or
+      already merged, so there is no PR for a box to bypass;
     - anything outside a registered checkout, including the workspace file itself and
       any scratch directory beside the projects.
 
@@ -226,10 +286,16 @@ def redirect_decision(
     if not project:
         return None
     lookup = branch_of or current_branch
-    if _within(here, root / project):
-        if not needs_box(lookup(root / project)):
+    has_commits = commits_of_own or branch_has_own_commits
+    checkout = root / project
+    branch = lookup(checkout)
+    # Resolved lazily and at most once: only a task branch can be protected, and the
+    # probe is a subprocess in a hook that runs on every edit.
+    protects = worktree.sweep.is_task_branch(branch) and has_commits(checkout)
+    if _within(here, checkout):
+        if not needs_box(branch, protects):
             return None
-    elif worktree.sweep.is_task_branch(lookup(root / project)):
+    elif protects:
         # The "fix PR #42" case, reached from *outside* the checkout -- which is how a
         # workspace-level session reaches it, and how `upgrade-project.py` leaves one:
         # parked on `claude/devkit-upgrade-<mmdd>` holding the adoption its commit gate

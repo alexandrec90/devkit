@@ -100,10 +100,18 @@ def on_branch(name: str):
     return lambda checkout: name
 
 
+def has_commits(value: bool):
+    """A `commits_of_own` stub: the checkout's branch carries work, or does not."""
+    return lambda checkout: value
+
+
 def test_an_edit_inside_a_checkout_on_a_task_branch_is_left_alone(root):
     """Something deliberately checked that branch out -- the "fix PR #42" case.
 
-    Routing it to a fresh box would put the fix somewhere the PR never sees.
+    Routing it to a fresh box would put the fix somewhere the PR never sees. The
+    branch has commits of its own, which is what makes it that case rather than an
+    abandoned one; injected, because `root` is a tmp tree and the real probe would
+    fail closed and pass this test for the wrong reason.
     """
     assert (
         guard.redirect_decision(
@@ -112,6 +120,7 @@ def test_an_edit_inside_a_checkout_on_a_task_branch_is_left_alone(root):
             root,
             PROJECTS,
             branch_of=on_branch("claude/fix-pr-42-0806"),
+            commits_of_own=has_commits(True),
         )
         is None
     )
@@ -200,6 +209,70 @@ def test_needs_box_is_the_home_branch_predicate():
     assert guard.needs_box("carameli-b") is True
     assert guard.needs_box("claude/voicemail-0806") is False
     assert guard.needs_box("") is False
+
+
+def test_needs_box_routes_a_task_branch_with_nothing_on_it():
+    """A `claude/...` branch carrying no commits protects no PR, so it is not a reason
+    to decline -- it is either freshly cut or already merged."""
+    assert guard.needs_box("claude/voicemail-0806", protects_open_work=False) is True
+    assert guard.needs_box("claude/voicemail-0806", protects_open_work=True) is False
+    # A home branch is routed regardless: there is nothing to protect either way.
+    assert guard.needs_box("master", protects_open_work=True) is True
+    # And an unnameable branch still declines -- git may simply be unavailable.
+    assert guard.needs_box("", protects_open_work=False) is False
+
+
+def test_an_edit_on_a_spent_task_branch_gets_a_box(root):
+    """The regression. Being a `claude/...` branch used to be the whole test, so the
+    first session to leave one checked out disabled this hook for every session after
+    it -- including one that arrived to find a branch whose PR had already merged, with
+    nothing left on it to protect. Two sessions landed in one checkout that way."""
+    decision = guard.redirect_decision(
+        str(root / "carameli" / "app" / "main.py"),
+        str(root / "carameli"),
+        root,
+        PROJECTS,
+        branch_of=on_branch("claude/merged-last-week-0801"),
+        commits_of_own=has_commits(False),
+    )
+    assert decision == ("carameli", str(Path("app/main.py")))
+
+
+def test_an_edit_from_outside_onto_a_spent_task_branch_gets_a_box(root):
+    """Same rule reached from the workspace root, where the decline is stricter."""
+    decision = guard.redirect_decision(
+        str(root / "carameli" / "app" / "main.py"),
+        str(root),
+        root,
+        PROJECTS,
+        branch_of=on_branch("claude/merged-last-week-0801"),
+        commits_of_own=has_commits(False),
+    )
+    assert decision == ("carameli", str(Path("app/main.py")))
+
+
+def test_an_edit_from_outside_onto_a_task_branch_holding_work_is_left_alone(root):
+    """`upgrade-project.py` leaves a checkout parked on `claude/devkit-upgrade-<mmdd>`
+    holding the adoption its commit gate rejected. A box would put a fix somewhere that
+    branch never sees, and the session being elsewhere does not change that."""
+    assert (
+        guard.redirect_decision(
+            str(root / "carameli" / "app" / "main.py"),
+            str(root),
+            root,
+            PROJECTS,
+            branch_of=on_branch("claude/devkit-upgrade-0810"),
+            commits_of_own=has_commits(True),
+        )
+        is None
+    )
+
+
+def test_branch_has_own_commits_fails_closed_when_git_will_not_answer(tmp_path):
+    """A directory that is not a repo stands in for every way the probe can fail. The
+    hook must not start diverting edits into boxes on the strength of a failed
+    subprocess: declining is what it did for every task branch before this existed."""
+    assert guard.branch_has_own_commits(tmp_path) is True
 
 
 def test_an_edit_already_inside_a_box_is_left_alone(root):
