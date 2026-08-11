@@ -195,8 +195,10 @@ def redirect_decision(
 
     - a path under `.worktrees/`: the edit is already in a box, which is the whole
       point of having sent it there;
-    - a session inside the checkout it is editing, when that checkout is already on a
-      task branch — see `needs_box`;
+    - a checkout already on a `claude/...` task branch — see `needs_box`. **Whether or
+      not the session is inside it**: the reason to decline is that something
+      deliberately put that branch there and a box would bypass it, and where the
+      editor happens to sit says nothing about that;
     - anything outside a registered checkout, including the workspace file itself and
       any scratch directory beside the projects.
 
@@ -223,10 +225,23 @@ def redirect_decision(
     project = owning_project(resolved, root, projects)
     if not project:
         return None
+    lookup = branch_of or current_branch
     if _within(here, root / project):
-        lookup = branch_of or current_branch
         if not needs_box(lookup(root / project)):
             return None
+    elif worktree.sweep.is_task_branch(lookup(root / project)):
+        # The "fix PR #42" case, reached from *outside* the checkout -- which is how a
+        # workspace-level session reaches it, and how `upgrade-project.py` leaves one:
+        # parked on `claude/devkit-upgrade-<mmdd>` holding the adoption its commit gate
+        # rejected. A box cut from `origin/<default>` puts the fix somewhere that
+        # branch and its PR never see, which is the one outcome the decline exists to
+        # prevent -- and the session being elsewhere does not change that.
+        #
+        # Asymmetric with the branch above on purpose. Inside, a branch git will not
+        # name declines (git may simply be unavailable, and `sweep.py` still catches a
+        # detached HEAD). From outside, silence is not consent: only a name git
+        # positively reports as a task branch is allowed through.
+        return None
     try:
         relative = resolved.relative_to(root / project)
     except ValueError:

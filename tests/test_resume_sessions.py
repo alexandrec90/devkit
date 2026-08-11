@@ -51,6 +51,49 @@ def write_transcript(
     return path
 
 
+def write_codex_rollout(
+    store: Path,
+    session_id: str,
+    *,
+    cwd: Path,
+    prompt: str = "do the Codex thing",
+    mtime: float | None = None,
+) -> Path:
+    """A rollout shaped like `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`."""
+    records = [
+        {
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": str(cwd), "source": "cli"},
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "# AGENTS.md instructions\ncontext"},
+                    {"type": "input_text", "text": f"<environment_context>{cwd}"},
+                ],
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": prompt}],
+            },
+        },
+    ]
+    directory = store / "2026" / "08" / "10"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"rollout-2026-08-10T12-00-00-{session_id}.jsonl"
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
 def session(name: str, mtime: float, cwd: Path, prompt: str = "topic"):
     """One `Session`. Deliberately unannotated: `rs` is loaded by path, so mypy has no
     name to resolve `rs.Session` against and reports the annotation as undefined."""
@@ -111,7 +154,7 @@ def test_records_with_no_flag_at_all_are_not_sidechains():
 
 def test_first_prompt_reads_a_plain_string_message():
     records = [{"type": "user", "message": {"role": "user", "content": "fix the gate"}}]
-    assert rs.first_prompt(records) == "fix the gate"
+    assert rs.claude_first_prompt(records) == "fix the gate"
 
 
 def test_first_prompt_reads_text_blocks_and_ignores_tool_results():
@@ -130,7 +173,7 @@ def test_first_prompt_reads_text_blocks_and_ignores_tool_results():
             "message": {"role": "user", "content": [{"type": "text", "text": "real prompt"}]},
         },
     ]
-    assert rs.first_prompt(records) == "real prompt"
+    assert rs.claude_first_prompt(records) == "real prompt"
 
 
 def test_injected_wrappers_do_not_become_the_title():
@@ -144,11 +187,39 @@ def test_injected_wrappers_do_not_become_the_title():
         {"type": "user", "message": {"role": "user", "content": "<system-reminder>ctx"}},
         {"type": "user", "message": {"role": "user", "content": "the actual ask"}},
     ]
-    assert rs.first_prompt(records) == "the actual ask"
+    assert rs.claude_first_prompt(records) == "the actual ask"
 
 
 def test_a_session_nobody_typed_in_has_no_prompt():
-    assert rs.first_prompt([{"type": "mode"}, {"type": "assistant"}]) == ""
+    assert rs.claude_first_prompt([{"type": "mode"}, {"type": "assistant"}]) == ""
+
+
+def test_codex_first_prompt_skips_injected_context():
+    records = [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "# AGENTS.md instructions\npolicy"},
+                    {
+                        "type": "input_text",
+                        "text": "<environment_context>cwd</environment_context>",
+                    },
+                ],
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "resume Codex sessions"}],
+            },
+        },
+    ]
+    assert rs.codex_first_prompt(records) == "resume Codex sessions"
 
 
 # --- parsing one session -----------------------------------------------------
@@ -158,7 +229,7 @@ def test_parse_session_reads_the_id_cwd_and_prompt(tmp_path):
     store, cwd = tmp_path / "store", tmp_path / "repo"
     cwd.mkdir()
     path = write_transcript(store, "abc-123", cwd=cwd, prompt="add the task", mtime=1000.0)
-    parsed = rs.parse_session(path)
+    parsed = rs.parse_claude_session(path)
     assert parsed is not None
     assert (parsed.session_id, parsed.cwd, parsed.prompt, parsed.mtime) == (
         "abc-123",
@@ -175,14 +246,14 @@ def test_the_id_comes_from_the_filename_not_the_records(tmp_path):
     path = write_transcript(store, "recorded-id", cwd=cwd)
     renamed = path.with_name("filename-id.jsonl")
     path.rename(renamed)
-    assert rs.parse_session(renamed).session_id == "filename-id"
+    assert rs.parse_claude_session(renamed).session_id == "filename-id"
 
 
 def test_a_sidechain_transcript_is_not_resumable(tmp_path):
     store, cwd = tmp_path / "store", tmp_path / "repo"
     cwd.mkdir()
     path = write_transcript(store, "sub", cwd=cwd, sidechain=True)
-    assert rs.parse_session(path) is None
+    assert rs.parse_claude_session(path) is None
 
 
 def test_a_session_opened_and_abandoned_is_not_resumable(tmp_path):
@@ -191,7 +262,7 @@ def test_a_session_opened_and_abandoned_is_not_resumable(tmp_path):
     (store / "proj").mkdir(parents=True)
     path = store / "proj" / "empty.jsonl"
     path.write_text(json.dumps({"type": "mode", "cwd": str(tmp_path)}) + "\n", encoding="utf-8")
-    assert rs.parse_session(path) is None
+    assert rs.parse_claude_session(path) is None
 
 
 def test_a_transcript_with_no_cwd_is_not_resumable(tmp_path):
@@ -202,7 +273,7 @@ def test_a_transcript_with_no_cwd_is_not_resumable(tmp_path):
         json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n",
         encoding="utf-8",
     )
-    assert rs.parse_session(path) is None
+    assert rs.parse_claude_session(path) is None
 
 
 def test_collect_walks_every_project_directory(tmp_path):
@@ -211,11 +282,33 @@ def test_collect_walks_every_project_directory(tmp_path):
     write_transcript(store, "one", cwd=cwd, slug="proj-a")
     write_transcript(store, "two", cwd=cwd, slug="proj-b")
     write_transcript(store, "sub", cwd=cwd, slug="proj-b", sidechain=True)
-    assert {s.session_id for s in rs.collect(store)} == {"one", "two"}
+    assert {s.session_id for s in rs.collect(store, "claude")} == {"one", "two"}
 
 
 def test_collect_on_a_machine_with_no_store_is_empty(tmp_path):
-    assert rs.collect(tmp_path / "absent") == []
+    assert rs.collect(tmp_path / "absent", "claude") == []
+
+
+def test_parse_codex_session_reads_metadata_and_human_prompt(tmp_path):
+    store, cwd = tmp_path / "store", tmp_path / "repo"
+    cwd.mkdir()
+    path = write_codex_rollout(store, "codex-id", cwd=cwd, prompt="fix the task", mtime=42.0)
+    parsed = rs.parse_codex_session(path)
+    assert parsed is not None
+    assert (parsed.session_id, parsed.cwd, parsed.prompt, parsed.mtime) == (
+        "codex-id",
+        cwd,
+        "fix the task",
+        42.0,
+    )
+
+
+def test_collect_codex_walks_the_dated_rollout_tree(tmp_path):
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    write_codex_rollout(tmp_path, "one", cwd=cwd)
+    write_codex_rollout(tmp_path, "two", cwd=cwd)
+    assert {s.session_id for s in rs.collect(tmp_path, "codex")} == {"one", "two"}
 
 
 # --- choosing which to reopen ------------------------------------------------
@@ -264,8 +357,19 @@ def test_wt_args_lays_the_tabs_out_in_the_order_given(tmp_path):
     assert args.index("first") < args.index("second")
 
 
-def test_the_agent_is_substitutable(tmp_path):
-    assert "codex" in rs.wt_args([session("a", 1.0, tmp_path)], agent="codex")
+def test_each_agent_uses_its_own_resume_syntax(tmp_path):
+    claude = rs.wt_args([session("a", 1.0, tmp_path)], agent="claude")
+    codex = rs.wt_args([session("a", 1.0, tmp_path)], agent="codex")
+    assert claude[claude.index("claude") :] == [
+        "claude",
+        "--resume",
+        "a",
+        ";",
+        "focus-tab",
+        "-t",
+        "0",
+    ]
+    assert codex[codex.index("codex") :] == ["codex", "resume", "a", ";", "focus-tab", "-t", "0"]
 
 
 def test_a_prompt_cannot_rearrange_the_window(tmp_path):
@@ -283,8 +387,9 @@ def test_a_long_prompt_is_trimmed_to_fit_a_tab(tmp_path):
 
 
 def test_shell_lines_are_the_no_windows_terminal_fallback(tmp_path):
-    lines = rs.shell_lines([session("abc", 1.0, tmp_path)])
-    assert lines == [f'cd "{tmp_path}" && claude --resume abc']
+    selected = [session("abc", 1.0, tmp_path)]
+    assert rs.shell_lines(selected, "claude") == [f'cd "{tmp_path}" && claude --resume abc']
+    assert rs.shell_lines(selected, "codex") == [f'cd "{tmp_path}" && codex resume abc']
 
 
 # --- the entrypoint ----------------------------------------------------------
@@ -355,6 +460,16 @@ def test_dry_run_prints_the_command_line_and_launches_nothing(tmp_path, capsys, 
     assert "--resume sess" in capsys.readouterr().out
 
 
+def test_codex_list_reads_rollouts_instead_of_claude_transcripts(tmp_path, capsys):
+    store, cwd = tmp_path / "store", tmp_path / "repo"
+    cwd.mkdir()
+    write_codex_rollout(store, "codex-session", cwd=cwd, prompt="Codex topic")
+    assert rs.main(["--agent", "codex", "--sessions-dir", str(store), "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "Codex session" in out
+    assert "Codex topic" in out
+
+
 def test_without_windows_terminal_it_prints_the_commands_and_fails(tmp_path, capsys, monkeypatch):
     """A launcher that could not launch must not report success."""
     store, cwd = tmp_path / "store", tmp_path / "repo"
@@ -365,11 +480,15 @@ def test_without_windows_terminal_it_prints_the_commands_and_fails(tmp_path, cap
     assert "claude --resume sess" in capsys.readouterr().err
 
 
-def test_the_store_defaults_to_the_claude_config_dir(monkeypatch, tmp_path):
+def test_each_agent_store_honours_its_config_home(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "elsewhere"))
-    assert rs.sessions_root() == tmp_path / "elsewhere" / "projects"
+    assert rs.sessions_root("claude") == tmp_path / "elsewhere" / "projects"
     monkeypatch.delenv("CLAUDE_CONFIG_DIR")
-    assert rs.sessions_root() == Path.home() / ".claude" / "projects"
+    assert rs.sessions_root("claude") == Path.home() / ".claude" / "projects"
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    assert rs.sessions_root("codex") == tmp_path / "codex-home" / "sessions"
+    monkeypatch.delenv("CODEX_HOME")
+    assert rs.sessions_root("codex") == Path.home() / ".codex" / "sessions"
 
 
 # --- the harness contract ----------------------------------------------------
@@ -394,3 +513,11 @@ def test_the_script_is_stdlib_only():
                 "dataclasses",
                 "pathlib",
             }, f"non-stdlib import: {line}"
+
+
+def test_the_workspace_task_passes_the_shared_agent_picker():
+    source = (REPO_ROOT / "workspace-tasks.jsonc").read_text(encoding="utf-8")
+    task = source[source.index('"label": "Agents: Resume Recent Sessions"') :]
+    task = task[: task.index('"problemMatcher"')]
+    assert '"--agent"' in task
+    assert '"${input:agentCli}"' in task
