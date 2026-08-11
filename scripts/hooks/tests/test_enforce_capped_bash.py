@@ -444,6 +444,122 @@ def test_other_git_subcommands_stay_blocked():
     assert hook.is_bounded("git log") is False
 
 
+# --- the commit itself, which the `git add` fix stopped one command short of ---
+#
+# Exempting the staging step and leaving `git commit` blocked meant every commit still
+# cost a block message -- the most repeated Bash call in the harness. There is no legal
+# spelling to fall back on: the message is multi-line, so the wrapper's cmd.exe mangles
+# it, and `| head -c N` masks the exit code, which on a commit means a pre-commit
+# rejection reports success.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'git commit -m "Subject line"',
+        'git commit -am "Subject line"',
+        "git commit --amend --no-edit",
+        # A message spanning newlines: the shape that is reported, and the one no
+        # wrapper can carry.
+        'git commit -m "Subject\n\nBody paragraph."',
+        # PowerShell's here-string, which is what the Bash tool receives on Windows.
+        "git commit -m @'\nSubject\n\nBody paragraph.\n'@",
+        # The single URL `gh pr create` prints is bounded by nothing at all, and its
+        # --body has the same multi-line problem as a commit message.
+        'gh pr create --title "t" --body "line one\n\nline two"',
+    ],
+)
+def test_a_commit_with_a_message_is_bounded(command):
+    assert hook.is_bounded(command) is True
+    assert hook.is_capped(command) is True
+
+
+def test_the_reported_commit_shape_is_one_statement():
+    """The newline split must not read the message body as uncappable statements."""
+    command = "git commit -m @'\nCut CLAUDE.md to what only it can say\n\nBody.\n'@"
+    assert hook.statements(command) == [command]
+
+
+def test_a_heredoc_commit_needs_no_head_cap_now():
+    """The spelling the suite used to require -- `head -c` masks the commit's exit code."""
+    assert hook.is_capped("git add -A && git commit -F - <<'EOF'\nSubject\nEOF") is True
+
+
+@pytest.mark.parametrize("flag", ["--dry-run", "--short", "--porcelain", "--long"])
+def test_a_dry_run_commit_is_not_bounded(flag):
+    """`git commit --dry-run` is `git status` renamed: it lists every untracked path."""
+    assert hook.is_bounded(f"git commit {flag}") is False
+
+
+@pytest.mark.parametrize("command", ["git commit -v", "git commit --verbose", "git commit -av"])
+def test_a_verbose_commit_is_not_bounded(command):
+    """`-v` appends the full staged diff, which scales with the change without limit."""
+    assert hook.is_bounded(command) is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'git commit -m "Add a --verbose flag to the runner"',
+        'git commit -m "Support --dry-run"',
+        "git commit -m @'\nStop -v from unbounding a commit\n'@",
+        'gh pr create --body "Adds --dry-run and -v"',
+    ],
+)
+def test_a_flag_named_in_the_message_does_not_unbound_the_commit(command):
+    """Prose is not flags.
+
+    Reading the disqualifiers off the raw statement makes a commit's own subject decide
+    whether it is allowed -- a false positive with no cause the block message can name,
+    firing on exactly the commits that describe this hook.
+    """
+    assert hook.is_bounded(command) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git commit -m 'Fix `foo` in the runner'",
+        "git commit -m @'\nStop `SUBSTITUTION_RE` firing on prose\n'@",
+        "git commit -m 'Handle $(x) in messages'",
+    ],
+)
+def test_a_backtick_inside_single_quotes_is_prose_not_substitution(command):
+    """The shell would not expand it there, so neither does this gate.
+
+    Found by this hook blocking the commit that introduced the exemption above: a
+    message about code is full of backticked identifiers, and every one of them read as
+    command substitution. The block message names no cause the author can act on.
+    """
+    assert hook.is_bounded(command) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    ['git commit -m "Fix `foo`"', 'git commit -m "Fix $(id) now"', "echo $(find / -name x)"],
+)
+def test_substitution_inside_double_quotes_still_unbounds(command):
+    """Double quotes expand it, so the output claim really is void."""
+    assert hook.is_bounded(command) is False
+
+
+def test_strip_quoted_blanks_both_quote_styles_across_newlines():
+    assert "keep" in hook.strip_quoted("keep 'drop --dry-run' more")
+    assert "--dry-run" not in hook.strip_quoted("git commit -m 'a\n--dry-run\nb'")
+    assert "--dry-run" not in hook.strip_quoted('git commit -m "a\n--dry-run\nb"')
+
+
+@pytest.mark.parametrize("command", ["git commit-tree x", "git committed", "gh pr createx"])
+def test_the_commit_exemption_does_not_extend_by_prefix(command):
+    assert hook.is_bounded(command) is False
+
+
+def test_other_gh_pr_subcommands_stay_blocked():
+    """`gh pr list`/`view` scale with the repo, and both wrap without trouble."""
+    assert hook.is_bounded("gh pr list") is False
+    assert hook.is_bounded("gh pr view --json number,url,state") is False
+
+
 # --- the /ship skill has to tell the agent about this gate ---
 #
 # The gate blocks every one of /ship's five steps -- `ship.py --preflight`, `git

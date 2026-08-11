@@ -50,6 +50,11 @@ does not resolve any of them:
     other end: it blocked the staging step of every commit, and the heredoc carrying the
     message cannot go through the wrapper either.
 
+**And the commit itself, which that fix stopped one command short of** (`COMMIT_LIKE`).
+Exempting `git add` made the staging step legal and left `git commit` blocked, so every
+commit still cost a block message -- the single most repeated Bash call in the harness,
+in a flow (`/ship`) that runs it once per task.
+
 The cap size comes from `[bash]` in `.devkit.toml` (see `harness_config.py`),
 so a project can widen it without forking this file -- and the number quoted in the
 block message follows it, rather than drifting from what the wrapper actually does.
@@ -93,6 +98,16 @@ STATEMENT_SEPARATORS = ("&&", "||", ";", "\n")
 # whatever the substitution found -- so a statement containing one is never bounded.
 SUBSTITUTION_RE = re.compile(r"\$\(|`")
 
+# ...but only where the shell would actually expand it. Inside single quotes it would
+# not, and the difference is not academic: a commit message is prose, and prose about
+# this codebase is full of backticked identifiers. `git commit -m 'fix `foo`'` was
+# blocked as command substitution -- by its own subject, with a block message that
+# names no cause the author could act on.
+#
+# Double-quoted spans are deliberately left alone, because `$(...)` and backticks DO
+# expand inside them. That is the whole distinction, and it is the shell's, not ours.
+SINGLE_QUOTED_SPAN_RE = re.compile(r"'[^']*'", re.DOTALL)
+
 # `-v` / `--verbose` turns every silent-on-success command into per-file output that
 # scales with the tree: `rm -rv big/` and `mkdir -pv a/b/c` both print a line per entry.
 # Disqualifying the flag is cheaper and more honest than a per-command list of which
@@ -116,6 +131,34 @@ VERBOSE_FLAG_RE = re.compile(r"(?:^|\s)(?:-[A-Za-z]*v[A-Za-z]*|--verbose)(?=\s|$
 SILENT_ON_SUCCESS = re.compile(
     r"(?:cd|export|unset|mkdir|rmdir|touch|rm|cp|mv|ln|chmod|git\s+add)\s"
 )
+
+# Commands that carry an authored message and answer with a fixed-shape summary. They
+# are exempt for a stronger reason than the silent-on-success family above: there is no
+# spelling of them this gate would accept.
+#
+#   * The message is multi-line -- a heredoc, a `"..."` spanning newlines, or PowerShell's
+#     `@'...'@` -- and none of those survive the wrapper's `cmd.exe`.
+#   * So the only remaining escape is `| head -c N`, which **masks the exit code**. On a
+#     commit that is actively dangerous: a commit rejected by a pre-commit hook reports
+#     success, and the agent ships a branch with nothing on it. The vendored suite's own
+#     example of a "legal" commit (`test_git_add_before_a_heredoc_commit_is_allowed`)
+#     pipes through `head -c 500` and would swallow exactly that.
+#
+# What they print is bounded by the *change*, not by the tree: a header line, one stat
+# line, and a `create mode` line per newly added path for a commit; a single URL for
+# `gh pr create`. That is the same criterion that keeps `ls` and `git status` out.
+COMMIT_LIKE = re.compile(r"(?:git\s+commit|gh\s+pr\s+create)(?:\s|$)")
+
+# The two spellings of `git commit` that are `git status` wearing a different name:
+# `--dry-run` (with its `--short`/`--porcelain`/`--long` output modes) lists every
+# untracked path, and `-v` appends the full staged diff. `VERBOSE_FLAG_RE` covers `-v`.
+COMMIT_LIKE_DISQUALIFIERS = re.compile(r"(?:^|\s)--(?:dry-run|short|porcelain|long)(?=\s|$)")
+
+# Quoted spans, removed before those flags are looked for. Without this the *message*
+# decides: `git commit -m "Add a --verbose flag"` reads as a verbose commit and is
+# blocked, which is a false positive triggered by prose and impossible to diagnose from
+# the block message. Flags live outside the quotes; the message is entirely inside them.
+QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", re.DOTALL)
 
 # A heredoc's body is data, not commands. Without this the `\n` split turns every line
 # of a commit message into a "statement" that is neither bounded nor cappable, so the
@@ -184,8 +227,9 @@ def block_message(max_bytes: int) -> str:
         "drops the pytest/ruff summary -- the part you actually need.\n"
         "Every statement needs its own cap: in `a; b | head -c N` only `b` is "
         "capped. Exempt, and needing no wrapper: constant-size output (pwd, git "
-        "rev-parse, --version), commands silent on success (mkdir, rm, cp), and "
-        "shell control flow. ls/cat/git status are NOT exempt because their "
+        "rev-parse, --version), commands silent on success (mkdir, rm, cp), the "
+        "commit pair whose message cannot survive the wrapper (git add/commit, gh "
+        "pr create), and shell control flow. ls/cat/git status are NOT exempt because their "
         "output grows with the tree -- use Read/Glob/Grep."
     )
 
@@ -302,11 +346,22 @@ def strip_control_prefix(statement: str) -> str:
     return statement
 
 
+def strip_quoted(statement: str) -> str:
+    """`statement` with quoted spans blanked out, so flags are read but prose is not."""
+    return QUOTED_SPAN_RE.sub(" ", statement)
+
+
 def is_bounded(statement: str) -> bool:
     """True when this statement's output is bounded by a small constant."""
-    if SUBSTITUTION_RE.search(statement):
+    if SUBSTITUTION_RE.search(SINGLE_QUOTED_SPAN_RE.sub(" ", statement)):
         return False
     statement = strip_control_prefix(statement.strip())
+    if COMMIT_LIKE.match(statement):
+        # Judged on the flags only: a `--dry-run` or `-v` anywhere in the *message* is
+        # prose, and unbounding a commit because of what it says about itself is a false
+        # positive with no visible cause.
+        flags = strip_quoted(statement)
+        return not (COMMIT_LIKE_DISQUALIFIERS.search(flags) or VERBOSE_FLAG_RE.search(flags))
     if SILENT_ON_SUCCESS.match(statement):
         # Scoped to this family, not applied globally: `-v` means *version* to about as
         # many commands as it means verbose, and an unscoped check revoked the

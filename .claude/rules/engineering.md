@@ -72,6 +72,10 @@ Two things not to reach for when it fires:
   — `pwd`, `git rev-parse`, `--version` probes, the silent-on-success family
   (`mkdir`, `rm`, `cp`), and shell control flow. If one of those is blocked, that is a
   defect in the gate worth reporting, not a command to wrap.
+- **`git commit` and `gh pr create` are exempt, and wrapping them anyway breaks them.**
+  Their message is authored, multi-line, and does not survive the wrapper's `cmd.exe`;
+  the `| head -c N` fallback masks the exit code, so a commit a pre-commit hook
+  rejected reads as a success. Issue those two bare.
 - **`ls`, `cat` and `git status` are exempt on purpose — they are not.** Their output
   grows with the tree, and the answer for them is the Read/Glob/Grep tools, which cost
   no subprocess and no cap. Reach for the wrapper for test and lint runs, where the

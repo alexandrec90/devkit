@@ -15,6 +15,12 @@ argument-hint: 'Optional PR title'
 > summaries live at the end. Pass no `--max-bytes`: it defaults to this project's
 > `[bash] max_bytes`, and a number written here would be one project's value baked
 > into a file every project vendors byte-for-byte.
+>
+> **The two that carry an authored message are the exception — issue `git commit` and
+> `gh pr create` bare.** The gate exempts them, and wrapping one destroys it: a
+> multi-line message does not survive `cmd.exe`, and the `| head -c N` fallback masks
+> the exit code, so a commit a pre-commit hook rejected reports success and step 3
+> pushes a branch with nothing on it.
 
 Run each step in order. Stop on failure; never open a PR for an unverified branch.
 
