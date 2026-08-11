@@ -15,6 +15,27 @@ harness seam, the instruction-feedback loop) and `.claude/rules/authoring.md` (w
 rules and skills) apply here too — devkit vendors them *out*, so it is also the first
 place they have to hold. Everything below is what is true about devkit specifically.
 
+## The docs are vibe-coded too
+
+Every file here was written by an agent, this one included. Prose is the only artifact
+in the repo with no compiler and no test, so a wrong sentence survives in a way wrong
+code cannot — and an instruction file is read as *authority*, which is what turns a
+stale paragraph into one agent talking the next one out of a correct change. That has
+already happened here. Assume it is happening now.
+
+1. **The code decides.** Where a document and the repo disagree, the document is the
+   defect. Fix it in the same change as the work that found it; never route around it,
+   and never let it veto a change you can otherwise see is right.
+2. **Write only what stays true.** A version, a count, a fact about another repo, or a
+   restatement of something a config file already states is a claim with no owner — the
+   thing moves, the sentence does not. Name the file that owns it instead of copying
+   its current value.
+3. **`tests/test_doc_claims.py` gates the checkable half.** Every path cited in an
+   inline code span or a Markdown link has to exist, and instruction prose may pin no
+   version. It cannot tell you a rationale went stale; it does stop the *silent* rot,
+   which is the kind that accumulates. Its two exemption lists are where a deliberate
+   absence goes, with the reason, and each entry has to stay both absent and cited.
+
 ## Nothing but the standard library, by contract
 
 Read the interpreter version and the dev tools off `pyproject.toml`; they are not
