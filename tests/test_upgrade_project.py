@@ -282,6 +282,160 @@ def test_an_upgrade_branch_from_any_day_is_recognised():
     assert not up.is_upgrade_branch("master")
 
 
+# --- a finished upgrade branch is not an unfinished one ----------------------
+
+
+def upgrade_branch(**overrides) -> sweep.State:
+    """Parked on the branch a previous run cut, its commit not yet in the base."""
+    base = {
+        "branch": "claude/devkit-upgrade-0810",
+        "ahead": 1,
+        "upstream": "origin/claude/devkit-upgrade-0810",
+    }
+    return clean(**{**base, **overrides})
+
+
+def merged_pr(*_args):
+    return subprocess.CompletedProcess(["gh"], 0, '[{"number": 38}]', "")
+
+
+def no_pr(*_args):
+    return subprocess.CompletedProcess(["gh"], 0, "[]", "")
+
+
+def test_an_upgrade_branch_whose_pr_merged_is_not_an_unfinished_upgrade():
+    """The lived failure. ibkr_trader's upgrade PR merged on 2026-08-10, the checkout
+    stayed parked on `claude/devkit-upgrade-0810`, and every run afterwards refused it
+    with "ship the branch and open its PR" -- for a PR that had already merged and a
+    remote branch GitHub had already deleted. No action existed behind that sentence
+    and the project could never adopt another release.
+
+    It is not a corner case either: `upgrade_one` leaves every checkout it upgrades
+    parked on the branch it cut, so this is the guaranteed end state of success."""
+    landed = upgrade_branch(merged_task_branches=("claude/devkit-upgrade-0810",))
+    assert up.landed_upgrade(landed)
+    assert up.refusal(landed, "v0.5.3", landed=True) == ""
+
+
+def test_an_upgrade_branch_that_really_is_unfinished_is_still_refused():
+    """The other half: an open PR *is* a thing to finish, and cutting a second branch
+    beside it would open a second PR for the same adoption."""
+    reason = up.refusal(upgrade_branch(), "v0.5.3", landed=False)
+    assert "unfinished upgrade" in reason
+    assert "has not merged" in reason
+
+
+def test_the_offline_signals_that_an_upgrade_branch_has_landed():
+    """Each is enough on its own, and none costs a network call."""
+    assert up.landed_upgrade(upgrade_branch(merged_task_branches=("claude/devkit-upgrade-0810",)))
+    # The shape a merged PR leaves once `fetch --prune` drops the tracking ref.
+    assert up.landed_upgrade(upgrade_branch(upstream="", upstream_gone=True))
+    # `sweep`'s spent-branch: nothing on it beyond the base.
+    assert up.landed_upgrade(upgrade_branch(ahead=0))
+    assert not up.landed_upgrade(upgrade_branch())
+
+
+def test_a_squash_merged_upgrade_is_only_visible_to_github():
+    """A squash merge rewrites the commits, so neither the ancestry check nor the
+    counts can see it: the branch reads as one commit ahead of a base that already
+    holds its content. Asking GitHub is the only answer that survives it."""
+    assert not up.landed_upgrade(upgrade_branch(), no_pr)
+    assert up.landed_upgrade(upgrade_branch(), merged_pr)
+
+
+def test_an_unreachable_gh_leaves_the_branch_refused_rather_than_assumed_finished():
+    """`has_merged_pr` fails open, and open here means today's refusal -- inventing a
+    merge on the say-so of an offline `gh` would cut a branch over unshipped work."""
+
+    def offline(*_args):
+        raise OSError("gh is not on PATH")
+
+    assert not up.landed_upgrade(upgrade_branch(), offline)
+
+
+def test_only_this_scripts_own_branches_are_read_this_way():
+    """Unrelated work on a task branch is refused whatever GitHub says about it."""
+    assert not up.landed_upgrade(clean(branch="claude/thing-0801"), merged_pr)
+    assert not up.landed_upgrade(clean(), merged_pr)
+
+
+def test_a_landed_upgrade_is_cut_from_the_home_branch_not_from_the_spent_one():
+    """Cutting today's branch off the merged one would re-propose its commits: the new
+    PR's merge base is the old base, so the diff is the last adoption plus this one."""
+    built = up.plan(upgrade_branch(ahead=0), "v0.5.3", DATE, landed=True)
+    assert built.steps == (
+        ("checkout", "master"),
+        ("merge", "--ff-only", "origin/master"),
+        ("checkout", "-b", "claude/devkit-upgrade-0802"),
+    )
+    assert built.anchor == "master"
+
+
+def test_going_home_never_writes_a_merge_commit():
+    """`--ff-only` or nothing: a diverged home branch is a state for a human, and the
+    merge commit would otherwise land inside the upgrade's own PR."""
+    steps = up.plan(upgrade_branch(ahead=0), "v0.5.3", DATE, landed=True).steps
+    assert [step for step in steps if step[0] == "merge"] == [
+        ("merge", "--ff-only", "origin/master")
+    ]
+
+
+def test_a_finished_upgrade_with_no_home_branch_is_refused_rather_than_guessed():
+    """Only a linked worktree reaches this -- git permits one checkout of a branch, so
+    it cannot fall back to the default branch the way a primary worktree can."""
+    reason = up.plan(upgrade_branch(ahead=0, linked=True), "v0.5.3", DATE, landed=True).refusal
+    assert "no home branch" in reason
+
+
+def test_a_parked_checkout_is_fetched_before_its_branch_is_judged(tmp_path, capsys, monkeypatch):
+    """Every signal is measured against the local `origin/<default>` ref, and a checkout
+    parked since its own PR merged is exactly one that has not fetched since. Stale, it
+    reads as unfinished forever -- which is the bug, not a symptom of it.
+
+    A dry run fetches too: read-only, and an answer that differed from the apply's would
+    be reporting on a different checkout than the one about to change."""
+    git = RecordingGit()
+    states = iter([upgrade_branch(), upgrade_branch(ahead=0, upstream="", upstream_gone=True)])
+    monkeypatch.setattr(up.sweep, "git_for", lambda _project: git)
+    monkeypatch.setattr(up.sweep, "gh_for", lambda _project: no_pr)
+    monkeypatch.setattr(up.sweep, "inspect", lambda *_a, **_kw: next(states))
+    (tmp_path / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
+
+    assert up.upgrade_one("ibkr_trader", tmp_path, "v0.8.0").code == 0
+    assert ("fetch", "--prune", "origin") in git.calls
+    printed = capsys.readouterr().out
+    assert "returning home first" in printed
+    assert "git -C ibkr_trader checkout master" in printed
+
+
+def test_a_dirty_parked_checkout_is_not_fetched_at_all(tmp_path, monkeypatch):
+    """The dirty refusal outranks this one and needs no network to reach."""
+    git = RecordingGit()
+    monkeypatch.setattr(up.sweep, "git_for", lambda _project: git)
+    monkeypatch.setattr(up.sweep, "inspect", lambda *_a, **_kw: upgrade_branch(dirty=1))
+    assert up.upgrade_one("apt-finder", tmp_path, "v0.8.0").code == 1
+    assert not git.calls
+
+
+def test_the_plan_numbers_its_steps_in_order(tmp_path, capsys, monkeypatch):
+    """The printed plan is the whole output of a dry run, and a dry run is how a
+    scheduled check reports. It numbered every git step `1.` -- invisible while there
+    was only ever one of them, and three lines called `1.` the moment there were three.
+    """
+    states = iter([upgrade_branch(), upgrade_branch(ahead=0, upstream="", upstream_gone=True)])
+    monkeypatch.setattr(up.sweep, "git_for", lambda _project: RecordingGit())
+    monkeypatch.setattr(up.sweep, "gh_for", lambda _project: no_pr)
+    monkeypatch.setattr(up.sweep, "inspect", lambda *_a, **_kw: next(states))
+    (tmp_path / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
+    up.upgrade_one("carameli", tmp_path, "v0.5.3")
+    numbers = [
+        line.strip().split(".", 1)[0]
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("  ") and line.strip()[0].isdigit()
+    ]
+    assert numbers == ["1", "2", "3", "4", "5", "6", "7"]
+
+
 def test_a_non_git_directory_is_refused():
     assert up.refusal(clean(is_git=False), "v0.5.3") == "not a git checkout"
 
