@@ -176,6 +176,71 @@ def test_a_checkout_stamped_with_devkits_head_is_current(tmp_path):
     assert up.is_current(tmp_path, head)
 
 
+# --- never backwards ----------------------------------------------------------
+
+
+def receipt(project, tag: str | None):
+    """A `DEVKIT_FILES.json` of the shape every pull writes."""
+    payload: dict = {"version": 1, "files": {}}
+    if tag is not None:
+        payload["devkit_tag"] = tag
+    (project / "DEVKIT_FILES.json").write_text(json.dumps(payload), encoding="utf-8")
+    return project
+
+
+def test_a_release_this_checkout_has_no_tag_for_is_refused(tmp_path):
+    """The release-window state, and what makes this a bug rather than a nuisance:
+    carameli had adopted v0.8.0 off the release branch before the tag existed here.
+    Every remaining step would then have run backwards -- an older tree pulled over
+    it, a commit titled `Adopt devkit v0.7.0`, and a PR calling that an adoption."""
+    receipt(tmp_path, "v0.8.0")
+    reason = up.unreleased_adoption(tmp_path, ["v0.7.0", "v0.6.0"])
+    assert "v0.8.0" in reason and "v0.7.0" in reason
+    assert "backwards" in reason
+
+
+def test_a_release_this_checkout_does_have_is_upgradable(tmp_path):
+    receipt(tmp_path, "v0.6.0")
+    assert up.unreleased_adoption(tmp_path, ["v0.7.0", "v0.6.0"]) == ""
+
+
+def test_a_receipt_with_no_recorded_tag_proves_nothing(tmp_path):
+    """An `--allow-untagged` pull, or one from before the receipt carried a tag.
+    Cannot tell is not ahead -- the line `sync-devkit.stale_pin` draws, for the same
+    reason: a check that cried wolf on every un-upgraded project would be ignored."""
+    receipt(tmp_path, None)
+    assert up.unreleased_adoption(tmp_path, ["v0.7.0"]) == ""
+
+
+def test_a_project_with_no_receipt_at_all_proves_nothing(tmp_path):
+    assert up.unreleased_adoption(tmp_path, ["v0.7.0"]) == ""
+
+
+def test_nothing_is_concluded_from_an_empty_tag_list(tmp_path):
+    """`release_tags` answers [] for a devkit it could not query. Reading "ahead"
+    into that would refuse every project in the workspace over one bad git call."""
+    receipt(tmp_path, "v0.8.0")
+    assert up.unreleased_adoption(tmp_path, []) == ""
+
+
+def test_the_receipt_is_read_through_sync_devkits_own_reader(tmp_path):
+    """Not reparsed here: `DEVKIT_FILES.json` already has a reader that owns its
+    format, and a second opinion about which release a project vendored is worse
+    than no opinion at all."""
+    receipt(tmp_path, "v0.8.0")
+    assert up.vendored_release(tmp_path) == "v0.8.0"
+    (tmp_path / "DEVKIT_FILES.json").write_text("{ not json", encoding="utf-8")
+    assert up.vendored_release(tmp_path) == ""
+
+
+def test_the_tag_list_is_newest_first_and_agrees_with_the_latest():
+    """Against the real checkout, because the split only earns its place if the
+    *set* and the *pick* can never disagree about what the newest release is."""
+    tags = up.release_tags(REPO_ROOT)
+    assert tags and tags[0] == up.latest_tag(REPO_ROOT)
+    assert up.release_tags(REPO_ROOT / "no-such-directory") == []
+
+
 def test_a_dirty_project_is_refused():
     """A branch cut under uncommitted work carries it along, and the commit would
     have to guess which files belonged to the upgrade."""
@@ -187,6 +252,34 @@ def test_a_dirty_project_is_refused():
 def test_a_project_already_on_a_task_branch_is_refused():
     reason = up.refusal(clean(branch="claude/thing-0801"), "v0.5.3")
     assert "task branch" in reason
+
+
+def test_this_scripts_own_branch_is_reported_as_an_unfinished_upgrade():
+    """`claude/devkit-upgrade-<mmdd>` is not unrelated work -- it is the previous run
+    of this operation, holding the adoption. "Upgrade from the home branch" is a dead
+    end there: today's run cuts a *differently dated* branch, so following it strands
+    the first one and opens a second beside it.
+
+    Lived: carameli sat on `claude/devkit-upgrade-0810` with its adoption committed
+    and pushed and no PR, and `--all` described it as work to be moved off."""
+    reason = up.refusal(clean(branch="claude/devkit-upgrade-0810"), "v0.5.3")
+    assert "unfinished upgrade" in reason
+    assert "PR" in reason
+
+
+def test_an_unrelated_task_branch_still_gets_the_general_refusal():
+    """Two states, two remedies -- collapsing them is what sent the operator wrong."""
+    reason = up.refusal(clean(branch="claude/thing-0801"), "v0.5.3")
+    assert "unfinished upgrade" not in reason
+
+
+def test_an_upgrade_branch_from_any_day_is_recognised():
+    """Keyed off the slug rather than today's name: an upgrade parked yesterday is
+    the same unfinished run, and the date is the only part that differs."""
+    assert up.is_upgrade_branch("claude/devkit-upgrade-0731")
+    assert up.is_upgrade_branch(up.branch_name())
+    assert not up.is_upgrade_branch("claude/devkit-upgrader-0801")
+    assert not up.is_upgrade_branch("master")
 
 
 def test_a_non_git_directory_is_refused():
@@ -537,6 +630,60 @@ def test_a_dry_run_never_builds_a_source_worktree(tmp_path, capsys, monkeypatch)
     ws = workspace(tmp_path, "carameli")
     assert up.main(["--all", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
     assert "Dry run" in capsys.readouterr().out
+
+
+def ahead(tmp_path, monkeypatch, *names):
+    """A workspace where every named checkout vendored a release devkit lacks."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.7.0")
+    monkeypatch.setattr(up, "release_tags", lambda _devkit: ["v0.7.0", "v0.6.0"])
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    for name in names:
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
+        receipt(tmp_path / name, "v0.8.0")
+    return workspace(tmp_path, *names)
+
+
+def test_a_project_ahead_of_this_checkout_is_refused_before_anything_is_cut(
+    tmp_path, capsys, monkeypatch
+):
+    """Why the check belongs in the pre-flight beside `is_current`: proving a project
+    must not be touched costs one file read, cuts no branch, and builds no worktree."""
+    monkeypatch.setattr(up, "source_at_tag", lambda *_a: pytest.fail("built a worktree"))
+    monkeypatch.setattr(up, "upgrade_one", lambda *_a, **_kw: pytest.fail("upgraded anyway"))
+    ws = ahead(tmp_path, monkeypatch, "carameli")
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
+    assert "v0.8.0" in capsys.readouterr().err
+
+
+def test_the_backwards_refusal_reaches_the_artifact(tmp_path, monkeypatch):
+    """A `--all` interleaves several checkouts' lines, so a refusal that is only
+    printed is one that scrolls away. `logs/upgrade.log` is what the next reader has."""
+    ws = ahead(tmp_path, monkeypatch, "carameli")
+    up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)])
+    written = (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8")
+    assert "carameli" in written and "v0.8.0" in written
+
+
+def test_a_project_ahead_does_not_stop_the_ones_behind(tmp_path, monkeypatch):
+    """The `--all` contract, extended to the new refusal: independent repos, and the
+    one release the others are missing is not held up by the one that is ahead."""
+    upgraded_names: list[str] = []
+    monkeypatch.setattr(up, "source_at_tag", _no_worktree)
+    monkeypatch.setattr(
+        up,
+        "upgrade_one",
+        lambda name, *_a, **_kw: (upgraded_names.append(name), up.Outcome(name, 0))[1],
+    )
+    ws = ahead(tmp_path, monkeypatch, "carameli")
+    (tmp_path / "ibkr_trader").mkdir()
+    (tmp_path / "ibkr_trader" / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
+    receipt(tmp_path / "ibkr_trader", "v0.6.0")
+    ws.write_text(
+        json.dumps({"folders": [{"path": "carameli"}, {"path": "ibkr_trader"}]}), encoding="utf-8"
+    )
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
+    assert upgraded_names == ["ibkr_trader"]
 
 
 @contextlib.contextmanager

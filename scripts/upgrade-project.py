@@ -17,6 +17,11 @@ Refuses a dirty target for the same reason: a branch cut under uncommitted work
 carries that work along, and the commit here would have to guess which files were
 part of the upgrade.
 
+**It only ever moves a project forward.** A consumer that vendored a release this
+checkout has no tag for -- the normal state of the hours around a release, when the
+adoption lands before the tag does -- is refused rather than pulled back to the
+older one; see `unreleased_adoption`.
+
 `--all` upgrades every checkout in the workspace that has actually vendored devkit,
 one PR each -- the release is one upstream revision, so adopting it everywhere is
 one operation. Each project is still upgraded on its own terms: a refusal in one
@@ -48,6 +53,9 @@ import sweep
 import task_branch as tb
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# devkit's own `scripts/`, resolved from this file rather than from `REPO_ROOT`:
+# that one is the artifact root, and the tests point it at a temporary directory.
+SCRIPTS_DIR = Path(__file__).resolve().parent
 # Box-aware (see `sweep.default_workspace`).
 DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 SYNC_SCRIPT = "scripts/sync-devkit.py"
@@ -171,9 +179,25 @@ def _same_path(left: Path, right: Path) -> bool:
         return False
 
 
+# The topic every upgrade branch is named for. Held as a constant because the name
+# is written by `branch_name` and read back by `is_upgrade_branch`, which is how a
+# checkout parked mid-upgrade is told apart from one holding unrelated work.
+UPGRADE_SLUG = tb.slugify("devkit upgrade")
+
+
 def branch_name(today: _dt.date | None = None) -> str:
     """The branch an upgrade lands on: `claude/devkit-upgrade-<mmdd>`."""
-    return tb.branch_name(tb.slugify("devkit upgrade"), set(), today)
+    return tb.branch_name(UPGRADE_SLUG, set(), today)
+
+
+def is_upgrade_branch(branch: str) -> bool:
+    """True for a branch this script cut, on any day.
+
+    Deliberately not `branch == branch_name()`: the `-<mmdd>` stamp means an upgrade
+    parked yesterday would not match today's name, and yesterday's unfinished upgrade
+    is exactly the one worth recognising.
+    """
+    return branch.startswith(f"{tb.BRANCH_PREFIX}{UPGRADE_SLUG}-")
 
 
 def commit_message(tag: str, files: int | str) -> str:
@@ -224,6 +248,18 @@ def refusal(state: sweep.State, tag: str | None) -> str:
         return (
             f"{state.dirty} uncommitted file(s). An upgrade is its own change; "
             f"commit or ship the work in progress first"
+        )
+    if is_upgrade_branch(state.branch):
+        # Not "unrelated work" -- it is this operation, half done. Sending the
+        # operator home is a dead end: today's run would cut a differently dated
+        # branch, so following that advice strands a branch that already holds the
+        # adoption (pushed, in the case that produced this message) and opens a
+        # second one beside it.
+        return (
+            f"parked on {state.branch}, an unfinished upgrade this script cut. "
+            f"Finish that one -- ship the branch and open its PR -- or delete it if "
+            f"it was abandoned; re-running from the home branch would leave it "
+            f"stranded and cut a second upgrade branch alongside it"
         )
     if sweep.is_task_branch(state.branch):
         return (
@@ -347,6 +383,55 @@ def is_current(project: Path, tag_commit: str) -> bool:
     except OSError:
         return False
     return names_commit(stamp, tag_commit)
+
+
+def vendored_release(project: Path) -> str:
+    """The release `project`'s receipt says its files came from; "" when unrecorded.
+
+    Read through `sync-devkit.read_receipt_tag` rather than reparsed here. The receipt
+    is that script's format, it already answers this question, and a second reader
+    that disagreed even slightly would make "which release is this project on" a
+    question with two answers -- the exact failure `is_current` was written to end.
+    Hyphenated filename, hence the loader; `SCRIPTS_DIR` rather than `REPO_ROOT`
+    because that one is a knob the tests move.
+    """
+    loader_dir = SCRIPTS_DIR / "precommit"
+    if str(loader_dir) not in sys.path:
+        sys.path.insert(0, str(loader_dir))
+    # Resolved by the insert above; `scripts/precommit/` is not an importable package.
+    from _loader import load_by_path
+
+    sync = load_by_path("_sync_devkit", SCRIPTS_DIR / "sync-devkit.py")
+    return sync.read_receipt_tag(project)
+
+
+def unreleased_adoption(project: Path, tags: list[str]) -> str:
+    """Why this project must not be upgraded *to* `tags[0]`, or "".
+
+    A project whose receipt names a release this devkit checkout has no tag for is
+    holding something this run cannot produce, and every step after the branch would
+    then run backwards: an older tree pulled over a newer one, a commit titled
+    `Adopt devkit <older>`, and a PR body describing the reversal as an adoption.
+
+    This is not a hypothetical -- it is the ordinary state of the hours around a
+    release. A consumer adopts off the release branch before the tag is cut, or the
+    tag exists upstream and this checkout has not fetched it, and until then the
+    stamp names a commit git here cannot resolve. `is_current` answers "no" to that,
+    correctly, and "not current" was being read as "stale" for want of this check.
+
+    "" when the receipt records no tag (a pull from before it carried one, or an
+    `--allow-untagged` one) and when `tags` is empty (a devkit this could not query).
+    Cannot tell is not ahead -- the line `sync-devkit.stale_pin` draws, for the same
+    reason: a check that fired on every project it could not read would be ignored.
+    """
+    vendored = vendored_release(project)
+    if not tags or not vendored or vendored in tags:
+        return ""
+    return (
+        f"vendored devkit {vendored}, which this checkout has no tag for; the newest "
+        f"here is {tags[0]}. Adopting {tags[0]} would move it backwards. Fetch devkit's "
+        f"tags, or cut {vendored} if it was never released (see RELEASING.md)"
+    )
 
 
 @contextlib.contextmanager
@@ -735,10 +820,15 @@ def main(argv: list[str] | None = None) -> int:
     # One lookup for the whole run: every project adopts the same release, and this is
     # what the per-project stamps are measured against.
     tag_commit = commit_for(args.devkit, tag)
+    # The whole tag set, for the projects that are *ahead* of it rather than behind.
+    tags = release_tags(args.devkit)
 
     scope = names if args.every else requested
     selected = select_all(candidates_for(root, scope, args.devkit))
 
+    # Refusals decided before any project is touched. Carried rather than printed
+    # only, because `_finish` owes them to the artifact and to the exit code.
+    preflight: list[Outcome] = []
     todo: list[str] = []
     for name, skip in selected:
         if skip:
@@ -752,12 +842,22 @@ def main(argv: list[str] | None = None) -> int:
         # clean, on the right branch, or on anything else this could refuse over.
         elif is_current(root / name, tag_commit):
             print(f"upgrade: {name} is already on devkit {tag}.")
+        elif backwards := unreleased_adoption(root / name, tags):
+            # A refusal (1) rather than a skip: the project is on a release this
+            # checkout cannot serve, and a human has to reconcile the two. Reported
+            # here so the branch refusal below can never describe it instead -- a
+            # project ahead of the release is usually parked on the upgrade branch
+            # that put it there, and that is the less true of the two facts.
+            message = f"upgrade: {name} -- {backwards}"
+            print(message, file=sys.stderr)
+            preflight.append(Outcome(name, 1, message))
         else:
             todo.append(name)
 
     if not todo:
-        # Still written -- as an empty file, clearing whatever the last run left.
-        return _finish(tag, args.dry_run, [])
+        # Still written -- as an empty file when nothing needs a human, clearing
+        # whatever the last run left.
+        return _finish(tag, args.dry_run, preflight)
 
     if args.dry_run:
         # The refusals still count. A dry run is how a scheduled check asks "could
@@ -765,7 +865,7 @@ def main(argv: list[str] | None = None) -> int:
         # task branch reports "all clear" for the one state that is not.
         outcomes = [upgrade_one(name, root / name, tag) for name in todo]
         print("\nDry run -- nothing was changed. Re-run with --yes to apply.")
-        return _finish(tag, args.dry_run, outcomes)
+        return _finish(tag, args.dry_run, preflight + outcomes)
 
     # One worktree for the whole run: every project adopts the same revision, and
     # it is materialised only once something is actually going to be pulled.
@@ -774,7 +874,25 @@ def main(argv: list[str] | None = None) -> int:
             outcomes = [upgrade_one(name, root / name, tag, source) for name in todo]
     except RuntimeError as exc:
         return stopped(2, f"upgrade: could not check devkit out at {tag}: {exc}", tag)
-    return _finish(tag, args.dry_run, outcomes)
+    return _finish(tag, args.dry_run, preflight + outcomes)
+
+
+def release_tags(devkit: Path) -> list[str]:
+    """Every devkit release tag, newest first; [] when there are none to read.
+
+    Split out from `latest_tag` because the *set* answers a second question the pick
+    cannot: whether the release a project already vendored exists in this checkout at
+    all. See `unreleased_adoption`.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(devkit), "tag", "--list", "--sort=-v:refname"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
 def latest_tag(devkit: Path) -> str | None:
@@ -786,15 +904,7 @@ def latest_tag(devkit: Path) -> str | None:
     which is noise rather than signal -- and this is meant to be safe to run on a
     schedule to prove nothing is stale.
     """
-    result = subprocess.run(
-        ["git", "-C", str(devkit), "tag", "--list", "--sort=-v:refname"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        return None
-    tags = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    tags = release_tags(devkit)
     return tags[0] if tags else None
 
 
