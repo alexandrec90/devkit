@@ -249,6 +249,85 @@ def test_the_setup_action_is_not_vendored():
     )
 
 
+# `vendored` near the composite action is allowed only as a denial; anything else is
+# the v0.7.0 claim outliving the commit that stopped making it true. `un-vendored` and
+# `vendoring` are the history, which stays sayable.
+_UNNEGATED_VENDORED = re.compile(r"(?<!never )(?<!not )(?<!no longer )(?<!un-)vendored")
+_NAMES_THE_ACTION = re.compile(r"setup-python-env")
+# The action's own two copies are entirely about themselves, so every line is in scope.
+_SETUP_ACTION_COPIES = (
+    ".github/actions/setup-python-env/action.yml",
+    "templates/core/dot-github/actions/setup-python-env/action.yml",
+)
+# Elsewhere the claim rode along beside a `uses:` line or a path in prose, and these
+# files legitimately describe *other* things as vendored (the auto-merge workflow, the
+# hook tier). So the window is the naming line plus what continues it.
+_MENTIONS_THE_ACTION = (
+    "templates/core/README.md.tmpl",
+    "templates/core/dot-github/workflows/pr-gate.yml.tmpl",
+    "templates/core/dot-github/workflows/nightly.yml.tmpl",
+    ".github/workflows/pr-gate.yml",
+    ".github/workflows/nightly.yml",
+)
+_WINDOW = 5
+
+
+def _vendored_claims_about_the_action(rel: str) -> list[str]:
+    lines = (REPO_ROOT / rel).read_text(encoding="utf-8").splitlines()
+    in_scope = set(range(len(lines)))
+    if rel in _MENTIONS_THE_ACTION:
+        named = [i for i, line in enumerate(lines) if _NAMES_THE_ACTION.search(line)]
+        in_scope = {j for i in named for j in range(i, min(i + _WINDOW, len(lines)))}
+    return [
+        f"{rel}:{i + 1}: {lines[i].strip()}"
+        for i in sorted(in_scope)
+        if _UNNEGATED_VENDORED.search(lines[i])
+    ]
+
+
+def test_nothing_still_calls_the_setup_action_vendored():
+    """The tier moved in `4ef8866`; the prose describing it did not.
+
+    Un-vendoring edited `MANIFEST` and added a `templates/` copy without changing a
+    word of the file, so both copies, five call sites across the gate and nightly
+    templates, and the README handed to every new project all went on saying the action
+    is "vendored byte-identical from devkit" and that editing it "shows up as drift".
+    Nothing was red — the claim is prose, and `test_the_setup_action_is_not_vendored`
+    guards only the tier itself.
+
+    It cost a review. A reader took the file at its word, concluded the hard-coded
+    `uv sync --all-extras --all-groups` was drift-gated and therefore unfixable from
+    inside a consumer's repo, and filed for a `sync-args` input — a seam for a problem
+    the un-vendoring had already solved more completely, since what differed between
+    the two projects that disproved vendoring was the *shape* of the install, not its
+    flags. Prose that outlives its subject bills the next reader for the discovery.
+    """
+    claims = [
+        c
+        for rel in _SETUP_ACTION_COPIES + _MENTIONS_THE_ACTION
+        for c in _vendored_claims_about_the_action(rel)
+    ]
+    assert not claims, (
+        "these lines say the composite action is vendored; it is a `templates/` copy "
+        "the project owns and may edit:\n  " + "\n  ".join(claims)
+    )
+
+
+def test_the_setup_action_says_which_tier_it_is_in():
+    """The ratchet above passes on silence, and silence is how the drift started.
+
+    Deleting the stale sentence satisfies it while leaving a reader no way to tell
+    whether rewriting the install step is supported or reported as drift — which is the
+    only question anyone opens this file to answer.
+    """
+    for rel in (*_SETUP_ACTION_COPIES, "templates/core/README.md.tmpl"):
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert "templates/" in text, (
+            f"{rel} no longer says the composite action comes from `templates/`, so "
+            "nothing tells a project it owns the file and may edit the install step"
+        )
+
+
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 TEMPLATE_WORKFLOWS = TEMPLATES / "core" / "dot-github" / "workflows"
 ACTIONS = REPO_ROOT / ".github" / "actions"

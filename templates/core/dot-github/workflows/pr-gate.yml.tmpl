@@ -39,8 +39,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-python-env
         with:
-          # Explicit at every call site: the action is vendored byte-identical from
-          # devkit, so its own default cannot know this project's version.
+          # Explicit at every call site: the action is copied from devkit verbatim
+          # rather than rendered, so its own default cannot know this project's version.
           python-version: "{{ python_version }}"
       - name: Run every hook over the whole repo
         # `--all-files` rather than the staged diff: on a push there is no staged diff.
@@ -58,8 +58,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-python-env
         with:
-          # Explicit at every call site: the action is vendored byte-identical from
-          # devkit, so its own default cannot know this project's version.
+          # Explicit at every call site: the action is copied from devkit verbatim
+          # rather than rendered, so its own default cannot know this project's version.
           python-version: "{{ python_version }}"
       - name: Install actionlint and dotenv-linter
         # Fail loudly, no `|| true`: `lint-all.py` degrades a missing linter to a
@@ -130,8 +130,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-python-env
         with:
-          # Explicit at every call site: the action is vendored byte-identical from
-          # devkit, so its own default cannot know this project's version.
+          # Explicit at every call site: the action is copied from devkit verbatim
+          # rather than rendered, so its own default cannot know this project's version.
           python-version: "{{ python_version }}"
 {{#alembic}}
       - name: Apply migrations
