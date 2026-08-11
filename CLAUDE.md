@@ -270,11 +270,20 @@ Five invariants, each of which something has already violated:
   a hang, so the guard passes `provision=False` and puts the `provision` command in its
   block message instead.
 - **The guard declines in exactly two cases**: the edit is already inside a box, or the
-  checkout is already on a `claude/...` branch — the "fix PR #42" case, where something
-  deliberately checked that branch out and a fresh box would put the fix somewhere the
-  PR never sees. Anything else that would land on a home branch gets a box, because
-  landing there with no task branch under it is the agent manufacturing the exact
-  `needs-branch` backlog the sweep exists to clear.
+  checkout is on a `claude/...` branch **that carries commits of its own** — the "fix
+  PR #42" case, where something deliberately checked that branch out and a fresh box
+  would put the fix somewhere the PR never sees. Anything else that would land on a
+  home branch gets a box, because landing there with no task branch under it is the
+  agent manufacturing the exact `needs-branch` backlog the sweep exists to clear.
+- **"Is this a task branch" is not the question; "is there work here a box would
+  strand" is.** Being a `claude/...` branch used to be the whole test, and the effect
+  was that the first session to leave one checked out turned the guard off for every
+  session afterwards — the checkout became shared, unguarded space until someone parked
+  it back on a home branch. Two sessions landed in one checkout that way, one of them
+  on a branch whose PR had already merged. `branch_has_own_commits` is the distinction,
+  and it is deliberately local (`git rev-list` against an already-fetched
+  `origin/<default>`, not a PR lookup) because this runs on every edit and a network
+  round trip in a PreToolUse hook is a hang. It **fails closed**: any error declines.
 
 The prompt's slug reaches the box through `scripts/task_slug.py`, keyed by **session id**
 rather than by worktree. That is the only key the two events share: the prompt arrives on
