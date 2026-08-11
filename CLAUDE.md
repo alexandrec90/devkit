@@ -391,17 +391,12 @@ python scripts/devkit_project.py --adopt-tasks   # live file -> workspace-tasks.
 python scripts/devkit_project.py --check-tasks   # verify they agree
 ```
 
-**The direction is one-way and there is no flag for the other one.** Editing
-`workspace-tasks.jsonc` directly appears to work — the file is in the repo, the diff
-looks right, `test_the_live_workspace_matches_the_canonical_block` even reports drift
-and names `--adopt-tasks` as the remedy. Running it then *deletes the edit*, because it
-regenerates the canonical copy from the live file. The direction was written down only
-in a comment header inside the generated file, which is the last place someone editing
-it will look.
-
-That test is also the only thing holding the two together, and it is
-`@needs_live_workspace` — so it is skipped in CI and on any machine without the
-workspace file. A canonical block that drifts is caught locally or not at all.
+**One-way, with no flag for the other direction.** Editing `workspace-tasks.jsonc`
+directly looks right — it is the file in the repo, the diff is clean, and the drift test
+even names `--adopt-tasks` as the remedy — and running that *deletes the edit*, because
+it regenerates the canonical copy from the live file. One test holds the pair together
+(`test_the_live_workspace_matches_the_canonical_block`) and it is
+`@needs_live_workspace`: skipped in CI, so drift is caught locally or not at all.
 
 Conventions for the tasks themselves:
 
