@@ -34,6 +34,7 @@ not assume the project's environment holds anything but the standard library.
 """
 
 import re
+import sys
 from pathlib import Path
 
 from conftest import REPO_ROOT
@@ -290,7 +291,94 @@ def test_third_party_actions_are_pinned_to_an_immutable_ref():
     assert not floating, f"actions pinned to a mutable ref: {floating}"
 
 
+# Every `uses: ./some/path` in a workflow. Deliberately separate from `USES`, which
+# matches the `owner/repo@ref` form -- a local action carries no `@ref` at all.
+LOCAL_USES = re.compile(r"^\s*-?\s*uses:\s*(\./[^\s\"'#]+)", re.MULTILINE)
+
+
+def _local_action_targets() -> list[tuple[Path, str]]:
+    """`(workflow, path)` for every local action reference across the workflows."""
+    return [(path, ref) for path in _workflows() for ref in LOCAL_USES.findall(_read(path))]
+
+
+def test_every_local_action_a_workflow_uses_actually_exists():
+    """A `uses: ./...` naming a directory this repo does not have fails the job at
+    startup, before a single step runs.
+
+    **This is the check that would have caught the un-vendoring.** When
+    `.github/actions/setup-python-env/action.yml` moved from the MANIFEST back to
+    `templates/`, `--pull` deleted it from every consumer that had not customised it and
+    put nothing back -- `templates/` is a one-shot copy, consulted only when a project is
+    generated. Two projects' gates died on the next push. A third's *nightly* was the
+    only workflow using it, so nothing failed anywhere a human was looking, and it
+    stayed broken for a week.
+
+    Every previous test in this file asks whether a file exists. This one asks whether
+    the files *agree with each other*, which is the failure a one-shot tier produces:
+    nothing is missing from any single point of view.
+
+    Portable by construction -- it reads this repo's own `.github/` and nothing else --
+    which is why it belongs in the vendored tier rather than in any one project's suite.
+    Had it been here, every consumer would have gone red in the same commit that broke
+    it, instead of one CI run at a time.
+    """
+    missing = [
+        f"{workflow.name}: uses {ref}, which is not in this repo"
+        for workflow, ref in _local_action_targets()
+        if not _resolves(ref)
+    ]
+    assert not missing, (
+        "workflow references a local action that does not exist:\n  "
+        + "\n  ".join(missing)
+        + "\n\nA deleted composite action fails the job at startup. If devkit un-vendored "
+        "it, the file is yours now: restore it from the project's history "
+        "(`git log --diff-filter=D -- <path>`) or render it from devkit's "
+        "`templates/core/dot-github/`."
+    )
+
+
+def _resolves(ref: str) -> bool:
+    """Whether `./x` names an action this repo has.
+
+    Both spellings count: a directory holding `action.yml`/`action.yaml`, which is the
+    composite form, and a direct path to the file.
+    """
+    target = REPO_ROOT / ref[2:]
+    return (
+        (target / "action.yml").is_file() or (target / "action.yaml").is_file() or target.is_file()
+    )
+
+
 # --- the parsers above, on inputs whose answer is known ------------------------
+
+
+def test_the_local_action_pattern_matches_the_shapes_a_workflow_uses():
+    """Pinned because a regex that silently matched nothing would make the check above
+    vacuous -- the same trap `test_the_workflow_scan_is_not_vacuous` guards for."""
+    text = "steps:\n  - uses: ./.github/actions/setup-python-env\n  - uses: actions/checkout@v7\n"
+    assert LOCAL_USES.findall(text) == ["./.github/actions/setup-python-env"]
+    # A commented-out reference is not a reference.
+    assert LOCAL_USES.findall("  # - uses: ./.github/actions/gone\n") == []
+
+
+def test_a_local_action_resolves_by_directory_or_by_file(tmp_path, monkeypatch):
+    """Both spellings GitHub accepts, against a tree whose answer is known.
+
+    Built rather than borrowed from this repo: the vendored suite may assert nothing
+    about which actions a particular project happens to have.
+    """
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    composite = tmp_path / ".github" / "actions" / "setup"
+    composite.mkdir(parents=True)
+    assert not _resolves("./.github/actions/setup"), "a directory with no action.yml"
+
+    (composite / "action.yml").write_text("runs:\n", encoding="utf-8")
+    assert _resolves("./.github/actions/setup")
+
+    (composite / "action.yml").rename(composite / "action.yaml")
+    assert _resolves("./.github/actions/setup"), "the .yaml spelling counts too"
+
+    assert not _resolves("./.github/actions/never-created")
 
 
 def test_block_parser_reads_only_column_zero_keys():

@@ -76,6 +76,24 @@ Two things not to reach for when it fires:
   Their message is authored, multi-line, and does not survive the wrapper's `cmd.exe`;
   the `| head -c N` fallback masks the exit code, so a commit a pre-commit hook
   rejected reads as a success. Issue those two bare.
+
+  **Put the message in a file whenever it is multi-line or contains backticks:**
+
+  ```bash
+  git commit -F <path>            # bare, not through the wrapper
+  gh pr create --body-file <path>
+  ```
+
+  Backticks are why, and the gate is right to insist. A backtick inside a
+  double-quoted `-m` is command substitution in any POSIX shell — the shell runs what
+  is between the backticks — so that spelling is blocked, while the same message in
+  single quotes is allowed. Commit messages here are prose *about code* and are
+  therefore full of backticked identifiers, which makes the blocked spelling the common
+  one rather than the exception. `-F` sidesteps quoting entirely.
+
+  Note what is **not** the problem: `-F -` with a heredoc passes the gate. It fails
+  later, on `cmd.exe`, and only if you route it through the wrapper. A file is the one
+  spelling that works in both places.
 - **`ls`, `cat` and `git status` are exempt on purpose — they are not.** Their output
   grows with the tree, and the answer for them is the Read/Glob/Grep tools, which cost
   no subprocess and no cap. Reach for the wrapper for test and lint runs, where the

@@ -32,6 +32,12 @@ Run each step in order. Stop on failure; never open a PR for an unverified branc
    the targeted tests for the changed behavior. Stage only the intended files, then
    commit with an imperative subject and a body explaining why. Use `$ARGUMENTS` as
    the subject when supplied.
+
+   **Write the message to a file and commit with `git commit -F` on that path, bare.**
+   A body worth writing is multi-line and names identifiers in backticks, and a
+   backtick inside a double-quoted `-m` is command substitution in a POSIX shell, so
+   the Bash gate blocks it — correctly. A file has no quoting to get wrong. Same at
+   step 4: pass the body to `gh pr create` with `--body-file`.
 3. Run `python scripts/ship.py`. This requires a clean tree, runs the changed-scope
    lint gate, and pushes the current branch with retry handling. Fix any failure and
    rerun this step.
