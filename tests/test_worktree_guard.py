@@ -13,9 +13,14 @@ import json
 from pathlib import Path
 
 import pytest
-from support import load_script
+from support import devkit_project, load_script
 
 guard = load_script("scripts/worktree-guard.py")
+
+# Read from the registry module rather than through `guard`: the coupling under test is
+# that the hook *uses* this, and reaching for it via the hook would make a revert that
+# drops the import an ImportError at collection instead of a failing assertion.
+NOT_PROJECTS = devkit_project.NOT_PROJECTS
 
 PROJECTS = ["carameli", "carameli-b", "ibkr_trader", "apt-finder", "apt-finder-b", "devkit"]
 
@@ -430,6 +435,34 @@ def test_an_in_checkout_edit_on_a_task_branch_is_allowed(root, monkeypatch):
     monkeypatch.setattr(
         "sys.stdin",
         _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root / "carameli"))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+@pytest.mark.parametrize("reference", sorted(NOT_PROJECTS))
+def test_an_edit_into_a_reference_checkout_is_allowed(root, monkeypatch, reference):
+    """A checkout in `folders` but not in the registry gets no box, whatever branch it
+    is parked on.
+
+    The wiring is the assertion: `main` builds its project list with `known_projects`,
+    which subtracts `NOT_PROJECTS`, rather than with `sweep.parse_workspace` directly.
+    Read raw, the registry would put `VanillaLand` behind a block and cut it an
+    ephemeral box on a `claude/...` branch -- for a reference checkout that ships
+    nothing, has no harness, and whose Azure DevOps remote has no PR for that branch to
+    become. `redirect_decision` cannot express this: it takes the project list as an
+    argument, so only the shell can be wrong about it.
+    """
+    (root / reference).mkdir()
+    workspace = root / "alex-projects.code-workspace"
+    workspace.write_text(
+        json.dumps({"folders": [{"path": name} for name in [*PROJECTS, reference]]}),
+        encoding="utf-8",
+    )
+    # A home branch, which is the case that would otherwise be boxed.
+    monkeypatch.setattr(guard, "current_branch", on_branch("develop"))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(payload(path=str(root / reference / "AppCode" / "a.cs"), cwd=str(root))),
     )
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
 
