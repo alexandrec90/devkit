@@ -243,7 +243,32 @@ def pr_body(tag: str, previous: str, changed: list[str]) -> str:
     return "\n".join(lines)
 
 
-def landed(state: sweep.State, gh: sweep.Git | None = None) -> bool:
+def adds_nothing(git: sweep.Git, default_branch: str) -> bool:
+    """True when this branch's tree is **identical** to `origin/<default_branch>`'s.
+
+    The content answer to the question every other signal asks about commits, and the
+    only one that is right when a branch's work reached the base by another route.
+    Lived: apt-finder sat two commits "ahead" of main on a v0.7.0 adoption whose PR was
+    closed unmerged -- because the *same* adoption had already landed from a different
+    branch. Not merged, not spent by the counts, and no merged PR to find; yet its tree
+    byte-identical to main's. Every commit-shaped signal called it work in progress,
+    about a branch that added nothing at all.
+
+    Compares `HEAD` against the ref rather than the working tree, so an unrelated dirty
+    file cannot make a spent branch look live. **Fails closed**: `--quiet` exits 1 for a
+    difference, and anything else -- an unresolvable ref, no git at all -- is non-zero
+    too, so an error reads as "still holds work" and the caller refuses.
+
+    Safe as a landed signal precisely because it is a statement about content: if the
+    trees are equal there is nothing on the branch that is not already in the base, so
+    walking home from it can strand nothing.
+    """
+    if not default_branch:
+        return False
+    return git("diff", "--quiet", f"origin/{default_branch}", "HEAD").returncode == 0
+
+
+def landed(state: sweep.State, gh: sweep.Git | None = None, git: sweep.Git | None = None) -> bool:
     """True when the task branch this checkout is parked on has **already landed**.
 
     The distinction this draws is the difference between a refusal an operator can
@@ -262,17 +287,20 @@ def landed(state: sweep.State, gh: sweep.Git | None = None) -> bool:
     checkout still sitting on last week's merged feature branch. Which branch a
     checkout is parked on has no bearing on whether that branch still holds work.
 
-    Three signals, in increasing cost, each enough on its own:
+    Four signals, in increasing cost, each enough on its own:
 
     - the branch is merged into `origin/<default>`,
     - it has no commits beyond that base -- merged, or cut and never used, which is
       `sweep`'s `spent-branch`,
-    - GitHub reports a merged PR for it. The authoritative answer, and the only one
-      that survives a squash merge -- which rewrites the commits, so neither the
+    - **its tree is identical to that base's** -- `adds_nothing`, the only signal that
+      asks about content rather than about commits, and the one that catches a branch
+      whose work reached the base by another route,
+    - GitHub reports a merged PR for it. The authoritative answer for a squash merge
+      whose tree has *since* diverged -- squashing rewrites the commits, so neither the
       ancestry check nor the counts can see it. `has_merged_pr` fails open, so an
       offline `gh` degrades to a refusal rather than to a wrong upgrade.
 
-    All three read a state that has to be **fetched first** to mean anything: they are
+    All four read a state that has to be **fetched first** to mean anything: they are
     measured against the local `origin/<default>` ref, and a checkout parked since its
     PR merged is exactly one that has not fetched since.
 
@@ -289,6 +317,8 @@ def landed(state: sweep.State, gh: sweep.Git | None = None) -> bool:
     if state.branch in state.merged_task_branches:
         return True
     if state.default_branch and state.ahead == 0:
+        return True
+    if git is not None and adds_nothing(git, state.default_branch):
         return True
     if gh is None:
         return False
@@ -732,7 +762,7 @@ def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) 
         # needs no network to reach.
         git("fetch", "--prune", "origin")
         state = sweep.inspect(name, project, git=git, fetch=False)
-        has_landed = landed(state, sweep.gh_for(project))
+        has_landed = landed(state, sweep.gh_for(project), git)
     upgrade = plan(state, tag, None, has_landed)
     if upgrade.refusal:
         return failed(1, f"upgrade: {name} -- {upgrade.refusal}")
