@@ -377,6 +377,52 @@ def test_a_deleted_remote_branch_is_not_by_itself_a_merge():
     assert up.landed(feature_branch(ahead=0, upstream="", upstream_gone=True))
 
 
+def diffs(code: int):
+    """A git whose `diff --quiet` reports `code`: 0 identical, 1 differing, 128 broken."""
+
+    def git(*args: str):
+        return subprocess.CompletedProcess(["git", *args], code if args[0] == "diff" else 0, "", "")
+
+    return git
+
+
+def test_a_branch_whose_work_reached_the_base_another_way_has_landed():
+    """The third instance of this bug, and the one no commit-shaped signal can see.
+
+    apt-finder sat two commits "ahead" of main on a v0.7.0 adoption whose PR was closed
+    unmerged -- because the *same* adoption had already landed from a different branch.
+    Not merged, not spent by the counts, no merged PR to find; and `git diff main HEAD`
+    empty. Every signal said work in progress about a branch that added nothing."""
+    stale = upgrade_branch(ahead=2)
+    assert not up.landed(stale, no_pr)
+    assert up.landed(stale, no_pr, diffs(0))
+
+
+def test_a_branch_that_really_adds_something_is_not_landed_by_content():
+    assert not up.landed(upgrade_branch(ahead=2), no_pr, diffs(1))
+
+
+def test_the_content_check_fails_closed():
+    """`--quiet` exits 1 for a difference and non-zero for an unresolvable ref or a
+    missing git alike, so an error has to read as "still holds work"."""
+    assert not up.adds_nothing(diffs(128), "master")
+    # No base to compare against is not an answer either.
+    assert not up.adds_nothing(diffs(0), "")
+
+
+def test_the_content_check_asks_about_head_not_the_working_tree():
+    """Otherwise an unrelated dirty file makes a spent branch look live -- which is
+    exactly apt-finder, whose uv.lock was modified while its branch added nothing."""
+    seen: list[tuple[str, ...]] = []
+
+    def git(*args: str):
+        seen.append(args)
+        return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+    assert up.adds_nothing(git, "master")
+    assert seen == [("diff", "--quiet", "origin/master", "HEAD")]
+
+
 def test_a_squash_merged_branch_is_only_visible_to_github():
     """A squash merge rewrites the commits, so neither the ancestry check nor the
     counts can see it: the branch reads as ahead of a base that already holds its
