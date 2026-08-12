@@ -13,27 +13,44 @@ whatever change was actually being shipped -- which is how a consumer ended up w
 an unfinished upgrade buried in 364 uncommitted files, discovered only when its own
 commit gate refused. An upgrade is its own operation with its own diff.
 
-Refuses a dirty target for the same reason: a branch cut under uncommitted work
-carries that work along, and the commit here would have to guess which files were
-part of the upgrade.
+**It runs in an ephemeral box, never in the static checkout.** That is the design,
+and it is what makes the rest of this file short.
+
+This script used to inspect the target checkout and refuse what it did not like: a
+dirty tree, a task branch, an unfinished upgrade, an upgrade branch whose PR had
+merged, one whose work had reached the base another way. Five predicates, three of
+them added one bug report at a time, and every one of them a state a human then had
+to clear by hand before the tool would run again. It was a treadmill: each fix taught
+the script about one more state, and the next state was already waiting.
+
+They are gone, and not by being made permissive. `upgrade_one` cuts a worktree off
+`origin/<default>` and works there, and a worktree younger than the run **cannot be
+dirty, cannot be parked on a branch, and cannot be behind**. devkit's own CLAUDE.md
+had the answer the whole time -- "a box cut fresh off `origin/<default>` and destroyed
+at the end cannot reach any of them". The refusals were never wrong; they answered a
+question this no longer has to ask.
+
+The test for whether a refusal belongs here at all: it must not be fixable by tidying
+a checkout. Exactly one survives -- `unreleased_adoption`.
 
 **It only ever moves a project forward.** A consumer that vendored a release this
 checkout has no tag for -- the normal state of the hours around a release, when the
 adoption lands before the tag does -- is refused rather than pulled back to the
 older one; see `unreleased_adoption`.
 
-**And it can always run again.** A checkout parked on a task branch used to be refused
-outright -- as "an unfinished upgrade" when this script had cut the branch, as
-"unrelated work" otherwise. Both of those describe work in progress, and a branch whose
-PR has merged is holding none: its content is in `origin/<default>` and the checkout
-merely never went home. So the remedies those refusals named did not exist, and the
-project could never adopt anything again. A landed branch is walked home instead of
-refused; see `landed`.
+**And "is it current" is asked of `origin/<default>`, not of the checkout.** That is
+the one question worth answering before spending a box, and on a scheduled run it is
+the answer for every project. Asking the ref means it needs nothing tidied first and
+cannot be misled by a checkout parked on a branch -- which it repeatedly was, in both
+directions.
 
 `--all` upgrades every checkout in the workspace that has actually vendored devkit,
 one PR each -- the release is one upstream revision, so adopting it everywhere is
 one operation. Each project is still upgraded on its own terms: a refusal in one
 does not stop the others, and the exit code reports the worst outcome.
+
+Safe to run unattended, which is the point: `scripts/install-upgrade-schedule.py`
+registers exactly that.
 
 Every refusal and failure is written to `logs/upgrade.log` in the devkit checkout,
 overwritten per run and emptied when a run is clean. A `--all` interleaves several
@@ -48,7 +65,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import datetime as _dt
 import subprocess
 import sys
 import tempfile
@@ -59,6 +75,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sweep
 import task_branch as tb
+import worktree
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # devkit's own `scripts/`, resolved from this file rather than from `REPO_ROOT`:
@@ -187,25 +204,9 @@ def _same_path(left: Path, right: Path) -> bool:
         return False
 
 
-# The topic every upgrade branch is named for. Held as a constant because the name
-# is written by `branch_name` and read back by `is_upgrade_branch`, which is how a
-# checkout parked mid-upgrade is told apart from one holding unrelated work.
-UPGRADE_SLUG = tb.slugify("devkit upgrade")
-
-
-def branch_name(today: _dt.date | None = None) -> str:
-    """The branch an upgrade lands on: `claude/devkit-upgrade-<mmdd>`."""
-    return tb.branch_name(UPGRADE_SLUG, set(), today)
-
-
-def is_upgrade_branch(branch: str) -> bool:
-    """True for a branch this script cut, on any day.
-
-    Deliberately not `branch == branch_name()`: the `-<mmdd>` stamp means an upgrade
-    parked yesterday would not match today's name, and yesterday's unfinished upgrade
-    is exactly the one worth recognising.
-    """
-    return branch.startswith(f"{tb.BRANCH_PREFIX}{UPGRADE_SLUG}-")
+# The topic every upgrade branch is named for. `worktree.plan_new` turns it into
+# `claude/devkit-upgrade-<mmdd>` and into the box name beside it.
+UPGRADE_SLUG = "devkit upgrade"
 
 
 def commit_message(tag: str, files: int | str) -> str:
@@ -243,214 +244,34 @@ def pr_body(tag: str, previous: str, changed: list[str]) -> str:
     return "\n".join(lines)
 
 
-def adds_nothing(git: sweep.Git, default_branch: str) -> bool:
-    """True when this branch's tree is **identical** to `origin/<default_branch>`'s.
-
-    The content answer to the question every other signal asks about commits, and the
-    only one that is right when a branch's work reached the base by another route.
-    Lived: apt-finder sat two commits "ahead" of main on a v0.7.0 adoption whose PR was
-    closed unmerged -- because the *same* adoption had already landed from a different
-    branch. Not merged, not spent by the counts, and no merged PR to find; yet its tree
-    byte-identical to main's. Every commit-shaped signal called it work in progress,
-    about a branch that added nothing at all.
-
-    Compares `HEAD` against the ref rather than the working tree, so an unrelated dirty
-    file cannot make a spent branch look live. **Fails closed**: `--quiet` exits 1 for a
-    difference, and anything else -- an unresolvable ref, no git at all -- is non-zero
-    too, so an error reads as "still holds work" and the caller refuses.
-
-    Safe as a landed signal precisely because it is a statement about content: if the
-    trees are equal there is nothing on the branch that is not already in the base, so
-    walking home from it can strand nothing.
-    """
-    if not default_branch:
-        return False
-    return git("diff", "--quiet", f"origin/{default_branch}", "HEAD").returncode == 0
-
-
-def landed(state: sweep.State, gh: sweep.Git | None = None, git: sweep.Git | None = None) -> bool:
-    """True when the task branch this checkout is parked on has **already landed**.
-
-    The distinction this draws is the difference between a refusal an operator can
-    act on and one nobody can. Both branch refusals below describe work in progress
-    -- "an unfinished upgrade", "unrelated work" -- and a checkout parked on a branch
-    whose PR merged is holding neither. It is holding nothing at all: the content is
-    in `origin/<default>`, and the checkout simply never went home. Told to "ship the
-    branch and open its PR" or to "upgrade from the home branch", the reader finds
-    there is nothing to ship and no work to avoid mixing into, and the project can
-    never adopt another release. Every subsequent run hits the same refusal.
-
-    **Deliberately about any task branch, not only this script's own.** Scoping it to
-    `claude/devkit-upgrade-*` fixed the case that is guaranteed -- `upgrade_one`
-    leaves every checkout it upgrades parked on the branch it cut -- and left the
-    identical dead end one branch-prefix away, for the far commoner case of a
-    checkout still sitting on last week's merged feature branch. Which branch a
-    checkout is parked on has no bearing on whether that branch still holds work.
-
-    Four signals, in increasing cost, each enough on its own:
-
-    - the branch is merged into `origin/<default>`,
-    - it has no commits beyond that base -- merged, or cut and never used, which is
-      `sweep`'s `spent-branch`,
-    - **its tree is identical to that base's** -- `adds_nothing`, the only signal that
-      asks about content rather than about commits, and the one that catches a branch
-      whose work reached the base by another route,
-    - GitHub reports a merged PR for it. The authoritative answer for a squash merge
-      whose tree has *since* diverged -- squashing rewrites the commits, so neither the
-      ancestry check nor the counts can see it. `has_merged_pr` fails open, so an
-      offline `gh` degrades to a refusal rather than to a wrong upgrade.
-
-    All four read a state that has to be **fetched first** to mean anything: they are
-    measured against the local `origin/<default>` ref, and a checkout parked since its
-    PR merged is exactly one that has not fetched since.
-
-    `upstream_gone` is deliberately **not** among them, though it looks like a fourth:
-    it is the shape a merged PR leaves once the remote branch is deleted, but it is
-    equally the shape a *closed* one leaves, and the two are told apart only by
-    whether the commits reached the base. With commits still ahead it is
-    `sweep.is_retired` -- stranded work on a branch that can never be committed to
-    again -- and walking home from there would abandon it. Ahead of nothing, the
-    second signal already covers it.
-    """
-    if not sweep.is_task_branch(state.branch):
-        return False
-    if state.branch in state.merged_task_branches:
-        return True
-    if state.default_branch and state.ahead == 0:
-        return True
-    if git is not None and adds_nothing(git, state.default_branch):
-        return True
-    if gh is None:
-        return False
-    return sweep.has_merged_pr(gh, state.branch)
-
-
-def refusal(state: sweep.State, tag: str | None, has_landed: bool = False) -> str:
-    """Why this project cannot be upgraded right now, or "" when it can.
-
-    Ordered by what the operator has to do about it, cheapest first. `has_landed` is
-    `landed`'s answer, passed in rather than computed so this stays pure -- that
-    predicate reads a fetched state and may ask GitHub.
-    """
-    if not state.is_git:
-        return "not a git checkout"
-    if not tag:
-        return NO_TAG
-    if state.dirty:
-        return (
-            f"{state.dirty} uncommitted file(s). An upgrade is its own change; "
-            f"commit or ship the work in progress first"
-        )
-    if has_landed:
-        # Finished, not in progress: `plan` walks it home and cuts today's branch from
-        # there. See `landed` for why refusing here is a dead end whatever the branch.
-        return ""
-    if is_upgrade_branch(state.branch):
-        # Not "unrelated work" -- it is this operation, half done. Sending the
-        # operator home is a dead end: today's run would cut a differently dated
-        # branch, so following that advice strands a branch that already holds the
-        # adoption (pushed, in the case that produced this message) and opens a
-        # second one beside it.
-        return (
-            f"parked on {state.branch}, an unfinished upgrade this script cut whose "
-            f"PR has not merged. Finish that one -- ship the branch and open its PR "
-            f"-- or delete it if it was abandoned; re-running from the home branch "
-            f"would leave it stranded and cut a second upgrade branch alongside it"
-        )
-    if sweep.is_task_branch(state.branch):
-        return (
-            f"already on the task branch {state.branch}. Upgrade from the home "
-            f"branch so the adoption is not mixed into unrelated work"
-        )
-    return ""
-
-
-# What `plan` says when a landed branch has nowhere to go home to. Only a linked
-# worktree can reach this -- `home_ref` falls back to the default branch for a primary
-# one -- and guessing a branch that may not exist is worse than saying so.
-NO_HOME = (
-    "on {branch}, whose work has already merged, but this worktree has no home branch "
-    "recorded. Run `sweep --sync` to park it, then upgrade again"
-)
-
-
-def plan(
-    state: sweep.State,
-    tag: str | None,
-    today: _dt.date | None = None,
-    has_landed: bool = False,
-) -> sweep.Plan:
-    """The git steps for one project's upgrade, or a refusal.
-
-    The `--pull` itself is not a git step, so it is not in `steps`: it runs between
-    the branch and the commit, and the commit is only meaningful if it succeeded.
-
-    A landed branch gets two steps in front of the usual one, because today's branch
-    must not be cut from it. Its commits are already in `origin/<default>`, so cutting
-    from there would re-propose them: the new PR's merge base is the *old* base, and
-    the diff GitHub shows is that branch's work plus this upgrade, over a main that
-    has since moved. Going home and fast-forwarding first is the same pair of steps
-    `sweep --sync` uses, and it makes the branch this run cuts a child of the release
-    it is upgrading from.
-    """
-    reason = refusal(state, tag, has_landed)
-    if reason:
-        return sweep.Plan(refusal=reason)
-    steps: list[tuple[str, ...]] = []
-    anchor = state.branch
-    if has_landed:
-        home = sweep.home_ref(state)
-        if not home:
-            return sweep.Plan(refusal=NO_HOME.format(branch=state.branch))
-        anchor = home
-        steps.append(("checkout", home))
-        if state.default_branch:
-            # `--ff-only`, never a merge: a home branch that has diverged from the
-            # remote is a state for a human, and a merge commit here would put it in
-            # the upgrade's PR.
-            steps.append(("merge", "--ff-only", f"origin/{state.default_branch}"))
-    steps.append(("checkout", "-b", branch_name(today)))
-    return sweep.Plan(steps=tuple(steps), anchor=anchor)
-
-
 def changed_paths(git) -> list[str]:
     """Everything the pull touched.
 
-    `refusal()` guarantees the tree was clean before the pull ran, so every dirty
-    path afterwards came from it. That precondition is what lets the commit below
-    stage with `add -A` instead of guessing at a path list -- and it is why the
-    clean-tree refusal is a correctness requirement, not politeness.
+    The box was cut from `origin/<default>` moments ago and nothing but the pull has
+    run in it, so every dirty path afterwards came from the pull. That is what lets the
+    commit stage with `add -A` rather than guessing at a path list -- and where the
+    guarantee used to come from a refusal the operator had to satisfy, it now comes
+    from how the worktree was made.
     """
     result = git("status", "--porcelain")
     return list(sweep.parse_porcelain(result.stdout if result.returncode == 0 else ""))
 
 
-def _abandon(git, name: str, home: str, why: str, code: int) -> int:
-    """Undo the branch this run cut, so an upgrade that did nothing leaves nothing.
+def version_on(git: sweep.Git, default_branch: str, path: str = "DEVKIT_VERSION") -> str:
+    """`path`'s content at the tip of `origin/<default_branch>`; "" when unreadable.
 
-    Never forces: `branch -d` refuses a branch carrying commits, and a refusal here
-    means the run did more than it thought, which is a state for a human rather
-    than one to clean up automatically.
-
-    Names the project, like every other line this prints. Under `--all` these are
-    interleaved with other checkouts' output, and an unattributed "already current"
-    is a sentence the reader has to guess the subject of.
+    **Read from the ref, never from the working tree.** The stamp that decides whether
+    a project is current is the one on the branch a PR would target, and a static
+    checkout's copy is whatever branch it happens to be parked on -- which for months
+    was a task branch holding an adoption that had already merged. Asking the ref costs
+    one `git show`, needs no clean tree, and is right regardless of what the checkout is
+    doing. It is also what makes the no-op case free: the common answer on a scheduled
+    run is "already current", and proving it must not require cutting a box.
     """
-    branch = branch_name()
-    if git("checkout", home).returncode != 0:
-        print(
-            f"upgrade: {name} -- {why}, but could not return to {home}; still on {branch}",
-            file=sys.stderr,
-        )
-        return 2
-    if git("branch", "-d", branch).returncode != 0:
-        print(
-            f"upgrade: {name} -- {why}, but {branch} would not delete; it is not empty",
-            file=sys.stderr,
-        )
-        return 2
-    print(f"upgrade: {name} -- {why}; no branch left behind.")
-    return code
+    if not default_branch:
+        return ""
+    result = git("show", f"origin/{default_branch}:{path}")
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def commit_for(devkit: Path, rev: str) -> str:
@@ -486,35 +307,35 @@ def names_commit(stamp: str, commit: str) -> bool:
     return commit.strip().lower().startswith(stamp)
 
 
-def is_current(project: Path, tag_commit: str) -> bool:
-    """True when the project's stamp already names the release's commit.
+def is_current_on_remote(project: Path, tag_commit: str) -> bool:
+    """True when `origin/<default>` already carries the release's commit stamp.
 
-    **The comparison has to go through the SHA.** `DEVKIT_VERSION` records the
-    upstream *commit* by contract -- `sync-devkit.py --pull` writes `git_head(src)`
-    there and the vendored `test_harness_version_records_a_commit` asserts a hex
-    value -- so comparing that file against a tag *name* compares two things that can
-    never be equal. This did exactly that, which made the predicate false for every
-    project forever: each scheduled run cut a branch, built a source worktree and ran
-    a full pull on projects already sitting on the release, discovered afterwards
-    that the tree was clean, and abandoned. The plan it printed first said an upgrade
-    was happening; the line after it said "already current".
+    **The comparison has to go through the SHA.** `DEVKIT_VERSION` records the upstream
+    *commit* by contract -- `sync-devkit.py --pull` writes `git_head(src)` there and the
+    vendored `test_harness_version_records_a_commit` asserts a hex value -- so comparing
+    that file against a tag *name* compares two things that can never be equal. This did
+    exactly that once, which made the predicate false for every project forever.
 
-    `stale_pin` in `sync-devkit.py` documents the same trap from the other side, and
-    solves it the other way -- by reading the tag out of the receipt. Either proof
-    works; this one is used here because `--all` has the devkit checkout in hand and
-    a stamp predates the receipt ever recording a tag.
+    **And the stamp has to come from the ref, not from the working tree.** Reading
+    `project/DEVKIT_VERSION` answers for whichever branch the checkout is parked on,
+    which is a different question and was frequently a different answer -- a checkout
+    left on a merged adoption branch reported the new version while `main` still had the
+    old, and one left on an abandoned branch reported the reverse. The question worth
+    asking is about the branch a PR would target.
 
-    Checked *before* anything is cut or copied, so proving a project is up to date
-    costs one file read and leaves the repo untouched. That is the property that
-    makes this safe to run on a schedule.
+    Fetches first, because `origin/<default>` is a local ref like any other and a
+    checkout nobody has touched for a week has a week-old copy of it.
+
+    Answered before any box is cut, so proving a project is up to date costs a fetch and
+    a `git show`. On a scheduled run that is the answer for every project, which is what
+    makes running this hourly cheap.
     """
     if not tag_commit:
         return False
-    try:
-        stamp = (project / "DEVKIT_VERSION").read_text(encoding="utf-8").strip()
-    except OSError:
-        return False
-    return names_commit(stamp, tag_commit)
+    git = sweep.git_for(project)
+    git("fetch", "--quiet", "origin")
+    default_branch = tb.detect_default_branch(git, fallback="")
+    return names_commit(version_on(git, default_branch), tag_commit)
 
 
 def vendored_release(project: Path) -> str:
@@ -730,16 +551,34 @@ class Outcome:
     detail: str = ""
 
 
-def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) -> Outcome:
-    """Adopt `tag` in one checkout: 0 done or nothing to do, 1 refused, 2 failed.
+def upgrade_one(
+    name: str,
+    project: Path,
+    tag: str,
+    source: Path | None = None,
+    workspace: Path | None = None,
+    tags: list[str] | None = None,
+) -> Outcome:
+    """Adopt `tag` for one project, in a box: 0 done or nothing to do, 1 refused, 2 failed.
 
-    `source` is a clean devkit worktree at `tag` to pull from. **None means dry
-    run** -- the plan is printed and nothing is touched, which is also why the
-    caller materialises the worktree rather than this function: one release is one
-    worktree however many projects adopt it.
+    `source` is a clean devkit worktree at `tag` to pull from. **None means dry run** --
+    the plan is printed and nothing is created, which is also why the caller
+    materialises that worktree: one release is one worktree however many projects adopt
+    it.
 
-    The exit codes are the sweep convention (1 needs a human decision, 2 something
-    broke mid-flight) so `main` can take the worst across a `--all` run.
+    **Nothing here touches the static checkout except to read refs from it.** The
+    adoption happens in an ephemeral worktree cut off `origin/<default>`, so the
+    checkout can be dirty, parked on any branch, mid-rebase or months stale and this
+    still runs. That is the whole point: every refusal this script used to carry
+    described a state a long-lived checkout accumulates, and a box cannot accumulate
+    anything -- it is younger than the run.
+
+    The box is deliberately **left behind** on success. `worktree.py reconcile` reaps it
+    when its PR merges, which is the same lifecycle every other box has; reaping here
+    would destroy the only checkout the work exists in if the PR call failed.
+
+    The exit codes are the sweep convention (1 needs a human decision, 2 something broke
+    mid-flight) so `main` can take the worst across a `--all` run.
     """
 
     def failed(code: int, *lines: str) -> Outcome:
@@ -749,57 +588,51 @@ def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) 
         return Outcome(name, code, text)
 
     git = sweep.git_for(project)
-    state = sweep.inspect(name, project, git=git, fetch=False)
-    has_landed = False
-    if sweep.is_task_branch(state.branch) and not state.dirty:
-        # The one state where the cheap, stale view produces a *permanent* refusal:
-        # every signal `landed` reads is measured against the local `origin/<default>`
-        # ref, and a checkout parked since its branch merged is precisely one that has
-        # not fetched since. `--prune` so a deleted remote branch stops resolving.
-        # Read-only, so a dry run does it too -- a dry run that answered differently
-        # from the apply would report on a different checkout than the one it is about
-        # to change. Skipped on a dirty tree, whose refusal outranks this one and
-        # needs no network to reach.
-        git("fetch", "--prune", "origin")
-        state = sweep.inspect(name, project, git=git, fetch=False)
-        has_landed = landed(state, sweep.gh_for(project), git)
-    upgrade = plan(state, tag, None, has_landed)
-    if upgrade.refusal:
-        return failed(1, f"upgrade: {name} -- {upgrade.refusal}")
+    default_branch = tb.detect_default_branch(git, fallback="")
+    previous = version_on(git, default_branch)
 
-    previous = (project / "DEVKIT_VERSION").read_text(encoding="utf-8").strip()
-    print(f"upgrade: {name} {previous} -> {tag}")
-    if has_landed:
-        print(f"  (parked on {state.branch}, already merged -- returning home first)")
-    numbered = 0
-    for numbered, step in enumerate(upgrade.steps, start=1):
-        print(f"  {numbered}. git -C {name} {' '.join(step)}")
-    print(f"  {numbered + 1}. {SYNC_SCRIPT} --pull --src <devkit worktree at {tag}>")
-    print(f"  {numbered + 2}. git -C {name} add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths")
-    print(f"  {numbered + 3}. git -C {name} commit -m {commit_message(tag, '<n>')!r}")
-    print(f"  {numbered + 4}. git push -u origin, then gh pr create")
-    if source is None:
+    print(f"upgrade: {name} {previous or '(unstamped)'} -> {tag}")
+    print(
+        f"  1. worktree.py new {name} --slug {UPGRADE_SLUG!r} (fresh off origin/{default_branch})"
+    )
+    print(f"  2. {SYNC_SCRIPT} --pull --src <devkit worktree at {tag}>  [in the box]")
+    print(f"  3. git add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths")
+    print(f"  4. git commit -m {commit_message(tag, '<n>')!r}")
+    print("  5. git push -u origin, then gh pr create")
+    print("  6. leave the box; `worktree.py reconcile` reaps it when the PR merges")
+    if source is None or workspace is None:
         return Outcome(name, 0)
 
-    applied = sweep.apply_plan(name, project, upgrade, git=git)
-    if not applied.ok:
-        return failed(2, f"upgrade: {name} -- FAILED at `{applied.failed}`", applied.error)
+    try:
+        spawn = worktree.plan_new(name, workspace, slug=UPGRADE_SLUG, fetch=True)
+    except (worktree.WorktreeError, ValueError) as exc:
+        return failed(2, f"upgrade: {name} -- could not plan a box: {exc}")
+    ok, notes = worktree.apply_new(spawn, workspace)
+    for note in notes:
+        print(f"  box: {note}")
+    if not ok:
+        return failed(2, f"upgrade: {name} -- could not cut a box", *notes)
 
-    runs, divergence = pull_to_fixpoint(project, source)
+    box = Path(spawn.path)
+    box_git = sweep.git_for(box)
+    print(f"upgrade: {name} -- working in {spawn.box.name} on {spawn.box.branch}")
+
+    # Read *in the box*, which is at `origin/<default>` by construction -- so the one
+    # remaining refusal asks about the tree a PR would actually be based on, rather than
+    # about whatever the checkout is parked on. `tags` comes from the caller because it
+    # is the devkit checkout's tag set, and `source` is a detached worktree with none.
+    if backwards := unreleased_adoption(box, tags or []):
+        return failed(1, f"upgrade: {name} -- {backwards}")
+
+    runs, divergence = pull_to_fixpoint(box, source)
     print("\n".join(run.stdout.rstrip() for run in runs).rstrip())
     pulled = runs[-1]
     if pulled.returncode != 0:
-        refusal = failed(2, f"upgrade: {name} -- the pull refused", pulled.stderr)
-        # `_abandon` decides the code -- a branch it could not unwind is worse news
-        # than the refusal that led there -- but the refusal is what the reader needs.
-        code = _abandon(git, name, upgrade.anchor, "the pull refused", code=2)
-        return Outcome(name, code, refusal.detail)
+        return failed(2, f"upgrade: {name} -- the pull refused", pulled.stderr)
     if divergence:
-        # Deliberately not abandoned: the tree holds a partial adoption, and dropping
-        # the branch out from under it would hide the evidence in a dirty checkout.
         return failed(2, f"upgrade: {name} -- {divergence}")
 
-    checked = verify_pull(project, source)
+    checked = verify_pull(box, source)
     if checked.returncode != 0:
         return failed(
             2,
@@ -808,23 +641,22 @@ def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) 
             checked.stderr,
         )
 
-    changed = changed_paths(git)
+    changed = changed_paths(box_git)
     if not changed:
-        # The already-current case, and the one that has to be *free*: this is meant
-        # to be run on a schedule to prove nothing is stale, so a no-op run must
-        # leave no trace. Cutting a branch and walking away would litter one empty
-        # `claude/devkit-upgrade-<mmdd>` per check, and `--sync` would then have to
-        # reap them.
-        return Outcome(name, _abandon(git, name, upgrade.anchor, "already current", code=0))
+        # Already current. Cheap rather than free -- `main` proves this from the ref
+        # before ever calling here, so reaching it means the stamp and the files
+        # disagreed. The box has nothing in it, so let `reconcile` collect it.
+        print(f"upgrade: {name} -- already current; {spawn.box.name} holds nothing.")
+        return Outcome(name, 0)
 
-    # Safe only because the tree was clean before the pull -- see `changed_paths`.
-    staged = git("add", "-A")
+    # Safe because the box was cut moments ago and only the pull has run in it.
+    staged = box_git("add", "-A")
     if staged.returncode != 0:
         return failed(
             2, f"upgrade: {name} -- FAILED at `git add -A`", staged.stderr or staged.stdout
         )
 
-    committed, retried = commit_with_hook_retry(git, commit_message(tag, len(changed)))
+    committed, retried = commit_with_hook_retry(box_git, commit_message(tag, len(changed)))
     if committed.returncode != 0:
         return failed(
             2,
@@ -833,21 +665,17 @@ def upgrade_one(name: str, project: Path, tag: str, source: Path | None = None) 
             committed.stderr or committed.stdout,
         )
 
-    pushed = git("push", "-u", "origin", branch_name())
+    pushed = box_git("push", "-u", "origin", spawn.box.branch)
     if pushed.returncode != 0:
-        return failed(
-            2,
-            f"upgrade: {name} -- FAILED at `git push`",
-            pushed.stderr or pushed.stdout,
-        )
+        return failed(2, f"upgrade: {name} -- FAILED at `git push`", pushed.stderr or pushed.stdout)
 
     url, created, error = sweep.ensure_pr(
-        sweep.gh_for(project),
+        sweep.gh_for(box),
         sweep.Plan(
             pr_title=commit_message(tag, len(changed)),
             pr_body=pr_body(tag, previous, changed),
-            pr_head=branch_name(),
-            pr_base=state.default_branch,
+            pr_head=spawn.box.branch,
+            pr_base=default_branch,
         ),
     )
     if error:
@@ -968,14 +796,15 @@ def main(argv: list[str] | None = None) -> int:
     # One lookup for the whole run: every project adopts the same release, and this is
     # what the per-project stamps are measured against.
     tag_commit = commit_for(args.devkit, tag)
-    # The whole tag set, for the projects that are *ahead* of it rather than behind.
+    # The whole tag set, for the projects that are *ahead* of this checkout rather than
+    # behind it. Read once here; `upgrade_one` cannot, since it only has the box.
     tags = release_tags(args.devkit)
 
     scope = names if args.every else requested
     selected = select_all(candidates_for(root, scope, args.devkit))
 
-    # Refusals decided before any project is touched. Carried rather than printed
-    # only, because `_finish` owes them to the artifact and to the exit code.
+    # Refusals decided before any box is cut. Carried rather than printed only,
+    # because `_finish` owes them to the artifact and to the exit code.
     preflight: list[Outcome] = []
     todo: list[str] = []
     for name, skip in selected:
@@ -985,20 +814,12 @@ def main(argv: list[str] | None = None) -> int:
             if not args.every:
                 return stopped(2, f"upgrade: {name} {skip}", tag)
             print(f"upgrade: {name} -- skipped, it {skip}")
-        # Before inspecting or refusing anything: an up-to-date project is the common
-        # case on a scheduled run, and proving it must not depend on the project being
-        # clean, on the right branch, or on anything else this could refuse over.
-        elif is_current(root / name, tag_commit):
+        # **Read off `origin/<default>`, not off the checkout.** This is the one
+        # question worth answering before spending a box on it, and on a scheduled run
+        # it is the answer for every project. Asking the ref means it cannot be wrong
+        # about a checkout parked on a branch, and needs nothing tidied first.
+        elif is_current_on_remote(root / name, tag_commit):
             print(f"upgrade: {name} is already on devkit {tag}.")
-        elif backwards := unreleased_adoption(root / name, tags):
-            # A refusal (1) rather than a skip: the project is on a release this
-            # checkout cannot serve, and a human has to reconcile the two. Reported
-            # here so the branch refusal below can never describe it instead -- a
-            # project ahead of the release is usually parked on the upgrade branch
-            # that put it there, and that is the less true of the two facts.
-            message = f"upgrade: {name} -- {backwards}"
-            print(message, file=sys.stderr)
-            preflight.append(Outcome(name, 1, message))
         else:
             todo.append(name)
 
@@ -1008,9 +829,6 @@ def main(argv: list[str] | None = None) -> int:
         return _finish(tag, args.dry_run, preflight)
 
     if args.dry_run:
-        # The refusals still count. A dry run is how a scheduled check asks "could
-        # this be adopted right now", and answering 0 while a project is parked on a
-        # task branch reports "all clear" for the one state that is not.
         outcomes = [upgrade_one(name, root / name, tag) for name in todo]
         print("\nDry run -- nothing was changed. Re-run with --yes to apply.")
         return _finish(tag, args.dry_run, preflight + outcomes)
@@ -1019,7 +837,9 @@ def main(argv: list[str] | None = None) -> int:
     # it is materialised only once something is actually going to be pulled.
     try:
         with source_at_tag(args.devkit, tag) as source:
-            outcomes = [upgrade_one(name, root / name, tag, source) for name in todo]
+            outcomes = [
+                upgrade_one(name, root / name, tag, source, args.workspace, tags) for name in todo
+            ]
     except RuntimeError as exc:
         return stopped(2, f"upgrade: could not check devkit out at {tag}: {exc}", tag)
     return _finish(tag, args.dry_run, preflight + outcomes)
@@ -1054,17 +874,6 @@ def latest_tag(devkit: Path) -> str | None:
     """
     tags = release_tags(devkit)
     return tags[0] if tags else None
-
-
-def _devkit_tag(devkit: Path) -> str | None:
-    """The tag on the devkit checkout's HEAD -- the release being adopted."""
-    result = subprocess.run(
-        ["git", "-C", str(devkit), "describe", "--tags", "--exact-match", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.stdout.strip() or None if result.returncode == 0 else None
 
 
 if __name__ == "__main__":
