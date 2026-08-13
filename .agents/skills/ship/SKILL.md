@@ -21,6 +21,15 @@ argument-hint: 'Optional PR title'
 > multi-line message does not survive `cmd.exe`, and the `| head -c N` fallback masks
 > the exit code, so a commit a pre-commit hook rejected reports success and step 3
 > pushes a branch with nothing on it.
+>
+> **Pass those two their text from a file — `git commit -F <path>` and `gh pr create
+> --body-file <path>` — never inline in double quotes.** A message worth writing about
+> this codebase names identifiers, and a Markdown body names them in backticks; inside
+> double quotes those are command substitution, which the shell really would expand, so
+> the gate is right to refuse the call. `-m "…"` and `--body "…"` therefore fail on
+> exactly the messages worth writing, and the block message names the cap rather than
+> the backtick, so the cause is invisible. Single quotes escape it for a one-liner; a
+> file is what survives a multi-paragraph body.
 
 Run each step in order. Stop on failure; never open a PR for an unverified branch.
 
@@ -30,15 +39,16 @@ Run each step in order. Stop on failure; never open a PR for an unverified branc
    changes with the Read tool rather than paging a capped `git diff` — a cap drops the
    middle of a large diff, which is the one part a truncated read hides from you. Run
    the targeted tests for the changed behavior. Stage only the intended files, then
-   commit with an imperative subject and a body explaining why. Use `$ARGUMENTS` as
-   the subject when supplied.
+   commit with an imperative subject and a body explaining why, written to a file and
+   passed with `git commit -F`. Use `$ARGUMENTS` as the subject when supplied.
 3. Run `python scripts/ship.py`. This requires a clean tree, runs the changed-scope
    lint gate, and pushes the current branch with retry handling. Fix any failure and
    rerun this step.
 4. Run `gh pr view --json number,url,state` to find an existing PR for the branch.
    Reuse it when present. Otherwise inspect the repository's PR template and run
    `gh pr create` with the detected base branch, current branch, commit subject (or
-   `$ARGUMENTS`), and a concise body covering the change and verification.
+   `$ARGUMENTS`), and a concise body covering the change and verification — written to
+   a file and passed with `--body-file`.
 5. Report the PR number and URL.
 
 Do not enable auto-merge, wait on CI, or start an autofix loop unless the user asks.

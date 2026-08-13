@@ -608,6 +608,33 @@ def test_the_ship_skill_does_not_pin_a_byte_cap():
     assert not re.search(r"--max-bytes[= ]\s*\d", text)
 
 
+def test_a_backticked_body_in_double_quotes_is_not_bounded():
+    """The gate is right about this one, which is what makes the skill the fix.
+
+    `$(...)` and backticks expand inside double quotes, so the shell really would run
+    them -- `is_bounded` refuses the statement and must keep refusing it. What made it
+    expensive is that the block message names the missing cap, so the backtick is
+    invisible as the cause and the wrapper it recommends does not help.
+    """
+    inline = 'gh pr create --title "t" --body "it calls `known_projects` first"'
+    assert not hook.is_bounded(inline)
+    assert hook.is_bounded('gh pr create --title "t" --body-file body.md')
+    # Single quotes are the one-liner escape: the shell does not expand there.
+    assert hook.is_bounded("git commit -m 'fix `known_projects`'")
+
+
+def test_the_ship_skill_says_how_to_pass_a_backticked_message():
+    """A commit subject or PR body about this codebase names identifiers, and a Markdown
+    body backticks them -- so `-m "..."` and `--body "..."` fail on exactly the messages
+    worth writing. The skill exempts both commands from the wrapper and used to stop
+    there, which left the author to rediscover the quoting rule from a block message
+    that names the cap instead of the backtick.
+    """
+    text = SHIP_SKILL.read_text(encoding="utf-8")
+    assert "--body-file" in text
+    assert "git commit -F" in text
+
+
 def test_get_value_dotted_and_missing():
     obj = {"tool_input": {"command": "x"}}
     assert hook.get_value(obj, "tool_input.command") == "x"
