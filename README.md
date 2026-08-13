@@ -324,9 +324,10 @@ it, and moves on.
 
 The run is windowless, so its only record is `logs/reconcile.log`, overwritten per
 pass and written on success too — a log that appears only on failure cannot be told
-apart from a task that has stopped running. Check `--status` when the workspace starts
-drifting: a scheduled task that has been disabled looks exactly like one that is
-working.
+apart from a task that has stopped running. That log's timestamp is also what
+`workspace-status.py` reads at session start: a scheduled task that has been disabled
+looks exactly like one that is working, so the status line says when a pass last
+finished rather than leaving you to notice the drift it causes.
 
 ## Authoring changes
 
