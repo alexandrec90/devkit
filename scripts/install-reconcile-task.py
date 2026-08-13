@@ -209,6 +209,24 @@ def main(argv: list[str] | None = None) -> int:
     # Box-aware (see `sweep.default_workspace`): the installed task carries this path
     # verbatim, so installing from a box would have scheduled a reconcile pass pointed
     # at a registry that does not exist -- every fifteen minutes, silently.
+    if args.apply and sweep.BOXES_DIR_NAME in REPO_ROOT.parts:
+        # The registered command carries this checkout's path verbatim, and a box is
+        # destroyed by the very pass being scheduled -- so this installs a task that
+        # works until the next reconcile and then fails silently every fifteen minutes
+        # forever. `install-upgrade-schedule.py` refuses the same thing for the same
+        # reason; this one did not, which is how a dry run from a box came to print a
+        # plan naming a path inside `.worktrees/`.
+        #
+        # Only on `--yes`: printing the plan from a box is how an agent reads what the
+        # install would do, and refusing that would break the read-only mode in the
+        # place it is most often invoked from.
+        print(
+            f"install-reconcile-task: {REPO_ROOT} is an ephemeral box, which this task "
+            f"would destroy. Run this from the static devkit checkout.",
+            file=sys.stderr,
+        )
+        return 2
+
     workspace = (args.workspace or sweep.default_workspace(REPO_ROOT)).resolve()
     python = windowless(sys.executable)
     arguments = reconcile_arguments(

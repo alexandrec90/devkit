@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from support import load_script
 
 installer = load_script("scripts/install-reconcile-task.py")
@@ -103,6 +104,29 @@ def test_a_dry_run_never_calls_schtasks(monkeypatch, capsys):
     monkeypatch.setattr(
         installer, "_run", lambda argv: (_ for _ in ()).throw(AssertionError("called schtasks"))
     )
+    assert installer.main([]) == 0
+    assert "Dry run" in capsys.readouterr().out
+
+
+def test_installing_from_an_ephemeral_box_is_refused(monkeypatch, capsys):
+    """The task would carry the box's path verbatim, and the pass it schedules destroys
+    boxes -- so it works until the next reconcile, then fails silently every fifteen
+    minutes forever. The sibling installer already refused this; this one did not."""
+    monkeypatch.setattr(installer.os, "name", "nt")
+    monkeypatch.setattr(installer, "REPO_ROOT", Path(r"C:\ws\.worktrees\devkit--topic-0813"))
+    monkeypatch.setattr(
+        installer, "_run_argv", lambda argv: pytest.fail("registered a task from a box")
+    )
+
+    assert installer.main(["--yes"]) == 2
+    assert "ephemeral box" in capsys.readouterr().err
+
+
+def test_reading_the_plan_from_a_box_still_works(monkeypatch, capsys):
+    """The read-only mode is most often invoked from a box -- that is where an agent
+    is, and refusing it would leave nothing to read before moving."""
+    monkeypatch.setattr(installer.os, "name", "nt")
+    monkeypatch.setattr(installer, "REPO_ROOT", Path(r"C:\ws\.worktrees\devkit--topic-0813"))
     assert installer.main([]) == 0
     assert "Dry run" in capsys.readouterr().out
 
