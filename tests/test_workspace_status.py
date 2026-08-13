@@ -7,6 +7,7 @@ watching goes unwatched again.
 """
 
 import json
+import os
 
 from support import LIVE_WORKSPACE, REPO_ROOT, load_script, needs_live_workspace, sweep
 
@@ -377,6 +378,69 @@ def test_this_workstations_root_actually_runs_the_guard():
     be asserted at all -- and it is the wiring that decides whether the guard exists for
     the sessions it was written for."""
     assert ws.guard_line(LIVE_WORKSPACE.parent) == ""
+
+
+# --- the unattended pass, when it has stopped --------------------------------
+
+
+NOW = 1_800_000_000.0
+
+
+def _logged(root, age_hours: float) -> None:
+    """A reconcile log last written `age_hours` before `NOW`."""
+    log = root / ws.worktree.RECONCILE_LOG
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("# a pass\n", encoding="utf-8")
+    stamp = NOW - age_hours * 3600
+    os.utime(log, (stamp, stamp))
+
+
+def test_a_pass_that_ran_recently_says_nothing(tmp_path):
+    _logged(tmp_path, 0.2)
+    assert ws.scheduler_line(tmp_path, now=NOW) == ""
+
+
+def test_a_pass_that_stopped_days_ago_is_reported(tmp_path):
+    """The failure this whole line exists for: the scheduled task sat disabled for five
+    days, and a stopped task is indistinguishable from a working one -- no error, no
+    output, nothing red anywhere."""
+    _logged(tmp_path, 24 * 5)
+    line = ws.scheduler_line(tmp_path, now=NOW)
+    assert "5d 0h ago" in line
+    assert "install-reconcile-task.py" in line
+
+
+def test_a_workstation_that_never_installed_the_task_is_left_alone(tmp_path):
+    """Absent is silence here, unlike `guard_line`: a standing demand to install a
+    Windows-only convenience is a line you learn to skim, which is the failure this one
+    is trying to fix rather than repeat."""
+    assert ws.scheduler_line(tmp_path, now=1_800_000_000.0) == ""
+
+
+def test_the_age_is_coarse_because_the_question_is_days_not_minutes():
+    assert ws._age(3600 * 5) == "5h"
+    assert ws._age(3600 * 50) == "2d 2h"
+
+
+def test_the_stopped_pass_is_reported_before_the_drift_it_causes():
+    """A reader who fixes the stranded checkouts by hand and leaves the pass stopped is
+    reading the same list again tomorrow."""
+    results = [result("carameli", sweep.READY)]
+    lines = ws.render(results, {}, "v0.5.3", scheduler="unattended pass last ran 5d 0h ago").split(
+        "\n"
+    )
+    assert "unattended pass" in lines[0]
+
+
+def test_a_specific_reconcile_schedule_failure_replaces_the_log_fallback():
+    schedule = ["schedule: devkit-worktree-reconcile: disabled -- nothing is running it"]
+    assert ws.scheduler_fallback("unattended pass last ran 5d 0h ago", schedule) == ""
+
+
+def test_an_upgrade_failure_does_not_hide_a_stale_reconcile_log():
+    schedule = ["schedule: devkit-upgrade-projects: last run failed (exit 1)"]
+    fallback = "unattended pass last ran 5d 0h ago"
+    assert ws.scheduler_fallback(fallback, schedule) == fallback
 
 
 # --- the architectural check ------------------------------------------------

@@ -296,6 +296,31 @@ Five invariants, each of which something has already violated:
   `origin/<default>`, not a PR lookup) because this runs on every edit and a network
   round trip in a PreToolUse hook is a hang. It **fails closed**: any error declines.
 
+### The scheduled pass carries the static tier too
+
+`reconcile` is the only thing in the workspace on a schedule, so it is also the only
+place the *static* checkouts can be brought up to their remotes without someone
+remembering. It runs `sweep.py --sync` over them after the box pass — `sync_checkouts`
+— and the tiers stay disjoint in what they decide: boxes by `reconcile_action`,
+checkouts by `sweep.classify`, neither tool learning about the other's.
+
+What made this worth doing is not tidiness. Every checkout in the workspace was found
+stale at once: four parked on task branches whose PRs had merged days earlier, and a
+session opened in one of them reads a tree that predates the work it was asked to
+continue — with nothing red anywhere, because a local branch that never advanced is
+not a failure of anything.
+
+Two things a change here must not do. **The checkout half never gains authority the
+hand-run sweep does not have** — it acts only on `sweep.SYNCABLE`, so a checkout
+holding uncommitted work, unpushed commits or an open PR is named and stepped over;
+its steps stay `merge --ff-only` and `branch -d`, both of which refuse rather than
+destroy. And **it must not redden a healthy pass**: `sweep.run_mode` returns 1 from a
+dry run that merely found something to do, so `checkout_sync_summary` reinterprets the
+code and only a failed git step under `--yes` counts. A scheduled runner whose alerts
+fire on the normal case is a runner whose alerts nobody reads — and this one has
+already been found *disabled*, with every box and checkout it manages left to rot,
+which is the failure mode that costs the most and shows the least.
+
 The prompt's slug reaches the box through `scripts/task_slug.py`, keyed by **session id**
 rather than by worktree. That is the only key the two events share: the prompt arrives on
 UserPromptSubmit, the box is cut on PreToolUse, and the two run in different processes
