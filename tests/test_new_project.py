@@ -924,6 +924,24 @@ def test_generated_lint_runner_accepts_every_flag_the_stop_hook_passes(tmp_path)
         assert flag in result.stdout, f"stop.py passes {flag}; the generated runner rejects it"
 
 
+def test_generated_lint_runner_accepts_the_paths_flag_ship_probes_for(tmp_path):
+    """The other half of the vendored-caller contract, for `/ship` rather than the Stop
+    hook: ship hands it the branch diff, and falls back to `--changed` without it --
+    which on the clean tree ship insists on is the empty set. The gate then passes
+    having linted nothing, in every generated project."""
+    import subprocess
+
+    root = generate(tmp_path, {})
+    result = subprocess.run(
+        [sys.executable, "scripts/lint-all.py", "--help"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--paths" in result.stdout
+
+
 def test_mypy_scope_excludes_the_vendored_harness(tmp_path):
     # Belt and braces, and both are load-bearing: the pyproject `exclude` covers
     # directory recursion, MYPY_SCOPE covers someone running `mypy .` by hand.
