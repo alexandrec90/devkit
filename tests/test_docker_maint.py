@@ -14,6 +14,7 @@ added, plus the two invariants that would be expensive to get wrong:
 
 from __future__ import annotations
 
+import subprocess
 import sys
 
 import pytest
@@ -163,3 +164,99 @@ def test_compose_file_recognises_every_supported_spelling(tmp_path, name):
 
 def test_compose_file_returns_none_when_there_is_no_stack(tmp_path):
     assert docker_maint.compose_file(tmp_path) is None
+
+
+# --- the unattended prune guard ------------------------------------------------
+# `prune` has two halves with very different blast radii. `docker system prune` frees
+# space inside the VM and returns nothing to Windows -- the VHDX does not shrink when
+# its contents do. `Optimize-VHD` is what returns it, and it needs `wsl --shutdown`,
+# which stops every running container. `--idle-only` is that distinction made operable
+# for the scheduled caller; these pin it, since the daemon modes themselves cannot be
+# exercised without actually doing it.
+
+
+def _ps(monkeypatch, stdout: str = "", returncode: int = 0, boom: bool = False):
+    """Stand in for `docker ps -q`."""
+
+    def fake_run(argv, **_kw):
+        if boom:
+            raise OSError("docker is not on PATH")
+        return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+    monkeypatch.setattr(docker_maint.subprocess, "run", fake_run)
+
+
+def test_running_containers_counts_the_ids(monkeypatch):
+    _ps(monkeypatch, "abc123\ndef456\n")
+    assert docker_maint.running_containers() == 2
+
+
+def test_running_containers_ignores_blank_lines(monkeypatch):
+    _ps(monkeypatch, "\n\nabc123\n\n")
+    assert docker_maint.running_containers() == 1
+
+
+def test_an_idle_engine_reports_zero(monkeypatch):
+    _ps(monkeypatch, "")
+    assert docker_maint.running_containers() == 0
+
+
+@pytest.mark.parametrize("kwargs", [{"returncode": 1}, {"boom": True}])
+def test_an_unreachable_engine_is_not_reported_as_idle(monkeypatch, kwargs):
+    """-1 rather than 0, so `--idle-only` fails toward *not* pruning. Guessing zero
+    would license `wsl --shutdown` against a machine that might be mid-run."""
+    _ps(monkeypatch, **kwargs)
+    assert docker_maint.running_containers() == -1
+
+
+def test_idle_only_does_nothing_while_containers_are_up(monkeypatch, capsys):
+    """The scheduled case. Stopping twelve containers at 4am to reclaim disk is not a
+    trade anything should make unattended."""
+    monkeypatch.setattr(docker_maint, "running_containers", lambda: 12)
+    monkeypatch.setattr(
+        docker_maint, "docker_info_ok", lambda *_a, **_kw: pytest.fail("touched the engine")
+    )
+    assert docker_maint.generic_prune(idle_only=True) == 0
+    printed = capsys.readouterr().out
+    assert "SKIPPED" in printed and "12 container(s) up" in printed
+
+
+def test_idle_only_skips_when_the_engine_cannot_be_asked(monkeypatch, capsys):
+    monkeypatch.setattr(docker_maint, "running_containers", lambda: -1)
+    monkeypatch.setattr(
+        docker_maint, "docker_info_ok", lambda *_a, **_kw: pytest.fail("touched the engine")
+    )
+    assert docker_maint.generic_prune(idle_only=True) == 0
+    assert "could not be asked" in capsys.readouterr().out
+
+
+def test_a_skipped_prune_is_a_success_not_a_failure(monkeypatch):
+    """It reports 0 so a scheduled run that correctly declines does not look broken.
+    "Nothing to do right now" is the expected outcome most nights."""
+    monkeypatch.setattr(docker_maint, "running_containers", lambda: 3)
+    assert docker_maint.generic_prune(idle_only=True) == 0
+
+
+def test_an_interactive_prune_never_consults_the_guard(monkeypatch):
+    """A human choosing this from the task list has already decided; asking again would
+    make the one-click action refuse for a reason it cannot explain there."""
+    monkeypatch.setattr(
+        docker_maint, "running_containers", lambda: pytest.fail("guarded an interactive run")
+    )
+    monkeypatch.setattr(docker_maint, "docker_info_ok", lambda *_a, **_kw: False)
+    monkeypatch.setattr(docker_maint, "start_docker", lambda: None)
+    monkeypatch.setattr(docker_maint, "poll_engine", lambda *_a, **_kw: False)
+    assert docker_maint.generic_prune() == 1
+
+
+def test_the_flag_reaches_the_generic_prune(monkeypatch):
+    """`--idle-only` is forwarded like any other argument, so it has to be read off the
+    forwarded list rather than parsed as a mode."""
+    seen: list[bool] = []
+    monkeypatch.setattr(docker_maint, "find_delegate", lambda _mode: None)
+    monkeypatch.setattr(
+        docker_maint, "generic_prune", lambda idle_only=False: (seen.append(idle_only), 0)[1]
+    )
+    docker_maint.main(["prune", "--generic", "--idle-only"])
+    docker_maint.main(["prune", "--generic"])
+    assert seen == [True, False]

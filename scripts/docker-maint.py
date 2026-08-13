@@ -31,6 +31,10 @@ its scripts there, so a candidate list per mode is no longer needed -- see DELEG
 Usage:  python docker-maint.py {up|down|restart-engine|fix|prune} [--generic] [args...]
         (run with cwd set to the workspace folder; --generic skips delegation)
 
+`prune --idle-only` is the unattended spelling: it does nothing while containers are
+running, because the half that actually returns disk to Windows needs
+`wsl --shutdown`. See `generic_prune`. That is what the scheduled task passes.
+
 The daemon modes are Windows-only by nature -- they drive Docker Desktop and compact
 the WSL2 VHDX. `up`/`down` are portable.
 
@@ -222,13 +226,51 @@ def generic_fix() -> int:
     return 1
 
 
-def generic_prune() -> int:
+def running_containers() -> int:
+    """How many containers are up; -1 when the engine cannot be asked.
+
+    -1 rather than 0 for "cannot tell", so `--idle-only` fails toward *not* pruning.
+    An unreadable engine is the one state where guessing zero would license the
+    disruptive half against a machine that might be mid-run.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "-q"], capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return -1
+    if result.returncode != 0:
+        return -1
+    return len([line for line in result.stdout.splitlines() if line.strip()])
+
+
+def generic_prune(idle_only: bool = False) -> int:
     """Reclaim image/build-cache space, then hand the freed space back to Windows.
 
     No --volumes and no `docker volume prune`, ever: named volumes are where dev
     databases live. Compose is left alone here -- a workspace that needs its stack
     torn down and brought back should ship its own docker-prune.py (see DELEGATES).
+
+    **The two halves have very different blast radii, and only the second reclaims
+    anything Windows can see.** `docker system prune` frees space *inside* the VM; the
+    VHDX is a dynamically-expanding file that does not shrink when its contents do, so
+    a prune on its own returns exactly zero bytes to the host. `Optimize-VHD` is what
+    returns them, and it needs exclusive access -- which means `wsl --shutdown`, which
+    kills every running container and every other WSL distro with them.
+
+    `idle_only` is that distinction made operable, and it exists for the scheduled
+    caller. A prune that runs while twelve containers are up would stop them at 4am to
+    reclaim disk, which is not a trade anything should make unattended. Interactive
+    callers leave it off: a human choosing this from the task list has already decided.
     """
+    if idle_only:
+        running = running_containers()
+        if running != 0:
+            where = "the engine could not be asked" if running < 0 else f"{running} container(s) up"
+            print(banner(f"SKIPPED -- {where}"))
+            print("  Compacting needs `wsl --shutdown`, which would stop them.")
+            print("  Run without --idle-only to prune and compact anyway.")
+            return 0
     print(banner("Docker Prune + Compact VHDX (generic)"))
     if not docker_info_ok():
         print("  Docker is not responding; starting it first.")
@@ -276,7 +318,7 @@ GENERIC: dict[str, Callable[[list[str]], int]] = {
     "down": generic_down,
     "restart-engine": lambda extra: generic_restart_engine(),
     "fix": lambda extra: generic_fix(),
-    "prune": lambda extra: generic_prune(),
+    "prune": lambda extra: generic_prune(idle_only="--idle-only" in extra),
 }
 
 
