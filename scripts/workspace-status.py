@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import schedule_health
 import sweep
 import worktree
 
@@ -316,6 +317,24 @@ def guard_line(root: Path, settings: Path = ROOT_SETTINGS) -> str:
     )
 
 
+def schedule_lines() -> list[str]:
+    """One line per unhealthy scheduled job; [] when they are all fine.
+
+    **The point of surfacing it here rather than in a command you run.** A scheduled
+    job's failure mode is silence, so the check for it must not itself be something
+    someone has to remember -- that is the same defect one level up. `reconcile` was
+    disabled for five days and 471 runs; the cost was 26 leaked boxes and 5 GB, and
+    nothing anywhere was red. This is the line that would have said so on the next
+    session start.
+
+    Never raises: `report` swallows its own failures and answers [] off Windows.
+    """
+    try:
+        return [f"schedule: {line}" for line in schedule_health.report()]
+    except Exception:
+        return []
+
+
 def render(
     results: list[sweep.Result],
     behind: dict[str, str],
@@ -325,6 +344,7 @@ def render(
     boxes: str = "",
     guard: str = "",
     retired: str = "",
+    schedule: list[str] | None = None,
 ) -> str:
     """The whole message, or "" when there is nothing worth saying."""
     halves = (
@@ -335,6 +355,7 @@ def render(
         boxes,
         guard,
         retired,
+        *(schedule or []),
     )
     lines = [line for line in halves if line]
     if not lines:
@@ -429,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
             boxes_line(box_survey(workspace)),
             guard_line(root),
             retired_hooks_line(root, names),
+            schedule_lines(),
         )
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)
