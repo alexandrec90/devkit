@@ -314,6 +314,11 @@ python scripts/install-reconcile-task.py --status   # what is installed, and whe
 python scripts/install-reconcile-task.py --uninstall --yes
 ```
 
+The task is registered from an XML document rather than `schtasks` flags, because the
+settings that decide whether it runs on a laptop — battery, and catching up a fire it
+slept through — have no flags. `scripts/devkit_schtasks.py` owns that document and its
+sibling `install-upgrade-schedule.py` uses the same one.
+
 One pass, both tiers. It reaps every box whose PR has merged and reclaims disk when
 the volume is low; then it runs `sweep.py --sync` over the **static** checkouts, so a
 merged PR advances each one's default branch instead of leaving it parked on a spent

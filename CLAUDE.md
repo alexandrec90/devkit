@@ -296,6 +296,38 @@ Five invariants, each of which something has already violated:
   `origin/<default>`, not a PR lookup) because this runs on every edit and a network
   round trip in a PreToolUse hook is a hang. It **fails closed**: any error declines.
 
+### A scheduled task is registered from XML, never from `schtasks` flags
+
+Both unattended jobs — `install-reconcile-task.py` and `install-upgrade-schedule.py` —
+go through `scripts/devkit_schtasks.py`, which builds a task document and registers it
+with `/XML`. That is not a style preference. **The three settings that decide whether a
+scheduled job on a laptop runs at all have no `schtasks.exe` flags**, so every task
+that tool creates silently inherits server defaults: it skips every fire while on
+battery, kills a run in progress when you unplug, and never catches up a fire it slept
+through.
+
+This workspace runs on a laptop, and the cost was measured rather than imagined: the
+reconcile task was found stopped for five days with every box it manages leaking its
+port slot and volume set, and the nightly upgrade loses a whole day for any night the
+lid is closed at 03:00. None of that reports anything — a job that does not run writes
+no log, so its silence is identical to a healthy pass with nothing to do.
+
+Two things a change here has to keep:
+
+- **`<Settings>` is a schema sequence, not a set.** Reordering it is rejected at
+  registration time, on the installing machine, where no unit test can reach it. The
+  order in `task_xml` was verified by registering the document and reading it back;
+  `test_the_settings_block_is_in_schema_order` pins it, and scopes its search to the
+  `<Settings>` element because `<Enabled>` is also a legal trigger child.
+- **A repetition carries no `<Duration>`.** Absent means indefinitely; any value
+  present is a stopping point, so a plausible-looking `P1D` turns the job off after a
+  day.
+
+The other half of keeping these alive is noticing when one has stopped anyway, which
+is `workspace-status.py`'s `scheduler_line` — it reads when a pass last *finished*
+rather than whether a task is registered, because `schtasks` answers yes for a task
+that is disabled, wedged, or pointed at a checkout that has moved.
+
 ### The scheduled pass carries the static tier too
 
 `reconcile` is the only thing in the workspace on a schedule, so it is also the only

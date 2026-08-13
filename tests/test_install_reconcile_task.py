@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from support import load_script
 
 installer = load_script("scripts/install-reconcile-task.py")
@@ -21,7 +22,7 @@ WORKSPACE = Path(r"C:\ws\alex-projects.code-workspace")
 
 
 def command(**kwargs) -> str:
-    return installer.reconcile_command(PY, SCRIPT, WORKSPACE, **kwargs)
+    return installer.reconcile_arguments(SCRIPT, WORKSPACE, **kwargs)
 
 
 def test_the_scheduled_run_applies_rather_than_dry_running():
@@ -49,8 +50,8 @@ def test_the_workspace_is_named_not_inferred():
 
 
 def test_paths_are_quoted_for_a_profile_name_with_spaces():
-    quoted = installer.reconcile_command(r"C:\Program Files\Python\python.exe", SCRIPT, WORKSPACE)
-    assert '"C:\\Program Files\\Python\\python.exe"' in quoted
+    quoted = installer.reconcile_arguments(Path(r"C:\Program Files\ws\worktree.py"), WORKSPACE)
+    assert '"C:\\Program Files\\ws\\worktree.py"' in quoted
 
 
 def test_the_static_checkouts_are_swept_by_default():
@@ -69,16 +70,26 @@ def test_a_disk_floor_is_passed_only_when_set():
     assert "--min-free-gb 40.0" in command(min_free_gb=40.0)
 
 
-def test_install_replaces_rather_than_erroring_on_a_second_run():
-    """Re-running after changing the interval is the natural thing to do."""
-    argv = installer.install_argv("t", "cmd", 15)
-    assert "/f" in argv
-
-
 def test_the_interval_is_minutes_not_days():
-    argv = installer.install_argv("t", "cmd", 15)
-    assert argv[argv.index("/sc") + 1] == "minute"
-    assert argv[argv.index("/mo") + 1] == "15"
+    """The tier's promise is that a merged PR stops costing disk within minutes."""
+    assert "<Interval>PT15M</Interval>" in installer.task_document(PY, "args", 15)
+
+
+def test_the_scheduled_task_runs_on_battery_and_catches_up():
+    """This task was found stopped for five days. `schtasks /SC MINUTE` cannot express
+    any of these three, which is the whole reason it is registered from a document."""
+    body = installer.task_document(PY, "args", 15)
+    assert "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>" in body
+    assert "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>" in body
+    assert "<StartWhenAvailable>true</StartWhenAvailable>" in body
+
+
+def test_the_interpreter_is_the_action_not_part_of_the_arguments():
+    """`<Exec>` splits the program from its arguments; folding them into one string
+    registers a task whose program is a path with a space in it."""
+    body = installer.task_document(PY, "worktree.py reconcile", 15)
+    assert f"<Command>{PY}</Command>" in body
+    assert "<Arguments>worktree.py reconcile</Arguments>" in body
 
 
 def test_uninstall_names_the_task_and_does_not_prompt():
@@ -89,7 +100,7 @@ def test_uninstall_names_the_task_and_does_not_prompt():
 
 
 def test_a_dry_run_never_calls_schtasks(monkeypatch, capsys):
-    monkeypatch.setattr(installer.os, "name", "nt")
+    monkeypatch.setattr(installer, "WINDOWS", True)
     monkeypatch.setattr(
         installer, "_run", lambda argv: (_ for _ in ()).throw(AssertionError("called schtasks"))
     )
@@ -97,8 +108,42 @@ def test_a_dry_run_never_calls_schtasks(monkeypatch, capsys):
     assert "Dry run" in capsys.readouterr().out
 
 
+def _box_root(tmp_path: Path) -> Path:
+    """A path shaped like an ephemeral box, on whichever OS is running the test.
+
+    Built with `/` rather than written as a Windows literal. `Path(r"C:\\ws\\.worktrees\\b")`
+    is a *single* path component on Linux -- backslash is an ordinary character there --
+    so `BOXES_DIR_NAME in root.parts` was false and this suite passed on Windows while
+    the same assertion failed in CI.
+    """
+    return tmp_path / installer.sweep.BOXES_DIR_NAME / "devkit--topic-0813"
+
+
+def test_installing_from_an_ephemeral_box_is_refused(monkeypatch, capsys, tmp_path):
+    """The task would carry the box's path verbatim, and the pass it schedules destroys
+    boxes -- so it works until the next reconcile, then fails silently every fifteen
+    minutes forever. The sibling installer already refused this; this one did not."""
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    monkeypatch.setattr(installer, "REPO_ROOT", _box_root(tmp_path))
+    monkeypatch.setattr(
+        installer, "_run_argv", lambda argv: pytest.fail("registered a task from a box")
+    )
+
+    assert installer.main(["--yes"]) == 2
+    assert "ephemeral box" in capsys.readouterr().err
+
+
+def test_reading_the_plan_from_a_box_still_works(monkeypatch, capsys, tmp_path):
+    """The read-only mode is most often invoked from a box -- that is where an agent
+    is, and refusing it would leave nothing to read before moving."""
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    monkeypatch.setattr(installer, "REPO_ROOT", _box_root(tmp_path))
+    assert installer.main([]) == 0
+    assert "Dry run" in capsys.readouterr().out
+
+
 def test_a_non_windows_machine_is_a_no_op_not_a_failure(monkeypatch, capsys):
-    monkeypatch.setattr(installer.os, "name", "posix")
+    monkeypatch.setattr(installer, "WINDOWS", False)
     assert installer.main(["--yes"]) == 0
     assert "Windows-only" in capsys.readouterr().out
 

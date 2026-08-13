@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import devkit_schtasks
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +52,12 @@ BOXES_DIR = sweep.BOXES_DIR_NAME
 # renaming it would orphan whatever a previous version registered -- the installer
 # would report "nothing scheduled" while the old entry kept firing.
 TASK_NAME = "devkit-upgrade-projects"
+
+# Resolved once, at import, so a test can force the Windows path without touching
+# `os.name` itself. `pathlib` reads `os.name` to decide whether `Path(...)` builds a
+# `WindowsPath`, so patching the global makes every subsequent bare `Path(...)` raise
+# `NotImplementedError` on a POSIX runner -- in code the patch was never aimed at.
+WINDOWS = os.name == "nt"
 
 # Daily rather than hourly. A devkit release is a human act that happens a few times a
 # month, so a tighter loop spends fetches to discover the same "already current" it
@@ -142,29 +149,30 @@ def valid_time(at: str) -> bool:
     return 0 <= int(hours) <= 23 and 0 <= int(minutes) <= 59
 
 
-def schtasks_argv(schedule: Schedule) -> list[str]:
-    """The Windows registration.
+def task_document(schedule: Schedule) -> str:
+    """The Windows registration, as a task document.
 
-    `/F` overwrites an existing entry of the same name, which is what makes this
-    installer re-runnable after the checkout moves -- the alternative is a stale task
-    pointing at a path that no longer exists, failing silently every night.
+    Not `schtasks /SC DAILY /ST`, and the reason is specific to *this* job. A daily
+    task is the one most exposed to the defaults that spelling cannot change: at 03:00
+    a laptop is asleep or unplugged more often than not, so `StartWhenAvailable=false`
+    silently drops the whole day's run and `DisallowStartIfOnBatteries=true` drops it
+    again on the nights it is awake. An upgrade nobody runs is indistinguishable from
+    an upgrade with nothing to do. See `devkit_schtasks`.
 
-    The command is one quoted string because `schtasks` takes `/TR` that way; the paths
-    inside it are the reason it has to be quoted at all.
+    The action's program is separated from its arguments because `<Exec>` takes them
+    that way; `schedule.command` stays the single source for both.
     """
-    return [
-        "schtasks",
-        "/Create",
-        "/TN",
-        schedule.name,
-        "/TR",
-        subprocess.list2cmdline(schedule.command),
-        "/SC",
-        "DAILY",
-        "/ST",
-        schedule.at,
-        "/F",
-    ]
+    program, *arguments = schedule.command
+    return devkit_schtasks.task_xml(
+        program,
+        subprocess.list2cmdline(arguments),
+        devkit_schtasks.daily_trigger(schedule.at),
+        # Longer than the reconcile pass: this one provisions a box and opens a PR per
+        # project that is behind, and a release landing in several at once is the run
+        # that takes longest. Still finite -- `IgnoreNew` means a wedged run suppresses
+        # every later one until this expires.
+        time_limit="PT2H",
+    )
 
 
 def crontab_line(schedule: Schedule) -> str:
@@ -208,7 +216,7 @@ def drifted(registered: str, schedule: Schedule) -> str:
     return ""
 
 
-def render_plan(schedule: Schedule, windows: bool = os.name == "nt") -> str:
+def render_plan(schedule: Schedule, windows: bool = WINDOWS) -> str:
     """What `--yes` would do, in the words of whichever scheduler is going to do it."""
     lines = [
         f"schedule: {schedule.name} -- daily at {schedule.at}",
@@ -219,7 +227,10 @@ def render_plan(schedule: Schedule, windows: bool = os.name == "nt") -> str:
         "",
     ]
     if windows:
-        lines.append(f"  via: {subprocess.list2cmdline(schtasks_argv(schedule))}")
+        lines.append(
+            "  via: a scheduled task registered from XML, so it runs on battery "
+            "and catches up a run it slept through"
+        )
     else:
         lines += [
             "  via crontab, which this installer does not edit for you:",
@@ -235,19 +246,19 @@ def install(schedule: Schedule, runner: Runner = run_command) -> tuple[bool, str
     edit this workspace does not do unattended, so there the plan *is* the deliverable
     and the line is printed for pasting.
     """
-    if os.name != "nt":
+    if not WINDOWS:
         return False, (
             "not a Windows machine -- add this crontab line yourself:\n  " + crontab_line(schedule)
         )
-    result = runner(schtasks_argv(schedule))
-    if result.returncode != 0:
-        return False, (result.stderr or result.stdout or "schtasks failed").strip()
+    ok, message = devkit_schtasks.register(schedule.name, task_document(schedule), runner)
+    if not ok:
+        return False, message
     return True, f"scheduled {schedule.name} daily at {schedule.at}"
 
 
 def run_check(schedule: Schedule, runner: Runner = run_command) -> tuple[int, str]:
     """`(exit code, message)` for `--check`. 1 when the schedule needs attention."""
-    if os.name != "nt":
+    if not WINDOWS:
         return 0, "not a Windows machine -- nothing this installer can query"
     result = runner(query_argv(schedule.name))
     registered = registered_command(result.stdout) if result.returncode == 0 else ""

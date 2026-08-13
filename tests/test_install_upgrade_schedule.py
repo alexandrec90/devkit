@@ -6,6 +6,7 @@ schedule fails silently every night with nothing red anywhere.
 """
 
 import subprocess
+from pathlib import Path
 
 import pytest
 from support import REPO_ROOT, load_script
@@ -87,13 +88,27 @@ def test_the_script_path_is_absolute_and_points_at_this_checkout():
 def test_the_windows_registration_overwrites_its_own_previous_entry():
     """Without `/F` a moved checkout leaves a task pointing at a path that no longer
     exists, failing every night with nothing to notice it."""
-    assert "/F" in sched.schtasks_argv(a_schedule())
+    assert "/F" in sched.devkit_schtasks.register_argv("t", Path("t.xml"))
 
 
 def test_the_registration_is_daily_at_the_requested_time():
-    argv = sched.schtasks_argv(a_schedule(at="04:30"))
-    assert argv[argv.index("/SC") + 1] == "DAILY"
-    assert argv[argv.index("/ST") + 1] == "04:30"
+    body = sched.task_document(a_schedule(at="04:30"))
+    assert "T04:30:00</StartBoundary>" in body
+    assert "<DaysInterval>1</DaysInterval>" in body
+
+
+def test_the_nightly_run_survives_a_closed_lid():
+    """The setting this job needs most: at 03:00 the laptop is asleep or unplugged more
+    often than not, and the default silently drops the whole day's run."""
+    body = sched.task_document(a_schedule())
+    assert "<StartWhenAvailable>true</StartWhenAvailable>" in body
+    assert "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>" in body
+
+
+def test_the_nightly_run_gets_longer_than_the_reconcile_pass():
+    """It provisions a box and opens a PR per project behind; a release landing in
+    several at once is the run that takes longest."""
+    assert "<ExecutionTimeLimit>PT2H</ExecutionTimeLimit>" in sched.task_document(a_schedule())
 
 
 def test_the_crontab_line_puts_minutes_first():
@@ -222,14 +237,14 @@ class FakeRunner:
 
 
 def test_a_failed_registration_is_reported_rather_than_assumed(monkeypatch):
-    monkeypatch.setattr(sched.os, "name", "nt")
+    monkeypatch.setattr(sched, "WINDOWS", True)
     ok, message = sched.install(a_schedule(), FakeRunner(returncode=1, stderr="ERROR: denied"))
     assert not ok
     assert "denied" in message
 
 
 def test_a_successful_registration_says_when_it_will_run(monkeypatch):
-    monkeypatch.setattr(sched.os, "name", "nt")
+    monkeypatch.setattr(sched, "WINDOWS", True)
     ok, message = sched.install(a_schedule(at="05:15"), FakeRunner())
     assert ok
     assert "05:15" in message
@@ -238,7 +253,7 @@ def test_a_successful_registration_says_when_it_will_run(monkeypatch):
 def test_a_posix_machine_is_told_the_line_rather_than_having_its_crontab_edited(monkeypatch):
     """Editing a user's crontab unattended is the kind of irreversible edit this
     workspace does not do; the line is the deliverable there."""
-    monkeypatch.setattr(sched.os, "name", "posix")
+    monkeypatch.setattr(sched, "WINDOWS", False)
     ok, message = sched.install(a_schedule(), FakeRunner())
     assert not ok
     assert "* * *" in message
