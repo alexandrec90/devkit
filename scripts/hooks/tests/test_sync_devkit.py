@@ -960,3 +960,127 @@ def test_the_retired_branch_hooks_are_listed_so_a_pull_unwires_them():
     ):
         assert rel in sh.RETIRED_PATHS
         assert rel not in sh.MANIFEST
+
+
+# --- un-vendoring is not retirement ------------------------------------------
+# The defect: a path that leaves the MANIFEST because it became a `templates/` file was
+# deleted from every consumer whose copy still matched the last pull, and nothing put it
+# back -- `templates/` is a one-shot copy that only `new-project.py` reads. Two projects'
+# PR gates died on an unresolvable local action; a third's nightly was the only workflow
+# using it, so nothing failed where anyone was looking and it stayed broken for a week.
+
+
+def _templated(src: Path, rel: str, text: str = "runs:\n") -> None:
+    """Put `rel` into a source's `templates/core/` tier, under the generator's spelling."""
+    parts = rel.split("/")
+    parts[0] = f"dot-{parts[0][1:]}" if parts[0].startswith(".") else parts[0]
+    path = src / "templates" / "core" / Path(*parts)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _receipted(root: Path, rel: str, text: str) -> None:
+    """A file the last pull wrote, recorded in the receipt with its real digest."""
+    _seed(root, rel, text)
+    receipt = json.loads((root / sh.RECEIPT_FILE).read_text(encoding="utf-8"))
+    receipt["files"][rel] = sh._sha256(root / rel)
+    (root / sh.RECEIPT_FILE).write_text(json.dumps(receipt), encoding="utf-8")
+
+
+def _blank_receipt(root: Path) -> None:
+    (root / sh.RECEIPT_FILE).write_text(json.dumps({"files": {}}), encoding="utf-8")
+
+
+ACTION = ".github/actions/setup-python-env/action.yml"
+
+
+def test_an_unvendored_file_survives_the_pull_that_unvendored_it(tmp_path):
+    """The regression, in the exact shape that hit three repos. The file left the
+    MANIFEST, the consumer had never edited it, and `--pull` deleted it."""
+    root, src = tmp_path / "project", tmp_path / "devkit"
+    root.mkdir()
+    _blank_receipt(root)
+    _receipted(root, ACTION, "runs:\n  using: composite\n")
+    _templated(src, ACTION)
+
+    removed, preserved, unvendored = sh.remove_receipt_retired(root, (), src)
+
+    assert (root / ACTION).is_file(), "the pull deleted a file nothing will put back"
+    assert unvendored == [ACTION]
+    assert removed == [] and preserved == []
+
+
+def test_a_genuinely_retired_file_is_still_deleted(tmp_path):
+    """The other half. A receipt entry that is in neither the MANIFEST nor `templates/`
+    really is obsolete, and never tidying those leaves consumers accumulating dead
+    files -- which is what this removal pass exists for."""
+    root, src = tmp_path / "project", tmp_path / "devkit"
+    root.mkdir()
+    _blank_receipt(root)
+    _receipted(root, "scripts/hooks/gone.py", "print('old')\n")
+    (src / "templates" / "core").mkdir(parents=True)
+
+    removed, _, unvendored = sh.remove_receipt_retired(root, (), src)
+
+    assert removed == ["scripts/hooks/gone.py"]
+    assert not (root / "scripts/hooks/gone.py").exists()
+    assert unvendored == []
+
+
+def test_a_locally_edited_file_is_still_preserved(tmp_path):
+    """Unchanged behaviour, and the accident that saved the one repo that survived:
+    its copy no longer matched, so the sha check spared it."""
+    root, src = tmp_path / "project", tmp_path / "devkit"
+    root.mkdir()
+    _blank_receipt(root)
+    _receipted(root, "scripts/hooks/edited.py", "original\n")
+    _seed(root, "scripts/hooks/edited.py", "mine now\n")
+
+    removed, preserved, unvendored = sh.remove_receipt_retired(root, (), src)
+
+    assert preserved == ["scripts/hooks/edited.py"]
+    assert removed == [] and unvendored == []
+
+
+def test_a_source_without_templates_falls_back_to_deleting(tmp_path):
+    """`src=None` and a source with no `templates/` are the same answer: cannot tell.
+    Preserving everything there would turn every real retirement into permanent cruft."""
+    root = tmp_path / "project"
+    root.mkdir()
+    _blank_receipt(root)
+    _receipted(root, "scripts/hooks/gone.py", "print('old')\n")
+
+    removed, _, unvendored = sh.remove_receipt_retired(root, (), None)
+
+    assert removed == ["scripts/hooks/gone.py"]
+    assert unvendored == []
+
+
+def test_template_outputs_speaks_the_generators_spelling(tmp_path):
+    """`dot-` is a leading dot and `.tmpl` is stripped, or nothing here compares equal
+    to a MANIFEST path and the guard silently never fires."""
+    src = tmp_path / "devkit"
+    _templated(src, ACTION)
+    _templated(src, ".github/workflows/pr-gate.yml", "on:\n")
+    (src / "templates" / "core" / "dot-github" / "workflows" / "pr-gate.yml").rename(
+        src / "templates" / "core" / "dot-github" / "workflows" / "pr-gate.yml.tmpl"
+    )
+    _templated(src, "scripts/notify.py", "print(1)\n")
+
+    outputs = sh.template_outputs(src)
+
+    assert ACTION in outputs
+    assert ".github/workflows/pr-gate.yml" in outputs, "the .tmpl suffix is not part of it"
+    assert "scripts/notify.py" in outputs, "a path with no leading dot is untouched"
+
+
+def test_template_outputs_is_empty_when_there_is_nothing_to_read(tmp_path):
+    assert sh.template_outputs(None) == set()
+    assert sh.template_outputs(tmp_path / "no-such-devkit") == set()
+
+
+def test_the_setup_action_is_the_case_this_guards(tmp_path):
+    """Reversion check, naming the file: un-vendor it again with this guard removed and
+    every consumer that never customised it loses the action on its next pull."""
+    assert ACTION not in sh.MANIFEST
+    assert ACTION not in sh.RETIRED_PATHS, "it was un-vendored, not retired"

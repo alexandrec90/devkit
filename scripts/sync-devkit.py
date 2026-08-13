@@ -843,15 +843,76 @@ def receipt_retired_present(root: Path, manifest: tuple[str, ...]) -> list[str]:
     )
 
 
-def remove_receipt_retired(root: Path, manifest: tuple[str, ...]) -> tuple[list[str], list[str]]:
-    """Remove no-longer-managed files only when unchanged since the previous pull."""
+def template_outputs(src: Path | None) -> set[str]:
+    """Every project-relative path the source's `templates/` tier can produce.
+
+    The `dot-` prefix on a path component is the generator's spelling of a leading dot
+    (`dot-github/workflows/pr-gate.yml.tmpl` -> `.github/workflows/pr-gate.yml`), and a
+    trailing `.tmpl` marks a file that is rendered rather than copied. Both are stripped
+    here so the result is directly comparable with a MANIFEST path.
+
+    Best effort by design: a source with no `templates/` (an older devkit, or a consumer
+    pushing back) yields the empty set, and every caller treats that as "cannot tell".
+    """
+    if src is None:
+        return set()
+    root = src / "templates"
+    if not root.is_dir():
+        return set()
+    outputs: set[str] = set()
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        # `templates/<preset>/...` -- the preset directory is not part of the output.
+        parts = path.relative_to(root).parts[1:]
+        if not parts:
+            continue
+        renamed = [
+            part[4:] and f".{part[4:]}" if part.startswith("dot-") else part for part in parts
+        ]
+        renamed[-1] = renamed[-1].removesuffix(".tmpl")
+        outputs.add("/".join(renamed))
+    return outputs
+
+
+def remove_receipt_retired(
+    root: Path, manifest: tuple[str, ...], src: Path | None = None
+) -> tuple[list[str], list[str], list[str]]:
+    """Remove no-longer-managed files. `(removed, preserved, unvendored)`.
+
+    Three ways a path in the receipt can be absent from the MANIFEST, and only one of
+    them is a deletion:
+
+    - **Locally edited.** Preserved, as before: the sha no longer matches what the last
+      pull wrote, so someone owns it now.
+    - **Un-vendored** -- it left the MANIFEST because it became a `templates/` file.
+      **Preserved**, and this is the fix. Deleting it was silent data loss: `templates/`
+      is a one-shot copy consulted only by `new-project.py`, so nothing put the file
+      back and nothing on either side reported the gap. When
+      `.github/actions/setup-python-env/action.yml` was un-vendored, the pull deleted it
+      from every consumer that had *not* customised it -- and customising it was the
+      only thing that saved the two that survived, by accident of the sha check above.
+      Two projects' PR gates then died on an unresolvable local action, and a third's
+      nightly failed silently for a week because only its nightly used the action.
+    - **Retired.** Genuinely obsolete, nothing should have it. Deleted, as before.
+
+    The distinction needs the source, so `src=None` (a caller that cannot supply one)
+    falls back to the old behaviour rather than preserving everything -- a receipt entry
+    that is neither in the MANIFEST nor in `templates/` really is retired, and never
+    tidying those would leave a consumer accumulating dead files forever.
+    """
     receipt = read_receipt(root)
     current = set(manifest)
+    templates = template_outputs(src)
     removed: list[str] = []
     preserved: list[str] = []
+    unvendored: list[str] = []
     for rel, expected in sorted(receipt.items()):
         path = root / rel
         if rel in current or not path.is_file():
+            continue
+        if rel in templates:
+            unvendored.append(rel)
             continue
         if _sha256(path) != expected:
             preserved.append(rel)
@@ -859,7 +920,7 @@ def remove_receipt_retired(root: Path, manifest: tuple[str, ...]) -> tuple[list[
         path.unlink()
         removed.append(rel)
         _prune_dir(path.parent)
-    return removed, preserved
+    return removed, preserved, unvendored
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -935,8 +996,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.pull or args.push:
         from_root, to_root = (src, REPO_ROOT) if args.pull else (REPO_ROOT, src)
-        managed_removed, preserved = (
-            remove_receipt_retired(REPO_ROOT, MANIFEST) if args.pull else ([], [])
+        managed_removed, preserved, unvendored = (
+            remove_receipt_retired(REPO_ROOT, MANIFEST, src) if args.pull else ([], [], [])
         )
         copied = [rel for rel in MANIFEST if _copy(rel, from_root, to_root)]
         skipped = [rel for rel in MANIFEST if rel not in copied]
@@ -954,6 +1015,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  (absent) {rel}")
         for rel in preserved:
             print(f"  (preserved local edit) {rel}")
+        for rel in unvendored:
+            # Named on every pull, not just the one that moved it. The file is this
+            # project's own from here on -- devkit will not update it again, and the
+            # only thing that could tell you so is this line.
+            print(f"  (now yours -- un-vendored, devkit no longer updates it) {rel}")
         for name in unwired:
             print(f"  (unwired retired hook) {SETTINGS_FILE}: {name}")
         if args.pull:
