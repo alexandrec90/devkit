@@ -301,6 +301,33 @@ puts work in one automatically: an agent editing a checkout its session is not i
 gets a box spawned and the path handed back, instead of a commit on that repo's home
 branch.
 
+### The scheduled pass
+
+Both tiers need something to run afterwards, and "afterwards" is exactly when nobody
+is looking. `worktree.py reconcile` is that pass, and
+`scripts/install-reconcile-task.py` puts it on the Windows scheduler — the only
+runner here that outlives a session, a reboot and a closed editor:
+
+```bash
+python scripts/install-reconcile-task.py --yes      # every 15 minutes
+python scripts/install-reconcile-task.py --status   # what is installed, and whether it runs
+python scripts/install-reconcile-task.py --uninstall --yes
+```
+
+One pass, both tiers. It reaps every box whose PR has merged and reclaims disk when
+the volume is low; then it runs `sweep.py --sync` over the **static** checkouts, so a
+merged PR advances each one's default branch instead of leaving it parked on a spent
+task branch that the next session then opens on. Merging stays a human decision unless
+the task was installed with `--merge`, and the checkout half destroys nothing: it
+refuses any checkout holding uncommitted work, unpushed commits or an open PR, names
+it, and moves on.
+
+The run is windowless, so its only record is `logs/reconcile.log`, overwritten per
+pass and written on success too — a log that appears only on failure cannot be told
+apart from a task that has stopped running. Check `--status` when the workspace starts
+drifting: a scheduled task that has been disabled looks exactly like one that is
+working.
+
 ## Authoring changes
 
 The harness repo is the source of truth. Edit here, open a PR, let CI test it, merge.

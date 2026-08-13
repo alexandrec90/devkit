@@ -42,6 +42,10 @@ Modes:
                   human. This is what makes the tier cost less attention than the
                   sweep instead of the same — `reap --all` already skipped boxes
                   holding work, but a person still had to remember to run it.
+                  It then hands the *static* checkouts to `sweep.py --sync`, so
+                  the one scheduled pass leaves the whole workspace current with
+                  its remotes. `--no-checkouts` turns that half off; the reason
+                  both tiers ride one schedule is in `sync_checkouts`.
 
 `new`, `reap` and `reconcile` print their plan and change nothing unless `--yes` is
 passed, the same contract `sweep.py`'s mutating modes keep.
@@ -1503,6 +1507,89 @@ def survey(workspace: Path, fetch: bool = False, sizes: bool = False) -> list[di
     return rows
 
 
+def checkout_sync_summary(results: list[sweep.Result], code: int) -> dict:
+    """What a `--sync` pass over the static checkouts did, as data rather than prose.
+
+    `sweep.run_mode` hands back rendered text and an exit code: the right shape for a
+    person reading a terminal, the wrong one for a report that also has to be JSON and
+    has to be asserted on. This turns the same pass into rows.
+
+    It is also where the exit code is **reinterpreted**, which is the part worth
+    knowing. `run_mode` returns 1 from a dry run that merely *found* something to do,
+    while `reconcile`'s contract is that non-zero means a failure -- a scheduled runner
+    that reddens on a healthy pass is a runner whose alerts nobody reads. Only 2, a git
+    step that actually failed under `--yes`, is a failure here.
+
+    `held` is derived from the verdict rather than from the plan's refusal text, and
+    the two cannot disagree: `sweep.sync_plan` refuses everything outside
+    `sweep.SYNCABLE`, and every one of those refusals means the same thing -- unshipped
+    work is sitting in that checkout and the sync stepped over it.
+    """
+    rows = [
+        {
+            "checkout": result.state.name,
+            "branch": result.state.branch,
+            "verdict": result.verdict,
+            "reason": result.reason,
+            "held": result.verdict not in sweep.SYNCABLE,
+        }
+        for result in results
+        if result.verdict != sweep.SKIPPED
+    ]
+    return {"rows": rows, "failed": code == 2}
+
+
+def sync_checkouts(
+    workspace: Path,
+    *,
+    apply: bool = False,
+    fetch: bool = True,
+) -> tuple[int, dict]:
+    """Park every static checkout on its home branch, current with `origin/<default>`.
+
+    The static tier's half of the unattended pass, and the reason it exists is a
+    failure worth writing down: a PR merged, and the checkout it was written in stayed
+    parked on the spent task branch for days. Nothing was lost and nothing was red --
+    the local `master` simply never advanced, so the next session opened on a tree
+    that predated the merge and could not see the work it was asked to continue. The
+    fix was one command nobody was going to remember to run, which is the definition of
+    something that belongs on a schedule.
+
+    **Why it rides `reconcile`'s schedule instead of getting its own.** The two tiers
+    stay disjoint in what they touch -- boxes are decided here, checkouts are decided
+    by `sweep.classify`, and neither tool learns about the other's tier -- but they
+    share one trigger, one log and one thing to enable. A second scheduled task is a
+    second thing that can be disabled without anyone noticing, and this workspace has
+    already had exactly that happen to the first one.
+
+    Ordered after the box pass on purpose: reaping a merged box deletes its branch in
+    the *source checkout*, so syncing afterwards reads a checkout the pass has already
+    finished with rather than one it is halfway through.
+
+    Nothing here can strand work. `sweep.sync_plan` acts only on `SYNCABLE` verdicts --
+    a checkout holding uncommitted changes, unpushed commits or an open PR is refused
+    and reported, never parked -- and its steps are `merge --ff-only` and `branch -d`,
+    both of which refuse rather than destroy. This adds no new authority to the
+    scheduled run; it runs the same plan the workspace task has always printed.
+    """
+    try:
+        registry = workspace.read_text(encoding="utf-8")
+    except OSError as exc:
+        # A pass that cannot read the registry has not decided anything, so it must not
+        # report a clean sweep of the checkouts it never looked at.
+        return 1, {"rows": [], "failed": True, "report": f"cannot read {workspace}: {exc}"}
+
+    names = sweep.parse_workspace(registry)
+    if not names:
+        return 0, {"rows": [], "failed": False, "report": ""}
+
+    results = sweep.sweep(workspace.parent, names, fetch=fetch)
+    report, code = sweep.run_mode(workspace.parent, results, "sync", apply=apply, fetch=fetch)
+    summary = checkout_sync_summary(results, code)
+    summary["report"] = report
+    return (1 if summary["failed"] else 0), summary
+
+
 def reconcile(
     workspace: Path,
     *,
@@ -1513,8 +1600,9 @@ def reconcile(
     max_age_days: float = DEFAULT_MAX_AGE_DAYS,
     fetch: bool = True,
     keep_stack: bool = False,
+    checkouts: bool = True,
 ) -> tuple[int, dict]:
-    """One unattended pass over every box: merge what is green, destroy what is done.
+    """One unattended pass over the workspace: boxes reaped, checkouts brought current.
 
     This is the half of the ephemeral tier that makes it cost less attention than the
     sweep rather than the same. `reap --all` already skips boxes holding work, but
@@ -1531,9 +1619,14 @@ def reconcile(
     is a property of the pass rather than something that switches on halfway through
     and treats the last boxes differently from the first.
 
+    The static checkouts follow, through `sync_checkouts`, unless `checkouts=False`.
+    That half destroys nothing and is refused on anything holding work; it exists so a
+    merged PR advances the local default branch without a person remembering to sweep.
+
     Returns `(exit_code, report)`. Non-zero only for a failure — a box that is holding
     work is this tool working, not failing, and a scheduled runner that reddened on one
-    would be a runner whose alerts nobody reads.
+    would be a runner whose alerts nobody reads. The same is true of a checkout the
+    sync stepped over.
     """
     root = workspace.parent
     boxes = live_boxes(root)
@@ -1610,6 +1703,13 @@ def reconcile(
             }
         )
 
+    # Last, and after the reaps: a reap deletes its box's branch in the source
+    # checkout, so the sync reads a checkout this pass has finished with.
+    synced: dict = {}
+    if checkouts:
+        code, synced = sync_checkouts(workspace, apply=apply, fetch=fetch)
+        worst = max(worst, code)
+
     report = {
         "applied": apply,
         "free_gb": round(free, 1),
@@ -1617,6 +1717,7 @@ def reconcile(
         "pressure": pressure,
         "automerge": automerge,
         "boxes": outcomes,
+        "checkouts": synced,
     }
     return worst, report
 
@@ -1704,8 +1805,9 @@ def render_reconcile(report: dict) -> str:
     """
     applied = report.get("applied")
     outcomes = report.get("boxes") or []
-    if not outcomes:
-        return "No ephemeral boxes. Nothing to reconcile."
+    checkouts = report.get("checkouts") or {}
+    if not outcomes and not checkouts.get("rows"):
+        return "No ephemeral boxes and no checkouts to sync. Nothing to reconcile."
 
     by_action: dict[str, list[dict]] = {}
     for row in outcomes:
@@ -1736,9 +1838,38 @@ def render_reconcile(report: dict) -> str:
             url = f"  {row['pr_url']}" if row.get("pr_url") else ""
             lines.append(f"    {row['box']} -- {row['reason']}{url}")
             lines.extend(f"        {note}" for note in row.get("notes") or [])
+    lines.extend(render_checkout_sync(checkouts, applied=bool(applied)))
     if not applied:
         lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")
     return "\n".join(lines)
+
+
+def render_checkout_sync(summary: dict, *, applied: bool) -> list[str]:
+    """The static tier's section of the reconcile report: a count, then the exceptions.
+
+    Deliberately one line when all is well. This runs every fifteen minutes and the
+    healthy answer -- "four checkouts, all current" -- is the answer almost every time;
+    printed as four rows it becomes something a reader learns to skip, and the box
+    section above it is what they actually opened the log for.
+
+    So only two things get their own lines, and both are requests: a checkout the sync
+    stepped over because it is holding work, and a failure. The failure case carries
+    `sweep`'s own report verbatim rather than a summary of it -- this is the one moment
+    the log has to be enough to diagnose from, and the git command that failed is in
+    there.
+    """
+    rows = summary.get("rows") or []
+    if not rows:
+        return []
+    held = [row for row in rows if row.get("held")]
+    verb = "synced" if applied else "would sync"
+    lines = [f"\n  checkouts: {len(rows) - len(held)} {verb}, {len(held)} holding work"]
+    for row in held:
+        lines.append(f"    {row['checkout']} [{row['verdict']}] -- {row['reason']}")
+    if summary.get("failed"):
+        lines.append("    [warn] a step failed -- sweep's own report follows")
+        lines.extend(f"    {line}" for line in (summary.get("report") or "").splitlines())
+    return lines
 
 
 def reap_argument_faults(box: str, every: bool, force: bool) -> list[str]:
@@ -1932,6 +2063,22 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     fix.add_argument("--keep-stack", action="store_true", help="leave Docker stacks running")
+    # Paired with its negation for the same reason `--no-merge` is: the scheduled
+    # command names every knob it passes, so `schtasks /query` shows what is on.
+    static = fix.add_mutually_exclusive_group()
+    static.add_argument(
+        "--checkouts",
+        dest="checkouts",
+        action="store_true",
+        default=True,
+        help="also run sweep.py --sync over the static checkouts (the default)",
+    )
+    static.add_argument(
+        "--no-checkouts",
+        dest="checkouts",
+        action="store_false",
+        help="boxes only; static checkouts stay wherever they are parked",
+    )
     add_common_args(fix)
 
     provision = sub.add_parser("provision", help="install an existing box's toolchain")
@@ -1984,6 +2131,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_age_days=args.max_age_days,
                 fetch=args.fetch,
                 keep_stack=args.keep_stack,
+                checkouts=args.checkouts,
             )
             rendered = json.dumps(report, indent=2) if args.json else render_reconcile(report)
             print(rendered)
