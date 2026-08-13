@@ -432,6 +432,17 @@ def test_the_stopped_pass_is_reported_before_the_drift_it_causes():
     assert "unattended pass" in lines[0]
 
 
+def test_a_specific_reconcile_schedule_failure_replaces_the_log_fallback():
+    schedule = ["schedule: devkit-worktree-reconcile: disabled -- nothing is running it"]
+    assert ws.scheduler_fallback("unattended pass last ran 5d 0h ago", schedule) == ""
+
+
+def test_an_upgrade_failure_does_not_hide_a_stale_reconcile_log():
+    schedule = ["schedule: devkit-upgrade-projects: last run failed (exit 1)"]
+    fallback = "unattended pass last ran 5d 0h ago"
+    assert ws.scheduler_fallback(fallback, schedule) == fallback
+
+
 # --- the architectural check ------------------------------------------------
 
 
