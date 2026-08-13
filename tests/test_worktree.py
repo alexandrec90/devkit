@@ -583,8 +583,24 @@ def test_exactly_one_python_installer_runs_however_many_markers_match(present):
 
 
 def test_the_frontend_toolchain_is_installed_alongside_the_python_one():
-    steps = worktree.provision_steps({"uv.lock"}, frontend_dir="frontend")
+    steps = worktree.provision_steps({"uv.lock"}, frontend_dir="frontend", windows=False)
     assert steps[-1].argv == ("npm", "install", "--prefix", "frontend", "--no-audit", "--no-fund")
+
+
+def test_the_npm_program_name_follows_the_platform():
+    """A bare `npm` is unrunnable as argv on Windows -- npm is `npm.cmd`, a batch shim,
+    and argv resolution does not consult PATHEXT. The step then dies with WinError 2,
+    which `run_provision` downgrades to a `[warn]`, so the box comes out announcing
+    itself provisioned with no `node_modules` and no frontend linter in it."""
+    assert worktree.npm_executable(windows=True) == "npm.cmd"
+    assert worktree.npm_executable(windows=False) == "npm"
+
+
+def test_the_frontend_step_is_runnable_on_windows():
+    """The reversion check for the above: with a bare `npm` this is what shipped, and
+    every Windows box silently lost eslint, tsc, stylelint and markdownlint."""
+    steps = worktree.provision_steps({"uv.lock"}, frontend_dir="frontend", windows=True)
+    assert steps[-1].argv[0] == "npm.cmd"
 
 
 def test_a_project_with_no_frontend_tier_runs_no_npm():

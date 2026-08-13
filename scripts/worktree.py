@@ -425,6 +425,24 @@ def venv_python(windows: bool) -> str:
     return ".venv/Scripts/python.exe" if windows else ".venv/bin/python"
 
 
+def npm_executable(windows: bool) -> str:
+    """npm's program name on this platform.
+
+    On Windows npm ships as `npm.cmd`, a batch shim; there is no `npm.exe`. These steps
+    run as argv with no shell — deliberately, so the ladder can be asserted — and argv
+    resolution does not consult PATHEXT, so a bare `npm` raises `[WinError 2] The system
+    cannot find the file specified`.
+
+    That failure was *silent in effect*: `run_provision` reports a step it could not
+    start as a `[warn]` and keeps the box, so every Windows box came out with no
+    `node_modules` while still announcing itself provisioned. Every frontend check —
+    eslint, tsc, stylelint, markdownlint — was then unrunnable in a box, so `/ship`'s
+    changed-scope lint gate could not catch a frontend or Markdown defect locally and
+    left it to CI.
+    """
+    return "npm.cmd" if windows else "npm"
+
+
 def provision_steps(
     present: frozenset[str] | set[str],
     install_command: str = "",
@@ -482,7 +500,14 @@ def provision_steps(
         steps.append(
             ProvisionStep(
                 f"npm install ({frontend_dir})",
-                ("npm", "install", "--prefix", frontend_dir, "--no-audit", "--no-fund"),
+                (
+                    npm_executable(windows),
+                    "install",
+                    "--prefix",
+                    frontend_dir,
+                    "--no-audit",
+                    "--no-fund",
+                ),
             )
         )
     return tuple(steps)
