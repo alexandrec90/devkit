@@ -38,8 +38,14 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sweep
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UPGRADE_SCRIPT = REPO_ROOT / "scripts" / "upgrade-project.py"
+# The directory ephemeral boxes live in. A schedule must never point inside it -- see
+# `main`. Read from `sweep` rather than spelled again, so one rename moves both.
+BOXES_DIR = sweep.BOXES_DIR_NAME
 
 # The registered name, and the string `--check` looks the task up by. Stable because
 # renaming it would orphan whatever a previous version registered -- the installer
@@ -68,25 +74,63 @@ class Schedule:
     script: str
     at: str
 
+    workspace: str = ""
+
     @property
     def command(self) -> list[str]:
-        """The argv the scheduler runs. `--all --yes` is the whole point of it."""
-        return [self.python, self.script, "--all", "--yes"]
+        """The argv the scheduler runs. `--all --yes` is the whole point of it.
+
+        `--workspace` is passed explicitly, the way the sibling reconcile task does.
+        `upgrade-project.py` can resolve it from its own location, but a scheduled task
+        has no cwd worth relying on and the registered command is the only record of
+        what it operates on -- a reader of `schtasks /Query` should not have to know the
+        default to know the blast radius.
+        """
+        argv = [self.python, self.script, "--all", "--yes"]
+        if self.workspace:
+            argv += ["--workspace", self.workspace]
+        return argv
+
+
+def windowless_python(executable: str = sys.executable) -> str:
+    """`pythonw.exe` beside `executable` when it exists, else `executable` unchanged.
+
+    **A scheduled task must not put a console on the desktop.** `python.exe` is a
+    console application, so Windows allocates one every time the task fires -- a black
+    window appearing and vanishing on its own, nightly, for a job whose entire output is
+    a log file nobody is watching in real time. `pythonw.exe` is the same interpreter
+    built as a GUI subsystem app, which is what the existing `devkit-worktree-reconcile`
+    task uses, and matching it is the point: two scheduled devkit jobs should not differ
+    in whether they interrupt you.
+
+    Falls back rather than failing: a POSIX machine has no `pythonw`, and neither does
+    every Windows Python layout. There the console question does not arise the same way.
+
+    The cost is real and worth stating: `pythonw` has no stdout or stderr at all, so
+    anything printed goes nowhere. That is survivable only because every failure this
+    run can produce is written to `logs/upgrade.log` -- see `upgrade-project.py`'s
+    `_finish`, which writes the artifact on *every* exit path including the ones that
+    never reach a project.
+    """
+    candidate = Path(executable).with_name("pythonw.exe")
+    return str(candidate) if candidate.is_file() else executable
 
 
 def schedule_for(at: str = DEFAULT_TIME, root: Path = REPO_ROOT) -> Schedule:
     """Resolve the schedule against *this* interpreter and *this* checkout.
 
-    `sys.executable` rather than a bare `python`: a scheduled task runs with no
-    activated virtualenv and often a different PATH, and `upgrade-project.py` imports
-    `sweep`, `worktree` and `task_branch` from beside it. Naming the interpreter that
-    is running this installer is the only spelling that is right by construction.
+    Derived from `sys.executable` rather than a bare `python`: a scheduled task runs
+    with no activated virtualenv and often a different PATH, and `upgrade-project.py`
+    imports `sweep`, `worktree` and `task_branch` from beside it. Naming the interpreter
+    that is running this installer is the only spelling that is right by construction.
     """
+    workspace = sweep.default_workspace(root)
     return Schedule(
         name=TASK_NAME,
-        python=sys.executable,
+        python=windowless_python(),
         script=str((root / "scripts" / "upgrade-project.py").resolve()),
         at=at,
+        workspace=str(workspace) if workspace else "",
     )
 
 
@@ -223,15 +267,41 @@ def main(argv: list[str] | None = None) -> int:
         help="report whether a task is registered and still points at this checkout",
     )
     parser.add_argument("--at", default=DEFAULT_TIME, help="daily start time, HH:MM (24-hour)")
+    parser.add_argument(
+        "--devkit",
+        type=Path,
+        default=REPO_ROOT,
+        help=(
+            "the devkit checkout the task should run from (default: this one). Name the "
+            "*static* checkout when installing from an ephemeral box -- a task pointing "
+            "into .worktrees/ dies the moment reconcile reaps it"
+        ),
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     if not valid_time(args.at):
         parser.error(f"--at must be HH:MM in 24-hour time, not {args.at!r}")
-    if not UPGRADE_SCRIPT.is_file():
-        print(f"schedule: no upgrade script at {UPGRADE_SCRIPT}", file=sys.stderr)
+    root = args.devkit.expanduser().resolve()
+    upgrade_script = root / "scripts" / "upgrade-project.py"
+    if not upgrade_script.is_file():
+        print(f"schedule: no upgrade script at {upgrade_script}", file=sys.stderr)
+        return 2
+    if args.yes and BOXES_DIR in root.parts:
+        # Registering a box would look fine today and break silently on the next
+        # `reconcile`. Refused rather than warned: the failure this mode's `--check`
+        # exists for is a task nobody notices has stopped running.
+        #
+        # Only on `--yes`. Printing the plan from a box is how an agent reads what the
+        # install would do before it has anywhere else to run, and refusing that would
+        # make the read-only mode useless in the place it is most often invoked from.
+        print(
+            f"schedule: {root} is an ephemeral box. Point --devkit at the static "
+            f"checkout, which outlives the boxes.",
+            file=sys.stderr,
+        )
         return 2
 
-    schedule = schedule_for(args.at)
+    schedule = schedule_for(args.at, root)
     if args.check:
         code, message = run_check(schedule)
         print(message, file=sys.stderr if code else sys.stdout)

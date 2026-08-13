@@ -286,6 +286,7 @@ def commit_for(devkit: Path, rev: str) -> str:
         capture_output=True,
         text=True,
         check=False,
+        creationflags=sweep.NO_WINDOW,
     )
     return result.stdout.strip() if result.returncode == 0 else ""
 
@@ -403,6 +404,7 @@ def source_at_tag(devkit: Path, tag: str):
             capture_output=True,
             text=True,
             check=False,
+            creationflags=sweep.NO_WINDOW,
         )
         if add.returncode != 0:
             raise RuntimeError((add.stderr or add.stdout).strip())
@@ -414,6 +416,7 @@ def source_at_tag(devkit: Path, tag: str):
                 capture_output=True,
                 text=True,
                 check=False,
+                creationflags=sweep.NO_WINDOW,
             )
 
 
@@ -429,6 +432,7 @@ def run_pull(project: Path, devkit: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=False,
+        creationflags=sweep.NO_WINDOW,
     )
 
 
@@ -533,6 +537,7 @@ def verify_pull(project: Path, source: Path) -> subprocess.CompletedProcess[str]
         capture_output=True,
         text=True,
         check=False,
+        creationflags=sweep.NO_WINDOW,
     )
 
 
@@ -857,6 +862,7 @@ def release_tags(devkit: Path) -> list[str]:
         capture_output=True,
         text=True,
         check=False,
+        creationflags=sweep.NO_WINDOW,
     )
     if result.returncode != 0:
         return []

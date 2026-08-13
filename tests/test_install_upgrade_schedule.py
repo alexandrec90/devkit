@@ -36,8 +36,46 @@ def test_the_interpreter_is_this_one_not_a_bare_python():
     """A scheduled task runs with no activated virtualenv and often a different PATH,
     and the script imports `sweep`/`worktree` from beside it."""
     resolved = sched.schedule_for()
-    assert resolved.python.endswith(("python.exe", "python", "python3"))
+    assert resolved.python.endswith(("pythonw.exe", "python.exe", "python", "python3"))
     assert resolved.python != "python"
+
+
+# --- it must not put a window on the desktop -----------------------------------
+
+
+def test_the_task_runs_the_windowless_interpreter(tmp_path):
+    """`python.exe` is a console app, so Windows allocates a console every time the task
+    fires -- a black window appearing and vanishing on its own, nightly, for a job whose
+    only output is a log file. The sibling `devkit-worktree-reconcile` task already uses
+    `pythonw.exe`; two scheduled devkit jobs must not differ in whether they interrupt
+    you."""
+    real = tmp_path / "python.exe"
+    real.write_text("", encoding="utf-8")
+    (tmp_path / "pythonw.exe").write_text("", encoding="utf-8")
+    assert sched.windowless_python(str(real)).endswith("pythonw.exe")
+
+
+def test_a_layout_without_pythonw_falls_back_rather_than_failing(tmp_path):
+    """POSIX has no `pythonw`, and neither does every Windows layout. There the console
+    question does not arise the same way, so the honest answer is the interpreter given."""
+    real = tmp_path / "python3"
+    real.write_text("", encoding="utf-8")
+    assert sched.windowless_python(str(real)) == str(real)
+
+
+def test_the_schedule_names_the_workspace_it_operates_on():
+    """The registered command is the only record of the blast radius; a reader of
+    `schtasks /Query` should not have to know the script's default to know it."""
+    resolved = sched.schedule_for()
+    assert "--workspace" in resolved.command
+    assert resolved.command.index("--workspace") == len(resolved.command) - 2
+
+
+def test_a_schedule_with_no_workspace_resolved_still_runs():
+    """`--workspace` is omitted rather than passed empty: an empty string reaches
+    argparse as a stray positional, which is the failure the picker convention exists
+    to avoid."""
+    assert "--workspace" not in a_schedule(workspace="").command
 
 
 def test_the_script_path_is_absolute_and_points_at_this_checkout():
@@ -89,6 +127,35 @@ def test_a_bad_time_stops_the_install_rather_than_registering_it():
     with pytest.raises(SystemExit) as exit_info:
         sched.main(["--yes", "--at", "25:00"])
     assert exit_info.value.code == 2
+
+
+# --- the checkout the task points at -------------------------------------------
+
+
+def test_registering_from_an_ephemeral_box_is_refused(tmp_path, capsys, monkeypatch):
+    """A task pointing into `.worktrees/` looks fine today and dies silently the moment
+    `reconcile` reaps that box -- which is exactly the failure `--check` exists to catch,
+    so it is better not to create it. Agents install from boxes; this is not exotic."""
+    box = tmp_path / sched.BOXES_DIR / "devkit--something-0812"
+    (box / "scripts").mkdir(parents=True)
+    (box / "scripts" / "upgrade-project.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(sched, "install", lambda *_a, **_kw: pytest.fail("registered a box"))
+
+    assert sched.main(["--yes", "--devkit", str(box)]) == 2
+    assert "ephemeral box" in capsys.readouterr().err
+
+
+def test_a_missing_upgrade_script_stops_the_install(tmp_path, capsys):
+    assert sched.main(["--yes", "--devkit", str(tmp_path)]) == 2
+    assert "no upgrade script" in capsys.readouterr().err
+
+
+def test_the_named_checkout_is_what_the_task_runs(tmp_path, capsys):
+    """`--devkit` is how an install from a box still targets the static checkout."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "upgrade-project.py").write_text("", encoding="utf-8")
+    assert sched.main(["--devkit", str(tmp_path)]) == 0
+    assert str(tmp_path / "scripts" / "upgrade-project.py") in capsys.readouterr().out
 
 
 # --- --check -------------------------------------------------------------------
