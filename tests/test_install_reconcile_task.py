@@ -53,6 +53,17 @@ def test_paths_are_quoted_for_a_profile_name_with_spaces():
     assert '"C:\\Program Files\\Python\\python.exe"' in quoted
 
 
+def test_the_static_checkouts_are_swept_by_default():
+    """The whole reason a workspace with no boxes still wants this task installed: a
+    merged PR has to advance the local default branch without anyone remembering."""
+    assert "--checkouts" in command()
+    assert "--no-checkouts" not in command()
+
+
+def test_the_checkout_sweep_can_be_scheduled_off():
+    assert "--no-checkouts" in command(checkouts=False)
+
+
 def test_a_disk_floor_is_passed_only_when_set():
     assert "--min-free-gb" not in command()
     assert "--min-free-gb 40.0" in command(min_free_gb=40.0)

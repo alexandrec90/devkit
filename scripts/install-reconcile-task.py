@@ -14,6 +14,13 @@ makes it safe: a box holding work is never touched, at any age, under any disk
 pressure. It runs with `--no-merge`, so merging a PR stays a human decision. Flip that
 with `--merge` here when you would rather it merged anything green.
 
+It also carries `--checkouts`, which brings the *static* checkouts up to their remotes
+(`worktree.sync_checkouts`). That half destroys nothing and refuses any checkout
+holding work, and it is the reason this task is worth having installed even in a
+workspace with no boxes at all: without it a merged PR leaves the local default branch
+behind, and the next session opens on a tree that predates the work it is continuing.
+`--no-checkouts` schedules the box pass alone.
+
 Every knob it passes is visible in `schtasks /query /tn <name> /xml`, and the task is
 removed by `--uninstall`, so nothing about it is hidden state.
 
@@ -70,6 +77,7 @@ def reconcile_command(
     workspace: Path,
     automerge: bool = False,
     min_free_gb: float = 0.0,
+    checkouts: bool = True,
 ) -> str:
     """The command line the scheduled task runs, as one string.
 
@@ -90,6 +98,10 @@ def reconcile_command(
         "--workspace",
         f'"{workspace}"',
         "--merge" if automerge else "--no-merge",
+        # Named rather than left to the default, like every other knob here: the
+        # command string is what `schtasks /query` shows, and this half of the pass
+        # runs git commands in checkouts a person is working in.
+        "--checkouts" if checkouts else "--no-checkouts",
         "--yes",
     ]
     if min_free_gb > 0:
@@ -152,6 +164,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="let the scheduled run squash-merge PRs whose gate is green (off by default)",
     )
+    parser.add_argument(
+        "--no-checkouts",
+        dest="checkouts",
+        action="store_false",
+        help=(
+            "schedule the box pass only; static checkouts are left wherever they are "
+            "parked and a merged PR stops advancing the local default branch again"
+        ),
+    )
     parser.add_argument("--min-free-gb", type=float, default=0.0)
     parser.add_argument("--workspace", type=Path, default=None)
     parser.add_argument("--yes", dest="apply", action="store_true", help="actually call schtasks")
@@ -183,14 +204,21 @@ def main(argv: list[str] | None = None) -> int:
     # at a registry that does not exist -- every fifteen minutes, silently.
     workspace = (args.workspace or sweep.default_workspace(REPO_ROOT)).resolve()
     command = reconcile_command(
-        windowless(sys.executable), worktree_script(), workspace, args.automerge, args.min_free_gb
+        windowless(sys.executable),
+        worktree_script(),
+        workspace,
+        args.automerge,
+        args.min_free_gb,
+        args.checkouts,
     )
     target = install_argv(args.name, command, args.minutes)
     if not args.apply:
+        parked = "ON -- merged PRs advance each checkout's default branch"
         print(
             f"Would run: {' '.join(target)}\n\n"
-            f"  every    {args.minutes} minutes\n"
-            f"  merging  {'ON -- green PRs are squash-merged' if args.automerge else 'off'}\n\n"
+            f"  every     {args.minutes} minutes\n"
+            f"  merging   {'ON -- green PRs are squash-merged' if args.automerge else 'off'}\n"
+            f"  checkouts {parked if args.checkouts else 'off -- boxes only'}\n\n"
             f"Dry run -- re-run with --yes."
         )
         return 0
