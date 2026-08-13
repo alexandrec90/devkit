@@ -453,11 +453,7 @@ def test_an_edit_into_a_reference_checkout_is_allowed(root, monkeypatch, referen
     argument, so only the shell can be wrong about it.
     """
     (root / reference).mkdir()
-    workspace = root / "alex-projects.code-workspace"
-    workspace.write_text(
-        json.dumps({"folders": [{"path": name} for name in [*PROJECTS, reference]]}),
-        encoding="utf-8",
-    )
+    workspace = _workspace(root, extra=[reference])
     # A home branch, which is the case that would otherwise be boxed.
     monkeypatch.setattr(guard, "current_branch", on_branch("develop"))
     monkeypatch.setattr(
@@ -557,10 +553,11 @@ class _stdin:
         return self._text
 
 
-def _workspace(root):
+def _workspace(root, extra=()):
     path = root / "alex-projects.code-workspace"
     path.write_text(
-        json.dumps({"folders": [{"path": name} for name in PROJECTS]}), encoding="utf-8"
+        json.dumps({"folders": [{"path": name} for name in [*PROJECTS, *extra]]}),
+        encoding="utf-8",
     )
     return path
 
