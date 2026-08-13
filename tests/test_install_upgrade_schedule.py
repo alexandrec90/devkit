@@ -237,14 +237,14 @@ class FakeRunner:
 
 
 def test_a_failed_registration_is_reported_rather_than_assumed(monkeypatch):
-    monkeypatch.setattr(sched.os, "name", "nt")
+    monkeypatch.setattr(sched, "WINDOWS", True)
     ok, message = sched.install(a_schedule(), FakeRunner(returncode=1, stderr="ERROR: denied"))
     assert not ok
     assert "denied" in message
 
 
 def test_a_successful_registration_says_when_it_will_run(monkeypatch):
-    monkeypatch.setattr(sched.os, "name", "nt")
+    monkeypatch.setattr(sched, "WINDOWS", True)
     ok, message = sched.install(a_schedule(at="05:15"), FakeRunner())
     assert ok
     assert "05:15" in message
@@ -253,7 +253,7 @@ def test_a_successful_registration_says_when_it_will_run(monkeypatch):
 def test_a_posix_machine_is_told_the_line_rather_than_having_its_crontab_edited(monkeypatch):
     """Editing a user's crontab unattended is the kind of irreversible edit this
     workspace does not do; the line is the deliverable there."""
-    monkeypatch.setattr(sched.os, "name", "posix")
+    monkeypatch.setattr(sched, "WINDOWS", False)
     ok, message = sched.install(a_schedule(), FakeRunner())
     assert not ok
     assert "* * *" in message

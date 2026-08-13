@@ -100,7 +100,7 @@ def test_uninstall_names_the_task_and_does_not_prompt():
 
 
 def test_a_dry_run_never_calls_schtasks(monkeypatch, capsys):
-    monkeypatch.setattr(installer.os, "name", "nt")
+    monkeypatch.setattr(installer, "WINDOWS", True)
     monkeypatch.setattr(
         installer, "_run", lambda argv: (_ for _ in ()).throw(AssertionError("called schtasks"))
     )
@@ -108,12 +108,23 @@ def test_a_dry_run_never_calls_schtasks(monkeypatch, capsys):
     assert "Dry run" in capsys.readouterr().out
 
 
-def test_installing_from_an_ephemeral_box_is_refused(monkeypatch, capsys):
+def _box_root(tmp_path: Path) -> Path:
+    """A path shaped like an ephemeral box, on whichever OS is running the test.
+
+    Built with `/` rather than written as a Windows literal. `Path(r"C:\\ws\\.worktrees\\b")`
+    is a *single* path component on Linux -- backslash is an ordinary character there --
+    so `BOXES_DIR_NAME in root.parts` was false and this suite passed on Windows while
+    the same assertion failed in CI.
+    """
+    return tmp_path / installer.sweep.BOXES_DIR_NAME / "devkit--topic-0813"
+
+
+def test_installing_from_an_ephemeral_box_is_refused(monkeypatch, capsys, tmp_path):
     """The task would carry the box's path verbatim, and the pass it schedules destroys
     boxes -- so it works until the next reconcile, then fails silently every fifteen
     minutes forever. The sibling installer already refused this; this one did not."""
-    monkeypatch.setattr(installer.os, "name", "nt")
-    monkeypatch.setattr(installer, "REPO_ROOT", Path(r"C:\ws\.worktrees\devkit--topic-0813"))
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    monkeypatch.setattr(installer, "REPO_ROOT", _box_root(tmp_path))
     monkeypatch.setattr(
         installer, "_run_argv", lambda argv: pytest.fail("registered a task from a box")
     )
@@ -122,17 +133,17 @@ def test_installing_from_an_ephemeral_box_is_refused(monkeypatch, capsys):
     assert "ephemeral box" in capsys.readouterr().err
 
 
-def test_reading_the_plan_from_a_box_still_works(monkeypatch, capsys):
+def test_reading_the_plan_from_a_box_still_works(monkeypatch, capsys, tmp_path):
     """The read-only mode is most often invoked from a box -- that is where an agent
     is, and refusing it would leave nothing to read before moving."""
-    monkeypatch.setattr(installer.os, "name", "nt")
-    monkeypatch.setattr(installer, "REPO_ROOT", Path(r"C:\ws\.worktrees\devkit--topic-0813"))
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    monkeypatch.setattr(installer, "REPO_ROOT", _box_root(tmp_path))
     assert installer.main([]) == 0
     assert "Dry run" in capsys.readouterr().out
 
 
 def test_a_non_windows_machine_is_a_no_op_not_a_failure(monkeypatch, capsys):
-    monkeypatch.setattr(installer.os, "name", "posix")
+    monkeypatch.setattr(installer, "WINDOWS", False)
     assert installer.main(["--yes"]) == 0
     assert "Windows-only" in capsys.readouterr().out
 

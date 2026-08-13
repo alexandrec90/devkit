@@ -53,6 +53,12 @@ BOXES_DIR = sweep.BOXES_DIR_NAME
 # would report "nothing scheduled" while the old entry kept firing.
 TASK_NAME = "devkit-upgrade-projects"
 
+# Resolved once, at import, so a test can force the Windows path without touching
+# `os.name` itself. `pathlib` reads `os.name` to decide whether `Path(...)` builds a
+# `WindowsPath`, so patching the global makes every subsequent bare `Path(...)` raise
+# `NotImplementedError` on a POSIX runner -- in code the patch was never aimed at.
+WINDOWS = os.name == "nt"
+
 # Daily rather than hourly. A devkit release is a human act that happens a few times a
 # month, so a tighter loop spends fetches to discover the same "already current" it
 # discovered an hour ago; and the run opens PRs, which is not a thing to do more often
@@ -210,7 +216,7 @@ def drifted(registered: str, schedule: Schedule) -> str:
     return ""
 
 
-def render_plan(schedule: Schedule, windows: bool = os.name == "nt") -> str:
+def render_plan(schedule: Schedule, windows: bool = WINDOWS) -> str:
     """What `--yes` would do, in the words of whichever scheduler is going to do it."""
     lines = [
         f"schedule: {schedule.name} -- daily at {schedule.at}",
@@ -240,7 +246,7 @@ def install(schedule: Schedule, runner: Runner = run_command) -> tuple[bool, str
     edit this workspace does not do unattended, so there the plan *is* the deliverable
     and the line is printed for pasting.
     """
-    if os.name != "nt":
+    if not WINDOWS:
         return False, (
             "not a Windows machine -- add this crontab line yourself:\n  " + crontab_line(schedule)
         )
@@ -252,7 +258,7 @@ def install(schedule: Schedule, runner: Runner = run_command) -> tuple[bool, str
 
 def run_check(schedule: Schedule, runner: Runner = run_command) -> tuple[int, str]:
     """`(exit code, message)` for `--check`. 1 when the schedule needs attention."""
-    if os.name != "nt":
+    if not WINDOWS:
         return 0, "not a Windows machine -- nothing this installer can query"
     result = runner(query_argv(schedule.name))
     registered = registered_command(result.stdout) if result.returncode == 0 else ""

@@ -49,6 +49,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TASK_NAME = "devkit-worktree-reconcile"
 DEFAULT_INTERVAL_MINUTES = 15
 
+# Resolved once, at import, so a test can force the Windows path without touching
+# `os.name` itself. That distinction is not stylistic: `pathlib` reads `os.name` to
+# decide whether `Path(...)` builds a `WindowsPath`, so a test that patches the global
+# makes every subsequent bare `Path(...)` raise `NotImplementedError` on a POSIX
+# runner. It passed here and failed in CI, in code the patch was never aimed at.
+WINDOWS = os.name == "nt"
+
 
 def worktree_script(root: Path = REPO_ROOT) -> Path:
     return root / "scripts" / "worktree.py"
@@ -185,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--yes", dest="apply", action="store_true", help="actually call schtasks")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
-    if os.name != "nt":
+    if not WINDOWS:
         print("install-reconcile-task: Windows-only; nothing to do here.")
         return 0
 
