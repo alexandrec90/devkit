@@ -105,6 +105,17 @@ def test_lint_runner_accepts_every_flag_the_stop_hook_passes():
         assert flag in help_text, f"stop.py passes {flag} but scripts/lint-all.py rejects it"
 
 
+def test_lint_runner_accepts_the_paths_flag_ship_probes_for():
+    """`ship.py` is vendored byte-identical and hands the lint runner the branch diff.
+
+    Without `--paths` the gate falls back to `--changed`, whose set is the working tree
+    versus HEAD -- and ship refuses to run at all unless that is clean. So the fallback
+    lints nothing and reports LINT PASSED for it, which is what shipped for as long as
+    `--changed` was the only scope ship could ask for.
+    """
+    assert "--paths" in _lint_runner_help(REPO_ROOT)
+
+
 def test_stop_hook_finds_devkits_own_lint_runner():
     stop = load_script("scripts/hooks/stop.py")
     assert stop.LINT_ALL.exists(), "the Stop hook's Tier 1 script is missing from devkit"

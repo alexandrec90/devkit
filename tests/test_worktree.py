@@ -583,8 +583,24 @@ def test_exactly_one_python_installer_runs_however_many_markers_match(present):
 
 
 def test_the_frontend_toolchain_is_installed_alongside_the_python_one():
-    steps = worktree.provision_steps({"uv.lock"}, frontend_dir="frontend")
+    steps = worktree.provision_steps({"uv.lock"}, frontend_dir="frontend", windows=False)
     assert steps[-1].argv == ("npm", "install", "--prefix", "frontend", "--no-audit", "--no-fund")
+
+
+def test_the_npm_program_name_follows_the_platform():
+    """A bare `npm` is unrunnable as argv on Windows -- npm is `npm.cmd`, a batch shim,
+    and argv resolution does not consult PATHEXT. The step then dies with WinError 2,
+    which `run_provision` downgrades to a `[warn]`, so the box comes out announcing
+    itself provisioned with no `node_modules` and no frontend linter in it."""
+    assert worktree.npm_executable(windows=True) == "npm.cmd"
+    assert worktree.npm_executable(windows=False) == "npm"
+
+
+def test_the_frontend_step_is_runnable_on_windows():
+    """The reversion check for the above: with a bare `npm` this is what shipped, and
+    every Windows box silently lost eslint, tsc, stylelint and markdownlint."""
+    steps = worktree.provision_steps({"uv.lock"}, frontend_dir="frontend", windows=True)
+    assert steps[-1].argv[0] == "npm.cmd"
 
 
 def test_a_project_with_no_frontend_tier_runs_no_npm():
@@ -1380,6 +1396,157 @@ def test_reconcile_dry_run_changes_nothing(workspace, monkeypatch):
 def test_reconcile_cli_reports_and_exits_zero_on_an_empty_workspace(workspace, capsys):
     assert worktree.main(["reconcile", "--no-fetch", "--workspace", str(workspace)]) == 0
     assert "Nothing to reconcile" in capsys.readouterr().out
+
+
+# --- the static half of the scheduled pass ----------------------------------
+
+
+def _results(*pairs: tuple[str, str]) -> list:
+    """`sweep.Result`s from `(checkout name, verdict)` pairs."""
+    return [
+        sweep.Result(state(name=name, branch="master"), verdict, f"because {verdict}")
+        for name, verdict in pairs
+    ]
+
+
+def test_a_checkout_holding_work_is_reported_rather_than_parked():
+    """The refusal is the safety property: `sweep.sync_plan` acts only on SYNCABLE, so
+    anything else is unshipped work the scheduled pass must step over and name."""
+    summary = worktree.checkout_sync_summary(
+        _results(("carameli", sweep.CLEAN), ("devkit", sweep.NEEDS_BRANCH)), 0
+    )
+    assert [row["held"] for row in summary["rows"]] == [False, True]
+
+
+def test_every_syncable_verdict_counts_as_synced():
+    """spent-branch is the one the whole change is for -- a merged PR's branch, still
+    checked out, keeping the local default branch from ever advancing."""
+    rows = worktree.checkout_sync_summary(
+        _results(("a", sweep.SPENT), ("b", sweep.NEEDS_PULL), ("c", sweep.CLEAN)), 0
+    )["rows"]
+    assert not any(row["held"] for row in rows)
+
+
+def test_a_non_git_folder_is_left_out_of_the_report_entirely():
+    """`skipped` is not a checkout with an opinion; a row for it is noise in a report
+    that is read every fifteen minutes."""
+    summary = worktree.checkout_sync_summary(_results(("notes", sweep.SKIPPED)), 0)
+    assert summary["rows"] == []
+
+
+def test_a_dry_run_that_found_work_is_not_a_failure():
+    """`run_mode` returns 1 for "there is something to do", and a scheduled runner that
+    reddens on a healthy pass is a runner whose alerts nobody reads."""
+    assert worktree.checkout_sync_summary(_results(("carameli", sweep.CLEAN)), 1)["failed"] is False
+
+
+def test_a_failed_git_step_is_a_failure():
+    assert worktree.checkout_sync_summary(_results(("carameli", sweep.CLEAN)), 2)["failed"] is True
+
+
+def test_sync_checkouts_asks_sweep_for_the_sync_mode_and_applies_it(workspace, monkeypatch):
+    """The wiring test: reconcile must not invent its own plan for the static tier --
+    `sweep` owns those checkouts and its `--sync` is the plan the workspace task has
+    always printed."""
+    seen: dict = {}
+    monkeypatch.setattr(sweep, "sweep", lambda root, names, fetch=True: _results(("demo", "clean")))
+    monkeypatch.setattr(
+        sweep,
+        "run_mode",
+        lambda root, results, mode, apply, fetch=True, slug="sweep": (
+            seen.update(mode=mode, apply=apply),
+            ("sync: applied", 0),
+        )[1],
+    )
+
+    code, summary = worktree.sync_checkouts(workspace, apply=True)
+
+    assert code == 0
+    assert seen == {"mode": "sync", "apply": True}
+    assert summary["rows"][0]["checkout"] == "demo"
+
+
+def test_the_reference_checkout_is_never_swept(tmp_path, monkeypatch):
+    """VanillaLand is an Azure DevOps reference checkout on a `develop` base, and
+    nothing in this workspace ships from it. Reading the exclusion off
+    `sweep.parse_workspace` rather than re-listing it here is what keeps the scheduled
+    pass and the hand-run sweep agreeing about which checkouts exist."""
+    registry = tmp_path / "registry.code-workspace"
+    registry.write_text(
+        json.dumps({"folders": [{"path": "carameli"}, {"path": "VanillaLand"}]}), encoding="utf-8"
+    )
+    swept: list[list[str]] = []
+    monkeypatch.setattr(
+        sweep, "sweep", lambda root, names, fetch=True: (swept.append(names), [])[1]
+    )
+    monkeypatch.setattr(sweep, "run_mode", lambda *a, **k: ("", 0))
+
+    worktree.sync_checkouts(registry, apply=True)
+
+    assert swept == [["carameli"]]
+
+
+def test_sync_checkouts_reports_a_registry_it_could_not_read(tmp_path):
+    """Reporting a clean sweep of checkouts it never looked at is the one wrong answer
+    -- it is indistinguishable from four checkouts that are genuinely current."""
+    code, summary = worktree.sync_checkouts(tmp_path / "missing.code-workspace", apply=True)
+    assert code == 1
+    assert summary["failed"] is True
+
+
+def test_reconcile_syncs_the_checkouts_by_default(workspace, monkeypatch):
+    """The regression test for the whole change: a PR merges, and nothing local
+    advances until someone remembers to sweep."""
+    called: list[bool] = []
+    monkeypatch.setattr(
+        worktree,
+        "sync_checkouts",
+        lambda ws, apply, fetch: (called.append(apply), (0, {"rows": [], "failed": False}))[1],
+    )
+
+    worktree.reconcile(workspace, apply=True)
+
+    assert called == [True]
+
+
+def test_reconcile_can_be_scheduled_for_boxes_only(workspace, monkeypatch):
+    monkeypatch.setattr(
+        worktree,
+        "sync_checkouts",
+        lambda *a, **k: pytest.fail("--no-checkouts still touched the static tier"),
+    )
+    assert worktree.reconcile(workspace, apply=True, checkouts=False)[0] == 0
+
+
+def test_a_checkout_that_will_not_sync_reddens_the_pass(workspace, monkeypatch):
+    monkeypatch.setattr(
+        worktree, "sync_checkouts", lambda *a, **k: (1, {"rows": [], "failed": True})
+    )
+    assert worktree.reconcile(workspace, apply=True)[0] == 1
+
+
+def test_the_healthy_checkout_report_is_one_line(workspace, monkeypatch):
+    """Read every fifteen minutes, so the answer it gives almost every time has to be
+    skimmable -- otherwise the box section above it is what gets skipped."""
+    summary = worktree.checkout_sync_summary(_results(("a", sweep.CLEAN), ("b", sweep.SPENT)), 0)
+    assert worktree.render_checkout_sync(summary, applied=True) == [
+        "\n  checkouts: 2 synced, 0 holding work"
+    ]
+
+
+def test_a_failing_sync_carries_sweeps_own_report_into_the_log():
+    """The log is the only artifact a windowless run leaves, so the failing git command
+    has to be in it -- a count of failures is not something you can diagnose from."""
+    summary = worktree.checkout_sync_summary(_results(("a", sweep.CLEAN)), 2)
+    summary["report"] = "  a: FAILED at `git merge --ff-only origin/master`"
+    rendered = "\n".join(worktree.render_checkout_sync(summary, applied=True))
+    assert "FAILED at `git merge --ff-only origin/master`" in rendered
+
+
+def test_the_checkouts_holding_work_are_named_not_counted():
+    summary = worktree.checkout_sync_summary(_results(("devkit", sweep.NEEDS_BRANCH)), 0)
+    rendered = "\n".join(worktree.render_checkout_sync(summary, applied=True))
+    assert "devkit [needs-branch]" in rendered
 
 
 # --- the scheduled pass leaves a record -------------------------------------

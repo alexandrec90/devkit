@@ -27,6 +27,7 @@ upstream rather than a consumer:
 Usage:
     python scripts/lint-all.py            # whole repo
     python scripts/lint-all.py --changed  # working-tree diff vs HEAD, plus untracked
+    python scripts/lint-all.py --paths a.py b.md  # exactly these (/ship's branch diff)
 """
 
 from __future__ import annotations
@@ -84,9 +85,28 @@ def changed_paths() -> list[str]:
     return sorted({n for n in (tracked + untracked) if (REPO_ROOT / n).exists()})
 
 
+def explicit_paths(paths: list[str]) -> list[str]:
+    """Exactly the paths given, normalised, minus any that no longer exist.
+
+    `--paths` is how a caller that knows its own scope states it. `/ship` is the
+    motivating one: it insists on a clean tree and then had only `--changed` to ask
+    with, whose set is the working tree *versus HEAD* — empty, by construction, for
+    every commit it was about to push. The gate passed having linted nothing.
+
+    A deleted path is dropped rather than passed on: there is nothing left to lint,
+    and ruff/mypy treat a missing argument as a usage error that fails the whole run.
+    """
+    return sorted({n.replace("\\", "/") for n in paths if (REPO_ROOT / n).exists()})
+
+
+def python_targets(paths: list[str]) -> list[str]:
+    """The lintable .py files among `paths`."""
+    return [n for n in paths if n.endswith(".py") and not n.startswith(EXCLUDED_PREFIXES)]
+
+
 def changed_python_files() -> list[str]:
     """Tracked-but-modified plus untracked .py files, relative to the repo root."""
-    return [n for n in changed_paths() if n.endswith(".py") and not n.startswith(EXCLUDED_PREFIXES)]
+    return python_targets(changed_paths())
 
 
 def workflow_files(limit_to: list[str] | None = None) -> list[str]:
@@ -189,6 +209,13 @@ def run_tool(name: str, cmd: list[str], fix_hint: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--changed", action="store_true", help="lint only the working-tree diff")
+    parser.add_argument(
+        "--paths",
+        nargs="+",
+        metavar="FILE",
+        default=[],
+        help="lint exactly these files, scoped as --changed is (used by /ship for the branch diff)",
+    )
     # Accepted, and a no-op here: devkit has no detect-secrets pass to skip. The Stop
     # hook passes `--no-secrets` unconditionally — see the same argument in
     # `templates/core/scripts/lint-all.py.tmpl` for why, and why *parsing* it is part
@@ -200,24 +227,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    changed = changed_paths() if args.changed else None
-    targets = changed_python_files() if args.changed else []
+    # `--paths` and `--changed` are the same narrowing, differing only in who names the
+    # files; everything downstream treats them identically.
+    scoped = args.changed or bool(args.paths)
+    selected: list[str] = []
+    if scoped:
+        selected = explicit_paths(args.paths) if args.paths else changed_paths()
+    changed = selected if scoped else None
+    targets = python_targets(selected)
     workflows = workflow_files(changed)
     envs = env_files(changed)
     markdown = markdown_files(changed)
-    if args.changed and not (targets or workflows or envs or markdown):
+    if scoped and not (targets or workflows or envs or markdown):
         print("lint-all: no changed files this run lints; nothing to do.")
         _write_artifact("")
         return 0
     scope = targets or ["."]
 
-    print(f"lint-all: {'changed files' if args.changed else 'whole repo'}")
+    label = f"{len(selected)} file(s)" if scoped else "whole repo"
+    print(f"lint-all: {label}")
 
     sections = ""
-    # `--changed` with only a workflow or `.env` edit leaves `targets` empty, and
+    # A narrowed run with only a workflow or `.env` edit leaves `targets` empty, and
     # `scope` then falls back to `["."]` — which would silently widen a per-turn
     # check into a whole-repo pass. Gate the Python passes on having Python to lint.
-    if targets or not args.changed:
+    if targets or not scoped:
         # Auto-fix first, then report. Both ruff passes mutate the same files, so they
         # must stay sequential relative to each other. No `--exclude` guard here: see the
         # module docstring — devkit formats its own harness, and CI's `ruff format --check`

@@ -72,16 +72,80 @@ def _porcelain() -> str:
     return result.stdout if result.returncode == 0 else ""
 
 
-def _run_lint() -> bool:
+def branch_diff_files(base: str, git=_git) -> list[str]:
+    """The files this branch changed, measured from where it left the default branch.
+
+    The gate used to ask for `--changed`, whose set is the working tree versus HEAD --
+    and `main()` has just refused to proceed unless that set is *empty*. So the lint
+    gate ran on nothing, every time, and reported LINT PASSED for it. A branch about to
+    become a PR is reviewed as a whole, so the whole branch is what to lint.
+
+    Returns [] when the merge base cannot be found (a base ref absent locally, a shallow
+    clone); the caller then falls back to the old behaviour rather than linting nothing
+    silently.
+    """
+    ref = f"origin/{base}"
+    if git("rev-parse", "--verify", "--quiet", ref).returncode != 0:
+        ref = base
+    merge_base = git("merge-base", ref, "HEAD")
+    if merge_base.returncode != 0 or not merge_base.stdout.strip():
+        return []
+    # --diff-filter=d: a path deleted on this branch has nothing left to lint, and a
+    # linter handed a missing file fails the run on a usage error.
+    diff = git("diff", "--name-only", "--diff-filter=d", merge_base.stdout.strip(), "HEAD")
+    if diff.returncode != 0:
+        return []
+    return [line.strip() for line in diff.stdout.splitlines() if line.strip()]
+
+
+def runner_supports_paths(help_text: str) -> bool:
+    """Whether this project's lint runner accepts `--paths`.
+
+    `lint-all.py` is project-owned, not vendored, so a project can be older than this
+    file. Probing `--help` beats parsing argparse's exit-2 usage error out of a stream
+    the gate otherwise passes straight through to the terminal.
+    """
+    return "--paths" in help_text
+
+
+def _lint_argv(paths: list[str], help_text: str) -> list[str]:
+    """The lint command to run, given the branch's files and the runner's capabilities."""
+    if paths and runner_supports_paths(help_text):
+        return [sys.executable, str(LINT_ALL), "--paths", *paths]
+    return [sys.executable, str(LINT_ALL), "--changed"]
+
+
+def _lint_help() -> str:
+    try:
+        probe = subprocess.run(
+            [sys.executable, str(LINT_ALL), "--help"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return ""
+    return (probe.stdout or "") + (probe.stderr or "")
+
+
+def _run_lint(base: str = "") -> bool:
     if not LINT_ALL.is_file():
         print(f"ship: required lint runner is missing: {LINT_ALL}", file=sys.stderr)
         return False
-    try:
-        result = subprocess.run(
-            [sys.executable, str(LINT_ALL), "--changed"],
-            cwd=REPO_ROOT,
-            check=False,
+    paths = branch_diff_files(base) if base else []
+    argv = _lint_argv(paths, _lint_help())
+    if paths and "--paths" not in argv:
+        # Say it rather than quietly linting the empty working tree: the gate is about
+        # to run, pass, and mean nothing, and only this line explains why.
+        print(
+            f"ship: {LINT_ALL.name} has no --paths, so the gate can only see the working "
+            "tree -- which is clean. It will check nothing. Add --paths to this "
+            "project's lint runner (see devkit's) to lint the branch diff.",
+            file=sys.stderr,
         )
+    try:
+        result = subprocess.run(argv, cwd=REPO_ROOT, check=False)
     except OSError as exc:
         print(f"ship: could not run lint gate: {exc}", file=sys.stderr)
         return False
@@ -128,8 +192,8 @@ def main(argv: list[str] | None = None) -> int:
     if not tree_clean(_porcelain()):
         print("ship: working tree is dirty; commit the intended changes first.", file=sys.stderr)
         return EXIT_DIRTY_TREE
-    if not _run_lint():
-        print("ship: changed-scope lint failed; see logs/lint-errors.log.", file=sys.stderr)
+    if not _run_lint(base):
+        print("ship: branch-scope lint failed; see logs/lint-errors.log.", file=sys.stderr)
         return EXIT_LINT_FAILED
     if not _push(branch):
         print("ship: push failed after retries.", file=sys.stderr)

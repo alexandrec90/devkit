@@ -1,22 +1,26 @@
 """Tests for scripts/upgrade-project.py (adopting a devkit release in a consumer).
 
-The refusals are the interesting half. An upgrade that runs when it should not is
-how a harness bump ends up mixed into unrelated work — the failure that motivated
-this script — so each precondition is pinned individually.
+**Where the work happens is the interesting half now.** This used to be a suite about
+refusals — dirty tree, task branch, unfinished upgrade — each pinned individually, and
+each one a state some human had to clear before the tool would run. The adoption moved
+into an ephemeral box cut off `origin/<default>`, so those states became unreachable
+rather than tolerated, and the tests that pinned them went with them.
+
+What replaced them asserts the property that makes it true: every write is aimed at the
+box, and nothing is aimed at the checkout.
 """
 
 import contextlib
-import datetime as dt
 import json
 import string
 import subprocess
+import types
+from pathlib import Path
 
 import pytest
 from support import REPO_ROOT, load_script, sweep
 
 up = load_script("scripts/upgrade-project.py")
-
-DATE = dt.date(2026, 8, 2)
 
 
 @pytest.fixture(autouse=True)
@@ -34,22 +38,13 @@ def done(code: int = 0):
     return lambda *_a, **_kw: up.Outcome("stub", code)
 
 
-def clean(**overrides) -> sweep.State:
-    """A consumer sitting on its home branch with nothing uncommitted."""
-    base = {
-        "name": "carameli",
-        "default_branch": "master",
-        "branch": "master",
-        "host": "github",
-    }
-    return sweep.State(**{**base, **overrides})
-
-
 # --- naming ------------------------------------------------------------------
 
 
-def test_the_branch_is_a_dated_task_branch():
-    assert up.branch_name(DATE) == "claude/devkit-upgrade-0802"
+def test_the_slug_is_what_the_box_tier_names_the_branch_from():
+    """`worktree.plan_new` turns it into `claude/devkit-upgrade-<mmdd>`, so this file
+    no longer builds the branch name itself -- one namer, not two that can disagree."""
+    assert up.UPGRADE_SLUG == "devkit upgrade"
 
 
 def test_the_commit_names_the_release():
@@ -62,8 +57,8 @@ def test_the_planned_commit_does_not_claim_a_file_count_it_cannot_know(
 ):
     """The plan is printed before the pull runs, so the count does not exist yet.
     It printed `0` there, which described every applied run wrongly."""
-    monkeypatch.setattr(up.sweep, "inspect", lambda *_a, **_kw: clean())
-    (tmp_path / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
+    monkeypatch.setattr(up.sweep, "git_for", lambda _p: refs({}))
+    monkeypatch.setattr(up.tb, "detect_default_branch", lambda *_a, **_kw: "master")
     assert up.upgrade_one("carameli", tmp_path, "v0.5.3").code == 0
     printed = capsys.readouterr().out
     assert "<n> vendored file(s)" in printed
@@ -85,59 +80,92 @@ def test_the_pr_body_truncates_a_long_file_list():
     assert f"and {120 - sweep.PR_BODY_FILE_LIMIT} more" in body
 
 
-# --- refusals ----------------------------------------------------------------
-
-
-def test_a_clean_project_on_its_home_branch_is_upgradable():
-    assert up.refusal(clean(), "v0.5.3") == ""
-    assert up.plan(clean(), "v0.5.3", DATE).steps == (
-        ("checkout", "-b", "claude/devkit-upgrade-0802"),
-    )
-
-
-def test_a_devkit_with_no_releases_is_refused():
-    """There is nothing to adopt. Note this is about *tags existing*, not about
-    where devkit's HEAD happens to sit -- keying off HEAD made this refuse on
-    nearly every run, since devkit normally lives on a working branch."""
-    reason = up.refusal(clean(), None)
-    assert "no release tags" in reason
-    assert up.plan(clean(), None, DATE).refusal
-
+# --- is it already current -----------------------------------------------------
 
 # A made-up commit SHA, not a credential — but detect-secrets cannot tell a 40-char hex
 # string from a key, so it is allowlisted inline per `.pre-commit-config.yaml`'s note.
 RELEASE_COMMIT = "9d95e4471bd60d6f3a2c81e5f7c0a4b8d1e2f3a4"  # pragma: allowlist secret
 
 
-def test_a_project_stamped_with_the_release_commit_is_current(tmp_path):
-    """The scheduled-run case: proving a project is up to date reads one file and
-    touches nothing, so it cannot fail on a dirty tree or the wrong branch."""
-    (tmp_path / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
-    assert up.is_current(tmp_path, RELEASE_COMMIT)
-    assert not up.is_current(tmp_path, "a" * 40)
+def refs(contents: dict[str, str], default: str = "master"):
+    """A git that serves `git show origin/<default>:<path>` out of `contents`."""
+    calls: list[tuple[str, ...]] = []
+
+    def git(*args: str):
+        calls.append(args)
+        if args[0] == "show":
+            path = args[1].split(":", 1)[1]
+            if path in contents:
+                return subprocess.CompletedProcess(["git", *args], 0, contents[path], "")
+            return subprocess.CompletedProcess(["git", *args], 128, "", "no such path")
+        if args[:2] == ("symbolic-ref", "refs/remotes/origin/HEAD"):
+            return subprocess.CompletedProcess(["git", *args], 0, f"origin/{default}", "")
+        return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+    git.calls = calls  # type: ignore[attr-defined]
+    return git
 
 
-def test_the_stamp_is_never_compared_against_the_tag_name(tmp_path):
-    """The regression. DEVKIT_VERSION holds the upstream **SHA** by contract, so a
-    predicate that compared it to `v0.5.3` was false for every project forever --
-    and each run then cut a branch, built a worktree and ran a full pull on a project
-    already on the release, only to abandon once the tree came back clean. That is
-    the "already current" line that contradicted the plan printed above it."""
-    (tmp_path / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
-    assert not up.is_current(tmp_path, "v0.5.3")
-    assert up.is_current(tmp_path, RELEASE_COMMIT)
+def test_the_stamp_is_read_off_the_ref_not_the_working_tree(tmp_path, monkeypatch):
+    """The question is about the branch a PR would target. A static checkout's copy is
+    whatever branch it is parked on, which was repeatedly a different answer in both
+    directions -- a checkout left on a merged adoption branch reported the new version
+    while main still had the old, and one left on an abandoned branch the reverse."""
+    git = refs({"DEVKIT_VERSION": "9d95e44\n"})
+    monkeypatch.setattr(up.sweep, "git_for", lambda _p: git)
+    monkeypatch.setattr(up.tb, "detect_default_branch", lambda *_a, **_kw: "master")
+    # The working tree says something else entirely, and is never consulted.
+    (tmp_path / "DEVKIT_VERSION").write_text("deadbee\n", encoding="utf-8")
+
+    assert up.is_current_on_remote(tmp_path, RELEASE_COMMIT)
+    assert ("show", "origin/master:DEVKIT_VERSION") in git.calls
 
 
-def test_a_provisional_pull_is_never_current(tmp_path):
+def test_the_ref_is_fetched_before_it_is_read(tmp_path, monkeypatch):
+    """`origin/<default>` is a local ref like any other, and a checkout nobody has
+    touched for a week has a week-old copy of it."""
+    git = refs({"DEVKIT_VERSION": "9d95e44\n"})
+    monkeypatch.setattr(up.sweep, "git_for", lambda _p: git)
+    monkeypatch.setattr(up.tb, "detect_default_branch", lambda *_a, **_kw: "master")
+    up.is_current_on_remote(tmp_path, RELEASE_COMMIT)
+    assert ("fetch", "--quiet", "origin") in git.calls
+
+
+def test_the_stamp_is_never_compared_against_the_tag_name(tmp_path, monkeypatch):
+    """DEVKIT_VERSION holds the upstream **SHA** by contract, so a predicate comparing
+    it to `v0.5.3` was false for every project forever."""
+    git = refs({"DEVKIT_VERSION": "9d95e44\n"})
+    monkeypatch.setattr(up.sweep, "git_for", lambda _p: git)
+    monkeypatch.setattr(up.tb, "detect_default_branch", lambda *_a, **_kw: "master")
+    assert not up.is_current_on_remote(tmp_path, "v0.5.3")
+    assert up.is_current_on_remote(tmp_path, RELEASE_COMMIT)
+
+
+def test_a_ref_with_no_stamp_on_it_is_not_current(tmp_path, monkeypatch):
+    """A project that never vendored, and a `git show` against a branch that has no
+    such path, are the same answer: no."""
+    git = refs({})
+    monkeypatch.setattr(up.sweep, "git_for", lambda _p: git)
+    monkeypatch.setattr(up.tb, "detect_default_branch", lambda *_a, **_kw: "master")
+    assert not up.is_current_on_remote(tmp_path, RELEASE_COMMIT)
+
+
+def test_version_on_reads_a_named_path_at_the_ref():
+    git = refs({"DEVKIT_VERSION": " abc1234 \n"})
+    assert up.version_on(git, "master") == "abc1234"
+    assert up.version_on(git, "master", "nope.json") == ""
+    # No base branch is not a question that can be answered, so it is not asked.
+    assert up.version_on(git, "") == ""
+
+
+def test_a_provisional_pull_is_never_current():
     """`--allow-dirty` stamps `<rev>-dirty`; those files are at no release at all."""
-    (tmp_path / "DEVKIT_VERSION").write_text("9d95e44-dirty\n", encoding="utf-8")
-    assert not up.is_current(tmp_path, RELEASE_COMMIT)
+    assert not up.names_commit("9d95e44-dirty", RELEASE_COMMIT)
 
 
-def test_a_stamp_that_is_not_a_sha_proves_nothing(tmp_path):
+def test_a_stamp_that_is_not_a_sha_proves_nothing():
     """`git_head` writes `unknown` when it cannot read the source's HEAD."""
-    (tmp_path / "DEVKIT_VERSION").write_text("unknown\n", encoding="utf-8")
-    assert not up.is_current(tmp_path, RELEASE_COMMIT)
+    assert not up.names_commit("unknown", RELEASE_COMMIT)
 
 
 def test_a_full_length_stamp_matches_too():
@@ -149,15 +177,13 @@ def test_an_abbreviation_too_short_to_be_a_sha_is_rejected():
     assert not up.names_commit("9d", RELEASE_COMMIT)
 
 
-def test_currency_cannot_be_proven_without_the_release_commit(tmp_path):
+def test_currency_cannot_be_proven_without_the_release_commit(tmp_path, monkeypatch):
     """A rev git could not resolve means "cannot tell", and cannot tell is not
     current -- the run proceeds and finds out by pulling."""
-    (tmp_path / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
-    assert not up.is_current(tmp_path, "")
-
-
-def test_a_project_that_never_vendored_is_not_current(tmp_path):
-    assert not up.is_current(tmp_path, RELEASE_COMMIT)
+    monkeypatch.setattr(
+        up.sweep, "git_for", lambda _p: pytest.fail("asked git without a release commit")
+    )
+    assert not up.is_current_on_remote(tmp_path, "")
 
 
 def test_the_release_commit_is_resolved_from_the_devkit_checkout():
@@ -168,12 +194,14 @@ def test_the_release_commit_is_resolved_from_the_devkit_checkout():
     assert up.commit_for(REPO_ROOT, "no-such-rev-anywhere") == ""
 
 
-def test_a_checkout_stamped_with_devkits_head_is_current(tmp_path):
+def test_a_real_checkout_stamped_with_devkits_head_is_current(tmp_path, monkeypatch):
     """End to end, with a real SHA and a real abbreviation of it: this is the shape
     every consumer's DEVKIT_VERSION actually has."""
     head = up.commit_for(REPO_ROOT, "HEAD")
-    (tmp_path / "DEVKIT_VERSION").write_text(f"{head[:7]}\n", encoding="utf-8")
-    assert up.is_current(tmp_path, head)
+    git = refs({"DEVKIT_VERSION": f"{head[:7]}\n"})
+    monkeypatch.setattr(up.sweep, "git_for", lambda _p: git)
+    monkeypatch.setattr(up.tb, "detect_default_branch", lambda *_a, **_kw: "master")
+    assert up.is_current_on_remote(tmp_path, head)
 
 
 # --- never backwards ----------------------------------------------------------
@@ -241,314 +269,142 @@ def test_the_tag_list_is_newest_first_and_agrees_with_the_latest():
     assert up.release_tags(REPO_ROOT / "no-such-directory") == []
 
 
-def test_a_dirty_project_is_refused():
-    """A branch cut under uncommitted work carries it along, and the commit would
-    have to guess which files belonged to the upgrade."""
-    reason = up.refusal(clean(dirty=364), "v0.5.3")
-    assert "uncommitted" in reason
-    assert not up.plan(clean(dirty=364), "v0.5.3", DATE).steps
+# --- the upgrade happens in a box, never in the checkout ----------------------
 
 
-def test_a_project_already_on_a_task_branch_is_refused():
-    reason = up.refusal(clean(branch="claude/thing-0801"), "v0.5.3")
-    assert "task branch" in reason
+class BoxRun:
+    """Drives `upgrade_one` past the box tier, recording what it was asked to build.
 
+    Everything the real thing does to disk -- cutting a worktree, pulling, verifying --
+    is stubbed. What is asserted is *where* each step was pointed, because the whole
+    change is that they point at the box rather than at the checkout.
+    """
 
-def test_this_scripts_own_branch_is_reported_as_an_unfinished_upgrade():
-    """`claude/devkit-upgrade-<mmdd>` is not unrelated work -- it is the previous run
-    of this operation, holding the adoption. "Upgrade from the home branch" is a dead
-    end there: today's run cuts a *differently dated* branch, so following it strands
-    the first one and opens a second beside it.
+    def __init__(self, tmp_path, monkeypatch, *, changed=("DEVKIT_VERSION",), ok=True):
+        self.box = tmp_path / "boxes" / "data-lake--devkit-upgrade-0812"
+        self.box.mkdir(parents=True)
+        self.spawned: list[tuple[str, str]] = []
+        self.pulled: list[Path] = []
+        self.git = RecordingGit()
+        plan = types.SimpleNamespace(
+            path=str(self.box),
+            box=types.SimpleNamespace(
+                name="data-lake--devkit-upgrade-0812",
+                branch="claude/devkit-upgrade-0812",
+                project="data-lake",
+            ),
+        )
 
-    Lived: carameli sat on `claude/devkit-upgrade-0810` with its adoption committed
-    and pushed and no PR, and `--all` described it as work to be moved off."""
-    reason = up.refusal(clean(branch="claude/devkit-upgrade-0810"), "v0.5.3")
-    assert "unfinished upgrade" in reason
-    assert "PR" in reason
+        def plan_new(project, _workspace, slug, **_kw):
+            self.spawned.append((project, slug))
+            return plan
 
+        def apply_new(_plan, _workspace, **_kw):
+            return ok, ["cut it"]
 
-def test_an_unrelated_task_branch_still_gets_the_general_refusal():
-    """Two states, two remedies -- collapsing them is what sent the operator wrong."""
-    reason = up.refusal(clean(branch="claude/thing-0801"), "v0.5.3")
-    assert "unfinished upgrade" not in reason
+        def fixpoint(project, _source, **_kw):
+            self.pulled.append(project)
+            return [subprocess.CompletedProcess(["pull"], 0, "moved 36 file(s)", "")], ""
 
+        monkeypatch.setattr(up.worktree, "plan_new", plan_new)
+        monkeypatch.setattr(up.worktree, "apply_new", apply_new)
+        monkeypatch.setattr(up, "pull_to_fixpoint", fixpoint)
+        monkeypatch.setattr(
+            up, "verify_pull", lambda *_a: subprocess.CompletedProcess(["check"], 0, "", "")
+        )
+        monkeypatch.setattr(up, "changed_paths", lambda _g: list(changed))
+        monkeypatch.setattr(up, "unreleased_adoption", lambda *_a: "")
+        monkeypatch.setattr(up.sweep, "git_for", lambda _p: self.git)
+        monkeypatch.setattr(up.sweep, "gh_for", lambda _p: no_pr)
+        monkeypatch.setattr(up.tb, "detect_default_branch", lambda *_a, **_kw: "main")
+        monkeypatch.setattr(
+            up.sweep, "ensure_pr", lambda *_a: ("https://example.test/pr/1", True, "")
+        )
 
-def test_an_upgrade_branch_from_any_day_is_recognised():
-    """Keyed off the slug rather than today's name: an upgrade parked yesterday is
-    the same unfinished run, and the date is the only part that differs."""
-    assert up.is_upgrade_branch("claude/devkit-upgrade-0731")
-    assert up.is_upgrade_branch(up.branch_name())
-    assert not up.is_upgrade_branch("claude/devkit-upgrader-0801")
-    assert not up.is_upgrade_branch("master")
-
-
-# --- a landed branch is not work in progress ---------------------------------
-
-
-def upgrade_branch(**overrides) -> sweep.State:
-    """Parked on the branch a previous run cut, its commit not yet in the base."""
-    base = {
-        "branch": "claude/devkit-upgrade-0810",
-        "ahead": 1,
-        "upstream": "origin/claude/devkit-upgrade-0810",
-    }
-    return clean(**{**base, **overrides})
-
-
-def feature_branch(**overrides) -> sweep.State:
-    """Parked on somebody else's task branch -- the commoner half of the same state."""
-    base = {
-        "branch": "claude/catalog-foreign-manifest-0808",
-        "ahead": 6,
-        "upstream": "origin/claude/catalog-foreign-manifest-0808",
-    }
-    return clean(**{**base, **overrides})
-
-
-def merged_pr(*_args):
-    return subprocess.CompletedProcess(["gh"], 0, '[{"number": 38}]', "")
+    def run(self, tmp_path):
+        return up.upgrade_one(
+            "data-lake", tmp_path / "checkout", "v0.8.0", tmp_path / "src", tmp_path / "ws.json"
+        )
 
 
 def no_pr(*_args):
     return subprocess.CompletedProcess(["gh"], 0, "[]", "")
 
 
-def test_an_upgrade_branch_whose_pr_merged_is_not_an_unfinished_upgrade():
-    """The lived failure. ibkr_trader's upgrade PR merged on 2026-08-10, the checkout
-    stayed parked on `claude/devkit-upgrade-0810`, and every run afterwards refused it
-    with "ship the branch and open its PR" -- for a PR that had already merged and a
-    remote branch GitHub had already deleted. No action existed behind that sentence
-    and the project could never adopt another release.
-
-    It is not a corner case either: `upgrade_one` leaves every checkout it upgrades
-    parked on the branch it cut, so this is the guaranteed end state of success."""
-    parked = upgrade_branch(merged_task_branches=("claude/devkit-upgrade-0810",))
-    assert up.landed(parked)
-    assert up.refusal(parked, "v0.5.3", has_landed=True) == ""
+def test_the_adoption_is_pulled_into_the_box_not_the_checkout(tmp_path, monkeypatch):
+    """The whole change in one assertion. Every refusal this script used to carry named
+    a state a long-lived checkout accumulates -- dirty, parked, behind -- and none of
+    them is reachable in a worktree younger than the run."""
+    run = BoxRun(tmp_path, monkeypatch)
+    assert run.run(tmp_path).code == 0
+    assert run.spawned == [("data-lake", up.UPGRADE_SLUG)]
+    assert run.pulled == [run.box]
 
 
-def test_a_merged_feature_branch_is_not_unrelated_work_either():
-    """The same dead end one branch-prefix away, and the commoner one: a checkout still
-    sitting on last week's merged branch was told to "upgrade from the home branch so
-    the adoption is not mixed into unrelated work" -- when the branch held no work to
-    mix into. Lived: data-lake, parked on a branch whose PR merged 2026-08-09.
-
-    Scoping this to `claude/devkit-upgrade-*` was the first fix and it was too narrow.
-    Which branch a checkout is parked on says nothing about whether it still holds
-    work."""
-    parked = feature_branch(merged_task_branches=("claude/catalog-foreign-manifest-0808",))
-    assert up.landed(parked)
-    assert up.refusal(parked, "v0.5.3", has_landed=True) == ""
+def test_the_commit_and_push_happen_in_the_box(tmp_path, monkeypatch):
+    """`git_for` is called for both the checkout (to read refs) and the box (to commit),
+    so pointing the write half at the wrong one would not fail loudly."""
+    run = BoxRun(tmp_path, monkeypatch)
+    run.run(tmp_path)
+    assert ("add", "-A") in run.git.calls
+    assert ("push", "-u", "origin", "claude/devkit-upgrade-0812") in run.git.calls
 
 
-def test_an_upgrade_branch_that_really_is_unfinished_is_still_refused():
-    """The other half: an open PR *is* a thing to finish, and cutting a second branch
-    beside it would open a second PR for the same adoption."""
-    reason = up.refusal(upgrade_branch(), "v0.5.3", has_landed=False)
-    assert "unfinished upgrade" in reason
-    assert "has not merged" in reason
+def test_nothing_checks_out_a_branch_in_the_static_checkout(tmp_path, monkeypatch):
+    """The old flow ran `checkout -b` in the consumer, which is how a checkout ended up
+    parked on an upgrade branch for months afterwards. Nothing does that now."""
+    run = BoxRun(tmp_path, monkeypatch)
+    run.run(tmp_path)
+    assert not [call for call in run.git.calls if call[0] == "checkout"]
+    assert not [call for call in run.git.calls if call[0] == "merge"]
 
 
-def test_unmerged_work_on_a_feature_branch_is_still_refused():
-    reason = up.refusal(feature_branch(), "v0.5.3", has_landed=False)
-    assert "unrelated work" in reason
-    assert "unfinished upgrade" not in reason
-
-
-def test_the_offline_signals_that_a_branch_has_landed():
-    """Each is enough on its own, and neither costs a network call."""
-    for parked in (upgrade_branch, feature_branch):
-        merged = parked(merged_task_branches=(parked().branch,))
-        assert up.landed(merged), merged.branch
-        # `sweep`'s spent-branch: nothing on it beyond the base.
-        assert up.landed(parked(ahead=0)), parked().branch
-        assert not up.landed(parked()), parked().branch
-
-
-def test_a_deleted_remote_branch_is_not_by_itself_a_merge():
-    """`upstream_gone` looks like a fourth signal and was briefly used as one. It is the
-    shape a merged PR leaves once the remote branch is deleted -- and equally the shape
-    a *closed* one leaves. With commits still ahead of the base it is `sweep.is_retired`:
-    stranded work on a branch that can never be committed to again, and walking home
-    from there would abandon it."""
-    assert not up.landed(feature_branch(upstream="", upstream_gone=True), no_pr)
-    assert not up.landed(upgrade_branch(upstream="", upstream_gone=True), no_pr)
-    # Ahead of nothing, the spent-branch signal already covers it -- no `gh` needed.
-    assert up.landed(feature_branch(ahead=0, upstream="", upstream_gone=True))
-
-
-def diffs(code: int):
-    """A git whose `diff --quiet` reports `code`: 0 identical, 1 differing, 128 broken."""
-
-    def git(*args: str):
-        return subprocess.CompletedProcess(["git", *args], code if args[0] == "diff" else 0, "", "")
-
-    return git
-
-
-def test_a_branch_whose_work_reached_the_base_another_way_has_landed():
-    """The third instance of this bug, and the one no commit-shaped signal can see.
-
-    apt-finder sat two commits "ahead" of main on a v0.7.0 adoption whose PR was closed
-    unmerged -- because the *same* adoption had already landed from a different branch.
-    Not merged, not spent by the counts, no merged PR to find; and `git diff main HEAD`
-    empty. Every signal said work in progress about a branch that added nothing."""
-    stale = upgrade_branch(ahead=2)
-    assert not up.landed(stale, no_pr)
-    assert up.landed(stale, no_pr, diffs(0))
-
-
-def test_a_branch_that_really_adds_something_is_not_landed_by_content():
-    assert not up.landed(upgrade_branch(ahead=2), no_pr, diffs(1))
-
-
-def test_the_content_check_fails_closed():
-    """`--quiet` exits 1 for a difference and non-zero for an unresolvable ref or a
-    missing git alike, so an error has to read as "still holds work"."""
-    assert not up.adds_nothing(diffs(128), "master")
-    # No base to compare against is not an answer either.
-    assert not up.adds_nothing(diffs(0), "")
-
-
-def test_the_content_check_asks_about_head_not_the_working_tree():
-    """Otherwise an unrelated dirty file makes a spent branch look live -- which is
-    exactly apt-finder, whose uv.lock was modified while its branch added nothing."""
-    seen: list[tuple[str, ...]] = []
-
-    def git(*args: str):
-        seen.append(args)
-        return subprocess.CompletedProcess(["git", *args], 0, "", "")
-
-    assert up.adds_nothing(git, "master")
-    assert seen == [("diff", "--quiet", "origin/master", "HEAD")]
-
-
-def test_a_squash_merged_branch_is_only_visible_to_github():
-    """A squash merge rewrites the commits, so neither the ancestry check nor the
-    counts can see it: the branch reads as ahead of a base that already holds its
-    content. Asking GitHub is the only answer that survives it."""
-    assert not up.landed(upgrade_branch(), no_pr)
-    assert up.landed(upgrade_branch(), merged_pr)
-    assert up.landed(feature_branch(), merged_pr)
-
-
-def test_an_unreachable_gh_leaves_the_branch_refused_rather_than_assumed_finished():
-    """`has_merged_pr` fails open, and open here means today's refusal -- inventing a
-    merge on the say-so of an offline `gh` would cut a branch over unshipped work."""
-
-    def offline(*_args):
-        raise OSError("gh is not on PATH")
-
-    assert not up.landed(upgrade_branch(), offline)
-    assert not up.landed(feature_branch(), offline)
-
-
-def test_a_home_branch_is_never_read_this_way():
-    """Only a task branch can be landed. A checkout already home is upgraded in place,
-    and asking GitHub about `master` would be a network call with no question behind
-    it."""
-    assert not up.landed(clean(), merged_pr)
-    assert not up.landed(clean(branch="carameli-b"), merged_pr)
-
-
-def test_a_landed_branch_is_cut_from_the_home_branch_not_from_the_spent_one():
-    """Cutting today's branch off the merged one would re-propose its commits: the new
-    PR's merge base is the old base, so the diff is that branch's work plus this one."""
-    built = up.plan(feature_branch(ahead=0), "v0.5.3", DATE, has_landed=True)
-    assert built.steps == (
-        ("checkout", "master"),
-        ("merge", "--ff-only", "origin/master"),
-        ("checkout", "-b", "claude/devkit-upgrade-0802"),
+def test_the_box_is_left_for_reconcile_to_reap(tmp_path, monkeypatch):
+    """Reaping on the strength of a push would destroy the only checkout the work
+    exists in whenever the PR call failed. `reconcile` reaps on a *merged* PR."""
+    run = BoxRun(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        up.worktree, "reap_plan", lambda *_a, **_kw: pytest.fail("reaped its own box")
     )
-    assert built.anchor == "master"
+    assert run.run(tmp_path).code == 0
 
 
-def test_going_home_never_writes_a_merge_commit():
-    """`--ff-only` or nothing: a diverged home branch is a state for a human, and the
-    merge commit would otherwise land inside the upgrade's own PR."""
-    steps = up.plan(upgrade_branch(ahead=0), "v0.5.3", DATE, has_landed=True).steps
-    assert [step for step in steps if step[0] == "merge"] == [
-        ("merge", "--ff-only", "origin/master")
-    ]
+def test_a_box_that_could_not_be_cut_is_a_failure_not_a_refusal(tmp_path, monkeypatch):
+    """Exit 2: nothing about the project is wrong, the machine could not make room."""
+    run = BoxRun(tmp_path, monkeypatch, ok=False)
+    assert run.run(tmp_path).code == 2
 
 
-def test_a_landed_branch_with_no_home_is_refused_rather_than_guessed():
-    """Only a linked worktree reaches this -- git permits one checkout of a branch, so
-    it cannot fall back to the default branch the way a primary worktree can."""
-    reason = up.plan(upgrade_branch(ahead=0, linked=True), "v0.5.3", DATE, has_landed=True).refusal
-    assert "no home branch" in reason
+def test_an_already_current_project_commits_nothing(tmp_path, monkeypatch):
+    """`main` proves currency off the ref before ever calling here, so reaching this
+    means the stamp and the files disagreed. The box holds nothing; leave it."""
+    run = BoxRun(tmp_path, monkeypatch, changed=())
+    assert run.run(tmp_path).code == 0
+    assert not [call for call in run.git.calls if call[0] == "commit"]
 
 
-def test_a_parked_checkout_is_fetched_before_its_branch_is_judged(tmp_path, capsys, monkeypatch):
-    """Every signal is measured against the local `origin/<default>` ref, and a checkout
-    parked since its branch merged is exactly one that has not fetched since. Stale, it
-    reads as work in progress forever -- which is the bug, not a symptom of it.
+def test_the_backwards_check_reads_the_box_not_the_checkout(tmp_path, monkeypatch):
+    """The one refusal that survives. It has to ask about the tree a PR would be based
+    on, which is the box -- the checkout may be parked anywhere."""
+    run = BoxRun(tmp_path, monkeypatch)
+    seen: list[Path] = []
 
-    A dry run fetches too: read-only, and an answer that differed from the apply's would
-    be reporting on a different checkout than the one about to change."""
-    git = RecordingGit()
-    states = iter([feature_branch(), feature_branch(ahead=0)])
-    monkeypatch.setattr(up.sweep, "git_for", lambda _project: git)
-    monkeypatch.setattr(up.sweep, "gh_for", lambda _project: no_pr)
-    monkeypatch.setattr(up.sweep, "inspect", lambda *_a, **_kw: next(states))
-    (tmp_path / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
+    def backwards(project, _tags):
+        seen.append(project)
+        return "vendored devkit v0.9.0, which this checkout has no tag for"
 
-    assert up.upgrade_one("data-lake", tmp_path, "v0.8.0").code == 0
-    assert ("fetch", "--prune", "origin") in git.calls
-    printed = capsys.readouterr().out
-    assert "returning home first" in printed
-    assert "git -C data-lake checkout master" in printed
+    monkeypatch.setattr(up, "unreleased_adoption", backwards)
+    outcome = run.run(tmp_path)
+    assert outcome.code == 1
+    assert seen == [run.box]
+    assert "v0.9.0" in outcome.detail
 
 
-def test_a_dirty_parked_checkout_is_not_fetched_at_all(tmp_path, monkeypatch):
-    """The dirty refusal outranks this one and needs no network to reach."""
-    git = RecordingGit()
-    monkeypatch.setattr(up.sweep, "git_for", lambda _project: git)
-    monkeypatch.setattr(up.sweep, "inspect", lambda *_a, **_kw: upgrade_branch(dirty=1))
-    assert up.upgrade_one("apt-finder", tmp_path, "v0.8.0").code == 1
-    assert not git.calls
-
-
-def test_the_plan_numbers_its_steps_in_order(tmp_path, capsys, monkeypatch):
-    """The printed plan is the whole output of a dry run, and a dry run is how a
-    scheduled check reports. It numbered every git step `1.` -- invisible while there
-    was only ever one of them, and three lines called `1.` the moment there were three.
-    """
-    states = iter([upgrade_branch(), upgrade_branch(ahead=0)])
-    monkeypatch.setattr(up.sweep, "git_for", lambda _project: RecordingGit())
-    monkeypatch.setattr(up.sweep, "gh_for", lambda _project: no_pr)
-    monkeypatch.setattr(up.sweep, "inspect", lambda *_a, **_kw: next(states))
-    (tmp_path / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
-    up.upgrade_one("carameli", tmp_path, "v0.5.3")
-    numbers = [
-        line.strip().split(".", 1)[0]
-        for line in capsys.readouterr().out.splitlines()
-        if line.startswith("  ") and line.strip()[0].isdigit()
-    ]
-    assert numbers == ["1", "2", "3", "4", "5", "6", "7"]
-
-
-def test_a_non_git_directory_is_refused():
-    assert up.refusal(clean(is_git=False), "v0.5.3") == "not a git checkout"
-
-
-def test_every_refusal_state_yields_a_plan_that_says_why():
-    """No silent no-ops: a plan with neither steps nor a refusal reads as done."""
-    states = [
-        clean(),
-        clean(dirty=1),
-        clean(is_git=False),
-        clean(branch="claude/x-0801"),
-    ]
-    for state in states:
-        for tag in ("v0.5.3", None):
-            built = up.plan(state, tag, DATE)
-            assert built.steps or built.refusal, (state, tag)
-
-
-def test_the_upgrade_records_the_home_branch_it_came_from():
-    # So `sweep --sync` can park the worktree back afterwards.
-    assert up.plan(clean(branch="carameli-b"), "v0.5.3", DATE).anchor == "carameli-b"
+def test_a_dry_run_cuts_no_box(tmp_path, monkeypatch, capsys):
+    run = BoxRun(tmp_path, monkeypatch)
+    assert up.upgrade_one("data-lake", tmp_path / "checkout", "v0.8.0").code == 0
+    assert run.spawned == []
+    assert "worktree.py new" in capsys.readouterr().out
 
 
 # --- what gets committed -----------------------------------------------------
@@ -594,37 +450,12 @@ class RecordingGit:
         )
 
 
-def test_a_no_op_upgrade_leaves_no_branch_behind():
-    """This is meant to run on a schedule to prove nothing is stale, so the
-    already-current path has to be free: one empty claude/devkit-upgrade branch per
-    check would be litter that --sync then has to reap."""
-    git = RecordingGit()
-    assert up._abandon(git, "carameli", "master", "already current", code=0) == 0
-    assert git.calls[0] == ("checkout", "master")
-    assert git.calls[1][:2] == ("branch", "-d")
-
-
-def test_every_abandon_message_names_its_project(capsys):
-    """Under `--all` these interleave with other checkouts' lines, and an
-    unattributed "already current" is a sentence with no subject."""
-    for fail_on, why in (("", "already current"), ("branch -d", "x"), ("checkout", "y")):
-        up._abandon(RecordingGit(fail_on=fail_on), "carameli", "master", why, code=0)
-        captured = capsys.readouterr()
-        assert "carameli" in captured.out + captured.err, fail_on
-
-
-def test_abandoning_never_force_deletes():
-    """`branch -d` refusing means the run did more than it thought -- a state for a
-    human, not one to force past."""
-    git = RecordingGit(fail_on="branch -d")
-    assert up._abandon(git, "carameli", "master", "already current", code=0) == 2
-    assert not any(step[:2] == ("branch", "-D") for step in git.calls)
-
-
-def test_abandoning_reports_when_it_cannot_get_home():
-    git = RecordingGit(fail_on="checkout")
-    assert up._abandon(git, "carameli", "master", "the pull refused", code=2) == 2
-    assert not any(step[:2] == ("branch", "-d") for step in git.calls)
+# `_abandon` is gone with the branch it used to unwind. It existed because the old flow
+# cut `claude/devkit-upgrade-<mmdd>` in the consumer *before* knowing whether there was
+# anything to adopt, so a no-op run had to walk itself back out -- and its four tests
+# were all about doing that carefully enough not to lose work. A box is cut in a
+# directory of its own and adopted by `reconcile`, so a no-op run leaves the checkout
+# exactly as it found it with nothing to undo.
 
 
 # --- scope: which checkouts `--all` covers -----------------------------------
@@ -724,6 +555,32 @@ def workspace(tmp_path, *names):
     return path
 
 
+def stamps_on_main(monkeypatch, default: str = "main"):
+    """Serve `git show origin/<default>:<path>` out of each project directory.
+
+    These tests still say "this project is on that release" by writing DEVKIT_VERSION,
+    which is the readable way to express it. The predicate reads it through a ref now,
+    so this is the bridge -- and it keeps the suite off the real `git`, which a bare
+    `tmp_path` is not a repository for anyway.
+    """
+
+    def git_for(path):
+        def git(*args: str):
+            if args[0] == "show":
+                target = Path(path) / args[1].split(":", 1)[1]
+                if target.is_file():
+                    return subprocess.CompletedProcess(
+                        ["git", *args], 0, target.read_text(encoding="utf-8"), ""
+                    )
+                return subprocess.CompletedProcess(["git", *args], 128, "", "no such path")
+            return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+        return git
+
+    monkeypatch.setattr(up.sweep, "git_for", git_for)
+    monkeypatch.setattr(up.tb, "detect_default_branch", lambda *_a, **_kw: default)
+
+
 def test_a_scope_is_mandatory():
     """Neither branch of the VS Code picker can emit nothing, and a bare run that
     guessed "all" would open PRs nobody asked for."""
@@ -776,6 +633,10 @@ def test_a_run_where_every_project_is_current_touches_nothing(tmp_path, capsys, 
     monkeypatch.setattr(
         up, "source_at_tag", lambda *_a: pytest.fail("built a worktree with nothing to pull")
     )
+    monkeypatch.setattr(
+        up.worktree, "plan_new", lambda *_a, **_kw: pytest.fail("cut a box with nothing to pull")
+    )
+    stamps_on_main(monkeypatch)
     for name in ("carameli", "ibkr_trader"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
@@ -802,9 +663,10 @@ def test_one_project_refusing_does_not_stop_the_others(tmp_path, capsys, monkeyp
     """Independent repos, independent PRs. Stopping at the first refusal would make
     `--all` useless the moment one checkout is mid-task."""
     monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    stamps_on_main(monkeypatch)
     seen: list[str] = []
 
-    def fake_upgrade(name, project, tag, source=None):
+    def fake_upgrade(name, *_a, **_kw):
         seen.append(name)
         return up.Outcome(name, 1 if name == "carameli" else 0)
 
@@ -883,6 +745,7 @@ def ahead(tmp_path, monkeypatch, *names):
     monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.7.0")
     monkeypatch.setattr(up, "release_tags", lambda _devkit: ["v0.7.0", "v0.6.0"])
     monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    stamps_on_main(monkeypatch)
     for name in names:
         (tmp_path / name).mkdir()
         (tmp_path / name / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
@@ -890,23 +753,27 @@ def ahead(tmp_path, monkeypatch, *names):
     return workspace(tmp_path, *names)
 
 
-def test_a_project_ahead_of_this_checkout_is_refused_before_anything_is_cut(
-    tmp_path, capsys, monkeypatch
-):
-    """Why the check belongs in the pre-flight beside `is_current`: proving a project
-    must not be touched costs one file read, cuts no branch, and builds no worktree."""
-    monkeypatch.setattr(up, "source_at_tag", lambda *_a: pytest.fail("built a worktree"))
-    monkeypatch.setattr(up, "upgrade_one", lambda *_a, **_kw: pytest.fail("upgraded anyway"))
-    ws = ahead(tmp_path, monkeypatch, "carameli")
-    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
-    assert "v0.8.0" in capsys.readouterr().err
+# The backwards refusal itself moved into `upgrade_one`, where it reads the box rather
+# than the checkout — see `test_the_backwards_check_reads_the_box_not_the_checkout`. It
+# costs a box now instead of a file read, which is the deliberate trade: the file read
+# was answering about whatever branch the checkout was parked on. What `main` still owes
+# it is aggregation, and that is what these two pin.
+
+
+def refuses_backwards(name, *_a, **_kw):
+    """An `upgrade_one` that refuses one project the way the box tier really would."""
+    if name == "carameli":
+        return up.Outcome(name, 1, f"upgrade: {name} -- vendored devkit v0.8.0, no tag for it")
+    return up.Outcome(name, 0)
 
 
 def test_the_backwards_refusal_reaches_the_artifact(tmp_path, monkeypatch):
     """A `--all` interleaves several checkouts' lines, so a refusal that is only
     printed is one that scrolls away. `logs/upgrade.log` is what the next reader has."""
+    monkeypatch.setattr(up, "upgrade_one", refuses_backwards)
+    monkeypatch.setattr(up, "source_at_tag", _no_worktree)
     ws = ahead(tmp_path, monkeypatch, "carameli")
-    up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)])
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
     written = (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8")
     assert "carameli" in written and "v0.8.0" in written
 
@@ -915,12 +782,15 @@ def test_a_project_ahead_does_not_stop_the_ones_behind(tmp_path, monkeypatch):
     """The `--all` contract, extended to the new refusal: independent repos, and the
     one release the others are missing is not held up by the one that is ahead."""
     upgraded_names: list[str] = []
+
+    def upgrade(name, *args, **kwargs):
+        outcome = refuses_backwards(name, *args, **kwargs)
+        if outcome.code == 0:
+            upgraded_names.append(name)
+        return outcome
+
     monkeypatch.setattr(up, "source_at_tag", _no_worktree)
-    monkeypatch.setattr(
-        up,
-        "upgrade_one",
-        lambda name, *_a, **_kw: (upgraded_names.append(name), up.Outcome(name, 0))[1],
-    )
+    monkeypatch.setattr(up, "upgrade_one", upgrade)
     ws = ahead(tmp_path, monkeypatch, "carameli")
     (tmp_path / "ibkr_trader").mkdir()
     (tmp_path / "ibkr_trader" / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
@@ -1022,20 +892,16 @@ def test_a_project_with_no_vendored_puller_reads_as_empty(tmp_path):
 
 
 def upgraded(tmp_path, monkeypatch, git, *, runs, divergence="", check=None):
-    """Drive `upgrade_one` past the git plumbing, with the pull's result supplied."""
-    monkeypatch.setattr(up.sweep, "inspect", lambda *_a, **_kw: clean())
-    monkeypatch.setattr(
-        up.sweep,
-        "apply_plan",
-        lambda name, *_a, **_kw: sweep.Applied(name, up.plan(clean(), "v0.7.0")),
-    )
+    """Drive `upgrade_one` past the box tier, with the pull's result supplied."""
+    run = BoxRun(tmp_path, monkeypatch)
     monkeypatch.setattr(up.sweep, "git_for", lambda _project: git)
     monkeypatch.setattr(up, "pull_to_fixpoint", lambda *_a, **_kw: (runs, divergence))
     monkeypatch.setattr(
         up, "verify_pull", lambda *_a: check or subprocess.CompletedProcess(["check"], 0, "", "")
     )
-    (tmp_path / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
-    return up.upgrade_one("carameli", tmp_path, "v0.7.0", source=tmp_path / "src")
+    return up.upgrade_one(
+        "carameli", tmp_path / "checkout", "v0.7.0", tmp_path / "src", tmp_path / "ws.json"
+    ), run
 
 
 def test_drift_the_pull_left_is_refused_before_the_commit_gate_sees_it(tmp_path, monkeypatch):
@@ -1043,7 +909,7 @@ def test_drift_the_pull_left_is_refused_before_the_commit_gate_sees_it(tmp_path,
     hook rejected it, and the operator got a hook id instead of a file list. Checking
     here reports it where the tree that caused it is still the subject."""
     git = RecordingGit()
-    outcome = upgraded(
+    outcome, _ = upgraded(
         tmp_path,
         monkeypatch,
         git,
@@ -1057,11 +923,12 @@ def test_drift_the_pull_left_is_refused_before_the_commit_gate_sees_it(tmp_path,
     assert not any(step[0] == "commit" for step in git.calls)
 
 
-def test_a_divergent_pull_leaves_its_evidence_in_the_checkout(tmp_path, monkeypatch):
-    """Unlike a refused pull, this one already copied files. Unwinding the branch from
-    under a half-adopted tree hides what went wrong in an unattributed dirty checkout."""
+def test_a_divergent_pull_leaves_its_evidence_in_the_box(tmp_path, monkeypatch):
+    """Unlike a refused pull, this one already copied files. The box holding a
+    half-adopted tree *is* the evidence, and it survives for someone to look at --
+    where the old flow had to be talked out of deleting the branch under it."""
     git = RecordingGit()
-    outcome = upgraded(
+    outcome, _ = upgraded(
         tmp_path,
         monkeypatch,
         git,
@@ -1181,6 +1048,7 @@ def test_a_run_with_nothing_to_do_clears_what_the_last_one_left(tmp_path, monkey
     stale = up.write_artifact(up.REPO_ROOT, "=== carameli (exit 2) ===\nold news\n")
     monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
     monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    stamps_on_main(monkeypatch)
     (tmp_path / "carameli").mkdir()
     (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
     ws = workspace(tmp_path, "carameli")

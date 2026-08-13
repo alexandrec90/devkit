@@ -269,12 +269,23 @@ Five invariants, each of which something has already violated:
   takes minutes and a PreToolUse hook that takes minutes is one the agent experiences as
   a hang, so the guard passes `provision=False` and puts the `provision` command in its
   block message instead.
-- **The guard declines in exactly two cases**: the edit is already inside a box, or the
-  checkout is on a `claude/...` branch **that carries commits of its own** — the "fix
-  PR #42" case, where something deliberately checked that branch out and a fresh box
-  would put the fix somewhere the PR never sees. Anything else that would land on a
-  home branch gets a box, because landing there with no task branch under it is the
-  agent manufacturing the exact `needs-branch` backlog the sweep exists to clear.
+- **The guard declines for a path that belongs to no project**, which is what keeps a
+  reference checkout out of the box tier entirely. It builds its project list with
+  `devkit_project.known_projects`, so a folder in `NOT_PROJECTS` is registered in the
+  workspace — visible, readable — and yet owns no path the guard will route: an edit
+  there is allowed silently, on whatever branch it is parked on. Reading the registry
+  raw instead would cut `VanillaLand` a box on a `claude/...` branch, for a checkout
+  that ships nothing and whose Azure DevOps remote has no PR for that branch to become.
+  `test_an_edit_into_a_reference_checkout_is_allowed` is the ratchet, and it is a
+  `main()` test on purpose: `redirect_decision` takes the project list as an argument,
+  so only the shell can be wrong about it.
+- **Among paths it does own, the guard declines in exactly two cases**: the edit is
+  already inside a box, or the checkout is on a `claude/...` branch **that carries
+  commits of its own** — the "fix PR #42" case, where something deliberately checked
+  that branch out and a fresh box would put the fix somewhere the PR never sees.
+  Anything else that would land on a home branch gets a box, because landing there with
+  no task branch under it is the agent manufacturing the exact `needs-branch` backlog
+  the sweep exists to clear.
 - **"Is this a task branch" is not the question; "is there work here a box would
   strand" is.** Being a `claude/...` branch used to be the whole test, and the effect
   was that the first session to leave one checked out turned the guard off for every
@@ -284,6 +295,31 @@ Five invariants, each of which something has already violated:
   and it is deliberately local (`git rev-list` against an already-fetched
   `origin/<default>`, not a PR lookup) because this runs on every edit and a network
   round trip in a PreToolUse hook is a hang. It **fails closed**: any error declines.
+
+### The scheduled pass carries the static tier too
+
+`reconcile` is the only thing in the workspace on a schedule, so it is also the only
+place the *static* checkouts can be brought up to their remotes without someone
+remembering. It runs `sweep.py --sync` over them after the box pass — `sync_checkouts`
+— and the tiers stay disjoint in what they decide: boxes by `reconcile_action`,
+checkouts by `sweep.classify`, neither tool learning about the other's.
+
+What made this worth doing is not tidiness. Every checkout in the workspace was found
+stale at once: four parked on task branches whose PRs had merged days earlier, and a
+session opened in one of them reads a tree that predates the work it was asked to
+continue — with nothing red anywhere, because a local branch that never advanced is
+not a failure of anything.
+
+Two things a change here must not do. **The checkout half never gains authority the
+hand-run sweep does not have** — it acts only on `sweep.SYNCABLE`, so a checkout
+holding uncommitted work, unpushed commits or an open PR is named and stepped over;
+its steps stay `merge --ff-only` and `branch -d`, both of which refuse rather than
+destroy. And **it must not redden a healthy pass**: `sweep.run_mode` returns 1 from a
+dry run that merely found something to do, so `checkout_sync_summary` reinterprets the
+code and only a failed git step under `--yes` counts. A scheduled runner whose alerts
+fire on the normal case is a runner whose alerts nobody reads — and this one has
+already been found *disabled*, with every box and checkout it manages left to rot,
+which is the failure mode that costs the most and shows the least.
 
 The prompt's slug reaches the box through `scripts/task_slug.py`, keyed by **session id**
 rather than by worktree. That is the only key the two events share: the prompt arrives on
