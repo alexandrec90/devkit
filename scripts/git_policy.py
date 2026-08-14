@@ -90,7 +90,23 @@ def run_command(
     input_text: str | None = None,
     cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a command without ever raising into Git's sparse hook error reporting."""
+    """Run a command without ever raising into Git's sparse hook error reporting.
+
+    The encoding is named rather than left to `text=True`, and that is not a nicety.
+    `text=True` alone decodes with the *locale* codec -- `cp1252` on a Windows
+    workstation -- while git speaks UTF-8, so a branch name, a commit subject or a
+    remote's banner carrying anything outside that codepage is undecodable. What
+    that costs is worse than a crash, because it is not one: the decode happens on
+    `subprocess`'s reader thread, so the `UnicodeDecodeError` is printed by
+    `threading` and swallowed, `run()` returns normally with the command's real exit
+    code, and the stream arrives as **`None`**. The caller then reports a failure
+    with no reason attached -- which is how the trunk-merge task came to log a failed
+    fetch whose message had been destroyed by the reading of it.
+
+    `errors="replace"` is the other half: output that is genuinely not UTF-8 -- a
+    path in some other codepage, a tool writing raw bytes -- must degrade to a
+    replacement character, never to a lost stream.
+    """
     try:
         return subprocess.run(
             list(argv),
@@ -98,6 +114,8 @@ def run_command(
             input=input_text,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except OSError as error:

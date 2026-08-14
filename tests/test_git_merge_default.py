@@ -206,11 +206,94 @@ def test_a_directory_that_is_not_a_repo_is_named(capsys):
     assert str(REPO) in capsys.readouterr().err
 
 
+DEAD_REMOTE = {
+    "fetch|--prune|origin": (128, "fatal: Authentication failed"),
+    "fetch|--no-prune|origin": (128, "fatal: Authentication failed"),
+}
+
+
 def test_a_failed_fetch_stops_before_merging(capsys):
-    fake = FakeGit(**{"fetch|--prune|origin": (128, "fatal: Authentication failed")})
+    fake = FakeGit(**DEAD_REMOTE)
     assert run(fake) == 1
     assert not fake.ran("merge")
     assert "Authentication failed" in capsys.readouterr().err
+
+
+def test_a_failed_fetch_that_said_nothing_still_explains_itself(capsys):
+    """The shape the real failure arrived in: git exited non-zero and the captured
+    stream was `None`, so the artifact held a blank line where the diagnosis belongs.
+    An exit code is a thin explanation; a task log with nothing in it is no explanation
+    at all, and it reads as the task itself being broken."""
+    fake = FakeGit(**{"fetch|--prune|origin": (128, None), "fetch|--no-prune|origin": (128, None)})
+    assert run(fake) == 1
+    err = capsys.readouterr().err
+    assert "git fetch origin" in err
+    assert "128" in err
+
+
+# --- a prune that cannot run is not a fetch that failed ----------------------
+#
+# Two remote-tracking refs differing only in case lock the same `<ref>.lock` path on a
+# case-insensitive filesystem, so `--prune` fails permanently -- while the fetch it is
+# attached to has already updated every ref the merge needs.
+
+CANNOT_PRUNE = {
+    "fetch|--prune|origin": (
+        1,
+        "error: could not delete references: cannot lock ref "
+        "'refs/remotes/origin/feature/41415_Hide_external_agents': Unable to create "
+        "'.git/refs/remotes/origin/feature/41415_Hide_external_agents.lock': File exists.",
+    ),
+    "fetch|--no-prune|origin": (0, ""),
+}
+
+
+def test_a_prune_that_cannot_run_does_not_take_the_merge_down(capsys):
+    fake = FakeGit(**CANNOT_PRUNE)
+    assert run(fake) == 0
+    assert fake.ran("merge", "--no-edit", "origin/develop")
+    assert "retrying without --prune" in capsys.readouterr().err
+
+
+def test_the_prunes_own_message_survives_being_downgraded(capsys):
+    """Downgraded to a note, not swallowed: the stale refs are real, and only someone
+    deleting one of the colliding pair makes `--prune` work again."""
+    assert run(FakeGit(**CANNOT_PRUNE)) == 0
+    assert "cannot lock ref" in capsys.readouterr().err
+
+
+def test_a_fetch_that_prunes_cleanly_is_not_run_twice():
+    """The retry is the exception path; a healthy remote pays for nothing."""
+    fake = FakeGit()
+    assert run(fake) == 0
+    assert not fake.ran("fetch", "--no-prune")
+
+
+def test_the_retry_disables_pruning_rather_than_leaving_it_to_the_config():
+    """`fetch.prune=true` is set in the checkout this was written for, and under it a
+    bare `git fetch` prunes -- so a retry that merely dropped the flag would reproduce
+    the failure it exists to route around."""
+    fake = FakeGit(**CANNOT_PRUNE)
+    assert run(fake) == 0
+    assert fake.ran("fetch", "--no-prune", "origin")
+
+
+def test_a_merge_refusal_that_said_nothing_still_explains_itself(capsys):
+    fake = FakeGit(
+        **{
+            "merge|--no-edit|origin/develop": (1, None),
+            "diff|--name-only|--diff-filter=U": (0, ""),
+        }
+    )
+    assert run(fake) == 1
+    err = capsys.readouterr().err
+    assert "git merge --no-edit origin/develop" in err
+    assert "MERGE CONFLICT" not in err
+
+
+def test_reason_prefers_what_the_command_actually_said():
+    said = subprocess.CompletedProcess(["git"], 128, "fatal: Authentication failed", "")
+    assert merge_default.reason(said, "git fetch") == "fatal: Authentication failed"
 
 
 def test_a_base_that_does_not_exist_on_the_remote_is_refused(capsys):
