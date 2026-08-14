@@ -132,6 +132,58 @@ def said(result: subprocess.CompletedProcess[str]) -> str:
     return ((result.stdout or "") + (result.stderr or "")).strip()
 
 
+def reason(result: subprocess.CompletedProcess[str], what: str) -> str:
+    """Why it failed, and never the empty string.
+
+    `said` returning nothing is not hypothetical: a captured stream can arrive as
+    `None`, and a git command can fail having written to neither. Printing that as-is
+    puts a blank line in `logs/<task>.log` where the diagnosis belongs -- an artifact
+    whose only content is `# exit: 1`, which is the one failure mode this task's whole
+    log-to-a-file design exists to prevent. The exit code is a poor explanation but it
+    is a real one, and it says which command produced it.
+    """
+    return said(result) or f"{what} failed with exit code {result.returncode}, saying nothing."
+
+
+def fetch(run: Runner, remote: str) -> subprocess.CompletedProcess[str]:
+    """Bring the remote-tracking refs up to date, pruning if the filesystem allows it.
+
+    `--prune` is housekeeping and this task is a merge, so a prune that fails must not
+    take the merge down with it -- but git reports the whole fetch as failed when only
+    the prune half did, having already updated every ref the merge needs.
+
+    That is not a hypothetical. A prune deletes its refs in one transaction, and each
+    deletion locks `<ref>.lock` -- a *path*. On Windows and macOS that path is
+    case-insensitive, so two dead branches differing only in case, `feature/41415_Hide`
+    and `feature/41415_hide`, lock the same file and the second fails `File exists`.
+    Git then advises terminating the other git process, of which there is none, and the
+    condition is permanent: every fetch afterwards fails identically until someone
+    deletes one of the refs by hand. A shared checkout of a big repo with a long history
+    of branch names accumulates these.
+
+    So a failed prune is retried without it, and only a fetch that fails on its own
+    terms is a failure. The prune's message is printed either way -- the stale refs are
+    real, someone has to clear one of them eventually, and if the retry fails too then
+    this was the first of two things that went wrong rather than a footnote to it.
+
+    The retry says `--no-prune` rather than merely dropping the flag, and that is the
+    difference between this working and not: `fetch.prune=true` is a common setting --
+    it is set in the checkout this was written for -- and under it a bare `git fetch`
+    prunes, so the retry would reproduce the failure it exists to route around.
+    """
+    pruned = git(run, "fetch", "--prune", remote)
+    if pruned.returncode == 0:
+        return pruned
+    print(
+        f"Note: pruning stale {remote} refs failed; retrying without --prune. "
+        "git said:\n"
+        f"{reason(pruned, f'git fetch --prune {remote}')}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return git(run, "fetch", "--no-prune", remote)
+
+
 def resolve_base(run: Runner, remote: str, requested: str) -> str:
     """The branch to merge FROM: the one asked for, or the remote's own default.
 
@@ -175,9 +227,9 @@ def merge(run: Runner, repo: Path, remote: str, requested_base: str) -> int:
         return 2
 
     print(f"Fetching {remote} in {repo} ...", flush=True)
-    fetched = git(run, "fetch", "--prune", remote)
+    fetched = fetch(run, remote)
     if fetched.returncode != 0:
-        print(said(fetched), file=sys.stderr)
+        print(reason(fetched, f"git fetch {remote}"), file=sys.stderr)
         return 1
 
     try:
@@ -219,7 +271,7 @@ def merge(run: Runner, repo: Path, remote: str, requested_base: str) -> int:
         # Refused rather than conflicted -- uncommitted changes in the way, unrelated
         # histories, a merge already in progress. Nothing was started, so there is
         # nothing to resolve and git's own message is the useful one.
-        print(said(merged), file=sys.stderr)
+        print(reason(merged, f"git merge --no-edit {target}"), file=sys.stderr)
         return 1
     print(remediation(repo, branch, target, paths), file=sys.stderr)
     return 1

@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import sys
 
 from support import git_policy
 
@@ -326,6 +327,65 @@ def test_skip_env_var_does_not_excuse_an_unsupported_hook():
     runner = FakeRunner(git_responses())
     code = git_policy.run_hook("post-merge", [], runner=runner, env={git_policy.SKIP_ENV_VAR: "1"})
     assert code == 1
+
+
+# --- the runner every caller decodes git through -----------------------------
+#
+# `run_command` backs the hooks, `sweep`, `workspace-status` and the trunk-merge task,
+# and its failure mode was not an exception: `text=True` alone decodes with the locale
+# codepage, the `UnicodeDecodeError` is raised on `subprocess`'s reader thread where
+# nothing propagates it, and the caller gets the real exit code with the stream set to
+# `None`. So a fetch failed and the task logged nothing but `# exit: 1`.
+
+
+def _emitting(expression: str) -> list[str]:
+    """A child that writes exact bytes to both streams, bypassing any text layer."""
+    return [
+        sys.executable,
+        "-c",
+        f"import sys;b={expression};sys.stdout.buffer.write(b);sys.stderr.buffer.write(b)",
+    ]
+
+
+def test_the_decoding_is_pinned_to_utf8_rather_than_the_ambient_locale(monkeypatch):
+    """The ratchet, asserted on the call rather than on the result, because the result
+    depends on the machine: this bug is invisible on a UTF-8 runner and fatal on the
+    cp1252 workstation the tasks actually run on."""
+    seen = {}
+
+    def spy(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(git_policy.subprocess, "run", spy)
+    git_policy.run_command(["git", "status"])
+    assert seen["encoding"] == "utf-8"
+    assert seen["errors"] == "replace"
+
+
+def test_utf8_output_survives_being_read():
+    """A curly quote in a commit subject or a remote's banner is ordinary git output."""
+    result = git_policy.run_command(_emitting(r"'fatal: “nope”'.encode()"))
+    assert result.stdout == "fatal: “nope”"
+    assert result.stderr == "fatal: “nope”"
+
+
+def test_undecodable_output_degrades_instead_of_losing_the_stream():
+    """Bytes that are not UTF-8 at all must cost a character, never the whole message
+    and never the exit code -- the two things a caller reports a failure with."""
+    result = git_policy.run_command(_emitting(r"b'fatal: \xff' + b'ok'"))
+    assert result.stdout is not None
+    assert result.stdout.startswith("fatal: ")
+    assert result.stdout.endswith("ok")
+    assert result.stderr is not None
+
+
+def test_a_failing_commands_exit_code_survives_undecodable_output():
+    argv = _emitting(r"b'\xff'")
+    argv[-1] += ";sys.exit(128)"
+    result = git_policy.run_command(argv)
+    assert result.returncode == 128
+    assert result.stdout is not None
 
 
 def test_failed_policy_never_runs_downstream_hooks(tmp_path):
