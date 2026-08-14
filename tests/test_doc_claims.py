@@ -154,8 +154,26 @@ def _exists(relpath: str) -> bool:
     )
 
 
+def _claude_md_files() -> list:
+    """Every `CLAUDE.md` in the repo, not only the root one.
+
+    The instruction tier is split by what it governs — a directory's own `CLAUDE.md`
+    loads when an agent works in it — and a claim is no less a claim for being written
+    one level down. `templates/` is skipped for the same reason ruff and mypy skip it:
+    what is in there is content awaiting a render, and its paths are the *generated*
+    project's, not devkit's.
+    """
+    skipped = _UNSEARCHED | {"templates"}
+    return sorted(
+        path
+        for path in REPO_ROOT.rglob("CLAUDE.md")
+        if not any(part in skipped for part in path.relative_to(REPO_ROOT).parts)
+    )
+
+
 def _documented_files() -> list:
-    roots = [REPO_ROOT / "CLAUDE.md", REPO_ROOT / "README.md", REPO_ROOT / "RELEASING.md"]
+    roots = [REPO_ROOT / "README.md", REPO_ROOT / "RELEASING.md"]
+    roots += _claude_md_files()
     roots += sorted((REPO_ROOT / ".claude" / "rules").glob("*.md"))
     roots += sorted((REPO_ROOT / ".claude" / "skills").glob("*/*.md"))
     return [path for path in roots if path.is_file()]
@@ -270,6 +288,44 @@ def test_exemptions_are_still_needed():
         )
     )
     assert not unused, f"ALLOWED_VERSION_PINS names pins no longer written: {unused}."
+
+
+def test_every_claude_md_is_checked_not_only_the_root_one():
+    """The split instruction tier has to be covered by the checks it is subject to.
+
+    Moving a paragraph from the root file into `scripts/CLAUDE.md` must not move it out
+    of this file's reach — that would make decomposition a way to launder an unchecked
+    claim, and the whole point of the split is that the same discipline applies at every
+    level. `templates/` stays out: its paths belong to the project a render produces.
+    """
+    covered = {path.relative_to(REPO_ROOT).as_posix() for path in _documented_files()}
+    nested = {name for name in covered if name.endswith("CLAUDE.md") and "/" in name}
+    assert "CLAUDE.md" in covered
+    assert nested, "no nested CLAUDE.md is being checked; did the tier collapse back?"
+    assert not any(name.startswith("templates/") for name in covered)
+
+
+def test_the_root_file_names_every_other_instruction_file():
+    """A rule nobody points at is a rule only one of the two agents can find.
+
+    Codex reads `CLAUDE.md` and reads straight past `.claude/rules/`, so the root file's
+    map is the only route from a Codex session to a rule's existence — and a nested
+    `CLAUDE.md` only loads once someone is already working in that directory. Neither
+    absence is visible from inside the file that should have named it, which is the
+    same shape as every other miss this module catches.
+    """
+    root = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    cited = set(cited_paths(root))
+    expected = {path.relative_to(REPO_ROOT).as_posix() for path in _claude_md_files()}
+    expected |= {
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in (REPO_ROOT / ".claude" / "rules").glob("*.md")
+    }
+    missing = sorted(expected - cited - {"CLAUDE.md"})
+    assert not missing, (
+        f"CLAUDE.md's map does not name: {missing}. Add a row, or the file is reachable "
+        "only by an agent that already knows it exists."
+    )
 
 
 # --- the extractors themselves ------------------------------------------------

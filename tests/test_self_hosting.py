@@ -810,8 +810,9 @@ def _tasks_json() -> dict:
     position for the repo that prescribes the rule. They are repointed here rather
     than deleted because the rules they enforce (a `detail` on everything, `process`
     type, one real token per picker branch, no `${input:typo}`) were never about
-    devkit's two tasks; they are the conventions CLAUDE.md states for VS Code tasks
-    generally, and the shared block is now where nearly all of them live.
+    devkit's two tasks; they are the conventions `.claude/rules/vscode-tasks.md` states
+    for VS Code tasks generally, and the shared block is now where nearly all of them
+    live.
 
     The move also fixes a check that had been asserting against the wrong file for as
     long as it existed: see `test_check_style_tasks_go_through_the_wrapper...` below.
@@ -822,7 +823,7 @@ def _tasks_json() -> dict:
 
 def test_vscode_tasks_are_valid_and_labelled():
     """Every task carries a `detail` — it is the only place a one-click action can state
-    its blast radius, which is CLAUDE.md's rule for this file."""
+    its blast radius, which is `.claude/rules/vscode-tasks.md`'s rule for this file."""
     tasks = _tasks_json()["tasks"]
     assert tasks, "no tasks defined"
     for task in tasks:
@@ -867,10 +868,11 @@ _EMPTY_OPTION_ALLOWED: frozenset[str] = frozenset({"testScope", "e2eMode"})
 
 
 def test_every_picker_option_supplies_a_real_token():
-    """CLAUDE.md's rule for this file: a `${input:...}` picker must produce one real
-    token in every branch. An empty string does not vanish from the args array — it
-    reaches argparse as a stray positional and the task fails. This is why sweep.py
-    and new-project.py both carry a `--dry-run` that is redundant with their default.
+    """`.claude/rules/vscode-tasks.md`'s rule for this file: a `${input:...}` picker
+    must produce one real token in every branch. An empty string does not vanish from
+    the args array — it reaches argparse as a stray positional and the task fails. This
+    is why sweep.py and new-project.py both carry a `--dry-run` that is redundant with
+    their default.
     """
     for spec in _tasks_json().get("inputs", []):
         if spec.get("type") != "pickString" or spec["id"] in _EMPTY_OPTION_ALLOWED:
