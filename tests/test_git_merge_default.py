@@ -66,8 +66,20 @@ class FakeGit:
     def __call__(self, argv):
         args = tuple(argv[1:])
         self.calls.append(args)
-        code, output = self.responses.get(args, (0, ""))
+        answer = self.responses.get(args, (0, ""))
+        if isinstance(answer, list):
+            # A list is consumed in order and its last entry sticks, which is how the
+            # same `git merge` answers a refusal and then the retry after the stash.
+            answer = answer.pop(0) if len(answer) > 1 else answer[0]
+        code, output = answer
         return subprocess.CompletedProcess(list(argv), code, output, "")
+
+    def when(self, *prefix: str) -> int:
+        """Index of the first call matching `prefix`, or -1 -- for asserting order."""
+        for index, call in enumerate(self.calls):
+            if call[: len(prefix)] == prefix:
+                return index
+        return -1
 
     def ran(self, *prefix: str) -> bool:
         return any(call[: len(prefix)] == prefix for call in self.calls)
@@ -312,6 +324,113 @@ def test_uncommitted_changes_are_flagged_but_do_not_block(capsys):
     assert "2 file(s) have uncommitted changes" in capsys.readouterr().out
 
 
+def test_a_merge_git_allows_never_touches_the_stash():
+    """A dirty tree git merged around is a tree nothing has to be done to. Stashing it
+    anyway would put a pop -- and a pop's conflicts -- on runs that never needed one."""
+    fake = FakeGit(**{"status|--porcelain": (0, " M app/notes.md")})
+    assert run(fake) == 0
+    assert not fake.ran("stash")
+
+
+# --- keeping the local work, which is why the task kept failing --------------
+#
+# The checkout this was written for carries months of uncommitted work and takes the
+# trunk constantly, so "git refuses because the merge touches a file you have edited"
+# is not an edge case there -- it is every run. The task reported that refusal
+# faithfully and did nothing, which is a task that does not work.
+
+REFUSED = (
+    "error: Your local changes to the following files would be overwritten by merge:\n"
+    "\tAppCode/Vanillasoft.Web/Web.config\n"
+    "Please commit your changes or stash them before you merge.\n"
+    "Aborting"
+)
+MERGED = (0, "Merge made by the 'ort' strategy.")
+DIRTY = {"status|--porcelain": (0, " M AppCode/Vanillasoft.Web/Web.config")}
+STASH_PUSH = ("stash", "push", "--include-untracked", "-m", merge_default.STASH_MESSAGE)
+
+
+def refusing_then(*answers):
+    """A merge that refuses over local edits, then answers `answers` in order."""
+    return {**DIRTY, "merge|--no-edit|origin/develop": [(1, REFUSED), *answers]}
+
+
+def test_a_refusal_over_local_edits_is_retried_around_a_stash(capsys):
+    fake = FakeGit(**refusing_then(MERGED))
+    assert run(fake) == 0
+    assert fake.calls.count(("merge", "--no-edit", "origin/develop")) == 2
+    assert "Done." in capsys.readouterr().out
+
+
+def test_the_work_is_set_aside_before_the_retry_and_put_back_after_it():
+    """Order is the whole of it: a pop before the merge restores nothing, and a stash
+    after it never happened in time to matter."""
+    fake = FakeGit(**refusing_then(MERGED))
+    assert run(fake) == 0
+    refusal, retry = [i for i, c in enumerate(fake.calls) if c[:2] == ("merge", "--no-edit")]
+    assert refusal < fake.when(*STASH_PUSH) < retry < fake.when("stash", "pop")
+
+
+def test_untracked_files_go_with_it_but_ignored_ones_do_not():
+    """An incoming file landing on an untracked path is one of the two refusals being
+    answered. `--all` would additionally sweep a build tree into the stash, which is not
+    something a merge task should ever do."""
+    fake = FakeGit(**refusing_then(MERGED))
+    assert run(fake) == 0
+    assert STASH_PUSH in fake.calls
+    assert not fake.ran("stash", "push", "--all")
+
+
+def test_a_conflict_after_stashing_leaves_the_work_in_the_stash(capsys):
+    """Popping into half-merged files would bury the conflicts under a second set."""
+    fake = FakeGit(
+        **refusing_then((1, "CONFLICT (content): Merge conflict in Web.config")),
+        **{"diff|--name-only|--diff-filter=U": (0, "AppCode/Vanillasoft.Web/Web.config\n")},
+    )
+    assert run(fake) == 1
+    assert not fake.ran("stash", "pop")
+    err = capsys.readouterr().err
+    assert merge_default.STASH_MESSAGE in err
+    assert "git stash pop" in err
+
+
+def test_a_second_refusal_puts_the_work_straight_back(capsys):
+    """Nothing was started, so the tree is where it was -- and what was taken out of it
+    belongs back in it, not in a stash the user never asked for."""
+    fake = FakeGit(
+        **refusing_then((1, "fatal: refusing to merge unrelated histories")),
+        **{"diff|--name-only|--diff-filter=U": (0, "")},
+    )
+    assert run(fake) == 1
+    assert fake.ran("stash", "pop")
+    assert "unrelated histories" in capsys.readouterr().err
+
+
+def test_a_stash_that_cannot_be_taken_leaves_the_refusal_standing(capsys):
+    """Nothing was set aside, so nothing is retried and nothing has to be put back --
+    and the message the user needs is git's original refusal."""
+    fake = FakeGit(
+        **refusing_then(MERGED),
+        **{"stash|push|--include-untracked|-m|" + merge_default.STASH_MESSAGE: (1, "error: gone")},
+    )
+    assert run(fake) == 1
+    assert fake.calls.count(("merge", "--no-edit", "origin/develop")) == 1
+    assert not fake.ran("stash", "pop")
+    err = capsys.readouterr().err
+    assert "would be overwritten by merge" in err
+
+
+def test_a_pop_that_conflicts_is_reported_rather_than_called_success(capsys):
+    """The work is then in the tree with markers AND still in the stash. A run that
+    printed `Done.` over that reads as the task having mangled the working copy."""
+    fake = FakeGit(**refusing_then(MERGED), **{"stash|pop": (1, "CONFLICT in Web.config")})
+    assert run(fake) == 1
+    out = capsys.readouterr()
+    assert "Done." not in out.out
+    assert "still in the stash" in out.err
+    assert merge_default.STASH_MESSAGE in out.err
+
+
 # --- the conflict path, which is the expected one ---------------------------
 
 CONFLICTED = {
@@ -364,9 +483,19 @@ def test_conflicted_paths_ignores_blank_lines():
 
 
 def test_the_remediation_block_carries_a_prompt_that_forbids_aborting():
-    text = remediation(REPO, "feature/x", "origin/develop", ["a.cs"])
+    text = remediation(REPO, "feature/x", "origin/develop", ["a.cs"], stashed=False)
     assert "do not abort it" in text
     assert "git merge --abort" in text  # still offered, as the deliberate way out
+
+
+def test_the_remediation_block_says_where_the_work_went_only_when_it_went_somewhere():
+    """A working tree that emptied itself during a task the user clicked for a *merge*
+    reads as the task having eaten the work; the recovery is one command nobody guesses
+    under that impression. Saying it when nothing was stashed is noise of its own."""
+    stashed = remediation(REPO, "feature/x", "origin/develop", ["a.cs"], stashed=True)
+    assert merge_default.STASH_MESSAGE in stashed
+    assert "NOT lost" in stashed
+    assert "NOT lost" not in remediation(REPO, "feature/x", "origin/develop", ["a.cs"], False)
 
 
 # --- the entrypoint ---------------------------------------------------------
