@@ -184,6 +184,50 @@
 			},
 			"problemMatcher": []
 		},
+		{
+			// The one task that reaches a REFERENCE checkout, and the reason it is
+			// not a devkit_project.py dispatch: that dispatcher resolves through
+			// `known_projects`, which drops NOT_PROJECTS because every action it
+			// runs needs a harness. Merging a trunk in needs git and nothing else,
+			// so this script resolves against the raw registry and its picker lists
+			// VanillaLand alongside the projects.
+			//
+			// The sibling above REBASES, which is right for a task branch and wrong
+			// for long-lived work whose history is already published. This merges.
+			"label": "Git: Merge Origin Default into Current Branch",
+			"detail": "Fetch, then MERGE origin's default branch — auto-detected, so `develop` in VanillaLand — into whatever branch the chosen checkout is on. Commits locally and NEVER pushes. On conflict the merge is LEFT IN PROGRESS and every unmerged file is named in devkit's logs/git-merge-origin-default-into-current-branch.log; hand that file to a coding agent.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"scripts/notify-wrap.py",
+				"Git: Merge Origin Default into Current Branch",
+				"--",
+				"python",
+				"scripts/log-wrap.py",
+				"Git: Merge Origin Default into Current Branch",
+				"--",
+				"python",
+				"scripts/git-merge-default.py",
+				"--checkout",
+				"${input:mergeCheckout}",
+				"--base",
+				"${input:mergeBase}"
+			],
+			"options": {
+				"cwd": "${workspaceFolder:devkit}"
+			},
+			"icon": {
+				"id": "git-merge",
+				"color": "terminal.ansiBrightCyan"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
 		// --- generic: Docker ------------------------------------------------
 		// Two kinds live here. The first two are STACK-scoped: they act on the
 		// chosen project's own compose topology, which genuinely differs (carameli
@@ -1602,6 +1646,54 @@
 				"codex"
 			],
 			"default": "claude"
+		},
+		{
+			// MAINTAINED BY new-project.py, like `project` — and it is the only
+			// picker that lists MORE than the registry, because the reference
+			// checkout can take this action and no other. Single-pick: a merge
+			// conflict is resolved per repo, so batching them would just queue up
+			// two half-finished merges.
+			"id": "mergeCheckout",
+			"type": "pickString",
+			"description": "Which checkout should take origin's default branch?",
+			"options": [
+				"VanillaLand",
+				"carameli",
+				"ibkr_trader",
+				"devkit",
+				"data-lake",
+				"apt-finder",
+				"sports_betting"
+			],
+			"default": "VanillaLand"
+		},
+		{
+			// Every branch supplies one real token — `auto` rather than "" — for the
+			// reason spelled out on `newProjectRemote`. `auto` reads the branch off
+			// refs/remotes/origin/HEAD, which is already `develop` in VanillaLand;
+			// the named ones are for merging from somewhere other than the trunk.
+			"id": "mergeBase",
+			"type": "pickString",
+			"description": "Which branch to merge FROM",
+			"options": [
+				{
+					"label": "Auto — origin's own default branch",
+					"value": "auto"
+				},
+				{
+					"label": "develop",
+					"value": "develop"
+				},
+				{
+					"label": "main",
+					"value": "main"
+				},
+				{
+					"label": "master",
+					"value": "master"
+				}
+			],
+			"default": "auto"
 		}
 	]
 }
