@@ -86,7 +86,7 @@ def _make_project(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path, Pa
 
 
 def _run(
-    project: Path, log: Path, env_file: Path, *, inherit_path: bool = True
+    project: Path, log: Path, env_file: Path, *, inherit_path: bool = True, remote: bool = True
 ) -> tuple[int, str, str]:
     """Drive the script with the stub bin dir first on PATH.
 
@@ -95,6 +95,11 @@ def _run(
     a stub is not enough when the real binary is installed in the environment running the
     tests, which is exactly the case in CI (`uv run pre-commit` puts it on PATH) and made
     the pre-commit-absent test pass alone and fail in a full run.
+
+    `remote=False` drives the LOCAL branch — the one every test here used to skip, which
+    is how the pre-commit wiring came to be reachable only from a sandbox. The project is
+    not a git repository, so the auto-rebase half finds no branch and stands down; the
+    branch-protection tests below build a real one when they need it.
     """
     # `pytestmark` already skips this module when bash is absent, but that is a runtime
     # guard a type-checker cannot see — assert so `BASH` narrows from `str | None`.
@@ -108,7 +113,7 @@ def _run(
         # and none of those are what any of these tests stub out.
         path = os.pathsep.join([str(stub_bin), "/usr/bin", "/bin"])
     env.update(
-        CLAUDE_CODE_REMOTE="true",
+        CLAUDE_CODE_REMOTE="true" if remote else "false",
         CLAUDE_PROJECT_DIR=str(project),
         CLAUDE_ENV_FILE=str(env_file),
         # Do not inherit the developer machine's global core.hooksPath. Individual
@@ -236,6 +241,72 @@ def test_pre_commit_hook_is_installed_when_a_config_is_present(tmp_path):
     rc, output, _ = _run(project, log, env_file)
     assert rc == 0, output
     assert "pre-commit install" in output, output
+    # A cold sandbox builds the hook environments while it is provisioning anyway; the
+    # local branch deliberately does not (see the test below).
+    assert "--install-hooks" in output, output
+
+
+def test_the_pre_commit_gate_is_wired_on_a_local_session_too(tmp_path):
+    """The regression this whole block exists for.
+
+    `.git/hooks/` is not committed on *any* machine, so a fresh clone has
+    `.pre-commit-config.yaml` and none of the hooks it describes. The wiring used to sit
+    below the local `exit 0`, so the only shape it ever reached was a remote sandbox --
+    and a consuming project cloned onto a second machine committed ungated, with nothing
+    to report it: the config file is committed and looks like the gate, and CI runs the
+    same checks in a job, so both ends read healthy while the commit-time half is absent.
+    """
+    project, log, env_file = _make_project(
+        tmp_path,
+        {
+            "pyproject.toml": PYPROJECT,
+            ".pre-commit-config.yaml": "repos: []\n",
+        },
+    )
+    rc, output, _ = _run(project, log, env_file, remote=False)
+    assert rc == 0, output
+    assert "pre-commit install" in output, output
+    # The cheap form: it writes `.git/hooks/pre-commit` and nothing else. Building the
+    # hook environments here would put a multi-minute install in front of a session that
+    # already has its toolchain.
+    assert "--install-hooks" not in output, output
+    # And nothing else from the remote provisioning path ran.
+    assert "-e .[dev]" not in output, output
+
+
+def test_a_local_session_defers_to_the_global_devkit_dispatcher(tmp_path):
+    """The dispatcher check has to hold on the branch that actually meets it.
+
+    A machine with the global branch policy installed is the *local* case by definition,
+    so this is where overwriting `core.hooksPath` -- disabling the policy for every
+    repository on the machine -- would really happen.
+    """
+    project, log, env_file = _make_project(
+        tmp_path,
+        {
+            "pyproject.toml": PYPROJECT,
+            ".pre-commit-config.yaml": "repos: []\n",
+        },
+    )
+    global_hooks = tmp_path / "global-hooks"
+    global_hooks.mkdir()
+    (global_hooks / "devkit_git_policy.py").write_text("# installed\n", encoding="utf-8")
+    (tmp_path / "gitconfig").write_text(
+        f"[core]\n\thooksPath = {global_hooks.as_posix()}\n",
+        encoding="utf-8",
+    )
+
+    rc, output, _ = _run(project, log, env_file, remote=False)
+    assert rc == 0, output
+    assert "global Devkit dispatcher" in output, output
+    assert "pre-commit install" not in output, output
+
+
+def test_a_local_session_without_a_config_wires_nothing(tmp_path):
+    project, log, env_file = _make_project(tmp_path, {"pyproject.toml": PYPROJECT})
+    rc, output, _ = _run(project, log, env_file, remote=False)
+    assert rc == 0, output
+    assert "pre-commit install" not in output, output
 
 
 def test_pre_commit_install_defers_to_the_global_devkit_dispatcher(tmp_path):

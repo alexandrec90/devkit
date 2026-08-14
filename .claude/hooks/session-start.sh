@@ -10,6 +10,56 @@
 # re-runs are cheap (venv reused, pip/npm no-op when satisfied).
 set -uo pipefail
 
+# --- The pre-commit gate, wired for BOTH session kinds -------------------------
+# `.git/hooks/` is not committed, so a fresh clone has the config file and none of the
+# hooks it describes — the gate silently does not exist until someone runs
+# `pre-commit install`. That is a property of *cloning*, not of running in a sandbox,
+# and this used to sit below the local `exit 0`: the one shape it never reached was a
+# clone on a developer's machine, which is the common one. A consuming project cloned
+# onto a second machine therefore committed ungated, with nothing anywhere to say so —
+# `.pre-commit-config.yaml` is committed and looks like the gate, and CI runs the same
+# checks in a job, so both ends report healthy while the commit-time half is absent.
+#
+# Detection, not configuration, like everything else here: the config on disk is the
+# signal, so a project without one skips this entirely. Installing the hook does NOT run
+# it — nothing is checked until a commit is made.
+#
+# `$1` is `warm` to build the hook environments too. A cold sandbox pays that once, up
+# front, because it is about to run a gate; a local session gets the plain install, which
+# only writes `.git/hooks/pre-commit` and costs milliseconds at every single start.
+wire_pre_commit() {
+  [ -f .pre-commit-config.yaml ] || return 0
+  global_hooks_path="$(git config --global --get core.hooksPath 2>/dev/null)"
+  if [ -n "$global_hooks_path" ] && [ -f "$global_hooks_path/devkit_git_policy.py" ]; then
+    # The global dispatcher invokes `pre-commit run` itself after its branch policy
+    # passes. Installing here would target core.hooksPath and ask pre-commit to
+    # overwrite that dispatcher, disabling the policy for every repository.
+    echo "[session-start] Using the global Devkit dispatcher for pre-commit."
+    return 0
+  fi
+  # `Scripts/` as well as `bin/`: the local branch runs on whatever the developer has,
+  # and on Windows a venv's console scripts land in `Scripts/`. The remote sandbox is
+  # Linux, which is why `bin/` alone was enough while this was remote-only.
+  if [ -x ./.venv/bin/pre-commit ]; then
+    precommit="./.venv/bin/pre-commit"
+  elif [ -x ./.venv/Scripts/pre-commit.exe ]; then
+    precommit="./.venv/Scripts/pre-commit.exe"
+  elif command -v pre-commit >/dev/null 2>&1; then
+    precommit="pre-commit"
+  else
+    echo "[session-start] pre-commit not installed — skipping git hook wiring"
+    return 0
+  fi
+  echo "[session-start] Installing the pre-commit git hook..."
+  if [ "${1:-}" = "warm" ]; then
+    "$precommit" install --install-hooks >/dev/null 2>&1 \
+      || echo "[session-start] WARN: pre-commit install failed — commits will not be gated"
+  else
+    "$precommit" install >/dev/null 2>&1 \
+      || echo "[session-start] WARN: pre-commit install failed — commits will not be gated"
+  fi
+}
+
 # --- LOCAL sessions only: keep this branch current with origin/master ---------
 # Parallel worktrees drift from master the longer their branches live; on a
 # local session this rebases the checked-out branch onto origin/master so it
@@ -87,7 +137,10 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
       fi
     fi
   ) || true
-  # Local machines already have the venv + node_modules; nothing to provision.
+  # Local machines already have the venv + node_modules; nothing to provision — but
+  # `.git/hooks/` is not committed on any machine, so the commit-time gate still has to
+  # be wired here. See `wire_pre_commit`.
+  (cd "${CLAUDE_PROJECT_DIR:-.}" && wire_pre_commit) || true
   exit 0
 fi
 
@@ -188,38 +241,10 @@ else
   echo "[session-start] No frontend tier in .devkit.toml — skipping npm install"
 fi
 
-# Wire the pre-commit gate into .git/hooks. `.git/hooks/` is not committed, so a fresh
-# clone — and every fresh sandbox — has the config file but none of the hooks it
-# describes, and the gate silently does not exist. `pre-commit install` is idempotent and
-# runs in well under a second.
-#
-# Detection, not configuration, like everything else here: the config on disk is the
-# signal. Projects without one skip this entirely. Installing the hook does NOT run it —
-# nothing is checked until a commit is made.
-if [ -f .pre-commit-config.yaml ]; then
-  global_hooks_path="$(git config --global --get core.hooksPath 2>/dev/null)"
-  if [ -n "$global_hooks_path" ] && [ -f "$global_hooks_path/devkit_git_policy.py" ]; then
-    # The global dispatcher invokes `pre-commit run` itself after its branch policy
-    # passes. Installing here would target core.hooksPath and ask pre-commit to
-    # overwrite that dispatcher, disabling the policy for every repository.
-    echo "[session-start] Using the global Devkit dispatcher for pre-commit."
-  else
-    if [ -x ./.venv/bin/pre-commit ]; then
-      precommit="./.venv/bin/pre-commit"
-    elif command -v pre-commit >/dev/null 2>&1; then
-      precommit="pre-commit"
-    else
-      precommit=""
-    fi
-    if [ -n "$precommit" ]; then
-      echo "[session-start] Installing the pre-commit git hook..."
-      "$precommit" install --install-hooks >/dev/null 2>&1 \
-        || echo "[session-start] WARN: pre-commit install failed — commits will not be gated"
-    else
-      echo "[session-start] pre-commit not installed — skipping git hook wiring"
-    fi
-  fi
-fi
+# Wire the pre-commit gate into .git/hooks, building the hook environments while the
+# sandbox is being provisioned anyway. The local branch above calls the same function
+# without `warm`; see it for why this is not remote-only.
+wire_pre_commit warm
 
 # External lint binaries lint-all.py shells out to, installed to a PATH dir so
 # `shutil.which(...)` finds them. Best-effort: the runner skips a missing tool
