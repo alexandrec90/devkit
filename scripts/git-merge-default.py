@@ -24,7 +24,8 @@ would throw away exactly the state that work needs. The task wraps this in
 `log-wrap.py`, so the list survives as `logs/<task>.log` -- something to hand an
 agent, rather than something to scrape out of a terminal that has scrolled.
 
-Nothing is pushed, and no branch is created or deleted.
+Nothing is pushed, and no branch is created or deleted. Uncommitted work is stashed
+and restored when git would otherwise refuse over it -- see `merge`.
 """
 
 from __future__ import annotations
@@ -48,6 +49,10 @@ DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 # every branch -- an empty string reaches argparse as a stray positional.
 AUTO = "auto"
 DEFAULT_REMOTE = "origin"
+
+# Named, not generated: it is what a reader of `git stash list` sees weeks later, and
+# what every message here tells them to look for.
+STASH_MESSAGE = "git-merge-default: set aside so the trunk could be merged"
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -76,7 +81,24 @@ def conflicted_paths(diff_output: str) -> list[str]:
     return [line.strip() for line in diff_output.splitlines() if line.strip()]
 
 
-def remediation(repo: Path, branch: str, target: str, paths: list[str]) -> str:
+def held_in_the_stash(stashed: bool) -> str:
+    """The paragraph every failure path owes the reader once work has been set aside.
+
+    Silence here is the one unrecoverable outcome this script can produce. The changes
+    are safe -- `git stash` does not lose things -- but a working tree that emptied
+    itself during a task the user clicked for a *merge* reads as the task having eaten
+    the work, and the recovery is one command nobody guesses under that impression.
+    """
+    if not stashed:
+        return ""
+    return (
+        f"\nYour uncommitted work is NOT lost: it is stashed as {STASH_MESSAGE!r}.\n"
+        "  `git stash list` to see it, `git stash pop` to put it back once the tree is\n"
+        "  in a state you want it back in.\n"
+    )
+
+
+def remediation(repo: Path, branch: str, target: str, paths: list[str], stashed: bool) -> str:
     """What happens next, written for whoever reads the artifact rather than the run.
 
     Usually that is not the person who clicked the task -- it is the agent they hand
@@ -95,6 +117,7 @@ def remediation(repo: Path, branch: str, target: str, paths: list[str]) -> str:
         f"Or finish it by hand, in {repo}:\n"
         "  resolve each file, then `git add <file>` and `git commit --no-edit`\n"
         "  or back out entirely with `git merge --abort`\n"
+        f"{held_in_the_stash(stashed)}"
     )
 
 
@@ -211,11 +234,87 @@ def resolve_base(run: Runner, remote: str, requested: str) -> str:
     return detected
 
 
+def refused_over_local_changes(merged: subprocess.CompletedProcess[str]) -> bool:
+    """git declined before starting, because the merge needs a file you have edited.
+
+    Matched on git's own sentence rather than on the exit code, which is 1 for every
+    refusal and for a conflict alike. Both spellings -- "Your local changes to the
+    following files would be overwritten by merge" and the untracked-file variant --
+    end in the same clause, which is the part being matched.
+    """
+    return merged.returncode != 0 and "would be overwritten by merge" in said(merged)
+
+
+def merge_around_local_changes(
+    run: Runner,
+    target: str,
+    refusal: subprocess.CompletedProcess[str],
+) -> tuple[subprocess.CompletedProcess[str], bool]:
+    """Set the working tree aside, merge, and report whether the stash is still held.
+
+    This is the case the task exists for and the one it used to fail on. The checkout it
+    was written for carries months of uncommitted work -- 147 files when this was
+    written -- and the trunk moves under it constantly, so "git refuses when the merge
+    touches a file you have edited" is not an edge case there, it is every run. A
+    one-click task whose outcome on its own target is always "refused, do it yourself"
+    is a task that does not work.
+
+    It is deliberately reached only *after* git has refused, not whenever the tree is
+    dirty. git merges around edits it does not need to touch, and that path leaves the
+    working tree untouched -- no stash, no restore, nothing to go wrong. Stashing up
+    front would trade a guarantee for a convenience on every run that never needed it.
+
+    `--include-untracked` because an incoming file landing on an untracked path is one
+    of the two refusals being answered. Ignored files stay put; `git stash` does not
+    take those without `--all`, and sweeping a build tree into a stash entry is not
+    something a merge task should ever do.
+    """
+    print(
+        "git refused: the merge needs files you have edited. Setting them aside and retrying.",
+        flush=True,
+    )
+    pushed = git(run, "stash", "push", "--include-untracked", "-m", STASH_MESSAGE)
+    if pushed.returncode != 0:
+        # Nothing was set aside, so nothing has to be put back and the refusal stands.
+        print(reason(pushed, "git stash push"), file=sys.stderr)
+        return refusal, False
+    return git(run, "merge", "--no-edit", target), True
+
+
+def restore(run: Runner) -> bool:
+    """Put the stashed work back. False when it did not go back cleanly.
+
+    A pop that conflicts leaves the entry in the stash *and* the conflict markers in the
+    tree -- git's behaviour, and the right one -- so the work exists twice rather than
+    not at all. That is worth saying out loud, because a working tree full of markers
+    after a task that reported success is otherwise indistinguishable from damage.
+    """
+    print("Restoring your uncommitted work ...", flush=True)
+    popped = git(run, "stash", "pop")
+    if popped.returncode == 0:
+        return True
+    print(
+        f"{said(popped)}\n\n"
+        "Your work came back with conflicts against what was merged, so it is BOTH in\n"
+        "the working tree (with conflict markers) and still in the stash. Resolve the\n"
+        "files, then `git stash drop` the entry once you are happy with them."
+        f"{held_in_the_stash(True)}",
+        file=sys.stderr,
+    )
+    return False
+
+
 def merge(run: Runner, repo: Path, remote: str, requested_base: str) -> int:
     """Fetch, then merge `<remote>/<base>` into the checked-out branch.
 
     0 when merged or already current, 1 when git refused or the merge conflicted, 2
     when the request itself was wrong and nothing was attempted.
+
+    Uncommitted work is stashed only if git refuses over it, and put back on every path
+    out of here that leaves the tree quiescent -- after a clean merge, and after a
+    second refusal that started nothing. The one path that deliberately leaves it in the
+    stash is a *conflicted* merge, where popping into half-merged files would bury the
+    conflicts the next step has to resolve; `remediation` says where it is.
     """
     if git(run, "rev-parse", "--show-toplevel").returncode != 0:
         print(f"{repo} is not a git repository.", file=sys.stderr)
@@ -251,29 +350,37 @@ def merge(run: Runner, repo: Path, remote: str, requested_base: str) -> int:
 
     dirty = said(git(run, "status", "--porcelain"))
     if dirty:
-        # Not a refusal: git merges happily around local edits it does not need to
-        # touch, and refuses -- cleanly, changing nothing -- when it does. Saying so up
-        # front is what makes that refusal legible when it arrives.
+        # Not a warning about a refusal any more -- a refusal is now handled below --
+        # but still worth stating, because it is what makes the stash step legible when
+        # it happens.
         print(
             f"Note: {len(dirty.splitlines())} file(s) have uncommitted changes. "
-            "git will refuse the merge if it needs to overwrite one of them."
+            "They will be set aside and restored if the merge needs to touch one."
         )
 
     print(f"Merging {target} into {branch!r} ({behind} commit(s)) ...", flush=True)
     merged = git(run, "merge", "--no-edit", target)
+    stashed = False
+    if refused_over_local_changes(merged):
+        merged, stashed = merge_around_local_changes(run, target, merged)
+
     if merged.returncode == 0:
         print(said(merged))
+        if stashed and not restore(run):
+            return 1
         print(f"Done. {branch!r} now contains {target}. Nothing was pushed.")
         return 0
 
     paths = conflicted_paths(said(git(run, "diff", "--name-only", "--diff-filter=U")))
     if not paths:
-        # Refused rather than conflicted -- uncommitted changes in the way, unrelated
-        # histories, a merge already in progress. Nothing was started, so there is
-        # nothing to resolve and git's own message is the useful one.
+        # Refused rather than conflicted -- unrelated histories, a merge already in
+        # progress, or local changes a stash could not be taken of. Nothing was started,
+        # so the tree is where it was and anything set aside belongs back in it.
         print(reason(merged, f"git merge --no-edit {target}"), file=sys.stderr)
+        if stashed and not restore(run):
+            return 1
         return 1
-    print(remediation(repo, branch, target, paths), file=sys.stderr)
+    print(remediation(repo, branch, target, paths, stashed), file=sys.stderr)
     return 1
 
 
