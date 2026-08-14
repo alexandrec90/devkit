@@ -308,7 +308,27 @@ def test_an_existence_probe_is_allowed():
 def test_a_condition_test_does_not_launder_an_unbounded_statement():
     """The exemption is per-statement, so the `ls` still decides."""
     assert hook.is_capped("test -d src && ls -R src") is False
-    assert hook.is_bounded("test -n $(ls -R /)") is False
+
+
+def test_a_condition_test_bounds_a_substitution_it_consumes():
+    """This assertion used to read `is False`, and reversing it was deliberate.
+
+    The reasoning behind the old expectation was the general one for the substitution
+    veto: `$(...)` can print anything, so a statement containing one cannot be called
+    bounded. That holds wherever the statement has a path to the terminal -- and a
+    condition test has none. `test` consumes the substitution's output as an *argument*
+    and writes nothing to stdout under any flag, so the bytes never reach the agent.
+
+    The veto was therefore refusing on output that cannot exist, and it did so on the
+    shape every readiness poll in this workspace is written in
+    (`until [ "$(docker inspect ...)" = healthy ]`), where the remedy the block message
+    offers -- cap it -- caps an empty stream. This gate budgets context, not risk; what
+    the substitution *does* is not its question.
+    """
+    assert hook.is_bounded("test -n $(ls -R /)") is True
+    # The distinction is whether the statement can print, not whether it is a builtin:
+    # `echo` puts the same substitution straight into context.
+    assert hook.is_bounded("echo $(ls -R /)") is False
 
 
 def test_a_bounded_prefix_does_not_exempt_a_longer_word():
@@ -696,6 +716,251 @@ def test_the_ship_skill_says_how_to_pass_a_backticked_message():
     text = SHIP_SKILL.read_text(encoding="utf-8")
     assert "--body-file" in text
     assert "git commit -F" in text
+
+
+# --- the cap is a family, not one spelling -------------------------------------
+# Measured, not guessed: over the workspace's transcripts a little over half of every
+# block this hook had ever issued was one of the shapes below. Each was blocked by a
+# gate whose own message recommends piping into head/tail.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The self-contradiction that made this worth measuring: the block message says
+        # to keep the tail on a test run because the summary is the part you need.
+        "python -m pytest scripts/hooks/tests/ -q 2>&1 | tail -c 2500",
+        "gh run view --job 91847812208 --log-failed 2>&1 | tail -c 4000",
+        "cat big.log | tail -c 512",
+    ],
+)
+def test_tail_c_is_a_cap_exactly_as_head_c_is(command):
+    assert hook.has_cap(command) is True
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git ls-files | head -100",
+        "git ls-files | head -n 100",
+        "gh pr view 116 --json number,title,body 2>&1 | head -60",
+        "cat big.log | tail -20",
+        "cat big.log | tail -n 20",
+        # A file argument rather than a pipe: still bounded to N lines.
+        "head -50 big.log",
+    ],
+)
+def test_a_line_count_is_a_cap(command):
+    """Weaker than a byte cap and admitted deliberately -- see `CAP_RE`.
+
+    A line count is bounded regardless of repo or filesystem size, which is this
+    hook's stated criterion, and it is the bound the Read tool applies too. What it
+    does not bound is line length.
+    """
+    assert hook.has_cap(command) is True
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # "From line 5 to the end" is not a bound at all.
+        "cat big.log | tail -n +5",
+        # Does not terminate, so it bounds nothing and hangs the turn.
+        "tail -f app.log",
+        # No count anywhere.
+        "cat big.log | head",
+    ],
+)
+def test_a_head_or_tail_that_bounds_nothing_is_not_a_cap(command):
+    assert hook.has_cap(command) is False
+    assert hook.decide(payload("Bash", command))[0] == hook.EXIT_BLOCK
+
+
+# --- redirected output never reaches the agent ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'gh run view 31437747160 --job 93615604936 --log > "/tmp/run.log"',
+        "ls -R / > /dev/null",
+        "find . -name '*.py' >> inventory.txt",
+        "cat huge.log 1> out.txt",
+        "make build &> build.log",
+    ],
+)
+def test_stdout_redirected_to_a_file_is_bounded(command):
+    """The strongest bound there is: the output is not in the agent's context at all.
+
+    The remedy the block message offered for these -- cap the output -- caps a stream
+    that was never going to arrive.
+    """
+    assert hook.is_bounded(command) is True
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A file-descriptor duplication, not a redirect of stdout to a file. Reading it
+        # as one would exempt most of the commands this gate exists to catch, since
+        # `2>&1` is how they are all written.
+        "ls -R / 2>&1",
+        "grep -r foo . 2>&1",
+        "cat big.log >&2",
+        # stderr only: stdout still reaches the terminal. The no-space spelling is the
+        # common one and the likeliest regression -- `2>/dev/null` is a hair away from
+        # reading as a redirect and would exempt most of what this gate is for.
+        "ls -R / 2>/dev/null",
+        "grep -r foo . 2>/dev/null",
+        "ls -R / 2> errors.txt",
+    ],
+)
+def test_a_descriptor_dup_is_not_a_redirect(command):
+    assert hook.is_bounded(command) is False
+    assert hook.decide(payload("Bash", command))[0] == hook.EXIT_BLOCK
+
+
+def test_a_redirect_inside_quotes_does_not_bound():
+    """Prose is not a redirect: the `>` here is inside the message."""
+    assert hook.is_bounded('grep -r "a > b" .') is False
+
+
+# --- the substitution veto must not outrank a statement with no stdout ---------
+
+
+def test_a_substitution_inside_a_condition_stays_bounded():
+    """`until [ "$(docker inspect ...)" = healthy ]` is how every readiness poll here
+    is written, and the veto blocked all of them. `[` has no stdout path, so the
+    substitution feeds the condition and never the terminal.
+    """
+    poll = 'until [ "$(docker inspect --format \'{{.State.Status}}\' db-1)" = "running" ]'
+    assert hook.is_bounded(poll) is True
+
+
+def test_a_substitution_whose_output_is_redirected_stays_bounded():
+    assert hook.is_bounded("echo $(ls -R /) > /dev/null") is True
+
+
+def test_the_veto_still_holds_where_output_can_reach_the_terminal():
+    """The ordering change must not weaken the rule it reorders."""
+    assert hook.is_bounded("echo $(find / -name x)") is False
+    assert hook.is_bounded("echo `ls -R /`") is False
+
+
+def test_the_readiness_poll_that_was_blocked_end_to_end():
+    """The exact shape from the transcripts, every fragment of it."""
+    command = (
+        'until [ "$(docker inspect --format \'{{.State.Health.Status}}\' db-1)" = "healthy" ];'
+        ' do sleep 2; done; echo "db healthy"'
+    )
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+# --- git log is bounded exactly when it is told how many commits to print ------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git log --oneline -3",
+        "git log --oneline -25",
+        "git log -n 5 --format=%H",
+        "git log --max-count=10",
+        "git log --max-count 10",
+        'git -C "C:/Users/x/devkit" log --oneline -5',
+    ],
+)
+def test_a_counted_git_log_is_bounded(command):
+    assert hook.is_bounded(command) is True
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Scales with history: the case the exemption must not reach.
+        "git log",
+        "git log --oneline",
+        "git log --format=%H",
+        # One commit's diff has no bound, so a count does not earn the exemption.
+        "git log -p -3",
+        "git log --patch -1",
+        "git log -3 -u",
+    ],
+)
+def test_an_uncounted_or_patch_git_log_stays_blocked(command):
+    assert hook.is_bounded(command) is False
+    assert hook.decide(payload("Bash", command))[0] == hook.EXIT_BLOCK
+
+
+# --- the remaining single-command gaps -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Found by the poll loop above: once the control keywords became bounded, the
+        # `sleep` was the last fragment in the line still able to block it.
+        "sleep 2",
+        "sleep 10",
+        # Move a checkout, answer with a fixed confirmation or nothing.
+        "git checkout -- .secrets.baseline scripts/hooks/tests/test_repo_contract.py",
+        "git checkout -b agent/topic-0813",
+        "git switch main",
+        "git restore --staged pyproject.toml",
+        # One line: a URL, a sha, or nothing at all.
+        "git remote get-url origin",
+        "git merge-base --is-ancestor origin/agent/x origin/main",
+        # Silent on success, one diagnostic on failure.
+        "bash -n /tmp/prepare.sh",
+        "sh -n install.sh",
+    ],
+)
+def test_the_remaining_bounded_commands_need_no_wrapper(command):
+    assert hook.is_bounded(command) is True
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+def test_verbose_still_revokes_the_new_silent_on_success_entries():
+    """`-v` is what turns a fixed confirmation into per-file output."""
+    assert hook.is_bounded("git checkout -v main") is False
+
+
+# --- the guarantee is unchanged for everything the gate exists to catch ---------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls",
+        "ls -R /",
+        "cat setup.py",
+        "git status",
+        "git status --short",
+        "git diff",
+        "find . -name '*.py'",
+        "grep -r foo .",
+        "cat big | grep x",
+        # One capped statement must still not launder an uncapped one.
+        "find / -name x; echo done | head -c 10",
+        "git ls-files | head -50 && ls -R /",
+    ],
+)
+def test_the_relaxations_do_not_reach_what_the_gate_is_for(command):
+    assert hook.decide(payload("Bash", command))[0] == hook.EXIT_BLOCK
+
+
+def test_block_message_names_every_spelling_that_counts():
+    """An agent that does not know `tail -c` passes will keep rewriting it as `head -c`,
+    which is the rewrite that drops the summary it wanted.
+    """
+    _, msg = hook.decide(payload("Bash", "ls -R /"))
+    for spelling in ("head -c N", "tail -c N", "head -N", "tail -N"):
+        assert spelling in msg
+    assert "redirecting stdout" in msg
 
 
 def test_get_value_dotted_and_missing():

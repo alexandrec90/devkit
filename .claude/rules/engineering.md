@@ -59,6 +59,13 @@ python3 scripts/hooks/invoke-capped.py --command "<the command>"
 which keeps a head *and* a tail window and preserves the exit code. Omit
 `--max-bytes`; it defaults to this project's `[bash] max_bytes`.
 
+**A pipe into `head` or `tail` also counts**, in any of its spellings — `head -c N`,
+`tail -c N`, `head -N`, `tail -N`, and the `-n N` forms — as does redirecting stdout to
+a file, which bounds the output by sending it somewhere that is not your context at all.
+Those run in the harness's own shell rather than `cmd.exe`, so reach for one when the
+command needs POSIX syntax the wrapper would mangle; the cost is that the pipe masks the
+exit code, which is why the wrapper stays the default for test and lint runs.
+
 Learn this here rather than from the gate. Until this paragraph existed, nothing in
 any instruction file mentioned the hook, so **the only way to find out it was running
 was to be blocked by it** — and each block spends a turn plus the ~1 KB of remedy text
@@ -70,8 +77,12 @@ Two things not to reach for when it fires:
 
 - **`is_capped` is not a style check to satisfy.** Bounded commands are already exempt
   — `pwd`, `git rev-parse`, `--version` probes, the silent-on-success family
-  (`mkdir`, `rm`, `cp`), and shell control flow. If one of those is blocked, that is a
-  defect in the gate worth reporting, not a command to wrap.
+  (`mkdir`, `rm`, `cp`, `sleep`), condition tests (`test`, `[`), `git log` given a
+  commit count, and shell control flow. If one of those is blocked, that is a defect in
+  the gate worth reporting, not a command to wrap. Report it rather than working around
+  it: over half of every block this gate had issued turned out to be one of four cap
+  spellings it simply did not recognise, and it stayed that way because being blocked
+  reads as a rule to obey rather than as a bug.
 - **`git commit` and `gh pr create` are exempt, and wrapping them anyway breaks them.**
   Their message is authored, multi-line, and does not survive the wrapper's `cmd.exe`;
   the `| head -c N` fallback masks the exit code, so a commit a pre-commit hook
