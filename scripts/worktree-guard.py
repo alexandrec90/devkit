@@ -24,9 +24,10 @@ the message carries the provision command along with the rest of the route out.
 
 **Silent on everything else**, which is most calls:
 
-  - an edit inside a checkout that is already on a managed task branch: something
-    deliberately put it there, and the commonest reason is "fix PR #42", where a fresh
-    box would put the fix somewhere the PR never sees (see `needs_box`);
+  - an edit inside a checkout on a managed task branch **that carries commits of its
+    own**: something deliberately put it there, and the commonest reason is "fix PR
+    #42", where a fresh box would put the fix somewhere the PR never sees. A task
+    branch with nothing on it is *not* one of these (see `needs_box`);
   - an edit already inside a box;
   - any path that is not under a registered checkout;
   - any machine with no multi-root workspace file, which is every CI runner and every
@@ -331,6 +332,44 @@ def session_slug(session: str, recorded: str = "") -> str:
     return recorded or (f"ws-{session[:8]}" if session else "ws")
 
 
+def block_reason(project: str, relative: str, branch: str, inside: bool) -> str:
+    """The opening line: why this edit is being routed, naming the branch it was judged on.
+
+    Three different facts arrive here and they used to share one sentence. A session
+    sitting in `carameli` on a freshly cut `claude/...` branch was therefore told the
+    checkout was "parked on a home branch" — false on both counts — and did the
+    reasonable thing with a message that contradicts what it can see: it read the hook
+    as broken, spent its turn reporting the bug, and never re-issued the edit in the box
+    that was waiting for it. A block message that misdescribes the state it blocked on
+    costs more than no message, because the agent has no way to tell a wrong reason from
+    a wrong decision.
+
+    So each case says what it actually saw, and every one of them names the branch. The
+    task-branch case additionally has to say *why* a task branch was not enough, since
+    that is the half nothing else in the harness explains: `needs_box` asks whether there
+    is work here a box would strand, not whether the name looks managed.
+    """
+    lands = f"an edit to {relative} would land on it with no task branch under it."
+    if worktree.sweep.is_task_branch(branch):
+        return (
+            f"Blocked: {project} is on '{branch}', which is a task branch but carries no "
+            f"commits of its own - so it is either freshly cut or already merged, there is "
+            f"no open work on it for this edit to belong to, and a box strands nothing. (A "
+            f"task branch WITH commits is left alone; this one has none.)"
+        )
+    if not branch:
+        return (
+            f"Blocked: git would not name a branch for {project} (detached HEAD, or git did "
+            f"not answer) and this session is not inside that checkout, so {lands}"
+        )
+    if inside:
+        return f"Blocked: {project} is parked on '{branch}', a home branch, so {lands}"
+    return (
+        f"Blocked: this session is not inside {project}, which is on '{branch}' "
+        f"(a home branch), so {lands}"
+    )
+
+
 def deny_message(
     project: str,
     relative: str,
@@ -339,6 +378,7 @@ def deny_message(
     notes: list[str],
     spawned: bool = True,
     inside: bool = False,
+    branch: str = "",
 ) -> str:
     """What the agent reads. The path first, because that is the actionable part.
 
@@ -347,12 +387,12 @@ def deny_message(
     on the reuse path, and a message that misdescribes what just happened is how an
     agent concludes it is in a loop.
 
-    `inside` distinguishes the two reasons an edit gets here, which need different
-    opening sentences. From outside the checkout the problem is *where the session is*;
-    from inside it the session is in the right repo and the problem is that the
-    checkout is parked on a home branch. Telling a session sitting in `carameli` that
-    it "is not inside carameli" reads as a bug in the hook and invites working around
-    it.
+    `inside` and `branch` decide the opening sentence, which is `block_reason`'s whole
+    job: the reasons an edit reaches here are different states and a message that names
+    the wrong one reads as a bug in the hook and invites working around it. Telling a
+    session sitting in `carameli` that it "is not inside carameli" was the first version
+    of that mistake; telling one on a freshly cut task branch that it is "parked on a
+    home branch" was the second.
 
     Every remaining step is spelled out as a command, including the two that are not
     obvious from inside a session that is somewhere else:
@@ -367,13 +407,7 @@ def deny_message(
     """
     devkit_worktree = Path(__file__).parent / "worktree.py"
     lines = [
-        (
-            f"Blocked: {project} is parked on a home branch, so an edit to {relative} "
-            f"would land on it with no task branch under it."
-            if inside
-            else f"Blocked: this session is not inside {project}, so an edit to {relative} "
-            f"would land on that checkout's home branch with no task branch under it."
-        ),
+        block_reason(project, relative, branch, inside),
         "",
         (
             "A box has been spawned for it. Re-issue the edit against:"
@@ -409,17 +443,23 @@ def deny_message(
     return "\n".join(lines)
 
 
-def failure_message(project: str, relative: str, error: str) -> str:
+def failure_message(
+    project: str, relative: str, error: str, inside: bool = False, branch: str = ""
+) -> str:
     """When spawning failed. Still a block, because allowing the edit is the bad outcome.
 
     Naming the manual command matters more than usual here: the whole promise of this
     hook is that being blocked is never a dead end, and a spawn that failed is the one
     case where the agent has to finish the job itself.
+
+    Opens through `block_reason` for the same reason `deny_message` does: this line used
+    to assert the session was outside the checkout and the branch was a home branch,
+    and it is read in exactly the situation where an agent is already deciding whether
+    to trust the hook.
     """
     return "\n".join(
         [
-            f"Blocked: an edit to {project}/{relative} from outside that checkout would land "
-            f"on its home branch with no task branch under it.",
+            block_reason(project, relative, branch, inside),
             "",
             f"Spawning a box for it failed: {error}",
             "",
@@ -452,10 +492,21 @@ def main(argv: list[str] | None = None) -> int:
 
     cwd = str(payload.get("cwd") or "")
     root = workspace.parent
-    decision = redirect_decision(edited_path(payload), cwd, root, projects)
+    # The branch is what the decision turns on, so it is also what the block message has
+    # to name -- and reading it a second time would be a second subprocess per blocked
+    # edit and, worse, could report a different branch than the one that was judged.
+    # `redirect_decision` calls its lookup at most once, so recording it is enough.
+    observed: list[str] = []
+
+    def observe(checkout: Path) -> str:
+        observed.append(current_branch(checkout))
+        return observed[-1]
+
+    decision = redirect_decision(edited_path(payload), cwd, root, projects, branch_of=observe)
     if decision is None:
         return EXIT_ALLOW
     project, relative = decision
+    branch = observed[-1] if observed else ""
     session = str(payload.get("session_id") or payload.get("sessionId") or "")
     inside = _within(Path(cwd or "."), (root / project).resolve())
 
@@ -470,6 +521,7 @@ def main(argv: list[str] | None = None) -> int:
                 [],
                 spawned=False,
                 inside=inside,
+                branch=branch,
             ),
             file=sys.stderr,
         )
@@ -480,15 +532,27 @@ def main(argv: list[str] | None = None) -> int:
         plan = worktree.plan_new(project, workspace, slug=slug, session=session, fetch=True)
         ok, notes = worktree.apply_new(plan, workspace, timeout=SPAWN_TIMEOUT, provision=False)
     except Exception as exc:
-        print(failure_message(project, relative, f"{type(exc).__name__}: {exc}"), file=sys.stderr)
+        print(
+            failure_message(
+                project, relative, f"{type(exc).__name__}: {exc}", inside=inside, branch=branch
+            ),
+            file=sys.stderr,
+        )
         return EXIT_BLOCK
 
     if not ok:
-        print(failure_message(project, relative, "; ".join(notes) or "no detail"), file=sys.stderr)
+        print(
+            failure_message(
+                project, relative, "; ".join(notes) or "no detail", inside=inside, branch=branch
+            ),
+            file=sys.stderr,
+        )
         return EXIT_BLOCK
 
     print(
-        deny_message(project, relative, plan.path, plan.box.name, notes, inside=inside),
+        deny_message(
+            project, relative, plan.path, plan.box.name, notes, inside=inside, branch=branch
+        ),
         file=sys.stderr,
     )
     return EXIT_BLOCK
