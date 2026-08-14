@@ -24,7 +24,7 @@ the message carries the provision command along with the rest of the route out.
 
 **Silent on everything else**, which is most calls:
 
-  - an edit inside a checkout that is already on a `claude/...` task branch: something
+  - an edit inside a checkout that is already on a managed task branch: something
     deliberately put it there, and the commonest reason is "fix PR #42", where a fresh
     box would put the fix somewhere the PR never sees (see `needs_box`);
   - an edit already inside a box;
@@ -148,7 +148,7 @@ def needs_box(branch: str, protects_open_work: bool = True) -> bool:
 
     Two cases decline, and both are cases where someone has already made the decision:
 
-    - **on a `claude/...` task branch that carries commits of its own**
+    - **on a managed task branch that carries commits of its own**
       (`protects_open_work`). Something deliberately put the checkout there, and the
       commonest reason is the one `branch-on-write.py` was rewritten for: "fix PR #42,
       it has conflicts" means checking that PR's branch out and editing it. Routing to
@@ -159,7 +159,7 @@ def needs_box(branch: str, protects_open_work: bool = True) -> bool:
       running, is what catches a detached HEAD.
 
     **A task branch with no commits of its own is not one of them**, and used to be.
-    Being a `claude/...` branch was the whole test, so the *first* session to leave one
+    Being on a managed task branch was the whole test, so the *first* session to leave one
     checked out turned this hook off for every session afterwards — the checkout became
     shared, unguarded space until someone parked it back on a home branch. Two sessions
     landed in one checkout that way, and neither could see it: one inherited a branch
@@ -253,7 +253,7 @@ def redirect_decision(
 
     - a path under `.worktrees/`: the edit is already in a box, which is the whole
       point of having sent it there;
-    - a checkout on a `claude/...` task branch **that carries commits of its own** —
+    - a checkout on a managed task branch **that carries commits of its own** —
       see `needs_box`. **Whether or not the session is inside it**: the reason to
       decline is that something deliberately put that branch there and a box would
       bypass it, and where the editor happens to sit says nothing about that. A task
@@ -382,7 +382,7 @@ def deny_message(
         ),
         f"    {Path(box_path) / relative}",
         "",
-        f"The box is on a fresh claude/... branch cut from origin/<default>, with its own "
+        f"The box is on a fresh agent/... branch cut from origin/<default>, with its own "
         f"COMPOSE_PROJECT_NAME ({box}) and port lease, so its stack cannot collide with "
         f"{project}'s.",
         "",

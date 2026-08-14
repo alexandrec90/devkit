@@ -19,8 +19,6 @@ import task_branch as tb
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LINT_ALL = REPO_ROOT / "scripts" / "lint-all.py"
-TASK_BRANCH_PREFIX = "claude/"
-
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_NOT_SHIPPABLE = 3
@@ -29,14 +27,23 @@ EXIT_LINT_FAILED = 5
 EXIT_PUSH_FAILED = 6
 
 
-def is_shippable(branch: str, default: str, prefix: str = TASK_BRANCH_PREFIX) -> tuple[bool, str]:
-    """Return whether branch is an isolated task branch suitable for a PR."""
+def is_shippable(branch: str, default: str) -> tuple[bool, str]:
+    """Return whether branch is an isolated, namespaced task branch suitable for a PR.
+
+    The namespace identifies a short-lived task branch without coupling shipping to
+    whichever agent created it (for example ``agent/``, ``claude/`` or ``codex/``).
+    Unnamespaced branches remain reserved for default and long-lived home branches.
+    """
     if not branch:
         return False, "HEAD is detached; check out a task branch before shipping."
     if branch == default:
-        return False, f"'{default}' is the default branch; ship from a {prefix} task branch."
-    if not branch.startswith(prefix):
-        return False, f"'{branch}' is not a {prefix} task branch; refusing to ship it."
+        return False, f"'{default}' is the default branch; ship from a namespaced task branch."
+    namespace, separator, topic = branch.partition("/")
+    if not separator or not namespace or not topic:
+        return False, (
+            f"'{branch}' is not a namespaced task branch; refusing to ship it. "
+            "Use a branch such as agent/fix-thing."
+        )
     return True, ""
 
 

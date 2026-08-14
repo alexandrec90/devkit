@@ -25,7 +25,7 @@ Modes:
   --json      the same verdicts as JSON, for a driver to fan out over.
   --check     exit 1 when any repo needs action, 2 when any is blocked. For a
               root-level task that should fail loudly rather than print quietly.
-  --branch    cut a `claude/...` branch under work stranded on a branch that
+  --branch    cut an `agent/...` branch under work stranded on a branch that
               cannot be shipped from -- a home branch, or a task branch the
               branch policy has retired. Step 1 of the sweep.
   --ship      commit what is on each task branch, push it, open its PR.
@@ -234,7 +234,7 @@ class State:
     linked: bool = False
     # This worktree's recorded home branch, from ANCHOR_MARKER_NAME; "" when unset.
     anchor: str = ""
-    # Local branch names, and the `claude/...` ones already merged into
+    # Local branch names, and the managed task branches already merged into
     # origin/<default_branch> -- what `--sync` deletes.
     local_branches: tuple[str, ...] = ()
     merged_task_branches: tuple[str, ...] = ()
@@ -432,13 +432,13 @@ def parse_ahead_behind(text: str) -> tuple[int, int]:
 
 
 def is_task_branch(branch: str) -> bool:
-    """True for a `claude/...` branch -- the only kind a PR is opened from.
+    """True for a task branch whose lifecycle devkit is allowed to manage.
 
     Everything else is a *home* branch: the default branch, or a long-lived
     worktree anchor like `carameli-b`. The distinction is the whole basis of the
     branch axis below, so it is one predicate rather than a repeated startswith.
     """
-    return branch.startswith(tb.BRANCH_PREFIX)
+    return tb.is_managed_task_branch(branch)
 
 
 def is_retired(state: State) -> bool:
@@ -640,7 +640,7 @@ def plan_for(state: State, verdict: str) -> list[str]:
 
 
 def branch_plan(state: State, slug: str = "sweep", today: _dt.date | None = None) -> Plan:
-    """Step 1: get stranded work onto a `claude/...` branch it can be shipped from.
+    """Step 1: get stranded work onto an `agent/...` branch it can be shipped from.
 
     The new branch is cut from HEAD, not from `origin/<default>`, so a dirty tree
     comes along untouched (`tb.checkout_base` makes the same call for the same
@@ -660,7 +660,7 @@ def branch_plan(state: State, slug: str = "sweep", today: _dt.date | None = None
     anchored either -- the branch it came from is a task branch, and recording that
     as the worktree's home would send `--sync` to park on a dead branch. The topic
     is taken from the branch name instead of the slug, so the new branch reads as
-    the continuation it is rather than as an unrelated `claude/sweep-<mmdd>`.
+    the continuation it is rather than as an unrelated `agent/sweep-<mmdd>`.
     """
     retired = is_retired(state)
     if is_task_branch(state.branch) and not retired:
@@ -680,14 +680,15 @@ def branch_plan(state: State, slug: str = "sweep", today: _dt.date | None = None
 
 
 def branch_topic(branch: str) -> str:
-    """What a task branch is about, from its name: `claude/voicemail-0802` -> `voicemail`.
+    """What a managed task branch is about: `codex/voicemail-0802` -> `voicemail`.
 
     Strips the prefix and the `-<mmdd>` stamp `tb.branch_name` adds, plus any `-N`
     disambiguator. Returns "" for anything that is not a task branch.
     """
     if not is_task_branch(branch):
         return ""
-    return _DATE_SUFFIX_RE.sub("", branch[len(tb.BRANCH_PREFIX) :])
+    prefix = tb.managed_branch_prefix(branch)
+    return _DATE_SUFFIX_RE.sub("", branch[len(prefix) :])
 
 
 def commit_message(state: State) -> str:
@@ -890,7 +891,7 @@ def dedupe_branch_names(pairs: list[tuple[State, Plan]]) -> list[Plan]:
     read during `inspect()` -- before any plan ran. Two linked worktrees of one
     repo share a ref store, so they see the same branch list, and both pick the
     same name; the first `checkout -b` creates it and the second dies on `fatal: a
-    branch named 'claude/sweep-0802' already exists`, leaving that worktree still
+    branch named 'agent/sweep-0802' already exists`, leaving that worktree still
     stranded while the run reports success everywhere else.
 
     Same shape as `dedupe_reaps` and the same resolution: first claim wins,
@@ -1562,7 +1563,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--branch",
         action="store_true",
-        help="step 1: cut a claude/... branch under work stranded on a home branch",
+        help="step 1: cut an agent/... branch under work stranded on a home branch",
     )
     mode.add_argument(
         "--ship",
@@ -1599,7 +1600,7 @@ def main(argv: list[str] | None = None) -> int:
         default="sweep",
         help=(
             "--branch only: topic for the branch names it cuts (default: sweep -> "
-            "claude/sweep-<mmdd>). There is no prompt to derive one from here, so "
+            "agent/sweep-<mmdd>). There is no prompt to derive one from here, so "
             "pass what the stranded work is about when it is worth naming. --ship "
             "ignores it and takes its topic from the branch each checkout is on, "
             "which one sweep cannot supply -- it spans every repo in the workspace"

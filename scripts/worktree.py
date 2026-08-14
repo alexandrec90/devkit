@@ -6,7 +6,7 @@ The static tier — `carameli`, `carameli-b`, one permanent slot each in `ports.
 task that used it. That is where `sweep.py`'s workload comes from: `needs-branch`,
 `needs-rebranch`, `spent-branch`, the anchor marker, `home_ref`, `dedupe_reaps` are
 all states a checkout can only reach by surviving its task. A box cut fresh off
-`origin/<default>` onto a `claude/...` branch and destroyed at the end cannot reach
+`origin/<default>` onto an `agent/...` branch and destroyed at the end cannot reach
 any of them.
 
 So this is not "sweep, but faster". It is the other half of the model:
@@ -286,7 +286,7 @@ def lease_file(workspace_root: Path) -> Path:
 
 
 def box_name(project: str, branch: str) -> str:
-    """`carameli` + `claude/voicemail-0806` -> `carameli--voicemail-0806`.
+    """`carameli` + `agent/voicemail-0806` -> `carameli--voicemail-0806`.
 
     Also the box's `COMPOSE_PROJECT_NAME`, which is what namespaces its containers,
     network and volumes — the same identity `ports.toml` requires of a static
@@ -294,7 +294,8 @@ def box_name(project: str, branch: str) -> str:
     accepts `[a-z0-9][a-z0-9_-]*`, which both halves already satisfy: project names
     come from directory names and the topic from `tb.slugify`.
     """
-    topic = branch[len(tb.BRANCH_PREFIX) :] if sweep.is_task_branch(branch) else branch
+    prefix = tb.managed_branch_prefix(branch)
+    topic = branch[len(prefix) :] if prefix else branch
     return f"{project}{NAME_SEP}{topic}"
 
 
@@ -638,7 +639,7 @@ def branch_delete_flag(state: sweep.State, pr_merged: bool) -> str:
     usually parked on some other branch, so a box branch sitting exactly on
     `origin/<default>` is "not fully merged" as far as `-d` is concerned. Every reap of
     an unused box therefore failed at its last step, exited non-zero, and left the branch
-    behind — the tier accumulating `claude/ws-*` refs in every repo it touched.
+    behind — the tier accumulating `agent/ws-*` refs in every repo it touched.
 
     That last rule reads `state.ahead`, which is the same field `sweep.classify` turns
     into `spent`, rather than the verdict itself. The verdict is a summary and the state

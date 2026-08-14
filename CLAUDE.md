@@ -274,20 +274,20 @@ Five invariants, each of which something has already violated:
   `devkit_project.known_projects`, so a folder in `NOT_PROJECTS` is registered in the
   workspace — visible, readable — and yet owns no path the guard will route: an edit
   there is allowed silently, on whatever branch it is parked on. Reading the registry
-  raw instead would cut `VanillaLand` a box on a `claude/...` branch, for a checkout
+  raw instead would cut `VanillaLand` a box on an `agent/...` branch, for a checkout
   that ships nothing and whose Azure DevOps remote has no PR for that branch to become.
   `test_an_edit_into_a_reference_checkout_is_allowed` is the ratchet, and it is a
   `main()` test on purpose: `redirect_decision` takes the project list as an argument,
   so only the shell can be wrong about it.
 - **Among paths it does own, the guard declines in exactly two cases**: the edit is
-  already inside a box, or the checkout is on a `claude/...` branch **that carries
+  already inside a box, or the checkout is on a managed task branch **that carries
   commits of its own** — the "fix PR #42" case, where something deliberately checked
   that branch out and a fresh box would put the fix somewhere the PR never sees.
   Anything else that would land on a home branch gets a box, because landing there with
   no task branch under it is the agent manufacturing the exact `needs-branch` backlog
   the sweep exists to clear.
 - **"Is this a task branch" is not the question; "is there work here a box would
-  strand" is.** Being a `claude/...` branch used to be the whole test, and the effect
+  strand" is.** Being a managed task branch used to be the whole test, and the effect
   was that the first session to leave one checked out turned the guard off for every
   session afterwards — the checkout became shared, unguarded space until someone parked
   it back on a home branch. Two sessions landed in one checkout that way, one of them
