@@ -394,6 +394,50 @@ def test_the_deny_message_says_to_ship_with_the_box_as_the_working_directory():
     assert "cd /ws/.worktrees/b" in message
 
 
+def test_the_block_reason_names_the_branch_it_judged():
+    """Whatever the state, the agent can check the message against `git branch` -- which
+    is the only way it can tell a wrong reason from a wrong decision."""
+    for branch, inside in (
+        ("master", True),
+        ("master", False),
+        ("claude/x-0813", True),
+        ("claude/x-0813", False),
+    ):
+        reason = guard.block_reason("carameli", "a.py", branch, inside)
+        assert branch in reason, (branch, inside)
+
+
+def test_a_freshly_cut_task_branch_is_not_called_a_home_branch():
+    """The defect a carameli session reported. It was on `claude/...-0813`, the branch
+    carried no commits yet, and the message said the checkout was "parked on a home
+    branch" -- so the agent concluded the hook inferred "no task branch" from HEAD being
+    level with origin/master and filed that instead of re-issuing the edit in the box.
+
+    The decision was right (a task branch with nothing on it strands nothing, and being
+    a task branch used to be the whole test -- see `needs_box`). The sentence was wrong
+    twice over, and a message an agent can disprove by looking at its own checkout is
+    one it will route around.
+    """
+    reason = guard.block_reason("carameli", "a.py", "claude/dual-vendor-status-audit-0813", True)
+    assert "home branch" not in reason
+    assert "claude/dual-vendor-status-audit-0813" in reason
+    assert "no commits of its own" in reason
+
+
+def test_the_block_reason_does_not_tell_an_inside_session_it_is_outside():
+    """The first version of the same mistake: telling a session sitting in carameli that
+    it "is not inside carameli" reads as a hook bug and invites working around it."""
+    assert "not inside" not in guard.block_reason("carameli", "a.py", "master", True)
+    assert "not inside" in guard.block_reason("carameli", "a.py", "master", False)
+
+
+def test_the_block_reason_says_so_when_git_would_not_name_the_branch():
+    """Reachable from outside the checkout only -- inside, an unnameable branch declines.
+    Naming no branch at all is honest; claiming a home branch would not be."""
+    reason = guard.block_reason("carameli", "a.py", "", False)
+    assert "would not name a branch" in reason
+
+
 def test_a_failed_spawn_still_blocks_and_says_how_to_do_it_by_hand():
     """Allowing the edit through would land it on the home branch -- the failure mode
     the hook exists to prevent, so a broken spawn must not fall back to it."""
@@ -476,8 +520,33 @@ def test_an_in_checkout_edit_on_a_home_branch_is_blocked_and_says_why(root, monk
     )
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
     err = capsys.readouterr().err
-    assert "parked on a home branch" in err
+    assert "parked on 'master', a home branch" in err
     assert "not inside" not in err
+
+
+def test_the_block_message_names_the_branch_the_decision_was_made_on(root, monkeypatch, capsys):
+    """The wiring, not the wording: `main` judges the branch and then has to report the
+    same one. Reading it a second time for the message would be a second subprocess and
+    could name a different branch than the one that was judged.
+
+    The state is the reported defect end to end -- inside the checkout, on a task branch
+    with no commits of its own -- which `block_reason` alone cannot pin, because it takes
+    the branch as an argument and only the shell can fail to supply it.
+    """
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard, "current_branch", on_branch("claude/dual-vendor-status-audit-0813"))
+    monkeypatch.setattr(guard, "branch_has_own_commits", has_commits(False))
+    monkeypatch.setattr(guard.worktree, "plan_new", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root / "carameli"))),
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    err = capsys.readouterr().err
+    assert "claude/dual-vendor-status-audit-0813" in err
+    assert "home branch" not in err
 
 
 def test_a_session_reuses_the_box_it_already_has(root, monkeypatch, capsys):
