@@ -33,8 +33,9 @@ argument-hint: 'Optional PR title'
 
 Run each step in order. Stop on failure; never open a PR for an unverified branch.
 
-1. Run `python scripts/ship.py --preflight`. It must report a `claude/` task branch
-   and the repository's detected default branch.
+1. Run `python scripts/ship.py --preflight`. It must report a namespaced task branch
+   and the repository's detected default branch. The namespace is agent-neutral, so
+   branches such as `agent/...`, `claude/...`, and `codex/...` are all valid.
 2. Review the change. Get the file list from `git status --short`, then read the
    changes with the Read tool rather than paging a capped `git diff` — a cap drops the
    middle of a large diff, which is the one part a truncated read hides from you. Run

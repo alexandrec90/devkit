@@ -66,10 +66,11 @@ def state(**kwargs) -> sweep.State:
 
 def test_box_name_joins_project_and_branch_topic():
     assert worktree.box_name("carameli", "claude/voicemail-0806") == "carameli--voicemail-0806"
+    assert worktree.box_name("carameli", "codex/voicemail-0806") == "carameli--voicemail-0806"
 
 
 def test_box_name_keeps_a_non_task_branch_whole():
-    """No `claude/` prefix to strip means the branch name is the topic, not a slice of it."""
+    """No managed prefix to strip means the branch name is the topic, not a slice of it."""
     assert worktree.box_name("carameli", "hotfix") == "carameli--hotfix"
 
 
@@ -249,14 +250,14 @@ def test_spawn_never_tracks_the_base():
 
 def test_spawn_names_the_branch_the_way_the_hooks_do():
     plan = spawn()
-    assert plan.box.branch == "claude/voicemail-0806"
+    assert plan.box.branch == "agent/voicemail-0806"
     assert plan.box.name == "carameli--voicemail-0806"
     assert plan.path.replace("\\", "/").endswith(".worktrees/carameli--voicemail-0806")
 
 
 def test_spawn_disambiguates_against_existing_branches():
-    plan = spawn(existing_branches={"claude/voicemail-0806"})
-    assert plan.box.branch == "claude/voicemail-0806-2"
+    plan = spawn(existing_branches={"agent/voicemail-0806"})
+    assert plan.box.branch == "agent/voicemail-0806-2"
 
 
 def test_spawn_without_a_registry_leases_no_slot():

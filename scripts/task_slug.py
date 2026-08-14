@@ -8,7 +8,7 @@ that names a box is `worktree-guard.py`, which fires on a PreToolUse event and s
 never seen the prompt.
 
 The consequence was visible in every PR title. With nothing to read, the guard fell
-back to `session_slug()` — `claude/ws-3f2a1b8c-0807`, a branch named after a session
+back to `session_slug()` — `agent/ws-3f2a1b8c-0807`, a branch named after a session
 id — so a list of open PRs said nothing about what any of them did.
 
 So the slug is keyed by **session**, not by worktree. That is the only key both ends

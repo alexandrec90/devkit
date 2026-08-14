@@ -353,7 +353,7 @@ def test_dirty_on_a_worktree_anchor_needs_a_branch_not_a_ship():
     assert verdict == sweep.NEEDS_BRANCH
     assert "4 uncommitted" in reason
     assert "proj-b" in reason
-    assert "not a claude/ task branch" in reason
+    assert "not a agent/ task branch" in reason
 
 
 def test_commits_straight_to_an_anchor_also_need_a_branch():
@@ -370,8 +370,12 @@ def test_a_clean_current_anchor_is_clean():
 
 def test_a_checkout_already_on_a_task_branch_is_left_alone():
     # The user's "don't cut a second branch for carameli" case: it is already on a
-    # claude/... branch, so it is ready to ship, not stranded.
+    # managed task branch, so it is ready to ship, not stranded.
     assert classify(on_feature(dirty=9))[0] == sweep.READY
+
+
+def test_codex_task_branches_are_managed_like_existing_claude_branches():
+    assert classify(on_feature(branch="codex/fix-shipping-0813", dirty=1))[0] == sweep.READY
 
 
 # --- classification: blocked and skipped ------------------------------------
@@ -399,7 +403,7 @@ def test_missing_origin_is_blocked():
 def test_stranded_work_is_told_to_cut_a_branch_before_shipping():
     state = on_default(dirty=7)
     plan = plan_for(state, sweep.NEEDS_BRANCH)
-    assert "claude/" in plan[0]
+    assert "agent/" in plan[0]
     assert plan[-1].startswith("/ship")
 
 
@@ -465,7 +469,7 @@ def test_a_linked_worktree_with_no_resolvable_home_refuses_to_guess():
 
 def test_branching_cuts_a_task_branch_off_head_carrying_the_dirty_tree():
     plan = sweep.branch_plan(on_default(dirty=29), slug="sweep", today=DATE)
-    assert plan.steps[0] == ("checkout", "-b", "claude/sweep-0729")
+    assert plan.steps[0] == ("checkout", "-b", "agent/sweep-0729")
     # No base ref: branching off HEAD is what carries uncommitted work across.
     assert not any("origin/main" in step[-1] for step in plan.steps if step[0] == "checkout")
 
@@ -503,7 +507,7 @@ def test_rebranching_keeps_the_topic_the_branch_was_named_for():
     """The retired branch was named from the task's own prompt, which is a better
     topic than any slug one workspace-wide sweep could supply."""
     plan = sweep.branch_plan(retired(dirty=1), slug="sweep", today=DATE)
-    assert plan.steps[0][-1] == "claude/thing-0729"
+    assert plan.steps[0][-1] == "agent/thing-0729"
 
 
 def test_rebranching_never_records_the_dead_branch_as_home():
@@ -523,12 +527,12 @@ def test_the_slug_names_the_branch():
     # There is no prompt here to derive a topic from, so the caller supplies one;
     # `sweep` is the honest default rather than a fabricated description.
     plan = sweep.branch_plan(on_default(dirty=29), slug="ingestion connector settings", today=DATE)
-    assert plan.steps[0][-1] == "claude/ingestion-connector-settings-0729"
+    assert plan.steps[0][-1] == "agent/ingestion-connector-settings-0729"
 
 
 def test_branch_names_do_not_collide_with_existing_ones():
-    state = on_default(dirty=1, local_branches=("main", "claude/sweep-0729"))
-    assert sweep.branch_plan(state, today=DATE).steps[0][-1] == "claude/sweep-0729-2"
+    state = on_default(dirty=1, local_branches=("main", "agent/sweep-0729"))
+    assert sweep.branch_plan(state, today=DATE).steps[0][-1] == "agent/sweep-0729-2"
 
 
 def branch_sibling_pair(store="/repo/.git", **overrides):
@@ -546,15 +550,15 @@ def branch_sibling_pair(store="/repo/.git", **overrides):
 def test_siblings_sharing_a_ref_store_plan_the_same_branch_name():
     """The bug, before the fix: nothing in `branch_plan` can see the other worktree."""
     (_, first), (_, second) = branch_sibling_pair()
-    assert first.steps[0] == second.steps[0] == ("checkout", "-b", "claude/sweep-0729")
+    assert first.steps[0] == second.steps[0] == ("checkout", "-b", "agent/sweep-0729")
 
 
 def test_dedupe_branch_names_bumps_the_second_sibling():
-    """The regression test for `fatal: a branch named 'claude/sweep-0802' already
+    """The regression test for `fatal: a branch named 'agent/sweep-0802' already
     exists` -- the second worktree was left stranded while the run reported OK."""
     first, second = sweep.dedupe_branch_names(branch_sibling_pair())
-    assert first.steps[0] == ("checkout", "-b", "claude/sweep-0729")
-    assert second.steps[0] == ("checkout", "-b", "claude/sweep-0729-2")
+    assert first.steps[0] == ("checkout", "-b", "agent/sweep-0729")
+    assert second.steps[0] == ("checkout", "-b", "agent/sweep-0729-2")
 
 
 def test_dedupe_branch_names_keeps_bumping_past_a_taken_suffix():
@@ -562,7 +566,7 @@ def test_dedupe_branch_names_keeps_bumping_past_a_taken_suffix():
     third = on_anchor(name="proj-c", dirty=1, git_common_dir="/repo/.git")
     pairs.append((third, sweep.branch_plan(third, today=DATE)))
     names = [plan.steps[0][-1] for plan in sweep.dedupe_branch_names(pairs)]
-    assert names == ["claude/sweep-0729", "claude/sweep-0729-2", "claude/sweep-0729-3"]
+    assert names == ["agent/sweep-0729", "agent/sweep-0729-2", "agent/sweep-0729-3"]
 
 
 def test_dedupe_branch_names_leaves_separate_clones_alone():
@@ -571,12 +575,12 @@ def test_dedupe_branch_names_leaves_separate_clones_alone():
     pairs = branch_sibling_pair()
     pairs[1] = (replace(pairs[1][0], git_common_dir="/other/.git"), pairs[1][1])
     first, second = sweep.dedupe_branch_names(pairs)
-    assert first.steps[0] == second.steps[0] == ("checkout", "-b", "claude/sweep-0729")
+    assert first.steps[0] == second.steps[0] == ("checkout", "-b", "agent/sweep-0729")
 
 
 def test_dedupe_branch_names_does_not_pool_checkouts_git_would_not_identify():
     first, second = sweep.dedupe_branch_names(branch_sibling_pair(store=""))
-    assert first.steps[0] == second.steps[0] == ("checkout", "-b", "claude/sweep-0729")
+    assert first.steps[0] == second.steps[0] == ("checkout", "-b", "agent/sweep-0729")
 
 
 def test_dedupe_branch_names_preserves_the_rest_of_the_plan():

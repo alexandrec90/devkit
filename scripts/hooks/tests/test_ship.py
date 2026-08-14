@@ -12,9 +12,10 @@ class _Result:
         self.stderr = stderr
 
 
-def test_only_claude_task_branches_are_shippable():
-    assert ship.is_shippable("claude/fix-thing", "main") == (True, "")
-    for branch in ("", "main", "feature/x", "carameli-b"):
+def test_namespaced_task_branches_are_shippable_regardless_of_agent():
+    for branch in ("agent/fix-thing", "claude/fix-thing", "codex/fix-thing", "feature/x"):
+        assert ship.is_shippable(branch, "main") == (True, "")
+    for branch in ("", "main", "carameli-b"):
         ok, _ = ship.is_shippable(branch, "main")
         assert not ok
 
