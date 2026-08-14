@@ -3,12 +3,20 @@
 # Grouping is not cosmetic. Ungrouped, a weekly run opens one PR per package and
 # every one of them costs a full PR Gate run. Minor/patch land as a single PR;
 # majors stay individual so `dependabot-automerge.yml` can judge each on its own.
+#
+# Neither is `assignees`, which every entry carries. A Dependabot PR matches none of
+# the tabs on github.com/pulls -- the bot is the author, it mentions nobody, and it
+# requests no review -- so without an assignee these PRs are reachable only by opening
+# this repository. Assignment is the one qualifier a config file can set that puts them
+# in a view someone already reads.
 version: 2
 updates:
   - package-ecosystem: uv
     directory: /
     schedule:
       interval: weekly
+    assignees:
+      - {{ github_owner }}
     groups:
       minor-and-patch:
         update-types:
@@ -24,6 +32,8 @@ updates:
     directory: /frontend
     schedule:
       interval: weekly
+    assignees:
+      - {{ github_owner }}
     # Give fast-moving frontend ecosystems time to add peer support for a new
     # major. This delays version updates only; it never freezes them, and it does
     # not delay Dependabot security updates.
@@ -79,6 +89,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    assignees:
+      - {{ github_owner }}
     groups:
       minor-and-patch:
         update-types:
@@ -93,6 +105,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    assignees:
+      - {{ github_owner }}
     ignore:
       # A Python base-image bump reads as semver-MINOR (3.12 -> 3.14), so it would
       # sail straight through the auto-merge classifier — while uv.lock is resolved

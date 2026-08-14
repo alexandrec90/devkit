@@ -125,24 +125,25 @@ the ratchet against re-adding it.
 
 ## The CI surface every project has
 
-Four files, and which tier each belongs to is decided by whether its *content* varies:
+Five files, and which tier each belongs to is decided by whether its *content* varies:
 
 | File | Tier | Why |
 | --- | --- | --- |
 | `.github/workflows/dependabot-automerge.yml` | vendored | nothing in it varies |
+| `.github/workflows/scheduled-failure-issue.yml` | vendored | same; the assignee is read at run time |
 | `.github/actions/setup-python-env/action.yml` | template | how a project installs is the project's |
 | `.github/workflows/pr-gate.yml` | template | its jobs are the project's |
 | `.github/workflows/nightly.yml` | template | same, plus the tiers too slow to gate on |
 | `.github/dependabot.yml` | template | names the ecosystems this project ships |
 
-The automerge workflow is vendored because it has no per-project value left: it carries
-no `branches:` filter and waits on a gate titled `PR Gate` in every project, devkit
-included. The PR gate is not, and cannot be — its jobs are the project's own services,
+The two vendored ones have no per-project value left: each waits on a workflow by a title
+every project shares (`PR Gate`, `Nightly`) and names nothing else about the repo it runs
+in. The PR gate is not, and cannot be — its jobs are the project's own services,
 migrations and frontend tier, and the largest consumer's five-job gate is what a shared
 one would have to delete or exempt.
 
 `scripts/hooks/tests/test_ci_workflow_contract.py` is vendored alongside them and
-requires **all four to exist**, plus the settings that make an unattended run safe: a
+requires **all five to exist**, plus the settings that make an unattended run safe: a
 top-level `permissions:` block, a `concurrency:` group, `cancel-in-progress: false` on
 anything scheduled, and no action pinned to a mutable ref.
 
@@ -172,6 +173,15 @@ Deliberately **not** normalized, and each for the same reason (it encodes one pr
 economics, not a shared practice): mutation testing and migration round-trips, a paid
 provider tier's smoke suite, lock repair for a locking scheme no other project uses, and
 an agent-fixer loop.
+
+### A workflow run is the least visible artifact GitHub has
+
+`scheduled-failure-issue.yml` fixes that: the cross-repository dashboards aggregate
+issues and PRs and **nothing else**, so a nightly that failed and one that silently
+stopped being scheduled read the same. Its docstring holds the three properties a change
+must keep — closes itself on green, assigns from `github.repository_owner`, dedupes by
+exact title. `assignees` in `dependabot.yml`, required on every `updates:` entry, is the
+same argument applied to a bot PR, which matches no dashboard tab either.
 
 ## The two channels
 
