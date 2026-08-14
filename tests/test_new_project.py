@@ -722,8 +722,9 @@ def test_lint_all_does_not_rewrite_the_vendored_harness(tmp_path):
 def test_a_generated_project_satisfies_the_vendored_ci_contract(tmp_path):
     """The rendered CI surface must pass the check that is vendored alongside it.
 
-    `test_ci_workflow_contract.py` requires four files, and only two of them arrive
-    vendored. The other two — `dependabot.yml` and `nightly.yml` — are rendered from
+    `test_ci_workflow_contract.py` requires five files, and only two of them arrive
+    vendored. The other three — `pr-gate.yml`, `dependabot.yml` and `nightly.yml` — are
+    rendered from
     `templates/`, so the requirement and the thing that satisfies it live in different
     tiers and are edited by different changes. A template that stops emitting one, or
     emits it without a `schedule:` or without `cancel-in-progress: false`, hands the

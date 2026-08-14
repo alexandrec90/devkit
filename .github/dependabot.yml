@@ -16,12 +16,20 @@
 #     `.github/workflows/`, so a bump here does not reach the templates —
 #     `test_workflow_action_pins_match_the_templates` fails until it is carried
 #     across by hand.
+#
+# `assignees` is on every entry, and it is not a courtesy. A Dependabot PR matches none
+# of the tabs on github.com/pulls -- the bot is the author, it mentions nobody, and it
+# requests no review -- so without an assignee these PRs exist only inside this
+# repository's own PR list. Assignment is the one qualifier a config file can set that
+# lands them somewhere already read. The vendored contract test requires it per entry.
 version: 2
 updates:
   - package-ecosystem: uv
     directory: /
     schedule:
       interval: weekly
+    assignees:
+      - alexandrec90
     groups:
       # One PR for the toolchain's minor/patch drift rather than one per package,
       # each costing a full CI run. Majors stay individual so the auto-merge
@@ -35,6 +43,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    assignees:
+      - alexandrec90
     groups:
       minor-and-patch:
         update-types:

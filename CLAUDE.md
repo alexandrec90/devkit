@@ -125,40 +125,33 @@ the ratchet against re-adding it.
 
 ## The CI surface every project has
 
-Four files, and which tier each belongs to is decided by whether its *content* varies:
+Five files, and which tier each belongs to is decided by whether its *content* varies:
 
 | File | Tier | Why |
 | --- | --- | --- |
 | `.github/workflows/dependabot-automerge.yml` | vendored | nothing in it varies |
+| `.github/workflows/scheduled-failure-issue.yml` | vendored | same; the assignee is read at run time |
 | `.github/actions/setup-python-env/action.yml` | template | how a project installs is the project's |
 | `.github/workflows/pr-gate.yml` | template | its jobs are the project's |
 | `.github/workflows/nightly.yml` | template | same, plus the tiers too slow to gate on |
 | `.github/dependabot.yml` | template | names the ecosystems this project ships |
 
-The automerge workflow is vendored because it has no per-project value left: it carries
-no `branches:` filter and waits on a gate titled `PR Gate` in every project, devkit
-included. The PR gate is not, and cannot be — its jobs are the project's own services,
-migrations and frontend tier, and the largest consumer's five-job gate is what a shared
-one would have to delete or exempt.
-
-`scripts/hooks/tests/test_ci_workflow_contract.py` is vendored alongside them and
-requires **all four to exist**, plus the settings that make an unattended run safe: a
-top-level `permissions:` block, a `concurrency:` group, `cancel-in-progress: false` on
+The two vendored ones have no per-project value left: each waits on a workflow by a title
+every project shares (`PR Gate`, `Nightly`) and names nothing else about the repo it runs
+in. The gate cannot be — its jobs are the project's own services, migrations and frontend
+tier, and the largest consumer's five-job gate is what a shared one would have to delete
+or exempt. `scripts/hooks/tests/test_ci_workflow_contract.py` is vendored alongside them
+and requires **all five to exist**, plus the settings that make an unattended run safe:
+a top-level `permissions:` block, a `concurrency:` group, `cancel-in-progress: false` on
 anything scheduled, and no action pinned to a mutable ref.
 
-That test exists because **`templates/` cannot notice an absence.** A one-shot copy has
-no way to report that a project never received a file or later deleted one, and the
-result was measurable: when the contract was written, most repos in this workspace were
-missing at least one of the four, and two had nothing that could merge a dependency-bump
-PR at all. None of those gaps is visible from inside the repo that has it — a missing
-nightly does not fail, it just never reports that the world moved under a branch nobody
-pushed to. The contract test does not supply the workflow; it refuses to let a project
-go without one, and the failure message carries the minimal file to add.
-
-Adding a required file therefore has a cost the vendored tier does not: an existing
-project's next `--pull` gets the *requirement* and not the render, and goes red until
-someone writes the file. That is intended, and it is the reason the required set is
-small and every entry has to earn its place.
+That test exists because **`templates/` cannot notice an absence** — a one-shot copy
+cannot report that a project never received a file, and no such gap is visible from
+inside the repo that has it; its module docstring carries what was missing where when the
+contract was written. Adding a required file therefore has a cost the vendored tier does
+not: an existing project's next `--pull` gets the *requirement* and not the render, and
+goes red until someone writes the file. That is intended, and it is why the required set
+is small and every entry has to earn its place.
 
 The nightly is the one worth arguing for explicitly, since a gate already runs
 everything. A gate fires on a change, so it cannot see the failures that arrive without
@@ -167,11 +160,16 @@ expired credential, a test that is flaky rather than broken. devkit's own nightl
 second job — `unlocked-toolchain`, which resolves the `dev` group off-lock — because
 devkit's dev group *is* its product surface: a linter release that breaks `lint-all.py`
 breaks it in every consumer, and the lock hides that until the weekly dependency PR.
+Deliberately **not** normalized, each because it encodes one project's economics rather
+than a shared practice: mutation testing, migration round-trips, a paid provider tier's
+smoke suite, lock repair for a scheme no other project uses, and an agent-fixer loop.
 
-Deliberately **not** normalized, and each for the same reason (it encodes one project's
-economics, not a shared practice): mutation testing and migration round-trips, a paid
-provider tier's smoke suite, lock repair for a locking scheme no other project uses, and
-an agent-fixer loop.
+### A workflow run is the least visible artifact GitHub has
+
+`scheduled-failure-issue.yml` fixes that: the dashboards aggregate issues and PRs and
+**nothing else**, so a failing nightly and one that silently stopped being scheduled read
+the same. Its docstring holds the three properties a change must keep; `assignees` in
+`dependabot.yml` is the same argument applied to a bot PR.
 
 ## The two channels
 

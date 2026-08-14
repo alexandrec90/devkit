@@ -196,6 +196,18 @@ MANIFEST: tuple[str, ...] = (
     # byte-identical copy of devkit's own -- `test_setup_action_template_matches_devkits`
     # holds the two together the way `notify.py` is held to its template.
     ".github/workflows/dependabot-automerge.yml",
+    # The scheduled-failure reporter qualifies on the same test: it watches a workflow
+    # titled `Nightly` (required of every project by the contract test below, exactly as
+    # `PR Gate` is) and reads its assignee from `github.repository_owner` at run time,
+    # so there is no project value left in either the workflow or its script.
+    #
+    # It is vendored rather than added as a job to the nightly *because* the nightly is
+    # a template. A one-shot copy would have delivered this to new projects only, and
+    # the repos that most need it are the existing ones -- the whole failure mode it
+    # addresses is a red scheduled run in a repo nobody has opened for a month.
+    ".github/workflows/scheduled-failure-issue.yml",
+    "scripts/report-workflow-failure.py",
+    "scripts/hooks/tests/test_report_workflow_failure.py",
     # The rest of the CI surface -- `dependabot.yml`, the gate, the nightly -- cannot
     # be vendored for the reason above, and `templates/` cannot keep them honest
     # either: a one-shot copy has no way to notice that a project never received a

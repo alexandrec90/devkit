@@ -550,6 +550,42 @@ def test_devkit_automerge_waits_on_devkits_own_ci_workflow():
         )
 
 
+def test_the_failure_reporter_watches_a_workflow_devkit_actually_has():
+    """Same trap as the automerge title, with a quieter symptom.
+
+    A renamed nightly still fails visibly in its own Actions tab, so nothing looks
+    broken -- while the reporter that was meant to carry that failure into an issue
+    simply never fires. devkit is the repo where this must hold first: it ships the file
+    to everyone else, so a title mismatch here is one it would ship inert.
+    """
+    yaml = _yaml()
+    reporter = WORKFLOWS / "scheduled-failure-issue.yml"
+    assert reporter.exists(), "devkit does not run the failure reporter it vendors"
+    parsed = yaml.safe_load(reporter.read_text(encoding="utf-8"))
+    # PyYAML is YAML 1.1, where an unquoted `on` key parses as the boolean True.
+    triggers = parsed.get("on", parsed.get(True))
+    watched = triggers["workflow_run"]["workflows"]
+    titles = {
+        yaml.safe_load(p.read_text(encoding="utf-8"))["name"]
+        for p in WORKFLOWS.glob("*.yml")
+        if p != reporter
+    }
+    for name in watched:
+        assert name in titles, (
+            f"scheduled-failure-issue.yml waits on a workflow named {name!r}, "
+            f"but devkit's workflows are {sorted(titles)}"
+        )
+
+
+def test_the_failure_reporter_can_write_the_issues_it_exists_to_write():
+    """`issues: write` is the whole file. Without it every run dies on the first `gh`
+    call -- and it dies in a workflow nobody watches, reporting a failure about a
+    failure nobody was going to see either."""
+    yaml = _yaml()
+    parsed = yaml.safe_load((WORKFLOWS / "scheduled-failure-issue.yml").read_text(encoding="utf-8"))
+    assert parsed["permissions"].get("issues") == "write", parsed["permissions"]
+
+
 def test_devkit_automerge_tells_gh_which_repo_it_is_acting_on():
     """The classify job checks nothing out, so `gh` has no git remote to infer from.
 
@@ -645,6 +681,10 @@ def test_every_local_composite_action_referenced_by_a_workflow_exists():
 # per project, and how a project installs its dependencies always does.
 VENDORED_CI_FILES = {
     ".github/workflows/dependabot-automerge.yml": "no branch filter, one fixed gate title",
+    ".github/workflows/scheduled-failure-issue.yml": (
+        "one fixed nightly title, and the assignee is read from `repository_owner` at "
+        "run time rather than written down"
+    ),
 }
 
 
