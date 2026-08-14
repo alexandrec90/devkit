@@ -228,17 +228,23 @@ def project_selection(value: str) -> list[str]:
     return list(dict.fromkeys(name.strip() for name in value.split(",") if name.strip()))
 
 
-def resolve_project(name: str, projects: list[str], root: Path) -> Path:
+def resolve_project(name: str, projects: list[str], root: Path, noun: str = "project") -> Path:
     """The checkout directory for `name`, validated against the registry.
 
     Validating against the registry (not just `is_dir()`) is what makes a typo'd or
     stale picker entry fail with the list of real names instead of running in a
     directory that happens to exist.
+
+    `noun` is what the failure calls the thing that was not found. It exists because
+    `git-merge-default.py` resolves against the RAW registry -- reference checkouts
+    included, since merging a trunk needs git and no harness — and telling someone
+    `unknown project 'VanillaLand'` about a folder this file deliberately excludes from
+    the word "project" would send them to fix the wrong list.
     """
     if not name:
-        raise ProjectError(f"no project given; expected one of: {', '.join(projects)}")
+        raise ProjectError(f"no {noun} given; expected one of: {', '.join(projects)}")
     if name not in projects:
-        raise ProjectError(f"unknown project {name!r}; the workspace lists: {', '.join(projects)}")
+        raise ProjectError(f"unknown {noun} {name!r}; the workspace lists: {', '.join(projects)}")
     path = root / name
     if not path.is_dir():
         raise ProjectError(f"{name} is registered in the workspace but {path} does not exist")
@@ -420,7 +426,16 @@ def insert_picker_option(text: str, name: str) -> str:
     answer against `folders`, so a missed update costs a picker entry, not correctness.
     """
     updated = text
-    for picker_id in ("project", "daemonProject", "worktreeProject", "sweepScope", "upgradeScope"):
+    for picker_id in (
+        "project",
+        "daemonProject",
+        "worktreeProject",
+        "sweepScope",
+        "upgradeScope",
+        # Lists MORE than the registry -- the reference checkouts too -- so a new
+        # project still has to be added to it, and this is the only place that can.
+        "mergeCheckout",
+    ):
         scan = devkit_jsonc.blank_comments(updated)
         marker = scan.find(f'"id": "{picker_id}"')
         if marker < 0:

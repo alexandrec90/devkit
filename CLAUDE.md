@@ -389,6 +389,15 @@ way is not blocked from hoisting — write the seam. `scripts/backtest-task.py` 
 ibkr_trader exists for exactly that reason: its two tasks invoked a console-script
 executable directly, which the dispatcher cannot call.
 
+### The one task that must not be a dispatch
+
+`scripts/git-merge-default.py` is a workspace task, not an `ACTIONS` entry: the dispatcher
+subtracts `NOT_PROJECTS` because its actions need a harness, and a merge needs git alone,
+so it resolves against the **raw** registry rather than making the exclusion an exception.
+That makes `mergeCheckout` the only picker listing *more* than the registry —
+`insert_picker_option` maintains it, and a test pins the equality both ways. Its docstring
+carries the rest.
+
 ### Changing a task: the live file first, then adopt
 
 `workspace-tasks.jsonc` is devkit's copy of the block, and the workspace file — which

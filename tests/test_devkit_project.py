@@ -462,7 +462,8 @@ def test_picker_registration_updates_the_multi_test_picker_too():
                 {"id": "daemonProject", "options": ["alpha"]},
                 {"id": "worktreeProject", "options": ["alpha"]},
                 {"id": "sweepScope", "options": ["alpha"]},
-                {"id": "upgradeScope", "options": ["alpha"]}
+                {"id": "upgradeScope", "options": ["alpha"]},
+                {"id": "mergeCheckout", "options": ["alpha"]}
             ]
         }
     }"""
@@ -518,7 +519,13 @@ def test_registering_against_the_real_workspace_file():
     options = _input_options(picker)
     assert options[-2:] == ["probe", "probe-b"]
     inputs = {i["id"]: i for i in devkit_jsonc_loads(updated)["tasks"]["inputs"]}
-    for picker_id in ("daemonProject", "worktreeProject", "sweepScope", "upgradeScope"):
+    for picker_id in (
+        "daemonProject",
+        "worktreeProject",
+        "sweepScope",
+        "upgradeScope",
+        "mergeCheckout",
+    ):
         assert _input_options(inputs[picker_id])[-2:] == ["probe", "probe-b"]
     # VanillaLand is a reference checkout and must not drift into the middle.
     assert [f["path"] for f in devkit_jsonc_loads(updated)["folders"]][-1] == "VanillaLand"
@@ -829,6 +836,42 @@ def test_every_scope_exclusion_names_a_real_checkout_and_a_reason(canonical):
         for name, reason in exclusions.items():
             assert name in registry, f"{picker_id} excludes {name}, which is not a checkout"
             assert reason.strip(), f"{picker_id} excludes {name} with no reason given"
+
+
+# The one task that reaches a checkout `NOT_PROJECTS` excludes. Named once, because two
+# tests below assert about it and a renamed label must break them rather than quietly
+# exempt itself.
+MERGE_TASK = "Git: Merge Origin Default into Current Branch"
+
+
+def test_the_merge_picker_reaches_the_reference_checkouts_too(canonical):
+    """The exception to `SCOPE_PICKERS`, and the reason it is not simply listed there.
+
+    Every other picker offers the registry minus its documented exclusions. This one
+    offers the registry PLUS `NOT_PROJECTS`: merging origin's default branch in is pure
+    git — no `.devkit.toml`, no virtualenv, no vendored tier — so it is the one action a
+    reference checkout can take, and the checkout it was written for is one.
+
+    Asserted as an equality in both directions so the picker cannot drift either way: a
+    newly generated project has to reach it (`register()` maintains it alongside
+    `project`), and a checkout that stops being a non-project has to leave it.
+    """
+    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
+    registry = _picker_values(inputs["project"])
+    expected = registry | set(devkit_project.NOT_PROJECTS)
+    assert _picker_values(inputs["mergeCheckout"]) == expected
+
+
+def test_the_merge_task_bypasses_the_dispatcher_on_purpose(canonical):
+    """A dispatch would resolve through `known_projects` and refuse the reference
+    checkout by name — correctly, since every ACTION needs a harness. Routing this one
+    around the dispatcher is what keeps that rule intact instead of punching a hole in
+    it, so the bypass is the behaviour, not an oversight to be tidied up later."""
+    task = next(t for t in canonical["tasks"] if t["label"] == MERGE_TASK)
+    args = [str(a) for a in task["args"]]
+    assert not any("devkit_project.py" in arg for arg in args)
+    assert "scripts/git-merge-default.py" in args
+    assert "${input:mergeCheckout}" in args
 
 
 def test_every_input_referenced_is_defined(canonical):
