@@ -120,6 +120,22 @@ SINGLE_QUOTED_SPAN_RE = re.compile(r"'[^']*'", re.DOTALL)
 # the long-standing `command -v gh` exemption.
 VERBOSE_FLAG_RE = re.compile(r"(?:^|\s)(?:-[A-Za-z]*v[A-Za-z]*|--verbose)(?=\s|$)")
 
+# Global options that sit between `git` and its subcommand, so the two git exemptions
+# below survive `git -C <path> add` as well as `git add`.
+#
+# That spelling is not exotic here -- it is what the workspace's own ephemeral-box flow
+# produces, because the box is never the session's working directory and `git -C <box>`
+# is the natural way to reach it. Without this the exemption silently did not apply, and
+# the failure is a bad one to leave standing: the block message *promises* the commit
+# pair is exempt, so being blocked on a commit reads as the gate being broken rather
+# than as the `-C` being the thing it did not recognise.
+#
+# `-c` and `-C` take a following value, which may be a quoted path with spaces; the
+# valued long forms (`--git-dir=`, `--work-tree=`) attach theirs with `=` and are
+# covered by the bare `--\S+` arm. None of this weakens the disqualifiers: they are
+# `search`es over the whole statement, so a flag cannot hide in the option position.
+_GIT_GLOBAL_OPTS = r"""(?:\s+(?:-[cC]\s+(?:"[^"]*"|'[^']*'|\S+)|--\S+))*"""
+
 # Commands with no output path at all when they succeed. Named rather than inlined into
 # `BOUNDED_COMMANDS` because `VERBOSE_FLAG_RE` has to be scoped to exactly this family.
 #
@@ -129,7 +145,7 @@ VERBOSE_FLAG_RE = re.compile(r"(?:^|\s)(?:-[A-Za-z]*v[A-Za-z]*|--verbose)(?=\s|$
 # `git add -A && git commit -F - <<'EOF' ... ` fails on the `git add` alone, and the
 # heredoc that follows cannot be handed to the wrapper either.
 SILENT_ON_SUCCESS = re.compile(
-    r"(?:cd|export|unset|mkdir|rmdir|touch|rm|cp|mv|ln|chmod|git\s+add)\s"
+    r"(?:cd|export|unset|mkdir|rmdir|touch|rm|cp|mv|ln|chmod|git" + _GIT_GLOBAL_OPTS + r"\s+add)\s"
 )
 
 # Commands that carry an authored message and answer with a fixed-shape summary. They
@@ -147,7 +163,7 @@ SILENT_ON_SUCCESS = re.compile(
 # What they print is bounded by the *change*, not by the tree: a header line, one stat
 # line, and a `create mode` line per newly added path for a commit; a single URL for
 # `gh pr create`. That is the same criterion that keeps `ls` and `git status` out.
-COMMIT_LIKE = re.compile(r"(?:git\s+commit|gh\s+pr\s+create)(?:\s|$)")
+COMMIT_LIKE = re.compile(r"(?:git" + _GIT_GLOBAL_OPTS + r"\s+commit|gh\s+pr\s+create)(?:\s|$)")
 
 # The two spellings of `git commit` that are `git status` wearing a different name:
 # `--dry-run` (with its `--short`/`--porcelain`/`--long` output modes) lists every
@@ -189,6 +205,14 @@ CONTROL_PREFIX_RE = re.compile(r"^(?:do|then|else|elif|if|while|until|\{)\s+")
 _BOUNDED_PATTERNS = (
     # Fixed, one-line output regardless of flags.
     r"(?:pwd|whoami|hostname|uptime|date|true|false)\b",
+    # Condition tests: no output path at all, ever. That is a stronger claim than the
+    # silent-on-success family, which only holds while nobody passes `-v` -- `test`,
+    # `[` and `[[` answer with an exit code and nothing else, and no flag turns that
+    # on. Blocked until now, which made the idiomatic existence probe unspellable:
+    # in `test -f x && echo yes || echo no` the `echo`s are already exempt, so the
+    # block landed on the one word in the line that can never print, and the remedy
+    # the message offers -- wrap it -- caps output that does not exist.
+    r"(?:test|\[\[?)\s",
     # Prints text that is already in the command, hence already in context.
     r"(?:echo|printf)\s",
     # One line: a path, or nothing.

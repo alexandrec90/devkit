@@ -250,6 +250,11 @@ def test_empty_command_is_not_capped():
         "git config --get commit.gpgsign",
         "python --version",
         "node -V",
+        # Condition tests print nothing at all, under any flag.
+        "test -f pyproject.toml",
+        "test -d .venv",
+        "[ -f pyproject.toml ]",
+        "[[ -n $DEVKIT_DIR ]]",
     ],
 )
 def test_bounded_commands_need_no_wrapper(command):
@@ -288,10 +293,29 @@ def test_command_substitution_voids_a_bounded_claim():
     assert hook.decide(payload("Bash", "echo $(ls -R /)"))[0] == hook.EXIT_BLOCK
 
 
+def test_an_existence_probe_is_allowed():
+    """`test -f x && echo yes || echo no` is the idiom the gate used to make unspellable.
+
+    Every word in it was already exempt except the one that can never print, so the
+    block had no legal remedy: the wrapper caps output that does not exist, and there
+    is no other spelling of "does this file exist" without a `test`.
+    """
+    command = "test -f .devkit.toml && echo EXISTS || echo MISSING"
+    assert hook.is_capped(command) is True
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+def test_a_condition_test_does_not_launder_an_unbounded_statement():
+    """The exemption is per-statement, so the `ls` still decides."""
+    assert hook.is_capped("test -d src && ls -R src") is False
+    assert hook.is_bounded("test -n $(ls -R /)") is False
+
+
 def test_a_bounded_prefix_does_not_exempt_a_longer_word():
     """`date` is bounded; `dates_report.sh` is a different command entirely."""
     assert hook.is_bounded("dateutil-dump --all") is False
     assert hook.is_bounded("echoes-everything") is False
+    assert hook.is_bounded("testrunner --all") is False
 
 
 def test_block_message_explains_both_new_rules():
@@ -472,6 +496,45 @@ def test_other_git_subcommands_stay_blocked():
 def test_a_commit_with_a_message_is_bounded(command):
     assert hook.is_bounded(command) is True
     assert hook.is_capped(command) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C /repo add -A",
+        'git -C "C:/path with spaces/repo" add -A',
+        "git -C /repo commit -F msg.txt",
+        "git --no-pager -C /repo commit -F msg.txt",
+        "git -c user.name=agent commit -F msg.txt",
+    ],
+)
+def test_git_global_options_do_not_revoke_the_commit_pair_exemption(command):
+    """`git -C <box> add` is the workspace's own spelling: the box is never the cwd.
+
+    The exemption used to require the subcommand to follow `git` immediately, so every
+    commit made into an ephemeral box was blocked -- while the block message went on
+    promising the commit pair was exempt.
+    """
+    assert hook.is_bounded(command) is True
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The disqualifiers `search` the whole statement, so they still reach a flag
+        # written after a global option.
+        "git -C /repo commit --dry-run",
+        "git -C /repo commit -v",
+        "git -C /repo add -v .",
+        # Not the commit pair at all; `-C` must not launder an unbounded subcommand.
+        "git -C /repo log --oneline",
+        "git -C /repo status",
+    ],
+)
+def test_a_global_option_does_not_launder_an_unbounded_git_command(command):
+    assert hook.is_bounded(command) is False
+    assert hook.decide(payload("Bash", command))[0] == hook.EXIT_BLOCK
 
 
 def test_the_reported_commit_shape_is_one_statement():
