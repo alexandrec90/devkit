@@ -381,24 +381,12 @@ executable directly, which the dispatcher cannot call.
 
 ### The one task that must not be a dispatch
 
-`scripts/git-merge-default.py` merges `origin/<default>` into whatever branch a checkout
-is on, and it is wired as a workspace-scoped task rather than an `ACTIONS` entry. The
-reason is the checkout it exists for: the dispatcher resolves through `known_projects`,
-which subtracts `NOT_PROJECTS`, and it is right to — every action it runs needs a
-harness the reference checkout does not have. Merging a trunk in needs git and nothing
-else, so it resolves against the **raw** registry instead, and the exclusion stays a
-statement about harnesses rather than one riddled with exceptions.
-
-That makes its `mergeCheckout` picker the only one listing more than the registry, which
-is also the only way it can go stale in a direction nothing else notices —
-`insert_picker_option` maintains it alongside `project`, and
-`test_the_merge_picker_reaches_the_reference_checkouts_too` pins the equality in both
-directions.
-
-The other half of the design is that **a conflict is the expected outcome, not a
-failure**: the merge is left in progress with every unmerged path named, because the
-next step is someone — usually an agent — resolving it, and aborting would discard
-exactly that state. `log-wrap.py` is what turns the list into a file to hand over.
+`scripts/git-merge-default.py` is a workspace task, not an `ACTIONS` entry: the dispatcher
+subtracts `NOT_PROJECTS` because its actions need a harness, and a merge needs git alone,
+so it resolves against the **raw** registry rather than making the exclusion an exception.
+That makes `mergeCheckout` the only picker listing *more* than the registry —
+`insert_picker_option` maintains it, and a test pins the equality both ways. Its docstring
+carries the rest.
 
 ### Changing a task: the live file first, then adopt
 
