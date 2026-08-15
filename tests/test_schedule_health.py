@@ -66,6 +66,22 @@ def test_a_failed_run_is_reported_with_its_exit_code():
     assert "failed (exit 1)" in line
 
 
+def test_a_failed_run_says_where_to_read_about_it():
+    """The regression this closes: `devkit-docker-prune: last run failed (exit 1)` is a
+    complete sentence and a dead end. The job runs windowless, so there is no terminal
+    it scrolled off -- without the pointer the next move is to guess."""
+    name = next(iter(health.ARTIFACTS))
+    line = health.problems([job(name=name, last_result=1)], NOW)[0]
+    assert f"see {health.ARTIFACTS[name]}" in line
+
+
+def test_a_job_with_no_artifact_is_not_sent_to_an_invented_one():
+    """An absent file reads as "the job never ran", which is a different diagnosis --
+    so a job outside the table gets no pointer rather than a plausible path."""
+    line = health.problems([job(name="devkit-something-new", last_result=1)], NOW)[0]
+    assert "see" not in line
+
+
 def test_a_job_that_stopped_firing_is_reported():
     """Two intervals is the threshold: a 15-minute job silent for an hour has stopped,
     whatever the scheduler still claims about its next run."""

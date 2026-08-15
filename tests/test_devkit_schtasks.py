@@ -88,6 +88,35 @@ def test_the_settings_block_is_in_schema_order():
     assert positions == sorted(positions)
 
 
+def test_a_job_runs_where_it_was_told_to():
+    """A scheduled task's cwd is `system32`, so a job that resolves `logs/` from the cwd
+    -- which every runner following the failure-artifact rule does -- writes its report
+    into a Windows system directory. `<WorkingDirectory>` is what makes an unattended
+    job's artifact land where anyone can read it."""
+    assert "<WorkingDirectory>C:\\ws\\devkit</WorkingDirectory>" in document(
+        working_dir=r"C:\ws\devkit"
+    )
+
+
+def test_a_job_that_names_no_directory_emits_no_element():
+    """Absent, not empty: an empty `<WorkingDirectory>` is not the same as omitting it,
+    and the two jobs that predate this parameter pass absolute paths instead."""
+    assert "<WorkingDirectory>" not in document()
+
+
+def test_the_exec_block_is_in_schema_order():
+    """`<Exec>` children are a sequence like `<Settings>`. `<WorkingDirectory>` before
+    `<Arguments>` is rejected at registration, on the installing machine, where nothing
+    in this suite can reach it."""
+    body = document(working_dir=r"C:\ws\devkit")
+    order = [body.index(f"<{name}>") for name in ("Command", "Arguments", "WorkingDirectory")]
+    assert order == sorted(order)
+
+
+def test_a_working_directory_with_an_ampersand_is_escaped_like_every_other_path():
+    assert "C:\\ws\\a &amp; b" in document(working_dir=r"C:\ws\a & b")
+
+
 def test_a_wedged_run_cannot_suppress_every_later_one_forever():
     """`IgnoreNew` plus the three-day default limit means one hang silently disables the
     job for three days -- the exact failure shape being fixed."""

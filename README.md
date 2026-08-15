@@ -339,6 +339,26 @@ apart from a task that has stopped running. That log's timestamp is also what
 looks exactly like one that is working, so the status line says when a pass last
 finished rather than leaving you to notice the drift it causes.
 
+### Every scheduled job, and where each one reports
+
+Three jobs, one installer apiece, and the same contract on all of them: registered from
+XML so a laptop actually runs them, and leaving a file to read when one fails.
+
+| Job | Installer | Cadence | Its record |
+| --- | --- | --- | --- |
+| `devkit-worktree-reconcile` | `scripts/install-reconcile-task.py` | every 15 min | `logs/reconcile.log` |
+| `devkit-upgrade-projects` | `scripts/install-upgrade-schedule.py` | daily 03:00 | `logs/upgrade.log` |
+| `devkit-docker-prune` | `scripts/install-docker-prune.py` | daily 04:00 | `logs/scheduled-docker-prune.log` |
+
+`scripts/schedule_health.py` answers the question no artifact can — *did it run at all*
+— and names the file above when one exits non-zero, so the session-start line is a
+pointer rather than a bare exit code. `tests/test_scheduled_jobs.py` holds the contract:
+a job registered by hand, or one that leaves nothing behind, fails the suite.
+
+The prune runs `--idle-only`, so it declines whenever containers are up; reclaiming the
+VHDX needs `wsl --shutdown`, and stopping a running stack at 04:00 for disk is not a
+trade to make unattended.
+
 ## Authoring changes
 
 The harness repo is the source of truth. Edit here, open a PR, let CI test it, merge.
