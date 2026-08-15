@@ -322,6 +322,81 @@ def test_force_says_what_it_will_destroy():
     assert "discarded" in note and "2 uncommitted file(s)" in note
 
 
+# --- reap: the squash-merged box --------------------------------------------
+# A squash merge rewrites the branch's commits and `--delete-branch` removes the
+# upstream, so `sweep.classify` reports `needs-rebranch` -- true of the refs, false of
+# the work. Before `reapable` consulted the PR, that verdict outlived the merge and the
+# box could only be freed with `--force`, the flag that also discards uncommitted edits.
+
+
+def test_a_squash_merged_box_is_reapable_without_force():
+    """Regression. This is the state every merged box reaches once the deleted remote
+    branch is pruned, and it refused: "2 unmerged commit(s) ... the work is still only in
+    this box" about work that was on `main` at the time it said so."""
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_REBRANCH,
+        "2 unmerged commit(s) on agent/x, whose remote branch is gone",
+        force=False,
+        pr_merged=True,
+        holds_uncommitted=False,
+    )
+    assert allowed
+    assert note == ""
+
+
+def test_a_merged_pr_does_not_license_destroying_uncommitted_work():
+    """The safety property, at the predicate rather than at the pass: the merge says
+    where the *commits* are and says nothing about the edits sitting on top of them."""
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_REBRANCH,
+        "3 uncommitted file(s) on agent/x",
+        force=False,
+        pr_merged=True,
+        holds_uncommitted=True,
+    )
+    assert not allowed
+    assert "/ship" in note
+
+
+def test_an_unmerged_box_stays_refused_however_clean_it_is():
+    """`holds_uncommitted=False` is not itself permission. A retired branch carrying
+    commits whose PR was *closed* rather than merged holds the only copy of them."""
+    assert not worktree.reapable(sweep.NEEDS_REBRANCH, pr_merged=False, holds_uncommitted=False)
+
+
+def test_a_ready_box_never_escapes_through_the_merge_path():
+    """`ready` means uncommitted work by definition, so a zero count beside it is two
+    fields disagreeing rather than a clean box. Keyed on the count alone this returned
+    True, and `test_reconcile_never_reaps_a_box_holding_work` failed -- the merge escape
+    is scoped to the verdict a squash can actually be stale about."""
+    assert not worktree.reapable(sweep.READY, pr_merged=True, holds_uncommitted=False)
+    assert sweep.READY not in worktree.MERGE_CAN_BE_STALE_ABOUT
+
+
+def test_not_knowing_whether_a_box_is_dirty_holds_it():
+    """Both flags default to the cautious answer, so a caller that forgets to pass them
+    keeps a box it might have destroyed rather than the reverse."""
+    assert not worktree.reapable(sweep.NEEDS_REBRANCH, pr_merged=True)
+
+
+def test_the_two_classifiers_agree_about_a_squash_merged_box():
+    """`reconcile` warns "reap refused" and stalls the box when its decision and
+    `reap_decision` disagree, so the pair is asserted together rather than apart."""
+    merged = worktree.parse_pr_view(pr_json(state="MERGED"))
+    action, _ = worktree.reconcile_action(
+        sweep.NEEDS_REBRANCH, "2 unmerged commit(s)", merged, holds_uncommitted=False
+    )
+    allowed, _ = worktree.reap_decision(
+        sweep.NEEDS_REBRANCH,
+        "2 unmerged commit(s)",
+        force=False,
+        pr_merged=True,
+        holds_uncommitted=False,
+    )
+    assert action == worktree.REAP
+    assert allowed
+
+
 # --- reap: the plan ---------------------------------------------------------
 
 
@@ -1300,12 +1375,27 @@ def _reconcilable(workspace, monkeypatch, name, verdict, reason, pr_state):
 def test_reconcile_plan_orders_by_box_name_and_decides_each():
     merged = worktree.parse_pr_view(pr_json(state="MERGED"))
     rows = [
-        (box("b--two-0806"), sweep.READY, "work", merged),
-        (box("a--one-0806"), sweep.NEEDS_PR, "up", merged),
+        (box("b--two-0806"), sweep.READY, "work", merged, 3),
+        (box("a--one-0806"), sweep.NEEDS_PR, "up", merged, 0),
     ]
     plan = worktree.reconcile_plan(rows)
     assert [p.box for p in plan] == ["a--one-0806", "b--two-0806"]
     assert [p.action for p in plan] == [worktree.REAP, worktree.HOLD]
+
+
+def test_reconcile_plan_reads_dirtiness_from_the_row_not_from_the_verdict():
+    """Two boxes on the same verdict and the same merged PR, told apart only by the
+    uncommitted count the row carries. Drop that field and both decide the same way --
+    either the clean one leaks forever or the dirty one is destroyed."""
+    merged = worktree.parse_pr_view(pr_json(state="MERGED"))
+    rows = [
+        (box("a--clean-0806"), sweep.NEEDS_REBRANCH, "2 unmerged commit(s)", merged, 0),
+        (box("b--dirty-0806"), sweep.NEEDS_REBRANCH, "2 uncommitted file(s)", merged, 2),
+    ]
+    assert [p.action for p in worktree.reconcile_plan(rows)] == [
+        worktree.REAP,
+        worktree.HOLD,
+    ]
 
 
 def test_reconcile_reaps_a_merged_box_end_to_end(workspace, monkeypatch):
