@@ -104,6 +104,14 @@ def remediation(repo: Path, branch: str, target: str, paths: list[str], stashed:
     Usually that is not the person who clicked the task -- it is the agent they hand
     the file to -- so the paths, the two branches and the checkout are all named here
     rather than left implicit in the terminal above.
+
+    The handoff prompt stops at *resolving*, and that boundary is deliberate. This task's
+    only sanctioned target is a reference checkout where committing is blocked outright
+    by a `PreToolUse` hook, so a prompt saying "finish the merge" hands the next agent an
+    instruction its own harness refuses -- one wasted turn, every time, at the end of the
+    one workflow that is supposed to reach that checkout. Staging and committing belong
+    to whoever owns the checkout, who may need them typed with a `!` prefix; the
+    conflict resolution is the part an agent can actually deliver.
     """
     listed = "\n".join(f"  {path}" for path in paths)
     return (
@@ -113,9 +121,10 @@ def remediation(repo: Path, branch: str, target: str, paths: list[str], stashed:
         f"{listed}\n\n"
         "Hand to a coding agent, verbatim:\n"
         f'  "Resolve the merge conflicts in {repo}. {target} is being merged into '
-        f'{branch}; finish the merge, do not abort it."\n\n'
-        f"Or finish it by hand, in {repo}:\n"
-        "  resolve each file, then `git add <file>` and `git commit --no-edit`\n"
+        f"{branch}; resolve every file listed above and leave the result unstaged. Do "
+        'not abort the merge, and do not stage or commit."\n\n'
+        f"Then finish it yourself, in {repo}:\n"
+        "  `git add <file>` and `git commit --no-edit`\n"
         "  or back out entirely with `git merge --abort`\n"
         f"{held_in_the_stash(stashed)}"
     )

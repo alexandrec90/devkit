@@ -482,9 +482,22 @@ def test_conflicted_paths_ignores_blank_lines():
     assert conflicted_paths("a.cs\n\n  b.cs  \n") == ["a.cs", "b.cs"]
 
 
+def test_the_handoff_prompt_stops_at_resolving():
+    """The only checkout this task is sanctioned to reach blocks `git add` and `git
+    commit` in a PreToolUse hook, so a prompt saying "finish the merge" hands the next
+    agent an instruction its own harness refuses -- one wasted turn at the end of the one
+    workflow meant to reach that checkout. The instruction to the human keeps both
+    commands; it is the *agent's* prompt that must not carry them."""
+    text = remediation(REPO, "feature/x", "origin/develop", ["a.cs"], stashed=False)
+    prompt = text.split("Hand to a coding agent, verbatim:")[1].split("Then finish it")[0]
+    assert "do not stage or commit" in prompt
+    assert "git commit" not in prompt
+    assert "git commit --no-edit" in text  # still spelled out, for the human
+
+
 def test_the_remediation_block_carries_a_prompt_that_forbids_aborting():
     text = remediation(REPO, "feature/x", "origin/develop", ["a.cs"], stashed=False)
-    assert "do not abort it" in text
+    assert "not abort the merge" in text
     assert "git merge --abort" in text  # still offered, as the deliberate way out
 
 
