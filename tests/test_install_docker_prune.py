@@ -12,6 +12,7 @@ left no account of itself anywhere).
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 from support import load_script
@@ -65,8 +66,16 @@ def test_the_inner_interpreter_is_windowless_too():
 
 
 def test_paths_are_quoted_for_a_profile_name_with_spaces():
-    quoted = installer.prune_arguments(PY, root=Path(r"C:\Program Files\ws\devkit"))
-    assert '"C:\\Program Files\\ws\\devkit\\scripts\\docker-maint.py"' in quoted
+    """The property is that each path survives as *one* argv entry despite the space, so
+    the assertion tokenises rather than matching a literal. A literal is what this test
+    had first, and it read `...\\devkit\\scripts\\...`: `Path` joins with the separator of
+    the platform running the test, so the whole of it held on this Windows machine and
+    none of it on the Linux runner, which is a red PR gate for a test the code passes.
+    """
+    root = Path(r"C:\Program Files\ws\devkit")
+    tokens = shlex.split(installer.prune_arguments(PY, root=root), posix=False)
+    assert f'"{installer.maint_script(root)}"' in tokens
+    assert f'"{installer.wrapper_script(root)}"' in tokens
 
 
 def test_the_task_runs_in_the_checkout_so_its_log_is_findable():
