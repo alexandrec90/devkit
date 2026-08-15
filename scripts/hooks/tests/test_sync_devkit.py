@@ -325,10 +325,38 @@ def test_an_untagged_pull_leaves_the_pin_alone(tmp_path, monkeypatch):
     assert sh.read_pin((repo / sh.PRECOMMIT_FILE).read_text()) == "v0.5.2"
 
 
-def test_check_noop_when_src_unset(capsys, monkeypatch):
+def test_check_noop_when_src_unset_and_project_never_pulled(tmp_path, capsys, monkeypatch):
+    """Pre-adoption: nothing is vendored, so there is nothing a skip could hide.
+
+    REPO_ROOT is patched rather than left at the real one because this test ships into
+    every consumer, and a consumer's repo root IS stamped -- reading it would make the
+    two cases the same test in devkit and the opposite one downstream.
+    """
     monkeypatch.delenv(sh.SRC_ENV, raising=False)
+    monkeypatch.setattr(sh, "REPO_ROOT", tmp_path)
     assert sh.main(["--check"]) == 0
     assert "skipping" in capsys.readouterr().out
+
+
+def test_check_fails_when_src_unset_but_the_project_has_pulled(tmp_path, capsys, monkeypatch):
+    """The trap: a stamped project has vendored files and this compared none of them.
+
+    Exiting 0 here reports a gate that ran over nothing, which in a log is indistinguishable
+    from a clean gate. The stamp is committed and `$DEVKIT_DIR` is a property of the
+    machine, which is what lets this tell "not adopted yet" from "adopted, and this machine
+    has no clone to check against" -- a second workstation, a fresh clone, or a CI job
+    whose `env:` block was dropped.
+    """
+    monkeypatch.delenv(sh.SRC_ENV, raising=False)
+    monkeypatch.setattr(sh, "REPO_ROOT", tmp_path)
+    (tmp_path / sh.VERSION_FILE).write_text("abc1234\n")
+
+    assert sh.main(["--check"]) == 1
+    out = capsys.readouterr().out
+    assert "NOTHING WAS CHECKED" in out
+    # Both remedies, because one of them works with no devkit clone on the machine.
+    assert sh.SRC_ENV in out
+    assert "devkit-drift" in out
 
 
 def test_check_passes_when_in_sync(tmp_path, monkeypatch):

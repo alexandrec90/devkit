@@ -245,9 +245,16 @@ everything with no submodule and no install step.
 - `python scripts/sync-devkit.py --check` fails on drift, `--pull` adopts upstream,
   `--push` sends a change authored here back up. `DEVKIT_VERSION` records which
   upstream commit the vendored copy corresponds to.
-- **Every mode no-ops clean (exit 0) when `$DEVKIT_DIR` is unset.** That is
-  correct before adoption and a trap after: if `--check` ever prints "nothing to do
-  (skipping)" in CI, the gate is inert — fix the wiring, don't ignore it.
+- **`$DEVKIT_DIR` unset means there is nothing to compare against, and the stamp
+  decides what that is worth.** Before adoption every mode no-ops clean (exit 0):
+  nothing is vendored, so the gate has nothing to miss. Once `DEVKIT_VERSION` exists,
+  the same silence would report a comparison that never ran, so it **fails** instead.
+  `$DEVKIT_DIR` is a property of the machine and `DEVKIT_VERSION` is committed, which
+  is what makes the distinction reliable: a second workstation, a fresh clone or a CI
+  job missing its `env:` block is where the gate would otherwise go quiet. On a machine
+  with no devkit clone at all, the drift check that still works is
+  `pre-commit run devkit-drift --all-files` — same comparison, against the rev pinned
+  in `.pre-commit-config.yaml`.
 - A vendored script may depend on a file the project owns (`lint-all.py`,
   `run-tests.py`). Those dependencies are asserted by
   `scripts/hooks/tests/test_repo_contract.py`, because at runtime a missing one is a

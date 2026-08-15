@@ -74,8 +74,10 @@ DEVKIT_DIR=/path/to/devkit python scripts/sync-devkit.py --pull
 # Add a .devkit.toml (see this repo's as the template), then commit.
 ```
 
-- `--check` (default): fail on drift — wire into CI. **No-ops when
-  `$DEVKIT_DIR`/`--src` is unset**, so CI is green before adoption.
+- `--check` (default): fail on drift — wire into CI. With no `$DEVKIT_DIR`/`--src` it
+  **no-ops until the project has pulled** (CI is green before adoption) and **fails
+  once `DEVKIT_VERSION` is stamped**, because there is then vendored code it did not
+  compare.
 - `--pull`: adopt this repo's version (stamps `DEVKIT_VERSION` with the commit).
 - `--push`: copy a project's version back here (author a change / seed a fresh repo).
 - `--list`: print the manifest + the project's vendored version.
@@ -106,12 +108,14 @@ devkit ref as the PR gate.
 | `devkit-hooks-stdlib-only` | A third-party import in `scripts/hooks/`. Those scripts run *before* the virtualenv exists, so this cannot be caught by a test suite — which runs inside it. |
 | `devkit-drift` | A vendored file that differs from the pinned devkit rev. |
 
-**Why `devkit-drift` exists next to `sync-devkit.py --check`.** The sync tool resolves
-its source from `$DEVKIT_DIR` and **exits 0 doing nothing when that is unset** —
-correct before adoption, an inert gate afterwards, and indistinguishable from success in a
-log. Run through pre-commit there is nothing to configure: pre-commit has already cloned
-devkit at the pinned rev, so the version being compared against is written down in the
-consumer's config and moved by `pre-commit autoupdate`.
+**Why `devkit-drift` exists next to `sync-devkit.py --check`.** The sync tool needs a
+**local devkit clone** for `$DEVKIT_DIR` to point at. Where there is none it can only
+refuse — which is at least loud now, rather than the exit 0 it used to report — and a
+refusal is still not a check. A second workstation, a fresh clone and a CI job whose
+`env:` block was dropped are all that shape. Run through pre-commit there is nothing to
+configure and nothing to clone by hand: pre-commit has already fetched devkit at the
+pinned rev, so the version being compared against is written down in the consumer's
+config and moved by `pre-commit autoupdate`.
 
 Two consequences worth knowing:
 

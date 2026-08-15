@@ -11,9 +11,10 @@
 repos:
   # --- devkit's published hooks ------------------------------------------------
   # The alternative to `sync-devkit.py --check`, which resolves its source from
-  # $DEVKIT_DIR and silently checks NOTHING when that is unset. pre-commit has
-  # already cloned devkit at the rev below, so the version is written down here instead of
-  # depending on a variable in whoever's shell.
+  # $DEVKIT_DIR and can only refuse when that is unset — no clone, no comparison.
+  # pre-commit has already fetched devkit at the rev below, so the version is written down
+  # here instead of depending on a variable in whoever's shell, and a second machine that
+  # has never cloned devkit is still gated.
   - repo: https://github.com/{{ github_owner }}/devkit
     rev: {{ devkit_ref }}
     hooks:
