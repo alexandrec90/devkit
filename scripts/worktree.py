@@ -112,6 +112,52 @@ DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 # Everything else — `ready` above all — means work is still only here.
 SAFE_TO_REAP: frozenset[str] = frozenset({sweep.SPENT, sweep.NEEDS_PR, sweep.CLEAN})
 
+
+# The one verdict a merge can be stale about. `needs-rebranch` says "commits on a branch
+# that can no longer be committed to", which is what a squash merge leaves behind and is
+# also what an abandoned branch leaves behind -- the PR tells them apart. Every other
+# refusing verdict means something a merge does not answer: `ready` and `needs-branch`
+# are uncommitted work, `blocked` is a state nothing here should be guessing at.
+MERGE_CAN_BE_STALE_ABOUT: frozenset[str] = frozenset({sweep.NEEDS_REBRANCH})
+
+
+def reapable(verdict: str, *, pr_merged: bool = False, holds_uncommitted: bool = True) -> bool:
+    """May this box be destroyed? The one predicate `reap` and `reconcile` both ask.
+
+    `SAFE_TO_REAP` alone is not the whole answer, because **a squash merge is invisible
+    to the verdict**. Squashing rewrites the branch's commits, so they are never
+    ancestors of the default branch no matter how thoroughly the work landed, and
+    `--delete-branch` removes the upstream the classifier would otherwise have read. The
+    box therefore comes out of `sweep.classify` as `needs-rebranch` — "unmerged commits
+    on a retired branch" — which is true of the refs and false of the work. That verdict
+    is not in `SAFE_TO_REAP`, so `reap` refused and `reconcile` returned `HOLD`, forever:
+    every squash-merged box was a permanent leak of a checkout, a port lease and a volume
+    set, and the only way out was `--force`, which is documented as discarding work.
+
+    So the merged PR is consulted directly, exactly the way `branch_delete_flag` already
+    consults it to choose `-D`. The two now agree about one box rather than describing it
+    two different ways.
+
+    Two independent signals then have to agree that nothing is at stake, and requiring
+    both is deliberate. `holds_uncommitted` is the direct one; `MERGE_CAN_BE_STALE_ABOUT`
+    is the verdict's own account of what it is complaining about. Keying on the count
+    alone was tried first and `test_reconcile_never_reaps_a_box_holding_work` rejected
+    it: a `ready` box means uncommitted work *by definition*, so a zero count next to
+    that verdict is two fields disagreeing, and a safety property that resolves such a
+    disagreement in favour of destroying is not one.
+
+    Work that exists *only* in the box is therefore still never destroyed on the strength
+    of a merge — shipping a branch and carrying on editing is ordinary, and the PR can
+    merge while those edits sit there uncommitted. `holds_uncommitted` defaults to `True`
+    so a caller that does not know defaults to holding: this predicate must fail towards
+    keeping a box that could be destroyed, never towards destroying one that should be
+    kept.
+    """
+    if verdict in SAFE_TO_REAP:
+        return True
+    return pr_merged and not holds_uncommitted and verdict in MERGE_CAN_BE_STALE_ABOUT
+
+
 # Marks the block `new` writes into a box's `.env`. Docker Compose's dotenv parser
 # takes the LAST assignment of a key, so appending is what lets the block win over a
 # seeded copy of the project's own `.env` without editing the lines it came with.
@@ -599,7 +645,14 @@ def spawn_plan(
     )
 
 
-def reap_decision(verdict: str, reason: str, force: bool) -> tuple[bool, str]:
+def reap_decision(
+    verdict: str,
+    reason: str,
+    force: bool,
+    *,
+    pr_merged: bool = False,
+    holds_uncommitted: bool = True,
+) -> tuple[bool, str]:
     """`(allowed, note)` — may this box be destroyed, and what to say about it.
 
     This is the inversion that replaces sweeping. Work cannot be stranded in a box
@@ -611,8 +664,13 @@ def reap_decision(verdict: str, reason: str, force: bool) -> tuple[bool, str]:
     (`branch_delete_flag`), so committed work survives as a local branch even when the
     box it was made in does not. Uncommitted junk should not need a human; commits
     should never be destroyed by a cleanup command.
+
+    The merged-PR case is `reapable`'s, not `--force`'s. Forcing past a verdict that is
+    merely *stale about a squash* spends the one flag that also discards uncommitted
+    work, on the most ordinary ending a box has — which teaches the reflex on the exact
+    boxes where the refusal is the point.
     """
-    if verdict in SAFE_TO_REAP:
+    if reapable(verdict, pr_merged=pr_merged, holds_uncommitted=holds_uncommitted):
         return True, ""
     if force:
         return True, f"forced past `{verdict}` ({reason}) — uncommitted changes will be discarded"
@@ -684,7 +742,13 @@ def reap_plan(
     scope cannot silently widen to the source project if the box's `.env` is missing.
     """
     path = str(box_path(workspace_root, box.name))
-    allowed, note = reap_decision(verdict, reason, force)
+    allowed, note = reap_decision(
+        verdict,
+        reason,
+        force,
+        pr_merged=pr_merged,
+        holds_uncommitted=bool(state.dirty),
+    )
     if not allowed:
         return ReapPlan(box=box.name, path=path, project=box.project, refusal=note)
 
@@ -824,6 +888,7 @@ def reconcile_action(
     pressure: bool = False,
     age_days: float = 0.0,
     max_age_days: float = DEFAULT_MAX_AGE_DAYS,
+    holds_uncommitted: bool = True,
 ) -> tuple[str, str]:
     """`(action, why)` for one box. Pure; every IO decision above it collapses to these.
 
@@ -833,6 +898,14 @@ def reconcile_action(
     the two can legitimately coexist: ship a branch, keep working in the box, and the PR
     merges while uncommitted edits are still sitting there. Reaping on the strength of
     the merge alone would delete them.
+
+    What that test asks is `reapable`, not `verdict in SAFE_TO_REAP`, and the difference
+    is the squash-merged box: its commits are on the default branch under a rewritten
+    sha, which no verdict can see, so it arrives here as `needs-rebranch` and used to
+    HOLD forever. `holds_uncommitted` is the half of that predicate the safety property
+    lives in, and it stays first: a merge never licenses destroying uncommitted edits.
+    `reap_decision` asks the same predicate, because a disagreement between the two
+    surfaces as this pass's "reap refused" warning and stalls the box either way.
 
     After that the cases are disjoint by construction:
 
@@ -850,7 +923,7 @@ def reconcile_action(
       never merged: the commits are safe on the remote but nobody will ever look at
       them, and that is a person's decision, not a cleanup's.
     """
-    if verdict not in SAFE_TO_REAP:
+    if not reapable(verdict, pr_merged=pr.merged, holds_uncommitted=holds_uncommitted):
         return HOLD, f"{verdict} -- {reason}"
 
     if pr.merged:
@@ -882,7 +955,7 @@ def reconcile_action(
 
 
 def reconcile_plan(
-    rows: list[tuple[Box, str, str, PullRequest]],
+    rows: list[tuple[Box, str, str, PullRequest, int]],
     *,
     automerge: bool = False,
     merge_label: str = "",
@@ -895,6 +968,11 @@ def reconcile_plan(
     Takes the inspected rows rather than doing the inspecting so a full reconciliation,
     including the disk-pressure escalation and the merge gate, can be asserted without
     git, `gh`, docker, or a disk.
+
+    The row carries the box's uncommitted-file count alongside its verdict because
+    `reconcile_action` needs both to answer `reapable`, and the verdict is a summary that
+    cannot be decompiled back into one: `needs-rebranch` is reported for a dirty box and
+    for a clean squash-merged one alike, and those two want opposite decisions.
     """
     return [
         Reconciliation(
@@ -904,7 +982,7 @@ def reconcile_plan(
             verdict=verdict,
             pr=pr,
         )
-        for box, verdict, reason, pr in sorted(rows, key=lambda row: row[0].name)
+        for box, verdict, reason, pr, dirty in sorted(rows, key=lambda row: row[0].name)
         for action, why in [
             reconcile_action(
                 verdict,
@@ -915,6 +993,7 @@ def reconcile_plan(
                 pressure=pressure,
                 age_days=box_age_days(box.created, now),
                 max_age_days=max_age_days,
+                holds_uncommitted=bool(dirty),
             )
         ]
     ]
@@ -1634,7 +1713,7 @@ def reconcile(
     free = free_gb(boxes_root(root) if boxes_root(root).is_dir() else root)
     pressure = under_pressure(free, min_free_gb)
 
-    rows: list[tuple[Box, str, str, PullRequest]] = []
+    rows: list[tuple[Box, str, str, PullRequest, int]] = []
     for name, box in sorted(boxes.items()):
         state, verdict, reason = inspect_box(box, root, fetch=fetch)
         pr = (
@@ -1642,7 +1721,7 @@ def reconcile(
             if fetch and box.branch and state.host == "github"
             else PullRequest()
         )
-        rows.append((box, verdict, reason, pr))
+        rows.append((box, verdict, reason, pr, state.dirty))
 
     outcomes: list[dict] = []
     worst = 0

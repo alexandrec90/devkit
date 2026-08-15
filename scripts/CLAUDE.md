@@ -93,6 +93,18 @@ Each of these has already been violated by something:
   commit is on the remote and what is lost is the checkout rather than the work. Work
   that exists only in a box has to survive a merged PR, disk pressure and any age. The
   ordering is the whole safety property, and four tests fail if it moves.
+- **"Has the work left the box" is not a question the verdict can answer alone.** A
+  squash merge rewrites the commits and `--delete-branch` takes the upstream with it, so
+  the box `sweep.classify` sees is one with unmerged commits on a retired branch —
+  `needs-rebranch`, forever, however completely the work landed. That verdict is not
+  reapable, so **every squash-merged box was a permanent `HOLD`**: a leaked checkout,
+  port lease and volume set apiece, and `--force` — the flag that also discards
+  uncommitted work — as the only way out. `worktree.reapable` is the single predicate
+  both `reap` and `reconcile` now ask, and it consults the merged PR the way
+  `branch_delete_flag` already did to choose `-D`. It is narrow in both directions:
+  `MERGE_CAN_BE_STALE_ABOUT` scopes the escape to that one verdict, and the box must
+  also be clean, because a merge says where the *commits* are and nothing about the
+  edits on top of them.
 - **`reap` is the one place in the workspace that passes `-v` to `compose down`.**
   `docker-maint.py` must never do it — its target is a static checkout whose named
   volumes hold a dev database costing hours to re-ingest. A box's volumes were created
