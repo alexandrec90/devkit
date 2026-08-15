@@ -2,10 +2,12 @@
 """pre-commit hook: the vendored harness in this repo matches the devkit rev it pins.
 
 This is the drift check `scripts/sync-devkit.py --check` performs, with the awkward part
-removed. That script resolves its source from `$DEVKIT_DIR`, and **no-ops clean
-(exit 0) when it is unset** — correct before a project adopts the shared repo, and an
-inert gate afterwards. Anyone who has not exported the variable is running a check that
-checks nothing, and it says so in a line that is easy to miss.
+removed. That script resolves its source from `$DEVKIT_DIR`, so **on a machine with no
+devkit clone it cannot run at all**: it now says so and exits 1 once the project is
+stamped, rather than reporting a comparison that never happened, but a loud refusal is
+still not a check. This hook needs no variable and no local clone — pre-commit has
+already fetched devkit at the rev the consumer pins — so it is the one that works on a
+second machine.
 
 Run through pre-commit there is nothing to configure, because pre-commit has already
 cloned devkit at the `rev` the config pins: this file *is* the source of truth for that

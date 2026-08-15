@@ -89,7 +89,9 @@ docker-compose.yml       the local stack
 
 `.github/workflows/pr-gate.yml` runs lint, tests, and the harness drift check on
 every PR. The drift check is only meaningful when it can see devkit — if it prints
-"nothing to do (skipping)", the gate is inert and the wiring needs fixing.
+"nothing to do (skipping)", the gate is inert and the wiring needs fixing. Locally,
+where `DEVKIT_DIR` is usually unset, `pre-commit run devkit-drift --all-files` is the
+same check against the devkit rev pinned in `.pre-commit-config.yaml`.
 
 `.github/dependabot.yml` opens weekly dependency PRs, and
 `.github/workflows/dependabot-automerge.yml` merges them once the gate passes —

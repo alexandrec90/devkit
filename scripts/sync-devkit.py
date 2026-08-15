@@ -9,7 +9,9 @@ submodule. This script keeps that copy honest:
 
   - `--check` (default): fail (exit 1) if any vendored file drifts from the shared
     repo. Wired into the PR gate. **No-ops clean (exit 0) when the shared repo is
-    not configured**, so CI is safe before a project adopts the shared repo.
+    not configured and this project has never pulled**, so CI is safe before a
+    project adopts the shared repo; once `DEVKIT_VERSION` exists, an unresolvable
+    source is itself a failure rather than a skip (see `main`).
   - `--pull`: copy the shared repo's version into this project (adopt upstream).
     Also remove exact paths retired by the shared repo; project-owned skill state
     is never included in that retirement list.
@@ -979,9 +981,33 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if src is None:
-        # Unconfigured: every mode is a clean no-op so the PR gate passes pre-adoption.
-        print(f"sync-harness: ${SRC_ENV} unset and no --src; nothing to do (skipping).")
-        return 0
+        # Unconfigured. Before adoption that is correct and every mode no-ops clean, so a
+        # project generated an hour ago -- no vendored files, and nothing to compare them
+        # against -- passes its own PR gate.
+        #
+        # After adoption the same silence is a lie. A stamped project HAS vendored files,
+        # `--check` is the gate over them, and exit 0 reports a comparison that never ran.
+        #
+        # The stamp is the one signal that separates the two, and the reason it works is
+        # that it is committed. `$DEVKIT_DIR` is a property of the *machine* -- a second
+        # workstation, a fresh clone, a CI job whose `env:` block was dropped -- and every
+        # one of those is a place where the gate goes quiet exactly when the project has
+        # the most vendored code to compare. `DEVKIT_VERSION` travels with the repo, so it
+        # can tell "not adopted yet" from "adopted, and this machine cannot check it".
+        stamped = read_version(REPO_ROOT)
+        if stamped is None:
+            print(f"sync-harness: ${SRC_ENV} unset and no --src; nothing to do (skipping).")
+            return 0
+        print(
+            f"sync-harness: this project vendors devkit ({VERSION_FILE} = {stamped}), but "
+            f"${SRC_ENV} is unset and no --src was given. There is nothing to compare "
+            f"against, so NOTHING WAS CHECKED.\n"
+            f"  point it at a devkit checkout:  {SRC_ENV}=<path> python scripts/sync-devkit.py\n"
+            f"  or drift-check without a clone: pre-commit run devkit-drift --all-files\n"
+            f"(that hook compares against the devkit rev pinned in {PRECOMMIT_FILE}, so it "
+            f"needs no ${SRC_ENV} and no local devkit at all)"
+        )
+        return 1
 
     if args.pull:
         # Both guards run *before* anything is copied: a refusal must leave the

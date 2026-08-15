@@ -174,9 +174,10 @@ jobs:
         with:
           python-version: "{{ python_version }}"
       - name: Drift check
-        # DEVKIT_DIR must be set. Unset, every mode exits 0 with "nothing to
-        # do (skipping)" — which is correct before adoption and an inert gate after.
-        # If that line ever appears in this job's log, fix the wiring; do not ignore it.
+        # DEVKIT_DIR must be set: it is what the checkout step above exists to provide.
+        # Unset, this exits 0 with "nothing to do (skipping)" before the project has
+        # pulled — correct, nothing is vendored yet — and fails loudly once DEVKIT_VERSION
+        # exists. If the skip line ever appears in this job's log, fix the wiring.
         env:
           DEVKIT_DIR: ${{ github.workspace }}/.devkit-src
         run: python scripts/sync-devkit.py --check

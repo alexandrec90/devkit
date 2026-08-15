@@ -358,6 +358,121 @@ def test_pre_commit_absence_is_a_warning_not_a_failure(tmp_path):
     assert PATH_EXPORT in (env_file.read_text(encoding="utf-8") if env_file.exists() else "")
 
 
+# --- what a LOCAL session is missing ------------------------------------------
+# The local branch used to assert in a comment that "local machines already have the venv
+# + node_modules". True of a checkout set up months ago; false for a fresh clone, which is
+# the one machine that has neither — and it then discovers that one failed ruff/pytest
+# call at a time, each looking like a broken tool rather than an empty checkout.
+#
+# The hook reports and does not install. These tests pin BOTH halves, because the
+# tempting fix (run the ladder under a `[ -d .venv ]` guard) puts a multi-minute
+# synchronous install in front of every fresh-clone session and duplicates a provisioner
+# `worktree.py` already owns.
+
+
+def _unprovisioned(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path, Path]:
+    """`_make_project` with the pre-created `.venv` removed: a fresh clone."""
+    project, log, env_file = _make_project(tmp_path, files)
+    shutil.rmtree(project / ".venv")
+    return project, log, env_file
+
+
+def test_a_fresh_clone_is_told_which_install_command_to_run(tmp_path):
+    project, log, env_file = _unprovisioned(tmp_path, {"uv.lock": "", "pyproject.toml": PYPROJECT})
+    rc, output, written = _run(project, log, env_file, remote=False)
+    assert rc == 0, output
+    assert "No .venv here" in output, output
+    assert "uv sync --all-extras --all-groups" in output, output
+    # Reported, not run: none of the remote provisioning path may have executed.
+    assert "Installing Python toolchain" not in output, output
+    assert written == "", "a local session must not rewrite PATH for a venv that does not exist"
+
+
+def test_a_provisioned_checkout_is_told_nothing(tmp_path):
+    """The no-op half. Every session on a working checkout pays this and must see nothing."""
+    project, log, env_file = _make_project(tmp_path, {"uv.lock": "", "pyproject.toml": PYPROJECT})
+    rc, output, _ = _run(project, log, env_file, remote=False)
+    assert rc == 0, output
+    assert "No .venv here" not in output, output
+
+
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        pytest.param({"uv.lock": "", "pyproject.toml": PYPROJECT}, "uv sync", id="uv-lock"),
+        pytest.param(
+            {"requirements.txt": "ruff==0.15.0\n", "requirements-dev.txt": "uv==0.4.0\n"},
+            "-r requirements.txt -r requirements-dev.txt",
+            id="requirements-locks",
+        ),
+        pytest.param({"pyproject.toml": PYPROJECT}, "-e '.[dev]'", id="unlocked-pyproject"),
+    ],
+)
+def test_the_named_command_matches_the_project_dependency_model(tmp_path, files, expected):
+    """Same detection ladder as the installer, in the same order — a command that does not
+    fit the project is worse than no command, because it is followed."""
+    project, log, env_file = _unprovisioned(tmp_path, files)
+    rc, output, _ = _run(project, log, env_file, remote=False)
+    assert rc == 0, output
+    assert expected in output, output
+
+
+def test_a_project_with_no_dependency_file_is_told_nothing(tmp_path):
+    """There is nothing to install, so there is no command to name."""
+    project, log, env_file = _unprovisioned(tmp_path, {"README.md": "# probe\n"})
+    rc, output, _ = _run(project, log, env_file, remote=False)
+    assert rc == 0, output
+    assert "No .venv here" not in output, output
+
+
+def test_the_manifest_install_command_wins_over_detection(tmp_path):
+    project, log, env_file = _unprovisioned(
+        tmp_path,
+        {
+            "uv.lock": "",
+            "pyproject.toml": PYPROJECT,
+            ".devkit.toml": '[python]\ninstall_command = "make bootstrap"\n',
+        },
+    )
+    rc, output, _ = _run(project, log, env_file, remote=False)
+    assert rc == 0, output
+    assert "fix: make bootstrap" in output, output
+    assert "uv sync" not in output, "detection ran despite an explicit install_command"
+
+
+def test_a_frontend_tier_missing_node_modules_is_reported_too(tmp_path):
+    """`node_modules` is the other half of the claim this replaced."""
+    project, log, env_file = _make_project(
+        tmp_path,
+        {
+            "pyproject.toml": PYPROJECT,
+            ".devkit.toml": '[frontend]\nenabled = true\ndir = "web"\n',
+            "web/package.json": "{}\n",
+        },
+    )
+    rc, output, _ = _run(project, log, env_file, remote=False)
+    assert rc == 0, output
+    assert "No web/node_modules" in output, output
+    assert "npm install --prefix web" in output, output
+    # Named, not run — the stub would have logged an invocation.
+    assert "npm install --prefix web --no-audit" not in output, output
+
+
+def test_a_frontend_tier_with_node_modules_is_not_reported(tmp_path):
+    project, log, env_file = _make_project(
+        tmp_path,
+        {
+            "pyproject.toml": PYPROJECT,
+            ".devkit.toml": '[frontend]\nenabled = true\ndir = "web"\n',
+            "web/package.json": "{}\n",
+            "web/node_modules/.keep": "",
+        },
+    )
+    rc, output, _ = _run(project, log, env_file, remote=False)
+    assert rc == 0, output
+    assert "node_modules" not in output, output
+
+
 # --- the local auto-rebase must not rewrite published history ------------------
 # A rebase rewrites commits. On a branch with an open PR that marks every review comment
 # outdated and forces the next push -- an outward-facing consequence no prompt asked for,

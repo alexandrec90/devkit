@@ -13,10 +13,10 @@
 # by contract — so pre-commit's clone is already everything they need. That also keeps the
 # hooks usable from a repo that has no Python environment of its own yet.
 #
-# NB: `rev` is the whole point of this channel. The vendored tier needs
-# `$DEVKIT_DIR` to point somewhere and silently checks nothing when it does not;
-# here the version is written down in the consumer's config and moved by
-# `pre-commit autoupdate`.
+# NB: `rev` is the whole point of this channel. The vendored tier needs `$DEVKIT_DIR` to
+# point at a local clone and can only refuse when it does not; here the version is written
+# down in the consumer's config and moved by `pre-commit autoupdate`, so a machine that has
+# never cloned devkit still gets the check.
 
 - id: devkit-manifest
   name: validate .devkit.toml
