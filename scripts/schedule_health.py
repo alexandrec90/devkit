@@ -23,10 +23,14 @@ only place three of the four failure modes are visible at all:
 | it ran, and declined to do anything | the job's own artifact, not here |
 
 The last row is the one this deliberately does not cover: "ran fine, did nothing" is a
-statement about the work, and the job that did it owns that log. `logs/reconcile.log`
-and `logs/upgrade.log` are those. This answers the prior question -- *did it run at
-all* -- which no artifact can answer, because an artifact that was never written and
-one whose job never ran are the same empty file.
+statement about the work, and the job that did it owns that log. This answers the prior
+question -- *did it run at all* -- which no artifact can answer, because an artifact
+that was never written and one whose job never ran are the same empty file.
+
+What it does do is **hand the reader over**. Every job's artifact is named in
+`ARTIFACTS`, so a failure line ends in `see logs/<file>` rather than in an exit code
+with nowhere to go; the two halves answer different questions and the report is only
+useful when it carries both.
 
 Cadence is derived rather than configured: a healthy job's `Next Run Time` minus its
 `Last Run Time` **is** its interval, whatever the trigger says, so nothing here has to
@@ -71,6 +75,36 @@ NOT_A_FAILURE = frozenset({0, SCHED_S_TASK_HAS_NOT_RUN, SCHED_S_TASK_RUNNING})
 # asleep at 04:00 misses a daily run and catches it the next night, which is the system
 # working. Two consecutive misses is a job that has stopped.
 STALE_INTERVALS = 2.0
+
+# Where each job's own account of its last run lives, relative to the devkit checkout.
+#
+# **The exit code alone is a dead end.** "devkit-docker-prune: last run failed (exit 1)"
+# is a true and complete sentence that tells a fresh agent nothing it can act on: the
+# job runs windowless, so there is no terminal it scrolled off, and until this table
+# existed the reader's only remaining move was to guess. One `see <path>` closes that,
+# and it costs nothing at session start because the line is only printed when something
+# is already wrong.
+#
+# Hand-maintained on purpose -- there is no rule mapping a task name to a file, since
+# each job chose its own artifact for its own reasons. `tests/test_scheduled_jobs.py`
+# requires an entry here for every job devkit knows how to install, so the drift this
+# invites is caught in the suite rather than by the next person to read a bare exit code.
+ARTIFACTS: dict[str, str] = {
+    "devkit-worktree-reconcile": "logs/reconcile.log",
+    "devkit-upgrade-projects": "logs/upgrade.log",
+    "devkit-docker-prune": "logs/scheduled-docker-prune.log",
+}
+
+
+def artifact_hint(name: str, artifacts: dict[str, str] | None = None) -> str:
+    """`" -- see logs/x.log"` for a job that keeps one, `""` for a job that does not.
+
+    A job with no entry gets no pointer rather than a guessed path: sending a reader to
+    a file that was never written is worse than sending them nowhere, because an absent
+    artifact reads as "the job never ran" and that is a different diagnosis.
+    """
+    path = (ARTIFACTS if artifacts is None else artifacts).get(name, "")
+    return f" -- see {path}" if path else ""
 
 
 @dataclass(frozen=True)
@@ -168,7 +202,7 @@ def problems(jobs: list[Job], now: _dt.datetime | None = None) -> list[str]:
         if job.last_result not in NOT_A_FAILURE:
             found.append(
                 f"{job.name}: last run failed (exit {job.last_result}) at "
-                f"{job.last_run:%Y-%m-%d %H:%M}"
+                f"{job.last_run:%Y-%m-%d %H:%M}{artifact_hint(job.name)}"
             )
             continue
         interval = job.interval

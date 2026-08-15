@@ -147,9 +147,9 @@ with different working directories. Without it every guard-cut box was named
 
 ## A scheduled task is registered from XML, never from `schtasks` flags
 
-Both unattended jobs — `install-reconcile-task.py` and `install-upgrade-schedule.py` —
-go through `scripts/devkit_schtasks.py`, which builds a task document and registers it
-with `/XML`. That is not a style preference. **The three settings that decide whether a
+Every unattended job — `install-reconcile-task.py`, `install-upgrade-schedule.py`,
+`install-docker-prune.py` — goes through `scripts/devkit_schtasks.py`, which builds a
+task document and registers it with `/XML`. That is not a style preference. **The three settings that decide whether a
 scheduled job on a laptop runs at all have no `schtasks.exe` flags**, so every task
 that tool creates silently inherits server defaults: it skips every fire while on
 battery, kills a run in progress when you unplug, and never catches up a fire it slept
@@ -176,6 +176,31 @@ The other half of keeping these alive is noticing when one has stopped anyway, w
 is `workspace-status.py`'s `scheduler_line` — it reads when a pass last *finished*
 rather than whether a task is registered, because `schtasks` answers yes for a task
 that is disabled, wedged, or pointed at a checkout that has moved.
+
+### A job with no artifact is a job that fails in private
+
+`pythonw.exe` is what keeps a console window from flashing up on every fire, and its
+stdout goes **nowhere** — not to a file, not to the Event Log. So a scheduled job leaves
+exactly what it writes itself, and `devkit-docker-prune` was found writing nothing: it
+had been exiting 1 for a day, and the entire record on the machine was a `Last Result`
+integer. Nobody could say which of `generic_prune`'s two failure exits it took, and the
+job was also the only one no installer here had ever registered — it was created by hand
+with `schtasks /Create /SC DAILY`, so it had none of the settings above either.
+
+Both halves of that are now enforced rather than remembered. Every installer declares
+`TASK_NAME` and `ARTIFACT`, `schedule_health.ARTIFACTS` maps one to the other so the
+session-start failure line ends in `see logs/…`, and `tests/test_scheduled_jobs.py`
+fails a job that skips either. For a runner with no artifact of its own — `docker-maint.py`
+has several callers, most of them interactive — wrap the scheduled call in
+`log-wrap.py --always`, which records the passing run too. That flag exists for exactly
+this caller: for a task someone clicked, an empty log means "you watched it pass", and
+for a job nobody watches it means nothing at all.
+
+Two mechanics that make the wrapper work from a scheduler, both of which fail silently
+if forgotten: pass `working_dir` to `task_xml`, because a task's cwd is `system32` and
+`log-wrap.py` resolves `logs/` from the cwd; and keep the *inner* interpreter windowless
+too, because Windows allocates a console window for a console-subsystem child of a GUI
+parent even with every handle redirected.
 
 ### The scheduled pass carries the static tier too
 

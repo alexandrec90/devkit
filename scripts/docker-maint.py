@@ -33,7 +33,15 @@ Usage:  python docker-maint.py {up|down|restart-engine|fix|prune} [--generic] [a
 
 `prune --idle-only` is the unattended spelling: it does nothing while containers are
 running, because the half that actually returns disk to Windows needs
-`wsl --shutdown`. See `generic_prune`. That is what the scheduled task passes.
+`wsl --shutdown`. See `generic_prune`. `scripts/install-docker-prune.py` is what
+schedules it, and it passes that flag -- the hand-registered task it replaced did not,
+because nothing in this repo owned that task or checked what it ran.
+
+**This script writes no artifact of its own, deliberately**: most of its callers are
+interactive, and a `logs/` file per click is noise. The scheduled caller is the
+exception and gets one from the outside, by being wrapped in `log-wrap.py --always`.
+Anything else that runs this unattended has to do the same -- under `pythonw.exe` these
+`print`s go nowhere at all.
 
 The daemon modes are Windows-only by nature -- they drive Docker Desktop and compact
 the WSL2 VHDX. `up`/`down` are portable.

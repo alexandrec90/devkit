@@ -103,6 +103,7 @@ def task_xml(
     *,
     time_limit: str = DEFAULT_TIME_LIMIT,
     author: str = "devkit",
+    working_dir: str = "",
 ) -> str:
     """The full task document: one action, one trigger, and the settings that matter.
 
@@ -117,6 +118,16 @@ def task_xml(
     is unusual and produces a document that fails to parse rather than a task that runs
     the wrong thing, but a generator that can emit invalid XML is one you cannot trust
     with a path you did not choose.
+
+    **`working_dir` is what lets a scheduled job write an artifact.** A task with no
+    `<WorkingDirectory>` starts in `system32`, so anything resolving `logs/` from the
+    cwd -- `log-wrap.py`, and every runner that follows the failure-artifact rule --
+    writes its report into a Windows system directory, where it is both unfindable and
+    likely unwritable. The two jobs that predate this compensated by passing every path
+    as an absolute argument, which works and does not generalise: it makes each new job
+    responsible for remembering, and the one that forgot is what this parameter was
+    added for. `<Exec>` children are an ordered sequence like `<Settings>`, so it goes
+    last, after `<Arguments>`.
     """
     return (
         '<?xml version="1.0" encoding="UTF-16"?>\n'
@@ -150,7 +161,12 @@ def task_xml(
         "    <Exec>\n"
         f"      <Command>{escape(command)}</Command>\n"
         f"      <Arguments>{escape(arguments)}</Arguments>\n"
-        "    </Exec>\n"
+        + (
+            f"      <WorkingDirectory>{escape(working_dir)}</WorkingDirectory>\n"
+            if working_dir
+            else ""
+        )
+        + "    </Exec>\n"
         "  </Actions>\n"
         "</Task>\n"
     )

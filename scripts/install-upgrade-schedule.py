@@ -53,6 +53,12 @@ BOXES_DIR = sweep.BOXES_DIR_NAME
 # would report "nothing scheduled" while the old entry kept firing.
 TASK_NAME = "devkit-upgrade-projects"
 
+# Where this job's account of itself lives -- `upgrade-project.py` writes it, and
+# `schedule_health.ARTIFACTS` sends a reader here when the scheduler reports a failure.
+# Declared on the installer because that is the one place that knows a job exists at
+# all; `tests/test_scheduled_jobs.py` checks it against the runner's own constant.
+ARTIFACT = "logs/upgrade.log"
+
 # Resolved once, at import, so a test can force the Windows path without touching
 # `os.name` itself. `pathlib` reads `os.name` to decide whether `Path(...)` builds a
 # `WindowsPath`, so patching the global makes every subsequent bare `Path(...)` raise

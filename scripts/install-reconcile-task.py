@@ -49,6 +49,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TASK_NAME = "devkit-worktree-reconcile"
 DEFAULT_INTERVAL_MINUTES = 15
 
+# Where this job's account of itself lives -- `worktree.write_reconcile_log` writes it,
+# and `schedule_health.ARTIFACTS` sends a reader here when the scheduler reports a
+# failure. Declared on the installer because that is the one place that knows a job
+# exists at all; `tests/test_scheduled_jobs.py` checks it against `worktree.py`'s own
+# constant rather than trusting the copy.
+ARTIFACT = "logs/reconcile.log"
+
 # Resolved once, at import, so a test can force the Windows path without touching
 # `os.name` itself. That distinction is not stylistic: `pathlib` reads `os.name` to
 # decide whether `Path(...)` builds a `WindowsPath`, so a test that patches the global
