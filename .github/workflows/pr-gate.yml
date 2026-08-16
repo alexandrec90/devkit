@@ -63,7 +63,7 @@ jobs:
           # the default here would leave the convention untested in the one repo
           # that ships it.
           python-version: "3.12"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
