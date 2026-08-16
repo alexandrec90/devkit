@@ -560,6 +560,14 @@ default to `gpt-5.6-luna` with low reasoning, no reasoning summary, and low verb
 Keep these tests manual, nightly, or release-only. The converter and adapter tests are the
 zero-model-cost gate for every hook change.
 
+`tests/test_claude_hooks_live.py` is the Claude-side counterpart. It loads the real
+vendored engineering rule and capped-Bash hook in an isolated project, exposes only the
+Bash tool, and proves Claude chooses `invoke-capped.py` on its first and only shell call.
+The sentinel must be created without a denial or retry. It is also paid and opt-in:
+`python -m pytest tests/test_claude_hooks_live.py -m "claude_live and paid" -s`.
+`CLAUDE_LIVE_HOOK_MODEL`, `CLAUDE_LIVE_HOOK_EFFORT`, and
+`CLAUDE_LIVE_HOOK_BUDGET_USD` override its low-cost defaults.
+
 For a local diagnostic, run `codex doctor --summary` first; it checks installation,
 configuration, authentication, and connectivity, but not whether a hook changed
 behavior. Then use the two durable behavior checks:

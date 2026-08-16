@@ -1512,3 +1512,19 @@ def test_claude_settings_only_wires_hooks_that_are_actually_vendored(tmp_path):
         assert referenced in manifest_text, (
             f"{referenced} is wired as a hook but is not in sync-devkit.py's MANIFEST"
         )
+
+
+def test_generated_claude_settings_keep_the_bash_cap_hook(tmp_path):
+    """Codex drops this one handler; generation must not weaken Claude with it."""
+    root = generate(tmp_path, {})
+    settings = json.loads((root / ".claude/settings.json").read_text(encoding="utf-8"))
+    groups = settings["hooks"]["PreToolUse"]
+
+    bash_handlers = [
+        handler["command"]
+        for group in groups
+        if group.get("matcher") == "^Bash$"
+        for handler in group["hooks"]
+    ]
+
+    assert any("scripts/hooks/enforce-capped-bash.py" in command for command in bash_handlers)
