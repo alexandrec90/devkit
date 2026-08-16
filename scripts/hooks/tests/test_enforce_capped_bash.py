@@ -88,6 +88,67 @@ def test_blank_command_blocks():
     assert "missing command text" in msg
 
 
+# --- Codex's Windows PowerShell port ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Get-Content README.md | Select-Object -First 200",
+        "Get-Content logs/test.log | Select-Object -Last 80",
+        "Get-Content README.md -TotalCount 200",
+        "Get-Content logs/test.log -Tail 80",
+        "New-Item -ItemType Directory -Force .codex/tmp | Out-Null",
+        "Start-Sleep -Seconds 2",
+        "Test-Path scripts/hooks/invoke-capped.py",
+        "Get-Item README.md",
+        "(Get-Item -LiteralPath README.md).Length",
+        (
+            "$p='README.md'; $s=[IO.File]::ReadAllText($p); "
+            "if($s.Length -gt 12000){$s.Substring(0,12000)}else{$s}"
+        ),
+    ],
+)
+def test_powershell_native_bounds_allow(command):
+    assert hook.decide(payload("Bash", command), command_shell="powershell") == (0, "")
+
+
+def test_powershell_wrapper_allows():
+    command = (
+        "python3 scripts/hooks/invoke-capped.py --shell powershell "
+        "--command 'Get-ChildItem -Recurse'"
+    )
+    assert hook.decide(payload("Bash", command), command_shell="powershell") == (0, "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Get-Content -Raw README.md",
+        "Get-ChildItem -Recurse",
+        "Get-Item *.md",
+        "git status --short",
+        "rg TODO .",
+    ],
+)
+def test_uncapped_powershell_blocks(command):
+    code, message = hook.decide(payload("Bash", command), command_shell="powershell")
+    assert code == hook.EXIT_BLOCK
+    assert "Blocked uncapped PowerShell command" in message
+    assert "--shell powershell" in message
+
+
+def test_one_powershell_cap_does_not_launder_a_second_statement():
+    command = "Get-Content README.md | Select-Object -First 20; Get-ChildItem -Recurse"
+    code, _ = hook.decide(payload("Bash", command), command_shell="powershell")
+    assert code == hook.EXIT_BLOCK
+
+
+def test_powershell_syntax_does_not_weaken_the_bash_policy():
+    code, _ = hook.decide(payload("Bash", "cat README.md | Select-Object -First 20"))
+    assert code == hook.EXIT_BLOCK
+
+
 # --- alternate payload shapes ---
 
 

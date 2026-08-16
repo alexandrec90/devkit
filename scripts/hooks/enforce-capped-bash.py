@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""PreToolUse hook: blocks Bash tool calls that lack an output byte-cap wrapper.
+"""PreToolUse hook: blocks shell calls that lack an output byte-cap wrapper.
 
 An agent's context is the scarce resource, and one `ls -R` or unfiltered test run
 can spend a large slice of it on output nobody reads. This hook makes the cap
 mandatory rather than remembered: an uncapped Bash call is blocked with exit 2 and
 the reason is fed back into the turn, so the agent re-issues it wrapped.
+
+Claude's source configuration is Bash-native. The Codex hook generator adds
+``--shell powershell`` to its Windows override, which keeps this one policy while
+judging the syntax of the shell that will actually execute the command.
 
 Two forms pass, and **they do not run in the same shell** -- the block message says
 so, because that difference is the most common way the wrapper surprises a caller:
@@ -86,6 +90,7 @@ Decision logic is exposed as pure functions (`decide`, `is_capped`, `statements`
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
@@ -131,6 +136,35 @@ WRAPPER_RE = re.compile(r"scripts/hooks/invoke-capped\.py")
 # -- and so is `tail -f`, which does not terminate. Both fall out of requiring a leading
 # `-` on the count rather than accepting any digits.
 CAP_RE = re.compile(r"^(?:head|tail)\s+(?:-c\s*\d+|-n\s*\d+|-\d+)(?=\s|$)")
+
+# Codex uses PowerShell on Windows. These are the native equivalents of the Bash
+# caps and bounded commands above. They stay separate rather than being mixed into
+# the Bash grammar: a token such as `Select-Object` has no output-bound meaning in
+# Bash, while `head -c` is not a PowerShell-native pipeline stage.
+POWERSHELL_SELECT_CAP_RE = re.compile(
+    r"^Select-Object\s+-(?:First|Last)\s+\d+(?=\s|$)", re.IGNORECASE
+)
+POWERSHELL_OUT_NULL_RE = re.compile(r"^Out-Null(?:\s|$)", re.IGNORECASE)
+POWERSHELL_ASSIGNMENT_RE = re.compile(r"^\$[A-Za-z_][\w:]*\s*=")
+POWERSHELL_SILENT_RE = re.compile(
+    r"^(?:Start-Sleep|Remove-Item|Copy-Item|Move-Item|Set-Content|Add-Content|"
+    r"Clear-Content|New-ItemProperty|Set-ItemProperty|Remove-ItemProperty)(?:\s|$)",
+    re.IGNORECASE,
+)
+POWERSHELL_FIXED_RE = re.compile(r"^(?:Test-Path)(?:\s|$)", re.IGNORECASE)
+POWERSHELL_CONTENT_CAP_RE = re.compile(
+    r"^Get-Content\b.*\s-(?:TotalCount|Tail)\s+\d+(?=\s|$)", re.IGNORECASE
+)
+POWERSHELL_GET_ITEM_RE = re.compile(r"^Get-Item(?:\s|$)", re.IGNORECASE)
+POWERSHELL_GET_ITEM_PROPERTY_RE = re.compile(
+    r"^\(\s*Get-Item\b.*\)\.[A-Za-z_]\w*\s*$", re.IGNORECASE
+)
+POWERSHELL_LENGTH_GUARD_RE = re.compile(
+    r"^if\s*\(\s*(?P<value>\$[A-Za-z_]\w*)\.Length\s+-gt\s+(?P<count>\d+)\s*\)"
+    r"\s*\{\s*(?P=value)\.Substring\(\s*0\s*,\s*(?P=count)\s*\)\s*\}"
+    r"\s*else\s*\{\s*(?P=value)\s*\}\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 
 # Redirection of stdout to a file, which bounds a statement by sending its output
 # somewhere that is not the agent's context at all -- the strongest bound there is.
@@ -378,8 +412,21 @@ _BOUNDED_PATTERNS = (
 BOUNDED_COMMANDS = (SILENT_ON_SUCCESS, NO_STDOUT_RE, *(re.compile(p) for p in _BOUNDED_PATTERNS))
 
 
-def block_message(max_bytes: int) -> str:
+def block_message(max_bytes: int, command_shell: str = "bash") -> str:
     """The reason string fed back to the agent, quoting the configured cap."""
+    if command_shell == "powershell":
+        return (
+            "Blocked uncapped PowerShell command. Route output through the "
+            f"PowerShell-native byte-cap wrapper (default {max_bytes} bytes).\n"
+            "Suggested pattern: python3 scripts/hooks/invoke-capped.py --shell "
+            f"powershell --command '<your command>' --max-bytes {max_bytes}\n"
+            f"--max-bytes must be >= {harness_config.MIN_MAX_BYTES}.\n"
+            "Native caps such as `Select-Object -First N`, `Select-Object -Last N`, "
+            "`Get-Content -TotalCount N`, `Get-Content -Tail N`, `Out-Null`, and "
+            "stdout redirection are accepted. Every semicolon-separated statement "
+            "must be bounded. Raw Get-Content/Get-ChildItem/git status output still "
+            "scales with the file or tree and requires a cap."
+        )
     return (
         f"Blocked uncapped Bash command. Route output through a byte-cap wrapper "
         f"(default {max_bytes} bytes).\n"
@@ -609,6 +656,38 @@ def has_cap(statement: str) -> bool:
     return any(CAP_RE.match(segment) for segment in split_top_level(statement, ("|",)))
 
 
+def has_powershell_cap(statement: str) -> bool:
+    """Whether a PowerShell pipeline contains a native global output bound."""
+    if WRAPPER_RE.search(statement):
+        return True
+    segments = split_top_level(statement, ("|",))
+    return any(
+        POWERSHELL_SELECT_CAP_RE.match(segment.strip())
+        or POWERSHELL_OUT_NULL_RE.match(segment.strip())
+        for segment in segments
+    )
+
+
+def is_powershell_bounded(statement: str) -> bool:
+    """True for PowerShell statements whose terminal output is constant-size."""
+    statement = statement.strip()
+    if POWERSHELL_ASSIGNMENT_RE.match(statement):
+        # PowerShell assignment captures the RHS; it does not emit it to the pipeline.
+        return True
+    if POWERSHELL_SILENT_RE.match(statement) or POWERSHELL_FIXED_RE.match(statement):
+        return True
+    if POWERSHELL_CONTENT_CAP_RE.match(statement):
+        return True
+    if POWERSHELL_LENGTH_GUARD_RE.match(statement):
+        return True
+    if (
+        POWERSHELL_GET_ITEM_RE.match(statement) or POWERSHELL_GET_ITEM_PROPERTY_RE.match(statement)
+    ) and not re.search(r"[*?\[]", statement):
+        # One result per authored literal path. Wildcards remain unbounded.
+        return True
+    return is_bounded(statement)
+
+
 def get_value(obj, *paths):
     """Return the first present dotted-path value (as str) from a nested dict."""
     for path in paths:
@@ -624,7 +703,7 @@ def get_value(obj, *paths):
     return None
 
 
-def is_capped(command: str) -> bool:
+def is_capped(command: str, command_shell: str = "bash") -> bool:
     """True when EVERY statement in the command is capped or bounded.
 
     The `all` (rather than the `any` this once was) is the whole fix: a command is
@@ -634,10 +713,16 @@ def is_capped(command: str) -> bool:
     parts = statements(command)
     if not parts:
         return False
+    if command_shell == "powershell":
+        return all(is_powershell_bounded(part) or has_powershell_cap(part) for part in parts)
     return all(is_bounded(part) or has_cap(part) for part in parts)
 
 
-def decide(raw: str, max_bytes: int | None = None) -> tuple[int, str]:
+def decide(
+    raw: str,
+    max_bytes: int | None = None,
+    command_shell: str = "bash",
+) -> tuple[int, str]:
     """Pure decision: map raw stdin payload to (exit_code, message).
 
     exit_code 0 allows the call, EXIT_BLOCK blocks it. message may be empty.
@@ -667,14 +752,17 @@ def decide(raw: str, max_bytes: int | None = None) -> tuple[int, str]:
             "enforce-capped-bash: Bash tool call is missing command text; blocking by policy.",
         )
 
-    if is_capped(command):
+    if is_capped(command, command_shell=command_shell):
         return 0, ""
 
-    return EXIT_BLOCK, block_message(cap)
+    return EXIT_BLOCK, block_message(cap, command_shell=command_shell)
 
 
-def main() -> int:
-    exit_code, message = decide(sys.stdin.read())
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--shell", choices=("bash", "powershell"), default="bash")
+    args = parser.parse_args(argv)
+    exit_code, message = decide(sys.stdin.read(), command_shell=args.shell)
     if message:
         # stderr, not stdout: only stderr is surfaced for a blocking hook.
         print(message, file=sys.stderr)

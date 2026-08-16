@@ -204,6 +204,84 @@ class TestToCodexHooks:
         assert entry["command"].endswith('/posix.py"')
         assert entry["commandWindows"].endswith('-- python "__CODEX_PROJECT_ROOT__/windows.py"')
 
+    def test_ports_the_bash_cap_policy_to_powershell_on_windows(self):
+        claude = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": (
+                                    'python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/'
+                                    'enforce-capped-bash.py"'
+                                ),
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+        entry = hook.to_codex_hooks(claude)["hooks"]["PreToolUse"][0]["hooks"][0]
+
+        assert "--shell powershell" not in entry["command"]
+        assert entry["commandWindows"].endswith(
+            '-- python3 "__CODEX_PROJECT_ROOT__/scripts/hooks/enforce-capped-bash.py" '
+            "--shell powershell"
+        )
+
+    def test_explicit_windows_cap_command_remains_authoritative(self):
+        claude = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "python3 scripts/hooks/enforce-capped-bash.py",
+                                "commandWindows": "python custom-cap.py",
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+        entry = hook.to_codex_hooks(claude)["hooks"]["PreToolUse"][0]["hooks"][0]
+
+        assert entry["commandWindows"].endswith("-- python custom-cap.py")
+        assert "--shell powershell" not in entry["commandWindows"]
+
+    def test_raises_too_short_codex_session_start_timeout(self):
+        claude = {
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "python status.py",
+                                "timeout": 20,
+                            },
+                            {
+                                "type": "command",
+                                "command": "python slow-status.py",
+                                "timeout": 90,
+                            },
+                        ]
+                    }
+                ]
+            }
+        }
+
+        entries = hook.to_codex_hooks(claude)["hooks"]["SessionStart"][0]["hooks"]
+
+        assert entries[0]["timeout"] == hook.MIN_CODEX_SESSION_START_TIMEOUT
+        assert entries[1]["timeout"] == 90
+
     def test_preserves_hook_entry_fields(self):
         claude = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "run"}]}]}}
         entry = hook.to_codex_hooks(claude)["hooks"]["Stop"][0]["hooks"][0]

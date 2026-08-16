@@ -14,7 +14,8 @@ instead of non-zero exit codes for blocking. This generator therefore:
 
 - drops explicitly classified unsupported events and matchers,
 - resolves shared scripts from the git root so subdirectory sessions work, and
-- wraps command hooks with the Codex compatibility adapter.
+- wraps command hooks with the Codex compatibility adapter, and
+- ports shell-specific handlers to the shell Codex actually uses on Windows.
 
 Invoked by scripts/sync-codex-context.py after the repository skill mirror.
 
@@ -40,6 +41,9 @@ CODEX_LAUNCHER = f'python3 -c "{CODEX_LAUNCHER_CODE}"'
 CODEX_ADAPTER = CODEX_LAUNCHER
 CLAUDE_SESSION_START = ".claude/hooks/session-start.sh"
 CODEX_SESSION_START = f'python3 "{CODEX_ROOT_EXPR}/scripts/hooks/codex-session-start.py"'
+CLAUDE_BASH_CAP = "scripts/hooks/enforce-capped-bash.py"
+CODEX_POWERSHELL_ARG = " --shell powershell"
+MIN_CODEX_SESSION_START_TIMEOUT = 60
 SUPPORTED_EVENTS = frozenset(
     {
         "SessionStart",
@@ -111,11 +115,28 @@ def port_handler(event: str, handler: dict, root: str = "") -> dict:
         return dict(handler)
 
     result = {**handler, "command": wrap_command(event, command, root)}
+    if event == "SessionStart" and isinstance(result.get("timeout"), (int, float)):
+        # Codex adds its own compatibility process around imported hooks, and the
+        # workstation status hook legitimately surveys several repositories plus
+        # Task Scheduler. Preserve larger authored budgets, but never port the old
+        # 20-second budget that is shorter than the work it encloses.
+        result["timeout"] = max(result["timeout"], MIN_CODEX_SESSION_START_TIMEOUT)
     # A hand-authored Windows command is the better source when one exists. Only add
     # an override for handlers routed through the compatibility adapter; copying a
     # shell builtin such as `echo` would claim it was portable without making it so.
+    has_explicit_windows_command = "commandWindows" in handler
     windows_source = handler.get("commandWindows", command)
     if isinstance(windows_source, str):
+        # Claude's shell tool is Bash even on this workstation; Codex's Windows
+        # shell tool is PowerShell. The output-cap policy is shared, but its parser
+        # and remediation command must follow the target shell. Keep explicit
+        # commandWindows values authoritative.
+        if (
+            not has_explicit_windows_command
+            and event == "PreToolUse"
+            and CLAUDE_BASH_CAP in windows_source
+        ):
+            windows_source += CODEX_POWERSHELL_ARG
         windows_rewritten = rewrite_command(windows_source, root, windows=True)
         if (
             event == "SessionStart" and CLAUDE_SESSION_START in windows_rewritten

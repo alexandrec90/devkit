@@ -532,6 +532,12 @@ second instruction tree that can drift.
 block when a repository has opted into `.codex/`. Both scripts are in the `MANIFEST`,
 and `new-project.py` runs the compatibility sync at creation.
 
+The conversion is semantic, not a byte-for-byte copy. Claude keeps its Bash-native
+hook commands. Generated Codex hooks carry `commandWindows` overrides, and known
+shell-sensitive handlers are ported there: the capped-output policy runs in PowerShell
+mode, while a too-short authored SessionStart timeout is raised to 60 seconds. Explicit
+`commandWindows` values remain authoritative.
+
 The generated commands run through `scripts/hooks/codex-hook-adapter.py`; Codex's
 cross-platform SessionStart path uses `scripts/hooks/codex-session-start.py`. Both
 runtime files and their unit tests are vendored with the converter. The generic repo
@@ -573,7 +579,7 @@ Instruction discovery has a free, model-less check. `codex debug prompt-input
 rule bridge and the repository's `CLAUDE.md` heading. This catches a missing fallback
 setting without spending a model call.
 
-### The Bash output cap
+### The shell output cap
 
 `enforce-capped-bash.py` (PreToolUse) blocks a Bash call whose output is not
 byte-capped; `invoke-capped.py` is the wrapper it demands. Both are vendored, and they
@@ -581,13 +587,18 @@ ship together — the gate's allow-list matches the wrapper's path, so vendoring
 without the other yields a hook that blocks every Bash call and names a remedy the repo
 does not have.
 
+On Windows, Codex presents its shell call under the compatible `Bash` hook matcher but
+executes the command with PowerShell. The generator therefore adds `--shell powershell`
+only to the Windows handler. That mode understands PowerShell's native bounds
+(`Select-Object -First/-Last`, `Get-Content -TotalCount/-Tail`, and `Out-Null`) and tells
+the wrapper to invoke `pwsh` rather than silently switching the command to `cmd.exe`.
+
 Cap size is `[bash] max_bytes` / `head_bytes` in `.devkit.toml`, read by both, so the
-number the agent is told to use is the number it actually gets. Two forms pass the gate
-and **they do not run in the same shell**: the wrapper uses the platform shell
-(`cmd.exe` on Windows — heredocs and single-quoted paths do not survive it) and
-preserves the exit code, while `| head -c N` keeps POSIX syntax but masks the exit code
-behind `head`'s. The block message says both, because that difference is the most
-common way the wrapper surprises a caller.
+number the agent is told to use is the number it actually gets. Claude's default wrapper
+uses the platform shell and preserves the exit code, while `| head -c N` keeps POSIX
+syntax but masks the exit code behind `head`'s. Codex's generated Windows hook instead
+recommends `invoke-capped.py --shell powershell`, which preserves both PowerShell syntax
+and the child exit code.
 
 ## Scope note
 
