@@ -38,6 +38,7 @@ package = false
 testpaths = ["tests"]
 addopts = '-q -m "not paid"'
 markers = [
+  "claude_live: paid opt-in smoke tests that launch an authenticated Claude Code CLI session",
   "codex_live: paid opt-in smoke tests that launch an authenticated Codex CLI session",
   "paid: tests that may consume paid live infrastructure and are excluded by default",
 ]
