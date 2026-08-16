@@ -134,3 +134,14 @@ def test_the_prune_writes_the_file_its_installer_advertises():
     log_wrap = load_script("scripts/log-wrap.py")
     assert installer.ARTIFACT == f"logs/{log_wrap.slug(installer.LABEL)}.log"
     assert "--always" in installer.prune_arguments(r"C:\py\pythonw.exe", root=Path(r"C:\ws"))
+
+
+def test_the_vanillaland_merge_writes_the_file_its_installer_advertises():
+    """Same shape as the prune: `git-merge-default.py` has several callers -- a VS Code
+    task among them -- and writes no artifact of its own, so the claim here is about the
+    label the wrapper is given. The label differs from the clicked task's on purpose, so
+    a click cannot overwrite the unattended run's only record."""
+    installer = load_script("scripts/install-vanillaland-merge.py")
+    log_wrap = load_script("scripts/log-wrap.py")
+    assert installer.ARTIFACT == f"logs/{log_wrap.slug(installer.LABEL)}.log"
+    assert "--always" in installer.merge_arguments(r"C:\py\pythonw.exe", root=Path(r"C:\ws"))

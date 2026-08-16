@@ -341,14 +341,15 @@ finished rather than leaving you to notice the drift it causes.
 
 ### Every scheduled job, and where each one reports
 
-Three jobs, one installer apiece, and the same contract on all of them: registered from
-XML so a laptop actually runs them, and leaving a file to read when one fails.
+One installer apiece, and the same contract on all of them: registered from XML so a
+laptop actually runs them, and leaving a file to read when one fails.
 
 | Job | Installer | Cadence | Its record |
 | --- | --- | --- | --- |
 | `devkit-worktree-reconcile` | `scripts/install-reconcile-task.py` | every 15 min | `logs/reconcile.log` |
 | `devkit-upgrade-projects` | `scripts/install-upgrade-schedule.py` | daily 03:00 | `logs/upgrade.log` |
 | `devkit-docker-prune` | `scripts/install-docker-prune.py` | daily 04:00 | `logs/scheduled-docker-prune.log` |
+| `devkit-vanillaland-merge` | `scripts/install-vanillaland-merge.py` | daily 05:00 | `logs/scheduled-vanillaland-merge-develop.log` |
 
 `scripts/schedule_health.py` answers the question no artifact can — *did it run at all*
 — and names the file above when one exits non-zero, so the session-start line is a
@@ -358,6 +359,13 @@ a job registered by hand, or one that leaves nothing behind, fails the suite.
 The prune runs `--idle-only`, so it declines whenever containers are up; reclaiming the
 VHDX needs `wsl --shutdown`, and stopping a running stack at 04:00 for disk is not a
 trade to make unattended.
+
+The VanillaLand merge is the odd one out and the only job that touches a working tree a
+human is going to open: it runs `git-merge-default.py` against the reference checkout, so
+`develop` arrives daily instead of as one unreviewable merge weeks later. It commits
+locally and never pushes. A conflict is left **in progress** with every unmerged file
+named in the log, and uncommitted work it had to set aside stays in a named stash — the
+installer's docstring is the place that explains why, and the log repeats the recovery.
 
 ## Authoring changes
 

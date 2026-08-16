@@ -99,6 +99,7 @@ ARTIFACTS: dict[str, str] = {
     "devkit-worktree-reconcile": "logs/reconcile.log",
     "devkit-upgrade-projects": "logs/upgrade.log",
     "devkit-docker-prune": "logs/scheduled-docker-prune.log",
+    "devkit-vanillaland-merge": "logs/scheduled-vanillaland-merge-develop.log",
 }
 
 
