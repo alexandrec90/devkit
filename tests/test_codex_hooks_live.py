@@ -17,6 +17,9 @@ pytestmark = [
     pytest.mark.paid,
 ]
 
+LIVE_MODEL = os.environ.get("CODEX_LIVE_HOOK_MODEL", "gpt-5.6-luna")
+LIVE_REASONING_EFFORT = os.environ.get("CODEX_LIVE_HOOK_REASONING_EFFORT", "low")
+
 
 def test_project_hooks_are_discovered_and_block_a_real_tool_call(tmp_path):
     """Exercise repo discovery, generation, adapter execution, and denial together."""
@@ -140,6 +143,14 @@ def test_project_hooks_are_discovered_and_block_a_real_tool_call(tmp_path):
         [
             codex,
             "exec",
+            "--model",
+            LIVE_MODEL,
+            "--config",
+            f'model_reasoning_effort="{LIVE_REASONING_EFFORT}"',
+            "--config",
+            'model_reasoning_summary="none"',
+            "--config",
+            'model_verbosity="low"',
             "--dangerously-bypass-hook-trust",
             "--enable",
             "hooks",
