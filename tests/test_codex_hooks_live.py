@@ -1,9 +1,11 @@
 """Opt-in black-box smoke test for generated hooks in the real Codex CLI."""
 
 import json
+import os
 import shutil
 import subprocess
 import textwrap
+from pathlib import Path
 
 import pytest
 from support import REPO_ROOT, load_script
@@ -111,6 +113,28 @@ def test_project_hooks_are_discovered_and_block_a_real_tool_call(tmp_path):
         encoding="utf-8",
         newline="",
     )
+    for groups in generated["hooks"].values():
+        for group in groups:
+            for command_hook in group["hooks"]:
+                assert "commandWindows" in command_hook
+
+    # `--ignore-user-config` does not isolate ~/.codex/hooks.json. Without a clean
+    # CODEX_HOME, a workstation guard can block the sentinel and make this project
+    # hook test look green even though its recorder never ran. Carry authentication
+    # only; project config and hooks still come from tmp_path.
+    source_codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    isolated_codex_home = tmp_path / ".codex-home"
+    isolated_codex_home.mkdir()
+    project_key = str(tmp_path).lower()
+    (isolated_codex_home / "config.toml").write_text(
+        f"[projects.'{project_key}']\ntrust_level = \"trusted\"\n",
+        encoding="utf-8",
+        newline="",
+    )
+    auth_file = source_codex_home / "auth.json"
+    if auth_file.is_file():
+        shutil.copyfile(auth_file, isolated_codex_home / "auth.json")
+    clean_env = {**os.environ, "CODEX_HOME": str(isolated_codex_home)}
 
     result = subprocess.run(
         [
@@ -120,7 +144,6 @@ def test_project_hooks_are_discovered_and_block_a_real_tool_call(tmp_path):
             "--enable",
             "hooks",
             "--ephemeral",
-            "--ignore-user-config",
             "--ignore-rules",
             "--sandbox",
             "workspace-write",
@@ -137,6 +160,7 @@ def test_project_hooks_are_discovered_and_block_a_real_tool_call(tmp_path):
         capture_output=True,
         encoding="utf-8",
         errors="replace",
+        env=clean_env,
         timeout=240,
         check=False,
     )

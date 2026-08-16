@@ -504,9 +504,20 @@ retirement list exists only to migrate consumers created before receipts were in
 
 ### Codex skills and hooks are generated, never hand-edited
 
-Codex reads `CLAUDE.md` directly through the configured project-document fallback, so
-project instructions need no duplicate. Repository skills still live at
-`.agents/skills/`, while Codex hooks live at `.codex/hooks.json`.
+Codex reads `CLAUDE.md` through its project-document fallback, so project instructions
+need no duplicate. Configure that once in `~/.codex/config.toml` (or in a trusted
+project's `.codex/config.toml`):
+
+```toml
+project_doc_fallback_filenames = ["CLAUDE.md"]
+```
+
+Repository skills still live at `.agents/skills/`, while Codex hooks live at
+`.codex/hooks.json`. Because Codex does not discover `.claude/rules/`, the global
+`~/.codex/AGENTS.md` carries one generic bridge: inspect rule frontmatter and read the
+unscoped rules plus rules whose `paths` match the files being edited. The repository's
+`CLAUDE.md` remains the rule index; copying rule bodies into `AGENTS.md` would create a
+second instruction tree that can drift.
 
 `sync-codex-context.py` mirrors only `.claude/skills/` to `.agents/skills/` and invokes
 `sync-codex-hooks.py` to regenerate `.codex/hooks.json` from the `settings.json` hooks
@@ -528,6 +539,27 @@ isolated repository with project-local `.codex/hooks.json`, launches the real Co
 and proves discovery plus a real `PreToolUse` denial by asserting a sentinel file was
 not created. Normal test runs exclude the `paid` marker; opt in deliberately with
 `python -m pytest tests/test_codex_hooks_live.py -m "codex_live and paid" -s`.
+
+For a local diagnostic, run `codex doctor --summary` first; it checks installation,
+configuration, authentication, and connectivity, but not whether a hook changed
+behavior. Then use the two durable behavior checks:
+
+```bash
+python -m pytest scripts/hooks/tests/test_sync_codex_hooks.py \
+  scripts/hooks/tests/test_codex_hook_adapter.py -q
+python -m pytest tests/test_codex_hooks_live.py -m "codex_live and paid" -s
+```
+
+The live test uses a temporary `CODEX_HOME` with authentication but no user hooks, and
+trusts only its temporary project. That isolation is load-bearing: a workstation hook
+can otherwise block the sentinel and make the project hook look healthy when it never
+ran. The test uses `--dangerously-bypass-hook-trust` only inside that vetted temporary
+repository; normal sessions review changed hook hashes with `/hooks`.
+
+Instruction discovery has a free, model-less check. `codex debug prompt-input
+"instruction probe"` prints the exact model-visible input; search it for the global
+rule bridge and the repository's `CLAUDE.md` heading. This catches a missing fallback
+setting without spending a model call.
 
 ### The Bash output cap
 

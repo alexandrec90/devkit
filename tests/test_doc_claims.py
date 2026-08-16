@@ -213,7 +213,11 @@ ALLOWED_MISSING = {
     "tier exists to avoid",
     "dependabot-lock-repair.yml": "carameli's, cited among the workflows deliberately "
     "not normalized",
+    ".codex/config.toml": "an optional trusted-project location for the fallback; "
+    "devkit configures it at user scope instead",
     ".codex/hooks.json": "written only for a repo that opts into Codex; devkit has not",
+    "AGENTS.md": "the README explicitly rejects a repository copy; the generic Claude-rule "
+    "bridge lives in the user's ~/.codex/AGENTS.md",
     "DEVKIT_FILES.json": "the receipt `--pull` writes in a *consumer*; devkit is the "
     "source, so it has none",
     "known-fixes.md": "a consumer's project-owned sibling that retirement must not delete",
