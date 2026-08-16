@@ -49,6 +49,17 @@ does not resolve any of them:
     `cmd.exe` on Windows, where bash loop syntax is a parse error. Control keywords are
     now bounded on their own, and a keyword that introduces a command is peeled off so
     the command behind it is judged instead (`do ls -R /` is still blocked, on the `ls`).
+
+    That fix was written against one spelling of a loop and left four neighbours of it
+    blocked, each with the same non-remedy on offer. A `!` between the keyword and the
+    condition (`until ! [ -f x ]`, `while ! test -f x`) inverts an exit code and prints
+    nothing, so it peels like any other keyword. A redirection *after* `done` binds the
+    loop's stdin or stderr rather than emitting anything, so `done < /dev/null` and
+    `done 2>/dev/null` are bounded exactly as bare `done` is. A trailing `# comment` is
+    not a command at all, and `split_top_level` now drops one -- to end of line, and
+    only where a shell would, which is also why the `;` in `pwd # a; ls -R /` stays
+    inside the comment instead of starting a statement. And a `case` arm arrives as
+    `case $x in a) pwd`: a header and a pattern in front of a command, and both peel.
   - *Heredoc bodies.* Splitting on newlines turned every line of a `git commit -F -
     <<'EOF'` message into its own "statement", so the prose was evaluated as commands.
     `split_top_level` now consumes the body between the operator and its terminator.
@@ -195,14 +206,42 @@ _GIT_GLOBAL_OPTS = r"""(?:\s+(?:-[cC]\s+(?:"[^"]*"|'[^']*'|\S+)|--\S+))*"""
 # into `until <test>` / `do sleep 2` / `done`, and once the control keywords became
 # bounded the `sleep` was the last fragment in the line still able to block it.
 #
+# `set`, `shopt`, `trap`, `kill` and `read` were the fragments still able to block it
+# after that. They are shell *bookkeeping* -- they change an option, arm a handler,
+# signal a pid, consume a line of stdin -- and none of them has an output path when it
+# succeeds. `set -euo pipefail` heads a poll loop about as often as the loop keyword
+# does, and it was blocked by itself. Each still requires an argument, which is not
+# incidental: bare `set` dumps every shell variable and function, so the `\s` is the
+# only thing between that spelling and an exemption it must never have.
+#
 # The three git subcommands beside `add` move a checkout around and answer with a fixed
 # confirmation -- "Switched to branch 'x'", or nothing. Bounded by a small constant, not
 # by the tree, which is the membership test.
 SILENT_ON_SUCCESS = re.compile(
-    r"(?:cd|export|unset|mkdir|rmdir|touch|rm|cp|mv|ln|chmod|sleep|git"
-    + _GIT_GLOBAL_OPTS
-    + r"\s+(?:add|checkout|switch|restore))\s"
+    r"(?:cd|export|unset|mkdir|rmdir|touch|rm|cp|mv|ln|chmod|sleep"
+    r"|set|shopt|trap|kill|read|git" + _GIT_GLOBAL_OPTS + r"\s+(?:add|checkout|switch|restore))\s"
 )
+
+# The same commands in their argument-less spellings, which are legal shell and equally
+# silent: `cd` goes home, `wait` blocks on the background jobs, `read` consumes a line,
+# `:` does nothing at all. Kept apart from `SILENT_ON_SUCCESS` rather than relaxing its
+# trailing `\s`, because for `set` and `trap` the bare form is the one that *prints* --
+# a lone `set` is `env` for shell variables, and relaxing the two families together
+# would have exempted it.
+BARE_NO_OUTPUT_RE = re.compile(r"(?::|cd|wait|read)\s*$")
+
+# `grep -q` is the other half of a readiness poll -- `until grep -q ready logs/x.log` is
+# the shape, and it is the natural spelling once the thing being waited for is a line in
+# a file rather than the file itself. `-q` means *print nothing and answer in the exit
+# code*, so it is bounded for the same reason `test` is, and by a stronger constant than
+# anything else in this file: zero bytes. Without it the loop keyword being exempt bought
+# nothing, since the condition it introduces was still blocked.
+#
+# The flag is looked for outside quoted spans, so a `-q` inside the pattern is not read
+# as one, and a pipeline counts as quiet when its *last* stage is: everything upstream
+# of `| grep -q x` can only reach `grep`, exactly as for a `head -c` cap.
+GREP_RE = re.compile(r"(?:e|f|r)?grep(?:\s|$)")
+QUIET_FLAG_RE = re.compile(r"(?:^|\s)(?:-[A-Za-z]*q[A-Za-z]*|--quiet|--silent)(?=\s|$)")
 
 # `git log` is bounded exactly when it is told how many commits to print, which is how
 # it is almost always spelled here (`git log --oneline -5`). Bare `git log` scales with
@@ -266,9 +305,37 @@ HEREDOC_RE = re.compile(r"<<-?\s*(?P<quote>['\"]?)(?P<word>[A-Za-z_][\w.-]*)(?P=
 #   * CONTROL_HEADER -- a `for`/`case` header, whose word list is data. Bounded.
 #   * CONTROL_PREFIX -- a keyword introducing a command (`do ls -R /`). Peeled off, and
 #     the command behind it is judged on its own merits, so the `ls` still blocks.
-CONTROL_ONLY_RE = re.compile(r"(?:do|done|then|else|elif|fi|esac|;;|\{|\}|\(|\))\s*$")
+#
+# CONTROL_ONLY carries an optional tail of redirections, because a loop's redirections
+# attach to its `done`: `while read -r l; do echo $l; done < paths.txt` is how the
+# construct is spelled, and the fragment that reached here was `done < paths.txt`. A
+# `<` moves stdin and `2>` moves stderr, so neither is covered by `REDIRECT_RE` -- which
+# is right, since neither *bounds* anything, but they do not emit anything either and the
+# keyword they trail is already bounded.
+#
+# `!` is a CONTROL_PREFIX for the same reason `until` is: it inverts the exit status of
+# what follows and contributes no output of its own. `until ! [ -f x ]` and `if ! test
+# -f x` are ordinary spellings of a poll and a guard, and both were blocked on the `!`
+# alone -- the peel loop stopped at it, so the condition behind it was never judged.
+CONTROL_ONLY_RE = re.compile(
+    r"(?:do|done|then|else|elif|fi|esac|;;|\{|\}|\(|\))(?:\s+\d*[<>]{1,2}&?\s*\S+)*\s*$"
+)
 CONTROL_HEADER_RE = re.compile(r"(?:for\s+\w+(?:\s+in\b.*)?|case\s+.*\sin)\s*$")
-CONTROL_PREFIX_RE = re.compile(r"^(?:do|then|else|elif|if|while|until|\{)\s+")
+CONTROL_PREFIX_RE = re.compile(r"^(?:do|then|else|elif|if|while|until|\{|!)\s+")
+
+# A `case` arm reaches here as one fragment holding a header, a pattern and a command --
+# `case $x in a) pwd` -- because `;;` contains the `;` that `statements()` splits on.
+# Peeling both leaves `pwd` to be judged, which is the same trade CONTROL_PREFIX makes:
+# a pattern list emits nothing, and an arm whose body is `ls -R /` still blocks on the
+# `ls`. The pattern arm requires a `)` followed by whitespace and forbids `(` before it,
+# so a subshell (`(cd x && ls)`) and a substitution are not mistaken for one.
+#
+# Quote characters are excluded from the pattern for a sharper reason than tidiness: a
+# `)` inside a *message* would otherwise make an arm out of prose, and
+# `git commit -m "fix x) here"` would have been peeled down to `here"` and blocked --
+# the exact class of false positive `QUOTED_SPAN_RE` exists to prevent elsewhere.
+CASE_HEADER_RE = re.compile(r"^case\s+\S+\s+in\s+")
+CASE_ARM_RE = re.compile(r"""^[^()&|;'"]+(?:\|[^()&|;'"]+)*\)\s+""")
 
 # Commands whose output is bounded by a small constant no matter what arguments or
 # repository they are given. That is a much stronger claim than "usually short", and it
@@ -322,8 +389,9 @@ def block_message(max_bytes: int) -> str:
         "head *and* a tail window and preserves the exit code.\n"
         "Every statement needs its own cap: in `a; b | head -c N` only `b` is "
         "capped. Exempt, and needing no wrapper: constant-size output (pwd, git "
-        "rev-parse, --version), commands silent on success (mkdir, rm, cp, sleep), "
-        "condition tests, `git log` given a commit count, the commit pair whose "
+        "rev-parse, --version), commands silent on success (mkdir, rm, cp, sleep, "
+        "set, trap, kill), condition tests including a quiet `grep -q`, "
+        "`git log` given a commit count, the commit pair whose "
         "message cannot survive the wrapper (git add/commit, gh pr create), and "
         "shell control flow. ls/cat/git status are NOT exempt because their "
         "output grows with the tree -- use Read/Glob/Grep."
@@ -389,6 +457,15 @@ def split_top_level(text: str, separators: tuple[str, ...]) -> list[str]:
             buf.append(text[i + 1])
             i += 2
             continue
+        if ch == "#" and (i == 0 or text[i - 1].isspace()):
+            # A comment is not a command, and it runs to end of line -- so it also
+            # swallows any separator inside it, which is why it is dropped here rather
+            # than per-statement afterwards: in `pwd # a; ls -R /` the shell never sees
+            # a second statement. Only a `#` that starts a word is one; `logs/x#2` and
+            # `curl http://h/p#frag` are ordinary arguments and are left alone.
+            newline = text.find("\n", i)
+            i = len(text) if newline == -1 else newline
+            continue
         if text.startswith("<<<", i):
             # A here-string feeds one word and has no body to skip. Consumed whole so
             # the scan cannot re-enter at the second `<` and read `<<'word'` as a
@@ -436,15 +513,34 @@ def strip_control_prefix(statement: str) -> str:
     Loops reach this function already split on `;`, so the keyword and the command it
     introduces arrive in the same fragment. Judging the command behind the keyword is
     what keeps the guarantee intact: `do ls -R /` still blocks, on the `ls`.
+
+    The loop runs to a fixed point because the prefixes stack: `until ! [ -f x ]` is two
+    of them, and peeling only the first leaves a `!` in front of a condition test that
+    would then match nothing.
     """
-    while (peeled := CONTROL_PREFIX_RE.sub("", statement, count=1)) != statement:
+    while True:
+        peeled = CASE_ARM_RE.sub("", CASE_HEADER_RE.sub("", statement, count=1), count=1)
+        peeled = CONTROL_PREFIX_RE.sub("", peeled, count=1)
+        if peeled == statement:
+            return statement
         statement = peeled
-    return statement
 
 
 def strip_quoted(statement: str) -> str:
     """`statement` with quoted spans blanked out, so flags are read but prose is not."""
     return QUOTED_SPAN_RE.sub(" ", statement)
+
+
+def is_quiet_grep(statement: str) -> bool:
+    """True when the statement's output all ends in a `grep -q`, which prints nothing.
+
+    Judged on the *last* stage of the pipeline, because that is the only one whose
+    output can reach the terminal: in `docker ps | grep -q db-1` everything the first
+    stage prints is consumed by the second, exactly as a `head -c` cap consumes it.
+    """
+    segments = split_top_level(statement, ("|",))
+    last = segments[-1].strip() if segments else ""
+    return bool(GREP_RE.match(last)) and bool(QUIET_FLAG_RE.search(strip_quoted(last)))
 
 
 def is_bounded(statement: str) -> bool:
@@ -459,7 +555,9 @@ def is_bounded(statement: str) -> bool:
     and neither could be spelled any other way.
     """
     peeled = strip_control_prefix(statement.strip())
-    if NO_STDOUT_RE.match(peeled):
+    if NO_STDOUT_RE.match(peeled) or BARE_NO_OUTPUT_RE.match(peeled):
+        return True
+    if is_quiet_grep(peeled):
         return True
     # Quoted spans collapse to a word character rather than to a space, because a
     # redirect target is very often quoted (`--log > "/tmp/run.log"`) and blanking it

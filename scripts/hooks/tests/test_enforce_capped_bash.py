@@ -416,6 +416,153 @@ def test_control_flow_fragments_are_bounded(fragment):
     assert hook.is_bounded(fragment) is True
 
 
+# --- the four loop shapes the control-flow fix stopped one spelling short of ----
+#
+# Reported as "the gate blocked a bare `until [ -f … ]; do sleep 3; done`, which its own
+# block message lists as exempt". That exact spelling passed; each of these neighbours of
+# it did not, and every one is the same defect -- a fragment that emits nothing, blocked
+# with a remedy (wrap it) that cannot be applied to a loop at all.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # `!` is a control keyword like any other: it inverts an exit status and prints
+        # nothing. The peel loop stopped at it, so the condition behind it was never
+        # judged and the whole loop blocked on one character.
+        "until ! [ -f logs/run.log ]; do sleep 3; done",
+        "while ! test -f logs/run.log; do sleep 3; done",
+        "if ! [ -f .venv ]; then mkdir .venv; fi",
+        # A comment is not a command. It also runs to end of line, so it swallows the
+        # `;` inside it rather than yielding a second statement.
+        "until [ -f logs/run.log ]; do sleep 3; done  # wait for the runner",
+        "pwd  # where am I",
+        # A loop's redirections attach to its `done`. Neither `<` nor `2>` bounds
+        # anything -- they are not stdout -- but neither emits anything either.
+        "until [ -f logs/run.log ]; do sleep 3; done < /dev/null",
+        "until [ -f logs/run.log ]; do sleep 3; done 2>/dev/null",
+        "while read -r line; do echo $line; done < paths.txt",
+        # `;;` contains the `;` the splitter cuts on, so an arm arrives as a header and
+        # a pattern in front of its command.
+        "case $x in a) pwd ;; esac",
+        "case $mode in a|b) rm -f out ;; *) sleep 1 ;; esac",
+    ],
+)
+def test_the_loop_shapes_beside_the_one_that_was_fixed(command):
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+def test_a_comment_swallows_the_separator_inside_it():
+    """`pwd # a; ls -R /` is one statement to a shell, and must be one here.
+
+    Stripping comments per-statement instead would read the `ls -R /` as real, block a
+    command the shell will never run, and -- worse in the other direction -- let the
+    text after a `#` decide anything at all.
+    """
+    assert hook.statements("pwd # a; ls -R /") == ["pwd"]
+    assert hook.decide(payload("Bash", "pwd # a; ls -R /")) == (0, "")
+
+
+def test_a_hash_inside_a_word_is_not_a_comment():
+    """Only a `#` that starts a word opens one; the rest are ordinary argument text."""
+    assert hook.statements("cp logs/x#2.log out/") == ["cp logs/x#2.log out/"]
+    assert hook.is_bounded("cp logs/x#2.log out/") is True
+
+
+def test_a_command_that_is_only_a_comment_still_blocks():
+    """The one shape left blocked, deliberately: it parses to no statements at all, and
+    `is_capped` treats an empty parse as uncapped so a payload whose command vanishes is
+    never allowed on the strength of having vanished. A pure comment runs nothing, so
+    the block costs nothing real.
+    """
+    assert hook.statements("# just a note") == []
+    assert hook.decide(payload("Bash", "# just a note"))[0] == hook.EXIT_BLOCK
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Shell bookkeeping: changes an option, arms a handler, signals a pid, consumes
+        # a line. `set -euo pipefail` heads a poll loop as often as the keyword does.
+        "set -euo pipefail",
+        "set -e",
+        "shopt -s nullglob",
+        "trap 'rm -f /tmp/lock' EXIT",
+        "kill 4213",
+        "read -r line",
+        # Legal argument-less spellings, equally silent.
+        "cd",
+        "wait",
+        ":",
+    ],
+)
+def test_shell_bookkeeping_needs_no_wrapper(command):
+    assert hook.is_bounded(command) is True
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+def test_bare_set_is_still_blocked():
+    """The whole reason the bookkeeping family keeps its trailing `\\s`.
+
+    A lone `set` prints every shell variable and function -- output that scales with the
+    environment, which is the one thing this gate exists to stop. Relaxing the argument
+    requirement to admit bare `cd` would have admitted this too, which is why the
+    argument-less spellings are a separate, enumerated pattern.
+    """
+    assert hook.is_bounded("set") is False
+    assert hook.decide(payload("Bash", "set"))[0] == hook.EXIT_BLOCK
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The other half of a readiness poll: once the thing being waited for is a line
+        # in a file rather than the file itself, `[ -f x ]` becomes `grep -q`.
+        "until grep -q 'Listening on' logs/run.log; do sleep 3; done",
+        "grep -q TODO README.md",
+        "grep -rq secret .",
+        "grep --quiet TODO README.md",
+        # A quiet last stage consumes the pipeline exactly as a `head -c` cap does.
+        "docker ps --format '{{.Names}}' | grep -q db-1",
+        "until ! docker ps --format '{{.Names}}' | grep -q db-1; do sleep 2; done",
+    ],
+)
+def test_a_quiet_grep_is_bounded(command):
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # `-q` is a flag, not any `q`: a bare `q` is the pattern being searched for.
+        "grep -r q .",
+        "grep 'x -q y' big.log",
+        # Quiet, but not last: what follows it prints.
+        "cat big | grep -q x | cat",
+        # The loop keyword is peeled, and what it introduces is judged as always.
+        "until ! ls -R /; do sleep 3; done",
+        "case $x in a) ls -R / ;; esac",
+        "while read -r line; do cat $line; done < paths.txt",
+        # A comment cannot launder the statement in front of it.
+        "ls -R /  # just looking",
+    ],
+)
+def test_the_loop_relaxations_do_not_reach_what_the_gate_is_for(command):
+    assert hook.decide(payload("Bash", command))[0] == hook.EXIT_BLOCK
+
+
+def test_a_paren_in_a_commit_message_is_not_a_case_arm():
+    """The case-arm peel must not be triggerable by prose.
+
+    `[^()&|;'"]+\\)` would otherwise match through a message: `git commit -m "fix x)
+    here"` peels to `here"` and blocks the commit the gate explicitly exempts. Excluding
+    quote characters from the pattern is what stops it, and this is the regression.
+    """
+    command = 'git commit -m "fix x) here"'
+    assert hook.strip_control_prefix(command) == command
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
 def test_a_heredoc_body_is_not_read_as_statements():
     """A commit message is data. The newline split read every line of one as a command.
 
