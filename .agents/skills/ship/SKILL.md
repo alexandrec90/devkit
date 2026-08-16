@@ -6,15 +6,17 @@ argument-hint: 'Optional PR title'
 
 # Ship the current task
 
-> **Every Bash command below needs an output cap.** Their output scales with the repo,
-> so `scripts/hooks/enforce-capped-bash.py` blocks each one issued bare — and shipping
-> is where that used to cost the most, because the skill named all five steps in the
-> spelling the gate rejects and the block was rediscovered one step at a time. Issue
-> each as `python3 scripts/hooks/invoke-capped.py --command "<the command>"`, which
-> keeps a head *and* a tail window and preserves the exit code — the pytest and ruff
-> summaries live at the end. Pass no `--max-bytes`: it defaults to this project's
-> `[bash] max_bytes`, and a number written here would be one project's value baked
-> into a file every project vendors byte-for-byte.
+> **Claude Code needs an output cap on every Bash command below.** Their output scales
+> with the repo, so `scripts/hooks/enforce-capped-bash.py` blocks each one issued bare.
+> In Claude Code, issue each as `python3 scripts/hooks/invoke-capped.py --command
+> "<the command>"`, which keeps a head *and* a tail window and preserves the exit code.
+> Pass no `--max-bytes`: it defaults to this project's `[bash] max_bytes`, and a number
+> written here would be one project's value baked into a file every project vendors
+> byte-for-byte.
+>
+> **Codex runs the numbered commands directly.** Its shell runner already caps captured
+> output, and `scripts/sync-codex-hooks.py` omits the redundant gate. Adding the wrapper
+> in Codex only adds transcript noise and can change shell semantics.
 >
 > **The two that carry an authored message are the exception — issue `git commit` and
 > `gh pr create` bare.** The gate exempts them, and wrapping one destroys it: a

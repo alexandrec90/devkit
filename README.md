@@ -532,11 +532,11 @@ second instruction tree that can drift.
 block when a repository has opted into `.codex/`. Both scripts are in the `MANIFEST`,
 and `new-project.py` runs the compatibility sync at creation.
 
-The conversion is semantic, not a byte-for-byte copy. Claude keeps its Bash-native
-hook commands. Generated Codex hooks carry `commandWindows` overrides, and known
-shell-sensitive handlers are ported there: the capped-output policy runs in PowerShell
-mode, while a too-short authored SessionStart timeout is raised to 60 seconds. Explicit
-`commandWindows` values remain authoritative.
+The conversion is semantic, not a byte-for-byte copy. Generated Codex hooks carry
+`commandWindows` overrides, while a too-short authored SessionStart timeout is raised
+to 60 seconds. Explicit `commandWindows` values remain authoritative. Claude's Bash
+output-cap handler is deliberately omitted because Codex already bounds shell-tool
+output before returning it to the model.
 
 The generated commands run through `scripts/hooks/codex-hook-adapter.py`; Codex's
 cross-platform SessionStart path uses `scripts/hooks/codex-session-start.py`. Both
@@ -545,8 +545,8 @@ contract parses an opted-in `.codex/hooks.json` and fails when any git-root hand
 path is absent, so successful conversion cannot mask an incomplete pull.
 
 Carameli's `test_codex_hooks_contract.py` stays in carameli: it pins that repo's exact
-hook topology (`codex-session-start.py`, `enforce-capped-bash.py`), which is the coupling
-this whole tier exists to avoid.
+hook topology and every semantic drop, which is the coupling this whole tier exists to
+avoid.
 
 `tests/test_codex_hooks_live.py` is the paid, explicit release smoke. It creates an
 isolated repository with project-local `.codex/hooks.json`, launches the real Codex CLI,
@@ -581,24 +581,21 @@ setting without spending a model call.
 
 ### The shell output cap
 
-`enforce-capped-bash.py` (PreToolUse) blocks a Bash call whose output is not
-byte-capped; `invoke-capped.py` is the wrapper it demands. Both are vendored, and they
-ship together — the gate's allow-list matches the wrapper's path, so vendoring one
+For Claude Code, `enforce-capped-bash.py` (PreToolUse) blocks a Bash call whose output
+is not byte-capped; `invoke-capped.py` is the wrapper it demands. Both are vendored, and
+they ship together — the gate's allow-list matches the wrapper's path, so vendoring one
 without the other yields a hook that blocks every Bash call and names a remedy the repo
 does not have.
 
-On Windows, Codex presents its shell call under the compatible `Bash` hook matcher but
-executes the command with PowerShell. The generator therefore adds `--shell powershell`
-only to the Windows handler. That mode understands PowerShell's native bounds
-(`Select-Object -First/-Last`, `Get-Content -TotalCount/-Tail`, and `Out-Null`) and tells
-the wrapper to invoke `pwsh` rather than silently switching the command to `cmd.exe`.
+Codex's shell tool already bounds captured output. The hook converter therefore drops
+this handler, removes a `PreToolUse` group or event left empty by the drop, and preserves
+unrelated handlers that shared the group. This avoids the deny-and-retry cycle without
+weakening Claude's Bash policy.
 
-Cap size is `[bash] max_bytes` / `head_bytes` in `.devkit.toml`, read by both, so the
-number the agent is told to use is the number it actually gets. Claude's default wrapper
-uses the platform shell and preserves the exit code, while `| head -c N` keeps POSIX
-syntax but masks the exit code behind `head`'s. Codex's generated Windows hook instead
-recommends `invoke-capped.py --shell powershell`, which preserves both PowerShell syntax
-and the child exit code.
+Cap size is `[bash] max_bytes` / `head_bytes` in `.devkit.toml`, read by both Claude-side
+scripts, so the number the agent is told to use is the number it actually gets. The
+wrapper uses the platform shell and preserves the exit code, while `| head -c N` keeps
+POSIX syntax but masks the exit code behind `head`'s.
 
 ## Scope note
 

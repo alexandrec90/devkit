@@ -6,8 +6,9 @@ description: Audit this machine's background and automated processes -- the sche
 # Check the automated processes
 
 > Depends on Windows Task Scheduler (`schtasks`) and a devkit checkout on this machine.
-> Every Bash call needs an output cap -- route each through
-> `scripts/hooks/invoke-capped.py`, per `.claude/rules/engineering.md`.
+> In Claude Code, route the shell examples through `scripts/hooks/invoke-capped.py`, per
+> `.claude/rules/engineering.md`. In Codex, run them as written; its shell runner already
+> caps captured output.
 
 Answer in this order. It is not a preference: each step decides whether the next one's
 evidence means anything.
@@ -15,7 +16,7 @@ evidence means anything.
 ## 1. Ask the scheduler before you open a single file
 
 ```bash
-python scripts/hooks/invoke-capped.py --command "python scripts/workspace-status.py"
+python scripts/workspace-status.py
 ```
 
 `scripts/schedule_health.py`'s docstring owns why this comes first, and it is worth
@@ -101,7 +102,7 @@ windowless, where `sys.stdout` is `None` rather than a discarded stream.
 ## 6. The other automated tier: boxes and checkouts
 
 ```bash
-python scripts/hooks/invoke-capped.py --command "python scripts/worktree.py list"
+python scripts/worktree.py list
 ```
 
 `logs/reconcile.log` is the scheduled pass's own account -- disk headroom, boxes reaped,

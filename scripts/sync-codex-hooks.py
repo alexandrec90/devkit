@@ -12,10 +12,10 @@ like `model: opus` or `permissions.allow` are not copied there.
 Codex supports most, but not all, Claude hook events and uses structured JSON
 instead of non-zero exit codes for blocking. This generator therefore:
 
-- drops explicitly classified unsupported events and matchers,
+- drops explicitly classified unsupported events, matchers, and redundant handlers,
 - resolves shared scripts from the git root so subdirectory sessions work, and
 - wraps command hooks with the Codex compatibility adapter, and
-- ports shell-specific handlers to the shell Codex actually uses on Windows.
+- adds Windows handler forms and adjusts known compatibility limits.
 
 Invoked by scripts/sync-codex-context.py after the repository skill mirror.
 
@@ -42,7 +42,6 @@ CODEX_ADAPTER = CODEX_LAUNCHER
 CLAUDE_SESSION_START = ".claude/hooks/session-start.sh"
 CODEX_SESSION_START = f'python3 "{CODEX_ROOT_EXPR}/scripts/hooks/codex-session-start.py"'
 CLAUDE_BASH_CAP = "scripts/hooks/enforce-capped-bash.py"
-CODEX_POWERSHELL_ARG = " --shell powershell"
 MIN_CODEX_SESSION_START_TIMEOUT = 60
 SUPPORTED_EVENTS = frozenset(
     {
@@ -61,6 +60,7 @@ SUPPORTED_EVENTS = frozenset(
 )
 UNSUPPORTED_EVENTS = frozenset({"PostToolUseFailure"})
 UNSUPPORTED_MATCHERS = frozenset({("PostToolUse", "^Skill$")})
+REDUNDANT_HANDLERS = frozenset({("PreToolUse", CLAUDE_BASH_CAP)})
 
 
 # Command prefixes that identify a shared handler worth routing through the adapter.
@@ -124,19 +124,8 @@ def port_handler(event: str, handler: dict, root: str = "") -> dict:
     # A hand-authored Windows command is the better source when one exists. Only add
     # an override for handlers routed through the compatibility adapter; copying a
     # shell builtin such as `echo` would claim it was portable without making it so.
-    has_explicit_windows_command = "commandWindows" in handler
     windows_source = handler.get("commandWindows", command)
     if isinstance(windows_source, str):
-        # Claude's shell tool is Bash even on this workstation; Codex's Windows
-        # shell tool is PowerShell. The output-cap policy is shared, but its parser
-        # and remediation command must follow the target shell. Keep explicit
-        # commandWindows values authoritative.
-        if (
-            not has_explicit_windows_command
-            and event == "PreToolUse"
-            and CLAUDE_BASH_CAP in windows_source
-        ):
-            windows_source += CODEX_POWERSHELL_ARG
         windows_rewritten = rewrite_command(windows_source, root, windows=True)
         if (
             event == "SessionStart" and CLAUDE_SESSION_START in windows_rewritten
@@ -145,12 +134,24 @@ def port_handler(event: str, handler: dict, root: str = "") -> dict:
     return result
 
 
+def is_redundant_handler(event: str, handler: dict) -> bool:
+    """Whether Codex already provides the guarantee this Claude hook adds."""
+    command = handler.get("command")
+    if not isinstance(command, str):
+        return False
+    return any(
+        event == redundant_event and handler_path in command
+        for redundant_event, handler_path in REDUNDANT_HANDLERS
+    )
+
+
 def to_codex_hooks(claude_settings: dict, root: str = "") -> dict:
     """Build Codex's `{"hooks": ...}` payload from a Claude settings dict.
 
-    Explicitly unsupported events and dead matchers are omitted. An unclassified
-    event raises so adding a Claude hook cannot silently skip Codex compatibility
-    review. A missing `hooks` block yields an empty one.
+    Explicitly unsupported events, dead matchers, and handlers whose guarantee Codex
+    already provides are omitted. An unclassified event raises so adding a Claude hook
+    cannot silently skip Codex compatibility review. A missing `hooks` block yields an
+    empty one.
     """
     hooks = claude_settings.get("hooks", {})
     unclassified_events = set(hooks) - SUPPORTED_EVENTS - UNSUPPORTED_EVENTS
@@ -169,11 +170,14 @@ def to_codex_hooks(claude_settings: dict, root: str = "") -> dict:
         for group in groups:
             if (event, group.get("matcher", "")) in UNSUPPORTED_MATCHERS:
                 continue
-            new_group = dict(group)
-            new_group["hooks"] = [
-                port_handler(event, h, root) if isinstance(h, dict) else h
-                for h in group.get("hooks", [])
+            handlers = [
+                port_handler(event, handler, root) if isinstance(handler, dict) else handler
+                for handler in group.get("hooks", [])
+                if not (isinstance(handler, dict) and is_redundant_handler(event, handler))
             ]
+            if not handlers:
+                continue
+            new_group = {**group, "hooks": handlers}
             new_groups.append(new_group)
         if new_groups:
             result[event] = new_groups

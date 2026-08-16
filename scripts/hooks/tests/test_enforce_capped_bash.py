@@ -871,14 +871,13 @@ def test_the_other_authored_gh_pr_commands_are_bounded(command):
     assert hook.decide(payload("Bash", command)) == (0, "")
 
 
-# --- the /ship skill has to tell the agent about this gate ---
+# --- the /ship skill has to scope this gate to Claude Code ---
 #
 # The gate blocks every one of /ship's five steps -- `ship.py --preflight`, `git
 # status`, `git diff`, `ship.py`, `gh pr view` -- because each one's output scales
-# with the repo. The skill used to name them all bare, so a ship spent five blocked
-# calls and five copies of a ~1 KB block message rediscovering the same rule, in every
-# project that vendors both files. These assert the directive that fixes that is still
-# there, still honest, and still project-agnostic.
+# with the repo in Claude Code. Codex already bounds shell output, so importing the
+# same policy caused a blocked call and a wrapper retry instead. These assert both
+# agent-specific directives remain discoverable and project-agnostic.
 
 SHIP_SKILL = conftest.REPO_ROOT / ".claude/skills/ship/SKILL.md"
 BASELINE_RULE = conftest.REPO_ROOT / ".claude/rules/engineering.md"
@@ -896,11 +895,15 @@ def test_the_baseline_rule_introduces_the_gate():
     text = BASELINE_RULE.read_text(encoding="utf-8")
     assert WRAPPER_RELPATH in text
     assert "enforce-capped-bash.py" in text
+    assert "Codex is the exception" in text
+    assert "Codex shell commands directly" in text
 
 
-def test_the_ship_skill_directs_its_bash_through_the_wrapper():
-    """Without this the gate is rediscovered one blocked step at a time, every ship."""
-    assert WRAPPER_RELPATH in SHIP_SKILL.read_text(encoding="utf-8")
+def test_the_ship_skill_distinguishes_claude_from_codex():
+    """Claude needs the wrapper; prescribing it to Codex recreates the noisy retry."""
+    text = SHIP_SKILL.read_text(encoding="utf-8")
+    assert WRAPPER_RELPATH in text
+    assert "Codex runs the numbered commands directly" in text
 
 
 def test_the_wrapper_the_ship_skill_names_exists():
