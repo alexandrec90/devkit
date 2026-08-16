@@ -740,6 +740,21 @@ def reap_plan(
     the box, are namespaced to `COMPOSE_PROJECT_NAME`, and leaking one per task is how
     the WSL2 VHDX becomes the next bottleneck. `-p <box>` is passed explicitly so the
     scope cannot silently widen to the source project if the box's `.env` is missing.
+
+    **A forced reap plans no branch delete it knows `git` will refuse.** `--force`
+    discards the worktree and never the commits (`reap_decision`), so on a box whose
+    branch still carries commits no remote has, the only flag left is `-d` -- and `-d`
+    refuses that branch by definition. Planning it anyway made the step fail *every
+    time*: the worktree was already gone, so a reap that had done exactly what it was
+    designed to do ended in `FAILED at git branch -d`, exit 1, and a git hint
+    recommending the `-D` this design deliberately withholds. A caller reading that
+    cannot tell a working `--force` from a broken one, and the honest reading of the
+    exit code -- something went wrong, do it again -- is the one action that helps least.
+
+    So the branch is kept deliberately and said so in the warning, which is where the
+    rest of the forced-reap consequences are already reported. Discarding those commits
+    stays possible and stays a separate, typed decision: the warning names the
+    `git branch -D` that does it.
     """
     path = str(box_path(workspace_root, box.name))
     allowed, note = reap_decision(
@@ -756,8 +771,22 @@ def reap_plan(
     if force:
         remove = (*remove, "--force")
     steps: list[tuple[str, ...]] = [remove]
+    warning = note
     if box.branch:
-        steps.append(("branch", branch_delete_flag(state, pr_merged), box.branch))
+        flag = branch_delete_flag(state, pr_merged)
+        if force and flag == "-d":
+            warning = "; ".join(
+                part
+                for part in (
+                    note,
+                    f"{box.branch} is kept -- it carries commits no remote has, and "
+                    f"--force never destroys commits. To discard those too: "
+                    f"git -C {box.project} branch -D {box.branch}",
+                )
+                if part
+            )
+        else:
+            steps.append(("branch", flag, box.branch))
     return ReapPlan(
         box=box.name,
         path=path,
@@ -765,7 +794,7 @@ def reap_plan(
         steps=tuple(steps),
         stack_down=has_stack and not keep_stack,
         slot=box.slot,
-        warning=note,
+        warning=warning,
     )
 
 

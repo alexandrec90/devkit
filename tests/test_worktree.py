@@ -449,10 +449,51 @@ def test_reap_never_forces_the_worktree_removal_by_default():
 
 def test_force_reap_discards_the_worktree_but_not_the_commits():
     """The asymmetry the whole `--force` design rests on: `worktree remove --force`
-    throws away uncommitted edits, `branch -d` still refuses to lose commits."""
+    throws away uncommitted edits, and nothing in the plan can lose a commit."""
     plan = reap(sweep.READY, state=state(dirty=3, ahead=1), reason="3 files", force=True)
     assert "--force" in plan.steps[0]
-    assert plan.steps[-1][1] == "-d"
+    assert not [step for step in plan.steps if step[0] == "branch"]
+
+
+def test_a_forced_reap_plans_no_delete_git_is_certain_to_refuse():
+    """Lived, on `devkit--handoff-prompt-no-commit-0815`: its PR was closed rather than
+    merged and the remote branch deleted, so `--force` was the only way out. The plan
+    removed the worktree and then ran `branch -d` on a branch carrying a commit no
+    remote had -- which `-d` refuses by definition. Every forced reap of a box like that
+    ended `FAILED at git branch -d`, exit 1, with the worktree already gone and a git
+    hint pushing the `-D` that `--force` deliberately withholds.
+
+    Keeping the branch is the design; failing while keeping it is the defect."""
+    plan = reap(
+        sweep.NEEDS_REBRANCH,
+        state=state(upstream="", ahead=1, unpushed=1),
+        reason="1 unmerged commit(s)",
+        force=True,
+    )
+    assert plan.steps == (("worktree", "remove", plan.path, "--force"),)
+    assert "is kept" in plan.warning
+    assert f"branch -D {box().branch}" in plan.warning
+
+
+def test_the_kept_branch_warning_still_carries_what_force_destroyed():
+    """Two facts, one line: the uncommitted edits are gone, and the branch is not. The
+    second used to arrive as a git error, so appending it must not drop the first."""
+    plan = reap(
+        sweep.NEEDS_REBRANCH,
+        state=state(upstream="", ahead=1, unpushed=1, dirty=2),
+        reason="1 unmerged commit(s)",
+        force=True,
+    )
+    assert "forced past" in plan.warning
+    assert "is kept" in plan.warning
+
+
+def test_a_forced_reap_still_deletes_a_branch_that_is_safe_to_delete():
+    """The skip is scoped to the flag git would refuse. A pushed branch resolves to
+    `-D`, and forcing must not start leaving those behind -- that is the `agent/ws-*`
+    accumulation `branch_delete_flag` was written to stop."""
+    plan = reap(sweep.NEEDS_PR, force=True)
+    assert plan.steps[-1] == ("branch", "-D", box().branch)
 
 
 def test_no_reap_plan_ever_emits_a_capital_D_without_the_remote_having_it():
