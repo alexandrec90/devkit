@@ -1,6 +1,9 @@
 """Unit tests for the .codex/hooks.json generator (from .claude/settings.json)."""
 
 import json
+import shutil
+import subprocess
+import textwrap
 
 import pytest
 from conftest import load_module
@@ -27,14 +30,14 @@ class TestRewriteCommand:
     def test_resolves_project_dir_from_git_root(self):
         assert (
             hook.rewrite_command('python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/example-hook.py"')
-            == 'python3 "$(git rev-parse --show-toplevel)/scripts/hooks/example-hook.py"'
+            == 'python3 "__CODEX_PROJECT_ROOT__/scripts/hooks/example-hook.py"'
         )
 
     def test_keeps_claude_subpath_after_prefix(self):
         # The .claude/... portion is a real path Codex reads directly.
         assert (
             hook.rewrite_command('python3 "${CLAUDE_PROJECT_DIR:-.}/.claude/skills/example/x.py"')
-            == 'python3 "$(git rev-parse --show-toplevel)/.claude/skills/example/x.py"'
+            == 'python3 "__CODEX_PROJECT_ROOT__/.claude/skills/example/x.py"'
         )
 
     def test_command_without_prefix_is_unchanged(self):
@@ -55,7 +58,7 @@ class TestWrapCommand:
         )
         assert "codex-hook-adapter.py" in result
         assert "--event PreToolUse -- python3" in result
-        assert "$(git rev-parse --show-toplevel)/scripts/hooks/example-hook.py" in result
+        assert "__CODEX_PROJECT_ROOT__/scripts/hooks/example-hook.py" in result
 
     def test_session_start_bash_handler_uses_cross_platform_bridge(self):
         result = hook.wrap_command(
@@ -68,6 +71,73 @@ class TestWrapCommand:
     def test_leaves_shell_builtin_unwrapped(self):
         command = 'echo \'{"systemMessage":"x"}\''
         assert hook.wrap_command("PostToolUse", command) == command
+
+    def test_windows_command_uses_the_same_cross_platform_launcher(self):
+        result = hook.wrap_command(
+            "PreToolUse",
+            'python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/example-hook.py"',
+            windows=True,
+        )
+        assert result.startswith(hook.CODEX_LAUNCHER)
+        assert 'python3 "__CODEX_PROJECT_ROOT__/scripts/hooks/example-hook.py"' in result
+        assert "$(git rev-parse" not in result
+
+    def test_windows_absolute_root_needs_no_shell_lookup(self):
+        result = hook.wrap_command(
+            "PreToolUse", 'python3 "x/guard.py"', root="C:/ws/devkit", windows=True
+        )
+        assert result.startswith('python3 "C:/ws/devkit/scripts/hooks/codex-hook-adapter.py"')
+        assert "for /f" not in result
+
+    def test_launcher_executes_from_a_nested_working_directory(self, tmp_path):
+        subprocess.run(
+            ["git", "init", "--quiet"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        hooks_dir = tmp_path / "scripts" / "hooks"
+        hooks_dir.mkdir(parents=True)
+        shutil.copyfile(
+            sync_devkit.REPO_ROOT / "scripts/hooks/codex-hook-adapter.py",
+            hooks_dir / "codex-hook-adapter.py",
+        )
+        (tmp_path / "recorder.py").write_text(
+            textwrap.dedent(
+                """\
+                import json
+                import sys
+                from pathlib import Path
+
+                payload = json.load(sys.stdin)
+                (Path(__file__).parent / "seen-event.txt").write_text(
+                    payload["hook_event_name"], encoding="utf-8"
+                )
+                print("{}")
+                """
+            ),
+            encoding="utf-8",
+            newline="",
+        )
+        nested = tmp_path / "src" / "feature"
+        nested.mkdir(parents=True)
+        command = hook.wrap_command(
+            "UserPromptSubmit", 'python3 "${CLAUDE_PROJECT_DIR:-.}/recorder.py"'
+        )
+
+        result = subprocess.run(  # noqa: S602 - generated shell command under test
+            command,
+            cwd=nested,
+            input='{"hook_event_name":"UserPromptSubmit"}',
+            capture_output=True,
+            text=True,
+            shell=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "seen-event.txt").read_text(encoding="utf-8") == "UserPromptSubmit"
 
 
 class TestToCodexHooks:
@@ -104,16 +174,35 @@ class TestToCodexHooks:
         assert set(result["hooks"]) == {"SessionStart", "PreToolUse"}
         session = result["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         assert session.startswith(hook.CODEX_ADAPTER)
-        assert session.endswith(
-            '--event SessionStart -- bash "$(git rev-parse --show-toplevel)/x.sh"'
-        )
+        assert session.endswith('--event SessionStart -- bash "__CODEX_PROJECT_ROOT__/x.sh"')
         # The matcher passes through untouched.
         assert result["hooks"]["PreToolUse"][0]["matcher"] == "Bash"
         pretool = result["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         assert pretool.startswith(hook.CODEX_ADAPTER)
-        assert pretool.endswith(
-            '--event PreToolUse -- python3 "$(git rev-parse --show-toplevel)/p.py"'
-        )
+        assert pretool.endswith('--event PreToolUse -- python3 "__CODEX_PROJECT_ROOT__/p.py"')
+        windows = result["hooks"]["PreToolUse"][0]["hooks"][0]["commandWindows"]
+        assert windows == pretool
+
+    def test_preserves_and_wraps_an_explicit_windows_command(self):
+        claude = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": 'python3 "${CLAUDE_PROJECT_DIR:-.}/posix.py"',
+                                "commandWindows": 'python "${CLAUDE_PROJECT_DIR:-.}/windows.py"',
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        entry = hook.to_codex_hooks(claude)["hooks"]["PreToolUse"][0]["hooks"][0]
+        assert entry["command"].endswith('/posix.py"')
+        assert entry["commandWindows"].endswith('-- python "__CODEX_PROJECT_ROOT__/windows.py"')
 
     def test_preserves_hook_entry_fields(self):
         claude = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "run"}]}]}}
@@ -195,7 +284,7 @@ def test_sync_writes_hooks_only(tmp_path):
     assert set(written) == {"hooks"}
     command = written["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
     assert "--event PostToolUse -- python3" in command
-    assert command.endswith('python3 "$(git rev-parse --show-toplevel)/lint.py"')
+    assert command.endswith('python3 "__CODEX_PROJECT_ROOT__/lint.py"')
     # Must emit LF (repo enforces eol=lf), never CRLF, regardless of OS.
     assert b"\r\n" not in dest.read_bytes()
 
@@ -222,18 +311,33 @@ def test_a_python_command_is_wrapped_like_python3():
     assert "--event PreToolUse" in wrapped
 
 
-def test_an_absolute_root_replaces_the_git_rev_parse_expression():
-    """A Codex session opened outside any checkout makes `$(git rev-parse ...)` fail
-    and takes the hook with it -- which is exactly where the workstation file is read."""
+def test_an_absolute_root_replaces_the_repo_root_token():
+    """A user hook needs a stable root even when the session is not in a checkout."""
     wrapped = hook.wrap_command("PreToolUse", 'python "x/guard.py"', root="C:/ws/devkit")
     assert "C:/ws/devkit/scripts/hooks/codex-hook-adapter.py" in wrapped
     assert "git rev-parse" not in wrapped
 
 
+def test_an_absolute_root_produces_a_windows_override_without_git_lookup():
+    entry = hook.to_codex_hooks(
+        {
+            "hooks": {
+                "PreToolUse": [{"hooks": [{"type": "command", "command": 'python "x/guard.py"'}]}]
+            }
+        },
+        root="C:/ws/devkit",
+    )["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert "git rev-parse" not in entry["commandWindows"]
+    assert entry["commandWindows"].startswith(
+        'python3 "C:/ws/devkit/scripts/hooks/codex-hook-adapter.py"'
+    )
+
+
 def test_the_per_repo_form_still_resolves_through_the_git_root():
     """Repo-level files must stay repo-relative so a fresh clone works anywhere."""
     wrapped = hook.wrap_command("PreToolUse", 'python3 "x/guard.py"')
-    assert "$(git rev-parse --show-toplevel)" in wrapped
+    assert hook.CODEX_LAUNCHER in wrapped
+    assert "__CODEX_PROJECT_ROOT__" in wrapped
 
 
 def test_session_start_is_redirected_through_the_absolute_codex_entrypoint():

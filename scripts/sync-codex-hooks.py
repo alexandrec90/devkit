@@ -27,8 +27,17 @@ import sys
 from pathlib import Path
 
 CLAUDE_PROJECT_DIR_PREFIX = "${CLAUDE_PROJECT_DIR:-.}/"
-CODEX_ROOT_EXPR = "$(git rev-parse --show-toplevel)"
-CODEX_ADAPTER = f'python3 "{CODEX_ROOT_EXPR}/scripts/hooks/codex-hook-adapter.py"'
+CODEX_ROOT_EXPR = "__CODEX_PROJECT_ROOT__"
+CODEX_LAUNCHER_CODE = (
+    "import pathlib,runpy,sys;"
+    "p=pathlib.Path.cwd();"
+    "r=next(x for x in (p,*p.parents) if (x/'.git').exists());"
+    "sys.argv=[str(r/'scripts/hooks/codex-hook-adapter.py'),"
+    "*[a.replace('__CODEX_PROJECT_ROOT__',str(r)) for a in sys.argv[1:]]];"
+    "runpy.run_path(sys.argv[0],run_name='__main__')"
+)
+CODEX_LAUNCHER = f'python3 -c "{CODEX_LAUNCHER_CODE}"'
+CODEX_ADAPTER = CODEX_LAUNCHER
 CLAUDE_SESSION_START = ".claude/hooks/session-start.sh"
 CODEX_SESSION_START = f'python3 "{CODEX_ROOT_EXPR}/scripts/hooks/codex-session-start.py"'
 SUPPORTED_EVENTS = frozenset(
@@ -58,32 +67,61 @@ UNSUPPORTED_MATCHERS = frozenset({("PostToolUse", "^Skill$")})
 HANDLER_PREFIXES = ("python3 ", "python ", "bash ")
 
 
-def adapter_command(root: str = "") -> str:
+def root_expression(root: str = "", windows: bool = False) -> str:
+    """The stable project root spelling for the target command shell."""
+    del windows  # The inline Python launcher is identical on every supported OS.
+    return root or CODEX_ROOT_EXPR
+
+
+def adapter_command(root: str = "", windows: bool = False) -> str:
     """The Codex adapter invocation, resolved through `root` or the session's git root.
 
     `root` is for the **workstation-level** file (`~/.codex/hooks.json`), which has no
     repository to resolve against: a Codex session opened at the workspace root, or in
-    any directory that is not a checkout, makes `$(git rev-parse --show-toplevel)`
-    fail and takes the hook with it. Passing devkit's absolute path fixes those without
-    changing the per-repo files, which must stay repo-relative so a clone works
-    anywhere.
+    any directory that is not a checkout, has no project root for the inline launcher
+    to discover. Passing devkit's absolute path fixes those without changing the
+    per-repo files, which must stay repo-relative so a clone works anywhere.
     """
-    return f'python3 "{root or CODEX_ROOT_EXPR}/scripts/hooks/codex-hook-adapter.py"'
+    project_root = root_expression(root, windows)
+    if not root:
+        return CODEX_LAUNCHER
+    return f'python3 "{project_root}/scripts/hooks/codex-hook-adapter.py"'
 
 
-def rewrite_command(command: str, root: str = "") -> str:
+def rewrite_command(command: str, root: str = "", windows: bool = False) -> str:
     """Resolve Claude's project-dir placeholder through the git root, or `root`."""
-    return command.replace(CLAUDE_PROJECT_DIR_PREFIX, f"{root or CODEX_ROOT_EXPR}/")
+    return command.replace(CLAUDE_PROJECT_DIR_PREFIX, f"{root_expression(root, windows)}/")
 
 
-def wrap_command(event: str, command: str, root: str = "") -> str:
+def wrap_command(event: str, command: str, root: str = "", windows: bool = False) -> str:
     """Route a shared Python/bash handler through the Codex compatibility adapter."""
-    rewritten = rewrite_command(command, root)
+    project_root = root_expression(root, windows)
+    rewritten = rewrite_command(command, root, windows)
     if event == "SessionStart" and CLAUDE_SESSION_START in rewritten:
-        rewritten = f'python3 "{root or CODEX_ROOT_EXPR}/scripts/hooks/codex-session-start.py"'
+        rewritten = f'python3 "{project_root}/scripts/hooks/codex-session-start.py"'
     if not rewritten.lstrip().startswith(HANDLER_PREFIXES):
         return rewritten
-    return f"{adapter_command(root)} --event {event} -- {rewritten}"
+    return f"{adapter_command(root, windows)} --event {event} -- {rewritten}"
+
+
+def port_handler(event: str, handler: dict, root: str = "") -> dict:
+    """Add Codex's POSIX command and a Windows override to a command handler."""
+    command = handler.get("command")
+    if not isinstance(command, str):
+        return dict(handler)
+
+    result = {**handler, "command": wrap_command(event, command, root)}
+    # A hand-authored Windows command is the better source when one exists. Only add
+    # an override for handlers routed through the compatibility adapter; copying a
+    # shell builtin such as `echo` would claim it was portable without making it so.
+    windows_source = handler.get("commandWindows", command)
+    if isinstance(windows_source, str):
+        windows_rewritten = rewrite_command(windows_source, root, windows=True)
+        if (
+            event == "SessionStart" and CLAUDE_SESSION_START in windows_rewritten
+        ) or windows_rewritten.lstrip().startswith(HANDLER_PREFIXES):
+            result["commandWindows"] = wrap_command(event, windows_source, root, windows=True)
+    return result
 
 
 def to_codex_hooks(claude_settings: dict, root: str = "") -> dict:
@@ -112,9 +150,7 @@ def to_codex_hooks(claude_settings: dict, root: str = "") -> dict:
                 continue
             new_group = dict(group)
             new_group["hooks"] = [
-                {**h, "command": wrap_command(event, h["command"], root)}
-                if isinstance(h, dict) and isinstance(h.get("command"), str)
-                else h
+                port_handler(event, h, root) if isinstance(h, dict) else h
                 for h in group.get("hooks", [])
             ]
             new_groups.append(new_group)
