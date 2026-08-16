@@ -204,7 +204,7 @@ class TestToCodexHooks:
         assert entry["command"].endswith('/posix.py"')
         assert entry["commandWindows"].endswith('-- python "__CODEX_PROJECT_ROOT__/windows.py"')
 
-    def test_ports_the_bash_cap_policy_to_powershell_on_windows(self):
+    def test_drops_the_redundant_bash_cap_policy(self):
         claude = {
             "hooks": {
                 "PreToolUse": [
@@ -224,15 +224,11 @@ class TestToCodexHooks:
             }
         }
 
-        entry = hook.to_codex_hooks(claude)["hooks"]["PreToolUse"][0]["hooks"][0]
+        result = hook.to_codex_hooks(claude)
 
-        assert "--shell powershell" not in entry["command"]
-        assert entry["commandWindows"].endswith(
-            '-- python3 "__CODEX_PROJECT_ROOT__/scripts/hooks/enforce-capped-bash.py" '
-            "--shell powershell"
-        )
+        assert result == {"hooks": {}}
 
-    def test_explicit_windows_cap_command_remains_authoritative(self):
+    def test_drops_only_the_bash_cap_handler_from_a_shared_group(self):
         claude = {
             "hooks": {
                 "PreToolUse": [
@@ -241,19 +237,23 @@ class TestToCodexHooks:
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": "python3 scripts/hooks/enforce-capped-bash.py",
-                                "commandWindows": "python custom-cap.py",
-                            }
+                                "command": (
+                                    'python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/'
+                                    'enforce-capped-bash.py"'
+                                ),
+                            },
+                            {"type": "command", "command": "python3 keep.py"},
                         ],
                     }
                 ]
             }
         }
 
-        entry = hook.to_codex_hooks(claude)["hooks"]["PreToolUse"][0]["hooks"][0]
+        result = hook.to_codex_hooks(claude)
+        handlers = result["hooks"]["PreToolUse"][0]["hooks"]
 
-        assert entry["commandWindows"].endswith("-- python custom-cap.py")
-        assert "--shell powershell" not in entry["commandWindows"]
+        assert len(handlers) == 1
+        assert handlers[0]["command"].endswith("-- python3 keep.py")
 
     def test_raises_too_short_codex_session_start_timeout(self):
         claude = {

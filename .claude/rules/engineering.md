@@ -47,10 +47,11 @@ logic itself didn't change.
 Instruction files — `CLAUDE.md`, `.claude/rules/*`, `.claude/skills/*` — are covered by
 this same mandate. See `.claude/rules/authoring.md`.
 
-## Every Bash call carries an output cap
+## Claude Code's Bash calls carry an output cap
 
-`scripts/hooks/enforce-capped-bash.py` is a PreToolUse gate: a Bash command whose
-output is not bounded is **blocked**, not trimmed. Route it through the wrapper —
+In Claude Code, `scripts/hooks/enforce-capped-bash.py` is a PreToolUse gate: a Bash
+command whose output is not bounded is **blocked**, not trimmed. Route it through the
+wrapper —
 
 ```bash
 python3 scripts/hooks/invoke-capped.py --command "<the command>"
@@ -58,6 +59,11 @@ python3 scripts/hooks/invoke-capped.py --command "<the command>"
 
 which keeps a head *and* a tail window and preserves the exit code. Omit
 `--max-bytes`; it defaults to this project's `[bash] max_bytes`.
+
+**Codex is the exception.** Its shell tool already caps captured output before it
+reaches model context, so `scripts/sync-codex-hooks.py` omits this Claude-only gate.
+Issue ordinary Codex shell commands directly; routing them through `invoke-capped.py`
+adds visible indirection without adding another output bound.
 
 **A pipe into `head` or `tail` also counts**, in any of its spellings — `head -c N`,
 `tail -c N`, `head -N`, `tail -N`, and the `-n N` forms — as does redirecting stdout to

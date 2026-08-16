@@ -230,6 +230,15 @@ ALLOWED_MISSING = {
 ALLOWED_VERSION_PINS: dict[str, str] = {}
 
 
+def test_check_logs_skill_does_not_wrap_codex_shell_calls():
+    """Codex already caps shell output; the skill must not recreate wrapper noise."""
+    text = (REPO_ROOT / ".claude/skills/check-logs/SKILL.md").read_text(encoding="utf-8")
+
+    assert "In Codex, run them as written" in text
+    assert 'invoke-capped.py --command "python scripts/workspace-status.py"' not in text
+    assert 'invoke-capped.py --command "python scripts/worktree.py list"' not in text
+
+
 def test_documented_paths_exist():
     """A path a document names is a claim the repo has to keep."""
     missing: list[str] = []
