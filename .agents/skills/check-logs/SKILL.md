@@ -44,7 +44,8 @@ Get-ScheduledTask -TaskName 'devkit-*' | Get-ScheduledTaskInfo |
 If `LastRunTime` predates `LastWriteTime`, **the result describes a command that no
 longer exists**. Say so and stop; there is no failure to fix. Confirm what changed with
 `git log` on the installer -- `scripts/install-docker-prune.py`,
-`scripts/install-reconcile-task.py`, `scripts/install-upgrade-schedule.py`.
+`scripts/install-reconcile-task.py`, `scripts/install-upgrade-schedule.py`,
+`scripts/install-vanillaland-merge.py`.
 
 ## 3. Read the registered command against its installer
 
@@ -81,8 +82,9 @@ session-start line names the absence rather than pointing at the path.
 ## 5. Verify a wrapper without running the job
 
 Never fire a scheduled job to clear a stale status. `scripts/docker-maint.py` runs
-`wsl --shutdown` and prunes every unused image; the reconcile pass destroys boxes. Both
-are correct at 04:00 and wrong as a diagnostic.
+`wsl --shutdown` and prunes every unused image; the reconcile pass destroys boxes; the
+VanillaLand merge stashes a working tree somebody may be editing right now. Each is
+correct in the small hours and wrong as a diagnostic.
 
 To prove the wrapper writes what it claims, run the *registered* command with a scratch
 directory as the working directory and a trivial child, and read the artifact it leaves
@@ -113,8 +115,9 @@ checkouts synced. Two readings that are easy to get backwards:
 
 ## Reporting
 
-Say which jobs are healthy, not only which are not -- "three jobs, two green, one stale
-record" is the answer; a list of everything wrong reads as a broken machine.
+Say which jobs are healthy, not only which are not -- "every job green but one, and that
+one is a stale record" is the answer; a list of everything wrong reads as a broken
+machine.
 
 Fix what you find in the same turn, per the execution default. Two things are the user's
 call, because both are irreversible and neither is yours to assume: discarding work that
