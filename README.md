@@ -548,14 +548,16 @@ Carameli's `test_codex_hooks_contract.py` stays in carameli: it pins that repo's
 hook topology and every semantic drop, which is the coupling this whole tier exists to
 avoid.
 
-`tests/test_codex_hooks_live.py` is the paid, explicit release smoke. It creates an
-isolated repository with project-local `.codex/hooks.json`, launches the real Codex CLI,
-and proves discovery plus a real `PreToolUse` denial by asserting a sentinel file was
-not created. Normal test runs exclude the `paid` marker; opt in deliberately with
-`python -m pytest tests/test_codex_hooks_live.py -m "codex_live and paid" -s`. The smoke
-defaults to `gpt-5.6-luna` with low reasoning, no reasoning summary, and low verbosity;
+`tests/test_codex_hooks_live.py` contains the paid, explicit release smokes. They create
+isolated repositories with project-local `.codex/hooks.json` and launch the real Codex
+CLI. One proves discovery plus a real `PreToolUse` denial; the other supplies Claude's
+capped-Bash handler beside a recorder and proves one ordinary shell command executes
+once without a denial, wrapper retry, or repeated call. Normal test runs exclude the
+`paid` marker; opt in deliberately with
+`python -m pytest tests/test_codex_hooks_live.py -m "codex_live and paid" -s`. The smokes
+default to `gpt-5.6-luna` with low reasoning, no reasoning summary, and low verbosity;
 `CODEX_LIVE_HOOK_MODEL` and `CODEX_LIVE_HOOK_REASONING_EFFORT` override those defaults.
-Keep this test manual, nightly, or release-only. The converter and adapter tests are the
+Keep these tests manual, nightly, or release-only. The converter and adapter tests are the
 zero-model-cost gate for every hook change.
 
 For a local diagnostic, run `codex doctor --summary` first; it checks installation,
