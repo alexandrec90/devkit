@@ -785,9 +785,29 @@ def test_the_commit_exemption_does_not_extend_by_prefix(command):
 
 
 def test_other_gh_pr_subcommands_stay_blocked():
-    """`gh pr list`/`view` scale with the repo, and both wrap without trouble."""
+    """`gh pr list`/`view` scale with the repo, and both wrap without trouble.
+
+    `view` is the sharpest line here: it is the one `gh pr` subcommand that *prints* a
+    body instead of supplying one, so the very thing that exempts `edit` is what keeps
+    `view` blocked.
+    """
     assert hook.is_bounded("gh pr list") is False
     assert hook.is_bounded("gh pr view --json number,url,state") is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Found by correcting a PR body this gate's own change had just written: same
+        # authored `--body-file`, same single URL back, exempt only for `create`.
+        'gh pr edit 100 --body-file "C:/tmp/body.md"',
+        "gh pr comment 100 --body-file body.md",
+        "gh pr edit 100 --title 'Stop blocking the loops it calls exempt'",
+    ],
+)
+def test_the_other_authored_gh_pr_commands_are_bounded(command):
+    assert hook.is_bounded(command) is True
+    assert hook.decide(payload("Bash", command)) == (0, "")
 
 
 # --- the /ship skill has to tell the agent about this gate ---

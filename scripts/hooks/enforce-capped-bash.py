@@ -274,7 +274,16 @@ NO_STDOUT_RE = re.compile(r"(?:test|\[\[?)\s")
 # What they print is bounded by the *change*, not by the tree: a header line, one stat
 # line, and a `create mode` line per newly added path for a commit; a single URL for
 # `gh pr create`. That is the same criterion that keeps `ls` and `git status` out.
-COMMIT_LIKE = re.compile(r"(?:git" + _GIT_GLOBAL_OPTS + r"\s+commit|gh\s+pr\s+create)(?:\s|$)")
+#
+# `gh pr edit` and `gh pr comment` are the same command wearing a later timestamp -- an
+# authored `--body-file`, one URL back -- and were left out only because `create` was
+# the one spelling in front of whoever wrote this. Correcting a PR body it had just
+# written is where the omission surfaced. `gh pr view` is deliberately NOT here: it
+# *prints* the body rather than supplying one, and a long PR description is exactly the
+# unbounded output this gate is for.
+COMMIT_LIKE = re.compile(
+    r"(?:git" + _GIT_GLOBAL_OPTS + r"\s+commit|gh\s+pr\s+(?:create|edit|comment))(?:\s|$)"
+)
 
 # The two spellings of `git commit` that are `git status` wearing a different name:
 # `--dry-run` (with its `--short`/`--porcelain`/`--long` output modes) lists every
@@ -392,7 +401,8 @@ def block_message(max_bytes: int) -> str:
         "rev-parse, --version), commands silent on success (mkdir, rm, cp, sleep, "
         "set, trap, kill), condition tests including a quiet `grep -q`, "
         "`git log` given a commit count, the commit pair whose "
-        "message cannot survive the wrapper (git add/commit, gh pr create), and "
+        "message cannot survive the wrapper (git add/commit, gh pr "
+        "create/edit/comment), and "
         "shell control flow. ls/cat/git status are NOT exempt because their "
         "output grows with the tree -- use Read/Glob/Grep."
     )
