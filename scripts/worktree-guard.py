@@ -29,6 +29,8 @@ the message carries the provision command along with the rest of the route out.
     #42", where a fresh box would put the fix somewhere the PR never sees. A task
     branch with nothing on it is *not* one of these (see `needs_box`);
   - an edit already inside a box;
+  - an edit to a **git-ignored** path (`.env`, `.local/`, `logs/`): it cannot land on
+    any branch, so there is no branch for a box to protect;
   - any path that is not under a registered checkout;
   - any machine with no multi-root workspace file, which is every CI runner and every
     fresh clone.
@@ -190,6 +192,34 @@ def _git(checkout: Path, *args: str):
     )
 
 
+def path_is_ignored(checkout: Path, target: Path) -> bool:
+    """True when `target` is git-ignored inside `checkout`.
+
+    The premise of every block this hook issues is that the edit "would land on the home
+    branch" — and for an ignored path that premise is simply false. `.env`, `.local/`,
+    `logs/` and the rest of a checkout's untracked local state cannot land on any branch,
+    so routing them to a box does not protect a branch from anything. It costs the turn
+    and delivers nothing: the box gets its *own* seeded `.env`, so re-issuing the edit
+    there writes the value into a worktree that is destroyed without ever shipping it,
+    and the file the agent was actually asked to configure stays unchanged.
+
+    `git check-ignore` is the right oracle rather than a hard-coded list of names,
+    because what is ignored is per-project and already written down in `.gitignore`.
+    It consults the index by default (no `--no-index`), so a *tracked* file that also
+    matches an ignore rule reports as not-ignored and still gets a box — tracked is
+    tracked, and that is the case the hook exists for.
+
+    **Fails closed**: any error means "not ignored", i.e. route it. A hook that cannot
+    read the repo must not start letting edits through on the strength of a failed
+    subprocess.
+    """
+    try:
+        result = _git(checkout, "check-ignore", "--quiet", "--", str(target))
+    except (OSError, worktree.subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def current_branch(checkout: Path) -> str:
     """The branch `checkout` has checked out; "" when git will not say.
 
@@ -247,6 +277,7 @@ def redirect_decision(
     projects: list[str],
     branch_of: Callable[[Path], str] | None = None,
     commits_of_own: Callable[[Path], bool] | None = None,
+    ignored: Callable[[Path, Path], bool] | None = None,
 ) -> tuple[str, str] | None:
     """`(project, path relative to that checkout)` when this edit needs its own box.
 
@@ -261,7 +292,10 @@ def redirect_decision(
       branch with no commits of its own is not covered: it is either freshly cut or
       already merged, so there is no PR for a box to bypass;
     - anything outside a registered checkout, including the workspace file itself and
-      any scratch directory beside the projects.
+      any scratch directory beside the projects;
+    - a **git-ignored** path inside a checkout — see `path_is_ignored`. It cannot land
+      on the home branch, so there is no branch for a box to protect, and the box would
+      swallow the edit whole.
 
     A session inside a checkout parked on a **home** branch is no longer among them.
     That was the case `branch-on-write.py` owned, and with that hook retired an edit
@@ -286,9 +320,14 @@ def redirect_decision(
     project = owning_project(resolved, root, projects)
     if not project:
         return None
+    checkout = root / project
+    # Asked before the branch is read, and it is the cheaper order: an ignored path is
+    # allowed on one subprocess and never consults the branch, while for everything else
+    # this is one `check-ignore` added to a path that was already going to spawn a box.
+    if (ignored or path_is_ignored)(checkout, resolved):
+        return None
     lookup = branch_of or current_branch
     has_commits = commits_of_own or branch_has_own_commits
-    checkout = root / project
     branch = lookup(checkout)
     # Resolved lazily and at most once: only a task branch can be protected, and the
     # probe is a subprocess in a hook that runs on every edit.
