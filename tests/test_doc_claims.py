@@ -115,6 +115,15 @@ def cited_paths(text: str) -> list[str]:
 
     Code spans are split on whitespace so a command (`python scripts/run-tests.py`)
     yields the path it names rather than being skipped for containing a space.
+
+    **Nothing inside a fenced block is a claim**, which is what `version_pins` already
+    says about the same blocks: a fence is a transcript or a sample. Code spans were
+    never read there anyway -- the pattern cannot cross the newlines a fence contains --
+    so links were the one construct still leaking out, and they produced a false failure
+    the first time anyone wrote PowerShell in this repo. `[xml](Get-Content ...)` is a
+    type cast; to the link pattern it is `[text](target)`, so the suite demanded a file
+    named `Get-Content`, and the author's only remedy was to rewrite working PowerShell
+    to appease a Markdown regex.
     """
     found: list[str] = []
     for span in _CODE_SPAN.findall(text):
@@ -125,7 +134,7 @@ def cited_paths(text: str) -> list[str]:
             suffix = candidate[candidate.rfind(".") :] if "." in candidate else ""
             if suffix in _PATH_SUFFIXES:
                 found.append(candidate)
-    for target in _LINK.findall(text):
+    for target in _LINK.findall(strip_fences(text)):
         clean = target.split("#", 1)[0]
         # A bare anchor, an external URL, and an absolute path are all somebody
         # else's to keep true.
@@ -346,6 +355,21 @@ def test_cited_paths_reads_spans_links_and_commands():
 
 def test_cited_paths_ignores_urls_anchors_and_absolute_targets():
     text = "[a](https://example.com/x.md) [b](#anchor) [c](/etc/hosts) [d](../up.md)"
+    assert cited_paths(text) == []
+
+
+def test_cited_paths_does_not_read_a_powershell_cast_as_a_link():
+    """Lived, on the first skill in this repo to document PowerShell. `[xml](Get-Content
+    ...)` is a type cast; to a link pattern it is `[text](target)`, so the suite demanded
+    a file called `Get-Content` and the only way to green was to rewrite the sample."""
+    text = "```powershell\n$doc = [xml](Get-Content 'x.xml' -Raw)\n```\n"
+    assert cited_paths(text) == []
+
+
+def test_cited_paths_reads_nothing_at_all_out_of_a_fenced_block():
+    """The rule the case above generalises to, and the one a reader should hold: a fence
+    is a sample. A path worth checking is named in prose, in a span or a link."""
+    text = "```bash\npython scripts/run-tests.py\nsee [rules](.claude/x.md)\n```\n"
     assert cited_paths(text) == []
 
 
