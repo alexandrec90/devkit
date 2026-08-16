@@ -546,7 +546,11 @@ this whole tier exists to avoid.
 isolated repository with project-local `.codex/hooks.json`, launches the real Codex CLI,
 and proves discovery plus a real `PreToolUse` denial by asserting a sentinel file was
 not created. Normal test runs exclude the `paid` marker; opt in deliberately with
-`python -m pytest tests/test_codex_hooks_live.py -m "codex_live and paid" -s`.
+`python -m pytest tests/test_codex_hooks_live.py -m "codex_live and paid" -s`. The smoke
+defaults to `gpt-5.6-luna` with low reasoning, no reasoning summary, and low verbosity;
+`CODEX_LIVE_HOOK_MODEL` and `CODEX_LIVE_HOOK_REASONING_EFFORT` override those defaults.
+Keep this test manual, nightly, or release-only. The converter and adapter tests are the
+zero-model-cost gate for every hook change.
 
 For a local diagnostic, run `codex doctor --summary` first; it checks installation,
 configuration, authentication, and connectivity, but not whether a hook changed
