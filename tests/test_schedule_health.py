@@ -66,13 +66,42 @@ def test_a_failed_run_is_reported_with_its_exit_code():
     assert "failed (exit 1)" in line
 
 
-def test_a_failed_run_says_where_to_read_about_it():
+def written(tmp_path, name):
+    """Give `name`'s artifact a file, and point the module at that tree.
+
+    Every pointer assertion below goes through here rather than through the real
+    checkout: `logs/` is untracked, so in a fresh clone or an ephemeral box the same
+    test would assert against whichever files happened to be on disk.
+    """
+    path = tmp_path / health.ARTIFACTS[name]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    return path
+
+
+def test_a_failed_run_says_where_to_read_about_it(tmp_path, monkeypatch):
     """The regression this closes: `devkit-docker-prune: last run failed (exit 1)` is a
     complete sentence and a dead end. The job runs windowless, so there is no terminal
     it scrolled off -- without the pointer the next move is to guess."""
     name = next(iter(health.ARTIFACTS))
+    written(tmp_path, name)
+    monkeypatch.setattr(health, "REPO_ROOT", tmp_path)
     line = health.problems([job(name=name, last_result=1)], NOW)[0]
     assert f"see {health.ARTIFACTS[name]}" in line
+
+
+def test_a_failure_whose_artifact_is_missing_says_that_instead(tmp_path, monkeypatch):
+    """Lived, and the reason the check exists: `devkit-docker-prune` failed at 11:58
+    under the hand-registered command, and the corrected task -- the one that wraps the
+    run in `log-wrap.py --always` -- was registered at 16:18 the same day. Windows keeps
+    a task's `Last Result` across the `/Create /F` that replaces it, so the failure
+    outlived the command, and `see logs/scheduled-docker-prune.log` pointed every
+    session start at a file that could not exist."""
+    name = next(iter(health.ARTIFACTS))
+    monkeypatch.setattr(health, "REPO_ROOT", tmp_path)
+    line = health.problems([job(name=name, last_result=1)], NOW)[0]
+    assert f"no {health.ARTIFACTS[name]}" in line
+    assert "see" not in line
 
 
 def test_a_job_with_no_artifact_is_not_sent_to_an_invented_one():
@@ -80,6 +109,27 @@ def test_a_job_with_no_artifact_is_not_sent_to_an_invented_one():
     so a job outside the table gets no pointer rather than a plausible path."""
     line = health.problems([job(name="devkit-something-new", last_result=1)], NOW)[0]
     assert "see" not in line
+    assert "logs/" not in line
+
+
+def test_the_pointer_is_resolved_against_the_checkout_not_the_cwd(tmp_path, monkeypatch):
+    """`workspace-status.py` calls this from the workspace root, one level above devkit.
+    Resolving `logs/reconcile.log` from there would find nothing and report every job's
+    artifact missing -- a cwd-shaped bug that reads exactly like a broken job."""
+    name = next(iter(health.ARTIFACTS))
+    written(tmp_path, name)
+    monkeypatch.setattr(health, "REPO_ROOT", tmp_path)
+    monkeypatch.chdir(tmp_path.parent)
+    assert "see" in health.artifact_hint(name)
+
+
+def test_an_explicit_root_overrides_the_checkout(tmp_path):
+    """The seam the tests above use, exercised directly: `root` decides, and a table
+    passed in is read instead of the module's."""
+    name = next(iter(health.ARTIFACTS))
+    written(tmp_path, name)
+    assert health.artifact_hint(name, root=tmp_path).endswith(health.ARTIFACTS[name])
+    assert health.artifact_hint(name, artifacts={}, root=tmp_path) == ""
 
 
 def test_a_job_that_stopped_firing_is_reported():

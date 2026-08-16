@@ -50,6 +50,12 @@ import datetime as _dt
 import io
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
+
+# `ARTIFACTS` holds repo-relative paths, and the caller is `workspace-status.py`, whose
+# cwd is the workspace rather than this checkout. Resolving against this file keeps the
+# existence check answering "did the job write it", not "where was this run from".
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Every devkit job registers under this prefix, so the set maintains itself -- a job
 # added tomorrow is checked without touching this file.
@@ -96,15 +102,38 @@ ARTIFACTS: dict[str, str] = {
 }
 
 
-def artifact_hint(name: str, artifacts: dict[str, str] | None = None) -> str:
-    """`" -- see logs/x.log"` for a job that keeps one, `""` for a job that does not.
+def artifact_hint(
+    name: str,
+    artifacts: dict[str, str] | None = None,
+    root: Path | None = None,
+) -> str:
+    """`" -- see logs/x.log"` for a job that kept one, and the truth when it did not.
 
     A job with no entry gets no pointer rather than a guessed path: sending a reader to
     a file that was never written is worse than sending them nowhere, because an absent
     artifact reads as "the job never ran" and that is a different diagnosis.
+
+    **An entry whose file is not there is that same dead end**, which the paragraph above
+    asserted and the code did not check. `devkit-docker-prune` produced exactly it: the
+    job failed at 11:58 under the hand-registered command, the corrected task -- the one
+    that wraps the run in `log-wrap.py --always` -- was registered at 16:18 the same day,
+    and Windows carries a task's `Last Result` across the `/Create /F` that replaces it.
+    So the scheduler went on reporting a failure from a command that no longer existed,
+    and every session start sent its reader to a file that *could not* exist, because the
+    run it describes predates the wrapper that would have written one.
+
+    Naming the absence costs one `stat` and turns that into the two things it can mean:
+    the failing run predates the artifact, or the job died before writing it. Both point
+    at the same next move -- compare the registered command against its installer, which
+    `install-<job>.py --status` prints and `--yes` makes true again idempotently.
     """
     path = (ARTIFACTS if artifacts is None else artifacts).get(name, "")
-    return f" -- see {path}" if path else ""
+    if not path:
+        return ""
+    base = REPO_ROOT if root is None else root
+    if (base / path).is_file():
+        return f" -- see {path}"
+    return f" -- no {path}: the run predates it, or died before writing one"
 
 
 @dataclass(frozen=True)
