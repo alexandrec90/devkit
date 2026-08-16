@@ -374,6 +374,169 @@ def test_sync_missing_src_is_noop(tmp_path):
     assert not dest.exists()
 
 
+# --- the generated artifact is committed, so it can go stale ------------------
+# The generator is vendored and its output is not. `REDUNDANT_HANDLERS` dropped the
+# Claude-only Bash cap the day it landed, and Codex sessions went on being blocked by
+# it for as long as the already-generated `.codex/hooks.json` survived -- because
+# `--pull` copies the generator and, until `is_stale`, nothing read what it produced.
+# The block's own remedy is `invoke-capped.py`, so each block bought a session a
+# wrapper it then reused on every command after it. These are that regression.
+
+
+def _settings_with_cap(path):
+    """A settings file wiring the Claude-only Bash cap, as every consumer's does."""
+    path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "^Bash$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f'python3 "${{CLAUDE_PROJECT_DIR:-.}}/'
+                                        f'{hook.CLAUDE_BASH_CAP}"'
+                                    ),
+                                }
+                            ],
+                        },
+                        {
+                            "matcher": "^Edit$",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": 'python3 "${CLAUDE_PROJECT_DIR:-.}/guard.py"',
+                                }
+                            ],
+                        },
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestIsStale:
+    def test_a_file_written_by_a_previous_generator_is_stale(self, tmp_path):
+        """The exact shape of the bug: the artifact still carries the Bash cap that the
+        generator no longer emits, so Codex keeps being blocked by a hook this repo has
+        already stopped describing."""
+        src = _settings_with_cap(tmp_path / "settings.json")
+        dest = tmp_path / "hooks.json"
+        # What the pre-`REDUNDANT_HANDLERS` generator produced: the cap ported through.
+        dest.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "^Bash$",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": (
+                                            f"adapter --event PreToolUse -- "
+                                            f"python3 {hook.CLAUDE_BASH_CAP}"
+                                        ),
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        assert hook.is_stale(src, dest) is True
+
+    def test_a_freshly_generated_file_is_not_stale(self, tmp_path):
+        src = _settings_with_cap(tmp_path / "settings.json")
+        dest = tmp_path / "hooks.json"
+        hook.sync(src, dest)
+        assert hook.is_stale(src, dest) is False
+
+    def test_a_crlf_checkout_is_not_reported_as_stale(self, tmp_path):
+        """A consumer whose git checked the artifact out with CRLF would otherwise fail
+        its own PR gate forever, on a difference regenerating does not remove."""
+        src = _settings_with_cap(tmp_path / "settings.json")
+        dest = tmp_path / "hooks.json"
+        dest.write_text(hook.render(src).replace("\n", "\r\n"), encoding="utf-8", newline="")
+        assert hook.is_stale(src, dest) is False
+
+    def test_a_project_without_codex_has_nothing_to_be_stale(self, tmp_path):
+        src = _settings_with_cap(tmp_path / "settings.json")
+        assert hook.is_stale(src, tmp_path / "absent.json") is False
+
+    def test_missing_settings_is_not_stale(self, tmp_path):
+        dest = tmp_path / "hooks.json"
+        dest.write_text("{}\n", encoding="utf-8")
+        assert hook.is_stale(tmp_path / "absent.json", dest) is False
+
+
+class TestCheckMode:
+    def test_check_exits_one_on_a_stale_artifact_and_writes_nothing(self, tmp_path, capsys):
+        src = _settings_with_cap(tmp_path / "settings.json")
+        dest = tmp_path / "hooks.json"
+        dest.write_text('{"hooks": {}}\n', encoding="utf-8")
+
+        assert hook.main(["--check", str(src), str(dest)]) == 1
+        # Reporting must not repair: a gate that fixes what it measures is a gate that
+        # passes on the second run having told nobody.
+        assert dest.read_text(encoding="utf-8") == '{"hooks": {}}\n'
+        assert "sync-codex-context.py" in capsys.readouterr().err
+
+    def test_check_exits_zero_when_the_artifact_is_current(self, tmp_path):
+        src = _settings_with_cap(tmp_path / "settings.json")
+        dest = tmp_path / "hooks.json"
+        hook.sync(src, dest)
+        assert hook.main(["--check", str(src), str(dest)]) == 0
+
+    def test_flags_do_not_consume_the_positional_pair(self, tmp_path):
+        """`--check src dest` must still address `src`/`dest`; reading argv positionally
+        would make the flag silently retarget the check at this repo's own pair."""
+        src = _settings_with_cap(tmp_path / "settings.json")
+        dest = tmp_path / "hooks.json"
+        assert hook.main([str(src), str(dest)]) == 0
+        assert hook.is_stale(src, dest) is False
+
+
+def test_the_bash_cap_never_reaches_codex_from_this_repos_own_settings():
+    """The end-to-end guarantee, against the real settings file rather than a fixture.
+
+    `REDUNDANT_HANDLERS` matches on a path substring, so renaming the cap script, moving
+    it, or wiring it under a second matcher would each restore the port silently. This
+    fails in whichever project that happens in, which is the only place it can be seen.
+    """
+    settings = sync_devkit.REPO_ROOT / ".claude/settings.json"
+    if not settings.is_file():
+        pytest.skip("project has no .claude/settings.json to port")
+    emitted = json.dumps(hook.to_codex_hooks(json.loads(settings.read_text(encoding="utf-8"))))
+    assert hook.CLAUDE_BASH_CAP not in emitted, (
+        "Codex would run the Claude-only Bash cap. Its shell runner already caps "
+        "captured output, so the gate only blocks -- and the block's own remedy is to "
+        "wrap every later command in invoke-capped.py."
+    )
+
+
+def test_the_committed_codex_artifact_matches_the_generator():
+    """This project's own `.codex/hooks.json`, if it has one, is current."""
+    settings = sync_devkit.REPO_ROOT / ".claude/settings.json"
+    artifact = sync_devkit.REPO_ROOT / ".codex/hooks.json"
+    if not artifact.is_file():
+        pytest.skip("project has not opted into .codex/")
+    assert not hook.is_stale(settings, artifact), (
+        f"{artifact} is not what {settings} generates today -- Codex is running hook "
+        f"wiring this repo no longer describes. Run `python scripts/sync-codex-context.py`."
+    )
+
+
 # --- the workstation-level pair ---------------------------------------------
 # ~/.claude/settings.json wires the hooks that are NOT vendored into any repo -- the
 # home-branch edit guard and the task-slug recorder. Codex had neither, so its edits

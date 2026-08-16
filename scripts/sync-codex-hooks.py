@@ -184,16 +184,44 @@ def to_codex_hooks(claude_settings: dict, root: str = "") -> dict:
     return {"hooks": result}
 
 
+def render(src: Path, root: str = "") -> str:
+    """The exact text `sync` would write for `src`."""
+    data = json.loads(src.read_text(encoding="utf-8"))
+    return json.dumps(to_codex_hooks(data, root), indent=2) + "\n"
+
+
+def is_stale(src: Path, dest: Path, root: str = "") -> bool:
+    """Whether `dest` differs from what this generator produces from `src` today.
+
+    `.codex/hooks.json` is a **generated artifact that is committed**, and until this
+    existed nothing compared the two. That gap is what let the Claude-only Bash cap go
+    on blocking Codex long after it was fixed: `REDUNDANT_HANDLERS` dropped the handler
+    the day it landed, and every project that had already generated its
+    `.codex/hooks.json` kept running the old file, because `--pull` copies the
+    *generator* and nothing anywhere read its output. A project found out only by being
+    blocked, one command at a time -- and the recovery the block message suggests, wrap
+    it in `invoke-capped.py`, is exactly the wrapping the omission exists to prevent, so
+    the session pays for it on every command from there on.
+
+    False when either file is absent: a project that has not opted into `.codex/` has
+    nothing to keep in step, and a missing settings file is the no-op `sync` already
+    treats as clean.
+    """
+    if not src.exists() or not dest.exists():
+        return False
+    # `sync` writes with newline='' so the file keeps LF on Windows, but a consumer
+    # whose git checked it out with CRLF must not read as drift a regeneration would
+    # not change.
+    return dest.read_text(encoding="utf-8").replace("\r\n", "\n") != render(src, root)
+
+
 def sync(src: Path, dest: Path, root: str = "") -> int:
     """Write `src` settings' hooks to `dest` in Codex form. No-op if src missing."""
     if not src.exists():
         return 0
-    data = json.loads(src.read_text(encoding="utf-8"))
     # newline='' keeps LF on Windows (the repo enforces eol=lf via .gitattributes).
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(
-        json.dumps(to_codex_hooks(data, root), indent=2) + "\n", encoding="utf-8", newline=""
-    )
+    dest.write_text(render(src, root), encoding="utf-8", newline="")
     return 0
 
 
@@ -221,7 +249,11 @@ def stable_root() -> str:
 
 
 def main(argv: list[str]) -> int:
-    """`[src dest] | --user`. Without arguments, syncs this repo's pair.
+    """`[src dest] | --user | --check`. Without arguments, syncs this repo's pair.
+
+    `--check` reports rather than writes, and is what `sync-devkit.py --check` calls so
+    a stale `.codex/hooks.json` fails a PR gate instead of being discovered by a Codex
+    session hitting the hook it should no longer have.
 
     `--user` is the workstation pair, and it is what keeps Codex from silently falling
     behind Claude. The user-level `~/.claude/settings.json` wires the hooks that are
@@ -232,16 +264,28 @@ def main(argv: list[str]) -> int:
     someone remembers.
     """
     root = ""
+    check = "--check" in argv
+    positional = [arg for arg in argv if not arg.startswith("--")]
     if "--user" in argv:
         src, dest = USER_CLAUDE_SETTINGS, USER_CODEX_HOOKS
         # No repository to resolve against at this level -- see `adapter_command`.
         root = stable_root()
-    elif len(argv) >= 2:
-        src, dest = Path(argv[0]), Path(argv[1])
+    elif len(positional) >= 2:
+        src, dest = Path(positional[0]), Path(positional[1])
     else:
         repo_root = Path(__file__).resolve().parent.parent
         src = repo_root / ".claude/settings.json"
         dest = repo_root / ".codex/hooks.json"
+    if check:
+        if not is_stale(src, dest, root):
+            return 0
+        print(
+            f"sync-codex-hooks: {dest} is not what {src} generates today. Codex is "
+            f"running hook wiring this repo no longer describes -- regenerate it with "
+            f"`python scripts/sync-codex-context.py`.",
+            file=sys.stderr,
+        )
+        return 1
     return sync(src, dest, root)
 
 

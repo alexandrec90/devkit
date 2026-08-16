@@ -17,6 +17,7 @@ both are about the target being a *reference* checkout with a human's work in it
 from __future__ import annotations
 
 import shlex
+import sys
 from pathlib import Path
 
 from support import load_script
@@ -180,10 +181,46 @@ def test_devkit_points_the_registered_command_at_another_checkout(monkeypatch, c
     monkeypatch.setattr(
         installer, "REPO_ROOT", Path(r"C:\ws") / installer.sweep.BOXES_DIR_NAME / "devkit--x"
     )
-    assert installer.main(["--devkit", str(ROOT)]) == 0
+    # A checkout that is genuinely not the running one. Naming the real `ROOT` made the
+    # test contradict itself the moment the suite ran from a box -- which is now the
+    # normal way this repo is worked on: the first assertion demanded a path containing
+    # `.worktrees` and the second forbade one.
+    static = Path(r"C:\ws\devkit")
+    assert installer.main(["--devkit", str(static)]) == 0
     printed = capsys.readouterr().out
-    assert str(installer.merge_script(ROOT)) in printed
+    assert str(installer.merge_script(static)) in printed
     assert installer.sweep.BOXES_DIR_NAME not in printed
+
+
+def test_the_interpreter_comes_from_the_named_checkout(tmp_path):
+    """The half `--devkit` missed. Every *script* path moved to the named checkout while
+    the interpreter stayed `sys.executable`, so installing from a box registered the
+    box's own `.venv\\Scripts\\pythonw.exe` -- which reconcile deletes when the PR merges.
+    The task then fails every morning, in silence, which is exactly what `--devkit`
+    exists to avoid."""
+    venv = tmp_path / ".venv" / ("Scripts" if installer.WINDOWS else "bin")
+    venv.mkdir(parents=True)
+    named = venv / ("python.exe" if installer.WINDOWS else "python")
+    named.write_text("", encoding="utf-8")
+    assert installer.interpreter(tmp_path) == str(named)
+
+
+def test_a_named_checkout_without_a_virtualenv_never_yields_a_box_interpreter(monkeypatch):
+    """The remaining hole: `--devkit` names a checkout whose tools are on PATH, so there
+    is no virtualenv to point at, and falling back to the running one would re-register
+    the box's python after all. `sys._base_executable` is the one interpreter in reach
+    that outlives every box."""
+    box_python = Path(r"C:\ws") / installer.sweep.BOXES_DIR_NAME / "d--x" / ".venv/python.exe"
+    monkeypatch.setattr(sys, "executable", str(box_python))
+    monkeypatch.setattr(sys, "_base_executable", r"C:\Python314\python.exe", raising=False)
+    assert installer.interpreter(Path(r"C:\ws\devkit")) == r"C:\Python314\python.exe"
+
+
+def test_a_checkout_without_a_virtualenv_keeps_the_running_interpreter(tmp_path, monkeypatch):
+    """Outside a box there is nothing wrong with the running interpreter, and a task
+    pointing at a python that does not exist is worse than one pointing at this one."""
+    monkeypatch.setattr(sys, "executable", r"C:\Python314\python.exe")
+    assert installer.interpreter(tmp_path) == r"C:\Python314\python.exe"
 
 
 def test_installing_against_a_checkout_with_no_merge_script_is_refused(monkeypatch, capsys):

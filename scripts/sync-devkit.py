@@ -834,6 +834,59 @@ def prune_settings(root: Path, retired: tuple[str, ...] = RETIRED_PATHS) -> list
     return dropped
 
 
+CODEX_HOOKS_FILE = ".codex/hooks.json"
+CODEX_GENERATOR = "scripts/sync-codex-hooks.py"
+
+
+def _codex_generator(root: Path, *flags: str) -> list[str]:
+    return [
+        sys.executable,
+        str(root / CODEX_GENERATOR),
+        *flags,
+        str(root / SETTINGS_FILE),
+        str(root / CODEX_HOOKS_FILE),
+    ]
+
+
+def codex_hooks_stale(root: Path) -> bool:
+    """Whether this project's committed `.codex/hooks.json` is what it would generate.
+
+    The generator is vendored; **its output is not**, and that asymmetry is the whole
+    reason this exists. `--pull` copies `sync-codex-hooks.py`, so a fix to what Codex
+    should be running lands in every consumer — and changes nothing, because the file
+    Codex actually reads was written by the *previous* generator and no gate on either
+    side ever looked at it. `regenerate_codex_hooks` closes it for a project that pulls;
+    this closes it for one whose file went stale some other way, so the PR gate says so
+    instead of a Codex session discovering it a blocked command at a time.
+
+    Runs the generator out-of-process rather than importing it: these are sibling
+    scripts at fixed vendored paths, and `sync-codex-context.py` already invokes it the
+    same way. Best-effort — a generator that is absent or that raises leaves this
+    reporting nothing, because a project with no `.codex/` has nothing to be stale.
+    """
+    if not (root / CODEX_HOOKS_FILE).is_file() or not (root / CODEX_GENERATOR).is_file():
+        return False
+    try:
+        result = subprocess.run(_codex_generator(root, "--check"), capture_output=True, text=True)
+    except OSError:
+        return False
+    return result.returncode == 1
+
+
+def regenerate_codex_hooks(root: Path) -> bool:
+    """Rewrite `.codex/hooks.json` from the just-pulled generator. True if it changed.
+
+    Only for a project that already has the file: generating one for a project that
+    never opted into `.codex/` would wire Codex hooks nobody asked for.
+    """
+    if not codex_hooks_stale(root):
+        return False
+    try:
+        return subprocess.run(_codex_generator(root)).returncode == 0
+    except OSError:
+        return False
+
+
 def remove_retired(root: Path) -> list[str]:
     """Delete only reviewed retired files, never project-owned sibling state."""
     removed = retired_present(root)
@@ -1043,6 +1096,10 @@ def main(argv: list[str] | None = None) -> int:
         # After the deletions, never before: pruning a hook whose script survived the
         # pull would disable a live hook.
         unwired = prune_settings(REPO_ROOT) if args.pull else []
+        # After the settings prune, never before: the Codex file is generated *from*
+        # those settings, so regenerating first would bake back in whatever the prune
+        # is about to remove.
+        codex_regenerated = regenerate_codex_hooks(REPO_ROOT) if args.pull else False
         blocks_written, blocks_failed = sync_blocks(from_root, to_root, BLOCK_MANIFEST)
         verb = "pulled" if args.pull else "pushed"
         print(
@@ -1060,6 +1117,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  (now yours -- un-vendored, devkit no longer updates it) {rel}")
         for name in unwired:
             print(f"  (unwired retired hook) {SETTINGS_FILE}: {name}")
+        if codex_regenerated:
+            # Named, because it is the one file the pull rewrote that was never copied
+            # from the source: it is generated here, from this project's own settings.
+            print(f"  (regenerated from {SETTINGS_FILE}) {CODEX_HOOKS_FILE}")
         if args.pull:
             # The SHA, always: DEVKIT_VERSION records the upstream *commit*, and
             # the vendored `test_harness_version_records_a_commit` asserts exactly
@@ -1103,7 +1164,16 @@ def main(argv: list[str] | None = None) -> int:
     block_drifted, block_unusable, block_ok = classify_blocks(src, REPO_ROOT, BLOCK_MANIFEST)
     retired = retired_present(REPO_ROOT)
     receipt_retired = receipt_retired_present(REPO_ROOT, MANIFEST)
-    if not (drifted or missing or retired or receipt_retired or block_drifted or block_unusable):
+    codex_stale = codex_hooks_stale(REPO_ROOT)
+    if not (
+        drifted
+        or missing
+        or retired
+        or receipt_retired
+        or block_drifted
+        or block_unusable
+        or codex_stale
+    ):
         blocks = f" and {len(block_ok)} block(s)" if BLOCK_MANIFEST else ""
         print(f"sync-harness: all {len(MANIFEST)} vendored files{blocks} in sync with {src}.")
         return 0
@@ -1134,12 +1204,31 @@ def main(argv: list[str] | None = None) -> int:
         # Distinct from DRIFT on purpose: `--pull` fixes drift, and cannot fix a
         # missing marker pair. Saying so here saves the pull that would not help.
         print(f"BLOCK   {label} -- not comparable; --pull cannot fix this", file=sys.stderr)
-    print(
-        "sync-harness: vendored harness drifted from the shared repo. "
-        "Run `python scripts/sync-devkit.py --pull` to adopt upstream, "
-        "or `--push` if this project authored the change.",
-        file=sys.stderr,
-    )
+    if codex_stale:
+        # Not DRIFT: nothing upstream to compare against, and `--pull` fixes it only as
+        # a side effect of regenerating. Say which command actually rewrites the file.
+        print(
+            f"STALE   {CODEX_HOOKS_FILE} -- not what {SETTINGS_FILE} generates today; "
+            f"Codex is running hook wiring this repo no longer describes. "
+            f"Run `python scripts/sync-codex-context.py`",
+            file=sys.stderr,
+        )
+    if drifted or missing or retired or receipt_retired or block_drifted or block_unusable:
+        print(
+            "sync-harness: vendored harness drifted from the shared repo. "
+            "Run `python scripts/sync-devkit.py --pull` to adopt upstream, "
+            "or `--push` if this project authored the change.",
+            file=sys.stderr,
+        )
+    else:
+        # A `--pull` would resolve this one too, but only incidentally, and telling
+        # someone to adopt upstream when nothing upstream differs is the kind of advice
+        # that gets a red gate reclassified as noise.
+        print(
+            "sync-harness: every vendored file is in sync; only the generated Codex "
+            "hooks are stale.",
+            file=sys.stderr,
+        )
     return 1
 
 
