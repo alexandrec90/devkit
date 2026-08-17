@@ -513,6 +513,72 @@ def test_the_loop_shapes_beside_the_one_that_was_fixed(command):
     assert hook.decide(payload("Bash", command)) == (0, "")
 
 
+# --- a loop header whose word list is a command substitution --------------------
+#
+# The next spelling along, and it was blocked for a reason the module docstring already
+# ruled out: the substitution veto fired on `$(seq 1 60)`. `is_bounded` ran the
+# control-flow check *after* that veto, so the exemption it was supposed to grant could
+# never be reached by any header containing a `$(` or a backtick.
+#
+# What makes it wrong is that the substitution is not the thing being run. `seq`'s output
+# is the loop's word list -- the shell consumes it to decide how many iterations there are
+# and prints not one byte of it, exactly as a condition test consumes the substitution
+# feeding it. `until [ "$(docker inspect ...)" = healthy ]` had already been moved above
+# the veto for precisely that reason; the loop header is the same argument.
+#
+# Reported from a session that needed to poll an API until it recovered, found the two
+# obvious spellings split -- `while true; do ...; done` allowed, `for i in $(seq 1 60);
+# do ...; done` blocked -- and could not wrap either, because the wrapper runs through
+# cmd.exe where bash loop syntax is a parse error.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The reported case: a bounded retry loop.
+        "for i in $(seq 1 60); do sleep 30; done",
+        "for i in `seq 1 60`; do sleep 30; done",
+        # The word list is a repository query, which is the whole reason to use one.
+        'for f in $(git ls-files "*.py"); do python3 scripts/hooks/invoke-capped.py '
+        '--command "ruff check $f"; done',
+        # A substitution in the redirect a loop's `done` carries: it names a file, and a
+        # file name is not output either.
+        "while read -r line; do sleep 1; done < $(mktemp)",
+        # `case` selects on one too.
+        "case $(uname) in Linux) pwd ;; esac",
+    ],
+)
+def test_a_substitution_in_a_control_header_is_not_output(command):
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+def test_the_header_exemption_does_not_reach_the_loop_body():
+    """The guard against fixing this too widely.
+
+    Only the *header* consumes the substitution. Whatever the body prints still reaches
+    the terminal and is still judged on its own, so this stays blocked -- on the `cat`,
+    which is where the block belongs and what the author can act on.
+    """
+    command = "for f in $(ls); do cat $f; done"
+    code, message = hook.decide(payload("Bash", command))
+    assert code != 0, "a loop body's output is not covered by its header"
+    assert "cat" in message
+
+
+def test_the_substitution_veto_still_applies_to_a_command_that_prints():
+    """The veto is not weakened, only reordered: `echo` does have a path to the terminal,
+    so what a substitution hands it is genuinely unknowable."""
+    assert hook.is_bounded("echo $(find / -name x)") is False
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    ["for i in $(seq 1 60)", "for f in `git ls-files`", "case $(uname) in", "done < $(mktemp)"],
+)
+def test_control_headers_are_bounded_even_with_a_substitution(fragment):
+    assert hook.is_bounded(fragment) is True
+
+
 def test_a_comment_swallows_the_separator_inside_it():
     """`pwd # a; ls -R /` is one statement to a shell, and must be one here.
 
