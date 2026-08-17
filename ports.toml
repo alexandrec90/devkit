@@ -43,6 +43,24 @@ minio = 9000
 minio_console = 9040
 grafana = 3000
 prometheus = 9090
+
+[shared]
+# Workspace **singletons**: one process serves every checkout, so the port is fixed
+# rather than offset by slot. `validate()` keeps these clear of every `[services]`
+# base's slot range, so a singleton can never land on a per-checkout stack's port.
+#
+# WHY THIS TABLE EXISTS. `otel_http` was a `[services]` base until 2026-08-17, which
+# gave every project its own agent-telemetry endpoint: carameli 4318 (slot 0),
+# sports_betting 4322 (slot 4), apt-finder 4324 (slot 6). Only carameli ever ran a
+# collector, so the other two exported into a closed port for a month -- and an OTLP
+# exporter that cannot connect retries in the background forever, so nothing ever
+# said so. The slot model was simply the wrong shape for this one: Claude Code's
+# telemetry is about the *agent*, which is one program driving every checkout in the
+# workspace, not about the stack a checkout happens to publish.
+#
+# One collector, one port, `service.name` in OTEL_RESOURCE_ATTRIBUTES telling the
+# senders apart. The collector itself lives in carameli's `monitoring` compose
+# profile, where its Prometheus and Grafana consumers already are.
 otel_http = 4318
 
 [slots]
