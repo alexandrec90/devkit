@@ -217,6 +217,12 @@ destinations and any branch name with an already-merged PR, while still allowing
 remote branch deletion. Non-GitHub remotes skip only the PR lookup; protected branch
 destinations remain blocked.
 
+It also refuses a push that creates or moves a **release tag** — a `vX.Y.Z` ref, the one
+thing consumers pin — because only a release workflow runs the suite against the commit
+*as tagged* before publishing it. Tag deletion stays allowed, since that is the recovery
+path for one already published, and any other tag shape is ignored. `RELEASING.md` has
+the release this was written for.
+
 GitHub verification fails closed by default. Temporarily degrade it to a warning when
 offline with:
 
