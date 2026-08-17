@@ -58,12 +58,14 @@ The decision logic is pure and stdlib-only: every planner turns a `Box` plus a
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -92,6 +94,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # tier's own callers keep reading `worktree.BOXES_DIR_NAME`.
 BOXES_DIR_NAME = sweep.BOXES_DIR_NAME
 LEASE_FILE_NAME = "leases.json"
+
+# Mutual exclusion for the lease file's read-modify-write, held by `apply_new` and
+# `apply_reap`. A directory rather than a file because `mkdir` is the one creation
+# primitive that is atomic-and-failing on every platform this runs on. The window it
+# closes is real: two guard hooks spawning boxes seconds apart both read the file,
+# and the second write erased the first's entry — the erased box became a worktree
+# no tool could see (`orphaned_boxes` is the recovery for ones already lost).
+LEASE_LOCK_NAME = "leases.lock"
+LEASE_LOCK_WAIT = 10.0
+LEASE_LOCK_STALE = 60.0
 
 # Separates the project from the branch topic in a box name. Two hyphens rather than
 # one because project names already contain hyphens (`apt-finder`) and the box name is
@@ -1155,10 +1167,61 @@ def read_leases(workspace_root: Path) -> dict[str, Box]:
         return {}
 
 
+@contextlib.contextmanager
+def lease_lock(
+    workspace_root: Path, wait: float = LEASE_LOCK_WAIT, stale: float = LEASE_LOCK_STALE
+):
+    """Hold the inter-process mutex around one lease read-modify-write.
+
+    A holder that died is broken after `stale` seconds — the lock is held for
+    milliseconds, so anything older is a corpse. If the lock cannot be had within
+    `wait` seconds the caller proceeds *unlocked*: this tier fails toward
+    availability (see `parse_leases`), and an unlocked write is the status quo
+    ante, not a new failure mode. Same for a filesystem that cannot create the
+    lock directory at all.
+    """
+    path = boxes_root(workspace_root) / LEASE_LOCK_NAME
+    acquired = False
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            os.mkdir(path)
+            acquired = True
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - path.stat().st_mtime
+            except OSError:
+                continue  # released between mkdir and stat — retry at once
+            if age > stale:
+                with contextlib.suppress(OSError):
+                    os.rmdir(path)
+                continue
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        except OSError:
+            break
+    try:
+        yield
+    finally:
+        if acquired:
+            with contextlib.suppress(OSError):
+                os.rmdir(path)
+
+
 def write_leases(workspace_root: Path, boxes: Mapping[str, Box]) -> None:
+    """Replace the lease file atomically, so a reader never sees a torn write.
+
+    A truncated read parses as *no boxes* (`parse_leases`), which re-offers every
+    slot at once — `os.replace` makes that state unobservable.
+    """
     path = lease_file(workspace_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_leases(boxes), encoding="utf-8", newline="\n")
+    tmp = path.parent / f"{path.name}.{os.getpid()}.tmp"
+    tmp.write_text(render_leases(boxes), encoding="utf-8", newline="\n")
+    os.replace(tmp, path)
 
 
 def seed_env(source: Path, target: Path, env: Mapping[str, str]) -> None:
@@ -1237,18 +1300,124 @@ def prune_leases(recorded: Mapping[str, Box], live: Mapping[str, Box]) -> list[s
     return sorted(set(recorded) - set(live))
 
 
+def _worktree_branch(box_dir: Path) -> str:
+    """The branch a linked worktree is on, read without spawning git.
+
+    A linked worktree's `.git` is a *file* naming its private gitdir, and that
+    gitdir's `HEAD` names the branch. Anything else — a plain directory, a full
+    clone, a detached HEAD — returns "" and is not a box. File reads only, because
+    `live_boxes` runs inside a PreToolUse hook on every edit.
+    """
+    try:
+        pointer = (box_dir / ".git").read_text(encoding="utf-8").strip()
+        if not pointer.startswith("gitdir:"):
+            return ""
+        gitdir = Path(pointer[len("gitdir:") :].strip())
+        head = (gitdir / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    prefix = "ref: refs/heads/"
+    return head[len(prefix) :] if head.startswith(prefix) else ""
+
+
+def recovered_slot(env_text: str, registry: devkit_ports.Registry | None) -> int:
+    """The port slot a box's seeded `.env` was rendered from, or -1.
+
+    An adopted box (below) lost its lease before its slot could be recorded, but
+    `seed_env` already wrote that slot's every port into the box's managed block —
+    so the block identifies the slot. Recovering it puts the slot back into
+    `next_lease_slot`'s union, without which the same ports would be leased twice.
+    """
+    if registry is None:
+        return -1
+    managed: dict[str, str] = {}
+    keeping = False
+    for line in env_text.splitlines():
+        stripped = line.strip()
+        if stripped == MANAGED_BEGIN:
+            keeping = True
+        elif stripped == MANAGED_END:
+            keeping = False
+        elif keeping and "=" in stripped:
+            key, _, value = stripped.partition("=")
+            managed[key] = value
+    for slot in range(registry.max_slots):
+        expected = registry.env_for_slot(slot)
+        if expected and all(managed.get(key) == value for key, value in expected.items()):
+            return slot
+    return -1
+
+
+def orphaned_boxes(
+    workspace_root: Path,
+    recorded: Mapping[str, Box],
+    registry: devkit_ports.Registry | None = None,
+) -> dict[str, Box]:
+    """Box worktrees the lease file has forgotten, rebuilt from what survives on disk.
+
+    Two ways an entry goes missing while the worktree stays: the process died in
+    `apply_new` between `git worktree add` and the lease write, or two unlocked
+    writers raced and the loser's entry was overwritten (`lease_lock` closes that
+    window for new spawns; this adopts what was already lost). Un-adopted, such a
+    box is invisible to `list`, `reap --all` and `reconcile` — a checkout, branch
+    and volume set nothing will ever clean, holding work nothing reports.
+
+    The `session` cannot be rebuilt, so an adopted box is never re-found by
+    `find_session_box`; the slot is recovered from the seeded `.env` where the
+    registry can still identify it.
+    """
+    found: dict[str, Box] = {}
+    try:
+        entries = list(boxes_root(workspace_root).iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        name = entry.name
+        if name in recorded or NAME_SEP not in name or not entry.is_dir():
+            continue
+        branch = _worktree_branch(entry)
+        if not branch:
+            continue
+        try:
+            env_text = (entry / ".env").read_text(encoding="utf-8")
+        except OSError:
+            env_text = ""
+        try:
+            created = _dt.datetime.fromtimestamp(entry.stat().st_mtime, _dt.UTC).isoformat(
+                timespec="seconds"
+            )
+        except OSError:
+            created = ""
+        found[name] = Box(
+            name=name,
+            project=project_of(name),
+            branch=branch,
+            slot=recovered_slot(env_text, registry),
+            session="",
+            created=created,
+        )
+    return found
+
+
 def live_boxes(workspace_root: Path) -> dict[str, Box]:
-    """Leases whose worktree directory still exists.
+    """Leases whose worktree directory still exists, plus adopted orphans.
 
     The lease file is a record, not the truth: a `git worktree remove` run by hand
     leaves the entry behind, and a stale entry holds a port slot nobody is using. The
-    directory is the truth, so it is what filters.
+    directory is the truth, so it is what filters. The converse holds too — a
+    worktree the file has forgotten is merged back in by `orphaned_boxes`, so every
+    caller sees it and the next lease write persists it. The registry is loaded only
+    once an orphan is found, keeping the steady-state cost of this read to one
+    directory listing.
     """
-    return {
+    boxes = {
         name: box
         for name, box in read_leases(workspace_root).items()
         if box_path(workspace_root, name).is_dir()
     }
+    if orphaned_boxes(workspace_root, boxes):
+        boxes.update(orphaned_boxes(workspace_root, boxes, load_registry(workspace_root)))
+    return boxes
 
 
 def load_registry(root: Path) -> devkit_ports.Registry | None:
@@ -1453,15 +1622,46 @@ def apply_new(
             return False, notes
 
     path = Path(plan.path)
+
+    # The lease is written as soon as the worktree exists — before seeding and
+    # provisioning — so the window in which a killed process leaves a worktree the
+    # file has never heard of is as narrow as it can be. The slot is re-checked
+    # under the lock because it was chosen at *plan* time, and the fetch and
+    # worktree-add between plan and here are seconds in which a concurrent spawn
+    # can record the same slot first.
+    box = plan.box
+    env = plan.env
+    with lease_lock(root):
+        recorded = read_leases(root)
+        boxes = live_boxes(root)
+        dropped = prune_leases(recorded, boxes)
+        if box.slot >= 0 and any(b.slot == box.slot for b in boxes.values()):
+            registry = load_registry(root)
+            try:
+                slot = next_lease_slot(registry, boxes) if registry is not None else -1
+            except devkit_ports.RegistryError as exc:
+                slot = box.slot
+                notes.append(f"[warn] slot {box.slot} is now shared with another box: {exc}")
+            if slot != box.slot:
+                notes.append(
+                    f"slot {box.slot} was taken while the box was being cut — re-leased slot {slot}"
+                )
+                box = replace(box, slot=slot)
+                env = managed_env(box.name, registry, slot)
+        boxes[box.name] = box
+        write_leases(root, boxes)
+    if dropped:
+        notes.append(f"released {len(dropped)} stale lease(s): {', '.join(dropped)}")
+
     stack = has_stack(path)
     if should_seed_env(stack, is_tracked(path, ".env")):
-        seed_env(source / ".env", path / ".env", plan.env)
-        notes.append(f"seeded {path.name}/.env (COMPOSE_PROJECT_NAME={plan.box.name})")
+        seed_env(source / ".env", path / ".env", env)
+        notes.append(f"seeded {path.name}/.env (COMPOSE_PROJECT_NAME={box.name})")
     elif stack:
         notes.append(
-            f"[warn] .env is tracked in {plan.box.project}, so it was left alone — this "
+            f"[warn] .env is tracked in {box.project}, so it was left alone — this "
             f"box shares the source checkout's COMPOSE_PROJECT_NAME and ports. Export "
-            f"{' '.join(f'{k}={v}' for k, v in sorted(plan.env.items()))} when running "
+            f"{' '.join(f'{k}={v}' for k, v in sorted(env.items()))} when running "
             f"compose here, or gitignore .env so future boxes can be seeded."
         )
 
@@ -1471,16 +1671,8 @@ def apply_new(
     elif plan.provision:
         notes.append(
             f"not provisioned - run `python {Path(__file__).resolve()} provision "
-            f"{plan.box.name} --yes` before running its tests or /ship"
+            f"{box.name} --yes` before running its tests or /ship"
         )
-
-    recorded = read_leases(root)
-    boxes = live_boxes(root)
-    dropped = prune_leases(recorded, boxes)
-    boxes[plan.box.name] = plan.box
-    write_leases(root, boxes)
-    if dropped:
-        notes.append(f"released {len(dropped)} stale lease(s): {', '.join(dropped)}")
     return True, notes
 
 
@@ -1574,10 +1766,11 @@ def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
         notes.append(f"FAILED at `{failed}`: {error}")
         return False, notes
 
-    recorded = read_leases(root)
-    boxes = live_boxes(root)
-    boxes.pop(plan.box, None)
-    write_leases(root, boxes)
+    with lease_lock(root):
+        recorded = read_leases(root)
+        boxes = live_boxes(root)
+        boxes.pop(plan.box, None)
+        write_leases(root, boxes)
     notes.append(f"lease released (slot {plan.slot})" if plan.slot >= 0 else "lease released")
     dropped = [name for name in prune_leases(recorded, boxes) if name != plan.box]
     if dropped:
