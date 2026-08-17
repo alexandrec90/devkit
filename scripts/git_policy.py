@@ -38,6 +38,14 @@ ALWAYS_PROTECTED = frozenset({"main", "master"})
 ZERO_OID_RE = re.compile(r"^0+$")
 SUPPORTED_HOOKS = ("pre-commit", "pre-push")
 
+# Windows only. `run_command` is the single spawn point for two callers that run with no
+# console: the nightly trunk-merge job (`git-merge-default.py`, under `pythonw.exe`) and
+# the installed git hooks. Windows gives a console child of a console-less process a
+# brand new console **window**, so without this every `git` the merge runs is a window
+# flashing on the desktop -- and the merge runs a dozen of them. The flagged child gets a
+# window-less console that its own descendants inherit. Zero off Windows.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # A release tag is the one ref consumers pin, so the commit it names must be one whose
 # suite passed *as tagged*. devkit's `release.yml phase=tag` is what guarantees that: it
 # stages the tag locally, runs lint and the full suite against that exact commit, and
@@ -161,6 +169,7 @@ def run_command(
             encoding="utf-8",
             errors="replace",
             check=False,
+            creationflags=NO_WINDOW,
         )
     except OSError as error:
         return subprocess.CompletedProcess(list(argv), 127, stdout="", stderr=str(error))

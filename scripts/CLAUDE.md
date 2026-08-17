@@ -248,6 +248,37 @@ if forgotten: pass `working_dir` to `task_xml`, because a task's cwd is `system3
 too, because Windows allocates a console window for a console-subsystem child of a GUI
 parent even with every handle redirected.
 
+### A job's reach is longer than the script the scheduler names
+
+`pythonw.exe` stops the job opening a console. It does nothing about the console child
+that job spawns: a process with no console of its own makes Windows allocate a **brand
+new console window** for each console child, so `creationflags=CREATE_NO_WINDOW` has to
+be on the spawn as well. That much was known, and `sweep.py`, `worktree.py` and
+`worktree-guard.py` were fixed for it — with a check that read exactly those three files.
+
+The flicker came back anyway, from `git` spawned by `sync-devkit.py` on the nightly
+upgrade pass, and the shape of the miss is the part worth keeping. **The flag stops at a
+process boundary**: `upgrade-project.py` flags its spawn of `sync-devkit.py`, Windows
+*ignores* the flag because the interpreter it launches is `pythonw.exe` and the flag
+applies only to console-subsystem children, and the fresh console-less process then
+spawns `git` per project with nothing set. A check scoped to one job's own scripts could
+not have seen it, because the script at fault belongs to no job.
+
+So the rule is about the reachable set, and `tests/test_scheduled_jobs.py` holds both
+halves: every module in `UNATTENDED` flags every spawn, and every script an installer
+names has to be in `UNATTENDED`. Only the outermost spawn strictly needs the flag — a
+window-less console *is* inherited, which is why nothing below `git` needs to know — but
+"outermost" is not checkable, so every site carries it.
+
+Its cost is the second half, and it is the one that trades a visible bug for an invisible
+one: **the flag binds a child that captures nothing to the console it was just given**,
+so such a child's output stops reaching the handles it inherited. Every spawn in the
+reconcile path captures, which is why this never bit there. `docker-maint.py` streams,
+and flagging it alone would have emptied `logs/scheduled-docker-prune.log` of everything
+docker said — an artifact reporting an exit code and nothing to diagnose it with, which
+is the failure that made artifacts mandatory two sections up. Capture, or name the
+streams (`docker-maint.inherited_streams`); never just add the flag.
+
 ### The scheduled pass carries the static tier too
 
 `reconcile` is the only thing in the workspace on a schedule, so it is also the only

@@ -58,6 +58,18 @@ from pathlib import Path
 
 MODES = ("up", "down", "restart-engine", "fix", "prune")
 
+# Windows only. The scheduled prune reaches this script under `pythonw.exe`, which has no
+# console, and Windows answers a console-less parent by giving each console child a brand
+# new console **window** -- so an unflagged `docker` here is a window flashing on the
+# desktop for every command the prune runs. The flagged child gets a window-less console
+# instead, and passes it down to its own children.
+#
+# Applied to the interactive spawns too, where it costs nothing: the child still inherits
+# this process's stdout and stderr handles, so a click still sees the output in its own
+# terminal. Uniformity is the point -- `tests/test_scheduled_jobs.py` checks every spawn
+# in a script the scheduler can reach, because one unflagged site restores the flicker.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # Per-mode delegation targets, most-specific first. Relative to the workspace cwd.
 DELEGATES = {
     "up": ("scripts/docker-up.py",),
@@ -96,11 +108,39 @@ def banner(text: str) -> str:
     return f"\n{'=' * 60}\n  {text}\n{'=' * 60}\n"
 
 
+def inherited_streams() -> dict:
+    """The stream arguments that keep a window-less child's output where a reader is.
+
+    `NO_WINDOW` gives the child a console of its own, and **a child that was not told
+    otherwise writes to that console rather than to the handles it inherited**. For a
+    spawn that captures nothing the flag alone is therefore not free: it empties
+    `logs/scheduled-docker-prune.log` of everything docker said, leaving an artifact
+    that reports an exit code and nothing to diagnose it with -- which is the failure
+    that made this job's artifact mandatory in the first place. Naming the streams is
+    what puts the output back.
+
+    Both fallbacks mean the same thing -- there is no stream here to hand down, so
+    inherit and let the child do what it would have done. `sys.stdout` is None under a
+    bare `pythonw.exe`, and under pytest's capture it is an object with no real
+    `fileno` (`io.UnsupportedOperation` is both a ValueError and an OSError).
+    """
+    streams = {}
+    for key, stream in (("stdout", sys.stdout), ("stderr", sys.stderr)):
+        try:
+            stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            continue
+        streams[key] = stream
+    return streams
+
+
 def run(cmd, check: bool = False, timeout: int = 300) -> int:
     """Run `cmd`, streaming output. Returns the exit code (127 if not found)."""
     print(f"  $ {' '.join(str(c) for c in cmd)}")
     try:
-        code = subprocess.run(cmd, timeout=timeout).returncode
+        code = subprocess.run(
+            cmd, timeout=timeout, creationflags=NO_WINDOW, **inherited_streams()
+        ).returncode
     except FileNotFoundError:
         print(f"  [skip] {cmd[0]} not on PATH")
         return 127
@@ -115,7 +155,13 @@ def run(cmd, check: bool = False, timeout: int = 300) -> int:
 def docker_info_ok(timeout: int = 15) -> bool:
     try:
         return (
-            subprocess.run(["docker", "info"], capture_output=True, timeout=timeout).returncode == 0
+            subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                timeout=timeout,
+                creationflags=NO_WINDOW,
+            ).returncode
+            == 0
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
@@ -143,7 +189,7 @@ def start_docker() -> None:
     if not DOCKER_DESKTOP_EXE.is_file():
         print(f"  [skip] {DOCKER_DESKTOP_EXE} not found -- start Docker Desktop manually")
         return
-    subprocess.Popen([str(DOCKER_DESKTOP_EXE)])
+    subprocess.Popen([str(DOCKER_DESKTOP_EXE)], creationflags=NO_WINDOW)
 
 
 def find_delegate(mode: str) -> Path | None:
@@ -243,7 +289,12 @@ def running_containers() -> int:
     """
     try:
         result = subprocess.run(
-            ["docker", "ps", "-q"], capture_output=True, text=True, timeout=30, check=False
+            ["docker", "ps", "-q"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            creationflags=NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return -1
@@ -360,7 +411,11 @@ def main(argv: list[str] | None = None) -> int:
         delegate = find_delegate(mode)
         if delegate:
             print(f"Delegating to this workspace's own script: {delegate}\n")
-            return subprocess.run([sys.executable, str(delegate), *forwarded]).returncode
+            return subprocess.run(
+                [sys.executable, str(delegate), *forwarded],
+                creationflags=NO_WINDOW,
+                **inherited_streams(),
+            ).returncode
 
     return GENERIC[mode](forwarded)
 
