@@ -233,9 +233,11 @@ def test_the_merge_job_is_gated_by_label_not_by_author():
         "`automerge` label is the authorization, and an actor condition makes the "
         "job skip every labelled non-Dependabot PR."
     )
-    assert 'index("automerge")' in text, (
-        f"{AUTOMERGE}'s merge job no longer checks for the `automerge` label -- "
-        "without it, every PR whose gate passes merges itself."
+    assert "scripts/merge-dependabot-prs.py" in text, (
+        f"{AUTOMERGE} no longer delegates to scripts/merge-dependabot-prs.py -- that "
+        "script is where the `automerge`-label check lives (pinned by "
+        "test_merge_dependabot_prs.py), so without it every PR whose gate passes "
+        "merges itself."
     )
 
 

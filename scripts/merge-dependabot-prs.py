@@ -23,11 +23,13 @@ implementation detail: the outage that stranded those PRs took out GraphQL only,
 a REST endpoint, so the retry survives the exact failure that created the work for it.
 
 **The guards are re-derived, never inherited.** A schedule carries no PR, so each
-candidate is re-checked from scratch: authored by Dependabot, carrying the `automerge`
-label the classifier applied, and with a *successful `PR Gate` run on its current head
-SHA*. That last one is what keeps this honest -- it is the same condition the event job
-waits for, so the sweep can only ever complete a merge that was already earned, and a
-push to a `dependabot/` branch moves the head past the gated SHA and disqualifies it.
+candidate is re-checked from scratch: carrying the `automerge` label, and with a
+*successful `PR Gate` run on its current head SHA*. That last one is what keeps this
+honest -- it is the same condition the event job waits for, so the sweep can only ever
+complete a merge that was already earned, and a push to the branch moves the head past
+the gated SHA and disqualifies it. There is deliberately no author guard: only write
+access can apply the label, so the label is the whole authorization, whoever wrote the
+PR -- Dependabot bumps, devkit upgrades, anything a human marks routine.
 
 Vendored from devkit (`sync-devkit.py`'s MANIFEST) and byte-identical everywhere: the
 repository arrives in the environment and the gate's title is one every project shares.
@@ -40,7 +42,8 @@ import os
 import subprocess
 import sys
 
-# The label `dependabot-automerge.yml`'s classify job applies. Only a PR carrying it is a
+# The label `dependabot-automerge.yml`'s classify job applies to routine Dependabot
+# bumps, and anything with write access may apply by hand. Only a PR carrying it is a
 # candidate here -- this file never classifies, because the Dependabot metadata that
 # decides the label is available on the pull_request event and nowhere else.
 AUTOMERGE_LABEL = "automerge"
@@ -48,11 +51,6 @@ AUTOMERGE_LABEL = "automerge"
 # The gate whose success the event-driven job waits on. Vendored byte-identical, so the
 # title cannot be parameterised; `test_ci_workflow_contract.py` requires it per project.
 GATE_WORKFLOW = "PR Gate"
-
-# Dependabot spells its own login differently depending on which API answered: REST's
-# `user.login` says `dependabot[bot]`, while `gh pr list --json author` says
-# `app/dependabot`. Both are accepted so a caller cannot be wrong about which it holds.
-DEPENDABOT_LOGINS = ("dependabot[bot]", "app/dependabot")
 
 # Check conclusions that are not an objection. `neutral` and `skipped` are how a job that
 # opted out of this PR reports, and treating either as a failure would block every repo
@@ -80,11 +78,6 @@ def gh(args: list[str], run) -> str:
 def gh_json(path: str, run):
     """GET a REST path and parse it. Never GraphQL -- see the module docstring."""
     return json.loads(gh(["api", path], run) or "null")
-
-
-def is_dependabot(pr: dict) -> bool:
-    login = ((pr.get("user") or {}).get("login")) or ""
-    return login in DEPENDABOT_LOGINS
 
 
 def labels_of(pr: dict) -> list[str]:
@@ -158,8 +151,9 @@ def verdict(repo: str, pr: dict, run, env_sha: str = "") -> tuple[bool, str]:
     `env_sha` is the commit the triggering gate run actually tested, and is passed only in
     branch mode; the sweep has no such commit and judges the head as it finds it.
     """
-    if not is_dependabot(pr):
-        return False, "not authored by Dependabot"
+    # No author guard, deliberately: only write access can apply the label, so the label
+    # is the whole authorization -- see the module docstring. The head-SHA check below is
+    # what defuses a stray human commit on the branch, not the author field.
     if AUTOMERGE_LABEL not in labels_of(pr):
         return False, f"not labelled {AUTOMERGE_LABEL!r} (unclassified, or held for review)"
     if pr.get("draft"):
@@ -227,9 +221,11 @@ def main(env: dict[str, str] | None = None, run=None) -> int:
         return 1
 
     found, scope = candidates(env, repo, run)
-    considered = [pr for pr in found if is_dependabot(pr)]
+    # Prefiltered on the label so the per-PR detail read below only spends a call on
+    # actual candidates; `verdict` re-checks it against the fresh detail regardless.
+    considered = [pr for pr in found if AUTOMERGE_LABEL in labels_of(pr)]
     if not considered:
-        print(f"No open Dependabot PRs for {scope}; nothing to do.")
+        print(f"No open {AUTOMERGE_LABEL!r}-labelled PRs for {scope}; nothing to do.")
         return 0
 
     gated_sha = env.get("RUN_HEAD_SHA", "").strip()

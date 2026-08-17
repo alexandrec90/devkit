@@ -5,10 +5,10 @@ or from an API call, which is what lets these tests build the whole world as a d
 fake `subprocess.run`: no repository, no network, no `gh`.
 
 What they pin is the pair of properties that make a scheduled merge safe rather than
-reckless. It merges only what the event-driven job would already have merged -- Dependabot
-as author, the classifier's label, a successful `PR Gate` on the *current* head SHA -- and
-it re-derives every one of those rather than inheriting any of them, because a schedule
-carries no PR and no gate result to trust.
+reckless. It merges only what the event-driven job would already have merged -- the
+`automerge` label something with write access applied, a successful `PR Gate` on the
+*current* head SHA -- and it re-derives every one of those rather than inheriting any of
+them, because a schedule carries no PR and no gate result to trust.
 
 The regression underneath all of it: on 2026-08-17 two already-green PRs were stranded
 when `gh pr merge` hit a GraphQL 503, and nothing ever retried them.
@@ -140,12 +140,16 @@ def test_a_pr_labelled_for_manual_review_is_left_alone():
     assert not run.merges()
 
 
-def test_a_pr_somebody_else_authored_is_never_merged():
-    """A `dependabot/` branch is not proof of authorship -- anyone with push access can
-    put a commit on one, and this job runs unattended with `contents: write`."""
+def test_a_labelled_pr_merges_whoever_wrote_it():
+    """The label is the whole authorization, for every PR author.
+
+    Only write access can apply a label, so an author guard adds no safety the label
+    does not already carry -- and it silently excluded the routine PRs the label exists
+    for (devkit upgrades, anything a human marks routine). A stray commit pushed onto
+    the branch is defused by the head-SHA guard, not by the author field."""
     run = FakeRun(world(prs=[pr(user={"login": "a-human"})]))
     assert merger.main(env(), run) == 0
-    assert not run.merges()
+    assert len(run.merges()) == 1, run.calls
 
 
 def test_a_pr_whose_gate_never_passed_is_not_merged():
