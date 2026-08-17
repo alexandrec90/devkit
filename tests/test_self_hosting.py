@@ -71,8 +71,8 @@ def test_devkit_wires_every_hook_event_the_template_does():
     running an older version of it.
     """
     template_hooks = set(re.findall(r'"(\w+)": \[', TEMPLATE_SETTINGS.read_text(encoding="utf-8")))
-    # `hooks` itself is not an event, and neither is the permissions `allow` list.
-    template_events = {name for name in template_hooks if name not in {"hooks", "allow"}}
+    # `hooks` itself is not an event.
+    template_events = {name for name in template_hooks if name != "hooks"}
     missing = template_events - set(_settings()["hooks"])
     assert not missing, f"the template wires {sorted(missing)} but devkit does not"
 
@@ -93,8 +93,15 @@ def test_generated_projects_do_not_override_user_preferences():
     only because they happened to match.
 
     Which model, how much effort, and how much the harness may do unattended are
-    properties of the operator, not of the repo. The template gets hooks, permission
-    allow-lists and telemetry — the things that really are per-project.
+    properties of the operator, not of the repo. The template gets hooks and telemetry —
+    the things that really are per-project.
+
+    `permissions` is banned wholesale, not just `defaultMode`. How much an agent may do
+    without asking is the operator's trust decision, made once in the user file; a seeded
+    allow-list is a one-shot template copy that nothing reconciles, so each project's
+    drifted separately until no two repos granted the same set — and under the operator's
+    own `defaultMode` the lists were dead weight the whole time. A project that needs a
+    repo-shaped rule (a `deny` guarding its secrets) adds it deliberately, not from here.
     """
     template = json.loads(TEMPLATE_SETTINGS.read_text(encoding="utf-8"))
     present = [key for key in USER_PREFERENCE_KEYS if key in template]
@@ -102,9 +109,9 @@ def test_generated_projects_do_not_override_user_preferences():
         f"the template sets {present}, which overrides the user's own selection in "
         "every generated project"
     )
-    assert "defaultMode" not in template.get("permissions", {}), (
-        "the template pins permissions.defaultMode, which overrides the user's own "
-        "permission mode in every generated project"
+    assert "permissions" not in template, (
+        "the template seeds a permissions block, which overrides the user's own "
+        "permission rules in every generated project and is reconciled by nothing"
     )
 
 

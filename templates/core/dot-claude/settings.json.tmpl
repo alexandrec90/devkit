@@ -9,18 +9,6 @@
     "OTEL_LOGS_EXPORT_INTERVAL": "5000",
     "OTEL_RESOURCE_ATTRIBUTES": "service.name={{ name }},service.instance.id={{ checkout }},deployment.environment=local"
   },
-  "permissions": {
-    "allow": [
-      "Bash(*)",
-      "Read(*)",
-      "Edit(*)",
-      "Write(*)",
-      "Grep(*)",
-      "Glob(*)",
-      "WebFetch(*)",
-      "WebSearch(*)"
-    ]
-  },
   "hooks": {
     "SessionStart": [
       {
