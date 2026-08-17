@@ -334,7 +334,10 @@ One pass, both tiers. It reaps every box whose PR has merged and reclaims disk w
 the volume is low; then it runs `sweep.py --sync` over the **static** checkouts, so a
 merged PR advances each one's default branch instead of leaving it parked on a spent
 task branch that the next session then opens on. Merging stays a human decision unless
-the task was installed with `--merge`, and the checkout half destroys nothing: it
+the task was installed with `--merge`, which squash-merges a green box PR only when it
+carries the `automerge` label — applying the label is the review decision, and
+`upgrade-project.py` labels its PRs at creation (`--merge-label ""` at install time
+drops the gate and merges anything green). The checkout half destroys nothing: it
 refuses any checkout holding uncommitted work, unpushed commits or an open PR, names
 it, and moves on.
 

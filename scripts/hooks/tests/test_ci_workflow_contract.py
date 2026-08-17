@@ -214,6 +214,28 @@ def test_dependabot_prs_have_something_that_merges_them():
     )
 
 
+def test_the_merge_job_is_gated_by_label_not_by_author():
+    """The `automerge` label is the whole authorization, for every PR author.
+
+    The merge job once required Dependabot as both the run's actor and the PR's
+    author, which silently excluded the routine PRs the label exists for -- devkit
+    upgrades, and anything a human labels instead of babysitting the gate. Only
+    write access can apply a label, so an author condition adds no safety the label
+    does not already carry; reintroducing one turns labelled PRs back into ones
+    that sit open behind a passed gate.
+    """
+    text = _read(WORKFLOWS_DIR / AUTOMERGE)
+    assert "workflow_run.actor" not in text, (
+        f"{AUTOMERGE}'s merge job conditions on the workflow_run actor again; the "
+        "`automerge` label is the authorization, and an actor condition makes the "
+        "job skip every labelled non-Dependabot PR."
+    )
+    assert 'index("automerge")' in text, (
+        f"{AUTOMERGE}'s merge job no longer checks for the `automerge` label -- "
+        "without it, every PR whose gate passes merges itself."
+    )
+
+
 def test_dependency_update_prs_are_assigned_to_someone():
     """Otherwise they are visible in no aggregate view, in any repo.
 

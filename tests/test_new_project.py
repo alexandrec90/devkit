@@ -1253,16 +1253,17 @@ def test_generated_automerge_tells_gh_which_repo_it_is_acting_on(tmp_path):
 def test_generated_automerge_re_checks_every_guard_before_merging(tmp_path):
     """`workflow_run` hands over a branch name, not a PR — the guards must be re-run.
 
-    A human can push to a `dependabot/...` branch, and a new commit can land after
-    the gate passed. Each of these three checks is what keeps the merge tied to the
-    exact commit that was gated, authored by the bot, and classified as safe.
+    A new commit can land after the gate passed, and the label can be absent. The
+    two checks keep the merge tied to the exact commit that was gated and to a PR
+    something with write access explicitly labelled. There is deliberately no
+    author guard any more: the label is the authorization, whoever wrote the PR
+    (Dependabot bumps, devkit upgrades, anything a human marks routine).
     """
     root = generate(tmp_path, {})
     body = (root / ".github" / "workflows" / "dependabot-automerge.yml").read_text(encoding="utf-8")
     merge_job = body.split("  merge:", 1)[1]
-    assert 'if [ "$author" != "app/dependabot" ]' in merge_job, "any author could be merged"
     assert 'if [ "$head_sha" != "$RUN_HEAD_SHA" ]' in merge_job, "an ungated commit could merge"
-    assert 'index("automerge")' in merge_job, "a runtime major could merge unreviewed"
+    assert 'index("automerge")' in merge_job, "an unlabelled PR could merge unreviewed"
 
 
 def test_generated_automerge_holds_runtime_majors_for_review(tmp_path):

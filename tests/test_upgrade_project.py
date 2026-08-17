@@ -334,9 +334,13 @@ class BoxRun:
         monkeypatch.setattr(up.sweep, "git_for", lambda _p: self.git)
         monkeypatch.setattr(up.sweep, "gh_for", lambda _p: no_pr)
         monkeypatch.setattr(up.tb, "detect_default_branch", lambda *_a, **_kw: "main")
-        monkeypatch.setattr(
-            up.sweep, "ensure_pr", lambda *_a: ("https://example.test/pr/1", True, "")
-        )
+        self.pr_plans: list = []
+
+        def ensure_pr(_gh, plan):
+            self.pr_plans.append(plan)
+            return ("https://example.test/pr/1", True, "")
+
+        monkeypatch.setattr(up.sweep, "ensure_pr", ensure_pr)
 
     def run(self, tmp_path):
         return up.upgrade_one(
@@ -365,6 +369,16 @@ def test_the_commit_and_push_happen_in_the_box(tmp_path, monkeypatch):
     run.run(tmp_path)
     assert ("add", "-A") in run.git.calls
     assert ("push", "-u", "origin", "claude/devkit-upgrade-0812") in run.git.calls
+
+
+def test_the_upgrade_pr_is_labelled_automerge(tmp_path, monkeypatch):
+    """An upgrade PR is a vendored copy of an already-released tag, so a green gate
+    is the whole review; the label is what lets `reconcile --merge` and the vendored
+    workflow land it without a human. Losing it turns every release back into one
+    hand-merged PR per consumer."""
+    run = BoxRun(tmp_path, monkeypatch)
+    assert run.run(tmp_path).code == 0
+    assert [plan.pr_labels for plan in run.pr_plans] == [(up.sweep.AUTOMERGE_LABEL,)]
 
 
 def test_nothing_checks_out_a_branch_in_the_static_checkout(tmp_path, monkeypatch):

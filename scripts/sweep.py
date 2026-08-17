@@ -261,6 +261,21 @@ class Result:
     plan: list[str] = field(default_factory=list)
 
 
+# The label that marks a PR as mergeable without a human: `worktree.py reconcile
+# --merge --merge-label automerge` merges it locally, and the vendored
+# `dependabot-automerge.yml` merges it server-side once the PR Gate passes. Only
+# someone with write access can apply a label, which is what makes it an
+# authorization rather than a request.
+AUTOMERGE_LABEL = "automerge"
+
+# Colour and description per label `ensure_pr` may need to create. The `automerge`
+# spelling matches `dependabot-automerge.yml`'s `gh label create` exactly -- both
+# use `--force`, so two spellings would flip the label back and forth per run.
+LABEL_SPECS: dict[str, tuple[str, str]] = {
+    AUTOMERGE_LABEL: ("0e8a16", "PR the harness may merge once the gate passes"),
+}
+
+
 @dataclass(frozen=True)
 class Plan:
     """A mutation `--branch`/`--sync` would perform on one checkout.
@@ -276,6 +291,11 @@ class Plan:
     another entry in `steps` so that `steps` stays homogeneous -- every existing
     caller, renderer and safety test reads it as "git argv and nothing else", and
     a `gh` fragment hiding in there would quietly falsify all of them.
+
+    `pr_labels` are applied to the PR whether it was created or reused -- a reused
+    PR may predate the caller learning to label -- and each is created in the repo
+    first, because both `gh pr create --label` and `gh pr edit --add-label` fail
+    outright on a label the repo has never carried.
     """
 
     steps: tuple[tuple[str, ...], ...] = ()
@@ -285,6 +305,7 @@ class Plan:
     pr_body: str = ""
     pr_head: str = ""
     pr_base: str = ""
+    pr_labels: tuple[str, ...] = ()
 
     @property
     def acts(self) -> bool:
@@ -1241,11 +1262,22 @@ def ensure_pr(gh: Git, plan: Plan) -> tuple[str, bool, str]:
     conflict: `--ship` has to be safe to re-run over a workspace where some
     checkouts were shipped on an earlier pass, and `gh pr create` on a branch that
     already has one fails with a message that reads like a real error.
+
+    A label failure is an error, not a shrug, and the URL is still returned beside
+    it: the PR is real either way, but a plan that asked for `automerge` and did
+    not get it is a PR that silently waits for the review it was labelled to skip.
     """
     existing = gh("pr", "view", plan.pr_head, "--json", "url", "--jq", ".url")
     if existing.returncode == 0 and existing.stdout.strip():
-        return existing.stdout.strip(), False, ""
+        url = existing.stdout.strip()
+        return url, False, _apply_labels(gh, plan, url)
 
+    for label in plan.pr_labels:
+        ensured = _ensure_label(gh, label)
+        if ensured.returncode != 0:
+            return "", False, (ensured.stderr or ensured.stdout or "").strip()
+
+    label_args = [arg for label in plan.pr_labels for arg in ("--label", label)]
     created = gh(
         "pr",
         "create",
@@ -1257,12 +1289,34 @@ def ensure_pr(gh: Git, plan: Plan) -> tuple[str, bool, str]:
         plan.pr_title,
         "--body",
         plan.pr_body,
+        *label_args,
     )
     if created.returncode != 0:
         return "", False, (created.stderr or created.stdout or "").strip()
     # `gh pr create` prints the URL as its last line of output.
     lines = [line.strip() for line in created.stdout.splitlines() if line.strip()]
     return (lines[-1] if lines else ""), True, ""
+
+
+def _ensure_label(gh: Git, label: str):
+    """Create `label` in the repo, idempotently -- `--force` also makes an existing
+    label converge on this spelling of its colour and description."""
+    color, description = LABEL_SPECS.get(label, ("ededed", ""))
+    return gh("label", "create", label, "--force", "--color", color, "--description", description)
+
+
+def _apply_labels(gh: Git, plan: Plan, url: str) -> str:
+    """Add `plan.pr_labels` to an existing PR; "" on success, the failure otherwise."""
+    for label in plan.pr_labels:
+        ensured = _ensure_label(gh, label)
+        if ensured.returncode != 0:
+            detail = (ensured.stderr or ensured.stdout or "").strip()
+            return f"PR exists at {url}, but creating label `{label}` failed: {detail}"
+        added = gh("pr", "edit", plan.pr_head, "--add-label", label)
+        if added.returncode != 0:
+            detail = (added.stderr or added.stdout or "").strip()
+            return f"PR exists at {url}, but labelling it `{label}` failed: {detail}"
+    return ""
 
 
 @dataclass
