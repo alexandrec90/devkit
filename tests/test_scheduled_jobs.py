@@ -139,6 +139,15 @@ def test_the_prune_writes_the_file_its_installer_advertises():
     assert "--always" in installer.prune_arguments(r"C:\py\pythonw.exe", root=Path(r"C:\ws"))
 
 
+def test_the_stop_idle_pass_writes_the_file_its_installer_advertises():
+    """Same shape as the prune, same runner even: `docker-maint.py` writes no artifact
+    of its own, so the claim is about the label the wrapper is given."""
+    installer = load_script("scripts/install-docker-stop-idle.py")
+    log_wrap = load_script("scripts/log-wrap.py")
+    assert installer.ARTIFACT == f"logs/{log_wrap.slug(installer.LABEL)}.log"
+    assert "--always" in installer.stop_idle_arguments(r"C:\py\pythonw.exe", root=Path(r"C:\ws"))
+
+
 def test_the_vanillaland_merge_writes_the_file_its_installer_advertises():
     """Same shape as the prune: `git-merge-default.py` has several callers -- a VS Code
     task among them -- and writes no artifact of its own, so the claim here is about the
@@ -183,9 +192,9 @@ UNATTENDED: dict[str, str] = {
     # entry points, named directly in an installer's argv
     "scripts/worktree.py": "devkit-worktree-reconcile runs it every 15 minutes",
     "scripts/upgrade-project.py": "devkit-upgrade-projects runs it nightly",
-    "scripts/docker-maint.py": "devkit-docker-prune runs it nightly",
+    "scripts/docker-maint.py": "devkit-docker-prune and devkit-docker-stop-idle run it nightly",
     "scripts/git-merge-default.py": "devkit-vanillaland-merge runs it nightly",
-    "scripts/log-wrap.py": "the wrapper two of those jobs are launched through",
+    "scripts/log-wrap.py": "the wrapper three of those jobs are launched through",
     # reached from an entry point
     "scripts/sweep.py": "the git and gh IO for reconcile, upgrade and the merge",
     "scripts/sync-devkit.py": "upgrade-project.py spawns it per project, once per pass",

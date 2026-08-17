@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from datetime import timedelta
 
 import pytest
 from support import load_script
@@ -260,3 +261,209 @@ def test_the_flag_reaches_the_generic_prune(monkeypatch):
     docker_maint.main(["prune", "--generic", "--idle-only"])
     docker_maint.main(["prune", "--generic"])
     assert seen == [True, False]
+
+
+# --- the unattended stop-idle pass ----------------------------------------------
+# `stop-idle` runs nightly against every compose stack at once, so its two invariants
+# are the expensive-to-get-wrong ones: it stops nothing that has not opted in, and
+# every ambiguity -- unreadable engine, unreadable netstat, unparseable start time --
+# reads as "in use" rather than as "idle". The parsers are pure and tested as such;
+# the orchestration is tested with every spawn faked out.
+
+
+def test_published_ports_reads_every_mapping_and_nothing_else():
+    field = "127.0.0.1:5433->5432/tcp, 0.0.0.0:8080->80/tcp, [::]:8080->80/tcp, 6379/tcp"
+    assert docker_maint.published_ports(field) == {5433, 8080}
+
+
+def test_established_ports_reads_both_ends_v4_and_v6_and_skips_listeners():
+    output = (
+        "Active Connections\n"
+        "\n"
+        "  Proto  Local Address          Foreign Address        State\n"
+        "  TCP    127.0.0.1:5433         127.0.0.1:52344        ESTABLISHED\n"
+        "  TCP    [::1]:52999            [::1]:9200             ESTABLISHED\n"
+        "  TCP    0.0.0.0:1433           0.0.0.0:0              LISTENING\n"
+    )
+    assert docker_maint.established_ports(output) == {5433, 52344, 52999, 9200}
+
+
+def test_compose_stacks_groups_by_project_and_leaves_unlabelled_containers_alone():
+    """An ad-hoc `docker run` -- an MCP server, a one-off shell -- is not a stack."""
+    listing = (
+        "abc\tcarameli\tC:\\ws\\carameli\t127.0.0.1:5432->5432/tcp\n"
+        "def\tcarameli\tC:\\ws\\carameli\t127.0.0.1:6379->6379/tcp\n"
+        "mcp\t\t\t\n"
+    )
+    stacks = docker_maint.compose_stacks(listing)
+    assert set(stacks) == {"carameli"}
+    assert stacks["carameli"]["ids"] == ["abc", "def"]
+    assert stacks["carameli"]["ports"] == {5432, 6379}
+
+
+def test_auto_stop_is_opt_in_so_absence_in_every_form_means_no(tmp_path):
+    """A collector-style stack does scheduled work with no client connected, which no
+    connection check can tell apart from idle -- so the default has to be "keep"."""
+    assert not docker_maint.auto_stop_enabled("")
+    assert not docker_maint.auto_stop_enabled(str(tmp_path))
+    (tmp_path / ".devkit.toml").write_text('[project]\nenv_prefix = "X"\n', encoding="utf-8")
+    assert not docker_maint.auto_stop_enabled(str(tmp_path))
+
+
+def test_auto_stop_requires_the_literal_true(tmp_path):
+    manifest = tmp_path / ".devkit.toml"
+    manifest.write_text("[docker]\nauto_stop = true\n", encoding="utf-8")
+    assert docker_maint.auto_stop_enabled(str(tmp_path))
+    manifest.write_text('[docker]\nauto_stop = "yes"\n', encoding="utf-8")
+    assert not docker_maint.auto_stop_enabled(str(tmp_path))
+
+
+def test_a_manifest_that_does_not_parse_reads_as_not_opted_in(tmp_path):
+    (tmp_path / ".devkit.toml").write_text("[docker\n", encoding="utf-8")
+    assert not docker_maint.auto_stop_enabled(str(tmp_path))
+
+
+def test_youngest_start_trims_dockers_nanoseconds_and_takes_the_newest():
+    listing = "2026-08-17T03:00:00.123456789Z\n2026-08-17T09:30:00.987654321Z\n"
+    newest = docker_maint.youngest_start(listing)
+    assert newest is not None
+    assert (newest.hour, newest.minute) == (9, 30)
+
+
+def test_youngest_start_is_none_when_nothing_parses():
+    assert docker_maint.youngest_start("template parsing error\n") is None
+
+
+def _idle_stack(ports=frozenset({5433})):
+    return {"ids": ["abc"], "workdir": "C:\\ws\\project", "ports": set(ports)}
+
+
+def _old_start(monkeypatch):
+    """`docker inspect` answering with a start far outside the grace window."""
+    monkeypatch.setattr(
+        docker_maint, "_capture", lambda cmd, timeout=60: "2020-01-01T00:00:00.000000000Z\n"
+    )
+
+
+def test_a_stack_that_never_opted_in_is_kept(monkeypatch):
+    monkeypatch.setattr(docker_maint, "auto_stop_enabled", lambda workdir: False)
+    reason = docker_maint.keep_reason(_idle_stack(), set(), _now())
+    assert reason is not None
+    assert "auto_stop" in reason
+
+
+def test_an_unreadable_netstat_keeps_every_stack(monkeypatch):
+    """None means "could not be asked", and guessing "no connections" is the guess
+    that licenses stopping a database out from under someone."""
+    monkeypatch.setattr(docker_maint, "auto_stop_enabled", lambda workdir: True)
+    reason = docker_maint.keep_reason(_idle_stack(), None, _now())
+    assert reason is not None
+    assert "netstat" in reason
+
+
+def test_an_established_connection_to_a_published_port_keeps_the_stack(monkeypatch):
+    monkeypatch.setattr(docker_maint, "auto_stop_enabled", lambda workdir: True)
+    reason = docker_maint.keep_reason(_idle_stack({5433}), {5433, 60123}, _now())
+    assert reason is not None
+    assert "5433" in reason
+
+
+def test_a_recently_started_stack_is_inside_the_grace_window(monkeypatch):
+    """An agent that brought a stack up minutes ago has no connections during the edit
+    half of its loop; recency is the only signal that something still wants it."""
+    monkeypatch.setattr(docker_maint, "auto_stop_enabled", lambda workdir: True)
+    recent = (_now() - timedelta(minutes=10)).isoformat()
+    monkeypatch.setattr(docker_maint, "_capture", lambda cmd, timeout=60: recent + "\n")
+    reason = docker_maint.keep_reason(_idle_stack(), set(), _now())
+    assert reason is not None
+    assert "grace" in reason
+
+
+def test_an_unreadable_start_time_keeps_the_stack(monkeypatch):
+    monkeypatch.setattr(docker_maint, "auto_stop_enabled", lambda workdir: True)
+    monkeypatch.setattr(docker_maint, "_capture", lambda cmd, timeout=60: None)
+    assert docker_maint.keep_reason(_idle_stack(), set(), _now()) is not None
+
+
+def test_an_opted_in_idle_old_stack_is_cleared_to_stop(monkeypatch):
+    monkeypatch.setattr(docker_maint, "auto_stop_enabled", lambda workdir: True)
+    _old_start(monkeypatch)
+    assert docker_maint.keep_reason(_idle_stack(), set(), _now()) is None
+
+
+def _now():
+    return docker_maint.datetime.now(docker_maint.timezone.utc)
+
+
+def _routed_capture(monkeypatch, ps=None, netstat=None, inspect=None):
+    """Answer each of the pass's three captures by the command being run."""
+
+    def fake(cmd, timeout=60):
+        if cmd[:2] == ["docker", "ps"]:
+            return ps
+        if cmd[0] == "netstat":
+            return netstat
+        if cmd[:2] == ["docker", "inspect"]:
+            return inspect
+        raise AssertionError(f"unexpected capture: {cmd}")
+
+    monkeypatch.setattr(docker_maint, "_capture", fake)
+
+
+def test_stop_idle_reports_nothing_to_do_when_the_engine_cannot_be_asked(
+    monkeypatch, commands, capsys
+):
+    _routed_capture(monkeypatch, ps=None)
+    assert docker_maint.generic_stop_idle() == 0
+    assert commands == []
+    assert "could not be asked" in capsys.readouterr().out
+
+
+def test_stop_idle_stops_the_idle_opted_in_stack_and_names_why_it_keeps_the_rest(
+    monkeypatch, commands, capsys
+):
+    """The full pass: one stack opted in and idle, one busy on a published port, one
+    that never opted in. Only the first is stopped, with `docker stop` -- containers
+    and volumes survive, and `unless-stopped` keeps a stopped stack stopped."""
+    listing = (
+        "abc\tidle-proj\tC:\\ws\\idle\t127.0.0.1:5433->5432/tcp\n"
+        "def\tbusy-proj\tC:\\ws\\busy\t127.0.0.1:9200->9200/tcp\n"
+        "ghi\tcollector\tC:\\ws\\collector\t\n"
+    )
+    netstat = "  TCP    127.0.0.1:9200    127.0.0.1:52344    ESTABLISHED\n"
+    _routed_capture(
+        monkeypatch, ps=listing, netstat=netstat, inspect="2020-01-01T00:00:00.000000000Z\n"
+    )
+    monkeypatch.setattr(
+        docker_maint, "auto_stop_enabled", lambda workdir: workdir != "C:\\ws\\collector"
+    )
+    assert docker_maint.generic_stop_idle() == 0
+    assert commands == [["docker", "stop", "abc"]]
+    printed = capsys.readouterr().out
+    assert "[stop] idle-proj" in printed
+    assert "[keep] busy-proj" in printed
+    assert "[keep] collector" in printed
+
+
+def test_stop_idle_stops_nothing_when_netstat_cannot_be_read(monkeypatch, commands, capsys):
+    listing = "abc\tidle-proj\tC:\\ws\\idle\t127.0.0.1:5433->5432/tcp\n"
+    _routed_capture(monkeypatch, ps=listing, netstat=None)
+    monkeypatch.setattr(docker_maint, "auto_stop_enabled", lambda workdir: True)
+    assert docker_maint.generic_stop_idle() == 0
+    assert commands == []
+    assert "cannot be verified" in capsys.readouterr().out
+
+
+def test_a_failed_stop_is_the_only_thing_that_reddens_the_pass(monkeypatch, capsys):
+    listing = "abc\tidle-proj\tC:\\ws\\idle\t127.0.0.1:5433->5432/tcp\n"
+    _routed_capture(monkeypatch, ps=listing, netstat="", inspect="2020-01-01T00:00:00.000000000Z\n")
+    monkeypatch.setattr(docker_maint, "auto_stop_enabled", lambda workdir: True)
+    monkeypatch.setattr(docker_maint, "run", lambda cmd, **kw: 1)
+    assert docker_maint.generic_stop_idle() == 1
+
+
+def test_the_mode_reaches_the_generic_pass(monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(docker_maint, "generic_stop_idle", lambda: seen.append("ran") or 0)
+    assert docker_maint.main(["stop-idle", "--generic"]) == 0
+    assert seen == ["ran"]
