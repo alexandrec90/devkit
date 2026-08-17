@@ -842,6 +842,209 @@ def test_all_never_forces():
     assert faults and "never forces" in faults[0]
 
 
+# --- the lease file's read-modify-write is exclusive ---------------------------
+#
+# Two guard hooks spawning boxes seconds apart both read `leases.json` and the second
+# write erased the first's entry; the erased box (`carameli--voicemail-hook-0816`,
+# 2026-08-16) became a worktree no tool could see. `lease_lock` closes the window and
+# `orphaned_boxes` (next section) adopts what an unlocked writer already lost.
+
+
+def _lock_dir(tmp_path: Path) -> Path:
+    return worktree.boxes_root(tmp_path) / worktree.LEASE_LOCK_NAME
+
+
+def test_the_lease_lock_is_held_inside_and_released_after(tmp_path):
+    with worktree.lease_lock(tmp_path):
+        assert _lock_dir(tmp_path).is_dir()
+    assert not _lock_dir(tmp_path).exists()
+
+
+def test_a_held_lock_is_waited_on_then_stepped_past_not_stolen(tmp_path):
+    """Timing out fails toward availability -- an unlocked write is the status quo
+    ante -- but the *other* holder's lock must survive our exit untouched."""
+    _lock_dir(tmp_path).mkdir(parents=True)
+    with worktree.lease_lock(tmp_path, wait=0.2, stale=60.0):
+        pass
+    assert _lock_dir(tmp_path).is_dir()
+
+
+def test_a_lock_whose_holder_died_is_broken(tmp_path):
+    lock = _lock_dir(tmp_path)
+    lock.mkdir(parents=True)
+    stale = worktree.time.time() - 300
+    worktree.os.utime(lock, (stale, stale))
+    with worktree.lease_lock(tmp_path, wait=5.0, stale=60.0):
+        assert lock.is_dir()
+    assert not lock.exists()  # we owned it, so exit removed it
+
+
+def test_write_leases_replaces_the_file_leaving_no_partial_state(tmp_path):
+    worktree.write_leases(tmp_path, {"a--x-0806": box("a--x-0806")})
+    assert "a--x-0806" in worktree.read_leases(tmp_path)
+    leftovers = [p for p in worktree.boxes_root(tmp_path).iterdir() if p.suffix == ".tmp"]
+    assert leftovers == []
+
+
+def _spawn_plan(name: str = "demo--x-0806", slot: int = -1) -> worktree.SpawnPlan:
+    spawned = box(name, project="demo", branch="agent/x-0806", slot=slot, session="s1")
+    return worktree.SpawnPlan(box=spawned, path=name, steps=())
+
+
+def test_apply_new_reads_and_writes_the_leases_under_the_lock(tmp_path, monkeypatch):
+    """The reversion check for the lost-update race: the fresh read and the write
+    happen inside one critical section, so a concurrent spawn's entry cannot be
+    read-before and overwritten-after."""
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+    locked_during: list[bool] = []
+    real_read, real_write = worktree.read_leases, worktree.write_leases
+    monkeypatch.setattr(
+        worktree,
+        "read_leases",
+        lambda root: (locked_during.append(_lock_dir(root).is_dir()), real_read(root))[1],
+    )
+    monkeypatch.setattr(
+        worktree,
+        "write_leases",
+        lambda root, boxes: (
+            locked_during.append(_lock_dir(root).is_dir()),
+            real_write(root, boxes),
+        )[1],
+    )
+
+    ok, _ = worktree.apply_new(_spawn_plan(), workspace, provision=False)
+
+    assert ok
+    assert locked_during and all(locked_during)
+    assert "demo--x-0806" in real_read(workspace.parent)
+
+
+def test_apply_reap_releases_the_lease_under_the_same_lock(tmp_path, monkeypatch):
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    worktree.write_leases(workspace.parent, {"demo--x-0806": box("demo--x-0806", project="demo")})
+    worktree.box_path(workspace.parent, "demo--x-0806").mkdir()  # live: the dir exists
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+    locked_during: list[bool] = []
+    real_write = worktree.write_leases
+    monkeypatch.setattr(
+        worktree,
+        "write_leases",
+        lambda root, boxes: (
+            locked_during.append(_lock_dir(root).is_dir()),
+            real_write(root, boxes),
+        )[1],
+    )
+
+    ok, _ = worktree.apply_reap(worktree.ReapPlan(box="demo--x-0806", project="demo"), workspace)
+
+    assert ok
+    assert locked_during and all(locked_during)
+    assert "demo--x-0806" not in worktree.read_leases(workspace.parent)
+
+
+def test_apply_new_re_leases_a_slot_taken_while_the_box_was_cut(tmp_path, monkeypatch):
+    """The slot is chosen at plan time and the fetch + worktree-add between plan and
+    lease write are seconds wide; a concurrent spawn recording the same slot first
+    must not end with two stacks publishing the same host ports."""
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    rival = box("demo--rival-0806", project="demo", slot=3)
+    worktree.boxes_root(workspace.parent).mkdir(parents=True)
+    worktree.box_path(workspace.parent, rival.name).mkdir()  # live: the dir exists
+    worktree.write_leases(workspace.parent, {rival.name: rival})
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+    monkeypatch.setattr(worktree, "load_registry", lambda root: registry())
+
+    ok, notes = worktree.apply_new(_spawn_plan(slot=3), workspace, provision=False)
+
+    assert ok
+    recorded = worktree.read_leases(workspace.parent)
+    assert recorded["demo--x-0806"].slot == 0
+    assert recorded["demo--rival-0806"].slot == 3
+    assert any("re-leased slot 0" in note for note in notes)
+
+
+# --- a worktree the lease file forgot is adopted, not leaked -------------------
+
+
+def _orphan(
+    tmp_path: Path, name: str = "carameli--lost-0806", branch: str = "agent/lost-0806"
+) -> Path:
+    """A linked worktree the lease file has never heard of, built from files alone."""
+    gitdir = tmp_path / "carameli" / ".git" / "worktrees" / name
+    gitdir.mkdir(parents=True)
+    (gitdir / "HEAD").write_text(f"ref: refs/heads/{branch}\n", encoding="utf-8")
+    home = worktree.boxes_root(tmp_path) / name
+    home.mkdir(parents=True)
+    (home / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    return home
+
+
+def test_a_worktree_the_lease_file_forgot_is_adopted_on_read(tmp_path):
+    _orphan(tmp_path)
+    boxes = worktree.live_boxes(tmp_path)
+    adopted = boxes["carameli--lost-0806"]
+    assert adopted.project == "carameli"
+    assert adopted.branch == "agent/lost-0806"
+    assert adopted.session == ""  # never re-found by find_session_box, only managed
+
+
+def test_a_recorded_box_is_not_re_adopted_over_its_lease(tmp_path):
+    _orphan(tmp_path, "carameli--kept-0806", "agent/kept-0806")
+    kept = box("carameli--kept-0806", branch="agent/kept-0806", slot=5, session="s9")
+    worktree.write_leases(tmp_path, {kept.name: kept})
+    assert worktree.live_boxes(tmp_path)["carameli--kept-0806"] == kept
+
+
+def test_a_plain_directory_beside_the_boxes_is_not_adopted(tmp_path):
+    (worktree.boxes_root(tmp_path) / "carameli--not-a-worktree").mkdir(parents=True)
+    (worktree.boxes_root(tmp_path) / "slugs").mkdir()
+    assert worktree.live_boxes(tmp_path) == {}
+
+
+def test_a_detached_worktree_is_not_adopted(tmp_path):
+    home = _orphan(tmp_path, "carameli--detached-0806")
+    gitdir = Path((home / ".git").read_text(encoding="utf-8")[len("gitdir:") :].strip())
+    (gitdir / "HEAD").write_text("0" * 40 + "\n", encoding="utf-8")
+    assert worktree.live_boxes(tmp_path) == {}
+
+
+def test_adoption_recovers_the_slot_from_the_seeded_env(tmp_path):
+    reg = registry()
+    home = _orphan(tmp_path)
+    (home / ".env").write_text(
+        worktree.render_env("", worktree.managed_env("carameli--lost-0806", reg, 3)),
+        encoding="utf-8",
+    )
+    adopted = worktree.orphaned_boxes(tmp_path, {}, reg)["carameli--lost-0806"]
+    assert adopted.slot == 3
+
+
+def test_an_adopted_box_without_an_env_spends_no_slot(tmp_path):
+    _orphan(tmp_path)
+    adopted = worktree.orphaned_boxes(tmp_path, {}, registry())["carameli--lost-0806"]
+    assert adopted.slot == -1
+
+
+def test_the_next_lease_write_persists_an_adopted_box(tmp_path, monkeypatch):
+    """Adoption is passive on read; any apply that writes the file makes it durable,
+    which is what puts the orphan back in reach of `reap --all` and `reconcile`."""
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    _orphan(workspace.parent)
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+
+    ok, _ = worktree.apply_new(_spawn_plan(), workspace, provision=False)
+
+    assert ok
+    recorded = worktree.read_leases(workspace.parent)
+    assert "carameli--lost-0806" in recorded
+    assert recorded["carameli--lost-0806"].branch == "agent/lost-0806"
+
+
 # --- two defects the first real lifecycle found -------------------------------
 
 
