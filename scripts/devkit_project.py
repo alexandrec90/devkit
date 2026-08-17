@@ -164,6 +164,13 @@ ACTIONS: dict[str, Action] = {
     # phantom gaps.
     "test-target": Action("scripts/run-tests.py", "Test: Run Carameli Target", projects=CARAMELI),
     "e2e": Action("scripts/run-e2e.py", "Test: Run Browser E2E", projects=CARAMELI),
+    # The carameli <-> VanillaLand local integration suite, both directions. carameli
+    # owns the orchestrator: it boots the VanillaLand-side harness (VS_REPO_DIR in its
+    # `.env.local-e2e`), runs tests/local_e2e, then the .NET outbound driver. VanillaLand
+    # cannot own an action — it is in NOT_PROJECTS — so carameli fronts for the pair.
+    "local-e2e": Action(
+        "scripts/local-e2e.py", "Test: Run Local Integration E2E", projects=CARAMELI
+    ),
     "ngrok": Action("scripts/start-ngrok.py", "Start: ngrok + Sync URLs", projects=CARAMELI),
     "vnc": Action("scripts/vnc-viewer.py", "IBKR: Open Gateway VNC Viewer", projects=IBKR),
     "ingest": Action("scripts/ingest-task.py", "Ingest: Run Source", projects=IBKR),

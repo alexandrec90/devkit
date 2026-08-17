@@ -327,6 +327,10 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
     able to click is now unreachable from anywhere, which nothing else in the suite
     notices — `test_every_action_is_reachable_from_a_task` only checks the actions that
     still exist.
+
+    Equality rather than a subset, so a *new* scoped action has to be added here
+    deliberately and say where it came from. The list is no longer only the hoisted
+    ones, which is why each non-hoisted entry carries its origin in a comment.
     """
     scoped = {key for key, action in ACTIONS.items() if action.projects}
     assert scoped == {
@@ -341,6 +345,10 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # From the GENERATOR template rather than a live repo — the last task anywhere
         # to leave a `.vscode/tasks.json`.
         "db-revision",
+        # Never hoisted — born scoped. The integration suite spans carameli and the
+        # VanillaLand checkout, and VanillaLand is in NOT_PROJECTS, so carameli fronts
+        # for the pair and no other checkout can run it.
+        "local-e2e",
     }
 
 
