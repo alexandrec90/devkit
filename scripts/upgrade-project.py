@@ -143,9 +143,9 @@ def select_all(candidates: list[Candidate]) -> list[tuple[str, str]]:
     """`(name, skip reason)` for each checkout, in workspace order; "" means upgrade.
 
     Worktree siblings are deduplicated because upgrading both would not merely be
-    redundant, it would fail: they share a ref store, so the second `checkout -b
-    claude/devkit-upgrade-<mmdd>` hits a branch that already exists, and both PRs
-    would target the same repo with the same change.
+    redundant, it would fail: they share a ref store, so the second worktree cut for
+    `agent/devkit-upgrade-<tag>-<mmdd>` hits a branch that already exists, and both
+    PRs would target the same repo with the same change.
 
     First in workspace order claims the repo. That is arbitrary when the claimant
     turns out to be un-upgradable (dirty, or parked on a task branch), so the skip
@@ -204,9 +204,23 @@ def _same_path(left: Path, right: Path) -> bool:
         return False
 
 
-# The topic every upgrade branch is named for. `worktree.plan_new` turns it into
-# `claude/devkit-upgrade-<mmdd>` and into the box name beside it.
+# The topic every upgrade branch is named for; `upgrade_slug` appends the release.
 UPGRADE_SLUG = "devkit upgrade"
+
+
+def upgrade_slug(tag: str) -> str:
+    """The topic `worktree.plan_new` names this upgrade's branch and box from.
+
+    Carries the tag, and that is a correctness requirement rather than a label: a
+    branch name whose PR merged is *permanently retired* by the branch policy, and
+    `plan_new` disambiguates only against refs that still exist -- a squash-merged,
+    branch-deleted PR leaves none. Named by date alone, the morning release's merged
+    adoption therefore blocked every commit of the afternoon's (v0.9.0 -> v0.9.1, in
+    three consumers at once). One release is one operation, so the release is the
+    name -- and a same-tag rerun never reaches a commit anyway, because
+    `is_current_on_remote` answers before a box is cut.
+    """
+    return f"{UPGRADE_SLUG} {tag}"
 
 
 def commit_message(tag: str, files: int | str) -> str:
@@ -598,7 +612,7 @@ def upgrade_one(
 
     print(f"upgrade: {name} {previous or '(unstamped)'} -> {tag}")
     print(
-        f"  1. worktree.py new {name} --slug {UPGRADE_SLUG!r} (fresh off origin/{default_branch})"
+        f"  1. worktree.py new {name} --slug {upgrade_slug(tag)!r} (fresh off origin/{default_branch})"
     )
     print(f"  2. {SYNC_SCRIPT} --pull --src <devkit worktree at {tag}>  [in the box]")
     print(f"  3. git add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths")
@@ -609,7 +623,7 @@ def upgrade_one(
         return Outcome(name, 0)
 
     try:
-        spawn = worktree.plan_new(name, workspace, slug=UPGRADE_SLUG, fetch=True)
+        spawn = worktree.plan_new(name, workspace, slug=upgrade_slug(tag), fetch=True)
     except (worktree.WorktreeError, ValueError) as exc:
         return failed(2, f"upgrade: {name} -- could not plan a box: {exc}")
     ok, notes = worktree.apply_new(spawn, workspace)

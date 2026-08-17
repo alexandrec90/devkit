@@ -11,6 +11,7 @@ box, and nothing is aimed at the checkout.
 """
 
 import contextlib
+import datetime as _dt
 import json
 import string
 import subprocess
@@ -42,9 +43,25 @@ def done(code: int = 0):
 
 
 def test_the_slug_is_what_the_box_tier_names_the_branch_from():
-    """`worktree.plan_new` turns it into `claude/devkit-upgrade-<mmdd>`, so this file
-    no longer builds the branch name itself -- one namer, not two that can disagree."""
-    assert up.UPGRADE_SLUG == "devkit upgrade"
+    """`worktree.plan_new` turns it into `agent/devkit-upgrade-<tag>-<mmdd>`, so this
+    file no longer builds the branch name itself -- one namer, not two that can
+    disagree."""
+    assert up.upgrade_slug("v0.9.1") == "devkit upgrade v0.9.1"
+
+
+def test_two_same_day_releases_do_not_share_a_branch_name():
+    """A branch name whose PR merged is permanently retired by the branch policy, and
+    `worktree.plan_new` disambiguates only against refs that still exist -- a merged
+    `--delete-branch` PR leaves none. So when v0.9.0's adoption merged in the morning
+    and v0.9.1 ran in the afternoon, the date-only name collided and every commit was
+    refused. The tag in the slug is what keeps two same-day releases apart."""
+    day = _dt.date(2026, 8, 17)
+    first = up.tb.branch_name(up.tb.slugify(up.upgrade_slug("v0.9.0")), set(), day)
+    second = up.tb.branch_name(up.tb.slugify(up.upgrade_slug("v0.9.1")), set(), day)
+    assert first != second
+    # The tag must survive slugification recognisably, or the PR list becomes a wall
+    # of identical branch names again.
+    assert "v0-9-1" in second
 
 
 def test_the_commit_names_the_release():
@@ -337,7 +354,7 @@ def test_the_adoption_is_pulled_into_the_box_not_the_checkout(tmp_path, monkeypa
     them is reachable in a worktree younger than the run."""
     run = BoxRun(tmp_path, monkeypatch)
     assert run.run(tmp_path).code == 0
-    assert run.spawned == [("data-lake", up.UPGRADE_SLUG)]
+    assert run.spawned == [("data-lake", up.upgrade_slug("v0.8.0"))]
     assert run.pulled == [run.box]
 
 
