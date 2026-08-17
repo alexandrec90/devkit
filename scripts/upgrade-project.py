@@ -688,6 +688,10 @@ def upgrade_one(
     if pushed.returncode != 0:
         return failed(2, f"upgrade: {name} -- FAILED at `git push`", pushed.stderr or pushed.stdout)
 
+    # Labelled `automerge` because an upgrade PR is upstream churn the gate already
+    # judges: the diff is a vendored copy of an already-released devkit tag, so a
+    # green gate is the whole review. The label is what lets `reconcile --merge
+    # --merge-label automerge` and the vendored workflow land it unattended.
     url, created, error = sweep.ensure_pr(
         sweep.gh_for(box),
         sweep.Plan(
@@ -695,6 +699,7 @@ def upgrade_one(
             pr_body=pr_body(tag, previous, changed),
             pr_head=spawn.box.branch,
             pr_base=default_branch,
+            pr_labels=(sweep.AUTOMERGE_LABEL,),
         ),
     )
     if error:

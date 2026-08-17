@@ -11,8 +11,11 @@ reboot, and a closed editor.
 **What the scheduled run is allowed to do, and what it is not.** It runs with `--yes`,
 so it genuinely destroys boxes — that is the point, and `reconcile_action` is what
 makes it safe: a box holding work is never touched, at any age, under any disk
-pressure. It runs with `--no-merge`, so merging a PR stays a human decision. Flip that
-with `--merge` here when you would rather it merged anything green.
+pressure. It runs with `--no-merge` by default, so merging a PR stays a human decision.
+Flip that with `--merge` here, which is label-gated: only a green PR carrying the
+`automerge` label is squash-merged, so applying the label *is* the review decision and
+everything unlabelled still waits for a human. Pass `--merge-label ""` for the
+unguarded version that merges anything green.
 
 It also carries `--checkouts`, which brings the *static* checkouts up to their remotes
 (`worktree.sync_checkouts`). That half destroys nothing and refuses any checkout
@@ -93,6 +96,7 @@ def reconcile_arguments(
     automerge: bool = False,
     min_free_gb: float = 0.0,
     checkouts: bool = True,
+    merge_label: str = sweep.AUTOMERGE_LABEL,
 ) -> str:
     """The arguments the scheduled task runs, as one string — the interpreter excluded.
 
@@ -121,6 +125,8 @@ def reconcile_arguments(
         "--checkouts" if checkouts else "--no-checkouts",
         "--yes",
     ]
+    if automerge and merge_label:
+        parts += ["--merge-label", merge_label]
     if min_free_gb > 0:
         parts += ["--min-free-gb", str(min_free_gb)]
     return " ".join(parts)
@@ -183,7 +189,18 @@ def main(argv: list[str] | None = None) -> int:
         "--merge",
         dest="automerge",
         action="store_true",
-        help="let the scheduled run squash-merge PRs whose gate is green (off by default)",
+        help=(
+            "let the scheduled run squash-merge green PRs carrying the label named by "
+            "--merge-label (off by default)"
+        ),
+    )
+    parser.add_argument(
+        "--merge-label",
+        default=sweep.AUTOMERGE_LABEL,
+        help=(
+            "with --merge, only merge green PRs carrying this label; pass an empty "
+            f"string to merge any green PR (default: {sweep.AUTOMERGE_LABEL})"
+        ),
     )
     parser.add_argument(
         "--no-checkouts",
@@ -249,13 +266,21 @@ def main(argv: list[str] | None = None) -> int:
         args.automerge,
         args.min_free_gb,
         args.checkouts,
+        args.merge_label,
     )
     if not args.apply:
         parked = "ON -- merged PRs advance each checkout's default branch"
+        merging = (
+            f"ON -- green PRs labelled `{args.merge_label}` are squash-merged"
+            if args.automerge and args.merge_label
+            else "ON -- any green PR is squash-merged"
+            if args.automerge
+            else "off"
+        )
         print(
             f'Would run: "{python}" {arguments}\n\n'
             f"  every     {args.minutes} minutes\n"
-            f"  merging   {'ON -- green PRs are squash-merged' if args.automerge else 'off'}\n"
+            f"  merging   {merging}\n"
             f"  checkouts {parked if args.checkouts else 'off -- boxes only'}\n"
             f"  on battery runs anyway, and catches up a fire it slept through\n\n"
             f"Dry run -- re-run with --yes."
