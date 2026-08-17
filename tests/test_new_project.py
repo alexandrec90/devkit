@@ -1225,6 +1225,10 @@ def test_generated_automerge_can_create_the_labels_it_applies(tmp_path):
     path = root / ".github" / "workflows" / "dependabot-automerge.yml"
     parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert parsed["permissions"] == {
+        # `actions: read` is the retry sweep's: it asks the runs API whether `PR Gate`
+        # succeeded on a PR's current head SHA, which the event-driven job is handed by
+        # its trigger and a scheduled pass has to go and find.
+        "actions": "read",
         "contents": "write",
         "issues": "write",
         "pull-requests": "write",
@@ -1250,19 +1254,46 @@ def test_generated_automerge_tells_gh_which_repo_it_is_acting_on(tmp_path):
     assert not offenders, f"these steps run `gh` with no repo to resolve: {offenders}"
 
 
-def test_generated_automerge_re_checks_every_guard_before_merging(tmp_path):
+def test_generated_automerge_hands_the_merge_the_commit_that_was_gated(tmp_path):
     """`workflow_run` hands over a branch name, not a PR — the guards must be re-run.
 
-    A human can push to a `dependabot/...` branch, and a new commit can land after
-    the gate passed. Each of these three checks is what keeps the merge tied to the
-    exact commit that was gated, authored by the bot, and classified as safe.
+    A human can push to a `dependabot/...` branch, and a new commit can land after the
+    gate passed. The guards themselves moved into `scripts/merge-dependabot-prs.py`,
+    where they are unit-tested against a fake API rather than asserted as `bash`
+    substrings — but that only holds if the generated project **ships the script and
+    passes it the gated SHA**, which is what this checks. Without `RUN_HEAD_SHA` the
+    script cannot tell a rebased head from the one the gate actually ran against, and
+    it has no other way to know.
     """
     root = generate(tmp_path, {})
     body = (root / ".github" / "workflows" / "dependabot-automerge.yml").read_text(encoding="utf-8")
-    merge_job = body.split("  merge:", 1)[1]
-    assert 'if [ "$author" != "app/dependabot" ]' in merge_job, "any author could be merged"
-    assert 'if [ "$head_sha" != "$RUN_HEAD_SHA" ]' in merge_job, "an ungated commit could merge"
-    assert 'index("automerge")' in merge_job, "a runtime major could merge unreviewed"
+    merge_job = body.split("  merge:", 1)[1].split("  sweep:", 1)[0]
+    assert "RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}" in merge_job, (
+        "the merge job does not pass the gated commit, so an ungated head could merge"
+    )
+    assert "HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}" in merge_job
+    assert "scripts/merge-dependabot-prs.py" in merge_job
+    assert (root / "scripts" / "merge-dependabot-prs.py").is_file(), (
+        "the workflow calls a script the generated project was never given"
+    )
+
+
+def test_generated_automerge_retries_on_a_schedule(tmp_path):
+    """The event-driven merge fires once per gate completion and nothing re-runs it.
+
+    A single transient failure — the GraphQL outage on 2026-08-17 was the one that cost
+    two already-green PRs — strands an approved bump permanently, and it strands it
+    *invisibly*: no failing check on the PR, just an old red run in the Actions tab.
+    """
+    yaml = pytest.importorskip("yaml")
+    path = generate(tmp_path, {}) / ".github" / "workflows" / "dependabot-automerge.yml"
+    parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    triggers = parsed[True] if True in parsed else parsed["on"]
+    assert "schedule" in triggers, (
+        "no `schedule:` — a merge dropped by an outage or a rate limit is never retried"
+    )
+    assert "sweep" in parsed["jobs"]
+    assert parsed["concurrency"]["cancel-in-progress"] is False
 
 
 def test_generated_automerge_holds_runtime_majors_for_review(tmp_path):

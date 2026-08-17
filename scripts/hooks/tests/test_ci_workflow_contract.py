@@ -309,12 +309,18 @@ def test_every_workflow_declares_top_level_permissions():
         )
 
 
-def test_every_workflow_declares_concurrency_except_the_automerge_one():
+def test_every_workflow_declares_concurrency():
+    """No exemptions left, and the one that used to be here is worth recording.
+
+    `dependabot-automerge.yml` was exempt because its merge job is driven by
+    `workflow_run` completions and a shared group would drop one of two branches'
+    completions as superseded. That reasoning was about the *key*, not about concurrency
+    itself -- and when the file gained a `schedule:` for its retry sweep, the exemption
+    would have silently swallowed the requirement that a scheduled run be allowed to
+    finish. It keys on `github.event.workflow_run.head_branch || github.run_id` now, so
+    branches stay independent and anything without a branch gets a group of its own.
+    """
     for path in _workflows():
-        if path.name == AUTOMERGE:
-            # Deliberately omitted there: its merge job is driven by workflow_run
-            # completion events, and a concurrency group would drop one as superseded.
-            continue
         assert _top_level_block(_read(path), "concurrency") is not None, (
             f"{path.name}: no top-level `concurrency:` block, so redundant runs pile "
             "up on the same ref."
