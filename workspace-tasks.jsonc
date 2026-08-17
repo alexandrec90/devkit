@@ -409,6 +409,30 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "Test: Run Local Integration E2E — free",
+			"detail": "Both directions of the carameli <-> VanillaLand integration: boots local IIS Express + vs-sql via VS_REPO_DIR, runs tests/local_e2e, then the .NET outbound driver. Needs a filled .env.local-e2e (see .env.local-e2e.example); no telephony, no cost.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"${input:carameliCheckout}",
+				"local-e2e"
+			],
+			"group": "test",
+			"icon": {
+				"id": "plug",
+				"color": "terminal.ansiBrightGreen"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
 			// This one was deleted from carameli's task file for being a one-line
 			// wrapper around a documented script, under the old rule that a
 			// PROJECT-level task had to justify its copy. That rule is gone with the
