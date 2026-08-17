@@ -229,6 +229,11 @@ MANIFEST: tuple[str, ...] = (
     ".github/workflows/scheduled-failure-issue.yml",
     "scripts/report-workflow-failure.py",
     "scripts/hooks/tests/test_report_workflow_failure.py",
+    # The auto-merge's retry half, and vendored for the same reason: an event handler that
+    # fires once per gate completion strands its PR permanently on any transient failure,
+    # and the repos where that goes unnoticed longest are the existing ones.
+    "scripts/merge-dependabot-prs.py",
+    "scripts/hooks/tests/test_merge_dependabot_prs.py",
     # The rest of the CI surface -- `dependabot.yml`, the gate, the nightly -- cannot
     # be vendored for the reason above, and `templates/` cannot keep them honest
     # either: a one-shot copy has no way to notice that a project never received a
