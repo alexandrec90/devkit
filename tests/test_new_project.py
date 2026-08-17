@@ -1253,16 +1253,17 @@ def test_generated_automerge_tells_gh_which_repo_it_is_acting_on(tmp_path):
 def test_generated_automerge_re_checks_every_guard_before_merging(tmp_path):
     """`workflow_run` hands over a branch name, not a PR — the guards must be re-run.
 
-    A human can push to a `dependabot/...` branch, and a new commit can land after
-    the gate passed. Each of these three checks is what keeps the merge tied to the
-    exact commit that was gated, authored by the bot, and classified as safe.
+    A new commit can land after the gate passed, and the label can be absent. The
+    two checks keep the merge tied to the exact commit that was gated and to a PR
+    something with write access explicitly labelled. There is deliberately no
+    author guard any more: the label is the authorization, whoever wrote the PR
+    (Dependabot bumps, devkit upgrades, anything a human marks routine).
     """
     root = generate(tmp_path, {})
     body = (root / ".github" / "workflows" / "dependabot-automerge.yml").read_text(encoding="utf-8")
     merge_job = body.split("  merge:", 1)[1]
-    assert 'if [ "$author" != "app/dependabot" ]' in merge_job, "any author could be merged"
     assert 'if [ "$head_sha" != "$RUN_HEAD_SHA" ]' in merge_job, "an ungated commit could merge"
-    assert 'index("automerge")' in merge_job, "a runtime major could merge unreviewed"
+    assert 'index("automerge")' in merge_job, "an unlabelled PR could merge unreviewed"
 
 
 def test_generated_automerge_holds_runtime_majors_for_review(tmp_path):
@@ -1572,6 +1573,28 @@ def test_claude_settings_only_wires_hooks_that_are_actually_vendored(tmp_path):
         assert referenced in manifest_text, (
             f"{referenced} is wired as a hook but is not in sync-devkit.py's MANIFEST"
         )
+
+
+def test_generated_telemetry_endpoint_is_the_shared_collector_not_the_project_slot(tmp_path):
+    """A generated project must export to the one collector, not to its own slot.
+
+    `otel_http` was a slot-offset `[services]` base until 2026-08-17, so every project
+    was scaffolded with a private endpoint -- 4318, 4322, 4324 -- while exactly one
+    collector existed in the workspace. The two projects on the wrong end exported into
+    a closed port for a month and neither could report it: an OTLP exporter that cannot
+    connect retries in the background and Claude Code carries on regardless.
+
+    Asserting against `[shared]` rather than a literal is deliberate. A literal here
+    would still pass if someone moved the collector and left the template behind.
+    """
+    shared = devkit_ports.load(REPO_ROOT).shared_port("otel_http")
+    root = generate(tmp_path, {})
+    env = json.loads((root / ".claude/settings.json").read_text(encoding="utf-8"))["env"]
+
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == f"http://localhost:{shared}"
+    # The other half of the bargain: with one endpoint for everyone, the resource
+    # attributes are the only thing left that says which project sent a metric.
+    assert "service.name=" in env["OTEL_RESOURCE_ATTRIBUTES"]
 
 
 def test_generated_claude_settings_keep_the_bash_cap_hook(tmp_path):

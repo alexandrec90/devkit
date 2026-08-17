@@ -278,7 +278,12 @@ def _destination_name(relative: Path) -> str:
     return str(Path(*parts))
 
 
-def build_context(args: argparse.Namespace, slot: int, ports: dict[str, int]) -> dict[str, object]:
+def build_context(
+    args: argparse.Namespace,
+    slot: int,
+    ports: dict[str, int],
+    shared: dict[str, int] | None = None,
+) -> dict[str, object]:
     """The full template namespace. Flags and values share it deliberately."""
     package = slugify_package(args.name)
     features = {f: bool(getattr(args, f)) for f in FEATURES}
@@ -320,9 +325,22 @@ def build_context(args: argparse.Namespace, slot: int, ports: dict[str, int]) ->
         **features,
     }
     # Ports the feature set actually uses, plus otel which is always exported.
+    #
+    # `otel_http` comes from `[shared]`, not from this project's slot: one collector
+    # serves the whole workspace, so a generated project must point at *that* port and
+    # not at a per-slot one nothing is listening on. See `[shared]` in `ports.toml`.
     for service in SERVICE_BY_FEATURE.values():
         context[f"{service}_port"] = ports.get(service, 0)
-    context["otel_http_port"] = ports["otel_http"]
+    #
+    # Missing is a hard error rather than a default: the failure mode of a wrong
+    # telemetry port is an exporter retrying into a closed socket forever, which no
+    # generated project would ever report.
+    try:
+        context["otel_http_port"] = (shared or {})["otel_http"]
+    except KeyError:
+        raise GeneratorError(
+            "no shared `otel_http` port in ports.toml; add it under [shared]"
+        ) from None
     return context
 
 
@@ -338,7 +356,7 @@ def plan(args: argparse.Namespace, registry: devkit_ports.Registry) -> Plan:
 
     slot = _slot_for(registry, args.name)
     ports = registry.ports_for_slot(slot)
-    context = build_context(args, slot, ports)
+    context = build_context(args, slot, ports, registry.shared)
 
     worktree_env: dict[str, str] = {}
     if args.worktree:

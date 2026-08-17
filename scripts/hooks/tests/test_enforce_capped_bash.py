@@ -579,6 +579,42 @@ def test_control_headers_are_bounded_even_with_a_substitution(fragment):
     assert hook.is_bounded(fragment) is True
 
 
+def test_a_loop_over_a_substitution_is_judged_on_its_body():
+    """The fifth neighbour: a header whose word list comes from a substitution.
+
+    `for f in $(git diff --name-only)` was vetoed as unknowable output before the
+    control-flow check ever ran, though the substitution feeds the loop variable and
+    never the terminal -- the same reasoning-about-output-that-cannot-exist that had
+    already moved the condition tests ahead of the veto. The body still arrives as its
+    own statements and is judged on its own merits.
+    """
+    assert hook.is_bounded("for f in $(git diff --name-only)") is True
+    assert hook.is_bounded("case $(uname -s) in") is True
+    command = "for f in $(git diff --name-only); do echo $f; done"
+    assert hook.decide(payload("Bash", command)) == (0, "")
+    # The exemption is the header's alone: an unbounded body still blocks the loop...
+    blocked = "for f in $(git diff --name-only); do cat $f; done"
+    assert hook.decide(payload("Bash", blocked))[0] == hook.EXIT_BLOCK
+    # ...and a substitution with a real path to the terminal is still vetoed.
+    assert hook.is_bounded("echo $(find / -name x)") is False
+
+
+def test_an_env_assignment_prefix_does_not_revoke_an_exemption():
+    """`DEVKIT_SKIP_BRANCH_POLICY=1 git commit -F m` is the branch policy's own
+    documented bypass, and this gate blocked it: the assignment prefix broke the
+    COMMIT_LIKE match, so the one spelling another gate's error message tells the
+    agent to type was refused with a remedy (wrap it) that destroys a commit. The
+    prefix emits nothing; the command behind it decides.
+    """
+    assert hook.is_bounded("DEVKIT_SKIP_BRANCH_POLICY=1 git commit -F msg.txt") is True
+    assert hook.is_bounded("GIT_PAGER=cat git rev-parse HEAD") is True
+    assert hook.is_bounded('CFLAGS="-O2 -g" make install > build.log') is True
+    # The exemptions stay intact behind the prefix, in both directions.
+    assert hook.is_bounded("FOO=bar ls -R /") is False
+    assert hook.decide(payload("Bash", "RUST_LOG=debug cargo test"))[0] == hook.EXIT_BLOCK
+    assert hook.decide(payload("Bash", "GIT_EDITOR=true git commit -F msg.txt")) == (0, "")
+
+
 def test_a_comment_swallows_the_separator_inside_it():
     """`pwd # a; ls -R /` is one statement to a shell, and must be one here.
 

@@ -39,6 +39,28 @@ def done(code: int = 0):
     return lambda *_a, **_kw: up.Outcome("stub", code)
 
 
+def test_an_argparse_failure_still_writes_the_artifact():
+    """argparse exits 2 from inside `parse_args`, before `main` can reach `_finish`.
+
+    Under the scheduler that is the worst spelling of a failure this script has:
+    `pythonw` has no stderr, so the whole record on the machine is a Last Result of 2
+    beside an artifact still saying whatever the previous run left -- the exact
+    signature found on 2026-08-17, unexplainable from the log precisely because
+    nothing owed the log anything on that path.
+    """
+    with pytest.raises(SystemExit) as stop:
+        up.main(["--no-such-flag"])
+    assert stop.value.code == 2
+    text = (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8")
+    assert "--no-such-flag" in text
+
+    # The two explicit `parser.error` refusals in `main` take the same exit.
+    with pytest.raises(SystemExit):
+        up.main(["carameli", "--all"])
+    text = (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8")
+    assert "--all" in text
+
+
 # --- naming ------------------------------------------------------------------
 
 
@@ -334,9 +356,13 @@ class BoxRun:
         monkeypatch.setattr(up.sweep, "git_for", lambda _p: self.git)
         monkeypatch.setattr(up.sweep, "gh_for", lambda _p: no_pr)
         monkeypatch.setattr(up.tb, "detect_default_branch", lambda *_a, **_kw: "main")
-        monkeypatch.setattr(
-            up.sweep, "ensure_pr", lambda *_a: ("https://example.test/pr/1", True, "")
-        )
+        self.pr_plans: list = []
+
+        def ensure_pr(_gh, plan):
+            self.pr_plans.append(plan)
+            return ("https://example.test/pr/1", True, "")
+
+        monkeypatch.setattr(up.sweep, "ensure_pr", ensure_pr)
 
     def run(self, tmp_path):
         return up.upgrade_one(
@@ -365,6 +391,16 @@ def test_the_commit_and_push_happen_in_the_box(tmp_path, monkeypatch):
     run.run(tmp_path)
     assert ("add", "-A") in run.git.calls
     assert ("push", "-u", "origin", "claude/devkit-upgrade-0812") in run.git.calls
+
+
+def test_the_upgrade_pr_is_labelled_automerge(tmp_path, monkeypatch):
+    """An upgrade PR is a vendored copy of an already-released tag, so a green gate
+    is the whole review; the label is what lets `reconcile --merge` and the vendored
+    workflow land it without a human. Losing it turns every release back into one
+    hand-merged PR per consumer."""
+    run = BoxRun(tmp_path, monkeypatch)
+    assert run.run(tmp_path).code == 0
+    assert [plan.pr_labels for plan in run.pr_plans] == [(up.sweep.AUTOMERGE_LABEL,)]
 
 
 def test_nothing_checks_out_a_branch_in_the_static_checkout(tmp_path, monkeypatch):

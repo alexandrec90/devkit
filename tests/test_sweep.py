@@ -1376,6 +1376,66 @@ def test_a_failed_pr_creation_is_reported_not_swallowed():
     assert "not authenticated" in error
 
 
+LABELED_PLAN = sweep.Plan(
+    pr_title="Adopt devkit v9.9.9",
+    pr_body="body",
+    pr_head="agent/upgrade",
+    pr_base="main",
+    pr_labels=(sweep.AUTOMERGE_LABEL,),
+)
+
+
+def test_a_labelled_plan_creates_the_label_before_the_pr_that_wears_it():
+    """`gh pr create --label` fails outright on a label the repo has never
+    carried, which is every repo before its first labelled PR."""
+    gh = FakeGh()
+    url, created, error = sweep.ensure_pr(gh, LABELED_PLAN)
+    assert (url, created, error) == ("https://github.com/o/r/pull/7", True, "")
+    label_at = gh.calls.index(
+        (
+            "label",
+            "create",
+            "automerge",
+            "--force",
+            "--color",
+            "0e8a16",
+            "--description",
+            sweep.LABEL_SPECS["automerge"][1],
+        )
+    )
+    create_at = next(i for i, call in enumerate(gh.calls) if call[:2] == ("pr", "create"))
+    assert label_at < create_at
+    create = gh.calls[create_at]
+    assert ("--label", "automerge") == create[create.index("--label") : create.index("--label") + 2]
+
+
+def test_a_reused_pr_still_gets_its_labels():
+    # A reused PR may predate the caller learning to label; re-running must
+    # converge on the labelled state, not skip it as already-shipped.
+    gh = FakeGh(existing="https://github.com/o/r/pull/2")
+    url, created, error = sweep.ensure_pr(gh, LABELED_PLAN)
+    assert (url, created, error) == ("https://github.com/o/r/pull/2", False, "")
+    assert ("pr", "edit", "agent/upgrade", "--add-label", "automerge") in gh.calls
+
+
+def test_an_unlabelled_plan_issues_no_label_calls():
+    gh = FakeGh(existing="https://github.com/o/r/pull/2")
+    sweep.ensure_pr(gh, SHIP_PLAN)
+    assert not any(call[0] == "label" or call[:2] == ("pr", "edit") for call in gh.calls)
+
+
+def test_a_label_failure_on_a_reused_pr_is_an_error_that_still_names_the_url():
+    """A plan that asked for `automerge` and did not get it is a PR that silently
+    waits for the review it was labelled to skip -- but the PR itself is real."""
+    url, created, error = sweep.ensure_pr(
+        FakeGh(existing="https://github.com/o/r/pull/2", create_fails="gh: boom"), LABELED_PLAN
+    )
+    assert url == "https://github.com/o/r/pull/2"
+    assert not created
+    assert "https://github.com/o/r/pull/2" in error
+    assert "boom" in error
+
+
 def test_the_pr_is_opened_only_after_every_git_step_lands():
     """A PR on a branch whose push failed points at a ref the remote does not have."""
     git, gh = FakeGit(fail_on="push"), FakeGh()
