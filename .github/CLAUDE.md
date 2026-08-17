@@ -18,7 +18,8 @@ an application of.
 
 The two vendored ones have no per-project value left: each waits on a workflow by a title
 every project shares (`PR Gate`, `Nightly`) and names nothing else about the repo it runs
-in. The gate cannot be — its jobs are the project's own services, migrations and frontend
+in. That is also the reporter's ceiling, and it is why it has a second job — see the last
+section. The gate cannot be — its jobs are the project's own services, migrations and frontend
 tier, and the largest consumer's five-job gate is what a shared one would have to delete
 or exempt. `scripts/hooks/tests/test_ci_workflow_contract.py` is vendored alongside them
 and requires **all five to exist**, plus the settings that make an unattended run safe:
@@ -72,3 +73,29 @@ smoke suite, lock repair for a scheme no other project uses, and an agent-fixer 
 **nothing else**, so a failing nightly and one that silently stopped being scheduled read
 the same. Its docstring holds the three properties a change must keep; `assignees` in
 `.github/dependabot.yml` is the same argument applied to a bot PR.
+
+### Being vendored is what made it watch one workflow, and why it now sweeps
+
+`on.workflow_run` selects the workflows it watches **by title**, and a title list is
+exactly the per-project value this file may not carry — so it shipped watching `Nightly`
+and nothing else. That is not a small gap. carameli had grown two more scheduled
+workflows by the time anyone looked, and one of them had failed three consecutive Sundays
+with no issue filed, while its nightly tracker sat correctly closed. Nothing was red
+anywhere; the reporter was working exactly as written.
+
+The second job, `sweep`, runs on the file's own cron and **enumerates instead of
+subscribing**: every workflow in `.github/workflows/` declaring a `schedule:`, reconciled
+against its latest run on the default branch. There is no list to keep current, which is
+the only form this can take in a file that may not name a project.
+
+It also reaches what the event half cannot see at all — a workflow GitHub **disabled**
+after 60 days of repository inactivity. That one emits no completion event, so the
+event-driven reporter goes quiet precisely when there is something to report. The
+workflows API states it in `state`, so the sweep reads it rather than guessing from run
+timestamps, and `disabled_manually` is deliberately excluded: that switch was flipped on
+purpose.
+
+Two consequences worth keeping. Both jobs write the **same** trackers — same titles, same
+dedup — so running both is idempotent, not duplicative; and the sweep cannot judge
+itself, because its own latest run is the one executing. That last one is inherent rather
+than fixable: nothing inside a repository can report that its own reporter is broken.

@@ -8,8 +8,11 @@ to leave running unattended.
 Why a contract test rather than more vendoring. Some of the required files carry no
 per-project content and are therefore shipped whole: `dependabot-automerge.yml` and
 `scheduled-failure-issue.yml` are in `sync-devkit.py`'s MANIFEST and drift-checked
-byte-for-byte -- each waits on a workflow by a title every project shares, and neither
-names anything else about the repo it runs in. The rest cannot be. A
+byte-for-byte -- what each waits on is a title every project shares, and neither names
+anything else about the repo it runs in. That constraint is also the reporter's limit:
+`on.workflow_run` can only ever name `Nightly`, so its second, scheduled job enumerates
+the workflow directory instead of subscribing to a list it is not allowed to hold. The
+rest cannot be vendored at all. A
 `dependabot.yml` names the ecosystems this project actually has; a gate or a nightly
 names its services, its migrations and its frontend tier, and carameli's five-job gate
 is the standing proof that a shared one would have to delete real work or live
@@ -315,6 +318,40 @@ def test_the_nightly_carries_the_title_the_failure_reporter_waits_on():
         f"{NIGHTLY} is not titled {NIGHTLY_TITLE!r}. {FAILURE_REPORTER} is vendored "
         "byte-identical and waits on that exact title in every project. Add the tiers "
         "you want to this file, but keep the name."
+    )
+
+
+def test_the_failure_reporter_also_sweeps_on_its_own_schedule():
+    """The title above buys coverage for `Nightly` and for nothing else.
+
+    `on.workflow_run` selects by title, and a title list is precisely the per-project
+    value a vendored file may not carry -- so the reporter's event-driven half watches
+    one workflow, permanently. A project's *second* scheduled workflow is therefore
+    uncovered the moment it is added, and uncovered silently: it fails in an Actions tab,
+    files nothing, and the reporter that was supposed to carry it looks healthy because
+    the workflow it does watch is green.
+
+    That is not hypothetical. It is how a `Weekly Hardening` came to fail three
+    consecutive Sundays in one of the repos this harness ships to, with no issue, while
+    that repo's nightly tracker sat correctly closed.
+
+    The `schedule:` trigger is the sweep half, which enumerates every scheduled workflow
+    in this directory instead of subscribing to one. A copy that has lost it still
+    reports nightlies, so nothing here looks broken -- which is exactly why it is gated.
+    """
+    reporter = WORKFLOWS_DIR / FAILURE_REPORTER
+    assert reporter.is_file(), f".github/workflows/{FAILURE_REPORTER} is missing."
+    triggers = _triggers(_read(reporter))
+    assert "schedule" in triggers, (
+        f"{FAILURE_REPORTER} declares {sorted(triggers)} and no `schedule:`. Without it "
+        "only the workflow named in its `workflow_run` filter is ever reported on, and "
+        "every other scheduled workflow in this repo fails into silence. Run "
+        "`python scripts/sync-devkit.py --pull`."
+    )
+    assert "workflow_run" in triggers, (
+        f"{FAILURE_REPORTER} has no `workflow_run:` trigger, so a nightly failure waits "
+        "for the next sweep instead of filing immediately, and a fix does not close its "
+        "issue until then either."
     )
 
 
