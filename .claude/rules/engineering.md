@@ -72,6 +72,11 @@ Those run in the harness's own shell rather than `cmd.exe`, so reach for one whe
 command needs POSIX syntax the wrapper would mangle; the cost is that the pipe masks the
 exit code, which is why the wrapper stays the default for test and lint runs.
 
+**One cap can cover several commands, if you group them.** `{ a; b; } | head -c N` and
+`(a; b) > file` hand the shell a single stream, and the gate reads the group as one
+statement rather than asking each member for a cap of its own. That is the spelling for a
+loop or a setup chain, both of which need the POSIX syntax `cmd.exe` cannot run.
+
 Learn this here rather than from the gate. Until this paragraph existed, nothing in
 any instruction file mentioned the hook, so **the only way to find out it was running
 was to be blocked by it** — and each block spends a turn plus the ~1 KB of remedy text
