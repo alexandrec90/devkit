@@ -259,6 +259,57 @@ def github_repo(remote_url: str) -> str | None:
 
 
 def merged_pr(runner: Runner, repo: str, branch: str) -> MergedPR:
+    """Whether `branch` has a merged PR, asked over GraphQL and then over REST.
+
+    Both, because the two APIs fail independently and this question is asked from a
+    hook that **fails closed**: an unanswerable "has it merged?" blocks the commit and
+    the push. On 2026-08-17 `api.github.com/graphql` returned 503 for roughly an hour
+    while REST served the same fact perfectly, and every commit in the workspace was
+    blocked for the duration -- with the documented remedy being
+    `DEVKIT_SKIP_BRANCH_POLICY=1`, i.e. turning the gate off entirely to get past an
+    outage in one of two endpoints that could have answered.
+
+    `gh pr list` speaks GraphQL and is kept as the primary path: it is one call, it
+    filters server-side, and its error text is the more useful of the two. The REST
+    fallback runs only when that one fails, so the common case costs nothing extra.
+    """
+    primary = _merged_pr_via_graphql(runner, repo, branch)
+    if not primary.error:
+        return primary
+    fallback = _merged_pr_via_rest(runner, repo, branch)
+    if not fallback.error:
+        return fallback
+    # Both named. A message reporting only one sends whoever reads it to check an API
+    # that was never the problem.
+    return MergedPR(error=f"{primary.error} (REST fallback also failed: {fallback.error})")
+
+
+def _merged_pr_via_rest(runner: Runner, repo: str, branch: str) -> MergedPR:
+    """The same question over the REST pulls endpoint.
+
+    REST has no "merged" state filter -- a merged PR is `state=closed` with a non-null
+    `merged_at` -- so the filtering is done in `--jq`. `head` needs the `OWNER:branch`
+    form even when the branch is on the repo itself.
+    """
+    owner = repo.split("/")[0]
+    argv = [
+        "gh",
+        "api",
+        f"repos/{repo}/pulls?state=closed&head={owner}:{branch}&per_page=100",
+        "--jq",
+        ".[] | select(.merged_at != null) | .html_url",
+    ]
+    result = runner(argv)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "gh exited unsuccessfully").strip()
+        return MergedPR(error=detail)
+    urls = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    if not urls:
+        return MergedPR()
+    return MergedPR(url=urls[0])
+
+
+def _merged_pr_via_graphql(runner: Runner, repo: str, branch: str) -> MergedPR:
     argv = [
         "gh",
         "pr",

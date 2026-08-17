@@ -66,6 +66,83 @@ def merged_response(branch, payload):
     return {argv: completed(argv, stdout=json.dumps(payload))}
 
 
+def rest_argv(branch, repo="acme/widgets"):
+    owner = repo.split("/")[0]
+    return (
+        "gh",
+        "api",
+        f"repos/{repo}/pulls?state=closed&head={owner}:{branch}&per_page=100",
+        "--jq",
+        ".[] | select(.merged_at != null) | .html_url",
+    )
+
+
+GRAPHQL_503 = "HTTP 503: No server is currently available to service your request."
+
+
+def graphql_down(branch):
+    argv = next(iter(merged_response(branch, [])))
+    return {argv: completed(argv, stderr=GRAPHQL_503, returncode=1)}
+
+
+# --- merged_pr: two APIs, because the gate fails closed --------------------------
+#
+# `gh pr list` speaks GraphQL. On 2026-08-17 api.github.com/graphql returned 503 for
+# about an hour while REST served the same fact perfectly, and because an unanswerable
+# "has this branch merged?" blocks the commit AND the push, every commit in the
+# workspace was blocked -- with the documented remedy being to turn the gate off.
+
+
+def test_merged_pr_answers_from_rest_when_graphql_is_down():
+    runner = FakeRunner(
+        {
+            **graphql_down("claude/fresh"),
+            rest_argv("claude/fresh"): completed(
+                ["gh"], stdout="https://github.com/acme/widgets/pull/7\n"
+            ),
+        }
+    )
+    result = git_policy.merged_pr(runner, "acme/widgets", "claude/fresh")
+    assert result.url == "https://github.com/acme/widgets/pull/7"
+    assert not result.error
+
+
+def test_merged_pr_reports_no_merged_pr_from_rest_when_graphql_is_down():
+    # The exact case that blocked work: a freshly cut branch with no PR at all. An
+    # empty REST result must read as "not merged", not as another failure.
+    runner = FakeRunner(
+        {
+            **graphql_down("claude/fresh"),
+            rest_argv("claude/fresh"): completed(["gh"], stdout="\n"),
+        }
+    )
+    result = git_policy.merged_pr(runner, "acme/widgets", "claude/fresh")
+    assert not result.url
+    assert not result.error
+
+
+def test_merged_pr_names_both_failures_when_neither_api_answers():
+    runner = FakeRunner(
+        {
+            **graphql_down("claude/fresh"),
+            rest_argv("claude/fresh"): completed(["gh"], stderr="gh: not logged in", returncode=1),
+        }
+    )
+    result = git_policy.merged_pr(runner, "acme/widgets", "claude/fresh")
+    # Naming only one sends whoever reads it to check an API that was never the problem.
+    assert "503" in result.error
+    assert "not logged in" in result.error
+
+
+def test_merged_pr_does_not_reach_for_rest_when_graphql_answers():
+    runner = FakeRunner(merged_response("claude/fresh", []))
+    result = git_policy.merged_pr(runner, "acme/widgets", "claude/fresh")
+    assert not result.error
+    assert not any("api" in call for call in runner.calls), (
+        "the fallback must cost nothing in the common case"
+    )
+
+
 def test_github_repo_parses_https_ssh_and_rejects_other_hosts():
     assert git_policy.github_repo("https://github.com/acme/widgets.git") == "acme/widgets"
     assert git_policy.github_repo("git@github.com:acme/widgets.git") == "acme/widgets"
