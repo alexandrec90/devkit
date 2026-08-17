@@ -72,20 +72,28 @@ optional — the fallback bump has to be **committed before the tag exists**.
 The workflow refuses a version that already exists, so a double-run is a safe no-op
 failure rather than a moved tag.
 
-### If you are doing it by hand
+### The pre-push policy refuses a hand-pushed tag
 
-Same order, and the same reason for it:
+`git push origin vX.Y.Z` from a workstation is **blocked** by
+`git_policy.release_tag_decision`, installed globally by `install-git-policy.py`. Use
+`phase=tag`; it is the only thing that runs lint and the suite against the commit *as
+tagged* before publishing.
 
-```bash
-# 3. bump FALLBACK_DEVKIT_REF in scripts/new-project.py, commit, and land it
-# 5. then, and only then:
-git tag vX.Y.Z && git push && git push --tags
-```
+This paragraph used to be the whole guard, and it did not hold. It read "never push the
+tag before the commit that bumps the fallback", and on 2026-08-16 `v0.9.0` was pushed by
+hand six minutes after its prepare run, before #107 had merged — so the published tag
+named a commit whose `FALLBACK_DEVKIT_REF` still said `v0.8.0` and whose vendored tree
+already differed from `main` by one MANIFEST file. Nothing was red: the cost was a
+drift-red gate waiting in every consumer that adopted it, plus three open PRs failing
+`test_fallback_devkit_ref_tracks_the_newest_tag` until the bump landed. `v0.9.1` exists
+because moving the published tag would have bypassed the gate a second time.
 
-Never push the tag before the commit that bumps the fallback — a tag that exists while
-the constant still names the previous one is precisely the state step 4's test was
-written to catch, and it would then pass for the wrong reason. Re-run the suite
-afterwards; that test is green once `git describe --tags` can see the tag.
+To push one by hand anyway — recovering a half-finished release, or a repo with no
+workflow — the escape hatch is `DEVKIT_SKIP_BRANCH_POLICY=1`, and the ordering it leaves
+you responsible for is: bump `FALLBACK_DEVKIT_REF` in `scripts/new-project.py`, land that
+commit, and only then tag. Re-run the suite afterwards; the fallback test is green once
+`git describe --tags` can see the tag. Deleting a tag is not blocked — that is the
+recovery path for one already published.
 
 ## Verify the tag serves what it claims
 

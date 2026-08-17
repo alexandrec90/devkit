@@ -85,7 +85,7 @@ PRESETS: dict[str, tuple[str, ...]] = {
 # users who cannot hit the fast path. So it must track the newest tag, and
 # `test_fallback_devkit_ref_tracks_the_newest_tag` fails at release time if a tag
 # lands without it being bumped. Bump it in the same commit as the tag.
-FALLBACK_DEVKIT_REF = "v0.9.0"
+FALLBACK_DEVKIT_REF = "v0.9.1"
 
 
 class GeneratorError(RuntimeError):
@@ -93,23 +93,46 @@ class GeneratorError(RuntimeError):
 
 
 def latest_devkit_tag(root: Path = DEVKIT_ROOT) -> str | None:
-    """devkit's newest tag, or None when git cannot say.
+    """devkit's highest release tag, or None when git cannot say.
 
     The generated PR gate must pin a tag, never `@main` — one bad devkit commit must
     not redden every consuming repo at once. Resolving the newest tag at generation
     time beats a hardcoded default, which is how the default came to say `v0.1.0`
     long after v0.2.0 shipped.
+
+    This asks `git tag --sort=-v:refname`, and neither half of that is incidental.
+
+    It was `git describe --tags --abbrev=0`, which answers a different question:
+    the newest tag **reachable from HEAD**. Every caller here wants "which release
+    is current", a property of the repository and not of whatever the checkout is
+    parked on — and the gap between the two is silent in both directions. Minutes
+    after v0.9.1 was published, `install-git-policy.py --yes` in a checkout not yet
+    fast-forwarded installed v0.9.0's runtime and reported doing so as success,
+    which is precisely the stale-policy failure that file's receipts exist to
+    surface. `--check` could not see it either: it compares the receipt against this
+    function, so both sides shared the blind spot.
+
+    `-v:refname` rather than a plain sort because version order is not lexical
+    order: `v0.10.0` sorts *below* `v0.9.1` as a string, so the first release past
+    a two-digit minor would otherwise silently pin the older tag into every
+    generated project.
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "describe", "--tags", "--abbrev=0"],
+            ["git", "-C", str(root), "tag", "--list", "v*", "--sort=-v:refname"],
             capture_output=True,
             text=True,
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return result.stdout.strip() or None if result.returncode == 0 else None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        tag = line.strip()
+        if tag:
+            return tag
+    return None
 
 
 def harness_files_matching_ref(ref: str, root: Path = DEVKIT_ROOT) -> list[str] | None:
