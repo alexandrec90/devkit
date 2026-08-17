@@ -26,13 +26,12 @@ on:
         type: choice
         options: [prepare, tag]
 
-# `contents: write` pushes the release branch and the tag. `pull-requests: write` is for
-# the one `gh pr create` at the end of the prepare phase — without it that call, and only
-# that call, 403s with "Resource not accessible by integration", after the bump has
-# already been committed and pushed.
+# `contents: write` pushes the release branch and the tag. There is deliberately no
+# `pull-requests: write`: this workflow never opens the release PR itself, because a
+# PR opened with GITHUB_TOKEN triggers no workflow run and so arrives with no PR Gate
+# — see the prepare step.
 permissions:
   contents: write
-  pull-requests: write
 
 # One release run at a time, and never cancelled. Both halves matter, and neither was
 # here until `test_ci_workflow_contract.py` asked for the block:
@@ -91,23 +90,21 @@ jobs:
       # own pre-push policy protects that branch, and a workflow that ignored it
       # would be asserting a rule the humans are held to does not apply to CI.
       #
-      # The `gh pr create` is best-effort, and that is not indifference to a 403.
-      # It fails when "Allow GitHub Actions to create and approve pull requests" is
-      # off — a repo setting `permissions:` cannot override and a free-tier private
-      # repo may not be able to turn on at all. By then the bump is committed and
-      # the branch is pushed, so failing the job here reddens a release that has in
-      # fact succeeded up to its last, hand-repeatable step, and buries the one
-      # command that finishes it. So: emit that command into the step summary and
-      # let the run stay green about what it actually did.
-      #
-      # Enabling the setting is not the fix to reach for either. A PR opened with
-      # GITHUB_TOKEN triggers no workflow run, so the release PR would arrive with
-      # no PR Gate at all — and RELEASING.md step 4 requires reading that gate's
-      # uploaded test-failures.log before merging.
+      # The PR itself is deliberately NOT opened here. A PR opened with
+      # GITHUB_TOKEN triggers no workflow run, so it arrives with no PR Gate at
+      # all — and RELEASING.md step 4 requires reading that gate's uploaded
+      # test-failures.log before merging. This step used to attempt
+      # `gh pr create` anyway, assuming "Allow GitHub Actions to create and
+      # approve pull requests" would be off and the call would 403 into the
+      # manual path. The v0.9.0 release disproved it: the setting was on, the
+      # call succeeded, and the release PR sat with no checks until a human
+      # closed and reopened it to get a real-actor `pull_request` event. So the
+      # manual path is the only path: the bump is committed and the branch
+      # pushed, and the one remaining command goes in the step summary, to be
+      # run by the operator whose PR will actually carry a gate.
       - name: Prepare the release PR
         if: inputs.phase == 'prepare'
         env:
-          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           REPO: ${{ github.repository }}
         run: |
@@ -130,20 +127,14 @@ jobs:
           read the uploaded test-failures.log and confirm before merging.
           EOF
 
-          if gh pr create --repo "$REPO" \
-            --base main --head "release/$VERSION" \
-            --title "Release $VERSION" \
-            --body-file /tmp/release-pr-body.md; then
-            exit 0
-          fi
-
-          echo "::warning::The branch is pushed; opening its PR needs one manual command (see the summary)."
+          echo "::notice::The branch is pushed; open its PR with the command in the summary."
           {
-            echo "### release/$VERSION is pushed — open its PR by hand"
+            echo "### release/$VERSION is pushed — open its PR"
             echo
-            echo "\`gh pr create\` was refused. This is expected when **Allow GitHub"
-            echo "Actions to create and approve pull requests** is off; the bump is"
-            echo "already committed and pushed, so only this last step is left:"
+            echo "The workflow does not open the PR itself: a PR opened with"
+            echo "GITHUB_TOKEN carries no PR Gate, and step 4 of RELEASING.md is"
+            echo "reading that gate's test-failures.log. The bump is already"
+            echo "committed and pushed, so only this step is left:"
             echo
             echo '```bash'
             echo "gh pr create --repo $REPO --base main --head release/$VERSION \\"

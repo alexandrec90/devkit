@@ -38,16 +38,14 @@ optional — the fallback bump has to be **committed before the tag exists**.
    gh workflow run release.yml -f version=vX.Y.Z -f phase=prepare
    ```
 
-   > **The PR is the one step that may land on you.** `gh pr create` is refused when
-   > *Allow GitHub Actions to create and approve pull requests* is off — which
-   > `permissions:` cannot override, and a free-tier private repo may not be able to
-   > turn on. The run stays green and puts the exact `gh pr create` command in its
-   > **step summary**; paste it. Nothing is lost, because the bump is committed and
-   > the branch pushed before that call is made.
-   >
-   > Do not "fix" this by enabling the setting. A PR opened with `GITHUB_TOKEN`
-   > triggers no workflow run, so the release PR would arrive with no PR Gate — and
-   > step 4 below is *reading that gate's* `test-failures.log`.
+   > **Opening the PR is always yours.** The workflow pushes the branch and puts the
+   > exact `gh pr create` command in its **step summary**; paste it. It deliberately
+   > never opens the PR itself: a PR opened with `GITHUB_TOKEN` triggers no workflow
+   > run, so it would arrive with no PR Gate — and step 4 below is *reading that
+   > gate's* `test-failures.log`. The v0.9.0 release proved this the hard way: with
+   > *Allow GitHub Actions to create and approve pull requests* on, the workflow's own
+   > `gh pr create` succeeded and the release PR sat with `no checks reported` until a
+   > human closed and reopened it to get a real-actor `pull_request` event.
 
 4. **Merge that PR — expecting exactly one red test.**
 

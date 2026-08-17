@@ -488,31 +488,39 @@ def test_release_stages_the_tag_before_gates_and_publishes_it_afterward():
     assert "git push origin" in steps[published]["run"]
 
 
-def test_a_refused_release_pr_does_not_fail_the_prepare_phase():
-    """`gh pr create` is the last thing prepare does, and the one that can be vetoed.
+def _executed_lines(run: str, needle: str) -> list[str]:
+    """Lines of a `run:` block that would *execute* `needle`, not merely print it."""
+    return [
+        line
+        for line in run.splitlines()
+        if needle in line and not line.strip().startswith(("echo ", "echo\t", "#"))
+    ]
 
-    "Allow GitHub Actions to create and approve pull requests" is a repo setting that
-    `permissions:` cannot override and a free-tier private repo may not be able to turn
-    on. It was off here for v0.7.0: the run bumped FALLBACK_DEVKIT_REF, committed it and
-    pushed `release/v0.7.0` — then died on the PR call and reported the whole release as
-    failed, with the one command that would finish it nowhere in the output.
 
-    So the call must be conditional, and its failure must leave the command behind in
-    the step summary.
+def test_the_prepare_phase_never_opens_the_release_pr_itself():
+    """A PR opened with GITHUB_TOKEN triggers no workflow run, so it has no PR Gate.
+
+    RELEASING.md step 4 is *reading that gate's* uploaded test-failures.log before
+    merging, so a gate-less release PR is a release PR nobody verified. Prepare used
+    to attempt `gh pr create` anyway, on the assumption that "Allow GitHub Actions to
+    create and approve pull requests" would be off and the call would 403 into the
+    manual path. v0.9.0 disproved it: the setting was on, the call succeeded, and the
+    release PR sat with `no checks reported` until a human closed and reopened it to
+    get a real-actor `pull_request` event.
+
+    So prepare only *echoes* the finishing `gh pr create` command into the step
+    summary, for the operator whose PR will actually carry a gate.
     """
     yaml = _yaml()
     parsed = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))
     steps = parsed["jobs"]["release"]["steps"]
     prepare = [s for s in steps if "gh pr create" in (s.get("run") or "")]
-    assert len(prepare) == 1, "expected exactly one step opening the release PR"
+    assert len(prepare) == 1, "expected exactly one step handing over the release PR"
     run = prepare[0]["run"]
 
-    # Bare `gh pr create` on its own line aborts the job under `bash -e`.
-    assert "if gh pr create" in run, "the PR call must be conditional, not fatal"
-    assert "GITHUB_STEP_SUMMARY" in run, "a refused PR must leave its command in the summary"
-    # Twice: the attempt, and the copy echoed into the summary for someone to paste.
-    # A summary saying only "this failed" is what made the first one expensive.
-    assert run.count("gh pr create") >= 2, "the summary must carry the command, not just the news"
+    executed = _executed_lines(run, "gh pr create")
+    assert not executed, f"prepare must never run `gh pr create` itself: {executed}"
+    assert "GITHUB_STEP_SUMMARY" in run, "the finishing command must land in the step summary"
 
 
 # `gh pr` verbs that WRITE. `list` and `view` are deliberately absent: they read, and
@@ -546,7 +554,10 @@ def test_workflow_jobs_declare_the_gh_scopes_they_use():
             granted = effective.get("pull-requests") if isinstance(effective, dict) else effective
             for step in job.get("steps") or []:
                 run = step.get("run") or ""
-                if not any(f"gh pr {verb}" in run for verb in GH_PR_WRITES):
+                # Executed calls only: release.yml's prepare step echoes a
+                # `gh pr create` command into its summary without running it,
+                # and a printed command needs no scope.
+                if not any(_executed_lines(run, f"gh pr {verb}") for verb in GH_PR_WRITES):
                     continue
                 if granted != "write":
                     offenders.append(
