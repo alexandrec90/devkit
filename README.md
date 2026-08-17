@@ -538,6 +538,12 @@ to 60 seconds. Explicit `commandWindows` values remain authoritative. Claude's B
 output-cap handler is deliberately omitted because Codex already bounds shell-tool
 output before returning it to the model.
 
+`.codex/hooks.json` is generated and **committed**, so it can fall behind the generator
+that writes it. `sync-devkit.py --pull` regenerates it after adopting upstream, and
+`--check` reports a stale one as `STALE` — as does the vendored
+`test_the_committed_codex_artifact_matches_the_generator`, which needs no `$DEVKIT_DIR`.
+`sync-codex-hooks.py --check` is the same comparison on its own.
+
 The generated commands run through `scripts/hooks/codex-hook-adapter.py`; Codex's
 cross-platform SessionStart path uses `scripts/hooks/codex-session-start.py`. Both
 runtime files and their unit tests are vendored with the converter. The generic repo

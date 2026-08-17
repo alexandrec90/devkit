@@ -109,6 +109,31 @@ def wrapper_script(root: Path = REPO_ROOT) -> Path:
     return root / "scripts" / "log-wrap.py"
 
 
+def interpreter(root: Path = REPO_ROOT) -> str:
+    """The interpreter the scheduled task should run, belonging to `root`.
+
+    `sys.executable` is the wrong answer for the one caller that matters. `--devkit`
+    exists so an agent working in a box can register the job against the static
+    checkout, and it moved every *script* path across while leaving the interpreter
+    pointing at the box's own `.venv` -- which `reconcile` deletes the moment the PR
+    merges. The escape hatch registered exactly the failure it was the escape from, and
+    silently: the task runs fine until the box is reaped.
+
+    Falls back to `sys.executable` when `root` has no virtualenv -- the ordinary case for
+    a checkout whose tools are on PATH -- except when the running one is itself a box's.
+    There, `sys._base_executable` is the interpreter that *created* this virtualenv, and
+    it is the only one in reach that outlives every box.
+    """
+    venv = (
+        root / ".venv" / ("Scripts" if WINDOWS else "bin") / ("python.exe" if WINDOWS else "python")
+    )
+    if venv.is_file():
+        return str(venv)
+    if sweep.BOXES_DIR_NAME in Path(sys.executable).parts:
+        return getattr(sys, "_base_executable", "") or sys.executable
+    return sys.executable
+
+
 def windowless(python: str) -> str:
     """`pythonw.exe` beside `python.exe`, so the nightly run opens no console.
 
@@ -276,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    python = windowless(sys.executable)
+    python = windowless(interpreter(root))
     arguments = merge_arguments(python, root=root, base=args.base, checkout=args.checkout)
     if not args.apply:
         print(

@@ -1112,3 +1112,157 @@ def test_the_setup_action_is_the_case_this_guards(tmp_path):
     every consumer that never customised it loses the action on its next pull."""
     assert ACTION not in sh.MANIFEST
     assert ACTION not in sh.RETIRED_PATHS, "it was un-vendored, not retired"
+
+
+# --- the generated Codex artifact ------------------------------------------
+# `--pull` copies the generator; the file Codex actually reads was written by the
+# generator that came before it, and nothing on either side compared the two. So the
+# Claude-only Bash cap kept blocking Codex sessions in every project that had already
+# generated a `.codex/hooks.json` -- long after `sync-codex-hooks.py` stopped emitting
+# it -- and each block's suggested remedy (`invoke-capped.py`) is a wrapper the session
+# then carried on every command after it.
+
+CODEX_SETTINGS = json.dumps(
+    {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "^Bash$",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                'python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/'
+                                'enforce-capped-bash.py"'
+                            ),
+                        }
+                    ],
+                }
+            ]
+        }
+    },
+    indent=2,
+)
+# What the pre-`REDUNDANT_HANDLERS` generator wrote, and what every consumer that has
+# not regenerated is still handing Codex. The cap command has to be really in here: an
+# artifact that merely differs would let the assertions below pass without the fix.
+STALE_CODEX_HOOKS = (
+    json.dumps(
+        {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "^Bash$",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": (
+                                    'python3 "__CODEX_PROJECT_ROOT__/scripts/hooks/'
+                                    'codex-hook-adapter.py" --event PreToolUse -- python3 '
+                                    '"__CODEX_PROJECT_ROOT__/scripts/hooks/'
+                                    'enforce-capped-bash.py"'
+                                ),
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+        indent=2,
+    )
+    + "\n"
+)
+
+
+def _codex_project(root: Path, hooks_json: str | None = STALE_CODEX_HOOKS) -> Path:
+    """A project with the real generator vendored, so the subprocess call is the real one."""
+    _seed(root, sh.SETTINGS_FILE, CODEX_SETTINGS)
+    _seed(
+        root,
+        sh.CODEX_GENERATOR,
+        (sh.REPO_ROOT / sh.CODEX_GENERATOR).read_text(encoding="utf-8"),
+    )
+    if hooks_json is not None:
+        _seed(root, sh.CODEX_HOOKS_FILE, hooks_json)
+    return root
+
+
+def test_a_codex_artifact_from_an_older_generator_is_stale(tmp_path):
+    assert sh.codex_hooks_stale(_codex_project(tmp_path)) is True
+
+
+def test_a_project_that_never_opted_into_codex_is_not_stale(tmp_path):
+    """Generating one here would wire Codex hooks into a project that asked for none."""
+    root = _codex_project(tmp_path, hooks_json=None)
+    assert sh.codex_hooks_stale(root) is False
+    assert sh.regenerate_codex_hooks(root) is False
+    assert not (root / sh.CODEX_HOOKS_FILE).exists()
+
+
+def test_a_project_without_the_generator_is_not_stale(tmp_path):
+    """A consumer several releases behind has the artifact and not yet the script. It
+    must fail its gate on the vendored drift, not on a check that cannot run."""
+    _seed(tmp_path, sh.SETTINGS_FILE, CODEX_SETTINGS)
+    _seed(tmp_path, sh.CODEX_HOOKS_FILE, STALE_CODEX_HOOKS)
+    assert sh.codex_hooks_stale(tmp_path) is False
+
+
+def test_regenerate_drops_the_bash_cap_the_stale_artifact_still_carried(tmp_path):
+    """The bug, end to end: after regeneration Codex no longer runs the Claude-only
+    gate, so nothing blocks its shell commands into the invoke-capped spiral."""
+    root = _codex_project(tmp_path)
+    assert sh.regenerate_codex_hooks(root) is True
+    rewritten = (root / sh.CODEX_HOOKS_FILE).read_text(encoding="utf-8")
+    assert "enforce-capped-bash.py" not in rewritten
+    assert sh.codex_hooks_stale(root) is False
+
+
+def test_regenerating_a_current_artifact_is_a_no_op(tmp_path):
+    root = _codex_project(tmp_path)
+    sh.regenerate_codex_hooks(root)
+    assert sh.regenerate_codex_hooks(root) is False
+
+
+def test_pull_regenerates_the_stale_codex_artifact(tmp_path, monkeypatch, capsys):
+    """The wiring that matters: adopting the fixed generator must also rewrite the file
+    Codex reads. Without this the pull lands, the gate goes green, and every Codex
+    session keeps being blocked by the hook the pull was meant to remove."""
+    src = _repo(tmp_path / "src", tag="v0.5.3", files={"scripts/hooks/x.py": "upstream"})
+    repo = _codex_project(tmp_path / "proj")
+    _seed(repo, sh.PRECOMMIT_FILE, CONFIG)
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    assert "enforce-capped-bash.py" not in (repo / sh.CODEX_HOOKS_FILE).read_text(encoding="utf-8")
+    assert sh.CODEX_HOOKS_FILE in capsys.readouterr().out
+
+
+def test_check_fails_on_a_stale_codex_artifact_with_everything_else_in_sync(
+    tmp_path, monkeypatch, capsys
+):
+    """A project can be byte-perfect on every vendored file and still be running hook
+    wiring it no longer describes -- which is precisely the state every consumer was in."""
+    src = _repo(tmp_path / "src", tag="v0.5.3", files={"scripts/hooks/x.py": "upstream"})
+    repo = _codex_project(tmp_path / "proj")
+    _seed(repo, "scripts/hooks/x.py", "upstream")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    assert sh.main(["--check", "--src", str(src)]) != 0
+    reported = capsys.readouterr().err
+    assert "STALE" in reported
+    # Not "the vendored harness drifted, run --pull": nothing upstream differs, and
+    # advice that does not describe the failure is how a red gate becomes noise.
+    assert "drifted from the shared repo" not in reported
+
+
+def test_check_passes_once_the_codex_artifact_is_regenerated(tmp_path, monkeypatch):
+    src = _repo(tmp_path / "src", tag="v0.5.3", files={"scripts/hooks/x.py": "upstream"})
+    repo = _codex_project(tmp_path / "proj")
+    _seed(repo, "scripts/hooks/x.py", "upstream")
+    sh.regenerate_codex_hooks(repo)
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    assert sh.main(["--check", "--src", str(src)]) == 0

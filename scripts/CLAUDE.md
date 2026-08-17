@@ -30,6 +30,29 @@ artifacts under `logs/`).
 The move that has actually gone wrong is the other one — vendoring something whose
 *content* varies. [`.github/CLAUDE.md`](../.github/CLAUDE.md) has that case in full.
 
+## Vendoring a generator does not vendor its output
+
+`.codex/hooks.json` is written by `sync-codex-hooks.py` from the project's own
+`.claude/settings.json`, so the script is in the `MANIFEST` and the file it produces
+cannot be — its content is per-project. That asymmetry is a **third** delivery path,
+and it was the one with no gate on it: a `--pull` adopts a new generator and changes
+nothing about what Codex actually runs, because the file Codex reads was written by the
+generator before it.
+
+It cost months. `REDUNDANT_HANDLERS` stopped porting the Claude-only Bash cap into Codex
+the day it landed, and Codex sessions in every already-generated project went on being
+blocked by it — with the block's own suggested remedy, `invoke-capped.py`, being a
+wrapper the session then applied to every command after it. Half the shell calls in one
+project's Codex sessions were the wrapper. Nothing was red anywhere, because both halves
+were individually correct.
+
+So: **anything generated from a vendored script needs a check that regenerates it and
+compares.** `sync_devkit.codex_hooks_stale` is that check, `regenerate_codex_hooks` runs
+it on `--pull`, and the vendored
+`test_the_committed_codex_artifact_matches_the_generator` runs it in a consumer's PR
+gate where no `$DEVKIT_DIR` exists. Regenerating on pull is not enough on its own —
+a project only pulls when someone asks it to.
+
 ## `templates/` is content, not source
 
 - `.tmpl` files are not valid Python until rendered, and the plain `.py` files under
@@ -184,6 +207,16 @@ Two things a change here has to keep:
 - **A repetition carries no `<Duration>`.** Absent means indefinitely; any value
   present is a stopping point, so a plausible-looking `P1D` turns the job off after a
   day.
+- **The interpreter is part of "which checkout", not part of the environment.**
+  `--devkit` exists so an agent in a box can register a job against the static checkout,
+  and `install-vanillaland-merge.py` moved every *script* path across while leaving
+  `sys.executable` — the box's own `.venv` — as the interpreter. `reconcile` deletes that
+  when the PR merges, so the escape hatch registered the exact failure it was the escape
+  from, silently and only after the box was reaped. `interpreter(root)` is the fix; when
+  the named checkout has no virtualenv, `sys._base_executable` is the only interpreter in
+  reach that outlives every box. The test that should have caught it named the *running*
+  checkout as the other one, so it asserted nothing until the suite itself ran from a box
+  — at which point its two assertions contradicted each other.
 
 The other half of keeping these alive is noticing when one has stopped anyway, which
 is `workspace-status.py`'s `scheduler_line` — it reads when a pass last *finished*
