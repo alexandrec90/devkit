@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 
+import support
 from support import git_policy
 
 
@@ -219,6 +220,90 @@ def test_push_input_parser_ignores_malformed_lines_and_tags():
         f"refs/heads/x {'1' * 40} refs/heads/x {'0' * 40}\n"
     )
     assert [update.branch for update in git_policy.parse_push_updates(raw)] == ["x"]
+
+
+def tag_push(tag, *, delete=False):
+    """A pre-push payload line for `tag`, as git writes it."""
+    if delete:
+        return f"(delete) {'0' * 40} refs/tags/{tag} {'1' * 40}\n"
+    return f"refs/tags/{tag} {'1' * 40} refs/tags/{tag} {'0' * 40}\n"
+
+
+def test_pre_push_blocks_a_hand_pushed_release_tag():
+    # The v0.9.0 regression: the tag was pushed from a workstation, so it named a
+    # commit no `phase=tag` run had ever validated as tagged.
+    runner = FakeRunner(git_responses())
+    decision = git_policy.evaluate_pre_push("origin", "", tag_push("v0.9.0"), runner)
+    assert not decision.ok
+    assert "push of release tag 'v0.9.0' blocked" in decision.errors[0]
+    assert "release.yml" in decision.errors[0]
+    # Pure: a tag needs no PR lookup, so nothing may reach the network for one.
+    assert not any(call[0] == "gh" for call in runner.calls)
+
+
+def test_pre_push_blocks_a_release_tag_riding_along_with_a_branch():
+    # `push.followTags`, or `git push origin HEAD v0.9.0`: the branch half is
+    # unobjectionable and the whole push still has to fail.
+    raw = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n" + tag_push(
+        "v1.2.3"
+    )
+    decision = git_policy.evaluate_pre_push("origin", "", raw, FakeRunner(git_responses()))
+    assert not decision.ok
+    assert "'v1.2.3'" in decision.errors[0]
+
+
+def test_pre_push_allows_deleting_a_release_tag():
+    # Deletion is the recovery move for a tag already published, and the rest of the
+    # policy exempts deletions too. Blocking it would trap the mistake instead of the
+    # act that makes one.
+    runner = FakeRunner(git_responses())
+    decision = git_policy.evaluate_pre_push("origin", "", tag_push("v0.9.0", delete=True), runner)
+    assert decision.ok
+
+
+def test_pre_push_allows_a_tag_that_is_not_a_release():
+    # A marker, a nightly, a vendor pin: nothing downstream resolves those the way a
+    # consumer resolves `rev:`, so the gate has no claim on them.
+    for tag in ("nightly-2026-08-17", "v1.2", "release-candidate", "v1.2.3-rc1"):
+        decision = git_policy.evaluate_pre_push(
+            "origin", "", tag_push(tag), FakeRunner(git_responses())
+        )
+        assert decision.ok, f"{tag} should not be treated as a release tag"
+
+
+def test_the_release_tag_block_is_waived_by_the_skip_env_var(tmp_path, monkeypatch):
+    # The escape hatch has to reach this check too: `release.py --yes` run by hand is a
+    # legitimate caller, and `--no-verify` would take the project's own gate with it.
+    responses = git_responses()
+    responses[("git", "rev-parse", "--git-path", "devkit-branch-policy.json")] = completed(
+        ["git"], returncode=1
+    )
+    responses[("git", "rev-parse", "--show-toplevel")] = completed(["git"], stdout=f"{tmp_path}\n")
+    code = git_policy.run_hook(
+        "pre-push",
+        ["origin", "https://github.com/acme/widgets.git"],
+        input_text=tag_push("v0.9.0"),
+        runner=FakeRunner(responses),
+        env={git_policy.SKIP_ENV_VAR: "1"},
+    )
+    assert code == 0
+
+
+def test_the_release_tag_pattern_matches_the_release_scripts():
+    """The duplicated regex is the price of the hook running with no checkout in reach.
+
+    `git_policy.py` is *copied* into `~/.devkit/git-hooks`, so it cannot import
+    `release.py`. If the two ever disagree about what a release version looks like, the
+    gate stops covering the versions the workflow can actually cut — silently, since a
+    tag it fails to recognise is one it waves through.
+    """
+    release = support.load_script("scripts/release.py")
+    for version in ("v0.9.1", "v1.0.0", "v10.20.30"):
+        assert release.VERSION_RE.fullmatch(version)
+        assert git_policy.RELEASE_TAG_RE.fullmatch(version)
+    for other in ("v1.2", "1.2.3", "v1.2.3-rc1", "release/v1.2.3"):
+        assert not release.VERSION_RE.fullmatch(other)
+        assert not git_policy.RELEASE_TAG_RE.fullmatch(other)
 
 
 def test_policy_runs_pre_commit_framework_then_project_hook(tmp_path, monkeypatch):

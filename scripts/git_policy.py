@@ -2,11 +2,12 @@
 """Global Git branch-lifecycle policy installed by Devkit.
 
 The policy is deliberately local: GitHub Free cannot enforce protected branches in
-private repositories. It blocks the two mistakes that matter before Git changes
-anything remotely:
+private repositories. It blocks the mistakes that matter before Git changes anything
+remotely:
 
 * commits while detached, on the remote default branch, or on main/master;
-* pushes to those protected branches, or to a branch name whose GitHub PR merged.
+* pushes to those protected branches, or to a branch name whose GitHub PR merged;
+* pushes that create or move a release tag, which only a release workflow may do.
 
 After the policy passes, the dispatcher runs the repository's pre-commit framework
 configuration (for ``pre-commit``) and an optional ``.githooks/<hook>``. Everything
@@ -37,6 +38,24 @@ ALWAYS_PROTECTED = frozenset({"main", "master"})
 ZERO_OID_RE = re.compile(r"^0+$")
 SUPPORTED_HOOKS = ("pre-commit", "pre-push")
 
+# A release tag is the one ref consumers pin, so the commit it names must be one whose
+# suite passed *as tagged*. devkit's `release.yml phase=tag` is what guarantees that: it
+# stages the tag locally, runs lint and the full suite against that exact commit, and
+# pushes only then. A tag pushed from a workstation skips every part of it.
+#
+# That is not hypothetical. `v0.9.0` was pushed by hand six minutes after its prepare
+# run and before its own fallback bump had merged, so the published tag named a commit
+# whose `FALLBACK_DEVKIT_REF` still said `v0.8.0` and whose vendored tree already
+# differed from `main`. Nothing was red anywhere -- the cost was a drift-red PR gate
+# waiting in every consumer that adopted it, and three open PRs failing one shared test
+# until the bump landed. `RELEASING.md` had warned against exactly this ordering in
+# prose for months, which is the evidence that prose was not enough.
+#
+# Duplicated from `release.py`'s `VERSION_RE` on purpose: this module is *copied* into
+# `~/.devkit/git-hooks` and runs with no checkout in reach, so it cannot import it.
+# `test_the_release_tag_pattern_matches_the_release_scripts` holds the two together.
+RELEASE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+
 # Escape hatch for scripted repo setup -- a generator that seeds an initial commit, a
 # test fixture, a migration script. Named to match `DEVKIT_SKIP_STOP_VERIFY`.
 #
@@ -62,6 +81,10 @@ class Decision:
         return not self.errors
 
 
+def _is_deletion(local_ref: str, local_oid: str) -> bool:
+    return local_ref == "(delete)" or bool(ZERO_OID_RE.fullmatch(local_oid))
+
+
 @dataclass(frozen=True)
 class PushUpdate:
     local_ref: str
@@ -72,7 +95,28 @@ class PushUpdate:
 
     @property
     def deletion(self) -> bool:
-        return self.local_ref == "(delete)" or bool(ZERO_OID_RE.fullmatch(self.local_oid))
+        return _is_deletion(self.local_ref, self.local_oid)
+
+
+@dataclass(frozen=True)
+class TagUpdate:
+    """One `refs/tags/...` line of a pre-push payload.
+
+    A separate type from `PushUpdate` rather than a reused one with `branch` holding a
+    tag name: the two are asked different questions -- a branch is looked up on GitHub,
+    a tag is matched against a shape -- and a field lying about which it holds is how
+    the wrong one gets passed to the wrong check.
+    """
+
+    local_ref: str
+    local_oid: str
+    remote_ref: str
+    remote_oid: str
+    tag: str
+
+    @property
+    def deletion(self) -> bool:
+        return _is_deletion(self.local_ref, self.local_oid)
 
 
 @dataclass(frozen=True)
@@ -240,9 +284,13 @@ def merged_pr(runner: Runner, repo: str, branch: str) -> MergedPR:
     return MergedPR(url=url if isinstance(url, str) else f"{repo} merged PR")
 
 
-def parse_push_updates(raw: str) -> tuple[PushUpdate, ...]:
-    updates: list[PushUpdate] = []
-    prefix = "refs/heads/"
+def _parse_ref_updates(raw: str, prefix: str) -> tuple[tuple[str, str, str, str, str], ...]:
+    """The `<local ref> <local oid> <remote ref> <remote oid>` lines under `prefix`.
+
+    Malformed lines are dropped rather than raising: this parses git's stdin inside a
+    hook, where a line nobody anticipated must not take the push down.
+    """
+    parsed: list[tuple[str, str, str, str, str]] = []
     for line in raw.splitlines():
         fields = line.split()
         if len(fields) != 4:
@@ -250,10 +298,57 @@ def parse_push_updates(raw: str) -> tuple[PushUpdate, ...]:
         local_ref, local_oid, remote_ref, remote_oid = fields
         if not remote_ref.startswith(prefix):
             continue
-        branch = remote_ref[len(prefix) :]
-        if branch:
-            updates.append(PushUpdate(local_ref, local_oid, remote_ref, remote_oid, branch))
-    return tuple(updates)
+        name = remote_ref[len(prefix) :]
+        if name:
+            parsed.append((local_ref, local_oid, remote_ref, remote_oid, name))
+    return tuple(parsed)
+
+
+def parse_push_updates(raw: str) -> tuple[PushUpdate, ...]:
+    """The branch updates in a pre-push payload. Tag lines are `parse_tag_updates`'s."""
+    return tuple(PushUpdate(*fields) for fields in _parse_ref_updates(raw, "refs/heads/"))
+
+
+def parse_tag_updates(raw: str) -> tuple[TagUpdate, ...]:
+    """The tag updates in a pre-push payload.
+
+    These were parsed by nothing at all until a hand-pushed `v0.9.0` got through: the
+    branch parser drops every `refs/tags/` line, which made a tag-only push a payload
+    the policy saw as empty and waved through.
+    """
+    return tuple(TagUpdate(*fields) for fields in _parse_ref_updates(raw, "refs/tags/"))
+
+
+def release_tag_decision(raw_updates: str) -> Decision:
+    """Refuse a push that creates or moves a release tag.
+
+    Pure -- no git, no network -- so it holds in a repo with no remote, no GitHub, or
+    no `gh`, and cannot be the thing that makes a push hang.
+
+    A *deletion* is deliberately allowed. Deleting is the recovery move when a bad tag
+    is already published, and the rest of the pre-push policy exempts deletions for the
+    same reason: this gate exists to stop an unverified tag being published, not to trap
+    one that already was.
+    """
+    tags = sorted(
+        {
+            update.tag
+            for update in parse_tag_updates(raw_updates)
+            if not update.deletion and RELEASE_TAG_RE.fullmatch(update.tag)
+        }
+    )
+    if not tags:
+        return Decision()
+    rendered = ", ".join(f"'{tag}'" for tag in tags)
+    return Decision(
+        errors=(
+            f"push of release tag {rendered} blocked: a release tag is what consumers "
+            "pin, so it must be cut by the release workflow that runs lint and the full "
+            "suite against the exact commit first (devkit: `gh workflow run release.yml "
+            "-f version=<tag> -f phase=tag`, after its prepare PR has merged). "
+            f"To push it by hand anyway, set {SKIP_ENV_VAR}=1.",
+        )
+    )
 
 
 def _remote_url(runner: Runner, remote: str, supplied_url: str = "") -> str:
@@ -335,6 +430,13 @@ def evaluate_pre_push(
     raw_updates: str,
     runner: Runner = run_command,
 ) -> Decision:
+    # Before the branch checks, and before their early return: a `git push --tags` or a
+    # `push.followTags` ride-along carries no branch update at all, so anything that
+    # reads `updates` first has already decided there is nothing to check.
+    tag_decision = release_tag_decision(raw_updates)
+    if not tag_decision.ok:
+        return tag_decision
+
     updates = tuple(update for update in parse_push_updates(raw_updates) if not update.deletion)
     if not updates:
         return Decision()
