@@ -491,19 +491,20 @@ def sweep(env: dict[str, str], run) -> int:
 
     for file_name, title in scheduled:
         if states.get(file_name) == STOPPED_STATE:
-            print(
-                f"{title}: {
-                    apply(
-                        'open',
-                        stopped_title(title),
-                        issues,
-                        body=stopped_body(title, repo),
-                        comment=f'`{title}` is still disabled.',
-                        owner=owner,
-                        run=run,
-                    )
-                }"
+            # Hoisted out of the f-string: a line break inside a replacement field is
+            # Python 3.12 syntax, and this file ships to consumers whose ruff still
+            # targets 3.11 -- where it is a lint-time syntax error that refuses the
+            # adopting commit.
+            stopped_outcome = apply(
+                "open",
+                stopped_title(title),
+                issues,
+                body=stopped_body(title, repo),
+                comment=f"`{title}` is still disabled.",
+                owner=owner,
+                run=run,
             )
+            print(f"{title}: {stopped_outcome}")
             continue
 
         # Active again: retire the stopped tracker before judging any run, so a workflow
@@ -532,21 +533,17 @@ def sweep(env: dict[str, str], run) -> int:
             continue
 
         facts = run_env(info, title)
-        print(
-            f"{title}: {
-                apply(
-                    action,
-                    issue_title(title),
-                    issues,
-                    body=failure_body(facts),
-                    comment=recurrence_comment(facts)
-                    if action == 'open'
-                    else recovery_comment(facts),
-                    owner=owner,
-                    run=run,
-                )
-            }"
+        # Same 3.11 constraint as the stopped-workflow print above.
+        verdict_outcome = apply(
+            action,
+            issue_title(title),
+            issues,
+            body=failure_body(facts),
+            comment=recurrence_comment(facts) if action == "open" else recovery_comment(facts),
+            owner=owner,
+            run=run,
         )
+        print(f"{title}: {verdict_outcome}")
 
     return 0
 
