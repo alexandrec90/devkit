@@ -17,7 +17,7 @@ from __future__ import annotations
 import itertools
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REGISTRY_NAME = "ports.toml"
@@ -38,6 +38,24 @@ class Registry:
     max_slots: int
     services: dict[str, int]
     slots: dict[str, int]
+    shared: dict[str, int] = field(default_factory=dict)
+
+    def shared_port(self, service: str) -> int:
+        """The fixed port of a workspace singleton (see `[shared]` in the registry).
+
+        Deliberately *not* reachable through `ports_for`: that method answers "what
+        does this checkout publish", and a singleton is not published per checkout.
+        Folding the two together is what produced a per-project telemetry endpoint
+        for a collector that only ever existed once.
+        """
+        try:
+            return self.shared[service]
+        except KeyError:
+            known = ", ".join(sorted(self.shared)) or "(none)"
+            raise RegistryError(
+                f"no shared port registered for {service!r}; known: {known}. "
+                f"Add it to [shared] in {REGISTRY_NAME}."
+            ) from None
 
     def slot_of(self, checkout: str) -> int:
         """The slot registered for `checkout` (a directory name)."""
@@ -93,16 +111,24 @@ class Registry:
         )
 
 
-def validate(max_slots: int, services: dict[str, int], slots: dict[str, int]) -> None:
+def validate(
+    max_slots: int,
+    services: dict[str, int],
+    slots: dict[str, int],
+    shared: dict[str, int] | None = None,
+) -> None:
     """Raise `RegistryError` unless the registry is internally consistent.
 
-    Three ways it can be wrong, all of which produce a port collision at `docker
+    Four ways it can be wrong, all of which produce a port collision at `docker
     compose up` that reads as "port is already allocated" with no hint of the cause:
 
     1. two checkouts sharing a slot — their whole stacks overlap;
     2. a slot outside `[0, max_slots)` — unvalidated spacing below it;
     3. two service bases closer together than `max_slots` — a high slot of the lower
-       service lands on a low slot of the higher one.
+       service lands on a low slot of the higher one;
+    4. a `[shared]` singleton inside some service's slot range — the singleton is a
+       fixed number and the slot port moves, so this collides only for the one
+       checkout holding that slot, which is the hardest version of this bug to see.
     """
     if max_slots < 1:
         raise RegistryError(f"registry.max_slots must be >= 1, got {max_slots}")
@@ -136,17 +162,37 @@ def validate(max_slots: int, services: dict[str, int], slots: dict[str, int]) ->
                 f"Move one base at least {max_slots} away."
             )
 
+    for name, port in sorted((shared or {}).items()):
+        if not isinstance(port, int) or isinstance(port, bool):
+            raise RegistryError(f"shared port for {name!r} must be an integer, got {port!r}")
+        for service, base in sorted(services.items(), key=lambda kv: kv[1]):
+            if base <= port < base + max_slots:
+                raise RegistryError(
+                    f"shared port {name}={port} falls inside the slot range of service "
+                    f"base {service}={base} ([{base}, {base + max_slots})): the checkout "
+                    f"on slot {port - base} would publish {service} on the singleton's "
+                    f"port. Move one of them."
+                )
+
 
 def from_dict(data: dict) -> Registry:
     """Build a validated `Registry` from an already-parsed registry mapping."""
     registry = data.get("registry", {})
     services = data.get("services", {})
     slots = data.get("slots", {})
+    shared = data.get("shared", {})
     if not isinstance(services, dict) or not isinstance(slots, dict):
         raise RegistryError("[services] and [slots] must both be tables")
+    if not isinstance(shared, dict):
+        raise RegistryError("[shared] must be a table")
     max_slots = registry.get("max_slots", 16) if isinstance(registry, dict) else 16
-    validate(max_slots, services, slots)
-    return Registry(max_slots=max_slots, services=dict(services), slots=dict(slots))
+    validate(max_slots, services, slots, shared)
+    return Registry(
+        max_slots=max_slots,
+        services=dict(services),
+        slots=dict(slots),
+        shared=dict(shared),
+    )
 
 
 def load(root: Path) -> Registry:
@@ -181,6 +227,10 @@ def main(argv: list[str] | None = None) -> int:
             print("service bases:")
             for service, base in sorted(registry.services.items(), key=lambda kv: kv[1]):
                 print(f"      {service} = {base}")
+            if registry.shared:
+                print("shared (one per workspace, not offset by slot):")
+                for service, port in sorted(registry.shared.items(), key=lambda kv: kv[1]):
+                    print(f"      {service} = {port}")
             return 0
         selected = list(
             dict.fromkeys(

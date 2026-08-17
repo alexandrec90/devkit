@@ -95,6 +95,67 @@ def test_service_bases_exactly_max_slots_apart_are_allowed():
     validate(4, {"a": 100, "b": 104}, {})
 
 
+# --- [shared]: workspace singletons -------------------------------------------------
+#
+# A `[services]` base is offset by slot because each checkout runs its own copy. A
+# `[shared]` port is fixed because one process serves every checkout. Conflating the
+# two is not a style question: `otel_http` sat in `[services]` until 2026-08-17, which
+# handed carameli 4318, sports_betting 4322 and apt-finder 4324 while exactly one
+# collector existed, so two of the three exported into a closed port for a month with
+# no error on either side.
+
+SHARED = {**BASE, "shared": {"otel_http": 4318}}
+
+
+def test_a_shared_port_is_the_same_for_every_checkout():
+    registry = from_dict(SHARED)
+    assert registry.shared_port("otel_http") == 4318
+    # The point of the tier, stated as an assertion: no slot arithmetic anywhere.
+    assert {registry.shared_port("otel_http") for _ in registry.slots} == {4318}
+
+
+def test_a_shared_port_is_not_reachable_through_ports_for():
+    # `ports_for` answers "what does this checkout publish". A singleton is published
+    # by nobody in particular, and letting it leak into that answer is how it acquired
+    # a per-slot offset in the first place.
+    registry = from_dict(SHARED)
+    assert "otel_http" not in registry.ports_for("alpha")
+    with pytest.raises(RegistryError, match="unknown service"):
+        registry.ports_for("alpha", ["otel_http"])
+
+
+def test_shared_port_rejects_an_unknown_singleton():
+    with pytest.raises(RegistryError, match="no shared port registered"):
+        from_dict(SHARED).shared_port("nope")
+
+
+def test_a_registry_with_no_shared_table_still_loads():
+    # Every consumer predating the tier passes no `[shared]`, and must keep working.
+    assert from_dict(BASE).shared == {}
+
+
+def test_a_shared_port_inside_a_service_slot_range_is_rejected():
+    # max_slots=4, so db owns 5432..5435. A singleton on 5434 collides only for the
+    # checkout holding slot 2 -- the version of this bug that survives longest,
+    # because every other checkout works.
+    with pytest.raises(RegistryError, match="falls inside the slot range"):
+        validate(4, {"db": 5432}, {}, {"otel_http": 5434})
+
+
+def test_a_shared_port_just_past_a_slot_range_is_allowed():
+    validate(4, {"db": 5432}, {}, {"otel_http": 5436})
+
+
+def test_boolean_shared_port_is_not_accepted_as_an_integer():
+    with pytest.raises(RegistryError, match="must be an integer"):
+        from_dict({**BASE, "shared": {"otel_http": True}})
+
+
+def test_shared_must_be_a_table():
+    with pytest.raises(RegistryError, match=r"\[shared\] must be a table"):
+        from_dict({**BASE, "shared": 4318})
+
+
 def test_empty_services_is_rejected():
     with pytest.raises(RegistryError, match="nothing to allocate"):
         validate(4, {}, {})
@@ -136,6 +197,19 @@ def test_the_shipped_registry_matches_the_ports_the_stacks_publish_today():
     # carameli-b held slot 2 (db 5434) until the `-b` tier was retired. Its slot is now
     # free for an ephemeral box to lease, which is the whole point of freeing it.
     assert "carameli-b" not in registry.slots
+
+
+def test_the_shipped_registry_gives_every_checkout_one_telemetry_endpoint():
+    # The regression this locks: `otel_http` must not go back into `[services]`. There
+    # it produced one endpoint per checkout for a collector that exists once, and the
+    # projects on the wrong end of that had no way to notice -- an OTLP exporter whose
+    # endpoint refuses the connection retries in the background and never reports.
+    registry = load(REPO_ROOT)
+    assert "otel_http" not in registry.services, (
+        "otel_http is a workspace singleton; a [services] base would give every "
+        "checkout its own endpoint again"
+    )
+    assert registry.shared_port("otel_http") == 4318
 
 
 def test_no_two_shipped_checkouts_share_a_port():
