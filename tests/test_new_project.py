@@ -1367,6 +1367,66 @@ def test_latest_devkit_tag_is_none_outside_a_git_repo(tmp_path):
     assert new_project.latest_devkit_tag(tmp_path) is None
 
 
+def _repo_with_tags(tmp_path, tags):
+    """A throwaway repo with one commit per entry of `tags`, tagged in that order.
+
+    Returns the repo and a `git` callable bound to it. The global config is not
+    inherited for the same reason `_seed_fake_devkit` refuses it: this seeds commits
+    on `main`, which the installed branch policy blocks.
+    """
+    import subprocess
+
+    repo = tmp_path / "tagged"
+    repo.mkdir()
+    env = dict(os.environ, GIT_CONFIG_GLOBAL=str(tmp_path / "gitconfig"), GIT_CONFIG_NOSYSTEM="1")
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, text=True, env=env
+        )
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    for index, tag in enumerate(tags):
+        (repo / "f.txt").write_text(f"{index}\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", f"c{index}")
+        git("tag", tag)
+    return repo, git
+
+
+def test_the_newest_tag_is_found_from_a_checkout_parked_behind_it(tmp_path):
+    """Which release is current is a property of the repo, not of where HEAD sits.
+
+    `git describe --tags --abbrev=0` answered the other question — the newest tag
+    *reachable from HEAD* — and the gap is silent. Minutes after v0.9.1 was
+    published, `install-git-policy.py --yes` in a checkout not yet fast-forwarded
+    installed v0.9.0's runtime and reported that as success, which is exactly the
+    stale-policy state that script's receipts exist to make visible. `--check`
+    shared the blind spot, because it compares the receipt against this function.
+    """
+    repo, git = _repo_with_tags(tmp_path, ["v1.0.0", "v1.1.0"])
+    git("checkout", "-q", "v1.0.0")  # detached, one release behind
+    assert new_project.latest_devkit_tag(repo) == "v1.1.0"
+
+
+def test_tags_are_ordered_by_version_and_not_lexically(tmp_path):
+    # `v0.10.0` sorts *below* `v0.9.1` as a string, so the first release past a
+    # two-digit minor is where a lexical sort would start pinning the older tag into
+    # every generated project — and `FALLBACK_DEVKIT_REF`'s release-time test would
+    # then demand a bump back down to it.
+    repo, _ = _repo_with_tags(tmp_path, ["v0.9.1", "v0.10.0"])
+    assert new_project.latest_devkit_tag(repo) == "v0.10.0"
+
+
+def test_a_tag_that_is_not_a_release_is_not_a_candidate(tmp_path):
+    # A marker or a vendor pin must never become the ref a generated project pins.
+    repo, git = _repo_with_tags(tmp_path, ["v1.0.0"])
+    git("tag", "nightly-2026-08-17")
+    assert new_project.latest_devkit_tag(repo) == "v1.0.0"
+
+
 def test_manifest_paths_are_read_from_the_sync_tool():
     # Read from sync-devkit.py rather than duplicated, so the two cannot disagree.
     manifest = new_project._read_manifest_paths(REPO_ROOT)
