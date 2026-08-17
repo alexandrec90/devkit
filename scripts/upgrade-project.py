@@ -71,6 +71,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sweep
@@ -772,7 +773,7 @@ class _ReportingParser(argparse.ArgumentParser):
 
     raw_argv: tuple[str, ...] = ()
 
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> NoReturn:
         detail = f"{message}\nargv: {' '.join(self.raw_argv)}"
         dry_run = "--yes" not in self.raw_argv
         write_artifact(
