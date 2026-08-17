@@ -586,6 +586,83 @@ def test_a_failed_teardown_removes_the_box_but_does_not_report_success(tmp_path,
     assert any("may survive" in note for note in notes)
 
 
+def test_a_long_path_failure_falls_back_to_a_direct_delete(tmp_path, monkeypatch):
+    """`git worktree remove` deletes with plain Win32 calls, so a provisioned box whose
+    `.venv` nesting exceeds MAX_PATH died with `Filename too long` -- on a clean box the
+    plan had every right to destroy. The half-deleted husk then classified as `skipped`
+    and read as "holding work" forever. The reap finishes the delete itself and prunes
+    the worktree record instead of stranding the box."""
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    box_dir = tmp_path / "ws" / ".worktrees" / "demo--x-0806"
+    box_dir.mkdir(parents=True)
+    stubborn = box_dir / "nested" / "artifact.txt"
+    stubborn.parent.mkdir()
+    stubborn.write_text("x", encoding="utf-8")
+    stubborn.chmod(0o444)  # the read-only bit Windows also refuses deletion over
+
+    ran: list[tuple[tuple[str, ...], ...]] = []
+
+    def fake_run_steps(cwd, steps, timeout=300.0):
+        ran.append(tuple(steps))
+        if steps and steps[0][:2] == ("worktree", "remove"):
+            rendered = "git " + " ".join(steps[0])
+            return [], rendered, f"error: failed to delete '{box_dir}': Filename too long"
+        return ["git " + " ".join(step) for step in steps], "", ""
+
+    monkeypatch.setattr(worktree, "run_steps", fake_run_steps)
+    monkeypatch.setattr(worktree, "read_leases", lambda root: {})
+    monkeypatch.setattr(worktree, "write_leases", lambda root, boxes: None)
+
+    plan = worktree.ReapPlan(
+        box="demo--x-0806",
+        path=str(box_dir),
+        project="demo",
+        steps=(("worktree", "remove", str(box_dir)), ("branch", "-d", "agent/x-0806")),
+    )
+    ok, notes = worktree.apply_reap(plan, workspace)
+    assert ok is True, notes
+    assert not box_dir.exists(), "the fallback did not finish the delete"
+    assert ("worktree", "prune") in [steps[0] for steps in ran if steps]
+    assert ("branch", "-d", "agent/x-0806") in [step for steps in ran for step in steps], (
+        "the steps after the remove were dropped instead of resumed"
+    )
+    assert any("deleted the tree directly" in note for note in notes)
+
+
+def test_a_dirty_tree_refusal_is_not_finished_by_the_fallback(tmp_path, monkeypatch):
+    """The narrow gate on the fallback is the safety property: git refusing a dirty
+    tree without `--force` must stay a refusal, because the direct delete would destroy
+    exactly the uncommitted work git just declined to."""
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    box_dir = tmp_path / "ws" / ".worktrees" / "demo--x-0806"
+    box_dir.mkdir(parents=True)
+    (box_dir / ".git").write_text("gitdir: elsewhere", encoding="utf-8")
+    (box_dir / "uncommitted.py").write_text("work", encoding="utf-8")
+
+    def fake_run_steps(cwd, steps, timeout=300.0):
+        rendered = "git " + " ".join(steps[0])
+        return (
+            [],
+            rendered,
+            f"fatal: '{box_dir}' contains modified or untracked files, use --force to delete it",
+        )
+
+    monkeypatch.setattr(worktree, "run_steps", fake_run_steps)
+
+    plan = worktree.ReapPlan(
+        box="demo--x-0806",
+        path=str(box_dir),
+        project="demo",
+        steps=(("worktree", "remove", str(box_dir)),),
+    )
+    ok, notes = worktree.apply_reap(plan, workspace)
+    assert ok is False
+    assert (box_dir / "uncommitted.py").exists(), "the fallback destroyed a dirty tree"
+    assert any("FAILED at" in note for note in notes)
+
+
 # --- the CLI ----------------------------------------------------------------
 
 
