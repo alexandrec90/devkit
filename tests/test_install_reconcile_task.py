@@ -41,6 +41,24 @@ def test_merging_can_be_turned_on_explicitly():
     assert "--no-merge" not in command(automerge=True)
 
 
+def test_merging_is_label_gated_by_default():
+    """`--merge` alone would merge ANY green PR, which turns every agent PR into a
+    self-approving one. The default label keeps the aggressive mode scoped to PRs
+    something explicitly marked routine (`automerge`), so the label is the review."""
+    assert f"--merge-label {installer.sweep.AUTOMERGE_LABEL}" in command(automerge=True)
+
+
+def test_the_label_gate_can_be_dropped_or_renamed():
+    assert "--merge-label" not in command(automerge=True, merge_label="")
+    assert "--merge-label trusted" in command(automerge=True, merge_label="trusted")
+
+
+def test_no_merge_label_is_passed_when_merging_is_off():
+    # `worktree.py reconcile --no-merge --merge-label x` would be a contradiction in
+    # the one string `schtasks /query` shows a human debugging the task.
+    assert "--merge-label" not in command()
+
+
 def test_the_workspace_is_named_not_inferred():
     """A scheduled task starts in system32; leaving the default relies on the checkout
     never moving, and a moved checkout should fail loudly rather than reconcile

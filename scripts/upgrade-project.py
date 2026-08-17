@@ -71,6 +71,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sweep
@@ -688,6 +689,10 @@ def upgrade_one(
     if pushed.returncode != 0:
         return failed(2, f"upgrade: {name} -- FAILED at `git push`", pushed.stderr or pushed.stdout)
 
+    # Labelled `automerge` because an upgrade PR is upstream churn the gate already
+    # judges: the diff is a vendored copy of an already-released devkit tag, so a
+    # green gate is the whole review. The label is what lets `reconcile --merge
+    # --merge-label automerge` and the vendored workflow land it unattended.
     url, created, error = sweep.ensure_pr(
         sweep.gh_for(box),
         sweep.Plan(
@@ -695,6 +700,7 @@ def upgrade_one(
             pr_body=pr_body(tag, previous, changed),
             pr_head=spawn.box.branch,
             pr_base=default_branch,
+            pr_labels=(sweep.AUTOMERGE_LABEL,),
         ),
     )
     if error:
@@ -746,7 +752,10 @@ def _finish(tag: str, dry_run: bool, outcomes: list[Outcome]) -> int:
 
     Every exit from `main` goes through here, including the ones that never reach a
     project: "devkit has no tags" and "that checkout is not in the workspace" are the
-    two failures most likely to be read hours later out of a task terminal.
+    two failures most likely to be read hours later out of a task terminal. The one
+    exit that cannot -- argparse's own, raised from inside `parse_args` before `main`
+    has anything to finish -- writes the same artifact through
+    `_ReportingParser.error` instead.
     """
     body = artifact_body(tag, dry_run, outcomes)
     path = write_artifact(REPO_ROOT, body)
@@ -755,8 +764,32 @@ def _finish(tag: str, dry_run: bool, outcomes: list[Outcome]) -> int:
     return max((outcome.code for outcome in outcomes), default=0)
 
 
+class _ReportingParser(argparse.ArgumentParser):
+    """An ArgumentParser whose failures reach `logs/upgrade.log` like every other.
+
+    `parser.error` exits 2 from inside `parse_args`, before `main` can route anything
+    through `_finish` -- and under the scheduler that is the worst spelling of a
+    failure this script has: `pythonw` has no stderr, so the whole record on the
+    machine is a Last Result of 2 beside an artifact still saying whatever the
+    previous run left. That exact signature was found on 2026-08-17 and could not be
+    explained from the log, precisely because nothing owed the log anything on this
+    path. `--help`'s clean exit does not come through `error()` and stays silent.
+    """
+
+    raw_argv: tuple[str, ...] = ()
+
+    def error(self, message: str) -> NoReturn:
+        detail = f"{message}\nargv: {' '.join(self.raw_argv)}"
+        dry_run = "--yes" not in self.raw_argv
+        write_artifact(
+            REPO_ROOT,
+            artifact_body("(argv never parsed)", dry_run, [Outcome("(run)", 2, detail)]),
+        )
+        super().error(message)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = _ReportingParser(description=__doc__.splitlines()[0])
     # Optional, and paired with --all for the same reason --dry-run is paired with
     # --yes: the VS Code picker has to emit one real token on the "every project"
     # branch too, and an empty string would reach argparse as a stray positional.
@@ -782,7 +815,8 @@ def main(argv: list[str] | None = None) -> int:
     apply_mode = parser.add_mutually_exclusive_group()
     apply_mode.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     apply_mode.add_argument("--yes", dest="dry_run", action="store_false")
-    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    parser.raw_argv = tuple(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(list(parser.raw_argv))
     requested = project_selection(args.project)
     if args.every and requested:
         parser.error(f"--all upgrades every project; drop {args.project} or drop --all")

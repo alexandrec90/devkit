@@ -1605,6 +1605,28 @@ def test_claude_settings_only_wires_hooks_that_are_actually_vendored(tmp_path):
         )
 
 
+def test_generated_telemetry_endpoint_is_the_shared_collector_not_the_project_slot(tmp_path):
+    """A generated project must export to the one collector, not to its own slot.
+
+    `otel_http` was a slot-offset `[services]` base until 2026-08-17, so every project
+    was scaffolded with a private endpoint -- 4318, 4322, 4324 -- while exactly one
+    collector existed in the workspace. The two projects on the wrong end exported into
+    a closed port for a month and neither could report it: an OTLP exporter that cannot
+    connect retries in the background and Claude Code carries on regardless.
+
+    Asserting against `[shared]` rather than a literal is deliberate. A literal here
+    would still pass if someone moved the collector and left the template behind.
+    """
+    shared = devkit_ports.load(REPO_ROOT).shared_port("otel_http")
+    root = generate(tmp_path, {})
+    env = json.loads((root / ".claude/settings.json").read_text(encoding="utf-8"))["env"]
+
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == f"http://localhost:{shared}"
+    # The other half of the bargain: with one endpoint for everyone, the resource
+    # attributes are the only thing left that says which project sent a metric.
+    assert "service.name=" in env["OTEL_RESOURCE_ATTRIBUTES"]
+
+
 def test_generated_claude_settings_keep_the_bash_cap_hook(tmp_path):
     """Codex drops this one handler; generation must not weaken Claude with it."""
     root = generate(tmp_path, {})

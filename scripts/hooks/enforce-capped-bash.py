@@ -64,6 +64,13 @@ does not resolve any of them:
     only where a shell would, which is also why the `;` in `pwd # a; ls -R /` stays
     inside the comment instead of starting a statement. And a `case` arm arrives as
     `case $x in a) pwd`: a header and a pattern in front of a command, and both peel.
+
+    The fifth neighbour was a header whose word list comes from a substitution --
+    `for f in $(git diff --name-only)` -- vetoed as unknowable output before the
+    control-flow check ever ran, though the substitution feeds the loop variable and
+    never the terminal. Control shapes are now judged before the veto, next to the
+    condition tests that moved there for the same reason; the loop's *body* still
+    arrives as its own statements and is judged on its own merits.
   - *Heredoc bodies.* Splitting on newlines turned every line of a `git commit -F -
     <<'EOF'` message into its own "statement", so the prose was evaluated as commands.
     `split_top_level` now consumes the body between the operator and its terminator.
@@ -366,6 +373,17 @@ CONTROL_ONLY_RE = re.compile(
 CONTROL_HEADER_RE = re.compile(r"(?:for\s+\w+(?:\s+in\b.*)?|case\s+.*\sin)\s*$")
 CONTROL_PREFIX_RE = re.compile(r"^(?:do|then|else|elif|if|while|until|\{|!)\s+")
 
+# An environment-assignment prefix (`VAR=1 git commit ...`) sets a variable for one
+# command and emits nothing; the command behind it decides. It peels like a control
+# keyword, and was found the same way: `DEVKIT_SKIP_BRANCH_POLICY=1 git commit -F m` is
+# the branch policy's own documented bypass, the commit pair is exempt, and the prefix
+# broke the match -- so this gate blocked the exact spelling another gate's error
+# message tells the agent to type. Quoted values are consumed whole so a space inside
+# one is not a word boundary; the exemptions stay intact behind it (`FOO=bar ls -R /`
+# still blocks, on the `ls`), and a substitution in the value still vetoes, because the
+# veto reads the statement before any peeling.
+ENV_ASSIGNMENT_PREFIX_RE = re.compile(r"^[A-Za-z_]\w*=(?:'[^']*'|\"(?:\\.|[^\"\\])*\"|\S*)\s+")
+
 # A `case` arm reaches here as one fragment holding a header, a pattern and a command --
 # `case $x in a) pwd` -- because `;;` contains the `;` that `statements()` splits on.
 # Peeling both leaves `pwd` to be judged, which is the same trade CONTROL_PREFIX makes:
@@ -578,6 +596,7 @@ def strip_control_prefix(statement: str) -> str:
     while True:
         peeled = CASE_ARM_RE.sub("", CASE_HEADER_RE.sub("", statement, count=1), count=1)
         peeled = CONTROL_PREFIX_RE.sub("", peeled, count=1)
+        peeled = ENV_ASSIGNMENT_PREFIX_RE.sub("", peeled, count=1)
         if peeled == statement:
             return statement
         statement = peeled
@@ -603,16 +622,21 @@ def is_quiet_grep(statement: str) -> bool:
 def is_bounded(statement: str) -> bool:
     """True when this statement's output is bounded by a small constant.
 
-    Two checks run *before* the command-substitution veto, and the order is the whole
-    point of them. The veto is a claim that a statement's output is unknowable because a
-    substitution could print anything -- which is only true when the statement has a
-    path to the terminal at all. A condition test has none, and a redirect has taken it
-    away, so vetoing either is reasoning about output that cannot exist. Both shapes
-    were blocked that way (`until [ "$(...)" = healthy ]`, `gh run view --log > file`)
-    and neither could be spelled any other way.
+    Several checks run *before* the command-substitution veto, and the order is the
+    whole point of them. The veto is a claim that a statement's output is unknowable
+    because a substitution could print anything -- which is only true when the
+    statement has a path to the terminal at all. A condition test has none, a redirect
+    has taken it away, and a `for`/`case` header feeds its substitution into the word
+    list rather than the terminal -- so vetoing any of them is reasoning about output
+    that cannot exist. All three shapes were blocked that way (`until [ "$(...)" =
+    healthy ]`, `gh run view --log > file`, `for f in $(git diff --name-only)`) and
+    none could be spelled any other way: the loop's body is judged as its own
+    statements, so the header carrying the list is the only fragment left to block.
     """
     peeled = strip_control_prefix(statement.strip())
     if NO_STDOUT_RE.match(peeled) or BARE_NO_OUTPUT_RE.match(peeled):
+        return True
+    if CONTROL_ONLY_RE.match(peeled) or CONTROL_HEADER_RE.match(peeled):
         return True
     if is_quiet_grep(peeled):
         return True
@@ -639,8 +663,6 @@ def is_bounded(statement: str) -> bool:
         # many commands as it means verbose, and an unscoped check revoked the
         # long-standing `command -v gh` exemption two lines below.
         return not VERBOSE_FLAG_RE.search(statement)
-    if CONTROL_ONLY_RE.match(statement) or CONTROL_HEADER_RE.match(statement):
-        return True
     return any(pattern.match(statement) for pattern in BOUNDED_COMMANDS)
 
 
