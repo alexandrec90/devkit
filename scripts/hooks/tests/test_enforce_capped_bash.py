@@ -1296,6 +1296,183 @@ def test_block_message_names_every_spelling_that_counts():
     assert "redirecting stdout" in msg
 
 
+# --- a group is one statement, and its cap covers the members --------------------
+# Reported from a session: `cd X && { ...loop...; } | head -c 3000` was blocked because
+# `statements()` split on the `;` inside the braces, leaving the cap with the `}`
+# fragment and each member of the group judged as an uncapped statement of its own.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The reported shape, loop and all -- including the substitution feeding the
+        # loop's word list, whose `)` used to close the brace group four commands early.
+        'cd /repo && { for f in $(git diff --name-only); do sed -n 1,5p "$f"; done; }'
+        " | head -c 3000",
+        'cd /repo && { for f in a b; do sed -n 1,5p "$f"; done; } | head -c 3000',
+        # A bounded group is a bound on everything downstream of it, wherever it sits.
+        "cat big.txt | { head -c 10; }",
+        "{ cat a.txt; cat b.txt; } | head -c 500",
+        "{ cat a.txt; cat b.txt; } > logs/out.txt",
+        "(cd /repo && make) > logs/build.log",
+        "(cat a.txt; cat b.txt) | tail -c 500",
+        # The cap binds the group from inside a loop body too.
+        "for f in a b; do { cat $f; cat $f.bak; } | head -c 200; done",
+        # A group nested in a capped group inherits the cap.
+        "{ pwd; { cat a.txt; cat b.txt; }; } | head -c 200",
+    ],
+)
+def test_a_capped_group_covers_every_member(command):
+    assert hook.is_capped(command) is True
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Nothing binds the group, so the members are judged as they always were.
+        "{ cat a.txt; cat b.txt; }",
+        "(cat a.txt; cat b.txt)",
+        # The laundering the unpacking exists to prevent: a bounded first member must
+        # not carry an unbounded second one past the gate.
+        "{ pwd; cat big.txt; }",
+        "(pwd; ls -R /)",
+        # Only stderr is redirected; stdout still reaches the terminal.
+        "{ pwd; cat big.txt; } 2>/dev/null",
+        # A cap on ONE member is not a cap on the group.
+        "{ cat a.txt | head -c 50; cat b.txt; }",
+        # ...nor is a group in mid-pipeline that leaks past its own cap.
+        "cat big.txt | { head -c 10; cat other.txt; }",
+        # Unbalanced: judged on the command behind the brace, and blocked.
+        "{ cat big.txt",
+        # An unbalanced opener must not swallow a following statement into safety.
+        "{ cat big.txt ; echo done | head -c 10",
+    ],
+)
+def test_an_unbound_group_is_still_judged_member_by_member(command):
+    assert hook.is_capped(command) is False
+    assert hook.decide(payload("Bash", command))[0] == hook.EXIT_BLOCK
+
+
+def test_a_group_survives_splitting_as_one_statement():
+    command = "cd /repo && { pwd; pwd; } | head -c 100"
+    assert hook.statements(command) == ["cd /repo", "{ pwd; pwd; } | head -c 100"]
+
+
+def test_a_substitution_inside_a_group_does_not_close_it():
+    """`$(...)`'s `)` has to pop the substitution, not the group enclosing it."""
+    body, tail = hook.split_group(
+        "{ for f in $(git diff --name-only); do pwd; done; } | head -c 20"
+    )
+    assert body == "for f in $(git diff --name-only); do pwd; done;"
+    assert tail == "| head -c 20"
+
+
+def test_split_group_returns_the_body_and_what_binds_it():
+    assert hook.split_group("{ pwd; cat a; } | head -c 10") == ("pwd; cat a;", "| head -c 10")
+    assert hook.split_group("(pwd; cat a) > out.txt") == ("pwd; cat a", "> out.txt")
+    assert hook.split_group("pwd") is None
+    assert hook.split_group("{ pwd") is None
+    # A heredoc body is data this parser cannot delimit; None sends it to the old path.
+    assert hook.split_group("{ git commit -F - <<'EOF'\nSubject\nEOF\n}") is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A brace that is not a word is not a group, and splitting must be unaffected.
+        "echo ${HOME} && cat big.txt",
+        "find . -name '*.py' -exec grep -l x {} \\; && cat big.txt",
+        "awk '{print $1}' a.txt && cat big.txt",
+        # `$(` is a substitution, not a subshell: the veto still applies.
+        "echo $(cat big.txt)",
+    ],
+)
+def test_a_brace_that_is_not_a_group_does_not_bound_anything(command):
+    assert hook.is_capped(command) is False
+
+
+def test_a_case_arm_still_splits_after_the_group_change():
+    """A `)` with no opener is ordinary text; reading it as a closer would disable
+    splitting for the rest of the command."""
+    assert hook.is_capped("case $x in a) pwd ;; b) pwd ;; esac") is True
+    assert hook.is_capped("case $x in a) pwd ;; b) cat big.txt ;; esac") is False
+
+
+# --- git global options, part two ------------------------------------------------
+# `-C <path>` was taught to the commit pair and to `git log`, and to nothing else --
+# so `git -C <box> rev-parse` blocked while the block message named bare
+# `git rev-parse` as its example of an exempt command.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C /repo rev-parse --abbrev-ref HEAD",
+        'git -C "C:/path with spaces/repo" rev-parse --show-toplevel',
+        "git -C /repo branch --show-current",
+        "git -C /repo symbolic-ref refs/remotes/origin/HEAD",
+        "git -C /repo describe --tags",
+        "git -C /repo rev-list --count HEAD",
+        "git -C /repo config --get remote.origin.url",
+        "git -C /repo remote get-url origin",
+        "git -C /repo merge-base --is-ancestor a b",
+        # One line of confirmation, and only with the flag.
+        "git -C /repo branch -d agent/done-0817",
+        "git branch -D agent/done-0817",
+    ],
+)
+def test_git_global_options_do_not_revoke_the_plumbing_exemptions(command):
+    assert hook.is_bounded(command) is True
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Bare `git branch` lists every branch there is; the flag is what bounds it.
+        "git branch",
+        "git -C /repo branch",
+        "git -C /repo branch -a",
+    ],
+)
+def test_an_unflagged_git_branch_is_not_bounded(command):
+    assert hook.is_bounded(command) is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git fetch origin main --quiet",
+        "git fetch -q origin",
+        "git -C /repo fetch --quiet",
+        "git push --quiet origin HEAD",
+        "git clone --quiet https://example.invalid/x.git",
+    ],
+)
+def test_a_quiet_network_command_prints_nothing(command):
+    assert hook.is_bounded(command) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Progress output scales with what the remote has to send.
+        "git fetch origin main",
+        "git pull",
+        # `--quiet` inside a message is prose, not a flag on this command.
+        "git fetch origin 'branch --quiet'",
+    ],
+)
+def test_an_unquiet_network_command_is_not_bounded(command):
+    assert hook.is_bounded(command) is False
+
+
+def test_the_block_message_names_the_group_form():
+    msg = hook.block_message(4000)
+    assert "{ a; b; } | head -c N" in msg
+
+
 def test_get_value_dotted_and_missing():
     obj = {"tool_input": {"command": "x"}}
     assert hook.get_value(obj, "tool_input.command") == "x"

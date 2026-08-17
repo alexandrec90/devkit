@@ -35,6 +35,13 @@ quote-aware, so a separator inside `invoke-capped.py --command "a; b"` is not on
 and each statement has to carry its own cap. Within a *pipeline* a cap anywhere
 suffices: everything downstream of `head -c N` can only receive N bytes.
 
+**A group is one statement, and the cap after it covers everything inside.**
+`{ a; b; } | head -c N` and `(a; b) > file` hand the shell a single stream, so splitting
+on the `;` inside the braces judged members that have no stdout of their own to cap --
+and the cap itself stayed behind with the `}` fragment. `split_group` unpacks the group
+instead of trusting it, so an unbound group is still judged member by member and
+`{ pwd; cat big; }` blocks on the `cat`.
+
 **Commands whose output is bounded by a small constant are exempt** (`BOUNDED_COMMANDS`):
 `pwd`, `git rev-parse`, `rm`, `X --version` and friends. The criterion is deliberately
 strict -- bounded *regardless of repo or filesystem size* -- which is why `ls`, `cat` and
@@ -91,7 +98,8 @@ so a project can widen it without forking this file -- and the number quoted in 
 block message follows it, rather than drifting from what the wrapper actually does.
 
 Decision logic is exposed as pure functions (`decide`, `is_capped`, `statements`,
-`is_bounded`, `get_value`) so it can be unit-tested without spawning a subprocess. See
+`statement_is_capped`, `is_bounded`, `split_group`, `get_value`) so it can be
+unit-tested without spawning a subprocess. See
 `scripts/hooks/tests/test_enforce_capped_bash.py`.
 """
 
@@ -292,6 +300,16 @@ GIT_LOG_RE = re.compile(r"git" + _GIT_GLOBAL_OPTS + r"\s+log(?:\s|$)")
 GIT_LOG_COUNT_RE = re.compile(r"(?:^|\s)(?:-\d+|-n\s*\d+|--max-count(?:=|\s+)\d+)(?=\s|$)")
 GIT_LOG_PATCH_RE = re.compile(r"(?:^|\s)(?:-p|-u|--patch)(?=\s|$)")
 
+# The network subcommands, whose entire output is progress -- and exactly zero bytes of it
+# when told to be quiet. That is the same claim `grep -q` is already exempt on, and by the
+# same stronger-than-usual constant. `git fetch origin main --quiet` heads every branch cut
+# in this workspace and was blocked by itself, which put a wrapper around a command that
+# prints nothing. Bare (unquiet) spellings stay blocked: their progress output scales with
+# what the remote has to send.
+GIT_QUIET_CAPABLE_RE = re.compile(
+    r"git" + _GIT_GLOBAL_OPTS + r"\s+(?:fetch|pull|push|clone)(?:\s|$)"
+)
+
 # Condition tests, pulled out of `_BOUNDED_PATTERNS` because they have to be judged
 # *before* the command-substitution veto rather than after it. `test`, `[` and `[[`
 # have no stdout path at all, so a substitution inside one feeds the condition and
@@ -406,6 +424,23 @@ ENV_ASSIGNMENT_PREFIX_RE = re.compile(r"^[A-Za-z_]\w*=(?:'[^']*'|\"(?:\\.|[^\"\\
 CASE_HEADER_RE = re.compile(r"^case\s+\S+\s+in\s+")
 CASE_ARM_RE = re.compile(r"""^[^()&|;'"]+(?:\|[^()&|;'"]+)*\)\s+""")
 
+# A brace group or a subshell is **one command** as far as the shell's I/O is concerned,
+# so a cap or a redirect written after its closer bounds every member at once. The gate
+# used to shred it: `statements()` split on the `;` separating the members, the cap stayed
+# behind with the `}` fragment, and each member was then judged as an uncapped statement
+# of its own. `cd x && { for f in $(git diff --name-only); do sed -n 1,5p "$f"; done; }
+# | head -c 3000` is the shape that reported it, and it is the control-flow false positive
+# in a new spelling -- the remedy on offer resolves nothing, because a brace group does
+# not survive the wrapper's `cmd.exe` either.
+#
+# `{` and `}` are group tokens only where the shell treats them as one: standing as their
+# own word. `${HOME}`, `awk '{print $1}'` and `find -exec ls {} \;` are not groups and must
+# keep splitting exactly as before. A `$(...)` is tracked for where it *ends* and judged
+# for what it means by `SUBSTITUTION_RE`, which is unchanged; an unbalanced group is left
+# to the ordinary path, which fails closed.
+GROUP_OPEN_RE = re.compile(r"^(?:\{\s|\()")
+GROUP_DELIMITER_NEIGHBOURS = " \t\n;|&"
+
 # Commands whose output is bounded by a small constant no matter what arguments or
 # repository they are given. That is a much stronger claim than "usually short", and it
 # is the whole test for membership: `ls`, `cat`, `git status`, `git diff --stat` and
@@ -418,17 +453,24 @@ _BOUNDED_PATTERNS = (
     # One line: a path, or nothing.
     r"(?:which|type)\s+\S+\s*$",
     r"command\s+-v\s+\S+\s*$",
-    # git plumbing that answers with a single ref, hash, or count.
-    r"git\s+rev-parse\b",
-    r"git\s+branch\s+--show-current\s*$",
-    r"git\s+symbolic-ref\b",
-    r"git\s+describe\b",
-    r"git\s+rev-list\s+--count\b",
-    r"git\s+config\s+(?:--\S+\s+)*--get\b",
+    # git plumbing that answers with a single ref, hash, or count. Each carries
+    # `_GIT_GLOBAL_OPTS`, because `git -C <path> rev-parse` is the workspace's own
+    # spelling -- a box is never the session's cwd -- and it blocked, while the block
+    # message named bare `git rev-parse` as the example of something exempt. The option
+    # was taught to the commit pair and to `git log` when those were fixed and to
+    # nothing else, so the omission was one edit wide from the start.
+    r"git" + _GIT_GLOBAL_OPTS + r"\s+rev-parse\b",
+    r"git" + _GIT_GLOBAL_OPTS + r"\s+branch\s+--show-current\s*$",
+    # One line, and only with the flag: bare `git branch` lists every branch there is.
+    r"git" + _GIT_GLOBAL_OPTS + r"\s+branch\s+(?:-[dDm]|--delete|--move)\b",
+    r"git" + _GIT_GLOBAL_OPTS + r"\s+symbolic-ref\b",
+    r"git" + _GIT_GLOBAL_OPTS + r"\s+describe\b",
+    r"git" + _GIT_GLOBAL_OPTS + r"\s+rev-list\s+--count\b",
+    r"git" + _GIT_GLOBAL_OPTS + r"\s+config\s+(?:--\S+\s+)*--get\b",
     # One line: a URL, or a merge base's sha. `--is-ancestor` prints nothing and answers
     # in the exit code, which is the spelling that reached here blocked.
-    r"git\s+remote\s+get-url\b",
-    r"git\s+merge-base\b",
+    r"git" + _GIT_GLOBAL_OPTS + r"\s+remote\s+get-url\b",
+    r"git" + _GIT_GLOBAL_OPTS + r"\s+merge-base\b",
     # A syntax check: silent on success, one diagnostic on failure.
     r"(?:ba|z)?sh\s+-n\s",
     # Version probes. `--help` is deliberately excluded: help text is long.
@@ -469,6 +511,9 @@ def block_message(max_bytes: int, command_shell: str = "bash") -> str:
         "`head -N`, `tail -N` (and their `-n N` spellings), or redirecting stdout "
         "to a file. Prefer the wrapper for test and lint runs even so: it keeps a "
         "head *and* a tail window and preserves the exit code.\n"
+        "One cap can cover several commands if they are grouped: everything inside "
+        "`{ a; b; } | head -c N` or `(a; b) > file` is bounded by the group's own "
+        "cap.\n"
         "Every statement needs its own cap: in `a; b | head -c N` only `b` is "
         "capped. Exempt, and needing no wrapper: constant-size output (pwd, git "
         "rev-parse, --version), commands silent on success (mkdir, rm, cp, sleep, "
@@ -499,6 +544,89 @@ def skip_heredoc_bodies(text: str, start: int, delimiters: list[str]) -> int:
     return index
 
 
+def is_brace_word(text: str, index: int) -> bool:
+    """True when the brace at `text[index]` stands as its own word, as a group's does.
+
+    This is the shell's own rule, and it is what keeps `${HOME}`, `awk '{print $1}'` and
+    `find -exec ls {} \\;` out of the group grammar.
+    """
+    before = text[index - 1] if index else " "
+    after = text[index + 1] if index + 1 < len(text) else " "
+    return before in GROUP_DELIMITER_NEIGHBOURS and after in GROUP_DELIMITER_NEIGHBOURS + ")"
+
+
+def group_closer(text: str, index: int) -> str | None:
+    """The delimiter that would close a group opening at `text[index]`, or None.
+
+    `$(` opens one too, though it is a substitution rather than a subshell, and that is
+    not a detail: its `)` has to pop the substitution instead of whatever encloses it.
+    Counting depth without it closed the brace group in `{ for f in $(git diff
+    --name-only); do sed -n 1,5p "$f"; done; } | head -c 3000` at the substitution --
+    four commands early -- which put the `;` after it back to splitting the group in
+    half. `SUBSTITUTION_RE` still judges what a substitution means; this only says where
+    it ends.
+    """
+    char = text[index]
+    if char == "(":
+        return ")"
+    if char == "{" and is_brace_word(text, index):
+        return "}"
+    return None
+
+
+def closes_group(text: str, index: int, expected: str) -> bool:
+    """True when `text[index]` closes an open group whose closer is `expected`."""
+    char = text[index]
+    if char != expected:
+        return False
+    return char == ")" or is_brace_word(text, index)
+
+
+def split_group(statement: str) -> tuple[str, str] | None:
+    """`(body, tail)` when `statement` is a balanced group or subshell, else None.
+
+    The tail is what follows the closer -- a `| head -c N`, a `> file`, or nothing --
+    and it is the only place a cap can bind the group as a whole.
+
+    None is the answer for anything this cannot parse, and it is the safe one: the
+    statement then takes the ordinary path, where an unbalanced `{ cat big` is judged
+    on the `cat` and blocked. A heredoc inside the group answers None for the same
+    reason -- its body is data, and `split_top_level` is the only place that knows
+    where it ends.
+    """
+    text = statement.strip()
+    if not GROUP_OPEN_RE.match(text):
+        return None
+    stack: list[str] = []
+    quote: str | None = None
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if quote is not None:
+            if char == "\\" and quote == '"':
+                i += 2
+                continue
+            if char == quote:
+                quote = None
+            i += 1
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == "\\":
+            i += 2
+            continue
+        elif char == "<" and HEREDOC_RE.match(text, i):
+            return None
+        elif stack and closes_group(text, i, stack[-1]):
+            stack.pop()
+            if not stack:
+                return text[1:i].strip(), text[i + 1 :].strip()
+        elif (closer := group_closer(text, i)) is not None:
+            stack.append(closer)
+        i += 1
+    return None
+
+
 def split_top_level(text: str, separators: tuple[str, ...]) -> list[str]:
     """Split `text` on `separators` that are outside quotes. Never raises.
 
@@ -512,11 +640,18 @@ def split_top_level(text: str, separators: tuple[str, ...]) -> list[str]:
     otherwise reads each line of a commit message as its own uncappable statement --
     a shape with no legal spelling at all, since a heredoc cannot be handed to the
     wrapper either.
+
+    A balanced `{ ...; }` or `( ... )` comes back whole, because a separator inside one
+    does not end a statement the shell's redirections can reach: the cap in
+    `{ a; b; } | head -c N` binds the group, not the `b`. `is_capped` unpacks the group
+    with `split_group` rather than trusting it, so the members are still judged when
+    nothing binds it.
     """
     out: list[str] = []
     buf: list[str] = []
     quote: str | None = None
     pending_heredocs: list[str] = []
+    group_stack: list[str] = []
     i = 0
     while i < len(text):
         ch = text[i]
@@ -573,7 +708,24 @@ def split_top_level(text: str, separators: tuple[str, ...]) -> list[str]:
                 out.append("".join(buf))
                 buf = []
             continue
-        hit = next((sep for sep in separators if text.startswith(sep, i)), None)
+        if group_stack and closes_group(text, i, group_stack[-1]):
+            group_stack.pop()
+            buf.append(ch)
+            i += 1
+            continue
+        if (closer := group_closer(text, i)) is not None:
+            group_stack.append(closer)
+            buf.append(ch)
+            i += 1
+            continue
+        # A closer with nothing open is ordinary text and is left alone: a `case` arm
+        # reaches this function as `a) pwd`, and treating its `)` as a group's would
+        # unbalance the scan for the rest of the command.
+        hit = (
+            next((sep for sep in separators if text.startswith(sep, i)), None)
+            if not group_stack
+            else None
+        )
         if hit is not None:
             out.append("".join(buf))
             buf = []
@@ -600,8 +752,15 @@ def strip_control_prefix(statement: str) -> str:
     The loop runs to a fixed point because the prefixes stack: `until ! [ -f x ]` is two
     of them, and peeling only the first leaves a `!` in front of a condition test that
     would then match nothing.
+
+    A **balanced** group is the one `{` that is not a prefix, and stopping at it is what
+    keeps the group honest: peeled, `{ pwd; cat big; }` would be judged on the `pwd` it
+    now starts with and pass while printing a whole file. `statement_is_capped` unpacks
+    it instead. An unbalanced `{` is still peeled, so a fragment keeps behaving as it did.
     """
     while True:
+        if split_group(statement) is not None:
+            return statement
         peeled = CASE_ARM_RE.sub("", CASE_HEADER_RE.sub("", statement, count=1), count=1)
         peeled = CONTROL_PREFIX_RE.sub("", peeled, count=1)
         peeled = ENV_ASSIGNMENT_PREFIX_RE.sub("", peeled, count=1)
@@ -672,6 +831,8 @@ def is_bounded(statement: str) -> bool:
     if GIT_LOG_RE.match(statement):
         flags = strip_quoted(statement)
         return bool(GIT_LOG_COUNT_RE.search(flags)) and not GIT_LOG_PATCH_RE.search(flags)
+    if GIT_QUIET_CAPABLE_RE.match(statement):
+        return bool(QUIET_FLAG_RE.search(strip_quoted(statement)))
     if COMMIT_LIKE.match(statement):
         # Judged on the flags only: a `--dry-run` or `-v` anywhere in the *message* is
         # prose, and unbounding a commit because of what it says about itself is a false
@@ -692,10 +853,19 @@ def has_cap(statement: str) -> bool:
     A cap anywhere in the pipeline counts, not just at the end: everything downstream
     of it can only ever receive what it passed, so `cat big | head -c 100 | grep x` is
     genuinely bounded and blocking it would be a false positive.
+
+    A segment that is itself a bounded group counts for the same reason and by the same
+    argument: `cat big | { head -c 10; }` passes no more bytes on than the `head` inside
+    it does. The mutual recursion with `statement_is_capped` terminates because a group's
+    body is strictly shorter than the segment holding it.
     """
     if WRAPPER_RE.search(statement):
         return True
-    return any(CAP_RE.match(segment) for segment in split_top_level(statement, ("|",)))
+    segments = split_top_level(statement, ("|",))
+    return any(
+        CAP_RE.match(segment) or (split_group(segment) is not None and statement_is_capped(segment))
+        for segment in segments
+    )
 
 
 def has_powershell_cap(statement: str) -> bool:
@@ -730,6 +900,27 @@ def is_powershell_bounded(statement: str) -> bool:
     return is_bounded(statement)
 
 
+def statement_is_capped(statement: str) -> bool:
+    """True when one statement is bounded, capped, or a group whose members are.
+
+    A group is **unpacked, not trusted**. A cap or a stdout redirect written after its
+    closer binds every member at once, which is the whole point of the shape and the
+    reason `{ a; b; } | head -c N` has to pass. With nothing binding it, each member is
+    judged on its own merits exactly as it was when the gate saw them as separate
+    statements -- so `{ pwd; cat big; }` still blocks, on the `cat`.
+
+    Control keywords peel first, because `do { ...; } | head -c N` is the same group
+    wearing a loop body's prefix.
+    """
+    group = split_group(strip_control_prefix(statement.strip()))
+    if group is not None:
+        body, tail = group
+        if has_cap(tail) or REDIRECT_RE.search(QUOTED_SPAN_RE.sub("q", tail)):
+            return True
+        return all(statement_is_capped(member) for member in statements(body))
+    return is_bounded(statement) or has_cap(statement)
+
+
 def get_value(obj, *paths):
     """Return the first present dotted-path value (as str) from a nested dict."""
     for path in paths:
@@ -757,7 +948,7 @@ def is_capped(command: str, command_shell: str = "bash") -> bool:
         return False
     if command_shell == "powershell":
         return all(is_powershell_bounded(part) or has_powershell_cap(part) for part in parts)
-    return all(is_bounded(part) or has_cap(part) for part in parts)
+    return all(statement_is_capped(part) for part in parts)
 
 
 def decide(
