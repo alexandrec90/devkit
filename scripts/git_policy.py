@@ -26,7 +26,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 FAIL_CLOSED_KEY = "devkit.branchPolicy.failClosed"
 PROTECTED_BRANCH_KEY = "devkit.branchPolicy.protectedBranch"
@@ -258,7 +258,7 @@ def github_repo(remote_url: str) -> str | None:
     return "/".join(parts)
 
 
-def merged_pr(runner: Runner, repo: str, branch: str) -> MergedPR:
+def _pr_list_merged(runner: Runner, repo: str, branch: str) -> MergedPR:
     argv = [
         "gh",
         "pr",
@@ -291,6 +291,51 @@ def merged_pr(runner: Runner, repo: str, branch: str) -> MergedPR:
         return MergedPR(error="gh returned an unexpected pull-request record")
     url = first.get("url")
     return MergedPR(url=url if isinstance(url, str) else f"{repo} merged PR")
+
+
+def _rest_merged_pr(runner: Runner, repo: str, branch: str) -> MergedPR:
+    """The same question over the REST API, for when the GraphQL half of gh is down.
+
+    `state=closed` includes every merged PR; `merged_at` tells the merged ones from
+    the merely closed. The branch is percent-encoded because a task branch routinely
+    holds `/` and may hold characters a query value cannot.
+    """
+    owner = repo.split("/", 1)[0]
+    head = quote(f"{owner}:{branch}", safe=":")
+    argv = ["gh", "api", f"repos/{repo}/pulls?state=closed&head={head}&per_page=100"]
+    result = runner(argv)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "gh api exited unsuccessfully").strip()
+        return MergedPR(error=detail)
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as error:
+        return MergedPR(error=f"gh api returned invalid JSON: {error}")
+    if not isinstance(payload, list):
+        return MergedPR(error="gh api returned an unexpected response")
+    for item in payload:
+        if isinstance(item, dict) and item.get("merged_at"):
+            url = item.get("html_url")
+            return MergedPR(url=url if isinstance(url, str) else f"{repo} merged PR")
+    return MergedPR()
+
+
+def merged_pr(runner: Runner, repo: str, branch: str) -> MergedPR:
+    """Whether a PR from `branch` has merged, asked over both APIs before failing.
+
+    `gh pr list` rides GraphQL, and GraphQL has been observed returning 503 while REST
+    answered fine -- which, with `failClosed` defaulting on, blocked a commit and a
+    push over an outage in the transport rather than any fact about the branch. The
+    REST fallback asks the same question over the other API before the error is
+    allowed to become a decision; only both failing reports one.
+    """
+    primary = _pr_list_merged(runner, repo, branch)
+    if not primary.error:
+        return primary
+    fallback = _rest_merged_pr(runner, repo, branch)
+    if fallback.error:
+        return MergedPR(error=f"{primary.error} (REST fallback: {fallback.error})")
+    return fallback
 
 
 def _parse_ref_updates(raw: str, prefix: str) -> tuple[tuple[str, str, str, str, str], ...]:

@@ -146,6 +146,61 @@ def test_pre_commit_permanently_retires_a_merged_branch_name():
     assert "pull/17" in decision.errors[0]
 
 
+def rest_merged_response(branch, payload):
+    """The REST fallback's exact argv, mirroring `_rest_merged_pr`'s encoding."""
+    from urllib.parse import quote
+
+    head = quote(f"acme:{branch}", safe=":")
+    argv = ("gh", "api", f"repos/acme/widgets/pulls?state=closed&head={head}&per_page=100")
+    return {argv: completed(argv, stdout=json.dumps(payload))}
+
+
+def test_a_graphql_outage_falls_back_to_rest_before_failing_closed():
+    """`gh pr list` rides GraphQL, which has returned 503 while REST answered fine.
+
+    With `failClosed` defaulting on, that transport outage blocked a commit and a push
+    over no fact about the branch at all -- the reporter had to reach for
+    DEVKIT_SKIP_BRANCH_POLICY after confirming the answer over REST by hand. The
+    fallback asks REST the same question before the error becomes a decision.
+    """
+    # `gh pr list` is absent from the responses, so it takes the failing default.
+    responses = git_responses()
+    responses.update(
+        rest_merged_response(
+            "claude/fresh",
+            [{"number": 3, "merged_at": None, "html_url": "https://x/pull/3"}],
+        )
+    )
+    decision = git_policy.evaluate_pre_commit(FakeRunner(responses))
+    assert decision.ok, f"REST said not merged, got {decision.errors}"
+
+
+def test_the_rest_fallback_still_retires_a_merged_branch():
+    responses = git_responses(branch="claude/already-shipped")
+    responses.update(
+        rest_merged_response(
+            "claude/already-shipped",
+            [
+                {"number": 4, "merged_at": None, "html_url": "https://x/pull/4"},
+                {
+                    "number": 17,
+                    "merged_at": "2026-08-17T00:00:00Z",
+                    "html_url": "https://github.com/acme/widgets/pull/17",
+                },
+            ],
+        )
+    )
+    decision = git_policy.evaluate_pre_commit(FakeRunner(responses))
+    assert not decision.ok
+    assert "pull/17" in decision.errors[0]
+
+
+def test_both_apis_failing_names_both_in_the_error():
+    decision = git_policy.evaluate_pre_commit(FakeRunner(git_responses()))
+    assert not decision.ok
+    assert any("REST fallback" in error for error in decision.errors)
+
+
 def test_github_lookup_failure_is_closed_by_default_and_configurably_open():
     responses = git_responses()
     runner = FakeRunner(responses)

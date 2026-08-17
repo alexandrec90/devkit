@@ -513,6 +513,26 @@ def test_the_loop_shapes_beside_the_one_that_was_fixed(command):
     assert hook.decide(payload("Bash", command)) == (0, "")
 
 
+def test_a_loop_over_a_substitution_is_judged_on_its_body():
+    """The fifth neighbour: a header whose word list comes from a substitution.
+
+    `for f in $(git diff --name-only)` was vetoed as unknowable output before the
+    control-flow check ever ran, though the substitution feeds the loop variable and
+    never the terminal -- the same reasoning-about-output-that-cannot-exist that had
+    already moved the condition tests ahead of the veto. The body still arrives as its
+    own statements and is judged on its own merits.
+    """
+    assert hook.is_bounded("for f in $(git diff --name-only)") is True
+    assert hook.is_bounded("case $(uname -s) in") is True
+    command = "for f in $(git diff --name-only); do echo $f; done"
+    assert hook.decide(payload("Bash", command)) == (0, "")
+    # The exemption is the header's alone: an unbounded body still blocks the loop...
+    blocked = "for f in $(git diff --name-only); do cat $f; done"
+    assert hook.decide(payload("Bash", blocked))[0] == hook.EXIT_BLOCK
+    # ...and a substitution with a real path to the terminal is still vetoed.
+    assert hook.is_bounded("echo $(find / -name x)") is False
+
+
 def test_a_comment_swallows_the_separator_inside_it():
     """`pwd # a; ls -R /` is one statement to a shell, and must be one here.
 
