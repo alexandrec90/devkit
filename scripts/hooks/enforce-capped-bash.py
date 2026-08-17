@@ -373,6 +373,17 @@ CONTROL_ONLY_RE = re.compile(
 CONTROL_HEADER_RE = re.compile(r"(?:for\s+\w+(?:\s+in\b.*)?|case\s+.*\sin)\s*$")
 CONTROL_PREFIX_RE = re.compile(r"^(?:do|then|else|elif|if|while|until|\{|!)\s+")
 
+# An environment-assignment prefix (`VAR=1 git commit ...`) sets a variable for one
+# command and emits nothing; the command behind it decides. It peels like a control
+# keyword, and was found the same way: `DEVKIT_SKIP_BRANCH_POLICY=1 git commit -F m` is
+# the branch policy's own documented bypass, the commit pair is exempt, and the prefix
+# broke the match -- so this gate blocked the exact spelling another gate's error
+# message tells the agent to type. Quoted values are consumed whole so a space inside
+# one is not a word boundary; the exemptions stay intact behind it (`FOO=bar ls -R /`
+# still blocks, on the `ls`), and a substitution in the value still vetoes, because the
+# veto reads the statement before any peeling.
+ENV_ASSIGNMENT_PREFIX_RE = re.compile(r"^[A-Za-z_]\w*=(?:'[^']*'|\"(?:\\.|[^\"\\])*\"|\S*)\s+")
+
 # A `case` arm reaches here as one fragment holding a header, a pattern and a command --
 # `case $x in a) pwd` -- because `;;` contains the `;` that `statements()` splits on.
 # Peeling both leaves `pwd` to be judged, which is the same trade CONTROL_PREFIX makes:
@@ -585,6 +596,7 @@ def strip_control_prefix(statement: str) -> str:
     while True:
         peeled = CASE_ARM_RE.sub("", CASE_HEADER_RE.sub("", statement, count=1), count=1)
         peeled = CONTROL_PREFIX_RE.sub("", peeled, count=1)
+        peeled = ENV_ASSIGNMENT_PREFIX_RE.sub("", peeled, count=1)
         if peeled == statement:
             return statement
         statement = peeled
