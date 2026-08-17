@@ -77,19 +77,34 @@ def test_devkit_wires_every_hook_event_the_template_does():
     assert not missing, f"the template wires {sorted(missing)} but devkit does not"
 
 
-def test_generated_projects_do_not_pin_a_model():
-    """A `model` key in the template silently outranks the user's own default.
+# Settings that belong to whoever is *driving* the session, not to the repo being
+# worked in. `defaultMode` is nested under `permissions`; the rest are top level.
+USER_PREFERENCE_KEYS = ("model", "effortLevel", "skipDangerousModePermissionPrompt", "tui")
 
-    Project settings sit *above* `~/.claude/settings.json` in Claude Code's precedence,
-    so this key is not a default — it overrides whatever the user selected globally, in
-    every generated project at once, with nothing in the session saying where it came
-    from. That is how `"model": "opus"` ended up winning in six checkouts against a user
-    setting of Fable. Model choice belongs to the user or to `--model`, not the scaffold.
+
+def test_generated_projects_do_not_override_user_preferences():
+    """These keys in the template silently outrank the user's own `~/.claude/settings.json`.
+
+    Project settings sit *above* the user file in Claude Code's precedence, so none of
+    them is a default — each overrides what the user selected globally, in every
+    generated project at once, with nothing on screen saying where the override came
+    from. That is how `"model": "opus"` won in six checkouts against a user setting of
+    Fable, and `effortLevel` and `defaultMode` were riding along beside it, invisible
+    only because they happened to match.
+
+    Which model, how much effort, and how much the harness may do unattended are
+    properties of the operator, not of the repo. The template gets hooks, permission
+    allow-lists and telemetry — the things that really are per-project.
     """
     template = json.loads(TEMPLATE_SETTINGS.read_text(encoding="utf-8"))
-    assert "model" not in template, (
-        f"the template pins model={template['model']!r}, which overrides the user's "
-        "global model selection in every generated project"
+    present = [key for key in USER_PREFERENCE_KEYS if key in template]
+    assert not present, (
+        f"the template sets {present}, which overrides the user's own selection in "
+        "every generated project"
+    )
+    assert "defaultMode" not in template.get("permissions", {}), (
+        "the template pins permissions.defaultMode, which overrides the user's own "
+        "permission mode in every generated project"
     )
 
 
