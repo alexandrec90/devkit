@@ -354,6 +354,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | --- | --- | --- | --- |
 | `devkit-worktree-reconcile` | `scripts/install-reconcile-task.py` | every 15 min | `logs/reconcile.log` |
 | `devkit-upgrade-projects` | `scripts/install-upgrade-schedule.py` | daily 03:00 | `logs/upgrade.log` |
+| `devkit-docker-stop-idle` | `scripts/install-docker-stop-idle.py` | daily 03:30 | `logs/scheduled-docker-stop-idle.log` |
 | `devkit-docker-prune` | `scripts/install-docker-prune.py` | daily 04:00 | `logs/scheduled-docker-prune.log` |
 | `devkit-vanillaland-merge` | `scripts/install-vanillaland-merge.py` | daily 05:00 | `logs/scheduled-vanillaland-merge-develop.log` |
 
@@ -365,6 +366,18 @@ a job registered by hand, or one that leaves nothing behind, fails the suite.
 The prune runs `--idle-only`, so it declines whenever containers are up; reclaiming the
 VHDX needs `wsl --shutdown`, and stopping a running stack at 04:00 for disk is not a
 trade to make unattended.
+
+The stop-idle pass is the other half of that trade. `restart: unless-stopped`
+resurrects on every boot whatever was left running, so a stack someone brought up once
+runs around the clock; nightly, any stack that has **opted in** (`[docker]
+auto_stop = true` in the project's own `.devkit.toml`) and shows no established
+connection to a published port -- with a grace window for anything recently started --
+is stopped. `docker stop`, never `down`: containers and named volumes survive, and a
+stopped stack stays stopped across reboots until something wants it again
+(`docker-maint.py up`, or the stop hook's `*_STOP_TESTS_AUTOSTART` tier). Opt-in is
+the safety property: a collector-style stack doing scheduled work with no client
+connected looks exactly like an idle one, so it is safe by default rather than by
+being remembered.
 
 The VanillaLand merge is the odd one out and the only job that touches a working tree a
 human is going to open: it runs `git-merge-default.py` against the reference checkout, so

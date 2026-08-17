@@ -8,8 +8,10 @@ project prompt.
 Two scopes live here, and the difference is worth keeping straight:
 
   - `up` / `down` are STACK-scoped -- one project's compose topology.
-  - `restart-engine` / `fix` / `prune` are DAEMON-scoped -- one Docker Desktop per
-    machine, so they are about the VM rather than about any repo.
+  - `restart-engine` / `fix` / `prune` / `stop-idle` are DAEMON-scoped -- one Docker
+    Desktop per machine, so they are about the VM rather than about any repo.
+    `stop-idle` walks every running compose stack at once, which is why it cannot be
+    stack-scoped: the stack it stops is by definition not the one anyone is in.
 
 Both are defined once at workspace level rather than copy-pasted into every repo's
 .vscode/tasks.json. `up`/`down` arrived here last, from carameli's "Start: Full Stack"
@@ -28,7 +30,8 @@ project whose plain `docker compose` stack the fallback handles correctly.
 Delegate paths are `scripts/<name>.py` and nothing else. Every consuming project keeps
 its scripts there, so a candidate list per mode is no longer needed -- see DELEGATES.
 
-Usage:  python docker-maint.py {up|down|restart-engine|fix|prune} [--generic] [args...]
+Usage:  python docker-maint.py {up|down|stop-idle|restart-engine|fix|prune}
+        [--generic] [args...]
         (run with cwd set to the workspace folder; --generic skips delegation)
 
 `prune --idle-only` is the unattended spelling: it does nothing while containers are
@@ -36,6 +39,11 @@ running, because the half that actually returns disk to Windows needs
 `wsl --shutdown`. See `generic_prune`. `scripts/install-docker-prune.py` is what
 schedules it, and it passes that flag -- the hand-registered task it replaced did not,
 because nothing in this repo owned that task or checked what it ran.
+
+`stop-idle` is the other unattended mode: it stops every running compose stack that
+has opted in (`[docker] auto_stop = true` in the project's own `.devkit.toml`) and
+shows no sign of being used. `scripts/install-docker-stop-idle.py` schedules it; see
+`generic_stop_idle` for what "idle" means and why every ambiguity reads as "in use".
 
 **This script writes no artifact of its own, deliberately**: most of its callers are
 interactive, and a `logs/` file per click is noise. The scheduled caller is the
@@ -50,13 +58,15 @@ Never passes --volumes to any prune or any `down`: named volumes hold real dev
 databases, and losing one costs a re-ingest measured in hours.
 """
 
+import re
 import subprocess
 import sys
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
-MODES = ("up", "down", "restart-engine", "fix", "prune")
+MODES = ("up", "down", "stop-idle", "restart-engine", "fix", "prune")
 
 # Windows only. The scheduled prune reaches this script under `pythonw.exe`, which has no
 # console, and Windows answers a console-less parent by giving each console child a brand
@@ -81,6 +91,9 @@ DELEGATES = {
     # one repo's private layout. That project's scripts now live in `scripts/` like
     # everyone else's, so the special case is gone rather than merely unused.
     "prune": ("scripts/docker-prune.py",),
+    # No delegate on purpose: `stop-idle` acts on every project's stack at once, so no
+    # single repo is better informed about it than the generic pass.
+    "stop-idle": (),
 }
 
 # Any of these in the cwd means there is a stack to act on. Checked before running a
@@ -367,6 +380,193 @@ def generic_prune(idle_only: bool = False) -> int:
     return 1
 
 
+# --- stop-idle: the unattended stack half -------------------------------------
+
+# A stack an agent brought up minutes ago has no connections during the edit half of
+# its loop; the window says "recent enough that something probably still wants it"
+# without having to watch anything.
+GRACE_HOURS = 2.0
+
+# One row per container: id, compose project, that project's source directory, and the
+# published ports -- everything the verdict needs, from one `docker ps`.
+PS_FORMAT = (
+    '{{.ID}}\t{{.Label "com.docker.compose.project"}}\t'
+    '{{.Label "com.docker.compose.project.working_dir"}}\t{{.Ports}}'
+)
+
+
+def _capture(cmd: list[str], timeout: int = 60) -> str | None:
+    """stdout of `cmd`, or None when it cannot be asked -- absent, failed, timed out.
+
+    None rather than "" for the same reason `running_containers` returns -1: every
+    caller here treats "cannot tell" as "leave the stack alone", and an empty answer
+    would read as "nothing running / no connections", which licenses the stop.
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            creationflags=NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def published_ports(ports_field: str) -> set[int]:
+    """Host ports out of a `docker ps` Ports column ('127.0.0.1:5433->5432/tcp, ...')."""
+    return {int(port) for port in re.findall(r":(\d+)->", ports_field)}
+
+
+def compose_stacks(ps_output: str) -> dict[str, dict]:
+    """Group `docker ps` rows (PS_FORMAT) by compose project. Pure.
+
+    A container with no compose project label -- an ad-hoc `docker run`, an MCP
+    server -- is not a stack and is left alone.
+    """
+    stacks: dict[str, dict] = {}
+    for line in ps_output.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 4:
+            continue
+        cid, project, workdir, ports = (part.strip() for part in parts)
+        if not cid or not project:
+            continue
+        stack = stacks.setdefault(project, {"ids": [], "workdir": workdir, "ports": set()})
+        stack["ids"].append(cid)
+        stack["ports"] |= published_ports(ports)
+    return stacks
+
+
+def established_ports(netstat_output: str) -> set[int]:
+    """Both ends of every ESTABLISHED row.
+
+    The stack's published port and its client's ephemeral port land on opposite sides
+    depending on which row of a loopback pair netstat prints, so only the union is a
+    reliable "someone is connected to something".
+    """
+    ports: set[int] = set()
+    for line in netstat_output.splitlines():
+        tokens = line.split()
+        if len(tokens) < 4 or not tokens[0].upper().startswith("TCP"):
+            continue
+        if "ESTABLISHED" not in (token.upper() for token in tokens):
+            continue
+        for addr in tokens[1:3]:
+            _host, sep, port = addr.rpartition(":")
+            if sep and port.isdigit():
+                ports.add(int(port))
+    return ports
+
+
+def auto_stop_enabled(workdir: str) -> bool:
+    """True only when the project's own `.devkit.toml` says `[docker] auto_stop = true`.
+
+    Opt-in, so a collector-style stack -- one doing scheduled work with no client
+    connected, which no connection check can tell apart from an idle one -- is safe by
+    *default* rather than by being remembered. Every failure (no label, no file, no
+    `tomllib`, a parse error) reads as "not opted in".
+    """
+    if not workdir:
+        return False
+    try:
+        import tomllib  # stdlib 3.11+; guarded the way harness_config guards it
+    except ModuleNotFoundError:
+        return False
+    try:
+        with (Path(workdir) / ".devkit.toml").open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):  # TOMLDecodeError is a ValueError
+        return False
+    docker = data.get("docker")
+    return isinstance(docker, dict) and docker.get("auto_stop") is True
+
+
+def youngest_start(inspect_output: str) -> datetime | None:
+    """The newest `State.StartedAt` in an inspect listing; None when none parse.
+
+    Docker prints nanoseconds and `fromisoformat` takes at most six digits, so the
+    fraction is trimmed rather than parsed.
+    """
+    newest = None
+    for line in inspect_output.splitlines():
+        text = re.sub(r"\.(\d{1,6})\d*", r".\1", line.strip()).replace("Z", "+00:00")
+        try:
+            started = datetime.fromisoformat(text)
+        except ValueError:
+            continue
+        if newest is None or started > newest:
+            newest = started
+    return newest
+
+
+def keep_reason(stack: dict, busy_ports: set[int] | None, now: datetime) -> str | None:
+    """Why this stack is left alone, or None when it is safe to stop.
+
+    Ordered cheapest-first, and every ambiguity keeps the stack up: an unreadable
+    netstat or an unparseable start time is exactly the state in which this could
+    stop a database out from under someone.
+    """
+    if not auto_stop_enabled(stack["workdir"]):
+        return "not opted in (`[docker] auto_stop = true` in its .devkit.toml)"
+    if busy_ports is None:
+        return "netstat could not be read, so idleness cannot be verified"
+    used = sorted(stack["ports"] & busy_ports)
+    if used:
+        return f"established connection(s) on port(s) {used}"
+    listing = _capture(
+        ["docker", "inspect", "--format", "{{.State.StartedAt}}", *stack["ids"]], timeout=30
+    )
+    newest = youngest_start(listing) if listing is not None else None
+    if newest is None:
+        return "start time unreadable, so the grace window cannot be checked"
+    age_hours = (now - newest).total_seconds() / 3600
+    if age_hours < GRACE_HOURS:
+        return f"started {age_hours:.1f}h ago (grace window {GRACE_HOURS:g}h)"
+    return None
+
+
+def generic_stop_idle() -> int:
+    """Stop the compose stacks that opted in and show no sign of being used.
+
+    The counterpart to `restart: unless-stopped`, which resurrects on every boot
+    whatever was running at shutdown -- so a stack someone brought up once runs around
+    the clock whether or not anyone touches that project again. This pass turns "left
+    up" back into "up on demand": `docker stop`, never `down`, so containers and named
+    volumes survive, the restart (`docker-maint.py up`, or the stop hook's
+    `*_STOP_TESTS_AUTOSTART` tier bringing up just db+redis) costs seconds, and a
+    manual stop is exactly the state `unless-stopped` respects across reboots.
+
+    Exit 0 covers "nothing eligible" -- most runs, and the correct outcome; only a
+    `docker stop` that actually failed reports 1.
+    """
+    print(banner("Docker Stop Idle Stacks (generic)"))
+    listing = _capture(["docker", "ps", "--format", PS_FORMAT], timeout=30)
+    if listing is None:
+        print("  [skip] the engine could not be asked; nothing to stop.")
+        return 0
+    stacks = compose_stacks(listing)
+    if not stacks:
+        print("  No compose stacks are running.")
+        return 0
+    netstat = _capture(["netstat", "-n"], timeout=60)
+    busy_ports = established_ports(netstat) if netstat is not None else None
+    now = datetime.now(timezone.utc)
+    failures = 0
+    for project, stack in sorted(stacks.items()):
+        reason = keep_reason(stack, busy_ports, now)
+        if reason:
+            print(f"  [keep] {project}: {reason}")
+            continue
+        print(f"  [stop] {project}: opted in, no connections, past the grace window")
+        if run(["docker", "stop", *stack["ids"]], timeout=300):
+            failures += 1
+    return 1 if failures else 0
+
+
 # The stack modes take the forwarded arguments; the daemon ones are parameterless by
 # nature (there is one Docker Desktop and nothing to aim it at), so they are adapted to
 # the same signature rather than dispatched differently. Annotated because a dict of
@@ -375,6 +575,7 @@ def generic_prune(idle_only: bool = False) -> int:
 GENERIC: dict[str, Callable[[list[str]], int]] = {
     "up": generic_up,
     "down": generic_down,
+    "stop-idle": lambda extra: generic_stop_idle(),
     "restart-engine": lambda extra: generic_restart_engine(),
     "fix": lambda extra: generic_fix(),
     "prune": lambda extra: generic_prune(idle_only="--idle-only" in extra),
