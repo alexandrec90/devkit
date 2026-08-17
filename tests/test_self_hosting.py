@@ -77,6 +77,22 @@ def test_devkit_wires_every_hook_event_the_template_does():
     assert not missing, f"the template wires {sorted(missing)} but devkit does not"
 
 
+def test_generated_projects_do_not_pin_a_model():
+    """A `model` key in the template silently outranks the user's own default.
+
+    Project settings sit *above* `~/.claude/settings.json` in Claude Code's precedence,
+    so this key is not a default — it overrides whatever the user selected globally, in
+    every generated project at once, with nothing in the session saying where it came
+    from. That is how `"model": "opus"` ended up winning in six checkouts against a user
+    setting of Fable. Model choice belongs to the user or to `--model`, not the scaffold.
+    """
+    template = json.loads(TEMPLATE_SETTINGS.read_text(encoding="utf-8"))
+    assert "model" not in template, (
+        f"the template pins model={template['model']!r}, which overrides the user's "
+        "global model selection in every generated project"
+    )
+
+
 # --- the lint runner / Stop hook contract -------------------------------------
 
 
