@@ -279,6 +279,32 @@ SILENT_ON_SUCCESS = re.compile(
 # would have exempted it.
 BARE_NO_OUTPUT_RE = re.compile(r"(?::|cd|wait|read)\s*$")
 
+# A standalone assignment -- `DIR=/some/path` with no command behind it -- writes to a
+# variable and prints nothing, which is the same claim `ENV_ASSIGNMENT_PREFIX_RE` already
+# makes about the prefix form. That regex requires trailing whitespace and a command, so
+# the bare form matched nothing and fell through to be judged as a command named
+# `DIR=/some/path`, which no exemption covers.
+#
+# The shape that reported it is a capped group with its paths hoisted out front:
+# `R=/a; L=/b; { grep x "$R"; tail -c 400 "$L"; } | head -c 4000`. The group is bounded
+# and the gate agrees it is -- but `statements()` splits on the `;` first, so the two
+# assignments were judged alone and the whole call was blocked. Moving them inside the
+# braces passes, which makes the block look like a rule about where variables may be
+# written rather than the false positive it is. A substitution in the value peels away
+# here for the same reason it does in the prefix form: it feeds the variable, never the
+# terminal.
+#
+# It carries alternatives the prefix form does not need, because it is anchored at the
+# end rather than at a following command: a value spanning spaces has nothing after it to
+# re-establish the word boundary. `ENV_ASSIGNMENT_PREFIX_RE` backtracks out of its quoted
+# alternative when the `\s+` behind it cannot match and peels `L="/a` off the front of
+# `L="/a path"`, which is harmless there -- it only ever hands a fragment to a check that
+# fails closed -- and would be wrong here.
+BARE_ASSIGNMENT_RE = re.compile(
+    r"^[A-Za-z_]\w*=(?:'[^']*'|\"(?:\\.|[^\"\\])*\"|\$\(.*\)|`.*`|\S*)\s*$",
+    re.DOTALL,
+)
+
 # `grep -q` is the other half of a readiness poll -- `until grep -q ready logs/x.log` is
 # the shape, and it is the natural spelling once the thing being waited for is a line in
 # a file rather than the file itself. `-q` means *print nothing and answer in the exit
@@ -520,7 +546,7 @@ def block_message(max_bytes: int, command_shell: str = "bash") -> str:
         "set, trap, kill), condition tests including a quiet `grep -q`, "
         "`git log` given a commit count, the commit pair whose "
         "message cannot survive the wrapper (git add/commit, gh pr "
-        "create/edit/comment), and "
+        "create/edit/comment), a standalone variable assignment, and "
         "shell control flow. ls/cat/git status are NOT exempt because their "
         "output grows with the tree -- use Read/Glob/Grep."
     )
@@ -806,8 +832,16 @@ def is_bounded(statement: str) -> bool:
     separate statement and is still judged on its own, which is what keeps
     `for f in $(ls); do cat $f; done` blocked, on the `cat`, where it belongs.
     """
-    peeled = strip_control_prefix(statement.strip())
+    raw = statement.strip()
+    # Judged before the peel, not after: the peel is what breaks a quoted value apart,
+    # and a standalone assignment has no command behind it for the peel to expose.
+    if BARE_ASSIGNMENT_RE.match(raw):
+        return True
+    peeled = strip_control_prefix(raw)
     if NO_STDOUT_RE.match(peeled) or BARE_NO_OUTPUT_RE.match(peeled):
+        return True
+    # Again after it, for the spellings a control keyword introduces (`then R=/a`).
+    if BARE_ASSIGNMENT_RE.match(peeled):
         return True
     if CONTROL_ONLY_RE.match(peeled) or CONTROL_HEADER_RE.match(peeled):
         return True
