@@ -30,6 +30,13 @@ Modes:
   list            every live box, its branch, its verdict, and whether it can be
                   reaped. Reuses `sweep.inspect`/`sweep.classify` — one classifier
                   for both tiers, so the two can never disagree about "has work".
+  preview <ref>   check out someone ELSE's branch or PR in a box of its own and
+                  bring its stack up, so a change can be *seen running* before it
+                  is merged. The box sits on a `preview/...` copy of the remote
+                  ref rather than on the ref itself, which is what lets it coexist
+                  with the agent box that owns that branch; re-running it
+                  fast-forwards onto whatever has been pushed since. Also takes a
+                  live box name, which is the same request for work already here.
   provision <box> install the toolchain into a box that was cut without one (the
                   guard hook cuts those — see `apply_new`).
   reap <box>      tear the stack down, remove the worktree, delete the branch,
@@ -134,6 +141,29 @@ SAFE_TO_REAP: frozenset[str] = frozenset({sweep.SPENT, sweep.NEEDS_PR, sweep.CLE
 MERGE_CAN_BE_STALE_ABOUT: frozenset[str] = frozenset({sweep.NEEDS_REBRANCH})
 
 
+# A preview box is not a task box, and the distinction is worth a field because every
+# destructive decision in this file turns on it. A task box is where work is *made*, so
+# nothing may reset it and nothing may reap it until the work has left. A preview box is
+# where someone else's work is *looked at*: it holds a disposable copy of a remote ref,
+# it is refreshed by resetting onto that ref, and it is worth exactly the disk it costs.
+#
+# The local branch is `preview/<topic>`, never the previewed ref itself. Two worktrees
+# cannot check out one local branch, and the agent's own box got there first — so a
+# preview that tried to check out `agent/foo` would fail on precisely the branch anyone
+# would most want to preview.
+PREVIEW_KIND = "preview"
+TASK_KIND = "task"
+PREVIEW_VERDICT = "preview"
+PREVIEW_BRANCH_PREFIX = "preview/"
+
+# Services whose port is worth an http:// URL in the report. Everything else in the
+# registry is a wire protocol a browser cannot open, and printing a URL for Postgres
+# invites exactly one support question per person who tries it.
+HTTP_SERVICES: frozenset[str] = frozenset(
+    {"frontend", "app", "grafana", "prometheus", "minio_console"}
+)
+
+
 def reapable(verdict: str, *, pr_merged: bool = False, holds_uncommitted: bool = True) -> bool:
     """May this box be destroyed? The one predicate `reap` and `reconcile` both ask.
 
@@ -165,7 +195,14 @@ def reapable(verdict: str, *, pr_merged: bool = False, holds_uncommitted: bool =
     so a caller that does not know defaults to holding: this predicate must fail towards
     keeping a box that could be destroyed, never towards destroying one that should be
     kept.
+
+    A **preview** box answers the question by construction: every commit in it came from
+    a remote ref, so there is nothing in it to strand. It is still gated on
+    `holds_uncommitted`, because someone reading a diff may well have poked at a file,
+    and a cleanup pass is not the right moment to find out.
     """
+    if verdict == PREVIEW_VERDICT:
+        return not holds_uncommitted
     if verdict in SAFE_TO_REAP:
         return True
     return pr_merged and not holds_uncommitted and verdict in MERGE_CAN_BE_STALE_ABOUT
@@ -224,6 +261,12 @@ class Box:
     `session` is the agent session that spawned it, and is what makes the guard hook
     idempotent — the second edit into a project during one session finds this box
     instead of cutting a second one.
+
+    `kind` is `task` or `preview` (see `PREVIEW_KIND`), and `tracks` is the remote branch
+    a preview is a copy of — empty for a task box, which tracks nothing because its
+    branch is its own. The pair is what lets `reconcile` look a preview's PR up by the
+    branch under review rather than by the throwaway `preview/...` ref, and reap the
+    preview when that PR lands.
     """
 
     name: str
@@ -232,6 +275,8 @@ class Box:
     slot: int = -1
     session: str = ""
     created: str = ""
+    kind: str = TASK_KIND
+    tracks: str = ""
 
 
 @dataclass(frozen=True)
@@ -286,6 +331,26 @@ class ReapPlan:
     @property
     def acts(self) -> bool:
         return bool(self.steps or self.stack_down)
+
+
+@dataclass(frozen=True)
+class PreviewPlan:
+    """What `preview` will do to one box: cut it, refresh it, or just run its stack.
+
+    Three shapes in one object rather than three plan types, because the caller that has
+    to switch on which type it got is the caller that forgets a case. An empty `spawn`
+    and an empty `refresh` is the ordinary "the box is already right, start it" path.
+    """
+
+    box: Box
+    path: str = ""
+    spawn: SpawnPlan | None = None
+    refresh: tuple[tuple[str, ...], ...] = ()
+    up: bool = False
+    down: bool = False
+    urls: tuple[tuple[str, int, str], ...] = ()
+    refusal: str = ""
+    warning: str = ""
 
 
 @dataclass(frozen=True)
@@ -393,6 +458,8 @@ def parse_leases(text: str) -> dict[str, Box]:
             slot=raw.get("slot", -1) if isinstance(raw.get("slot"), int) else -1,
             session=str(raw.get("session", "")),
             created=str(raw.get("created", "")),
+            kind=str(raw.get("kind", "")) or TASK_KIND,
+            tracks=str(raw.get("tracks", "")),
         )
     return boxes
 
@@ -658,6 +725,141 @@ def spawn_plan(
     )
 
 
+def preview_box_name(project: str, ref: str) -> str:
+    """`carameli` + `agent/ui-editor-0817` -> `carameli--preview-ui-editor-0817`.
+
+    Deliberately not `box_name`'s spelling. A preview of a branch and the agent box that
+    owns it exist at the same time by design, and one name for the two would be one
+    `COMPOSE_PROJECT_NAME` for two stacks — the exact collision the lease tier exists to
+    prevent, arriving through the door marked "convenience".
+    """
+    prefix = tb.managed_branch_prefix(ref)
+    topic = ref[len(prefix) :] if prefix else ref
+    return f"{project}{NAME_SEP}{PREVIEW_KIND}-{tb.slugify(topic)}"
+
+
+def preview_branch(ref: str) -> str:
+    """The local branch a preview of `ref` checks out."""
+    prefix = tb.managed_branch_prefix(ref)
+    topic = ref[len(prefix) :] if prefix else ref
+    return f"{PREVIEW_BRANCH_PREFIX}{tb.slugify(topic)}"
+
+
+def preview_refresh_steps(tracks: str) -> tuple[tuple[str, ...], ...]:
+    """Git argv, run **in the box**, that puts it back on the tip of `origin/<tracks>`.
+
+    The refspec is written out in full rather than left to `git fetch origin <branch>`.
+    The short form updates the remote-tracking ref only as a side effect of the default
+    refspec matching, so on a repo configured to fetch a subset it silently updates
+    `FETCH_HEAD` alone — and the `reset` that follows would then move the box onto
+    whatever it was already on, reporting a refresh that did not happen.
+    """
+    return (
+        ("fetch", "--quiet", "origin", f"+refs/heads/{tracks}:refs/remotes/origin/{tracks}"),
+        ("reset", "--hard", f"origin/{tracks}"),
+    )
+
+
+def preview_refresh_decision(kind: str, dirty: int, force: bool) -> tuple[bool, str]:
+    """`(refresh, why not)` — may this box be reset onto the ref it is showing?
+
+    **A task box is never refreshed, at any `--force`.** `reset --hard` there would
+    discard an agent's uncommitted work, and the promise of this whole tier is that
+    nothing does. `preview <task box>` is still a useful request — bring its stack up and
+    say which ports it is on — so it is served, and the reset is what is withheld.
+
+    A preview box holds no work by construction, so the only thing a reset can cost is an
+    edit someone made while reading. That is worth reporting and worth `--force`, which
+    is the same bargain `reap_decision` strikes for the same kind of edit.
+    """
+    if kind != PREVIEW_KIND:
+        return False, (
+            "a task box is served as it is — only a preview box is reset onto its ref, "
+            "because reset --hard in a task box would discard the work it exists to hold"
+        )
+    if dirty and not force:
+        return False, f"{dirty} uncommitted file(s) here — pass --force to discard them and refresh"
+    return True, ""
+
+
+def preview_urls(
+    registry: devkit_ports.Registry | None, slot: int
+) -> tuple[tuple[str, int, str], ...]:
+    """`(service, host port, url)` for a box's slot; url is "" for a non-HTTP service.
+
+    This is the half of the port model that never had an output. The registry has always
+    known that a box on slot 3 publishes Vite on 5176, and nothing ever said so — so the
+    documented way to find a box's UI was to open its seeded `.env` and do the arithmetic
+    by hand, which is a step that gets skipped and then reported as "the preview didn't
+    come up".
+    """
+    if registry is None or slot < 0:
+        return ()
+    return tuple(
+        (service, port, f"http://localhost:{port}" if service in HTTP_SERVICES else "")
+        for service, port in sorted(registry.ports_for_slot(slot).items())
+    )
+
+
+def preview_spawn_plan(
+    project: str,
+    workspace_root: Path,
+    ref: str,
+    boxes: Mapping[str, Box],
+    registry: devkit_ports.Registry | None = None,
+    fetch: bool = True,
+    provision: tuple[ProvisionStep, ...] = (),
+    now: _dt.datetime | None = None,
+) -> SpawnPlan:
+    """`spawn_plan` for a preview: an existing remote ref instead of a fresh branch.
+
+    `--no-track` for the reason `spawn_plan` gives and then one more that is specific to
+    this mode: a preview branch with `origin/<ref>` as its upstream turns a reflexive
+    `git push` from inside the box into a push onto **someone else's task branch**, which
+    is the one thing a read-only checkout must not be able to do by accident.
+    """
+    name = preview_box_name(project, ref)
+    path = box_path(workspace_root, name)
+    slot = next_lease_slot(registry, boxes) if registry is not None else -1
+    local = preview_branch(ref)
+
+    steps: list[tuple[str, ...]] = []
+    if fetch:
+        steps.append(("fetch", "--quiet", "origin", f"+refs/heads/{ref}:refs/remotes/origin/{ref}"))
+    steps.append(("worktree", "add", "--no-track", "-b", local, str(path), f"origin/{ref}"))
+    box = Box(
+        name=name,
+        project=project,
+        branch=local,
+        slot=slot,
+        session="",
+        created=(now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds"),
+        kind=PREVIEW_KIND,
+        tracks=ref,
+    )
+    return SpawnPlan(
+        box=box,
+        path=str(path),
+        steps=tuple(steps),
+        env=managed_env(name, registry, slot),
+        provision=provision,
+    )
+
+
+def preview_branch_delete_flag(state: sweep.State) -> str:
+    """`-D` for a preview branch that is still a copy, `-d` for one that is not.
+
+    `-d` refuses any branch that is not an ancestor of the checkout's HEAD, which a
+    `preview/...` branch never is — so planning `-d` here would end every preview reap in
+    the `FAILED at git branch -d` that `reap_plan` documents at length for forced reaps.
+    `-D` is safe *because* the branch is a copy of a remote ref, and only while it is
+    one, which is what `state.ahead` is asked. A commit made inside a preview box exists
+    nowhere else, and destroying it in a cleanup is the one thing this tier promises not
+    to do.
+    """
+    return "-D" if state.ahead <= 0 else "-d"
+
+
 def reap_decision(
     verdict: str,
     reason: str,
@@ -786,7 +988,11 @@ def reap_plan(
     steps: list[tuple[str, ...]] = [remove]
     warning = note
     if box.branch:
-        flag = branch_delete_flag(state, pr_merged)
+        flag = (
+            preview_branch_delete_flag(state)
+            if box.kind == PREVIEW_KIND
+            else branch_delete_flag(state, pr_merged)
+        )
         if force and flag == "-d":
             warning = "; ".join(
                 part
@@ -967,6 +1173,19 @@ def reconcile_action(
     """
     if not reapable(verdict, pr_merged=pr.merged, holds_uncommitted=holds_uncommitted):
         return HOLD, f"{verdict} -- {reason}"
+
+    if verdict == PREVIEW_VERDICT:
+        # A preview is never merged and never shipped: it is a copy of a ref someone is
+        # looking at. It ends when the thing it shows lands, when the disk is needed, or
+        # when it has been sitting there long enough that nobody is still looking.
+        if pr.merged or pr.state == "CLOSED":
+            return REAP, f"preview of PR #{pr.number} ({pr.state.lower()})"
+        if pressure:
+            return REAP, "reclaiming disk -- a preview holds nothing of its own"
+        if age_days > max_age_days:
+            return REAP, f"preview is {age_days:.1f}d old (limit {max_age_days:g}d)"
+        subject = f"PR #{pr.number}" if pr.number else "a branch"
+        return WAIT, f"preview of {subject} -- reap it when you are done looking"
 
     if pr.merged:
         return REAP, f"PR #{pr.number} merged"
@@ -1552,6 +1771,60 @@ def is_tracked(repo: Path, relative: str) -> bool:
     return completed.returncode == 0
 
 
+def compose_up(path: Path, project_name: str, timeout: float = 1800.0) -> tuple[bool, str]:
+    """`compose up -d --build` scoped to one box. `(ok, message)`.
+
+    `-p` for the same reason `compose_down` passes it, and here the consequence of
+    omitting it is worse than a missed teardown: compose would fall back to the
+    directory name, and a box whose `.env` seeding was skipped would start a *second*
+    copy of the source checkout's stack on the ports that checkout already holds.
+
+    Half an hour, because the first `up` in a fresh box builds the project's images from
+    nothing. A timeout is reported rather than retried — `up` is idempotent, so running
+    it again resumes the build instead of repeating it.
+    """
+    try:
+        completed = subprocess.run(
+            ["docker", "compose", "-p", project_name, "up", "-d", "--build"],
+            cwd=str(path),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            creationflags=sweep.NO_WINDOW,
+        )
+    except FileNotFoundError:
+        return False, "docker is not on PATH — the stack was not started"
+    except subprocess.TimeoutExpired:
+        return False, (
+            f"compose up timed out after {timeout:g}s — the build may still be running; "
+            f"`docker compose -p {project_name} ps` says where it got to"
+        )
+    if completed.returncode != 0:
+        return False, (completed.stderr or completed.stdout or "").strip()
+    return True, f"stack {project_name} is up"
+
+
+def pr_head_branch(gh: sweep.Git, number: int) -> str:
+    """The head branch of PR `number`, or "" when `gh` cannot say.
+
+    Through the same shim `pr_for` uses, and empty on every failure path for the same
+    reason: an offline or unauthenticated machine must produce "cannot resolve that PR",
+    never a branch name it guessed.
+    """
+    try:
+        result = gh("pr", "view", str(number), "--json", "headRefName")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    return str(payload.get("headRefName", "")) if isinstance(payload, dict) else ""
+
+
 def compose_down(path: Path, project_name: str) -> tuple[bool, str]:
     """`compose down -v` scoped to one box. `(ok, message)`; a missing docker is not fatal.
 
@@ -1708,6 +1981,144 @@ def apply_new(
     return True, notes
 
 
+def serve_preview(
+    box: Box,
+    workspace_root: Path,
+    *,
+    up: bool = True,
+    down: bool = False,
+    force: bool = False,
+    fetch: bool = True,
+) -> PreviewPlan:
+    """The plan for a box that already exists: refresh it if it may be, then run it."""
+    path = box_path(workspace_root, box.name)
+    state = sweep.inspect(box.name, path, fetch=False)
+    allowed, why = preview_refresh_decision(box.kind, state.dirty, force)
+    refresh = preview_refresh_steps(box.tracks) if allowed and box.tracks and fetch else ()
+    return PreviewPlan(
+        box=box,
+        path=str(path),
+        refresh=refresh,
+        up=up and has_stack(path),
+        down=down,
+        urls=preview_urls(load_registry(workspace_root), box.slot),
+        warning="" if allowed or not box.tracks else why,
+    )
+
+
+def plan_preview(
+    target: str,
+    workspace: Path,
+    *,
+    branch: str = "",
+    pr: int = 0,
+    fetch: bool = True,
+    provision: bool = False,
+    up: bool = True,
+    down: bool = False,
+    force: bool = False,
+) -> PreviewPlan:
+    """Resolve `preview`'s arguments against disk and, for `--pr`, against GitHub.
+
+    `target` is either a live box — serve what is already here, which is the answer when
+    the agent ran on this machine and its box is still standing — or a project, in which
+    case `--pr`/`--branch` names the ref to check out. That second form is the one that
+    does not need the work to be local at all: the branch is on the remote, so a review
+    can start the moment the agent pushes rather than after someone merges it.
+    """
+    root = workspace.parent
+    boxes = live_boxes(root)
+
+    if not branch and not pr:
+        existing = boxes.get(target)
+        if existing is None:
+            known = ", ".join(sorted(boxes)) or "(none)"
+            raise WorktreeError(
+                f"{target!r} is not a live box, and no ref was named. Either pass "
+                f"--pr <n> / --branch <name> to preview a ref of the {target!r} project, "
+                f"or name a live box: {known}"
+            )
+        return serve_preview(existing, root, up=up, down=down, force=force, fetch=fetch)
+
+    projects = known_projects(workspace)
+    source = devkit_project.resolve_project(target, projects, root)
+    project = source.name
+    ref = branch
+    if pr:
+        ref = pr_head_branch(sweep.gh_for(source), pr)
+        if not ref:
+            raise WorktreeError(
+                f"cannot read the head branch of PR #{pr} in {project} — is `gh` "
+                f"authenticated for that remote? `--branch <name>` skips the lookup."
+            )
+
+    name = preview_box_name(project, ref)
+    existing = boxes.get(name)
+    if existing is not None:
+        return serve_preview(existing, root, up=up, down=down, force=force, fetch=fetch)
+
+    registry = load_registry(root) if has_stack(source) else None
+    spawn = preview_spawn_plan(
+        project=project,
+        workspace_root=root,
+        ref=ref,
+        boxes=boxes,
+        registry=registry,
+        fetch=fetch,
+        provision=plan_provision(source) if provision else (),
+    )
+    return PreviewPlan(
+        box=spawn.box,
+        path=spawn.path,
+        spawn=spawn,
+        up=up and has_stack(source),
+        down=down,
+        urls=preview_urls(registry, spawn.box.slot),
+    )
+
+
+def apply_preview(
+    plan: PreviewPlan, workspace: Path, timeout: float = 300.0
+) -> tuple[bool, list[str]]:
+    """Cut or refresh the preview box, then start (or stop) its stack. `(ok, notes)`."""
+    if plan.refusal:
+        return False, [plan.refusal]
+    notes: list[str] = []
+    path = Path(plan.path)
+
+    if plan.spawn is not None:
+        ok, spawn_notes = apply_new(
+            plan.spawn, workspace, timeout=timeout, provision=bool(plan.spawn.provision)
+        )
+        notes.extend(spawn_notes)
+        if not ok:
+            return False, notes
+    elif plan.refresh:
+        _, failed, error = run_steps(path, plan.refresh, timeout=timeout)
+        if failed:
+            # A refresh that could not run leaves the box on the commit it was already
+            # showing, which is a stale preview and not a broken one — say which, because
+            # a UI that does not show the change is otherwise read as the change failing.
+            notes.append(
+                f"[warn] not refreshed: `{failed}` failed ({error}); the box is still on "
+                f"the commit it was last set to"
+            )
+        else:
+            notes.append(f"refreshed onto origin/{plan.box.tracks}")
+
+    if plan.down:
+        ok, message = compose_down(path, plan.box.name)
+        notes.append(message if ok else f"[warn] {message}")
+        return ok, notes
+
+    if plan.up:
+        ok, message = compose_up(path, plan.box.name)
+        notes.append(message if ok else f"[warn] {message}")
+        if not ok:
+            return False, notes
+    return True, notes
+
+
 def inspect_box(
     box: Box, workspace_root: Path, fetch: bool = False
 ) -> tuple[sweep.State, str, str]:
@@ -1716,8 +2127,18 @@ def inspect_box(
     Deliberately the same classifier the static tier uses. A second one would be a
     second opinion about "does this hold unshipped work", and the two would disagree
     exactly when it mattered.
+
+    A **preview** box is the one thing that classifier has no vocabulary for: it sits on
+    a `preview/...` branch that is not a task branch and never will be, so every verdict
+    it can return is a complaint about a state that is this box's whole point.
+    `needs-branch` on a preview would make `reconcile` HOLD it forever and `reap` refuse
+    it, which is the leak the ephemeral tier exists to avoid. So the kind answers first,
+    and the state is still read, because `dirty` is what protects an edit made in there.
     """
     state = sweep.inspect(box.name, box_path(workspace_root, box.name), fetch=fetch)
+    if box.kind == PREVIEW_KIND:
+        subject = box.tracks or box.branch
+        return state, PREVIEW_VERDICT, f"a read-only copy of {subject}, held for review"
     verdict, reason = sweep.classify(state)
     return state, verdict, reason
 
@@ -1880,6 +2301,7 @@ def survey(workspace: Path, fetch: bool = False, sizes: bool = False) -> list[di
     `workspace-status.py` can keep calling this at every session start.
     """
     root = workspace.parent
+    registry = load_registry(root)
     rows: list[dict] = []
     for name, box in sorted(live_boxes(root).items()):
         state, verdict, reason = inspect_box(box, root, fetch=fetch)
@@ -1894,7 +2316,14 @@ def survey(workspace: Path, fetch: bool = False, sizes: bool = False) -> list[di
             "age_days": round(box_age_days(box.created), 2),
             "verdict": verdict,
             "reason": reason,
-            "reapable": verdict in SAFE_TO_REAP,
+            # `reapable(...)` rather than the set, so a preview — which the set cannot
+            # contain without making `spent-branch` mean two things — is not reported as
+            # a box holding work. The other verdicts are unchanged: with no merged PR in
+            # hand the predicate reduces to the same membership test.
+            "reapable": reapable(verdict, holds_uncommitted=bool(state.dirty)),
+            "kind": box.kind,
+            "tracks": box.tracks,
+            "urls": [list(entry) for entry in preview_urls(registry, box.slot)],
             "path": str(path),
         }
         if sizes:
@@ -2032,9 +2461,13 @@ def reconcile(
     rows: list[tuple[Box, str, str, PullRequest, int]] = []
     for name, box in sorted(boxes.items()):
         state, verdict, reason = inspect_box(box, root, fetch=fetch)
+        # A preview's PR is the one for the branch it is SHOWING. Looking it up by
+        # `box.branch` would ask GitHub about the throwaway `preview/...` ref, get
+        # nothing back, and leave the preview standing after the work it shows merged.
+        subject = box.tracks or box.branch
         pr = (
-            pr_for(sweep.gh_for(box_path(root, name)), box.branch)
-            if fetch and box.branch and state.host == "github"
+            pr_for(sweep.gh_for(box_path(root, name)), subject)
+            if fetch and subject and state.host == "github"
             else PullRequest()
         )
         rows.append((box, verdict, reason, pr, state.dirty))
@@ -2150,6 +2583,14 @@ def render_survey(rows: list[dict]) -> str:
     widths = [max(len(r[i]) for r in table) for i in range(len(table[0]))]
     lines = ["  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip() for r in table]
     lines.insert(1, "  ".join("-" * w for w in widths))
+    previews = [row for row in rows if row.get("kind") == PREVIEW_KIND]
+    if previews:
+        lines.append("")
+        lines.append(f"{len(previews)} preview(s) — someone else's branch, held for review:")
+        for row in previews:
+            urls = [url for _, _, url in row.get("urls", ()) if url]
+            where = f" -> {urls[0]}" if urls else ""
+            lines.append(f"  {row['box']} shows {row.get('tracks') or row['branch']}{where}")
     held = [row for row in rows if not row["reapable"]]
     if held:
         lines.append("")
@@ -2325,6 +2766,37 @@ def render_spawn(plan: SpawnPlan, applied: bool, notes: list[str]) -> str:
     return "\n".join(lines)
 
 
+def render_preview(plan: PreviewPlan, applied: bool, notes: list[str]) -> str:
+    if plan.refusal:
+        return f"{plan.box.name}: refused -- {plan.refusal}"
+    subject = plan.box.tracks or plan.box.branch
+    verb = "Previewing" if applied else "Would preview"
+    lines = [f"{verb} {subject} in {plan.box.name}"]
+    lines.append(f"  path    {plan.path}")
+    lines.append(f"  slot    {plan.box.slot if plan.box.slot >= 0 else '- (no Docker tier)'}")
+    steps = 0
+    for step in plan.spawn.steps if plan.spawn else ():
+        steps += 1
+        lines.append(f"    {steps}. git -C {plan.box.project} {' '.join(step)}")
+    for step in plan.refresh:
+        steps += 1
+        lines.append(f"    {steps}. git -C {plan.box.name} {' '.join(step)}")
+    if plan.down:
+        lines.append(f"    {steps + 1}. docker compose -p {plan.box.name} down -v --remove-orphans")
+    elif plan.up:
+        lines.append(f"    {steps + 1}. docker compose -p {plan.box.name} up -d --build")
+    if plan.warning:
+        lines.append(f"  [warn] {plan.warning}")
+    if plan.urls and not plan.down:
+        lines.append("  open")
+        for service, port, url in plan.urls:
+            lines.append(f"    {service:<15} {url or f'localhost:{port}'}")
+    lines.extend(f"  {note}" for note in notes)
+    if not applied:
+        lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")
+    return "\n".join(lines)
+
+
 def render_reap(plan: ReapPlan, applied: bool, notes: list[str]) -> str:
     if plan.refusal:
         return f"{plan.box}: refused -- {plan.refusal}"
@@ -2477,6 +2949,42 @@ def main(argv: list[str] | None = None) -> int:
     )
     add_common_args(fix)
 
+    look = sub.add_parser(
+        "preview", help="run someone else's branch or PR in a box of its own, and open it"
+    )
+    look.add_argument("target", help="a project (with --pr/--branch), or a live box name")
+    ref = look.add_mutually_exclusive_group()
+    ref.add_argument("--pr", type=int, default=0, help="preview the head branch of this PR")
+    ref.add_argument("--branch", default="", help="preview this branch as it is on origin")
+    stack = look.add_mutually_exclusive_group()
+    stack.add_argument(
+        "--up",
+        dest="up",
+        action="store_true",
+        default=True,
+        help="bring the box's compose stack up afterwards (the default)",
+    )
+    stack.add_argument(
+        "--no-up",
+        dest="up",
+        action="store_false",
+        help="check the ref out and print its ports; start nothing",
+    )
+    look.add_argument(
+        "--down", action="store_true", help="stop this preview's stack, keeping the box"
+    )
+    look.add_argument(
+        "--provision",
+        action="store_true",
+        help="also install the host toolchain (a compose stack does not need it)",
+    )
+    look.add_argument(
+        "--force",
+        action="store_true",
+        help="refresh a preview box that has uncommitted edits, discarding them",
+    )
+    add_common_args(look)
+
     provision = sub.add_parser("provision", help="install an existing box's toolchain")
     provision.add_argument("box")
     add_common_args(provision)
@@ -2563,6 +3071,43 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(render_spawn(plan, applied=not args.dry_run, notes=notes))
             return 0 if ok else 2
+
+        if args.mode == "preview":
+            pv = plan_preview(
+                args.target,
+                args.workspace,
+                branch=args.branch,
+                pr=args.pr,
+                fetch=args.fetch,
+                provision=args.provision,
+                up=args.up and not args.down,
+                down=args.down,
+                force=args.force,
+            )
+            notes = []
+            ok = not pv.refusal
+            if ok and not args.dry_run:
+                ok, notes = apply_preview(pv, args.workspace)
+            applied = not args.dry_run and not pv.refusal
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "box": asdict(pv.box),
+                            "path": pv.path,
+                            "urls": [list(entry) for entry in pv.urls],
+                            "refusal": pv.refusal,
+                            "warning": pv.warning,
+                            "applied": applied,
+                            "ok": ok,
+                            "notes": notes,
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                print(render_preview(pv, applied=applied, notes=notes))
+            return 0 if ok else 1
 
         if args.mode == "provision":
             root = args.workspace.parent

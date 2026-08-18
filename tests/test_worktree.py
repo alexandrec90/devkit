@@ -2075,3 +2075,220 @@ def test_an_unwritable_log_never_fails_the_pass(tmp_path, monkeypatch):
 
 def test_no_window_is_windows_only():
     assert (sweep.NO_WINDOW != 0) is (worktree.os.name == "nt")
+
+
+# --- preview: someone else's branch, run before it merges -------------------
+#
+# The mode exists because testing an agent's change used to mean merging it first: the
+# work is on a branch, the branch is in a box the reviewer does not own, and two
+# worktrees cannot check out one local branch. Everything below is the machinery that
+# lets a *copy* of that ref run beside the work rather than after it — and, more
+# importantly, the machinery that keeps a read-only copy from being mistaken for a box
+# holding work in either direction.
+
+PREVIEW_REF = "agent/ui-editor-0817"
+
+
+def preview_box(**kwargs) -> worktree.Box:
+    defaults = {
+        "name": "carameli--preview-ui-editor-0817",
+        "project": "carameli",
+        "branch": "preview/ui-editor-0817",
+        "slot": 5,
+        "kind": worktree.PREVIEW_KIND,
+        "tracks": PREVIEW_REF,
+    }
+    return worktree.Box(**{**defaults, **kwargs})
+
+
+def test_a_preview_box_is_named_apart_from_the_task_box_for_the_same_branch():
+    """Both exist at once by design, so one name would be one COMPOSE_PROJECT_NAME."""
+    assert worktree.box_name("carameli", PREVIEW_REF) == "carameli--ui-editor-0817"
+    assert worktree.preview_box_name("carameli", PREVIEW_REF) == "carameli--preview-ui-editor-0817"
+    assert worktree.box_name("carameli", PREVIEW_REF) != worktree.preview_box_name(
+        "carameli", PREVIEW_REF
+    )
+
+
+def test_a_preview_checks_out_a_copy_and_never_the_ref_itself():
+    """The reversion check for the whole mode.
+
+    Checking out `agent/ui-editor-0817` directly fails whenever the agent's own box holds
+    it — which is every branch anyone would want to preview — and succeeds, worse, when
+    the box has been reaped: the reviewer would then be sitting on the real branch with
+    `origin/...` as its upstream, one reflexive `git push` away from writing to someone
+    else's work.
+    """
+    plan = worktree.preview_spawn_plan(
+        project="carameli",
+        workspace_root=Path("/ws"),
+        ref=PREVIEW_REF,
+        boxes={},
+        registry=registry(),
+        now=_dt.datetime(2026, 8, 17, tzinfo=_dt.UTC),
+    )
+    add = next(step for step in plan.steps if step[0] == "worktree")
+    assert "--no-track" in add
+    assert add[add.index("-b") + 1] == "preview/ui-editor-0817"
+    assert add[-1] == f"origin/{PREVIEW_REF}"
+    assert plan.box.branch == "preview/ui-editor-0817"
+    assert plan.box.tracks == PREVIEW_REF
+    assert plan.box.kind == worktree.PREVIEW_KIND
+    assert plan.box.session == ""
+
+
+def test_a_preview_fetches_the_ref_into_its_own_remote_tracking_branch():
+    """`git fetch origin <branch>` updates FETCH_HEAD; only the refspec is guaranteed."""
+    plan = worktree.preview_spawn_plan(
+        project="carameli",
+        workspace_root=Path("/ws"),
+        ref=PREVIEW_REF,
+        boxes={},
+        registry=registry(),
+    )
+    refspec = f"+refs/heads/{PREVIEW_REF}:refs/remotes/origin/{PREVIEW_REF}"
+    assert plan.steps[0] == ("fetch", "--quiet", "origin", refspec)
+    assert worktree.preview_refresh_steps(PREVIEW_REF) == (
+        ("fetch", "--quiet", "origin", refspec),
+        ("reset", "--hard", f"origin/{PREVIEW_REF}"),
+    )
+
+
+def test_a_preview_leases_a_slot_the_task_box_is_not_using():
+    """Both stacks run at once, so they cannot share the port slot either."""
+    live = {"carameli--ui-editor-0817": box(name="carameli--ui-editor-0817", slot=0)}
+    plan = worktree.preview_spawn_plan(
+        project="carameli",
+        workspace_root=Path("/ws"),
+        ref=PREVIEW_REF,
+        boxes=live,
+        registry=registry(max_slots=4),
+    )
+    assert plan.box.slot == 1
+    assert plan.env["COMPOSE_PROJECT_NAME"] == "carameli--preview-ui-editor-0817"
+    assert plan.env["APP_HOST_PORT"] == "8001"
+
+
+def test_a_task_box_is_never_reset_onto_a_ref_even_with_force():
+    """`reset --hard` in a box holding an agent's work is the one thing this cannot do."""
+    for dirty in (0, 7):
+        for force in (False, True):
+            allowed, why = worktree.preview_refresh_decision(worktree.TASK_KIND, dirty, force)
+            assert not allowed, (dirty, force)
+            assert "task box" in why
+
+
+def test_a_preview_with_edits_in_it_needs_force_to_refresh():
+    allowed, why = worktree.preview_refresh_decision(worktree.PREVIEW_KIND, 3, force=False)
+    assert not allowed
+    assert "--force" in why
+    assert worktree.preview_refresh_decision(worktree.PREVIEW_KIND, 3, force=True)[0]
+    assert worktree.preview_refresh_decision(worktree.PREVIEW_KIND, 0, force=False)[0]
+
+
+def test_the_lease_file_round_trips_a_preview():
+    boxes = {"carameli--preview-ui-editor-0817": preview_box()}
+    back = worktree.parse_leases(worktree.render_leases(boxes))
+    assert back == boxes
+    assert back["carameli--preview-ui-editor-0817"].tracks == PREVIEW_REF
+
+
+def test_a_lease_written_before_previews_existed_is_a_task_box():
+    """Every lease on disk predates the field, and none of them is a preview."""
+    older = json.dumps(
+        {"boxes": {"carameli--voicemail-0806": {"project": "carameli", "branch": "agent/x"}}}
+    )
+    parsed = worktree.parse_leases(older)["carameli--voicemail-0806"]
+    assert parsed.kind == worktree.TASK_KIND
+    assert parsed.tracks == ""
+
+
+def test_a_clean_preview_is_reapable_and_an_edited_one_is_not():
+    assert worktree.reapable(worktree.PREVIEW_VERDICT, holds_uncommitted=False)
+    assert not worktree.reapable(worktree.PREVIEW_VERDICT, holds_uncommitted=True)
+
+
+def test_reconcile_reaps_a_preview_once_the_work_it_shows_has_landed():
+    for state_name in ("MERGED", "CLOSED"):
+        action, why = decide(
+            worktree.PREVIEW_VERDICT,
+            "a read-only copy",
+            worktree.PullRequest(number=162, state=state_name),
+            holds_uncommitted=False,
+        )
+        assert action == worktree.REAP, state_name
+        assert "#162" in why
+
+
+def test_reconcile_leaves_a_preview_of_an_open_pr_alone():
+    """A preview is not a box waiting to be shipped, so it is neither merged nor pushed."""
+    action, why = decide(
+        worktree.PREVIEW_VERDICT,
+        "a read-only copy",
+        worktree.PullRequest(number=162, state="OPEN", checks=worktree.CHECKS_SUCCESS),
+        automerge=True,
+        merge_label="",
+        holds_uncommitted=False,
+    )
+    assert action == worktree.WAIT
+    assert "done looking" in why
+
+
+def test_a_preview_is_reclaimed_under_pressure_and_at_age():
+    open_pr = worktree.PullRequest(number=162, state="OPEN")
+    assert (
+        decide(worktree.PREVIEW_VERDICT, "x", open_pr, pressure=True, holds_uncommitted=False)[0]
+        == worktree.REAP
+    )
+    assert (
+        decide(
+            worktree.PREVIEW_VERDICT,
+            "x",
+            open_pr,
+            age_days=99.0,
+            max_age_days=3.0,
+            holds_uncommitted=False,
+        )[0]
+        == worktree.REAP
+    )
+
+
+def test_reconcile_never_reaps_a_preview_someone_is_editing():
+    for pr in (
+        worktree.PullRequest(),
+        worktree.PullRequest(number=162, state="MERGED"),
+        worktree.PullRequest(number=162, state="OPEN"),
+    ):
+        action, _ = decide(
+            worktree.PREVIEW_VERDICT, "x", pr, pressure=True, age_days=1e6, holds_uncommitted=True
+        )
+        assert action == worktree.HOLD, pr.state
+
+
+def test_reaping_a_preview_deletes_the_copy_it_made():
+    """`-d` refuses a preview branch by definition, so planning it would fail every reap."""
+    plan = reap(
+        verdict=worktree.PREVIEW_VERDICT,
+        box=preview_box(),
+        state=state(branch="preview/ui-editor-0817", upstream="", ahead=0, dirty=0),
+    )
+    assert not plan.refusal
+    assert plan.steps[-1] == ("branch", "-D", "preview/ui-editor-0817")
+
+
+def test_reaping_a_preview_that_grew_a_commit_leaves_git_to_refuse():
+    """A commit made inside a preview exists nowhere else; -D would be the one loss."""
+    plan = reap(
+        verdict=worktree.PREVIEW_VERDICT,
+        box=preview_box(),
+        state=state(branch="preview/ui-editor-0817", upstream="", ahead=1, dirty=0),
+    )
+    assert plan.steps[-1] == ("branch", "-d", "preview/ui-editor-0817")
+
+
+def test_preview_urls_name_the_ports_the_slot_publishes():
+    urls = dict((service, url) for service, _, url in worktree.preview_urls(registry(), slot=3))
+    assert urls["app"] == "http://localhost:8003"
+    assert urls["db"] == ""  # a browser cannot open Postgres
+    assert worktree.preview_urls(None, slot=3) == ()
+    assert worktree.preview_urls(registry(), slot=-1) == ()
