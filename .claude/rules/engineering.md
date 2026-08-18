@@ -89,7 +89,7 @@ Two things not to reach for when it fires:
 - **`is_capped` is not a style check to satisfy.** Bounded commands are already exempt
   — `pwd`, `git rev-parse`, `--version` probes, the silent-on-success family
   (`mkdir`, `rm`, `cp`, `sleep`), condition tests (`test`, `[`), `git log` given a
-  commit count, and shell control flow. If one of those is blocked, that is a defect in
+  commit count, a standalone variable assignment, and shell control flow. If one of those is blocked, that is a defect in
   the gate worth reporting, not a command to wrap. Report it rather than working around
   it: over half of every block this gate had issued turned out to be one of four cap
   spellings it simply did not recognise, and it stayed that way because being blocked

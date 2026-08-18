@@ -1478,3 +1478,55 @@ def test_get_value_dotted_and_missing():
     assert hook.get_value(obj, "tool_input.command") == "x"
     assert hook.get_value(obj, "missing.path", "tool_input.command") == "x"
     assert hook.get_value(obj, "nope") is None
+
+
+# Reported as "a capped group blocked because the paths were assigned in front of it".
+# `ENV_ASSIGNMENT_PREFIX_RE` already grants the prefix form -- `FOO=1 git commit -F m` --
+# on the grounds that an assignment prints nothing, but it requires a command behind the
+# `=`, so the standalone spelling fell through and was judged as a command by that name.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "R=/some/path",
+        'L="/a path/with spaces"',
+        "DIR='/single/quoted'",
+        "EMPTY=",
+        # A substitution feeds the variable, never the terminal -- the same reasoning
+        # that peels one away in the prefix and control-header forms.
+        "SHA=$(git rev-parse HEAD)",
+        "TREE=$(ls -R /)",
+    ],
+)
+def test_a_standalone_assignment_prints_nothing(command):
+    assert hook.is_bounded(command) is True
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+def test_assignments_in_front_of_a_capped_group_do_not_block_it():
+    """The exact call that reported this, reduced.
+
+    The group is bounded and the gate agrees it is; `statements()` splits on the `;`
+    first, so before the fix the two assignments were judged alone and took the whole
+    call down with them. Hoisting paths out of a group is the natural way to write one,
+    and the block read as a rule about where variables may be written.
+    """
+    command = 'R=/a; L=/b; { grep x "$R"; tail -c 400 "$L"; } | head -c 4000'
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+def test_an_assignment_does_not_launder_the_statement_after_it():
+    """Exemption is per statement, and an assignment covers only itself."""
+    assert hook.decide(payload("Bash", "R=/a; ls -R /"))[0] == hook.EXIT_BLOCK
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A command whose *name* contains `=` is not an assignment, and neither is a
+        # comparison: both have a word boundary the pattern refuses to cross.
+        "R=/a ls -R /",
+        "diff <(sort a) <(sort b)",
+    ],
+)
+def test_a_command_is_not_mistaken_for_an_assignment(command):
+    assert hook.is_bounded(command) is False
