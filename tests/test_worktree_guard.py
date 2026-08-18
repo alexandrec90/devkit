@@ -591,6 +591,31 @@ def test_an_edit_into_a_reference_checkout_is_allowed(root, monkeypatch, referen
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
 
 
+@pytest.mark.parametrize("reference", sorted(NOT_PROJECTS))
+def test_a_project_scoped_session_may_still_edit_a_reference_checkout(root, monkeypatch, reference):
+    """The exemption is a property of the *target*, not of where the session is rooted.
+
+    The case above runs from the workspace root, which is the multi-root session. The
+    commoner one is a session scoped to a single project -- an agent working in carameli
+    that is asked to change the reference checkout too -- and it reaches this hook with a
+    cwd inside a registered checkout, which is the shape that IS boxed when the target is
+    a project. Nothing may make that difference decide this: the reference checkout has
+    no PR to open and no branch to open it from, so a box for it is a dead end wherever
+    the edit was issued from. `main` resolves its registry from `--workspace`, never from
+    the cwd, which is what keeps the two shapes identical.
+    """
+    (root / reference).mkdir()
+    workspace = _workspace(root, extra=[reference])
+    monkeypatch.setattr(guard, "current_branch", on_branch("develop"))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            payload(path=str(root / reference / "AppCode" / "a.cs"), cwd=str(root / "carameli"))
+        ),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
 def test_an_in_checkout_edit_on_a_home_branch_is_blocked_and_says_why(root, monkeypatch, capsys):
     """The message must not tell a session sitting in carameli that it "is not inside
     carameli" -- that reads as a hook bug and invites working around it."""
