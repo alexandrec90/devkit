@@ -1062,6 +1062,31 @@ def test_a_clean_run_writes_an_empty_artifact():
     assert up.artifact_body("v0.7.0", False, []) == ""
 
 
+def test_a_clean_run_says_so_on_stdout(tmp_path, monkeypatch, capsys):
+    """The other half of "empty rather than absent", and the half that was missing: an
+    empty artifact and a silent run are the same evidence, so a successful pass left
+    nothing that distinguished it from one that died before writing anything. Asked
+    whether an upgrade had worked, the only honest reading of what it left was "cannot
+    tell". The line names the release, because that is the fact a reader wants."""
+    monkeypatch.setattr(up, "REPO_ROOT", tmp_path)
+    assert up._finish("v0.7.0", False, [up.Outcome("carameli", 0)]) == 0
+    out = capsys.readouterr().out
+    assert "v0.7.0" in out
+    assert up.ARTIFACT.as_posix() in out
+    assert (tmp_path / up.ARTIFACT).read_text(encoding="utf-8") == ""
+
+
+def test_a_failing_run_never_claims_to_be_clean(tmp_path, monkeypatch, capsys):
+    """The reversion check for the line above: it is keyed on the artifact being empty,
+    which is the same predicate that decides whether anything needs a human. A run with a
+    refusal in it gets the pointer on stderr and no reassurance on stdout."""
+    monkeypatch.setattr(up, "REPO_ROOT", tmp_path)
+    assert up._finish("v0.7.0", False, [up.Outcome("carameli", 2, "FAILED at `git commit`")]) == 2
+    captured = capsys.readouterr()
+    assert "clean" not in captured.out
+    assert up.ARTIFACT.as_posix() in captured.err
+
+
 def test_the_artifact_carries_each_failure_and_the_command_that_retries_it():
     body = up.artifact_body(
         "v0.7.0",
