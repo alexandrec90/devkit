@@ -1156,8 +1156,39 @@ def merge_pr(gh: sweep.Git, number: int) -> tuple[bool, str]:
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"gh pr merge failed to run: {exc}"
     if result.returncode != 0:
-        return False, (result.stderr or result.stdout or "").strip()
+        detail = (result.stderr or result.stdout or "").strip()
+        if pr_state(gh, number) == "MERGED":
+            # The merge landed and something *after* it failed -- almost always the
+            # local `--delete-branch` step, which cannot remove a ref another worktree
+            # has checked out. Believing the exit code here would report a failure for
+            # a merge that happened, skip the reap it licenses, and leave the box for
+            # the next pass a quarter of an hour later.
+            return True, (f"merged PR #{number} (squash); post-merge cleanup failed: {detail}")
+        return False, detail
     return True, f"merged PR #{number} (squash, remote branch deleted)"
+
+
+def pr_state(gh: sweep.Git, number: int) -> str:
+    """GitHub's state for PR `number` -- `""` when it cannot be read.
+
+    Deliberately not `pr_for`: this asks by number rather than by branch, and after a
+    `--delete-branch` the branch is exactly the thing that may no longer resolve. The
+    empty string is the "cannot tell" answer, so an offline or unauthenticated `gh`
+    leaves `merge_pr` believing its exit code, which is the pre-existing behaviour.
+    """
+    try:
+        result = gh("pr", "view", str(number), "--json", "state")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("state") or "")
 
 
 def read_leases(workspace_root: Path) -> dict[str, Box]:

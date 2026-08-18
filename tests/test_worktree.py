@@ -1516,6 +1516,74 @@ def test_pr_for_fails_closed_when_gh_is_missing_or_errors():
     assert not worktree.pr_for(lambda *a: _completed(0, pr_json()), "").exists
 
 
+# --- reconcile: merging ------------------------------------------------------
+
+# The observed failure: `gh pr merge --delete-branch` run from a box merges, then tries
+# to delete the local branch, and cannot check out the default branch to do it because
+# another worktree holds it. Exit 1 for a merge that happened.
+DELETE_BRANCH_FATAL = "fatal: 'main' is already used by worktree at '.../apt-finder'"
+
+
+def _gh_merge_stub(merge_code: int, view: object):
+    """A `gh` whose `pr merge` exits `merge_code` and whose `pr view` returns `view`.
+
+    `view` is the stdout for the state probe, or an exception instance to raise.
+    """
+
+    def gh(*args):
+        if args[:2] == ("pr", "merge"):
+            return _completed(merge_code, "", DELETE_BRANCH_FATAL)
+        if isinstance(view, Exception):
+            raise view
+        return _completed(0, view) if view is not None else _completed(1, "", "no pr")
+
+    return gh
+
+
+def test_merge_pr_believes_the_pr_state_over_a_post_merge_exit_code():
+    """The local branch delete failing must not report the merge as failed."""
+    ok, message = worktree.merge_pr(_gh_merge_stub(1, '{"state": "MERGED"}'), 42)
+
+    assert ok
+    assert "merged PR #42" in message
+    assert DELETE_BRANCH_FATAL in message
+
+
+def test_merge_pr_still_fails_when_the_pr_did_not_merge():
+    ok, message = worktree.merge_pr(_gh_merge_stub(1, '{"state": "OPEN"}'), 42)
+
+    assert not ok
+    assert message == DELETE_BRANCH_FATAL
+
+
+def test_merge_pr_fails_when_the_pr_state_cannot_be_read():
+    """Unreadable is not merged: an offline `gh` must not license a reap."""
+    for view in (None, "not json", "{}", OSError("gh not found")):
+        assert not worktree.merge_pr(_gh_merge_stub(1, view), 42)[0]
+
+
+def test_merge_pr_does_not_probe_when_the_merge_exits_clean():
+    def gh(*args):
+        assert args[:2] == ("pr", "merge"), "probed GitHub after a successful merge"
+        return _completed()
+
+    ok, message = worktree.merge_pr(gh, 42)
+
+    assert ok and "remote branch deleted" in message
+
+
+def test_pr_state_asks_by_number_not_by_branch():
+    """After `--delete-branch` the branch is the one ref that may not resolve."""
+    seen: list[tuple] = []
+
+    def gh(*args):
+        seen.append(args)
+        return _completed(0, '{"state": "MERGED"}')
+
+    assert worktree.pr_state(gh, 42) == "MERGED"
+    assert seen == [("pr", "view", "42", "--json", "state")]
+
+
 # --- reconcile: the merge gate ----------------------------------------------
 
 
