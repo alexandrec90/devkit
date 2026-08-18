@@ -347,6 +347,56 @@ def test_unbounded_commands_are_not_exempt(command):
     assert hook.decide(payload("Bash", command))[0] == hook.EXIT_BLOCK
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The spelling that reported this: reading one range out of a source file.
+        "sed -n '150,200p' scripts/devkit_project.py",
+        "sed -n 150,200p scripts/devkit_project.py",
+        'sed -n "150,200p" scripts/devkit_project.py',
+        # A single line, and the long spellings of `-n`.
+        "sed -n 5p pyproject.toml",
+        "sed --quiet '1,20p' README.md",
+        "sed --silent '1,20p' README.md",
+        # `-e` is where the address usually goes when there is more than one.
+        "sed -n -e '1,5p' README.md",
+        "sed -n '1,5p;20,25p' README.md",
+    ],
+)
+def test_a_numeric_sed_range_is_bounded(command):
+    """A line range bounds output exactly as `head -N` does, and blocked for years.
+
+    Reported by this gate blocking `sed -n '150,200p' scripts/devkit_project.py` while
+    an agent read one function out of a file. The remedy the block offered was worse
+    than the command: the wrapper runs it through cmd.exe, where the single-quoted
+    address does not survive.
+    """
+    assert hook.is_bounded(command) is True
+    assert hook.decide(payload("Bash", command)) == (0, "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # `$` is the end of the file, so the range scales with it.
+        "sed -n '10,$p' big.log",
+        # A pattern address is bounded by content, which is not a constant.
+        "sed -n '/start/,/end/p' big.log",
+        # No `-n`: every line is echoed as well as printed.
+        "sed '1,5p' big.log",
+        "sed 's/a/b/' big.log",
+        # A `p` with no address at all prints the whole file twice.
+        "sed -n p big.log",
+        # Not a range spelling this gate knows; `sedative` must not match either.
+        "sed -n '1,5d' big.log",
+        "sedate --all",
+    ],
+)
+def test_a_sed_that_is_not_a_numeric_range_still_needs_a_cap(command):
+    assert hook.is_bounded(command) is False
+    assert hook.decide(payload("Bash", command))[0] == hook.EXIT_BLOCK
+
+
 def test_command_substitution_voids_a_bounded_claim():
     """`echo $(find / -name x)` prints whatever the substitution found."""
     assert hook.is_bounded("echo $(find / -name x)") is False
