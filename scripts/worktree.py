@@ -74,7 +74,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -432,6 +432,20 @@ def project_of(name: str) -> str:
     return name.split(NAME_SEP, 1)[0] if NAME_SEP in name else ""
 
 
+def kind_of_branch(branch: str) -> str:
+    """The kind a lease with no `kind` field must be, read off its branch name.
+
+    Not a convenience: the field is only as reliable as the *oldest* copy of this file
+    that writes the lease. `render_leases` emits every field of `Box`, but a worktree.py
+    that predates `kind` parses the file into a Box that has none and writes it straight
+    back — so one `worktree-guard` spawn or one scheduled `reconcile` from an unupdated
+    checkout silently strips `kind` from every box in the file, and a preview reverts to
+    being classified as a task box holding unshipped work. The `preview/` prefix cannot
+    be stripped that way: it is in the branch name, which every version already keeps.
+    """
+    return PREVIEW_KIND if branch.startswith(PREVIEW_BRANCH_PREFIX) else TASK_KIND
+
+
 def parse_leases(text: str) -> dict[str, Box]:
     """Boxes from the lease file's contents. Unreadable content is no boxes, not a crash.
 
@@ -451,14 +465,15 @@ def parse_leases(text: str) -> dict[str, Box]:
     for name, raw in entries.items():
         if not isinstance(raw, dict):
             continue
+        branch = str(raw.get("branch", ""))
         boxes[name] = Box(
             name=name,
             project=str(raw.get("project", project_of(name))),
-            branch=str(raw.get("branch", "")),
+            branch=branch,
             slot=raw.get("slot", -1) if isinstance(raw.get("slot"), int) else -1,
             session=str(raw.get("session", "")),
             created=str(raw.get("created", "")),
-            kind=str(raw.get("kind", "")) or TASK_KIND,
+            kind=str(raw.get("kind", "")) or kind_of_branch(branch),
             tracks=str(raw.get("tracks", "")),
         )
     return boxes
@@ -799,6 +814,19 @@ def preview_urls(
         (service, port, f"http://localhost:{port}" if service in HTTP_SERVICES else "")
         for service, port in sorted(registry.ports_for_slot(slot).items())
     )
+
+
+def primary_url(urls: Iterable[tuple[str, int, str]]) -> str:
+    """The one URL worth printing on a single line: the UI if there is one.
+
+    `preview_urls` is sorted by service name, which puts `app` first and Vite seventh —
+    so a one-line summary that took the first entry would answer "where is the change I
+    am reviewing" with the API root, on the mode whose whole purpose is looking at a
+    frontend.
+    """
+    ranked = {service: rank for rank, service in enumerate(("frontend", "app"))}
+    candidates = [(ranked.get(service, len(ranked)), url) for service, _, url in urls if url]
+    return min(candidates)[1] if candidates else ""
 
 
 def preview_spawn_plan(
@@ -2588,8 +2616,8 @@ def render_survey(rows: list[dict]) -> str:
         lines.append("")
         lines.append(f"{len(previews)} preview(s) — someone else's branch, held for review:")
         for row in previews:
-            urls = [url for _, _, url in row.get("urls", ()) if url]
-            where = f" -> {urls[0]}" if urls else ""
+            best = primary_url(row.get("urls", ()))
+            where = f" -> {best}" if best else ""
             lines.append(f"  {row['box']} shows {row.get('tracks') or row['branch']}{where}")
     held = [row for row in rows if not row["reapable"]]
     if held:

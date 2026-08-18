@@ -2203,6 +2203,33 @@ def test_a_lease_written_before_previews_existed_is_a_task_box():
     assert parsed.tracks == ""
 
 
+def test_a_lease_stripped_of_its_kind_is_still_read_as_a_preview():
+    """Observed live, minutes after the first preview box existed.
+
+    `render_leases` writes every field of `Box`, but the file is written by whichever
+    copy of worktree.py gets there first — a `worktree-guard` spawn or the scheduled
+    `reconcile`, both of which run from the static checkout. One of those, predating
+    `kind`, parses the file into Boxes that have none and writes them back, stripping the
+    field from every box at once. The preview then classifies as `needs-branch`, holds
+    its slot forever, and reads as a box full of unshipped work.
+    """
+    stripped = json.dumps(
+        {
+            "boxes": {
+                "carameli--preview-ui-editor-0817": {
+                    "project": "carameli",
+                    "branch": "preview/ui-editor-0817",
+                    "slot": 5,
+                }
+            }
+        }
+    )
+    parsed = worktree.parse_leases(stripped)["carameli--preview-ui-editor-0817"]
+    assert parsed.kind == worktree.PREVIEW_KIND
+    assert worktree.kind_of_branch("agent/ui-editor-0817") == worktree.TASK_KIND
+    assert worktree.kind_of_branch("") == worktree.TASK_KIND
+
+
 def test_a_clean_preview_is_reapable_and_an_edited_one_is_not():
     assert worktree.reapable(worktree.PREVIEW_VERDICT, holds_uncommitted=False)
     assert not worktree.reapable(worktree.PREVIEW_VERDICT, holds_uncommitted=True)
@@ -2284,6 +2311,23 @@ def test_reaping_a_preview_that_grew_a_commit_leaves_git_to_refuse():
         state=state(branch="preview/ui-editor-0817", upstream="", ahead=1, dirty=0),
     )
     assert plan.steps[-1] == ("branch", "-d", "preview/ui-editor-0817")
+
+
+def test_the_one_line_summary_points_at_the_ui_not_the_api():
+    """`preview_urls` sorts by service name, so `app` comes first and Vite comes seventh."""
+    with_ui = devkit_ports.from_dict(
+        {
+            "registry": {"max_slots": 8},
+            "services": {"app": 8000, "db": 5432, "frontend": 5173},
+            "slots": {},
+        }
+    )
+    urls = worktree.preview_urls(with_ui, slot=3)
+    assert next(service for service, _, _ in urls) == "app"  # sorted by name
+    assert worktree.primary_url(urls) == "http://localhost:5176"
+    assert worktree.primary_url([("app", 8003, "http://localhost:8003")]) == "http://localhost:8003"
+    assert worktree.primary_url([("db", 5435, "")]) == ""
+    assert worktree.primary_url(()) == ""
 
 
 def test_preview_urls_name_the_ports_the_slot_publishes():
