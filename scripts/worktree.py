@@ -428,6 +428,30 @@ def next_lease_slot(registry: devkit_ports.Registry, boxes: Mapping[str, Box]) -
     )
 
 
+# The shortest abbreviation of a session id a lease is trusted to name. Eight hex
+# characters is the spelling agents actually cut by hand (`--session <first 8 of the
+# id>`, read off a scratchpad path); anything shorter is too little entropy to say
+# "this box is that session's".
+SESSION_PREFIX_MIN = 8
+
+
+def sessions_match(recorded: str, session: str) -> bool:
+    """Does the lease's session id name this session?
+
+    Exact match, or either id is a prefix of the other with the shorter side at
+    least `SESSION_PREFIX_MIN` characters. The prefix case exists because a box cut
+    by hand gets `--session <first 8 hex>` — an agent abbreviating its own id — and
+    the abbreviation must keep naming the session it abbreviates in both directions,
+    or the guard cuts that session a second box and blocks it out of its first one.
+    """
+    if not recorded or not session:
+        return False
+    if recorded == session:
+        return True
+    short, long = sorted((recorded, session), key=len)
+    return len(short) >= SESSION_PREFIX_MIN and long.startswith(short)
+
+
 def find_session_box(boxes: Mapping[str, Box], project: str, session: str) -> Box | None:
     """The box this session already has for `project`, if any.
 
@@ -437,9 +461,36 @@ def find_session_box(boxes: Mapping[str, Box], project: str, session: str) -> Bo
     if not session:
         return None
     for box in boxes.values():
-        if box.project == project and box.session == session:
+        if box.project == project and sessions_match(box.session, session):
             return box
     return None
+
+
+def claim_box(workspace: Path, name: str, session: str, apply: bool = True) -> Box:
+    """Re-lease a live box to `session` — the sanctioned takeover.
+
+    The guard blocks an edit into a box leased to a different session and names this
+    as the way through when the user really has handed the work over. It is a lease
+    rewrite only: nothing in the worktree moves, so the new session inherits the old
+    one's uncommitted state as-is.
+    """
+    if not session:
+        raise WorktreeError(
+            "claim needs a session id; an empty one would leave the box unowned "
+            "and turn the ownership gate off for it"
+        )
+    root = workspace.parent
+    with lease_lock(root):
+        boxes = live_boxes(root)
+        box = boxes.get(name)
+        if box is None:
+            known = ", ".join(sorted(boxes)) or "(none)"
+            raise WorktreeError(f"no live box called {name!r}; live boxes: {known}")
+        claimed = replace(box, session=session)
+        if apply:
+            boxes[name] = claimed
+            write_leases(root, boxes)
+    return claimed
 
 
 def managed_env(box: str, registry: devkit_ports.Registry | None, slot: int) -> dict[str, str]:
@@ -2481,6 +2532,15 @@ def main(argv: list[str] | None = None) -> int:
     provision.add_argument("box")
     add_common_args(provision)
 
+    takeover = sub.add_parser(
+        "claim", help="re-lease a box to another session (a sanctioned takeover)"
+    )
+    takeover.add_argument("box")
+    takeover.add_argument(
+        "--session", required=True, help="the full session id taking the box over"
+    )
+    add_common_args(takeover)
+
     reap = sub.add_parser("reap", help="destroy a box once its work has shipped")
     # Optional so `--all` can stand alone, and checked below rather than through
     # `nargs="?"` alone: argparse cannot express "exactly one of a positional and a flag",
@@ -2563,6 +2623,17 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(render_spawn(plan, applied=not args.dry_run, notes=notes))
             return 0 if ok else 2
+
+        if args.mode == "claim":
+            claimed = claim_box(args.workspace, args.box, args.session, apply=not args.dry_run)
+            if args.json:
+                print(json.dumps({"box": asdict(claimed), "applied": not args.dry_run}, indent=2))
+            else:
+                verb = "would be leased" if args.dry_run else "now leased"
+                print(f"{claimed.name} {verb} to session {claimed.session}")
+                if args.dry_run:
+                    print("\nDry run -- nothing was changed. Re-run with --yes to apply.")
+            return 0
 
         if args.mode == "provision":
             root = args.workspace.parent

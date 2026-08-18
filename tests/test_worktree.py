@@ -147,6 +147,68 @@ def test_find_session_box_without_a_session_id_finds_nothing():
     assert worktree.find_session_box(boxes, "carameli", "") is None
 
 
+def test_sessions_match_exactly_and_by_long_prefix():
+    """`worktree.py new --session <first 8 hex>` is how an agent tags a hand-cut box --
+    it reads its own id off a scratchpad path and abbreviates. The abbreviation must
+    keep naming the session it abbreviates, in both directions, or the guard cuts the
+    session a second box and blocks it out of its own first one."""
+    assert worktree.sessions_match("da11d826", "da11d826-371d-41ec-b5ee-77aabc7d119f")
+    assert worktree.sessions_match("da11d826-371d-41ec-b5ee-77aabc7d119f", "da11d826")
+    assert worktree.sessions_match("s1", "s1")
+    # Seven characters is below the trust floor: too short to be one session's name.
+    assert not worktree.sessions_match("da11d82", "da11d826-371d-41ec-b5ee-77aabc7d119f")
+    assert not worktree.sessions_match("", "da11d826")
+    assert not worktree.sessions_match("da11d826", "")
+    assert not worktree.sessions_match("da11d826", "ffee0011-371d-41ec-b5ee-77aabc7d119f")
+
+
+def test_find_session_box_matches_a_lease_recorded_with_an_abbreviated_id():
+    boxes = {"carameli--x-0806": box("carameli--x-0806", session="da11d826")}
+    found = worktree.find_session_box(boxes, "carameli", "da11d826-371d-41ec-b5ee-77aabc7d119f")
+    assert found is not None and found.name == "carameli--x-0806"
+
+
+# --- claiming a box ---------------------------------------------------------
+
+
+def _claim_root(tmp_path, session="old-session"):
+    ws = tmp_path / "alex-projects.code-workspace"
+    ws.write_text("{}", encoding="utf-8")
+    (tmp_path / ".worktrees" / "carameli--x-0806").mkdir(parents=True)
+    worktree.write_leases(tmp_path, {"carameli--x-0806": box("carameli--x-0806", session=session)})
+    return ws
+
+
+def test_claim_re_leases_the_box_to_the_new_session(tmp_path):
+    """The sanctioned takeover: the guard blocks a cross-session box edit and names this
+    command as the way through when the user really did hand the work over."""
+    ws = _claim_root(tmp_path)
+    claimed = worktree.claim_box(ws, "carameli--x-0806", "new-session")
+    assert claimed.session == "new-session"
+    assert worktree.read_leases(tmp_path)["carameli--x-0806"].session == "new-session"
+
+
+def test_claim_dry_run_changes_nothing(tmp_path):
+    ws = _claim_root(tmp_path)
+    claimed = worktree.claim_box(ws, "carameli--x-0806", "new-session", apply=False)
+    assert claimed.session == "new-session"
+    assert worktree.read_leases(tmp_path)["carameli--x-0806"].session == "old-session"
+
+
+def test_claim_refuses_a_box_that_is_not_live(tmp_path):
+    ws = _claim_root(tmp_path)
+    with pytest.raises(worktree.WorktreeError, match="no live box"):
+        worktree.claim_box(ws, "carameli--gone-0806", "new-session")
+
+
+def test_claim_refuses_an_empty_session(tmp_path):
+    """An empty tag would make the box unowned, which is adoption's meaning -- silently
+    turning the ownership gate off is not what a takeover command may do."""
+    ws = _claim_root(tmp_path)
+    with pytest.raises(worktree.WorktreeError, match="session"):
+        worktree.claim_box(ws, "carameli--x-0806", "")
+
+
 # --- env seeding ------------------------------------------------------------
 
 

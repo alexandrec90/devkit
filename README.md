@@ -295,6 +295,7 @@ when the work leaves it:
 python scripts/worktree.py new carameli --slug voicemail --yes  # cut, lease, install
 python scripts/worktree.py list                                 # what exists, and its verdict
 python scripts/worktree.py reap --all --yes                     # everything already shipped
+python scripts/worktree.py claim <box> --session <id> --yes     # hand a box to another session
 ```
 
 `new` branches off `origin/<default>`, leases a port slot from `ports.toml` (released on
@@ -310,7 +311,10 @@ workspace file — registering one would hand `sweep.py` a second owner for its 
 `scripts/worktree-guard.py`, wired as a PreToolUse hook at the workspace root, is what
 puts work in one automatically: an agent editing a checkout its session is not inside
 gets a box spawned and the path handed back, instead of a commit on that repo's home
-branch.
+branch. The same hook holds the boundary between boxes: each one is leased to the
+session it was cut for, an edit aimed into another session's box is blocked toward the
+editor's own, and `claim` is the deliberate handover for when the user moves a task
+between sessions.
 
 ### The scheduled pass
 
