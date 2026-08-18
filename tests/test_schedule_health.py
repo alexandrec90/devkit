@@ -9,6 +9,7 @@ that cries wolf is one that gets removed, and then the silence is back.
 from __future__ import annotations
 
 import datetime as dt
+import os
 
 import pytest
 from support import load_script
@@ -66,16 +67,26 @@ def test_a_failed_run_is_reported_with_its_exit_code():
     assert "failed (exit 1)" in line
 
 
-def written(tmp_path, name):
+def written(tmp_path, name, body="=== something (exit 2) ===\nit broke\n", age=None):
     """Give `name`'s artifact a file, and point the module at that tree.
 
     Every pointer assertion below goes through here rather than through the real
     checkout: `logs/` is untracked, so in a fresh clone or an ephemeral box the same
     test would assert against whichever files happened to be on disk.
+
+    **The default body is non-empty on purpose.** It used to be `""`, which made every
+    pointer assertion here pass against the one file shape that cannot be read -- a
+    zero-byte artifact -- and that is the shape the pointer was later found sending
+    people to. `body=""` is now a case with its own tests rather than the fixture's
+    default, and `age` back-dates the mtime so "was this rewritten after the run that
+    failed" is something a test can set rather than something it inherits from the clock.
     """
     path = tmp_path / health.ARTIFACTS[name]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("", encoding="utf-8")
+    path.write_text(body, encoding="utf-8")
+    if age is not None:
+        stamp = age.timestamp()
+        os.utime(path, (stamp, stamp))
     return path
 
 
@@ -102,6 +113,42 @@ def test_a_failure_whose_artifact_is_missing_says_that_instead(tmp_path, monkeyp
     line = health.problems([job(name=name, last_result=1)], NOW)[0]
     assert f"no {health.ARTIFACTS[name]}" in line
     assert "see" not in line
+
+
+def test_an_artifact_emptied_after_the_failed_run_is_reported_as_history(tmp_path, monkeypatch):
+    """Lived, and the reason `since` exists. `devkit-upgrade-projects` last *scheduled*
+    fire failed at 08:51; a hand-run pass at 19:36 upgraded everything and, per
+    `upgrade-project.artifact_body`, emptied the artifact because nothing needed a human.
+    A hand run does not update the scheduler's `Last Result`, so session start went on
+    reporting the morning's exit 2 and pointing at a zero-byte file -- no error in it,
+    and no success either, which is exactly how it was read. The mtime settles it."""
+    name = "devkit-upgrade-projects"
+    written(tmp_path, name, body="", age=NOW - dt.timedelta(hours=1))
+    monkeypatch.setattr(health, "REPO_ROOT", tmp_path)
+    line = health.problems(
+        [job(name=name, last_result=2, last_run=NOW - dt.timedelta(hours=9))], NOW
+    )[0]
+    assert "empty" in line
+    assert "history" in line
+    assert f"see {health.ARTIFACTS[name]}" not in line
+
+
+def test_an_empty_artifact_no_newer_than_the_run_says_the_run_recorded_nothing(
+    tmp_path, monkeypatch
+):
+    """The other reading of zero bytes, and the one that is still a dead end: the failing
+    run is the last thing that touched the file, so it wrote nothing and there is no
+    later pass to credit. Distinguished by mtime alone, which is why `see` cannot be the
+    answer to either."""
+    name = "devkit-upgrade-projects"
+    written(tmp_path, name, body="", age=NOW - dt.timedelta(hours=10))
+    monkeypatch.setattr(health, "REPO_ROOT", tmp_path)
+    line = health.problems(
+        [job(name=name, last_result=2, last_run=NOW - dt.timedelta(hours=9))], NOW
+    )[0]
+    assert "empty" in line
+    assert "recorded nothing" in line
+    assert "history" not in line
 
 
 def test_a_job_with_no_artifact_is_not_sent_to_an_invented_one():

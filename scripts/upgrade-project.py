@@ -756,11 +756,24 @@ def _finish(tag: str, dry_run: bool, outcomes: list[Outcome]) -> int:
     exit that cannot -- argparse's own, raised from inside `parse_args` before `main`
     has anything to finish -- writes the same artifact through
     `_ReportingParser.error` instead.
+
+    **A clean run says so, out loud.** The artifact is empty by design when nothing needs
+    a human, and for a while that was the *entire* output of a successful pass: no
+    failure line, no summary, a zero-byte log. Asked whether an upgrade had worked, the
+    only honest answer from what it left behind was "cannot tell" -- which is the same
+    evidence a run that died before writing anything leaves. One line naming the release
+    closes that, and it has to come from here: by the time anyone reads the artifact the
+    run is over, so `schedule_health.artifact_hint` can only report the silence.
     """
     body = artifact_body(tag, dry_run, outcomes)
     path = write_artifact(REPO_ROOT, body)
     if body and path is not None:
         print(f"upgrade: details in {ARTIFACT.as_posix()}", file=sys.stderr)
+    elif not body:
+        print(
+            f"upgrade: clean -- every selected checkout is on devkit {tag}; "
+            f"nothing needs a human, so {ARTIFACT.as_posix()} is empty."
+        )
     return max((outcome.code for outcome in outcomes), default=0)
 
 

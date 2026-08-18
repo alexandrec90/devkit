@@ -108,6 +108,7 @@ def artifact_hint(
     name: str,
     artifacts: dict[str, str] | None = None,
     root: Path | None = None,
+    since: _dt.datetime | None = None,
 ) -> str:
     """`" -- see logs/x.log"` for a job that kept one, and the truth when it did not.
 
@@ -128,14 +129,41 @@ def artifact_hint(
     the failing run predates the artifact, or the job died before writing it. Both point
     at the same next move -- compare the registered command against its installer, which
     `install-<job>.py --status` prints and `--yes` makes true again idempotently.
+
+    **An artifact that is present but empty is the third spelling of that dead end**, and
+    the one this reported as `see logs/upgrade.log` for months. `upgrade-project.py` --
+    and every other job whose artifact is a *failure* artifact -- writes an empty file on
+    a clean run deliberately, so a fixed failure cannot go on sending readers after
+    itself. That makes a zero-byte artifact the strongest evidence available that the
+    scheduler's verdict is history: `devkit-upgrade-projects` was found reporting exit 2
+    from 08:51 beside an artifact a clean 19:36 run had emptied, and reading the file
+    answered neither question -- no error, and no success either, which is exactly how it
+    was reported.
+
+    So `since` (the failed run's own timestamp) turns the mtime into the answer. Newer
+    means a later run finished clean and the scheduler is simply repeating its last
+    *scheduled* result, which a hand-run pass never updates. Not newer -- or unknown --
+    means the run itself recorded nothing, and the job's own console output is the only
+    remaining place to look.
     """
     path = (ARTIFACTS if artifacts is None else artifacts).get(name, "")
     if not path:
         return ""
     base = REPO_ROOT if root is None else root
-    if (base / path).is_file():
+    target = base / path
+    try:
+        size = target.stat().st_size
+        written = _dt.datetime.fromtimestamp(target.stat().st_mtime)
+    except OSError:
+        return f" -- no {path}: the run predates it, or died before writing one"
+    if size:
         return f" -- see {path}"
-    return f" -- no {path}: the run predates it, or died before writing one"
+    if since is not None and written > since:
+        return (
+            f" -- {path} is empty and was rewritten {written:%Y-%m-%d %H:%M}, after this "
+            f"run: a later pass finished clean and the scheduler is reporting history"
+        )
+    return f" -- {path} is empty: this run recorded nothing, so it left no diagnosis"
 
 
 @dataclass(frozen=True)
@@ -233,7 +261,8 @@ def problems(jobs: list[Job], now: _dt.datetime | None = None) -> list[str]:
         if job.last_result not in NOT_A_FAILURE:
             found.append(
                 f"{job.name}: last run failed (exit {job.last_result}) at "
-                f"{job.last_run:%Y-%m-%d %H:%M}{artifact_hint(job.name)}"
+                f"{job.last_run:%Y-%m-%d %H:%M}"
+                f"{artifact_hint(job.name, since=job.last_run)}"
             )
             continue
         interval = job.interval
