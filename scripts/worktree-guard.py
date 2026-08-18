@@ -49,8 +49,14 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # For annotations only. At runtime the module is bound by `load_by_path` below;
+    # mypy cannot see through that, but it can resolve `scripts/worktree.py` by name.
+    from worktree import Box
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
@@ -284,7 +290,9 @@ def redirect_decision(
     None — allow, silently — for every case someone else already owns:
 
     - a path under `.worktrees/`: the edit is already in a box, which is the whole
-      point of having sent it there;
+      point of having sent it there. Whether it is in the *right* box is not this
+      function's question — `main` asks `foreign_box` before calling here, so by the
+      time this allow fires the ownership check has already passed;
     - a checkout on a managed task branch **that carries commits of its own** —
       see `needs_box`. **Whether or not the session is inside it**: the reason to
       decline is that something deliberately put that branch there and a box would
@@ -418,6 +426,7 @@ def deny_message(
     spawned: bool = True,
     inside: bool = False,
     branch: str = "",
+    reason: str = "",
 ) -> str:
     """What the agent reads. The path first, because that is the actionable part.
 
@@ -443,10 +452,14 @@ def deny_message(
       `python scripts/ship.py`, so run from here it would preflight *this* checkout and
       report that the box's branch is not the current one. "ship from inside the box"
       was accurate and, from a session that cannot cd, not actionable.
+
+    `reason`, when non-empty, replaces the `block_reason` opening entirely: the
+    foreign-box case is not a branch judgement, so every sentence `block_reason` can
+    produce would misdescribe it, which is this docstring's own first lesson.
     """
     devkit_worktree = Path(__file__).parent / "worktree.py"
     lines = [
-        block_reason(project, relative, branch, inside),
+        reason or block_reason(project, relative, branch, inside),
         "",
         (
             "A box has been spawned for it. Re-issue the edit against:"
@@ -483,7 +496,12 @@ def deny_message(
 
 
 def failure_message(
-    project: str, relative: str, error: str, inside: bool = False, branch: str = ""
+    project: str,
+    relative: str,
+    error: str,
+    inside: bool = False,
+    branch: str = "",
+    reason: str = "",
 ) -> str:
     """When spawning failed. Still a block, because allowing the edit is the bad outcome.
 
@@ -498,7 +516,7 @@ def failure_message(
     """
     return "\n".join(
         [
-            block_reason(project, relative, branch, inside),
+            reason or block_reason(project, relative, branch, inside),
             "",
             f"Spawning a box for it failed: {error}",
             "",
@@ -506,6 +524,164 @@ def failure_message(
             f"    python {Path(__file__).parent / 'worktree.py'} new {project} --slug <topic> --yes",
         ]
     )
+
+
+def resolve_target(target: str, cwd: str) -> Path | None:
+    """The edit's absolute target, or None when it cannot be resolved.
+
+    Same resolution `redirect_decision` performs; split out so `main` can ask "is this
+    under the box tier" before that function's checkout logic, which returns None for
+    every box path and so cannot carry the ownership question.
+    """
+    if not target:
+        return None
+    try:
+        base = Path(cwd) if cwd else Path.cwd()
+        return (
+            (base / target).resolve() if not Path(target).is_absolute() else Path(target).resolve()
+        )
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def foreign_box(
+    resolved: Path, root: Path, boxes: Mapping[str, Box], session: str
+) -> tuple[Box, str] | None:
+    """`(box, path relative to it)` when this edit targets a box leased to someone else.
+
+    None — allow — for everything under `.worktrees/` that is not that:
+
+    - the session's own box, including one whose lease records a hand-abbreviated
+      session id (`sessions_match`);
+    - an **unowned** box (empty lease session): an adopted orphan's lease cannot name
+      an owner, so there is nobody to defend and blocking would dead-end every box
+      that survived a lost lease file;
+    - a payload with no session id: with no name to compare, a block would lock every
+      box against a harness that simply did not send one;
+    - a path in no live box at all — `leases.json`, the `slugs/` directory, a stray
+      folder.
+
+    This check exists because the allow at the top of `redirect_decision` used to be
+    unconditional, and a second session that found a live box through `worktree.py
+    list` could adopt it wholesale: two sessions' edits interleaved in one worktree
+    until one of them watched files change under it mid-turn.
+    """
+    if not session:
+        return None
+    for box in boxes.values():
+        home = worktree.box_path(root, box.name).resolve()
+        if not _within(resolved, home):
+            continue
+        if not box.session or worktree.sessions_match(box.session, session):
+            return None
+        try:
+            relative = str(resolved.relative_to(home))
+        except ValueError:
+            relative = resolved.name
+        return box, relative
+    return None
+
+
+def foreign_box_reason(box: Box, relative: str) -> str:
+    """The opening line for a foreign-box block: an ownership fact, not a branch one."""
+    return (
+        f"Blocked: {box.name} is a box leased to a different session, so an edit to "
+        f"{relative} there would interleave two sessions' work in one worktree - the "
+        f"collision the box tier exists to prevent."
+    )
+
+
+def claim_hint(box: Box, session: str) -> str:
+    """The sanctioned takeover, spelled as the command that performs it."""
+    return (
+        f"if the user really has handed that box's work to this session, take its lease "
+        f"over instead: python {Path(__file__).parent / 'worktree.py'} claim {box.name} "
+        f"--session {session} --yes"
+    )
+
+
+def route_to_own_box(
+    project: str,
+    relative: str,
+    workspace: Path,
+    root: Path,
+    session: str,
+    boxes: Mapping[str, Box],
+    inside: bool = False,
+    branch: str = "",
+    reason: str = "",
+    extra_notes: tuple[str, ...] = (),
+) -> int:
+    """Block toward the session's box for `project`, reusing or spawning it.
+
+    The one blocking flow both entry points share: an edit that would land on a
+    checkout's home branch, and an edit aimed into another session's box. Always
+    returns `EXIT_BLOCK`; the message is the variable part.
+    """
+    existing = worktree.find_session_box(boxes, project, session)
+    if existing is not None:
+        print(
+            deny_message(
+                project,
+                relative,
+                str(worktree.box_path(root, existing.name)),
+                existing.name,
+                list(extra_notes),
+                spawned=False,
+                inside=inside,
+                branch=branch,
+                reason=reason,
+            ),
+            file=sys.stderr,
+        )
+        return EXIT_BLOCK
+
+    try:
+        slug = session_slug(session, task_slug.read(root, session))
+        plan = worktree.plan_new(project, workspace, slug=slug, session=session, fetch=True)
+        ok, notes = worktree.apply_new(plan, workspace, timeout=SPAWN_TIMEOUT, provision=False)
+    except Exception as exc:
+        print(
+            failure_message(
+                project,
+                relative,
+                f"{type(exc).__name__}: {exc}",
+                inside=inside,
+                branch=branch,
+                reason=reason,
+            ),
+            file=sys.stderr,
+        )
+        return EXIT_BLOCK
+
+    if not ok:
+        print(
+            failure_message(
+                project,
+                relative,
+                "; ".join(notes) or "no detail",
+                inside=inside,
+                branch=branch,
+                reason=reason,
+            ),
+            file=sys.stderr,
+        )
+        return EXIT_BLOCK
+
+    print(
+        deny_message(
+            project,
+            relative,
+            plan.path,
+            plan.box.name,
+            [*notes, *extra_notes],
+            inside=inside,
+            branch=branch,
+            reason=reason,
+        ),
+        file=sys.stderr,
+    )
+    return EXIT_BLOCK
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -531,6 +707,30 @@ def main(argv: list[str] | None = None) -> int:
 
     cwd = str(payload.get("cwd") or "")
     root = workspace.parent
+    session = str(payload.get("session_id") or payload.get("sessionId") or "")
+
+    # The box tier first: `redirect_decision` allows everything under `.worktrees/`,
+    # so the ownership question has to be asked before it swallows the path. The
+    # lease read happens only for edits actually aimed at the box tier — the common
+    # checkout edit never pays it here.
+    target = resolve_target(edited_path(payload), cwd)
+    if target is not None and _within(target, worktree.boxes_root(root).resolve()):
+        boxes = worktree.live_boxes(root)
+        conflict = foreign_box(target, root, boxes, session)
+        if conflict is None:
+            return EXIT_ALLOW
+        box, relative = conflict
+        return route_to_own_box(
+            box.project,
+            relative,
+            workspace,
+            root,
+            session,
+            boxes,
+            reason=foreign_box_reason(box, relative),
+            extra_notes=(claim_hint(box, session),),
+        )
+
     # The branch is what the decision turns on, so it is also what the block message has
     # to name -- and reading it a second time would be a second subprocess per blocked
     # edit and, worse, could report a different branch than the one that was judged.
@@ -546,55 +746,18 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ALLOW
     project, relative = decision
     branch = observed[-1] if observed else ""
-    session = str(payload.get("session_id") or payload.get("sessionId") or "")
     inside = _within(Path(cwd or "."), (root / project).resolve())
 
-    existing = worktree.find_session_box(worktree.live_boxes(root), project, session)
-    if existing is not None:
-        print(
-            deny_message(
-                project,
-                relative,
-                str(worktree.box_path(root, existing.name)),
-                existing.name,
-                [],
-                spawned=False,
-                inside=inside,
-                branch=branch,
-            ),
-            file=sys.stderr,
-        )
-        return EXIT_BLOCK
-
-    try:
-        slug = session_slug(session, task_slug.read(root, session))
-        plan = worktree.plan_new(project, workspace, slug=slug, session=session, fetch=True)
-        ok, notes = worktree.apply_new(plan, workspace, timeout=SPAWN_TIMEOUT, provision=False)
-    except Exception as exc:
-        print(
-            failure_message(
-                project, relative, f"{type(exc).__name__}: {exc}", inside=inside, branch=branch
-            ),
-            file=sys.stderr,
-        )
-        return EXIT_BLOCK
-
-    if not ok:
-        print(
-            failure_message(
-                project, relative, "; ".join(notes) or "no detail", inside=inside, branch=branch
-            ),
-            file=sys.stderr,
-        )
-        return EXIT_BLOCK
-
-    print(
-        deny_message(
-            project, relative, plan.path, plan.box.name, notes, inside=inside, branch=branch
-        ),
-        file=sys.stderr,
+    return route_to_own_box(
+        project,
+        relative,
+        workspace,
+        root,
+        session,
+        worktree.live_boxes(root),
+        inside=inside,
+        branch=branch,
     )
-    return EXIT_BLOCK
 
 
 if __name__ == "__main__":

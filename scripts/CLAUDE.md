@@ -158,12 +158,25 @@ Each of these has already been violated by something:
   `test_an_edit_into_a_reference_checkout_is_allowed` is the ratchet, and it is a
   `main()` test on purpose: `redirect_decision` takes the project list as an argument,
   so only the shell can be wrong about it.
-- **Among paths it does own, exactly two cases**: the edit is already inside a box, or
-  the checkout is on a managed task branch **that carries commits of its own** — the
-  "fix PR #42" case, where something deliberately checked that branch out and a fresh
-  box would put the fix somewhere the PR never sees. Anything else that would land on a
-  home branch gets a box, because landing there with no task branch under it is the
-  agent manufacturing the exact `needs-branch` backlog the sweep exists to clear.
+- **Among paths it does own, exactly two cases**: the edit is already inside a box
+  **this session holds the lease on**, or the checkout is on a managed task branch
+  **that carries commits of its own** — the "fix PR #42" case, where something
+  deliberately checked that branch out and a fresh box would put the fix somewhere the
+  PR never sees. Anything else that would land on a home branch gets a box, because
+  landing there with no task branch under it is the agent manufacturing the exact
+  `needs-branch` backlog the sweep exists to clear.
+- **A box is owned space, not shared space.** The allow for `.worktrees/` paths used to
+  be unconditional, and a second session that saw a topically-matching live box in
+  `worktree.py list` adopted it wholesale — two sessions' edits interleaved in one
+  worktree until one watched files change under it mid-turn. `foreign_box` now blocks an
+  edit into a box leased to a different session and routes it to the session's own box,
+  with `worktree.py claim <box> --session <id> --yes` named in the message as the
+  sanctioned takeover when the user really has handed the work over. The comparison is
+  `sessions_match`, which accepts a hand-abbreviated lease id (≥8 characters, prefix in
+  either direction) so a `worktree.py new --session <first 8 hex>` box keeps admitting
+  the session that cut it. An **unowned** box — an adopted orphan whose lease cannot
+  name an owner — stays open to everyone, because blocking there would dead-end every
+  box that survived a lost lease file.
 - **"Is this a task branch" is not the question; "is there work here a box would
   strand" is.** Being a managed task branch used to be the whole test, and the effect
   was that the first session to leave one checked out turned the guard off for every
