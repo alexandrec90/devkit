@@ -708,6 +708,106 @@ def _plan(root):
     )
 
 
+def test_an_edit_into_the_sessions_own_box_is_left_alone(root, monkeypatch):
+    """The ownership gate must not tax the normal case: the fortieth edit into the box
+    this session was routed to stays silent."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--x-0806", project="carameli", session="s1")
+    target = root / ".worktrees" / "carameli--x-0806" / "app" / "main.py"
+    monkeypatch.setattr("sys.stdin", _stdin(payload(path=str(target), cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_an_edit_into_another_sessions_box_is_blocked_toward_its_own(root, monkeypatch, capsys):
+    """The collision this prevents happened: a second session found a live box through
+    `worktree.py list`, adopted it because the topic matched its task, and two sessions'
+    edits interleaved in one worktree until one noticed files changing under it
+    mid-turn. One box per (session, project) only holds if the box side of the boundary
+    is guarded too, not just the checkout side."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--x-0806", project="carameli", session="other-session")
+    monkeypatch.setattr(guard.worktree, "plan_new", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    target = root / ".worktrees" / "carameli--x-0806" / "app" / "main.py"
+    monkeypatch.setattr("sys.stdin", _stdin(payload(path=str(target), cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    err = capsys.readouterr().err
+    assert "carameli--x-0806" in err and "different session" in err
+    # Routed to a box of its own, and told how a sanctioned takeover looks instead.
+    assert "carameli--ws-s1-0806" in err
+    assert "claim carameli--x-0806 --session s1 --yes" in err
+
+
+def test_a_foreign_box_edit_reuses_the_sessions_existing_box(root, monkeypatch, capsys):
+    workspace = _workspace(root)
+    (root / ".worktrees" / "carameli--mine-0806").mkdir(parents=True)
+    (root / ".worktrees" / "leases.json").write_text(
+        json.dumps(
+            {
+                "boxes": {
+                    "carameli--x-0806": {
+                        "branch": "agent/x-0806",
+                        "project": "carameli",
+                        "session": "other-session",
+                    },
+                    "carameli--mine-0806": {
+                        "branch": "agent/mine-0806",
+                        "project": "carameli",
+                        "session": "s1",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    target = root / ".worktrees" / "carameli--x-0806" / "app" / "main.py"
+    monkeypatch.setattr("sys.stdin", _stdin(payload(path=str(target), cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    err = capsys.readouterr().err
+    assert "carameli--mine-0806" in err and "already has a box" in err
+
+
+def test_a_box_leased_under_an_abbreviated_session_id_still_admits_its_session(root, monkeypatch):
+    """A hand-cut `worktree.py new --session <first 8 hex>` box must keep admitting the
+    session that abbreviation names -- blocking it out of its own box would be the gate
+    manufacturing the very collision it exists to prevent."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--x-0806", project="carameli", session="da11d826")
+    target = root / ".worktrees" / "carameli--x-0806" / "app" / "main.py"
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            payload(
+                path=str(target),
+                cwd=str(root),
+                session="da11d826-371d-41ec-b5ee-77aabc7d119f",
+            )
+        ),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_an_unowned_box_is_left_alone(root, monkeypatch):
+    """An adopted orphan carries no session (`worktree.py` cannot rebuild one), so there
+    is no owner to defend and blocking would dead-end every box that survived a lost
+    lease file."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--x-0806", project="carameli", session="")
+    target = root / ".worktrees" / "carameli--x-0806" / "app" / "main.py"
+    monkeypatch.setattr("sys.stdin", _stdin(payload(path=str(target), cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_a_non_box_path_under_worktrees_is_left_alone(root, monkeypatch):
+    """`leases.json`, the `slugs/` directory, a stray folder: no lease, no owner, no
+    block -- the status quo for everything in `.worktrees/` that is not a live box."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--x-0806", project="carameli", session="other-session")
+    target = root / ".worktrees" / "slugs" / "some-session"
+    monkeypatch.setattr("sys.stdin", _stdin(payload(path=str(target), cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
 def test_the_reason_goes_to_stderr_because_stdout_is_not_surfaced(root, monkeypatch, capsys):
     workspace = _workspace(root)
     _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
