@@ -6,9 +6,8 @@ description: Audit this machine's background and automated processes -- the sche
 # Check the automated processes
 
 > Depends on Windows Task Scheduler (`schtasks`) and a devkit checkout on this machine.
-> In Claude Code, route the shell examples through `scripts/hooks/invoke-capped.py`, per
-> `.claude/rules/engineering.md`. In Codex, run them as written; its shell runner already
-> caps captured output.
+> Every shell example below is issued bare, in either harness: none of them is on the
+> Bash blocklist in `.claude/rules/engineering.md`, and a wrapper here buys no bound.
 
 Answer in this order. It is not a preference: each step decides whether the next one's
 evidence means anything.
