@@ -497,6 +497,19 @@ _BOUNDED_PATTERNS = (
     # in the exit code, which is the spelling that reached here blocked.
     r"git" + _GIT_GLOBAL_OPTS + r"\s+remote\s+get-url\b",
     r"git" + _GIT_GLOBAL_OPTS + r"\s+merge-base\b",
+    # A numeric line range: `sed -n '150,200p' file` prints at most as many lines as the
+    # range names, which is the identical bound `head -N` carries and is admitted on the
+    # identical terms. It is the spelling for reading *the middle* of a file from a
+    # subprocess, and it blocked -- while the remedy on offer, `invoke-capped.py`, sends
+    # the single-quoted address through cmd.exe, which is one of the three shapes the
+    # block message itself says will not survive the wrapper.
+    #
+    # Only the numeric address forms count, and everything that scales with the file is
+    # left out by requiring digits on both sides: `10,$p` runs to the end, `/start/,/end/p`
+    # is bounded by whatever the file happens to contain, and a bare `sed 's/a/b/' file`
+    # prints all of it. `-n` is required for the same reason -- without it every line is
+    # echoed as well as printed.
+    r"sed\s+(?:-n|--quiet|--silent)(?:\s+-e)?\s+(['\"]?)\d+(?:,\d+)?p(?:;\s*\d+(?:,\d+)?p)*\1(?=\s|$)",
     # A syntax check: silent on success, one diagnostic on failure.
     r"(?:ba|z)?sh\s+-n\s",
     # Version probes. `--help` is deliberately excluded: help text is long.
@@ -544,7 +557,8 @@ def block_message(max_bytes: int, command_shell: str = "bash") -> str:
         "capped. Exempt, and needing no wrapper: constant-size output (pwd, git "
         "rev-parse, --version), commands silent on success (mkdir, rm, cp, sleep, "
         "set, trap, kill), condition tests including a quiet `grep -q`, "
-        "`git log` given a commit count, the commit pair whose "
+        "`git log` given a commit count, a numeric-range `sed -n '10,40p'`, "
+        "the commit pair whose "
         "message cannot survive the wrapper (git add/commit, gh pr "
         "create/edit/comment), a standalone variable assignment, and "
         "shell control flow. ls/cat/git status are NOT exempt because their "
