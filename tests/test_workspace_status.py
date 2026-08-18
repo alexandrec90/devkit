@@ -285,8 +285,27 @@ def test_the_adoption_half_alone_still_prints():
 # --- the ephemeral tier ------------------------------------------------------
 
 
-def row(box: str, reapable: bool) -> dict:
-    return {"box": box, "reapable": reapable, "verdict": "ready", "reason": "x"}
+def row(box: str, reapable: bool, verdict: str = "ready") -> dict:
+    return {"box": box, "reapable": reapable, "verdict": verdict, "reason": "x"}
+
+
+def test_a_box_waiting_on_its_pr_is_not_advertised_as_reapable():
+    """Regression. `needs-pr` counted as reapable here, so the banner printed
+    `reap --all --yes` as the fix for a box whose PR was open and under review -- advice
+    to destroy the checkout the review pointed at, printed at every session start, while
+    `worktree.py reconcile` reported the same box as `waiting`."""
+    line = ws.boxes_line([row("carameli--x-0817", reapable=False, verdict="needs-pr")])
+    assert "1 awaiting a PR merge (carameli--x-0817)" in line
+    assert "reapable" not in line
+    assert "holding work" not in line
+    assert "reap --all" not in line
+
+
+def test_the_reap_fix_is_only_offered_when_something_is_reapable():
+    holding = ws.boxes_line([row("a--x-0806", reapable=False)])
+    reapable = ws.boxes_line([row("b--y-0806", reapable=True)])
+    assert "reap --all" not in holding
+    assert "reap --all" in reapable
 
 
 def test_no_boxes_is_silence():

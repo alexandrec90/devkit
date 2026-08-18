@@ -350,7 +350,7 @@ def test_the_box_lives_outside_every_checkout():
 # --- reap: the safety property ----------------------------------------------
 
 
-@pytest.mark.parametrize("verdict", sorted(worktree.SAFE_TO_REAP))
+@pytest.mark.parametrize("verdict", sorted(worktree.SWEEPABLE))
 def test_reap_allows_a_box_whose_work_has_left_it(verdict):
     allowed, note = worktree.reap_decision(verdict, "", force=False)
     assert allowed and note == ""
@@ -382,6 +382,56 @@ def test_force_says_what_it_will_destroy():
     allowed, note = worktree.reap_decision(sweep.READY, "2 uncommitted file(s)", force=True)
     assert allowed
     assert "discarded" in note and "2 uncommitted file(s)" in note
+
+
+# --- reap: a push is not a merge ---------------------------------------------
+# `needs-pr` means every commit is on the remote, so nothing is at stake and the verdict
+# sits in `SAFE_TO_REAP`. That made `list` mark a box whose PR was open and under review
+# as reapable, and `workspace-status.py` print `reap --all --yes` as the fix for it, at
+# every session start -- while `reconcile`, looking at the same box, reported `waiting`.
+
+
+def test_reap_refuses_a_pushed_box_whose_pr_has_not_merged():
+    """Regression. The commits were safe on the remote; the checkout the review still
+    pointed at was not, and the tool that said to destroy it was the session banner."""
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_PR,
+        "3 commit(s) pushed to origin/agent/x -- confirm a PR is open",
+        force=False,
+        holds_uncommitted=False,
+        awaiting_pr=True,
+    )
+    assert not allowed
+    assert "A push is not a merge" in note
+
+
+def test_a_merge_is_what_licenses_reaping_a_pushed_box():
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_PR,
+        "3 commit(s) pushed to origin/agent/x",
+        force=False,
+        pr_merged=True,
+        holds_uncommitted=False,
+        awaiting_pr=True,
+    )
+    assert allowed and note == ""
+
+
+def test_force_still_reaps_a_box_waiting_on_its_pr():
+    """The escape hatch stays, and says which of the two refusals it spent."""
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_PR, "3 commit(s) pushed", force=True, awaiting_pr=True
+    )
+    assert allowed
+    assert "has not merged" in note
+
+
+def test_the_survey_and_reap_agree_about_a_box_waiting_on_its_pr():
+    """`list` is where the session-start line gets its counts, so a verdict it calls
+    reapable and `reap` then refuses is the disagreement that produced bad advice."""
+    assert sweep.NEEDS_PR in worktree.AWAITS_A_MERGE
+    assert sweep.NEEDS_PR not in worktree.SWEEPABLE
+    assert sweep.NEEDS_PR in worktree.SAFE_TO_REAP  # still nothing *at stake*
 
 
 # --- reap: the squash-merged box --------------------------------------------
@@ -1387,6 +1437,51 @@ def test_a_worktree_with_no_lease_can_still_be_reaped(workspace, monkeypatch):
     assert [step[0] for step in plan.steps] == ["worktree"]
 
 
+def test_only_the_caller_holding_a_pr_may_reap_a_pushed_box(workspace, monkeypatch):
+    """The two audiences, asserted together. `reap` has no PR and no policy, so it is
+    refused; `reconcile` passes the PR it already fetched and keeps its own -- which is
+    what leaves its disk-pressure and `max_age_days` paths free to reap an open PR."""
+    root = workspace.parent
+    (root / worktree.BOXES_DIR_NAME / "demo--pushed-0806").mkdir(parents=True)
+    worktree.write_leases(
+        root,
+        {"demo--pushed-0806": box("demo--pushed-0806", project="demo", branch="agent/pushed-0806")},
+    )
+    monkeypatch.setattr(
+        worktree,
+        "inspect_box",
+        lambda *a, **k: (state(), sweep.NEEDS_PR, "3 commit(s) pushed to origin/agent/pushed-0806"),
+    )
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+
+    bare = worktree.plan_reap("demo--pushed-0806", workspace, fetch=False)
+    assert bare.refusal and not bare.steps
+
+    handed = worktree.plan_reap(
+        "demo--pushed-0806",
+        workspace,
+        fetch=False,
+        pr=worktree.parse_pr_view(pr_json(state="OPEN")),
+    )
+    assert handed.refusal == ""
+
+
+def test_the_survey_leaves_a_box_waiting_on_its_pr_out_of_the_reapable_count(
+    workspace, monkeypatch
+):
+    """Straight through `survey`, because the boolean it writes is what the session
+    banner counts -- not a constant a reader has to connect to it by hand."""
+    root = workspace.parent
+    worktree.write_leases(root, {"demo--pushed-0806": box("demo--pushed-0806", project="demo")})
+    (root / worktree.BOXES_DIR_NAME / "demo--pushed-0806").mkdir(parents=True)
+    monkeypatch.setattr(
+        worktree, "inspect_box", lambda *a, **k: (state(), sweep.NEEDS_PR, "3 commit(s) pushed")
+    )
+
+    rows = worktree.survey(workspace)
+    assert rows[0]["reapable"] is False
+
+
 def test_reaping_a_box_that_never_existed_names_the_ones_that_do(workspace):
     worktree.write_leases(workspace.parent, {"demo--x-0806": box("demo--x-0806", project="demo")})
     with pytest.raises(worktree.WorktreeError, match="demo--x-0806"):
@@ -1416,7 +1511,7 @@ def test_the_survey_renders_every_box_and_singles_out_the_ones_holding_work():
         },
     ]
     rendered = worktree.render_survey(rows)
-    assert "1 box(es) still holding work" in rendered
+    assert "1 box(es) not reapable yet" in rendered
     assert "demo--busy-0806 [ready] -- 2 files changed" in rendered
     assert "demo--done-0806" in rendered
 
