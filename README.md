@@ -652,11 +652,17 @@ setting without spending a model call.
 
 ### The shell output cap
 
-For Claude Code, `enforce-capped-bash.py` (PreToolUse) blocks a Bash call whose output
-is not byte-capped; `invoke-capped.py` is the wrapper it demands. Both are vendored, and
-they ship together — the gate's allow-list matches the wrapper's path, so vendoring one
-without the other yields a hook that blocks every Bash call and names a remedy the repo
-does not have.
+For Claude Code, `enforce-capped-bash.py` (PreToolUse) blocks a short, closed list of
+commands whose output grows with the repository — `ls`, `cat`, `find`, `tree`, `du`,
+`env`, `git status`, an uncounted `git log`, and a raw `git diff`/`git show`. Everything
+else runs uncapped. `invoke-capped.py` is one of the three ways out it names, and the
+unconditional bound on every call is `BASH_MAX_OUTPUT_LENGTH` in `.claude/settings.json`.
+Both scripts are vendored and ship together — the gate names the wrapper's path in its
+block message, so vendoring one without the other offers a remedy the repo does not have.
+
+The gate used to require every Bash call to *prove* it was bounded. Its docstring records
+why that ended, with the measurement: 46% of every block it ever issued was its own false
+positive rather than a command anyone needed to rewrite.
 
 Codex's shell tool already bounds captured output. The hook converter therefore drops
 this handler, removes a `PreToolUse` group or event left empty by the drop, and preserves
