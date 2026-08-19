@@ -93,6 +93,41 @@ anyone needed to change. So if this gate blocks something that is not one of the
 that is a defect in it: **report it with the exact command**, per the feedback-loop
 guardrail at the foot of this file. Never rewrite a correct command to satisfy it.
 
+## Waiting on a CI gate: one blocking call, not a poll loop
+
+When you are asked to wait for a PR gate, the expensive part is not the `gh` command --
+it is that **every poll is a full API round trip that re-sends the whole conversation**.
+Measured over ~16k API calls in the workspace this rule was written for (2026-08): 307
+polling calls burned 36M billed input tokens, ~2.5% of all spend, at an average context
+of 117k tokens per poll. Polls land at the *end* of a session, where context is largest,
+so they are the most expensive place a call can go -- one late poll cost more than five
+whole sessions did.
+
+**Spell the wait as a single call that blocks**, backgrounded so the harness re-invokes
+you when it exits instead of holding a turn open:
+
+```bash
+gh pr checks <N> --watch --fail-fast      # with run_in_background: true
+```
+
+`--watch` returns only once every check has settled, so N polls collapse into 1 call plus
+the completion notification. Backgrounding is the half that is easy to drop: a gate
+routinely outruns the Bash tool's ten-minute ceiling, and a foreground `--watch` that
+times out has become a poll loop again with the timeout as its interval.
+
+Two things this does **not** condemn, because neither is waste:
+
+- **Diagnosing a failure.** `gh run view --log-failed` and the greps after it are the
+  work itself, not waiting. Where the volume warrants it, send them to a file and read
+  from there.
+- **Asking once.** A single `gh pr checks` is one call and often the right answer. The
+  waste begins at the *second* identical poll and compounds from there.
+
+When the gate will outlast anything useful you could do meanwhile, the cheapest correct
+move is to stop: report that the branch is pushed and the gate is running, and let the
+result arrive in a fresh session. The same report costs the session floor there, against
+six times as much at the tail of a long one.
+
 ## Scripts
 
 All scripts under `scripts/` are Python, for cross-environment compatibility (a local
