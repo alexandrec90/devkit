@@ -278,10 +278,37 @@ def test_only_the_producing_end_of_a_pipeline_is_judged():
 
 @pytest.mark.parametrize(
     "cap",
-    ["| head -c 400", "| tail -c 400", "| head -20", "| tail -n 20", "| wc -l", "> out.txt"],
+    [
+        "| head -c 400",
+        "| tail -c 400",
+        "| head -20",
+        "| tail -n 20",
+        "| wc -l",
+        "| grep -c warn",
+        "| grep -rc warn",
+        "| grep --count warn",
+        "> out.txt",
+    ],
 )
 def test_every_cap_spelling_counts(cap):
     assert allows(f"ls -R / {cap}")
+
+
+def test_a_counting_grep_bounds_a_blocked_head():
+    """One number per input is a bound, and this spelling was blocking real work.
+
+    `git show <ref>:<file> | grep -c <pattern>` -- reading whether a symbol survives in
+    a tagged tree -- was refused for want of a `wc`, and the block message's remedies
+    (`--stat`, `--name-only`) answer a different question than the one being asked.
+    """
+    assert allows('git show v1.2.3:scripts/hooks/hook.py | grep -c "def main"')
+    assert allows("cat big.log | egrep -c warn")
+
+
+def test_grep_context_is_not_a_count():
+    """`-C 3` prints three lines around every match, so the case distinction is load-bearing."""
+    assert blocks("git show HEAD | grep -C 3 warn")
+    assert blocks("cat big.log | grep warn")
 
 
 def test_a_descriptor_duplication_is_not_a_redirect():

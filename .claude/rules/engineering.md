@@ -63,7 +63,7 @@ Any of three spellings takes a named command off the list:
 
 | Form | Trade |
 | --- | --- |
-| `<cmd> \| head -c N`, `\| tail -c N`, `\| wc -l` | shell-native; **masks the exit code** |
+| `<cmd> \| head -c N`, `\| tail -c N`, `\| wc -l`, `\| grep -c <pat>` | shell-native; **masks the exit code** |
 | `<cmd> > <file>` | strongest bound -- the output never enters your context at all |
 | `python3 scripts/hooks/invoke-capped.py --command "<cmd>"` | keeps a head *and* a tail window, preserves the exit code |
 

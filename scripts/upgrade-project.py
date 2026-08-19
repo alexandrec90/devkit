@@ -374,6 +374,66 @@ def vendored_release(project: Path) -> str:
     return sync.read_receipt_tag(project)
 
 
+def manifest_paths() -> list[str]:
+    """Every vendored path, read from `sync-devkit.py` rather than restated here."""
+    loader_dir = SCRIPTS_DIR / "precommit"
+    if str(loader_dir) not in sys.path:
+        sys.path.insert(0, str(loader_dir))
+    # Resolved by the insert above; `scripts/precommit/` is not an importable package.
+    from _loader import load_by_path
+
+    sync = load_by_path("_sync_devkit", SCRIPTS_DIR / "sync-devkit.py")
+    return [str(entry).replace("\\", "/") for entry in sync.MANIFEST]
+
+
+def unreleased_vendored_changes(devkit: Path, tag: str) -> list[str]:
+    """Vendored files `origin/<default>` carries that `tag` does not; [] when none.
+
+    **A vendored fix that is not tagged is a fix no project can run.** This script pulls
+    from a worktree at the newest tag -- `source_at_tag` -- so the release is the whole
+    delivery mechanism, and every hour a MANIFEST change spends untagged is an hour in
+    which a consumer upgrades, reports itself current, and keeps running the old file.
+
+    Neither end of that shows anything: devkit's CI is green because the fix is merged,
+    and the consumer's is green because it matches the tag it pinned. It cost a day of
+    agent turns once already -- `enforce-capped-bash.py` was inverted from a
+    prove-every-call gate to a nine-command blocklist, sat on main untagged, and every
+    session in the workspace went on being blocked by the version it replaced, including
+    the ones that had just run this script to get the fix.
+
+    Best-effort by design: an unreadable devkit, a missing `origin/<default>` or a
+    `sync-devkit.py` that will not load all answer [] rather than failing a run whose
+    real work is unaffected.
+    """
+    git = sweep.git_for(devkit)
+    default_branch = tb.detect_default_branch(git, fallback="main")
+    if not default_branch:
+        return []
+    result = git("diff", "--name-only", f"{tag}..origin/{default_branch}")
+    if result.returncode != 0:
+        return []
+    try:
+        vendored = set(manifest_paths())
+    except Exception:
+        return []
+    return sorted(line.strip() for line in result.stdout.splitlines() if line.strip() in vendored)
+
+
+def unreleased_line(files: list[str], tag: str) -> str:
+    """The one-line warning for `unreleased_vendored_changes`; "" when there are none.
+
+    Named, not counted: "6 files" tells the reader nothing about whether the fix they
+    came for is among them, which is the only question they have.
+    """
+    if not files:
+        return ""
+    return (
+        f"upgrade: devkit main carries {len(files)} vendored change(s) {tag} does not, "
+        f"so this run cannot deliver them: {', '.join(files)}\n"
+        f"        Cut a release first (RELEASING.md); this run adopts {tag}."
+    )
+
+
 def unreleased_adoption(project: Path, tags: list[str]) -> str:
     """Why this project must not be upgraded *to* `tags[0]`, or "".
 
@@ -865,6 +925,12 @@ def main(argv: list[str] | None = None) -> int:
     # The whole tag set, for the projects that are *ahead* of this checkout rather than
     # behind it. Read once here; `upgrade_one` cannot, since it only has the box.
     tags = release_tags(args.devkit)
+
+    # Said once for the run, before any box is cut: the answer is the same for every
+    # project, and a reader who came here for a specific vendored fix needs to know the
+    # tag does not carry it *before* reading four green adoption lines.
+    if warning := unreleased_line(unreleased_vendored_changes(args.devkit, tag), tag):
+        print(warning, file=sys.stderr)
 
     scope = names if args.every else requested
     selected = select_all(candidates_for(root, scope, args.devkit))
