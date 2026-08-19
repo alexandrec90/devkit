@@ -71,6 +71,7 @@ import json
 import os
 import shutil
 import stat
+import string
 import subprocess
 import sys
 import time
@@ -329,6 +330,12 @@ class SpawnPlan:
     steps: tuple[tuple[str, ...], ...] = ()
     env: dict[str, str] = field(default_factory=dict)
     provision: tuple[ProvisionStep, ...] = ()
+    # The project's `[worktree] env` templates, kept so `apply_new` can re-expand
+    # them if the slot is re-leased between plan and apply. Without this the plan's
+    # `env` would be rebuilt from the new port while a derived value like
+    # `CORS_ORIGINS` still pointed at the old one — the exact half-configured box
+    # this field exists to prevent, arriving only in the race.
+    env_templates: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -596,17 +603,54 @@ def claim_box(workspace: Path, name: str, session: str, apply: bool = True) -> B
     return claimed
 
 
-def managed_env(box: str, registry: devkit_ports.Registry | None, slot: int) -> dict[str, str]:
+def expand_env_templates(base: Mapping[str, str], templates: Mapping[str, str]) -> dict[str, str]:
+    """`templates` with `${NAME}` resolved against `base`. Pure; never raises.
+
+    A box gets its own ports, but a setting *derived* from one does not: seeding copies
+    the source checkout's `.env` verbatim, so a value naming the primary's frontend port
+    goes on naming it. That is invisible until a browser refuses the request — carameli's
+    `CORS_ORIGINS` names `http://localhost:5173`, the box serves on its own port, and the
+    app rejects every call its own frontend makes.
+
+    A template naming something not in `base` is **dropped, not written half-expanded**:
+    compose's dotenv parser does no substitution of its own, so a surviving `${...}`
+    reaches the application as those literal characters, and a CORS origin of
+    `http://localhost:${FRONTEND_HOST_PORT}` fails in a way that looks like neither a
+    typo nor a missing port. Dropping it leaves the seeded line in force, which is at
+    least a value someone chose.
+    """
+    resolved: dict[str, str] = {}
+    for key, template in templates.items():
+        try:
+            value = string.Template(template).substitute(base)
+        except (KeyError, ValueError):
+            continue
+        resolved[key] = value
+    return resolved
+
+
+def managed_env(
+    box: str,
+    registry: devkit_ports.Registry | None,
+    slot: int,
+    templates: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """The env a box's stack needs to stand apart from every other stack.
 
     `COMPOSE_PROJECT_NAME` is the load-bearing one: it namespaces containers, network
     and volumes, and it is what makes the `-v` in `reap` safe (see `reap_plan`).
     The port variables only matter for a project whose compose file publishes to the
     host; one that does not still gets the project name.
+
+    `templates` is the project's `[worktree] env`, expanded last and against everything
+    above it — see {@link expand_env_templates}. It comes last on purpose: a template is
+    written in terms of the ports, so it cannot be one of the values it reads.
     """
     env = {"COMPOSE_PROJECT_NAME": box}
     if registry is not None and slot >= 0:
         env.update(registry.env_for_slot(slot))
+    if templates:
+        env.update(expand_env_templates(env, templates))
     return env
 
 
@@ -757,6 +801,22 @@ def plan_provision(source: Path, windows: bool = os.name == "nt") -> tuple[Provi
     return provision_steps(present, install_command, frontend_dir, windows=windows)
 
 
+def plan_env_templates(source: Path) -> dict[str, str]:
+    """The project's `[worktree] env` templates, or none. Never raises.
+
+    Read from the SOURCE checkout for the reason `SpawnPlan.provision` gives: the
+    manifest is tracked, so the box is guaranteed the same answer, and reading it at
+    plan time is what puts the derived values in the dry run.
+
+    Silent on failure, unlike `plan_provision`'s warning. A missing toolchain leaves a
+    box that cannot run its own gates, which is worth a line on stderr; a project with
+    no derived `.env` values is the ordinary case and has nothing to report.
+    """
+    with contextlib.suppress(Exception):
+        return dict(harness_config.load(source).worktree.env)
+    return {}
+
+
 def spawn_plan(
     project: str,
     workspace_root: Path,
@@ -769,6 +829,7 @@ def spawn_plan(
     fetch: bool = True,
     today: _dt.date | None = None,
     provision: tuple[ProvisionStep, ...] = (),
+    env_templates: Mapping[str, str] | None = None,
 ) -> SpawnPlan:
     """Everything `new` will run, decided without touching git.
 
@@ -807,8 +868,9 @@ def spawn_plan(
         box=box,
         path=str(path),
         steps=tuple(steps),
-        env=managed_env(name, registry, slot),
+        env=managed_env(name, registry, slot, env_templates),
         provision=provision,
+        env_templates=dict(env_templates or {}),
     )
 
 
@@ -910,6 +972,7 @@ def preview_spawn_plan(
     fetch: bool = True,
     provision: tuple[ProvisionStep, ...] = (),
     now: _dt.datetime | None = None,
+    env_templates: Mapping[str, str] | None = None,
 ) -> SpawnPlan:
     """`spawn_plan` for a preview: an existing remote ref instead of a fresh branch.
 
@@ -941,8 +1004,9 @@ def preview_spawn_plan(
         box=box,
         path=str(path),
         steps=tuple(steps),
-        env=managed_env(name, registry, slot),
+        env=managed_env(name, registry, slot, env_templates),
         provision=provision,
+        env_templates=dict(env_templates or {}),
     )
 
 
@@ -2011,6 +2075,7 @@ def plan_new(
         session=session,
         fetch=fetch,
         provision=plan_provision(source),
+        env_templates=plan_env_templates(source),
     )
 
 
@@ -2075,7 +2140,7 @@ def apply_new(
                     f"slot {box.slot} was taken while the box was being cut — re-leased slot {slot}"
                 )
                 box = replace(box, slot=slot)
-                env = managed_env(box.name, registry, slot)
+                env = managed_env(box.name, registry, slot, plan.env_templates)
         boxes[box.name] = box
         write_leases(root, boxes)
     if dropped:
@@ -2189,6 +2254,7 @@ def plan_preview(
         registry=registry,
         fetch=fetch,
         provision=plan_provision(source) if provision else (),
+        env_templates=plan_env_templates(source),
     )
     return PreviewPlan(
         box=spawn.box,

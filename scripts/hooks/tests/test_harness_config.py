@@ -279,3 +279,41 @@ def test_docker_auto_stop_requires_the_literal_true():
 
 def test_a_docker_table_of_the_wrong_shape_is_ignored():
     assert cfg.from_dict({"docker": "auto_stop"}).docker.auto_stop is False
+
+
+# --- [worktree]: the `.env` values a box must derive for itself -----------------
+
+
+def test_worktree_env_defaults_to_nothing():
+    """Absence means "the seeded `.env` is already right", which is true of every
+    project that has no value derived from a port."""
+    assert cfg.Config().worktree.env == {}
+    assert cfg.from_dict({}).worktree.env == {}
+    assert cfg.from_dict({"worktree": {}}).worktree.env == {}
+
+
+def test_worktree_env_is_carried_through_verbatim():
+    """The templates are expanded by the caller that knows the box's ports, not here."""
+    raw = {"worktree": {"env": {"CORS_ORIGINS": "http://localhost:${FRONTEND_HOST_PORT}"}}}
+    assert cfg.from_dict(raw).worktree.env == {
+        "CORS_ORIGINS": "http://localhost:${FRONTEND_HOST_PORT}"
+    }
+
+
+def test_worktree_env_values_are_coerced_to_strings():
+    """TOML gives an int for `PORT = 5176`; a non-string reaching the `.env` writer
+    would render by luck of repr and never match a template."""
+    assert cfg.from_dict({"worktree": {"env": {"PORT": 5176}}}).worktree.env == {"PORT": "5176"}
+
+
+def test_a_worktree_table_of_the_wrong_shape_is_ignored():
+    for junk in ("env", {"env": "CORS_ORIGINS"}, {"env": ["a"]}, None):
+        assert cfg.from_dict({"worktree": junk}).worktree.env == {}
+
+
+def test_the_default_worktree_env_is_not_shared_between_configs():
+    """`dict` default on a frozen dataclass: a mutable default shared across instances
+    would let one project's manifest leak into the next box devkit cuts."""
+    first = cfg.Config()
+    first.worktree.env["X"] = "1"
+    assert cfg.Config().worktree.env == {}
