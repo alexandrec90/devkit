@@ -148,6 +148,15 @@ def test_the_stop_idle_pass_writes_the_file_its_installer_advertises():
     assert "--always" in installer.stop_idle_arguments(r"C:\py\pythonw.exe", root=Path(r"C:\ws"))
 
 
+def test_the_global_tools_pass_writes_the_file_its_installer_advertises():
+    """This one writes its own artifact rather than being wrapped: the content that
+    matters is not the captured stdout of an npm command but the rollback line for
+    every version it moved, and that is a thing only the runner can render."""
+    installer = load_script("scripts/install-global-tools.py")
+    runner = load_script("scripts/global-tools.py")
+    assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
+
+
 def test_the_vanillaland_merge_writes_the_file_its_installer_advertises():
     """Same shape as the prune: `git-merge-default.py` has several callers -- a VS Code
     task among them -- and writes no artifact of its own, so the claim here is about the
@@ -194,6 +203,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/upgrade-project.py": "devkit-upgrade-projects runs it nightly",
     "scripts/docker-maint.py": "devkit-docker-prune and devkit-docker-stop-idle run it nightly",
     "scripts/git-merge-default.py": "devkit-vanillaland-merge runs it nightly",
+    "scripts/global-tools.py": "devkit-global-tools runs it nightly",
     "scripts/log-wrap.py": "the wrapper three of those jobs are launched through",
     # reached from an entry point
     "scripts/sweep.py": "the git and gh IO for reconcile, upgrade and the merge",
