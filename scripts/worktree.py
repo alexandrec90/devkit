@@ -132,6 +132,27 @@ DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 # Everything else — `ready` above all — means work is still only here.
 SAFE_TO_REAP: frozenset[str] = frozenset({sweep.SPENT, sweep.NEEDS_PR, sweep.CLEAN})
 
+# `needs-pr` is in SAFE_TO_REAP because nothing is *at stake* -- the remote has every
+# commit -- which is the question `reconcile_action` needs answered before it applies its
+# own PR policy on top. It is not the question `reap` and `list` ask. Those two have no
+# policy: `reap --all` destroys whatever they call reapable, and `list` is where
+# `workspace-status.py` gets the "N reapable (fix: reap --all --yes)" it prints at every
+# session start. So a box whose PR was open and under review came out of `list` as
+# reapable and out of `reconcile` as `waiting`, at the same moment, about the same box --
+# and only one of the two was telling an agent to run a destructive command.
+#
+# Splitting the audiences is what makes them agree. A **merge** licenses an unprompted
+# reap; a push does not, however completely the remote has the commits. `reconcile` keeps
+# reaping an open PR under disk pressure or past `max_age_days`, because it has looked at
+# the PR and weighed it -- it passes that `pr` down to `plan_reap` and is therefore never
+# subject to the refusal in `reap_decision`.
+AWAITS_A_MERGE: frozenset[str] = frozenset({sweep.NEEDS_PR})
+
+# What `reap` and `list` may destroy with no PR in hand. `survey` subtracts the same
+# set from `reapable` rather than reading this one, because a preview box is reapable
+# without being in `SAFE_TO_REAP` at all; for every task verdict the two agree.
+SWEEPABLE: frozenset[str] = SAFE_TO_REAP - AWAITS_A_MERGE
+
 
 # The one verdict a merge can be stale about. `needs-rebranch` says "commits on a branch
 # that can no longer be committed to", which is what a squash merge leaves behind and is
@@ -946,6 +967,7 @@ def reap_decision(
     *,
     pr_merged: bool = False,
     holds_uncommitted: bool = True,
+    awaiting_pr: bool = False,
 ) -> tuple[bool, str]:
     """`(allowed, note)` — may this box be destroyed, and what to say about it.
 
@@ -963,7 +985,27 @@ def reap_decision(
     merely *stale about a squash* spends the one flag that also discards uncommitted
     work, on the most ordinary ending a box has — which teaches the reflex on the exact
     boxes where the refusal is the point.
+
+    `awaiting_pr` is the second refusal, and it guards a box holding no work at all.
+    `needs-pr` means every commit is on the remote, so `reapable` says yes and nothing is
+    lost in the sense that word usually carries — but the checkout is where a review
+    comment gets answered, and destroying it the moment the branch is pushed is reaping
+    on the strength of the *push*. `plan_reap` sets this for the callers with no PR in
+    hand (`reap`, and `list` through `survey`); `reconcile` passes a `pr` instead and
+    is never flagged, so its pressure and `max_age_days` paths still reap an open PR
+    deliberately. A merge clears it, which is what `pr_merged` is doing here.
     """
+    if awaiting_pr and not pr_merged:
+        if force:
+            return True, (
+                f"forced past `{verdict}` ({reason}) — the PR has not merged, so this "
+                f"discards the checkout its review is still pointing at"
+            )
+        return False, (
+            f"{verdict} — {reason}. A push is not a merge: `reconcile` reaps this box "
+            f"once its PR lands, and until then the checkout is where review comments "
+            f"get answered. Wait for the merge, or pass --force."
+        )
     if reapable(verdict, pr_merged=pr_merged, holds_uncommitted=holds_uncommitted):
         return True, ""
     if force:
@@ -1020,6 +1062,7 @@ def reap_plan(
     force: bool = False,
     keep_stack: bool = False,
     has_stack: bool = False,
+    awaiting_pr: bool = False,
 ) -> ReapPlan:
     """Everything `reap` will run, in the only order that is safe.
 
@@ -1057,6 +1100,7 @@ def reap_plan(
         force,
         pr_merged=pr_merged,
         holds_uncommitted=bool(state.dirty),
+        awaiting_pr=awaiting_pr,
     )
     if not allowed:
         return ReapPlan(box=box.name, path=path, project=box.project, refusal=note)
@@ -2266,6 +2310,7 @@ def plan_reap(
         force=force,
         keep_stack=keep_stack,
         has_stack=has_stack(path),
+        awaiting_pr=pr is None and verdict in AWAITS_A_MERGE,
     )
 
 
@@ -2397,9 +2442,14 @@ def survey(workspace: Path, fetch: bool = False, sizes: bool = False) -> list[di
             "reason": reason,
             # `reapable(...)` rather than the set, so a preview — which the set cannot
             # contain without making `spent-branch` mean two things — is not reported as
-            # a box holding work. The other verdicts are unchanged: with no merged PR in
-            # hand the predicate reduces to the same membership test.
-            "reapable": reapable(verdict, holds_uncommitted=bool(state.dirty)),
+            # a box holding work. `AWAITS_A_MERGE` is then subtracted for the same reason
+            # `plan_reap` sets `awaiting_pr`: this row feeds `reap --all` and the session
+            # banner, neither of which has a PR in hand, so a pushed box under review must
+            # not be advertised as free to destroy.
+            "reapable": (
+                reapable(verdict, holds_uncommitted=bool(state.dirty))
+                and verdict not in AWAITS_A_MERGE
+            ),
             "kind": box.kind,
             "tracks": box.tracks,
             "urls": [list(entry) for entry in preview_urls(registry, box.slot)],
@@ -2673,7 +2723,7 @@ def render_survey(rows: list[dict]) -> str:
     held = [row for row in rows if not row["reapable"]]
     if held:
         lines.append("")
-        lines.append(f"{len(held)} box(es) still holding work:")
+        lines.append(f"{len(held)} box(es) not reapable yet:")
         for row in held:
             lines.append(f"  {row['box']} [{row['verdict']}] -- {row['reason']}")
     return "\n".join(lines)

@@ -269,23 +269,42 @@ def boxes_line(rows: list[dict]) -> str:
     containers and volumes. Nothing else says a box exists — they are deliberately absent
     from the workspace file, so the sweep cannot see them and no picker lists them.
 
-    Two states, because they want opposite actions. A box that still holds work wants
-    shipping; a box whose work has left wants reaping, and is pure leaked resource until
-    it is.
+    Three states, because they want different actions, and only one of them wants a
+    command from whoever reads this line. A box that still holds work wants shipping. A
+    box whose work has left wants reaping, and is pure leaked resource until it is. A box
+    that is pushed and waiting on its PR wants **nothing**: `reconcile` reaps it when the
+    PR merges, and the line used to file it under `reapable` and then append `reap --all
+    --yes` as the fix -- standing advice, printed at every session start, to destroy the
+    checkout an open review still points at. `worktree.AWAITS_A_MERGE` is the same
+    constant `reap` refuses on, so the advice here and the tool's behaviour cannot drift
+    apart again.
+
+    The fix suffix is therefore printed only when something is actually reapable.
     """
     if not rows:
         return ""
-    holding = [row["box"] for row in rows if not row["reapable"]]
     reapable = [row["box"] for row in rows if row["reapable"]]
+    awaiting = [
+        row["box"]
+        for row in rows
+        if not row["reapable"] and row["verdict"] in worktree.AWAITS_A_MERGE
+    ]
+    holding = [
+        row["box"]
+        for row in rows
+        if not row["reapable"] and row["verdict"] not in worktree.AWAITS_A_MERGE
+    ]
     parts = []
     if holding:
         parts.append(f"{len(holding)} holding work ({', '.join(sorted(holding))})")
+    if awaiting:
+        parts.append(f"{len(awaiting)} awaiting a PR merge ({', '.join(sorted(awaiting))})")
     if reapable:
         parts.append(f"{len(reapable)} reapable ({', '.join(sorted(reapable))})")
-    return (
-        f"{len(rows)} ephemeral box(es): {'; '.join(parts)} "
-        f"(fix: python devkit/scripts/worktree.py reap --all --yes)"
-    )
+    line = f"{len(rows)} ephemeral box(es): {'; '.join(parts)}"
+    if reapable:
+        line += " (fix: python devkit/scripts/worktree.py reap --all --yes)"
+    return line
 
 
 def scheduler_line(source: Path = SOURCE_ROOT, now: float = 0.0, stale_hours: float = 2.0) -> str:
