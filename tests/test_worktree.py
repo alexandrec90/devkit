@@ -2411,6 +2411,69 @@ def test_a_lease_stripped_of_its_kind_is_still_read_as_a_preview():
     assert worktree.kind_of_branch("") == worktree.TASK_KIND
 
 
+REFLOG_CREATION = (
+    "0000000000000000000000000000000000000000 f891e30 A <a@b.c> 1787018357 -0400\t"
+    f"branch: Created from origin/{PREVIEW_REF}\n"
+)
+
+
+def _preview_on_disk(root: Path, tracks: str = "") -> Path:
+    """A preview box laid out as git lays one out: pointer, commondir, shared reflog."""
+    box = root / worktree.BOXES_DIR_NAME / "carameli--preview-ui-editor-0817"
+    box.mkdir(parents=True)
+    gitdir = root / "carameli" / ".git" / "worktrees" / box.name
+    gitdir.mkdir(parents=True)
+    (box / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+    reflog = root / "carameli" / ".git" / "logs" / "refs" / "heads" / "preview"
+    reflog.mkdir(parents=True)
+    (reflog / "ui-editor-0817").write_text(REFLOG_CREATION, encoding="utf-8")
+    (root / worktree.BOXES_DIR_NAME / worktree.LEASE_FILE_NAME).write_text(
+        worktree.render_leases({box.name: preview_box(tracks=tracks)}), encoding="utf-8"
+    )
+    return box
+
+
+def test_tracks_is_read_back_off_the_branch_reflog():
+    assert worktree.tracks_from_reflog(REFLOG_CREATION) == PREVIEW_REF
+
+
+def test_a_reflog_that_never_says_where_the_branch_came_from_recovers_nothing():
+    """Recovery is best-effort: an expired or absent creation entry is not a crash."""
+    later = "f891e30 a1b2c3d A <a@b.c> 1787018357 -0400\treset: moving to origin/main\n"
+    assert worktree.tracks_from_reflog(later) == ""
+    assert worktree.tracks_from_reflog("") == ""
+
+
+def test_a_preview_stripped_of_its_tracks_is_repaired_from_git(tmp_path):
+    """Observed live: `carameli--preview-speech-bubble-types-0817`, cut 2026-08-17.
+
+    Its lease had `kind: preview` and `tracks: ""`, so `reconcile` asked GitHub for a PR
+    on `preview/speech-bubble-types-0817`, found none, and left the box standing — stack
+    up, slot held — for the 1.7 days between its PR merging and `max_age_days`. Same
+    stripping mechanism as `kind`, which recovers; this half did not.
+    """
+    _preview_on_disk(tmp_path)
+    box = worktree.live_boxes(tmp_path)["carameli--preview-ui-editor-0817"]
+    assert box.tracks == PREVIEW_REF
+    # What `reconcile` looks the PR up by: the branch under review, not the copy.
+    assert (box.tracks or box.branch) == PREVIEW_REF
+
+
+def test_a_recorded_tracks_is_never_second_guessed_by_the_reflog(tmp_path):
+    _preview_on_disk(tmp_path, tracks="agent/something-else-0817")
+    box = worktree.live_boxes(tmp_path)["carameli--preview-ui-editor-0817"]
+    assert box.tracks == "agent/something-else-0817"
+
+
+def test_recovering_tracks_without_a_worktree_pointer_is_quiet(tmp_path):
+    assert worktree.recovered_tracks(tmp_path / "nothing-here", "preview/x") == ""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / ".git").write_text("not a pointer\n", encoding="utf-8")
+    assert worktree.recovered_tracks(plain, "preview/x") == ""
+
+
 def test_a_clean_preview_is_reapable_and_an_edited_one_is_not():
     assert worktree.reapable(worktree.PREVIEW_VERDICT, holds_uncommitted=False)
     assert not worktree.reapable(worktree.PREVIEW_VERDICT, holds_uncommitted=True)

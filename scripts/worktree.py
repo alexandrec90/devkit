@@ -1722,6 +1722,52 @@ def recovered_slot(env_text: str, registry: devkit_ports.Registry | None) -> int
     return -1
 
 
+def tracks_from_reflog(text: str) -> str:
+    """The remote branch a `preview/...` branch was created from, off its reflog.
+
+    `kind_of_branch` recovers the other half of a stripped preview lease, and the same
+    argument applies here with a worse consequence: a copy of this file that predates
+    `tracks` parses the lease into a Box without it and writes it straight back, so one
+    `worktree-guard` spawn from an unupdated checkout empties the field for every box at
+    once. `kind` survives that because the branch name carries it; `tracks` cannot, since
+    `preview_branch` slugifies the topic and drops the `agent/` prefix that would say
+    which ref this is a copy of.
+
+    Git kept it anyway. `preview_spawn_plan` creates the branch from `origin/<ref>`, and
+    that is what the creation entry of its reflog records. Reading it back is what lets
+    `reconcile` ask GitHub about the branch under review instead of the throwaway
+    `preview/...` ref — the difference between reaping a preview when its PR lands and
+    letting it stand, with its stack up and its slot held, until `max_age_days`.
+    """
+    marker = "branch: Created from origin/"
+    for line in text.splitlines():
+        _, _, message = line.partition("\t")
+        if message.startswith(marker):
+            return message[len(marker) :].strip()
+    return ""
+
+
+def recovered_tracks(box_dir: Path, branch: str) -> str:
+    """`tracks` for a preview whose lease lost it, or "" when git cannot say either.
+
+    File reads only, for `_worktree_branch`'s reason: this runs under `live_boxes`, which
+    a PreToolUse hook calls on every edit. A linked worktree's `.git` names its private
+    gitdir, whose `commondir` points at the repository's — and **branch reflogs live
+    there, not in the per-worktree gitdir**, which holds only `HEAD`'s.
+    """
+    try:
+        pointer = (box_dir / ".git").read_text(encoding="utf-8").strip()
+        if not pointer.startswith("gitdir:"):
+            return ""
+        gitdir = Path(pointer[len("gitdir:") :].strip())
+        common = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+        repo_git = (gitdir / common) if common else gitdir
+        reflog = (repo_git / "logs" / "refs" / "heads" / branch).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return tracks_from_reflog(reflog)
+
+
 def orphaned_boxes(
     workspace_root: Path,
     recorded: Mapping[str, Box],
@@ -1783,12 +1829,21 @@ def live_boxes(workspace_root: Path) -> dict[str, Box]:
     caller sees it and the next lease write persists it. The registry is loaded only
     once an orphan is found, keeping the steady-state cost of this read to one
     directory listing.
+
+    A preview whose lease lost its `tracks` is repaired the same way and for the same
+    reason — see `recovered_tracks`. Only a preview missing the field pays the two extra
+    file reads, so the steady state is unchanged.
     """
     boxes = {
         name: box
         for name, box in read_leases(workspace_root).items()
         if box_path(workspace_root, name).is_dir()
     }
+    for name, box in boxes.items():
+        if box.kind == PREVIEW_KIND and not box.tracks:
+            found = recovered_tracks(box_path(workspace_root, name), box.branch)
+            if found:
+                boxes[name] = replace(box, tracks=found)
     if orphaned_boxes(workspace_root, boxes):
         boxes.update(orphaned_boxes(workspace_root, boxes, load_registry(workspace_root)))
     return boxes
