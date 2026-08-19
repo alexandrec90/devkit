@@ -230,13 +230,22 @@ ALLOWED_MISSING = {
 ALLOWED_VERSION_PINS: dict[str, str] = {}
 
 
-def test_check_logs_skill_does_not_wrap_codex_shell_calls():
-    """Codex already caps shell output; the skill must not recreate wrapper noise."""
-    text = (REPO_ROOT / ".claude/skills/check-logs/SKILL.md").read_text(encoding="utf-8")
+def test_no_skill_wraps_a_command_the_gate_does_not_block():
+    """A wrapper on a command nothing blocks is pure noise, and it spreads by copying.
 
-    assert "In Codex, run them as written" in text
-    assert 'invoke-capped.py --command "python scripts/workspace-status.py"' not in text
-    assert 'invoke-capped.py --command "python scripts/worktree.py list"' not in text
+    Both harnesses are covered by one assertion now that `enforce-capped-bash.py` is a
+    blocklist: `python scripts/...` was never on it, so wrapping it buys no second bound
+    in Claude Code either. The earlier version of this test pinned one sentence of the
+    check-logs preamble and could only speak for Codex.
+    """
+    offenders: list[str] = []
+    for skill in sorted(REPO_ROOT.glob(".claude/skills/*/SKILL.md")):
+        text = skill.read_text(encoding="utf-8")
+        for match in re.finditer(r'invoke-capped\.py --command "([^"]+)"', text):
+            command = match.group(1)
+            if command.startswith(("python ", "python3 ")):
+                offenders.append(f"{skill.parent.name}: {command}")
+    assert not offenders, "wrapped commands the gate does not block: " + "; ".join(offenders)
 
 
 def test_documented_paths_exist():

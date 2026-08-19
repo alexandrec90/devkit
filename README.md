@@ -316,6 +316,35 @@ session it was cut for, an edit aimed into another session's box is blocked towa
 editor's own, and `claim` is the deliberate handover for when the user moves a task
 between sessions.
 
+### Running someone else's branch before it merges
+
+`preview` is the reviewer's half of the same tier. Testing an agent's change used to mean
+merging the PR first and pulling the result into a checkout — the change had to land
+before anyone could see whether it should:
+
+```bash
+python scripts/worktree.py preview carameli --pr 163 --yes   # a PR, wherever it was authored
+python scripts/worktree.py preview carameli --branch agent/ui-editor-0817 --yes
+python scripts/worktree.py preview carameli--ui-editor-0817 --yes   # a live box, served as-is
+```
+
+It cuts a box like `new` does — leased slot, own `COMPOSE_PROJECT_NAME`, seeded `.env` —
+then brings the stack up and prints the URLs that slot publishes, so the frontend of two
+different branches can run side by side without either one noticing the other.
+
+What it does **not** do is check out the branch it is showing. A preview gets its own
+`preview/<slug>` copy of `origin/<ref>`, for two reasons that are the whole design: a
+local branch cannot be checked out in two worktrees, so the agent's own box would refuse
+to be previewed at all; and if that box had already been reaped, the reviewer would be
+sitting on the real branch with `origin/...` as its upstream, one reflexive `git push`
+from writing to work that is not theirs. `--force` refreshes a preview onto the ref's
+current tip; there is no spelling of it that resets a task box.
+
+`reconcile` treats previews as their own kind: reaped once the work they show has merged
+or closed, reclaimed under slot pressure or at `--max-age-days`, and held — like any box
+— the moment there are uncommitted edits inside. Reviewing by editing is allowed; the
+box just stops being disposable when you do.
+
 ### The scheduled pass
 
 Both tiers need something to run afterwards, and "afterwards" is exactly when nobody
@@ -623,11 +652,17 @@ setting without spending a model call.
 
 ### The shell output cap
 
-For Claude Code, `enforce-capped-bash.py` (PreToolUse) blocks a Bash call whose output
-is not byte-capped; `invoke-capped.py` is the wrapper it demands. Both are vendored, and
-they ship together — the gate's allow-list matches the wrapper's path, so vendoring one
-without the other yields a hook that blocks every Bash call and names a remedy the repo
-does not have.
+For Claude Code, `enforce-capped-bash.py` (PreToolUse) blocks a short, closed list of
+commands whose output grows with the repository — `ls`, `cat`, `find`, `tree`, `du`,
+`env`, `git status`, an uncounted `git log`, and a raw `git diff`/`git show`. Everything
+else runs uncapped. `invoke-capped.py` is one of the three ways out it names, and the
+unconditional bound on every call is `BASH_MAX_OUTPUT_LENGTH` in `.claude/settings.json`.
+Both scripts are vendored and ship together — the gate names the wrapper's path in its
+block message, so vendoring one without the other offers a remedy the repo does not have.
+
+The gate used to require every Bash call to *prove* it was bounded. Its docstring records
+why that ended, with the measurement: 46% of every block it ever issued was its own false
+positive rather than a command anyone needed to rewrite.
 
 Codex's shell tool already bounds captured output. The hook converter therefore drops
 this handler, removes a `PreToolUse` group or event left empty by the drop, and preserves
