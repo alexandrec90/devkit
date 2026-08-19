@@ -460,6 +460,44 @@
 			},
 			"problemMatcher": []
 		},
+		// --- scoped: the reference checkout ----------------------------------
+		// The second task to reach VanillaLand, and the second one that cannot be a
+		// `devkit_project.py` dispatch: that dispatcher resolves through
+		// `known_projects`, which drops NOT_PROJECTS because every action it runs
+		// needs a harness. Running a start script the checkout itself ships needs
+		// PowerShell and nothing else, so `scripts/vanillaland-e2e.py` resolves
+		// against the raw registry the way `git-merge-default.py` does.
+		{
+			"label": "Start: VanillaLand IIS Express",
+			"detail": "Run VanillaLand's own .local/carameli-e2e/start.ps1: the persisted vs-sql container, the local SOAP stand-ins, and both 64-bit IIS Express sites (VoipApi :8085, classic web UI :8022), waiting for each to answer — up to ~3 min on a cold start while .NET JITs. Idempotent: a port already listening is left alone. Needs a machine seeded per that checkout's .local/carameli-e2e/README.md. Stops nothing.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"scripts/notify-wrap.py",
+				"Start: VanillaLand IIS Express",
+				"--",
+				"python",
+				"scripts/log-wrap.py",
+				"Start: VanillaLand IIS Express",
+				"--",
+				"python",
+				"scripts/vanillaland-e2e.py"
+			],
+			"options": {
+				"cwd": "${workspaceFolder:devkit}"
+			},
+			"icon": {
+				"id": "server-process",
+				"color": "terminal.ansiMagenta"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
 		// --- scoped: ibkr_trader's worktree pair -----------------------------
 		// The five that came up out of `ibkr_trader/.vscode/tasks.json`. Each routes
 		// through a `scripts/*.py` in that repo, which is what makes them dispatchable

@@ -4,7 +4,9 @@ paths:
   - workspace-tasks.jsonc
   - scripts/devkit_project.py
   - scripts/git-merge-default.py
+  - scripts/vanillaland-e2e.py
   - tests/test_devkit_project.py
+  - tests/test_vanillaland_e2e.py
   - tests/test_self_hosting.py
 ---
 
@@ -29,14 +31,22 @@ way is not blocked from hoisting — write the seam. `scripts/backtest-task.py` 
 ibkr_trader exists for exactly that reason: its two tasks invoked a console-script
 executable directly, which the dispatcher cannot call.
 
-## The one task that must not be a dispatch
+## The tasks that must not be a dispatch
 
-`scripts/git-merge-default.py` is a workspace task, not an `ACTIONS` entry: the dispatcher
-subtracts `NOT_PROJECTS` because its actions need a harness, and a merge needs git alone,
-so it resolves against the **raw** registry rather than making the exclusion an exception.
-That makes `mergeCheckout` the only picker listing *more* than the registry —
-`insert_picker_option` maintains it, and a test pins the equality both ways. Its docstring
-carries the rest.
+Two of them, for the same reason twice. The dispatcher subtracts `NOT_PROJECTS` because
+every action it runs needs a harness a reference checkout does not have — so an operation
+needing *only* what such a checkout already carries cannot become an `ACTIONS` entry
+without turning that exclusion into an exception. Each resolves against the **raw**
+registry instead, and neither moves the dispatcher's contract:
+
+- `scripts/git-merge-default.py` merges a trunk in and needs git alone. Its picker,
+  `mergeCheckout`, is the only one listing *more* than the registry —
+  `insert_picker_option` maintains it, and a test pins the equality both ways.
+- `scripts/vanillaland-e2e.py` runs the start script VanillaLand itself ships and needs
+  PowerShell alone. It carries **no** picker: one checkout owns that stack, so the name
+  is a constant and `--checkout` stays a flag only so the tests can aim it elsewhere.
+
+Both docstrings carry the rest.
 
 ## Changing a task: the live file first, then adopt
 
