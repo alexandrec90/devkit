@@ -283,6 +283,8 @@ def test_only_the_producing_end_of_a_pipeline_is_judged():
         "| tail -c 400",
         "| head -20",
         "| tail -n 20",
+        "| head",
+        "| tail",
         "| wc -l",
         "| grep -c warn",
         "| grep -rc warn",
@@ -292,6 +294,32 @@ def test_only_the_producing_end_of_a_pipeline_is_judged():
 )
 def test_every_cap_spelling_counts(cap):
     assert allows(f"ls -R / {cap}")
+
+
+def test_an_uncounted_head_is_still_a_cap():
+    """Ten lines is `head`'s default, so the count was never what made it a bound.
+
+    Requiring one blocked `git status --porcelain | head`, which is the shape a session
+    reaches for first -- a report of this exact false positive is what removed it.
+    """
+    assert allows("git status --porcelain | head")
+    assert allows("cat big.log | tail")
+    assert allows("ls -R / | head foo.txt")
+
+
+@pytest.mark.parametrize(
+    "segment",
+    [
+        "| tail -f",
+        "| tail --follow",
+        "| tail -n +5",
+        "| head -n -5",
+    ],
+)
+def test_an_unbounded_head_or_tail_is_not_a_cap(segment):
+    """The flags that make `head`/`tail` unbounded: following, and counting from the
+    other end. An optional count must not admit these by matching the bare name."""
+    assert blocks(f"cat big.log {segment}")
 
 
 def test_a_counting_grep_bounds_a_blocked_head():
