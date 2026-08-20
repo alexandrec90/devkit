@@ -145,7 +145,10 @@ SAFE_TO_REAP: frozenset[str] = frozenset({sweep.SPENT, sweep.NEEDS_PR, sweep.CLE
 # and only one of the two was telling an agent to run a destructive command.
 #
 # Splitting the audiences is what makes them agree. A **merge** licenses an unprompted
-# reap; a push does not, however completely the remote has the commits. `reconcile` keeps
+# reap; a push does not, however completely the remote has the commits. So does a
+# **close**, from the other end: the wait this set names is a wait for a person, and a
+# closed PR is that person having answered. See `reap_decision`.
+# `reconcile` keeps
 # reaping an open PR under disk pressure or past `max_age_days`, because it has looked at
 # the PR and weighed it -- it passes that `pr` down to `plan_reap` and is therefore never
 # subject to the refusal in `reap_decision`.
@@ -409,6 +412,16 @@ class PullRequest:
     @property
     def is_open(self) -> bool:
         return self.state == "OPEN"
+
+    @property
+    def is_closed(self) -> bool:
+        """Closed without merging -- a terminal state a person put the PR into.
+
+        Deliberately not spelled `not is_open` at the call sites: an empty
+        `PullRequest` is not open either, and "nobody ever opened one" is the absence
+        of a decision where this is a decision that was made.
+        """
+        return self.state == "CLOSED"
 
 
 @dataclass(frozen=True)
@@ -1123,6 +1136,7 @@ def reap_decision(
     force: bool,
     *,
     pr_merged: bool = False,
+    pr_closed: bool = False,
     holds_uncommitted: bool = True,
     awaiting_pr: bool = False,
 ) -> tuple[bool, str]:
@@ -1151,8 +1165,23 @@ def reap_decision(
     hand (`reap`, and `list` through `survey`); `reconcile` passes a `pr` instead and
     is never flagged, so its pressure and `max_age_days` paths still reap an open PR
     deliberately. A merge clears it, which is what `pr_merged` is doing here.
+
+    So does a **close**, and not because the work landed -- it did not. `awaiting_pr`
+    names a wait, and a closed PR is the end of one: someone read the branch and
+    declined it, so there is no review left to answer in this checkout and no merge
+    left to arrive. Left set, it made every closed-PR box a permanent `needs-pr` --
+    reported as holding work it does not hold, leaking a checkout, a lease and a
+    volume set, with `--force` as the only way out. That is the same leak `reapable`
+    documents for squash merges, reached from the opposite end, and it happened here:
+    two boxes whose duplicate PRs were closed on 2026-08-20 had to be forced.
+
+    A close does **not** stand in for a merge anywhere else, and `reapable` is the
+    line: `needs-rebranch` plus a closed PR is an abandoned branch, which is precisely
+    the case `MERGE_CAN_BE_STALE_ABOUT` exists to keep holding. What is cleared here
+    is a *policy* refusal about a box whose commits are already on the remote, never
+    the safety predicate underneath it.
     """
-    if awaiting_pr and not pr_merged:
+    if awaiting_pr and not (pr_merged or pr_closed):
         if force:
             return True, (
                 f"forced past `{verdict}` ({reason}) — the PR has not merged, so this "
@@ -1216,6 +1245,7 @@ def reap_plan(
     verdict: str,
     reason: str,
     pr_merged: bool = False,
+    pr_closed: bool = False,
     force: bool = False,
     keep_stack: bool = False,
     has_stack: bool = False,
@@ -1256,6 +1286,7 @@ def reap_plan(
         reason,
         force,
         pr_merged=pr_merged,
+        pr_closed=pr_closed,
         holds_uncommitted=bool(state.dirty),
         awaiting_pr=awaiting_pr,
     )
@@ -1439,6 +1470,11 @@ def reconcile_action(
 
     - **merged** -- the work is on the default branch. Nothing is left to lose and the
       box is pure cost, so it goes regardless of age or pressure.
+    - **closed** -- declined rather than landed, which changes where the content ended
+      up and not whether the box is finished. The commits are on the remote, the PR can
+      be reopened without this checkout, and nothing further will be reviewed in it. It
+      used to fall through to the `needs-pr` case below and wait forever for a PR that
+      already existed.
     - **open** -- every commit is on the remote, so reaping costs only the convenience
       of still having the checkout. That is worth paying for a while (`WAIT`), and not
       worth paying past `max_age_days` or under `pressure`. `automerge` is offered
@@ -1447,9 +1483,10 @@ def reconcile_action(
     - **no PR** -- a box that was cut and never used, which is the commonest kind: the
       guard hook cuts one per (session, project) whether or not that session writes
       anything. Nothing was ever at stake, so it goes immediately.
-    - **no PR but pushed** -- `needs-pr` with nothing on GitHub. Never destroyed and
-      never merged: the commits are safe on the remote but nobody will ever look at
-      them, and that is a person's decision, not a cleanup's.
+    - **no PR but pushed** -- `needs-pr` with nothing on GitHub *at all*, which is the
+      one case here where no person has ruled on the branch. Never destroyed and never
+      merged: the commits are safe on the remote but nobody will ever look at them, and
+      whether that is finished is a person's decision, not a cleanup's.
     """
     if not reapable(verdict, pr_merged=pr.merged, holds_uncommitted=holds_uncommitted):
         return HOLD, f"{verdict} -- {reason}"
@@ -1469,6 +1506,13 @@ def reconcile_action(
 
     if pr.merged:
         return REAP, f"PR #{pr.number} merged"
+
+    if pr.is_closed:
+        # Reached only for a verdict `reapable` already cleared, which for a task box
+        # means the remote has every commit. So what a close settles is the *policy*
+        # question this pass adds on top -- is anyone still going to use this checkout
+        # -- and the answer a person recorded on GitHub is no.
+        return REAP, f"PR #{pr.number} closed without merging"
 
     if pr.is_open:
         if automerge:
@@ -2490,10 +2534,21 @@ def plan_reap(
 ) -> ReapPlan:
     """Everything `reap` will run for one box, resolved from disk.
 
-    `pr` short-circuits the merged-PR lookup for a caller that already made it.
-    `reconcile` asks GitHub about every box in order to decide what to do with it, and
-    asking a second time here would double a pass's network cost for an answer it is
-    already holding.
+    `pr` short-circuits the lookup for a caller that already made it. `reconcile` asks
+    GitHub about every box in order to decide what to do with it, and asking a second
+    time here would double a pass's network cost for an answer it is already holding.
+
+    The lookup is `pr_for` rather than `sweep.has_merged_pr`: same one `gh` call, and
+    it answers with the PR's *state* instead of a single boolean, which is what lets a
+    closed PR clear `awaiting_pr` (see `reap_decision`). Asking the same question as
+    `reconcile` also means the two stop being able to disagree about one box -- the
+    disagreement `AWAITS_A_MERGE` was added to stop appearing between `list` and
+    `reconcile`. `--no-fetch` skips it and therefore sees neither a merge nor a close,
+    exactly as before.
+
+    `awaiting_pr` still reads the *caller's* `pr`, never the looked-up one: it asks
+    whether whoever called this had a PR in hand, and answering it from a lookup made
+    here would turn the flag off for every caller and delete the refusal.
     """
     root = workspace.parent
     boxes = read_leases(root)
@@ -2508,19 +2563,18 @@ def plan_reap(
         box = Box(name=name, project=project_of(name), branch="", slot=-1)
 
     state, verdict, reason = inspect_box(box, root, fetch=fetch)
-    if pr is not None:
-        pr_merged = pr.merged
-    else:
-        pr_merged = False
-        if fetch and box.branch and state.host == "github":
-            pr_merged = sweep.has_merged_pr(sweep.gh_for(path), box.branch)
+    found = pr
+    if found is None and fetch and box.branch and state.host == "github":
+        found = pr_for(sweep.gh_for(path), box.branch)
+    found = found or PullRequest()
     return reap_plan(
         box=box,
         workspace_root=root,
         state=state,
         verdict=verdict,
         reason=reason,
-        pr_merged=pr_merged,
+        pr_merged=found.merged,
+        pr_closed=found.is_closed,
         force=force,
         keep_stack=keep_stack,
         has_stack=has_stack(path),
