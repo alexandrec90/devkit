@@ -312,6 +312,79 @@ def load(root: Path) -> Config:
     return Config()
 
 
+def harness_version(root: Path) -> str:
+    """The vendored harness's provenance, for a hook to stamp on what it tells an agent.
+
+    Returns the short `DEVKIT_VERSION` SHA in a consuming project, `"source"` in devkit
+    itself (which has no such file because it *is* the upstream), and `""` when neither
+    can be determined -- callers omit the stamp rather than print a placeholder.
+
+    Why a hook message should carry this at all. A vendored gate is a **copy**, and it
+    is routinely months of fixes behind the repo it came from: at the time of writing
+    every consumer in this workspace is pinned at the v0.10.2 merge while nine
+    subsequent PRs -- two of them fixes to this very gate's false positives -- sit
+    upstream. An agent that trips over one of those has no way to tell "devkit is
+    wrong" from "this copy of devkit is old", so it reports the block as a defect, a
+    human relays it upstream, and it is closed as already-fixed. The version is the one
+    fact that distinguishes the two cases, it costs one file read, and the agent cannot
+    obtain it any other way without spending a turn.
+
+    Never raises: this is called from hooks, on the path where they are already
+    reporting something else.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        stamp = (root / "DEVKIT_VERSION").read_text(encoding="utf-8").strip()
+        # The file holds a SHA by contract (see `sync-devkit.stale_pin`). Trim it to
+        # the length a human pastes into `git show`, and refuse anything that is not
+        # one rather than echoing arbitrary file content into an agent's context.
+        first = stamp.split()[0] if stamp.split() else ""
+        if first and len(first) >= 7 and all(c in "0123456789abcdef" for c in first.lower()):
+            return first[:12]
+    if is_devkit_source(root):
+        # devkit vendors *out* of itself and so carries no stamp. Saying "source" is
+        # more useful than saying nothing: it tells the agent this copy cannot be
+        # behind, so a defect here is genuinely a defect and worth reporting.
+        return "source"
+    return ""
+
+
+def is_devkit_source(root: Path) -> bool:
+    """Whether `root` is devkit itself rather than a project that vendored it.
+
+    Read from `pyproject.toml`'s project name, **not** from the directory name: devkit
+    develops itself in ephemeral boxes under `.worktrees/devkit--<slug>/`, so the
+    directory is `devkit` in exactly the checkout where nobody is working. The name
+    is the fallback for a repo with no parseable `pyproject.toml`.
+    """
+    with contextlib.suppress(OSError, ValueError, KeyError, TypeError, ImportError):
+        import tomllib  # stdlib 3.11+; guarded for older shims
+
+        with (root / "pyproject.toml").open("rb") as fh:
+            return bool(tomllib.load(fh)["project"]["name"] == "devkit")
+    return root.name == "devkit"
+
+
+def provenance(root: Path) -> str:
+    """The one-line footer a hook appends when it tells an agent something is wrong.
+
+    Deliberately terse. It fires on every block -- 150-odd times a month in this
+    workspace -- so it has to be worth its bytes on the calls where nothing is wrong
+    with the harness at all. What earns them is the second clause: it names the check
+    that settles "already fixed upstream?" without the agent having to know
+    `sync-devkit.py` exists.
+    """
+    version = harness_version(root)
+    if not version:
+        return ""
+    if version == "source":
+        return "(devkit harness: this repo is the source, so this behaviour is current.)"
+    return (
+        f"(devkit harness {version} -- a vendored copy, which may be behind. If this "
+        f"looks wrong, check for an upstream fix before reporting it: "
+        f"python scripts/sync-devkit.py --check)"
+    )
+
+
 def lookup(cfg: Config, dotted: str) -> str:
     """One config value as a plain string, for shell callers. Never raises.
 

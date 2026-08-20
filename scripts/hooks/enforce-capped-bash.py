@@ -206,8 +206,20 @@ POWERSHELL_NOISY_COMMANDS = (
 POWERSHELL_CONTENT_CAP_RE = re.compile(r"-(?:TotalCount|Tail)\s+\d+(?=\s|$)", re.IGNORECASE)
 
 
-def block_message(reasons: list[str], max_bytes: int, command_shell: str = "bash") -> str:
-    """The reason string fed back to the agent: what is unbounded, and the way out."""
+def block_message(
+    reasons: list[str],
+    max_bytes: int,
+    command_shell: str = "bash",
+    stamp: str = "",
+) -> str:
+    """The reason string fed back to the agent: what is unbounded, and the way out.
+
+    `stamp` is `harness_config.provenance()` -- which copy of the harness decided this,
+    appended as a footer. It is here rather than at the top because the actionable half
+    has to lead; and it is on the *block* path only, because that is the message an
+    agent goes on to report as a devkit defect when the copy that produced it was
+    simply old. See `harness_config.harness_version` for what that costs today.
+    """
     shell_flag = " --shell powershell" if command_shell == "powershell" else ""
     bullets = "\n".join(f"  - {reason}" for reason in dict.fromkeys(reasons))
     cap_forms = (
@@ -225,7 +237,7 @@ def block_message(reasons: list[str], max_bytes: int, command_shell: str = "bash
         f'--command "<your command>" --max-bytes {max_bytes}\n'
         "Nothing else is gated. This is a short blocklist of tree-scaling commands, "
         "not a requirement to prove every call is bounded -- so do not wrap commands "
-        "it did not name."
+        "it did not name." + (f"\n{stamp}" if stamp else "")
     )
 
 
@@ -506,12 +518,14 @@ def decide(
     raw: str,
     max_bytes: int | None = None,
     command_shell: str = "bash",
+    stamp: str = "",
 ) -> tuple[int, str]:
     """Pure decision: map raw stdin payload to (exit_code, message).
 
     exit_code 0 allows the call, EXIT_BLOCK blocks it. message may be empty.
     `max_bytes` defaults to the manifest value; injectable so a test does not
-    depend on the repo it happens to run in.
+    depend on the repo it happens to run in, and `stamp` for the same reason --
+    the provenance footer names a SHA, which no assertion should have to predict.
     """
     cap = CFG.bash.max_bytes if max_bytes is None else max_bytes
 
@@ -541,14 +555,18 @@ def decide(
     if not reasons:
         return 0, ""
 
-    return EXIT_BLOCK, block_message(reasons, cap, command_shell=command_shell)
+    return EXIT_BLOCK, block_message(reasons, cap, command_shell=command_shell, stamp=stamp)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--shell", choices=("bash", "powershell"), default="bash")
     args = parser.parse_args(argv)
-    exit_code, message = decide(sys.stdin.read(), command_shell=args.shell)
+    exit_code, message = decide(
+        sys.stdin.read(),
+        command_shell=args.shell,
+        stamp=harness_config.provenance(REPO_ROOT),
+    )
     if message:
         # stderr, not stdout: only stderr is surfaced for a blocking hook.
         print(message, file=sys.stderr)

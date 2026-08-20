@@ -58,15 +58,15 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from conftest import REPO_ROOT, load_module
 
-hook = load_module("scripts/hooks/stop.py")
-
 SETTINGS = REPO_ROOT / ".claude" / "settings.json"
+MANIFEST = REPO_ROOT / ".devkit.toml"
 
 # Claude Code's hook contract, and the whole point of this file. 0 allows the call; 2
 # blocks it and feeds stderr to the model. 1 is the ordinary "this hook errored"
@@ -202,17 +202,43 @@ def declared_exit_codes(source: str) -> set[int]:
     return codes
 
 
+def env_prefix() -> str:
+    """The project's control-env prefix, read from `.devkit.toml` and nothing else.
+
+    `harness_config.Config.env()` is the authority on this and is *not* used here, on
+    purpose. This file's whole job is to keep running when a hook module is broken --
+    the 2026-08-19 outage was a hook dying because a module it imports had unresolved
+    conflict markers in it -- and importing that module at collection time would take
+    the entire contract suite down with the very defect it exists to report. So the
+    prefix comes from the manifest via `tomllib`, which is stdlib and reads data rather
+    than executing it. `test_the_env_prefix_matches_harness_config` pins the two
+    together, and pays the import inside a single test so only that one goes red.
+    """
+    default = "DEVKIT"
+    if not MANIFEST.is_file():
+        return default
+    try:
+        data = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return default
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return default
+    found = project.get("env_prefix", default)
+    return found if isinstance(found, str) and found else default
+
+
 def inert_env() -> dict[str, str]:
     """The environment every hook subprocess runs under.
 
     `stop.py` is the one hook whose no-op branch is not reachable from a degenerate
     payload: absent `stop_hook_active` it assumes a real Stop and runs the project's
     whole lint-and-test gate, which would turn one contract test into the slowest thing
-    in CI. Its documented opt-out is the seam, and the variable is read from config
-    because it is prefixed per project (`DEVKIT_`, `CARAMELI_`, ...) -- spelling it
-    here would be exactly the hard-coded project value this tree forbids.
+    in CI. Its documented opt-out is the seam, and the variable is prefixed per project
+    (`DEVKIT_`, `CARAMELI_`, ...) -- spelling one of them here would be exactly the
+    hard-coded project value this tree forbids.
     """
-    return {**os.environ, hook.SKIP_VERIFY_ENV: "1"}
+    return {**os.environ, f"{env_prefix()}_SKIP_STOP_VERIFY": "1"}
 
 
 def run_hook(script: Path, payload: str, timeout: float = HOOK_TIMEOUT):
@@ -419,6 +445,35 @@ def test_the_bash_gate_allows_a_capped_command():
 
 
 # --- The helpers this file leans on ----------------------------------------------
+
+
+def test_the_env_prefix_matches_harness_config():
+    """`env_prefix()` must agree with the authority it deliberately does not import.
+
+    The one test in this file that loads a hook module, so a broken harness tree costs
+    exactly this assertion instead of the whole suite -- which is the arrangement
+    `env_prefix` exists to buy.
+    """
+    cfg = load_module("scripts/hooks/harness_config.py")
+    authoritative = cfg.load(REPO_ROOT).env("SKIP_STOP_VERIFY")
+    assert f"{env_prefix()}_SKIP_STOP_VERIFY" == authoritative
+
+
+def test_env_prefix_falls_back_when_the_manifest_is_unreadable(monkeypatch, tmp_path):
+    """A missing or malformed `.devkit.toml` yields the default, never an exception."""
+    monkeypatch.setattr(sys.modules[__name__], "MANIFEST", tmp_path / "absent.toml")
+    assert env_prefix() == "DEVKIT"
+    broken = tmp_path / "broken.toml"
+    broken.write_text("[project\nenv_prefix =", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "MANIFEST", broken)
+    assert env_prefix() == "DEVKIT"
+
+
+def test_env_prefix_reads_a_project_override(monkeypatch, tmp_path):
+    manifest = tmp_path / ".devkit.toml"
+    manifest.write_text('[project]\nenv_prefix = "CARAMELI"\n', encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "MANIFEST", manifest)
+    assert env_prefix() == "CARAMELI"
 
 
 def test_declared_exit_codes_reads_both_spellings():
