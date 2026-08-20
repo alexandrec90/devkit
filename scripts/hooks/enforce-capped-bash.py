@@ -86,7 +86,13 @@ WRAPPER_RE = re.compile(r"scripts/hooks/invoke-capped\.py")
 # missing spelling only matters for the nine commands below, and `wc` joins the list for
 # free -- it consumes a stream and answers with three integers.
 CAP_RE = re.compile(
-    r"^(?:head|tail)\s+(?:-c\s*\d+|-n\s*\d+|-\d+)(?=\s|$)"
+    # The count is optional because `head` and `tail` are bounded without one: both
+    # default to ten lines, so a bare `| head` caps as truly as `| head -20` does, and
+    # requiring the number blocked `git status --porcelain | head`. The lookahead is
+    # what keeps that from admitting the spellings that are *not* bounded -- `tail -f`
+    # follows forever and `tail -n +5` counts from the front -- so an unrecognised flag
+    # disqualifies the segment while a plain operand (`head file`) does not.
+    r"^(?:head|tail)(?:\s+(?:-c\s*\d+|-n\s*\d+|-\d+))?(?=\s+[^-\s]|\s*$)"
     r"|^wc(?:\s|$)"
     # A counting grep emits one number per input, so it bounds a pipeline the same
     # way `wc` does -- `git show <ref>:<file> | grep -c foo` was blocked for want of
