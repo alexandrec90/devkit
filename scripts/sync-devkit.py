@@ -88,6 +88,27 @@ DEVKIT_SLUG = "alexandrec90/devkit"
 # `getattr` supplies zero off Windows, where the flag does not exist.
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+
+def console_python() -> str:
+    """The console interpreter beside `sys.executable`, for spawning a Python child.
+
+    `NO_WINDOW` is necessary and **not sufficient**. Windows ignores
+    `CREATE_NO_WINDOW` for a GUI-subsystem child, so passing the flag alongside
+    `pythonw.exe` -- which is what `sys.executable` is under a scheduled job -- leaves
+    that child console-*less*, the exact condition that makes Windows open a fresh
+    visible console for each of *its* children. Spawn a console interpreter with the
+    flag instead and the child gets a hidden console that every descendant inherits.
+    Pair the two; neither alone suppresses a window. Identity off Windows, and under
+    any session that already has a console.
+    """
+    executable = Path(sys.executable)
+    if executable.name.lower() != "pythonw.exe":
+        return sys.executable
+    console = executable.with_name("python.exe")
+    # An embedded install could ship `pythonw.exe` with no console twin next to it.
+    return str(console) if console.exists() else sys.executable
+
+
 # Repo-relative paths of the shared harness files (source of truth = shared repo).
 # Every entry ships with its test; keep both in the manifest so a vendored copy is
 # verifiable in isolation. NB: `.devkit.toml` is intentionally absent -- it
@@ -866,7 +887,7 @@ CODEX_GENERATOR = "scripts/sync-codex-hooks.py"
 
 def _codex_generator(root: Path, *flags: str) -> list[str]:
     return [
-        sys.executable,
+        console_python(),
         str(root / CODEX_GENERATOR),
         *flags,
         str(root / SETTINGS_FILE),

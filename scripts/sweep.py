@@ -151,6 +151,38 @@ Git = Callable[..., "subprocess.CompletedProcess[str]"]
 # for mypy to check on both platforms.
 NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+
+def console_python() -> str:
+    """The console interpreter beside `sys.executable`, for spawning a Python child.
+
+    `NO_WINDOW` is necessary and **not sufficient**, and the gap between the two is
+    what put a sixteen-second `ensurepip` window on screen every night. Windows
+    ignores `CREATE_NO_WINDOW` for a **GUI-subsystem** child: `pythonw.exe` has no
+    console to suppress, so the flag is a no-op there and the child is left
+    console-*less* -- which is precisely the condition that makes Windows allocate a
+    fresh visible console for each of *its* children. The flag protects the one hop it
+    is passed to and then loses the entire subtree behind it.
+
+    A console-subsystem child spawned with `CREATE_NO_WINDOW` gets a real console that
+    is merely hidden, and **every descendant inherits it**. One flagged hop to
+    `python.exe` therefore covers `-m venv` and the `ensurepip` it re-spawns, `-m
+    pre_commit` and each hook under it, and whatever a delegate script reaches -- none
+    of which take a `creationflags` argument from here.
+
+    So under a scheduled job, where `sys.executable` *is* `pythonw.exe`, spawn a Python
+    child as `console_python()` with `creationflags=NO_WINDOW`; neither alone is
+    enough. Everywhere else `sys.executable` already names a console interpreter and
+    this is the identity.
+    """
+    executable = Path(sys.executable)
+    if executable.name.lower() != "pythonw.exe":
+        return sys.executable
+    console = executable.with_name("python.exe")
+    # An embedded install could ship `pythonw.exe` with no console twin. Falling back
+    # keeps the spawn working -- with a window -- rather than raising from a hook.
+    return str(console) if console.exists() else sys.executable
+
+
 # --- verdicts ---------------------------------------------------------------
 # Ordered roughly by how much attention each needs.
 BLOCKED = "blocked"  # a human has to look; the sweep will not guess

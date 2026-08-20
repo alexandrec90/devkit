@@ -147,6 +147,26 @@ def windowless(python: str) -> str:
     return candidate if os.path.isfile(candidate) else python
 
 
+def console(python: str) -> str:
+    """`python.exe` beside `pythonw.exe`, for the command the wrapper actually runs.
+
+    The inverse of `windowless`, and the two are not interchangeable halves of a
+    preference: the task's own `<Command>` must be windowless, and the interpreter
+    *inside* the wrapped argv must not be. `log-wrap.py` spawns it with
+    `CREATE_NO_WINDOW`, which Windows **ignores for a GUI-subsystem child** -- so a
+    `pythonw.exe` there is left with no console at all, and every process it goes on to
+    spawn is handed a fresh visible one. A console child with the flag gets a hidden
+    console instead, and passes it down.
+
+    Falls back to the given interpreter when there is no `python.exe` beside it, and is
+    the identity for the console interpreter a human installs from.
+    """
+    if os.path.basename(python).lower() != "pythonw.exe":
+        return python
+    candidate = os.path.join(os.path.dirname(python), "python.exe")
+    return candidate if os.path.isfile(candidate) else python
+
+
 def merge_arguments(
     python: str,
     root: Path = REPO_ROOT,
@@ -157,8 +177,9 @@ def merge_arguments(
 
     Nested `log-wrap.py --always <label> -- <python> git-merge-default.py ...`, the same
     nesting a dispatched VS Code task gets from `devkit_project.plan_command`. The inner
-    interpreter is windowless too: Windows allocates a console window for a
-    console-subsystem child of a GUI-subsystem parent even with every handle redirected.
+    interpreter is the **console** one (`console`, not `windowless`): the wrapper spawns
+    it with `CREATE_NO_WINDOW`, which Windows ignores for a GUI-subsystem child, so a
+    `pythonw.exe` here would be console-less and give each `git` below it a window.
 
     `--workspace` is passed explicitly even though the script resolves the same path from
     its own location. A scheduled task's registered command line is the only record of
@@ -174,7 +195,7 @@ def merge_arguments(
             "--always",
             f'"{LABEL}"',
             "--",
-            f'"{python}"',
+            f'"{console(python)}"',
             f'"{merge_script(root)}"',
             "--checkout",
             checkout,

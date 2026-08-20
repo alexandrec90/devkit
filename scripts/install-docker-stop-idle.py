@@ -90,13 +90,34 @@ def windowless(python: str) -> str:
     return candidate if os.path.isfile(candidate) else python
 
 
+def console(python: str) -> str:
+    """`python.exe` beside `pythonw.exe`, for the command the wrapper actually runs.
+
+    The inverse of `windowless`, and the two are not interchangeable halves of a
+    preference: the task's own `<Command>` must be windowless, and the interpreter
+    *inside* the wrapped argv must not be. `log-wrap.py` spawns it with
+    `CREATE_NO_WINDOW`, which Windows **ignores for a GUI-subsystem child** -- so a
+    `pythonw.exe` there is left with no console at all, and every process it goes on to
+    spawn is handed a fresh visible one. A console child with the flag gets a hidden
+    console instead, and passes it down.
+
+    Falls back to the given interpreter when there is no `python.exe` beside it, and is
+    the identity for the console interpreter a human installs from.
+    """
+    if os.path.basename(python).lower() != "pythonw.exe":
+        return python
+    candidate = os.path.join(os.path.dirname(python), "python.exe")
+    return candidate if os.path.isfile(candidate) else python
+
+
 def stop_idle_arguments(python: str, root: Path = REPO_ROOT) -> str:
     """The arguments the scheduled task runs, as one string -- interpreter excluded.
 
     Nested `log-wrap.py --always <label> -- <python> docker-maint.py ...`, with the
-    inner interpreter windowless too: a console-subsystem `python.exe` spawned from a
-    GUI-subsystem parent is allocated its own console window by Windows even when all
-    three of its handles are redirected.
+    inner interpreter the **console** one (`console`, not `windowless`): the wrapper
+    spawns it with `CREATE_NO_WINDOW`, which Windows ignores for a GUI-subsystem child,
+    so a `pythonw.exe` here would be console-less and hand each `docker` below it a
+    fresh visible console.
 
     Every path is quoted: this workspace lives under a user profile, and profile names
     contain spaces on most machines that are not this one.
@@ -107,7 +128,7 @@ def stop_idle_arguments(python: str, root: Path = REPO_ROOT) -> str:
             "--always",
             f'"{LABEL}"',
             "--",
-            f'"{python}"',
+            f'"{console(python)}"',
             f'"{maint_script(root)}"',
             *STOP_IDLE_ARGS,
         ]
@@ -191,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     python = windowless(sys.executable)
-    arguments = stop_idle_arguments(python)
+    arguments = stop_idle_arguments(sys.executable)
     if not args.apply:
         print(
             f'Would run: "{python}" {arguments}\n\n'
