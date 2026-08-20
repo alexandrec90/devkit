@@ -69,6 +69,7 @@ import contextlib
 import datetime as _dt
 import json
 import os
+import re
 import shutil
 import stat
 import string
@@ -717,11 +718,17 @@ def venv_step(python_version: str = "") -> ProvisionStep:
     provisioned: the mismatch surfaces later as a resolution or type-check failure that
     reads as a broken branch rather than as the wrong interpreter.
 
-    `[python] version` in `.devkit.toml` is the seam, because the pin lives in files
-    devkit does not parse and cannot keep parsing as projects change build systems. With
-    it set, `uv venv --python` picks that interpreter — and fetches it when the machine
-    has no such version, which `python -m venv` structurally cannot do, since it can only
-    ever produce a copy of the interpreter already running it.
+    The version reaching here is `[python] version` from `.devkit.toml`, or failing that
+    whatever `detect_python_version` reads off the project's own build files. With one,
+    `uv venv --python` picks that interpreter — and fetches it when the machine has no such
+    version, which `python -m venv` structurally cannot do, since it can only ever produce
+    a copy of the interpreter already running it.
+
+    The manifest was the sole source at first, on the reasoning that devkit should not
+    parse build files it does not own. That held for the projects that filled the field in
+    and left every other one exactly as broken as before: carameli pinned 3.12 in three
+    places devkit could see and still got a 3.14 box, because an absent field reads as
+    "unpinned" rather than as "not asked".
     """
     if python_version:
         return ProvisionStep(
@@ -808,6 +815,49 @@ def provision_steps(
 PROVISION_MARKERS = ("uv.lock", "requirements.txt", "requirements-dev.txt", "pyproject.toml")
 
 
+# The build files that pin an interpreter *unambiguously*, in the order they win. A
+# `requires-python` floor is deliberately absent: `>=3.12` is satisfied by 3.14, which is
+# the very skew this exists to stop.
+PIN_FILES = (".python-version", "Dockerfile")
+
+_FROM_PYTHON = re.compile(
+    r"^\s*FROM\s+(?:--\S+\s+)*python:(\d[^\s@]*)", re.IGNORECASE | re.MULTILINE
+)
+
+
+def detect_python_version(source: Path) -> tuple[str, str]:
+    """The interpreter a project pins in its own build files, and which file said so.
+
+    `[python] version` in `.devkit.toml` is the seam and still wins, but a project that
+    never sets it is not therefore unpinned — carameli pins 3.12 in `FROM python:3.12-slim`
+    and got a box venv on the workstation's 3.14 anyway, because the manifest field was the
+    *only* thing consulted and an absent field is indistinguishable from "no pin". That is
+    the same detect-first shape `install_command` already has: read what the files on disk
+    say, and keep the manifest for the projects they do not describe.
+
+    Only the two spellings that name an exact interpreter count. An `ARG`-interpolated tag
+    (`FROM python:${PYTHON_VERSION}`) does not match, and neither does a pyenv virtualenv
+    name in `.python-version`; both leave the box on the running interpreter, as before.
+
+    Returns `("", "")` when nothing pins one.
+    """
+    for name in PIN_FILES:
+        try:
+            text = (source / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if name == ".python-version":
+            line = text.strip().splitlines()[0].strip() if text.strip() else ""
+            if line and line[0].isdigit():
+                return line, name
+            continue
+        match = _FROM_PYTHON.search(text)
+        if match:
+            # `3.12-slim`, `3.12.7-bookworm` -> the version, without the variant.
+            return match.group(1).split("-")[0], name
+    return "", ""
+
+
 def plan_provision(source: Path, windows: bool = os.name == "nt") -> tuple[ProvisionStep, ...]:
     """`provision_steps` for a real checkout: read the markers and the manifest."""
     present = {name for name in PROVISION_MARKERS if (source / name).is_file()}
@@ -830,6 +880,15 @@ def plan_provision(source: Path, windows: bool = os.name == "nt") -> tuple[Provi
             f"provisioning from the lockfiles alone.",
             file=sys.stderr,
         )
+    if not python_version:
+        python_version, origin = detect_python_version(source)
+        if python_version:
+            print(
+                f"worktree: no [python] version in {source.name}/.devkit.toml; "
+                f"provisioning on {python_version}, the pin in {origin}. Set the field to "
+                f"override it.",
+                file=sys.stderr,
+            )
     return provision_steps(
         present, install_command, frontend_dir, windows=windows, python_version=python_version
     )
