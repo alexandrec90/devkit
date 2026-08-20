@@ -18,6 +18,12 @@ Three things pin a devkit **tag**, never a branch:
 paths normally return the same thing, so **a feature that is not tagged does not exist
 as far as a generated project is concerned**, no matter that it is on `main`.
 
+The same holds for a project that already exists: `upgrade-project.py` pulls from a
+worktree at the newest tag, so an untagged MANIFEST change is invisible to a consumer
+that has just upgraded — and to everyone reading its green gate. That run now names the
+vendored files main carries and the tag does not (`unreleased_vendored_changes`); when it
+does, the fix is a release, not a re-run.
+
 ## Use the workflow
 
 `.github/workflows/release.yml` does all of this. It is `workflow_dispatch` with a

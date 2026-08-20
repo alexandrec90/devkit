@@ -1139,3 +1139,80 @@ def test_an_unwritable_logs_directory_does_not_fail_the_upgrade(tmp_path):
     blocked = tmp_path / "wall"
     blocked.write_text("not a directory", encoding="utf-8")
     assert up.write_artifact(blocked, "anything") is None
+
+
+# --- what the tag does not carry ---
+
+
+def diffs(names: list[str], code: int = 0, default: str = "master"):
+    """A git whose `diff --name-only <tag>..origin/<default>` serves `names`."""
+
+    def git(*args: str):
+        if args[:2] == ("diff", "--name-only"):
+            return subprocess.CompletedProcess(["git", *args], code, "\n".join(names), "")
+        if args[:2] == ("symbolic-ref", "refs/remotes/origin/HEAD"):
+            return subprocess.CompletedProcess(["git", *args], 0, f"origin/{default}", "")
+        return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+    return git
+
+
+def lag(monkeypatch, changed: list[str], vendored: list[str], code: int = 0):
+    monkeypatch.setattr(up.sweep, "git_for", lambda _p: diffs(changed, code))
+    monkeypatch.setattr(up.tb, "detect_default_branch", lambda *_a, **_kw: "master")
+    monkeypatch.setattr(up, "manifest_paths", lambda: vendored)
+    return up.unreleased_vendored_changes(Path("devkit"), "v0.5.3")
+
+
+def test_a_vendored_fix_that_is_not_tagged_yet_is_reported(tmp_path, monkeypatch):
+    """The whole delivery gap: this script pulls from a worktree at the newest tag, so
+    a MANIFEST change merged after it reaches nobody, and both ends stay green."""
+    found = lag(
+        monkeypatch,
+        ["scripts/hooks/enforce-capped-bash.py", "README.md"],
+        ["scripts/hooks/enforce-capped-bash.py"],
+    )
+    assert found == ["scripts/hooks/enforce-capped-bash.py"]
+
+
+def test_a_change_outside_the_manifest_is_not_a_delivery_gap(tmp_path, monkeypatch):
+    """devkit's own generator and workspace tooling are never vendored, so main moving
+    ahead of the tag there costs a consumer nothing. Warning about it would fire on
+    every run and teach the reader to skip the line that matters."""
+    assert (
+        lag(monkeypatch, ["scripts/new-project.py", "tests/test_sweep.py"], ["MANIFEST.md"]) == []
+    )
+
+
+def test_a_git_that_cannot_answer_is_not_a_gap(tmp_path, monkeypatch):
+    """Best-effort: a diagnostic must never fail the upgrade it annotates."""
+    assert lag(monkeypatch, ["scripts/hooks/hook.py"], ["scripts/hooks/hook.py"], code=128) == []
+
+
+def test_the_warning_names_the_files_rather_than_counting_them():
+    """A count cannot answer the reader's only question -- whether the fix they came
+    for is in it."""
+    line = up.unreleased_line(["scripts/hooks/enforce-capped-bash.py"], "v0.5.3")
+    assert "scripts/hooks/enforce-capped-bash.py" in line
+    assert "v0.5.3" in line and "RELEASING.md" in line
+
+
+def test_no_gap_says_nothing():
+    assert up.unreleased_line([], "v0.5.3") == ""
+
+
+def test_the_gap_is_reported_once_for_the_run_before_any_box(tmp_path, capsys, monkeypatch):
+    """Once, and early: the answer is the same for every project, and a reader who came
+    for a specific vendored fix needs it before four green adoption lines."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    monkeypatch.setattr(
+        up, "unreleased_vendored_changes", lambda *_a: ["scripts/hooks/enforce-capped-bash.py"]
+    )
+    stamps_on_main(monkeypatch)
+    for name in ("carameli", "ibkr_trader"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli", "ibkr_trader")
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    assert capsys.readouterr().err.count("enforce-capped-bash.py") == 1

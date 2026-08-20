@@ -85,7 +85,14 @@ WRAPPER_RE = re.compile(r"scripts/hooks/invoke-capped\.py")
 # here was a false positive, and finding them all took four commits; under a blocklist a
 # missing spelling only matters for the nine commands below, and `wc` joins the list for
 # free -- it consumes a stream and answers with three integers.
-CAP_RE = re.compile(r"^(?:head|tail)\s+(?:-c\s*\d+|-n\s*\d+|-\d+)(?=\s|$)|^wc(?:\s|$)")
+CAP_RE = re.compile(
+    r"^(?:head|tail)\s+(?:-c\s*\d+|-n\s*\d+|-\d+)(?=\s|$)"
+    r"|^wc(?:\s|$)"
+    # A counting grep emits one number per input, so it bounds a pipeline the same
+    # way `wc` does -- `git show <ref>:<file> | grep -c foo` was blocked for want of
+    # this spelling. `-C 3` is context, not count, so the match stays case-sensitive.
+    r"|^(?:e|f)?grep\s+(?:\S+\s+)*?(?:-[a-zA-Z]*c|--count)(?=\s|$)"
+)
 
 # Redirection of stdout to a file bounds a statement by sending its output somewhere that
 # is not the agent's context at all. Matches only *stdout*: `2>&1` and `>&2` duplicate a
