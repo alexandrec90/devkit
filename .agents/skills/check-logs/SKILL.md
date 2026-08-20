@@ -112,6 +112,9 @@ checkouts synced. Two readings that are easy to get backwards:
 - **A box whose PR was *closed* rather than merged is different**, and worth surfacing:
   its commits exist nowhere else, and no schedule will ever clear it. Check with
   `gh pr view <n> --json state,mergedAt` before calling it abandoned.
+- **A box that is simply gone** is answered by `logs/worktree-reaped.log`, not by this
+  one. It is append-only, so grep it for the box name; the line says which verdict
+  destroyed it, whether it was forced, and how many uncommitted files it held.
 
 ## Reporting
 
