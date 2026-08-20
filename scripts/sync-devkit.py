@@ -124,6 +124,10 @@ MANIFEST: tuple[str, ...] = (
     # the manifest that selects them is spelled right. No script of its own -- it
     # asserts against whatever the consuming repo already has.
     "scripts/hooks/tests/test_repo_contract.py",
+    # Execution contract: runs every hook the consuming repo actually wires, as a
+    # subprocess over JSON stdin, and asserts the exit codes Claude Code acts on.
+    # Also has no script of its own -- it reads that repo's `.claude/settings.json`.
+    "scripts/hooks/tests/test_hook_execution_contract.py",
     # Config loader (the per-project seam) + the Stop dispatcher it drives.
     "scripts/hooks/harness_config.py",
     "scripts/hooks/tests/test_harness_config.py",

@@ -375,6 +375,33 @@ def test_powershell_leaves_everything_else_alone():
     assert ps_allows("python -m pytest -q")
 
 
+def test_the_block_message_carries_the_harness_provenance_when_given_one():
+    """The stamp is injected, not read: the footer names a SHA, and an assertion that
+    had to predict it would pin this repo's current commit into the vendored suite."""
+    _, msg = hook.decide(
+        payload("Bash", "ls -la"), max_bytes=4000, stamp="(devkit harness deadbeef)"
+    )
+    assert msg.endswith("(devkit harness deadbeef)")
+    # The stamp is a footer, not a replacement -- the actionable half still leads.
+    assert "`ls`" in msg
+
+
+def test_no_stamp_leaves_the_message_exactly_as_it_was():
+    """A project whose harness cannot be identified gets the message unchanged, with
+    no trailing blank line hinting that something failed to render."""
+    _, msg = hook.decide(payload("Bash", "ls -la"), max_bytes=4000)
+    assert not msg.endswith("\n")
+
+
+def test_an_allowed_command_never_carries_a_stamp():
+    """The footer costs bytes in an agent's context; it is only earned when the hook
+    is the thing standing in the way."""
+    code, msg = hook.decide(
+        payload("Bash", "ls | wc -l"), max_bytes=4000, stamp="(devkit harness deadbeef)"
+    )
+    assert code == 0 and "deadbeef" not in msg
+
+
 def test_the_powershell_message_names_native_caps_only():
     _, msg = hook.decide(
         payload("Bash", "Get-ChildItem -Recurse"), max_bytes=4000, command_shell="powershell"

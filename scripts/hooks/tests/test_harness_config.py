@@ -344,3 +344,123 @@ def test_the_default_worktree_env_is_not_shared_between_configs():
     first = cfg.Config()
     first.worktree.env["X"] = "1"
     assert cfg.Config().worktree.env == {}
+
+
+# --- harness provenance -------------------------------------------------------
+#
+# What a hook stamps on the messages it sends an agent. The failure this exists to
+# stop is not a crash: it is an agent tripping over a gate, reporting it upstream as
+# a defect, and the report being closed as already-fixed because the copy that
+# blocked it was months behind. Only the version distinguishes the two cases, so
+# these tests pin that the stamp is either accurate or absent -- never a guess.
+
+
+# A fabricated commit SHA, kept in one place: detect-secrets scores any long hex run as
+# a high-entropy string and cannot tell a git SHA from a key. A SHA is public by nature,
+# and this one names no commit that exists.
+FAKE_SHA = "8a1894e2c3d4f5061728394a5b6c7d8e9f001122"  # pragma: allowlist secret
+
+
+def stamped(tmp_path: Path, contents: str | None, *, name: str = "someproject") -> str:
+    root = tmp_path / name
+    root.mkdir(exist_ok=True)  # callers reuse one tmp_path across several stamps
+    stamp = root / "DEVKIT_VERSION"
+    if contents is None:
+        stamp.unlink(missing_ok=True)
+    else:
+        stamp.write_text(contents, encoding="utf-8")
+    return cfg.harness_version(root)
+
+
+def test_a_vendored_copy_reports_its_pinned_sha(tmp_path):
+    assert stamped(tmp_path, FAKE_SHA + "\n") == FAKE_SHA[:12]
+
+
+def test_a_short_sha_is_reported_as_written(tmp_path):
+    """`sync-devkit.py` writes a full SHA, but a hand-edited stamp is still a fact
+    about this copy -- truncating to 12 must not become a floor of 12."""
+    assert stamped(tmp_path, FAKE_SHA[:7]) == FAKE_SHA[:7]
+
+
+def test_the_stamp_is_read_from_the_first_field(tmp_path):
+    """The file has carried a trailing annotation before now; the SHA is field one."""
+    assert stamped(tmp_path, f"{FAKE_SHA[:16]} v0.10.2 2026-08-14") == FAKE_SHA[:12]
+
+
+def test_devkit_itself_reports_source_rather_than_a_version(tmp_path):
+    """devkit vendors *out* of itself, so it carries no stamp. Saying `source` tells
+    the agent this copy cannot be behind -- a defect here is worth reporting."""
+    assert stamped(tmp_path, None, name="devkit") == "source"
+
+
+def test_the_source_checkout_is_recognised_by_its_project_name_not_its_directory(tmp_path):
+    """devkit develops itself in boxes under `.worktrees/devkit--<slug>/`, so the
+    directory is named `devkit` in exactly the checkout nobody is working in."""
+    root = tmp_path / "devkit--some-slug-0820"
+    root.mkdir()
+    (root / "pyproject.toml").write_text('[project]\nname = "devkit"\n', encoding="utf-8")
+    assert cfg.harness_version(root) == "source"
+
+
+def test_a_project_that_merely_lives_in_a_directory_named_devkit_is_not_the_source(tmp_path):
+    """The directory name is only the fallback; a manifest that names another project
+    outranks it, or every consumer cloned to `~/devkit` would claim to be upstream."""
+    root = tmp_path / "devkit"
+    root.mkdir()
+    (root / "pyproject.toml").write_text('[project]\nname = "carameli"\n', encoding="utf-8")
+    assert cfg.harness_version(root) == ""
+
+
+def test_a_checkout_named_devkit_that_does_carry_a_stamp_is_a_consumer(tmp_path):
+    """A stamp is positive evidence of vendoring and outranks either name check."""
+    assert stamped(tmp_path, FAKE_SHA[:12], name="devkit") == FAKE_SHA[:12]
+
+
+def test_an_unparseable_pyproject_falls_back_to_the_directory_name(tmp_path):
+    """Never raises: this runs while a hook is already reporting something else."""
+    root = tmp_path / "devkit"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("[project\nname = ", encoding="utf-8")
+    assert cfg.harness_version(root) == "source"
+
+
+def test_no_stamp_and_no_devkit_name_reports_nothing(tmp_path):
+    """Callers omit the footer entirely rather than print a placeholder: a stamp that
+    says `unknown` reads as a fact about the harness instead of a gap in it."""
+    assert stamped(tmp_path, None) == ""
+
+
+def test_junk_in_the_stamp_is_refused_rather_than_echoed(tmp_path):
+    """This value lands in an agent's context verbatim. Anything that is not a SHA is
+    someone else's file, and printing it would be the hook's own prompt injection."""
+    for junk in ("", "   \n", "not-a-sha", "v0.10.2", "ghijklm", "abcdef"):
+        assert stamped(tmp_path, junk) == "", junk
+
+
+def test_a_missing_root_never_raises(tmp_path):
+    """Hooks call this while already reporting something else; an exception here
+    would replace a useful block message with a traceback."""
+    assert cfg.harness_version(tmp_path / "nope") == ""
+
+
+def test_the_footer_names_the_version_and_the_check_that_settles_it(tmp_path):
+    root = tmp_path / "consumer"
+    root.mkdir()
+    (root / "DEVKIT_VERSION").write_text(FAKE_SHA[:16], encoding="utf-8")
+    footer = cfg.provenance(root)
+    assert FAKE_SHA[:12] in footer
+    assert "sync-devkit.py --check" in footer
+    assert footer.count("\n") == 0  # one line: it rides on every block
+
+
+def test_the_footer_says_a_source_checkout_cannot_be_behind(tmp_path):
+    root = tmp_path / "devkit"
+    root.mkdir()
+    footer = cfg.provenance(root)
+    assert "source" in footer
+    # Nothing to pull, so pointing at the drift check here would be a wasted turn.
+    assert "sync-devkit.py --check" not in footer
+
+
+def test_no_version_means_no_footer(tmp_path):
+    assert cfg.provenance(tmp_path / "nope") == ""
