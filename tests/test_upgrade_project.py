@@ -34,6 +34,35 @@ def artifact_elsewhere(tmp_path, monkeypatch):
     monkeypatch.setattr(up, "REPO_ROOT", tmp_path / "_artifact_root")
 
 
+def gh_listing(payload, code=0):
+    """A `gh` that answers `pr list --json ...` with `payload` (str, or JSON-able)."""
+    calls: list[tuple[str, ...]] = []
+
+    def gh(*args: str):
+        calls.append(args)
+        out = payload if isinstance(payload, str) else json.dumps(payload)
+        return subprocess.CompletedProcess(["gh", *args], code, out, "")
+
+    gh.calls = calls
+    return gh
+
+
+@pytest.fixture(autouse=True)
+def no_open_adoption_pr(monkeypatch):
+    """No test reaches the real `gh`, in either direction.
+
+    `main` asks `open_adoption_pr` about every project it judges stale, so without this
+    the whole suite would shell out to a CLI whose answer depends on the machine, the
+    network and whatever is open in a real repo -- and the tests that fake `upgrade_one`
+    would start passing or failing for reasons nothing in them mentions. The tests that
+    are *about* that question install their own `gh` over this one.
+
+    Stubbed at `gh_for` rather than at `open_adoption_pr`, so the predicate itself still
+    runs for real everywhere it is called -- a stub of the function would hide a crash
+    in it from every test but the six that name it."""
+    monkeypatch.setattr(up.sweep, "gh_for", lambda _p: gh_listing([]))
+
+
 def done(code: int = 0):
     """A stand-in `upgrade_one` result, for the tests that fake the per-project work."""
     return lambda *_a, **_kw: up.Outcome("stub", code)
@@ -84,6 +113,68 @@ def test_two_same_day_releases_do_not_share_a_branch_name():
     # The tag must survive slugification recognisably, or the PR list becomes a wall
     # of identical branch names again.
     assert "v0-9-1" in second
+
+
+# --- an adoption already up for review ---------------------------------------
+
+
+def test_the_branch_stem_is_built_from_the_box_tiers_own_namer():
+    """Restating `agent/` or the slug rules here would give the stem a second author,
+    and a rename in `task_branch` would stop matching without failing anything."""
+    stem = up.upgrade_branch_stem("v0.10.2")
+    assert stem == f"{up.tb.BRANCH_PREFIX}{up.tb.slugify(up.upgrade_slug('v0.10.2'))}-"
+    # And it really is a prefix of what the box tier would cut, on any day.
+    cut = up.tb.branch_name(up.tb.slugify(up.upgrade_slug("v0.10.2")), set(), _dt.date(2026, 8, 20))
+    assert cut.startswith(stem)
+
+
+def test_an_open_pr_for_this_release_is_found(tmp_path, monkeypatch):
+    """The duplicate this exists to prevent: `DEVKIT_VERSION` on the default branch only
+    moves when an adoption *merges*, so a PR that is open-but-red leaves every later run
+    judging the project out of date. carameli collected three PRs for v0.10.2 that way."""
+    gh = gh_listing(
+        [
+            {"number": 173, "headRefName": "agent/baseline-drift-0819", "url": "u/173"},
+            {"number": 170, "headRefName": "agent/devkit-upgrade-v0-10-2-0819", "url": "u/170"},
+        ]
+    )
+    monkeypatch.setattr(up.sweep, "gh_for", lambda _p: gh)
+    assert up.open_adoption_pr(tmp_path, "v0.10.2") == "#170 u/170"
+    assert gh.calls[0][:4] == ("pr", "list", "--state", "open")
+
+
+def test_a_same_day_rerun_of_the_same_release_is_still_a_duplicate(tmp_path, monkeypatch):
+    """The second run of a day gets `-2` appended, which is exactly the shape that has
+    to keep matching -- #175 was `...-0820-2`."""
+    gh = gh_listing(
+        [{"number": 174, "headRefName": "agent/devkit-upgrade-v0-10-2-0820-2", "url": "u"}]
+    )
+    monkeypatch.setattr(up.sweep, "gh_for", lambda _p: gh)
+    assert up.open_adoption_pr(tmp_path, "v0.10.2").startswith("#174")
+
+
+def test_an_open_pr_for_a_different_release_is_not_this_one(tmp_path, monkeypatch):
+    """v0.10.1's adoption sitting open must not suppress v0.10.2's -- that would be the
+    mirror-image bug, an upgrade that never happens."""
+    gh = gh_listing(
+        [{"number": 161, "headRefName": "agent/devkit-upgrade-v0-10-1-0817", "url": "u"}]
+    )
+    monkeypatch.setattr(up.sweep, "gh_for", lambda _p: gh)
+    assert up.open_adoption_pr(tmp_path, "v0.10.2") == ""
+
+
+def test_no_open_prs_at_all_is_not_a_duplicate(tmp_path, monkeypatch):
+    monkeypatch.setattr(up.sweep, "gh_for", lambda _p: gh_listing([]))
+    assert up.open_adoption_pr(tmp_path, "v0.10.2") == ""
+
+
+def test_a_gh_that_cannot_answer_never_blocks_the_upgrade(tmp_path, monkeypatch):
+    """No `gh`, no auth, no remote: fail open. A duplicate PR is a nuisance; a scheduled
+    upgrade that silently stops running is not."""
+    monkeypatch.setattr(up.sweep, "gh_for", lambda _p: gh_listing("", code=1))
+    assert up.open_adoption_pr(tmp_path, "v0.10.2") == ""
+    monkeypatch.setattr(up.sweep, "gh_for", lambda _p: gh_listing("not json at all"))
+    assert up.open_adoption_pr(tmp_path, "v0.10.2") == ""
 
 
 def test_the_commit_names_the_release():
@@ -710,6 +801,35 @@ def test_a_project_on_an_older_release_is_still_upgraded(tmp_path, capsys, monke
     ws = workspace(tmp_path, "carameli")
     assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
     assert "already on devkit" not in capsys.readouterr().out
+
+
+def test_a_stale_project_whose_adoption_is_already_open_is_left_alone(
+    tmp_path, capsys, monkeypatch
+):
+    """The regression: carameli was stale by the only test this had -- `DEVKIT_VERSION`
+    on `master` -- for the whole time #170 sat open with a red gate, so the 03:00 run
+    and two reruns each cut a box and opened another identical PR (#174, #175). Being
+    stale is not enough; the adoption has to be *missing*."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    monkeypatch.setattr(
+        up, "source_at_tag", lambda *_a: pytest.fail("built a worktree for a PR that exists")
+    )
+    monkeypatch.setattr(
+        up.worktree, "plan_new", lambda *_a, **_kw: pytest.fail("cut a second box for one release")
+    )
+    monkeypatch.setattr(
+        up.sweep,
+        "gh_for",
+        lambda _p: gh_listing(
+            [{"number": 170, "headRefName": "agent/devkit-upgrade-v0-5-3-0819", "url": "u/170"}]
+        ),
+    )
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli")
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    assert "already up for adoption in #170" in capsys.readouterr().out
 
 
 def test_one_project_refusing_does_not_stop_the_others(tmp_path, capsys, monkeypatch):

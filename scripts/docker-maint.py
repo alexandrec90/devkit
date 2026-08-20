@@ -34,9 +34,12 @@ Usage:  python docker-maint.py {up|down|stop-idle|restart-engine|fix|prune}
         [--generic] [args...]
         (run with cwd set to the workspace folder; --generic skips delegation)
 
-`prune --idle-only` is the unattended spelling: it does nothing while containers are
-running, because the half that actually returns disk to Windows needs
-`wsl --shutdown`. See `generic_prune`. `scripts/install-docker-prune.py` is what
+`prune --idle-only` is the unattended spelling: it normally does nothing while
+containers are running, because the half that actually returns disk to Windows needs
+`wsl --shutdown`. Its one exception is a disk already low enough that `worktree.py
+reconcile` has started destroying boxes with open PRs, where waiting for an idle
+machine is the more expensive mistake -- `prune_verdict` owns that call. See
+`generic_prune`. `scripts/install-docker-prune.py` is what
 schedules it, and it passes that flag -- the hand-registered task it replaced did not,
 because nothing in this repo owned that task or checked what it ran.
 
@@ -59,6 +62,7 @@ databases, and losing one costs a re-ingest measured in hours.
 """
 
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -136,6 +140,13 @@ DOCKER_PROCESSES = [
 DOCKER_DESKTOP_EXE = Path(r"C:\Program Files\Docker\Docker\Docker Desktop.exe")
 POLL_TIMEOUT = 90
 POLL_INTERVAL = 5
+
+# A cold start straight after a compaction is not a plain start: the engine re-mounts a
+# freshly rewritten VHDX and then brings back every `restart: unless-stopped` container
+# on the machine. Measured at over 90s on 2026-08-20, which is how a prune that had just
+# reclaimed 16 GB came to print `PRUNE DONE, BUT ENGINE DID NOT COME BACK` and exit 1 --
+# a scheduled job reporting failure for work it had completed.
+COMPACT_POLL_TIMEOUT = 300
 
 
 def banner(text: str) -> str:
@@ -337,6 +348,65 @@ def running_containers() -> int:
     return len([line for line in result.stdout.splitlines() if line.strip()])
 
 
+# Free space below which an unattended prune stops waiting for an idle machine.
+#
+# Deliberately ABOVE the floor at which `worktree.py reconcile` starts destroying boxes
+# whose PR is merely *open* (`worktree.DEFAULT_MIN_FREE_GB`). Below that floor the
+# machine is already losing work, so the cheap remedy has to fire while the expensive
+# one is still avoidable. `tests/test_docker_maint.py` asserts the ordering rather than
+# trusting this paragraph, because the two constants live in different files.
+PRESSURE_FREE_GB = 25.0
+
+
+def free_gb(path: Path | None = None) -> float:
+    """Free space on the volume holding `path`, in GB; -1.0 when it cannot be read.
+
+    -1.0 rather than 0.0 for unreadable, so `prune_verdict` can tell "no space left"
+    from "cannot tell" and refuse to escalate on the second -- the same distinction
+    `worktree.free_gb` draws, for the same reason.
+    """
+    try:
+        return shutil.disk_usage(path or Path.home()).free / 1_000_000_000
+    except OSError:
+        return -1.0
+
+
+def prune_verdict(running: int, free: float, floor: float = PRESSURE_FREE_GB) -> tuple[bool, str]:
+    """Whether the unattended prune should go ahead, and the line that explains why.
+
+    Pure, so the decision is testable without killing Docker Desktop -- which is the
+    reason the daemon modes were otherwise left uncovered.
+
+    `--idle-only` used to mean "never compact while anything is running", on the
+    grounds that stopping containers at 4am to reclaim disk is not a trade anything
+    should make unattended. That was right when it was written and is wrong now:
+    `reconcile` has since gained a free-space floor of its own, and under it the thing
+    that gets destroyed is a *box with an open PR*. So the real choice at 4am is no
+    longer "stop containers or leave them" -- it is "stop containers, which
+    `restart: unless-stopped` undoes in seconds with no data loss, or let the machine
+    fall far enough that the box tier starts deleting checkouts". The first is plainly
+    cheaper, but only the disk number can tell which situation this is.
+
+    Both unknowns still refuse to escalate, matching `worktree.under_pressure`: an
+    engine that cannot be asked how many containers are up, and a volume whose free
+    space cannot be read, are exactly the states in which guessing licenses the
+    disruptive half against a machine that might be mid-run.
+    """
+    if running == 0:
+        return True, "no containers are running"
+    if running < 0:
+        return False, "the engine could not be asked"
+    plural = "" if running == 1 else "s"
+    if free < 0:
+        return False, f"{running} container{plural} up, and free space could not be read"
+    if free > floor:
+        return False, f"{running} container{plural} up, {free:.1f} GB free"
+    return True, (
+        f"{running} container{plural} up, but only {free:.1f} GB free -- under the "
+        f"{floor:g} GB floor, so stopping them to compact is the cheaper loss"
+    )
+
+
 def generic_prune(idle_only: bool = False) -> int:
     """Reclaim image/build-cache space, then hand the freed space back to Windows.
 
@@ -352,18 +422,20 @@ def generic_prune(idle_only: bool = False) -> int:
     kills every running container and every other WSL distro with them.
 
     `idle_only` is that distinction made operable, and it exists for the scheduled
-    caller. A prune that runs while twelve containers are up would stop them at 4am to
-    reclaim disk, which is not a trade anything should make unattended. Interactive
-    callers leave it off: a human choosing this from the task list has already decided.
+    caller: it waits for a machine with nothing running rather than stopping containers
+    at 4am to reclaim disk. `prune_verdict` owns the one case where it stops waiting --
+    a disk low enough that the box tier has started destroying open-PR checkouts -- and
+    its docstring owns why that reverses the trade. Interactive callers leave the flag
+    off entirely: a human choosing this from the task list has already decided.
     """
     if idle_only:
-        running = running_containers()
-        if running != 0:
-            where = "the engine could not be asked" if running < 0 else f"{running} container(s) up"
-            print(banner(f"SKIPPED -- {where}"))
+        proceed, why = prune_verdict(running_containers(), free_gb())
+        if not proceed:
+            print(banner(f"SKIPPED -- {why}"))
             print("  Compacting needs `wsl --shutdown`, which would stop them.")
             print("  Run without --idle-only to prune and compact anyway.")
             return 0
+        print(f"  Proceeding: {why}")
     print(banner("Docker Prune + Compact VHDX (generic)"))
     if not docker_info_ok():
         print("  Docker is not responding; starting it first.")
@@ -394,7 +466,7 @@ def generic_prune(idle_only: bool = False) -> int:
         print("  [skip] No Docker WSL VHDX found at the expected paths.")
 
     start_docker()
-    if poll_engine():
+    if poll_engine(timeout=COMPACT_POLL_TIMEOUT):
         print(banner("PRUNE COMPLETE -- ENGINE READY"))
         return 0
     print(banner("PRUNE DONE, BUT ENGINE DID NOT COME BACK"))

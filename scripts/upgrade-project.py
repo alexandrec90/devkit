@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import subprocess
 import sys
 import tempfile
@@ -218,10 +219,59 @@ def upgrade_slug(tag: str) -> str:
     branch-deleted PR leaves none. Named by date alone, the morning release's merged
     adoption therefore blocked every commit of the afternoon's (v0.9.0 -> v0.9.1, in
     three consumers at once). One release is one operation, so the release is the
-    name -- and a same-tag rerun never reaches a commit anyway, because
-    `is_current_on_remote` answers before a box is cut.
+    name.
+
+    The name is also what makes a rerun recognisable: `open_adoption_pr` matches the
+    branch stem below, so the second run of a release finds the first run's PR instead
+    of opening its own.
     """
     return f"{UPGRADE_SLUG} {tag}"
+
+
+def upgrade_branch_stem(tag: str) -> str:
+    """The prefix every branch this script cuts for `tag` starts with.
+
+    `worktree.plan_new` appends `-<mmdd>` and, for a same-day rerun, `-<n>` -- so the
+    stem is as much of the name as is fixed by the release. Built from `tb` rather
+    than spelled out, because the two halves are the box tier's to decide: a rename
+    there that this file restated would silently stop matching.
+    """
+    return f"{tb.BRANCH_PREFIX}{tb.slugify(upgrade_slug(tag))}-"
+
+
+def open_adoption_pr(project: Path, tag: str) -> str:
+    """`#<n> <url>` for an open PR already adopting `tag` in `project`; "" when none.
+
+    **The currency test alone is not enough to stop a duplicate.**
+    `is_current_on_remote` reads `DEVKIT_VERSION` off `origin/<default>`, which only
+    changes when an adoption *merges* -- so between opening a PR and merging it, every
+    run judges the project out of date and cuts another box, another branch and another
+    PR for the same release. carameli collected three for v0.10.2 (#170, #174, #175) in
+    sixteen hours that way, because the first one's gate was red and it sat open: a
+    scheduled run at 03:00, a manual rerun, and one more the following morning.
+
+    Matching is by branch stem rather than by title, because the title is prose this
+    script owns today and could reword tomorrow, while the branch name is the identity
+    the box registry and `reconcile` already key on.
+
+    **Fails open.** No `gh`, no auth, a repo with no remote: all answer "" and the run
+    proceeds exactly as it did before this existed. A duplicate PR is a nuisance; a
+    scheduled upgrade that stops running because the CLI is missing is a silent one.
+    """
+    listed = sweep.gh_for(project)(
+        "pr", "list", "--state", "open", "--limit", "100", "--json", "number,headRefName,url"
+    )
+    if listed.returncode != 0:
+        return ""
+    try:
+        rows = json.loads(listed.stdout or "[]")
+    except json.JSONDecodeError:
+        return ""
+    stem = upgrade_branch_stem(tag)
+    for row in rows if isinstance(rows, list) else []:
+        if str(row.get("headRefName", "")).startswith(stem):
+            return f"#{row.get('number')} {row.get('url', '')}".strip()
+    return ""
 
 
 def commit_message(tag: str, files: int | str) -> str:
@@ -952,6 +1002,12 @@ def main(argv: list[str] | None = None) -> int:
         # about a checkout parked on a branch, and needs nothing tidied first.
         elif is_current_on_remote(root / name, tag_commit):
             print(f"upgrade: {name} is already on devkit {tag}.")
+        # Asked only of a project that is *not* current, which is the one case where
+        # the answer can differ from the stamp's: the adoption exists, it is just not
+        # merged yet. Skipping is right whatever is holding it up -- a red gate, a
+        # review, a human -- because a second identical PR fixes none of them.
+        elif pending := open_adoption_pr(root / name, tag):
+            print(f"upgrade: {name} -- devkit {tag} is already up for adoption in {pending}.")
         else:
             todo.append(name)
 

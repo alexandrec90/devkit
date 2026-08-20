@@ -383,8 +383,9 @@ settings that decide whether it runs on a laptop — battery, and catching up a 
 slept through — have no flags. `scripts/devkit_schtasks.py` owns that document and its
 sibling `install-upgrade-schedule.py` uses the same one.
 
-One pass, both tiers. It reaps every box whose PR has merged and reclaims disk when
-the volume is low; then it runs `sweep.py --sync` over the **static** checkouts, so a
+One pass, both tiers. It reaps every box whose PR has settled — merged, or closed
+without merging, which ends the wait just as finally — and reclaims disk when the
+volume is low; then it runs `sweep.py --sync` over the **static** checkouts, so a
 merged PR advances each one's default branch instead of leaving it parked on a spent
 task branch that the next session then opens on. Merging stays a human decision unless
 the task was installed with `--merge`, which squash-merges a green box PR only when it

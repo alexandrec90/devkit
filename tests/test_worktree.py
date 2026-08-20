@@ -497,6 +497,78 @@ def test_the_survey_and_reap_agree_about_a_box_waiting_on_its_pr():
     assert sweep.NEEDS_PR in worktree.SAFE_TO_REAP  # still nothing *at stake*
 
 
+# --- reap: the box whose PR was closed ---------------------------------------
+# A close is not a merge and never becomes one. What it *is* is the end of the wait
+# `AWAITS_A_MERGE` names: a person read the branch and declined it, so no review will
+# be answered in this checkout and no merge is coming. Until this was distinguished
+# from "no PR at all", such a box refused forever and `--force` -- the flag that also
+# discards uncommitted work -- was the only way out of it.
+
+
+def test_a_closed_pr_reaps_a_pushed_box_without_force():
+    """Regression. Two boxes whose duplicate PRs were closed on 2026-08-20 had to be
+    forced, and the refusal they printed read "confirm a PR is open" about a PR that a
+    person had explicitly closed."""
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_PR,
+        "1 commit(s) pushed to origin/agent/x",
+        force=False,
+        pr_closed=True,
+        holds_uncommitted=False,
+        awaiting_pr=True,
+    )
+    assert allowed and note == ""
+
+
+def test_a_closed_pr_still_never_destroys_uncommitted_work():
+    """The safety property is untouched: a close says where the PR went and nothing
+    about the edits sitting in the box."""
+    allowed, note = worktree.reap_decision(
+        sweep.READY,
+        "3 uncommitted file(s)",
+        force=False,
+        pr_closed=True,
+        holds_uncommitted=True,
+    )
+    assert not allowed
+    assert "/ship" in note
+
+
+def test_a_close_does_not_stand_in_for_a_merge_on_a_retired_branch():
+    """The boundary, and the reason `reapable` never learns about closes. Plus a
+    *merged* PR, `needs-rebranch` is a squash whose content is on the default branch;
+    plus a *closed* one it is an abandoned branch holding the only copy of its
+    commits -- which is exactly what `MERGE_CAN_BE_STALE_ABOUT` exists to keep."""
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_REBRANCH,
+        "2 unmerged commit(s) on agent/x, whose remote branch is gone",
+        force=False,
+        pr_closed=True,
+        holds_uncommitted=False,
+    )
+    assert not allowed
+    assert "still only in this box" in note
+
+
+def test_the_two_classifiers_agree_about_a_closed_pr():
+    """Asserted as a pair for the same reason the squash case is: when `reconcile` and
+    `reap_decision` disagree, the pass prints "reap refused" and the box stalls."""
+    closed = worktree.parse_pr_view(pr_json(state="CLOSED"))
+    action, _ = worktree.reconcile_action(
+        sweep.NEEDS_PR, "1 commit(s) pushed", closed, holds_uncommitted=False
+    )
+    allowed, _ = worktree.reap_decision(
+        sweep.NEEDS_PR,
+        "1 commit(s) pushed",
+        force=False,
+        pr_closed=True,
+        holds_uncommitted=False,
+        awaiting_pr=True,
+    )
+    assert action == worktree.REAP
+    assert allowed
+
+
 # --- reap: the squash-merged box --------------------------------------------
 # A squash merge rewrites the branch's commits and `--delete-branch` removes the
 # upstream, so `sweep.classify` reports `needs-rebranch` -- true of the refs, false of
@@ -1059,6 +1131,75 @@ def test_plan_provision_without_a_pin_uses_the_running_interpreter(tmp_path):
     )
 
 
+def test_plan_provision_falls_back_to_the_dockerfile_pin(tmp_path):
+    """The reported failure. carameli sets no `[python] version`, pins 3.12 in
+    `FROM python:3.12-slim`, and still got a box venv on the workstation's 3.14 -- because
+    the manifest field was the only thing consulted, and its absence read as "no pin"."""
+    (tmp_path / "requirements-dev.txt").write_text("", encoding="utf-8")
+    (tmp_path / ".devkit.toml").write_text("[python]\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM python:3.12-slim AS builder\nRUN true\nFROM python:3.12-slim AS base\n",
+        encoding="utf-8",
+    )
+    assert worktree.plan_provision(tmp_path, windows=False)[0].argv == (
+        "uv",
+        "venv",
+        "--python",
+        "3.12",
+        ".venv",
+    )
+
+
+def test_the_manifest_still_wins_over_a_detected_pin(tmp_path):
+    """`version` is an override, so a project whose box must not match its container can
+    still say so: detection may not quietly outvote the field."""
+    (tmp_path / "requirements-dev.txt").write_text("", encoding="utf-8")
+    (tmp_path / ".devkit.toml").write_text('[python]\nversion = "3.13"\n', encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\n", encoding="utf-8")
+    assert worktree.plan_provision(tmp_path, windows=False)[0].argv[3] == "3.13"
+
+
+def test_a_dot_python_version_outranks_the_dockerfile(tmp_path):
+    (tmp_path / ".python-version").write_text("3.11.9\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\n", encoding="utf-8")
+    assert worktree.detect_python_version(tmp_path) == ("3.11.9", ".python-version")
+
+
+def test_a_variant_tag_yields_the_version_alone(tmp_path):
+    """`uv venv --python 3.12.7-bookworm` is not a version uv can resolve, so the image
+    variant has to come off the tag."""
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12.7-bookworm\n", encoding="utf-8")
+    assert worktree.detect_python_version(tmp_path) == ("3.12.7", "Dockerfile")
+
+
+def test_detection_reads_a_pin_through_a_platform_flag(tmp_path):
+    (tmp_path / "Dockerfile").write_text(
+        "FROM --platform=linux/amd64 python:3.12-alpine AS base\n", encoding="utf-8"
+    )
+    assert worktree.detect_python_version(tmp_path) == ("3.12", "Dockerfile")
+
+
+def test_an_unresolvable_tag_detects_nothing(tmp_path):
+    """An `ARG`-interpolated tag names no interpreter, and a pyenv virtualenv name is not
+    a version. Guessing either would put the box on an interpreter nobody chose, so both
+    leave it on the running one."""
+    (tmp_path / ".python-version").write_text("my-venv\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "ARG PYTHON_VERSION=3.12\nFROM python:${PYTHON_VERSION}-slim\n", encoding="utf-8"
+    )
+    assert worktree.detect_python_version(tmp_path) == ("", "")
+
+
+def test_a_project_with_no_build_files_detects_nothing(tmp_path):
+    assert worktree.detect_python_version(tmp_path) == ("", "")
+
+
+def test_a_node_only_dockerfile_detects_nothing(tmp_path):
+    """The base image is not always Python; a `node:` tag must not be read as one."""
+    (tmp_path / "Dockerfile").write_text("FROM node:22-alpine\nRUN true\n", encoding="utf-8")
+    assert worktree.detect_python_version(tmp_path) == ("", "")
+
+
 def test_the_interpreter_path_follows_the_platform():
     assert worktree.venv_python(windows=True) == ".venv/Scripts/python.exe"
     assert worktree.venv_python(windows=False) == ".venv/bin/python"
@@ -1611,6 +1752,60 @@ def test_only_the_caller_holding_a_pr_may_reap_a_pushed_box(workspace, monkeypat
     assert handed.refusal == ""
 
 
+def test_reap_asks_github_the_same_question_reconcile_does(workspace, monkeypatch):
+    """`reap` used to ask only "has anything merged?", so a closed PR was
+    indistinguishable from no PR at all and the box refused forever. `pr_for` answers
+    with the state instead, for the same single `gh` call."""
+    root = workspace.parent
+    (root / worktree.BOXES_DIR_NAME / "demo--closed-0806").mkdir(parents=True)
+    worktree.write_leases(
+        root,
+        {"demo--closed-0806": box("demo--closed-0806", project="demo", branch="agent/closed-0806")},
+    )
+    monkeypatch.setattr(
+        worktree,
+        "inspect_box",
+        lambda *a, **k: (
+            state(upstream="origin/agent/closed-0806", unpushed=0, ahead=1),
+            sweep.NEEDS_PR,
+            "1 commit(s) pushed to origin/agent/closed-0806",
+        ),
+    )
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+    monkeypatch.setattr(
+        worktree, "pr_for", lambda gh, branch: worktree.parse_pr_view(pr_json(state="CLOSED"))
+    )
+
+    plan = worktree.plan_reap("demo--closed-0806", workspace, fetch=True)
+    assert plan.refusal == ""
+    assert [step[0] for step in plan.steps] == ["worktree", "branch"]
+
+
+def test_no_fetch_learns_nothing_and_therefore_still_refuses(workspace, monkeypatch):
+    """`--no-fetch` skips the lookup, so it sees neither a merge nor a close. The
+    refusal it keeps is the cautious answer, which is the one it must fail to."""
+    root = workspace.parent
+    (root / worktree.BOXES_DIR_NAME / "demo--closed-0806").mkdir(parents=True)
+    worktree.write_leases(
+        root,
+        {"demo--closed-0806": box("demo--closed-0806", project="demo", branch="agent/closed-0806")},
+    )
+    monkeypatch.setattr(
+        worktree,
+        "inspect_box",
+        lambda *a, **k: (state(), sweep.NEEDS_PR, "1 commit(s) pushed"),
+    )
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+
+    def never(*a, **k):
+        raise AssertionError("--no-fetch must make no network call")
+
+    monkeypatch.setattr(worktree, "pr_for", never)
+
+    plan = worktree.plan_reap("demo--closed-0806", workspace, fetch=False)
+    assert plan.refusal and not plan.steps
+
+
 def test_the_survey_leaves_a_box_waiting_on_its_pr_out_of_the_reapable_count(
     workspace, monkeypatch
 ):
@@ -2020,10 +2215,32 @@ def test_a_pushed_branch_with_no_pr_is_reported_never_destroyed():
     assert "no PR" in why
 
 
+def test_a_closed_pr_reaps_its_box():
+    """Regression. This fell through to the `needs-pr` case and returned WAIT with
+    "branch is pushed but has no PR -- /ship it, or open one by hand", about a branch
+    whose PR existed and had been closed. Nothing would ever have changed its mind."""
+    closed = worktree.parse_pr_view(pr_json(state="CLOSED"))
+    action, why = decide(sweep.NEEDS_PR, "pushed", closed)
+    assert action == worktree.REAP
+    assert "#42 closed" in why
+
+
+def test_a_closed_pr_on_a_box_still_holding_work_is_held():
+    """`HOLD` is tested before any of this, so the close never reaches the decision."""
+    closed = worktree.parse_pr_view(pr_json(state="CLOSED"))
+    action, why = decide(sweep.READY, "3 uncommitted file(s)", closed)
+    assert action == worktree.HOLD
+    assert "ready" in why
+
+
 def test_no_decision_destroys_a_box_outside_safe_to_reap():
     """Reversion check for the whole mode, swept over every input combination."""
     for verdict in (sweep.READY, sweep.BLOCKED, sweep.NEEDS_BRANCH, sweep.NEEDS_REBRANCH):
-        for pr in (worktree.PullRequest(), worktree.parse_pr_view(pr_json(state="MERGED"))):
+        for pr in (
+            worktree.PullRequest(),
+            worktree.parse_pr_view(pr_json(state="MERGED")),
+            worktree.parse_pr_view(pr_json(state="CLOSED")),
+        ):
             for pressure in (True, False):
                 action, _ = decide(
                     verdict, "x", pr, pressure=pressure, automerge=True, age_days=1e6

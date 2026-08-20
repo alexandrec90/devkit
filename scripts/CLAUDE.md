@@ -128,6 +128,15 @@ Each of these has already been violated by something:
   `MERGE_CAN_BE_STALE_ABOUT` scopes the escape to that one verdict, and the box must
   also be clean, because a merge says where the *commits* are and nothing about the
   edits on top of them.
+- **A PR can end without merging, and the tier knew only one ending.** A closed PR
+  left its box `needs-pr` forever — *wait for the merge*, about a merge nobody was
+  going to make — so the leak above arrived a second time from the other end, with
+  `--force` again the only way out. What a close clears is the **policy** refusal in
+  `reap_decision`, never `reapable`: `needs-rebranch` plus a *closed* PR is an
+  abandoned branch holding the only copy of its commits, which is precisely what the
+  merge escape above exists to keep holding. `reap` reads the state from the same
+  `pr_for` call `reconcile` makes, so the two can no longer describe one box in two
+  ways — the disagreement `AWAITS_A_MERGE` was added to end.
 - **`reap` is the one place in the workspace that passes `-v` to `compose down`.**
   `docker-maint.py` must never do it — its target is a static checkout whose named
   volumes hold a dev database costing hours to re-ingest. A box's volumes were created
