@@ -437,9 +437,33 @@ def test_the_deny_message_does_not_tell_the_agent_to_reap():
     worse than no instruction.
     """
     message = guard.deny_message("carameli", "a.py", "/ws/.worktrees/b", "b", [])
-    assert "reap" not in message.split("Do NOT reap")[0]
+    assert "reap" not in prose_of(message)
     assert "reconcile" in message
     assert "MERGED" in message
+
+
+def prose_of(message: str) -> str:
+    """`message` up to the "Do NOT reap" line, with this checkout's path elided.
+
+    The `provision` line names `worktree.py` by absolute path, and that path is wherever
+    the clone happens to live. devkit's own suite runs from an ephemeral box, and a box
+    is named after the task it was cut for -- so the session that changed `reap` was
+    working in `devkit--reap-a-box-whose-pr-was-closed-0820`, and the assertion above
+    failed on its own working directory. A path is not an instruction to anybody: only
+    the prose is read, and the elision is the whole reason this helper exists rather
+    than the assertion being loosened.
+    """
+    return message.replace(str(Path(guard.__file__).parent), "<devkit>").split("Do NOT reap")[0]
+
+
+def test_the_reap_check_reads_the_prose_and_not_the_checkout_path(monkeypatch, tmp_path):
+    """Regression for `prose_of`. `deny_message` resolves its own directory through the
+    module global, so a checkout path carrying the word is reproducible rather than
+    something only the box that hit it could show."""
+    monkeypatch.setattr(guard, "__file__", str(tmp_path / "devkit--reap-0820" / "guard.py"))
+    message = guard.deny_message("carameli", "a.py", "/ws/.worktrees/b", "b", [])
+    assert "reap" in message.split("Do NOT reap")[0]  # the path is there...
+    assert "reap" not in prose_of(message)  # ...and it is not prose
 
 
 def test_the_block_message_gives_an_absolute_path_from_a_relative_workspace(
