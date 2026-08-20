@@ -103,16 +103,16 @@ class PythonConfig:
     reality the way a manifest field can. Set `install_command` only for a project
     that fits none of those shapes; it then wins over detection.
 
-    `version` is the one thing the files on disk do *not* say. A lockfile pins
-    packages, not the interpreter that resolves them, so `worktree.py provision`
-    built every box's `.venv` from whatever interpreter happened to be running it --
-    the workstation default, not the version the project is pinned to in its
-    `FROM python:` tag, its compiled locks, its type-checker config and CI. The box came
-    out announcing itself provisioned with a venv the container does not match, and
-    the mismatch surfaced later as an install or a type-check failure that reads as
-    a broken branch rather than as the wrong interpreter. Set it to the same version
-    those files carry (`"3.12"`, or a full `"3.12.7"`); left empty, provisioning
-    keeps using the running interpreter, which is right for a project with no pin.
+    `version` is an override for the same reason. A lockfile pins packages, not the
+    interpreter that resolves them, so `worktree.py provision` built every box's `.venv`
+    from whatever interpreter happened to be running it -- the workstation default, not
+    the version the project is pinned to in its `FROM python:` tag, its compiled locks,
+    its type-checker config and CI. The box came out announcing itself provisioned with a
+    venv the container does not match, and the mismatch surfaced later as an install or a
+    type-check failure that reads as a broken branch rather than as the wrong interpreter.
+    Provisioning now reads an exact pin out of `.python-version` or a `FROM python:` tag
+    when this field is empty, so set it only where those disagree with what the box should
+    run, or where the pin lives somewhere else entirely (`"3.12"`, or a full `"3.12.7"`).
     """
 
     install_command: str = ""

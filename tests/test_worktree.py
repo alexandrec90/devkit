@@ -1059,6 +1059,75 @@ def test_plan_provision_without_a_pin_uses_the_running_interpreter(tmp_path):
     )
 
 
+def test_plan_provision_falls_back_to_the_dockerfile_pin(tmp_path):
+    """The reported failure. carameli sets no `[python] version`, pins 3.12 in
+    `FROM python:3.12-slim`, and still got a box venv on the workstation's 3.14 -- because
+    the manifest field was the only thing consulted, and its absence read as "no pin"."""
+    (tmp_path / "requirements-dev.txt").write_text("", encoding="utf-8")
+    (tmp_path / ".devkit.toml").write_text("[python]\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM python:3.12-slim AS builder\nRUN true\nFROM python:3.12-slim AS base\n",
+        encoding="utf-8",
+    )
+    assert worktree.plan_provision(tmp_path, windows=False)[0].argv == (
+        "uv",
+        "venv",
+        "--python",
+        "3.12",
+        ".venv",
+    )
+
+
+def test_the_manifest_still_wins_over_a_detected_pin(tmp_path):
+    """`version` is an override, so a project whose box must not match its container can
+    still say so: detection may not quietly outvote the field."""
+    (tmp_path / "requirements-dev.txt").write_text("", encoding="utf-8")
+    (tmp_path / ".devkit.toml").write_text('[python]\nversion = "3.13"\n', encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\n", encoding="utf-8")
+    assert worktree.plan_provision(tmp_path, windows=False)[0].argv[3] == "3.13"
+
+
+def test_a_dot_python_version_outranks_the_dockerfile(tmp_path):
+    (tmp_path / ".python-version").write_text("3.11.9\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\n", encoding="utf-8")
+    assert worktree.detect_python_version(tmp_path) == ("3.11.9", ".python-version")
+
+
+def test_a_variant_tag_yields_the_version_alone(tmp_path):
+    """`uv venv --python 3.12.7-bookworm` is not a version uv can resolve, so the image
+    variant has to come off the tag."""
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12.7-bookworm\n", encoding="utf-8")
+    assert worktree.detect_python_version(tmp_path) == ("3.12.7", "Dockerfile")
+
+
+def test_detection_reads_a_pin_through_a_platform_flag(tmp_path):
+    (tmp_path / "Dockerfile").write_text(
+        "FROM --platform=linux/amd64 python:3.12-alpine AS base\n", encoding="utf-8"
+    )
+    assert worktree.detect_python_version(tmp_path) == ("3.12", "Dockerfile")
+
+
+def test_an_unresolvable_tag_detects_nothing(tmp_path):
+    """An `ARG`-interpolated tag names no interpreter, and a pyenv virtualenv name is not
+    a version. Guessing either would put the box on an interpreter nobody chose, so both
+    leave it on the running one."""
+    (tmp_path / ".python-version").write_text("my-venv\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "ARG PYTHON_VERSION=3.12\nFROM python:${PYTHON_VERSION}-slim\n", encoding="utf-8"
+    )
+    assert worktree.detect_python_version(tmp_path) == ("", "")
+
+
+def test_a_project_with_no_build_files_detects_nothing(tmp_path):
+    assert worktree.detect_python_version(tmp_path) == ("", "")
+
+
+def test_a_node_only_dockerfile_detects_nothing(tmp_path):
+    """The base image is not always Python; a `node:` tag must not be read as one."""
+    (tmp_path / "Dockerfile").write_text("FROM node:22-alpine\nRUN true\n", encoding="utf-8")
+    assert worktree.detect_python_version(tmp_path) == ("", "")
+
+
 def test_the_interpreter_path_follows_the_platform():
     assert worktree.venv_python(windows=True) == ".venv/Scripts/python.exe"
     assert worktree.venv_python(windows=False) == ".venv/bin/python"
