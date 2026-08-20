@@ -125,6 +125,29 @@ class DockerConfig:
 
 
 @dataclass(frozen=True)
+class WorktreeConfig:
+    """Extra `.env` assignments an ephemeral box must make for itself.
+
+    A box already gets its own port lease, but a setting *derived* from a port is
+    still the source checkout's after seeding, and nothing notices until a browser
+    does. carameli's `CORS_ORIGINS` is the case that found this: the box publishes
+    its frontend on its own port, the seeded `.env` still names the primary's, and
+    the app then refuses every request its own frontend makes -- as a CORS error in
+    the console, which reads as an application bug rather than as a box that was
+    provisioned half-configured.
+
+    Ports are the only thing devkit knows generically, so this is a template map
+    rather than a fixed key: `${NAME}` expands against the managed env devkit
+    already writes -- `COMPOSE_PROJECT_NAME` and one `<SERVICE>_HOST_PORT` per
+    service in the port registry. A template naming something else is left out
+    rather than written half-expanded, because a `.env` line containing a literal
+    `${...}` is a value compose would pass through to the app verbatim.
+    """
+
+    env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Config:
     """Shape of the project the harness scripts operate on."""
 
@@ -139,6 +162,7 @@ class Config:
     python: PythonConfig = field(default_factory=PythonConfig)
     bash: BashConfig = field(default_factory=BashConfig)
     docker: DockerConfig = field(default_factory=DockerConfig)
+    worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
 
     def env(self, suffix: str) -> str:
         """The prefixed control-env name, e.g. env("SKIP_STOP_VERIFY")."""
@@ -221,6 +245,16 @@ def _docker_from(raw: dict[str, Any], default: DockerConfig) -> DockerConfig:
     return replace(default, auto_stop=raw.get("auto_stop", default.auto_stop) is True)
 
 
+def _worktree_from(raw: dict[str, Any], default: WorktreeConfig) -> WorktreeConfig:
+    env = raw.get("env")
+    if not isinstance(env, dict):
+        return replace(default, env=dict(default.env))
+    # Both halves coerced to str: TOML gives an int for `PORT = 5176`, and a
+    # non-string value reaching the `.env` writer would be a template that never
+    # matches and a key that renders as `PORT=5176` only by luck of repr.
+    return replace(default, env={str(k): str(v) for k, v in env.items()})
+
+
 def from_dict(data: dict[str, Any]) -> Config:
     """Build a Config from an already-parsed manifest dict. Pure; never raises."""
     default = Config()
@@ -231,6 +265,7 @@ def from_dict(data: dict[str, Any]) -> Config:
     py_raw = data.get("python", {}) if isinstance(data.get("python"), dict) else {}
     bash_raw = data.get("bash", {}) if isinstance(data.get("bash"), dict) else {}
     docker_raw = data.get("docker", {}) if isinstance(data.get("docker"), dict) else {}
+    wt_raw = data.get("worktree", {}) if isinstance(data.get("worktree"), dict) else {}
     return Config(
         env_prefix=str(project.get("env_prefix", default.env_prefix)),
         app_dir=str(paths.get("app", default.app_dir)),
@@ -241,6 +276,7 @@ def from_dict(data: dict[str, Any]) -> Config:
         python=_python_from(py_raw, default.python),
         bash=_bash_from(bash_raw, default.bash),
         docker=_docker_from(docker_raw, default.docker),
+        worktree=_worktree_from(wt_raw, default.worktree),
     )
 
 

@@ -306,6 +306,26 @@ holds unshipped work**, which is the difference that matters: the static tier's
 stranded work is found afterwards by `sweep.py`, and a box's cannot be stranded at all,
 because being stranded is what stops the cleanup.
 
+A port lease is not the whole story, because a setting *derived* from a port is not a
+port. Seeding copies the source checkout's `.env` verbatim, so a value naming the
+primary's frontend goes on naming it in every box — which nothing notices until a
+browser does. carameli's `CORS_ORIGINS` named `http://localhost:5173`, the box served
+on its own port, and its app then refused every request its own frontend made, as a
+CORS error that reads like an application bug rather than like a half-configured box.
+A project declares those values in its own `.devkit.toml`, as templates over the env
+devkit already writes:
+
+```toml
+[worktree.env]
+CORS_ORIGINS = "http://localhost:${FRONTEND_HOST_PORT}"
+```
+
+`${...}` resolves against `COMPOSE_PROJECT_NAME` and one `<SERVICE>_HOST_PORT` per
+service in `ports.toml`. A template naming anything else is **dropped rather than
+written half-expanded**: compose's dotenv parser does no substitution of its own, so a
+surviving `${...}` would reach the application as those literal characters, and leaving
+the seeded line in force is at least a value somebody chose.
+
 Boxes live in `<workspace>/.worktrees/` and are deliberately absent from the multi-root
 workspace file — registering one would hand `sweep.py` a second owner for its lifecycle.
 `scripts/worktree-guard.py`, wired as a PreToolUse hook at the workspace root, is what

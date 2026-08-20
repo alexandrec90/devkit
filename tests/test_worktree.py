@@ -33,6 +33,18 @@ def registry(max_slots: int = 8, **slots: int) -> devkit_ports.Registry:
     )
 
 
+def with_frontend(max_slots: int = 8, **slots: int) -> devkit_ports.Registry:
+    """`registry()` plus a `frontend` service — the one a browser talks to, and so the
+    one every derived-value case is about."""
+    return devkit_ports.from_dict(
+        {
+            "registry": {"max_slots": max_slots},
+            "services": {"app": 8000, "db": 5432, "frontend": 5173},
+            "slots": dict(slots),
+        }
+    )
+
+
 def box(name: str = "carameli--voicemail-0806", **kwargs) -> worktree.Box:
     defaults = {
         "project": "carameli",
@@ -221,6 +233,56 @@ def test_managed_env_always_carries_the_compose_project_name():
 
 def test_managed_env_without_a_registry_still_namespaces_the_stack():
     assert worktree.managed_env("devkit--x-0806", None, -1) == {
+        "COMPOSE_PROJECT_NAME": "devkit--x-0806"
+    }
+
+
+def test_a_derived_value_follows_the_box_port_and_not_the_source_checkout():
+    """Regression: a box got its own ports but every value *derived* from one still
+    named the primary's, because seeding copies the source `.env` verbatim. carameli's
+    `CORS_ORIGINS` named localhost:5173, the box served on its own port, and its app
+    then refused every request its own frontend made -- as a CORS error in the browser,
+    which reads as an application bug rather than as a half-configured box."""
+    env = worktree.managed_env(
+        "carameli--x-0806",
+        with_frontend(),
+        3,
+        {"CORS_ORIGINS": "http://localhost:${FRONTEND_HOST_PORT}"},
+    )
+    assert env["CORS_ORIGINS"] == f"http://localhost:{env['FRONTEND_HOST_PORT']}"
+    assert env["CORS_ORIGINS"] != "http://localhost:5173"
+
+
+def test_a_template_may_read_any_managed_key_including_the_project_name():
+    env = worktree.managed_env(
+        "carameli--x-0806", registry(), 3, {"TAG": "${COMPOSE_PROJECT_NAME}"}
+    )
+    assert env["TAG"] == "carameli--x-0806"
+
+
+def test_a_template_naming_an_unknown_variable_is_dropped_not_half_expanded():
+    """A surviving `${...}` would reach the app as those literal characters: compose's
+    dotenv parser does no substitution of its own. Dropping the key leaves the seeded
+    line in force, which is at least a value somebody chose."""
+    env = worktree.managed_env("carameli--x-0806", registry(), 3, {"X": "${NO_SUCH_PORT}/api"})
+    assert "X" not in env
+
+
+def test_a_malformed_template_is_dropped_rather_than_raising():
+    """`$` is legal in a password and in a shell snippet, and a manifest typo must not
+    be the thing that stops a box being cut."""
+    assert worktree.expand_env_templates({"A": "1"}, {"X": "$"}) == {}
+
+
+def test_templates_expand_against_the_ports_not_against_each_other():
+    """Ordering is deliberate: a template is written in terms of the ports, so it can
+    never be one of the values another template reads. Otherwise the result would
+    depend on dict order, which is the manifest author's typing order."""
+    assert worktree.expand_env_templates({"A": "1"}, {"B": "${A}", "C": "${B}"}) == {"B": "1"}
+
+
+def test_a_project_with_no_templates_gets_exactly_what_it_got_before():
+    assert worktree.managed_env("devkit--x-0806", None, -1, {}) == {
         "COMPOSE_PROJECT_NAME": "devkit--x-0806"
     }
 
