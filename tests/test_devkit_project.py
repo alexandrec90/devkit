@@ -349,6 +349,11 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # VanillaLand checkout, and VanillaLand is in NOT_PROJECTS, so carameli fronts
         # for the pair and no other checkout can run it.
         "local-e2e",
+        # Also born scoped, and the only entry whose scope is devkit itself: the
+        # live-CLI smokes are in `tests/`, the one tree `sync-devkit.py` never vendors,
+        # so no consumer has the file. Every other action here is scoped by capability;
+        # this one is scoped by where the code physically is.
+        "test-hooks-live",
     }
 
 
@@ -742,6 +747,36 @@ def test_a_scoped_task_offers_exactly_the_checkouts_its_action_allows(canonical)
         )
         checked += 1
     assert checked, "no scoped task found — the wiring this test guards is gone"
+
+
+def test_the_live_smoke_task_names_the_only_checkout_that_can_run_it(canonical):
+    """The test above skips a task whose `--project` is a literal rather than a picker,
+    which is exactly what "Test: Harness Hook Tests — paid, live CLI" is: its action is
+    defined for one checkout, and a picker of length one asks a question with no second
+    answer. That trade is only safe while the literal and the scope agree — so this is
+    the same assertion, made against the constant instead of against an option list.
+
+    Written for the general case rather than for one label: a second single-scope task
+    spelled the same way is covered the day it is added, which is when it would
+    otherwise be silently ungated.
+    """
+    checked = 0
+    for task in canonical["tasks"]:
+        args = [str(a) for a in task.get("args", [])]
+        if not args or not args[0].endswith("devkit_project.py") or "--project" not in args:
+            continue
+        index = args.index("--project")
+        name, key = args[index + 1], args[index + 2]
+        if name.startswith("${input:"):
+            continue
+        action = ACTIONS.get(key)
+        assert action is not None, f"{task['label']}: {key} is not an action"
+        assert action.projects == (name,), (
+            f"{task['label']}: hard-codes --project {name} but {key} is defined for "
+            f"{list(action.projects) or 'every checkout'}"
+        )
+        checked += 1
+    assert checked, "no literal-checkout dispatch found — this test now guards nothing"
 
 
 # The pickers that choose a CHECKOUT for a workspace-scoped task, and who each one is

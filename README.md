@@ -681,6 +681,16 @@ The sentinel must be created without a denial or retry. It is also paid and opt-
 `CLAUDE_LIVE_HOOK_MODEL`, `CLAUDE_LIVE_HOOK_EFFORT`, and
 `CLAUDE_LIVE_HOOK_BUDGET_USD` override its low-cost defaults.
 
+Both are reachable from one workspace task, **Test: Harness Hook Tests — paid, live
+CLI**, backed by `scripts/hook-tests-live.py`; it picks a suite, prints what it is about
+to spend before launching anything, and writes failures to
+`logs/hook-test-live-failures.log`. It exists because the raw `pytest` invocations above
+have two ways to cost nothing and prove nothing while exiting 0 — the CLI is not on
+`PATH`, so the suite skips, or the `-m` selector is dropped, so `addopts`' `-m "not
+paid"` deselects everything. The runner reads the count of tests that actually ran and
+fails when it is zero. The task is scoped to devkit alone: these suites live in `tests/`,
+which is never vendored, so no consuming project has the file.
+
 For a local diagnostic, run `codex doctor --summary` first; it checks installation,
 configuration, authentication, and connectivity, but not whether a hook changed
 behavior. Then use the two durable behavior checks:

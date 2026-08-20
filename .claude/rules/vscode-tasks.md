@@ -97,6 +97,13 @@ it regenerates the canonical copy from the live file. One test holds the pair to
   flags alongside their negations. The exception is a picker feeding
   `scripts/devkit_project.py`, which strips empties before exec — `testScope` and
   `e2eMode` rely on that, and say so.
+- **An action scoped to exactly one checkout writes the name, not a picker.** A
+  `${input:...}` with a single option asks a question that has no second answer, and the
+  extension still shows it. Spell the checkout in the task's `--project` argument
+  instead — `test-hooks-live` does. The usual picker/scope gate skips a literal, so
+  `test_the_live_smoke_task_names_the_only_checkout_that_can_run_it` asserts the same
+  agreement against `Action.projects` directly; a literal that outgrows its scope fails
+  there rather than in a terminal.
 - **A new project has to reach more than the `project` picker.** `register()` extends the
   `folders` list and that one picker; the workspace-scoped pickers — `sweepScope`,
   `upgradeScope` — are hand-maintained and were silently skipped, so a newly generated

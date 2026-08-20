@@ -99,6 +99,14 @@ DEVKIT = "devkit"
 CARAMELI = ("carameli",)
 IBKR = ("ibkr_trader",)
 
+# The source checkout, as a scope. One action is genuinely devkit-only rather than
+# merely implemented here: the live-CLI hook smokes live in `tests/`, which is the tree
+# `sync-devkit.py` never vendors, so no consumer has the file to run. Scoped rather than
+# DEVKIT-owned-and-unscoped, because those differ in what happens when someone picks a
+# consumer -- owning it here would run pytest in that repo and collect nothing, and a
+# suite that collects nothing exits green.
+DEVKIT_ONLY = ("devkit",)
+
 # Checkouts with a database and an Alembic tree. Scoped by NAME like the pairs above
 # rather than probed for the script, because `--check`'s whole job is to report a project
 # that is MISSING its `db-revision.py` — a probe for that same file could never say so.
@@ -140,6 +148,16 @@ ACTIONS: dict[str, Action] = {
     # vendored tier lives at the same path everywhere and pytest's `testpaths`
     # excludes it everywhere. A PROJECT-owned copy would be four identical scripts.
     "test-hooks": Action("scripts/hook-tests.py", "Test: Harness Hook Tests", owner=DEVKIT),
+    # The paid counterpart, and PROJECT-owned in a scope of one rather than DEVKIT-owned:
+    # the script is devkit's own, so `--check` should demand it of devkit and of nobody
+    # else. It launches a real CLI, which is why it is a separate action instead of a
+    # flag on `test-hooks` -- a cost that can be reached by mistyping an argument to the
+    # free task is a cost nobody consented to.
+    "test-hooks-live": Action(
+        "scripts/hook-tests-live.py",
+        "Test: Harness Hook Tests — Live CLI",
+        projects=DEVKIT_ONLY,
+    ),
     "docker-restart-engine": Action(
         "scripts/docker-maint.py", "Docker: Restart Engine", ("restart-engine",), owner=DEVKIT
     ),
