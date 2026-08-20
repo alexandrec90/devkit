@@ -742,13 +742,19 @@ def venv_step(python_version: str = "") -> ProvisionStep:
     and left every other one exactly as broken as before: carameli pinned 3.12 in three
     places devkit could see and still got a 3.14 box, because an absent field reads as
     "unpinned" rather than as "not asked".
+
+    The unpinned branch spawns `sweep.console_python()` rather than `sys.executable`
+    for the reason that helper documents: the nightly upgrade pass reaches here under
+    `pythonw.exe`, `CREATE_NO_WINDOW` is ignored for a GUI child, and `venv` re-spawns
+    `ensurepip` -- which is a visible console window for about sixteen seconds, once
+    per box, on a machine nobody is sitting at.
     """
     if python_version:
         return ProvisionStep(
             f"create .venv (python {python_version})",
             ("uv", "venv", "--python", python_version, ".venv"),
         )
-    return ProvisionStep("create .venv", (sys.executable, "-m", "venv", ".venv"))
+    return ProvisionStep("create .venv", (sweep.console_python(), "-m", "venv", ".venv"))
 
 
 def provision_steps(

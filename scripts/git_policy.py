@@ -46,6 +46,27 @@ SUPPORTED_HOOKS = ("pre-commit", "pre-push")
 # window-less console that its own descendants inherit. Zero off Windows.
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+
+def console_python() -> str:
+    """The console interpreter beside `sys.executable`, for spawning a Python child.
+
+    `NO_WINDOW` is necessary and **not sufficient**. Windows ignores
+    `CREATE_NO_WINDOW` for a GUI-subsystem child, so passing the flag alongside
+    `pythonw.exe` -- which is what `sys.executable` is under a scheduled job -- leaves
+    that child console-*less*, the exact condition that makes Windows open a fresh
+    visible console for each of *its* children. Spawn a console interpreter with the
+    flag instead and the child gets a hidden console that every descendant inherits.
+    Pair the two; neither alone suppresses a window. Identity off Windows, and under
+    any session that already has a console.
+    """
+    executable = Path(sys.executable)
+    if executable.name.lower() != "pythonw.exe":
+        return sys.executable
+    console = executable.with_name("python.exe")
+    # An embedded install could ship `pythonw.exe` with no console twin next to it.
+    return str(console) if console.exists() else sys.executable
+
+
 # A release tag is the one ref consumers pin, so the commit it names must be one whose
 # suite passed *as tagged*. devkit's `release.yml phase=tag` is what guarantees that: it
 # stages the tag locally, runs lint and the full suite against that exact commit, and
@@ -531,7 +552,7 @@ def _pre_commit_command(root: Path) -> list[str] | None:
     if executable:
         return [executable]
     if importlib.util.find_spec("pre_commit") is not None:
-        return [sys.executable, "-m", "pre_commit"]
+        return [console_python(), "-m", "pre_commit"]
     return None
 
 
@@ -558,7 +579,7 @@ def _project_hook_command(path: Path, args: Sequence[str]) -> list[str] | None:
     if os.name != "nt":
         return [str(path), *args]
     if path.suffix.lower() == ".py":
-        return [sys.executable, str(path), *args]
+        return [console_python(), str(path), *args]
     shell = shutil.which("sh")
     return [shell, str(path), *args] if shell else None
 

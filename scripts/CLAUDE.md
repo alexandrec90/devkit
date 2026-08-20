@@ -275,9 +275,9 @@ for a job nobody watches it means nothing at all.
 
 Two mechanics that make the wrapper work from a scheduler, both of which fail silently
 if forgotten: pass `working_dir` to `task_xml`, because a task's cwd is `system32` and
-`log-wrap.py` resolves `logs/` from the cwd; and keep the *inner* interpreter windowless
-too, because Windows allocates a console window for a console-subsystem child of a GUI
-parent even with every handle redirected.
+`log-wrap.py` resolves `logs/` from the cwd; and give the *inner* interpreter — the one
+inside the wrapped argv — the **console** spelling, `python.exe`, which is the opposite
+of what this paragraph said until 2026-08-20 and the reason the next section exists.
 
 ### A job's reach is longer than the script the scheduler names
 
@@ -300,6 +300,51 @@ halves: every module in `UNATTENDED` flags every spawn, and every script an inst
 names has to be in `UNATTENDED`. Only the outermost spawn strictly needs the flag — a
 window-less console *is* inherited, which is why nothing below `git` needs to know — but
 "outermost" is not checkable, so every site carries it.
+
+### The flag is half of it. The interpreter is the other half
+
+Everything above was in place, every spawn carried `NO_WINDOW`, and a console window
+still opened every night for about sixteen seconds. The paragraph above even names the
+mechanism in passing — *Windows ignores the flag for a GUI-subsystem child* — without
+drawing the conclusion, and the wrapper section above it drew the opposite one.
+
+`CREATE_NO_WINDOW` is a **console** flag. Passing it alongside `pythonw.exe` suppresses
+nothing, because there is no console to suppress; the child is left console-*less*,
+which is the precise condition that makes Windows allocate a fresh visible console for
+each of *its* children. The flag protects the hop it is passed to and loses the whole
+subtree behind it. Pass it with a console `python.exe` instead and the child gets a real
+console that is merely hidden — and **every descendant inherits that**, including the
+`ensurepip` that `python -m venv` re-spawns, and every hook `python -m pre_commit` runs.
+
+Measured under `pythonw.exe`, flag set on both spawns:
+
+| Spawn | Result |
+| --- | --- |
+| `sys.executable -m venv X` | rc 0 in 16.5s, **and a console window** for `ensurepip` |
+| `python.exe -m venv Y` | rc 0 in 11.7s, no window |
+
+So the pair is the rule, and neither half works alone:
+
+- **`pythonw.exe` only at the scheduler boundary** — the task's own `<Command>`, and
+  nowhere else. That is what `windowless()` is for in each installer.
+- **`console_python()` plus `creationflags=NO_WINDOW` for every Python child a job
+  spawns**, including the interpreter *inside* a `log-wrap.py --always ... -- <python>`
+  argv, which is what `console()` is for in the three wrapped installers.
+
+`sys.executable` is therefore banned outright in `UNATTENDED`, not merely inspected at
+spawn sites: `git_policy` builds its argv in one helper and spawns it three functions
+away through an injected `runner`, so a site-scoped check reads it as clean. The ban and
+its one exemption — the body of `console_python` itself — are
+`test_no_scheduled_job_spawns_the_interpreter_that_is_running_it`.
+
+Three further checks in that file exist because each was a way this could come back
+unseen: the `creationflags` **value** is now compared against a `NO_WINDOW` spelling
+rather than the keyword merely being present; `os.system` and the other spawns that
+accept no `creationflags` at all are refused; and the **import closure** of `UNATTENDED`
+is walked, so a helper module that gains a spawn joins the check by being imported
+rather than by being remembered. `IMPORTED_NOT_ENTERED` is the one exemption to that
+last, and it is mechanically narrow: the module's spawns must all be inside its own
+`main()`, which nothing imports its way into.
 
 Its cost is the second half, and it is the one that trades a visible bug for an invisible
 one: **the flag binds a child that captures nothing to the console it was just given**,

@@ -552,7 +552,7 @@ def run_pull(project: Path, devkit: Path) -> subprocess.CompletedProcess[str]:
     what that project has, and an older copy upgrading itself is the normal case.
     """
     return subprocess.run(
-        [sys.executable, SYNC_SCRIPT, "--pull", "--src", str(devkit)],
+        [sweep.console_python(), SYNC_SCRIPT, "--pull", "--src", str(devkit)],
         cwd=str(project),
         capture_output=True,
         text=True,
@@ -657,7 +657,7 @@ def verify_pull(project: Path, source: Path) -> subprocess.CompletedProcess[str]
     point where the tree that caused it is still the subject of the sentence.
     """
     return subprocess.run(
-        [sys.executable, SYNC_SCRIPT, "--check", "--src", str(source)],
+        [sweep.console_python(), SYNC_SCRIPT, "--check", "--src", str(source)],
         cwd=str(project),
         capture_output=True,
         text=True,

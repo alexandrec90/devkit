@@ -246,6 +246,22 @@ def spawn_sites(source: str) -> list[ast.Call]:
     ]
 
 
+def names_the_no_window_flag(value: ast.expr) -> bool:
+    """`NO_WINDOW`, `sweep.NO_WINDOW`, `worktree.sweep.NO_WINDOW` -- and not `0`.
+
+    That the keyword was *present* used to be the whole assertion, which passes for
+    `creationflags=0` and for any other flag someone reaches for. The keyword is not
+    the property being claimed; the value is.
+    """
+    if isinstance(value, ast.Name):
+        return value.id == "NO_WINDOW"
+    if isinstance(value, ast.Attribute):
+        return value.attr in {"NO_WINDOW", "CREATE_NO_WINDOW"}
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
+        return names_the_no_window_flag(value.left) or names_the_no_window_flag(value.right)
+    return False
+
+
 @pytest.mark.parametrize("rel", sorted(UNATTENDED), ids=sorted(UNATTENDED))
 def test_every_spawn_a_scheduled_job_can_reach_suppresses_its_console(rel):
     source = (REPO_ROOT / rel).read_text(encoding="utf-8")
@@ -258,10 +274,15 @@ def test_every_spawn_a_scheduled_job_can_reach_suppresses_its_console(rel):
         )
         return
     for site in sites:
-        flagged = any(keyword.arg == "creationflags" for keyword in site.keywords)
-        assert flagged, (
+        flag = next((kw.value for kw in site.keywords if kw.arg == "creationflags"), None)
+        assert flag is not None, (
             f"{rel}:{site.lineno} spawns a process without creationflags. Under "
             f"pythonw.exe this opens a console window; pass creationflags=NO_WINDOW."
+        )
+        assert names_the_no_window_flag(flag), (
+            f"{rel}:{site.lineno} passes creationflags, but the value is not a "
+            f"NO_WINDOW constant. The keyword was the whole of this check once, which "
+            f"makes creationflags=0 -- or any other flag -- pass it."
         )
 
 
@@ -370,4 +391,310 @@ def test_every_script_a_job_launches_is_covered(name, module):
         assert rel in UNATTENDED, (
             f"{name} launches {rel}, which is not in UNATTENDED. Every script a "
             f"scheduled job runs has to suppress the console windows of what it spawns."
+        )
+
+
+# --- the flag is half of it: the interpreter is the other half -------------------
+#
+# `CREATE_NO_WINDOW` was on every spawn in the reachable set above, and a window still
+# appeared nightly for about sixteen seconds. The reason is a Windows rule the flag's
+# own name hides: **it is ignored for a GUI-subsystem child.** `pythonw.exe` has no
+# console to suppress, so passing the flag alongside it is a no-op, and the child is
+# left console-*less* -- which is the exact condition that makes Windows allocate a
+# fresh visible console for each of *its* children.
+#
+# So a job that spawns `sys.executable` propagates console-lessness instead of stopping
+# it, and the window opens one hop further down, where nothing is looking. Measured on
+# this workstation, under `pythonw.exe`, with the flag set on both spawns:
+#
+#     sys.executable -m venv X   -> rc 0 in 16.5s, and a console window for the
+#                                   `ensurepip` that `venv` re-spawns
+#     python.exe     -m venv Y   -> rc 0 in 11.7s, no window
+#
+# `console_python()` is that second spelling, and pairing it with the flag is what
+# actually suppresses the subtree: a console child spawned with `CREATE_NO_WINDOW` gets
+# a real console that is merely hidden, and every descendant inherits it.
+#
+# Hence a blanket ban rather than a spawn-argv scan. `git_policy` builds its argv in a
+# helper and spawns it three functions away through an injected `runner`; a check that
+# looked only at spawn sites would have read that as clean. The interpreter is not
+# allowed into these modules at all, except inside the function whose job is to convert
+# it.
+
+CONSOLE_HELPERS = frozenset({"console_python", "console"})
+
+
+def interpreter_sites(source: str) -> list[int]:
+    """Lines naming `sys.executable`, outside the helper that exists to replace it.
+
+    Attribute nodes only, so the prose above and every docstring that explains the rule
+    are invisible to it -- `script_literals` had to learn the same lesson.
+    """
+    tree = ast.parse(source)
+    exempt: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in CONSOLE_HELPERS:
+            exempt.update(id(child) for child in ast.walk(node))
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr in {"executable", "_base_executable"}
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "sys"
+        and id(node) not in exempt
+    ]
+
+
+@pytest.mark.parametrize("rel", sorted(UNATTENDED), ids=sorted(UNATTENDED))
+def test_no_scheduled_job_spawns_the_interpreter_that_is_running_it(rel):
+    lines = interpreter_sites((REPO_ROOT / rel).read_text(encoding="utf-8"))
+    assert not lines, (
+        f"{rel}:{lines} names sys.executable. Under a scheduled job that is "
+        f"pythonw.exe, and CREATE_NO_WINDOW is ignored for a GUI-subsystem child -- so "
+        f"the child is left with no console and Windows gives each of its own children "
+        f"a visible one. Spawn console_python() with creationflags=NO_WINDOW instead; "
+        f"both, since neither alone suppresses the window."
+    )
+
+
+def modules_defining_a_console_helper() -> list[str]:
+    """Found rather than listed, for the reason the rest of this file is."""
+    return [
+        rel
+        for rel in sorted(UNATTENDED)
+        if "def console_python(" in (REPO_ROOT / rel).read_text(encoding="utf-8")
+    ]
+
+
+HELPER_MODULES = modules_defining_a_console_helper()
+
+
+def test_the_helper_exists_somewhere_to_be_checked():
+    """The ban above is satisfiable by deleting every spawn, which would pass this file
+    and break the jobs. Something has to still own the conversion."""
+    assert "scripts/sweep.py" in HELPER_MODULES, (
+        f"no module in UNATTENDED defines console_python(); found {HELPER_MODULES}"
+    )
+
+
+@pytest.fixture
+def two_interpreters(tmp_path):
+    """A directory holding both spellings, as a real Python install does."""
+    console = tmp_path / "python.exe"
+    gui = tmp_path / "pythonw.exe"
+    console.write_text("", encoding="utf-8")
+    gui.write_text("", encoding="utf-8")
+    return console, gui
+
+
+@pytest.mark.parametrize("rel", HELPER_MODULES, ids=HELPER_MODULES)
+def test_the_helper_returns_the_console_twin_under_a_scheduled_job(
+    rel, two_interpreters, monkeypatch
+):
+    console, gui = two_interpreters
+    module = load_script(rel)
+    monkeypatch.setattr(module.sys, "executable", str(gui))
+    assert module.console_python() == str(console)
+
+
+@pytest.mark.parametrize("rel", HELPER_MODULES, ids=HELPER_MODULES)
+def test_the_helper_is_the_identity_when_there_is_already_a_console(
+    rel, two_interpreters, monkeypatch
+):
+    """Every interactive caller, every POSIX machine, and this test run itself."""
+    console, _gui = two_interpreters
+    module = load_script(rel)
+    monkeypatch.setattr(module.sys, "executable", str(console))
+    assert module.console_python() == str(console)
+
+
+@pytest.mark.parametrize("rel", HELPER_MODULES, ids=HELPER_MODULES)
+def test_the_helper_falls_back_rather_than_raising_when_there_is_no_twin(
+    rel, tmp_path, monkeypatch
+):
+    """An embedded install can ship `pythonw.exe` alone. A hook that raised here would
+    fail the edit it was gating, which is a worse outcome than a window."""
+    gui = tmp_path / "pythonw.exe"
+    gui.write_text("", encoding="utf-8")
+    module = load_script(rel)
+    monkeypatch.setattr(module.sys, "executable", str(gui))
+    assert module.console_python() == str(gui)
+
+
+# `os.system` and friends take no `creationflags` at all, so a job that reaches for one
+# has no way to satisfy the check above -- and the failure would be the same window.
+
+CANNOT_BE_FLAGGED = {
+    ("os", "system"),
+    ("os", "popen"),
+    ("subprocess", "getoutput"),
+    ("subprocess", "getstatusoutput"),
+}
+
+
+@pytest.mark.parametrize("rel", sorted(UNATTENDED), ids=sorted(UNATTENDED))
+def test_no_scheduled_job_uses_a_spawn_that_cannot_be_flagged(rel):
+    tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        value = node.func.value
+        module = value.id if isinstance(value, ast.Name) else getattr(value, "attr", "")
+        assert (module, node.func.attr) not in CANNOT_BE_FLAGGED, (
+            f"{rel}:{node.lineno} calls {module}.{node.func.attr}, which accepts no "
+            f"creationflags. Use subprocess.run(..., creationflags=NO_WINDOW)."
+        )
+
+
+# --- and the interpreter the wrapper is handed is a console one -----------------
+#
+# Three jobs are launched as `pythonw.exe log-wrap.py --always <label> -- <python>
+# <script> ...`, so there are two interpreters in one command line and they are not the
+# same one. The outer must be windowless -- it is the job, and its console would be the
+# window. The inner must not be: `log-wrap.py` spawns it with `CREATE_NO_WINDOW`, which
+# the paragraph above explains is ignored for a GUI child, so a `pythonw.exe` there
+# hands every `docker` and every `git` below it a visible console.
+#
+# This is the pair the instruction tier had backwards -- `scripts/CLAUDE.md` said to
+# keep the inner interpreter windowless too -- so it is asserted rather than written
+# down.
+
+
+def wrapped_jobs() -> list[tuple[str, object]]:
+    """Job installers whose argv nests `log-wrap.py`, found from the argv itself."""
+    found = []
+    for name, module in JOBS:
+        source = (REPO_ROOT / "scripts" / name).read_text(encoding="utf-8")
+        if "log-wrap.py" in script_literals(source):
+            found.append((name, module))
+    return found
+
+
+WRAPPED = wrapped_jobs()
+WRAPPED_IDS = [name for name, _module in WRAPPED]
+
+
+def arguments_builder(name, module):
+    builders = sorted(attr for attr in dir(module) if attr.endswith("_arguments"))
+    assert len(builders) == 1, f"{name} has {builders}; expected exactly one argv builder"
+    return getattr(module, builders[0])
+
+
+def test_the_jobs_that_go_through_the_wrapper_are_still_found():
+    assert WRAPPED_IDS, "no wrapped job installers found; this suite passes vacuously"
+
+
+@pytest.mark.parametrize(("name", "module"), WRAPPED, ids=WRAPPED_IDS)
+def test_the_wrapped_command_names_a_console_interpreter(name, module, two_interpreters):
+    """Hand the builder the *task's own* windowless interpreter -- what `main` has in
+    hand -- and the command it wraps must still come out console-subsystem."""
+    console, gui = two_interpreters
+    arguments = arguments_builder(name, module)(str(gui), root=REPO_ROOT)
+    assert "pythonw.exe" not in arguments, (
+        f"{name} wraps a command that runs under pythonw.exe. CREATE_NO_WINDOW is "
+        f"ignored for it, so everything the wrapped script spawns opens a window."
+    )
+    assert str(console) in arguments
+
+
+@pytest.mark.parametrize(("name", "module"), WRAPPED, ids=WRAPPED_IDS)
+def test_the_task_itself_still_runs_windowless(name, module, two_interpreters):
+    """The other half of the pair, and the reason it is asserted beside its opposite:
+    `console` and `windowless` are inverses, and swapping them is silent."""
+    console, gui = two_interpreters
+    assert module.windowless(str(console)) == str(gui)
+    assert module.console(str(gui)) == str(console)
+
+
+# --- a module reached by an import is reached by the job ------------------------
+#
+# `UNATTENDED` is a hand-written list of what a job can reach, and the failure it was
+# written for is a hand-written list going stale. An import edge is the one part of the
+# reachable set that *can* be followed statically, so it is followed here: a helper
+# module that gains a spawn joins the check by being imported, not by being remembered.
+
+IMPORTED_NOT_ENTERED: dict[str, str] = {
+    "scripts/devkit_project.py": (
+        "imported for known_projects and the action table; its only spawn is the VS "
+        "Code task dispatcher inside main(), which no job calls"
+    ),
+}
+
+
+def local_imports(source: str, available: set[str]) -> set[str]:
+    """Sibling `scripts/*.py` modules imported by `source`."""
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            found.add(node.module.split(".")[0])
+    return found & available
+
+
+def import_closure() -> set[str]:
+    """Every `scripts/*.py` reachable from `UNATTENDED` by import, transitively."""
+    available = {path.stem: path for path in (REPO_ROOT / "scripts").glob("*.py")}
+    seen: set[str] = set()
+    queue = [Path(rel).stem for rel in UNATTENDED]
+    while queue:
+        stem = queue.pop()
+        if stem in seen or stem not in available:
+            continue
+        seen.add(stem)
+        source = available[stem].read_text(encoding="utf-8")
+        queue.extend(local_imports(source, set(available)))
+    return {f"scripts/{stem}.py" for stem in seen}
+
+
+def spawns_outside_main(rel: str) -> list[int]:
+    """Spawn sites in `rel` that are not lexically inside its `main()`.
+
+    The exemption an `IMPORTED_NOT_ENTERED` entry claims is precisely this: the module
+    is imported for a helper, and the code that spawns is the command-line entry point
+    nothing imports its way into. A spawn anywhere else is reachable and has to carry
+    the flag like any other.
+    """
+    tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
+    entry: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "main":
+            entry.update(id(child) for child in ast.walk(node))
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in SPAWN_ATTRS
+        and _is_subprocess(node.func.value)
+        and id(node) not in entry
+    ]
+
+
+def test_every_module_a_job_imports_is_checked_or_spawns_nothing():
+    for rel in sorted(import_closure() - set(UNATTENDED)):
+        outside = spawns_outside_main(rel)
+        if not outside and rel not in IMPORTED_NOT_ENTERED:
+            continue  # nothing to suppress, so nothing to declare
+        assert rel in IMPORTED_NOT_ENTERED, (
+            f"{rel} is imported by a scheduled job and spawns at {outside}. Add it to "
+            f"UNATTENDED so its spawns are checked, or -- if the spawns are only in "
+            f"its own main() -- to IMPORTED_NOT_ENTERED with the reason."
+        )
+        assert not outside, (
+            f"{rel} is exempt as main()-only, but spawns at {outside} outside main(). "
+            f"Those are reachable from a job; move it into UNATTENDED."
+        )
+
+
+def test_the_import_exemptions_are_not_stale():
+    """A module that stopped being imported, or stopped spawning, keeps an exemption
+    that reads as a decision someone made about today's code."""
+    closure = import_closure()
+    for rel in IMPORTED_NOT_ENTERED:
+        assert rel in closure, f"{rel} is exempt but no job imports it any more"
+        assert rel not in UNATTENDED, f"{rel} is both exempt and checked"
+        assert spawn_sites((REPO_ROOT / rel).read_text(encoding="utf-8")), (
+            f"{rel} is exempt as main()-only, but no longer spawns anything at all"
         )
