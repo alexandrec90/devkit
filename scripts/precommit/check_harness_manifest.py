@@ -29,6 +29,7 @@ stdlib only, like everything else that runs before a virtualenv exists.
 
 from __future__ import annotations
 
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -37,6 +38,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _loader import load_by_path
 
 DEVKIT_ROOT = Path(__file__).resolve().parents[2]
+
+# An interpreter request uv could resolve: a version, optionally an implementation
+# ("pypy@3.10") or an explicit path. Deliberately loose — the point is to reject a value
+# no spelling could be (a stray space, an empty quote, prose), not to re-implement uv's
+# parser and start failing commits over a form it added later.
+_VERSION_REQUEST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.@:_/\\+-]*")
 
 
 def _load_harness_config():
@@ -91,6 +98,17 @@ def check(manifest_path: Path) -> list[str]:
         problems.append("[paths] unit_tests is empty")
     elif not (root / cfg.unit_tests).is_dir():
         problems.append(f"[paths] unit_tests = {cfg.unit_tests!r} is not a directory in this repo")
+
+    # `[python] version` is handed to `uv venv --python` / `uv sync --python` as argv.
+    # uv accepts several request spellings ("3.12", "3.12.7", "pypy@3.10"), so this only
+    # rejects what none of them can be. It matters because a box's provisioning failure
+    # is a warning, not an error: a typo here yields a box with no .venv that still
+    # reports itself provisioned, and the missing toolchain surfaces much later.
+    if cfg.python.version and not _VERSION_REQUEST.fullmatch(cfg.python.version):
+        problems.append(
+            f"[python] version = {cfg.python.version!r} is not an interpreter uv can be "
+            f"asked for — expected something like '3.12' or '3.12.7'"
+        )
 
     if cfg.db.enabled:
         for field in ("user", "password", "name", "url_scheme"):

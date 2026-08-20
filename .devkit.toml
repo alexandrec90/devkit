@@ -26,6 +26,13 @@ tests = "tests/"
 # that an app-code change selects is the suite itself.
 unit_tests = "tests"
 
+# The interpreter, matching `requires-python` in pyproject.toml. devkit runs its own
+# harness, so this is also the field's first consumer: without it `worktree.py provision`
+# builds a box's .venv from whatever Python is running the provisioner, which on this
+# workstation is a newer release than the floor devkit's syntax is tested against.
+[python]
+version = "3.12"
+
 # The PreToolUse Bash output cap, wired in .claude/settings.json. devkit takes the
 # defaults; they are stated explicitly rather than omitted so that this file documents
 # the tier it runs, and so a change to the neutral default in harness_config.py shows up

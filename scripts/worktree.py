@@ -85,8 +85,9 @@ import devkit_ports
 import devkit_project
 
 # Resolved by the sys.path insert above; `scripts/hooks/` is not a package. Read for
-# `[python] install_command` and `[frontend]` — the same per-project seam the hooks use,
-# so a box provisions the way its project says to rather than the way this file guesses.
+# `[python] install_command`, `[python] version` and `[frontend]` — the same per-project
+# seam the hooks use, so a box provisions the way its project says to rather than the way
+# this file guesses.
 import harness_config
 import sweep
 import task_branch as tb
@@ -705,11 +706,37 @@ def npm_executable(windows: bool) -> str:
     return "npm.cmd" if windows else "npm"
 
 
+def venv_step(python_version: str = "") -> ProvisionStep:
+    """How a box's own `.venv` gets created, on the interpreter the project is pinned to.
+
+    The marker files say which *dependency model* a project uses; none of them says which
+    **interpreter** resolves it. So this step ran `sys.executable -m venv`, which is
+    whatever Python happens to be running `worktree.py` — the workstation default. A
+    project pinned to 3.12 across its `FROM python:` tag, its uv-compiled locks,
+    `mypy.ini` and CI therefore got a box venv on 3.14, and the box announced itself
+    provisioned: the mismatch surfaces later as a resolution or type-check failure that
+    reads as a broken branch rather than as the wrong interpreter.
+
+    `[python] version` in `.devkit.toml` is the seam, because the pin lives in files
+    devkit does not parse and cannot keep parsing as projects change build systems. With
+    it set, `uv venv --python` picks that interpreter — and fetches it when the machine
+    has no such version, which `python -m venv` structurally cannot do, since it can only
+    ever produce a copy of the interpreter already running it.
+    """
+    if python_version:
+        return ProvisionStep(
+            f"create .venv (python {python_version})",
+            ("uv", "venv", "--python", python_version, ".venv"),
+        )
+    return ProvisionStep("create .venv", (sys.executable, "-m", "venv", ".venv"))
+
+
 def provision_steps(
     present: frozenset[str] | set[str],
     install_command: str = "",
     frontend_dir: str = "",
     windows: bool = os.name == "nt",
+    python_version: str = "",
 ) -> tuple[ProvisionStep, ...]:
     """What makes a fresh box runnable, from the marker files the project ships.
 
@@ -735,15 +762,18 @@ def provision_steps(
     if install_command:
         steps.append(ProvisionStep(".devkit.toml install_command", shell_command=install_command))
     elif "uv.lock" in present:
-        # uv owns ./.venv here and creates it itself, so there is no venv step.
+        # uv owns ./.venv here and creates it itself, so there is no venv step. The pin
+        # still has to reach it: `requires-python` in the lock is a floor, so a project
+        # pinned to 3.12 resolves happily on 3.14 unless the version is passed through.
+        pin = ("--python", python_version) if python_version else ()
         steps.append(
-            ProvisionStep("uv sync (uv.lock)", ("uv", "sync", "--all-extras", "--all-groups"))
+            ProvisionStep("uv sync (uv.lock)", ("uv", "sync", "--all-extras", "--all-groups", *pin))
         )
     elif "requirements-dev.txt" in present:
         locks = ["-r", "requirements-dev.txt"]
         if "requirements.txt" in present:
             locks = ["-r", "requirements.txt", *locks]
-        steps.append(ProvisionStep("create .venv", (sys.executable, "-m", "venv", ".venv")))
+        steps.append(venv_step(python_version))
         steps.append(
             ProvisionStep(
                 "uv pip install (requirements locks)",
@@ -751,7 +781,7 @@ def provision_steps(
             )
         )
     elif "pyproject.toml" in present:
-        steps.append(ProvisionStep("create .venv", (sys.executable, "-m", "venv", ".venv")))
+        steps.append(venv_step(python_version))
         steps.append(
             ProvisionStep(
                 "uv pip install -e .[dev] (unlocked pyproject)",
@@ -783,9 +813,11 @@ def plan_provision(source: Path, windows: bool = os.name == "nt") -> tuple[Provi
     present = {name for name in PROVISION_MARKERS if (source / name).is_file()}
     install_command = ""
     frontend_dir = ""
+    python_version = ""
     try:
         cfg = harness_config.load(source)
         install_command = cfg.python.install_command
+        python_version = cfg.python.version
         if cfg.frontend.enabled and (source / cfg.frontend.dir).is_dir():
             frontend_dir = cfg.frontend.dir
     except Exception as exc:
@@ -798,7 +830,9 @@ def plan_provision(source: Path, windows: bool = os.name == "nt") -> tuple[Provi
             f"provisioning from the lockfiles alone.",
             file=sys.stderr,
         )
-    return provision_steps(present, install_command, frontend_dir, windows=windows)
+    return provision_steps(
+        present, install_command, frontend_dir, windows=windows, python_version=python_version
+    )
 
 
 def plan_env_templates(source: Path) -> dict[str, str]:

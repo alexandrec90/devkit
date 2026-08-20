@@ -60,6 +60,25 @@ def test_manifest_hook_accepts_a_sound_manifest(tmp_path):
     assert check_manifest.check(_project(tmp_path, SOUND_MANIFEST)) == []
 
 
+@pytest.mark.parametrize(
+    "pin", ["", '[python]\nversion = "3.12"\n', '[python]\nversion = "pypy@3.10"\n']
+)
+def test_manifest_hook_accepts_an_absent_or_plain_interpreter_pin(tmp_path, pin):
+    """Absent is the default and must stay silent; `worktree.py provision` then uses the
+    interpreter running it, which is right for a project with no pin."""
+    assert check_manifest.check(_project(tmp_path, SOUND_MANIFEST + pin)) == []
+
+
+def test_manifest_hook_rejects_an_interpreter_pin_uv_could_not_resolve(tmp_path):
+    """A box's provisioning failure is downgraded to a warning, so a typo here produces a
+    box with no `.venv` that still announces itself provisioned."""
+    problems = check_manifest.check(
+        _project(tmp_path, SOUND_MANIFEST + '[python]\nversion = "python 3.12"\n')
+    )
+    assert len(problems) == 1
+    assert "[python] version" in problems[0]
+
+
 def test_manifest_hook_rejects_unparseable_toml(tmp_path):
     """The failure mode the whole hook exists for: `load()` would return defaults."""
     problems = check_manifest.check(_project(tmp_path, "[project\nenv_prefix = "))

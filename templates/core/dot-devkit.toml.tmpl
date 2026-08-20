@@ -17,6 +17,15 @@ app = "{{ app_dir }}"
 tests = "{{ tests_dir }}"
 unit_tests = "{{ unit_tests }}"
 
+# The interpreter this project is pinned to — the same version `pyproject.toml`'s
+# `requires-python`, mypy and ruff's `target-version` carry. A lockfile pins the
+# packages but never the interpreter, so `worktree.py provision` built an ephemeral
+# box's .venv from whatever Python happened to run it — the workstation default,
+# which is a newer release than this on most machines. Keep this in step when you
+# move the version elsewhere.
+[python]
+version = "{{ python_version }}"
+
 # The PreToolUse Bash output cap. `enforce-capped-bash.py` blocks an uncapped Bash
 # call and quotes `max_bytes` in the reason; `invoke-capped.py` applies it. One
 # field feeds both, so the number the agent is told to use is the number it gets.
