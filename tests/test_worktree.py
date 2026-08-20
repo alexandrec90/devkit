@@ -415,7 +415,9 @@ def test_the_box_lives_outside_every_checkout():
 
 @pytest.mark.parametrize("verdict", sorted(worktree.SWEEPABLE))
 def test_reap_allows_a_box_whose_work_has_left_it(verdict):
-    allowed, note = worktree.reap_decision(verdict, "", force=False)
+    # A verdict in this set describes a clean tree, so the caller says so. Omitting it
+    # would exercise the "I do not know" default, which is a different test below.
+    allowed, note = worktree.reap_decision(verdict, "", force=False, holds_uncommitted=False)
     assert allowed and note == ""
 
 
@@ -624,6 +626,105 @@ def test_not_knowing_whether_a_box_is_dirty_holds_it():
     """Both flags default to the cautious answer, so a caller that forgets to pass them
     keeps a box it might have destroyed rather than the reverse."""
     assert not worktree.reapable(sweep.NEEDS_REBRANCH, pr_merged=True)
+
+
+@pytest.mark.parametrize("verdict", sorted(worktree.SAFE_TO_REAP))
+def test_a_safe_verdict_beside_uncommitted_work_still_holds_the_box(verdict):
+    """The `SAFE_TO_REAP` path used to return True without consulting the flag at all.
+
+    `sweep.classify` cannot *currently* produce one of these verdicts for a dirty tree
+    -- it tests `state.dirty` first, and that count includes untracked files -- so this
+    combination means the two halves came from different reads of the box. That is
+    precisely when a destroying predicate must refuse, and it made the cautious default
+    silently inert on the three verdicts most boxes are destroyed under.
+    """
+    assert not worktree.reapable(verdict, holds_uncommitted=True)
+    assert worktree.reapable(verdict, holds_uncommitted=False)
+
+
+@pytest.mark.parametrize("verdict", sorted(worktree.SAFE_TO_REAP))
+def test_a_caller_that_does_not_say_gets_no_safe_verdict_either(verdict):
+    """The default is `True` so ignorance holds the box; before this it was overridden
+    on exactly the path where ignorance is commonest."""
+    assert not worktree.reapable(verdict)
+
+
+# --- the destruction ledger ---------------------------------------------------
+
+
+def reaped_plan(**kw):
+    fields = {
+        "box": "devkit--topic-0820",
+        "path": r"C:\ws\.worktrees\devkit--topic-0820",
+        "project": "devkit",
+        "branch": "agent/topic-0820",
+        "verdict": sweep.SPENT,
+        "reason": "no commits beyond main -- branch is spent",
+        "forced": False,
+        "dirty": 0,
+    }
+    return worktree.ReapPlan(**{**fields, **kw})
+
+
+def test_the_ledger_line_names_the_box_and_why_it_went():
+    line = worktree.reap_ledger_line(reaped_plan(), "2026-08-20T17:17:18+00:00")
+    assert line.startswith("2026-08-20T17:17:18+00:00\t")
+    assert "box=devkit--topic-0820" in line
+    assert "branch=agent/topic-0820" in line
+    assert f"verdict={sweep.SPENT}" in line
+    assert "forced=no" in line and "dirty=0" in line
+
+
+def test_the_ledger_records_a_forced_reap_as_forced():
+    """The one field that separates "cleanup took it" from "somebody overrode the
+    refusal", which is the first question asked when work goes missing."""
+    line = worktree.reap_ledger_line(reaped_plan(forced=True, dirty=3), "T")
+    assert "forced=yes" in line and "dirty=3" in line
+
+
+def test_the_ledger_line_never_wraps():
+    """One box is one line: the file is read by grepping for a name long after the box
+    stopped existing, and a reason containing a newline would split the record."""
+    line = worktree.reap_ledger_line(reaped_plan(reason="two\nlines  and   spaces"), "T")
+    assert "\n" not in line
+    assert "reason=two lines and spaces" in line
+
+
+def test_recording_a_reap_appends_rather_than_replaces(tmp_path):
+    """`reconcile.log` is overwritten by the next pass fifteen minutes later, which is
+    why no record of a destroyed box survived to be read. This one accumulates."""
+    assert worktree.record_reap(reaped_plan(box="first"), root=tmp_path) is not None
+    assert worktree.record_reap(reaped_plan(box="second"), root=tmp_path) is not None
+    written = (tmp_path / worktree.REAP_LEDGER).read_text(encoding="utf-8")
+    assert written.count("\n") == 2
+    assert "box=first" in written and "box=second" in written
+
+
+def test_recording_a_reap_never_fails_the_reap(tmp_path):
+    """The box is already gone by the time this runs; reporting failure over the
+    bookkeeping would tell the caller the opposite of what happened."""
+    blocked = tmp_path / "logs"
+    blocked.write_text("not a directory", encoding="utf-8")
+    assert worktree.record_reap(reaped_plan(), root=tmp_path) is None
+
+
+def test_destroying_a_box_writes_the_ledger(tmp_path, monkeypatch):
+    """The wiring, not the writer. Drop the `record_reap` call from `apply_reap` and
+    every test above still passes while no destruction is recorded again -- which is
+    exactly the state this whole section exists to end."""
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+    monkeypatch.setattr(worktree, "read_leases", lambda root: {})
+    monkeypatch.setattr(worktree, "write_leases", lambda root, boxes: None)
+    monkeypatch.setattr(worktree, "REPO_ROOT", tmp_path)
+
+    ok, notes = worktree.apply_reap(reaped_plan(box="demo--x-0806", project="demo"), workspace)
+
+    assert ok is True
+    written = (tmp_path / worktree.REAP_LEDGER).read_text(encoding="utf-8")
+    assert "box=demo--x-0806" in written
+    assert any(worktree.REAP_LEDGER.split("/")[-1] in note for note in notes)
 
 
 def test_the_two_classifiers_agree_about_a_squash_merged_box():
@@ -2135,6 +2236,11 @@ def test_mergeable_names_the_reason_it_refused(payload, expected):
 
 
 def decide(verdict=sweep.NEEDS_PR, reason="pushed", pr=None, **kwargs):
+    # `holds_uncommitted=False` unless a case says otherwise: these tests vary the PR
+    # and the verdict, and the verdict is where dirtiness is already stated. Leaving it
+    # at the production default (True, "I do not know, so hold") would make every one of
+    # them assert the cautious refusal instead of the policy they were written for.
+    kwargs.setdefault("holds_uncommitted", False)
     return worktree.reconcile_action(verdict, reason, pr or worktree.PullRequest(), **kwargs)
 
 
@@ -2233,8 +2339,14 @@ def test_a_closed_pr_on_a_box_still_holding_work_is_held():
     assert "ready" in why
 
 
-def test_no_decision_destroys_a_box_outside_safe_to_reap():
-    """Reversion check for the whole mode, swept over every input combination."""
+def test_no_decision_destroys_a_box_holding_work():
+    """Reversion check for the whole mode, swept over every input combination.
+
+    `holds_uncommitted=True` is the premise, not an incidental argument: the one
+    documented escape from a verdict outside `SAFE_TO_REAP` is a merged PR on
+    `needs-rebranch`, and it is gated on the box being clean. Sweeping with the flag
+    unset would assert that the squash-merge path does not exist.
+    """
     for verdict in (sweep.READY, sweep.BLOCKED, sweep.NEEDS_BRANCH, sweep.NEEDS_REBRANCH):
         for pr in (
             worktree.PullRequest(),
@@ -2243,7 +2355,13 @@ def test_no_decision_destroys_a_box_outside_safe_to_reap():
         ):
             for pressure in (True, False):
                 action, _ = decide(
-                    verdict, "x", pr, pressure=pressure, automerge=True, age_days=1e6
+                    verdict,
+                    "x",
+                    pr,
+                    pressure=pressure,
+                    automerge=True,
+                    age_days=1e6,
+                    holds_uncommitted=True,
                 )
                 assert action == worktree.HOLD, (verdict, pr.state, pressure)
 

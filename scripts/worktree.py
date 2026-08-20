@@ -227,11 +227,24 @@ def reapable(verdict: str, *, pr_merged: bool = False, holds_uncommitted: bool =
     a remote ref, so there is nothing in it to strand. It is still gated on
     `holds_uncommitted`, because someone reading a diff may well have poked at a file,
     and a cleanup pass is not the right moment to find out.
+
+    `SAFE_TO_REAP` is gated on it too, and that gate is **deliberately redundant**.
+    `sweep.classify` tests `state.dirty` -- which counts untracked files, since it reads
+    an unfiltered `git status --porcelain` -- before it can reach `spent-branch`,
+    `needs-pr` or `clean`, so one of those verdicts already implies a clean tree *for
+    the snapshot it was computed from*. The parameter exists for the case where that
+    stops being true: a verdict cached across a step, a second snapshot taken later, a
+    caller that assembles the two from different reads. Ignoring it there was the same
+    "two fields disagreeing" the paragraph above refuses to resolve in favour of
+    destroying, and it made `holds_uncommitted=True` -- the default, chosen so an
+    ignorant caller fails towards keeping -- silently inert on the three commonest
+    verdicts a box is destroyed under. A predicate whose safety argument is "the caller
+    cannot construct that state" should still refuse the state.
     """
     if verdict == PREVIEW_VERDICT:
         return not holds_uncommitted
     if verdict in SAFE_TO_REAP:
-        return True
+        return not holds_uncommitted
     return pr_merged and not holds_uncommitted and verdict in MERGE_CAN_BE_STALE_ABOUT
 
 
@@ -360,6 +373,14 @@ class ReapPlan:
     slot: int = -1
     refusal: str = ""
     warning: str = ""
+    # Carried only so `apply_reap` can write the destruction ledger. Not read by any
+    # decision: everything that decides has already been decided by the time a plan
+    # exists. See `record_reap`.
+    branch: str = ""
+    verdict: str = ""
+    reason: str = ""
+    forced: bool = False
+    dirty: int = 0
 
     @property
     def acts(self) -> bool:
@@ -1331,6 +1352,11 @@ def reap_plan(
         stack_down=has_stack and not keep_stack,
         slot=box.slot,
         warning=warning,
+        branch=box.branch,
+        verdict=verdict,
+        reason=reason,
+        forced=force,
+        dirty=state.dirty,
     )
 
 
@@ -2628,6 +2654,57 @@ def _worktree_remove_fallback_applies(plan: ReapPlan, error: str) -> bool:
     return not (Path(plan.path) / ".git").exists()
 
 
+REAP_LEDGER = "logs/worktree-reaped.log"
+
+
+def reap_ledger_line(plan: ReapPlan, stamp: str) -> str:
+    """One ledger record for a destroyed box. Pure, so the format is testable.
+
+    Tab-separated `key=value`, one line, no wrapping: this file is read by grepping for
+    a box name months after the box stopped existing, which rules out both JSON (an
+    interrupted write leaves an unparseable document) and prose.
+    """
+    fields = (
+        ("box", plan.box),
+        ("branch", plan.branch or "-"),
+        ("verdict", plan.verdict or "-"),
+        ("forced", "yes" if plan.forced else "no"),
+        ("dirty", str(plan.dirty)),
+        ("path", plan.path or "-"),
+        ("reason", " ".join((plan.reason or "-").split())),
+    )
+    return stamp + "\t" + "\t".join(f"{key}={value}" for key, value in fields)
+
+
+def record_reap(plan: ReapPlan, root: Path = REPO_ROOT) -> Path | None:
+    """Append one line to `logs/worktree-reaped.log`. Returns the path, or None.
+
+    **The only durable record that a box ever existed.** Nothing else in the workspace
+    keeps one: `leases.json` is the live set and the entry is deleted by the reap
+    itself, `reconcile.log` is overwritten by the next pass fifteen minutes later, and
+    `reap` writes nothing at all. So when a box disappears, the questions that follow --
+    which pass took it, was it forced, did it hold uncommitted files at the time -- have
+    no source to answer them from, and the incident that prompted this one could not be
+    attributed to a mechanism even with every log on the machine in hand.
+
+    Append-only and never rotated, for the same reason. A record of destruction that the
+    next destruction overwrites is not a record; this file grows by one line per box,
+    which is a few kilobytes a year.
+
+    Best-effort: a box that has been destroyed has been destroyed, and failing the reap
+    over the bookkeeping would leave the caller believing the opposite.
+    """
+    path = root / REAP_LEDGER
+    stamp = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(reap_ledger_line(plan, stamp) + "\n")
+    except OSError:
+        return None
+    return path
+
+
 def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
     """Destroy the box. `(ok, notes)`. The lease is released only once it is gone.
 
@@ -2678,6 +2755,14 @@ def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
     if failed:
         notes.append(f"FAILED at `{failed}`: {error}")
         return False, notes
+
+    # After the tree is gone and before the lease entry is: this is the last moment the
+    # box is still described by anything, and the first moment it is certainly destroyed.
+    # `REPO_ROOT` passed rather than defaulted: a default is bound once at import, and
+    # the ledger's own test has to be able to point it somewhere other than this repo.
+    ledger = record_reap(plan, REPO_ROOT)
+    if ledger is not None:
+        notes.append(f"recorded in {ledger}")
 
     with lease_lock(root):
         recorded = read_leases(root)

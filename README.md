@@ -402,6 +402,15 @@ apart from a task that has stopped running. That log's timestamp is also what
 looks exactly like one that is working, so the status line says when a pass last
 finished rather than leaving you to notice the drift it causes.
 
+Overwritten per pass is right for a health check and wrong for a destruction, so those
+go somewhere else: every box that is destroyed, by any path, appends one line to
+`logs/worktree-reaped.log` — box, branch, verdict, whether it was forced, and how many
+uncommitted files it held at the time. Nothing else outlives a box: the lease registry
+is the live set and the reap deletes the entry, `reconcile.log` is gone in fifteen
+minutes, and `reap` used to write nothing at all — so a box that vanished could not be
+attributed to a mechanism even with every log on the machine in hand. This file is
+append-only and never rotated; it costs a line per box.
+
 ### Every scheduled job, and where each one reports
 
 One installer apiece, and the same contract on all of them: registered from XML so a
