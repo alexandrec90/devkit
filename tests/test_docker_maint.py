@@ -1,9 +1,12 @@
 """Tests for `scripts/docker-maint.py`'s stack modes and its argument plumbing.
 
-The daemon modes (`restart-engine`, `fix`, `prune`) are deliberately not exercised
-here: they kill Docker Desktop and compact a WSL2 VHDX, so there is nothing to assert
-that does not involve doing it. What IS tested is everything the `up`/`down` hoist
-added, plus the two invariants that would be expensive to get wrong:
+The daemon modes (`restart-engine`, `fix`, `prune`) are still not *executed* here:
+they kill Docker Desktop and compact a WSL2 VHDX, so there is nothing to assert that
+does not involve doing it. Their **decisions** are a different matter and are covered,
+because `prune_verdict` was factored out to be pure precisely so the choice to stop a
+machine's containers at 4am could be tested without stopping any. What IS tested is
+everything the `up`/`down` hoist added, plus the two invariants that would be
+expensive to get wrong:
 
   - arguments reach the delegate (before this, `find_delegate`'s spawn passed none, so
     a hoisted "Docker: Start Stack" would have dropped `--build` in every project that
@@ -211,15 +214,35 @@ def test_an_unreachable_engine_is_not_reported_as_idle(monkeypatch, kwargs):
 
 
 def test_idle_only_does_nothing_while_containers_are_up(monkeypatch, capsys):
-    """The scheduled case. Stopping twelve containers at 4am to reclaim disk is not a
-    trade anything should make unattended."""
+    """The scheduled case, on a machine with disk to spare. Stopping twelve containers
+    at 4am to reclaim disk nobody needs is not a trade anything should make unattended.
+
+    `free_gb` is stubbed rather than left to read the real volume: the skip is now
+    conditional on free space, so a developer whose own disk happened to be under the
+    floor would watch this assert the opposite of what it is named for."""
     monkeypatch.setattr(docker_maint, "running_containers", lambda: 12)
+    monkeypatch.setattr(docker_maint, "free_gb", lambda *_a, **_kw: 400.0)
     monkeypatch.setattr(
         docker_maint, "docker_info_ok", lambda *_a, **_kw: pytest.fail("touched the engine")
     )
     assert docker_maint.generic_prune(idle_only=True) == 0
     printed = capsys.readouterr().out
-    assert "SKIPPED" in printed and "12 container(s) up" in printed
+    assert "SKIPPED" in printed and "12 containers up" in printed
+
+
+def test_idle_only_compacts_anyway_when_the_disk_is_under_the_floor(monkeypatch, capsys):
+    """The reversal, end to end: the same twelve containers, a disk low enough that
+    `reconcile` is deleting open-PR boxes, and the prune goes ahead. This is the test
+    that fails if the escalation is reverted."""
+    monkeypatch.setattr(docker_maint, "running_containers", lambda: 12)
+    monkeypatch.setattr(docker_maint, "free_gb", lambda *_a, **_kw: 12.0)
+    monkeypatch.setattr(docker_maint, "docker_info_ok", lambda *_a, **_kw: False)
+    monkeypatch.setattr(docker_maint, "start_docker", lambda: None)
+    monkeypatch.setattr(docker_maint, "poll_engine", lambda **_kw: False)
+    assert docker_maint.generic_prune(idle_only=True) == 1
+    printed = capsys.readouterr().out
+    assert "SKIPPED" not in printed
+    assert "Proceeding" in printed and "12.0 GB free" in printed
 
 
 def test_idle_only_skips_when_the_engine_cannot_be_asked(monkeypatch, capsys):
@@ -467,3 +490,86 @@ def test_the_mode_reaches_the_generic_pass(monkeypatch):
     monkeypatch.setattr(docker_maint, "generic_stop_idle", lambda: seen.append("ran") or 0)
     assert docker_maint.main(["stop-idle", "--generic"]) == 0
     assert seen == ["ran"]
+
+
+# --- the unattended prune's decision half ---------------------------------
+# Lived on 2026-08-20. `docker_data.vhdx` had grown to 26.25 GB holding ~6 GB of live
+# data, because the only step that returns bytes to Windows needs `wsl --shutdown` and
+# `--idle-only` had refused it every night for months -- something is always up on a
+# machine whose stacks carry `restart: unless-stopped`. Free space reached 12.0 GB,
+# `reconcile` crossed its own 20 GB floor, and it began destroying boxes whose PRs were
+# still open. Compacting by hand returned 16.2 GB.
+
+
+def test_an_idle_machine_still_prunes_without_consulting_the_disk():
+    """The ordinary case, and the one that must not regress: nothing running means
+    there is nothing to weigh."""
+    proceed, why = docker_maint.prune_verdict(running=0, free=500.0)
+    assert proceed
+    assert "no containers" in why
+
+
+def test_containers_up_on_a_roomy_disk_still_skips():
+    """The guard's original purpose. 4am is not the time to stop twelve containers
+    for disk nobody needs."""
+    proceed, why = docker_maint.prune_verdict(running=12, free=400.0)
+    assert not proceed
+    assert "12 containers up" in why
+
+
+def test_containers_up_under_the_floor_escalates():
+    """Below the floor the alternative is `reconcile` deleting open-PR boxes, so
+    stopping containers `unless-stopped` will restart is the cheaper loss."""
+    proceed, why = docker_maint.prune_verdict(running=12, free=12.0)
+    assert proceed
+    assert "12.0 GB free" in why
+    assert "cheaper loss" in why
+
+
+def test_an_unreadable_disk_never_escalates():
+    """`free_gb` returns -1.0 for "cannot tell", which must not read as "no space
+    left" -- that would license the disruptive half against a machine mid-run."""
+    proceed, why = docker_maint.prune_verdict(running=12, free=-1.0)
+    assert not proceed
+    assert "could not be read" in why
+
+
+def test_an_unreachable_engine_never_escalates():
+    """`running_containers` returns -1 the same way, and for the same reason."""
+    proceed, why = docker_maint.prune_verdict(running=-1, free=1.0)
+    assert not proceed
+    assert "could not be asked" in why
+
+
+def test_the_floor_sits_above_the_one_reconcile_reaps_at():
+    """The whole point of the escalation is to fire while the expensive remedy is
+    still avoidable. The two constants live in different files, so nothing but this
+    keeps them ordered."""
+    worktree = load_script("scripts/worktree.py")
+    assert docker_maint.PRESSURE_FREE_GB > worktree.DEFAULT_MIN_FREE_GB
+
+
+def test_exactly_at_the_floor_escalates():
+    """`under_pressure` in worktree.py treats the floor as inclusive; this agrees with
+    it rather than leaving a one-gigabyte band where neither remedy acts."""
+    assert docker_maint.prune_verdict(running=1, free=docker_maint.PRESSURE_FREE_GB)[0]
+
+
+def test_one_container_is_not_pluralised():
+    """The verdict string is what the nightly artifact shows a human at 8am."""
+    assert "1 container up" in docker_maint.prune_verdict(running=1, free=999.0)[1]
+
+
+def test_free_gb_reports_minus_one_when_the_volume_cannot_be_read(monkeypatch):
+    def boom(_path):
+        raise OSError("no such volume")
+
+    monkeypatch.setattr(docker_maint.shutil, "disk_usage", boom)
+    assert docker_maint.free_gb() == -1.0
+
+
+def test_the_engine_gets_longer_to_come_back_after_a_compaction():
+    """A cold start that re-mounts a rewritten VHDX and restarts every
+    `unless-stopped` container took over 90s, so the default poll reported a
+    successful prune as a failure."""
+    assert docker_maint.COMPACT_POLL_TIMEOUT > docker_maint.POLL_TIMEOUT
