@@ -85,7 +85,7 @@ PRESETS: dict[str, tuple[str, ...]] = {
 # users who cannot hit the fast path. So it must track the newest tag, and
 # `test_fallback_devkit_ref_tracks_the_newest_tag` fails at release time if a tag
 # lands without it being bumped. Bump it in the same commit as the tag.
-FALLBACK_DEVKIT_REF = "v0.10.1"
+FALLBACK_DEVKIT_REF = "v0.10.2"
 
 
 class GeneratorError(RuntimeError):
