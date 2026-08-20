@@ -102,9 +102,21 @@ class PythonConfig:
     pip-tools locks, else `pyproject.toml`), because a lockfile cannot drift from
     reality the way a manifest field can. Set `install_command` only for a project
     that fits none of those shapes; it then wins over detection.
+
+    `version` is the one thing the files on disk do *not* say. A lockfile pins
+    packages, not the interpreter that resolves them, so `worktree.py provision`
+    built every box's `.venv` from whatever interpreter happened to be running it --
+    the workstation default, not the version the project is pinned to in its
+    `FROM python:` tag, its compiled locks, its type-checker config and CI. The box came
+    out announcing itself provisioned with a venv the container does not match, and
+    the mismatch surfaced later as an install or a type-check failure that reads as
+    a broken branch rather than as the wrong interpreter. Set it to the same version
+    those files carry (`"3.12"`, or a full `"3.12.7"`); left empty, provisioning
+    keeps using the running interpreter, which is right for a project with no pin.
     """
 
     install_command: str = ""
+    version: str = ""
 
 
 @dataclass(frozen=True)
@@ -213,7 +225,9 @@ def _frontend_from(raw: dict[str, Any], default: FrontendConfig) -> FrontendConf
 
 def _python_from(raw: dict[str, Any], default: PythonConfig) -> PythonConfig:
     return replace(
-        default, install_command=str(raw.get("install_command", default.install_command))
+        default,
+        install_command=str(raw.get("install_command", default.install_command)),
+        version=str(raw.get("version", default.version)),
     )
 
 

@@ -292,6 +292,23 @@ def test_generated_env_example_has_no_stripped_section_scars(tmp_path, features)
 
 
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
+def test_generated_manifest_pins_the_same_interpreter_pyproject_requires(tmp_path, features):
+    """A generated project is pinned by construction, not by someone remembering.
+
+    `[python] version` is what `worktree.py provision` builds an ephemeral box's venv
+    on; with it absent the box gets whatever interpreter runs the provisioner, which on
+    a workstation is a newer release than the project's own. Asserted against
+    `requires-python` rather than against a literal so the two cannot drift apart.
+    """
+    root = generate(tmp_path, features)
+    with (root / ".devkit.toml").open("rb") as fh:
+        pinned = tomllib.load(fh)["python"]["version"]
+    with (root / "pyproject.toml").open("rb") as fh:
+        requires = tomllib.load(fh)["project"]["requires-python"]
+    assert pinned and requires == f">={pinned}"
+
+
+@pytest.mark.parametrize("features", FEATURE_MATRIX)
 def test_generated_toml_parses(tmp_path, features):
     root = generate(tmp_path, features)
     for name in (".devkit.toml", "pyproject.toml", "ruff.toml"):

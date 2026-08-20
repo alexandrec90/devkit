@@ -164,6 +164,33 @@ def test_malformed_python_section_degrades_to_default():
         assert isinstance(cfg.from_dict(bad).python.install_command, str)
 
 
+# --- [python] version: the interpreter the marker files do not name -----------
+# A lockfile pins packages, not the interpreter. Empty means "use whatever is
+# running the provisioner", which is what every project got unconditionally before
+# this field existed.
+
+
+def test_python_version_defaults_to_empty_so_the_running_interpreter_is_used():
+    assert cfg.Config().python.version == ""
+    assert cfg.from_dict({}).python.version == ""
+
+
+def test_python_version_is_read_from_the_manifest():
+    assert cfg.from_dict({"python": {"version": "3.12"}}).python.version == "3.12"
+
+
+def test_an_unquoted_python_version_still_reads_as_a_string():
+    """`version = 3.12` in TOML parses as a float, and it is the spelling an author
+    reaches for first. It has to reach `uv venv --python` as "3.12", not as a float
+    that would blow up argv construction."""
+    assert cfg.from_dict({"python": {"version": 3.12}}).python.version == "3.12"
+
+
+def test_python_version_is_addressable_from_the_shell_lookup():
+    c = cfg.from_dict({"python": {"version": "3.12"}})
+    assert cfg.lookup(c, "python.version") == "3.12"
+
+
 # --- [bash]: the PreToolUse output cap ----------------------------------------
 # Read by both enforce-capped-bash.py (the number it quotes when blocking) and
 # invoke-capped.py (the cap it actually applies). They must agree, which is why

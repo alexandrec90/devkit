@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -878,7 +879,7 @@ def _python_installer(steps) -> list[str]:
     return [
         s.label
         for s in steps
-        if s.label != "create .venv" and not s.label.startswith("npm install")
+        if not s.label.startswith("create .venv") and not s.label.startswith("npm install")
     ]
 
 
@@ -974,6 +975,88 @@ def test_the_frontend_step_is_runnable_on_windows():
 def test_a_project_with_no_frontend_tier_runs_no_npm():
     steps = worktree.provision_steps({"uv.lock"})
     assert not any("npm" in s.argv for s in steps)
+
+
+def test_an_unpinned_project_gets_a_venv_from_the_running_interpreter():
+    """No `[python] version` is the common case and must stay exactly as it was: the
+    interpreter running the provisioner, with no dependency on uv for the venv itself."""
+    step = worktree.venv_step()
+    assert step.label == "create .venv"
+    assert step.argv == (sys.executable, "-m", "venv", ".venv")
+
+
+def test_a_pinned_project_gets_a_venv_on_the_version_it_declares():
+    """The regression check. `sys.executable` is the workstation default -- 3.14 on the
+    machine this was found on -- so a project pinned to 3.12 in its Dockerfile, its locks
+    and mypy.ini got a box whose venv the container does not match, and the box reported
+    itself provisioned anyway."""
+    step = worktree.venv_step("3.12")
+    assert step.argv == ("uv", "venv", "--python", "3.12", ".venv")
+    assert sys.executable not in step.argv
+    assert "3.12" in step.label, "the pin belongs in the label the provisioner prints"
+
+
+def test_the_pin_reaches_the_pip_tools_ladder():
+    steps = worktree.provision_steps(
+        {"requirements.txt", "requirements-dev.txt"}, windows=False, python_version="3.12"
+    )
+    assert steps[0].argv == ("uv", "venv", "--python", "3.12", ".venv")
+    assert steps[1].argv[:5] == ("uv", "pip", "install", "--python", ".venv/bin/python")
+
+
+def test_the_pin_reaches_the_unlocked_pyproject_ladder():
+    steps = worktree.provision_steps({"pyproject.toml"}, windows=False, python_version="3.12")
+    assert steps[0].argv == ("uv", "venv", "--python", "3.12", ".venv")
+
+
+def test_the_pin_reaches_uv_sync_even_though_uv_owns_the_venv():
+    """`requires-python` in a uv lock is a floor, not a pin: 3.14 satisfies `>=3.12`, so
+    a uv-locked project resolves on the wrong interpreter unless the version is passed."""
+    steps = worktree.provision_steps({"uv.lock"}, python_version="3.12")
+    assert steps[0].argv == ("uv", "sync", "--all-extras", "--all-groups", "--python", "3.12")
+
+
+def test_an_unpinned_uv_project_passes_no_python_flag():
+    assert worktree.provision_steps({"uv.lock"})[0].argv == (
+        "uv",
+        "sync",
+        "--all-extras",
+        "--all-groups",
+    )
+
+
+def test_the_install_command_escape_hatch_still_owns_the_whole_toolchain():
+    """A project that sets `install_command` builds its own venv however it likes, so
+    bolting a `uv venv` in front of it would create one it did not ask for."""
+    steps = worktree.provision_steps(
+        {"requirements-dev.txt"}, install_command="make dev", python_version="3.12"
+    )
+    assert [s.label for s in steps] == [".devkit.toml install_command"]
+
+
+def test_plan_provision_reads_the_pin_off_the_manifest(tmp_path):
+    (tmp_path / "requirements-dev.txt").write_text("", encoding="utf-8")
+    (tmp_path / ".devkit.toml").write_text('[python]\nversion = "3.12"\n', encoding="utf-8")
+    assert worktree.plan_provision(tmp_path, windows=False)[0].argv == (
+        "uv",
+        "venv",
+        "--python",
+        "3.12",
+        ".venv",
+    )
+
+
+def test_plan_provision_without_a_pin_uses_the_running_interpreter(tmp_path):
+    """The reversion check for the manifest read: drop `python_version=` from the
+    `provision_steps` call and this stays green while the one above goes red."""
+    (tmp_path / "requirements-dev.txt").write_text("", encoding="utf-8")
+    (tmp_path / ".devkit.toml").write_text("[python]\n", encoding="utf-8")
+    assert worktree.plan_provision(tmp_path, windows=False)[0].argv == (
+        sys.executable,
+        "-m",
+        "venv",
+        ".venv",
+    )
 
 
 def test_the_interpreter_path_follows_the_platform():

@@ -145,6 +145,14 @@ Each of these has already been violated by something:
   takes minutes and a PreToolUse hook that takes minutes is one the agent experiences as
   a hang, so the guard passes `provision=False` and puts the `provision` command in its
   block message instead.
+- **The ladder detects the dependency model but cannot detect the interpreter.** No
+  marker file names one: a lockfile pins packages, and `requires-python` is a floor that
+  a newer release satisfies. So provisioning built every box's `.venv` from
+  `sys.executable` — the workstation default — and a project pinned to an older version
+  in its `FROM python:` tag, its locks, its type-checker config and CI got a box the
+  container does not match, reported as provisioned. `[python] version` in `.devkit.toml` is the seam,
+  and `uv venv --python` fetches the version when the machine lacks it, which
+  `python -m venv` cannot: it only ever copies the interpreter already running it.
 
 ### What the guard declines, and why each case exists
 
