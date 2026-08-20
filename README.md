@@ -412,12 +412,34 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-upgrade-projects` | `scripts/install-upgrade-schedule.py` | daily 03:00 | `logs/upgrade.log` |
 | `devkit-docker-stop-idle` | `scripts/install-docker-stop-idle.py` | daily 03:30 | `logs/scheduled-docker-stop-idle.log` |
 | `devkit-docker-prune` | `scripts/install-docker-prune.py` | daily 04:00 | `logs/scheduled-docker-prune.log` |
+| `devkit-global-tools` | `scripts/install-global-tools.py` | daily 04:30 | `logs/global-tools.log` |
 | `devkit-vanillaland-merge` | `scripts/install-vanillaland-merge.py` | daily 05:00 | `logs/scheduled-vanillaland-merge-develop.log` |
 
 `scripts/schedule_health.py` answers the question no artifact can — *did it run at all*
 — and names the file above when one exits non-zero, so the session-start line is a
 pointer rather than a bare exit code. `tests/test_scheduled_jobs.py` holds the contract:
 a job registered by hand, or one that leaves nothing behind, fails the suite.
+
+The global-tools pass is the machine-wide counterpart to the project upgrade. Four of
+this workspace's MCP servers — chrome-devtools, postgres, redis, azure-devops — are
+launched from a **globally installed** npm bin rather than through `npx`, so the global
+install is the pin and nothing was moving it; the same is true of every linter reachable
+without a project venv. `scripts/global-tools.py` reads the outdated set from npm itself
+rather than from a list that would go stale, updates each package to the exact version it
+reported, and skips `npm` and `@anthropic-ai/claude-code` — the two things that would have
+to still work in order to undo a bad update.
+
+It is the one devkit artifact that keeps a **history** rather than overwriting per run,
+because an unpinned auto-update is noticed days after the bump that caused it: each pass
+records `npm install -g <name>@<old>` for everything it moved. A registry it cannot reach
+is recorded and exits 0 — a laptop offline at 04:30 is the system working, and a job whose
+alerts fire on the normal case is a job whose alerts nobody reads.
+
+```bash
+python scripts/install-global-tools.py            # what it would register
+python scripts/install-global-tools.py --yes      # daily 04:30
+python scripts/global-tools.py                    # what is behind, installing nothing
+```
 
 The prune runs `--idle-only`, so it declines whenever containers are up; reclaiming the
 VHDX needs `wsl --shutdown`, and stopping a running stack at 04:00 for disk is not a
