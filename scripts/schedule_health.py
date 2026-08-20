@@ -75,7 +75,23 @@ NEVER_RUN_DATE = _dt.date(1999, 11, 30)
 # was reported as "last run failed (exit 267011)".
 SCHED_S_TASK_HAS_NOT_RUN = 267011  # 0x00041303
 SCHED_S_TASK_RUNNING = 267009  # 0x00041301
-NOT_A_FAILURE = frozenset({0, SCHED_S_TASK_HAS_NOT_RUN, SCHED_S_TASK_RUNNING})
+
+# `0x800710E0` -- documented as "the operator or administrator has refused the request",
+# and what Task Scheduler reports when `MultipleInstancesPolicy` is `IgnoreNew` and a
+# fire comes due while the previous run is still going. It is the *scheduler's* verdict
+# on starting a second instance, never the job's exit code, so reading it as one calls a
+# healthy mid-pass job broken -- which is how `devkit-worktree-reconcile` came to be
+# reported as `last run failed (exit -2147020576)` on 2026-08-20 while its 09:00 pass was
+# still running, 50 minutes into a job scheduled every 15.
+#
+# Both spellings are carried because the two Windows front ends disagree: `schtasks`
+# signs the HRESULT and `Get-ScheduledTaskInfo` reports the same bits unsigned, so which
+# one arrives here depends only on who was asked.
+SCHED_REFUSED_ALREADY_RUNNING = -2147020576  # 0x800710E0, as `schtasks` signs it
+SCHED_REFUSED_ALREADY_RUNNING_UNSIGNED = 2147946720  # the same bits, unsigned
+OVERLAPPING = frozenset({SCHED_REFUSED_ALREADY_RUNNING, SCHED_REFUSED_ALREADY_RUNNING_UNSIGNED})
+
+NOT_A_FAILURE = frozenset({0, SCHED_S_TASK_HAS_NOT_RUN, SCHED_S_TASK_RUNNING}) | OVERLAPPING
 
 # How many intervals a job may miss before it is worth a line. One is noise: a laptop
 # asleep at 04:00 misses a daily run and catches it the next night, which is the system
@@ -258,6 +274,17 @@ def problems(jobs: list[Job], now: _dt.datetime | None = None) -> list[str]:
             # scheduler says which that is: its next run is already in the past.
             if job.next_run is None or job.next_run < moment:
                 found.append(f"{job.name}: registered but has never run")
+            continue
+        if job.last_result in OVERLAPPING:
+            # Not a failure, but not silence either: a job whose pass outlives its own
+            # interval is running essentially continuously, and that background cost is
+            # invisible everywhere else.
+            found.append(
+                f"{job.name}: a run was still going at "
+                f"{job.last_run:%Y-%m-%d %H:%M}, so the scheduled fire was skipped -- "
+                f"its runs are overlapping"
+                f"{artifact_hint(job.name, since=job.last_run)}"
+            )
             continue
         if job.last_result not in NOT_A_FAILURE:
             found.append(

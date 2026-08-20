@@ -347,3 +347,38 @@ def test_a_real_failure_is_still_reported():
     """Reversion check: widen `NOT_A_FAILURE` too far and nothing is ever reported."""
     assert "failed (exit 1)" in health.problems([job(last_result=1)], NOW)[0]
     assert "failed (exit 2147942401)" in health.problems([job(last_result=2147942401)], NOW)[0]
+
+
+# --- a fire refused because the previous run had not finished --------------------
+# Lived on 2026-08-20: `devkit-worktree-reconcile` fires every 15 minutes, a pass took
+# over 50, and the 09:00 fire was refused. Session start reported
+# `last run failed (exit -2147020576)` -- a healthy job, mid-pass, described as broken.
+
+
+def test_a_fire_refused_because_a_run_was_still_going_is_not_a_failure():
+    """`0x800710E0` is what `IgnoreNew` reports when it declines to start a second
+    instance. It is a scheduler status, not the job's exit code."""
+    for code in (
+        health.SCHED_REFUSED_ALREADY_RUNNING,
+        health.SCHED_REFUSED_ALREADY_RUNNING_UNSIGNED,
+    ):
+        assert "failed" not in "".join(health.problems([job(last_result=code)], NOW))
+
+
+def test_overlapping_runs_are_reported_as_an_overrun_not_a_failure():
+    """Still worth a line: a job that cannot finish inside its own interval runs
+    essentially continuously, which is a real background cost."""
+    line = health.problems([job(last_result=health.SCHED_REFUSED_ALREADY_RUNNING)], NOW)[0]
+    assert "overlapping" in line
+    assert "devkit-upgrade-projects" in line
+
+
+def test_both_spellings_of_the_refusal_code_are_recognised():
+    """`schtasks` signs the HRESULT and `Get-ScheduledTaskInfo` does not, so the same
+    refusal reaches this module as either value depending on which one was read."""
+    assert health.SCHED_REFUSED_ALREADY_RUNNING == -2147020576
+    assert health.SCHED_REFUSED_ALREADY_RUNNING_UNSIGNED == 2147946720
+    assert (
+        health.SCHED_REFUSED_ALREADY_RUNNING_UNSIGNED - health.SCHED_REFUSED_ALREADY_RUNNING
+        == 2**32
+    )
