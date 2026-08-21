@@ -361,6 +361,13 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # job N times and report nothing on runs 2..N. Scoping it to devkit is what lets
         # the task pin `--project devkit` and offer no picker.
         "reclaim",
+        # Born scoped, for `reclaim`'s reason rather than its own: the menu
+        # `preview-task.py` prints is assembled from the box registry and the port
+        # registry, and there is exactly one of each on this machine. So the question
+        # "which checkout" has no answer to give -- every checkout is already a column
+        # in the menu -- and the task pins `--project devkit` and asks the one question
+        # worth asking instead.
+        "preview",
     }
 
 
