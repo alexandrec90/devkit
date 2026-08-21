@@ -82,7 +82,7 @@ try:
         "harness_events", Path(__file__).resolve().parent / "hooks" / "harness_events.py"
     )
 except Exception:  # pragma: no cover - a checkout missing the ledger module
-    harness_events = None
+    harness_events = None  # type: ignore[assignment]  # Module-or-None, checked at each use
 
 # Where the ledger lives: this checkout, which is the workspace's static devkit — the
 # workspace settings wire this hook by that path, so `__file__` resolves there even
