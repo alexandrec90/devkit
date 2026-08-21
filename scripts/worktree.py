@@ -3210,7 +3210,14 @@ def sync_checkouts(
     a checkout holding uncommitted changes, unpushed commits or an open PR is refused
     and reported, never parked -- and its steps are `merge --ff-only` and `branch -d`,
     both of which refuse rather than destroy. This adds no new authority to the
-    scheduled run; it runs the same plan the workspace task has always printed.
+    scheduled run; it runs the same plan `sweep.py --sync` has always printed.
+
+    That schedule is now the *only* caller. The workspace once carried a `Ship:
+    Sync Worktrees (step 3)` task that hand-cranked the same plan, and a one-click
+    duplicate of a job that already runs every fifteen minutes is a second owner
+    for one tier's lifecycle -- the thing the box/checkout split exists to avoid.
+    It was retired once this pass had been syncing every checkout unattended for
+    long enough to prove it; `sweep.py --sync` remains reachable on the CLI.
     """
     try:
         registry = workspace.read_text(encoding="utf-8")

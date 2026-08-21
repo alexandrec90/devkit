@@ -2619,8 +2619,9 @@ def test_a_failed_git_step_is_a_failure():
 
 def test_sync_checkouts_asks_sweep_for_the_sync_mode_and_applies_it(workspace, monkeypatch):
     """The wiring test: reconcile must not invent its own plan for the static tier --
-    `sweep` owns those checkouts and its `--sync` is the plan the workspace task has
-    always printed."""
+    `sweep` owns those checkouts and its `--sync` is the plan. Since the `Ship: Sync
+    Worktrees` task was retired this schedule is the only caller, so a plan invented
+    here would be the only one anyone ever saw."""
     seen: dict = {}
     monkeypatch.setattr(sweep, "sweep", lambda root, names, fetch=True: _results(("demo", "clean")))
     monkeypatch.setattr(

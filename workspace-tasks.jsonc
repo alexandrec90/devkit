@@ -891,8 +891,8 @@
 			"problemMatcher": []
 		},
 		{
-			"label": "Ship: Branch Stranded Work (step 1)",
-			"detail": "DRY RUN by default. In each selected checkout, cut a claude/sweep-<mmdd> branch under stranded work and leave existing task branches alone. This only moves work onto branches; step 2 commits and opens the PRs.",
+			"label": "Ship: Branch Stranded Work",
+			"detail": "DRY RUN by default. In each selected checkout, cut an agent/sweep-<mmdd> branch under work stranded on a home branch, leaving existing task branches alone. That is the whole job: the branch policy will then let the work be committed, so finish it with /ship in that repo, where the diff is in context. Parking checkouts back home and dropping merged branches is not a task any more — the reconcile schedule does it every 15 minutes.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -914,40 +914,6 @@
 			},
 			"icon": {
 				"id": "git-branch",
-				"color": "terminal.ansiMagenta"
-			},
-			"presentation": {
-				"reveal": "always",
-				"panel": "new",
-				"showReuseMessage": false,
-				"close": false
-			},
-			"problemMatcher": []
-		},
-		{
-			"label": "Ship: Publish Swept Work (step 2)",
-			"detail": "DRY RUN by default. Commits whatever sits on each claude/… branch, pushes it, and opens a DRAFT PR. Asks nothing else — each commit takes its topic from the branch it is on. Nothing reads the diff, so the message describes the sweep, not the change: this is for making sure nothing is stranded, not for work you want reviewed as-is. Use /ship per repo for that. Never force-pushes, never bypasses a hook, and reuses a PR that is already open.",
-			"type": "process",
-			"command": "python",
-			"args": [
-				"scripts/notify-wrap.py",
-				"Ship: Publish Swept Work",
-				"--",
-				"python",
-				"scripts/log-wrap.py",
-				"Ship: Publish Swept Work",
-				"--",
-				"python",
-				"scripts/sweep.py",
-				"--ship",
-				"--only=${input:sweepScope}",
-				"${input:sweepApply}"
-			],
-			"options": {
-				"cwd": "${workspaceFolder:devkit}"
-			},
-			"icon": {
-				"id": "git-pull-request",
 				"color": "terminal.ansiMagenta"
 			},
 			"presentation": {
@@ -982,40 +948,6 @@
 			"icon": {
 				"id": "package",
 				"color": "terminal.ansiBlue"
-			},
-			"presentation": {
-				"reveal": "always",
-				"panel": "new",
-				"showReuseMessage": false,
-				"close": false
-			},
-			"problemMatcher": []
-		},
-		{
-			"label": "Ship: Sync Worktrees (step 3)",
-			"detail": "DRY RUN by default. For each selected checkout: return to its home branch, fast-forward, and delete merged claude/… branches. Refuses unshipped work; never force-deletes or rewrites history.",
-			"type": "process",
-			"command": "python",
-			"args": [
-				"scripts/notify-wrap.py",
-				"Ship: Sync Worktrees",
-				"--",
-				"python",
-				"scripts/log-wrap.py",
-				"Ship: Sync Worktrees",
-				"--",
-				"python",
-				"scripts/sweep.py",
-				"--sync",
-				"--only=${input:sweepScope}",
-				"${input:sweepApply}"
-			],
-			"options": {
-				"cwd": "${workspaceFolder:devkit}"
-			},
-			"icon": {
-				"id": "sync",
-				"color": "terminal.ansiMagenta"
 			},
 			"presentation": {
 				"reveal": "always",

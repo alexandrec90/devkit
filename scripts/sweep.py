@@ -27,12 +27,13 @@ Modes:
               root-level task that should fail loudly rather than print quietly.
   --branch    cut an `agent/...` branch under work stranded on a branch that
               cannot be shipped from -- a home branch, or a task branch the
-              branch policy has retired. Step 1 of the sweep.
+              branch policy has retired. The rescue step, and the only mode
+              here that still has a workspace task of its own.
   --ship      commit what is on each task branch, push it, open its PR.
-              Step 2 -- the unattended alternative to `/ship` per repo.
+              The unattended alternative to `/ship` per repo. CLI only.
   --sync      park each worktree back on its home branch, fast-forward it to
               `origin/<default>`, and delete the task branches that have merged.
-              Step 3 -- run it once the PRs from step 2 are merged.
+              Run unattended by `worktree.py reconcile` every 15 minutes.
 
 **The reporting modes never touch a repository.** `--branch`, `--ship` and
 `--sync` do, and all three print their plan and change nothing unless `--yes` is
@@ -202,9 +203,10 @@ ACTIONABLE: frozenset[str] = frozenset({
 # Verdicts with no next action. Every *other* verdict must yield a plan.
 TERMINAL: frozenset[str] = frozenset({CLEAN, SKIPPED})
 
-# Verdicts each mutating mode acts on. Pairwise disjoint by construction: step 1
-# moves work onto task branches, step 2 commits and publishes it, step 3 tidies up
-# once the resulting PRs have merged, and none touches a repo another one owns.
+# Verdicts each mutating mode acts on. Pairwise disjoint by construction:
+# `--branch` moves work onto task branches, `--ship` commits and publishes it,
+# `--sync` tidies up once the resulting PRs have merged, and none touches a repo
+# another one owns.
 BRANCHABLE: frozenset[str] = frozenset({NEEDS_BRANCH, NEEDS_REBRANCH})
 SHIPPABLE: frozenset[str] = frozenset({READY, NEEDS_PR})
 SYNCABLE: frozenset[str] = frozenset({SPENT, NEEDS_PULL, CLEAN})
@@ -693,7 +695,7 @@ def plan_for(state: State, verdict: str) -> list[str]:
 
 
 def branch_plan(state: State, slug: str = "sweep", today: _dt.date | None = None) -> Plan:
-    """Step 1: get stranded work onto an `agent/...` branch it can be shipped from.
+    """`--branch`: get stranded work onto an `agent/...` branch it can be shipped from.
 
     The new branch is cut from HEAD, not from `origin/<default>`, so a dirty tree
     comes along untouched (`tb.checkout_base` makes the same call for the same
@@ -793,7 +795,7 @@ def pr_body(state: State, limit: int = PR_BODY_FILE_LIMIT) -> str:
 
 
 def ship_plan(state: State, verdict: str) -> Plan:
-    """Step 2: commit whatever is on a task branch, push it, and open its PR.
+    """`--ship`: commit whatever is on a task branch, push it, and open its PR.
 
     The mode that exists because the previous split -- branch here, commit and PR
     by hand per repo -- left a workspace half-swept whenever attention moved on.
@@ -857,7 +859,7 @@ def ship_plan(state: State, verdict: str) -> Plan:
 
 
 def sync_plan(state: State, verdict: str, fetch: bool = True) -> Plan:
-    """Step 2: park a checkout on its home branch, current, with the spent branches gone.
+    """`--sync`: park a checkout on its home branch, current, with the spent branches gone.
 
     Refuses outright on anything holding unshipped work. That is the ordering the
     two steps depend on -- syncing a checkout that still has a PR in flight would
@@ -1649,20 +1651,20 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--branch",
         action="store_true",
-        help="step 1: cut an agent/... branch under work stranded on a home branch",
+        help="cut an agent/... branch under work stranded on a home branch",
     )
     mode.add_argument(
         "--ship",
         action="store_true",
         help=(
-            "step 2: commit whatever sits on a task branch, push it, and open its PR. "
+            "commit whatever sits on a task branch, push it, and open its PR. "
             "Nothing reads the diff, so the message describes the sweep, not the change"
         ),
     )
     mode.add_argument(
         "--sync",
         action="store_true",
-        help="step 3: park each worktree on its home branch, fast-forward, drop merged branches",
+        help="park each worktree on its home branch, fast-forward, drop merged branches",
     )
     # `--dry-run` is redundant with the default and exists anyway: the VS Code task
     # picks one of these two strings, and passing "" instead would reach argparse as

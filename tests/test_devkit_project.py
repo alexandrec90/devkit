@@ -979,6 +979,37 @@ def test_every_mutating_sweep_task_offers_the_scope_picker(canonical):
         )
 
 
+# The sweep's mutating modes, and who is allowed to be their one-click entry point.
+# `--branch` rescues work a hook could not stop landing on a home branch, which no
+# schedule can decide for you -- it keeps its task. The other two do not: `--sync` is
+# run unattended by `worktree.py reconcile` every fifteen minutes, and `--ship` writes
+# a commit message describing the sweep rather than the change, which `/ship` per repo
+# always does better now that an agent is a box away.
+SWEEP_MODES_WITHOUT_A_TASK = ("--ship", "--sync")
+
+
+def test_the_scheduled_sweep_modes_have_no_workspace_task(canonical):
+    """One owner per tier, asserted where the duplicate would be added.
+
+    Both of these had a task -- `Ship: Publish Swept Work (step 2)` and `Ship: Sync
+    Worktrees (step 3)` -- and neither was ever run on the machine they were written
+    for: the box tier had already removed the stranding they existed to clean up, and
+    reconcile had been syncing every checkout on a schedule for months. A hand-crank
+    beside a scheduled job is a second owner for one tier's lifecycle, and the two
+    disagree the first time someone clicks it mid-pass. Re-adding one means retiring
+    the automatic caller first, not just deleting this test.
+    """
+    for task in canonical["tasks"]:
+        args = [str(a) for a in task.get("args", [])]
+        if not any("sweep.py" in a for a in args):
+            continue
+        clash = set(args) & set(SWEEP_MODES_WITHOUT_A_TASK)
+        assert not clash, (
+            f"{task['label']} runs sweep.py {' '.join(sorted(clash))}, which has an "
+            "owner already -- reconcile's schedule for --sync, /ship per repo for --ship"
+        )
+
+
 def test_some_task_still_routes_through_the_dispatcher(canonical):
     """The wiring itself, asserted separately from what it points at.
 
