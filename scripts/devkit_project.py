@@ -186,6 +186,17 @@ ACTIONS: dict[str, Action] = {
     "reclaim": Action(
         "scripts/reclaim.py", "Machine: Reclaim Resources", ("--yes",), projects=DEVKIT_ONLY
     ),
+    # Reviewing a UI change before its PR merges. DEVKIT_ONLY for the same reason
+    # `reclaim` is, and the reasoning is worth repeating because this one looks far more
+    # like a per-project action than it is: the menu it prints is assembled from the box
+    # registry and the port registry, and there is exactly ONE of each on this machine.
+    # Run once per selected checkout it would print the same machine-wide menu two or
+    # three times over, and the second copy's row numbers would mean something different
+    # from the first's. The project dimension lives INSIDE the menu instead, as a column.
+    #
+    # No picker, per the literal-over-single-option convention: the task pins
+    # `--project devkit` and the only question asked is the one worth asking.
+    "preview": Action("scripts/preview-task.py", "Preview: Open a UI Branch", projects=DEVKIT_ONLY),
     # --- scoped to one repo's worktree pair ---
     #
     # These are the tasks that used to live in `carameli/.vscode/tasks.json` and
