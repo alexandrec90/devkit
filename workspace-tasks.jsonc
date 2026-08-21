@@ -66,6 +66,37 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "Test: Harness Hook Tests — paid, live CLI",
+			"detail": "PAID — launches a real authenticated agent CLI against a throwaway project and proves the hooks change what it actually does. devkit only: these smokes live in tests/, which is never vendored. 'Claude only' is the cheapest run; each suite's model and budget are set in its own test file. Failures go to devkit/logs/hook-test-live-failures.log.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				// Written out rather than a picker: the action's scope is one checkout, so a
+				// picker here would be a list of length one asking a question with no second
+				// answer. `test_the_live_smoke_task_names_the_only_checkout_that_can_run_it`
+				// pins this literal against `Action.projects` so the two cannot drift.
+				"devkit",
+				"test-hooks-live",
+				"${input:liveHookSuite}"
+			],
+			"group": "test",
+			// Same `zap` family as the free hook tests, in red: the colour is the only
+			// warning a one-click paid task gets before it is clicked.
+			"icon": {
+				"id": "zap",
+				"color": "terminal.ansiRed"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
 			"label": "Lint: Everything",
 			"detail": "Full-repo lint for each selected checkout, run sequentially via scripts/lint-all.py. Findings go to that checkout's logs/lint-errors.log.",
 			"type": "process",
@@ -1238,6 +1269,30 @@
 				}
 			],
 			"default": ""
+		},
+		{
+			// The one picker in this file where an accidental Enter spends money, so the
+			// default is the smallest run that still proves something rather than the most
+			// thorough one. Single-pick for the same reason: "both" is a deliberate choice,
+			// not two checkboxes that are easy to leave ticked from last time.
+			"id": "liveHookSuite",
+			"type": "pickString",
+			"description": "Which live CLI smoke? Every option launches a paid session.",
+			"options": [
+				{
+					"label": "Claude only — cheapest, one session",
+					"value": "claude"
+				},
+				{
+					"label": "Codex only — two sessions",
+					"value": "codex"
+				},
+				{
+					"label": "Both — every live smoke",
+					"value": "both"
+				}
+			],
+			"default": "claude"
 		},
 		{
 			// The two-option pickers for the project-SCOPED tasks. Deliberately not
