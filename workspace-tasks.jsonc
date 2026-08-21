@@ -445,6 +445,37 @@
 			"problemMatcher": []
 		},
 		{
+			// The same two dropdowns, cutting the CHEAP kind of box: only the project's
+			// `[worktree] ui_services` start, and the backend is borrowed from the static
+			// checkout's running stack on its usual ports. A project that has not declared
+			// a UI tier in `.devkit.toml` says so and points at the full task above.
+			"label": "Preview: Open a UI Branch (Frontend Only)",
+			"detail": "The cheap preview: same two dropdowns as 'Open a UI Branch', but the box starts only the project's declared UI services (e.g. the Vite frontend) and points them at the static checkout's already-running backend instead of cloning the whole stack — seconds and one container, not minutes and nine. Needs that checkout's stack up ('Docker: Up' it if not). Refs whose change is not frontend-only will not show it here; use the full preview.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"devkit",
+				"preview",
+				"--pick-ref",
+				"${input:previewRow}",
+				"--ui"
+			],
+			"icon": {
+				"id": "preview",
+				"color": "terminal.ansiBrightCyan"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"focus": true,
+				"clear": true,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
 			// The same action with the menu skipped, and deliberately WITHOUT `focus`: after
 			// a reboot the answer is always "all of them", so the one task that needs no
 			// keyboard is the one that should not take it.

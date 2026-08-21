@@ -379,6 +379,39 @@ def test_a_row_with_no_box_is_previewed_by_project_and_branch():
     assert preview_task.preview_kwargs(row) == {"target": "carameli", "branch": "agent/ui"}
 
 
+def test_a_ui_request_goes_by_ref_even_when_the_row_is_a_box():
+    """The row's box runs the full stack (or holds the branch under review); the cheap
+    kind has its own name and lease, and `plan_preview(ui=True)` finds a standing one
+    by that name -- so going by ref is what keeps re-picking a row idempotent."""
+    row = preview_task.Candidate(
+        project="carameli", ref="agent/ui", kind=preview_task.KIND_BOX, box="carameli--ui"
+    )
+    assert preview_task.preview_kwargs(row, ui=True) == {
+        "target": "carameli",
+        "branch": "agent/ui",
+        "ui": True,
+    }
+
+
+def test_serve_passes_ui_through_to_the_planner(monkeypatch, tmp_path, capsys):
+    seen = {}
+
+    def plan(**kwargs):
+        seen.update(kwargs)
+        return worktree.PreviewPlan(
+            box=worktree.Box(name="b", project="carameli", branch="preview/ui/x"), path="p"
+        )
+
+    monkeypatch.setattr(preview_task.worktree, "plan_preview", plan)
+    monkeypatch.setattr(preview_task.worktree, "apply_preview", lambda plan, ws: (True, []))
+    candidate = preview_task.Candidate(
+        project="carameli", ref="agent/x", kind=preview_task.KIND_BRANCH
+    )
+    assert preview_task.serve(candidate, tmp_path, open_it=False, ui=True) is True
+    assert seen["ui"] is True and seen["branch"] == "agent/x"
+    assert "(UI only)" in capsys.readouterr().out
+
+
 def test_the_url_report_puts_the_ui_on_its_own_line():
     """The failure the whole script exists to fix: the frontend is seventh in the list."""
     row = preview_task.Candidate(
@@ -758,6 +791,27 @@ def test_all_serves_every_standing_preview_and_nothing_else(stub):
     )
     assert preview_task.main(["--workspace", str(stub.workspace), "--all"]) == 0
     assert stub.served == ["a", "b"]
+
+
+def test_ui_with_all_is_refused_before_the_scan(stub, capsys):
+    """`--all` re-serves boxes as their leases say; `--ui` names how to CUT one.
+    Combined they would cut a UI twin of every standing full preview."""
+    stub.monkeypatch.setattr(
+        preview_task, "collect", lambda *a, **k: pytest.fail("refused before the scan")
+    )
+    assert preview_task.main(["--workspace", str(stub.workspace), "--ui", "--all"]) == 2
+    assert "Drop one" in capsys.readouterr().out
+    assert stub.served == []
+
+
+def test_main_passes_ui_to_serve(stub):
+    _menu(stub, [preview_task.Candidate(project="p", ref="agent/ui", kind=preview_task.KIND_PR)])
+    kwargs_seen = []
+    stub.monkeypatch.setattr(
+        preview_task, "serve", lambda c, *a, **k: kwargs_seen.append(k) or True
+    )
+    assert preview_task.main(["--workspace", str(stub.workspace), "--pick", "1", "--ui"]) == 0
+    assert kwargs_seen[0]["ui"] is True
 
 
 def test_all_with_no_standing_preview_says_so(stub, capsys):
