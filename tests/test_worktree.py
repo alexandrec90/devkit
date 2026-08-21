@@ -1251,6 +1251,38 @@ def test_plan_provision_falls_back_to_the_dockerfile_pin(tmp_path):
     )
 
 
+def test_an_inferred_pin_is_said_out_loud_by_default(tmp_path, capsys):
+    """The warning is the prompt to set the field, aimed at whoever runs `new` or
+    `provision` and reads their own terminal."""
+    (tmp_path / "requirements-dev.txt").write_text("", encoding="utf-8")
+    (tmp_path / ".devkit.toml").write_text("[python]\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\n", encoding="utf-8")
+    worktree.plan_provision(tmp_path, windows=False)
+    assert "no [python] version" in capsys.readouterr().err
+
+
+def test_quiet_keeps_the_inferred_pin_off_stderr(tmp_path, capsys):
+    """The guard's escape: its stderr is its block message, so in that caller the same
+    warning surfaced as `PreToolUse:Edit hook error: ... no [python] version` -- the
+    first line of every block, ahead of the actual reason, in every project that pins
+    its interpreter anywhere but the manifest. The steps must stay identical: quiet
+    changes what is said, never what is planned."""
+    (tmp_path / "requirements-dev.txt").write_text("", encoding="utf-8")
+    (tmp_path / ".devkit.toml").write_text("[python]\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12-slim\n", encoding="utf-8")
+    loud = worktree.plan_provision(tmp_path, windows=False)
+    capsys.readouterr()
+    assert worktree.plan_provision(tmp_path, windows=False, quiet=True) == loud
+    assert capsys.readouterr().err == ""
+
+
+def test_quiet_also_covers_an_unreadable_manifest(tmp_path, capsys):
+    (tmp_path / "requirements-dev.txt").write_text("", encoding="utf-8")
+    (tmp_path / ".devkit.toml").write_text("[python\n", encoding="utf-8")
+    worktree.plan_provision(tmp_path, windows=False, quiet=True)
+    assert capsys.readouterr().err == ""
+
+
 def test_the_manifest_still_wins_over_a_detected_pin(tmp_path):
     """`version` is an override, so a project whose box must not match its container can
     still say so: detection may not quietly outvote the field."""

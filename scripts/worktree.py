@@ -898,8 +898,18 @@ def detect_python_version(source: Path) -> tuple[str, str]:
     return "", ""
 
 
-def plan_provision(source: Path, windows: bool = os.name == "nt") -> tuple[ProvisionStep, ...]:
-    """`provision_steps` for a real checkout: read the markers and the manifest."""
+def plan_provision(
+    source: Path, windows: bool = os.name == "nt", quiet: bool = False
+) -> tuple[ProvisionStep, ...]:
+    """`provision_steps` for a real checkout: read the markers and the manifest.
+
+    `quiet` exists for the worktree guard, whose stderr IS its block message: a
+    PreToolUse hook's exit-2 stderr is shown to the agent as `PreToolUse:<tool> hook
+    error`, so a plan-time warning printed here lands as the FIRST line of every block,
+    ahead of the reason for the block -- and the guard never runs these steps anyway
+    (`apply_new(provision=False)`). The warnings still reach whoever provisioning
+    actually answers to: `worktree.py new` and `worktree.py provision` plan loudly.
+    """
     present = {name for name in PROVISION_MARKERS if (source / name).is_file()}
     install_command = ""
     frontend_dir = ""
@@ -915,14 +925,15 @@ def plan_provision(source: Path, windows: bool = os.name == "nt") -> tuple[Provi
         # and a box with a Python toolchain and no frontend one beats no box at all. Said
         # out loud rather than swallowed, because the silent version of this is a box that
         # is missing exactly the frontend tier its lint gate is about to ask for.
-        print(
-            f"worktree: could not read {source.name}/.devkit.toml ({type(exc).__name__}); "
-            f"provisioning from the lockfiles alone.",
-            file=sys.stderr,
-        )
+        if not quiet:
+            print(
+                f"worktree: could not read {source.name}/.devkit.toml ({type(exc).__name__}); "
+                f"provisioning from the lockfiles alone.",
+                file=sys.stderr,
+            )
     if not python_version:
         python_version, origin = detect_python_version(source)
-        if python_version:
+        if python_version and not quiet:
             print(
                 f"worktree: no [python] version in {source.name}/.devkit.toml; "
                 f"provisioning on {python_version}, the pin in {origin}. Set the field to "
@@ -2271,6 +2282,7 @@ def plan_new(
     slug: str,
     session: str = "",
     fetch: bool = True,
+    quiet: bool = False,
 ) -> SpawnPlan:
     """Resolve everything `new` needs from disk, then hand off to the pure planner."""
     root = workspace.parent
@@ -2298,7 +2310,7 @@ def plan_new(
         registry=registry,
         session=session,
         fetch=fetch,
-        provision=plan_provision(source),
+        provision=plan_provision(source, quiet=quiet),
         env_templates=plan_env_templates(source),
     )
 

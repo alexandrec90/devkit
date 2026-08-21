@@ -723,6 +723,31 @@ def test_the_hook_never_waits_for_an_install(root, monkeypatch, capsys):
     assert "provision carameli--ws-s1-0806 --yes" in capsys.readouterr().err
 
 
+def test_the_spawn_is_planned_quietly(root, monkeypatch, capsys):
+    """This process's stderr IS the block message -- Claude Code surfaces an exit-2
+    hook's stderr as `PreToolUse:<tool> hook error`, every line of it. `plan_provision`
+    warns on stderr when a project's interpreter pin has to be inferred (no `[python]
+    version` in `.devkit.toml`), so without `quiet=True` that warning opened every
+    guard block in such a project, ahead of the actual reason, reading as a hook
+    failure. The warning is not lost: `worktree.py new` and `provision` still plan
+    loudly, and provisioning is where it is actionable."""
+    workspace = _workspace(root)
+    seen: dict = {}
+
+    def fake_plan_new(*args, **kwargs):
+        seen.update(kwargs)
+        return _plan(root)
+
+    monkeypatch.setattr(guard.worktree, "plan_new", fake_plan_new)
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert seen.get("quiet") is True
+
+
 def _plan(root):
     """The SpawnPlan a stubbed `plan_new` hands back."""
     name = "carameli--ws-s1-0806"
