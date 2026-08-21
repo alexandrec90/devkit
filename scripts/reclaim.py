@@ -245,13 +245,21 @@ def snapshot(path: Path | None = None) -> Snapshot:
     status = _MemoryStatusEx()
     status.dwLength = ctypes.sizeof(_MemoryStatusEx)
     try:
-        # `getattr` rather than `ctypes.windll` plus a `type: ignore`. mypy resolves that
-        # attribute against the platform it is *running* on, so the ignore is required on
-        # a Linux CI runner and flagged as unused on the Windows desktop -- the one
-        # spelling that cannot be green in both places at once.
-        windll = ctypes.windll
+        # `sys.modules["ctypes"]` rather than `ctypes.windll`, and the indirection is
+        # load-bearing rather than clever. mypy resolves that attribute against the
+        # platform it is *running* on: a bare `ctypes.windll` fails `[attr-defined]` on
+        # the Linux CI runner, and the `# type: ignore` that silences it there is then
+        # reported as an unused ignore on this Windows desktop -- the one spelling that
+        # cannot be green in both places at once.
+        #
+        # A getattr on the module with a literal name reads better and does not survive:
+        # ruff's B009 is enabled and its autofix rewrites it back to the attribute, so
+        # the pre-commit hook silently undid this and reddened the gate. Indexing
+        # `sys.modules` types as `ModuleType`, whose attributes are `Any`, and there is
+        # no lint rule that wants to unwrap it.
+        windll = sys.modules["ctypes"].windll
         ok = windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
-    except (AttributeError, OSError):
+    except (AttributeError, OSError, KeyError):
         ok = 0
     if not ok:
         return Snapshot(free, -1.0, -1.0, -1.0)

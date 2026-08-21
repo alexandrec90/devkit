@@ -256,8 +256,20 @@ def test_idle_only_skips_when_the_engine_cannot_be_asked(monkeypatch, capsys):
 
 def test_a_skipped_prune_is_a_success_not_a_failure(monkeypatch):
     """It reports 0 so a scheduled run that correctly declines does not look broken.
-    "Nothing to do right now" is the expected outcome most nights."""
+    "Nothing to do right now" is the expected outcome most nights.
+
+    `free_gb` is stubbed, and that is a fix rather than boilerplate: this test used to
+    stub only the container count, so `prune_verdict` read the **host's** free disk and
+    the assertion held only while this machine happened to sit above the floor. On
+    2026-08-21 it dropped below and the test went on to `sc start` the Docker service and
+    wait 90 seconds for a real engine. A unit test that reaches the machine passes for a
+    reason that has nothing to do with the code, which is the same as not covering it.
+    The `pytest.fail` tripwire below is the neighbouring test's, for the same reason."""
     monkeypatch.setattr(docker_maint, "running_containers", lambda: 3)
+    monkeypatch.setattr(docker_maint, "free_gb", lambda *_a, **_kw: 200.0)
+    monkeypatch.setattr(
+        docker_maint, "docker_info_ok", lambda *_a, **_kw: pytest.fail("touched the engine")
+    )
     assert docker_maint.generic_prune(idle_only=True) == 0
 
 

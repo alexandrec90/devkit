@@ -19,6 +19,7 @@ on a named volume.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from support import load_script
 
@@ -202,6 +203,28 @@ def test_a_near_limit_commit_names_the_holders_and_admits_it_cannot_help(monkeyp
     assert "near the limit" in body
     assert "does not free committed memory" in body
     assert "chrome.exe" in body and "37 processes" in body
+
+
+def test_the_windows_api_is_reached_without_a_bare_attribute_access():
+    """`ctypes.windll` spelled directly cannot be green on both platforms at once: mypy
+    resolves it against the platform it runs on, so it is an `[attr-defined]` error on the
+    Linux CI runner and the `type: ignore` that fixes it there is an unused-ignore error
+    on the Windows desktop. The obvious workaround, `getattr(ctypes, "windll")`, is worse
+    than useless -- ruff's B009 autofix rewrites it back at commit time, which is exactly
+    how this reddened the gate once. Assert the surviving spelling, not the intent."""
+    source = Path(reclaim.__file__).read_text(encoding="utf-8")
+    assert 'sys.modules["ctypes"].windll' in source
+    assert "getattr(ctypes" not in source, "ruff B009 will rewrite this at commit time"
+
+
+def test_snapshot_reads_this_machine():
+    """The ctypes call is stubbed everywhere else in this file, so without this nothing
+    would notice it had stopped working."""
+    snap = reclaim.snapshot()
+    assert snap.free_gb > 0
+    if snap.limit_gb > 0:  # a platform without GlobalMemoryStatusEx reports -1.0
+        assert snap.committed_gb > 0
+        assert snap.committed_gb <= snap.limit_gb
 
 
 def test_an_unreadable_memory_status_reports_that(monkeypatch):
