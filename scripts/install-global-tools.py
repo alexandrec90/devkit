@@ -122,16 +122,12 @@ def interpreter(root: Path = REPO_ROOT) -> str:
     return sys.executable
 
 
-def windowless(python: str) -> str:
-    """`pythonw.exe` beside `python.exe`, so the nightly run opens no console.
-
-    A copy of `install-docker-prune.windowless` rather than an import of it, for the
-    reason that file gives: the shared thing worth enforcing -- windowless means no
-    stdout, so the job must write an artifact -- is enforced for every job at once in
-    `tests/test_scheduled_jobs.py`.
-    """
-    candidate = os.path.join(os.path.dirname(python), "pythonw.exe")
-    return candidate if os.path.isfile(candidate) else python
+# The interpreter for the task's own `<Command>`. This job is the reason
+# `devkit_schtasks.windowless` is shared rather than copied: `interpreter` above prefers
+# the checkout's `.venv`, whose `pythonw.exe` under uv is a trampoline that spawns the
+# real interpreter as a child -- and a console child of a console-less scheduled task is
+# what put a window back on this desktop. That docstring owns the whole account.
+windowless = devkit_schtasks.windowless
 
 
 @dataclass(frozen=True)

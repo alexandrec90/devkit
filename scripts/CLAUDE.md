@@ -369,6 +369,36 @@ docker said — an artifact reporting an exit code and nothing to diagnose it wi
 is the failure that made artifacts mandatory two sections up. Capture, or name the
 streams (`docker-maint.inherited_streams`); never just add the flag.
 
+### A file named `pythonw.exe` need not be an interpreter
+
+Both sections above were in place — the pair was the rule, every spawn carried the flag,
+and the checks were in `tests/test_scheduled_jobs.py` — when a console window came back
+at boot on 2026-08-21. **Every guard for this bug was a source scan of devkit's own
+files, and every one of them was checking a name.**
+
+Inside a virtualenv, `Scripts\pythonw.exe` is not an interpreter. It is a stub deferring
+to the base install named in `pyvenv.cfg`, and the two builders differ in the one way
+that matters here: CPython's stub loads the base **in-process**, while uv's is a
+trampoline that **spawns it as a child**. So `devkit-global-tools` — the only job whose
+interpreter comes from a `.venv`, because `install-global-tools.interpreter` prefers the
+checkout's — was registered against a GUI-subsystem file correctly named `pythonw.exe`,
+opened no console of its own, and handed its console child a brand new visible one. That
+is the same mechanism as the section above, arriving through the *scheduler boundary*
+rather than through a spawn site.
+
+Two consequences, both now enforced rather than written down:
+
+- **`devkit_schtasks.windowless` owns the resolution, and no installer keeps a copy.**
+  Six of them did, identically, on the stated reasoning that six lines are cheaper to
+  repeat than to couple — and all six were wrong at once for as long as it took one
+  job's interpreter to come from a venv. It resolves through `home`, which also settles
+  the hazard `interpreter` warned about from the other end: a box's `.venv` disappears
+  when its PR merges, and the base install outlives every venv.
+- **A source scan cannot close this class of bug, so one check reads the machine.**
+  `schedule_health.virtualenv_interpreter` compares each registered task's `Task To Run`
+  against `pyvenv.cfg` and reports it at session start. All three rounds of this bug were
+  found by a human watching windows flash; that is the loop this replaces.
+
 ### The scheduled pass carries the static tier too
 
 `reconcile` is the only thing in the workspace on a schedule, so it is also the only

@@ -71,23 +71,13 @@ def worktree_script(root: Path = REPO_ROOT) -> Path:
     return root / "scripts" / "worktree.py"
 
 
-def windowless(python: str) -> str:
-    """`pythonw.exe` beside `python.exe`, so the scheduled run opens no console.
-
-    A task running `python.exe` pops a console window into the foreground on every
-    fire. At a fifteen-minute interval on a desktop that is not a cosmetic
-    complaint — it steals focus while you are typing, and the natural response is to
-    delete the task, which silently removes the workspace's only automatic cleanup.
-
-    `pythonw.exe` is the same interpreter with no console allocated. Its stdout goes
-    nowhere, which is why `worktree.write_reconcile_log` exists: the pass has to leave
-    a record somewhere a person can read it.
-
-    Falls back to the given interpreter when there is no `pythonw` beside it (a
-    virtualenv without one, a non-CPython build). A visible window beats no scheduler.
-    """
-    candidate = os.path.join(os.path.dirname(python), "pythonw.exe")
-    return candidate if os.path.isfile(candidate) else python
+# The interpreter for the task's own `<Command>`. At a fifteen-minute interval a console
+# window is not a cosmetic complaint: it steals focus while you are typing, and the
+# natural response is to delete the task, which silently removes the workspace's only
+# automatic cleanup. Windowless also means no stdout at all, which is why
+# `worktree.write_reconcile_log` exists. `devkit_schtasks.windowless` owns the resolution
+# and the venv-stub failure that consolidated the installers' copies of it.
+windowless = devkit_schtasks.windowless
 
 
 def reconcile_arguments(
