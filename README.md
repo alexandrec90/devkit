@@ -365,6 +365,29 @@ or closed, reclaimed under slot pressure or at `--max-age-days`, and held — li
 — the moment there are uncommitted edits inside. Reviewing by editing is allowed; the
 box just stops being disposable when you do.
 
+#### The menu in front of it
+
+Each of those commands needs the ref and the flag that takes it, which is a lot to know
+before you can look at something. `scripts/preview-task.py` asks instead: it enumerates
+every standing preview, live agent box, open PR and recent `agent/…` branch on the
+machine, prints them newest-first as one numbered menu, and previews the row that gets
+picked.
+
+```bash
+python scripts/preview-task.py            # menu, then bring the pick up and open it
+python scripts/preview-task.py --list     # print the menu and exit (agents: --json)
+python scripts/preview-task.py --pick 3   # take row 3 without asking
+python scripts/preview-task.py --all      # re-serve every standing preview
+```
+
+`--all` is the post-reboot case: Docker stops every container on a restart while the
+boxes, their branches and their port leases all survive, so each preview lands back on
+the port it had before. Two VS Code tasks — *Preview: Open a UI Branch* and *Preview:
+Restart Standing Previews* — are those two invocations, one click each.
+
+A checkout with no compose stack contributes no rows, which keeps devkit out of a menu it
+would publish nothing for.
+
 ### The scheduled pass
 
 Both tiers need something to run afterwards, and "afterwards" is exactly when nobody

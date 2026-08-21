@@ -409,6 +409,64 @@
 			},
 			"problemMatcher": []
 		},
+		{
+			// Reviewing a UI change before its PR merges. Machine scope, not project
+			// scope — there is one box registry and one port registry on this machine, so
+			// the menu this prints has no project dimension to pick from and the project is
+			// a column in it instead. See ACTIONS["preview"].
+			//
+			// `focus` because the task asks a question: without it the answer is typed into
+			// whatever had focus when it was clicked.
+			"label": "Preview: Open a UI Branch",
+			"detail": "Lists everything you could look at — preview boxes already standing, live agent boxes, open PRs, recent agent/ branches on origin — then asks which one to deploy, brings its stack up in a box of its own and opens the URL it publishes. Cutting a box for the first time builds its images and can take minutes; re-serving one that is already standing takes seconds. A running preview costs CPU until 'Machine: Reclaim Resources' stops it.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"devkit",
+				"preview"
+			],
+			"icon": {
+				"id": "preview",
+				"color": "terminal.ansiBrightMagenta"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"focus": true,
+				"clear": true,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
+			// The same action with the menu skipped, and deliberately WITHOUT `focus`: after
+			// a reboot the answer is always "all of them", so the one task that needs no
+			// keyboard is the one that should not take it.
+			"label": "Preview: Restart Standing Previews",
+			"detail": "Brings every preview box that is already cut back up — the one-click answer after a reboot, when Docker stopped every container while the boxes, their branches and their port leases all survived, so each lands back on the port it had before. Asks nothing; a machine with no preview boxes says so and exits.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"devkit",
+				"preview",
+				"--all"
+			],
+			"icon": {
+				"id": "debug-restart",
+				"color": "terminal.ansiBrightGreen"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true,
+				"close": false
+			},
+			"problemMatcher": []
+		},
 		// --- scoped: carameli's worktree pair --------------------------------
 		// These three came up out of `carameli/.vscode/tasks.json`. The picker lists
 		// two checkouts rather than five because that is what the action is defined
