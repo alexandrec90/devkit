@@ -552,9 +552,10 @@ def register(text: str, names: list[str]) -> str:
 CANONICAL_TASKS = REPO_ROOT / "workspace-tasks.jsonc"
 
 CANONICAL_HEADER = """// Canonical shared task block — devkit owns this; alex-projects.code-workspace
-// carries a copy under its "tasks" key. Edit the workspace file, then adopt the
-// change here:
+// carries a copy under its "tasks" key. Check for pre-existing drift, edit the
+// workspace file, then adopt the intentional change here:
 //
+//     python scripts/devkit_project.py --check-tasks
 //     python scripts/devkit_project.py --adopt-tasks
 //
 // and verify with `--check-tasks`. The workspace file is not inside any repo, so it

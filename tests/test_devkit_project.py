@@ -578,6 +578,16 @@ def test_no_drift_against_itself(canonical):
     assert tasks_drift(canonical, canonical) == []
 
 
+def test_task_adoption_instructions_require_a_preflight_check():
+    """Without the first check, adoption absorbs unrelated live-workspace drift."""
+    rule = (REPO_ROOT / ".claude" / "rules" / "vscode-tasks.md").read_text(encoding="utf-8")
+    section = rule[rule.index("## Changing a task") :]
+    assert section.index("--check-tasks") < section.index("--adopt-tasks")
+    assert devkit_project.CANONICAL_HEADER.index(
+        "--check-tasks"
+    ) < devkit_project.CANONICAL_HEADER.index("--adopt-tasks")
+
+
 def test_drift_reports_a_missing_task(canonical):
     trimmed = {**canonical, "tasks": canonical["tasks"][1:]}
     problems = tasks_drift(trimmed, canonical)
@@ -679,6 +689,7 @@ def test_every_action_is_reachable_from_a_task(canonical):
 UNLOGGED_TASKS = {
     "Agents: Open Tabs (External Terminal)": "spawns terminal tabs; the window is the output",
     "Agents: Resume Recent Sessions": "same — reopens sessions in tabs, then exits",
+    "Agents: Import Limited Claude Sessions": "same — opens imported sessions in tabs",
     "IBKR: Open Gateway VNC Viewer": "launches a GUI viewer; nothing to parse when it closes",
 }
 
@@ -686,8 +697,8 @@ UNLOGGED_TASKS = {
 def test_every_workspace_scoped_task_writes_a_failure_artifact(canonical):
     """The task-file half of the artifact rule.
 
-    The other 20 tasks are a `devkit_project.py` dispatch and get theirs inside the
-    dispatcher, where the chosen checkout is finally known — see `plan_command`. These
+    Dispatched tasks get their artifact inside the dispatcher, where the chosen checkout
+    is finally known — see `plan_command`. These
     run against devkit itself, so the wrapping has to be written here, and a new task
     added without it would fail silently into a terminal nobody kept.
     """
