@@ -40,20 +40,45 @@ Usage:
     python preview-task.py --pick 3        # take row 3 without asking
     python preview-task.py --all           # re-serve every standing preview (post-reboot)
     python preview-task.py --down          # menu, then STOP the picked row's stack
+    python preview-task.py --pick-ref carameli:agent/comic-book-ui-0820  # what the task sends
+    python preview-task.py --refresh       # rebuild the dropdown's option file and exit
 
-Interactive by default, which is unusual for this directory and is why the prompt is
-written the way it is: the task runs under `log-wrap.py`, whose `stream()` gives this
-process a **pipe** for stdout while leaving stdin inherited. A prompt that does not end
-in a newline therefore sits in the pipe's buffer and never reaches the terminal, and the
-user waits at what looks like a hung task. Every prompt here is a whole flushed line for
-that reason. When stdin is not there at all -- an agent, a scheduled run -- reading it
-returns EOF, and that is reported as "nothing was picked" with the non-interactive
-spelling, never as an error.
+**The VS Code task asks with two dropdowns, and this menu is what it falls back to.**
+Typing a row number into a terminal is the wrong verb for a thing every real caller
+reaches by clicking a task, so the task resolves one `${input:...}` -- a checkout, then
+the refs belonging to it -- and sends the answer as `--pick-ref <project>:<ref>`. The
+colon is a safe separator rather than a hopeful one: `git check-ref-format` refuses a ref
+that contains one.
+
+The extension that draws those lists (`rioj7.command-variable`) cannot run a command to
+build them; it can only read a **file**. So `write_menu` saves one on every run of this
+script, which makes the dropdown the previous scan rather than the current one. On a
+machine that has never run this, `--refresh` writes the file and picks nothing -- and so
+does `Preview: Restart Standing Previews`, which is the task that asks no question.
+
+That is admitted rather than hidden. Every checkout's list ends in a `Rescan` row whose
+description carries the timestamp the list was built at, and picking it lands in the
+terminal menu below with the scan already done -- `main` collects before it looks at the
+pick, so the file is rewritten either way. "The branch I just pushed is missing" costs
+one click and never dead-ends. A ref picked from a row this scan no longer produces is
+still served, as a plain branch: a stale row is a good guess about a ref, and
+`worktree.py` is the half that knows whether one resolves.
+
+Interactive when nothing has picked for it, which is unusual for this directory and is
+why the prompt is written the way it is: the task runs under `log-wrap.py`, whose
+`stream()` gives this process a **pipe** for stdout while leaving stdin inherited. A
+prompt that does not end in a newline therefore sits in the pipe's buffer and never
+reaches the terminal, and the user waits at what looks like a hung task. Every prompt
+here is a whole flushed line for that reason. When stdin is not there at all -- an
+agent, a scheduled run -- reading it returns EOF, and that is reported as "nothing was
+picked" with the non-interactive spelling, never as an error.
 
 Devkit-scoped (`DEVKIT_ONLY` in `devkit_project.py`) though it previews other projects:
-the machine has one box registry and one port registry, so the menu has no project
-dimension to pick from. Restricting the sources to checkouts with a compose stack is
-what keeps devkit itself -- which has no stack, by contract -- out of its own menu.
+the machine has one box registry and one port registry, so the *task* is owned by no
+single checkout. The checkout is a dimension inside the answer instead -- a column in
+the terminal menu, and the first of the two dropdowns. Restricting the sources to
+checkouts with a compose stack is what keeps devkit itself -- which has no stack, by
+contract -- out of its own menu.
 
 Writes no artifact of its own: `devkit_project.py` wraps every dispatched action in
 `log-wrap.py`. Tested in `tests/test_preview_task.py`.
@@ -126,6 +151,19 @@ KIND_NOTE = {
     KIND_PR: "open PR",
     KIND_BRANCH: "branch on origin",
 }
+
+# The file the VS Code dropdown reads its options from. Under `logs/` because it is
+# machine state with exactly the lifetime of `logs/reconcile.log` -- gitignored, owned by
+# whichever run writes it next, and worth nothing to a fresh clone.
+MENU_CACHE = REPO_ROOT / "logs" / "preview-menu.json"
+
+# `--pick-ref <project>:<ref>`, one token because a VS Code input resolves to one string.
+# The separator is safe rather than merely conventional: `git check-ref-format` refuses a
+# ref containing a colon, so the first one is always the one between the two halves.
+PICK_SEP = ":"
+
+# The ref half of a pick that means "this list is stale, look again".
+RESCAN = "__rescan__"
 
 
 @dataclass(frozen=True)
@@ -350,6 +388,127 @@ def render_menu(
     return "\n".join(lines)
 
 
+def pick_value(candidate: Candidate) -> str:
+    """The token the dropdown returns for one row: `<project>:<ref>`."""
+    return f"{candidate.project}{PICK_SEP}{candidate.ref}"
+
+
+def parse_pick(text: str) -> tuple[str, str]:
+    """`carameli:agent/foo` -> `("carameli", "agent/foo")`; a bare ref -> `("", ref)`.
+
+    The bare form is for a person or an agent typing `--pick-ref` by hand, where naming
+    the checkout twice is a tax on the caller and `resolve_pick` can find it anyway.
+    """
+    project, sep, ref = text.strip().partition(PICK_SEP)
+    return (project, ref) if sep else ("", project)
+
+
+def resolve_pick(text: str, candidates: list[Candidate]) -> Candidate | None:
+    """The row a `--pick-ref` value names, or None when the value asks for a rescan.
+
+    A value matching no row is not an error, and that is the whole reason this is a
+    function rather than an index lookup: the dropdown is drawn from a file the previous
+    run wrote, so a row can be picked minutes after `reconcile` reaped the box that put
+    it there, or after its PR merged and its branch was deleted. What survives all of
+    that is the ref, which is the only thing `plan_preview` needs -- so an unmatched pick
+    becomes a plain branch row and fails, if it fails at all, against git rather than
+    against a menu that was right an hour ago.
+
+    Raises ValueError only for a value nothing could be made of, which after the fallback
+    above means a bare ref that matched nothing: it names no checkout to serve it from.
+    """
+    project, ref = parse_pick(text)
+    if ref == RESCAN:
+        return None
+    for candidate in candidates:
+        if candidate.ref == ref and project in ("", candidate.project):
+            return candidate
+    if project and ref:
+        return Candidate(project=project, ref=ref, kind=KIND_BRANCH)
+    raise ValueError(f"--pick-ref {text!r} matches no row and names no checkout to serve it from")
+
+
+def rescan_row(project: str, as_of: str) -> dict[str, str]:
+    """The row every checkout's list ends in: the way out of a stale options file.
+
+    It is also what stops a checkout with nothing found from drawing an EMPTY pick list,
+    which is the state the branch you pushed thirty seconds ago arrives in -- the one
+    moment the list is most wrong is the one moment it would otherwise offer no way to
+    correct it.
+    """
+    return {
+        "value": f"{project}{PICK_SEP}{RESCAN}",
+        "label": "Rescan",
+        "description": f"this list was built {as_of}",
+        "detail": "picks nothing -- rescans boxes, PRs and branches, then asks in the terminal",
+    }
+
+
+def menu_row(candidate: Candidate, now: _dt.datetime | None = None) -> dict[str, str]:
+    """One dropdown entry, with every field a string. See `menu_payload` for why."""
+    return {
+        "value": pick_value(candidate),
+        "label": candidate.ref,
+        "description": describe(candidate, now),
+        "detail": candidate.title,
+    }
+
+
+def project_note(found: list[Candidate], as_of: str) -> str:
+    """The first dropdown's second column: what picking this checkout will offer."""
+    if not found:
+        return f"nothing to preview -- as of {as_of}"
+    standing = sum(1 for candidate in found if candidate.kind == KIND_STANDING)
+    note = f"{len(found)} to look at"
+    if standing:
+        note += f", {standing} already standing"
+    return f"{note} -- as of {as_of}"
+
+
+def menu_payload(
+    candidates: list[Candidate],
+    projects: list[str],
+    now: _dt.datetime | None = None,
+) -> dict:
+    """The dropdown's options file: the checkouts, and each one's rows keyed by name.
+
+    Two shapes here are load-bearing rather than stylistic, because the extension builds
+    its list by evaluating one expression **per field** against rising indices until one
+    *throws*:
+
+      - every row carries all four of `value`, `label`, `description` and `detail`, and
+        each as a string. A field that resolves to `undefined` on a row that exists does
+        not end the list -- it appends ten thousand blank entries and then draws them.
+      - the rows are an array under a key per checkout, so the expression that reads them
+        ends in a property access. `rows[project][i].value` raises past the end, which is
+        what the extension is watching for; a bare `list[i]` would merely be undefined.
+
+    Every checkout with a stack is listed even when it contributed no row, so a checkout
+    can always be picked -- see `rescan_row`. Checkouts are ordered by their freshest
+    row, for the same reason `sort_key` puts recency above kind: the change someone has
+    just asked to look at is the newest thing on the machine.
+    """
+    stamp = now or _dt.datetime.now(_dt.UTC)
+    as_of = stamp.astimezone().strftime("%Y-%m-%d %H:%M")
+    grouped: dict[str, list[Candidate]] = {project: [] for project in projects}
+    for candidate in candidates:
+        grouped.setdefault(candidate.project, []).append(candidate)
+
+    def freshest(project: str) -> tuple[float, str]:
+        rows = grouped[project]
+        return (-max((_epoch(row.updated) for row in rows), default=float("-inf")), project)
+
+    entries, rows = [], {}
+    for project in sorted(grouped, key=freshest):
+        found = sorted(grouped[project], key=lambda candidate: candidate.sort_key)
+        rows[project] = [menu_row(candidate, stamp) for candidate in found]
+        rows[project].append(rescan_row(project, as_of))
+        entries.append(
+            {"name": project, "label": project, "description": project_note(found, as_of)}
+        )
+    return {"generated": stamp.isoformat(), "asOf": as_of, "projects": entries, "rows": rows}
+
+
 def parse_choice(text: str, count: int) -> tuple[str, int]:
     """`("pick", n)`, `("all", 0)`, `("quit", 0)`, or `("again", 0)` for a retry.
 
@@ -511,23 +670,31 @@ def local_branch_dates(project_dir: Path) -> dict[str, str]:
     return dates
 
 
-def collect(
-    workspace: Path, fetch: bool = True, now: _dt.datetime | None = None
-) -> list[Candidate]:
-    """Every previewable ref on this machine, merged and ranked.
+def stack_projects(workspace: Path) -> list[str]:
+    """The checkouts a preview can be served from: registered, present, and with a stack.
 
-    Checkouts with no compose stack are skipped entirely rather than contributing rows
+    Checkouts with no compose stack are left out entirely rather than contributing rows
     with nothing to publish. devkit is the one that matters: it has no stack by contract,
     so every one of its boxes would otherwise appear here as a row that comes up on no
     port and answers no question anyone opened this task to ask.
     """
     root = workspace.parent
+    return [
+        project
+        for project in worktree.known_projects(workspace)
+        if (root / project).is_dir() and worktree.has_stack(root / project)
+    ]
+
+
+def collect(
+    workspace: Path, fetch: bool = True, now: _dt.datetime | None = None
+) -> list[Candidate]:
+    """Every previewable ref on this machine, merged and ranked."""
+    root = workspace.parent
     boxes = worktree.live_boxes(root)
     candidates: list[Candidate] = []
-    for project in worktree.known_projects(workspace):
+    for project in stack_projects(workspace):
         project_dir = root / project
-        if not project_dir.is_dir() or not worktree.has_stack(project_dir):
-            continue
         branches = [
             entry for entry in recent_branches(project_dir, fetch=fetch) if fresh(entry[1], now=now)
         ]
@@ -541,6 +708,29 @@ def collect(
             )
         )
     return sorted(candidates, key=lambda candidate: candidate.sort_key)
+
+
+def write_menu(payload: dict, path: Path | None = None) -> Path | None:
+    """Save the dropdown's options, atomically. The path on success, None on any failure.
+
+    Never raises, and that is the point: this runs on the way to bringing a stack up, and
+    a preview that worked is not worth failing because the *next* one's menu could not be
+    cached. The cost of a swallowed error is one stale dropdown, which the `Rescan` row
+    in every list already exists to answer.
+
+    The destination defaults at CALL time rather than in the signature, so a test can
+    point `MENU_CACHE` somewhere disposable and the caller in `main` -- which passes no
+    path -- follows it there.
+    """
+    path = path or MENU_CACHE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        scratch = path.with_suffix(".json.tmp")
+        scratch.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        scratch.replace(path)
+    except OSError:
+        return None
+    return path
 
 
 def read_choice(
@@ -621,6 +811,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="with --list, emit JSON")
     parser.add_argument("--pick", type=int, default=0, help="take row N without asking")
     parser.add_argument(
+        "--pick-ref",
+        default="",
+        metavar="PROJECT:REF",
+        help="take this ref without asking -- what the VS Code dropdown sends",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="rebuild the dropdown's option file and exit, picking nothing",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=MENU_LIMIT,
@@ -651,10 +852,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.fetch and not args.list:
         echo("Reading boxes, open PRs and recent branches ...")
+    everything = collect(workspace, fetch=args.fetch)
+    # Cached before anything can fail, and from the UNTRIMMED scan: the dropdown has no
+    # screen to run out of, so the row `--limit` drops from a terminal menu is exactly the
+    # row that only the dropdown can still offer.
+    written = write_menu(menu_payload(everything, stack_projects(workspace)))
+    if args.refresh:
+        echo(
+            f"Dropdown options written to {written}" if written else "Could not write the options."
+        )
+        return 0 if written else 1
+
     # Trimmed ONCE, here, so every consumer numbers the same rows. Trimming the menu and
     # not `--list` would give `--pick 12` two meanings depending on which one the caller
     # had read, which is the kind of divergence nothing would ever report.
-    candidates, dropped = trim(collect(workspace, fetch=args.fetch), args.limit)
+    candidates, dropped = trim(everything, args.limit)
 
     if args.list:
         if args.json:
@@ -663,11 +875,25 @@ def main(argv: list[str] | None = None) -> int:
             echo(render_menu(candidates, dropped=dropped))
         return 0
 
-    if not candidates:
+    picked = None
+    if args.pick_ref:
+        try:
+            picked = resolve_pick(args.pick_ref, everything)
+        except ValueError as exc:
+            echo(str(exc))
+            return 2
+        if picked is None:
+            # The `Rescan` row picks nothing on purpose, and the scan it asked for has
+            # already happened above. All that is left of it is to ask, which is what the
+            # terminal menu below already is.
+            echo("\nRescanned. Pick from the fresh list below -- the dropdown gets it next time.")
+
+    if picked is not None:
+        chosen = [picked]
+    elif not candidates:
         echo(render_menu(candidates))
         return 0
-
-    if args.all:
+    elif args.all:
         chosen = [c for c in candidates if c.kind == KIND_STANDING]
         if not chosen:
             echo("No preview boxes are standing; there is nothing to bring back up.")

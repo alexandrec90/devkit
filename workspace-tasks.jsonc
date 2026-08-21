@@ -412,20 +412,24 @@
 		{
 			// Reviewing a UI change before its PR merges. Machine scope, not project
 			// scope — there is one box registry and one port registry on this machine, so
-			// the menu this prints has no project dimension to pick from and the project is
-			// a column in it instead. See ACTIONS["preview"].
+			// the checkout is a dimension inside the ANSWER rather than a scope for the task:
+			// `previewProject` asks which one, `previewRow` lists that one's refs. See
+			// ACTIONS["preview"].
 			//
-			// `focus` because the task asks a question: without it the answer is typed into
-			// whatever had focus when it was clicked.
+			// `focus` because the terminal menu is still reachable — the `Rescan` row falls
+			// through to it — and without it that answer is typed into whatever had focus
+			// when the task was clicked.
 			"label": "Preview: Open a UI Branch",
-			"detail": "Lists everything you could look at — preview boxes already standing, live agent boxes, open PRs, recent agent/ branches on origin — then asks which one to deploy, brings its stack up in a box of its own and opens the URL it publishes. Cutting a box for the first time builds its images and can take minutes; re-serving one that is already standing takes seconds. A running preview costs CPU until 'Machine: Reclaim Resources' stops it.",
+			"detail": "Asks which checkout, then which of its refs — preview boxes already standing, live agent boxes, open PRs, recent agent/ branches on origin — and brings that one's stack up in a box of its own, opening the URL it publishes. Both lists are what the last run found; every checkout ends in a 'Rescan' row that looks again and then asks in the terminal. Cutting a box for the first time builds its images and can take minutes; re-serving one that is already standing takes seconds. A running preview costs CPU until 'Machine: Reclaim Resources' stops it.",
 			"type": "process",
 			"command": "python",
 			"args": [
 				"${workspaceFolder:devkit}/scripts/devkit_project.py",
 				"--project",
 				"devkit",
-				"preview"
+				"preview",
+				"--pick-ref",
+				"${input:previewRow}"
 			],
 			"icon": {
 				"id": "preview",
@@ -1910,6 +1914,53 @@
 				}
 			],
 			"default": "auto"
+		},
+		{
+			// The dropdown pair this task asks with. The extension cannot RUN anything to
+			// build a list, so both read the option file `preview-task.py` writes under
+			// devkit's `logs/` on every run — which makes the list the PREVIOUS scan. Every
+			// checkout's rows therefore end in a `Rescan` row that says so, and picking it
+			// rescans and falls through to the terminal menu. `Preview: Restart Standing
+			// Previews` asks nothing and writes the same file, so it is the way to bootstrap
+			// one on a machine that has never run either task.
+			//
+			// `previewProject` is NESTED inside this input rather than declared beside it,
+			// because the second list depends on the first: the extension resolves a nested
+			// `pickStringRemember` first and substitutes the answer into the expressions
+			// below. Two sibling inputs would resolve in whatever order VS Code chose, and
+			// neither could read the other.
+			//
+			// The value is one token, `<project>:<ref>`, because a VS Code input resolves to
+			// one string. `git check-ref-format` refuses a ref containing a colon, so the
+			// first one always separates the two halves.
+			"id": "previewRow",
+			"type": "command",
+			"command": "extension.commandvariable.pickStringRemember",
+			"args": {
+				"description": "Which branch, PR or box should be brought up?",
+				"key": "previewRow",
+				"fileName": "${workspaceFolder:devkit}/logs/preview-menu.json",
+				"fileFormat": "json",
+				"jsonOption": {
+					"value": "content.rows['${pickStringRemember:previewProject}'][__itemIdx__].value",
+					"label": "content.rows['${pickStringRemember:previewProject}'][__itemIdx__].label",
+					"description": "content.rows['${pickStringRemember:previewProject}'][__itemIdx__].description",
+					"detail": "content.rows['${pickStringRemember:previewProject}'][__itemIdx__].detail"
+				},
+				"pickStringRemember": {
+					"previewProject": {
+						"description": "Which checkout has the branch you want to look at?",
+						"key": "previewProject",
+						"fileName": "${workspaceFolder:devkit}/logs/preview-menu.json",
+						"fileFormat": "json",
+						"jsonOption": {
+							"value": "content.projects[__itemIdx__].name",
+							"label": "content.projects[__itemIdx__].label",
+							"description": "content.projects[__itemIdx__].description"
+						}
+					}
+				}
+			}
 		}
 	]
 }
