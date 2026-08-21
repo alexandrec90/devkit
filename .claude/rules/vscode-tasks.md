@@ -31,6 +31,26 @@ way is not blocked from hoisting — write the seam. `scripts/backtest-task.py` 
 ibkr_trader exists for exactly that reason: its two tasks invoked a console-script
 executable directly, which the dispatcher cannot call.
 
+## A task that rewrites the tree ships what it wrote
+
+The lint actions do not only report: `lint-all.py` runs `ruff check --fix`, `ruff format`
+and — where a project ships it — a detect-secrets baseline that acknowledges its own new
+findings. Those writes land in the static checkout, on its home branch, which is the one
+write `worktree-guard.py` would have routed into a box had an agent made it. Nobody
+authored them, so nobody committed them, and they surfaced days later as a `needs-branch`
+verdict that read like abandoned human work.
+
+So an `Action` marked `autofix=True` is followed by `sweep.py --branch` and `--ship` for
+that checkout, and `autofix_ship_plan` decides whether that is honest. It ships one case
+only — clean tree, home branch, green run — and declines the rest out loud; its docstring
+owns each reason. `--no-ship-fixes` is the escape hatch for inspecting fixes locally.
+
+Two consequences worth knowing before adding an action. **Marking one `autofix` is a
+claim that its writes belong in a PR of their own**, so a task that edits the tree as its
+*purpose* (a migration, a devkit `--pull`) is not one of these — that diff wants a real
+commit message. And the plan is pure, so a new decline is a test in
+`tests/test_devkit_project.py`, not a manual trial against a live checkout.
+
 ## The tasks that must not be a dispatch
 
 Two of them, for the same reason twice. The dispatcher subtracts `NOT_PROJECTS` because

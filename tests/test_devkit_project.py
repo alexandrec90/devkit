@@ -8,6 +8,7 @@ script exists to prevent.
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 from support import (
@@ -1042,3 +1043,168 @@ def test_every_devkit_owned_script_exists():
         if a.owner == devkit_project.DEVKIT and not (REPO_ROOT / a.script).is_file()
     ]
     assert not missing, f"devkit-owned scripts missing: {missing}"
+
+
+# --- shipping what an autofix action rewrote ---------------------------------
+#
+# The reversion check for this block: revert `autofix_ship_plan` to "always ship" and
+# three of these fail; revert it to "never ship" and the first one does.
+
+WORKSPACE_FILE = "/ws/projects.code-workspace"
+
+
+def plan(before=(), after=("app/main.py",), branch="master", lint_ok=True):
+    return devkit_project.autofix_ship_plan(
+        "alpha",
+        branch,
+        before,
+        after,
+        lint_ok=lint_ok,
+        workspace=Path(WORKSPACE_FILE),
+    )
+
+
+def test_a_green_autofix_run_on_a_clean_home_branch_is_branched_then_shipped():
+    outcome = plan()
+    assert not outcome.note
+    assert [step[-4:] for step in outcome.commands] == [
+        ("--branch", "--slug", "lint-autofix", "--yes"),
+        ("--only", "alpha", "--ship", "--yes"),
+    ]
+    for step in outcome.commands:
+        assert step[1].endswith("sweep.py")
+        assert "--only" in step and "alpha" in step
+        assert str(Path(WORKSPACE_FILE)) in step
+
+
+def test_the_branch_step_comes_first():
+    """Order is load-bearing: `--ship` refuses a home branch, by its own design."""
+    branch, ship = plan().commands
+    assert "--branch" in branch and "--ship" not in branch
+    assert "--ship" in ship and "--branch" not in ship
+
+
+def test_a_run_that_rewrote_nothing_does_nothing_and_says_nothing():
+    assert plan(before=("app/main.py",), after=("app/main.py",)) == devkit_project.AutofixOutcome()
+
+
+def test_pre_existing_changes_are_not_swept_into_a_mechanical_pr():
+    outcome = plan(before=("app/main.py",), after=("app/main.py", "app/util.py"))
+    assert not outcome.commands
+    assert "/ship" in outcome.note
+
+
+def test_fixes_on_a_task_branch_ride_the_task_they_belong_to():
+    outcome = plan(branch="agent/comic-book-ui-0819")
+    assert not outcome.commands
+    assert "agent/comic-book-ui-0819" in outcome.note
+
+
+def test_a_run_that_still_reported_findings_is_not_shipped():
+    outcome = plan(lint_ok=False)
+    assert not outcome.commands
+    assert "red gate" in outcome.note
+
+
+def test_a_detached_head_is_declined_rather_than_branched():
+    outcome = plan(branch="")
+    assert not outcome.commands
+    assert "detached" in outcome.note
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"before": ("app/main.py",), "after": ("app/main.py", "app/util.py")},
+        {"branch": "agent/x-0819"},
+        {"lint_ok": False},
+        {"branch": ""},
+    ],
+)
+def test_every_decline_names_the_churn_it_is_declining(kwargs):
+    """A silent decline is how this churn went unnoticed in the first place."""
+    outcome = plan(**kwargs)
+    assert not outcome.commands
+    assert "autofix rewrote" in outcome.note
+
+
+def test_only_the_lint_actions_rewrite_the_tree():
+    """A new autofix action must be a deliberate entry here, not an inherited default."""
+    assert {name for name, a in ACTIONS.items() if a.autofix} == {"lint", "lint-changed"}
+
+
+def autofix_run(tmp_path, monkeypatch, argv, dirty=("app/main.py",), returncode=0):
+    """Dispatch a lint action over one checkout, recording every command it runs."""
+    workspace = tmp_path / "projects.code-workspace"
+    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    scripts = tmp_path / "alpha" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "lint-all.py").write_text("")
+
+    calls = []
+    snapshots = iter([("master", ()), ("master", dirty)])
+    monkeypatch.setattr(devkit_project, "autofix_state", lambda _directory: next(snapshots))
+
+    def fake_run(command, *, cwd, check):
+        calls.append(command)
+        return type("Result", (), {"returncode": returncode if len(calls) == 1 else 0})()
+
+    monkeypatch.setattr(devkit_project.subprocess, "run", fake_run)
+    code = devkit_project.main(["--workspace", str(workspace), *argv])
+    return code, calls
+
+
+def test_the_lint_task_hands_its_churn_to_the_sweep(tmp_path, monkeypatch):
+    _, calls = autofix_run(tmp_path, monkeypatch, ["--project", "alpha", "lint"])
+    assert len(calls) == 3, calls
+    assert [c[-1] for c in calls[1:]] == ["--yes", "--yes"]
+    assert all(c[1].endswith("sweep.py") for c in calls[1:])
+
+
+def test_no_ship_fixes_leaves_the_churn_in_the_working_tree(tmp_path, monkeypatch):
+    _, calls = autofix_run(tmp_path, monkeypatch, ["--no-ship-fixes", "--project", "alpha", "lint"])
+    assert len(calls) == 1, "the dispatcher shipped despite --no-ship-fixes"
+
+
+def test_a_non_autofix_action_is_never_snapshotted(tmp_path, monkeypatch):
+    """`autofix_state` shells out to git; a `test` run must not pay for that."""
+    workspace = tmp_path / "projects.code-workspace"
+    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    scripts = tmp_path / "alpha" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "run-tests.py").write_text("")
+
+    def boom(_directory):
+        raise AssertionError("a non-autofix action snapshotted the tree")
+
+    monkeypatch.setattr(devkit_project, "autofix_state", boom)
+    monkeypatch.setattr(
+        devkit_project.subprocess,
+        "run",
+        lambda command, *, cwd, check: type("Result", (), {"returncode": 0})(),
+    )
+    assert devkit_project.main(["--workspace", str(workspace), "--project", "alpha", "test"]) == 0
+
+
+def test_a_failed_sweep_step_stops_the_chain_and_reports(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "projects.code-workspace"
+    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    scripts = tmp_path / "alpha" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "lint-all.py").write_text("")
+
+    snapshots = iter([("master", ()), ("master", ("app/main.py",))])
+    monkeypatch.setattr(devkit_project, "autofix_state", lambda _directory: next(snapshots))
+    calls = []
+
+    def fake_run(command, *, cwd, check):
+        calls.append(command)
+        # The lint run passes; the `--branch` step fails.
+        return type("Result", (), {"returncode": 0 if len(calls) == 1 else 3})()
+
+    monkeypatch.setattr(devkit_project.subprocess, "run", fake_run)
+    code = devkit_project.main(["--workspace", str(workspace), "--project", "alpha", "lint"])
+
+    assert code == 3
+    assert len(calls) == 2, "the --ship step ran after --branch failed"
+    assert "still in the working tree" in capsys.readouterr().err
