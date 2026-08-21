@@ -1414,12 +1414,20 @@
 			"description": "Which Carameli-only free target to run",
 			"options": [
 				{
-					"label": "All free targets (pytest + hooks + frontend), one merged artifact",
+					"label": "All free targets (pytest + hooks + frontend + bundle budgets), one merged artifact",
 					"value": "--all"
 				},
 				{
 					"label": "Frontend (Vitest)",
 					"value": "--target=frontend-tests"
+				},
+				{
+					// Builds the frontend, then measures what the build produced
+					// against frontend/bundlePolicy.ts. Separate from the Vitest
+					// entry above because `test:run` never builds and so can never
+					// reach those budgets.
+					"label": "Frontend bundle budgets (production build + Vitest)",
+					"value": "--target=bundle-budgets"
 				},
 				{
 					"label": "Public webhook reachability",
