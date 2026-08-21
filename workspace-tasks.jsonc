@@ -382,6 +382,33 @@
 			},
 			"problemMatcher": []
 		},
+		{
+			// Machine scope, not project scope — so no `${input:project}`. The three
+			// things that make this laptop slow after a few hours are unrelated to
+			// each other and only one of them is Docker's, which is why this is not
+			// another mode of "Docker: Prune + Compact VHDX". See ACTIONS["reclaim"].
+			"label": "Machine: Reclaim Resources",
+			"detail": "Stops every running container (docker stop, never down — named volumes and stopped state survive), deletes RDP traces / WSL crash dumps / pytest scratch / node cache and loose %TEMP% files older than 3 days, then reconciles ephemeral boxes — but only once the disk is clear of the 20 GB floor reconcile reaps open PRs at. Reports commit charge; it cannot free memory.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"devkit",
+				"reclaim"
+			],
+			"icon": {
+				"id": "flame",
+				"color": "terminal.ansiBrightRed"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true,
+				"close": false
+			},
+			"problemMatcher": []
+		},
 		// --- scoped: carameli's worktree pair --------------------------------
 		// These three came up out of `carameli/.vscode/tasks.json`. The picker lists
 		// two checkouts rather than five because that is what the action is defined

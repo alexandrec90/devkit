@@ -256,8 +256,20 @@ def test_idle_only_skips_when_the_engine_cannot_be_asked(monkeypatch, capsys):
 
 def test_a_skipped_prune_is_a_success_not_a_failure(monkeypatch):
     """It reports 0 so a scheduled run that correctly declines does not look broken.
-    "Nothing to do right now" is the expected outcome most nights."""
+    "Nothing to do right now" is the expected outcome most nights.
+
+    `free_gb` is stubbed, and that is a fix rather than boilerplate: this test used to
+    stub only the container count, so `prune_verdict` read the **host's** free disk and
+    the assertion held only while this machine happened to sit above the floor. On
+    2026-08-21 it dropped below and the test went on to `sc start` the Docker service and
+    wait 90 seconds for a real engine. A unit test that reaches the machine passes for a
+    reason that has nothing to do with the code, which is the same as not covering it.
+    The `pytest.fail` tripwire below is the neighbouring test's, for the same reason."""
     monkeypatch.setattr(docker_maint, "running_containers", lambda: 3)
+    monkeypatch.setattr(docker_maint, "free_gb", lambda *_a, **_kw: 200.0)
+    monkeypatch.setattr(
+        docker_maint, "docker_info_ok", lambda *_a, **_kw: pytest.fail("touched the engine")
+    )
     assert docker_maint.generic_prune(idle_only=True) == 0
 
 
@@ -573,3 +585,48 @@ def test_the_engine_gets_longer_to_come_back_after_a_compaction():
     `unless-stopped` container took over 90s, so the default poll reported a
     successful prune as a failure."""
     assert docker_maint.COMPACT_POLL_TIMEOUT > docker_maint.POLL_TIMEOUT
+
+
+# --- restarting what the stop actually killed ---------------------------------
+#
+# 2026-08-20: `restart-engine`, `fix` and `prune --generic` all left the engine
+# permanently unreachable and blamed the daemon -- "DOCKER STILL WEDGED ... reset to
+# factory defaults, or reboot". Nothing was wedged. `stop_docker` taskkills every name in
+# DOCKER_PROCESSES, one of which is a Windows *service*, while `start_docker` relaunched
+# only the GUI. Starting the service by hand brought `docker version` back in 6 seconds.
+
+
+def test_the_service_this_kills_is_one_it_can_restart():
+    """The defect was a mismatch between what gets killed and what gets started, so pin
+    the overlap itself rather than either list."""
+    assert docker_maint.DOCKER_SERVICE in docker_maint.DOCKER_PROCESSES
+
+
+def test_start_docker_starts_the_service_before_the_gui(monkeypatch, commands, tmp_path):
+    """Order matters: Docker Desktop reads the service at launch and will not start it,
+    so a GUI launched first comes up attached to nothing."""
+    exe = tmp_path / "Docker Desktop.exe"
+    exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(docker_maint, "DOCKER_DESKTOP_EXE", exe)
+    launched: list[list[str]] = []
+    monkeypatch.setattr(docker_maint.subprocess, "Popen", lambda cmd, **kw: launched.append(cmd))
+    docker_maint.start_docker()
+    assert ["sc", "start", docker_maint.DOCKER_SERVICE] in commands
+    assert launched, "the GUI must still be launched"
+
+
+def test_an_already_running_service_is_not_an_error(monkeypatch, capsys):
+    """1056 is ERROR_SERVICE_ALREADY_RUNNING -- the normal case on a machine where
+    nothing stopped it, and it must not print a warning."""
+    monkeypatch.setattr(docker_maint, "run", lambda *a, **kw: 1056)
+    docker_maint.start_docker_service()
+    assert "[warn]" not in capsys.readouterr().out
+
+
+def test_a_service_that_will_not_start_warns_but_does_not_raise(monkeypatch, capsys):
+    """Soft failure on purpose: a machine whose Docker ships without the service must
+    still reach the GUI launch, because this repairs a state `stop_docker` creates rather
+    than gating start on a new precondition."""
+    monkeypatch.setattr(docker_maint, "run", lambda *a, **kw: 5)
+    docker_maint.start_docker_service()
+    assert "[warn]" in capsys.readouterr().out
