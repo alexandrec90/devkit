@@ -213,7 +213,6 @@ def test_native_import_resolves_an_existing_thread_without_importing_it_again(
     tmp_path, monkeypatch
 ):
     session = parsed_session(tmp_path)
-    source = "\\\\?\\" + str(session.source)
     fake = FakeClient(
         {
             "data": [
@@ -221,7 +220,7 @@ def test_native_import_resolves_an_existing_thread_without_importing_it_again(
                     "successes": [
                         {
                             "itemType": "SESSIONS",
-                            "source": source,
+                            "source": str(session.source),
                             "target": "codex-thread-id",
                         }
                     ]
