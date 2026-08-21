@@ -95,6 +95,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import devkit_project
 import sweep
 import worktree
 
@@ -128,6 +129,14 @@ MENU_LIMIT = 20
 # shipped change is on; `preview/` is deliberately absent, because a preview branch is
 # this tool's own scratch copy and previewing one would nest a copy of a copy.
 BRANCH_NAMESPACES = ("agent",)
+
+# Head-branch namespaces that are never the UI change anyone opened this task to see.
+# The branch source is already scoped by `BRANCH_NAMESPACES`; this filters the PR
+# source, where dependabot's bumps are the case that actually happened -- every open
+# bump PR earned a row, above the branches a human might want. A standing preview of
+# such a ref keeps its row: someone deliberately brought it up, and only the sources
+# that *discover* refs are filtered, never the boxes already serving one.
+IGNORED_REF_PREFIXES = ("dependabot/",)
 
 # Where a row came from, and the order the menu puts them in. The ranking is "how few
 # seconds until it is on screen", which is also how likely each is to be the answer.
@@ -287,6 +296,8 @@ def merge_candidates(
         if not ref:
             continue
         current = found.get(ref)
+        if current is None and ref.startswith(IGNORED_REF_PREFIXES):
+            continue
         title = str(entry.get("title") or "")
         number = int(entry.get("number") or 0)
         updated = str(entry.get("updatedAt") or "")
@@ -401,6 +412,19 @@ def parse_pick(text: str) -> tuple[str, str]:
     """
     project, sep, ref = text.strip().partition(PICK_SEP)
     return (project, ref) if sep else ("", project)
+
+
+def unresolved(text: str) -> bool:
+    """True when `--pick-ref` carries VS Code's own placeholder rather than an answer.
+
+    Escaping either dropdown does not abort the task: VS Code runs the command anyway,
+    with the `${input:previewRow}` token left in the argv as literal text. That text can
+    never name a row -- `git check-ref-format` refuses `$` and `{`, so no real pick
+    starts with `${` -- which is what lets it be read as the cancel it is. Without this
+    it split on its colon like any pick and went to `worktree.py` as project `"${input"`,
+    which died three files away in `resolve_project` with a traceback.
+    """
+    return text.lstrip().startswith("${")
 
 
 def resolve_pick(text: str, candidates: list[Candidate]) -> Candidate | None:
@@ -775,7 +799,9 @@ def serve(
         plan = worktree.plan_preview(
             workspace=workspace, fetch=fetch, up=not down, down=down, **preview_kwargs(candidate)
         )
-    except worktree.WorktreeError as exc:
+    except (worktree.WorktreeError, devkit_project.ProjectError) as exc:
+        # ProjectError is a stale or hand-typed pick naming a checkout the workspace
+        # does not list -- a wrong answer, not a wrong program, so no traceback.
         echo(f"  failed: {exc}")
         return False
     ok, notes = worktree.apply_preview(plan, workspace)
@@ -849,6 +875,11 @@ def main(argv: list[str] | None = None) -> int:
     if not workspace.is_file():
         echo(f"no workspace registry at {workspace}")
         return 2
+
+    if args.pick_ref and unresolved(args.pick_ref):
+        # Before the scan: a cancelled run should cost nothing and touch nothing.
+        echo("Nothing picked -- the dropdown was cancelled.")
+        return 0
 
     if args.fetch and not args.list:
         echo("Reading boxes, open PRs and recent branches ...")
