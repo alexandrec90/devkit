@@ -202,6 +202,34 @@ def test_a_source_row_with_no_ref_is_dropped_rather_than_keyed_on_empty():
     assert merged == []
 
 
+def test_a_dependabot_pr_contributes_no_row():
+    """A dependency bump is never the UI change anyone opened this task to see."""
+    rows = preview_task.merge_candidates(
+        "carameli",
+        [],
+        [pr(9, "dependabot/pip/urllib3-2.0.5", title="Bump urllib3")],
+        [],
+    )
+    assert rows == []
+
+
+def test_a_standing_preview_of_an_ignored_ref_keeps_its_row():
+    """The filter drops discovery, never a box someone deliberately brought up."""
+    standing = box(
+        "carameli--pv-1",
+        kind=worktree.PREVIEW_KIND,
+        branch="preview/dependabot/pip/urllib3-2.0.5",
+        tracks="dependabot/pip/urllib3-2.0.5",
+    )
+    rows = preview_task.merge_candidates(
+        "carameli",
+        [standing],
+        [pr(9, "dependabot/pip/urllib3-2.0.5", title="Bump urllib3")],
+        [],
+    )
+    assert [(r.kind, r.pr) for r in rows] == [(preview_task.KIND_STANDING, 9)]
+
+
 def test_a_branch_never_overwrites_a_row_a_box_or_pr_already_claimed():
     merged = preview_task.merge_candidates(
         "carameli",
@@ -590,6 +618,19 @@ def test_a_bare_ref_that_matches_nothing_names_no_checkout_to_serve_it_from():
         preview_task.resolve_pick("agent/gone", [])
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("${input:previewRow}", True),
+        ("  ${input:previewRow}", True),
+        ("carameli:agent/x", False),
+        ("agent/x", False),
+    ],
+)
+def test_an_unsubstituted_input_token_reads_as_a_cancel(text, expected):
+    assert preview_task.unresolved(text) is expected
+
+
 def test_the_rescan_value_resolves_to_no_row():
     assert (
         preview_task.resolve_pick(f"carameli:{preview_task.RESCAN}", [_branch("agent/x")]) is None
@@ -630,6 +671,34 @@ def _menu(stub, rows):
 def test_a_missing_workspace_registry_is_reported_not_traced(tmp_path, capsys):
     assert preview_task.main(["--workspace", str(tmp_path / "gone.code-workspace")]) == 2
     assert "no workspace registry" in capsys.readouterr().out
+
+
+def test_an_escaped_dropdown_cancels_before_the_scan(stub, capsys):
+    """Esc at either dropdown runs the task with `${input:previewRow}` as literal text.
+
+    That is a cancel, so it must exit 0 without fetching, scanning, or serving --
+    the first version split the token on its colon and sent project `"${input"` into
+    `worktree.py`, which traced out of `resolve_project`.
+    """
+    stub.monkeypatch.setattr(
+        preview_task, "collect", lambda *a, **k: pytest.fail("a cancelled run must not scan")
+    )
+    argv = ["--workspace", str(stub.workspace), "--pick-ref", "${input:previewRow}"]
+    assert preview_task.main(argv) == 0
+    assert stub.served == []
+    assert "cancelled" in capsys.readouterr().out
+
+
+def test_a_pick_naming_an_unknown_checkout_is_reported_not_traced(monkeypatch, tmp_path, capsys):
+    """`ProjectError` is a wrong answer -- a stale or hand-typed pick -- not a crash."""
+
+    def refuse(**kwargs):
+        raise preview_task.devkit_project.ProjectError("unknown project 'nope'")
+
+    monkeypatch.setattr(preview_task.worktree, "plan_preview", refuse)
+    candidate = preview_task.Candidate(project="nope", ref="agent/x", kind=preview_task.KIND_BRANCH)
+    assert preview_task.serve(candidate, tmp_path) is False
+    assert "failed: unknown project 'nope'" in capsys.readouterr().out
 
 
 def test_list_json_emits_every_field_of_every_row(stub, capsys):
