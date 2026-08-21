@@ -24,11 +24,11 @@ Modes:
   (default)   human-readable table -- the testing/inspection mode.
   --json      the same verdicts as JSON, for a driver to fan out over.
   --check     exit 1 when any repo needs action, 2 when any is blocked. For a
-              root-level task that should fail loudly rather than print quietly.
+              caller that should fail loudly rather than print quietly.
   --branch    cut an `agent/...` branch under work stranded on a branch that
               cannot be shipped from -- a home branch, or a task branch the
-              branch policy has retired. The rescue step, and the only mode
-              here that still has a workspace task of its own.
+              branch policy has retired. The rescue step, for work a hook
+              could not stop landing on a home branch.
   --ship      commit what is on each task branch, push it, open its PR.
               The unattended alternative to `/ship` per repo. CLI only.
   --sync      park each worktree back on its home branch, fast-forward it to
@@ -1666,9 +1666,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="park each worktree on its home branch, fast-forward, drop merged branches",
     )
-    # `--dry-run` is redundant with the default and exists anyway: the VS Code task
-    # picks one of these two strings, and passing "" instead would reach argparse as
-    # a stray positional and be rejected. Same reason new-project.py carries it.
+    # `--dry-run` is redundant with the default and exists anyway. It was written for
+    # a VS Code task whose picker had to emit one real token in every branch -- an
+    # empty string reaches argparse as a stray positional and is rejected -- and it
+    # outlived that task because spelling the safe half is what makes `--yes` read as
+    # a choice on the command line. Same reason new-project.py carries it.
     apply_mode = parser.add_mutually_exclusive_group()
     apply_mode.add_argument(
         "--dry-run",

@@ -488,7 +488,6 @@ def test_picker_registration_updates_the_multi_test_picker_too():
                 {"id": "project", "options": ["alpha"]},
                 {"id": "daemonProject", "options": ["alpha"]},
                 {"id": "worktreeProject", "options": ["alpha"]},
-                {"id": "sweepScope", "options": ["alpha"]},
                 {"id": "upgradeScope", "options": ["alpha"]},
                 {"id": "mergeCheckout", "options": ["alpha"]}
             ]
@@ -549,7 +548,6 @@ def test_registering_against_the_real_workspace_file():
     for picker_id in (
         "daemonProject",
         "worktreeProject",
-        "sweepScope",
         "upgradeScope",
         "mergeCheckout",
     ):
@@ -822,7 +820,6 @@ def test_the_live_smoke_task_names_the_only_checkout_that_can_run_it(canonical):
 # checkout out stays possible, but as a decision someone recorded rather than a list
 # nobody updated.
 SCOPE_PICKERS: dict[str, dict[str, str]] = {
-    "sweepScope": {},
     "upgradeScope": {
         "devkit": (
             "is the source a release is pulled FROM, not a consumer of it; "
@@ -882,7 +879,6 @@ def test_project_scope_inputs_are_real_multi_picks(canonical):
         "carameliCheckout",
         "ibkrCheckout",
         "dbCheckout",
-        "sweepScope",
         "upgradeScope",
     ):
         spec = inputs[picker_id]
@@ -958,55 +954,29 @@ def test_every_input_referenced_is_defined(canonical):
     assert defined <= referenced, f"unused inputs: {defined - referenced}"
 
 
-def test_every_mutating_sweep_task_offers_the_scope_picker(canonical):
-    """`--only` restricts every sweep mode, so every step that changes a checkout has
-    to let you aim it at one.
+def test_the_sweep_has_no_workspace_task(canonical):
+    """`sweep.py` is a CLI and an import, and nothing in the quick-pick calls it.
 
-    Step 3 shipped without the picker and so was all-or-nothing: when a sync failed in
-    one repo, the only way to retry it was the CLI, and the fallback for a one-click
-    workflow being unable to express "just this one" is re-running it over every
-    checkout. The read-only modes are deliberately exempt — an unscoped sweep IS the
-    report, and a scoped one answers a question nobody asked of it.
+    There were five: two read-only reports and the three shipping steps. None had ever
+    been run on the machine they were written for -- `log-wrap` writes `logs/<slug>.log`
+    per run and nothing prunes that directory, and no `ship-*.log` was ever created --
+    because every reader the sweep has is automatic now. `workspace-status.py` runs it
+    at session start and prints the stranded-work line; `worktree.py reconcile` runs
+    `--sync` every fifteen minutes and reports what it refused to park. A one-click
+    duplicate of either is a second owner for one tier's lifecycle, and `--ship`'s
+    sweep-shaped commit message lost to `/ship` per repo once an agent was a box away.
+
+    So this is not "we removed some tasks" -- it is that the quick-pick is the wrong
+    surface for this tool entirely. Re-adding one means naming which automatic reader
+    it replaces, not just deleting this test. Nothing stops anyone typing
+    `python scripts/sweep.py --branch --yes`, and the modes are covered by
+    `tests/test_sweep.py` either way.
     """
     for task in canonical["tasks"]:
         args = [str(a) for a in task.get("args", [])]
-        if not any("sweep.py" in a for a in args):
-            continue
-        if not {"--branch", "--ship", "--sync"} & set(args):
-            continue
-        assert any("${input:sweepScope}" in arg for arg in args), (
-            f"{task['label']} changes checkouts but cannot be scoped to one"
-        )
-
-
-# The sweep's mutating modes, and who is allowed to be their one-click entry point.
-# `--branch` rescues work a hook could not stop landing on a home branch, which no
-# schedule can decide for you -- it keeps its task. The other two do not: `--sync` is
-# run unattended by `worktree.py reconcile` every fifteen minutes, and `--ship` writes
-# a commit message describing the sweep rather than the change, which `/ship` per repo
-# always does better now that an agent is a box away.
-SWEEP_MODES_WITHOUT_A_TASK = ("--ship", "--sync")
-
-
-def test_the_scheduled_sweep_modes_have_no_workspace_task(canonical):
-    """One owner per tier, asserted where the duplicate would be added.
-
-    Both of these had a task -- `Ship: Publish Swept Work (step 2)` and `Ship: Sync
-    Worktrees (step 3)` -- and neither was ever run on the machine they were written
-    for: the box tier had already removed the stranding they existed to clean up, and
-    reconcile had been syncing every checkout on a schedule for months. A hand-crank
-    beside a scheduled job is a second owner for one tier's lifecycle, and the two
-    disagree the first time someone clicks it mid-pass. Re-adding one means retiring
-    the automatic caller first, not just deleting this test.
-    """
-    for task in canonical["tasks"]:
-        args = [str(a) for a in task.get("args", [])]
-        if not any("sweep.py" in a for a in args):
-            continue
-        clash = set(args) & set(SWEEP_MODES_WITHOUT_A_TASK)
-        assert not clash, (
-            f"{task['label']} runs sweep.py {' '.join(sorted(clash))}, which has an "
-            "owner already -- reconcile's schedule for --sync, /ship per repo for --ship"
+        assert not any("sweep.py" in a for a in args), (
+            f"{task['label']} puts sweep.py back in the quick-pick; the readers that "
+            "replaced it are workspace-status.py and worktree.py reconcile"
         )
 
 
