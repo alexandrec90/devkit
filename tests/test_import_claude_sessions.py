@@ -1,9 +1,10 @@
-"""Tests for importing Claude sessions stopped by a usage limit into Codex."""
+"""Tests for native-importing usage-limited Claude sessions into Codex."""
 
-import base64
 import json
 import os
 from pathlib import Path
+
+import pytest
 
 from support import REPO_ROOT, load_script
 
@@ -78,21 +79,23 @@ def write_transcript(
     return path
 
 
-def test_parse_accepts_the_real_claude_limit_record_shape(tmp_path):
+def parsed_session(tmp_path, session_id="limited"):
     cwd = tmp_path / "repo"
-    cwd.mkdir()
-    path = write_transcript(tmp_path / "store", "limited", cwd=cwd, mtime=42.0)
+    cwd.mkdir(exist_ok=True)
+    source = write_transcript(tmp_path / "store", session_id, cwd=cwd)
+    session = ics.parse_session(source)
+    assert session is not None
+    return session
 
-    found = ics.parse_session(path)
 
-    assert found is not None
-    assert (found.session_id, found.cwd, found.prompt, found.mtime) == (
+def test_parse_accepts_the_real_claude_limit_record_shape(tmp_path):
+    session = parsed_session(tmp_path)
+    assert (session.session_id, session.prompt, session.mtime) == (
         "limited",
-        cwd,
         "finish the interrupted task",
-        42.0,
+        1_000.0,
     )
-    assert "session limit" in found.limit_message
+    assert "session limit" in session.limit_message
 
 
 def test_a_generic_429_is_not_mistaken_for_a_usage_limit(tmp_path):
@@ -124,148 +127,244 @@ def test_collect_and_select_take_the_recent_sessions_oldest_first(tmp_path):
     store = tmp_path / "store"
     for index in range(6):
         write_transcript(store, f"s{index}", cwd=cwd, mtime=1_000.0 + index)
-
-    selected = ics.select(ics.collect(store), 4)
-
-    assert [session.session_id for session in selected] == ["s2", "s3", "s4", "s5"]
-
-
-def test_import_artifact_copies_the_transcript_and_carries_a_safe_handoff(tmp_path):
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    source = write_transcript(tmp_path / "store", "limited", cwd=cwd)
-    session = ics.parse_session(source)
-    assert session is not None
-
-    artifact = ics.prepare_import(session, tmp_path / "codex-imports")
-
-    assert artifact.transcript.read_bytes() == source.read_bytes()
-    prompt = artifact.prompt.read_text(encoding="utf-8")
-    assert str(artifact.transcript) in prompt
-    assert "continue the latest unresolved user request" in prompt.lower()
-    assert "Do not just summarize" in prompt
-    assert not ics.is_imported(session, tmp_path / "codex-imports")
+    assert [item.session_id for item in ics.select(ics.collect(store), 4)] == [
+        "s2",
+        "s3",
+        "s4",
+        "s5",
+    ]
 
 
-def test_import_marker_is_idempotent_but_a_changed_source_can_be_imported_again(tmp_path):
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    source = write_transcript(tmp_path / "store", "limited", cwd=cwd)
-    session = ics.parse_session(source)
-    assert session is not None
-    root = tmp_path / "codex-imports"
-    artifact = ics.prepare_import(session, root)
+def detected_payload(session, *extra):
+    return {
+        "items": [
+            {"itemType": "CONFIG", "details": None},
+            {
+                "itemType": "SESSIONS",
+                "description": "Detected Claude sessions",
+                "cwd": None,
+                "details": {
+                    "sessions": [
+                        {
+                            "path": str(session.source),
+                            "cwd": str(session.cwd),
+                            "title": session.prompt,
+                        },
+                        *extra,
+                    ],
+                    "plugins": [],
+                },
+            },
+        ]
+    }
 
-    ics.mark_imported(session, artifact)
-    assert ics.is_imported(session, root)
 
-    source.write_text(source.read_text(encoding="utf-8") + "{}\n", encoding="utf-8")
-    changed = ics.parse_session(source)
-    assert changed is not None
-    assert not ics.is_imported(changed, root)
+def test_detected_migration_payload_is_filtered_to_the_selected_sessions(tmp_path):
+    session = parsed_session(tmp_path)
+    item = ics.select_detected_items(
+        detected_payload(
+            session,
+            {"path": str(tmp_path / "other.jsonl"), "cwd": str(session.cwd)},
+        ),
+        [session],
+    )[0]
+    assert item["itemType"] == "SESSIONS"
+    assert item["details"]["sessions"] == [
+        {"path": str(session.source), "cwd": str(session.cwd), "title": session.prompt}
+    ]
 
 
-def test_terminal_command_reads_the_prompt_file_without_putting_the_handoff_on_the_command_line(
-    tmp_path,
+def test_an_already_imported_session_can_be_absent_from_native_detection(tmp_path):
+    session = parsed_session(tmp_path)
+    assert ics.select_detected_items({"items": []}, [session]) == []
+
+
+class FakeClient:
+    def __init__(self, histories, detected, completed=None):
+        self.histories = histories
+        self.detected = detected
+        self.completed = completed or {
+            "importId": "import-1",
+            "itemTypeResults": [{"itemType": "SESSIONS", "successes": [], "failures": []}],
+        }
+        self.requests = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def request(self, method, params):
+        self.requests.append((method, params))
+        if method == "externalAgentConfig/detect":
+            return self.detected
+        if method == "externalAgentConfig/import":
+            return {"importId": "import-1"}
+        assert method == "externalAgentConfig/import/readHistories"
+        return self.histories
+
+    def notification(self, method, import_id):
+        assert (method, import_id) == ("externalAgentConfig/import/completed", "import-1")
+        return self.completed
+
+
+def test_native_import_resolves_an_existing_thread_without_importing_it_again(
+    tmp_path, monkeypatch
 ):
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    source = write_transcript(tmp_path / "store", "limited", cwd=cwd)
-    session = ics.parse_session(source)
-    assert session is not None
-    artifact = ics.prepare_import(session, tmp_path / "imports")
+    session = parsed_session(tmp_path)
+    source = "\\\\?\\" + str(session.source)
+    fake = FakeClient(
+        {
+            "data": [
+                {
+                    "successes": [
+                        {
+                            "itemType": "SESSIONS",
+                            "source": source,
+                            "target": "codex-thread-id",
+                        }
+                    ]
+                }
+            ]
+        },
+        {"items": []},
+    )
+    monkeypatch.setattr(ics, "AppServerClient", lambda _codex: fake)
 
-    args = ics.wt_args([artifact])
+    imported = ics.native_import("codex.cmd", [session])
 
+    assert imported == [ics.ImportedSession(session, "codex-thread-id")]
+    detect_method, detect_params = fake.requests[0]
+    assert detect_method == "externalAgentConfig/detect"
+    assert detect_params["migrationSource"] == "claude"
+    assert [method for method, _params in fake.requests] == [
+        "externalAgentConfig/detect",
+        "externalAgentConfig/import/readHistories",
+    ]
+
+
+def test_native_import_imports_a_detected_session_through_the_claude_migration(
+    tmp_path, monkeypatch
+):
+    session = parsed_session(tmp_path)
+    completed = {
+        "importId": "import-1",
+        "itemTypeResults": [
+            {
+                "itemType": "SESSIONS",
+                "successes": [
+                    {
+                        "itemType": "SESSIONS",
+                        "source": str(session.source),
+                        "target": "new-codex-thread-id",
+                    }
+                ],
+                "failures": [],
+            }
+        ],
+    }
+    fake = FakeClient({"data": []}, detected_payload(session), completed)
+    monkeypatch.setattr(ics, "AppServerClient", lambda _codex: fake)
+
+    imported = ics.native_import("codex.cmd", [session])
+
+    assert imported == [ics.ImportedSession(session, "new-codex-thread-id")]
+    method, params = fake.requests[1]
+    assert method == "externalAgentConfig/import"
+    assert params["migrationSource"] == "claude"
+    assert params["migrationItems"][0]["details"]["sessions"][0]["path"] == str(session.source)
+
+
+def test_native_import_fails_if_no_resumable_thread_is_returned(tmp_path, monkeypatch):
+    session = parsed_session(tmp_path)
+    monkeypatch.setattr(
+        ics,
+        "AppServerClient",
+        lambda _codex: FakeClient({"data": []}, detected_payload(session)),
+    )
+    with pytest.raises(ics.AppServerError, match="no resumable Codex thread"):
+        ics.native_import("codex.cmd", [session])
+
+
+def test_native_import_surfaces_importer_failures(tmp_path, monkeypatch):
+    session = parsed_session(tmp_path)
+    completed = {
+        "importId": "import-1",
+        "itemTypeResults": [
+            {
+                "itemType": "SESSIONS",
+                "successes": [],
+                "failures": [{"message": "unsupported transcript"}],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        ics,
+        "AppServerClient",
+        lambda _codex: FakeClient({"data": []}, detected_payload(session), completed),
+    )
+    with pytest.raises(ics.AppServerError, match="unsupported transcript"):
+        ics.native_import("codex.cmd", [session])
+
+
+def test_terminal_tabs_resume_the_native_codex_thread_ids(tmp_path):
+    session = parsed_session(tmp_path)
+    args = ics.wt_args([ics.ImportedSession(session, "codex-thread-id")])
     assert args.count("new-tab") == 1
-    encoded = args[args.index("-EncodedCommand") + 1]
-    command = base64.b64decode(encoded).decode("utf-16-le")
-    assert "Get-Content -Raw -LiteralPath" in command
-    assert str(artifact.prompt).replace("'", "''") in command
-    assert "& codex $prompt" in command
-    assert "work in progress" not in " ".join(args)
-    assert "Source transcript copy" not in " ".join(args)
+    assert args[args.index("-Command") + 1 :] == [
+        "codex",
+        "resume",
+        "codex-thread-id",
+        ";",
+        "focus-tab",
+        "-t",
+        "0",
+    ]
+    assert "Continue the interrupted" not in " ".join(args)
 
 
-def test_list_is_read_only_and_reports_only_unimported_limit_sessions(
-    tmp_path, capsys, monkeypatch
-):
+def test_list_is_read_only_and_reports_only_limit_sessions(tmp_path, capsys, monkeypatch):
     cwd = tmp_path / "repo"
     cwd.mkdir()
     store = tmp_path / "store"
     write_transcript(store, "limited", cwd=cwd)
     write_transcript(store, "normal", cwd=cwd, ending="success")
-    imports = tmp_path / "imports"
-
-    monkeypatch.setattr(
-        ics.subprocess, "run", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError)
-    )
-    assert ics.main(["--sessions-dir", str(store), "--imports-dir", str(imports), "--list"]) == 0
-
+    monkeypatch.setattr(ics, "native_import", lambda *_a: (_ for _ in ()).throw(AssertionError))
+    assert ics.main(["--sessions-dir", str(store), "--list"]) == 0
     output = capsys.readouterr().out
     assert "limited" in output
     assert "normal" not in output
-    assert not imports.exists()
 
 
-def test_successful_launch_marks_the_session_imported(tmp_path, monkeypatch):
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    store = tmp_path / "store"
-    source = write_transcript(store, "limited", cwd=cwd)
-    imports = tmp_path / "imports"
+def test_successful_native_import_launches_resume_tabs(tmp_path, monkeypatch):
+    parsed_session(tmp_path)
+    launches = []
     monkeypatch.setattr(ics, "find_terminal", lambda: r"C:\wt.exe")
     monkeypatch.setattr(ics, "find_codex", lambda: r"C:\codex.cmd")
     monkeypatch.setattr(
-        ics.subprocess, "run", lambda *_a, **_k: ics.subprocess.CompletedProcess([], 0)
+        ics, "native_import", lambda codex, sessions: [ics.ImportedSession(sessions[0], "t1")]
     )
-
-    assert ics.main(["--sessions-dir", str(store), "--imports-dir", str(imports)]) == 0
-
-    session = ics.parse_session(source)
-    assert session is not None
-    assert ics.is_imported(session, imports)
-
-
-def test_a_missing_terminal_does_not_mark_a_session_imported(tmp_path, monkeypatch):
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    store = tmp_path / "store"
-    source = write_transcript(store, "limited", cwd=cwd)
-    imports = tmp_path / "imports"
-    monkeypatch.setattr(ics, "find_terminal", lambda: "")
-
-    assert ics.main(["--sessions-dir", str(store), "--imports-dir", str(imports)]) == 1
-
-    session = ics.parse_session(source)
-    assert session is not None
-    assert not ics.is_imported(session, imports)
-
-
-def test_a_missing_codex_cli_does_not_mark_or_launch(tmp_path, monkeypatch):
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    store = tmp_path / "store"
-    source = write_transcript(store, "limited", cwd=cwd)
-    imports = tmp_path / "imports"
-    monkeypatch.setattr(ics, "find_terminal", lambda: r"C:\wt.exe")
-    monkeypatch.setattr(ics, "find_codex", lambda: "")
     monkeypatch.setattr(
-        ics.subprocess, "run", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError)
+        ics.subprocess,
+        "run",
+        lambda args, **_kwargs: launches.append(args) or ics.subprocess.CompletedProcess(args, 0),
     )
-
-    assert ics.main(["--sessions-dir", str(store), "--imports-dir", str(imports)]) == 1
-
-    session = ics.parse_session(source)
-    assert session is not None
-    assert not ics.is_imported(session, imports)
+    assert ics.main(["--sessions-dir", str(tmp_path / "store")]) == 0
+    assert launches[0][0] == r"C:\wt.exe"
+    assert launches[0][-7:-4] == ["codex", "resume", "t1"]
 
 
-def test_config_homes_control_both_stores(monkeypatch, tmp_path):
+def test_missing_tools_do_not_attempt_a_native_import(tmp_path, monkeypatch):
+    parsed_session(tmp_path)
+    monkeypatch.setattr(ics, "find_terminal", lambda: "")
+    monkeypatch.setattr(ics, "native_import", lambda *_a: (_ for _ in ()).throw(AssertionError))
+    assert ics.main(["--sessions-dir", str(tmp_path / "store")]) == 1
+
+
+def test_claude_config_home_controls_the_source_store(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
     assert ics.claude_sessions_root() == tmp_path / "claude" / "projects"
-    assert ics.imports_root() == tmp_path / "codex" / "devkit" / "claude-handoffs"
 
 
 def test_an_empty_store_fails_loudly_and_names_the_path(tmp_path, capsys):
@@ -291,15 +390,16 @@ def test_the_script_is_stdlib_only():
     allowed = {
         "__future__",
         "argparse",
-        "base64",
         "dataclasses",
         "json",
         "os",
         "pathlib",
+        "queue",
         "re",
         "shutil",
         "subprocess",
         "sys",
+        "threading",
         "time",
     }
     for line in source.splitlines():
