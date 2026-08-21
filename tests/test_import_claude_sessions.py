@@ -265,7 +265,7 @@ def test_config_homes_control_both_stores(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
     assert ics.claude_sessions_root() == tmp_path / "claude" / "projects"
-    assert ics.imports_root() == tmp_path / "codex" / "imports" / "claude"
+    assert ics.imports_root() == tmp_path / "codex" / "devkit" / "claude-handoffs"
 
 
 def test_an_empty_store_fails_loudly_and_names_the_path(tmp_path, capsys):

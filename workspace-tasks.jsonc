@@ -1264,7 +1264,7 @@
 			// a durable handoff under CODEX_HOME. A fingerprint keeps repeat clicks from
 			// opening duplicates unless Claude appended to the transcript afterwards.
 			"label": "Agents: Import Limited Claude Sessions",
-			"detail": "Choose how many recent Claude sessions that ended at a usage limit to continue in Codex, one new Windows Terminal tab each, OLDEST TAB FIRST. Copies each raw transcript under CODEX_HOME/imports/claude, so the handoff survives and the project checkout stays untouched. Already imported transcript versions, Claude subagents, and sessions whose directory has been reaped are skipped.",
+			"detail": "Choose how many recent Claude sessions that ended at a usage limit to continue in Codex, one new Windows Terminal tab each, OLDEST TAB FIRST. Copies each raw transcript under CODEX_HOME/devkit/claude-handoffs, so the handoff survives and the project checkout stays untouched. Already imported transcript versions, Claude subagents, and sessions whose directory has been reaped are skipped.",
 			"type": "process",
 			"command": "python",
 			"args": [

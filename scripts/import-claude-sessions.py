@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Continue Claude sessions stopped by a usage limit in new Codex sessions.
 
-Backs the workspace-level task "Agents: Import Limited Claude Sessions". Codex can
-resume sessions it already owns, but it has no transcript-import command. This script
-therefore creates a durable handoff instead of writing Codex's private rollout format:
+Backs the workspace-level task "Agents: Import Limited Claude Sessions". To automate
+selection by Claude's terminal error without writing Codex's private session or import
+formats, this script creates a durable handoff:
 
 1. find recent top-level Claude transcripts whose final assistant record is the
    subscription/session/spend limit error;
-2. copy each raw JSONL transcript under ``$CODEX_HOME/imports/claude``;
+2. copy each raw JSONL transcript under ``$CODEX_HOME/devkit/claude-handoffs``;
 3. open Codex in the transcript's original directory with a short prompt telling it to
    reconstruct the interrupted task from that copy and continue it.
 
@@ -82,7 +82,7 @@ def claude_sessions_root(config_dir: str | None = None) -> Path:
 def imports_root(config_dir: str | None = None) -> Path:
     """The private Codex-side store for imported Claude transcripts."""
     base = config_dir or os.environ.get("CODEX_HOME", "")
-    return (Path(base) if base else Path.home() / ".codex") / "imports" / "claude"
+    return (Path(base) if base else Path.home() / ".codex") / "devkit" / "claude-handoffs"
 
 
 def _message_text(message: object) -> str:
@@ -343,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
         "--imports-dir",
         type=Path,
         default=None,
-        help="Codex handoff store (default: $CODEX_HOME/imports/claude)",
+        help="Codex handoff store (default: $CODEX_HOME/devkit/claude-handoffs)",
     )
     parser.add_argument(
         "--list", action="store_true", help="list candidates; write and launch nothing"
