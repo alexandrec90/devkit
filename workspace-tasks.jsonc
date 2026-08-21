@@ -1930,6 +1930,13 @@
 			// below. Two sibling inputs would resolve in whatever order VS Code chose, and
 			// neither could read the other.
 			//
+			// The pick fires ONCE, in `value`: the extension substitutes each template
+			// string in turn, and EVERY `${pickStringRemember:...}` occurrence opens its
+			// own quick-pick — spelled in all four fields, the project dropdown appeared
+			// four times per run. `value` resolves first, the pick stores its answer under
+			// its `key`, and the other three fields read it back with
+			// `${remember:previewProject}`, which never prompts.
+			//
 			// The value is one token, `<project>:<ref>`, because a VS Code input resolves to
 			// one string. `git check-ref-format` refuses a ref containing a colon, so the
 			// first one always separates the two halves.
@@ -1943,9 +1950,9 @@
 				"fileFormat": "json",
 				"jsonOption": {
 					"value": "content.rows['${pickStringRemember:previewProject}'][__itemIdx__].value",
-					"label": "content.rows['${pickStringRemember:previewProject}'][__itemIdx__].label",
-					"description": "content.rows['${pickStringRemember:previewProject}'][__itemIdx__].description",
-					"detail": "content.rows['${pickStringRemember:previewProject}'][__itemIdx__].detail"
+					"label": "content.rows['${remember:previewProject}'][__itemIdx__].label",
+					"description": "content.rows['${remember:previewProject}'][__itemIdx__].description",
+					"detail": "content.rows['${remember:previewProject}'][__itemIdx__].detail"
 				},
 				"pickStringRemember": {
 					"previewProject": {
