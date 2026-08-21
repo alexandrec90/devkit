@@ -28,6 +28,7 @@ Tested in `tests/test_workspace_status.py`.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import sys
 import time as _time
@@ -409,6 +410,55 @@ def scheduler_fallback(scheduler: str, schedule: list[str]) -> str:
     return scheduler
 
 
+# The two harness-events ledger event names that mean "someone should look", out of
+# everything the ledger records. The rest -- routine guard redirects, capped-Bash
+# blocks, lint findings -- are normal operation kept for forensics, and a count of
+# them at every session start would be exactly the noise the ledger exists to avoid.
+TRIAGE_EVENTS = ("agent-report", "guard-spawn-failed")
+
+
+def events_line(source: Path = SOURCE_ROOT, now: float = 0.0, window_days: float = 7.0) -> str:
+    """Reports untriaged harness events; "" when the recent ledger holds none.
+
+    The ledger (`scripts/hooks/harness_events.py`) is append-only and nothing consumes
+    it on a schedule, so an agent's defect report or a failed box spawn would otherwise
+    sit unread until someone thought to grep -- the same failure mode as a scheduled
+    job with no artifact, one tier up. A time window rather than a high-water mark:
+    the events surfaced here are rare enough that re-reading a week of them costs
+    less than a second state file that can itself go stale.
+
+    Read against `SOURCE_ROOT` for `scheduler_line`'s reason: every writer resolves
+    the ledger to the permanent checkout (`$DEVKIT_DIR`, or the guard's own path), so
+    from a box `REPO_ROOT` would be a `logs/` nothing writes to.
+    """
+    log = source / "logs" / "harness-events.log"
+    try:
+        lines = log.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    cutoff = (now or _time.time()) - window_days * 86400
+    count = 0
+    for line in lines:
+        stamp, _, rest = line.partition("\t")
+        if not rest.startswith("event="):
+            continue
+        if rest.split("\t", 1)[0].removeprefix("event=") not in TRIAGE_EVENTS:
+            continue
+        try:
+            when = _dt.datetime.fromisoformat(stamp).timestamp()
+        except ValueError:
+            continue
+        if when >= cutoff:
+            count += 1
+    if not count:
+        return ""
+    return (
+        f"{count} harness event(s) need triage -- agent defect reports or failed box "
+        f"spawns from the last {window_days:g} days: grep "
+        f"{', '.join(TRIAGE_EVENTS)} in devkit/logs/harness-events.log"
+    )
+
+
 def render(
     results: list[sweep.Result],
     behind: dict[str, str],
@@ -420,6 +470,7 @@ def render(
     retired: str = "",
     scheduler: str = "",
     schedule: list[str] | None = None,
+    events: str = "",
 ) -> str:
     """The whole message, or "" when there is nothing worth saying."""
     halves = (
@@ -435,6 +486,7 @@ def render(
         boxes,
         guard,
         retired,
+        events,
     )
     lines = [line for line in halves if line]
     if not lines:
@@ -533,6 +585,7 @@ def main(argv: list[str] | None = None) -> int:
             retired_hooks_line(root, names),
             scheduler,
             schedule,
+            events_line(),
         )
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)

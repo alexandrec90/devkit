@@ -73,11 +73,35 @@ import task_slug
 
 worktree = load_by_path("worktree", Path(__file__).resolve().parent / "worktree.py")
 
+# The harness-events ledger, so a block leaves a record outside the blocked session's
+# chat. Guarded, and `_record_event` checks for None: any unhandled exception in a
+# PreToolUse hook exits non-2, which Claude Code reports as a non-blocking error and
+# lets the edit PROCEED — an ImportError in the diagnostics would turn the guard off.
+try:
+    harness_events = load_by_path(
+        "harness_events", Path(__file__).resolve().parent / "hooks" / "harness_events.py"
+    )
+except Exception:  # pragma: no cover - a checkout missing the ledger module
+    harness_events = None
+
+# Where the ledger lives: this checkout, which is the workspace's static devkit — the
+# workspace settings wire this hook by that path, so `__file__` resolves there even
+# when the edit under judgment is aimed at a box.
+LEDGER_ROOT = Path(__file__).resolve().parents[1]
+
 # Claude Code hook contract, matching `enforce-capped-bash.py`: 0 allows the call, 2
 # blocks it and feeds stderr back to the model. A blocking hook MUST write its reason
 # to stderr — stdout is not surfaced.
 EXIT_ALLOW = 0
 EXIT_BLOCK = 2
+
+
+def _record_event(event: str, fields: tuple[tuple[str, object], ...]) -> None:
+    """Best-effort ledger append; never raises, never changes the decision."""
+    if harness_events is None:
+        return
+    harness_events.record(event, fields, root=LEDGER_ROOT)
+
 
 # Tools that write a file — the question this hook exists to answer is "is the agent
 # about to change a file, and may it land where it is pointing?".
@@ -610,6 +634,7 @@ def route_to_own_box(
     inside: bool = False,
     branch: str = "",
     reason: str = "",
+    kind: str = "checkout",
     extra_notes: tuple[str, ...] = (),
 ) -> int:
     """Block toward the session's box for `project`, reusing or spawning it.
@@ -620,6 +645,18 @@ def route_to_own_box(
     """
     existing = worktree.find_session_box(boxes, project, session)
     if existing is not None:
+        _record_event(
+            "guard-block",
+            (
+                ("project", project),
+                ("session", session),
+                ("kind", kind),
+                ("outcome", "reused"),
+                ("box", existing.name),
+                ("branch", existing.branch),
+                ("target", relative),
+            ),
+        )
         print(
             deny_message(
                 project,
@@ -649,6 +686,16 @@ def route_to_own_box(
         )
         ok, notes = worktree.apply_new(plan, workspace, timeout=SPAWN_TIMEOUT, provision=False)
     except Exception as exc:
+        _record_event(
+            "guard-spawn-failed",
+            (
+                ("project", project),
+                ("session", session),
+                ("kind", kind),
+                ("target", relative),
+                ("detail", f"{type(exc).__name__}: {exc}"),
+            ),
+        )
         print(
             failure_message(
                 project,
@@ -663,6 +710,16 @@ def route_to_own_box(
         return EXIT_BLOCK
 
     if not ok:
+        _record_event(
+            "guard-spawn-failed",
+            (
+                ("project", project),
+                ("session", session),
+                ("kind", kind),
+                ("target", relative),
+                ("detail", "; ".join(notes) or "no detail"),
+            ),
+        )
         print(
             failure_message(
                 project,
@@ -686,6 +743,18 @@ def route_to_own_box(
         ]
         if plan.resumed
         else []
+    )
+    _record_event(
+        "guard-block",
+        (
+            ("project", project),
+            ("session", session),
+            ("kind", kind),
+            ("outcome", "resumed" if plan.resumed else "spawned"),
+            ("box", plan.box.name),
+            ("branch", plan.box.branch),
+            ("target", relative),
+        ),
     )
     print(
         deny_message(
@@ -747,6 +816,7 @@ def main(argv: list[str] | None = None) -> int:
             session,
             boxes,
             reason=foreign_box_reason(box, relative),
+            kind="foreign-box",
             extra_notes=(claim_hint(box, session),),
         )
 

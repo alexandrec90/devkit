@@ -581,3 +581,68 @@ def test_a_windows_spelled_hook_path_is_still_matched(tmp_path):
     manifest paths are always POSIX."""
     _wire(tmp_path, "carameli", 'python3 "x\\scripts\\hooks\\branch-on-write.py"')
     assert "branch-on-write.py" in ws.retired_hooks_line(tmp_path, ["carameli"])
+
+
+# --- the harness-events triage line -------------------------------------------
+
+NOW = 1_755_000_000.0  # any fixed instant; the ledger stamps are written relative to it
+
+
+def _ledger(root, *entries):
+    """Write a harness-events ledger of (age_seconds, event) pairs under `root`."""
+    import datetime as dt
+
+    lines = []
+    for age, event in entries:
+        stamp = dt.datetime.fromtimestamp(NOW - age, dt.UTC).isoformat(timespec="seconds")
+        lines.append(f"{stamp}\tevent={event}\tproject=carameli\tsession=s1")
+    (root / "logs").mkdir(parents=True, exist_ok=True)
+    (root / "logs" / "harness-events.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_no_ledger_file_is_silence(tmp_path):
+    assert ws.events_line(source=tmp_path, now=NOW) == ""
+
+
+def test_a_recent_agent_report_is_surfaced_with_the_grep_to_run(tmp_path):
+    _ledger(tmp_path, (3600, "agent-report"))
+    line = ws.events_line(source=tmp_path, now=NOW)
+    assert "1 harness event(s) need triage" in line
+    assert "agent-report" in line and "harness-events.log" in line
+
+
+def test_a_failed_spawn_is_surfaced(tmp_path):
+    _ledger(tmp_path, (3600, "guard-spawn-failed"), (7200, "agent-report"))
+    assert "2 harness event(s)" in ws.events_line(source=tmp_path, now=NOW)
+
+
+def test_events_older_than_the_window_are_not_resurfaced(tmp_path):
+    _ledger(tmp_path, (8 * 86400, "agent-report"))
+    assert ws.events_line(source=tmp_path, now=NOW) == ""
+
+
+def test_routine_events_never_reach_the_session_start(tmp_path):
+    """The user's constraint, as a test: the ledger keeps everything, the session
+    start surfaces only what needs a human. A count of ordinary guard redirects and
+    capped-Bash blocks here would be the pollution the design was asked to avoid."""
+    _ledger(
+        tmp_path,
+        (60, "guard-block"),
+        (60, "capped-bash-block"),
+        (60, "lint-fix-block"),
+    )
+    assert ws.events_line(source=tmp_path, now=NOW) == ""
+
+
+def test_a_malformed_ledger_line_is_skipped_not_fatal(tmp_path):
+    (tmp_path / "logs").mkdir(parents=True)
+    (tmp_path / "logs" / "harness-events.log").write_text(
+        "not a stamp\tevent=agent-report\tx=y\ngarbage line\n", encoding="utf-8"
+    )
+    assert ws.events_line(source=tmp_path, now=NOW) == ""
+
+
+def test_the_events_line_reaches_the_rendered_message():
+    """A helper nothing calls is a check that reports nothing."""
+    message = ws.render([], {}, "", events="1 harness event(s) need triage -- x")
+    assert "[workspace] 1 harness event(s) need triage" in message
