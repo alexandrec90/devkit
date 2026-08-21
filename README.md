@@ -367,12 +367,11 @@ box just stops being disposable when you do.
 
 #### The menu in front of it
 
-Those three commands each need the ref, the flag that takes it, and the knowledge that
-the tool exists — so in practice the reviewing kept being delegated to whichever agent
-had done the work, who started a dev server by hand, or did not, or did and never said
-on which port. `scripts/preview-task.py` is the other half: it enumerates every standing
-preview, live agent box, open PR and recent `agent/…` branch on the machine, prints them
-newest-first as one numbered menu, and previews the row that gets picked.
+Each of those commands needs the ref and the flag that takes it, which is a lot to know
+before you can look at something. `scripts/preview-task.py` asks instead: it enumerates
+every standing preview, live agent box, open PR and recent `agent/…` branch on the
+machine, prints them newest-first as one numbered menu, and previews the row that gets
+picked.
 
 ```bash
 python scripts/preview-task.py            # menu, then bring the pick up and open it
@@ -381,14 +380,13 @@ python scripts/preview-task.py --pick 3   # take row 3 without asking
 python scripts/preview-task.py --all      # re-serve every standing preview
 ```
 
-`--all` is the post-reboot case, and it is the one that pays for the script: Docker stops
-every container on a restart while the boxes, their branches and their port leases all
-survive, so each preview lands back on the port it had before. Two VS Code tasks —
-*Preview: Open a UI Branch* and *Preview: Restart Standing Previews* — are the same two
-invocations, one click each.
+`--all` is the post-reboot case: Docker stops every container on a restart while the
+boxes, their branches and their port leases all survive, so each preview lands back on
+the port it had before. Two VS Code tasks — *Preview: Open a UI Branch* and *Preview:
+Restart Standing Previews* — are those two invocations, one click each.
 
-A checkout with no compose stack contributes no rows, which is what keeps devkit itself
-out of a menu it would publish nothing for.
+A checkout with no compose stack contributes no rows, which keeps devkit out of a menu it
+would publish nothing for.
 
 ### The scheduled pass
 
