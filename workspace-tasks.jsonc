@@ -33,7 +33,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -59,7 +59,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -90,7 +90,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -114,7 +114,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -140,7 +140,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -163,7 +163,7 @@
 			},
 			"presentation": {
 				"reveal": "silent",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -187,7 +187,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -210,7 +210,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"clear": true
 			},
 			"problemMatcher": []
@@ -253,7 +253,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -310,7 +310,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -333,7 +333,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"clear": true
 			},
 			"problemMatcher": []
@@ -355,7 +355,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"clear": true
 			},
 			"problemMatcher": []
@@ -377,7 +377,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "dedicated",
+				"panel": "new",
 				"clear": true
 			},
 			"problemMatcher": []
@@ -403,7 +403,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "dedicated",
+				"panel": "new",
 				"clear": true,
 				"close": false
 			},
@@ -437,7 +437,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "dedicated",
+				"panel": "new",
 				"focus": true,
 				"clear": true,
 				"close": false
@@ -465,7 +465,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "dedicated",
+				"panel": "new",
 				"clear": true,
 				"close": false
 			},
@@ -497,7 +497,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -546,7 +546,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -574,7 +574,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -612,7 +612,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -643,7 +643,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -668,7 +668,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "dedicated",
+				"panel": "new",
 				"clear": true
 			},
 			"problemMatcher": []
@@ -691,7 +691,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "dedicated",
+				"panel": "new",
 				"clear": true
 			},
 			"problemMatcher": []
@@ -725,7 +725,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "dedicated",
+				"panel": "new",
 				"clear": true
 			},
 			"problemMatcher": []
@@ -751,7 +751,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "dedicated",
+				"panel": "new",
 				"clear": true
 			},
 			"problemMatcher": []
@@ -780,7 +780,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -851,7 +851,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -884,7 +884,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -1094,7 +1094,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -1163,7 +1163,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -1191,7 +1191,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
@@ -1217,7 +1217,7 @@
 			},
 			"presentation": {
 				"reveal": "silent",
-				"panel": "shared",
+				"panel": "new",
 				"clear": true,
 				"close": true
 			},
@@ -1250,7 +1250,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},

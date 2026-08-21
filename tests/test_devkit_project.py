@@ -751,6 +751,27 @@ def test_no_two_tasks_share_an_icon_and_colour(canonical):
     assert not clashes, "; ".join(clashes)
 
 
+def test_every_task_opens_its_own_new_terminal(canonical):
+    """`panel: "new"` on every task, so a run can never overwrite an earlier one.
+
+    The default, `shared`, puts every task in one terminal: start a lint run while a test
+    run's output is still on screen and the earlier output is gone, with no warning and
+    nothing to scroll back to. `dedicated` is only half a fix — it separates task from
+    task but still overwrites the *previous run of the same task*, which is the pair a
+    reader most often wants side by side. A fresh panel per run is the only setting where
+    nothing is lost; terminals accumulate instead, and that is the trade.
+
+    The failure artifacts under `logs/` are not a substitute: `log-wrap.py` empties them
+    on a pass, so a successful run's output lives only in its terminal.
+    """
+    reusing = [
+        f"{task['label']}: {task.get('presentation', {}).get('panel')!r}"
+        for task in canonical["tasks"]
+        if task.get("presentation", {}).get("panel") != "new"
+    ]
+    assert not reusing, "these tasks would reuse a terminal: " + "; ".join(reusing)
+
+
 def test_a_scoped_task_offers_exactly_the_checkouts_its_action_allows(canonical):
     """The seam between this file and `Action.projects`, asserted from both ends.
 

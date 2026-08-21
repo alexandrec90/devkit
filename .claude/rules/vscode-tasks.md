@@ -70,7 +70,14 @@ it regenerates the canonical copy from the live file. One test holds the pair to
 
 - Use `"type": "process"` so VS Code monitors the process directly — that is what makes
   the spinner stop and the exit-code icon appear reliably.
-- Set `"close": false` in `presentation` so the terminal stays open for review.
+- **`"panel": "new"` and `"close": false` in `presentation`** — every run opens its own
+  terminal and it stays open for review. The VS Code default, `shared`, puts every task
+  in one terminal, so starting any task erases whatever the last one printed; `dedicated`
+  is only half a fix, separating task from task while still overwriting the previous run
+  of the *same* task. The `logs/` artifacts do not cover the gap — `log-wrap.py` empties
+  a task's log when it passes, so a successful run exists only in its terminal. Terminals
+  accumulate instead, which is the accepted trade;
+  `test_every_task_opens_its_own_new_terminal` holds the convention for new tasks.
 - **Wrap with `notify-wrap.py`** for the completion toast; never call `notify.py` from
   inside a script. Notifications are a task-layer concern only.
 - **And with `log-wrap.py`, inside it**, so the run's output survives the terminal as a
