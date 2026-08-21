@@ -611,6 +611,25 @@ def test_drift_reports_a_changed_input_definition(canonical):
     assert f"input definition differs: {first['id']}" in tasks_drift(changed, canonical)
 
 
+def test_the_preview_row_dropdown_asks_for_the_project_exactly_once(canonical):
+    """`${pickStringRemember:previewProject}` may appear in ONE `jsonOption` field only.
+
+    The extension substitutes each template string of `jsonOption` in turn, and every
+    occurrence of a `${pickStringRemember:...}` variable opens its own quick-pick.
+    Spelled in all four fields, the project dropdown appeared four times per run before
+    the branch list showed. `value` must resolve first — insertion order is evaluation
+    order — storing the answer under the nested pick's `key`, and the other fields read
+    it back with `${remember:previewProject}`, which never prompts.
+    """
+    row = next(i for i in canonical["inputs"] if i["id"] == "previewRow")
+    template = row["args"]["jsonOption"]
+    assert next(iter(template)) == "value", "the prompting field must be evaluated first"
+    prompting = [f for f, expr in template.items() if "${pickStringRemember:" in expr]
+    assert prompting == ["value"], f"fields that would each open a project pick: {prompting}"
+    reading = [f for f, expr in template.items() if "${remember:previewProject}" in expr]
+    assert reading == ["label", "description", "detail"]
+
+
 def _dispatched_actions(canonical) -> dict[str, str]:
     """{action key: task label} for every task routed through `devkit_project.py`."""
     found: dict[str, str] = {}
