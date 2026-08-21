@@ -116,6 +116,20 @@ Each of these has already been violated by something:
   commit is on the remote and what is lost is the checkout rather than the work. Work
   that exists only in a box has to survive a merged PR, disk pressure and any age. The
   ordering is the whole safety property, and four tests fail if it moves.
+- **"Only the checkout is lost" was a claim with nothing behind it.** That is the
+  sentence the pressure branch reaps an open PR's box on, and for a year there was no
+  verb that could get the checkout back: every route into the tier ran through
+  `spawn_plan`, which cuts a *new* branch off `origin/<default>` by construction. So the
+  reap was invisible and its consequence was not — the session's next edit continued one
+  task on a second branch under a second PR, and nothing in either said so. `resume_plan`
+  is the missing half, and `plan_respawn` is what makes it automatic: the guard asks for
+  a resume before it cuts anything, because an agent cannot know its box was destroyed
+  and by the time the divergence shows it is two PRs old. The branch comes from the reap
+  ledger, which is why `ReapPlan.session` exists — the lease file is the live set, and
+  the entry naming the box's owner was deleted by the reap that wrote the ledger line.
+  Resumability is decided by `branch_is_merged` against local refs rather than by the
+  PR's state: "has this work landed" is the actual question, and a merged branch lingers
+  in `refs/remotes/` until someone prunes.
 - **"Has the work left the box" is not a question the verdict can answer alone.** A
   squash merge rewrites the commits and `--delete-branch` takes the upstream with it, so
   the box `sweep.classify` sees is one with unmerged commits on a retired branch —

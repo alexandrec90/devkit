@@ -354,6 +354,11 @@ class SpawnPlan:
     # `CORS_ORIGINS` still pointed at the old one — the exact half-configured box
     # this field exists to prevent, arriving only in the race.
     env_templates: dict[str, str] = field(default_factory=dict)
+    # True when the branch predates this plan -- `resume` putting a box back on a
+    # branch whose own box is gone. Reported, never decided on: every step is already
+    # in `steps` by the time this is read, and the two flows differ only in what the
+    # renderer and the guard's block message should say happened.
+    resumed: bool = False
 
 
 @dataclass(frozen=True)
@@ -381,6 +386,11 @@ class ReapPlan:
     reason: str = ""
     forced: bool = False
     dirty: int = 0
+    # The session the destroyed box was leased to, so `resumable_branch` can find its
+    # way back. The only field here that is read again rather than only reported: the
+    # ledger is the sole record that a (session, project) pair ever had a box, and
+    # without the session on the line there is nothing to match a later edit against.
+    session: str = ""
 
     @property
     def acts(self) -> bool:
@@ -1018,6 +1028,93 @@ def spawn_plan(
     )
 
 
+def resume_plan(
+    project: str,
+    workspace_root: Path,
+    branch: str,
+    remote_branches: set[str],
+    existing_branches: set[str],
+    boxes: Mapping[str, Box],
+    registry: devkit_ports.Registry | None = None,
+    session: str = "",
+    fetch: bool = True,
+    provision: tuple[ProvisionStep, ...] = (),
+    env_templates: Mapping[str, str] | None = None,
+) -> SpawnPlan:
+    """Everything `resume` will run: a box back on `branch`, decided without touching git.
+
+    The counterpart to `spawn_plan`, and the difference is the whole point. `new` mints
+    a branch because a task starts empty; `resume` is handed one that already carries
+    commits and a PR, because its box was destroyed while the work was still open --
+    which `reconcile` does deliberately under disk pressure, on the stated grounds that
+    "the remote has every commit, so only the checkout is lost". That trade is only
+    honest if the checkout can be got back, and until this verb existed it could not:
+    every path back into the tier ran through `spawn_plan`, which can only cut a *new*
+    branch off `origin/<default>`. So the next edit opened a second branch, a second
+    PR and a second review of the same work, silently.
+
+    `--track`, where `spawn_plan` is emphatic about `--no-track`, and for that same
+    reason read the other way round: tracking is dangerous there because the upstream
+    would be `origin/<default>`, so a bare `git push` lands the task's commits on the
+    default branch. Here the upstream is `origin/<branch>` -- the branch's own remote --
+    which is precisely where a bare push should go, and is what makes finishing from a
+    resumed box no different from finishing from the box it replaces.
+
+    `preview` also checks out an existing ref and deliberately does *not* do this: it
+    copies the ref to a throwaway `preview/…` branch so a push can never land on someone
+    else's task branch. The distinction is ownership, not mechanism. A preview is a
+    stranger looking at the work; a resume is the work's own session picking it back up,
+    and it needs to be able to push.
+    """
+    if not branch:
+        raise WorktreeError("resume needs a branch -- pass --branch, or --pr N to look one up")
+    if branch not in remote_branches:
+        raise WorktreeError(
+            f"origin has no branch {branch!r} in {project} -- nothing to resume. "
+            f"A branch whose PR merged is finished work; cut a new box with "
+            f"`worktree.py new {project}`."
+        )
+    name = box_name(project, branch)
+    held = boxes.get(name)
+    if held is not None:
+        raise WorktreeError(
+            f"{branch} is already checked out in {name} -- resume has nothing to do. "
+            f"If it is leased to another session: "
+            f"worktree.py claim {name} --session {session or '<your session id>'} --yes"
+        )
+    path = box_path(workspace_root, name)
+    slot = next_lease_slot(registry, boxes) if registry is not None else -1
+
+    steps: list[tuple[str, ...]] = []
+    if fetch:
+        steps.append(("fetch", "--quiet", "origin"))
+    if branch in existing_branches:
+        # The local branch outlived its box: a forced reap keeps it (it may carry
+        # commits no remote has), and so does a `git worktree remove` run by hand.
+        # `-b` would refuse it, and re-creating it from origin would be the one move
+        # that discards exactly those commits.
+        steps.append(("worktree", "add", str(path), branch))
+    else:
+        steps.append(("worktree", "add", "--track", "-b", branch, str(path), f"origin/{branch}"))
+    box = Box(
+        name=name,
+        project=project,
+        branch=branch,
+        slot=slot,
+        session=session,
+        created=_dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+    )
+    return SpawnPlan(
+        box=box,
+        path=str(path),
+        steps=tuple(steps),
+        env=managed_env(name, registry, slot, env_templates),
+        provision=provision,
+        env_templates=dict(env_templates or {}),
+        resumed=True,
+    )
+
+
 def preview_box_name(project: str, ref: str) -> str:
     """`carameli` + `agent/ui-editor-0817` -> `carameli--preview-ui-editor-0817`.
 
@@ -1368,6 +1465,7 @@ def reap_plan(
         reason=reason,
         forced=force,
         dirty=state.dirty,
+        session=box.session,
     )
 
 
@@ -2315,6 +2413,116 @@ def plan_new(
     )
 
 
+def origin_has_branch(git: sweep.Git, branch: str, network: bool = True) -> bool:
+    """Whether `origin` carries `branch`. Never raises.
+
+    `ls-remote` when the network is allowed, because it is the only authoritative
+    answer and the whole question `resume` has to get right: `refs/remotes/origin/` is
+    stale in exactly the direction that would hurt, holding a branch whose PR merged
+    and whose remote `reconcile` then deleted. Resuming that is resuming finished work.
+
+    The local refs are the fallback, taken on `--no-fetch` and on any `ls-remote`
+    failure. An offline machine must read as "cannot confirm, so use what is on disk",
+    never as "the branch is gone" -- the second turns a flat tyre into a refusal to
+    resume work that is sitting on the remote perfectly intact.
+    """
+    if network:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            result = git("ls-remote", "--heads", "origin", f"refs/heads/{branch}")
+            if result.returncode == 0:
+                return bool((result.stdout or "").strip())
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        result = git("rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}")
+        return result.returncode == 0
+    return False
+
+
+def plan_resume(
+    project: str,
+    workspace: Path,
+    branch: str = "",
+    pr: int = 0,
+    session: str = "",
+    fetch: bool = True,
+    quiet: bool = False,
+) -> SpawnPlan:
+    """Resolve everything `resume` needs from disk and, for `--pr`, from GitHub."""
+    root = workspace.parent
+    projects = known_projects(workspace)
+    source = devkit_project.resolve_project(project, projects, root)
+    project = source.name
+
+    git = sweep.git_for(source)
+    if pr and not branch:
+        branch = pr_head_branch(sweep.gh_for(source), pr)
+        if not branch:
+            raise WorktreeError(
+                f"cannot read the head branch of PR #{pr} in {project} — is `gh` "
+                f"authenticated for that remote? `--branch <name>` skips the lookup."
+            )
+    if not branch and session:
+        branch = resumable_branch(root, project, session)
+        if not branch:
+            raise WorktreeError(
+                f"no reaped box for session {session} in {project} whose branch is still "
+                f"open on origin. Name one with --branch, or cut a fresh box: "
+                f"worktree.py new {project}"
+            )
+
+    existing = set(
+        sweep._out(git("for-each-ref", "--format=%(refname:short)", "refs/heads/")).splitlines()
+    )
+    remote = {branch} if branch and origin_has_branch(git, branch, network=fetch) else set()
+    return resume_plan(
+        project=project,
+        workspace_root=root,
+        branch=branch,
+        remote_branches=remote,
+        existing_branches=existing,
+        boxes=live_boxes(root),
+        registry=load_registry(root) if has_stack(source) else None,
+        session=session,
+        fetch=fetch,
+        provision=plan_provision(source, quiet=quiet),
+        env_templates=plan_env_templates(source),
+    )
+
+
+def plan_respawn(
+    project: str,
+    workspace: Path,
+    slug: str,
+    session: str = "",
+    fetch: bool = True,
+    quiet: bool = False,
+) -> SpawnPlan:
+    """A box for `(session, project)`: back onto its reaped branch, or a fresh one.
+
+    What `worktree-guard.py` calls instead of `plan_new`, and the reason the recovery
+    does not depend on anyone remembering it. A reap under disk pressure destroys a box
+    whose PR is still open, on the stated grounds that only the checkout is lost; the
+    next edit from that session then arrives at the guard with no box, and until this
+    existed the guard did the only thing it could and cut a *new* branch. The work was
+    never lost, but the session's next commit went somewhere else -- a second branch and
+    a second PR for one task, with nothing in either to say so.
+
+    An instruction file cannot close that: the agent has no way to know its box was
+    destroyed, and by the time the divergence is visible it is two PRs old. So the
+    decision belongs where the box is made.
+
+    Falls back to `plan_new` on anything unexpected. Cutting a fresh box is the old
+    behaviour and is always safe; a guard that raised here would block the edit outright
+    over a recovery that is a convenience.
+    """
+    with contextlib.suppress(Exception):
+        branch = resumable_branch(workspace.parent, project, session)
+        if branch:
+            return plan_resume(
+                project, workspace, branch=branch, session=session, fetch=fetch, quiet=quiet
+            )
+    return plan_new(project, workspace, slug=slug, session=session, fetch=fetch, quiet=quiet)
+
+
 def apply_new(
     plan: SpawnPlan, workspace: Path, timeout: float = 300.0, provision: bool = True
 ) -> tuple[bool, list[str]]:
@@ -2682,6 +2890,7 @@ def reap_ledger_line(plan: ReapPlan, stamp: str) -> str:
         ("verdict", plan.verdict or "-"),
         ("forced", "yes" if plan.forced else "no"),
         ("dirty", str(plan.dirty)),
+        ("session", plan.session or "-"),
         ("path", plan.path or "-"),
         ("reason", " ".join((plan.reason or "-").split())),
     )
@@ -2715,6 +2924,112 @@ def record_reap(plan: ReapPlan, root: Path = REPO_ROOT) -> Path | None:
     except OSError:
         return None
     return path
+
+
+def parse_ledger_line(line: str) -> dict[str, str]:
+    """One ledger line back into its fields. Pure; `{}` for anything unparseable.
+
+    Tolerant on purpose. This file is append-only and never rotated, so it still holds
+    lines written before `session` existed as a field, and will hold lines written
+    after the next field is added. A reader that insisted on a fixed shape would go
+    blind on the oldest half of its own record.
+    """
+    stamp, _, rest = line.partition("\t")
+    if not rest.strip():
+        return {}
+    fields = {"stamp": stamp.strip()}
+    for chunk in rest.split("\t"):
+        key, sep, value = chunk.partition("=")
+        if sep:
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+def reaped_branches(project: str, session: str, ledger: str) -> list[str]:
+    """Branches whose box was reaped out from under `(session, project)`, newest first.
+
+    Pure, taking the ledger's text rather than its path, because the interesting cases
+    are all shapes of line rather than states of the filesystem.
+
+    `-` is the ledger's spelling of an absent field, and a box with no branch recorded
+    is a box there is no way back to; both are skipped rather than returned as a branch
+    literally called `-`.
+    """
+    found: list[str] = []
+    for line in ledger.splitlines():
+        fields = parse_ledger_line(line)
+        branch = fields.get("branch", "-")
+        if branch in ("", "-"):
+            continue
+        if fields.get("session", "-") != session or project_of(fields.get("box", "")) != project:
+            continue
+        found.append(branch)
+    found.reverse()
+    return found
+
+
+def branch_is_merged(git: sweep.Git, branch: str, default_branch: str) -> bool:
+    """Whether `origin/<branch>` is already contained in `origin/<default_branch>`.
+
+    Local refs only, no network: this runs inside `worktree-guard.py`, where the caller
+    waiting on the answer is an agent's Edit. It is also the *right* question rather
+    than a proxy for it — "has this work landed" is what decides whether resuming the
+    branch continues a task or reopens a finished one, and neither the PR's state nor
+    the branch's continued existence on the remote answers it as directly.
+
+    False on any failure. An unreadable ref means the merge cannot be demonstrated, and
+    the safe reading of that is "not merged": it costs a box on a branch that turns out
+    to be finished, where the opposite costs a second PR for work already in flight.
+    """
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        result = git(
+            "merge-base",
+            "--is-ancestor",
+            f"refs/remotes/origin/{branch}",
+            f"refs/remotes/origin/{default_branch}",
+        )
+        return result.returncode == 0
+    return False
+
+
+def resumable_branch(
+    workspace_root: Path,
+    project: str,
+    session: str,
+    ledger_root: Path = REPO_ROOT,
+) -> str:
+    """The branch this session should be put back onto in `project`, or "".
+
+    The join between the two halves of the recovery: `record_reap` wrote down that a
+    box existed and whose it was, and this reads it back the moment the same session
+    tries to edit the same project again. Everything else the tier knows about that box
+    was deleted along with it.
+
+    Newest first, and the first branch that is neither merged nor gone wins. A session
+    that has had two boxes reaped in one project wants the one it was working in last;
+    the older ones are skipped rather than refused, because a merged branch behind a
+    live one is the ordinary shape of a long session, not a conflict.
+
+    Never raises and never blocks for long: a missing ledger, an unreadable one and a
+    project with no git are all "" -- the caller then cuts a fresh box, which is the
+    behaviour that existed before this function did.
+    """
+    try:
+        ledger = (ledger_root / REAP_LEDGER).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    candidates = reaped_branches(project, session, ledger)
+    if not candidates:
+        return ""
+    source = workspace_root / project
+    git = sweep.git_for(source)
+    default_branch = tb.detect_default_branch(git, fallback="")
+    for branch in candidates:
+        if default_branch and branch_is_merged(git, branch, default_branch):
+            continue
+        if origin_has_branch(git, branch, network=False):
+            return branch
+    return ""
 
 
 def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
@@ -3249,7 +3564,11 @@ def render_provision(
 
 
 def render_spawn(plan: SpawnPlan, applied: bool, notes: list[str]) -> str:
-    lines = [f"{'Created' if applied else 'Would create'} {plan.box.name}"]
+    if plan.resumed:
+        verb = "Resumed" if applied else "Would resume"
+    else:
+        verb = "Created" if applied else "Would create"
+    lines = [f"{verb} {plan.box.name}"]
     lines.append(f"  path    {plan.path}")
     lines.append(f"  branch  {plan.box.branch}")
     lines.append(f"  slot    {plan.box.slot if plan.box.slot >= 0 else '- (no Docker tier)'}")
@@ -3376,6 +3695,35 @@ def main(argv: list[str] | None = None) -> int:
         help="cut the box only; its tests and /ship will not run until it is provisioned",
     )
     add_common_args(new)
+
+    back = sub.add_parser(
+        "resume", help="put a box back on an existing branch whose own box is gone"
+    )
+    back.add_argument("project")
+    where = back.add_mutually_exclusive_group()
+    where.add_argument("--branch", default="", help="the branch to check out, as it is on origin")
+    where.add_argument("--pr", type=int, default=0, help="resume the head branch of this PR")
+    back.add_argument(
+        "--session",
+        default="",
+        help="lease the box to this session; with neither --branch nor --pr, "
+        "the branch is read from the reap ledger",
+    )
+    reinstall = back.add_mutually_exclusive_group()
+    reinstall.add_argument(
+        "--provision",
+        dest="provision",
+        action="store_true",
+        default=True,
+        help="install the box's toolchain after cutting it (the default)",
+    )
+    reinstall.add_argument(
+        "--no-provision",
+        dest="provision",
+        action="store_false",
+        help="cut the box only; its tests and /ship will not run until it is provisioned",
+    )
+    add_common_args(back)
 
     survey_parser = sub.add_parser("list", help="every live box and whether it can be reaped")
     survey_parser.add_argument(
@@ -3570,6 +3918,38 @@ def main(argv: list[str] | None = None) -> int:
                             "box": asdict(plan.box),
                             "path": plan.path,
                             "env": plan.env,
+                            "applied": not args.dry_run,
+                            "ok": ok,
+                            "notes": notes,
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                print(render_spawn(plan, applied=not args.dry_run, notes=notes))
+            return 0 if ok else 2
+
+        if args.mode == "resume":
+            plan = plan_resume(
+                args.project,
+                args.workspace,
+                branch=args.branch,
+                pr=args.pr,
+                session=args.session,
+                fetch=args.fetch,
+            )
+            notes = []
+            ok = True
+            if not args.dry_run:
+                ok, notes = apply_new(plan, args.workspace, provision=args.provision)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "box": asdict(plan.box),
+                            "path": plan.path,
+                            "env": plan.env,
+                            "resumed": plan.resumed,
                             "applied": not args.dry_run,
                             "ok": ok,
                             "notes": notes,

@@ -896,3 +896,65 @@ def _lease(root, name, **fields):
         json.dumps({"boxes": {name: {"branch": f"claude/{name.split('--')[1]}", **fields}}}),
         encoding="utf-8",
     )
+
+
+# --- picking a reaped box back up -------------------------------------------
+
+
+def _resumed_plan(root):
+    """What `plan_respawn` hands back when the session's box was reaped mid-task."""
+    name = "carameli--voicemail-0806"
+    return guard.worktree.SpawnPlan(
+        box=guard.worktree.Box(name=name, project="carameli", branch="agent/voicemail-0806"),
+        path=str(root / ".worktrees" / name),
+        resumed=True,
+    )
+
+
+def test_the_guard_asks_for_a_resume_before_it_cuts_a_new_branch(root, monkeypatch):
+    """The reversion check for the whole recovery. `reconcile` reaps a box whose PR is
+    still open when the disk is tight, so the session's next edit arrives here with no
+    box -- and with `plan_new` in this line, it silently continued the same task on a
+    second branch under a second PR. Nothing in either PR said so."""
+    workspace = _workspace(root)
+    asked = {}
+    monkeypatch.setattr(
+        guard.worktree,
+        "plan_respawn",
+        lambda project, ws, **kw: asked.update(project=project, **kw) or _plan(root),
+    )
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert asked["project"] == "carameli"
+    assert asked["session"] == "s1"
+
+
+def test_a_resumed_box_says_it_already_carries_this_sessions_commits(root, monkeypatch, capsys):
+    """Said out loud because the alternative is an agent assuming an empty box: a
+    resumed one has an open PR, so `/ship` updates that PR rather than opening one, and
+    a `git log` in it is otherwise a mystery."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _resumed_plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    err = capsys.readouterr().err
+    assert "resumed agent/voicemail-0806" in err
+    assert "reaped" in err and "commits are on this branch" in err
+
+
+def test_a_freshly_cut_box_is_not_announced_as_a_resume(root, monkeypatch, capsys):
+    """The ordinary case must stay silent about commits it does not have."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert "resumed" not in capsys.readouterr().err

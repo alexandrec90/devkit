@@ -640,7 +640,11 @@ def route_to_own_box(
         slug = session_slug(session, task_slug.read(root, session))
         # quiet=True: this process's stderr is the block message, and a plan-time
         # provisioning warning would land as its first line, ahead of the reason.
-        plan = worktree.plan_new(
+        # `plan_respawn`, not `plan_new`: when this session already had a box in this
+        # project and `reconcile` reaped it while its PR was still open, the branch is
+        # the one thing worth keeping and cutting a new one would split the task across
+        # two PRs. See `worktree.plan_respawn`.
+        plan = worktree.plan_respawn(
             project, workspace, slug=slug, session=session, fetch=True, quiet=True
         )
         ok, notes = worktree.apply_new(plan, workspace, timeout=SPAWN_TIMEOUT, provision=False)
@@ -672,13 +676,24 @@ def route_to_own_box(
         )
         return EXIT_BLOCK
 
+    # Said out loud because the alternative is an agent silently assuming an empty box.
+    # A resumed one already carries this session's commits and an open PR, so `/ship`
+    # updates that PR rather than opening one, and a `git log` here is not a mystery.
+    resumed = (
+        [
+            f"resumed {plan.box.branch} -- this session's earlier box for {project} was "
+            f"reaped while the work was still open, and its commits are on this branch."
+        ]
+        if plan.resumed
+        else []
+    )
     print(
         deny_message(
             project,
             relative,
             plan.path,
             plan.box.name,
-            [*notes, *extra_notes],
+            [*resumed, *notes, *extra_notes],
             inside=inside,
             branch=branch,
             reason=reason,

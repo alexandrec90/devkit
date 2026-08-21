@@ -3092,3 +3092,275 @@ def test_preview_urls_name_the_ports_the_slot_publishes():
     assert urls["db"] == ""  # a browser cannot open Postgres
     assert worktree.preview_urls(None, slot=3) == ()
     assert worktree.preview_urls(registry(), slot=-1) == ()
+
+
+# --- resume -----------------------------------------------------------------
+#
+# The counterpart to the `spawn` block above, and it exists because of a gap those
+# tests could not see: `reconcile` reaps a box whose PR is still open when the disk is
+# tight, on the stated grounds that only the checkout is lost -- but every path back
+# into the tier ran through `spawn_plan`, which can only mint a *new* branch. So the
+# session's next edit continued the same task on a second branch, under a second PR.
+
+
+def resume(**kwargs) -> worktree.SpawnPlan:
+    defaults = {
+        "project": "carameli",
+        "workspace_root": Path("/ws"),
+        "branch": "agent/voicemail-0806",
+        "remote_branches": {"agent/voicemail-0806"},
+        "existing_branches": set(),
+        "boxes": {},
+        "registry": registry(carameli=0),
+    }
+    return worktree.resume_plan(**{**defaults, **kwargs})
+
+
+def test_resume_checks_out_the_branch_it_was_given():
+    """The whole point: no new branch, and the box gets the name its predecessor had,
+    so a `list` after a resume reads the same as it did before the reap."""
+    plan = resume()
+    assert plan.box.branch == "agent/voicemail-0806"
+    assert plan.box.name == "carameli--voicemail-0806"
+    assert plan.resumed is True
+
+
+def test_resume_tracks_the_branchs_own_remote():
+    """The inversion of `test_spawn_never_tracks_the_base`, and it is not a
+    contradiction. `--no-track` is right for `new` because the upstream would be
+    `origin/<default>`, so a bare push lands the task's commits on the default branch.
+    Here the upstream is the branch's own remote, which is exactly where a bare push
+    should go -- and is what makes finishing from a resumed box identical to finishing
+    from the box it replaces."""
+    add = next(s for s in resume().steps if s[0] == "worktree")
+    assert "--track" in add and "--no-track" not in add
+    assert add[-1] == "origin/agent/voicemail-0806"
+    assert add[add.index("-b") + 1] == "agent/voicemail-0806"
+
+
+def test_resume_reuses_a_local_branch_that_outlived_its_box():
+    """A forced reap keeps the branch deliberately -- it may carry commits no remote
+    has -- and so does a `git worktree remove` run by hand. Re-creating it from origin
+    is the one move that would discard exactly those commits, and `-b` would refuse the
+    branch anyway."""
+    plan = resume(existing_branches={"agent/voicemail-0806"})
+    add = next(s for s in plan.steps if s[0] == "worktree")
+    assert "-b" not in add and "--track" not in add
+    assert add[-1] == "agent/voicemail-0806"
+
+
+def test_resume_refuses_a_branch_origin_does_not_have():
+    """The merged-and-deleted case. Resuming it would put a box on finished work and
+    invite a second review of something already merged."""
+    with pytest.raises(worktree.WorktreeError) as caught:
+        resume(remote_branches=set())
+    assert "nothing to resume" in str(caught.value)
+    assert "worktree.py new carameli" in str(caught.value)
+
+
+def test_resume_refuses_a_branch_a_live_box_already_holds():
+    """Two worktrees on one branch is a state git itself refuses, and the useful answer
+    is not that error but the takeover command -- the box is most likely another
+    session's."""
+    held = box(name="carameli--voicemail-0806", branch="agent/voicemail-0806")
+    with pytest.raises(worktree.WorktreeError) as caught:
+        resume(boxes={"carameli--voicemail-0806": held}, session="mine")
+    assert "already checked out" in str(caught.value)
+    assert "claim carameli--voicemail-0806 --session mine" in str(caught.value)
+
+
+def test_resume_refuses_with_no_branch_at_all():
+    with pytest.raises(worktree.WorktreeError) as caught:
+        resume(branch="")
+    assert "--branch" in str(caught.value) and "--pr" in str(caught.value)
+
+
+def test_resume_leases_a_slot_and_records_the_session():
+    plan = resume(session="abc123")
+    assert plan.box.session == "abc123"
+    assert plan.box.slot >= 0
+    assert plan.env["COMPOSE_PROJECT_NAME"] == "carameli--voicemail-0806"
+
+
+def test_resume_without_a_registry_leases_no_slot():
+    assert resume(registry=None).box.slot == -1
+
+
+def test_resume_can_skip_the_fetch():
+    assert all(step[0] != "fetch" for step in resume(fetch=False).steps)
+
+
+def test_only_a_resume_is_marked_resumed():
+    """`render_spawn` and the guard's block message both switch on this, and a `new`
+    box wrongly announcing itself as a resume would tell an agent that its empty branch
+    already carries commits."""
+    assert spawn().resumed is False
+
+
+def test_render_says_resumed_rather_than_created():
+    assert worktree.render_spawn(resume(), applied=True, notes=[]).startswith("Resumed ")
+    assert worktree.render_spawn(resume(), applied=False, notes=[]).startswith("Would resume ")
+    assert worktree.render_spawn(spawn(), applied=True, notes=[]).startswith("Created ")
+
+
+# --- the ledger as the way back ---------------------------------------------
+
+
+def test_the_ledger_records_whose_box_it_was():
+    """The one field on the line that is read again rather than only reported. Without
+    it there is nothing to match a later edit against: `leases.json` is the live set,
+    and the entry was deleted by the reap that wrote this line."""
+    line = worktree.reap_ledger_line(reaped_plan(session="sess-1"), "T")
+    assert "session=sess-1" in line
+
+
+def test_a_ledger_line_round_trips():
+    fields = worktree.parse_ledger_line(worktree.reap_ledger_line(reaped_plan(session="s"), "T"))
+    assert fields["stamp"] == "T"
+    assert fields["box"] == "devkit--topic-0820"
+    assert fields["branch"] == "agent/topic-0820"
+    assert fields["session"] == "s"
+
+
+def test_parsing_tolerates_lines_written_before_session_existed():
+    """The file is append-only and never rotated, so it still holds lines from before
+    this field, and will hold lines from after the next one. A reader that insisted on
+    a fixed shape would go blind on the oldest half of its own record."""
+    old = "T\tbox=devkit--topic-0820\tbranch=agent/topic-0820\tverdict=spent"
+    assert worktree.parse_ledger_line(old)["branch"] == "agent/topic-0820"
+    assert worktree.parse_ledger_line(old).get("session", "") == ""
+    assert worktree.parse_ledger_line("") == {}
+    assert worktree.parse_ledger_line("not a record at all") == {}
+
+
+def test_reaped_branches_are_newest_first_and_scoped_to_one_session():
+    ledger = "\n".join(
+        [
+            worktree.reap_ledger_line(
+                reaped_plan(box="devkit--old-0801", branch="agent/old-0801", session="mine"), "T1"
+            ),
+            worktree.reap_ledger_line(
+                reaped_plan(box="devkit--theirs-0802", branch="agent/theirs-0802", session="yours"),
+                "T2",
+            ),
+            worktree.reap_ledger_line(
+                reaped_plan(box="carameli--other-0803", branch="agent/other-0803", session="mine"),
+                "T3",
+            ),
+            worktree.reap_ledger_line(
+                reaped_plan(box="devkit--new-0804", branch="agent/new-0804", session="mine"), "T4"
+            ),
+        ]
+    )
+    assert worktree.reaped_branches("devkit", "mine", ledger) == [
+        "agent/new-0804",
+        "agent/old-0801",
+    ]
+
+
+def test_a_box_with_no_branch_recorded_is_not_a_way_back():
+    """`-` is the ledger's spelling of an absent field. A box cut by hand with no
+    branch has nothing to resume, and returning the literal `-` would send
+    `worktree add` at a branch named after the placeholder."""
+    line = worktree.reap_ledger_line(reaped_plan(branch="", session="mine"), "T")
+    assert worktree.reaped_branches("devkit", "mine", line) == []
+
+
+def _git_stub(**answers):
+    """A `sweep.Git` whose replies are keyed by the first argv token."""
+
+    def git(*argv):
+        return answers.get(argv[0], _completed(returncode=1))
+
+    return git
+
+
+def test_origin_has_branch_asks_the_remote_when_it_can():
+    git = _git_stub(**{"ls-remote": _completed(stdout="deadbeef\trefs/heads/agent/x-0806\n")})
+    assert worktree.origin_has_branch(git, "agent/x-0806") is True
+    assert worktree.origin_has_branch(_git_stub(**{"ls-remote": _completed()}), "agent/x") is False
+
+
+def test_origin_has_branch_falls_back_to_disk_when_the_network_is_gone():
+    """An offline machine must read as "cannot confirm, use what is on disk", never as
+    "the branch is gone" -- the second turns a flat tyre into a refusal to resume work
+    that is sitting on the remote perfectly intact."""
+    git = _git_stub(**{"rev-parse": _completed()})
+    assert worktree.origin_has_branch(git, "agent/x-0806") is True
+    assert worktree.origin_has_branch(git, "agent/x-0806", network=False) is True
+
+
+def _ledger_at(tmp_path, **plan_fields):
+    path = tmp_path / worktree.REAP_LEDGER
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fields = {"box": "devkit--topic-0820", "branch": "agent/topic-0820", "session": "mine"}
+    path.write_text(
+        worktree.reap_ledger_line(reaped_plan(**{**fields, **plan_fields}), "T") + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_merged_branch_is_not_resumable(tmp_path, monkeypatch):
+    """The question that decides whether a resume continues a task or reopens a
+    finished one, and it is asked of the refs rather than of the PR: a merged branch
+    lingers in `refs/remotes/` until someone prunes, so its existence proves nothing."""
+    _ledger_at(tmp_path)
+    monkeypatch.setattr(worktree.tb, "detect_default_branch", lambda git, fallback="": "main")
+
+    merged = _git_stub(**{"merge-base": _completed(), "rev-parse": _completed()})
+    monkeypatch.setattr(worktree.sweep, "git_for", lambda _d: merged)
+    assert worktree.resumable_branch(tmp_path, "devkit", "mine", ledger_root=tmp_path) == ""
+
+    open_still = _git_stub(**{"merge-base": _completed(returncode=1), "rev-parse": _completed()})
+    monkeypatch.setattr(worktree.sweep, "git_for", lambda _d: open_still)
+    assert (
+        worktree.resumable_branch(tmp_path, "devkit", "mine", ledger_root=tmp_path)
+        == "agent/topic-0820"
+    )
+
+
+def test_another_sessions_reaped_box_is_never_offered(tmp_path, monkeypatch):
+    """`find_session_box` refuses to hand one session another's live box; a destroyed
+    one must not become the loophole."""
+    _ledger_at(tmp_path, session="someone-else")
+    monkeypatch.setattr(worktree.tb, "detect_default_branch", lambda git, fallback="": "main")
+    monkeypatch.setattr(
+        worktree.sweep,
+        "git_for",
+        lambda _d: _git_stub(**{"merge-base": _completed(returncode=1), "rev-parse": _completed()}),
+    )
+    assert worktree.resumable_branch(tmp_path, "devkit", "mine", ledger_root=tmp_path) == ""
+
+
+def test_no_ledger_is_no_way_back_rather_than_a_crash(tmp_path):
+    """Every failure here has to degrade to "cut a fresh box", which is the behaviour
+    that existed before any of this: the caller is a PreToolUse hook holding an agent's
+    Edit open."""
+    assert worktree.resumable_branch(tmp_path, "devkit", "mine", ledger_root=tmp_path) == ""
+
+
+def test_respawn_prefers_the_reaped_branch_and_otherwise_cuts_a_new_box(monkeypatch):
+    """What the guard calls. The fallback is the important half: a resume is a
+    convenience, and a guard that raised over one would block the edit outright."""
+    calls = []
+    monkeypatch.setattr(
+        worktree, "plan_resume", lambda *a, **k: calls.append(("resume", k)) or spawn()
+    )
+    monkeypatch.setattr(worktree, "plan_new", lambda *a, **k: calls.append(("new", k)) or spawn())
+    workspace = Path("/ws/x.code-workspace")
+
+    monkeypatch.setattr(worktree, "resumable_branch", lambda *a: "agent/topic-0820")
+    worktree.plan_respawn("devkit", workspace, slug="topic", session="mine")
+    assert calls[-1][0] == "resume" and calls[-1][1]["branch"] == "agent/topic-0820"
+
+    monkeypatch.setattr(worktree, "resumable_branch", lambda *a: "")
+    worktree.plan_respawn("devkit", workspace, slug="topic", session="mine")
+    assert calls[-1][0] == "new"
+
+    def boom(*a):
+        raise RuntimeError("the ledger is a directory")
+
+    monkeypatch.setattr(worktree, "resumable_branch", boom)
+    worktree.plan_respawn("devkit", workspace, slug="topic", session="mine")
+    assert calls[-1][0] == "new"

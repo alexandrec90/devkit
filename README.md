@@ -296,6 +296,7 @@ python scripts/worktree.py new carameli --slug voicemail --yes  # cut, lease, in
 python scripts/worktree.py list                                 # what exists, and its verdict
 python scripts/worktree.py reap --all --yes                     # everything already shipped
 python scripts/worktree.py claim <box> --session <id> --yes     # hand a box to another session
+python scripts/worktree.py resume carameli --pr 163 --yes       # a box back on a branch it lost
 ```
 
 `new` branches off `origin/<default>`, leases a port slot from `ports.toml` (released on
@@ -305,6 +306,16 @@ tracked files only, so it starts with no `.venv`. `reap` **refuses while the box
 holds unshipped work**, which is the difference that matters: the static tier's
 stranded work is found afterwards by `sweep.py`, and a box's cannot be stranded at all,
 because being stranded is what stops the cleanup.
+
+`resume` is the way back in. `reconcile` destroys a box whose PR is still *open* when
+the disk is tight, on the grounds that the remote has every commit — a trade that is
+only honest if the checkout can be got back, and `new` cannot do it: it mints a branch,
+so continuing the task through it would open a second PR for the same work. `resume`
+takes the branch instead (`--branch`, `--pr N`, or, with `--session`, the one the reap
+ledger records for that session), checks it out with `origin/<branch>` as its upstream
+so a bare push still lands where the PR is watching, and refuses a branch origin no
+longer has. `worktree-guard.py` asks for it before it cuts anything, so a session whose
+box was reaped mid-task lands back on its own branch without knowing it had left.
 
 A port lease is not the whole story, because a setting *derived* from a port is not a
 port. Seeding copies the source checkout's `.env` verbatim, so a value naming the
