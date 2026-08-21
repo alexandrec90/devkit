@@ -1142,7 +1142,7 @@
 			// wherever they happened, so the script reads the transcript store — which
 			// records each session's own directory — instead of asking.
 			"label": "Agents: Resume Recent Sessions",
-			"detail": "Choose Claude or Codex, then reopen that agent's 4 most recently active sessions in a new Windows Terminal window, one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it.",
+			"detail": "Choose Claude or Codex and how many sessions, then reopen that agent's most recently active sessions in a new Windows Terminal window, one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -1150,7 +1150,7 @@
 				"--agent",
 				"${input:agentCli}",
 				"--count",
-				"4"
+				"${input:resumeSessionCount}"
 			],
 			"options": {
 				"cwd": "${workspaceFolder:devkit}"
@@ -1763,6 +1763,12 @@
 				"codex"
 			],
 			"default": "claude"
+		},
+		{
+			"id": "resumeSessionCount",
+			"type": "promptString",
+			"description": "How many of the most recently active sessions to reopen",
+			"default": "4"
 		},
 		{
 			// MAINTAINED BY new-project.py, like `project` — and it is the only
