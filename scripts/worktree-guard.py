@@ -638,7 +638,11 @@ def route_to_own_box(
 
     try:
         slug = session_slug(session, task_slug.read(root, session))
-        plan = worktree.plan_new(project, workspace, slug=slug, session=session, fetch=True)
+        # quiet=True: this process's stderr is the block message, and a plan-time
+        # provisioning warning would land as its first line, ahead of the reason.
+        plan = worktree.plan_new(
+            project, workspace, slug=slug, session=session, fetch=True, quiet=True
+        )
         ok, notes = worktree.apply_new(plan, workspace, timeout=SPAWN_TIMEOUT, provision=False)
     except Exception as exc:
         print(
