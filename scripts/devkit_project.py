@@ -167,6 +167,25 @@ ACTIONS: dict[str, Action] = {
     "docker-prune": Action(
         "scripts/docker-maint.py", "Docker: Prune + Compact VHDX", ("prune",), owner=DEVKIT
     ),
+    # Machine scope rather than Docker scope, and that distinction is the reason it is a
+    # separate action instead of another `docker-maint.py` mode. What makes the laptop
+    # slow after a few hours is three unrelated things -- containers bind-mounting Windows
+    # paths spinning `com.docker.backend.exe` across the 9p bridge, temp trees nobody
+    # collects, and a commit charge that grows the pagefile onto the same volume -- and
+    # only the first is Docker's. `docker-maint.py prune` cannot see the other two.
+    #
+    # `--yes` is baked in because a task the user clicks to clean up should clean up; the
+    # script's own default is a dry run, which is what an agent gets when it runs it.
+    #
+    # DEVKIT_ONLY rather than DEVKIT-owned-and-unscoped, and the difference is not
+    # cosmetic here: an unscoped action is run once per *selected checkout*, and this one
+    # has no project dimension at all -- it sweeps `%TEMP%`, stops every container on the
+    # machine and reconciles the box registry. Picking three checkouts would sweep the
+    # same machine three times, the second and third finding nothing and reading as a
+    # no-op. Scoped, the task pins `--project devkit` and there is no picker to get wrong.
+    "reclaim": Action(
+        "scripts/reclaim.py", "Machine: Reclaim Resources", ("--yes",), projects=DEVKIT_ONLY
+    ),
     # --- scoped to one repo's worktree pair ---
     #
     # These are the tasks that used to live in `carameli/.vscode/tasks.json` and

@@ -354,6 +354,13 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # so no consumer has the file. Every other action here is scoped by capability;
         # this one is scoped by where the code physically is.
         "test-hooks-live",
+        # Born scoped, and the only entry scoped for a reason that is neither capability
+        # nor code location: `reclaim` has no project dimension at all. It sweeps the
+        # machine's `%TEMP%`, stops every container on the daemon and reconciles one box
+        # registry, so running it once per selected checkout would repeat a machine-wide
+        # job N times and report nothing on runs 2..N. Scoping it to devkit is what lets
+        # the task pin `--project devkit` and offer no picker.
+        "reclaim",
     }
 
 

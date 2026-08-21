@@ -137,6 +137,9 @@ DOCKER_PROCESSES = [
     "com.docker.service",
     "com.docker.proxy",
 ]
+# The one name above that is a Windows service rather than a plain process. It is killed
+# with the rest and has to be restarted through the SCM -- see `start_docker_service`.
+DOCKER_SERVICE = "com.docker.service"
 DOCKER_DESKTOP_EXE = Path(r"C:\Program Files\Docker\Docker\Docker Desktop.exe")
 POLL_TIMEOUT = 90
 POLL_INTERVAL = 5
@@ -230,10 +233,38 @@ def stop_docker() -> None:
     run(["wsl", "--shutdown"], timeout=60)
 
 
+def start_docker_service() -> None:
+    """Bring `com.docker.service` back up before launching the GUI.
+
+    `stop_docker` taskkills every name in `DOCKER_PROCESSES`, and one of them is not a
+    plain process: `com.docker.service` is a Windows **service**, registered
+    `StartType=Manual`. Killing its process leaves the SCM believing it is stopped, and
+    Docker Desktop does not start it -- it expects to find it already running. So every
+    stop/start pair here ended with the engine permanently unreachable, and the three
+    modes built on that pair (`restart-engine`, `fix`, `prune`) reported
+    `ENGINE STILL NOT RESPONDING` / `DOCKER STILL WEDGED` and advised a factory reset or
+    a reboot -- for a service one `sc start` would have fixed.
+
+    Measured on 2026-08-20: after starting the service by hand, `docker version` answered
+    in **6 seconds**. Nothing was wedged and nothing needed a longer poll; the harness had
+    killed a service it could not restart, then blamed the daemon for not coming back.
+
+    Failure here is deliberately soft. A machine where the service is already running, or
+    where Docker ships without it, must still reach the `Popen` in `start_docker` -- this
+    repairs the state `stop_docker` creates, it is not a new precondition for starting.
+    """
+    code = run(["sc", "start", DOCKER_SERVICE], timeout=60, check=False)
+    # 1056 is ERROR_SERVICE_ALREADY_RUNNING -- the normal case when nothing stopped it.
+    if code not in (0, 1056):
+        print(f"  [warn] could not start the {DOCKER_SERVICE} service (exit {code})")
+        print("         if the engine never answers, start 'Docker Desktop Service' by hand")
+
+
 def start_docker() -> None:
     if not DOCKER_DESKTOP_EXE.is_file():
         print(f"  [skip] {DOCKER_DESKTOP_EXE} not found -- start Docker Desktop manually")
         return
+    start_docker_service()
     subprocess.Popen([str(DOCKER_DESKTOP_EXE)], creationflags=NO_WINDOW)
 
 
