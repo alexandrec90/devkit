@@ -1,7 +1,8 @@
 // Canonical shared task block — devkit owns this; alex-projects.code-workspace
-// carries a copy under its "tasks" key. Edit the workspace file, then adopt the
-// change here:
+// carries a copy under its "tasks" key. Check for pre-existing drift, edit the
+// workspace file, then adopt the intentional change here:
 //
+//     python scripts/devkit_project.py --check-tasks
 //     python scripts/devkit_project.py --adopt-tasks
 //
 // and verify with `--check-tasks`. The workspace file is not inside any repo, so it
@@ -1224,7 +1225,7 @@
 			"problemMatcher": []
 		},
 		{
-			// The one agent task that takes NO checkout, and deliberately so. Every
+			// These agent recovery tasks take NO checkout, and deliberately so. Every
 			// picker in this file lists the static checkouts; a session that ran in an
 			// ephemeral box is unreachable from all of them, because boxes are absent
 			// from `folders` by design. What you want back is the last few sessions
@@ -1247,6 +1248,36 @@
 			"icon": {
 				"id": "history",
 				"color": "terminal.ansiBrightMagenta"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
+			// Codex cannot resume a Claude-owned session ID. This copies only Claude
+			// transcripts whose final assistant turn is the account/session limit error,
+			// then starts an ordinary Codex session in each transcript's own directory with
+			// a durable handoff under CODEX_HOME. A fingerprint keeps repeat clicks from
+			// opening duplicates unless Claude appended to the transcript afterwards.
+			"label": "Agents: Import Limited Claude Sessions",
+			"detail": "Choose how many recent Claude sessions that ended at a usage limit to continue in Codex, one new Windows Terminal tab each, OLDEST TAB FIRST. Copies each raw transcript under CODEX_HOME/devkit/claude-handoffs, so the handoff survives and the project checkout stays untouched. Already imported transcript versions, Claude subagents, and sessions whose directory has been reaped are skipped.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"scripts/import-claude-sessions.py",
+				"--count",
+				"${input:resumeSessionCount}"
+			],
+			"options": {
+				"cwd": "${workspaceFolder:devkit}"
+			},
+			"icon": {
+				"id": "arrow-swap",
+				"color": "terminal.ansiBrightCyan"
 			},
 			"presentation": {
 				"reveal": "always",
