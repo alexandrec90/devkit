@@ -99,6 +99,36 @@ Two consequences for where a test goes. A change to a hook script needs its test
 it has to pass in every consumer too. And the generator is verified by **rendering, not
 by reading**: `tests/` builds a project of each preset and parses every file it emits.
 
+### Nothing gated whether a test existed at all
+
+Both trees are full of contract tests, and every one of them asserts about code someone
+remembered to cover. Nothing asserted the remembering, so "every new script ships with
+its tests in the same change" — `.claude/rules/engineering.md`, in those words — was a
+preference with a green suite behind it. Three scripts had no test module at all.
+
+`tests/test_test_contract.py` is the gate, in two halves. **Module level and absolute:**
+every script under `scripts/`, `scripts/hooks/` and `scripts/precommit/` needs a
+`test_<stem>.py`, and where the coverage genuinely lives elsewhere `COVERED_BY` names
+the module *and* the reason — a claim the same file checks, so a rename cannot leave a
+dangling excuse. **Symbol level and a ratchet:** every public top-level callable must be
+named by a test that references its module, and the ones that are not are listed in
+`tests/untested_symbols.txt`.
+
+Two properties make that list debt rather than configuration, and a change here has to
+keep both. A line that stops being true **fails**, so covering a symbol forces its line
+out and the file can only shrink. And the gate is **excluded from its own corpus** —
+its regex fixtures quote real symbol names, and counting them would have it certify
+coverage it invented.
+
+Scoping is the part that took measuring. Searching the whole test corpus passes `main`,
+`run`, `check` and `cap` everywhere, since dozens of scripts define those names;
+searching only the matching `test_<stem>.py` fails work that is correctly covered from a
+sibling. So the corpus is the test modules that reference the script under test.
+
+It is devkit-only, deliberately. The same gate belongs in the vendored tier, but turning
+it on in every consumer is a decision with a red PR gate attached, not a rider on the
+change that wrote it.
+
 ## The two channels
 
 devkit ships the same discipline through two mechanisms, and which one a thing belongs to
