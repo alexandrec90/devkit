@@ -675,11 +675,19 @@ zero-model-cost gate for every hook change.
 
 `tests/test_claude_hooks_live.py` is the Claude-side counterpart. It loads the real
 vendored engineering rule and capped-Bash hook in an isolated project, exposes only the
-Bash tool, and proves Claude chooses `invoke-capped.py` on its first and only shell call.
-The sentinel must be created without a denial or retry. It is also paid and opt-in:
+Bash tool, and proves Claude runs an **unlisted** command bare on its first and only
+shell call — no `invoke-capped.py` wrapper, and no denial or retry — which is the reflex
+the rule's "do not wrap commands it did not name" paragraph exists to prevent. It is
+also paid and opt-in:
 `python -m pytest tests/test_claude_hooks_live.py -m "claude_live and paid" -s`.
 `CLAUDE_LIVE_HOOK_MODEL`, `CLAUDE_LIVE_HOOK_EFFORT`, and
 `CLAUDE_LIVE_HOOK_BUDGET_USD` override its low-cost defaults.
+
+Because it is paid it is deselected by default, so nothing turned red when the Bash gate
+was inverted underneath it and its expectation became the opposite of shipped policy.
+`tests/test_live_smoke_matches_the_gate.py` is the free half added for that: it asks
+`enforce-capped-bash.decide` about the exact command the smoke prompts for and fails if
+the two ever disagree again, at no cost, in every PR gate.
 
 Both are reachable from one workspace task, **Test: Harness Hook Tests — paid, live
 CLI**, backed by `scripts/hook-tests-live.py`; it picks a suite, prints what it is about
