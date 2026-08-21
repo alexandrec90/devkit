@@ -97,6 +97,22 @@ it regenerates the canonical copy from the live file. One test holds the pair to
   flags alongside their negations. The exception is a picker feeding
   `scripts/devkit_project.py`, which strips empties before exec — `testScope` and
   `e2eMode` rely on that, and say so.
+- **A picker whose options are not knowable in advance reads a file, and the script that
+  answers it writes that file.** `rioj7.command-variable` can read and template a JSON
+  file, and cannot run a command — so a list of live branches or boxes has to be *cached*
+  by the previous run rather than gathered by this one. Three things that costs, all of
+  which `previewRow` pays and a new one has to: the list is stale by construction, so it
+  needs a visible timestamp and a `Rescan` entry that falls through to a terminal prompt;
+  a pick that no longer matches anything must still resolve to something servable, since
+  the world moved on after the file was written; and **every row must carry every
+  templated field, as a string.** The extension appends options until an expression
+  *throws*, and `undefined` does not throw — a row missing one field draws ten thousand
+  blank entries instead of ending the list.
+- **Two dependent pickers are one input, not two.** VS Code resolves sibling
+  `${input:...}` in no defined order and gives neither sight of the other, so a
+  "which project, then which of its branches" pair is a `pickStringRemember` nested
+  inside the outer input's `args`, read back as `${pickStringRemember:<id>}` — and the
+  answer travels to the script as one token, because an input resolves to one string.
 - **An action scoped to exactly one checkout writes the name, not a picker.** A
   `${input:...}` with a single option asks a question that has no second answer, and the
   extension still shows it. Spell the checkout in the task's `--project` argument

@@ -459,6 +459,151 @@ def _raise_or(outcome):
     return outcome
 
 
+# --- the dropdown's option file -----------------------------------------------
+#
+# The VS Code picker cannot run a command, so the two dropdowns read a file this script
+# wrote on its last run. That buys a shape with two hard constraints and one soft one,
+# and all three are asserted here because none of them fails loudly: the extension builds
+# a list by evaluating one expression per field against rising indices until one THROWS,
+# so a malformed payload does not error -- it draws ten thousand blank rows, or silently
+# omits a checkout that has nothing to offer but still needs a way to be rescanned.
+
+
+def _payload(rows, projects=("carameli",), now=NOW):
+    return preview_task.menu_payload(list(rows), list(projects), now)
+
+
+def _branch(ref, *, project="carameli", updated=""):
+    return preview_task.Candidate(
+        project=project, ref=ref, kind=preview_task.KIND_BRANCH, updated=updated
+    )
+
+
+def test_every_row_carries_every_field_as_a_string():
+    """The blank-rows failure, and the reason it would never be reported as one.
+
+    An expression that resolves to `undefined` on a row that exists does not end the
+    extension's loop -- only one that throws does. So a row missing `detail`, which is
+    every branch with no PR title, appends blanks up to the extension's 10000 cap and
+    then draws them.
+    """
+    payload = _payload([_branch("agent/x"), _branch("agent/y", updated="2026-08-21T17:00:00Z")])
+    assert payload["rows"]["carameli"]
+    for row in payload["rows"]["carameli"]:
+        assert set(row) == {"value", "label", "description", "detail"}
+        assert all(isinstance(value, str) for value in row.values())
+    for entry in payload["projects"]:
+        assert set(entry) == {"name", "label", "description"}
+        assert all(isinstance(value, str) for value in entry.values())
+
+
+def test_a_row_is_picked_by_project_and_ref_in_one_token():
+    """A VS Code input resolves to one string, so the checkout travels inside the value."""
+    payload = _payload([_branch("agent/x")])
+    assert payload["rows"]["carameli"][0]["value"] == "carameli:agent/x"
+    assert payload["rows"]["carameli"][0]["label"] == "agent/x"
+
+
+def test_every_checkout_ends_in_a_rescan_row():
+    payload = _payload([_branch("agent/x")], projects=("carameli", "ibkr_trader"))
+    for project in ("carameli", "ibkr_trader"):
+        last = payload["rows"][project][-1]
+        assert last["value"] == f"{project}:{preview_task.RESCAN}"
+        assert payload["asOf"] in last["description"]
+
+
+def test_a_checkout_with_nothing_to_preview_is_still_offered():
+    """Otherwise the branch pushed thirty seconds ago picks an empty list and stops.
+
+    That is the one moment the cached options are most wrong, so it is the one moment a
+    checkout most needs to be reachable -- to get at its `Rescan` row, which is all its
+    list has.
+    """
+    payload = _payload([], projects=("carameli", "ibkr_trader"))
+    assert sorted(entry["name"] for entry in payload["projects"]) == ["carameli", "ibkr_trader"]
+    assert len(payload["rows"]["carameli"]) == 1
+    assert "nothing to preview" in payload["projects"][0]["description"]
+
+
+def test_checkouts_are_ordered_by_their_freshest_row():
+    rows = [
+        _branch("agent/old", project="ibkr_trader", updated="2026-08-20T10:00:00Z"),
+        _branch("agent/new", project="carameli", updated="2026-08-21T17:00:00Z"),
+    ]
+    payload = _payload(rows, projects=("ibkr_trader", "carameli"))
+    assert [entry["name"] for entry in payload["projects"]] == ["carameli", "ibkr_trader"]
+
+
+def test_a_checkout_note_says_how_many_are_already_standing():
+    rows = [
+        preview_task.Candidate(
+            project="carameli", ref="agent/up", kind=preview_task.KIND_STANDING, box="b"
+        ),
+        _branch("agent/x"),
+    ]
+    note = _payload(rows)["projects"][0]["description"]
+    assert "2 to look at" in note
+    assert "1 already standing" in note
+
+
+def test_a_row_the_scan_found_is_present_even_though_the_menu_would_trim_it():
+    """The cache is written from the untrimmed scan: a dropdown has no screen to fill."""
+    rows = [_branch(f"agent/{n}") for n in range(preview_task.MENU_LIMIT + 5)]
+    payload = _payload(rows)
+    assert len(payload["rows"]["carameli"]) == len(rows) + 1
+
+
+# --- resolving what the dropdown sent back -------------------------------------
+
+
+def test_a_pick_resolves_back_to_the_row_it_was_drawn_from():
+    rows = [_branch("agent/x"), _branch("agent/y")]
+    picked = preview_task.resolve_pick(preview_task.pick_value(rows[1]), rows)
+    assert picked == rows[1]
+
+
+def test_a_pick_prefers_the_checkout_it_names():
+    rows = [_branch("agent/x", project="ibkr_trader"), _branch("agent/x", project="carameli")]
+    assert preview_task.resolve_pick("carameli:agent/x", rows).project == "carameli"
+
+
+def test_a_bare_ref_finds_its_checkout():
+    """Typed by hand, `--pick-ref agent/x` should not require naming the checkout twice."""
+    rows = [_branch("agent/x")]
+    assert preview_task.resolve_pick("agent/x", rows) == rows[0]
+
+
+def test_a_pick_for_a_row_that_has_gone_is_served_as_a_plain_branch():
+    """The list was written last run: its box may have been reaped since, its PR merged.
+
+    What survives all of that is the ref, which is the only thing `plan_preview` needs.
+    """
+    picked = preview_task.resolve_pick("carameli:agent/gone", [])
+    assert picked == preview_task.Candidate(
+        project="carameli", ref="agent/gone", kind=preview_task.KIND_BRANCH
+    )
+    assert preview_task.preview_kwargs(picked) == {"target": "carameli", "branch": "agent/gone"}
+
+
+def test_a_bare_ref_that_matches_nothing_names_no_checkout_to_serve_it_from():
+    with pytest.raises(ValueError, match="names no checkout"):
+        preview_task.resolve_pick("agent/gone", [])
+
+
+def test_the_rescan_value_resolves_to_no_row():
+    assert (
+        preview_task.resolve_pick(f"carameli:{preview_task.RESCAN}", [_branch("agent/x")]) is None
+    )
+
+
+def test_a_ref_with_a_slash_survives_the_round_trip():
+    """`git check-ref-format` refuses a colon in a ref, so the first one always splits."""
+    assert preview_task.parse_pick("carameli:preview/agent/x-0821") == (
+        "carameli",
+        "preview/agent/x-0821",
+    )
+
+
 # --- the CLI ------------------------------------------------------------------
 
 
@@ -469,7 +614,13 @@ def stub(monkeypatch, tmp_path):
     workspace.write_text("{}", encoding="utf-8")
     served = []
     monkeypatch.setattr(preview_task, "serve", lambda c, *a, **k: served.append(c.ref) or True)
-    return types.SimpleNamespace(workspace=workspace, served=served, monkeypatch=monkeypatch)
+    monkeypatch.setattr(preview_task, "MENU_CACHE", tmp_path / "logs" / "preview-menu.json")
+    return types.SimpleNamespace(
+        workspace=workspace,
+        served=served,
+        monkeypatch=monkeypatch,
+        cache=tmp_path / "logs" / "preview-menu.json",
+    )
 
 
 def _menu(stub, rows):
@@ -586,6 +737,75 @@ def test_the_prompt_offers_all_only_when_something_is_standing(stub, capsys, mon
     )
     preview_task.main(["--workspace", str(stub.workspace)])
     assert "`a` for all 1 standing preview(s)" in capsys.readouterr().out
+
+
+def test_every_run_leaves_the_dropdown_a_fresh_option_file(stub, monkeypatch):
+    """Nothing schedules this refresh: the previous preview is what keeps the list warm."""
+    monkeypatch.setattr(preview_task, "stack_projects", lambda w: ["carameli"])
+    _menu(stub, [_branch("agent/x")])
+    assert preview_task.main(["--workspace", str(stub.workspace), "--pick", "1"]) == 0
+    payload = json.loads(stub.cache.read_text(encoding="utf-8"))
+    assert payload["rows"]["carameli"][0]["value"] == "carameli:agent/x"
+
+
+def test_refresh_writes_the_options_and_picks_nothing(stub, capsys, monkeypatch):
+    monkeypatch.setattr(preview_task, "stack_projects", lambda w: ["carameli"])
+    _menu(stub, [_branch("agent/x")])
+    assert preview_task.main(["--workspace", str(stub.workspace), "--refresh"]) == 0
+    assert stub.served == []
+    assert stub.cache.is_file()
+    assert str(stub.cache) in capsys.readouterr().out
+
+
+def test_refresh_is_a_failure_when_the_options_cannot_be_written(stub, capsys, monkeypatch):
+    monkeypatch.setattr(preview_task, "write_menu", lambda *a, **k: None)
+    _menu(stub, [])
+    assert preview_task.main(["--workspace", str(stub.workspace), "--refresh"]) == 1
+    assert "Could not write" in capsys.readouterr().out
+
+
+def test_pick_ref_serves_that_row_without_asking(stub, monkeypatch):
+    monkeypatch.setattr(preview_task.sys, "stdin", types.SimpleNamespace(readline=lambda: ""))
+    _menu(stub, [_branch("agent/x"), _branch("agent/y")])
+    argv = ["--workspace", str(stub.workspace), "--pick-ref", "carameli:agent/y"]
+    assert preview_task.main(argv) == 0
+    assert stub.served == ["agent/y"]
+
+
+def test_pick_ref_reaches_a_row_the_terminal_menu_would_have_trimmed(stub):
+    """`--limit` is a screenful, not a scope: the dropdown offers rows past the end."""
+    rows = [_branch(f"agent/{n}") for n in range(preview_task.MENU_LIMIT + 3)]
+    _menu(stub, rows)
+    last = rows[-1].ref
+    assert (
+        preview_task.main(["--workspace", str(stub.workspace), "--pick-ref", f"carameli:{last}"])
+        == 0
+    )
+    assert stub.served == [last]
+
+
+def test_pick_ref_on_an_empty_machine_still_serves_the_ref(stub):
+    """A branch pushed since the last scan is not in the list and is still previewable."""
+    _menu(stub, [])
+    argv = ["--workspace", str(stub.workspace), "--pick-ref", "carameli:agent/brand-new"]
+    assert preview_task.main(argv) == 0
+    assert stub.served == ["agent/brand-new"]
+
+
+def test_the_rescan_row_falls_through_to_the_terminal_menu(stub, capsys, monkeypatch):
+    monkeypatch.setattr(preview_task.sys, "stdin", types.SimpleNamespace(readline=lambda: "1\n"))
+    _menu(stub, [_branch("agent/x")])
+    argv = ["--workspace", str(stub.workspace), "--pick-ref", f"carameli:{preview_task.RESCAN}"]
+    assert preview_task.main(argv) == 0
+    assert "Rescanned" in capsys.readouterr().out
+    assert stub.served == ["agent/x"]
+
+
+def test_a_pick_ref_that_names_no_checkout_is_reported_not_traced(stub, capsys):
+    _menu(stub, [])
+    assert preview_task.main(["--workspace", str(stub.workspace), "--pick-ref", "agent/gone"]) == 2
+    assert "matches no row" in capsys.readouterr().out
+    assert stub.served == []
 
 
 # --- the task that runs it ----------------------------------------------------
