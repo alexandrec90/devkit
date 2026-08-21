@@ -368,6 +368,12 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # in the menu -- and the task pins `--project devkit` and asks the one question
         # worth asking instead.
         "preview",
+        # Born scoped, and the third of the no-project-dimension kind -- but for a
+        # sharper reason than `reclaim`'s: repeating a release is not merely a no-op on
+        # runs 2..N, it is a failure. The second run would find the tag it just pushed
+        # and refuse, so a two-checkout pick would report a red task for a release that
+        # actually succeeded. Scoped, the task pins `--project devkit`.
+        "release",
     }
 
 

@@ -197,6 +197,19 @@ ACTIONS: dict[str, Action] = {
     # No picker, per the literal-over-single-option convention: the task pins
     # `--project devkit` and the only question asked is the one worth asking.
     "preview": Action("scripts/preview-task.py", "Preview: Open a UI Branch", projects=DEVKIT_ONLY),
+    # Cutting a devkit release. DEVKIT_ONLY because a release is devkit's own act and
+    # has no project dimension at all -- run per selected checkout it would try to tag
+    # this repo two or three times, and the second attempt would refuse a tag that now
+    # exists. The consumers appear at the END of the run, as `upgrade-project.py --all`,
+    # which is a different thing from the task being scoped to them.
+    #
+    # It is an ACTIONS entry rather than a hand-written task like `Devkit: Upgrade
+    # Projects` because it needs the wrapping more than that one does, not less: the run
+    # spans a PR gate and a workflow dispatch, so its useful output arrives minutes apart
+    # and the reader is not watching. `plan_command` gives it the notify toast and the
+    # `logs/` artifact for free, and the level picker rides through as a trailing
+    # argument the same way `db-revision`'s `-m` does.
+    "release": Action("scripts/release-pipeline.py", "Devkit: Cut Release", projects=DEVKIT_ONLY),
     # --- scoped to one repo's worktree pair ---
     #
     # These are the tasks that used to live in `carameli/.vscode/tasks.json` and

@@ -24,11 +24,40 @@ that has just upgraded — and to everyone reading its green gate. That run now 
 vendored files main carries and the tag does not (`unreleased_vendored_changes`); when it
 does, the fix is a release, not a re-run.
 
-## Use the workflow
+## Click the task
 
-`.github/workflows/release.yml` does all of this. It is `workflow_dispatch` with a
-`version` and a `phase`, and it runs in two passes because the ordering below is not
-optional — the fallback bump has to be **committed before the tag exists**.
+**`Devkit: Cut Release` runs every step below and stops if any of them is not what it
+expected.** It is the intended path; the manual checklist that follows is what it
+automates, kept because a run that refuses is diagnosed against it.
+
+Pick a bump level and *Apply*. Dry run first if you want the plan and the version it
+resolved; that mode changes nothing. On the CLI it is
+`python scripts/release-pipeline.py patch --yes` (or `minor`, `major`, or an explicit
+`vX.Y.Z`), and the run's output survives as `logs/devkit-cut-release.log`.
+
+The run is **resumable and idempotent**: it re-uses an open prepare PR rather than
+opening a second one, and skips straight to the tag phase if `main` already carries the
+bump. So the answer to a run that died in the middle — a dropped network, a closed
+terminal — is to click it again.
+
+It stops rather than guesses in three places, and each refusal names what it saw:
+
+- the version already exists as a tag, or the level is not a bump and not a `vX.Y.Z`;
+- the prepare PR's gate is red in **any** way other than the single expected test
+  (step 4), including a test job that failed before the suite ran, so no artifact
+  names a test at all;
+- the tag workflow does not end green, or the tag it should have pushed is not there
+  afterwards.
+
+What it does **not** decide is the version: patch is the default because that is what a
+release usually is, and step 2 below is still yours.
+
+## What it automates
+
+`.github/workflows/release.yml` does the two halves that must happen on CI. It is
+`workflow_dispatch` with a `version` and a `phase`, and it runs in two passes because
+the ordering below is not optional — the fallback bump has to be **committed before the
+tag exists**.
 
 1. **Land the work on `main`** and confirm CI is green, `generated-project` job
    included. That job renders a project of every preset and runs its suites — it is
@@ -44,7 +73,13 @@ optional — the fallback bump has to be **committed before the tag exists**.
    gh workflow run release.yml -f version=vX.Y.Z -f phase=prepare
    ```
 
-   > **Opening the PR is always yours.** The workflow pushes the branch and puts the
+   > **Opening the PR is never the workflow's.** `release-pipeline.py` does the whole
+   > of step 3 locally instead — it pushes `release/vX.Y.Z` from a throwaway worktree,
+   > so the static checkout is never moved onto the release branch, and runs
+   > `gh pr create` under *your* credentials, which is what makes the gate fire. Read
+   > the rest of this note before changing that: it is the constraint, not a detail.
+   >
+   > The workflow pushes the branch and puts the
    > exact `gh pr create` command in its **step summary**; paste it. It deliberately
    > never opens the PR itself: a PR opened with `GITHUB_TOKEN` triggers no workflow
    > run, so it would arrive with no PR Gate — and step 4 below is *reading that
@@ -63,6 +98,13 @@ optional — the fallback bump has to be **committed before the tag exists**.
    > Nothing else may be red. Read the uploaded `test-failures.log` and confirm that
    > this is the only failure before merging — the terminal shows a status line, not
    > the failures.
+   >
+   > This is the step `release-pipeline.py` exists for. It downloads that same
+   > artifact, parses the failing test names out of it, and merges **only** when the
+   > set is exactly `{test_fallback_devkit_ref_tracks_the_newest_tag}`. An artifact
+   > naming no tests at all is a stop, not a pass: the test job runs lint, mypy and the
+   > vendored hook suite before pytest, so "no test failed" and "nothing got as far as
+   > running" produce the same empty list.
 
 5. **Run the workflow with `phase=tag`.**
 
@@ -138,6 +180,13 @@ Adopters find out by running `sync-devkit.py --pull`, and **the commit message i
 only changelog they get.** When a change alters vendored behaviour, say so there.
 
 ## After the tag: the consumers
+
+`Devkit: Cut Release` finishes by running `upgrade-project.py --all --yes`, which does
+all of this in an ephemeral box per repo and opens the PRs. Two reasons to know what it
+opens rather than treat it as the end of the release: an adoption PR carries the
+`automerge` label, so a green one merges without being looked at; and a repo it skips —
+dirty, unvendored, or a duplicate worktree sibling — is reported in `logs/upgrade.log`
+and left for the next run rather than failing the release.
 
 Each consuming repo needs, ideally in the same commit as its `--pull`:
 

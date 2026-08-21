@@ -1314,7 +1314,16 @@ def test_the_warning_names_the_files_rather_than_counting_them():
     for is in it."""
     line = up.unreleased_line(["scripts/hooks/enforce-capped-bash.py"], "v0.5.3")
     assert "scripts/hooks/enforce-capped-bash.py" in line
-    assert "v0.5.3" in line and "RELEASING.md" in line
+    assert "v0.5.3" in line
+
+
+def test_the_warning_names_a_remedy_that_can_be_run():
+    """It used to end "Cut a release first (RELEASING.md)" -- a pointer to a five-step
+    checklist, i.e. a session's work, quoted at someone who was only running an upgrade.
+    The remedy is one task now, so the line names the task and the command behind it."""
+    line = up.unreleased_line(["scripts/hooks/lint-fix.py"], "v0.5.3")
+    assert up.RELEASE_TASK in line
+    assert up.RELEASE_COMMAND in line
 
 
 def test_no_gap_says_nothing():
@@ -1334,5 +1343,52 @@ def test_the_gap_is_reported_once_for_the_run_before_any_box(tmp_path, capsys, m
         (tmp_path / name).mkdir()
         (tmp_path / name / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
     ws = workspace(tmp_path, "carameli", "ibkr_trader")
-    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
     assert capsys.readouterr().err.count("enforce-capped-bash.py") == 1
+
+
+def test_the_undelivered_release_reaches_the_artifact_and_the_exit_code(
+    tmp_path, capsys, monkeypatch
+):
+    """The gap this script exists to report was the one thing it reported *only* to
+    stderr -- and the nightly pass runs under `pythonw`, whose stderr goes nowhere. So
+    the machine's entire record of "every consumer is about to adopt a release missing
+    the fix you merged" was an exit code of 0 beside a log saying the run was clean.
+
+    Reverting either half fails here: drop the outcome and the artifact is empty, drop
+    the exit code and `schedule_health` never surfaces the log at session start."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    monkeypatch.setattr(up, "unreleased_vendored_changes", lambda *_a: ["scripts/hooks/hook.py"])
+    stamps_on_main(monkeypatch)
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli")
+
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
+    written = (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8")
+    assert "scripts/hooks/hook.py" in written
+    assert up.RELEASE_TASK in written
+
+
+def test_a_run_level_outcome_is_not_offered_as_a_retry_target():
+    """`(run)` and `(release)` belong to no checkout, and the header used to feed them
+    to the retry line anyway -- handing whoever found the artifact
+    `upgrade-project.py (run) --yes`, a command that exits 2 on its own argument,
+    offered as the way out of a failure."""
+    only_run_scoped = up.artifact_body(
+        "v0.7.0", False, [up.Outcome(up.RUN_SCOPED, 2, "upgrade: no workspace file at X")]
+    )
+    assert "no workspace file" in only_run_scoped
+    assert "# retry:" not in only_run_scoped
+
+    mixed = up.artifact_body(
+        "v0.7.0",
+        False,
+        [
+            up.Outcome(up.RELEASE_SCOPED, 1, "cut a release"),
+            up.Outcome("carameli", 2, "FAILED at `git commit`"),
+        ],
+    )
+    assert "# retry: python scripts/upgrade-project.py carameli --yes" in mixed
+    assert up.RELEASE_SCOPED not in mixed.split("# unresolved:")[0]
