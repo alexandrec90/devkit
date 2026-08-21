@@ -144,6 +144,16 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/tests/test_enforce_capped_bash.py",
     "scripts/hooks/invoke-capped.py",
     "scripts/hooks/tests/test_invoke_capped.py",
+    # The harness-events ledger: the stdlib-only append helper every gate above uses
+    # to leave a central record of a block on this machine's devkit checkout (via
+    # $DEVKIT_DIR; silent no-op without one), and the CLI that gives an agent's own
+    # defect report the same destination. Vendored together because a writer without
+    # the helper is an ImportError inside a PreToolUse hook -- which exits non-2 and
+    # silently disables the gate it lives in.
+    "scripts/hooks/harness_events.py",
+    "scripts/hooks/tests/test_harness_events.py",
+    "scripts/hooks/report-harness-defect.py",
+    "scripts/hooks/tests/test_report_harness_defect.py",
     # The task-layer failure artifact. Vendored rather than templated because nothing
     # in it varies: it resolves `logs/` from the cwd the task set, and the task label
     # it is given names the file. `notify-wrap.py` is its sibling and stays a template

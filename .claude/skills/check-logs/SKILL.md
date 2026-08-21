@@ -116,6 +116,27 @@ checkouts synced. Two readings that are easy to get backwards:
   one. It is append-only, so grep it for the box name; the line says which verdict
   destroyed it, whether it was forced, and how many uncommitted files it held.
 
+## 7. What the harness did to agents: the events ledger
+
+`logs/harness-events.log` in the devkit checkout is the reap ledger's pattern applied
+to the rest of the harness: one line per event, ISO stamp then tab-separated
+`key=value`, append-only. Every guard block names the box and branch it routed to
+(`guard-block`), every capped-Bash and lint-fix block records the command or finding
+(`capped-bash-block`, `lint-fix-block`, written by the *vendored* copies through
+`$DEVKIT_DIR`, so consumer sessions land here too), and two event names mean someone
+should look rather than "the harness worked":
+
+- `agent-report` -- an agent judged something a harness defect and filed it with
+  `scripts/hooks/report-harness-defect.py`. The `version=` field says whether its
+  vendored copy was current; a stale one may already be fixed upstream.
+- `guard-spawn-failed` -- an edit was blocked and the box it should have been routed
+  to could not be cut. The session that hit it was left with a failure message and no
+  box, so the `detail=` field is the start of a real diagnosis.
+
+The session-start status line counts only those two, over the last week; everything
+else is forensics to grep when a session's account of a block needs corroborating.
+Grep by `project=`, `session=`, or event name -- never parse it as a document.
+
 ## Reporting
 
 Say which jobs are healthy, not only which are not -- "every job green but one, and that

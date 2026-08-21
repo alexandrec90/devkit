@@ -36,6 +36,21 @@ def root(tmp_path):
     return base
 
 
+@pytest.fixture(autouse=True)
+def ledger_root(tmp_path, monkeypatch):
+    """Redirect the harness-events ledger into tmp for every test.
+
+    `guard.LEDGER_ROOT` resolves to the checkout the hook lives in -- during a test
+    run, the real one -- and many tests here drive blocking flows, each of which
+    appends a ledger line. Without this, a green run would salt the workspace's actual
+    `logs/harness-events.log` with phantom `guard-spawn-failed` events, which is
+    exactly the class `workspace-status.py` surfaces for triage.
+    """
+    base = tmp_path / "ledger"
+    monkeypatch.setattr(guard, "LEDGER_ROOT", base)
+    return base
+
+
 def payload(tool: str = "Edit", path: str = "", cwd: str = "", session: str = "s1") -> str:
     return json.dumps(
         {
@@ -958,3 +973,114 @@ def test_a_freshly_cut_box_is_not_announced_as_a_resume(root, monkeypatch, capsy
     )
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
     assert "resumed" not in capsys.readouterr().err
+
+
+# --- the harness-events ledger ------------------------------------------------
+
+
+def _events(base: Path) -> list[str]:
+    path = base / "logs" / "harness-events.log"
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+def _blocked_edit(root, monkeypatch, target=None):
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(payload(path=str(target or root / "carameli" / "a.py"), cwd=str(root))),
+    )
+    return _workspace(root)
+
+
+def test_a_block_that_spawns_lands_on_the_ledger(root, monkeypatch, ledger_root, capsys):
+    workspace = _blocked_edit(root, monkeypatch)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    (line,) = _events(ledger_root)
+    assert "\tevent=guard-block\t" in line
+    assert "\tproject=carameli\t" in line and "\tsession=s1\t" in line
+    assert "\tkind=checkout\t" in line and "\toutcome=spawned\t" in line
+    assert "\tbox=carameli--ws-s1-0806\t" in line
+    assert "\ttarget=" in line
+    capsys.readouterr()
+
+
+def test_a_resumed_box_is_recorded_as_a_resume(root, monkeypatch, ledger_root, capsys):
+    workspace = _blocked_edit(root, monkeypatch)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _resumed_plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    (line,) = _events(ledger_root)
+    assert "\toutcome=resumed\t" in line
+    assert "\tbranch=agent/voicemail-0806\t" in line
+    capsys.readouterr()
+
+
+def test_a_reused_box_is_recorded_as_a_reuse(root, monkeypatch, ledger_root, capsys):
+    workspace = _blocked_edit(root, monkeypatch)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    (line,) = _events(ledger_root)
+    assert "\tevent=guard-block\t" in line and "\toutcome=reused\t" in line
+    capsys.readouterr()
+
+
+def test_a_failed_spawn_is_recorded_with_its_detail(root, monkeypatch, ledger_root, capsys):
+    workspace = _blocked_edit(root, monkeypatch)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (False, ["boom"]))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    (line,) = _events(ledger_root)
+    assert "\tevent=guard-spawn-failed\t" in line
+    assert "\tdetail=boom" in line
+    capsys.readouterr()
+
+
+def test_a_spawn_that_raises_is_recorded_with_the_exception(root, monkeypatch, ledger_root, capsys):
+    workspace = _blocked_edit(root, monkeypatch)
+
+    def explode(*a, **k):
+        raise RuntimeError("kaput")
+
+    monkeypatch.setattr(guard.worktree, "plan_respawn", explode)
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    (line,) = _events(ledger_root)
+    assert "\tevent=guard-spawn-failed\t" in line
+    assert "RuntimeError: kaput" in line
+    capsys.readouterr()
+
+
+def test_a_foreign_box_block_is_recorded_with_its_kind(root, monkeypatch, ledger_root, capsys):
+    workspace = _workspace(root)
+    _lease(root, "carameli--x-0806", project="carameli", session="other-session")
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    target = root / ".worktrees" / "carameli--x-0806" / "app" / "main.py"
+    monkeypatch.setattr("sys.stdin", _stdin(payload(path=str(target), cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    (line,) = _events(ledger_root)
+    assert "\tkind=foreign-box\t" in line
+    capsys.readouterr()
+
+
+def test_an_allowed_edit_leaves_no_ledger_line(root, monkeypatch, ledger_root):
+    """The ledger records what the harness did to an agent; the silent majority of
+    calls it waves through must stay off it, or grepping it means wading."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--x-0806", project="carameli", session="s1")
+    target = root / ".worktrees" / "carameli--x-0806" / "app" / "main.py"
+    monkeypatch.setattr("sys.stdin", _stdin(payload(path=str(target), cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    assert _events(ledger_root) == []
+
+
+def test_a_missing_ledger_module_never_changes_the_decision(root, monkeypatch, capsys):
+    """The guarded import is the guard's own safety: an unhandled exception in a
+    PreToolUse hook exits non-2, which Claude Code treats as non-blocking -- the edit
+    would PROCEED onto the home branch. Diagnostics must degrade to silence instead."""
+    workspace = _blocked_edit(root, monkeypatch)
+    monkeypatch.setattr(guard, "harness_events", None)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    capsys.readouterr()
