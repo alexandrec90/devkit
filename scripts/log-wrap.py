@@ -8,9 +8,9 @@ Usage (tasks.json):
   python scripts/log-wrap.py [--always] "Task Name" -- <command> [args...]
 
 Example:
-  python scripts/notify-wrap.py "Ship: Sweep Workspace" --
-    python scripts/log-wrap.py "Ship: Sweep Workspace" --
-      python scripts/sweep.py
+  python scripts/notify-wrap.py "Devkit: Upgrade Projects" --
+    python scripts/log-wrap.py "Devkit: Upgrade Projects" --
+      python scripts/upgrade-project.py --all
 
 **Why a second wrapper rather than a flag on `notify-wrap.py`.** They compose in that
 order and each does one thing: the toast needs only an exit code, this needs the
@@ -120,7 +120,7 @@ def parse_argv(argv: list[str]) -> tuple[str, list[str], bool] | None:
 
 
 def slug(title: str) -> str:
-    """`"Ship: Sweep Workspace"` -> `"ship-sweep-workspace"`, the artifact's stem.
+    """`"Devkit: Upgrade Projects"` -> `"devkit-upgrade-projects"`, the artifact's stem.
 
     Derived from the task label rather than from the command, so the file is named
     after the thing the operator clicked. Falls back to `task` for a title that is

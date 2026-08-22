@@ -630,7 +630,10 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     now and the per-project files hold only their own — and, more seriously, the new
     project was never added to the shared workspace at all. `sweep.py` reads that one
     file's `folders` as its registry, so a freshly scaffolded project was invisible to
-    `Ship: Check Workspace` and could strand work with nothing reporting it.
+    every sweep and could strand work with nothing reporting it. That matters more
+    now than it did then: the sweep has no workspace task left, so the only readers
+    are automatic ones -- `workspace-status.py`'s session-start line and reconcile's
+    checkout pass -- and an unregistered project is invisible to both.
 
     Registration is best-effort by design: the project itself is already written and
     usable at this point, so a workspace file that has been restructured out of
