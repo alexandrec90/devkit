@@ -1289,13 +1289,12 @@
 			"problemMatcher": []
 		},
 		{
-			// Codex cannot resume a Claude-owned session ID. This copies only Claude
-			// transcripts whose final assistant turn is the account/session limit error,
-			// then starts an ordinary Codex session in each transcript's own directory with
-			// a durable handoff under CODEX_HOME. A fingerprint keeps repeat clicks from
-			// opening duplicates unless Claude appended to the transcript afterwards.
+			// Claude and Codex session IDs differ. This selects only Claude transcripts
+			// whose final assistant turn is the account/session limit error, passes those
+			// transcripts through Codex's native Claude importer, then resumes the returned
+			// Codex thread IDs. Codex's importer owns deduplication and import history.
 			"label": "Agents: Import Limited Claude Sessions",
-			"detail": "Choose how many recent Claude sessions that ended at a usage limit to continue in Codex, one new Windows Terminal tab each, OLDEST TAB FIRST. Copies each raw transcript under CODEX_HOME/devkit/claude-handoffs, so the handoff survives and the project checkout stays untouched. Already imported transcript versions, Claude subagents, and sessions whose directory has been reaped are skipped.",
+			"detail": "Choose how many recent Claude sessions that ended at a usage limit to import through Codex's native Claude importer and resume by their Codex thread IDs, one new Windows Terminal tab each, OLDEST TAB FIRST. Claude subagents and sessions whose directory has been reaped are skipped. Already imported transcripts resolve to their existing native Codex threads.",
 			"type": "process",
 			"command": "python",
 			"args": [
