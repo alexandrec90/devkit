@@ -113,9 +113,26 @@ UPGRADE_PATHS: tuple[str, ...] = (
 SKIP_SOURCE = "is the devkit checkout this run pulls from"
 SKIP_UNADOPTED = "has no DEVKIT_VERSION -- it has never vendored devkit"
 
+# How a reader is told to cut the release this run needed and could not have. Named
+# here rather than spelled into each message because there are three of them, and a
+# remedy that is written out three times is a remedy that will be right in two places.
+# `tests/test_release_pipeline.py` holds the command against the script's own CLI.
+RELEASE_TASK = "Devkit: Cut Release"
+RELEASE_COMMAND = "python scripts/release-pipeline.py patch --yes"
+
 # What `refusal()` says when devkit has nothing to adopt. A constant because
 # `main()` reports it once for the whole run rather than once per project.
-NO_TAG = "devkit has no release tags -- there is nothing to adopt. Cut one first (see RELEASING.md)"
+NO_TAG = (
+    f"devkit has no release tags -- there is nothing to adopt. Cut one first: "
+    f'the VS Code task "{RELEASE_TASK}", or `{RELEASE_COMMAND}` (RELEASING.md)'
+)
+
+# The pseudo-name a run-level outcome carries in place of a checkout's. Parenthesised
+# so `artifact_body` can tell it from a project: "retry the release" is not spelled
+# `upgrade-project.py (release)`, and an artifact that says it is sends its reader to
+# a command that cannot parse.
+RUN_SCOPED = "(run)"
+RELEASE_SCOPED = "(release)"
 
 
 def project_selection(value: str | None) -> list[str]:
@@ -474,13 +491,19 @@ def unreleased_line(files: list[str], tag: str) -> str:
 
     Named, not counted: "6 files" tells the reader nothing about whether the fix they
     came for is among them, which is the only question they have.
+
+    It names the **remedy as a thing to run**, not as a document to go and read.
+    Cutting a release is one task -- `Devkit: Cut Release`, over
+    `scripts/release-pipeline.py` -- and a reader told to consult `RELEASING.md`
+    instead has to reconstruct by hand the ordering that pipeline already encodes.
     """
     if not files:
         return ""
     return (
         f"upgrade: devkit main carries {len(files)} vendored change(s) {tag} does not, "
         f"so this run cannot deliver them: {', '.join(files)}\n"
-        f"        Cut a release first (RELEASING.md); this run adopts {tag}."
+        f"        Cut a release to deliver them -- the VS Code task "
+        f'"{RELEASE_TASK}", or `{RELEASE_COMMAND}`. This run adopts {tag}.'
     )
 
 
@@ -819,6 +842,17 @@ def upgrade_one(
     return Outcome(name, 0)
 
 
+def run_scoped(name: str) -> bool:
+    """Is `name` a run-level pseudo-name rather than a checkout?
+
+    By shape, not by membership of a list of two: the next pseudo-name added would
+    otherwise reach the retry line, and it would do so silently -- the header is
+    generated text nobody diffs, and the command it offers is only ever run by
+    someone who is already dealing with a failure.
+    """
+    return name.startswith("(") and name.endswith(")")
+
+
 def artifact_body(tag: str, dry_run: bool, outcomes: list[Outcome]) -> str:
     """The full text of `logs/upgrade.log` -- empty when nothing needs a human.
 
@@ -826,15 +860,26 @@ def artifact_body(tag: str, dry_run: bool, outcomes: list[Outcome]) -> str:
     next reader after a failure that is already fixed. The header carries the command
     that re-runs the thing that failed, because the artifact is read by whoever finds
     it and not only by whoever started the run.
+
+    **Only a checkout can be retried by name.** A run-level outcome carries a
+    parenthesised pseudo-name (`(run)`, `(release)`) and belongs to no checkout, so
+    feeding it to the retry line produced `upgrade-project.py (run) --yes` -- a command
+    that exits 2 on its own argument, offered to the reader as the way out of a failure.
+    Those outcomes state their own remedy in `detail`; the header simply omits a retry
+    it cannot spell, rather than spelling one that does not run.
     """
     actionable = [outcome for outcome in outcomes if outcome.code != 0]
     if not actionable:
         return ""
     names = " ".join(outcome.name for outcome in actionable)
+    retryable = [outcome.name for outcome in actionable if not run_scoped(outcome.name)]
     lines = [
         "# source: devkit scripts/upgrade-project.py",
         f"# run: adopt devkit {tag} ({'dry run' if dry_run else 'apply'})",
-        f"# retry: python scripts/upgrade-project.py {','.join(o.name for o in actionable)} --yes",
+    ]
+    if retryable:
+        lines.append(f"# retry: python scripts/upgrade-project.py {','.join(retryable)} --yes")
+    lines += [
         f"# unresolved: {names}",
         "",
     ]
@@ -946,10 +991,18 @@ def main(argv: list[str] | None = None) -> int:
     if not args.every and not requested:
         parser.error("name one or more checkouts to upgrade, or pass --all for every adopter")
 
+    # Refusals decided before any box is cut, and the run-level facts that outlive an
+    # early exit. Carried rather than printed only, because `_finish` owes them to the
+    # artifact and to the exit code -- including on the `stopped()` paths, which used
+    # to replace the list with their own single outcome and so dropped the "cut a
+    # release" line at exactly the moment the run had also gone wrong for a second
+    # reason. Two facts, two entries; the reader gets both or neither is trustworthy.
+    preflight: list[Outcome] = []
+
     def stopped(code: int, message: str, tag: str = "(none resolved)") -> int:
         """A run-level failure: reported once, and to the artifact like any other."""
         print(message, file=sys.stderr)
-        return _finish(tag, args.dry_run, [Outcome("(run)", code, message)])
+        return _finish(tag, args.dry_run, [*preflight, Outcome(RUN_SCOPED, code, message)])
 
     if not args.workspace.is_file():
         return stopped(2, f"upgrade: no workspace file at {args.workspace}")
@@ -979,15 +1032,23 @@ def main(argv: list[str] | None = None) -> int:
     # Said once for the run, before any box is cut: the answer is the same for every
     # project, and a reader who came here for a specific vendored fix needs to know the
     # tag does not carry it *before* reading four green adoption lines.
+    #
+    # **Carried into the artifact, and exit 1 with it.** For months this printed to
+    # stderr and stopped there, which made it the one actionable sentence this script
+    # produces that nothing could act on: the nightly pass runs under `pythonw`, whose
+    # stderr goes nowhere at all, so the machine's whole record of "every consumer is
+    # about to adopt a release missing the fix you merged" was an exit code of 0 beside
+    # an empty log saying the run was clean. It was, of the checkouts -- and that is
+    # precisely the reading that made the gap invisible. Exit 1 is the needs-a-human
+    # code, and now that the human step is one task, this is a signal with a click
+    # behind it rather than a chore.
     if warning := unreleased_line(unreleased_vendored_changes(args.devkit, tag), tag):
         print(warning, file=sys.stderr)
+        preflight.append(Outcome(RELEASE_SCOPED, 1, warning))
 
     scope = names if args.every else requested
     selected = select_all(candidates_for(root, scope, args.devkit))
 
-    # Refusals decided before any box is cut. Carried rather than printed only,
-    # because `_finish` owes them to the artifact and to the exit code.
-    preflight: list[Outcome] = []
     todo: list[str] = []
     for name, skip in selected:
         if skip:
