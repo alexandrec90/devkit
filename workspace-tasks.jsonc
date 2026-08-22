@@ -211,6 +211,7 @@
 			"presentation": {
 				"reveal": "always",
 				"panel": "new",
+				"close": false,
 				"clear": true
 			},
 			"problemMatcher": []
@@ -334,6 +335,7 @@
 			"presentation": {
 				"reveal": "always",
 				"panel": "new",
+				"close": false,
 				"clear": true
 			},
 			"problemMatcher": []
@@ -356,6 +358,7 @@
 			"presentation": {
 				"reveal": "always",
 				"panel": "new",
+				"close": false,
 				"clear": true
 			},
 			"problemMatcher": []
@@ -378,6 +381,7 @@
 			"presentation": {
 				"reveal": "always",
 				"panel": "new",
+				"close": false,
 				"clear": true
 			},
 			"problemMatcher": []
@@ -669,6 +673,7 @@
 			"presentation": {
 				"reveal": "always",
 				"panel": "new",
+				"close": false,
 				"clear": true
 			},
 			"problemMatcher": []
@@ -692,6 +697,7 @@
 			"presentation": {
 				"reveal": "always",
 				"panel": "new",
+				"close": false,
 				"clear": true
 			},
 			"problemMatcher": []
@@ -726,6 +732,7 @@
 			"presentation": {
 				"reveal": "always",
 				"panel": "new",
+				"close": false,
 				"clear": true
 			},
 			"problemMatcher": []
@@ -752,6 +759,7 @@
 			"presentation": {
 				"reveal": "always",
 				"panel": "new",
+				"close": false,
 				"clear": true
 			},
 			"problemMatcher": []

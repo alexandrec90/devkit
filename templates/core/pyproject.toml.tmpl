@@ -57,9 +57,3 @@ warn_redundant_casts = true
 # and `sync-devkit.py --check` fails if this repo edits it). Type-checking it here
 # only produces errors this repo is not allowed to fix.
 exclude = '^scripts/(hooks/|sync-harness\.py)'
-
-[[tool.mypy.overrides]]
-# Optional at runtime: `notify.py` guards the import and no-ops without it, so the
-# toast dependency is deliberately not installed.
-module = ["win11toast"]
-ignore_missing_imports = true
