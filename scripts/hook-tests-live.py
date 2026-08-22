@@ -23,6 +23,8 @@ Two things this exists to stop, both of which a bare `pytest -m paid` does silen
 The cost defaults themselves are NOT restated here. They live in the test modules
 (`LIVE_MODEL`, `LIVE_EFFORT`, `LIVE_BUDGET_USD`) with environment overrides, and a copy
 in this file is a second number to keep in step with no test to catch it drifting.
+The Codex suite writes its model and reasoning settings only into the throwaway
+`CODEX_HOME` it launches; this runner never writes the operator's user configuration.
 
 **Runs with the cwd set to the chosen checkout**, like every dispatched action, so the
 target repo is `Path.cwd()`.

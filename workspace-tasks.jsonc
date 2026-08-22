@@ -1,7 +1,8 @@
 // Canonical shared task block — devkit owns this; alex-projects.code-workspace
-// carries a copy under its "tasks" key. Edit the workspace file, then adopt the
-// change here:
+// carries a copy under its "tasks" key. Check for pre-existing drift, edit the
+// workspace file, then adopt the intentional change here:
 //
+//     python scripts/devkit_project.py --check-tasks
 //     python scripts/devkit_project.py --adopt-tasks
 //
 // and verify with `--check-tasks`. The workspace file is not inside any repo, so it
@@ -434,6 +435,37 @@
 			"icon": {
 				"id": "preview",
 				"color": "terminal.ansiBrightMagenta"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"focus": true,
+				"clear": true,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
+			// The same two dropdowns, cutting the CHEAP kind of box: only the project's
+			// `[worktree] ui_services` start, and the backend is borrowed from the static
+			// checkout's running stack on its usual ports. A project that has not declared
+			// a UI tier in `.devkit.toml` says so and points at the full task above.
+			"label": "Preview: Open a UI Branch (Frontend Only)",
+			"detail": "The cheap preview: same two dropdowns as 'Open a UI Branch', but the box starts only the project's declared UI services (e.g. the Vite frontend) and points them at the static checkout's already-running backend instead of cloning the whole stack — seconds and one container, not minutes and nine. Needs that checkout's stack up ('Docker: Up' it if not). Refs whose change is not frontend-only will not show it here; use the full preview.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"devkit",
+				"preview",
+				"--pick-ref",
+				"${input:previewRow}",
+				"--ui"
+			],
+			"icon": {
+				"id": "preview",
+				"color": "terminal.ansiBrightCyan"
 			},
 			"presentation": {
 				"reveal": "always",
@@ -959,6 +991,37 @@
 			"problemMatcher": []
 		},
 		{
+			// The step that used to be the human's, and the only one in the release
+			// that needed judgement rather than typing: the prepare PR is red BY
+			// CONSTRUCTION on one named test, because FALLBACK_DEVKIT_REF has to
+			// point at a tag that does not exist yet. `release-pipeline.py` reads
+			// the gate's own test artifact and refuses to merge on any other red,
+			// which is what makes "merge a failing PR" safe to put behind a click.
+			"label": "Devkit: Cut Release",
+			"detail": "DRY RUN by default — prints the plan and stops. Applied, this bumps FALLBACK_DEVKIT_REF, opens the prepare PR, WAITS for the PR gate, merges it if the only failure is the expected one, dispatches the tag workflow, then opens an adoption PR in EVERY consumer. Minutes, mostly waiting on CI.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"${workspaceFolder:devkit}/scripts/devkit_project.py",
+				"--project",
+				"devkit",
+				"release",
+				"${input:releaseLevel}",
+				"${input:sweepApply}"
+			],
+			"icon": {
+				"id": "tag",
+				"color": "terminal.ansiBrightYellow"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "new",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
 			"label": "Devkit: Upgrade Projects",
 			"detail": "DRY RUN by default. Adopt the current devkit release in each selected consumer, one PR per repo. Skips duplicate worktree siblings and refuses dirty or unvendored explicit targets; one refusal does not stop the rest.",
 			"type": "process",
@@ -1224,7 +1287,7 @@
 			"problemMatcher": []
 		},
 		{
-			// The one agent task that takes NO checkout, and deliberately so. Every
+			// These agent recovery tasks take NO checkout, and deliberately so. Every
 			// picker in this file lists the static checkouts; a session that ran in an
 			// ephemeral box is unreachable from all of them, because boxes are absent
 			// from `folders` by design. What you want back is the last few sessions
@@ -1247,6 +1310,35 @@
 			"icon": {
 				"id": "history",
 				"color": "terminal.ansiBrightMagenta"
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"showReuseMessage": false,
+				"close": false
+			},
+			"problemMatcher": []
+		},
+		{
+			// Claude and Codex session IDs differ. This selects only Claude transcripts
+			// whose final assistant turn is the account/session limit error, passes those
+			// transcripts through Codex's native Claude importer, then resumes the returned
+			// Codex thread IDs. Codex's importer owns deduplication and import history.
+			"label": "Agents: Import Limited Claude Sessions",
+			"detail": "Choose how many recent Claude sessions that ended at a usage limit to import through Codex's native Claude importer and resume by their Codex thread IDs, one new Windows Terminal tab each, OLDEST TAB FIRST. Claude subagents and sessions whose directory has been reaped are skipped. Already imported transcripts resolve to their existing native Codex threads.",
+			"type": "process",
+			"command": "python",
+			"args": [
+				"scripts/import-claude-sessions.py",
+				"--count",
+				"${input:resumeSessionCount}"
+			],
+			"options": {
+				"cwd": "${workspaceFolder:devkit}"
+			},
+			"icon": {
+				"id": "arrow-swap",
+				"color": "terminal.ansiBrightCyan"
 			},
 			"presentation": {
 				"reveal": "always",
@@ -1850,6 +1942,33 @@
 				}
 			],
 			"default": "--dry-run"
+		},
+		{
+			// Patch is first AND the default because it is the answer almost every
+			// time: a devkit release delivers whatever has merged since the last
+			// one, and "what merged" is a set of fixes, not a decision about
+			// compatibility. The script also accepts an explicit vX.Y.Z, which the
+			// one case the bumps cannot express needs — re-cutting after a tag was
+			// deleted — but that stays on the CLI: a pickString cannot take free
+			// text, and a promptString here would let a typo name the release.
+			"id": "releaseLevel",
+			"type": "pickString",
+			"description": "How far should the version move?",
+			"options": [
+				{
+					"label": "Patch — v0.11.1 → v0.11.2, the usual",
+					"value": "patch"
+				},
+				{
+					"label": "Minor — v0.11.1 → v0.12.0, new capability",
+					"value": "minor"
+				},
+				{
+					"label": "Major — v0.11.1 → v1.0.0, consumers must change",
+					"value": "major"
+				}
+			],
+			"default": "patch"
 		},
 		{
 			"id": "agentCli",

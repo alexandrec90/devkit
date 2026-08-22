@@ -382,3 +382,103 @@ def test_both_spellings_of_the_refusal_code_are_recognised():
         health.SCHED_REFUSED_ALREADY_RUNNING_UNSIGNED - health.SCHED_REFUSED_ALREADY_RUNNING
         == 2**32
     )
+
+
+# --- the interpreter the task is registered against -----------------------------
+#
+# The only check here that reads the registration rather than the run, and the reason it
+# exists is that the run looks perfect: the job fires, exits 0, writes its artifact, and
+# puts a console window on the desktop anyway. Two rounds of fixing that bug were guarded
+# by source scans of devkit's own files, which cannot see that a file *named*
+# `pythonw.exe` is a uv trampoline spawning the base interpreter as a child.
+
+VENV_CSV = (
+    '"HostName","TaskName","Next Run Time","Status","Last Run Time","Last Result",'
+    '"Scheduled Task State","Task To Run"\n'
+    r'"HOST","\devkit-global-tools","8/14/2026 3:00:00 AM","Ready",'
+    '"8/13/2026 3:00:00 AM","0","Enabled",'
+    r'"C:\vs_code\devkit\.venv\Scripts\pythonw.exe C:\devkit\scripts\g.py --yes"'
+    "\n"
+)
+
+VENV_COMMAND = r"C:\vs_code\devkit\.venv\Scripts\pythonw.exe"
+
+
+def venv_layout(tmp_path):
+    """A virtualenv `Scripts/` beside the base install its `pyvenv.cfg` names."""
+    base = tmp_path / "base"
+    scripts = tmp_path / "venv" / "Scripts"
+    base.mkdir()
+    scripts.mkdir(parents=True)
+    for directory in (base, scripts):
+        for stem in ("python.exe", "pythonw.exe"):
+            (directory / stem).write_text("", encoding="utf-8")
+    (tmp_path / "venv" / "pyvenv.cfg").write_text(
+        f"home = {base}\nuv = 0.11.29\n", encoding="utf-8"
+    )
+    return scripts / "pythonw.exe", base
+
+
+def test_the_registered_command_is_read_off_the_scheduler():
+    parsed = health.parse_tasks(VENV_CSV)[0]
+    assert parsed.command.endswith("--yes")
+    assert parsed.interpreter == VENV_COMMAND
+
+
+def test_the_interpreter_is_found_even_when_its_path_contains_spaces():
+    """`schtasks` leaves the command unquoted however the arguments are quoted, so the
+    first whitespace token is wrong on any machine whose profile name is two words --
+    which is most of them, and all of the ones this has to work on."""
+    parsed = job(command=r"C:\Program Files\Python\pythonw.exe C:\a b\script.py --all")
+    assert parsed.interpreter == r"C:\Program Files\Python\pythonw.exe"
+
+
+def test_a_quoted_command_loses_its_quote():
+    parsed = job(command=r'"C:\py\pythonw.exe" script.py')
+    assert parsed.interpreter == r"C:\py\pythonw.exe"
+
+
+def test_a_command_naming_no_exe_falls_back_to_the_first_token():
+    """POSIX, and anything this has no model of. A wrong guess here would be a false
+    alarm at every session start, which is how a status check gets deleted."""
+    assert job(command="/usr/bin/python3 /opt/devkit/x.py --all").interpreter == "/usr/bin/python3"
+
+
+def test_a_job_registered_against_a_virtualenv_stub_is_reported(tmp_path):
+    stub, base = venv_layout(tmp_path)
+    lines = health.problems([job(command=f"{stub} script.py --yes")], NOW)
+    assert len(lines) == 1
+    assert str(base) in lines[0]
+    assert "visible console" in lines[0]
+    assert "--yes" in lines[0].rpartition("installer")[2]
+
+
+def test_a_healthy_job_on_a_real_interpreter_says_nothing(tmp_path):
+    """The reversion check, and the property that matters more than the rule: a check
+    that fires on the correct registration is one that gets removed."""
+    real = tmp_path / "pythonw.exe"
+    real.write_text("", encoding="utf-8")
+    assert health.problems([job(command=f"{real} script.py --yes")], NOW) == []
+
+
+def test_a_job_with_no_command_recorded_is_not_reported(tmp_path):
+    """A scheduler front end that stops reporting `Task To Run` should cost this check
+    its coverage, not the reader their trust in every other line."""
+    assert health.problems([job(command="")], NOW) == []
+
+
+def test_a_disabled_job_on_a_stub_is_reported_once(tmp_path):
+    """One line per job: the misregistration is real, and irrelevant next to a job
+    nothing is running at all."""
+    stub, _base = venv_layout(tmp_path)
+    lines = health.problems([job(enabled=False, command=f"{stub} script.py")], NOW)
+    assert lines == ["devkit-upgrade-projects: disabled -- nothing is running it"]
+
+
+def test_a_failing_job_on_a_stub_reports_the_failure_first(tmp_path):
+    """A misregistered command is permanent, so it is still there to report next
+    session. The failing run is the thing that may not be."""
+    stub, _base = venv_layout(tmp_path)
+    lines = health.problems([job(last_result=2, command=f"{stub} script.py")], NOW)
+    assert len(lines) == 1
+    assert "exit 2" in lines[0]

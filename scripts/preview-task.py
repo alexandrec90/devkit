@@ -550,13 +550,20 @@ def parse_choice(text: str, count: int) -> tuple[str, int]:
     return ("again", 0)
 
 
-def preview_kwargs(candidate: Candidate) -> dict:
+def preview_kwargs(candidate: Candidate, ui: bool = False) -> dict:
     """The `plan_preview` arguments for one row: a live box by name, or a ref by branch.
 
     A box name is passed alone, with no `--branch`, and that is not a shortcut -- naming
     both makes `plan_preview` resolve the ref instead, which for a task box would cut a
     SECOND worktree on a copy of a branch that is already checked out three feet away.
+
+    Under `--ui` the row always goes by ref, box or no box: what the box in the row runs
+    is the full stack (or is the box whose branch is under review), and the request is
+    for the cheap kind, which has its own name and lease. `plan_preview(ui=True)` finds
+    a standing UI box for the ref by that name, so re-picking a row stays idempotent.
     """
+    if ui:
+        return {"target": candidate.project, "branch": candidate.ref, "ui": True}
     if candidate.box:
         return {"target": candidate.box}
     return {"target": candidate.project, "branch": candidate.ref}
@@ -789,15 +796,21 @@ def serve(
     down: bool = False,
     fetch: bool = True,
     open_it: bool = True,
+    ui: bool = False,
 ) -> bool:
     """Preview one candidate through `worktree.py`, then say where it is. True on success."""
     verb = "Stopping" if down else "Bringing up"
-    echo(f"\n{verb} {candidate.project} {candidate.ref} ...")
+    mode = " (UI only)" if ui and not down else ""
+    echo(f"\n{verb} {candidate.project} {candidate.ref}{mode} ...")
     if not down:
         echo("  (a box being cut for the first time builds its images -- this can take a while)")
     try:
         plan = worktree.plan_preview(
-            workspace=workspace, fetch=fetch, up=not down, down=down, **preview_kwargs(candidate)
+            workspace=workspace,
+            fetch=fetch,
+            up=not down,
+            down=down,
+            **preview_kwargs(candidate, ui=ui),
         )
     except (worktree.WorktreeError, devkit_project.ProjectError) as exc:
         # ProjectError is a stale or hand-typed pick naming a checkout the workspace
@@ -858,6 +871,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--down", action="store_true", help="stop the picked row's stack instead")
     parser.add_argument(
+        "--ui",
+        action="store_true",
+        help="UI-only preview: start just the project's [worktree] ui_services, borrowing "
+        "the backend from the static checkout's running stack",
+    )
+    parser.add_argument(
         "--no-fetch",
         dest="fetch",
         action="store_false",
@@ -874,6 +893,13 @@ def main(argv: list[str] | None = None) -> int:
     workspace = args.workspace or sweep.default_workspace(REPO_ROOT)
     if not workspace.is_file():
         echo(f"no workspace registry at {workspace}")
+        return 2
+
+    if args.ui and args.all:
+        # `--all` re-serves boxes as whatever their leases say they are; `--ui` names
+        # how to CUT one. Combined they would cut a UI twin of every standing full
+        # preview, which nobody asked for and eight rows deep is hard to undo.
+        echo("--ui picks one ref; --all re-serves standing boxes as they are. Drop one.")
         return 2
 
     if args.pick_ref and unresolved(args.pick_ref):
@@ -948,7 +974,15 @@ def main(argv: list[str] | None = None) -> int:
 
     failures = 0
     for candidate in chosen:
-        if not serve(candidate, workspace, down=args.down, fetch=args.fetch, open_it=args.open):
+        served = serve(
+            candidate,
+            workspace,
+            down=args.down,
+            fetch=args.fetch,
+            open_it=args.open,
+            ui=args.ui,
+        )
+        if not served:
             failures += 1
     return 1 if failures else 0
 
