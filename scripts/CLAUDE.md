@@ -227,7 +227,8 @@ with different working directories. Without it every guard-cut box was named
 ## A scheduled task is registered from XML, never from `schtasks` flags
 
 Every unattended job — `install-reconcile-task.py`, `install-upgrade-schedule.py`,
-`install-docker-prune.py`, `install-vanillaland-merge.py`, `install-global-tools.py` —
+`install-release-schedule.py`, `install-docker-prune.py`, `install-vanillaland-merge.py`,
+`install-global-tools.py` —
 goes through
 `scripts/devkit_schtasks.py`, which builds a
 task document and registers it with `/XML`. That is not a style preference. **The three settings that decide whether a

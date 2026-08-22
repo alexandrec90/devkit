@@ -1,11 +1,27 @@
 # Cut a devkit release.
 #
-# Deliberately `workflow_dispatch` and not "tag every merge to main". The release
-# ordering in RELEASING.md steps 3-5 requires FALLBACK_DEVKIT_REF to be bumped and
-# committed *before* the tag exists; a merge commit gives no opportunity to do that
-# first, so auto-tagging on merge would leave
-# `test_fallback_devkit_ref_tracks_the_newest_tag` permanently red and every project
-# generated afterwards pinning a stale ref.
+# `workflow_dispatch`, and the caller is `scripts/release-pipeline.py` rather than a
+# person. What this workflow owns is the half that must not be automated *here*: it
+# stages the tag locally, runs the whole suite and the lint gate against that commit,
+# and only then pushes. Everything before it -- the bump, the PR, reading its gate,
+# merging -- happens on the machine that holds real `gh` credentials, because a PR
+# authored by `GITHUB_TOKEN` triggers no workflow run and so arrives with no gate for
+# the pipeline to read.
+#
+# This header used to say the trigger was `workflow_dispatch` because tagging every
+# merge to main was impossible: `FALLBACK_DEVKIT_REF` has to be bumped and committed
+# *before* the tag exists, and a merge commit gives no opportunity to do that first.
+# That is true of the naive design and of nothing else -- the pipeline pushes its own
+# bump commit and tags *that*, so the ordering is satisfied without a human in it. Nor
+# does this workflow push to main; the prepare PR does, through the ordinary gate,
+# which is the rule this repo holds its humans to and would be asserting does not apply
+# to CI.
+#
+# The real objection to "tag every merge" is cost, not ordering: a doc fix or a test
+# reaches no consumer, so tagging one spends a release plus an adoption PR in every
+# project to deliver nothing. `release_needed` is that objection as a predicate, and
+# `install-release-schedule.py` is the nightly job that acts on it -- so a release is
+# now automatic, just not indiscriminate.
 #
 # Releasing promptly matters more than it used to: `sync-devkit.py --pull` refuses to
 # vendor from an untagged devkit, because a consumer can only pin a tag. Untagged work

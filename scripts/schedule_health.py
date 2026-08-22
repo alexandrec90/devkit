@@ -113,6 +113,7 @@ STALE_INTERVALS = 2.0
 # invites is caught in the suite rather than by the next person to read a bare exit code.
 ARTIFACTS: dict[str, str] = {
     "devkit-worktree-reconcile": "logs/reconcile.log",
+    "devkit-release": "logs/scheduled-devkit-release.log",
     "devkit-upgrade-projects": "logs/upgrade.log",
     "devkit-docker-prune": "logs/scheduled-docker-prune.log",
     "devkit-docker-stop-idle": "logs/scheduled-docker-stop-idle.log",

@@ -24,11 +24,37 @@ that has just upgraded — and to everyone reading its green gate. That run now 
 vendored files main carries and the tag does not (`unreleased_vendored_changes`); when it
 does, the fix is a release, not a re-run.
 
-## Click the task
+## Nobody cuts a release
+
+**`devkit-release` fires nightly at 02:00 and cuts one when, and only when, `main`
+carries something a consumer cannot otherwise reach.** That is the intended path now.
+`scripts/install-release-schedule.py` registers it; `logs/scheduled-devkit-release.log`
+is its account of every night, including the quiet ones.
+
+The predicate is `release_pipeline.release_needed`: the diff from the newest tag to
+`origin/main`, restricted to the two tiers a consumer actually receives — the vendored
+`MANIFEST` and the published pre-commit channel (`.pre-commit-hooks.yaml`,
+`scripts/precommit/`). A night whose only changes were docs, tests, the generator or
+the pipeline itself ends with one line saying so. **Tagging those would not be
+harmless**: every tag costs an adoption PR in every consumer, and one that delivers
+nothing runnable trains everyone to merge them unread.
+
+It is also **the one devkit job that merges a pull request**, which is worth knowing
+before you install it. Its sibling `install-upgrade-schedule.py` says in as many words
+that it never does — a green gate plus a label is what authorises a merge here. The
+release PR cannot use that route at all: it is red *by construction* on
+`test_fallback_devkit_ref_tracks_the_newest_tag`, so no label-driven auto-merge can
+ever fire on it. `gate_verdict` is what stands in for the human read of that red, and
+it refuses on a second failing test, on a failure in another job, and on an artifact
+naming no tests at all.
+
+## Or click the task
 
 **`Devkit: Cut Release` runs every step below and stops if any of them is not what it
-expected.** It is the intended path; the manual checklist that follows is what it
-automates, kept because a run that refuses is diagnosed against it.
+expected.** Same script, without `--if-needed` — a click releases what it was asked to
+release, which is what you want when the schedule has not come round yet or the bump is
+not a patch. The manual checklist that follows is what both paths automate, kept because
+a run that refuses is diagnosed against it.
 
 Pick a bump level and *Apply*. Dry run first if you want the plan and the version it
 resolved; that mode changes nothing. On the CLI it is
@@ -50,7 +76,8 @@ It stops rather than guesses in three places, and each refusal names what it saw
   afterwards.
 
 What it does **not** decide is the version: patch is the default because that is what a
-release usually is, and step 2 below is still yours.
+release usually is, and the scheduled pass never picks anything else. A `minor` or a
+`major` is the one thing left that has to be clicked.
 
 ## What it automates
 

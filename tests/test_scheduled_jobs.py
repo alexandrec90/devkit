@@ -123,6 +123,37 @@ def test_reconcile_writes_the_file_its_installer_advertises():
     assert installer.ARTIFACT == worktree.RECONCILE_LOG
 
 
+def test_the_release_pass_writes_the_file_its_installer_advertises():
+    """Same shape as the prune: `release-pipeline.py` writes no artifact of its own --
+    most of its runs are clicks, and `devkit_project.plan_command` wraps those. The
+    wrapper is what gives the scheduled caller one, so the claim here is about the label.
+
+    The label differs from the clicked task's deliberately, and that is asserted rather
+    than left to the comment: the two slugging to one file would let the next morning's
+    click erase the only record of what fired at 2am.
+    """
+    installer = load_script("scripts/install-release-schedule.py")
+    devkit_project = load_script("scripts/devkit_project.py")
+    log_wrap = load_script("scripts/log-wrap.py")
+    assert installer.ARTIFACT == f"logs/{log_wrap.slug(installer.LABEL)}.log"
+    assert "--always" in installer.schedule_for(root=REPO_ROOT).arguments
+    clicked = devkit_project.ACTIONS["release"].label
+    assert log_wrap.slug(installer.LABEL) != log_wrap.slug(clicked)
+
+
+def test_the_scheduled_release_never_loses_the_predicate_that_makes_it_affordable():
+    """`--if-needed` is the difference between a nightly release and a nightly tag.
+
+    Without it this job would cut a release for a doc fix and open an adoption PR in
+    every consumer to deliver nothing -- and `--yes` without `--if-needed` is the exact
+    shape that edit would take, since both live in one tuple that is easy to trim.
+    """
+    installer = load_script("scripts/install-release-schedule.py")
+    arguments = installer.schedule_for(root=REPO_ROOT).arguments
+    assert "--if-needed" in arguments
+    assert "--yes" in arguments
+
+
 def test_the_upgrade_pass_writes_the_file_its_installer_advertises():
     installer = load_script("scripts/install-upgrade-schedule.py")
     upgrade = load_script("scripts/upgrade-project.py")
@@ -200,6 +231,7 @@ def test_the_vanillaland_merge_writes_the_file_its_installer_advertises():
 UNATTENDED: dict[str, str] = {
     # entry points, named directly in an installer's argv
     "scripts/worktree.py": "devkit-worktree-reconcile runs it every 15 minutes",
+    "scripts/release-pipeline.py": "devkit-release runs it nightly, behind --if-needed",
     "scripts/upgrade-project.py": "devkit-upgrade-projects runs it nightly",
     "scripts/docker-maint.py": "devkit-docker-prune and devkit-docker-stop-idle run it nightly",
     "scripts/git-merge-default.py": "devkit-vanillaland-merge runs it nightly",
@@ -208,6 +240,7 @@ UNATTENDED: dict[str, str] = {
     # reached from an entry point
     "scripts/sweep.py": "the git and gh IO for reconcile, upgrade and the merge",
     "scripts/sync-devkit.py": "upgrade-project.py spawns it per project, once per pass",
+    "scripts/release.py": "release-pipeline.py imports it for the version and bump helpers",
     "scripts/git_policy.py": "the single spawn point git-merge-default.py runs git through",
     # not scheduled, but the same failure: an agent hook's parent is whatever launched
     # the agent, and an editor's extension host has no console either.
