@@ -1008,12 +1008,22 @@ def test_some_task_still_routes_through_the_dispatcher(canonical):
 
 @needs_live_workspace
 def test_the_live_workspace_matches_the_canonical_block(canonical):
-    """The check `--check-tasks` runs, as a test so devkit's own gate catches drift."""
+    """The check `--check-tasks` runs, as a test so devkit's own gate catches drift.
+
+    Failing does not by itself mean the two copies have drifted. The live file is shared
+    by every session and is edited before the PR recording the change merges, so each
+    open task PR shows up here until it lands. `.claude/rules/vscode-tasks.md` carries
+    which direction means what, and why `--adopt-tasks` is the wrong reflex for a line
+    your branch does not own.
+    """
     text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     problems = tasks_drift(workspace_tasks(text), canonical)
-    assert not problems, "run `python scripts/devkit_project.py --adopt-tasks`: " + "; ".join(
-        problems
-    )
+    assert not problems, (
+        "the live block and devkit's copy disagree. An item your own branch changed is "
+        "settled by `python scripts/devkit_project.py --adopt-tasks`; one it did not "
+        "belongs to another session's open PR and adopting it ships their work under "
+        "your commit -- see .claude/rules/vscode-tasks.md. Differences: "
+    ) + "; ".join(problems)
 
 
 @needs_live_workspace

@@ -69,6 +69,17 @@ it regenerates the canonical copy from the live file. One test holds the pair to
 (`test_the_live_workspace_matches_the_canonical_block`) and it is
 `@needs_live_workspace`: skipped in CI, so drift is caught locally or not at all.
 
+**Red there is not evidence of drift.** The live file is a single file shared by every
+concurrent session, and the order above has each one editing it *before* the PR that
+records the change merges — so an open task PR is reported by that test from the moment
+it is written until it lands: its additions as `in the workspace but not in devkit`, its
+removals as `missing from the workspace`, its rewrites as `definition differs`. With
+several boxes open at once that is the normal state, not a defect.
+`git show origin/agent/<branch>:workspace-tasks.jsonc` says which branch owns an item.
+Settle only what your own branch changed — `--adopt-tasks` mirrors the **whole** live
+block, so running it to clear someone else's line pulls their unshipped edit into your
+PR and ships it under your commit message.
+
 ## Conventions for the tasks themselves
 
 - Use `"type": "process"` so VS Code monitors the process directly — that is what makes
