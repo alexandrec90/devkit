@@ -99,6 +99,23 @@ def test_the_wrapped_interpreter_is_the_console_one(tmp_path):
     assert sched.console(str(windowless_exe)) == str(tmp_path / "python.exe")
 
 
+def test_a_venv_interpreter_resolves_to_the_base_install(tmp_path):
+    """The half that is not "find the file next door": inside a virtualenv,
+    `pythonw.exe` is a stub deferring to the base named in `pyvenv.cfg`, and uv's spawns
+    that base as a *child* -- which is exactly what Windows hands a new console to. So
+    this delegates to `devkit_schtasks.windowless` rather than resolving beside the
+    interpreter it was given."""
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "pythonw.exe").write_text("", encoding="utf-8")
+    scripts = tmp_path / "venv" / "Scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "pythonw.exe").write_text("", encoding="utf-8")
+    (scripts / "python.exe").write_text("", encoding="utf-8")
+    (tmp_path / "venv" / "pyvenv.cfg").write_text(f"home = {base}\n", encoding="utf-8")
+    assert sched.windowless(str(scripts / "python.exe")) == str(base / "pythonw.exe")
+
+
 def test_each_interpreter_helper_falls_back_rather_than_failing():
     """A POSIX machine has neither name, and not every Windows layout ships both."""
     assert sched.windowless("/usr/bin/python3") == "/usr/bin/python3"

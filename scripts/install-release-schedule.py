@@ -106,12 +106,16 @@ def wrapper_script(root: Path = REPO_ROOT) -> Path:
 
 
 def windowless(python: str) -> str:
-    """`pythonw.exe` beside `python.exe`, so the nightly run opens no console.
+    """The interpreter the task's `<Command>` names, so the nightly run opens no console.
 
-    The task's own `<Command>`, and only that. See `console` for the other half.
+    A wrapper rather than an alias for `devkit_schtasks.windowless`, for the reason its
+    sibling `install-upgrade-schedule.windowless_python` gives: the shared function owns
+    *why* -- including that a venv's `pythonw.exe` is a stub that must be resolved
+    through `pyvenv.cfg`, since uv's spawns the base interpreter as a child and Windows
+    hands the child of a console-less task a brand new window. What belongs here is the
+    call site. See `console` for the other half.
     """
-    candidate = os.path.join(os.path.dirname(python), "pythonw.exe")
-    return candidate if os.path.isfile(candidate) else python
+    return devkit_schtasks.windowless(python)
 
 
 def console(python: str) -> str:
@@ -122,6 +126,10 @@ def console(python: str) -> str:
     **ignores for a GUI-subsystem child** -- so a `pythonw.exe` here would be left with
     no console at all, and every `gh` and `git` the pipeline runs would be handed a
     fresh visible one. Dozens of them, at 2am.
+
+    Resolved beside the interpreter it is handed rather than through `pyvenv.cfg`: this
+    one is spawned *by* the wrapper, so a venv stub is only a stub, and running the
+    checkout's own `python.exe` is the behaviour a venv is for.
     """
     if os.path.basename(python).lower() != "pythonw.exe":
         return python
