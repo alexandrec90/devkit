@@ -71,11 +71,27 @@ it regenerates the canonical copy from the live file. One test holds the pair to
 
 ## Conventions for the tasks themselves
 
-- Use `"type": "process"` so VS Code monitors the process directly — that is what makes
-  the spinner stop and the exit-code icon appear reliably.
-- Set `"close": false` in `presentation` so the terminal stays open for review.
+- **The settings a task carries are a table in the tests, not a habit.**
+  `TASK_CONTRACT` in `tests/test_devkit_project.py` holds `type`, `presentation.panel`,
+  `presentation.close` and `presentation.reveal` with what each is for, and
+  `CONTRACT_EXCEPTIONS` holds the two deviations and why. Copy the nearest neighbour
+  when you add a task and the test tells you what you missed — which is the failure it
+  was written for: the block had 33 tasks pinning `close: false` and 8 leaving it to the
+  default, and a `panel` split between `shared` and `dedicated` that nobody had decided.
+  A run's terminal is the only place a *passing* run's output exists, because
+  `log-wrap.py` empties the log when the task passes, so `panel: "new"` is the one
+  setting there is no artifact to fall back on.
 - **Wrap with `notify-wrap.py`** for the completion toast; never call `notify.py` from
-  inside a script. Notifications are a task-layer concern only.
+  inside a script. Notifications are a task-layer concern only. A task that ends too
+  fast to notify about, or whose own window is the notification, goes in
+  `UNTOASTED_TASKS` with its reason.
+- **The toast is stdlib, and it must stay that way.** `notify.py` shells out to
+  *Windows PowerShell 5.1* — `pwsh` cannot load a WinRT type — because devkit's runtime
+  dependency list is empty by contract. It previously imported `win11toast`, which no
+  project has ever installed, behind a bare `except Exception: pass`; every call was a
+  silent no-op for the wrapper's whole life, and nothing was red anywhere. That is why
+  a failed toast now prints one line to stderr: it must never break the task, and it
+  must never again be invisible.
 - **And with `log-wrap.py`, inside it**, so the run's output survives the terminal as a
   log under `logs/` named for the task — emptied when the task passes, so it never
   describes a failure that is already fixed. The nesting is `notify-wrap → log-wrap →
