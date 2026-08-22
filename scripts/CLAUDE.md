@@ -161,13 +161,30 @@ Each of these has already been violated by something:
   `sweep.py`'s scope, and then both tools would own its lifecycle. The cost is that
   nothing else can see boxes, which is why `workspace-status.py` reports them at session
   start, split by whether each holds work or is a pure leaked slot.
+- **The guard re-aims the call rather than refusing it, and the refusal is the
+  fallback.** For a year this hook could only exit 2, because a PreToolUse hook could
+  only allow or deny — so every guarded session paid a failed tool call per routed edit,
+  the agent re-sent arguments it had already sent (for a `Write`, a whole file), and the
+  transcript filled with hook errors that described correct behaviour. Claude Code's
+  `hookSpecificOutput.updatedInput` rewrites the arguments the tool is called with, so
+  the edit now lands in the box on the first attempt with the prose arriving as
+  `additionalContext`. Two properties keep it honest, both of them silent when broken:
+  the rewrite is applied **only when the same object sets no `permissionDecision`**, so
+  an `"allow"` added for symmetry drops it and lands the edit on the home branch; and
+  an unrecognised path key is logged as `permission_updated_input_invalid` and the
+  **original** arguments are used, which is why the path is written back under the key
+  it was read from rather than under `file_path`. `redirect_blocker` is the single
+  predicate for falling back to the old block, and every case in it is a way the rewrite
+  would fail *quietly* rather than loudly — a hook adapter that would drop the member
+  (`DEVKIT_HOOK_ADAPTER`), a tool whose argument shape the guard does not model, or an
+  `Edit` whose `old_string` the box's copy of the file does not contain.
 - **The guard is the one caller that skips provisioning.** A linked worktree checks out
   tracked files only, so a fresh box has no installed toolchain and nothing else was
   going to create one — `session-start.sh` returns early on a local machine. `worktree.py
   new` therefore installs it, walking the same ladder in the same order. But an install
   takes minutes and a PreToolUse hook that takes minutes is one the agent experiences as
-  a hang, so the guard passes `provision=False` and puts the `provision` command in its
-  block message instead.
+  a hang, so the guard passes `provision=False` and puts the `provision` command in the
+  message it hands back instead.
 - **The ladder detects the dependency model but cannot detect the interpreter.** No
   marker file names one: a lockfile pins packages, and `requires-python` is a floor that
   a newer release satisfies. So provisioning built every box's `.venv` from
