@@ -137,6 +137,25 @@ class DockerConfig:
 
 
 @dataclass(frozen=True)
+class TestContractConfig:
+    """Which of this project's code the untested-symbol ratchet scans.
+
+    `sources` defaults to the app directory plus `scripts/`, which is every project's
+    own code and nothing it vendored. A project that keeps code elsewhere -- a second
+    package, a `lib/` -- names those directories here rather than accepting a gate that
+    silently covers half of it. `exclude` is for subtrees inside those directories that
+    are genuinely not this project's to test: generated clients, a vendored library.
+
+    Both are prefixes matched against the repo-relative POSIX path, so `scripts/hooks/`
+    excludes the vendored tier wholesale and `scripts/hooks/harness_config.py` excludes
+    one file.
+    """
+
+    sources: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class WorktreeConfig:
     """Extra `.env` assignments an ephemeral box must make for itself.
 
@@ -175,6 +194,7 @@ class Config:
     bash: BashConfig = field(default_factory=BashConfig)
     docker: DockerConfig = field(default_factory=DockerConfig)
     worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
+    test_contract: TestContractConfig = field(default_factory=TestContractConfig)
 
     def env(self, suffix: str) -> str:
         """The prefixed control-env name, e.g. env("SKIP_STOP_VERIFY")."""
@@ -259,6 +279,14 @@ def _docker_from(raw: dict[str, Any], default: DockerConfig) -> DockerConfig:
     return replace(default, auto_stop=raw.get("auto_stop", default.auto_stop) is True)
 
 
+def _test_contract_from(raw: dict[str, Any], default: TestContractConfig) -> TestContractConfig:
+    return replace(
+        default,
+        sources=_as_str_tuple(raw.get("sources"), default.sources),
+        exclude=_as_str_tuple(raw.get("exclude"), default.exclude),
+    )
+
+
 def _worktree_from(raw: dict[str, Any], default: WorktreeConfig) -> WorktreeConfig:
     env = raw.get("env")
     if not isinstance(env, dict):
@@ -280,6 +308,7 @@ def from_dict(data: dict[str, Any]) -> Config:
     bash_raw = data.get("bash", {}) if isinstance(data.get("bash"), dict) else {}
     docker_raw = data.get("docker", {}) if isinstance(data.get("docker"), dict) else {}
     wt_raw = data.get("worktree", {}) if isinstance(data.get("worktree"), dict) else {}
+    tc_raw = data.get("test_contract", {}) if isinstance(data.get("test_contract"), dict) else {}
     return Config(
         env_prefix=str(project.get("env_prefix", default.env_prefix)),
         app_dir=str(paths.get("app", default.app_dir)),
@@ -291,6 +320,7 @@ def from_dict(data: dict[str, Any]) -> Config:
         bash=_bash_from(bash_raw, default.bash),
         docker=_docker_from(docker_raw, default.docker),
         worktree=_worktree_from(wt_raw, default.worktree),
+        test_contract=_test_contract_from(tc_raw, default.test_contract),
     )
 
 

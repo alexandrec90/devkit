@@ -1,8 +1,10 @@
-# Public symbols that no test naming their module references. See test_test_contract.py.
+# Public callables that no test naming their module references.
 #
-# This file may only SHRINK. It is the debt that existed when the gate was written --
-# not a place to send new code. Cover a symbol and delete its line; the gate fails on a
-# line that is no longer true, so both directions are enforced.
+# Debt, not configuration. This file may only SHRINK: a symbol missing from it fails
+# the gate, and so does a line here that is no longer a gap -- so covering a symbol
+# forces its line out. Never add a line to make a new symbol pass; write the test.
+#
+# Regenerate only when adopting the gate: python scripts/hooks/untested_symbols.py --seed
 scripts/devkit_project.py::extract_tasks_text
 scripts/devkit_project.py::insert_folder
 scripts/docker-maint.py::banner

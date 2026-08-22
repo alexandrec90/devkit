@@ -106,28 +106,36 @@ remembered to cover. Nothing asserted the remembering, so "every new script ship
 its tests in the same change" — `.claude/rules/engineering.md`, in those words — was a
 preference with a green suite behind it. Three scripts had no test module at all.
 
-`tests/test_test_contract.py` is the gate, in two halves. **Module level and absolute:**
-every script under `scripts/`, `scripts/hooks/` and `scripts/precommit/` needs a
-`test_<stem>.py`, and where the coverage genuinely lives elsewhere `COVERED_BY` names
-the module *and* the reason — a claim the same file checks, so a rename cannot leave a
-dangling excuse. **Symbol level and a ratchet:** every public top-level callable must be
-named by a test that references its module, and the ones that are not are listed in
-`tests/untested_symbols.txt`.
+Two gates now, and the tier each lives in is the decision worth knowing.
 
-Two properties make that list debt rather than configuration, and a change here has to
-keep both. A line that stops being true **fails**, so covering a symbol forces its line
-out and the file can only shrink. And the gate is **excluded from its own corpus** —
-its regex fixtures quote real symbol names, and counting them would have it certify
-coverage it invented.
+**Module level, devkit-only** — `tests/test_test_contract.py`. Every script under
+`scripts/`, `scripts/hooks/` and `scripts/precommit/` needs a `test_<stem>.py`, and
+where the coverage genuinely lives elsewhere `COVERED_BY` names the module *and* the
+reason — a claim the same file checks, so a rename cannot leave a dangling excuse. It
+stays here because `COVERED_BY` is project data and the naming convention is devkit's;
+vendoring either would be devkit holding an opinion about somebody else's layout.
+
+**Symbol level, vendored** — `scripts/hooks/untested_symbols.py` and its test. Every
+public top-level callable must be *named* by a test that references its module. Naming
+is a weak proxy for testing, but one with no false negatives, which is what makes it
+gateable. Scope comes from `[test_contract]` in `.devkit.toml`, so the scanner names no
+path; the gaps live in `.devkit-untested.txt`, which is **never vendored** because its
+content is a fact about one repo.
+
+Three properties make that file debt rather than configuration, and a change here has to
+keep all three. A line that stops being true **fails**, so covering a symbol forces its
+line out and the file can only shrink. `--seed` **refuses to overwrite**, so new
+untested code cannot be laundered into the list. And `sync-devkit.py --pull` seeds it on
+adoption, so switching the gate on is not a red PR gate in every consumer — which is the
+objection that kept this devkit-only when it was first written.
 
 Scoping is the part that took measuring. Searching the whole test corpus passes `main`,
 `run`, `check` and `cap` everywhere, since dozens of scripts define those names;
 searching only the matching `test_<stem>.py` fails work that is correctly covered from a
-sibling. So the corpus is the test modules that reference the script under test.
-
-It is devkit-only, deliberately. The same gate belongs in the vendored tier, but turning
-it on in every consumer is a decision with a red PR gate attached, not a rider on the
-change that wrote it.
+sibling. So the corpus is the test modules that reference the script under test — and
+`test_untested_symbols.py` uses **invented symbol names** in its fixtures, because a
+fixture quoting a real one would have the gate certify coverage it invented. The
+devkit-only ancestor shipped exactly that bug.
 
 ## The two channels
 
