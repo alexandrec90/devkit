@@ -48,13 +48,16 @@ registry instead, and neither moves the dispatcher's contract:
 
 Both docstrings carry the rest.
 
-## Changing a task: the live file first, then adopt
+## Changing a task: check the live file, edit it, then adopt
 
 `workspace-tasks.jsonc` is devkit's copy of the block, and the workspace file — which
 lives outside every repo and so cannot be vendored — is the one VS Code actually runs.
-**Edit the workspace's `.code-workspace` file, then record it:**
+**Check for existing drift before editing**, so adoption cannot mistake stale or unrelated
+workspace changes for part of yours. Resolve that drift or preserve its reported list,
+then edit the workspace's `.code-workspace` file and record the intentional result:
 
 ```bash
+python scripts/devkit_project.py --check-tasks   # preflight: run before editing
 python scripts/devkit_project.py --adopt-tasks   # live file -> workspace-tasks.jsonc
 python scripts/devkit_project.py --check-tasks   # verify they agree
 ```

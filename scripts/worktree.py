@@ -37,6 +37,9 @@ Modes:
                   with the agent box that owns that branch; re-running it
                   fast-forwards onto whatever has been pushed since. Also takes a
                   live box name, which is the same request for work already here.
+                  `--ui` starts only the project's `[worktree] ui_services` and
+                  borrows the rest of the stack from the static checkout — the
+                  cheap preview for a frontend change.
   provision <box> install the toolchain into a box that was cut without one (the
                   guard hook cuts those — see `apply_new`).
   reap <box>      tear the stack down, remove the worktree, delete the branch,
@@ -307,6 +310,15 @@ class Box:
     branch is its own. The pair is what lets `reconcile` look a preview's PR up by the
     branch under review rather than by the throwaway `preview/...` ref, and reap the
     preview when that PR lands.
+
+    `services` is empty for every box but a UI-only preview, where it lists the compose
+    services the box actually runs (the project's `[worktree] ui_services`). It is
+    recorded on the lease rather than re-read from the manifest because re-serving the
+    box — `preview <box name>`, or the restart-after-reboot pass — must scope its
+    `compose up` the same way the first one did: a UI-only box's `.env` deliberately
+    holds the *source checkout's* ports for every service it does not run, so an
+    unscoped `up` here would start a second database on the port the checkout's is
+    already bound to.
     """
 
     name: str
@@ -317,6 +329,7 @@ class Box:
     created: str = ""
     kind: str = TASK_KIND
     tracks: str = ""
+    services: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -354,6 +367,11 @@ class SpawnPlan:
     # `CORS_ORIGINS` still pointed at the old one — the exact half-configured box
     # this field exists to prevent, arriving only in the race.
     env_templates: dict[str, str] = field(default_factory=dict)
+    # The UI-only half of the same race guard: `[worktree] ui_env`, plus the slot the
+    # box borrows its backend ports from. Defaults are the no-op that keeps every
+    # other caller of `managed_env` on the single-slot path.
+    ui_env_templates: dict[str, str] = field(default_factory=dict)
+    donor_slot: int = -1
     # True when the branch predates this plan -- `resume` putting a box back on a
     # branch whose own box is gone. Reported, never decided on: every step is already
     # in `steps` by the time this is read, and the two flows differ only in what the
@@ -540,6 +558,7 @@ def parse_leases(text: str) -> dict[str, Box]:
         if not isinstance(raw, dict):
             continue
         branch = str(raw.get("branch", ""))
+        services = raw.get("services")
         boxes[name] = Box(
             name=name,
             project=str(raw.get("project", project_of(name))),
@@ -549,6 +568,7 @@ def parse_leases(text: str) -> dict[str, Box]:
             created=str(raw.get("created", "")),
             kind=str(raw.get("kind", "")) or kind_of_branch(branch),
             tracks=str(raw.get("tracks", "")),
+            services=(tuple(str(s) for s in services) if isinstance(services, list) else ()),
         )
     return boxes
 
@@ -680,6 +700,10 @@ def managed_env(
     registry: devkit_ports.Registry | None,
     slot: int,
     templates: Mapping[str, str] | None = None,
+    *,
+    donor_slot: int = -1,
+    own_services: tuple[str, ...] = (),
+    ui_templates: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """The env a box's stack needs to stand apart from every other stack.
 
@@ -691,12 +715,29 @@ def managed_env(
     `templates` is the project's `[worktree] env`, expanded last and against everything
     above it — see {@link expand_env_templates}. It comes last on purpose: a template is
     written in terms of the ports, so it cannot be one of the values it reads.
+
+    The keyword trio is the UI-only preview's inversion of the port model. A full box
+    gets every port from its own `slot`; a UI-only box runs only `own_services` and
+    borrows the rest of the stack from the source checkout, so its env starts from the
+    *donor's* slot — every `${APP_HOST_PORT}`-shaped template then lands on the backend
+    that is actually running — and only the services the box itself starts are moved
+    onto its own slot, which is what keeps two previews' frontends off one port.
+    `ui_templates` (`[worktree] ui_env`) expands last of all, on top of `templates`,
+    for the values that are only right in this mode (a dev-server proxy target that
+    must leave the compose network, say).
     """
     env = {"COMPOSE_PROJECT_NAME": box}
     if registry is not None and slot >= 0:
-        env.update(registry.env_for_slot(slot))
+        if donor_slot >= 0 and own_services:
+            env.update(registry.env_for_slot(donor_slot))
+            own_keys = {f"{s.upper()}{devkit_ports.ENV_SUFFIX}" for s in own_services}
+            env.update({k: v for k, v in registry.env_for_slot(slot).items() if k in own_keys})
+        else:
+            env.update(registry.env_for_slot(slot))
     if templates:
         env.update(expand_env_templates(env, templates))
+    if ui_templates:
+        env.update(expand_env_templates(env, ui_templates))
     return env
 
 
@@ -1115,24 +1156,38 @@ def resume_plan(
     )
 
 
-def preview_box_name(project: str, ref: str) -> str:
+def preview_box_name(project: str, ref: str, ui: bool = False) -> str:
     """`carameli` + `agent/ui-editor-0817` -> `carameli--preview-ui-editor-0817`.
 
     Deliberately not `box_name`'s spelling. A preview of a branch and the agent box that
     owns it exist at the same time by design, and one name for the two would be one
     `COMPOSE_PROJECT_NAME` for two stacks — the exact collision the lease tier exists to
     prevent, arriving through the door marked "convenience".
+
+    A UI-only preview gets `carameli--preview-ui--editor-0817` — the mode joined with
+    `NAME_SEP`, not a hyphen, because `tb.slugify` never emits a double hyphen and so
+    no *full* preview's name can contain one: `preview-ui-<topic>` is already the full
+    preview of any branch whose topic starts with `ui-`, which the example above is.
+    Distinct names because the two modes coexist on purpose — a full preview of the
+    same ref answers a different question and must not adopt (or reset) this box.
     """
     prefix = tb.managed_branch_prefix(ref)
     topic = ref[len(prefix) :] if prefix else ref
-    return f"{project}{NAME_SEP}{PREVIEW_KIND}-{tb.slugify(topic)}"
+    mode = f"{PREVIEW_KIND}-ui{NAME_SEP}" if ui else f"{PREVIEW_KIND}-"
+    return f"{project}{NAME_SEP}{mode}{tb.slugify(topic)}"
 
 
-def preview_branch(ref: str) -> str:
-    """The local branch a preview of `ref` checks out."""
+def preview_branch(ref: str, ui: bool = False) -> str:
+    """The local branch a preview of `ref` checks out.
+
+    `preview/ui/<topic>` for a UI-only preview: `tb.slugify` never emits a `/`, so the
+    extra path segment cannot collide with any full preview's branch, for the same
+    reason the box name's double separator cannot.
+    """
     prefix = tb.managed_branch_prefix(ref)
     topic = ref[len(prefix) :] if prefix else ref
-    return f"{PREVIEW_BRANCH_PREFIX}{tb.slugify(topic)}"
+    mode = "ui/" if ui else ""
+    return f"{PREVIEW_BRANCH_PREFIX}{mode}{tb.slugify(topic)}"
 
 
 def preview_refresh_steps(tracks: str) -> tuple[tuple[str, ...], ...]:
@@ -1173,7 +1228,7 @@ def preview_refresh_decision(kind: str, dirty: int, force: bool) -> tuple[bool, 
 
 
 def preview_urls(
-    registry: devkit_ports.Registry | None, slot: int
+    registry: devkit_ports.Registry | None, slot: int, services: tuple[str, ...] = ()
 ) -> tuple[tuple[str, int, str], ...]:
     """`(service, host port, url)` for a box's slot; url is "" for a non-HTTP service.
 
@@ -1182,12 +1237,18 @@ def preview_urls(
     documented way to find a box's UI was to open its seeded `.env` and do the arithmetic
     by hand, which is a step that gets skipped and then reported as "the preview didn't
     come up".
+
+    `services` non-empty is a UI-only box (`Box.services`), and the list is filtered to
+    what it actually runs: the slot prices every service, but nothing binds the others
+    here, so printing them would send the reviewer to eight ports that refuse the
+    connection. A service the registry does not price is silently absent either way.
     """
     if registry is None or slot < 0:
         return ()
     return tuple(
         (service, port, f"http://localhost:{port}" if service in HTTP_SERVICES else "")
         for service, port in sorted(registry.ports_for_slot(slot).items())
+        if not services or service in services
     )
 
 
@@ -1214,6 +1275,9 @@ def preview_spawn_plan(
     provision: tuple[ProvisionStep, ...] = (),
     now: _dt.datetime | None = None,
     env_templates: Mapping[str, str] | None = None,
+    ui_services: tuple[str, ...] = (),
+    ui_env_templates: Mapping[str, str] | None = None,
+    donor_slot: int = -1,
 ) -> SpawnPlan:
     """`spawn_plan` for a preview: an existing remote ref instead of a fresh branch.
 
@@ -1221,11 +1285,17 @@ def preview_spawn_plan(
     this mode: a preview branch with `origin/<ref>` as its upstream turns a reflexive
     `git push` from inside the box into a push onto **someone else's task branch**, which
     is the one thing a read-only checkout must not be able to do by accident.
+
+    `ui_services` non-empty makes it a UI-only preview: the box gets its own name and
+    branch namespace (`preview_box_name(ui=True)`), records the services on its lease,
+    and seeds a two-slot env — its own ports for those services, `donor_slot`'s (the
+    source checkout's) for the backend it borrows. See `managed_env`.
     """
-    name = preview_box_name(project, ref)
+    ui = bool(ui_services)
+    name = preview_box_name(project, ref, ui=ui)
     path = box_path(workspace_root, name)
     slot = next_lease_slot(registry, boxes) if registry is not None else -1
-    local = preview_branch(ref)
+    local = preview_branch(ref, ui=ui)
 
     steps: list[tuple[str, ...]] = []
     if fetch:
@@ -1240,14 +1310,25 @@ def preview_spawn_plan(
         created=(now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds"),
         kind=PREVIEW_KIND,
         tracks=ref,
+        services=tuple(ui_services),
     )
     return SpawnPlan(
         box=box,
         path=str(path),
         steps=tuple(steps),
-        env=managed_env(name, registry, slot, env_templates),
+        env=managed_env(
+            name,
+            registry,
+            slot,
+            env_templates,
+            donor_slot=donor_slot,
+            own_services=tuple(ui_services),
+            ui_templates=ui_env_templates,
+        ),
         provision=provision,
         env_templates=dict(env_templates or {}),
+        ui_env_templates=dict(ui_env_templates or {}),
+        donor_slot=donor_slot,
     )
 
 
@@ -2291,7 +2372,12 @@ def is_tracked(repo: Path, relative: str) -> bool:
     return completed.returncode == 0
 
 
-def compose_up(path: Path, project_name: str, timeout: float = 1800.0) -> tuple[bool, str]:
+def compose_up(
+    path: Path,
+    project_name: str,
+    timeout: float = 1800.0,
+    services: tuple[str, ...] = (),
+) -> tuple[bool, str]:
     """`compose up -d --build` scoped to one box. `(ok, message)`.
 
     `-p` for the same reason `compose_down` passes it, and here the consequence of
@@ -2299,13 +2385,20 @@ def compose_up(path: Path, project_name: str, timeout: float = 1800.0) -> tuple[
     directory name, and a box whose `.env` seeding was skipped would start a *second*
     copy of the source checkout's stack on the ports that checkout already holds.
 
+    `services` non-empty (a UI-only box) names what to start, with `--no-deps` so a
+    frontend whose compose file declares `depends_on: app` does not drag the whole
+    backend up behind it — the backend a UI-only box uses is the source checkout's,
+    and its own `.env` holds that checkout's ports, so a dependency-started copy here
+    would bind (or fail to bind) the donor's ports, not its own.
+
     Half an hour, because the first `up` in a fresh box builds the project's images from
     nothing. A timeout is reported rather than retried — `up` is idempotent, so running
     it again resumes the build instead of repeating it.
     """
+    scope = ["--no-deps", *services] if services else []
     try:
         completed = subprocess.run(
-            ["docker", "compose", "-p", project_name, "up", "-d", "--build"],
+            ["docker", "compose", "-p", project_name, "up", "-d", "--build", *scope],
             cwd=str(path),
             capture_output=True,
             text=True,
@@ -2584,7 +2677,15 @@ def apply_new(
                     f"slot {box.slot} was taken while the box was being cut — re-leased slot {slot}"
                 )
                 box = replace(box, slot=slot)
-                env = managed_env(box.name, registry, slot, plan.env_templates)
+                env = managed_env(
+                    box.name,
+                    registry,
+                    slot,
+                    plan.env_templates,
+                    donor_slot=plan.donor_slot,
+                    own_services=box.services,
+                    ui_templates=plan.ui_env_templates,
+                )
         boxes[box.name] = box
         write_leases(root, boxes)
     if dropped:
@@ -2633,7 +2734,7 @@ def serve_preview(
         refresh=refresh,
         up=up and has_stack(path),
         down=down,
-        urls=preview_urls(load_registry(workspace_root), box.slot),
+        urls=preview_urls(load_registry(workspace_root), box.slot, box.services),
         warning="" if allowed or not box.tracks else why,
     )
 
@@ -2649,6 +2750,7 @@ def plan_preview(
     up: bool = True,
     down: bool = False,
     force: bool = False,
+    ui: bool = False,
 ) -> PreviewPlan:
     """Resolve `preview`'s arguments against disk and, for `--pr`, against GitHub.
 
@@ -2657,6 +2759,13 @@ def plan_preview(
     case `--pr`/`--branch` names the ref to check out. That second form is the one that
     does not need the work to be local at all: the branch is on the remote, so a review
     can start the moment the agent pushes rather than after someone merges it.
+
+    `ui` cuts the cheap kind of preview: only the project's `[worktree] ui_services`
+    are started, and the rest of the stack is borrowed from the source checkout — the
+    mode for looking at a frontend change without paying for a second database, worker
+    and object store. It changes only how a *new* box is cut; a live box named as
+    `target` is served as whatever it already is, because the services it runs are on
+    its lease, not in this flag.
     """
     root = workspace.parent
     boxes = live_boxes(root)
@@ -2684,12 +2793,36 @@ def plan_preview(
                 f"authenticated for that remote? `--branch <name>` skips the lookup."
             )
 
-    name = preview_box_name(project, ref)
+    ui_services: tuple[str, ...] = ()
+    ui_env: dict[str, str] = {}
+    donor_slot = -1
+    if ui:
+        with contextlib.suppress(Exception):
+            worktree_cfg = harness_config.load(source).worktree
+            ui_services = tuple(worktree_cfg.ui_services)
+            ui_env = dict(worktree_cfg.ui_env)
+        if not ui_services:
+            raise WorktreeError(
+                f"{project} has no [worktree] ui_services in .devkit.toml, so there is "
+                f"nothing to scope a UI-only preview to. Name the compose services that "
+                f'make up its UI tier there (e.g. ui_services = ["frontend"]), or run a '
+                f"full preview."
+            )
+
+    name = preview_box_name(project, ref, ui=ui)
     existing = boxes.get(name)
     if existing is not None:
         return serve_preview(existing, root, up=up, down=down, force=force, fetch=fetch)
 
     registry = load_registry(root) if has_stack(source) else None
+    if ui:
+        donor_slot = registry.slots.get(project, -1) if registry is not None else -1
+        if donor_slot < 0:
+            raise WorktreeError(
+                f"a UI-only preview borrows the {project} checkout's running stack, "
+                f"which needs that checkout pinned in ports.toml [slots] — it is not, "
+                f"so there is no backend to point the UI at. Run a full preview instead."
+            )
     spawn = preview_spawn_plan(
         project=project,
         workspace_root=root,
@@ -2699,6 +2832,9 @@ def plan_preview(
         fetch=fetch,
         provision=plan_provision(source) if provision else (),
         env_templates=plan_env_templates(source),
+        ui_services=ui_services,
+        ui_env_templates=ui_env,
+        donor_slot=donor_slot,
     )
     return PreviewPlan(
         box=spawn.box,
@@ -2706,7 +2842,7 @@ def plan_preview(
         spawn=spawn,
         up=up and has_stack(source),
         down=down,
-        urls=preview_urls(registry, spawn.box.slot),
+        urls=preview_urls(registry, spawn.box.slot, spawn.box.services),
     )
 
 
@@ -2745,10 +2881,16 @@ def apply_preview(
         return ok, notes
 
     if plan.up:
-        ok, message = compose_up(path, plan.box.name)
+        ok, message = compose_up(path, plan.box.name, services=plan.box.services)
         notes.append(message if ok else f"[warn] {message}")
         if not ok:
             return False, notes
+        if plan.box.services:
+            notes.append(
+                f"ui-only: started {', '.join(plan.box.services)}; everything else is "
+                f"borrowed from the {plan.box.project} checkout's stack on its usual "
+                f"ports — bring that up if it is not already running"
+            )
     return True, notes
 
 
@@ -3138,7 +3280,7 @@ def survey(workspace: Path, fetch: bool = False, sizes: bool = False) -> list[di
             ),
             "kind": box.kind,
             "tracks": box.tracks,
-            "urls": [list(entry) for entry in preview_urls(registry, box.slot)],
+            "urls": [list(entry) for entry in preview_urls(registry, box.slot, box.services)],
             "path": str(path),
         }
         if sizes:
@@ -3610,7 +3752,8 @@ def render_preview(plan: PreviewPlan, applied: bool, notes: list[str]) -> str:
     if plan.down:
         lines.append(f"    {steps + 1}. docker compose -p {plan.box.name} down -v --remove-orphans")
     elif plan.up:
-        lines.append(f"    {steps + 1}. docker compose -p {plan.box.name} up -d --build")
+        scope = f" --no-deps {' '.join(plan.box.services)}" if plan.box.services else ""
+        lines.append(f"    {steps + 1}. docker compose -p {plan.box.name} up -d --build{scope}")
     if plan.warning:
         lines.append(f"  [warn] {plan.warning}")
     if plan.urls and not plan.down:
@@ -3826,6 +3969,12 @@ def main(argv: list[str] | None = None) -> int:
         help="check the ref out and print its ports; start nothing",
     )
     look.add_argument(
+        "--ui",
+        action="store_true",
+        help="start only the project's [worktree] ui_services, borrowing the backend "
+        "from the static checkout's running stack — the cheap preview for a UI change",
+    )
+    look.add_argument(
         "--down", action="store_true", help="stop this preview's stack, keeping the box"
     )
     look.add_argument(
@@ -3979,6 +4128,7 @@ def main(argv: list[str] | None = None) -> int:
                 up=args.up and not args.down,
                 down=args.down,
                 force=args.force,
+                ui=args.ui,
             )
             notes = []
             ok = not pv.refusal

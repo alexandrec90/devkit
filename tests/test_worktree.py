@@ -3095,6 +3095,239 @@ def test_preview_urls_name_the_ports_the_slot_publishes():
     assert worktree.preview_urls(registry(), slot=-1) == ()
 
 
+# --- the UI-only preview ------------------------------------------------------
+#
+# The cheap kind: only the project's `[worktree] ui_services` run in the box, and the
+# rest of the stack is borrowed from the static checkout -- so the box's `.env` mixes
+# two slots, its compose up is scoped, and its lease records what it runs. Everything
+# below is either that mixing or the naming that lets both kinds of preview of one
+# branch stand at once.
+
+
+def test_a_ui_preview_is_named_apart_from_the_full_preview_of_any_branch():
+    """`slugify` never emits `--` or `/`, so neither spelling can collide with a full
+    preview -- including the full preview of a branch whose topic starts `ui-`, which
+    is one hyphen away."""
+    assert (
+        worktree.preview_box_name("carameli", "agent/editor-0817", ui=True)
+        == "carameli--preview-ui--editor-0817"
+    )
+    assert worktree.preview_box_name("carameli", "agent/ui-editor-0817") == (
+        "carameli--preview-ui-editor-0817"
+    )
+    assert worktree.preview_box_name("carameli", "agent/editor-0817", ui=True) != (
+        worktree.preview_box_name("carameli", "agent/ui-editor-0817")
+    )
+    assert worktree.preview_branch("agent/editor-0817", ui=True) == "preview/ui/editor-0817"
+    assert worktree.preview_branch("agent/ui-editor-0817") == "preview/ui-editor-0817"
+
+
+def test_a_ui_boxs_env_borrows_the_donors_ports_for_what_it_does_not_run():
+    env = worktree.managed_env(
+        "carameli--preview-ui--x", with_frontend(), 3, donor_slot=0, own_services=("frontend",)
+    )
+    assert env["FRONTEND_HOST_PORT"] == "5176"  # the box's own slot
+    assert env["APP_HOST_PORT"] == "8000"  # the donor's
+    assert env["DB_HOST_PORT"] == "5432"
+
+
+def test_a_template_in_a_ui_box_lands_on_the_backend_that_is_running():
+    """The point of the mixing: carameli's `VITE_API_BASE_URL` template reads
+    `${APP_HOST_PORT}`, and in a UI-only box that must be the donor's port -- the
+    box's own slot prices an app nobody started."""
+    env = worktree.managed_env(
+        "carameli--preview-ui--x",
+        with_frontend(),
+        3,
+        {"VITE_API_BASE_URL": "http://localhost:${APP_HOST_PORT}"},
+        donor_slot=0,
+        own_services=("frontend",),
+    )
+    assert env["VITE_API_BASE_URL"] == "http://localhost:8000"
+
+
+def test_ui_templates_expand_last_and_win():
+    env = worktree.managed_env(
+        "carameli--preview-ui--x",
+        with_frontend(),
+        3,
+        {"X": "full-stack-value"},
+        donor_slot=0,
+        own_services=("frontend",),
+        ui_templates={"X": "${FRONTEND_HOST_PORT}"},
+    )
+    assert env["X"] == "5176"
+
+
+def test_a_donor_slot_without_services_changes_nothing():
+    """The keyword pair only means something together; a stray donor on a full box
+    must not quietly repoint its whole env at the checkout."""
+    env = worktree.managed_env("carameli--x-0806", with_frontend(), 3, donor_slot=0)
+    assert env["APP_HOST_PORT"] == "8003"
+    assert env["FRONTEND_HOST_PORT"] == "5176"
+
+
+def test_a_ui_preview_plan_records_its_services_on_the_lease():
+    plan = worktree.preview_spawn_plan(
+        project="carameli",
+        workspace_root=Path("/ws"),
+        ref=PREVIEW_REF,
+        boxes={},
+        registry=with_frontend(carameli=0),
+        ui_services=("frontend",),
+        ui_env_templates={"VITE_PROXY_TARGET": "http://h:${APP_HOST_PORT}"},
+        donor_slot=0,
+    )
+    assert plan.box.name == "carameli--preview-ui--ui-editor-0817"
+    assert plan.box.branch == "preview/ui/ui-editor-0817"
+    assert plan.box.services == ("frontend",)
+    assert plan.donor_slot == 0
+    assert plan.env["FRONTEND_HOST_PORT"] == "5174"  # slot 1, the first unpinned
+    assert plan.env["APP_HOST_PORT"] == "8000"  # the pinned checkout's
+    assert plan.env["VITE_PROXY_TARGET"] == "http://h:8000"
+
+
+def test_the_lease_file_round_trips_a_ui_previews_services():
+    ui = preview_box(
+        name="carameli--preview-ui--editor-0817",
+        branch="preview/ui/editor-0817",
+        services=("frontend",),
+    )
+    back = worktree.parse_leases(worktree.render_leases({ui.name: ui}))
+    assert back[ui.name].services == ("frontend",)
+
+
+def test_a_lease_written_before_services_existed_runs_the_full_stack():
+    for raw in ({}, {"services": "frontend"}, {"services": 5}):
+        older = json.dumps({"boxes": {"c--p": {"project": "c", "branch": "preview/x", **raw}}})
+        assert worktree.parse_leases(older)["c--p"].services == ()
+
+
+def test_preview_urls_for_a_ui_box_name_only_what_it_runs():
+    """The slot prices every service, but nothing binds the others in this box --
+    printing them would send the reviewer to ports that refuse the connection."""
+    urls = worktree.preview_urls(with_frontend(), 3, ("frontend",))
+    assert [service for service, _, _ in urls] == ["frontend"]
+
+
+def test_compose_up_for_a_ui_box_scopes_to_its_services_with_no_deps(monkeypatch):
+    """Without `--no-deps` a frontend with `depends_on: app` drags a second backend up
+    -- onto the donor's ports, because that is what this box's `.env` holds."""
+    seen = []
+    monkeypatch.setattr(
+        worktree.subprocess, "run", lambda argv, **k: seen.append(argv) or _completed()
+    )
+    ok, _ = worktree.compose_up(Path("x"), "c--preview-ui--y", services=("frontend",))
+    assert ok
+    assert seen[0][-3:] == ["--build", "--no-deps", "frontend"]
+    worktree.compose_up(Path("x"), "c--y")
+    assert seen[1][-1] == "--build"
+
+
+def test_apply_preview_of_a_ui_box_scopes_the_up_and_says_what_is_borrowed(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        worktree,
+        "compose_up",
+        lambda path, name, services=(): (calls.append(services), (True, f"stack {name} is up"))[1],
+    )
+    ui = preview_box(
+        name="carameli--preview-ui--editor-0817",
+        branch="preview/ui/editor-0817",
+        services=("frontend",),
+    )
+    ok, notes = worktree.apply_preview(worktree.PreviewPlan(box=ui, path="x", up=True), Path("ws"))
+    assert ok
+    assert calls == [("frontend",)]
+    assert any("borrowed from the carameli checkout" in note for note in notes)
+    _, full_notes = worktree.apply_preview(
+        worktree.PreviewPlan(box=preview_box(), path="x", up=True), Path("ws")
+    )
+    assert not any("borrowed" in note for note in full_notes)
+
+
+def test_a_re_leased_ui_box_keeps_its_two_slot_env(tmp_path, monkeypatch):
+    """The race guard's UI half: when the slot chosen at plan time is taken by the
+    time the lease is written, the recomputed env must move only the box's own
+    services onto the new slot and keep borrowing the donor's for the rest."""
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    rival = box("demo--rival-0806", project="demo", slot=1)
+    worktree.boxes_root(workspace.parent).mkdir(parents=True)
+    worktree.box_path(workspace.parent, rival.name).mkdir()  # live: the dir exists
+    worktree.write_leases(workspace.parent, {rival.name: rival})
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+    monkeypatch.setattr(worktree, "load_registry", lambda root: with_frontend(demo=0))
+    monkeypatch.setattr(worktree, "has_stack", lambda path: True)
+    monkeypatch.setattr(worktree, "is_tracked", lambda path, name: False)
+    seeded: dict[str, str] = {}
+    monkeypatch.setattr(worktree, "seed_env", lambda src, dst, env: seeded.update(env))
+    ui = worktree.Box(
+        name="demo--preview-ui--x",
+        project="demo",
+        branch="preview/ui/x",
+        slot=1,
+        kind=worktree.PREVIEW_KIND,
+        tracks="agent/x",
+        services=("frontend",),
+    )
+    plan = worktree.SpawnPlan(
+        box=ui,
+        path=str(worktree.box_path(workspace.parent, ui.name)),
+        steps=(),
+        donor_slot=0,
+        ui_env_templates={"VITE_PROXY_TARGET": "http://h:${APP_HOST_PORT}"},
+    )
+
+    ok, notes = worktree.apply_new(plan, workspace, provision=False)
+
+    assert ok
+    recorded = worktree.read_leases(workspace.parent)["demo--preview-ui--x"]
+    assert recorded.slot == 2
+    assert recorded.services == ("frontend",)
+    assert seeded["FRONTEND_HOST_PORT"] == "5175"  # the re-leased slot
+    assert seeded["APP_HOST_PORT"] == "8000"  # still the donor's
+    assert seeded["VITE_PROXY_TARGET"] == "http://h:8000"
+    assert any("re-leased slot 2" in note for note in notes)
+
+
+def test_a_ui_preview_of_a_project_with_no_ui_tier_is_refused(workspace):
+    with pytest.raises(worktree.WorktreeError, match="ui_services"):
+        worktree.plan_preview("demo", workspace, branch="agent/x", ui=True)
+
+
+def test_a_ui_preview_with_no_pinned_donor_slot_is_refused(workspace, monkeypatch):
+    """No pinned slot means no known backend to borrow; a box cut anyway would render
+    a frontend whose every API call lands on a port nothing serves."""
+    root = workspace.parent
+    (root / "demo" / ".devkit.toml").write_text(
+        '[worktree]\nui_services = ["frontend"]\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(worktree, "has_stack", lambda path: True)
+    monkeypatch.setattr(worktree, "load_registry", lambda r: with_frontend())
+    with pytest.raises(worktree.WorktreeError, match=r"ports\.toml"):
+        worktree.plan_preview("demo", workspace, branch="agent/x", ui=True)
+
+
+def test_plan_preview_reads_the_ui_tier_from_the_manifest(workspace, monkeypatch):
+    root = workspace.parent
+    (root / "demo" / ".devkit.toml").write_text(
+        "[worktree]\n"
+        'ui_services = ["frontend"]\n'
+        'ui_env = { VITE_PROXY_TARGET = "http://host.docker.internal:${APP_HOST_PORT}" }\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(worktree, "has_stack", lambda path: True)
+    monkeypatch.setattr(worktree, "load_registry", lambda r: with_frontend(demo=0))
+
+    plan = worktree.plan_preview("demo", workspace, branch="agent/x-0821", ui=True)
+
+    assert plan.box.services == ("frontend",)
+    assert plan.spawn is not None and plan.spawn.donor_slot == 0
+    assert plan.spawn.env["VITE_PROXY_TARGET"] == "http://host.docker.internal:8000"
+    assert [service for service, _, _ in plan.urls] == ["frontend"]
+
+
 # --- resume -----------------------------------------------------------------
 #
 # The counterpart to the `spawn` block above, and it exists because of a gap those
