@@ -79,15 +79,9 @@ def wrapper_script(root: Path = REPO_ROOT) -> Path:
     return root / "scripts" / "log-wrap.py"
 
 
-def windowless(python: str) -> str:
-    """`pythonw.exe` beside `python.exe`, so the nightly run opens no console.
-
-    Identical to `install-docker-prune.windowless` and not imported from it, for the
-    reason its docstring gives: the shared thing worth extracting is the policy, and
-    that lives in `devkit_schtasks`' docstring and in `tests/test_scheduled_jobs.py`.
-    """
-    candidate = os.path.join(os.path.dirname(python), "pythonw.exe")
-    return candidate if os.path.isfile(candidate) else python
+# The interpreter for the task's own `<Command>`; see `devkit_schtasks.windowless`, which
+# owns this policy and the venv-stub failure that consolidated the installers' copies.
+windowless = devkit_schtasks.windowless
 
 
 def console(python: str) -> str:

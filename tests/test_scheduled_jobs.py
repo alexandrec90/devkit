@@ -555,6 +555,105 @@ def test_the_helper_falls_back_rather_than_raising_when_there_is_no_twin(
     assert module.console_python() == str(gui)
 
 
+# --- and the task's own <Command> is an interpreter, not a stub for one ---------
+#
+# Everything above this line checks a *name*: that the file chosen is called
+# `pythonw.exe`, that no spawn names `sys.executable`, that the wrapped half is the
+# console twin. All of it passed while `devkit-global-tools` opened a window on every
+# fire, because inside a virtualenv `pythonw.exe` is not an interpreter -- it is a stub
+# deferring to the base install named in `pyvenv.cfg`, and uv builds that stub as a
+# trampoline which *spawns* the base as a child. A console child of a console-less
+# scheduled task is exactly what Windows hands a brand new visible console to.
+#
+# So this is the one check in this file with a filesystem under it. A source scan cannot
+# tell a trampoline from an interpreter; only a layout on disk can.
+
+WINDOWLESS_HELPERS = ("windowless", "windowless_python")
+
+
+def windowless_resolvers() -> list[tuple[str, object]]:
+    """Each job installer's resolver for the task's own `<Command>`, found not listed.
+
+    A seventh installer that grows a private copy of the two-line version joins this
+    check by existing, which is the whole point: six of them did, and all six were wrong
+    in the same way.
+    """
+    found = []
+    for name, module in JOBS:
+        for attr in WINDOWLESS_HELPERS:
+            resolver = getattr(module, attr, None)
+            if callable(resolver):
+                found.append((name, resolver))
+                break
+    return found
+
+
+RESOLVERS = windowless_resolvers()
+RESOLVER_IDS = [name for name, _resolver in RESOLVERS]
+
+
+def test_every_job_has_a_resolver_for_its_own_command():
+    assert len(RESOLVERS) == len(JOBS), (
+        f"{sorted(set(IDS) - set(RESOLVER_IDS))} define none of {WINDOWLESS_HELPERS}, so "
+        f"nothing here checks what interpreter their task is registered against"
+    )
+
+
+@pytest.fixture
+def uv_style_venv(tmp_path):
+    """A virtualenv's `Scripts/`, beside the base install its `pyvenv.cfg` names.
+
+    Both spellings exist in both directories, which is the shape that made this
+    invisible: resolving `pythonw.exe` beside the interpreter finds a real file with
+    exactly the right name, and every guard that checked the name was satisfied.
+    """
+    base = tmp_path / "base"
+    scripts = tmp_path / "venv" / "Scripts"
+    base.mkdir()
+    scripts.mkdir(parents=True)
+    for directory in (base, scripts):
+        for stem in ("python.exe", "pythonw.exe"):
+            (directory / stem).write_text("", encoding="utf-8")
+    (tmp_path / "venv" / "pyvenv.cfg").write_text(
+        f"home = {base}\nuv = 0.11.29\ninclude-system-site-packages = false\n",
+        encoding="utf-8",
+    )
+    return scripts / "python.exe", base / "pythonw.exe"
+
+
+@pytest.mark.parametrize(("name", "resolve"), RESOLVERS, ids=RESOLVER_IDS)
+def test_a_job_registered_from_a_virtualenv_runs_the_base_interpreter(name, resolve, uv_style_venv):
+    venv_python, base_gui = uv_style_venv
+    assert resolve(str(venv_python)) == str(base_gui), (
+        f"{name} would register the venv's own pythonw.exe. Under uv that is a "
+        f"trampoline that spawns the base interpreter as a child, and Windows gives the "
+        f"child of a console-less task a visible console -- so the task is GUI-subsystem, "
+        f"the file is named right, and a window opens anyway. Resolve through "
+        f"devkit_schtasks.windowless, which reads pyvenv.cfg."
+    )
+
+
+@pytest.mark.parametrize(("name", "resolve"), RESOLVERS, ids=RESOLVER_IDS)
+def test_a_job_registered_from_a_real_install_takes_the_twin_beside_it(
+    name, resolve, two_interpreters
+):
+    """The reversion check for the paragraph above: escaping a venv must not cost the
+    ordinary case, which is every job installed from a system Python."""
+    console, gui = two_interpreters
+    assert resolve(str(console)) == str(gui)
+
+
+@pytest.mark.parametrize(("name", "resolve"), RESOLVERS, ids=RESOLVER_IDS)
+def test_a_job_falls_back_rather_than_raising_when_there_is_no_windowless_twin(
+    name, resolve, tmp_path
+):
+    """POSIX, and any layout shipping `python.exe` alone. An installer that raised here
+    would leave the machine with no scheduled job at all, which is worse than a window."""
+    console = tmp_path / "python.exe"
+    console.write_text("", encoding="utf-8")
+    assert resolve(str(console)) == str(console)
+
+
 # `os.system` and friends take no `creationflags` at all, so a job that reaches for one
 # has no way to satisfy the check above -- and the failure would be the same window.
 

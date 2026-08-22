@@ -705,6 +705,8 @@ once without a denial, wrapper retry, or repeated call. Normal test runs exclude
 `python -m pytest tests/test_codex_hooks_live.py -m "codex_live and paid" -s`. The smokes
 default to `gpt-5.6-luna` with low reasoning, no reasoning summary, and low verbosity;
 `CODEX_LIVE_HOOK_MODEL` and `CODEX_LIVE_HOOK_REASONING_EFFORT` override those defaults.
+Those settings are written only to the smoke's throwaway `CODEX_HOME`; human sessions
+continue to take their model and reasoning effort from `~/.codex/config.toml`.
 Keep these tests manual, nightly, or release-only. The converter and adapter tests are the
 zero-model-cost gate for every hook change.
 

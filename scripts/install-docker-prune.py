@@ -86,18 +86,12 @@ def wrapper_script(root: Path = REPO_ROOT) -> Path:
     return root / "scripts" / "log-wrap.py"
 
 
-def windowless(python: str) -> str:
-    """`pythonw.exe` beside `python.exe`, so the nightly run opens no console.
-
-    Identical to `install-reconcile-task.windowless` and not imported from it: that
-    module is an installer with `sweep` and argparse behind it, and importing one
-    installer from another to borrow six lines couples their lifecycles. The shared
-    thing worth extracting is the *policy* -- windowless means no stdout, so the job
-    must write an artifact -- and that lives in `devkit_schtasks`' docstring and in
-    `tests/test_scheduled_jobs.py`, which enforces it for every job at once.
-    """
-    candidate = os.path.join(os.path.dirname(python), "pythonw.exe")
-    return candidate if os.path.isfile(candidate) else python
+# The interpreter for the task's own `<Command>`. Every installer used to carry its own
+# copy of this, on the reasoning that six lines are cheaper to repeat than to couple --
+# and all six were then wrong in the same way for as long as it took one job's
+# interpreter to come from a uv `.venv`. `devkit_schtasks.windowless` owns both the
+# implementation and that failure.
+windowless = devkit_schtasks.windowless
 
 
 def console(python: str) -> str:
