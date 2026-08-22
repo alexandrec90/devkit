@@ -6,10 +6,15 @@ money to check a test runner would be the exact failure the runner exists to mak
 visible.
 """
 
+import tomllib
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 from support import load_script
 
 live = load_script("scripts/hook-tests-live.py")
+codex_live = load_script("tests/test_codex_hooks_live.py")
 
 
 # --- suite selection ---------------------------------------------------------
@@ -127,6 +132,53 @@ def test_the_preflight_says_it_is_paid_and_where_the_cost_is_set():
     assert "tests/test_claude_hooks_live.py" in report
     assert "CLAUDE_LIVE_HOOK_BUDGET_USD" in report
     assert "haiku" not in report
+
+
+# --- Codex configuration isolation ------------------------------------------
+
+
+def test_codex_cost_settings_live_only_in_the_throwaway_home(tmp_path, monkeypatch):
+    """The smoke may be cheap without changing the operator's normal sessions."""
+    user_home = tmp_path / "user-codex"
+    user_home.mkdir()
+    user_config = user_home / "config.toml"
+    original = 'model = "human-model"\nmodel_reasoning_effort = "high"\n'
+    user_config.write_text(original, encoding="utf-8")
+    (user_home / "auth.json").write_text('{"token":"test-only"}', encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+
+    monkeypatch.setenv("CODEX_HOME", str(user_home))
+    monkeypatch.setattr(codex_live, "LIVE_MODEL", "cheapest-test-model")
+    monkeypatch.setattr(codex_live, "LIVE_REASONING_EFFORT", "low")
+
+    env = codex_live._isolated_codex_env(project)
+
+    isolated_home = Path(env["CODEX_HOME"])
+    config = tomllib.loads((isolated_home / "config.toml").read_text(encoding="utf-8"))
+    assert config["model"] == "cheapest-test-model"
+    assert config["model_reasoning_effort"] == "low"
+    assert config["model_reasoning_summary"] == "none"
+    assert config["model_verbosity"] == "low"
+    assert user_config.read_text(encoding="utf-8") == original
+
+
+def test_codex_command_does_not_override_human_model_preferences(tmp_path, monkeypatch):
+    calls = []
+
+    def record(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(codex_live.subprocess, "run", record)
+    isolated_env = {"CODEX_HOME": str(tmp_path / ".codex-home")}
+
+    codex_live._run_codex("codex", tmp_path, isolated_env, "test prompt")
+
+    command, kwargs = calls[0]
+    assert "--model" not in command
+    assert not any("model_reasoning_effort" in argument for argument in command)
+    assert kwargs["env"] is isolated_env
 
 
 # --- the artifact ------------------------------------------------------------

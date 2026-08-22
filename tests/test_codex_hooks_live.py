@@ -62,13 +62,24 @@ def _write_generated_hooks(tmp_path: Path, claude_settings: dict) -> dict:
 
 
 def _isolated_codex_env(tmp_path: Path) -> dict[str, str]:
-    """Keep workstation hooks out while retaining the authentication under test."""
+    """Keep workstation settings out while retaining the authentication under test.
+
+    The smoke's cheap model settings belong to this disposable Codex home. Putting
+    them here makes their lifetime and scope explicit: normal sessions continue to
+    read the operator's own config, and the Codex command needs no preference
+    overrides that could be mistaken for human-session defaults.
+    """
     source_codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
     isolated_codex_home = tmp_path / ".codex-home"
     isolated_codex_home.mkdir()
     project_key = str(tmp_path).lower()
     (isolated_codex_home / "config.toml").write_text(
-        f"[projects.'{project_key}']\ntrust_level = \"trusted\"\n",
+        f"model = {json.dumps(LIVE_MODEL)}\n"
+        f"model_reasoning_effort = {json.dumps(LIVE_REASONING_EFFORT)}\n"
+        'model_reasoning_summary = "none"\n'
+        'model_verbosity = "low"\n\n'
+        f"[projects.'{project_key}']\n"
+        'trust_level = "trusted"\n',
         encoding="utf-8",
         newline="",
     )
@@ -83,14 +94,6 @@ def _run_codex(codex: str, tmp_path: Path, clean_env: dict[str, str], prompt: st
         [
             codex,
             "exec",
-            "--model",
-            LIVE_MODEL,
-            "--config",
-            f'model_reasoning_effort="{LIVE_REASONING_EFFORT}"',
-            "--config",
-            'model_reasoning_summary="none"',
-            "--config",
-            'model_verbosity="low"',
             "--dangerously-bypass-hook-trust",
             "--approve-for-me",
             "--enable",
@@ -188,7 +191,8 @@ def test_project_hooks_are_discovered_and_block_a_real_tool_call(tmp_path):
     # `--ignore-user-config` does not isolate ~/.codex/hooks.json. Without a clean
     # CODEX_HOME, a workstation guard can block the sentinel and make this project
     # hook test look green even though its recorder never ran. Carry authentication
-    # only; project config and hooks still come from tmp_path.
+    # only; the temporary home owns the smoke's model preferences, while project
+    # config and hooks still come from tmp_path.
     clean_env = _isolated_codex_env(tmp_path)
     result = _run_codex(
         codex,
