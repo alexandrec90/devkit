@@ -35,6 +35,8 @@ import time as _time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import devkit_jsonc
+import devkit_project
 import schedule_health
 import sweep
 import worktree
@@ -459,6 +461,34 @@ def events_line(source: Path = SOURCE_ROOT, now: float = 0.0, window_days: float
     )
 
 
+def workspace_drift_line(workspace: Path) -> str:
+    """How far the live workspace file has fallen behind devkit's canonical copy.
+
+    The drift test that owns this comparison is `@needs_live_workspace`, so CI skips it
+    and nothing else looks. That is how the live file came to be running an unmerged
+    branch's task block for every window on the machine, for days, with `main` green
+    throughout -- a silence this line exists to break.
+
+    Counted, not listed. A full drift report is thirty-odd lines and this is a
+    session-start banner; the count plus the command is what makes it actionable.
+    """
+    try:
+        problems = devkit_project.workspace_drift(
+            devkit_jsonc.loads(workspace.read_text(encoding="utf-8")),
+            devkit_jsonc.loads(devkit_project.canonical_text()),
+        )
+    except Exception:
+        # Never the reason a session start fails. A malformed or missing canonical copy
+        # is a real problem, but `--check-workspace` is where it should be reported.
+        return ""
+    if not problems:
+        return ""
+    return (
+        f"{workspace.name}: {len(problems)} difference(s) from devkit's copy -- "
+        "run `python devkit/scripts/devkit_project.py --check-workspace`"
+    )
+
+
 def render(
     results: list[sweep.Result],
     behind: dict[str, str],
@@ -471,6 +501,7 @@ def render(
     scheduler: str = "",
     schedule: list[str] | None = None,
     events: str = "",
+    workspace_drift: str = "",
 ) -> str:
     """The whole message, or "" when there is nothing worth saying."""
     halves = (
@@ -487,6 +518,7 @@ def render(
         guard,
         retired,
         events,
+        workspace_drift,
     )
     lines = [line for line in halves if line]
     if not lines:
@@ -586,6 +618,7 @@ def main(argv: list[str] | None = None) -> int:
             scheduler,
             schedule,
             events_line(),
+            workspace_drift_line(workspace),
         )
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)

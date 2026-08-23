@@ -529,7 +529,7 @@ python scripts/new-project.py sports_betting --preset data --yes
 ```
 
 There is also a VS Code task, **"Project: New from devkit"**, in the shared workspace
-block (`workspace-tasks.jsonc` here, the multi-root workspace file live). A user-level
+block (`workspace.jsonc` here, the multi-root workspace file live). A user-level
 copy in `%APPDATA%/Code/User/tasks.json` is callable from any window, which matters
 because a window opened on the project it creates sees no task list at all.
 

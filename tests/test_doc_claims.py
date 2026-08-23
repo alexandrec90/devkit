@@ -223,6 +223,9 @@ ALLOWED_MISSING = {
     "known-fixes.md": "a consumer's project-owned sibling that retirement must not delete",
     "writing-conventions.md": "an illustrative filename in the progressive-disclosure "
     "example, not a file",
+    ".devkit-workspace-render.json": "the render stamp, written beside the LIVE "
+    "workspace file -- which lives outside every repo, so the stamp can never be in one; "
+    "test_the_stamp_sits_beside_the_live_file_not_under_devkit_logs pins where it goes",
     "pyvenv.cfg": "the file that makes a directory a virtualenv, named as the thing "
     "`devkit_schtasks.windowless` reads at runtime; it exists in every `.venv`, all of "
     "which are untracked, and never at the root of the repo",

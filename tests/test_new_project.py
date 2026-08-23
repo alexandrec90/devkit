@@ -43,7 +43,7 @@ def _hoisted_task_labels() -> frozenset[str]:
     devkit's canonical block instead means every task hoisted from now on becomes
     forbidden in the template automatically, with nothing to remember.
     """
-    text = devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8")
+    text = devkit_project.canonical_tasks_text()
     block = devkit_project.devkit_jsonc.loads(text)
     return frozenset(task["label"] for task in block.get("tasks", []) if task.get("label"))
 
