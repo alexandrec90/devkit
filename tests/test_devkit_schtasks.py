@@ -196,3 +196,77 @@ def test_the_task_file_is_removed_even_when_registration_fails(tmp_path, monkeyp
     assert ok is False
     assert "denied" in message
     assert seen and not seen[0].exists()
+
+
+# --- the interpreter a task is registered against -------------------------------
+#
+# `windowless` lives in this module rather than in each installer because six copies of
+# it were wrong in the same way at once: they resolved `pythonw.exe` *beside* the
+# interpreter they were handed, and inside a virtualenv that file is a stub for the base
+# install rather than an interpreter. uv's stub spawns the base as a child process, and
+# Windows hands the child of a console-less scheduled task a brand new visible console --
+# so the task was GUI-subsystem, the file was named right, and a window opened anyway.
+
+
+def venv(tmp_path, *, base_has_gui: bool = True, home: bool = True) -> Path:
+    """A virtualenv layout, and return its `Scripts/python.exe`."""
+    base = tmp_path / "base"
+    scripts = tmp_path / "venv" / "Scripts"
+    base.mkdir()
+    scripts.mkdir(parents=True)
+    for stem in ("python.exe", "pythonw.exe"):
+        (scripts / stem).write_text("", encoding="utf-8")
+    (base / "python.exe").write_text("", encoding="utf-8")
+    if base_has_gui:
+        (base / "pythonw.exe").write_text("", encoding="utf-8")
+    lines = ["uv = 0.11.29", "include-system-site-packages = false"]
+    if home:
+        lines.insert(0, f"home = {base}")
+    (tmp_path / "venv" / "pyvenv.cfg").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return scripts / "python.exe"
+
+
+def test_the_base_install_behind_a_virtualenv_is_read_from_its_config(tmp_path):
+    python = venv(tmp_path)
+    assert schtasks.venv_home(python) == tmp_path / "base"
+
+
+def test_a_real_install_reports_no_base_to_defer_to(tmp_path):
+    """No `pyvenv.cfg` anywhere above `Scripts/`, which is every system Python."""
+    python = tmp_path / "python.exe"
+    python.write_text("", encoding="utf-8")
+    assert schtasks.venv_home(python) is None
+
+
+def test_a_config_without_a_home_key_is_not_guessed_at(tmp_path):
+    """`home` is what makes the answer knowable. Without it there is nothing to return,
+    and inventing a path would send a scheduled task at a file that does not exist."""
+    python = venv(tmp_path, home=False)
+    assert schtasks.venv_home(python) is None
+
+
+def test_the_task_command_escapes_the_virtualenv_stub(tmp_path):
+    python = venv(tmp_path)
+    assert schtasks.windowless(str(python)) == str(tmp_path / "base" / "pythonw.exe")
+
+
+def test_the_stub_beside_it_is_still_better_than_a_console_when_the_base_has_none(tmp_path):
+    """An embedded or POSIX-shaped base install has no `pythonw.exe`. A CPython stub
+    loads the base in-process and opens no window, so it beats registering `python.exe`."""
+    python = venv(tmp_path, base_has_gui=False)
+    assert schtasks.windowless(str(python)) == str(python.with_name("pythonw.exe"))
+
+
+def test_the_twin_beside_a_real_install_is_taken_unchanged(tmp_path):
+    """The ordinary case, and the reversion check for the two above."""
+    for stem in ("python.exe", "pythonw.exe"):
+        (tmp_path / stem).write_text("", encoding="utf-8")
+    assert schtasks.windowless(str(tmp_path / "python.exe")) == str(tmp_path / "pythonw.exe")
+
+
+def test_there_is_no_window_question_to_answer_off_windows(tmp_path):
+    """`/usr/bin/python3` has no `pythonw` twin and needs none. Falling back rather than
+    raising is what lets one installer serve both platforms."""
+    python = tmp_path / "python"
+    python.write_text("", encoding="utf-8")
+    assert schtasks.windowless(str(python)) == str(python)

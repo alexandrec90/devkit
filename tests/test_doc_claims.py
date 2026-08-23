@@ -223,6 +223,9 @@ ALLOWED_MISSING = {
     "known-fixes.md": "a consumer's project-owned sibling that retirement must not delete",
     "writing-conventions.md": "an illustrative filename in the progressive-disclosure "
     "example, not a file",
+    "pyvenv.cfg": "the file that makes a directory a virtualenv, named as the thing "
+    "`devkit_schtasks.windowless` reads at runtime; it exists in every `.venv`, all of "
+    "which are untracked, and never at the root of the repo",
 }
 
 # Version literals prose is allowed to carry, with the reason each is not a pin that

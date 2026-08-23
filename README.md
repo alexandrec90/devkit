@@ -453,6 +453,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | Job | Installer | Cadence | Its record |
 | --- | --- | --- | --- |
 | `devkit-worktree-reconcile` | `scripts/install-reconcile-task.py` | every 15 min | `logs/reconcile.log` |
+| `devkit-release` | `scripts/install-release-schedule.py` | daily 02:00 | `logs/scheduled-devkit-release.log` |
 | `devkit-upgrade-projects` | `scripts/install-upgrade-schedule.py` | daily 03:00 | `logs/upgrade.log` |
 | `devkit-docker-stop-idle` | `scripts/install-docker-stop-idle.py` | daily 03:30 | `logs/scheduled-docker-stop-idle.log` |
 | `devkit-docker-prune` | `scripts/install-docker-prune.py` | daily 04:00 | `logs/scheduled-docker-prune.log` |
@@ -704,6 +705,8 @@ once without a denial, wrapper retry, or repeated call. Normal test runs exclude
 `python -m pytest tests/test_codex_hooks_live.py -m "codex_live and paid" -s`. The smokes
 default to `gpt-5.6-luna` with low reasoning, no reasoning summary, and low verbosity;
 `CODEX_LIVE_HOOK_MODEL` and `CODEX_LIVE_HOOK_REASONING_EFFORT` override those defaults.
+Those settings are written only to the smoke's throwaway `CODEX_HOME`; human sessions
+continue to take their model and reasoning effort from `~/.codex/config.toml`.
 Keep these tests manual, nightly, or release-only. The converter and adapter tests are the
 zero-model-cost gate for every hook change.
 

@@ -65,6 +65,63 @@ DEFAULT_TIME_LIMIT = "PT1H"
 EPOCH_START = "2020-01-01T00:00:00"
 
 
+def venv_home(python: str | Path) -> Path | None:
+    """The base install a virtualenv interpreter defers to, or None for a real one.
+
+    `pyvenv.cfg` sits one level above `Scripts/` (or `bin/`) and names the base install
+    in `home`. Reading it is the only spelling that covers every builder, which is the
+    point: the builders disagree about what the files in `Scripts/` even *are*, and
+    `windowless` needs the answer rather than a guess about one builder's layout.
+    """
+    executable = Path(python)
+    try:
+        text = (executable.parent.parent / "pyvenv.cfg").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip() == "home" and value.strip():
+            return Path(value.strip())
+    return None
+
+
+def windowless(python: str) -> str:
+    """The interpreter a task's `<Command>` must name, given a console one.
+
+    `pythonw.exe` is the same interpreter built as a GUI-subsystem app, so the scheduler
+    allocates no console for it and nothing flashes on the desktop. Every installer
+    wanted that and every installer carried its own copy of these two lines, each one
+    deliberately not imported from the others on the grounds that the shared thing worth
+    extracting was the *policy* rather than the code.
+
+    That was wrong, and it took a uv-built venv to show why. The copies all resolved
+    `pythonw.exe` *beside* the interpreter they were handed -- and inside a virtualenv
+    that file is not an interpreter at all. It is a stub deferring to the base install
+    named in `pyvenv.cfg`: CPython's is a copy that loads the base in-process, while
+    **uv's is a trampoline that spawns it as a child**, and a child of a console-less
+    parent is precisely what Windows hands a brand new visible console to. So the task
+    was GUI-subsystem, the file really was named `pythonw.exe`, and a window opened
+    anyway -- every fire of `devkit-global-tools`, the one job whose interpreter came
+    from a `.venv`. The name was checked; the property it stands for was not.
+
+    Resolving through `home` also settles a hazard `install-global-tools.interpreter`
+    already warned about from the other end -- a box's `.venv` is deleted the moment its
+    PR merges, taking the task's `<Command>` with it. The base install outlives every
+    venv, and these jobs import nothing but the standard library, so it runs them.
+
+    Identity off Windows, where there is no `pythonw.exe` to find.
+    """
+    candidates = []
+    home = venv_home(python)
+    if home is not None:
+        candidates.append(home / "pythonw.exe")
+    candidates.append(Path(python).parent / "pythonw.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return python
+
+
 def repeating_trigger(interval_minutes: int, start: str = EPOCH_START) -> str:
     """A trigger that fires every `interval_minutes`, forever.
 

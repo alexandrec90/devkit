@@ -123,6 +123,37 @@ def test_reconcile_writes_the_file_its_installer_advertises():
     assert installer.ARTIFACT == worktree.RECONCILE_LOG
 
 
+def test_the_release_pass_writes_the_file_its_installer_advertises():
+    """Same shape as the prune: `release-pipeline.py` writes no artifact of its own --
+    most of its runs are clicks, and `devkit_project.plan_command` wraps those. The
+    wrapper is what gives the scheduled caller one, so the claim here is about the label.
+
+    The label differs from the clicked task's deliberately, and that is asserted rather
+    than left to the comment: the two slugging to one file would let the next morning's
+    click erase the only record of what fired at 2am.
+    """
+    installer = load_script("scripts/install-release-schedule.py")
+    devkit_project = load_script("scripts/devkit_project.py")
+    log_wrap = load_script("scripts/log-wrap.py")
+    assert installer.ARTIFACT == f"logs/{log_wrap.slug(installer.LABEL)}.log"
+    assert "--always" in installer.schedule_for(root=REPO_ROOT).arguments
+    clicked = devkit_project.ACTIONS["release"].label
+    assert log_wrap.slug(installer.LABEL) != log_wrap.slug(clicked)
+
+
+def test_the_scheduled_release_never_loses_the_predicate_that_makes_it_affordable():
+    """`--if-needed` is the difference between a nightly release and a nightly tag.
+
+    Without it this job would cut a release for a doc fix and open an adoption PR in
+    every consumer to deliver nothing -- and `--yes` without `--if-needed` is the exact
+    shape that edit would take, since both live in one tuple that is easy to trim.
+    """
+    installer = load_script("scripts/install-release-schedule.py")
+    arguments = installer.schedule_for(root=REPO_ROOT).arguments
+    assert "--if-needed" in arguments
+    assert "--yes" in arguments
+
+
 def test_the_upgrade_pass_writes_the_file_its_installer_advertises():
     installer = load_script("scripts/install-upgrade-schedule.py")
     upgrade = load_script("scripts/upgrade-project.py")
@@ -200,6 +231,7 @@ def test_the_vanillaland_merge_writes_the_file_its_installer_advertises():
 UNATTENDED: dict[str, str] = {
     # entry points, named directly in an installer's argv
     "scripts/worktree.py": "devkit-worktree-reconcile runs it every 15 minutes",
+    "scripts/release-pipeline.py": "devkit-release runs it nightly, behind --if-needed",
     "scripts/upgrade-project.py": "devkit-upgrade-projects runs it nightly",
     "scripts/docker-maint.py": "devkit-docker-prune and devkit-docker-stop-idle run it nightly",
     "scripts/git-merge-default.py": "devkit-vanillaland-merge runs it nightly",
@@ -208,6 +240,7 @@ UNATTENDED: dict[str, str] = {
     # reached from an entry point
     "scripts/sweep.py": "the git and gh IO for reconcile, upgrade and the merge",
     "scripts/sync-devkit.py": "upgrade-project.py spawns it per project, once per pass",
+    "scripts/release.py": "release-pipeline.py imports it for the version and bump helpers",
     "scripts/git_policy.py": "the single spawn point git-merge-default.py runs git through",
     # not scheduled, but the same failure: an agent hook's parent is whatever launched
     # the agent, and an editor's extension host has no console either.
@@ -520,6 +553,105 @@ def test_the_helper_falls_back_rather_than_raising_when_there_is_no_twin(
     module = load_script(rel)
     monkeypatch.setattr(module.sys, "executable", str(gui))
     assert module.console_python() == str(gui)
+
+
+# --- and the task's own <Command> is an interpreter, not a stub for one ---------
+#
+# Everything above this line checks a *name*: that the file chosen is called
+# `pythonw.exe`, that no spawn names `sys.executable`, that the wrapped half is the
+# console twin. All of it passed while `devkit-global-tools` opened a window on every
+# fire, because inside a virtualenv `pythonw.exe` is not an interpreter -- it is a stub
+# deferring to the base install named in `pyvenv.cfg`, and uv builds that stub as a
+# trampoline which *spawns* the base as a child. A console child of a console-less
+# scheduled task is exactly what Windows hands a brand new visible console to.
+#
+# So this is the one check in this file with a filesystem under it. A source scan cannot
+# tell a trampoline from an interpreter; only a layout on disk can.
+
+WINDOWLESS_HELPERS = ("windowless", "windowless_python")
+
+
+def windowless_resolvers() -> list[tuple[str, object]]:
+    """Each job installer's resolver for the task's own `<Command>`, found not listed.
+
+    A seventh installer that grows a private copy of the two-line version joins this
+    check by existing, which is the whole point: six of them did, and all six were wrong
+    in the same way.
+    """
+    found = []
+    for name, module in JOBS:
+        for attr in WINDOWLESS_HELPERS:
+            resolver = getattr(module, attr, None)
+            if callable(resolver):
+                found.append((name, resolver))
+                break
+    return found
+
+
+RESOLVERS = windowless_resolvers()
+RESOLVER_IDS = [name for name, _resolver in RESOLVERS]
+
+
+def test_every_job_has_a_resolver_for_its_own_command():
+    assert len(RESOLVERS) == len(JOBS), (
+        f"{sorted(set(IDS) - set(RESOLVER_IDS))} define none of {WINDOWLESS_HELPERS}, so "
+        f"nothing here checks what interpreter their task is registered against"
+    )
+
+
+@pytest.fixture
+def uv_style_venv(tmp_path):
+    """A virtualenv's `Scripts/`, beside the base install its `pyvenv.cfg` names.
+
+    Both spellings exist in both directories, which is the shape that made this
+    invisible: resolving `pythonw.exe` beside the interpreter finds a real file with
+    exactly the right name, and every guard that checked the name was satisfied.
+    """
+    base = tmp_path / "base"
+    scripts = tmp_path / "venv" / "Scripts"
+    base.mkdir()
+    scripts.mkdir(parents=True)
+    for directory in (base, scripts):
+        for stem in ("python.exe", "pythonw.exe"):
+            (directory / stem).write_text("", encoding="utf-8")
+    (tmp_path / "venv" / "pyvenv.cfg").write_text(
+        f"home = {base}\nuv = 0.11.29\ninclude-system-site-packages = false\n",
+        encoding="utf-8",
+    )
+    return scripts / "python.exe", base / "pythonw.exe"
+
+
+@pytest.mark.parametrize(("name", "resolve"), RESOLVERS, ids=RESOLVER_IDS)
+def test_a_job_registered_from_a_virtualenv_runs_the_base_interpreter(name, resolve, uv_style_venv):
+    venv_python, base_gui = uv_style_venv
+    assert resolve(str(venv_python)) == str(base_gui), (
+        f"{name} would register the venv's own pythonw.exe. Under uv that is a "
+        f"trampoline that spawns the base interpreter as a child, and Windows gives the "
+        f"child of a console-less task a visible console -- so the task is GUI-subsystem, "
+        f"the file is named right, and a window opens anyway. Resolve through "
+        f"devkit_schtasks.windowless, which reads pyvenv.cfg."
+    )
+
+
+@pytest.mark.parametrize(("name", "resolve"), RESOLVERS, ids=RESOLVER_IDS)
+def test_a_job_registered_from_a_real_install_takes_the_twin_beside_it(
+    name, resolve, two_interpreters
+):
+    """The reversion check for the paragraph above: escaping a venv must not cost the
+    ordinary case, which is every job installed from a system Python."""
+    console, gui = two_interpreters
+    assert resolve(str(console)) == str(gui)
+
+
+@pytest.mark.parametrize(("name", "resolve"), RESOLVERS, ids=RESOLVER_IDS)
+def test_a_job_falls_back_rather_than_raising_when_there_is_no_windowless_twin(
+    name, resolve, tmp_path
+):
+    """POSIX, and any layout shipping `python.exe` alone. An installer that raised here
+    would leave the machine with no scheduled job at all, which is worse than a window."""
+    console = tmp_path / "python.exe"
+    console.write_text("", encoding="utf-8")
+    assert resolve(str(console)) == str(console)
 
 
 # `os.system` and friends take no `creationflags` at all, so a job that reaches for one
