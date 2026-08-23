@@ -487,6 +487,12 @@
 				"clear": true,
 				"close": false
 			},
+			// Same reason as the full preview above: several of these at once is the
+			// point of them, and the default limit of 1 turns the second click into an
+			// offer to kill the first.
+			"runOptions": {
+				"instanceLimit": 4
+			},
 			"problemMatcher": []
 		},
 		{

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import socket
 import types
 
 import pytest
@@ -1030,6 +1031,18 @@ def _registry(slots, services=None):
     return worktree.devkit_ports.Registry(
         max_slots=16, services=services or {"app": 8000, "frontend": 5180}, slots=slots
     )
+
+
+def test_port_is_open_answers_for_a_socket_that_is_listening_and_one_that_is_not():
+    """The default probe behind `donor_warning`. A real socket on an ephemeral port
+    rather than a stub, because the thing worth checking is that a refused connection
+    is False rather than an exception -- and it costs a millisecond on loopback."""
+    with socket.socket() as server:
+        server.bind((preview_task.LOOPBACK, 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        assert preview_task.port_is_open(port) is True
+    assert preview_task.port_is_open(port, timeout=0.25) is False
 
 
 def test_a_ui_preview_warns_when_the_backend_it_borrows_is_not_listening(monkeypatch, tmp_path):
