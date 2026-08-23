@@ -37,6 +37,18 @@ version = "{{ python_version }}"
 max_bytes = 4000
 head_bytes = 2000
 
+# Which of this project's code the untested-symbol ratchet scans
+# (`scripts/hooks/untested_symbols.py`; the gaps it finds are recorded in
+# `.devkit-untested.txt`, which is committed and may only shrink).
+#
+# Both fields are path prefixes and both are optional. `sources` defaults to the app
+# tree plus `scripts/` -- name it only if this project keeps code somewhere else, since
+# a gate covering half a repo is worse than one covering all of it. `exclude` is for
+# subtrees the project does not answer for: a generated client, a vendored library.
+#[test_contract]
+#sources = ["{{ app_dir }}", "scripts/", "lib/"]
+#exclude = ["{{ app_dir }}generated/"]
+
 {{#postgres}}
 # Tier 2b: host pytest against the DB over its published compose port.
 #

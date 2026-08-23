@@ -12,6 +12,7 @@ than by mocking a subprocess tree, which would pin `gh`'s flag spellings and not
 else.
 """
 
+import subprocess
 from pathlib import Path
 
 from support import REPO_ROOT, load_script
@@ -373,3 +374,72 @@ def test_a_stream_with_no_descriptor_is_left_to_inherit(monkeypatch):
     monkeypatch.setattr(rp.sys, "stdout", None)
     monkeypatch.setattr(rp.sys, "stderr", Captured())
     assert rp.inherited_streams() == {}
+
+
+# --- what the predicate reads, before it judges it ------------------------------
+#
+# `deliverable_changes` above is pure and thoroughly covered; these two are the halves
+# that go out to the repository for its arguments, and a wrong answer from either is a
+# release that does not fire (or fires nightly) with nothing in the log to say why.
+
+
+def test_the_vendored_list_is_the_manifest_and_not_a_second_spelling_of_it():
+    """Two lists of "what is vendored" would agree until the day one of them was the
+    reason a release did not fire. This one is the manifest's owner, read through it."""
+    paths = rp.vendored_paths()
+    assert paths == list(up.manifest_paths())
+    assert "scripts/sync-devkit.py" in paths
+
+
+def test_changes_since_a_tag_are_the_ones_the_default_branch_carries(tmp_path):
+    """The diff is `tag..origin/<default>`, not `tag..HEAD`: the pipeline runs from a
+    checkout whose local branch may be anywhere, and the question is what *main* has."""
+    run = _a_repo(tmp_path)
+    (tmp_path / "released.py").write_text("", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-m", "released")
+    run("tag", "v0.0.1")
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "sync-devkit.py").write_text("", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-m", "unreleased")
+    run("update-ref", "refs/remotes/origin/main", "HEAD")
+    run("checkout", "--quiet", "-b", "somewhere-else")
+
+    assert rp.changed_since_tag(tmp_path, "v0.0.1") == ["scripts/sync-devkit.py"]
+
+
+def test_a_tag_the_checkout_does_not_have_answers_nothing_rather_than_raising(tmp_path):
+    """`git diff` exits non-zero on an unknown revision, and the caller's contract is
+    best-effort: a night this cannot read is a night that does not release."""
+    run = _a_repo(tmp_path)
+    (tmp_path / "a.py").write_text("", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-m", "only commit")
+    run("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    assert rp.changed_since_tag(tmp_path, "v9.9.9") == []
+
+
+def test_a_directory_that_is_not_a_checkout_answers_nothing(tmp_path):
+    assert rp.changed_since_tag(tmp_path, "v0.0.1") == []
+
+
+def _a_repo(root):
+    """A real repository, because `changed_since_tag` resolves the default branch and
+    then diffs against a remote-tracking ref -- two behaviours a fake `git` would only
+    restate."""
+
+    def run(*args):
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    run("init", "--quiet")
+    run("config", "user.email", "test@example.com")
+    run("config", "user.name", "Test")
+    run("config", "commit.gpgsign", "false")
+    return run
