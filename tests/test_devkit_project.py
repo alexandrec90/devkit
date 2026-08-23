@@ -571,7 +571,7 @@ workspace_tasks = devkit_project.workspace_tasks
 
 @pytest.fixture
 def canonical():
-    return devkit_jsonc_loads(devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8"))
+    return devkit_project.canonical_tasks()
 
 
 def test_the_canonical_block_exists_and_parses(canonical):
@@ -583,14 +583,164 @@ def test_no_drift_against_itself(canonical):
     assert tasks_drift(canonical, canonical) == []
 
 
-def test_task_adoption_instructions_require_a_preflight_check():
-    """Without the first check, adoption absorbs unrelated live-workspace drift."""
+def test_the_rule_sends_an_editor_to_the_canonical_copy_first():
+    """The rule must name `workspace.jsonc` as the thing to edit before it names a render.
+
+    The old ordering assertion guarded a preflight `--check-tasks` before an adopt,
+    which was the best available advice while the LIVE file was the source. It is the
+    wrong shape now: the point is not to sequence two commands but to send the edit to
+    the copy that has a branch. A rule that mentioned rendering first would read as
+    "publish, then edit", which is the failure again.
+    """
     rule = (REPO_ROOT / ".claude" / "rules" / "vscode-tasks.md").read_text(encoding="utf-8")
     section = rule[rule.index("## Changing a task") :]
-    assert section.index("--check-tasks") < section.index("--adopt-tasks")
-    assert devkit_project.CANONICAL_HEADER.index(
-        "--check-tasks"
-    ) < devkit_project.CANONICAL_HEADER.index("--adopt-tasks")
+    assert section.index("workspace.jsonc") < section.index("--render-workspace")
+    assert "Never hand-edit the live file" in section
+
+    header = devkit_project.canonical_text()[:4000]
+    assert "--render-workspace" in header, "the canonical copy must say how it is published"
+    assert header.index("--check-workspace") < header.index("--adopt-workspace")
+
+
+# --- the whole file: drift, render, adopt ------------------------------------
+
+
+@pytest.fixture
+def workspace_pair(tmp_path, monkeypatch):
+    """A canonical copy and a live file, both writable, wired into the module.
+
+    The real pair cannot be used: rendering WRITES the live workspace file, which every
+    VS Code window on this machine is reading.
+    """
+    canonical = tmp_path / "workspace.jsonc"
+    canonical.write_text(devkit_project.canonical_text(), encoding="utf-8", newline="\n")
+    live = tmp_path / "alex-projects.code-workspace"
+    live.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
+    return canonical, live
+
+
+def _run(live, *flags):
+    return devkit_project.main(["--workspace", str(live), *flags])
+
+
+def test_drift_names_a_checkout_that_appeared_only_in_the_live_file():
+    """`folders` is the registry every sweep reads, so "differs" is not an answer."""
+    canonical = {"folders": [{"path": "carameli"}]}
+    live = {"folders": [{"path": "carameli"}, {"path": "sports_betting"}]}
+    problems = devkit_project.workspace_drift(live, canonical)
+    assert "folder in the workspace but not in devkit: sports_betting" in problems
+
+
+def test_drift_names_a_checkout_missing_from_the_live_file():
+    canonical = {"folders": [{"path": "carameli"}, {"path": "devkit"}]}
+    problems = devkit_project.workspace_drift({"folders": [{"path": "carameli"}]}, canonical)
+    assert "folder missing from the workspace: devkit" in problems
+
+
+def test_drift_reports_a_changed_setting():
+    problems = devkit_project.workspace_drift(
+        {"settings": {"powershell.cwd": "devkit"}}, {"settings": {"powershell.cwd": "carameli"}}
+    )
+    assert "settings differs" in problems
+
+
+def test_drift_ignores_layout_and_comments(workspace_pair):
+    """VS Code rewrites this file itself; a byte comparison would cry wolf every time."""
+    canonical, live = workspace_pair
+    payload = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))
+    live.write_text(json.dumps(payload, indent=8), encoding="utf-8", newline="\n")
+    assert _run(live, "--check-workspace") == 0
+
+
+def test_render_publishes_the_canonical_copy(workspace_pair):
+    canonical, live = workspace_pair
+    live.write_text(
+        live.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli"', '"x": "y"'),
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert _run(live, "--render-workspace", "--force") == 0
+    assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
+    assert _run(live, "--check-workspace") == 0
+
+
+def test_render_refuses_to_overwrite_an_unadopted_live_edit(workspace_pair):
+    """The whole point of the stamp. A render that silently discarded a hand edit would
+    be the old last-writer-wins failure wearing devkit's name."""
+    canonical, live = workspace_pair
+    canonical.write_text(
+        canonical.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli"', '"a": "b"'),
+        encoding="utf-8",
+        newline="\n",
+    )
+    live.write_text(
+        live.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli"', '"c": "d"'),
+        encoding="utf-8",
+        newline="\n",
+    )
+    before = live.read_text(encoding="utf-8")
+    assert _run(live, "--render-workspace") == 1
+    assert live.read_text(encoding="utf-8") == before, "the live edit was overwritten anyway"
+
+
+def test_render_proceeds_once_the_live_edit_is_adopted(workspace_pair):
+    canonical, live = workspace_pair
+    live.write_text(
+        live.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli"', '"c": "d"'),
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert _run(live, "--adopt-workspace") == 0
+    assert devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"] == {"c": "d"}
+    assert _run(live, "--check-workspace") == 0
+
+
+def test_render_stamps_so_the_next_one_is_not_mistaken_for_a_hand_edit(workspace_pair):
+    """A rendered file differs from what was there before; without the stamp the very
+    next render would read its own output as somebody else's edit."""
+    canonical, live = workspace_pair
+    canonical.write_text(
+        canonical.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli"', '"a": "b"'),
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert _run(live, "--render-workspace", "--force") == 0
+    canonical.write_text(
+        canonical.read_text(encoding="utf-8").replace('"a": "b"', '"e": "f"'),
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert _run(live, "--render-workspace") == 0, "the second render refused its own output"
+    assert devkit_jsonc_loads(live.read_text(encoding="utf-8"))["settings"] == {"e": "f"}
+
+
+def test_a_current_live_file_is_stamped_without_being_rewritten(workspace_pair):
+    """Adoption leaves the pair equal but unstamped, which must not arm the refusal."""
+    _canonical, live = workspace_pair
+    assert devkit_project.read_stamp(live) is None
+    assert _run(live, "--render-workspace") == 0
+    assert devkit_project.read_stamp(live) == devkit_project.semantic_digest(
+        live.read_text(encoding="utf-8")
+    )
+
+
+def test_a_written_stamp_reads_back_and_a_missing_one_is_not_an_error(tmp_path):
+    """`write_stamp`/`read_stamp` are what make a render refusable, so the round trip is
+    pinned directly rather than only through `--render-workspace`. A live file devkit
+    has never written has no stamp, and that has to read as "unknown", not as a crash --
+    it is the state every machine is in before the first render."""
+    live = tmp_path / devkit_project.DEFAULT_WORKSPACE.name
+    assert devkit_project.read_stamp(live) is None
+    devkit_project.write_stamp(live, "cafef00d")
+    assert devkit_project.read_stamp(live) == "cafef00d"
+
+
+def test_the_stamp_sits_beside_the_live_file_not_under_devkit_logs(tmp_path):
+    """An ephemeral box has its own empty `logs/`; a stamp there would make every box's
+    first render believe the live file had been hand-edited."""
+    live = tmp_path / devkit_project.DEFAULT_WORKSPACE.name
+    assert devkit_project.stamp_path(live).parent == live.parent
 
 
 def test_drift_reports_a_missing_task(canonical):
@@ -711,13 +861,40 @@ def test_every_workspace_scoped_task_writes_a_failure_artifact(canonical):
     for task in canonical["tasks"]:
         args = [str(a) for a in task.get("args", ())]
         label = task["label"]
-        if any("devkit_project.py" in a for a in args):
-            continue  # wrapped by the dispatcher
+        if args and args[0].endswith("devkit_project.py"):
+            continue  # a dispatch: wrapped inside plan_command, where the checkout is known
         if any(reason in label for reason in UNLOGGED_TASKS):
             continue
         if not any("log-wrap.py" in a for a in args):
             missing.append(label)
     assert not missing, f"tasks with no failure artifact: {missing}"
+
+
+def test_every_workspace_file_command_is_reachable_from_a_task(canonical):
+    """The three directions between the live file and `workspace.jsonc` are one click.
+
+    A flag nobody can click is how the old arrangement stayed broken: `--check-tasks`
+    existed for years, was correct, and was never wired to anything -- so the only
+    thing that ever ran it was a test that CI skips. Reachability is the difference
+    between a gate and a documented intention.
+    """
+    spelled = {arg for task in canonical["tasks"] for arg in map(str, task.get("args", ()))}
+    for flag in ("--check-workspace", "--render-workspace", "--adopt-workspace"):
+        assert flag in spelled, f"{flag} is reachable only by typing it"
+
+
+def test_the_workspace_file_tasks_are_not_dispatches(canonical):
+    """There is exactly one workspace file, so there is no checkout to pick -- and a
+    task that named the `project` picker would ask a question with no bearing on what
+    it does. They call the script directly, which is why they carry their own
+    `log-wrap.py` (see the artifact test above)."""
+    for task in canonical["tasks"]:
+        if not task["label"].startswith("Workspace: "):
+            continue
+        args = [str(a) for a in task.get("args", ())]
+        assert not args[0].endswith("devkit_project.py"), task["label"]
+        assert "${input:project}" not in args, task["label"]
+        assert "scripts/log-wrap.py" in args, task["label"]
 
 
 def test_the_unlogged_exceptions_are_all_real_tasks(canonical):
@@ -1125,23 +1302,22 @@ def test_some_task_still_routes_through_the_dispatcher(canonical):
 
 
 @needs_live_workspace
-def test_the_live_workspace_matches_the_canonical_block(canonical):
-    """The check `--check-tasks` runs, as a test so devkit's own gate catches drift.
+def test_the_live_workspace_matches_the_canonical_copy():
+    """The check `--check-workspace` runs, as a test so devkit's own gate catches drift.
 
-    Failing does not by itself mean the two copies have drifted. The live file is shared
-    by every session and is edited before the PR recording the change merges, so each
-    open task PR shows up here until it lands. `.claude/rules/vscode-tasks.md` carries
-    which direction means what, and why `--adopt-tasks` is the wrong reflex for a line
-    your branch does not own.
+    Whole-file now, not the task block alone. `folders` had no gate of any kind before:
+    `new-project.py` registers a checkout by editing the live file, so a generated
+    project existed only in the copy with no history — and that list is what every
+    sweep, status line and `--project` picker resolves against.
     """
     text = LIVE_WORKSPACE.read_text(encoding="utf-8")
-    problems = tasks_drift(workspace_tasks(text), canonical)
+    problems = devkit_project.workspace_drift(
+        devkit_jsonc_loads(text), devkit_jsonc_loads(devkit_project.canonical_text())
+    )
     assert not problems, (
-        "the live block and devkit's copy disagree. An item your own branch changed is "
-        "settled by `python scripts/devkit_project.py --adopt-tasks`; one it did not "
-        "belongs to another session's open PR and adopting it ships their work under "
-        "your commit -- see .claude/rules/vscode-tasks.md. Differences: "
-    ) + "; ".join(problems)
+        "run `python scripts/devkit_project.py --render-workspace` (or --adopt-workspace "
+        "to keep the live edits): " + "; ".join(problems)
+    )
 
 
 @needs_live_workspace

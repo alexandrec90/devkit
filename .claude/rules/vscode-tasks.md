@@ -1,7 +1,7 @@
 ---
-description: Where VS Code tasks live, how a task is defined and dispatched, and the one-way adoption flow that records them
+description: Where VS Code tasks live, how a task is defined and dispatched, and how devkit's canonical copy is rendered to the live workspace file
 paths:
-  - workspace-tasks.jsonc
+  - workspace.jsonc
   - scripts/devkit_project.py
   - scripts/git-merge-default.py
   - scripts/vanillaland-e2e.py
@@ -68,26 +68,42 @@ registry instead, and neither moves the dispatcher's contract:
 
 Both docstrings carry the rest.
 
-## Changing a task: check the live file, edit it, then adopt
+## Changing a task: edit devkit's copy, on a branch, then render
 
-`workspace-tasks.jsonc` is devkit's copy of the block, and the workspace file — which
-lives outside every repo and so cannot be vendored — is the one VS Code actually runs.
-**Check for existing drift before editing**, so adoption cannot mistake stale or unrelated
-workspace changes for part of yours. Resolve that drift or preserve its reported list,
-then edit the workspace's `.code-workspace` file and record the intentional result:
+`workspace.jsonc` is devkit's canonical copy of the **whole** workspace file, and the
+live `.code-workspace` — which lives outside every repo and so cannot be vendored — is
+what VS Code actually runs. **Edit the canonical one.** It is the only copy with a
+branch, a diff and a reviewer:
 
 ```bash
-python scripts/devkit_project.py --check-tasks   # preflight: run before editing
-python scripts/devkit_project.py --adopt-tasks   # live file -> workspace-tasks.jsonc
-python scripts/devkit_project.py --check-tasks   # verify they agree
+python scripts/devkit_project.py --check-workspace    # do they agree?
+# ...edit workspace.jsonc on a task branch, ship it, let the PR merge...
+python scripts/devkit_project.py --render-workspace   # workspace.jsonc -> the live file
 ```
 
-**One-way, with no flag for the other direction.** Editing `workspace-tasks.jsonc`
-directly looks right — it is the file in the repo, the diff is clean, and the drift test
-even names `--adopt-tasks` as the remedy — and running that *deletes the edit*, because
-it regenerates the canonical copy from the live file. One test holds the pair together
-(`test_the_live_workspace_matches_the_canonical_block`) and it is
-`@needs_live_workspace`: skipped in CI, so drift is caught locally or not at all.
+All three are one click as well — the *Workspace:* tasks, which are deliberately not
+dispatches: there is one workspace file, so there is no checkout to pick, and they carry
+their own `notify-wrap`/`log-wrap` because `plan_command` never sees them.
+
+**Never hand-edit the live file to make a change.** It has no branch dimension: one
+copy serves every window on the machine, so an in-flight edit is globally live before
+anyone reviews it, and two agents editing it race with last-writer-wins and nothing to
+recover the loser's edit *from*. That is not hypothetical — on 2026-08-21 the live file
+was found running PR #177's task block, still open, with five tasks deleted and 38
+reformatted, in `main`'s name. Editing `workspace.jsonc` on a branch instead puts the
+conflict in git, where a conflict has two visible sides.
+
+**The other direction still exists, for the edits that are not yours to route.** VS
+Code rewrites the file itself when a workspace setting is changed through its UI, and a
+hand edit in the editor is legitimate. `--adopt-workspace` records the live file back
+into `workspace.jsonc` for committing on a branch, and `--render-workspace` *refuses*
+rather than overwriting an unadopted edit — it renders only when the live file is
+byte-for-meaning what devkit last wrote, recorded in `.devkit-workspace-render.json`
+beside it. `--force` overrides that, and it discards.
+
+The pairing is held by `test_the_live_workspace_matches_the_canonical_copy`, which is
+`@needs_live_workspace`: skipped in CI, so drift is caught locally or not at all. That
+is what the session-start line in `scripts/workspace-status.py` exists to backstop.
 
 **Red there is not evidence of drift.** The live file is a single file shared by every
 concurrent session, and the order above has each one editing it *before* the PR that
