@@ -15,6 +15,7 @@ and it lives next to `--yes` in one tuple that a future edit could trim by half.
 """
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -290,3 +291,103 @@ def test_a_checkout_with_no_pipeline_is_refused(tmp_path, capsys):
 def test_a_malformed_time_is_refused_before_anything_is_registered(capsys):
     with pytest.raises(SystemExit):
         sched.main(["--yes", "--at", "2am", "--devkit", str(REPO_ROOT)])
+
+
+# --- the pieces the registered command is assembled from -----------------------
+#
+# Reached until now only through `Schedule`, which is the shape a reader checks and the
+# shape a rename survives: every one of these could return the wrong path and the
+# assertions above would still pass, because they read the string this file builds
+# rather than the file it points at.
+
+
+def test_the_pipeline_the_schedule_runs_is_the_one_in_the_checkout():
+    """A release job that points at a script the checkout does not have is the failure
+    `--check` exists for, and it is invisible until 2am."""
+    assert sched.pipeline_script(REPO_ROOT) == REPO_ROOT / "scripts" / "release-pipeline.py"
+    assert sched.pipeline_script(REPO_ROOT).is_file()
+
+
+def test_the_wrapper_the_schedule_runs_is_the_one_in_the_checkout():
+    assert sched.wrapper_script(REPO_ROOT) == REPO_ROOT / "scripts" / "log-wrap.py"
+    assert sched.wrapper_script(REPO_ROOT).is_file()
+
+
+def test_every_path_in_the_arguments_is_quoted(tmp_path):
+    """This workspace lives under a user profile, and profile names contain spaces on
+    most machines that are not this one: an unquoted path registers a task whose first
+    argument is half a directory name. Written against a directory with a space in it
+    rather than a Windows literal, so it is the quoting being asserted on either OS."""
+    root = tmp_path / "Program Files" / "devkit"
+    arguments = sched.release_arguments(WINDOWS_PYTHON, root)
+    assert f'"{sched.wrapper_script(root).resolve()}"' in arguments
+    assert f'"{sched.pipeline_script(root).resolve()}"' in arguments
+    assert " Files" not in arguments.replace(
+        f'"{sched.wrapper_script(root).resolve()}"', ""
+    ).replace(f'"{sched.pipeline_script(root).resolve()}"', "")
+
+
+def test_a_checkout_with_no_workspace_beside_it_passes_no_flag():
+    """`--workspace ""` would reach the adoption pass as an empty path rather than as
+    the absence of one."""
+    assert "--workspace" not in sched.release_arguments(WINDOWS_PYTHON, REPO_ROOT)
+    assert "--workspace" in sched.release_arguments(
+        WINDOWS_PYTHON, REPO_ROOT, "somewhere/alex.code-workspace"
+    )
+
+
+def test_the_query_asks_for_the_verbose_list_the_parser_reads():
+    """`registered_command` reads a `Task To Run:` line, which only `/V` prints and only
+    `/FO LIST` prints one-per-line. Drop either and the query still succeeds, reports no
+    command, and `--check` calls a correctly registered task drift."""
+    argv = sched.query_argv("devkit-release")
+    assert argv[:4] == ["schtasks", "/Query", "/TN", "devkit-release"]
+    assert "/V" in argv and argv[argv.index("/FO") + 1] == "LIST"
+
+
+def test_the_runner_captures_output_and_leaves_a_failure_to_the_caller():
+    """Every caller here reads `stdout` and branches on `returncode`; a `check=True`
+    would turn a task that is merely not registered yet into a traceback."""
+    result = sched.run_command([sys.executable, "-c", "print('out'); raise SystemExit(3)"])
+    assert result.returncode == 3
+    assert result.stdout.strip() == "out"
+
+
+# --- registering it ------------------------------------------------------------
+
+
+def test_registering_hands_schtasks_the_document_and_reports_the_time(monkeypatch):
+    monkeypatch.setattr(sched, "WINDOWS", True)
+    seen = []
+
+    def runner(argv):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(list(argv), 0, "SUCCESS", "")
+
+    ok, message = sched.install(a_schedule(), runner=runner)
+    assert ok, message
+    assert seen[0][:4] == ["schtasks", "/Create", "/TN", sched.TASK_NAME]
+    assert "02:00" in message
+
+
+def test_a_failed_registration_is_reported_rather_than_claimed(monkeypatch):
+    monkeypatch.setattr(sched, "WINDOWS", True)
+    ok, message = sched.install(
+        a_schedule(),
+        runner=lambda argv: subprocess.CompletedProcess(list(argv), 1, "", "Access is denied."),
+    )
+    assert not ok
+    assert "denied" in message
+
+
+def test_posix_is_told_what_to_add_rather_than_told_it_worked(monkeypatch):
+    """The installer cannot register anything here, and the one useful thing it can do
+    is hand over the line -- which is also what `render_plan` prints."""
+    monkeypatch.setattr(sched, "WINDOWS", False)
+    ok, message = sched.install(a_schedule(), runner=_no_runner)
+    assert not ok
+    assert "0 2 * * *" in message
+
+
+def _no_runner(argv):
+    raise AssertionError(f"nothing should be run on a machine that cannot register: {argv}")
