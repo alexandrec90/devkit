@@ -105,16 +105,20 @@ The pairing is held by `test_the_live_workspace_matches_the_canonical_copy`, whi
 `@needs_live_workspace`: skipped in CI, so drift is caught locally or not at all. That
 is what the session-start line in `scripts/workspace-status.py` exists to backstop.
 
-**Red there is not evidence of drift.** The live file is a single file shared by every
-concurrent session, and the order above has each one editing it *before* the PR that
-records the change merges — so an open task PR is reported by that test from the moment
-it is written until it lands: its additions as `in the workspace but not in devkit`, its
-removals as `missing from the workspace`, its rewrites as `definition differs`. With
-several boxes open at once that is the normal state, not a defect.
-`git show origin/agent/<branch>:workspace-tasks.jsonc` says which branch owns an item.
-Settle only what your own branch changed — `--adopt-tasks` mirrors the **whole** live
-block, so running it to clear someone else's line pulls their unshipped edit into your
-PR and ships it under your commit message.
+**Red there is not evidence of drift.** The live file is rendered from a *merged*
+canonical copy, and the order above has you editing `workspace.jsonc` before that merge
+— so from a box on an open task branch the test reports your own unlanded edit, every
+time: an added task as `missing from the workspace`, a changed one as
+`definition differs`. Another branch's edit reads the same way once its PR lands and
+this box has not merged main yet. With several boxes open at once that is the normal
+state, not a defect. What the live file should match is `workspace.jsonc` **as it stands
+on `origin/main`** — `git show` that revision of it, and the difference against your own
+copy is what your branch adds.
+
+**And the remedy the failure names is the wrong direction here.** `--adopt-workspace`
+takes the *live* file — which is still main's render — over your canonical copy, so
+running it in a box to get green deletes the edit the branch exists for. Render only
+after the PR merges; a box never renders.
 
 ## Conventions for the tasks themselves
 
@@ -194,3 +198,13 @@ PR and ships it under your commit message.
   cover every checkout the `project` picker lists, and a deliberate omission (devkit is
   not a target of a devkit upgrade) to carry its reason in writing. Pickers scoped by
   `Action.projects` are a separate case and are gated separately.
+
+- **A task meant to run twice at once says so with `runOptions.instanceLimit`.** The
+  default is **1**, and re-running a task that is already active offers to terminate it
+  instead — which is what the preview tasks did for months, so comparing two branches
+  side by side looked impossible from the outside while `worktree.py` underneath had
+  been concurrency-safe all along (a lease lock, a port slot and a
+  `COMPOSE_PROJECT_NAME` per box). `presentation.panel` is *not* this setting: `new`
+  gives each run its own terminal and still refuses the second run. Raising it also
+  gives that task's `log-wrap.py` artifact two writers, which is what `write_artifact`'s
+  `since` argument handles.
