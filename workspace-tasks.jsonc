@@ -473,7 +473,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "dedicated",
+				"panel": "new",
 				"focus": true,
 				"clear": true,
 				"close": false
@@ -1350,7 +1350,7 @@
 			},
 			"presentation": {
 				"reveal": "always",
-				"panel": "shared",
+				"panel": "new",
 				"showReuseMessage": false,
 				"close": false
 			},
