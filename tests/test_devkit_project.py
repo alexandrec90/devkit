@@ -495,7 +495,6 @@ def test_picker_registration_updates_the_multi_test_picker_too():
                 {"id": "project", "options": ["alpha"]},
                 {"id": "daemonProject", "options": ["alpha"]},
                 {"id": "worktreeProject", "options": ["alpha"]},
-                {"id": "sweepScope", "options": ["alpha"]},
                 {"id": "upgradeScope", "options": ["alpha"]},
                 {"id": "mergeCheckout", "options": ["alpha"]}
             ]
@@ -556,7 +555,6 @@ def test_registering_against_the_real_workspace_file():
     for picker_id in (
         "daemonProject",
         "worktreeProject",
-        "sweepScope",
         "upgradeScope",
         "mergeCheckout",
     ):
@@ -725,6 +723,17 @@ def test_a_current_live_file_is_stamped_without_being_rewritten(workspace_pair):
     assert devkit_project.read_stamp(live) == devkit_project.semantic_digest(
         live.read_text(encoding="utf-8")
     )
+
+
+def test_a_written_stamp_reads_back_and_a_missing_one_is_not_an_error(tmp_path):
+    """`write_stamp`/`read_stamp` are what make a render refusable, so the round trip is
+    pinned directly rather than only through `--render-workspace`. A live file devkit
+    has never written has no stamp, and that has to read as "unknown", not as a crash --
+    it is the state every machine is in before the first render."""
+    live = tmp_path / devkit_project.DEFAULT_WORKSPACE.name
+    assert devkit_project.read_stamp(live) is None
+    devkit_project.write_stamp(live, "cafef00d")
+    assert devkit_project.read_stamp(live) == "cafef00d"
 
 
 def test_the_stamp_sits_beside_the_live_file_not_under_devkit_logs(tmp_path):
@@ -935,6 +944,117 @@ def test_no_two_tasks_share_an_icon_and_colour(canonical):
     assert not clashes, "; ".join(clashes)
 
 
+# The settings every task carries, and what each one is for. A task is a one-click
+# action with no review step, so what makes the set navigable is that they all behave
+# the same way — and the way drift arrives is a new task written by copying whichever
+# neighbour happened to be nearest.
+#
+# `panel: "new"` is the one with a history. The VS Code default, `shared`, puts every
+# task in one terminal, so starting any task erases what the last one printed, with no
+# warning and nothing to scroll back to; `dedicated` is half a fix, separating task from
+# task while still overwriting the previous run of the *same* task, which is the pair a
+# reader most often wants side by side. The `logs/` artifacts do not cover the gap —
+# `log-wrap.py` empties a task's log when it passes, so a successful run exists only in
+# its terminal. Terminals accumulate instead, and that is the accepted trade.
+TASK_CONTRACT = {
+    "type": "process",  # VS Code watches the process, so the exit-code icon is real
+    "presentation.panel": "new",  # one run, one terminal; nothing is overwritten
+    "presentation.close": False,  # the terminal stays open for review
+    "presentation.reveal": "always",  # a task you clicked shows you what it did
+}
+
+# Tasks that deliberately finish without a toast, for the same reason `UNLOGGED_TASKS`
+# exists: a toast reports that something you were not watching has ended, and these
+# either end instantly or hand you a window that is itself the notification.
+UNTOASTED_TASKS = {
+    "Agents: Open Tabs (External Terminal)": "the tabs it opens are the notification",
+    "Agents: Resume Recent Sessions": "same — reopens sessions in tabs, then exits",
+    "Agents: Import Limited Claude Sessions": "same — opens imported sessions in tabs",
+    "Ports: Show Checkout Allocations": "prints a table and exits; you are already looking",
+}
+
+# Deviations, each with the reason it is one. A new task does not belong here: this is
+# for the handful whose *output is not in their terminal at all*.
+CONTRACT_EXCEPTIONS = {
+    ("Agent: Sync Codex Context", "presentation.reveal"): (
+        "silent: a context sync that prints nothing worth stealing focus for"
+    ),
+    ("Agents: Open Tabs (External Terminal)", "presentation.reveal"): (
+        "silent: the tabs it opens are the output; its own terminal holds one line"
+    ),
+    ("Agents: Open Tabs (External Terminal)", "presentation.close"): (
+        "closes: same — nothing is left in this terminal to review"
+    ),
+}
+
+
+def _setting(task: dict, dotted: str):
+    value = task
+    for key in dotted.split("."):
+        value = value.get(key, {}) if isinstance(value, dict) else {}
+    return value if value != {} else None
+
+
+def test_every_task_matches_the_presentation_contract(canonical):
+    """One table for the whole task block, so a new task cannot pick up half of it.
+
+    Before this test the block had drifted exactly the way it drifts: 33 tasks pinned
+    `close: false` and 8 left it to the default, and `panel` was `shared` on most and
+    `dedicated` on five — a distinction nobody had decided, arrived at by each task being
+    copied from a different neighbour.
+    """
+    wrong = []
+    for task in canonical["tasks"]:
+        for dotted, expected in TASK_CONTRACT.items():
+            if (task["label"], dotted) in CONTRACT_EXCEPTIONS:
+                continue
+            actual = _setting(task, dotted)
+            if actual != expected:
+                wrong.append(f"{task['label']}: {dotted} is {actual!r}, want {expected!r}")
+    assert not wrong, "\n".join(wrong)
+
+
+def test_every_contract_exception_names_a_real_task_and_still_deviates(canonical):
+    """The same ratchet `UNLOGGED_TASKS` and the scope exclusions carry.
+
+    An exemption outlives what it exempted twice over: the label is renamed and it
+    matches nothing, or the task is brought back into line and the entry now licenses a
+    future deviation nobody argued for.
+    """
+    tasks = {task["label"]: task for task in canonical["tasks"]}
+    for (label, dotted), reason in CONTRACT_EXCEPTIONS.items():
+        assert reason, f"{label}/{dotted} is exempt with no reason"
+        assert label in tasks, f"{label} names no task"
+        assert _setting(tasks[label], dotted) != TASK_CONTRACT[dotted], (
+            f"{label} now matches the contract on {dotted}; drop its exception"
+        )
+
+
+def test_every_direct_task_toasts_when_it_finishes(canonical):
+    """`notify-wrap.py` outermost on every task that is not a dispatch.
+
+    The dispatched ones get it from `plan_command`; these are written by hand and are
+    where it goes missing. Outermost matters: the toast needs only an exit code, so it
+    wraps `log-wrap.py`, which needs the output.
+    """
+    missing = []
+    for task in canonical["tasks"]:
+        args = [str(a) for a in task.get("args", ())]
+        if any("devkit_project.py" in a for a in args):
+            continue  # the dispatcher wraps it
+        if any(exempt in task["label"] for exempt in UNTOASTED_TASKS):
+            continue
+        if not args or "notify-wrap.py" not in args[0]:
+            missing.append(task["label"])
+    assert not missing, f"tasks that finish without a toast: {missing}"
+
+
+def test_the_untoasted_exceptions_are_all_real_tasks(canonical):
+    labels = {task["label"] for task in canonical["tasks"]}
+    for exempt in UNTOASTED_TASKS:
+        assert any(exempt in label for label in labels), f"{exempt} names no task"
+
+
 def test_a_scoped_task_offers_exactly_the_checkouts_its_action_allows(canonical):
     """The seam between this file and `Action.projects`, asserted from both ends.
 
@@ -1006,7 +1126,6 @@ def test_the_live_smoke_task_names_the_only_checkout_that_can_run_it(canonical):
 # checkout out stays possible, but as a decision someone recorded rather than a list
 # nobody updated.
 SCOPE_PICKERS: dict[str, dict[str, str]] = {
-    "sweepScope": {},
     "upgradeScope": {
         "devkit": (
             "is the source a release is pulled FROM, not a consumer of it; "
@@ -1066,7 +1185,6 @@ def test_project_scope_inputs_are_real_multi_picks(canonical):
         "carameliCheckout",
         "ibkrCheckout",
         "dbCheckout",
-        "sweepScope",
         "upgradeScope",
     ):
         spec = inputs[picker_id]
@@ -1142,24 +1260,29 @@ def test_every_input_referenced_is_defined(canonical):
     assert defined <= referenced, f"unused inputs: {defined - referenced}"
 
 
-def test_every_mutating_sweep_task_offers_the_scope_picker(canonical):
-    """`--only` restricts every sweep mode, so every step that changes a checkout has
-    to let you aim it at one.
+def test_the_sweep_has_no_workspace_task(canonical):
+    """`sweep.py` is a CLI and an import, and nothing in the quick-pick calls it.
 
-    Step 3 shipped without the picker and so was all-or-nothing: when a sync failed in
-    one repo, the only way to retry it was the CLI, and the fallback for a one-click
-    workflow being unable to express "just this one" is re-running it over every
-    checkout. The read-only modes are deliberately exempt — an unscoped sweep IS the
-    report, and a scoped one answers a question nobody asked of it.
+    There were five: two read-only reports and the three shipping steps. None had ever
+    been run on the machine they were written for -- `log-wrap` writes `logs/<slug>.log`
+    per run and nothing prunes that directory, and no `ship-*.log` was ever created --
+    because every reader the sweep has is automatic now. `workspace-status.py` runs it
+    at session start and prints the stranded-work line; `worktree.py reconcile` runs
+    `--sync` every fifteen minutes and reports what it refused to park. A one-click
+    duplicate of either is a second owner for one tier's lifecycle, and `--ship`'s
+    sweep-shaped commit message lost to `/ship` per repo once an agent was a box away.
+
+    So this is not "we removed some tasks" -- it is that the quick-pick is the wrong
+    surface for this tool entirely. Re-adding one means naming which automatic reader
+    it replaces, not just deleting this test. Nothing stops anyone typing
+    `python scripts/sweep.py --branch --yes`, and the modes are covered by
+    `tests/test_sweep.py` either way.
     """
     for task in canonical["tasks"]:
         args = [str(a) for a in task.get("args", [])]
-        if not any("sweep.py" in a for a in args):
-            continue
-        if not {"--branch", "--ship", "--sync"} & set(args):
-            continue
-        assert any("${input:sweepScope}" in arg for arg in args), (
-            f"{task['label']} changes checkouts but cannot be scoped to one"
+        assert not any("sweep.py" in a for a in args), (
+            f"{task['label']} puts sweep.py back in the quick-pick; the readers that "
+            "replaced it are workspace-status.py and worktree.py reconcile"
         )
 
 

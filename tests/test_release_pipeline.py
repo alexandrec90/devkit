@@ -12,6 +12,7 @@ than by mocking a subprocess tree, which would pin `gh`'s flag spellings and not
 else.
 """
 
+import subprocess
 from pathlib import Path
 
 from support import REPO_ROOT, load_script
@@ -236,3 +237,209 @@ def test_the_release_task_is_scoped_to_devkit_alone():
     checkout in the picker and would cut a devkit release from whichever one was
     chosen -- the same class of mistake `reclaim` and `preview` are scoped against."""
     assert devkit_project.ACTIONS["release"].projects == devkit_project.DEVKIT_ONLY
+
+
+# --- the trigger predicate ------------------------------------------------------
+#
+# `--if-needed` is what turns a click into a nightly job, and the whole of its judgement
+# is `deliverable_changes`. Pure and tested from filename lists rather than from a
+# repository, because the question "would tonight cut a release?" has to be answerable
+# without putting a checkout into a particular state.
+
+VENDORED = [
+    "scripts/hooks/enforce-capped-bash.py",
+    "scripts/hooks/harness_config.py",
+    "scripts/sync-devkit.py",
+    ".claude/rules/engineering.md",
+]
+
+
+def test_a_vendored_change_is_deliverable_only_by_a_release():
+    """The state that made `sync-devkit.py --check` red in all five consumers at once:
+    the fix is merged, devkit's CI is green, and no tag carries it."""
+    changed = ["scripts/hooks/enforce-capped-bash.py", "README.md"]
+    assert rp.deliverable_changes(changed, VENDORED) == ["scripts/hooks/enforce-capped-bash.py"]
+
+
+def test_devkits_own_changes_are_not_a_reason_to_release():
+    """The half that makes a nightly cadence affordable. A doc fix, a test and a
+    generator change reach no consumer, so tagging them spends a release and an adoption
+    PR per project to deliver nothing anyone can run."""
+    changed = [
+        "README.md",
+        "tests/test_release_pipeline.py",
+        "scripts/new-project.py",
+        "scripts/release-pipeline.py",
+        ".github/workflows/pr-gate.yml",
+    ]
+    assert rp.deliverable_changes(changed, VENDORED) == []
+
+
+def test_the_published_pre_commit_channel_counts_too():
+    """The tier `MANIFEST` does not cover, and the one a predicate written from the
+    vendored list alone would miss entirely. A consumer reaches these files by pinning a
+    `rev`, so they are unreachable until a tag exists -- which is how a generated project
+    once asked for hook ids its pinned tag could not serve."""
+    assert rp.deliverable_changes(["scripts/precommit/devkit_drift.py"], VENDORED) == [
+        "scripts/precommit/devkit_drift.py"
+    ]
+    assert rp.deliverable_changes([".pre-commit-hooks.yaml"], VENDORED) == [
+        ".pre-commit-hooks.yaml"
+    ]
+
+
+def test_devkits_own_pre_commit_wiring_is_not_published():
+    """`.pre-commit-config.yaml` sits beside the published file and reaches nobody --
+    devkit wires its own hooks as `repo: local`. A prefix match on `.pre-commit` would
+    release for an edit to it."""
+    assert rp.deliverable_changes([".pre-commit-config.yaml"], VENDORED) == []
+
+
+def test_a_directory_entry_matches_what_is_under_it_and_not_a_lookalike():
+    assert rp.in_published_channel("scripts/precommit/_loader.py")
+    assert not rp.in_published_channel("scripts/precommit_helpers.py")
+    assert not rp.in_published_channel("scripts/precommit")
+
+
+def test_windows_path_separators_do_not_hide_a_deliverable_change():
+    """`git diff --name-only` answers in forward slashes, but nothing in this pipeline
+    guarantees its caller does -- and a separator mismatch would read as "quiet night"."""
+    assert rp.deliverable_changes([r"scripts\hooks\harness_config.py"], VENDORED) == [
+        "scripts/hooks/harness_config.py"
+    ]
+
+
+def test_the_result_is_deduplicated_and_ordered():
+    """It is printed into the artifact as the reason the job fired, so it has to read
+    the same way twice."""
+    changed = ["scripts/sync-devkit.py", "scripts/sync-devkit.py", ".pre-commit-hooks.yaml"]
+    assert rp.deliverable_changes(changed, VENDORED) == [
+        ".pre-commit-hooks.yaml",
+        "scripts/sync-devkit.py",
+    ]
+
+
+def test_blank_lines_in_a_diff_are_not_files():
+    assert rp.deliverable_changes(["", "   ", "scripts/sync-devkit.py"], VENDORED) == [
+        "scripts/sync-devkit.py"
+    ]
+
+
+def test_an_unreadable_checkout_answers_nothing_owed(tmp_path):
+    """Best-effort by design, and biased towards the quiet answer: a false negative
+    costs a night's delay and the nightly upgrade pass still reports that a release is
+    owed, while a false positive would cut one from a state this could not read."""
+    assert rp.release_needed(tmp_path, "v0.11.1") == []
+
+
+def test_the_flag_that_carries_the_predicate_exists_and_is_off_by_default():
+    """A click releases what it was asked to release; only the scheduled pass asks the
+    question first."""
+    assert rp.build_parser().parse_args([]).if_needed is False
+    assert rp.build_parser().parse_args(["--if-needed"]).if_needed is True
+
+
+# --- the console discipline the scheduled caller needs --------------------------
+
+
+def test_every_spawn_carries_the_no_window_flag():
+    """Asserted here as well as in `test_scheduled_jobs.py` because this module's single
+    spawn site is the thing that makes the blanket rule cheap: one keyword, not a rule
+    every future `gh` call has to remember."""
+    source = (REPO_ROOT / "scripts" / "release-pipeline.py").read_text(encoding="utf-8")
+    assert "creationflags=NO_WINDOW" in source
+
+
+def test_a_streaming_child_is_handed_the_callers_handles(tmp_path, monkeypatch):
+    """The other half of the flag: it gives the child a console of its own, so a
+    non-capturing child writes there instead of into `log-wrap.py`'s pipe. Without this
+    the nightly artifact would say `# exit: 0` and nothing else."""
+    handle = (tmp_path / "out.txt").open("w", encoding="utf-8")
+    monkeypatch.setattr(rp.sys, "stdout", handle)
+    monkeypatch.setattr(rp.sys, "stderr", handle)
+    try:
+        assert rp.inherited_streams() == {"stdout": handle, "stderr": handle}
+    finally:
+        handle.close()
+
+
+def test_a_stream_with_no_descriptor_is_left_to_inherit(monkeypatch):
+    """`None` under a bare `pythonw.exe`, a capture object under pytest. Both would
+    raise if handed to `subprocess`."""
+
+    class Captured:
+        def fileno(self):
+            raise OSError("not a real descriptor")
+
+    monkeypatch.setattr(rp.sys, "stdout", None)
+    monkeypatch.setattr(rp.sys, "stderr", Captured())
+    assert rp.inherited_streams() == {}
+
+
+# --- what the predicate reads, before it judges it ------------------------------
+#
+# `deliverable_changes` above is pure and thoroughly covered; these two are the halves
+# that go out to the repository for its arguments, and a wrong answer from either is a
+# release that does not fire (or fires nightly) with nothing in the log to say why.
+
+
+def test_the_vendored_list_is_the_manifest_and_not_a_second_spelling_of_it():
+    """Two lists of "what is vendored" would agree until the day one of them was the
+    reason a release did not fire. This one is the manifest's owner, read through it."""
+    paths = rp.vendored_paths()
+    assert paths == list(up.manifest_paths())
+    assert "scripts/sync-devkit.py" in paths
+
+
+def test_changes_since_a_tag_are_the_ones_the_default_branch_carries(tmp_path):
+    """The diff is `tag..origin/<default>`, not `tag..HEAD`: the pipeline runs from a
+    checkout whose local branch may be anywhere, and the question is what *main* has."""
+    run = _a_repo(tmp_path)
+    (tmp_path / "released.py").write_text("", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-m", "released")
+    run("tag", "v0.0.1")
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "sync-devkit.py").write_text("", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-m", "unreleased")
+    run("update-ref", "refs/remotes/origin/main", "HEAD")
+    run("checkout", "--quiet", "-b", "somewhere-else")
+
+    assert rp.changed_since_tag(tmp_path, "v0.0.1") == ["scripts/sync-devkit.py"]
+
+
+def test_a_tag_the_checkout_does_not_have_answers_nothing_rather_than_raising(tmp_path):
+    """`git diff` exits non-zero on an unknown revision, and the caller's contract is
+    best-effort: a night this cannot read is a night that does not release."""
+    run = _a_repo(tmp_path)
+    (tmp_path / "a.py").write_text("", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-m", "only commit")
+    run("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    assert rp.changed_since_tag(tmp_path, "v9.9.9") == []
+
+
+def test_a_directory_that_is_not_a_checkout_answers_nothing(tmp_path):
+    assert rp.changed_since_tag(tmp_path, "v0.0.1") == []
+
+
+def _a_repo(root):
+    """A real repository, because `changed_since_tag` resolves the default branch and
+    then diffs against a remote-tracking ref -- two behaviours a fake `git` would only
+    restate."""
+
+    def run(*args):
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    run("init", "--quiet")
+    run("config", "user.email", "test@example.com")
+    run("config", "user.name", "Test")
+    run("config", "commit.gpgsign", "false")
+    return run

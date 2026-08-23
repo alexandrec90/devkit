@@ -83,6 +83,13 @@ def stranded_line(results: list[sweep.Result]) -> str:
     Names the checkouts rather than counting them: "3 checkouts need action" makes
     you go run something else to find out which, and at the top of a session the
     whole point is to not send you on an errand.
+
+    This line and `worktree.py reconcile`'s checkout pass are now the *only* readers
+    the static tier has. The workspace used to carry `Ship: Sweep Workspace` and `Ship:
+    Check Workspace` for the same answer on demand; neither was ever run, because a
+    report you have to remember to ask for loses to one printed at the top of every
+    session. So a checkout missing from the workspace file's `folders` is not merely
+    unsweepable -- nothing anywhere will mention its stranded work.
     """
     actionable = [r for r in results if r.verdict in sweep.ACTIONABLE]
     if not actionable:
