@@ -1383,6 +1383,146 @@ def test_a_spawn_that_raises_is_recorded_with_the_exception(root, monkeypatch, l
     capsys.readouterr()
 
 
+# --- the two registrations of this hook race for one box -----------------------
+#
+# It is registered in the user's `settings.json` and in the project's, and Claude Code
+# fires both on the same tool call. They plan the same box for the same session at the
+# same instant; the loser's `git worktree add` dies on the branch the winner has just
+# created. On 2026-08-23 an agent was handed both halves at once -- "Spawning a box for
+# it failed: ... a branch named 'agent/pr-merged-0823' already exists" as the error, and
+# "the edit was applied there instead" as the additionalContext -- with nothing written
+# anywhere. The context reads as authoritative, and an agent that believes it goes on to
+# edit a file it thinks already carries its change, or ships an empty branch.
+
+
+def _lost_the_race(root, name="carameli--ws-s1-0806", session="s1"):
+    """An `apply_new` that fails the way the losing process really fails.
+
+    The lease appearing *during* the call is the part that matters: the winner
+    registers its box between this process's plan and its `worktree add`, which is
+    exactly why the answer is available by the time the failure is handled.
+    """
+
+    def apply_new(plan, ws, timeout=300.0, provision=True):
+        _lease(root, name, project="carameli", session=session)
+        return False, [
+            "FAILED at `git worktree add --no-track -b agent/ws-s1-0806 ...`: fatal: "
+            "a branch named 'agent/ws-s1-0806' already exists"
+        ]
+
+    return apply_new
+
+
+def test_a_spawn_that_lost_the_race_routes_into_the_winners_box(root, monkeypatch, capsys):
+    """The regression. Blocking here contradicted the other process's own response."""
+    workspace = _guarded_edit(root, monkeypatch)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", _lost_the_race(root))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    answer = response(capsys)
+    box = root / ".worktrees" / "carameli--ws-s1-0806" / "a.py"
+    assert answer["updatedInput"]["file_path"] == str(box)
+    assert "already exists" in answer["additionalContext"]  # the failure is not hidden
+    assert "Cut one by hand" not in answer["additionalContext"]
+
+
+def test_a_spawn_that_failed_with_no_box_anywhere_still_blocks(root, monkeypatch, capsys):
+    """The reversion check for the recovery: it must not become an allow. Nothing was
+    cut, so there is nowhere to aim, and letting the edit through puts it on the home
+    branch -- the one outcome this hook exists to prevent."""
+    workspace = _guarded_edit(root, monkeypatch)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (False, ["boom"]))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    said = guidance(capsys)
+    assert "Spawning a box for it failed: boom" in said
+    assert "the edit was applied there instead" not in said
+
+
+def test_a_lost_race_is_recorded_as_raced_rather_than_as_a_failure(
+    root, monkeypatch, ledger_root, capsys
+):
+    """`workspace-status.py` surfaces `guard-spawn-failed` for triage. A race that
+    recovered is not a defect anyone needs to look at, and filing it as one buries the
+    spawns that really did fail."""
+    workspace = _guarded_edit(root, monkeypatch)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", _lost_the_race(root))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    (line,) = _events(ledger_root)
+    assert "\tevent=guard-spawn-raced\t" in line
+    assert "\tbox=carameli--ws-s1-0806\t" in line and "\toutcome=raced\t" in line
+    assert "already exists" in line
+    capsys.readouterr()
+
+
+def test_the_box_cut_while_this_hook_waited_is_found_by_re_reading(root, monkeypatch, capsys):
+    """`main` reads the leases before the spawn lock is waited on, so its snapshot is
+    the one mapping that cannot answer 'does this session have a box yet'. Re-reading
+    under the lock is what turns the second process's spawn into a plain reuse."""
+    workspace = _guarded_edit(root, monkeypatch)
+    live = guard.worktree.live_boxes
+    reads = []
+
+    def live_boxes(base):
+        reads.append(base)
+        return {} if len(reads) == 1 else live(base)  # the winner registers after read 1
+
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setattr(guard.worktree, "live_boxes", live_boxes)
+    spawned = []
+    monkeypatch.setattr(
+        guard.worktree, "plan_respawn", lambda *a, **k: spawned.append(a) or _plan(root)
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    assert spawned == []
+    assert "already has a box" in response(capsys)["additionalContext"]
+
+
+def test_a_spawn_waits_for_the_lock_the_other_registration_holds(root, monkeypatch, capsys):
+    """Waiting is the primary fix; the recovery above is what happens when the wait
+    runs out. Left unlocked, both processes reach `git worktree add` and one of them
+    always loses."""
+    workspace = _guarded_edit(root, monkeypatch)
+    monkeypatch.setattr(guard, "SPAWN_LOCK_WAIT", 0.2)
+    held = root / ".worktrees" / guard.worktree.spawn_lock_name("carameli--s1")
+    held.mkdir(parents=True)
+    waited = []
+    monkeypatch.setattr(
+        guard.worktree, "plan_respawn", lambda *a, **k: waited.append(True) or _plan(root)
+    )
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    assert waited == [True]  # it waited its turn, then went ahead anyway
+    assert held.is_dir()  # and left the other holder's lock alone
+    capsys.readouterr()
+
+
+def test_spawn_and_route_blocks_on_its_own_when_no_box_can_be_cut(root, monkeypatch, capsys):
+    """The spawn half runs under the lock its caller holds, so it is worth being able
+    to drive -- and to fail -- without one."""
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (False, ["boom"]))
+    call = json.loads(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    code = guard.spawn_and_route(
+        "carameli", "a.py", _workspace(root), root, "s1", call, locked=False
+    )
+    assert code == guard.EXIT_BLOCK
+    assert "boom" in guidance(capsys)
+
+
+def test_current_boxes_falls_back_to_the_snapshot_it_was_given(root, monkeypatch):
+    """An unreadable lease file must not turn a re-read into a second box: the caller's
+    snapshot is stale at worst, while `{}` would spawn one this session already has."""
+
+    def unreadable(_base):
+        raise OSError("leases.json is being replaced")
+
+    monkeypatch.setattr(guard.worktree, "live_boxes", unreadable)
+    snapshot = {"carameli--ws-s1-0806": object()}
+    assert guard.current_boxes(root, snapshot) is snapshot
+
+
 def test_a_foreign_box_route_is_recorded_with_its_kind(root, monkeypatch, ledger_root, capsys):
     workspace = _workspace(root)
     _lease(root, "carameli--x-0806", project="carameli", session="other-session")

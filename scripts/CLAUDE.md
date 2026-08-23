@@ -178,6 +178,18 @@ Each of these has already been violated by something:
   would fail *quietly* rather than loudly — a hook adapter that would drop the member
   (`DEVKIT_HOOK_ADAPTER`), a tool whose argument shape the guard does not model, or an
   `Edit` whose `old_string` the box's copy of the file does not contain.
+- **Two copies of the guard run on every call, and they race for the box.** It is
+  registered in the user's `settings.json` and in the project's, and Claude Code fires
+  both; each plans a box for the same `(session, project)` and the loser's `git worktree
+  add` dies on the branch the winner has just created. Because the two responses are
+  merged into one object, the agent was handed a spawn-failure error *beside* an
+  `additionalContext` saying the edit had been applied in the box — and nothing had been
+  written either way, so believing the context meant building on a change that did not
+  exist. `worktree.spawn_lock` brackets plan-and-apply so the second process waits and
+  finds the first one's box; `after_failed_spawn` is the fallback for when the wait runs
+  out, and it asks whether a box exists rather than matching on git's message, because
+  the box is what the decision turns on. Deduplicating the registration would fix the
+  race and cost every project without its own copy of the hook, so the hook absorbs it.
 - **The guard is the one caller that skips provisioning.** A linked worktree checks out
   tracked files only, so a fresh box has no installed toolchain and nothing else was
   going to create one — `session-start.sh` returns early on a local machine. `worktree.py
