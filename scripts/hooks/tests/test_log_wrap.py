@@ -131,8 +131,15 @@ def test_the_artifact_lands_under_logs_in_the_cwd(tmp_path):
 
 
 def test_a_pass_clears_what_the_last_failure_left(tmp_path):
-    """The whole reason the artifact is written on success too."""
-    lw.write_artifact(tmp_path, "ship-sweep", "an old failure\n")
+    """The whole reason the artifact is written on success too.
+
+    `_aged` because the retraction is now decided by comparing the file's mtime against
+    this run's start, and a file written microseconds earlier is not reliably *older*:
+    Windows dates a file from the tick-based system clock, which drifts either side of
+    the precise one `time.time()` reads. An hour makes the intended case -- a failure
+    left by an earlier run -- the one the test actually sets up.
+    """
+    _aged(lw.write_artifact(tmp_path, "ship-sweep", "an old failure\n"), 3600)
     assert lw.main(["Ship: Sweep", "--", "x"], run=lambda _c: (0, "fine"), root=tmp_path) == 0
     assert (tmp_path / "logs" / "ship-sweep.log").read_text(encoding="utf-8") == ""
 
@@ -190,6 +197,11 @@ def test_a_wrapped_pass_dates_itself_from_before_the_command_ran(tmp_path):
 
     def run(_command):
         path.parent.mkdir(parents=True, exist_ok=True)
+        # A file's mtime is taken from the system clock, which on Windows advances on a
+        # ~15ms tick, while `time.time()` does not -- so a file written in the same tick
+        # as the stamp can be dated *before* it. Spending a few ticks here is what makes
+        # "written after main started" true of the timestamps and not just of the order.
+        time.sleep(0.05)
         path.write_text("a concurrent failure\n", encoding="utf-8")
         return 0, "fine"
 
