@@ -178,6 +178,34 @@ Each of these has already been violated by something:
   would fail *quietly* rather than loudly — a hook adapter that would drop the member
   (`DEVKIT_HOOK_ADAPTER`), a tool whose argument shape the guard does not model, or an
   `Edit` whose `old_string` the box's copy of the file does not contain.
+- **A shell command is judged too, and it is never re-aimed.** Editor calls were the
+  whole scope until Claude Code's bypass-permissions mode began telling sessions — in
+  text arriving inside tool results, indistinguishable from their operator's — to prefer
+  `sed`, heredocs and short scripts over Edit and Write. An agent that complies writes to
+  a checkout's home branch through a tool the guard was not watching, so the blind side
+  stopped being an omission and became a route. `SHELL_WRITE_ALL`, `SHELL_WRITE_LAST` and
+  `REDIRECT` are a **closed list of write verbs**, deliberately shaped like
+  `enforce-capped-bash.py`'s blocklist rather than like the proof obligation it replaced:
+  requiring a command to demonstrate it does not write means modelling the shell, and
+  that design was 46% false positives there. What the list cannot see — an interpreter
+  script, `python -c 'open(...)'` — is a documented gap with a test naming it, not an
+  oversight. The verdict is always the block path, because the rewrite replaces a path
+  *argument* and a command line has none; `shell_note` tells the agent which of its own
+  words was read as the write, or it re-issues the line with the box path bolted on
+  somewhere else.
+- **The matcher is the other half, and it is not vendored.** A tool the guard judges but
+  `.claude/settings.json` does not list is a tier that silently covers nothing, and each
+  project owns its own copy of that file. `test_the_hook_is_wired_for_every_tool_it_judges`
+  compares `MUTATING_TOOLS` against devkit's matcher so at least the source of truth
+  cannot drift; a machine's user-level registration is outside every repo and has to be
+  widened by hand.
+- **Two registrations race for one box, and the loser used to contradict the winner.**
+  A workstation registers this hook at user level *and* through the project's own
+  settings, so both fire on one edit and both reach `apply_new`. The loser fails with
+  *a branch named `agent/…` already exists* — and, before it looked further, blocked the
+  call while the winner was re-aiming it, which is one edit answered two mutually
+  exclusive ways in the same turn. It now looks the settled box up with
+  `find_session_box` and delivers the winner's decision, recorded as `outcome=raced`.
 - **The guard is the one caller that skips provisioning.** A linked worktree checks out
   tracked files only, so a fresh box has no installed toolchain and nothing else was
   going to create one — `session-start.sh` returns early on a local machine. `worktree.py

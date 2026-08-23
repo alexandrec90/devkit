@@ -10,11 +10,12 @@ cut a worktree per edit rather than one per (session, project).
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
-from support import devkit_project, load_script
+from support import REPO_ROOT, devkit_project, load_script
 
 guard = load_script("scripts/worktree-guard.py")
 
@@ -1418,3 +1419,303 @@ def test_a_missing_ledger_module_never_changes_the_decision(root, monkeypatch, c
     monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
     assert response(capsys)["updatedInput"]
+
+
+# --- the shell tier ---------------------------------------------------------
+#
+# Editor calls were the guard's whole scope until Claude Code's bypass-permissions mode
+# began telling sessions, in text they cannot tell apart from their operator's, to make
+# file changes with `sed`, heredocs or short scripts rather than with Edit and Write.
+# That turned a quiet blind side into a route: the hook matched `^(Edit|Write|...)$`, so
+# a `sed -i` onto a checkout's home branch was not merely unguarded but *recommended*.
+# Every test here is about a command line, and the ones that assert an ALLOW are the
+# load-bearing half -- a tier that reads shell is one false positive away from being
+# switched off again, which is how the capped-Bash gate was lost.
+
+
+def shell_payload(command: str, cwd: str = "", session: str = "s1", tool: str = "Bash") -> str:
+    return json.dumps(
+        {
+            "tool_name": tool,
+            "tool_input": {"command": command},
+            "cwd": cwd,
+            "session_id": session,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        # redirection, which is also the whole heredoc route: `cat > x <<EOF` is this
+        ("cat > devkit/a.py", ["devkit/a.py"]),
+        ("cat >devkit/a.py", ["devkit/a.py"]),
+        ("cat >> devkit/a.py", ["devkit/a.py"]),
+        ("cat > devkit/a.py <<'EOF'", ["devkit/a.py"]),
+        ("python x.py 2> devkit/a.log", ["devkit/a.log"]),
+        ('echo x > "C:\\ws\\devkit\\a.py"', ["C:\\ws\\devkit\\a.py"]),
+        # the named verbs
+        ("sed -i 's/a/b/' devkit/a.py", ["s/a/b/", "devkit/a.py"]),
+        ("sed -i.bak s/a/b/ devkit/a.py", ["s/a/b/", "devkit/a.py"]),
+        ("tee devkit/a.py", ["devkit/a.py"]),
+        ("cat x | tee -a devkit/a.py", ["devkit/a.py"]),
+        ("rm devkit/a.py", ["devkit/a.py"]),
+        ("touch devkit/a.py", ["devkit/a.py"]),
+        ("dd if=/dev/zero of=devkit/a.bin", ["devkit/a.bin"]),
+        # copy-shaped: the last operand is the destination, the rest are reads
+        ("cp devkit/a.py /elsewhere/b", ["/elsewhere/b"]),
+        ("mv old.py devkit/a.py", ["devkit/a.py"]),
+        # wrappers standing in front of the real verb
+        ("sudo tee devkit/a.py", ["devkit/a.py"]),
+        ("FOO=1 tee devkit/a.py", ["devkit/a.py"]),
+        # PowerShell has its own tool in this harness, and its own spelling
+        ("Set-Content -Path devkit/a.py -Value x", ["devkit/a.py", "x"]),
+        ("Copy-Item -Path a -Destination devkit/a.py", ["devkit/a.py"]),
+        ("remove-item devkit/a.py", ["devkit/a.py"]),
+        # more than one, in the order the command names them
+        ("touch devkit/a.py && rm devkit/b.py", ["devkit/a.py", "devkit/b.py"]),
+    ],
+)
+def test_shell_write_targets_reads_the_spellings_that_write(command, expected):
+    assert guard.shell_write_targets(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat devkit/a.py",
+        "sed -n '1,5p' devkit/a.py",  # -n reads; only -i writes
+        "grep -rn thing devkit/",
+        "python -m pytest tests/ -q",
+        "git diff --stat devkit/a.py",
+        "python x.py 2>&1",  # a descriptor duplication names no file
+        "wc -l devkit/a.py",
+        "",
+    ],
+)
+def test_a_command_that_writes_nothing_names_no_target(command):
+    """The half that keeps this tier alive. `enforce-capped-bash.py` had to be reversed
+    because 46% of its blocks were its own false positives, and it earned them by trying
+    to model the shell; this one recognises verbs and allows everything else, so a read
+    has to stay invisible even when its argument is a checkout's file."""
+    assert guard.shell_write_targets(command) == []
+
+
+def test_an_interpreter_script_is_the_documented_gap():
+    """`python -c` computes its target at runtime and names it nowhere in the argv, so no
+    argv scan can see it. Pinned as a test rather than left implicit: a silent gap in a
+    guard reads as coverage, and whoever widens this tier should find the limit written
+    where closing it will show up as a failure."""
+    assert guard.shell_write_targets("python -c \"open('devkit/a.py','w').write('x')\"") == []
+
+
+def test_an_unbalanced_quote_falls_back_to_whitespace_splitting():
+    """`shlex` raises on it, and an unhandled raise in a PreToolUse hook exits non-2 --
+    which Claude Code reports as a non-blocking error and lets the write PROCEED."""
+    assert "devkit/a.py" in guard.shell_write_targets("tee devkit/a.py 'unclosed")
+
+
+def test_shell_tokens_keeps_windows_backslashes():
+    """`posix=True` eats them, and every path this hook judges on this machine has them."""
+    assert guard.shell_tokens(r"tee C:\ws\devkit\a.py") == ["tee", r"C:\ws\devkit\a.py"]
+
+
+def test_guarded_targets_reads_a_command_for_a_shell_tool_and_a_path_for_an_editor():
+    edit = json.loads(payload(path="/ws/carameli/a.py"))
+    assert guard.guarded_targets(edit) == ["/ws/carameli/a.py"]
+    assert guard.guarded_targets(json.loads(shell_payload("tee /ws/carameli/a.py"))) == [
+        "/ws/carameli/a.py"
+    ]
+    assert guard.guarded_targets(json.loads(shell_payload("cat /ws/carameli/a.py"))) == []
+
+
+def test_a_shell_write_onto_a_home_branch_is_routed_to_the_box(root, monkeypatch, capsys):
+    """The reversion check for the whole tier: take `Bash` back out of `MUTATING_TOOLS`
+    and this write lands on carameli's home branch with nothing under it."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload(f"sed -i s/a/b/ {root / 'carameli' / 'a.py'}", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    said = guidance(capsys)
+    assert "carameli--ws-s1-0806" in said
+    assert "shell command, not an editor call" in said
+
+
+def test_a_shell_write_is_blocked_rather_than_re_aimed(root, monkeypatch, capsys):
+    """The rewrite replaces a path *argument*, and a command line has none. Re-aiming one
+    would mean editing the command text -- guessing at quoting, at a heredoc body, at
+    which of `cp`'s operands moved -- and a rewrite this hook gets wrong lands the write
+    on the home branch while reporting success."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload(f"tee {root / 'carameli' / 'a.py'}", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    captured = capsys.readouterr()
+    assert captured.out.strip() == ""  # no updatedInput anywhere near this
+    assert "not re-aimed automatically" in captured.err
+
+
+def test_a_command_that_writes_nothing_never_reads_the_registry(root, monkeypatch):
+    """Widening the matcher put this hook on every Bash call in the session, not on the
+    handful that edit files. The overwhelming majority write nothing, and what they must
+    cost is a payload parse -- not a workspace read and a project list per `grep`."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        guard.devkit_project,
+        "known_projects",
+        lambda *a, **k: pytest.fail("a read-only command must not reach the registry"),
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload(f"grep -n foo {root / 'carameli' / 'a.py'}", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_the_shell_note_quotes_the_word_the_command_actually_used():
+    """The note's whole job is to be greppable against the command the agent just sent.
+    So it repeats the target *as written* -- an absolute Windows path, a relative one, a
+    quoted one -- rather than the resolved path the guard reasoned about, which appears
+    nowhere in the command line and so cannot be the word anyone replaces."""
+    for target in (r"C:\repo\app\a.py", "app/a.py", "'a file.py'"):
+        note = guard.shell_note(target)
+        assert f"`{target}`" in note
+        assert "shell command, not an editor call" in note
+        assert "not re-aimed automatically" in note
+
+
+def test_a_shell_command_that_only_reads_never_spawns(root, monkeypatch, capsys):
+    """A guard that cut a box per `cat` would be switched off within the hour."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        guard.worktree,
+        "plan_respawn",
+        lambda *a, **k: pytest.fail("a read must not spawn a box"),
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload(f"cat {root / 'carameli' / 'a.py'}", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    assert capsys.readouterr().out.strip() == ""
+
+
+def test_a_shell_write_outside_every_checkout_is_left_alone(root, monkeypatch):
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        guard.worktree,
+        "plan_respawn",
+        lambda *a, **k: pytest.fail("nothing outside a checkout has a branch to protect"),
+    )
+    monkeypatch.setattr("sys.stdin", _stdin(shell_payload("cat x > /dev/null", cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_a_shell_write_into_the_sessions_own_box_is_left_alone(root, monkeypatch):
+    """The commonest command in a guarded session, once the routing has worked."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setattr(
+        guard.worktree,
+        "plan_respawn",
+        lambda *a, **k: pytest.fail("the write is already where it belongs"),
+    )
+    box = root / ".worktrees" / "carameli--ws-s1-0806" / "a.py"
+    monkeypatch.setattr("sys.stdin", _stdin(shell_payload(f"tee {box}", cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_the_first_guarded_target_decides_the_whole_command(root, monkeypatch, capsys):
+    """There is no partial outcome for a command line: it runs or it does not. So a
+    command that writes somewhere harmless *and* onto a home branch is routed on the
+    second, and the message names the word that did it."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    command = f"touch /elsewhere/scratch && touch {root / 'carameli' / 'a.py'}"
+    monkeypatch.setattr("sys.stdin", _stdin(shell_payload(command, cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert str(root / "carameli" / "a.py") in guidance(capsys)
+
+
+def test_a_routed_shell_command_is_recorded_as_one(root, monkeypatch, ledger_root, capsys):
+    """`kind` is what tells a triage pass whether the shell tier is earning its keep or
+    manufacturing false positives, and the two cannot be told apart after the fact."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload(f"rm {root / 'carameli' / 'a.py'}", cwd=str(root))),
+    )
+    guard.main(["--workspace", str(workspace)])
+    capsys.readouterr()
+    assert any("kind=shell" in line for line in _events(ledger_root))
+
+
+def test_the_hook_is_wired_for_every_tool_it_judges():
+    """The code half is useless without the matcher half, and they live in different
+    files: `MUTATING_TOOLS` in the hook, a regex in `.claude/settings.json`. devkit runs
+    the harness it ships, so its own settings are the copy this can check."""
+    settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    matchers = [
+        entry["matcher"]
+        for entry in settings["hooks"]["PreToolUse"]
+        if any("worktree-guard" in hook.get("command", "") for hook in entry["hooks"])
+    ]
+    assert matchers, "worktree-guard.py is not wired in devkit's own settings"
+    for tool in guard.MUTATING_TOOLS:
+        assert any(re.fullmatch(matcher, tool) for matcher in matchers), tool
+
+
+# --- two guards, one call ---------------------------------------------------
+
+
+def test_a_spawn_that_lost_a_race_reuses_the_box_instead_of_blocking(root, monkeypatch, capsys):
+    """Found by this hook firing on itself. The guard is registered twice in a devkit
+    session -- a user-level absolute path and a project-level `$CLAUDE_PROJECT_DIR` one
+    resolving to the same file -- so two processes judge every call. Neither can see the
+    other's box, because the loser reads the lease registry before the winner writes it;
+    it then dies on `a branch named 'agent/...' already exists` and exits 2, blocking the
+    call the winner had just re-aimed. The agent is handed both messages at once -- "the
+    edit was applied at <box>" on stdout, "spawning a box failed" on stderr -- with the
+    box on disk and the edit nowhere."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(
+        guard.worktree,
+        "apply_new",
+        lambda *a, **k: (
+            False,
+            ["FAILED at `git worktree add`: a branch named ... already exists"],
+        ),
+    )
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    said = guidance(capsys)
+    assert "carameli--ws-s1-0806" in said
+    assert "failed" not in said.lower()
+
+
+def test_a_spawn_that_failed_with_no_box_afterwards_still_blocks(root, monkeypatch, capsys):
+    """The reuse above must not swallow a genuine failure: with no box on disk there is
+    nothing to aim at, and allowing the edit is the outcome this hook exists to prevent."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (False, ["boom"]))
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert "boom" in capsys.readouterr().err
