@@ -62,9 +62,3 @@ warn_redundant_casts = true
 # upstream — these files are the ones it is allowed and expected to fix, so they are in
 # scope here. `templates/` stays out: `.tmpl` files are not valid Python until rendered.
 exclude = '^templates/'
-
-[[tool.mypy.overrides]]
-# Optional at runtime: `notify.py` guards the import and no-ops without it, so the
-# toast dependency is deliberately not installed.
-module = ["win11toast"]
-ignore_missing_imports = true
