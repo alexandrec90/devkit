@@ -952,20 +952,21 @@ def _check_tasks() -> list[dict]:
 def test_check_style_tasks_go_through_the_wrapper_that_preserves_exit_codes():
     """A `--check` task's whole output is its exit code, so the wrapper must pass it on.
 
-    `sweep.py --check` prints the same table the read-only sweep does; the only thing
-    distinguishing "nothing stranded" from "three checkouts need action" is 0 vs 1. Wrap
+    `sweep.py --check` printed the same table the read-only sweep did; the only thing
+    distinguishing "nothing stranded" from "three checkouts need action" was 0 vs 1. Wrap
     it in anything that returns its own status and the task goes green over stranded
     work — a silent failure that looks exactly like success, which is the same shape as
     the Stop-hook dispatch bug this file exists to catch.
+
+    **The block currently defines no `--check` task**, so this iterates over nothing:
+    `Ship: Check Workspace` was the only one, and it went when the sweep left the
+    quick-pick for `workspace-status.py`'s session-start line. It is kept as a forward
+    guard rather than deleted because the trap is in the *shape* of a check task, not
+    in that one — the next one added inherits the assertion instead of rediscovering
+    it. `test_notify_wrap_propagates_the_wrapped_exit_code` below asserts the property
+    itself, and does have a subject.
     """
-    tasks = _check_tasks()
-    # This assertion is why the file this test reads had to change. Its whole subject
-    # is `sweep.py --check`, but it used to read devkit's own tasks.json, which has
-    # never contained a sweep task — it was matching "Format: Check Only" and passing
-    # on the strength of a task that had nothing to do with what it documents. Reading
-    # the shared block is the first time it asserts against Ship: Check Workspace.
-    assert tasks, "no --check task defined; this test is asserting against nothing"
-    for task in tasks:
+    for task in _check_tasks():
         assert task["args"][0] == "scripts/notify-wrap.py", (
             f"task {task['label']!r} runs --check without notify-wrap.py, "
             f"whose exit-code propagation is what makes the result readable"
