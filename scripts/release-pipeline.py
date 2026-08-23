@@ -9,10 +9,23 @@ means a coding agent's, since that is who runs commands here. A release therefor
 a session, and the cost fell exactly when nobody wanted to spend one: right after
 merging the fix that made the release necessary.
 
-So the seam is the thing this automates. It is deliberately not a scheduled job -- a
-release is a decision about what to publish, and "tag every merge to main" is the wrong
-automation for the ordering reason `release.py` documents -- but it is one **decision**,
-and a decision is a click. `Devkit: Cut Release` is that click.
+So the seam is the thing this automates, and `Devkit: Cut Release` is the click that
+runs it. It is **also** a scheduled job -- see `install-release-schedule.py` -- because
+the decision it encodes turned out to be smaller than it looked.
+
+"Tag every merge to main" really is the wrong automation, and not for the ordering
+reason `release.yml`'s header gives: that objection is to tagging the merge commit
+*itself*, which this script never does. The real objection is cost. A doc fix, a
+generator change or a test is not a thing any consumer can adopt, and tagging one
+spends a release plus an adoption PR in every project to deliver nothing.
+
+But **"release what a consumer cannot otherwise reach" is not a judgement at all.**
+`release_needed` computes it from the diff between the newest tag and `origin/main`,
+restricted to the two tiers a consumer actually receives -- the vendored `MANIFEST`
+and the published pre-commit channel. That is the same condition `upgrade-project.py`
+already detects and warns about, so the nightly pass was in the position of announcing
+a problem it had everything it needed to fix. `--if-needed` is that predicate as a
+flag, and it is the entire difference between the click and the 2am pass.
 
 What it does, in order:
 
@@ -36,9 +49,10 @@ genuinely broken release gets merged. Encoded, it is also the only step that can
 **Nothing here touches the static checkout's working tree.** The bump happens in a
 throwaway worktree cut from `origin/main`, so a release can be cut while the checkout
 sits on someone else's branch with uncommitted work -- unlike `release.py --yes`, which
-runs `git checkout -b` in place. It writes no artifact of its own: it is a dispatched
-task, so `devkit_project.plan_command` wraps it in `log-wrap.py` and the run's output
-lands under `logs/` named for the task.
+runs `git checkout -b` in place. It writes no artifact of its own, because both of its
+callers wrap it in `log-wrap.py`: `devkit_project.plan_command` does it for the click,
+and `install-release-schedule.py` does it for the scheduled pass, under a *different*
+label so a click cannot overwrite the unattended run's only record.
 
 Pure and stdlib-only; every decision is an importable function tested in
 `tests/test_release_pipeline.py`.
@@ -56,12 +70,19 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import release
+import sweep
+import task_branch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = Path(__file__).resolve().parent
+
+# Spelled once, from `sweep`, so this module holds no second definition of the flag the
+# scheduled-job suite scans for. See `_run`.
+NO_WINDOW = sweep.NO_WINDOW
 
 # The check whose failure a release is *supposed* to cause, and the job that reports it.
 #
@@ -77,6 +98,18 @@ GATE_TEST_ARTIFACT = "test-failures"
 GATE_TEST_ARTIFACT_FILE = "logs/test-failures.log"
 
 RELEASE_WORKFLOW = "release.yml"
+
+# The second tier a release delivers, and the one `MANIFEST` does not cover.
+#
+# devkit ships through two channels (see `CLAUDE.md`, "The two channels"). The vendored
+# tier is copied in by `sync-devkit.py --pull` and is exactly `MANIFEST`. The pre-commit
+# tier is *not*: a consumer pins devkit by `rev` in its `.pre-commit-config.yaml` and
+# pre-commit clones this repo at that rev, so these files reach a consumer only when a
+# tag exists to pin. That is the failure `RELEASING.md` records -- a rendered config
+# requesting hook ids its pinned tag could not serve, which aborted a new project's
+# first commit -- and a trigger reading `MANIFEST` alone would miss every instance of
+# it, because neither of these paths is vendored.
+PUBLISHED_CHANNEL = (".pre-commit-hooks.yaml", "scripts/precommit/")
 
 # Bump levels, and how each moves (major, minor, patch).
 BUMPS: dict[str, tuple[int, int, int]] = {
@@ -288,6 +321,40 @@ def pr_number_from_url(url: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+def in_published_channel(path: str) -> bool:
+    """True for a repo-relative path a consumer receives through the pre-commit `rev`.
+
+    A prefix match on a directory and an exact match on a file, deliberately: everything
+    under `scripts/precommit/` is executed straight out of pre-commit's clone, while at
+    the top level only `.pre-commit-hooks.yaml` is published -- `.pre-commit-config.yaml`
+    beside it is devkit's own wiring and reaches nobody.
+    """
+    cleaned = path.strip().replace("\\", "/")
+    if not cleaned:
+        return False
+    return any(
+        cleaned == entry or (entry.endswith("/") and cleaned.startswith(entry))
+        for entry in PUBLISHED_CHANNEL
+    )
+
+
+def deliverable_changes(paths: Sequence[str], vendored: Sequence[str]) -> list[str]:
+    """The subset of `paths` that a release is the only way to deliver.
+
+    Pure, and split out from the git call for that reason: this is the whole trigger
+    predicate, and "would tonight cut a release?" has to be answerable from a list of
+    filenames in a test rather than from a repository in a particular state.
+    """
+    manifest = {entry.replace("\\", "/") for entry in vendored}
+    hit = {
+        cleaned
+        for path in paths
+        if (cleaned := path.strip().replace("\\", "/"))
+        and (cleaned in manifest or in_published_channel(cleaned))
+    }
+    return sorted(hit)
+
+
 def plan_steps(version: str, adopt: bool) -> list[str]:
     """The dry run's account of itself: what `--yes` would do, in order."""
     steps = [
@@ -307,24 +374,56 @@ def plan_steps(version: str, adopt: bool) -> list[str]:
 # --- process plumbing -------------------------------------------------------
 
 
+def inherited_streams() -> dict[str, object]:
+    """`stdout`/`stderr` to hand a non-capturing child, or `{}` when there is nothing.
+
+    The other half of `NO_WINDOW`, and the half that is easy to ship without noticing:
+    the flag gives the child a console of its own, so a child that captures nothing
+    writes to *that* console rather than to the handles it inherited. Naming them puts
+    the output back where the caller can see it -- which under the scheduled pass is
+    `log-wrap.py`'s pipe, i.e. the artifact.
+
+    Empty when a stream has no file descriptor to pass down: `None` under a bare
+    `pythonw.exe`, and a capture object under pytest. Both would raise if handed to
+    `subprocess`. Same shape and same reasoning as `docker-maint.inherited_streams`,
+    duplicated rather than imported for the reason `install-docker-prune.windowless`
+    gives: six lines are not worth coupling two scripts' lifecycles.
+    """
+    streams: dict[str, Any] = {}
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        try:
+            stream.fileno()  # type: ignore[union-attr]
+        except (AttributeError, OSError, ValueError):
+            continue
+        streams[name] = stream
+    return streams
+
+
 def _run(
     cmd: Sequence[str], cwd: Path | None = None, capture: bool = True
 ) -> subprocess.CompletedProcess[str]:
     """Run `cmd`, capturing by default.
 
-    No `CREATE_NO_WINDOW` anywhere here, deliberately: this task is interactive by
-    construction (it is a click, and it is never scheduled), so every child inherits
-    the terminal's own console and there is no window to suppress. The flag's cost is
-    real -- it detaches a non-capturing child's output from the handles it inherited --
-    and the two steps that stream (`gh run watch`, the upgrade hand-off) are exactly
-    the ones whose output the reader is waiting on.
+    The single spawn site in this module, which is what lets the console discipline be
+    one keyword rather than a rule every future call has to remember. It is needed
+    because this script is no longer only a click: under `devkit-release` the parent is
+    `pythonw.exe`, and a console child spawned from a console-less parent gets a fresh
+    **visible** window -- at 2am, once per `gh` call, which is dozens.
+
+    `NO_WINDOW` alone would trade that flicker for a silent artifact, so the two travel
+    together: the flag, and `inherited_streams()` for the steps that stream (`gh run
+    watch` and the upgrade hand-off). Capturing calls need neither, and pass neither.
     """
+    streams: dict[str, Any] = {} if capture else inherited_streams()
     return subprocess.run(
         list(cmd),
         cwd=str(cwd) if cwd else None,
         capture_output=capture,
         text=True,
         check=False,
+        creationflags=NO_WINDOW,
+        **streams,
     )
 
 
@@ -341,6 +440,59 @@ def _gh_json(args: Sequence[str], cwd: Path) -> object | None:
 def existing_tags(devkit: Path) -> list[str]:
     result = _run(["git", "-C", str(devkit), "tag", "--list"])
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def vendored_paths() -> list[str]:
+    """Every path in the vendored `MANIFEST`, or [] when it cannot be read.
+
+    Goes through `upgrade-project.manifest_paths` rather than reading `sync-devkit.py`
+    again here. That function already resolves the manifest from its owner, and a second
+    spelling of "what is vendored" is the kind of copy that nothing compares -- the two
+    would agree until one of them was the reason a release did not fire.
+    """
+    loader_dir = SCRIPTS_DIR / "precommit"
+    if str(loader_dir) not in sys.path:
+        sys.path.insert(0, str(loader_dir))
+    # Resolved by the insert above; `scripts/precommit/` is not an importable package.
+    from _loader import load_by_path
+
+    upgrade = load_by_path("_upgrade_project", SCRIPTS_DIR / "upgrade-project.py")
+    return list(upgrade.manifest_paths())
+
+
+def changed_since_tag(devkit: Path, tag: str) -> list[str]:
+    """Repo-relative paths `origin/<default>` carries that `tag` does not; [] on error."""
+    git = sweep.git_for(devkit)
+    default_branch = task_branch.detect_default_branch(git, fallback="main")
+    if not default_branch:
+        return []
+    result = git("diff", "--name-only", f"{tag}..origin/{default_branch}")
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def release_needed(devkit: Path, tag: str) -> list[str]:
+    """What `tag` cannot deliver that `origin/main` has: the `--if-needed` predicate.
+
+    Empty means every change on main since the last release is devkit's own -- a doc,
+    a generator change, a test, this file -- and cutting a tag for it would spend an
+    adoption PR in every consumer to deliver nothing they can run.
+
+    Non-empty is the state that made `sync-devkit.py --check` red in all five consumers
+    at once, and it is not a judgement call: those files exist on main, no tag carries
+    them, and a consumer has no way to reach them until one does.
+
+    Best-effort in the same way `upgrade-project.unreleased_vendored_changes` is -- an
+    unreadable checkout answers "nothing owed" rather than failing. The bias is
+    deliberate: a false negative costs a night's delay and the nightly `upgrade` pass
+    still says a release is owed, while a false positive would cut a release from a
+    repository state this could not read.
+    """
+    try:
+        return deliverable_changes(changed_since_tag(devkit, tag), vendored_paths())
+    except Exception:
+        return []
 
 
 def main_fallback(devkit: Path) -> str:
@@ -611,7 +763,11 @@ def run_pipeline(devkit: Path, version: str, adopt: bool, workspace: Path | None
         return 0
     _say("opening an adoption PR per consumer")
     command = [
-        sys.executable,
+        # Not `sys.executable`: under the scheduled pass that is `pythonw.exe`, and
+        # Windows ignores `CREATE_NO_WINDOW` for a GUI-subsystem child -- leaving the
+        # upgrade pass console-less, which is what makes every `git` beneath it open a
+        # window of its own. See `sweep.console_python`.
+        sweep.console_python(),
         str(SCRIPTS_DIR / "upgrade-project.py"),
         "--all",
         "--yes",
@@ -666,6 +822,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="cut the release but do not open the consumers' adoption PRs",
     )
+    parser.add_argument(
+        "--if-needed",
+        action="store_true",
+        help=(
+            "do nothing, successfully, unless main carries a vendored or published-channel "
+            "change no tag delivers. The scheduled pass runs with this; a click does not"
+        ),
+    )
     apply_mode = parser.add_mutually_exclusive_group()
     apply_mode.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     apply_mode.add_argument("--yes", dest="dry_run", action="store_false")
@@ -682,10 +846,31 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     _run(["git", "-C", str(args.devkit), "fetch", "--tags", "--quiet", "origin"])
-    version, refusal = next_version(existing_tags(args.devkit), args.level)
+    tags = existing_tags(args.devkit)
+    version, refusal = next_version(tags, args.level)
     if refusal:
         print(f"release-pipeline: {refusal}", file=sys.stderr)
         return 2
+
+    if args.if_needed:
+        current = newest_release(tags)
+        owed = release_needed(args.devkit, current) if current else []
+        if current and not owed:
+            # Exit 0 and say so. A scheduled job that declined to act and a scheduled
+            # job that never fired look identical in `schtasks`, so the quiet night has
+            # to be a sentence in the artifact rather than an absence of one.
+            print(
+                f"release-pipeline: nothing to release -- every change on main since "
+                f"{current} is devkit's own (docs, tests, generator). A consumer can "
+                f"already reach everything {current} delivers."
+            )
+            return 0
+        reason = (
+            "no release tag exists yet, so nothing is deliverable"
+            if not current
+            else f"{len(owed)} change(s) {current} cannot deliver: {', '.join(owed)}"
+        )
+        print(f"release-pipeline: releasing because {reason}")
 
     print(f"release-pipeline: {version} ({args.level})")
     for index, step in enumerate(plan_steps(version, args.adopt), 1):
