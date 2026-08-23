@@ -725,6 +725,42 @@ def test_a_current_live_file_is_stamped_without_being_rewritten(workspace_pair):
     )
 
 
+def _add_a_folder(canonical):
+    """One unambiguous difference, in the key the drift report names rather than diffs."""
+    payload = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))
+    payload["folders"] = [*payload.get("folders", []), {"path": "invented"}]
+    canonical.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
+
+
+def test_publish_workspace_reports_which_of_the_three_things_it_did(workspace_pair):
+    """The CLI and the session-start hook publish through this one function, so the
+    verdict has to be readable rather than inferred from an exit code. It is the whole
+    reason the render logic left `main()`: a second answer to "is it safe to overwrite
+    the file every window on this machine reads" is the last thing this should grow."""
+    canonical, live = workspace_pair
+    assert devkit_project.publish_workspace(live) == (devkit_project.RENDER_CURRENT, [])
+
+    _add_a_folder(canonical)
+    outcome, problems = devkit_project.publish_workspace(live)
+    assert outcome == devkit_project.RENDER_PUBLISHED and problems
+    assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
+
+
+def test_publish_workspace_refuses_a_live_file_it_did_not_stamp(workspace_pair):
+    """The refusal belongs here and not in each caller -- the hook publishes unattended,
+    so a caller that forgot the check would discard a hand edit with nobody watching."""
+    canonical, live = workspace_pair
+    devkit_project.stamp_path(live).unlink(missing_ok=True)
+    _add_a_folder(canonical)
+    before = live.read_text(encoding="utf-8")
+
+    outcome, problems = devkit_project.publish_workspace(live)
+
+    assert outcome == devkit_project.RENDER_REFUSED and problems
+    assert live.read_text(encoding="utf-8") == before
+    assert devkit_project.publish_workspace(live, force=True)[0] == devkit_project.RENDER_PUBLISHED
+
+
 def test_a_written_stamp_reads_back_and_a_missing_one_is_not_an_error(tmp_path):
     """`write_stamp`/`read_stamp` are what make a render refusable, so the round trip is
     pinned directly rather than only through `--render-workspace`. A live file devkit
