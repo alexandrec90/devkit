@@ -304,6 +304,109 @@
 				},
 				"problemMatcher": []
 			},
+			// --- the workspace file itself ------------------------------------
+			// This file has no branch: one copy serves every VS Code window on the
+			// machine, so an edit is globally live before anyone reviews it. devkit's
+			// `workspace.jsonc` is the copy with a branch and a reviewer, and these
+			// three are the only sanctioned way to move content between them. They are
+			// NOT dispatches -- there is one workspace file, so there is nothing to
+			// pick a checkout for, and the wrapping is written out here.
+			{
+				"label": "Workspace: Check Drift vs devkit's Copy",
+				"detail": "Read-only. Compares the live .code-workspace against devkit's canonical workspace.jsonc — folders, extensions, tasks, inputs, settings — and names every difference. The full list the session-start line only counts.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Workspace: Check Drift vs devkit's Copy",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Workspace: Check Drift vs devkit's Copy",
+					"--",
+					"python",
+					"scripts/devkit_project.py",
+					"--check-workspace"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "multiple-windows",
+					"color": "terminal.ansiBlue"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "shared",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Workspace: Publish devkit's Copy",
+				"detail": "Renders devkit's workspace.jsonc over the live .code-workspace — the file every VS Code window on this machine reads. REFUSES rather than clobbering a live edit devkit never wrote; adopt that first. Publishes whatever branch the devkit checkout is on, so check it out before clicking.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Workspace: Publish devkit's Copy",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Workspace: Publish devkit's Copy",
+					"--",
+					"python",
+					"scripts/devkit_project.py",
+					"--render-workspace"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "cloud-upload",
+					"color": "terminal.ansiRed"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "shared",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Workspace: Adopt Live Edits into devkit",
+				"detail": "The other direction, for edits VS Code made itself — a workspace setting changed through its UI. Records the live file back into devkit's workspace.jsonc and leaves it UNCOMMITTED, so it reads as stranded work until you ship it on a task branch.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Workspace: Adopt Live Edits into devkit",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Workspace: Adopt Live Edits into devkit",
+					"--",
+					"python",
+					"scripts/devkit_project.py",
+					"--adopt-workspace"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "save",
+					"color": "terminal.ansiCyan"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "shared",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
 			{
 				"label": "Git: Sync Branch onto Origin Default (Keep Changes)",
 				"detail": "For each selected checkout, sequentially: detect origin's default branch, then fetch → stash if dirty → rebase → pop. Keeps unstaged/untracked changes.",

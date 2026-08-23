@@ -852,13 +852,40 @@ def test_every_workspace_scoped_task_writes_a_failure_artifact(canonical):
     for task in canonical["tasks"]:
         args = [str(a) for a in task.get("args", ())]
         label = task["label"]
-        if any("devkit_project.py" in a for a in args):
-            continue  # wrapped by the dispatcher
+        if args and args[0].endswith("devkit_project.py"):
+            continue  # a dispatch: wrapped inside plan_command, where the checkout is known
         if any(reason in label for reason in UNLOGGED_TASKS):
             continue
         if not any("log-wrap.py" in a for a in args):
             missing.append(label)
     assert not missing, f"tasks with no failure artifact: {missing}"
+
+
+def test_every_workspace_file_command_is_reachable_from_a_task(canonical):
+    """The three directions between the live file and `workspace.jsonc` are one click.
+
+    A flag nobody can click is how the old arrangement stayed broken: `--check-tasks`
+    existed for years, was correct, and was never wired to anything -- so the only
+    thing that ever ran it was a test that CI skips. Reachability is the difference
+    between a gate and a documented intention.
+    """
+    spelled = {arg for task in canonical["tasks"] for arg in map(str, task.get("args", ()))}
+    for flag in ("--check-workspace", "--render-workspace", "--adopt-workspace"):
+        assert flag in spelled, f"{flag} is reachable only by typing it"
+
+
+def test_the_workspace_file_tasks_are_not_dispatches(canonical):
+    """There is exactly one workspace file, so there is no checkout to pick -- and a
+    task that named the `project` picker would ask a question with no bearing on what
+    it does. They call the script directly, which is why they carry their own
+    `log-wrap.py` (see the artifact test above)."""
+    for task in canonical["tasks"]:
+        if not task["label"].startswith("Workspace: "):
+            continue
+        args = [str(a) for a in task.get("args", ())]
+        assert not args[0].endswith("devkit_project.py"), task["label"]
+        assert "${input:project}" not in args, task["label"]
+        assert "scripts/log-wrap.py" in args, task["label"]
 
 
 def test_the_unlogged_exceptions_are_all_real_tasks(canonical):

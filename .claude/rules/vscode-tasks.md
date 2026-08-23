@@ -81,6 +81,10 @@ python scripts/devkit_project.py --check-workspace    # do they agree?
 python scripts/devkit_project.py --render-workspace   # workspace.jsonc -> the live file
 ```
 
+All three are one click as well — the *Workspace:* tasks, which are deliberately not
+dispatches: there is one workspace file, so there is no checkout to pick, and they carry
+their own `notify-wrap`/`log-wrap` because `plan_command` never sees them.
+
 **Never hand-edit the live file to make a change.** It has no branch dimension: one
 copy serves every window on the machine, so an in-flight edit is globally live before
 anyone reviews it, and two agents editing it race with last-writer-wins and nothing to
