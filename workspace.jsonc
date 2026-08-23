@@ -1,0 +1,2138 @@
+// devkit owns this file. It is the CANONICAL alex-projects.code-workspace.
+//
+// The live workspace file sits outside every repo, so for years it was the source of
+// truth and this copy was a mirror taken from it. That inverted the only property
+// worth having: the file every agent writes to had no branch, no history and no
+// review, so two sessions editing it raced with last-writer-wins, and a single
+// session's in-flight edit was globally live before its PR was even opened. It is
+// how alex-projects.code-workspace came to be running an UNMERGED branch's task
+// block (PR #177, 2026-08-21) for every window on the machine.
+//
+// So the direction is now canonical -> live:
+//
+//     python scripts/devkit_project.py --check-workspace    // do they agree?
+//     python scripts/devkit_project.py --render-workspace   // this file -> the live one
+//     python scripts/devkit_project.py --adopt-workspace    // the live one -> this file
+//
+// Edit THIS file, on a task branch, and let `--render-workspace` publish it once the
+// PR merges. Two agents then conflict in git, where a conflict is visible and
+// resolvable, instead of in a file with no history. `--adopt-workspace` remains for
+// the other direction — a hand edit in VS Code, or a workspace setting the editor
+// wrote itself — and rendering refuses rather than overwriting one.
+//
+// Comparison is SEMANTIC (parsed), not byte-for-byte: VS Code reformats this file
+// when it writes a setting through its own UI, and flagging that would train
+// everyone to ignore the check.
+{
+	// The one workspace. Every checkout lives here, and `sweep.py` reads this
+	// `folders` list as the project registry — a project missing from it is invisible
+	// to every sweep, so nothing reports its stranded work: the session-start line
+	// (`workspace-status.py`) and reconcile's checkout pass both read this list, and
+	// there is no longer a task to run by hand instead. `new-project.py`
+	// registers new projects here rather than writing a workspace file of its own.
+	//
+	// VanillaLand is the legacy Azure DevOps monolith Carameli replaces: a reference
+	// checkout, not something we ship from. It is excluded by `sweep.DEFAULT_EXCLUDE`
+	// and `devkit_project.NOT_PROJECTS`, and it is a SINGLE SHARED CHECKOUT — both the
+	// primary and -b agents edit the same files, so hand ownership over explicitly
+	// (launch-agent-tabs.ps1 -VanillaLandOwners) rather than assuming it.
+	"folders": [
+		{
+			"path": "carameli"
+		},
+		{
+			"path": "ibkr_trader"
+		},
+		{
+			"path": "devkit"
+		},
+		{
+			"path": "data-lake"
+		},
+		{
+			"path": "apt-finder"
+		},
+		{
+			"path": "sports_betting"
+		},
+		{
+			"name": "VanillaLand (reference)",
+			"path": "VanillaLand"
+		}
+	],
+	"extensions": {
+		"recommendations": [
+			"rioj7.command-variable"
+		]
+	},
+	// ---------------------------------------------------------------------------
+	// EVERY task lives here. There are no project-level `.vscode/tasks.json` files left
+	// in this workspace, and re-growing one is now a test failure in the repo that does
+	// it rather than a matter of taste.
+	//
+	// The reason is arithmetic, not purity. This is a MULTI-ROOT workspace and every
+	// repo is checked out twice — carameli/carameli-b, ibkr_trader/ibkr_trader-b. A task
+	// defined inside a repo is therefore rendered once per FOLDER: two quick-pick entries
+	// carrying the same label, nothing to say which checkout each one would run in, and
+	// two copies that disagree the moment the worktrees sit on different branches. That
+	// last part was not hypothetical — when these were deleted, carameli's two copies
+	// had drifted to eight tasks versus two, and ibkr_trader's to five versus eleven,
+	// with the SAME label ("Stop: Docker Stack") running different commands.
+	//
+	// So a project-specific task is not laundered into a generic one on the way up. It
+	// keeps its project-specific script and gains a picker over the two checkouts that
+	// can actually run it — which is all the `--project` argument ever was.
+	// `devkit_project.py`'s `Action.projects` is the enforcement: `test-target`, `e2e`
+	// and `ngrok` are defined for the carameli pair only, the five IBKR actions for the
+	// ibkr_trader pair only, and the dispatcher refuses any other checkout BY NAME
+	// instead of falling through to "does not implement this action", which reads like
+	// an invitation to go implement it.
+	//
+	// Not everything that was in those files came up. The three-task frontend-preview
+	// composite stayed deleted because it was broken, not merely duplicated: its Simple
+	// Browser opened localhost:5174, while ports.toml allocates 5173 to carameli and
+	// 5175 to carameli-b, so it had never once pointed at a running server in either
+	// checkout. ibkr_trader's five hidden snapshot steps and carameli's stack start/stop
+	// are here as one task each ("Snapshot: Run Monthly", "Docker: Start/Stop Stack").
+	//
+	// Every task routes through `devkit_project.py`, which resolves the picked name
+	// against the `folders` list above and runs the action with cwd set to that
+	// checkout. That replaced `${fileWorkspaceFolder}`, which needed an editor tab
+	// open to anchor on and resolved to nothing when the picker was the only input.
+	//
+	// `${workspaceFolder:devkit}` (not `${workspaceFolder}`) is required: this is a
+	// multi-root workspace, so the bare form is ambiguous and VS Code will not resolve
+	// it. The named form is also why this file needs no absolute path.
+	//
+	// devkit owns and tests every script called here. If you are reading this in the
+	// live `.code-workspace`, you are reading a RENDER: the copy with a branch and a
+	// reviewer is `devkit/workspace.jsonc`, and `devkit_project.py --check-workspace`
+	// is the gate between them. Edit the canonical one and
+	// `--render-workspace`; `--adopt-workspace` goes the other way, for an edit VS
+	// Code itself made. `.claude/rules/vscode-tasks.md` carries the why.
+	//
+	// Conventions. Label "Domain: Title Case Action". Every task carries a `detail` —
+	// the second line of the quick-pick, and the only place a one-click action can state
+	// its cost or blast radius. Every task carries an `icon`, and no two share the same
+	// id+colour pair: with everything in one list, colour is what makes it scannable —
+	// green quality, yellow lint/teardown, cyan sync, blue inspection, red destructive,
+	// magenta ship/launch, and the BRIGHT variants for the project-scoped tasks, which
+	// is how you can see at a glance that a task will ask you which checkout to use.
+	"tasks":
+	{
+		"version": "2.0.0",
+		"tasks": [
+			// --- generic: pick a project ---------------------------------------
+			{
+				"label": "Test: Run Suite",
+				"detail": "Each selected checkout's own test suite, run sequentially via its scripts/run-tests.py. Failures go to that checkout's logs/test-failures.log — read the artifact, not the terminal.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:project}",
+					"test",
+					"${input:testScope}"
+				],
+				"group": {
+					"kind": "test",
+					"isDefault": true
+				},
+				"icon": {
+					"id": "beaker",
+					"color": "terminal.ansiGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Test: Harness Hook Tests — free",
+				"detail": "The vendored tier's own stdlib-only tests in each selected checkout, run sequentially. Separate from 'Test: Run Suite' because pytest's testpaths deliberately excludes scripts/hooks/tests/ in EVERY consumer. Fails loudly on a checkout that does not vendor the harness.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:project}",
+					"test-hooks"
+				],
+				"group": "test",
+				// Not `beaker`/green: that is "Test: Run Suite", and the two sat
+				// side by side in the picker as an identical icon under two labels.
+				"icon": {
+					"id": "zap",
+					"color": "terminal.ansiGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Test: Harness Hook Tests — paid, live CLI",
+				"detail": "PAID — launches a real authenticated agent CLI against a throwaway project and proves the hooks change what it actually does. devkit only: these smokes live in tests/, which is never vendored. 'Claude only' is the cheapest run; each suite's model and budget are set in its own test file. Failures go to devkit/logs/hook-test-live-failures.log.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					// Written out rather than a picker: the action's scope is one checkout, so a
+					// picker here would be a list of length one asking a question with no second
+					// answer. `test_the_live_smoke_task_names_the_only_checkout_that_can_run_it`
+					// pins this literal against `Action.projects` so the two cannot drift.
+					"devkit",
+					"test-hooks-live",
+					"${input:liveHookSuite}"
+				],
+				"group": "test",
+				// Same `zap` family as the free hook tests, in red: the colour is the only
+				// warning a one-click paid task gets before it is clicked.
+				"icon": {
+					"id": "zap",
+					"color": "terminal.ansiRed"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Lint: Everything",
+				"detail": "Full-repo lint for each selected checkout, run sequentially via scripts/lint-all.py. Findings go to that checkout's logs/lint-errors.log.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:project}",
+					"lint"
+				],
+				"group": "build",
+				"icon": {
+					"id": "checklist",
+					"color": "terminal.ansiYellow"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Lint: Changed Files",
+				"detail": "Lint only the working-tree diff (vs HEAD, plus untracked) in each selected checkout. Runs sequentially; same artifact as 'Lint: Everything'.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:project}",
+					"lint-changed"
+				],
+				"group": "build",
+				// Same reason as the hook tests above — `checklist`/yellow is
+				// "Lint: Everything"; the narrower scope gets the narrower icon.
+				"icon": {
+					"id": "list-selection",
+					"color": "terminal.ansiYellow"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Agent: Sync Codex Context",
+				"detail": "Regenerate Codex repository skills and hook configuration in each selected checkout, sequentially.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:project}",
+					"sync-codex"
+				],
+				"icon": {
+					"id": "sync",
+					"color": "terminal.ansiCyan"
+				},
+				"presentation": {
+					"reveal": "silent",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Harness: Check Drift vs devkit",
+				"detail": "Byte-compares each selected checkout's vendored scripts/hooks/ against devkit, sequentially. Needs DEVKIT_DIR set. Defaults to the read-only check; --pull and --push both rewrite files.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:project}",
+					"sync-devkit",
+					"${input:harnessMode}"
+				],
+				"icon": {
+					"id": "diff",
+					"color": "terminal.ansiCyan"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			// --- the workspace file itself ------------------------------------
+			// This file has no branch: one copy serves every VS Code window on the
+			// machine, so an edit is globally live before anyone reviews it. devkit's
+			// `workspace.jsonc` is the copy with a branch and a reviewer, and these
+			// three are the only sanctioned way to move content between them. They are
+			// NOT dispatches -- there is one workspace file, so there is nothing to
+			// pick a checkout for, and the wrapping is written out here.
+			{
+				"label": "Workspace: Check Drift vs devkit's Copy",
+				"detail": "Read-only. Compares the live .code-workspace against devkit's canonical workspace.jsonc — folders, extensions, tasks, inputs, settings — and names every difference. The full list the session-start line only counts.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Workspace: Check Drift vs devkit's Copy",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Workspace: Check Drift vs devkit's Copy",
+					"--",
+					"python",
+					"scripts/devkit_project.py",
+					"--check-workspace"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "multiple-windows",
+					"color": "terminal.ansiBlue"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Workspace: Publish devkit's Copy",
+				"detail": "Renders devkit's workspace.jsonc over the live .code-workspace — the file every VS Code window on this machine reads. REFUSES rather than clobbering a live edit devkit never wrote; adopt that first. Publishes whatever branch the devkit checkout is on, so check it out before clicking.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Workspace: Publish devkit's Copy",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Workspace: Publish devkit's Copy",
+					"--",
+					"python",
+					"scripts/devkit_project.py",
+					"--render-workspace"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "cloud-upload",
+					"color": "terminal.ansiRed"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Workspace: Adopt Live Edits into devkit",
+				"detail": "The other direction, for edits VS Code made itself — a workspace setting changed through its UI. Records the live file back into devkit's workspace.jsonc and leaves it UNCOMMITTED, so it reads as stranded work until you ship it on a task branch.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Workspace: Adopt Live Edits into devkit",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Workspace: Adopt Live Edits into devkit",
+					"--",
+					"python",
+					"scripts/devkit_project.py",
+					"--adopt-workspace"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "save",
+					"color": "terminal.ansiCyan"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Git: Sync Branch onto Origin Default (Keep Changes)",
+				"detail": "For each selected checkout, sequentially: detect origin's default branch, then fetch → stash if dirty → rebase → pop. Keeps unstaged/untracked changes.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:project}",
+					"sync-branch"
+				],
+				"icon": {
+					"id": "git-merge",
+					"color": "terminal.ansiGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			{
+				// The one task that reaches a REFERENCE checkout, and the reason it is
+				// not a devkit_project.py dispatch: that dispatcher resolves through
+				// `known_projects`, which drops NOT_PROJECTS because every action it
+				// runs needs a harness. Merging a trunk in needs git and nothing else,
+				// so this script resolves against the raw registry and its picker lists
+				// VanillaLand alongside the projects.
+				//
+				// The sibling above REBASES, which is right for a task branch and wrong
+				// for long-lived work whose history is already published. This merges.
+				"label": "Git: Merge Origin Default into Current Branch",
+				"detail": "Fetch, then MERGE origin's default branch — auto-detected, so `develop` in VanillaLand — into whatever branch the chosen checkout is on. Commits locally and NEVER pushes. On conflict the merge is LEFT IN PROGRESS and every unmerged file is named in devkit's logs/git-merge-origin-default-into-current-branch.log; hand that file to a coding agent.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Git: Merge Origin Default into Current Branch",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Git: Merge Origin Default into Current Branch",
+					"--",
+					"python",
+					"scripts/git-merge-default.py",
+					"--checkout",
+					"${input:mergeCheckout}",
+					"--base",
+					"${input:mergeBase}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "git-merge",
+					"color": "terminal.ansiBrightCyan"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			// --- generic: Docker ------------------------------------------------
+			// Two kinds live here. The first two are STACK-scoped: they act on the
+			// chosen project's own compose topology, which genuinely differs (carameli
+			// waits on healthchecks, ibkr_trader scopes to its ibkr/app profiles), so
+			// they delegate to that project's script and the shared thing is the CLI
+			// contract. The rest are DAEMON-scoped — one Docker Desktop per machine —
+			// and delegate only so a project can override the teardown.
+			{
+				"label": "Docker: Start Stack",
+				"detail": "Build and start each selected checkout's stack sequentially, then wait for healthchecks. The default build task (Ctrl+Shift+B). A checkout with no Docker tier says so by name.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:project}",
+					"docker-up"
+				],
+				"group": {
+					"kind": "build",
+					"isDefault": true
+				},
+				"icon": {
+					"id": "vm-running",
+					"color": "terminal.ansiGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Docker: Stop Stack",
+				"detail": "Stop each selected checkout's containers sequentially. Named volumes and their data survive — this is `down`, never `down -v`.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:project}",
+					"docker-down"
+				],
+				"icon": {
+					"id": "vm-outline",
+					"color": "terminal.ansiYellow"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Docker: Restart Engine",
+				"detail": "Unsticks a daemon hung on 'Starting the Docker Engine': kill processes → wsl --shutdown → relaunch → poll until `docker info` answers. Uses the chosen project's own scripts/docker-restart-engine.py when it ships one.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:daemonProject}",
+					"docker-restart-engine"
+				],
+				"icon": {
+					"id": "debug-restart",
+					"color": "terminal.ansiBlue"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Docker: Fix Stalled Desktop",
+				"detail": "The aggressive escalation from 'Restart Engine' — two stop/start rounds and a doubled poll window, for a Docker Desktop that never finishes starting. Uses the chosen project's own scripts/docker-fix.py when it ships one.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:daemonProject}",
+					"docker-fix"
+				],
+				"icon": {
+					"id": "tools",
+					"color": "terminal.ansiYellow"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Docker: Prune + Compact VHDX",
+				"detail": "For each selected checkout sequentially: reclaim image/build-cache space and compact the WSL2 VHDX. Never touches named volumes; project overrides may tear down and restore their own stack.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:project}",
+					"docker-prune"
+				],
+				"icon": {
+					"id": "trash",
+					"color": "terminal.ansiRed"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			{
+				// Machine scope, not project scope — so no `${input:project}`. The three
+				// things that make this laptop slow after a few hours are unrelated to
+				// each other and only one of them is Docker's, which is why this is not
+				// another mode of "Docker: Prune + Compact VHDX". See ACTIONS["reclaim"].
+				"label": "Machine: Reclaim Resources",
+				"detail": "Stops every running container (docker stop, never down — named volumes and stopped state survive), deletes RDP traces / WSL crash dumps / pytest scratch / node cache and loose %TEMP% files older than 3 days, then reconciles ephemeral boxes — but only once the disk is clear of the 20 GB floor reconcile reaps open PRs at. Reports commit charge; it cannot free memory.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"devkit",
+					"reclaim"
+				],
+				"icon": {
+					"id": "flame",
+					"color": "terminal.ansiBrightRed"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"clear": true,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				// Reviewing a UI change before its PR merges. Machine scope, not project
+				// scope — there is one box registry and one port registry on this machine, so
+				// the checkout is a dimension inside the ANSWER rather than a scope for the task:
+				// `previewProject` asks which one, `previewRow` lists that one's refs. See
+				// ACTIONS["preview"].
+				//
+				// `focus` because the terminal menu is still reachable — the `Rescan` row falls
+				// through to it — and without it that answer is typed into whatever had focus
+				// when the task was clicked.
+				"label": "Preview: Open a UI Branch",
+				"detail": "Asks which checkout, then which of its refs — preview boxes already standing, live agent boxes, open PRs, recent agent/ branches on origin — and brings that one's stack up in a box of its own, opening the URL it publishes. Both lists are what the last run found; every checkout ends in a 'Rescan' row that looks again and then asks in the terminal. Cutting a box for the first time builds its images and installs the frontend's dependencies — about three minutes, reported stage by stage, and the tab opens only once the page answers; re-serving one that is already standing takes seconds. A running preview costs CPU until 'Machine: Reclaim Resources' stops it.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"devkit",
+					"preview",
+					"--pick-ref",
+					"${input:previewRow}"
+				],
+				"icon": {
+					"id": "preview",
+					"color": "terminal.ansiBrightMagenta"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"focus": true,
+					"clear": true,
+					"close": false
+				},
+				// VS Code allows ONE instance of a task by default, and re-running a task
+				// that is already active offers to terminate it. Comparing two branches
+				// side by side is the normal way to use this one, and every box has its own
+				// port lease and COMPOSE_PROJECT_NAME, so nothing below the task was ever
+				// the thing serialising them. Four rather than unbounded: a cold box builds
+				// images and each running preview costs CPU until it is stopped.
+				"runOptions": {
+					"instanceLimit": 4
+				},
+				"problemMatcher": []
+			},
+			{
+				// The same two dropdowns, cutting the CHEAP kind of box: only the project's
+				// `[worktree] ui_services` start, and the backend is borrowed from the static
+				// checkout's running stack on its usual ports. A project that has not declared
+				// a UI tier in `.devkit.toml` says so and points at the full task above.
+				"label": "Preview: Open a UI Branch (Frontend Only)",
+				"detail": "The cheap preview: same two dropdowns as 'Open a UI Branch', but the box starts only the project's declared UI services (e.g. the Vite frontend) and points them at the static checkout's already-running backend instead of cloning the whole stack — one container and no image builds, so about a minute the first time a box is cut (the frontend installs its dependencies) and seconds after that. Needs that checkout's stack up ('Docker: Start Stack'); it says so before it starts when nothing is listening on that port. Refs whose change is not frontend-only will not show it here; use the full preview.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"devkit",
+					"preview",
+					"--pick-ref",
+					"${input:previewRow}",
+					"--ui"
+				],
+				"icon": {
+					"id": "preview",
+					"color": "terminal.ansiBrightCyan"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"focus": true,
+					"clear": true,
+					"close": false
+				},
+				// Same reason as the full preview above: several of these at once is the
+				// point of them, and the default limit of 1 turns the second click into an
+				// offer to kill the first.
+				"runOptions": {
+					"instanceLimit": 4
+				},
+				"problemMatcher": []
+			},
+			{
+				// The same action with the menu skipped, and deliberately WITHOUT `focus`: after
+				// a reboot the answer is always "all of them", so the one task that needs no
+				// keyboard is the one that should not take it.
+				"label": "Preview: Restart Standing Previews",
+				"detail": "Brings every preview box that is already cut back up — the one-click answer after a reboot, when Docker stopped every container while the boxes, their branches and their port leases all survived, so each lands back on the port it had before. Asks nothing; a machine with no preview boxes says so and exits.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"devkit",
+					"preview",
+					"--all"
+				],
+				"icon": {
+					"id": "debug-restart",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"clear": true,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			// --- scoped: carameli's worktree pair --------------------------------
+			// These three came up out of `carameli/.vscode/tasks.json`. The picker lists
+			// two checkouts rather than five because that is what the action is defined
+			// for — see `Action.projects` in devkit_project.py.
+			{
+				"label": "Test: Run Carameli Target — free",
+				"detail": "Run the chosen free target sequentially in each selected Carameli checkout. '--all' merges pytest + hooks + frontend into one artifact per checkout. Paid tiers remain CLI-only.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:carameliCheckout}",
+					"test-target",
+					"${input:carameliTestTarget}"
+				],
+				// Deliberately not `isDefault`: "Test: Run Suite" holds that, and two
+				// defaults in one multi-root workspace makes Run Test Task ambiguous.
+				// That collision was real while this task lived in the repo.
+				"group": "test",
+				"icon": {
+					"id": "beaker",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Test: Run Browser E2E — free",
+				"detail": "Run Playwright sequentially against each selected Carameli checkout. NEEDS each stack and Vite server up first. Failures go to that checkout's logs/e2e-failures.log.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:carameliCheckout}",
+					"e2e",
+					"${input:e2eMode}"
+				],
+				"group": "test",
+				"icon": {
+					"id": "browser",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Test: Run Local Integration E2E — free",
+				"detail": "Both directions of the carameli <-> VanillaLand integration: boots local IIS Express + vs-sql via VS_REPO_DIR, runs tests/local_e2e, then the .NET outbound driver. Needs a filled .env.local-e2e (see .env.local-e2e.example); no telephony, no cost.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:carameliCheckout}",
+					"local-e2e"
+				],
+				"group": "test",
+				"icon": {
+					"id": "plug",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				// This one was deleted from carameli's task file for being a one-line
+				// wrapper around a documented script, under the old rule that a
+				// PROJECT-level task had to justify its copy. That rule is gone with the
+				// files it governed: there is no copy here to drift, so a one-click
+				// tunnel-plus-resync costs nothing and the script stays the interface.
+				"label": "Start: ngrok + Sync Webhook URLs",
+				"detail": "Sequentially open an ngrok tunnel for each selected Carameli checkout, update its webhook environment values, and RECREATE app + worker. This interrupts in-flight work and changes each tunnel URL.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:carameliCheckout}",
+					"ngrok"
+				],
+				"icon": {
+					"id": "radio-tower",
+					"color": "terminal.ansiBrightMagenta"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			// --- scoped: the reference checkout ----------------------------------
+			// The second task to reach VanillaLand, and the second one that cannot be a
+			// `devkit_project.py` dispatch: that dispatcher resolves through
+			// `known_projects`, which drops NOT_PROJECTS because every action it runs
+			// needs a harness. Running a start script the checkout itself ships needs
+			// PowerShell and nothing else, so `scripts/vanillaland-e2e.py` resolves
+			// against the raw registry the way `git-merge-default.py` does.
+			{
+				"label": "Start: VanillaLand IIS Express",
+				"detail": "Run VanillaLand's own .local/carameli-e2e/start.ps1: the persisted vs-sql container, the local SOAP stand-ins, and both 64-bit IIS Express sites (VoipApi :8085, classic web UI :8022), waiting for each to answer — up to ~3 min on a cold start while .NET JITs. Idempotent: a port already listening is left alone. Needs a machine seeded per that checkout's .local/carameli-e2e/README.md. Stops nothing.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Start: VanillaLand IIS Express",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Start: VanillaLand IIS Express",
+					"--",
+					"python",
+					"scripts/vanillaland-e2e.py"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "server-process",
+					"color": "terminal.ansiMagenta"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			// --- scoped: ibkr_trader's worktree pair -----------------------------
+			// The five that came up out of `ibkr_trader/.vscode/tasks.json`. Each routes
+			// through a `scripts/*.py` in that repo, which is what makes them dispatchable
+			// at all — the two Backtest tasks named `.venv\Scripts\ibkr-trader.exe`
+			// directly and needed `scripts/backtest-task.py` written before they could
+			// move. Note there is no "Docker: Start Stack" story here: that project keeps
+			// containers OFF by default, and the generic task says so by name.
+			{
+				"label": "IBKR: Open Gateway VNC Viewer",
+				"detail": "Open one TigerVNC viewer per selected IBKR Trader checkout, sequentially. Each checkout needs its `ibkr` profile up; this task only opens viewers.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:ibkrCheckout}",
+					"vnc",
+					"${env:ProgramFiles}\\TigerVNC\\vncviewer.exe"
+				],
+				"icon": {
+					"id": "device-desktop",
+					"color": "terminal.ansiBrightBlue"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Ingest: Run Source",
+				"detail": "Run the selected source pull sequentially in each selected IBKR Trader checkout. Needs each `db` container up; output goes to that checkout's artifacts/tasks/ingest-*.log.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:ibkrCheckout}",
+					"ingest",
+					"${input:ingestSource}",
+					"--arg=${input:ingestArg}"
+				],
+				"icon": {
+					"id": "cloud-download",
+					"color": "terminal.ansiBrightCyan"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Snapshot: Run Monthly",
+				"detail": "Run the monthly forward-shadow ritual sequentially in each selected IBKR Trader checkout. Starts a container and does not stop it afterwards; failures go to artifacts/tasks/snapshot-monthly.log.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:ibkrCheckout}",
+					"snapshot-monthly",
+					"${input:snapshotScope}"
+				],
+				"icon": {
+					"id": "calendar",
+					"color": "terminal.ansiBrightYellow"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Backtest: Run",
+				"detail": "Simulate the chosen allocator and universe sequentially in each selected IBKR Trader checkout. Each `db` container must be up; writes to artifacts/tasks/backtest-run.log.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:ibkrCheckout}",
+					"backtest",
+					"--strategy",
+					"${input:btStrategy}",
+					"--account",
+					"${input:btAccount}",
+					"--universe-file",
+					"${input:btUniverseFile}",
+					"--start",
+					"${input:btStart}",
+					"--eval-start",
+					"${input:btEvalStart}",
+					"--end",
+					"${input:btEnd}"
+				],
+				"icon": {
+					"id": "graph-line",
+					"color": "terminal.ansiBrightBlue"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Backtest: OOS (Honest Per-Fold)",
+				"detail": "Run walk-forward OOS evaluation sequentially in each selected IBKR Trader checkout. Warm-up and simulation starts remain fixed for comparability; output is separate from 'Backtest: Run'.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:ibkrCheckout}",
+					"backtest-oos",
+					"--account",
+					"${input:btAccount}",
+					"--end",
+					"${input:oosEnd}"
+				],
+				"icon": {
+					"id": "graph",
+					"color": "terminal.ansiBrightMagenta"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			// --- scoped: the checkouts that have a database -----------------------
+			{
+				// The last task to leave a .vscode/tasks.json anywhere, and the only one
+				// that lived in the GENERATOR template rather than a live repo. Its
+				// picker spans four checkouts rather than two because two separate repos
+				// have an Alembic tree; devkit is absent because it has no database.
+				"label": "DB: New Migration (Autogenerate)",
+				"detail": "Run `alembic revision --autogenerate` sequentially in each selected database checkout. ALWAYS READ EVERY GENERATED FILE before committing. It never runs `upgrade`, but each database must be up and current.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:dbCheckout}",
+					"db-revision",
+					"-m",
+					"${input:migrationMessage}"
+				],
+				"icon": {
+					"id": "database",
+					"color": "terminal.ansiBrightRed"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			// --- workspace-scoped: act across every checkout ---------------------
+			{
+				"label": "Project: New from devkit",
+				"detail": "Scaffold a whole new project — templates, Docker stack on registry-allocated ports, vendored devkit harness, parallel worktree, PR gate, and a PRIVATE GitHub repo. Registers it in this workspace's folder list and project picker. DRY RUN by default: pick 'Apply' to actually write.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Project: New from devkit",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Project: New from devkit",
+					"--",
+					"python",
+					"scripts/new-project.py",
+					"${input:newProjectName}",
+					"--preset",
+					"${input:newProjectPreset}",
+					"--description",
+					"${input:newProjectDescription}",
+					"${input:newProjectRemote}",
+					"${input:newProjectApply}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "new-folder",
+					"color": "terminal.ansiCyan"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"clear": true,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				// The step that used to be the human's, and the only one in the release
+				// that needed judgement rather than typing: the prepare PR is red BY
+				// CONSTRUCTION on one named test, because FALLBACK_DEVKIT_REF has to
+				// point at a tag that does not exist yet. `release-pipeline.py` reads
+				// the gate's own test artifact and refuses to merge on any other red,
+				// which is what makes "merge a failing PR" safe to put behind a click.
+				"label": "Devkit: Cut Release",
+				"detail": "DRY RUN by default — prints the plan and stops. Applied, this bumps FALLBACK_DEVKIT_REF, opens the prepare PR, WAITS for the PR gate, merges it if the only failure is the expected one, dispatches the tag workflow, then opens an adoption PR in EVERY consumer. Minutes, mostly waiting on CI.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"devkit",
+					"release",
+					"${input:releaseLevel}",
+					"${input:sweepApply}"
+				],
+				"icon": {
+					"id": "tag",
+					"color": "terminal.ansiBrightYellow"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Devkit: Upgrade Projects",
+				"detail": "DRY RUN by default. Adopt the current devkit release in each selected consumer, one PR per repo. Skips duplicate worktree siblings and refuses dirty or unvendored explicit targets; one refusal does not stop the rest.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Devkit: Upgrade Projects",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Devkit: Upgrade Projects",
+					"--",
+					"python",
+					"scripts/upgrade-project.py",
+					"${input:upgradeScope}",
+					"${input:sweepApply}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "package",
+					"color": "terminal.ansiBlue"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			// --- the ephemeral tier: a box per task, destroyed when the work leaves it ---
+			//
+			// Deliberately three tasks and not four: there is no "reap one box" entry,
+			// because a picker cannot enumerate boxes that are created between clicks.
+			// Reaping by name is the CLI (`worktree.py reap <box> --yes`), and the one-click
+			// shape is the sweep, which steps over every box still holding work.
+			{
+				"label": "Worktree: New Box",
+				"detail": "Cut a disposable worktree for one task: a fresh claude/… branch off origin/<default>, its own port-slot lease and COMPOSE_PROJECT_NAME, and its toolchain installed (uv sync / pip locks / npm, whichever the project uses — a cold install can take minutes). Leave the topic blank to name it after the project. DRY RUN by default.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Worktree: New Box",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Worktree: New Box",
+					"--",
+					"python",
+					"scripts/worktree.py",
+					"new",
+					"${input:worktreeProject}",
+					"--slug",
+					"${input:worktreeSlug}",
+					"${input:sweepApply}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "repo-forked",
+					"color": "terminal.ansiCyan"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Worktree: List Boxes — read-only",
+				"detail": "Every live box, its branch, its port slot, and whether its work has left it yet. Boxes are absent from this workspace's folder list by design, so nothing else reports them — a forgotten one holds a slot out of a fixed ceiling and, if its project has a stack, a container and volume set. Touches nothing.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Worktree: List Boxes",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Worktree: List Boxes",
+					"--",
+					"python",
+					"scripts/worktree.py",
+					"list",
+					"${input:sweepFetch}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "list-tree",
+					"color": "terminal.ansiCyan"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Worktree: Reap Finished Boxes",
+				"detail": "DRY RUN by default. For every box whose work has left it: tear its stack down (containers, network and its own volumes), remove the worktree, delete the branch, release the port lease. REFUSES any box still holding unshipped work and names it instead — so nothing can be stranded — and never forces, whatever the answer.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Worktree: Reap Finished Boxes",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Worktree: Reap Finished Boxes",
+					"--",
+					"python",
+					"scripts/worktree.py",
+					"reap",
+					"--all",
+					"${input:sweepFetch}",
+					"${input:sweepApply}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "trash",
+					"color": "terminal.ansiBrightRed"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Worktree: Reconcile — merge, reap, reclaim disk",
+				"detail": "DRY RUN by default. The unattended pass a schedule runs: reap every box whose PR has MERGED, reap unused boxes, and — when free space is at or under the floor — reap boxes whose PR is merely open (the remote holds every commit, so only the checkout is lost). NEVER touches a box holding unshipped work; it names those instead. Merging is off unless you pick it.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Worktree: Reconcile",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Worktree: Reconcile",
+					"--",
+					"python",
+					"scripts/worktree.py",
+					"reconcile",
+					"${input:reconcileMerge}",
+					"${input:sweepApply}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "git-merge",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Ports: Show Checkout Allocations",
+				"detail": "Print the *_HOST_PORT block for each selected checkout. Use it to rebuild .env files after worktree changes rather than picking free-looking numbers.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/log-wrap.py",
+					"Ports: Show Checkout Allocations",
+					"--",
+					"python",
+					"scripts/devkit_ports.py",
+					"${input:project}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "plug",
+					"color": "terminal.ansiBlue"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Agents: Open Tabs (External Terminal)",
+				"detail": "Choose Claude or Codex, then open a new Windows Terminal window with one tab per worktree. Machine-scoped, so it takes no project. The Carameli tabs also mount ../VanillaLand as writable.",
+				"type": "process",
+				"command": "pwsh.exe",
+				"args": [
+					"-NoProfile",
+					"-ExecutionPolicy",
+					"Bypass",
+					"-File",
+					"${workspaceFolder:devkit}/scripts/launch-agent-tabs.ps1",
+					"-Agent",
+					"${input:agentCli}"
+				],
+				"icon": {
+					"id": "rocket",
+					"color": "terminal.ansiMagenta"
+				},
+				"presentation": {
+					"reveal": "silent",
+					"panel": "new",
+					"clear": true,
+					"close": true
+				},
+				"problemMatcher": []
+			},
+			{
+				// These agent recovery tasks take NO checkout, and deliberately so. Every
+				// picker in this file lists the static checkouts; a session that ran in an
+				// ephemeral box is unreachable from all of them, because boxes are absent
+				// from `folders` by design. What you want back is the last few sessions
+				// wherever they happened, so the script reads the transcript store — which
+				// records each session's own directory — instead of asking.
+				"label": "Agents: Resume Recent Sessions",
+				"detail": "Choose Claude or Codex and how many sessions, then reopen that agent's most recently active sessions in a new Windows Terminal window, one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/resume-sessions.py",
+					"--agent",
+					"${input:agentCli}",
+					"--count",
+					"${input:resumeSessionCount}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "history",
+					"color": "terminal.ansiBrightMagenta"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				// Claude and Codex session IDs differ. This selects only Claude transcripts
+				// whose final assistant turn is the account/session limit error, passes those
+				// transcripts through Codex's native Claude importer, then resumes the returned
+				// Codex thread IDs. Codex's importer owns deduplication and import history.
+				"label": "Agents: Import Limited Claude Sessions",
+				"detail": "Choose how many recent Claude sessions that ended at a usage limit to import through Codex's native Claude importer and resume by their Codex thread IDs, one new Windows Terminal tab each, OLDEST TAB FIRST. Claude subagents and sessions whose directory has been reaped are skipped. Already imported transcripts resolve to their existing native Codex threads.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/import-claude-sessions.py",
+					"--count",
+					"${input:resumeSessionCount}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "arrow-swap",
+					"color": "terminal.ansiBrightCyan"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			}
+		],
+		"inputs": [
+			{
+				// MAINTAINED BY new-project.py. Command inputs must return one string, so
+				// the extension joins checked names with commas. devkit_project.py splits
+				// that value, validates every checkout up front, then runs sequentially.
+				"id": "project",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which checkout(s) should run this task?",
+					"key": "projects",
+					"multiPick": true,
+					"multiPickStorage": "workspace",
+					"separator": ",",
+					"optionGroups": [
+						{
+							"label": "Select one or more checkouts",
+							"minCount": 1,
+							"options": [
+								"carameli",
+								"ibkr_trader",
+								"devkit",
+								"data-lake",
+								"apt-finder",
+								"sports_betting"
+							]
+						}
+					]
+				}
+			},
+			{
+				// The daemon restart/fix actions are machine-scoped. Running either once
+				// per checked project would restart the same Docker Desktop repeatedly.
+				"id": "daemonProject",
+				"type": "pickString",
+				"description": "Which checkout should supply the Docker override?",
+				"options": [
+					"carameli",
+					"ibkr_trader",
+					"devkit",
+					"data-lake",
+					"apt-finder",
+					"sports_betting"
+				],
+				"default": "carameli"
+			},
+			{
+				// Which repo a box is cut FROM. Single-pick, like daemonProject: a box
+				// belongs to exactly one checkout, and `worktree.py new` takes one name.
+				// register() maintains this list along with the other pickers, so a newly
+				// generated project can be boxed the day it exists.
+				"id": "worktreeProject",
+				"type": "pickString",
+				"description": "Which repo should the box be cut from?",
+				"options": [
+					"carameli",
+					"ibkr_trader",
+					"devkit",
+					"data-lake",
+					"apt-finder",
+					"sports_betting"
+				],
+				"default": "carameli"
+			},
+			{
+				// The branch topic, so the box is named after the work rather than after
+				// the session that asked for it. Safe to leave blank -- it is the value of
+				// `--slug`, which consumes it whatever it is, and worktree.py falls back to
+				// the project name. That is why it is spelled as a flag here and not as a
+				// bare positional, which an empty answer would turn into a stray argument.
+				"id": "worktreeSlug",
+				"type": "promptString",
+				"description": "Topic for the branch name (blank = name it after the project)",
+				"default": ""
+			},
+			{
+				// Every project's run-tests.py accepts both of these, which is what lets
+				// this be a picker rather than a free-text box. `--changed` is the
+				// canonical spelling everywhere — devkit, the template, and the vendored
+				// Stop hook's own remediation line. carameli used to spell it `--fast`,
+				// which meant the Stop hook's advice died on "Unknown argument"; it now
+				// accepts `--changed` and keeps `--fast` as a deprecated alias.
+				//
+				// The empty value is safe HERE specifically: devkit_project.py drops empty
+				// arguments before exec, so it cannot reach argparse as a stray positional
+				// (tests/test_devkit_project.py pins that). A picker feeding a script
+				// directly still needs one real token per branch.
+				"id": "testScope",
+				"type": "pickString",
+				"description": "How much of the suite to run",
+				"options": [
+					{
+						"label": "Full suite (default)",
+						"value": ""
+					},
+					{
+						"label": "Changed only — the working-tree diff",
+						"value": "--changed"
+					}
+				],
+				"default": ""
+			},
+			{
+				// The one picker in this file where an accidental Enter spends money, so the
+				// default is the smallest run that still proves something rather than the most
+				// thorough one. Single-pick for the same reason: "both" is a deliberate choice,
+				// not two checkboxes that are easy to leave ticked from last time.
+				"id": "liveHookSuite",
+				"type": "pickString",
+				"description": "Which live CLI smoke? Every option launches a paid session.",
+				"options": [
+					{
+						"label": "Claude only — cheapest, one session",
+						"value": "claude"
+					},
+					{
+						"label": "Codex only — two sessions",
+						"value": "codex"
+					},
+					{
+						"label": "Both — every live smoke",
+						"value": "both"
+					}
+				],
+				"default": "claude"
+			},
+			{
+				// The two-option pickers for the project-SCOPED tasks. Deliberately not
+				// the `project` picker above: three of the five checkouts it lists cannot
+				// run a Playwright suite, and offering them would make the wrong answer
+				// available at exactly the moment you are least likely to notice. The
+				// dispatcher validates the same restriction from its side
+				// (`Action.projects`), so these lists are UX, never the guarantee.
+				//
+				// The extension remembers checked items per workspace. The dispatcher
+				// still validates the action's scope before starting either checkout.
+				"id": "carameliCheckout",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which Carameli checkout(s) should run this task?",
+					"key": "carameliCheckouts",
+					"multiPick": true,
+					"multiPickStorage": "workspace",
+					"separator": ",",
+					"optionGroups": [
+						{
+							"label": "Select the checkout",
+							"minCount": 1,
+							"options": ["carameli"]
+						}
+					]
+				}
+			},
+			{
+				"id": "ibkrCheckout",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which IBKR Trader checkout(s) should run this task?",
+					"key": "ibkrCheckouts",
+					"multiPick": true,
+					"multiPickStorage": "workspace",
+					"separator": ",",
+					"optionGroups": [
+						{
+							"label": "Select the checkout",
+							"minCount": 1,
+							"options": ["ibkr_trader"]
+						}
+					]
+				}
+			},
+			{
+				// Four options, not two: `db-revision` is the one scoped action that
+				// spans two repos, because both have an Alembic tree. devkit is absent
+				// because it has no database (`[db] enabled = false`), and it is absent
+				// from `DB_PROJECTS` for the same reason — the two lists have to agree,
+				// and a test asserts they do.
+				"id": "dbCheckout",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which checkout(s) should generate this migration?",
+					"key": "dbCheckouts",
+					"multiPick": true,
+					"multiPickStorage": "workspace",
+					"separator": ",",
+					"optionGroups": [
+						{
+							"label": "Select one or more database checkouts",
+							"minCount": 1,
+							"options": [
+								"carameli",
+								"ibkr_trader"
+							]
+						}
+					]
+				}
+			},
+			{
+				// Free text, and it reaches a shell inside carameli's app container (the
+				// PgBouncer bypass needs `sh -c` to expand $DIRECT_DATABASE_URL), so that
+				// script quotes it. ibkr_trader's passes it as its own argv element and
+				// never involves a shell at all.
+				"id": "migrationMessage",
+				"type": "promptString",
+				"description": "Short description of the schema change (becomes part of the migration filename)",
+				"default": ""
+			},
+			{
+				// `hook-tests` is absent: it is the workspace's own "Test: Harness Hook
+				// Tests" now, identical in every consumer, and a second spelling of it
+				// here would be a third copy of the same run.
+				"id": "carameliTestTarget",
+				"type": "pickString",
+				"description": "Which Carameli-only free target to run",
+				"options": [
+					{
+						"label": "All free targets (pytest + hooks + frontend + bundle budgets), one merged artifact",
+						"value": "--all"
+					},
+					{
+						"label": "Frontend (Vitest)",
+						"value": "--target=frontend-tests"
+					},
+					{
+						// Builds the frontend, then measures what the build produced
+						// against frontend/bundlePolicy.ts. Separate from the Vitest
+						// entry above because `test:run` never builds and so can never
+						// reach those budgets.
+						"label": "Frontend bundle budgets (production build + Vitest)",
+						"value": "--target=bundle-budgets"
+					},
+					{
+						"label": "Public webhook reachability",
+						"value": "--target=webhook-e2e"
+					}
+				],
+				"default": "--all"
+			},
+			{
+				// Carries an empty branch, and is safe for the same reason `testScope`
+				// is: it feeds `devkit_project.py`, which drops empty arguments before
+				// exec. While this picker lived in carameli's own task file it fed
+				// `run-e2e.py` directly and survived only because that script happens to
+				// test membership rather than parse arguments — an accident, and one of
+				// the things hoisting these actually FIXED.
+				"id": "e2eMode",
+				"type": "pickString",
+				"description": "Which Playwright mode to run",
+				"options": [
+					{
+						"label": "Headless (default)",
+						"value": ""
+					},
+					{
+						"label": "Headed — watch the browser",
+						"value": "--headed"
+					},
+					{
+						"label": "Cross-browser — Chromium, Firefox, WebKit",
+						"value": "--cross-browser"
+					}
+				],
+				"default": ""
+			},
+			{
+				"id": "ingestSource",
+				"type": "pickString",
+				"description": "Which data source to pull",
+				"options": [
+					{ "label": "FMP prices — batch", "value": "fmp-prices-batch" },
+					{ "label": "FMP prices — one symbol", "value": "fmp-price-one" },
+					{ "label": "Yahoo prices — batch", "value": "yahoo-prices-batch" },
+					{ "label": "Yahoo fundamentals — batch", "value": "yahoo-fundamentals-batch" },
+					{ "label": "Alpha Vantage prices — batch", "value": "alpha-vantage-batch" },
+					{ "label": "Finnhub news — batch", "value": "finnhub-news-batch" },
+					{ "label": "Finnhub news — one symbol", "value": "finnhub-news-one" },
+					{ "label": "NewsAPI headlines — batch", "value": "newsapi-batch" },
+					{ "label": "Google Trends — batch", "value": "trends-batch" },
+					{ "label": "Google Trends — one keyword", "value": "trends-one" },
+					{ "label": "Reddit", "value": "reddit" },
+					{ "label": "FMP FX — one pair", "value": "fmp-fx" },
+					{ "label": "Yahoo FX — deep-history backfill", "value": "yahoo-fx-backfill" }
+				],
+				"default": "fmp-prices-batch"
+			},
+			{
+				// Consumed as `--arg=${input:ingestArg}`, one token, NOT as a separate
+				// `--arg` flag followed by this value. An empty answer is the common case
+				// (ten of the thirteen sources ignore it), and as two tokens the empty one
+				// is dropped in transit, leaving a dangling `--arg` for argparse to
+				// misread. `--arg=` with nothing after it is unambiguous.
+				"id": "ingestArg",
+				"type": "promptString",
+				"description": "Optional symbol, keyword, or FX pair for single-item modes",
+				"default": ""
+			},
+			{
+				// Every branch supplies one real token — `--full` is redundant against
+				// the script's own default and exists for exactly that reason.
+				"id": "snapshotScope",
+				"type": "pickString",
+				"description": "Full ritual, or re-run just the snapshot over data already ingested?",
+				"options": [
+					{
+						"label": "Full ritual — migrations, prices, aggregation, snapshot",
+						"value": "--full"
+					},
+					{
+						"label": "Snapshot only — skip the price ingests",
+						"value": "--skip-ingest"
+					},
+					{
+						"label": "Dry run — print the plan, run nothing",
+						"value": "--dry-run"
+					}
+				],
+				"default": "--full"
+			},
+			{
+				"id": "btStrategy",
+				"type": "pickString",
+				"description": "Allocator to simulate",
+				"options": [
+					"ml_lt_ridge",
+					"ml_lt",
+					"momentum_lt",
+					"equal_weight",
+					"buy_and_hold"
+				],
+				"default": "ml_lt_ridge"
+			},
+			{
+				// Shared by both Backtest tasks — the account is the one input the OOS
+				// run still takes, since which account you evaluate does not affect
+				// whether two OOS runs are comparable.
+				"id": "btAccount",
+				"type": "pickString",
+				"description": "Registered account to simulate",
+				"options": [
+					"tfsa",
+					"rrsp",
+					"fhsa",
+					"lira",
+					"nonreg"
+				],
+				"default": "tfsa"
+			},
+			{
+				"id": "btUniverseFile",
+				"type": "pickString",
+				"description": "Universe file",
+				"options": [
+					{ "label": "tickers-etfs.txt — ETF floor", "value": "tickers-etfs.txt" },
+					{ "label": "tickers.txt — stocks + ETFs", "value": "tickers.txt" }
+				],
+				"default": "tickers-etfs.txt"
+			},
+			{
+				"id": "btStart",
+				"type": "promptString",
+				"description": "Bar-load start",
+				"default": "2008-06-02"
+			},
+			{
+				"id": "btEvalStart",
+				"type": "promptString",
+				"description": "First decision date",
+				"default": "2010-01-04"
+			},
+			{
+				"id": "btEnd",
+				"type": "promptString",
+				"description": "Window end",
+				"default": "2030-01-01"
+			},
+			{
+				"id": "oosEnd",
+				"type": "promptString",
+				"description": "OOS dataset window end",
+				"default": "2026-07-01"
+			},
+			{
+				// Every branch supplies one real token — `--check` rather than "" for
+				// the default — for the reason spelled out on `newProjectRemote` below.
+				"id": "harnessMode",
+				"type": "pickString",
+				"description": "Drift-check, adopt upstream, or push a change authored here",
+				"options": [
+					{
+						"label": "Check for drift (safe, read-only)",
+						"value": "--check"
+					},
+					{
+						"label": "Pull — adopt devkit's version, overwriting local",
+						"value": "--pull"
+					},
+					{
+						"label": "Push — send this repo's version up to devkit",
+						"value": "--push"
+					},
+					{
+						"label": "List the manifest + vendored version",
+						"value": "--list"
+					}
+				],
+				"default": "--check"
+			},
+			{
+				"id": "newProjectName",
+				"type": "promptString",
+				"description": "New project name — becomes the directory, the Python package, and COMPOSE_PROJECT_NAME",
+				"default": ""
+			},
+			{
+				"id": "newProjectPreset",
+				"type": "pickString",
+				"description": "Project shape. Individual features can be added later with --with-* flags.",
+				"options": [
+					{
+						"label": "service — Docker + app + Postgres + Alembic",
+						"value": "service"
+					},
+					{
+						"label": "service-redis — the above plus Redis",
+						"value": "service-redis"
+					},
+					{
+						"label": "data — Postgres + the data-lake archive seam (ibkr_trader's shape)",
+						"value": "data"
+					},
+					{
+						"label": "fullstack — service-redis plus a Vite frontend (carameli's shape)",
+						"value": "fullstack"
+					},
+					{
+						"label": "bare — no Docker, no database; just the harness and CI",
+						"value": "bare"
+					}
+				],
+				"default": "service"
+			},
+			{
+				"id": "newProjectDescription",
+				"type": "promptString",
+				"description": "One-line description (goes into README.md, CLAUDE.md, and pyproject.toml)",
+				"default": ""
+			},
+			{
+				// Both pickers supply one real token in every branch, never "". An empty
+				// string in an args array reaches argparse as a stray positional and is
+				// rejected — which is why new-project.py carries the redundant-looking
+				// `--dry-run` and `--remote` flags alongside their negations.
+				"id": "newProjectRemote",
+				"type": "pickString",
+				"description": "Create a PRIVATE GitHub repo and push? (ignored on a dry run)",
+				"options": [
+					{
+						"label": "Yes — create alexandrec90/<name> as private, and push",
+						"value": "--remote"
+					},
+					{
+						"label": "No — local only, wire up the remote later",
+						"value": "--no-remote"
+					}
+				],
+				"default": "--remote"
+			},
+			{
+				"id": "newProjectApply",
+				"type": "pickString",
+				"description": "Dry run prints the full plan and writes nothing. Run it once before applying.",
+				"options": [
+					{
+						"label": "Dry run — print the plan, write nothing",
+						"value": "--dry-run"
+					},
+					{
+						"label": "Apply — write files, init git, add the worktree",
+						"value": "--yes"
+					}
+				],
+				"default": "--dry-run"
+			},
+			{
+				"id": "sweepFetch",
+				"type": "pickString",
+				"description": "Fetch every remote first?",
+				"options": [
+					{
+						"label": "Fetch — accurate ahead/behind counts (slower)",
+						"value": "--fetch"
+					},
+					{
+						"label": "Skip fetch — instant, counts may be stale",
+						"value": "--no-fetch"
+					}
+				],
+				"default": "--fetch"
+			},
+			{
+				// Separate from `project` because devkit is absent on purpose: it is the
+				// source the release is pulled *from*, and naming it is rejected — that
+				// exclusion is written down in `SCOPE_PICKERS` in tests/test_devkit_project.py,
+				// which otherwise requires this list to cover every checkout. Being listed
+				// here is not a claim that a project has vendored devkit; an explicitly
+				// selected checkout that has not is refused by name.
+				"id": "upgradeScope",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which checkouts should adopt the devkit release?",
+					"key": "upgradeScope",
+					"multiPick": true,
+					"multiPickStorage": "workspace",
+					"separator": ",",
+					"optionGroups": [
+						{
+							"label": "Select one or more consumers (devkit is the source)",
+							"minCount": 1,
+							"options": [
+								"carameli",
+								"ibkr_trader",
+								"data-lake",
+								"apt-finder",
+								"sports_betting"
+							]
+						}
+					]
+				}
+			},
+			{
+				"id": "reconcileMerge",
+				"type": "pickString",
+				"description": "Merge green PRs, or only clean up?",
+				"options": [
+					{
+						"label": "Clean up only — merging PRs stays yours",
+						"value": "--no-merge"
+					},
+					{
+						"label": "Also squash-merge every PR whose gate is green",
+						"value": "--merge"
+					}
+				],
+				"default": "--no-merge"
+			},
+			{
+				"id": "sweepApply",
+				"type": "pickString",
+				"description": "Dry run, or actually change the checkouts?",
+				"options": [
+					{
+						"label": "Dry run — print the plan, change nothing",
+						"value": "--dry-run"
+					},
+					{
+						"label": "Apply — run the git commands shown",
+						"value": "--yes"
+					}
+				],
+				"default": "--dry-run"
+			},
+			{
+				// Patch is first AND the default because it is the answer almost every
+				// time: a devkit release delivers whatever has merged since the last
+				// one, and "what merged" is a set of fixes, not a decision about
+				// compatibility. The script also accepts an explicit vX.Y.Z, which the
+				// one case the bumps cannot express needs — re-cutting after a tag was
+				// deleted — but that stays on the CLI: a pickString cannot take free
+				// text, and a promptString here would let a typo name the release.
+				"id": "releaseLevel",
+				"type": "pickString",
+				"description": "How far should the version move?",
+				"options": [
+					{
+						"label": "Patch — v0.11.1 → v0.11.2, the usual",
+						"value": "patch"
+					},
+					{
+						"label": "Minor — v0.11.1 → v0.12.0, new capability",
+						"value": "minor"
+					},
+					{
+						"label": "Major — v0.11.1 → v1.0.0, consumers must change",
+						"value": "major"
+					}
+				],
+				"default": "patch"
+			},
+			{
+				"id": "agentCli",
+				"type": "pickString",
+				"description": "Coding agent CLI to open in every worktree tab",
+				"options": [
+					"claude",
+					"codex"
+				],
+				"default": "claude"
+			},
+			{
+				"id": "resumeSessionCount",
+				"type": "promptString",
+				"description": "How many of the most recently active sessions to reopen",
+				"default": "4"
+			},
+			{
+				// MAINTAINED BY new-project.py, like `project` — and it is the only
+				// picker that lists MORE than the registry, because the reference
+				// checkout can take this action and no other. Single-pick: a merge
+				// conflict is resolved per repo, so batching them would just queue up
+				// two half-finished merges.
+				"id": "mergeCheckout",
+				"type": "pickString",
+				"description": "Which checkout should take origin's default branch?",
+				"options": [
+					"VanillaLand",
+					"carameli",
+					"ibkr_trader",
+					"devkit",
+					"data-lake",
+					"apt-finder",
+					"sports_betting"
+				],
+				"default": "VanillaLand"
+			},
+			{
+				// Every branch supplies one real token — `auto` rather than "" — for the
+				// reason spelled out on `newProjectRemote`. `auto` reads the branch off
+				// refs/remotes/origin/HEAD, which is already `develop` in VanillaLand;
+				// the named ones are for merging from somewhere other than the trunk.
+				"id": "mergeBase",
+				"type": "pickString",
+				"description": "Which branch to merge FROM",
+				"options": [
+					{
+						"label": "Auto — origin's own default branch",
+						"value": "auto"
+					},
+					{
+						"label": "develop",
+						"value": "develop"
+					},
+					{
+						"label": "main",
+						"value": "main"
+					},
+					{
+						"label": "master",
+						"value": "master"
+					}
+				],
+				"default": "auto"
+			},
+			{
+				// The dropdown pair this task asks with. The extension cannot RUN anything to
+				// build a list, so both read the option file `preview-task.py` writes under
+				// devkit's `logs/` on every run — which makes the list the PREVIOUS scan. Every
+				// checkout's rows therefore end in a `Rescan` row that says so, and picking it
+				// rescans and falls through to the terminal menu. `Preview: Restart Standing
+				// Previews` asks nothing and writes the same file, so it is the way to bootstrap
+				// one on a machine that has never run either task.
+				//
+				// `previewProject` is NESTED inside this input rather than declared beside it,
+				// because the second list depends on the first: the extension resolves a nested
+				// `pickStringRemember` first and substitutes the answer into the expressions
+				// below. Two sibling inputs would resolve in whatever order VS Code chose, and
+				// neither could read the other.
+				//
+				// The pick fires ONCE, in `value`: the extension substitutes each template
+				// string in turn, and EVERY `${pickStringRemember:...}` occurrence opens its
+				// own quick-pick — spelled in all four fields, the project dropdown appeared
+				// four times per run. `value` resolves first, the pick stores its answer under
+				// its `key`, and the other three fields read it back with
+				// `${remember:previewProject}`, which never prompts.
+				//
+				// The value is one token, `<project>:<ref>`, because a VS Code input resolves to
+				// one string. `git check-ref-format` refuses a ref containing a colon, so the
+				// first one always separates the two halves.
+				"id": "previewRow",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which branch, PR or box should be brought up?",
+					"key": "previewRow",
+					"fileName": "${workspaceFolder:devkit}/logs/preview-menu.json",
+					"fileFormat": "json",
+					"jsonOption": {
+						"value": "content.rows['${pickStringRemember:previewProject}'][__itemIdx__].value",
+						"label": "content.rows['${remember:previewProject}'][__itemIdx__].label",
+						"description": "content.rows['${remember:previewProject}'][__itemIdx__].description",
+						"detail": "content.rows['${remember:previewProject}'][__itemIdx__].detail"
+					},
+					"pickStringRemember": {
+						"previewProject": {
+							"description": "Which checkout has the branch you want to look at?",
+							"key": "previewProject",
+							"fileName": "${workspaceFolder:devkit}/logs/preview-menu.json",
+							"fileFormat": "json",
+							"jsonOption": {
+								"value": "content.projects[__itemIdx__].name",
+								"label": "content.projects[__itemIdx__].label",
+								"description": "content.projects[__itemIdx__].description"
+							}
+						}
+					}
+				}
+			}
+		]
+	}
+	,
+	"settings": {
+		"powershell.cwd": "carameli"
+	}
+}

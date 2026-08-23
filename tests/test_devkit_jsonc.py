@@ -7,7 +7,12 @@ markers *inside* string values, and commas that only look trailing.
 import json
 
 import pytest
-from support import LIVE_WORKSPACE, REPO_ROOT, devkit_jsonc, needs_live_workspace
+from support import (
+    LIVE_WORKSPACE,
+    devkit_jsonc,
+    devkit_project,
+    needs_live_workspace,
+)
 
 blank_comments = devkit_jsonc.blank_comments
 drop_trailing_commas = devkit_jsonc.drop_trailing_commas
@@ -113,5 +118,5 @@ def test_the_canonical_shared_task_block_parses():
     """devkit owns no `.vscode/tasks.json` of its own any more — this is the block it
     does own, and the one `--check-tasks` compares the live workspace against. If it
     stops parsing, the drift gate silently compares against nothing."""
-    text = (REPO_ROOT / "workspace-tasks.jsonc").read_text(encoding="utf-8")
+    text = devkit_project.canonical_tasks_text()
     assert loads(text)["version"] == "2.0.0"

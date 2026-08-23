@@ -646,3 +646,54 @@ def test_the_events_line_reaches_the_rendered_message():
     """A helper nothing calls is a check that reports nothing."""
     message = ws.render([], {}, "", events="1 harness event(s) need triage -- x")
     assert "[workspace] 1 harness event(s) need triage" in message
+
+
+# --- the live workspace file vs devkit's canonical copy -----------------------
+
+
+def _live(tmp_path, settings):
+    """A minimal live workspace file with `settings` as its only interesting key."""
+    path = tmp_path / "alex-projects.code-workspace"
+    path.write_text(
+        json.dumps({"folders": [{"path": "devkit"}], "settings": settings}),
+        encoding="utf-8",
+        newline="\n",
+    )
+    return path
+
+
+def test_no_workspace_drift_line_when_the_pair_agrees(tmp_path, monkeypatch):
+    canonical = tmp_path / "workspace.jsonc"
+    canonical.write_text(
+        json.dumps({"folders": [{"path": "devkit"}], "settings": {"a": "b"}}),
+        encoding="utf-8",
+        newline="\n",
+    )
+    monkeypatch.setattr(ws.devkit_project, "CANONICAL_WORKSPACE", canonical)
+    assert ws.workspace_drift_line(_live(tmp_path, {"a": "b"})) == ""
+
+
+def test_workspace_drift_line_counts_and_names_the_command(tmp_path, monkeypatch):
+    """The banner counts; `--check-workspace` is where the thirty-line list lives."""
+    canonical = tmp_path / "workspace.jsonc"
+    canonical.write_text(
+        json.dumps({"folders": [{"path": "devkit"}, {"path": "carameli"}], "settings": {"a": "b"}}),
+        encoding="utf-8",
+        newline="\n",
+    )
+    monkeypatch.setattr(ws.devkit_project, "CANONICAL_WORKSPACE", canonical)
+    line = ws.workspace_drift_line(_live(tmp_path, {"c": "d"}))
+    assert "2 difference(s) from devkit's copy" in line
+    assert "--check-workspace" in line
+
+
+def test_a_missing_canonical_copy_is_silence_not_a_failed_session(tmp_path, monkeypatch):
+    """This file's whole contract: never the reason a session start goes wrong."""
+    monkeypatch.setattr(ws.devkit_project, "CANONICAL_WORKSPACE", tmp_path / "gone.jsonc")
+    assert ws.workspace_drift_line(_live(tmp_path, {"a": "b"})) == ""
+
+
+def test_the_workspace_drift_line_reaches_the_rendered_message():
+    """A helper nothing calls is a check that reports nothing."""
+    message = ws.render([], {}, "", workspace_drift="alex-projects.code-workspace: 3 difference(s)")
+    assert "[workspace] alex-projects.code-workspace: 3 difference(s)" in message

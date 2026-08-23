@@ -1,7 +1,7 @@
 """Tests for the host-port registry."""
 
 import pytest
-from support import REPO_ROOT, devkit_jsonc, devkit_ports, devkit_project
+from support import REPO_ROOT, devkit_ports, devkit_project
 
 Registry = devkit_ports.Registry
 RegistryError = devkit_ports.RegistryError
@@ -262,7 +262,7 @@ def test_every_checkout_either_holds_a_slot_or_says_why_not():
     hand, which is the part this test replaces.
     """
     registry = load(REPO_ROOT)
-    canonical = devkit_jsonc.loads(devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8"))
+    canonical = devkit_project.canonical_tasks()
     picker = next(i for i in canonical["inputs"] if i["id"] == "project")
     options = picker.get("options", picker["args"]["optionGroups"][0]["options"])
     known = {o if isinstance(o, str) else o["value"] for o in options}
@@ -279,7 +279,7 @@ def test_every_slotless_exclusion_names_a_real_checkout_and_a_reason():
     checkout exempt forever, and invite the next omission to be silenced by adding a
     line here rather than a slot there."""
     registry = load(REPO_ROOT)
-    canonical = devkit_jsonc.loads(devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8"))
+    canonical = devkit_project.canonical_tasks()
     picker = next(i for i in canonical["inputs"] if i["id"] == "project")
     options = picker.get("options", picker["args"]["optionGroups"][0]["options"])
     known = {o if isinstance(o, str) else o["value"] for o in options}

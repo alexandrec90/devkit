@@ -11,7 +11,7 @@ import json
 import os
 from pathlib import Path
 
-from support import REPO_ROOT, load_script
+from support import REPO_ROOT, devkit_project, load_script
 
 rs = load_script("scripts/resume-sessions.py")
 
@@ -516,7 +516,7 @@ def test_the_script_is_stdlib_only():
 
 
 def test_the_workspace_task_passes_the_shared_agent_picker():
-    source = (REPO_ROOT / "workspace-tasks.jsonc").read_text(encoding="utf-8")
+    source = devkit_project.canonical_tasks_text()
     task = source[source.index('"label": "Agents: Resume Recent Sessions"') :]
     task = task[: task.index('"problemMatcher"')]
     assert '"--agent"' in task

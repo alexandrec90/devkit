@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from support import REPO_ROOT, load_script
+from support import REPO_ROOT, devkit_project, load_script
 
 ics = load_script("scripts/import-claude-sessions.py")
 
@@ -377,7 +377,7 @@ def test_a_zero_count_is_rejected(tmp_path):
 
 
 def test_workspace_task_wires_the_importer_and_shared_count_picker():
-    source = (REPO_ROOT / "workspace-tasks.jsonc").read_text(encoding="utf-8")
+    source = devkit_project.canonical_tasks_text()
     task = source[source.index('"label": "Agents: Import Limited Claude Sessions"') :]
     task = task[: task.index('"problemMatcher"')]
     assert '"scripts/import-claude-sessions.py"' in task

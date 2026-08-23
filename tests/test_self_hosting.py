@@ -866,7 +866,7 @@ def _tasks_json() -> dict:
     The move also fixes a check that had been asserting against the wrong file for as
     long as it existed: see `test_check_style_tasks_go_through_the_wrapper...` below.
     """
-    raw = devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8")
+    raw = devkit_project.canonical_tasks_text()
     return devkit_project.devkit_jsonc.loads(raw)
 
 
@@ -893,7 +893,7 @@ def test_devkit_ships_no_project_level_tasks():
     """
     assert not (REPO_ROOT / ".vscode" / "tasks.json").exists(), (
         "devkit has re-grown a project-level tasks.json; the shared block in "
-        f"{devkit_project.CANONICAL_TASKS.name} is where a task belongs"
+        f"{devkit_project.CANONICAL_WORKSPACE.name} is where a task belongs"
     )
 
 
