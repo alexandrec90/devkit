@@ -39,6 +39,13 @@ lease. It does *not* have a toolchain — installing one is minutes and a hook m
 take minutes — so the message carries the provision command along with the rest of the
 route out.
 
+**A shell command is judged too**, on the paths its own command line names as writes —
+see the shell tier below `old_strings`. Editor calls were the whole scope until Claude
+Code's bypass-permissions mode began telling sessions, in text indistinguishable from
+their operator's, to prefer `sed`/heredocs over Edit and Write; that made the blind side
+a route. A shell command is never re-aimed, because the rewrite replaces a path argument
+and a command line has none, so this tier always blocks toward the box.
+
 **Silent on everything else**, which is most calls:
 
   - an edit inside a checkout on a managed task branch **that carries commits of its
@@ -66,6 +73,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -139,10 +148,16 @@ def _record_event(event: str, fields: tuple[tuple[str, object], ...]) -> None:
     harness_events.record(event, fields, root=LEDGER_ROOT)
 
 
+# Tools that hand a shell a command line rather than a path. They write files too — see
+# the shell tier below — but nothing in their arguments says which, so every helper that
+# reads a path out of a payload has to ask whether it is looking at one of these.
+SHELL_TOOLS = frozenset({"Bash", "PowerShell"})
+
 # Tools that write a file — the question this hook exists to answer is "is the agent
 # about to change a file, and may it land where it is pointing?".
-MUTATING_TOOLS = frozenset(
-    {"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch", "create_file"}
+MUTATING_TOOLS = (
+    frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch", "create_file"})
+    | SHELL_TOOLS
 )
 
 # Per-git-step ceiling while spawning. Lower than `worktree.apply_new`'s default
@@ -225,6 +240,177 @@ def old_strings(payload: dict) -> list[str]:
         ]
     value = arguments.get("old_string")
     return [value] if isinstance(value, str) else []
+
+
+# --- The shell tier ------------------------------------------------------------------
+#
+# Everything above reads the path out of a tool argument, which is why for a year `Bash`
+# was the guard's blind side: `sed -i`, `cat > file <<EOF` or a `cp` writes a checkout's
+# tracked file with nothing between it and the home branch, and the hook never saw the
+# call. A hole, but a quiet one, while the agent's habit was to reach for `Edit`.
+#
+# Claude Code's own bypass-permissions guidance is what turned it into a route. In that
+# mode the session is told, in text it cannot tell apart from its operator's: *"make file
+# changes with sed, heredocs, or short scripts, rather than using the dedicated Read,
+# Edit, or Write tools."* So the one tier the workspace is built to protect was a single
+# nudge away from being bypassed by an agent doing exactly as it was told — and the agent
+# that reported this had to reason its way to disobeying, on every session, from first
+# principles. A guarantee that depends on that is not one.
+#
+# This tier recognises spellings; it does **not** model the shell. That is
+# `enforce-capped-bash.py`'s lesson taken as read: the gate that made every command prove
+# itself had to model the shell, and 46% of every block it ever issued was its own false
+# positive. So the verb list is closed and short, an unrecognised command is allowed, and
+# the paths it does extract go through the same `redirect_decision` an `Edit` would — so a
+# git-ignored path, a path in a box, a checkout on a task branch holding work, and
+# anything outside a registered checkout are all still allowed, silently.
+#
+# The gap it cannot close is an interpreter: `python -c`, or a `python - <<'EOF'` script,
+# computes its target at runtime and names it nowhere in the argv. Written down rather
+# than left implicit, because a silent gap in a guard reads as coverage.
+
+# Verbs whose every non-option operand is a file they write.
+SHELL_WRITE_ALL = frozenset(
+    {
+        "tee",
+        "truncate",
+        "touch",
+        "rm",
+        "unlink",
+        "shred",
+        # PowerShell, which is this workspace's other shell and has its own tool.
+        "set-content",
+        "add-content",
+        "out-file",
+        "new-item",
+        "remove-item",
+        "clear-content",
+    }
+)
+
+# Copy-shaped verbs, where every operand but the last is a source being *read*. Taking
+# them all would block `cp devkit/x.py /tmp/`, which writes nothing a branch can carry.
+SHELL_WRITE_LAST = frozenset(
+    {"cp", "mv", "install", "rsync", "ln", "copy-item", "move-item", "rename-item"}
+)
+
+# Wrappers that stand in front of the real verb rather than being one.
+SHELL_PREFIXES = frozenset({"sudo", "env", "command", "exec", "time", "nohup", "nice"})
+
+# A leading `FOO=bar` assignment, same case as the wrappers.
+ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+# `cmd >file`, `cmd >> file`, `cmd 2> file` — the heredoc route's other half, since
+# `cat > x <<EOF` is a redirect like any other. `>&1` duplicates a descriptor and names
+# no file, hence the exclusion; a `>` inside a quoted string can only invent a candidate,
+# and an invented candidate resolves to no checkout.
+REDIRECT = re.compile(r"\d?>>?\s*(?![&>])([^\s;|&<>]+)")
+
+# Statement separators. Splitting inside a quoted string can only lose a detection or
+# invent an unrecognised verb, and both of those allow — the safe direction for a
+# splitter this crude.
+STATEMENTS = re.compile(r"(?:&&|\|\||[;\n|]|&(?!\d))")
+
+
+def _unquote(token: str) -> str:
+    """Strip one layer of matching quotes; `shlex(posix=False)` leaves them attached."""
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+        return token[1:-1]
+    return token
+
+
+def _verb(token: str) -> str:
+    """The command word, normalised: basename, no `.exe`, case-folded.
+
+    Case-folded because PowerShell's cmdlets are conventionally `Set-Content` and its
+    parser does not care, so a matcher that did would be one capital away from useless.
+    """
+    name = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def shell_tokens(statement: str) -> list[str]:
+    """Split one statement into tokens, keeping Windows backslashes intact.
+
+    `posix=True` eats them — `C:\\Users\\x` arrives as `C:Usersx` — and every path this
+    hook judges on this machine is a Windows path.
+    """
+    try:
+        tokens = shlex.split(statement, posix=False)
+    except ValueError:  # an unbalanced quote; whitespace is a good enough fallback
+        tokens = statement.split()
+    return [_unquote(token) for token in tokens if token]
+
+
+def shell_write_targets(command: str) -> list[str]:
+    """Every path this command line names as something it is about to write.
+
+    Order-preserving and deduplicated, so a block names the first target the command
+    would have hit rather than an arbitrary one. Operands that are not paths at all — a
+    `sed` script, a `-Value` string — are left in: they resolve to no checkout, and
+    picking the "real" one out of a verb's argv is more shell modelling than this tier
+    is willing to do.
+    """
+    found: list[str] = []
+
+    def add(value: str) -> None:
+        value = _unquote(value.strip())
+        if value and value not in found:
+            found.append(value)
+
+    for statement in STATEMENTS.split(command or ""):
+        for match in REDIRECT.finditer(statement):
+            add(match.group(1))
+        tokens = shell_tokens(statement)
+        while tokens and (_verb(tokens[0]) in SHELL_PREFIXES or ENV_ASSIGN.match(tokens[0])):
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        verb = _verb(tokens[0])
+        operands = [token for token in tokens[1:] if not token.startswith("-")]
+        if verb == "sed":
+            # Only `-i`/`--in-place` writes. Every other `sed` reads, and `sed -n '1,5p'`
+            # over a checkout's file is how half the reading in a guarded session is done.
+            if any(t.startswith(("-i", "--in-place")) for t in tokens[1:]):
+                for operand in operands:
+                    add(operand)
+        elif verb == "dd":
+            for token in tokens[1:]:
+                if token.startswith("of="):
+                    add(token[3:])
+        elif verb in SHELL_WRITE_ALL:
+            for operand in operands:
+                add(operand)
+        elif verb in SHELL_WRITE_LAST and operands:
+            add(operands[-1])
+    return found
+
+
+def guarded_targets(payload: dict) -> list[str]:
+    """Every path this call is about to write, whichever kind of tool it is.
+
+    One list for both tiers, because `main` asks the same questions of each element and
+    a shell command can name more than one.
+    """
+    if _tool_name(payload) in SHELL_TOOLS:
+        return shell_write_targets(str(tool_input(payload).get("command") or ""))
+    path = edited_path(payload)
+    return [path] if path else []
+
+
+def shell_note(target: str) -> str:
+    """The extra line a routed shell command gets, which a routed `Edit` does not need.
+
+    An `Edit` names its path, so the block message's path is self-evidently the thing to
+    change. A command does not: the agent has to be told *which* of its words was read as
+    a write, or it re-issues the same line with the box path bolted somewhere else.
+    """
+    return (
+        f"This was a shell command, not an editor call. It was read as writing "
+        f"`{target}`; re-issue it with that word replaced by the path above. A shell "
+        f"write is not re-aimed automatically because the guard rewrites path arguments, "
+        f"and a command line has none."
+    )
 
 
 def _within(child: Path, parent: Path) -> bool:
@@ -962,6 +1148,46 @@ def route_to_own_box(
         return EXIT_BLOCK
 
     if not ok:
+        # A spawn can fail because someone else just did it. Two guards run on every
+        # call in a session whose settings register this hook twice — a user-level
+        # absolute path and a project-level `$CLAUDE_PROJECT_DIR` one resolving to the
+        # same file — and neither can see the other's box, because the loser reads the
+        # lease registry before the winner writes it. It then dies on
+        # `git worktree add: a branch named 'agent/…' already exists` and exits 2, which
+        # blocks the call the winner had just re-aimed successfully. The agent gets both
+        # messages: "the edit was applied at <box>" on stdout, "spawning a box failed" on
+        # stderr, and neither is true — the box exists and the edit went nowhere.
+        #
+        # So the collision is re-read rather than reported: the box this session needs is
+        # on disk by now, and reusing it is what the winner did. Only a genuine failure —
+        # no box afterwards either — is still a block.
+        settled = worktree.find_session_box(worktree.live_boxes(root), project, session)
+        if settled is not None:
+            code, routed = deliver(
+                payload,
+                project,
+                relative,
+                str(worktree.box_path(root, settled.name)),
+                settled.name,
+                list(extra_notes),
+                spawned=False,
+                inside=inside,
+                branch=branch,
+                reason=reason,
+            )
+            _record_event(
+                "guard-route" if routed == "redirect" else "guard-block",
+                (
+                    ("project", project),
+                    ("session", session),
+                    ("kind", kind),
+                    ("outcome", "raced"),
+                    ("box", settled.name),
+                    ("branch", settled.branch),
+                    ("target", relative),
+                ),
+            )
+            return code
         _record_event(
             "guard-spawn-failed",
             (
@@ -1038,6 +1264,13 @@ def main(argv: list[str] | None = None) -> int:
     if payload is None or _tool_name(payload) not in MUTATING_TOOLS:
         return EXIT_ALLOW
 
+    # Before the registry read, because widening the matcher to the shell tools put this
+    # hook on *every* Bash call rather than on the handful that edit files. A command that
+    # writes nothing has to cost a payload parse and nothing else.
+    targets = guarded_targets(payload)
+    if not targets:
+        return EXIT_ALLOW
+
     try:
         projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
     except OSError:
@@ -1046,59 +1279,73 @@ def main(argv: list[str] | None = None) -> int:
     cwd = str(payload.get("cwd") or "")
     root = workspace.parent
     session = str(payload.get("session_id") or payload.get("sessionId") or "")
-
-    # The box tier first: `redirect_decision` allows everything under `.worktrees/`,
-    # so the ownership question has to be asked before it swallows the path. The
-    # lease read happens only for edits actually aimed at the box tier — the common
-    # checkout edit never pays it here.
-    target = resolve_target(edited_path(payload), cwd)
-    if target is not None and _within(target, worktree.boxes_root(root).resolve()):
-        boxes = worktree.live_boxes(root)
-        conflict = foreign_box(target, root, boxes, session)
-        if conflict is None:
-            return EXIT_ALLOW
-        box, relative = conflict
-        return route_to_own_box(
-            box.project,
-            relative,
-            workspace,
-            root,
-            session,
-            boxes,
-            payload,
-            reason=foreign_box_reason(box, relative),
-            kind="foreign-box",
-            extra_notes=(claim_hint(box, session),),
-        )
+    shell = _tool_name(payload) in SHELL_TOOLS
 
     # The branch is what the decision turns on, so it is also what the block message has
     # to name -- and reading it a second time would be a second subprocess per blocked
     # edit and, worse, could report a different branch than the one that was judged.
     # `redirect_decision` calls its lookup at most once, so recording it is enough.
+    # Defined outside the loop so it closes over nothing that changes under it.
     observed: list[str] = []
 
     def observe(checkout: Path) -> str:
         observed.append(current_branch(checkout))
         return observed[-1]
 
-    decision = redirect_decision(edited_path(payload), cwd, root, projects, branch_of=observe)
-    if decision is None:
-        return EXIT_ALLOW
-    project, relative = decision
-    branch = observed[-1] if observed else ""
-    inside = _within(Path(cwd or "."), (root / project).resolve())
+    # An editor call names one path; a shell command can name several, and the first one
+    # that needs a box decides the whole call — there is no partial outcome for a command
+    # line. Everything below is what used to run once, run per candidate.
+    for candidate in targets:
+        # The box tier first: `redirect_decision` allows everything under `.worktrees/`,
+        # so the ownership question has to be asked before it swallows the path. The
+        # lease read happens only for edits actually aimed at the box tier — the common
+        # checkout edit never pays it here.
+        target = resolve_target(candidate, cwd)
+        if target is not None and _within(target, worktree.boxes_root(root).resolve()):
+            boxes = worktree.live_boxes(root)
+            conflict = foreign_box(target, root, boxes, session)
+            if conflict is None:
+                continue
+            box, relative = conflict
+            return route_to_own_box(
+                box.project,
+                relative,
+                workspace,
+                root,
+                session,
+                boxes,
+                payload,
+                reason=foreign_box_reason(box, relative),
+                kind="foreign-box",
+                extra_notes=(
+                    claim_hint(box, session),
+                    *((shell_note(candidate),) if shell else ()),
+                ),
+            )
 
-    return route_to_own_box(
-        project,
-        relative,
-        workspace,
-        root,
-        session,
-        worktree.live_boxes(root),
-        payload,
-        inside=inside,
-        branch=branch,
-    )
+        observed.clear()
+        decision = redirect_decision(candidate, cwd, root, projects, branch_of=observe)
+        if decision is None:
+            continue
+        project, relative = decision
+        branch = observed[-1] if observed else ""
+        inside = _within(Path(cwd or "."), (root / project).resolve())
+
+        return route_to_own_box(
+            project,
+            relative,
+            workspace,
+            root,
+            session,
+            worktree.live_boxes(root),
+            payload,
+            inside=inside,
+            branch=branch,
+            kind="shell" if shell else "checkout",
+            extra_notes=(shell_note(candidate),) if shell else (),
+        )
+
+    return EXIT_ALLOW
 
 
 if __name__ == "__main__":
