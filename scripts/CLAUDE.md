@@ -433,11 +433,39 @@ not a failure of anything.
 
 Two things a change here must not do. **The checkout half never gains authority the
 hand-run sweep does not have** — it acts only on `sweep.SYNCABLE`, so a checkout
-holding uncommitted work, unpushed commits or an open PR is named and stepped over;
-its steps stay `merge --ff-only` and `branch -d`, both of which refuse rather than
-destroy. And **it must not redden a healthy pass**: `sweep.run_mode` returns 1 from a
+holding uncommitted work or unpushed commits is named and stepped over; its steps stay
+`merge --ff-only` and `branch -d`, both of which refuse rather than destroy. And **it
+must not redden a healthy pass**: `sweep.run_mode` returns 1 from a
 dry run that merely found something to do, so `checkout_sync_summary` reinterprets the
 code and only a failed git step under `--yes` counts. A scheduled runner whose alerts
 fire on the normal case is a runner whose alerts nobody reads — and this one has
 already been found *disabled*, with every box and checkout it manages left to rot,
 which is the failure mode that costs the most and shows the least.
+
+### A verdict outside SYNCABLE has to be one somebody can act on
+
+`needs-pr` was not. It reads *confirm a PR is open*, it is the verdict a clean,
+fully-pushed task branch gets, and **the sweep never asks GitHub whether that PR
+exists** — so the only thing that could clear it was a human noticing the line and
+checking by hand. It is not in `SYNCABLE` either, so neither `sweep.py --sync` nor the
+scheduled pass above would bring the checkout home. A checkout that reached that state
+stayed in it: carameli sat on another session's `agent/…` branch for two days, reported
+as stranded at every session start, with its `master` frozen at whatever it had been.
+
+`PARKED` is the missing half. `has_open_pr` asks the question the verdict's own text
+asks, and a checkout with an open PR, a clean tree and nothing unpushed is syncable —
+the work is on the remote and under review, so what it loses by going home is its
+position and nothing else. The branch survives: `sync_plan`'s reap stays scoped to
+`SPENT`.
+
+Two properties to keep:
+
+- **`has_open_pr` fails closed while `has_merged_pr` fails open**, and the direction is
+  set by the consumer rather than by symmetry. A wrongly asserted *merge* only fails to
+  retire a branch git would refuse anyway; a wrongly asserted *open PR* moves a checkout
+  off the branch it is standing on, on the say-so of an offline `gh`. Failing closed
+  lands back on `needs-pr`, which is exactly the old behaviour.
+- **Its gate in `inspect` is the mirror of `pr_merged`'s and just as tight.** Both fire
+  only in the one state whose verdict the answer changes, and their `upstream` terms are
+  mutually exclusive, so a sweep still makes at most one `gh` call per checkout. A
+  network round trip per repo per pass is what the gates exist to bound.

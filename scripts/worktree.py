@@ -3349,10 +3349,20 @@ def sync_checkouts(
     finished with rather than one it is halfway through.
 
     Nothing here can strand work. `sweep.sync_plan` acts only on `SYNCABLE` verdicts --
-    a checkout holding uncommitted changes, unpushed commits or an open PR is refused
-    and reported, never parked -- and its steps are `merge --ff-only` and `branch -d`,
-    both of which refuse rather than destroy. This adds no new authority to the
-    scheduled run; it runs the same plan `sweep.py --sync` has always printed.
+    a checkout holding uncommitted changes or unpushed commits is refused and reported,
+    never parked -- and its steps are `merge --ff-only` and `branch -d`, both of which
+    refuse rather than destroy. This adds no new authority to the scheduled run; it runs
+    the same plan `sweep.py --sync` has always printed.
+
+    An **open PR** is not on that refusal list, and the difference is worth stating
+    because the sentence here used to say it was. A checkout that is clean and fully
+    pushed with a PR open is `sweep.PARKED`: the work is on the remote and under review,
+    so parking the checkout home costs it its position and nothing else, and the branch
+    survives -- `sync_plan` scopes its `branch -d` to `SPENT`. Holding instead was the
+    older behaviour and it had no exit: the verdict was `needs-pr`, which is not
+    syncable and which nothing in the sweep ever resolves, so a checkout that reached it
+    stayed there and its home branch stopped advancing. That is the state this pass
+    exists to clear, so it is the one it must not step over.
 
     That schedule is now the *only* caller. The workspace once carried a `Ship:
     Sync Worktrees (step 3)` task that hand-cranked the same plan, and a one-click

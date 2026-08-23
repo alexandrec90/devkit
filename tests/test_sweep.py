@@ -975,6 +975,7 @@ ALL_VERDICTS = {
     sweep.NEEDS_REBRANCH,
     sweep.READY,
     sweep.NEEDS_PR,
+    sweep.PARKED,
     sweep.NEEDS_PULL,
     sweep.SPENT,
     sweep.CLEAN,
@@ -997,6 +998,7 @@ STATES = [
         upstream=upstream,
         unpushed=unpushed,
         upstream_gone=upstream_gone,
+        pr_open=pr_open,
         linked=linked,
     )
     for is_git in (True, False)
@@ -1008,6 +1010,7 @@ STATES = [
     for ahead in (0, 2)
     for linked in (True, False)
     for upstream_gone in (True, False)
+    for pr_open in (True, False)
     for upstream, unpushed in (("", -1), ("origin/claude/x", 0), ("origin/claude/x", 2))
 ]
 
@@ -1187,7 +1190,7 @@ STRANDED_REPLIES = {**INSPECT_REPLIES, ("rev-list", "--left-right", "--count"): 
 
 
 def inspect_probing(tmp_path, replies, gh) -> sweep.State:
-    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git").mkdir(parents=True)
     return sweep.inspect("proj", tmp_path, git=ScriptedGit(replies), gh=gh, fetch=True)
 
 
@@ -1563,6 +1566,181 @@ def test_a_gh_that_cannot_run_at_all_fails_open(boom):
         raise boom
 
     assert sweep.has_merged_pr(gh, "claude/x-0806") is False
+
+
+# --- a parked checkout: pushed, PR open, and nothing left in the tree --------
+#
+# The state carameli was found in on 2026-08-23. Something checked a *foreign* task
+# branch out in the static checkout; every commit on it was already pushed and its PR
+# was open, so the checkout held nothing -- and yet `needs-pr` is outside SYNCABLE and
+# nothing in the sweep confirms a PR, so the verdict had no exit. Two days of "stranded
+# work: carameli (needs-pr)" at every session start, with `master` frozen behind it.
+
+
+def test_an_open_pr_is_detected():
+    assert sweep.has_open_pr(_gh('[{"number": 200}]'), "claude/x-0806") is True
+
+
+def test_no_open_pr_leaves_the_checkout_on_needs_pr():
+    assert sweep.has_open_pr(_gh("[]"), "claude/x-0806") is False
+
+
+@pytest.mark.parametrize(
+    "gh",
+    [
+        _gh("[]", returncode=1),  # gh present but unauthenticated / offline
+        _gh("not json"),  # a shape change upstream
+        _gh('{"number": 200}'),  # an object where a list was promised
+        _gh("[{}]", returncode=2),
+    ],
+)
+def test_an_unanswerable_gh_fails_closed_about_an_open_pr(gh):
+    """The opposite direction to `has_merged_pr`, and the asymmetry is the point.
+
+    A missed open PR costs nothing -- the verdict stays `needs-pr`, which is exactly
+    what it was before this probe existed. An *invented* one sends `--sync` to move a
+    checkout off the branch it is standing on, on the say-so of an offline `gh`.
+    """
+    assert sweep.has_open_pr(gh, "claude/x-0806") is False
+
+
+@pytest.mark.parametrize("boom", [FileNotFoundError("gh"), subprocess.TimeoutExpired("gh", 1)])
+def test_a_gh_that_cannot_run_at_all_fails_closed_about_an_open_pr(boom):
+    def gh(*args: str):
+        raise boom
+
+    assert sweep.has_open_pr(gh, "claude/x-0806") is False
+
+
+def test_the_open_probe_asks_only_about_open_prs_on_this_branch():
+    calls: list[tuple[str, ...]] = []
+
+    def gh(*args: str):
+        calls.append(args)
+        return subprocess.CompletedProcess(list(args), 0, "[]", "")
+
+    sweep.has_open_pr(gh, "claude/thing-0727")
+    argv = calls[0]
+    assert argv[:2] == ("pr", "list")
+    assert "--head" in argv and "claude/thing-0727" in argv
+    assert argv[argv.index("--state") + 1] == "open"
+
+
+def test_a_pushed_branch_with_an_open_pr_is_parked_not_needs_pr():
+    assert classify(on_feature(pr_open=True))[0] == sweep.PARKED
+
+
+def test_a_pushed_branch_with_no_open_pr_stays_needs_pr():
+    """`pr_open` defaults False, so an unanswerable `gh` lands here -- the old behaviour."""
+    assert classify(on_feature())[0] == sweep.NEEDS_PR
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        on_feature(pr_open=True, dirty=1),  # edits in the tree -- ship them
+        on_feature(pr_open=True, unpushed=2),  # commits not on the remote yet
+        on_feature(pr_open=True, ahead=0),  # nothing on the branch at all
+    ],
+)
+def test_parked_never_outranks_work_still_held_in_the_checkout(state):
+    """`PARKED` is syncable, so it must be unreachable from any state a sync could lose.
+
+    Each of these has an open PR *and* something the checkout is still the only home
+    for -- or, in the last case, nothing at all, which is `spent` and gets the branch
+    deleted rather than kept.
+    """
+    assert classify(state)[0] != sweep.PARKED
+
+
+def test_parked_is_actionable_and_syncable():
+    assert sweep.PARKED in sweep.ACTIONABLE
+    assert sweep.PARKED in sweep.SYNCABLE
+    assert sweep.PARKED not in sweep.SHIPPABLE
+    assert sweep.PARKED not in sweep.BRANCHABLE
+
+
+def test_syncing_a_parked_checkout_goes_home_and_keeps_the_branch():
+    """The branch is still the one under review, so the checkout leaves it and it stays.
+
+    `sync_plan` scopes its reap to `SPENT`; this asserts the scoping from the outside,
+    where widening it to "any task branch we are standing on" would show up.
+    """
+    state = on_feature(pr_open=True)
+    steps = sweep.sync_plan(state, sweep.PARKED).steps
+    assert ("checkout", "main") in steps
+    assert ("merge", "--ff-only", "origin/main") in steps
+    assert not [s for s in steps if s[:2] == ("branch", "-d")]
+    assert not [s for s in steps if s[:2] == ("branch", "-D")]
+
+
+def test_a_parked_checkout_is_told_how_to_come_home():
+    """The "nothing stranded" contract: an actionable verdict names its own exit.
+
+    `needs-pr` failed this in substance rather than in form -- it had a plan, but the
+    plan was "confirm an open PR exists", which is the thing that was already true.
+    """
+    steps = sweep.plan_for(on_feature(pr_open=True), sweep.PARKED)
+    assert steps
+    assert any("checkout main" in s for s in steps)
+    assert any("--sync" in s for s in steps)
+    assert not any("branch -d" in s for s in steps)
+
+
+PARKED_REPLIES = {
+    ("remote", "get-url", "origin"): "https://github.com/o/r.git",
+    ("branch", "--show-current"): "claude/thing-0727",
+    ("status", "--porcelain"): "",
+    # `ahead` is only measured when a default branch resolves, so this probe has to
+    # answer -- unlike the merged-PR fixtures above, whose gate reads `dirty` instead.
+    ("rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"): "",
+    ("rev-list", "--left-right", "--count"): "0\t1",
+    ("rev-parse", "--abbrev-ref"): "origin/claude/thing-0727",
+    ("rev-list", "--count"): "0",
+}
+
+
+def test_inspect_probes_for_an_open_pr_on_a_clean_fully_pushed_task_branch(tmp_path):
+    gh = ScriptedGh(json.dumps([{"number": 200}]))
+    state = inspect_probing(tmp_path, PARKED_REPLIES, gh)
+    assert state.pr_open
+    assert classify(state)[0] == sweep.PARKED
+    assert gh.calls, "the probe is the only thing that can clear this state"
+
+
+def test_inspect_makes_at_most_one_gh_call_per_checkout(tmp_path):
+    """The two probes' gates are mutually exclusive on `upstream`, so a sweep costs the
+    same one round trip it did before `pr_open` existed."""
+    gh = ScriptedGh(json.dumps([{"number": 200}]))
+    inspect_probing(tmp_path / "parked", PARKED_REPLIES, gh)
+    assert len(gh.calls) == 1
+    merged = ScriptedGh(MERGED_PAYLOAD)
+    inspect_probing(tmp_path / "stranded", STRANDED_REPLIES, merged)
+    assert len(merged.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "replies",
+    [
+        {("status", "--porcelain"): " M app.py"},  # dirty -- READY, already decided
+        {("rev-list", "--count"): "2"},  # unpushed -- READY, already decided
+        {("rev-list", "--left-right", "--count"): "0\t0"},  # spent -- decided either way
+        {("branch", "--show-current"): "main"},  # a home branch has no PR to ask about
+    ],
+)
+def test_inspect_does_not_probe_for_an_open_pr_in_an_already_decided_state(tmp_path, replies):
+    gh = ScriptedGh(json.dumps([{"number": 200}]))
+    state = inspect_probing(tmp_path, {**PARKED_REPLIES, **replies}, gh)
+    assert not state.pr_open
+    assert not gh.calls
+
+
+def test_inspect_skips_the_open_pr_probe_when_the_network_is_off(tmp_path):
+    gh = ScriptedGh(json.dumps([{"number": 200}]))
+    (tmp_path / ".git").mkdir()
+    state = sweep.inspect("proj", tmp_path, git=ScriptedGit(PARKED_REPLIES), gh=gh, fetch=False)
+    assert not state.pr_open
+    assert not gh.calls
 
 
 # --- resolving the workspace registry from wherever a script is run ----------

@@ -427,8 +427,12 @@ the task was installed with `--merge`, which squash-merges a green box PR only w
 carries the `automerge` label — applying the label is the review decision, and
 `upgrade-project.py` labels its PRs at creation (`--merge-label ""` at install time
 drops the gate and merges anything green). The checkout half destroys nothing: it
-refuses any checkout holding uncommitted work, unpushed commits or an open PR, names
-it, and moves on.
+refuses any checkout holding uncommitted work or unpushed commits, names it, and moves
+on. A checkout that is clean and fully pushed with a PR **open** is parked home anyway —
+the work is on the remote, and the branch it leaves behind is not deleted. Holding those
+too was the older rule, and it meant a checkout that landed on `needs-pr` had no way
+out of it: nothing in the sweep confirms a PR, so the verdict never cleared and the home
+branch never moved again.
 
 The run is windowless, so its only record is `logs/reconcile.log`, overwritten per
 pass and written on success too — a log that appears only on failure cannot be told
