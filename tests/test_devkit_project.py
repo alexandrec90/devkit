@@ -495,7 +495,6 @@ def test_picker_registration_updates_the_multi_test_picker_too():
                 {"id": "project", "options": ["alpha"]},
                 {"id": "daemonProject", "options": ["alpha"]},
                 {"id": "worktreeProject", "options": ["alpha"]},
-                {"id": "sweepScope", "options": ["alpha"]},
                 {"id": "upgradeScope", "options": ["alpha"]},
                 {"id": "mergeCheckout", "options": ["alpha"]}
             ]
@@ -556,7 +555,6 @@ def test_registering_against_the_real_workspace_file():
     for picker_id in (
         "daemonProject",
         "worktreeProject",
-        "sweepScope",
         "upgradeScope",
         "mergeCheckout",
     ):
@@ -840,7 +838,6 @@ def test_the_live_smoke_task_names_the_only_checkout_that_can_run_it(canonical):
 # checkout out stays possible, but as a decision someone recorded rather than a list
 # nobody updated.
 SCOPE_PICKERS: dict[str, dict[str, str]] = {
-    "sweepScope": {},
     "upgradeScope": {
         "devkit": (
             "is the source a release is pulled FROM, not a consumer of it; "
@@ -900,7 +897,6 @@ def test_project_scope_inputs_are_real_multi_picks(canonical):
         "carameliCheckout",
         "ibkrCheckout",
         "dbCheckout",
-        "sweepScope",
         "upgradeScope",
     ):
         spec = inputs[picker_id]
@@ -976,24 +972,29 @@ def test_every_input_referenced_is_defined(canonical):
     assert defined <= referenced, f"unused inputs: {defined - referenced}"
 
 
-def test_every_mutating_sweep_task_offers_the_scope_picker(canonical):
-    """`--only` restricts every sweep mode, so every step that changes a checkout has
-    to let you aim it at one.
+def test_the_sweep_has_no_workspace_task(canonical):
+    """`sweep.py` is a CLI and an import, and nothing in the quick-pick calls it.
 
-    Step 3 shipped without the picker and so was all-or-nothing: when a sync failed in
-    one repo, the only way to retry it was the CLI, and the fallback for a one-click
-    workflow being unable to express "just this one" is re-running it over every
-    checkout. The read-only modes are deliberately exempt — an unscoped sweep IS the
-    report, and a scoped one answers a question nobody asked of it.
+    There were five: two read-only reports and the three shipping steps. None had ever
+    been run on the machine they were written for -- `log-wrap` writes `logs/<slug>.log`
+    per run and nothing prunes that directory, and no `ship-*.log` was ever created --
+    because every reader the sweep has is automatic now. `workspace-status.py` runs it
+    at session start and prints the stranded-work line; `worktree.py reconcile` runs
+    `--sync` every fifteen minutes and reports what it refused to park. A one-click
+    duplicate of either is a second owner for one tier's lifecycle, and `--ship`'s
+    sweep-shaped commit message lost to `/ship` per repo once an agent was a box away.
+
+    So this is not "we removed some tasks" -- it is that the quick-pick is the wrong
+    surface for this tool entirely. Re-adding one means naming which automatic reader
+    it replaces, not just deleting this test. Nothing stops anyone typing
+    `python scripts/sweep.py --branch --yes`, and the modes are covered by
+    `tests/test_sweep.py` either way.
     """
     for task in canonical["tasks"]:
         args = [str(a) for a in task.get("args", [])]
-        if not any("sweep.py" in a for a in args):
-            continue
-        if not {"--branch", "--ship", "--sync"} & set(args):
-            continue
-        assert any("${input:sweepScope}" in arg for arg in args), (
-            f"{task['label']} changes checkouts but cannot be scoped to one"
+        assert not any("sweep.py" in a for a in args), (
+            f"{task['label']} puts sweep.py back in the quick-pick; the readers that "
+            "replaced it are workspace-status.py and worktree.py reconcile"
         )
 
 
@@ -1014,12 +1015,22 @@ def test_some_task_still_routes_through_the_dispatcher(canonical):
 
 @needs_live_workspace
 def test_the_live_workspace_matches_the_canonical_block(canonical):
-    """The check `--check-tasks` runs, as a test so devkit's own gate catches drift."""
+    """The check `--check-tasks` runs, as a test so devkit's own gate catches drift.
+
+    Failing does not by itself mean the two copies have drifted. The live file is shared
+    by every session and is edited before the PR recording the change merges, so each
+    open task PR shows up here until it lands. `.claude/rules/vscode-tasks.md` carries
+    which direction means what, and why `--adopt-tasks` is the wrong reflex for a line
+    your branch does not own.
+    """
     text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     problems = tasks_drift(workspace_tasks(text), canonical)
-    assert not problems, "run `python scripts/devkit_project.py --adopt-tasks`: " + "; ".join(
-        problems
-    )
+    assert not problems, (
+        "the live block and devkit's copy disagree. An item your own branch changed is "
+        "settled by `python scripts/devkit_project.py --adopt-tasks`; one it did not "
+        "belongs to another session's open PR and adopting it ships their work under "
+        "your commit -- see .claude/rules/vscode-tasks.md. Differences: "
+    ) + "; ".join(problems)
 
 
 @needs_live_workspace
