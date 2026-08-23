@@ -45,7 +45,7 @@ If `LastRunTime` predates `LastWriteTime`, **the result describes a command that
 longer exists**. Say so and stop; there is no failure to fix. Confirm what changed with
 `git log` on the installer -- `scripts/install-docker-prune.py`,
 `scripts/install-reconcile-task.py`, `scripts/install-upgrade-schedule.py`,
-`scripts/install-vanillaland-merge.py`.
+`scripts/install-release-schedule.py`, `scripts/install-vanillaland-merge.py`.
 
 ## 3. Read the registered command against its installer
 

@@ -30,6 +30,15 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# `release-pipeline.py` imports this module, and that pipeline is reachable from the
+# nightly `devkit-release` job -- whose interpreter is `pythonw.exe`, i.e. console-less,
+# which is the condition that makes Windows give every console child a visible window of
+# its own. Nothing here spawns on the scheduled path today (only pure helpers are
+# imported), but "today" is not a property a reader can check, and the flag costs an
+# interactive run nothing.
+NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 NEW_PROJECT = REPO_ROOT / "scripts" / "new-project.py"
 FALLBACK_CONST = "FALLBACK_DEVKIT_REF"
 
@@ -119,7 +128,11 @@ def branch_for(version: str) -> str:
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True, check=False
+        ["git", "-C", str(REPO_ROOT), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        creationflags=NO_WINDOW,
     )
 
 
