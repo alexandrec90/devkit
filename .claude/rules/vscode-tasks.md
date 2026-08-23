@@ -151,3 +151,13 @@ it regenerates the canonical copy from the live file. One test holds the pair to
   cover every checkout the `project` picker lists, and a deliberate omission (devkit is
   not a target of a devkit upgrade) to carry its reason in writing. Pickers scoped by
   `Action.projects` are a separate case and are gated separately.
+
+- **A task meant to run twice at once says so with `runOptions.instanceLimit`.** The
+  default is **1**, and re-running a task that is already active offers to terminate it
+  instead — which is what the preview tasks did for months, so comparing two branches
+  side by side looked impossible from the outside while `worktree.py` underneath had
+  been concurrency-safe all along (a lease lock, a port slot and a
+  `COMPOSE_PROJECT_NAME` per box). `presentation.panel` is *not* this setting: `new`
+  gives each run its own terminal and still refuses the second run. Raising it also
+  gives that task's `log-wrap.py` artifact two writers, which is what `write_artifact`'s
+  `since` argument handles.

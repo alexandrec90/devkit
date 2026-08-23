@@ -421,7 +421,7 @@
 			// through to it — and without it that answer is typed into whatever had focus
 			// when the task was clicked.
 			"label": "Preview: Open a UI Branch",
-			"detail": "Asks which checkout, then which of its refs — preview boxes already standing, live agent boxes, open PRs, recent agent/ branches on origin — and brings that one's stack up in a box of its own, opening the URL it publishes. Both lists are what the last run found; every checkout ends in a 'Rescan' row that looks again and then asks in the terminal. Cutting a box for the first time builds its images and can take minutes; re-serving one that is already standing takes seconds. A running preview costs CPU until 'Machine: Reclaim Resources' stops it.",
+			"detail": "Asks which checkout, then which of its refs — preview boxes already standing, live agent boxes, open PRs, recent agent/ branches on origin — and brings that one's stack up in a box of its own, opening the URL it publishes. Both lists are what the last run found; every checkout ends in a 'Rescan' row that looks again and then asks in the terminal. Cutting a box for the first time builds its images and installs the frontend's dependencies — about three minutes, reported stage by stage, and the tab opens only once the page answers; re-serving one that is already standing takes seconds. A running preview costs CPU until 'Machine: Reclaim Resources' stops it.",
 			"type": "process",
 			"command": "python",
 			"args": [
@@ -443,6 +443,15 @@
 				"clear": true,
 				"close": false
 			},
+			// VS Code allows ONE instance of a task by default, and re-running a task
+			// that is already active offers to terminate it. Comparing two branches
+			// side by side is the normal way to use this one, and every box has its own
+			// port lease and COMPOSE_PROJECT_NAME, so nothing below the task was ever
+			// the thing serialising them. Four rather than unbounded: a cold box builds
+			// images and each running preview costs CPU until it is stopped.
+			"runOptions": {
+				"instanceLimit": 4
+			},
 			"problemMatcher": []
 		},
 		{
@@ -451,7 +460,7 @@
 			// checkout's running stack on its usual ports. A project that has not declared
 			// a UI tier in `.devkit.toml` says so and points at the full task above.
 			"label": "Preview: Open a UI Branch (Frontend Only)",
-			"detail": "The cheap preview: same two dropdowns as 'Open a UI Branch', but the box starts only the project's declared UI services (e.g. the Vite frontend) and points them at the static checkout's already-running backend instead of cloning the whole stack — seconds and one container, not minutes and nine. Needs that checkout's stack up ('Docker: Up' it if not). Refs whose change is not frontend-only will not show it here; use the full preview.",
+			"detail": "The cheap preview: same two dropdowns as 'Open a UI Branch', but the box starts only the project's declared UI services (e.g. the Vite frontend) and points them at the static checkout's already-running backend instead of cloning the whole stack — one container and no image builds, so about a minute the first time a box is cut (the frontend installs its dependencies) and seconds after that. Needs that checkout's stack up ('Docker: Start Stack'); it says so before it starts when nothing is listening on that port. Refs whose change is not frontend-only will not show it here; use the full preview.",
 			"type": "process",
 			"command": "python",
 			"args": [

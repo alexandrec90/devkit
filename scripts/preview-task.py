@@ -42,6 +42,8 @@ Usage:
     python preview-task.py --down          # menu, then STOP the picked row's stack
     python preview-task.py --pick-ref carameli:agent/comic-book-ui-0820  # what the task sends
     python preview-task.py --refresh       # rebuild the dropdown's option file and exit
+    python preview-task.py --pick 3 --no-wait  # return when the containers start, not
+                                               # when what they serve answers
 
 **The VS Code task asks with two dropdowns, and this menu is what it falls back to.**
 Typing a row number into a terminal is the wrong verb for a thing every real caller
@@ -89,7 +91,11 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import socket
 import sys
+import time
+import urllib.error
+import urllib.request
 import webbrowser
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -173,6 +179,32 @@ PICK_SEP = ":"
 
 # The ref half of a pick that means "this list is stale, look again".
 RESCAN = "__rescan__"
+
+# How long to keep waiting for the URL the box publishes, and how often to say so.
+#
+# `compose up -d` returns when the CONTAINER has started, which for a dev server is a
+# long way before the thing it serves exists. Measured on a cold full preview of
+# carameli, 2026-08-23: 3m15s from the click to a page, of which the frontend container
+# spent its first 57s running `npm install` into the box's own empty `node_modules`
+# volume and then 0.6s starting Vite. The task opened the browser at second 137 -- on a
+# refused connection, with the remaining minute spent in silence -- so the mode that is
+# working correctly and the mode that has failed looked exactly alike.
+#
+# The wait is therefore part of the report rather than something the reviewer does by
+# reloading: every tick prints the elapsed total, which is also the only place the cost
+# of a cold box is ever stated in seconds.
+READY_TIMEOUT = 420.0
+READY_POLL = 2.0
+READY_TICK = 15.0
+
+# A probe that gets *any* HTTP status has its answer -- the server is up. Only a refused
+# connection, a DNS failure or a timeout means "not yet".
+PROBE_TIMEOUT = 3.0
+
+# `127.0.0.1`, never `localhost`: this machine resolves `localhost` to `::1` first, and
+# a compose port published on IPv4 only leaves an IPv6 connect hanging until it times
+# out -- which would read here as "the donor stack is down" for a stack that is up.
+LOOPBACK = "127.0.0.1"
 
 
 @dataclass(frozen=True)
@@ -603,6 +635,99 @@ def echo(line: str = "") -> None:
     print(line, flush=True)
 
 
+def probe(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
+    """Whether anything answers `url`. An HTTP error status counts as an answer.
+
+    A 404 or a 502 means a server accepted the connection and replied, which is the
+    question being asked -- a Vite dev server that is up returns 404 for a path its
+    router does not know, and a UI-only box whose borrowed backend is down returns 502
+    through the proxy. Treating either as "not ready" would wait out the whole timeout
+    on a preview that was already on screen.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def wait_for_ready(
+    url: str,
+    timeout: float = READY_TIMEOUT,
+    poll: float = READY_POLL,
+    tick: float = READY_TICK,
+    check=probe,
+    sleep=time.sleep,
+    clock=time.monotonic,
+) -> tuple[bool, float]:
+    """Poll `url` until it answers. `(ready, seconds waited)`, printing a line per tick.
+
+    Every collaborator is injected because the alternative is a test that really sleeps:
+    the thing worth asserting is the *shape* of the wait -- that it returns the moment
+    the probe succeeds, that it gives up rather than hanging forever, and that it says
+    so while waiting -- and none of that needs a clock that advances by itself.
+    """
+    started = clock()
+    spoken = 0.0
+    while True:
+        if check(url):
+            return True, clock() - started
+        waited = clock() - started
+        if waited >= timeout:
+            return False, waited
+        if waited - spoken >= tick:
+            spoken = waited
+            echo(f"  ... {waited:.0f}s: {url} is not answering yet (the container is up)")
+        sleep(poll)
+
+
+def port_is_open(port: int, host: str = LOOPBACK, timeout: float = PROBE_TIMEOUT) -> bool:
+    """Whether something is listening on `host:port`. False on any failure."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def donor_warning(project: str, workspace: Path, listening=port_is_open) -> str:
+    """The line to print when a UI-only preview's borrowed backend is not running.
+
+    A UI-only box starts the frontend and nothing else, so its API calls go to the
+    STATIC checkout's stack across the host bridge. When that stack is down the preview
+    still comes up and still opens -- the dev server is fine -- and every request in it
+    fails, which reads as the branch being broken rather than as the backend being
+    absent. `plan_preview` only checks that the checkout is *pinned* in `ports.toml`,
+    because a pin is all it needs to compute the port; whether anything is listening on
+    it is a question about right now, so it is asked here.
+
+    Empty when the backend answers, when the project publishes no `app` port, or when
+    the registry cannot be read: a warning that fires on its own uncertainty is one
+    people learn to scroll past. `load_registry` returns **None** for a workspace that
+    keeps no `ports.toml` at all, and a malformed one raises -- both are the same
+    "cannot tell" as an unpinned checkout, so all three land on the empty string.
+    """
+    try:
+        registry = worktree.load_registry(workspace.parent)
+        if registry is None:
+            return ""
+        slot = registry.slots.get(project, -1)
+        if slot < 0:
+            return ""
+        port = registry.ports_for_slot(slot).get("app", 0)
+    except (OSError, ValueError):  # ValueError covers devkit_ports.RegistryError
+        return ""
+    if not port or listening(port):
+        return ""
+    return (
+        f"[warn] {project}'s own stack is not up on port {port}, and a UI-only preview "
+        f"borrows its backend -- the page will load and every API call in it will fail. "
+        f"Run 'Docker: Start Stack' for {project}, or preview without --ui."
+    )
+
+
 def open_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
     """Open PRs for one checkout, newest first. Empty on every failure path.
 
@@ -797,13 +922,24 @@ def serve(
     fetch: bool = True,
     open_it: bool = True,
     ui: bool = False,
+    wait: bool = True,
 ) -> bool:
-    """Preview one candidate through `worktree.py`, then say where it is. True on success."""
+    """Preview one candidate through `worktree.py`, then say where it is. True on success.
+
+    The three things printed around the `worktree.py` call are the whole difference
+    between this and running that tool by hand, and each answers a question a reviewer
+    asked out loud: how long did that take, why is the page empty, and where is it.
+    """
     verb = "Stopping" if down else "Bringing up"
     mode = " (UI only)" if ui and not down else ""
     echo(f"\n{verb} {candidate.project} {candidate.ref}{mode} ...")
     if not down:
         echo("  (a box being cut for the first time builds its images -- this can take a while)")
+    if ui and not down:
+        warning = donor_warning(candidate.project, workspace)
+        if warning:
+            echo(f"  {warning}")
+    started = time.monotonic()
     try:
         plan = worktree.plan_preview(
             workspace=workspace,
@@ -826,10 +962,25 @@ def serve(
     if down:
         echo(f"  {candidate.ref} stopped; its box and port lease are kept.")
         return True
+    echo(f"  containers started in {time.monotonic() - started:.0f}s")
+    primary = worktree.primary_url(plan.urls)
+    ready = True
+    if wait and primary:
+        echo(f"  waiting for {primary} -- a cold box installs its dependencies first ...")
+        ready, waited = wait_for_ready(primary)
+        echo(
+            f"  {primary} answered after {waited:.0f}s"
+            if ready
+            else f"  [warn] {primary} still silent after {waited:.0f}s -- it may still be "
+            f"starting: `docker compose -p {plan.box.name} logs -f` says what it is doing"
+        )
+        echo(f"  total: {time.monotonic() - started:.0f}s")
     echo()
     echo(url_report(candidate, plan.urls))
-    primary = worktree.primary_url(plan.urls)
-    if open_it and primary:
+    # Never opened on a URL that has not answered: a tab on a refused connection is the
+    # failure this whole wait exists to stop reporting, and reloading it by hand is the
+    # step the reviewer should not have to know to take.
+    if open_it and primary and ready:
         try:
             webbrowser.open(primary)
         except OSError:  # pragma: no cover - a headless host has no browser to fail with
@@ -884,6 +1035,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--no-open", dest="open", action="store_false", help="print the URL but do not open it"
+    )
+    parser.add_argument(
+        "--no-wait",
+        dest="wait",
+        action="store_false",
+        help="return as soon as the containers start, without waiting for the URL to answer",
     )
     return parser
 
@@ -981,6 +1138,7 @@ def main(argv: list[str] | None = None) -> int:
             fetch=args.fetch,
             open_it=args.open,
             ui=args.ui,
+            wait=args.wait,
         )
         if not served:
             failures += 1

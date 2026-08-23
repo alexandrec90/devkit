@@ -48,6 +48,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 LOGS_DIR = "logs"
@@ -185,12 +186,27 @@ def artifact_body(
     )
 
 
-def write_artifact(root: Path, name: str, body: str) -> Path | None:
+def write_artifact(root: Path, name: str, body: str, since: float = 0.0) -> Path | None:
     """Persist under `root/logs/<name>.log`. Best-effort: a `logs/` that cannot be
-    written is not a reason to change what the task itself reported."""
+    written is not a reason to change what the task itself reported.
+
+    `since` is when THIS run started, and it exists because a task can now run more than
+    one instance at a time (`runOptions.instanceLimit` in the workspace file, added so
+    two previews can be brought up at once). One artifact per task then has two writers,
+    and the losing order is not the obvious one: an *empty* body is a passing run
+    retracting its own earlier report, so a short pass that finishes after a long run
+    already failed would delete a failure nobody has read yet.
+
+    The retraction is therefore skipped when the file on disk was written *after* this
+    run began -- that content cannot be the report this run is retracting. A failure
+    body is never held back: the last failure to finish is the one worth keeping, and
+    the terminal still holds the other one.
+    """
     path = root / LOGS_DIR / f"{name}.log"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        if not body and since and path.is_file() and path.stat().st_mtime > since:
+            return path
         path.write_text(body, encoding="utf-8")
     except OSError:
         return None
@@ -285,11 +301,15 @@ def main(argv: list[str] | None = None, run=stream, root: Path | None = None) ->
         return 2
     title, command, always = parsed
 
+    started = time.time()
     code, output = run(command)
 
     name = slug(title)
     path = write_artifact(
-        root or Path.cwd(), name, artifact_body(title, command, code, output, always)
+        root or Path.cwd(),
+        name,
+        artifact_body(title, command, code, output, always),
+        since=started,
     )
     if code != 0 and path is not None:
         # One line, and only the path -- the failure text is already above, and

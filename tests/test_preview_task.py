@@ -404,6 +404,10 @@ def test_serve_passes_ui_through_to_the_planner(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(preview_task.worktree, "plan_preview", plan)
     monkeypatch.setattr(preview_task.worktree, "apply_preview", lambda plan, ws: (True, []))
+    # The donor check opens a real socket against the checkout's app port, and `ui=True`
+    # is the mode that asks for it. Its own tests inject the probe; this one is about the
+    # planner, so it must not depend on what is listening on the machine running it.
+    monkeypatch.setattr(preview_task, "donor_warning", lambda project, workspace: "")
     candidate = preview_task.Candidate(
         project="carameli", ref="agent/x", kind=preview_task.KIND_BRANCH
     )
@@ -929,6 +933,235 @@ def test_a_pick_ref_that_names_no_checkout_is_reported_not_traced(stub, capsys):
     assert preview_task.main(["--workspace", str(stub.workspace), "--pick-ref", "agent/gone"]) == 2
     assert "matches no row" in capsys.readouterr().out
     assert stub.served == []
+
+
+# --- waiting for the page, rather than opening a refused connection -----------
+
+
+class Clock:
+    """A monotonic clock that only moves when something sleeps.
+
+    The wait is the one part of this script measured in minutes, so every test of it
+    would otherwise be a test that really waits. Injecting the pair keeps the assertion
+    on the *shape* of the wait and the runtime at zero.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_an_http_error_status_counts_as_an_answer(monkeypatch):
+    """Vite 404s for a path its router does not know, and a UI-only box whose borrowed
+    backend is down 502s through the proxy. Both mean a server accepted the connection,
+    which is the only question here -- reading either as "not ready" waits out the whole
+    timeout on a preview that is already on screen."""
+
+    def not_found(url, timeout=0):
+        raise preview_task.urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(preview_task.urllib.request, "urlopen", not_found)
+    assert preview_task.probe("http://127.0.0.1:5180/") is True
+
+
+def test_a_refused_connection_is_not_an_answer(monkeypatch):
+    def refuse(url, timeout=0):
+        raise preview_task.urllib.error.URLError(ConnectionRefusedError())
+
+    monkeypatch.setattr(preview_task.urllib.request, "urlopen", refuse)
+    assert preview_task.probe("http://127.0.0.1:5180/") is False
+
+
+def test_the_wait_returns_the_moment_the_url_answers():
+    clock = Clock()
+    seen = []
+    ready, waited = preview_task.wait_for_ready(
+        "http://x",
+        poll=2.0,
+        check=lambda url: seen.append(url) or len(seen) >= 3,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert (ready, waited) == (True, 4.0)
+    assert len(seen) == 3
+
+
+def test_the_wait_gives_up_rather_than_hanging_forever():
+    """`npm install` in a cold box takes about a minute; a box wedged on a build takes
+    forever. The timeout is what keeps the second one from holding the terminal."""
+    clock = Clock()
+    ready, waited = preview_task.wait_for_ready(
+        "http://x",
+        timeout=10.0,
+        poll=2.0,
+        tick=1000.0,
+        check=lambda url: False,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert (ready, waited) == (False, 10.0)
+
+
+def test_the_wait_speaks_on_the_tick_and_not_on_every_poll(capsys):
+    """Silence for a minute reads as a hang -- which is the report that started this.
+    A line per poll is the other failure: 40 identical lines say nothing either."""
+    clock = Clock()
+    preview_task.wait_for_ready(
+        "http://x",
+        timeout=40.0,
+        poll=5.0,
+        tick=15.0,
+        check=lambda url: False,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert capsys.readouterr().out.count("is not answering yet") == 2
+
+
+# --- the backend a UI-only preview borrows ------------------------------------
+
+
+def _registry(slots, services=None):
+    return worktree.devkit_ports.Registry(
+        max_slots=16, services=services or {"app": 8000, "frontend": 5180}, slots=slots
+    )
+
+
+def test_a_ui_preview_warns_when_the_backend_it_borrows_is_not_listening(monkeypatch, tmp_path):
+    """The whole failure mode of `--ui`: the dev server is fine, the page loads, and
+    every request in it fails -- which reads as the branch being broken."""
+    monkeypatch.setattr(preview_task.worktree, "load_registry", lambda root: _registry({"c": 0}))
+    warning = preview_task.donor_warning(
+        "c", tmp_path / "ws.code-workspace", listening=lambda p: False
+    )
+    assert "8000" in warning and "--ui" in warning
+
+
+def test_no_warning_when_the_backend_answers(monkeypatch, tmp_path):
+    monkeypatch.setattr(preview_task.worktree, "load_registry", lambda root: _registry({"c": 0}))
+    ports = []
+    warning = preview_task.donor_warning(
+        "c", tmp_path / "ws.code-workspace", listening=lambda p: ports.append(p) or True
+    )
+    assert warning == "" and ports == [8000]
+
+
+@pytest.mark.parametrize(
+    "registry",
+    [
+        pytest.param(lambda root: _registry({"other": 0}), id="checkout-not-pinned"),
+        pytest.param(lambda root: None, id="workspace-keeps-no-registry"),
+    ],
+)
+def test_a_warning_that_cannot_be_told_is_not_printed(monkeypatch, tmp_path, registry):
+    """A warning that fires on its own uncertainty is one people learn to scroll past."""
+    monkeypatch.setattr(preview_task.worktree, "load_registry", registry)
+
+    def listening(port):
+        pytest.fail("nothing to probe when there is no port")
+
+    assert (
+        preview_task.donor_warning("c", tmp_path / "ws.code-workspace", listening=listening) == ""
+    )
+
+
+def test_an_unreadable_registry_is_not_this_tool_s_news(monkeypatch, tmp_path):
+    def broken(root):
+        raise worktree.devkit_ports.RegistryError("ports.toml is malformed")
+
+    monkeypatch.setattr(preview_task.worktree, "load_registry", broken)
+    assert preview_task.donor_warning("c", tmp_path / "ws.code-workspace") == ""
+
+
+# --- what `serve` prints, and when it opens a tab ------------------------------
+
+
+URL = "http://127.0.0.1:5180/"
+
+
+def _up(monkeypatch, urls=(("frontend", 5180, URL),)):
+    """`plan_preview`/`apply_preview` stubbed to a box that came up publishing `urls`."""
+    plan = worktree.PreviewPlan(
+        box=worktree.Box(name="carameli--preview-x", project="carameli", branch="preview/x"),
+        path="p",
+        urls=tuple(urls),
+    )
+    monkeypatch.setattr(preview_task.worktree, "plan_preview", lambda **k: plan)
+    monkeypatch.setattr(preview_task.worktree, "apply_preview", lambda p, w: (True, []))
+    opened: list[str] = []
+    monkeypatch.setattr(preview_task.webbrowser, "open", opened.append)
+    return opened
+
+
+def _candidate():
+    return preview_task.Candidate(project="carameli", ref="agent/x", kind=preview_task.KIND_BRANCH)
+
+
+def test_serve_waits_for_the_page_then_opens_it(monkeypatch, tmp_path, capsys):
+    opened = _up(monkeypatch)
+    monkeypatch.setattr(preview_task, "wait_for_ready", lambda url, **k: (True, 61.0))
+    assert preview_task.serve(_candidate(), tmp_path) is True
+    assert opened == [URL]
+    out = capsys.readouterr().out
+    assert "containers started in" in out and "answered after 61s" in out and "total:" in out
+
+
+def test_serve_never_opens_a_url_that_has_not_answered(monkeypatch, tmp_path, capsys):
+    """The measured failure: `compose up` returns while `npm install` still has a minute
+    to run, so the browser opened on a refused connection and the reviewer read that as
+    the preview being broken. Reloading by hand is the step they should not have to know."""
+    opened = _up(monkeypatch)
+    monkeypatch.setattr(preview_task, "wait_for_ready", lambda url, **k: (False, 420.0))
+    assert preview_task.serve(_candidate(), tmp_path) is True
+    assert opened == []
+    out = capsys.readouterr().out
+    assert "still silent after 420s" in out and "logs -f" in out
+    assert URL in out  # the report still says where it will be
+
+
+def test_no_wait_returns_as_soon_as_the_containers_start(monkeypatch, tmp_path):
+    opened = _up(monkeypatch)
+    monkeypatch.setattr(
+        preview_task, "wait_for_ready", lambda *a, **k: pytest.fail("--no-wait must not probe")
+    )
+    assert preview_task.serve(_candidate(), tmp_path, wait=False) is True
+    assert opened == [URL]
+
+
+def test_a_box_that_publishes_nothing_is_not_waited_on(monkeypatch, tmp_path):
+    """A stackless project's box has no URL, so there is nothing to poll and no tab."""
+    opened = _up(monkeypatch, urls=())
+    monkeypatch.setattr(
+        preview_task, "wait_for_ready", lambda *a, **k: pytest.fail("no URL to wait for")
+    )
+    assert preview_task.serve(_candidate(), tmp_path) is True
+    assert opened == []
+
+
+def test_main_passes_no_wait_through_to_serve(stub):
+    _menu(stub, [preview_task.Candidate(project="p", ref="agent/ui", kind=preview_task.KIND_PR)])
+    kwargs_seen = []
+    stub.monkeypatch.setattr(
+        preview_task, "serve", lambda c, *a, **k: kwargs_seen.append(k) or True
+    )
+    argv = ["--workspace", str(stub.workspace), "--pick", "1", "--no-wait"]
+    assert preview_task.main(argv) == 0
+    assert kwargs_seen[0]["wait"] is False
+
+
+def test_the_wait_is_on_by_default(stub):
+    _menu(stub, [preview_task.Candidate(project="p", ref="agent/ui", kind=preview_task.KIND_PR)])
+    kwargs_seen = []
+    stub.monkeypatch.setattr(
+        preview_task, "serve", lambda c, *a, **k: kwargs_seen.append(k) or True
+    )
+    assert preview_task.main(["--workspace", str(stub.workspace), "--pick", "1"]) == 0
+    assert kwargs_seen[0]["wait"] is True
 
 
 # --- the task that runs it ----------------------------------------------------
