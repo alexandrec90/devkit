@@ -77,6 +77,9 @@ class Action:
     # *with cwd set to the chosen checkout* — for work that is the same everywhere but
     # still has to happen inside a specific repo, like the git sync.
     owner: str = "project"
+    # Whether this action rewrites tracked files with fixes nobody authored. Those fixes
+    # strand on a home branch unless something ships them -- see `autofix_ship_plan`.
+    autofix: bool = False
     # Which checkouts this action applies to; empty means every one of them. Naming the
     # checkout (`("carameli",)`) is how a genuinely project-specific action lives here
     # instead of in that repo's `.vscode/tasks.json`. Names rather than a capability
@@ -127,8 +130,10 @@ DB_PROJECTS = CARAMELI + IBKR
 ACTIONS: dict[str, Action] = {
     # --- implemented by each checkout ---
     "test": Action("scripts/run-tests.py", "Test: Run Suite"),
-    "lint": Action("scripts/lint-all.py", "Lint: Everything"),
-    "lint-changed": Action("scripts/lint-all.py", "Lint: Changed Files", ("--changed",)),
+    "lint": Action("scripts/lint-all.py", "Lint: Everything", autofix=True),
+    "lint-changed": Action(
+        "scripts/lint-all.py", "Lint: Changed Files", ("--changed",), autofix=True
+    ),
     "sync-codex": Action("scripts/sync-codex-context.py", "Agent: Sync Codex Context"),
     "sync-devkit": Action("scripts/sync-devkit.py", "Harness: Check Drift"),
     # --- implemented once, here ---
@@ -197,6 +202,19 @@ ACTIONS: dict[str, Action] = {
     # No picker, per the literal-over-single-option convention: the task pins
     # `--project devkit` and the only question asked is the one worth asking.
     "preview": Action("scripts/preview-task.py", "Preview: Open a UI Branch", projects=DEVKIT_ONLY),
+    # Cutting a devkit release. DEVKIT_ONLY because a release is devkit's own act and
+    # has no project dimension at all -- run per selected checkout it would try to tag
+    # this repo two or three times, and the second attempt would refuse a tag that now
+    # exists. The consumers appear at the END of the run, as `upgrade-project.py --all`,
+    # which is a different thing from the task being scoped to them.
+    #
+    # It is an ACTIONS entry rather than a hand-written task like `Devkit: Upgrade
+    # Projects` because it needs the wrapping more than that one does, not less: the run
+    # spans a PR gate and a workflow dispatch, so its useful output arrives minutes apart
+    # and the reader is not watching. `plan_command` gives it the notify toast and the
+    # `logs/` artifact for free, and the level picker rides through as a trailing
+    # argument the same way `db-revision`'s `-m` does.
+    "release": Action("scripts/release-pipeline.py", "Devkit: Cut Release", projects=DEVKIT_ONLY),
     # --- scoped to one repo's worktree pair ---
     #
     # These are the tasks that used to live in `carameli/.vscode/tasks.json` and
@@ -364,6 +382,118 @@ def plan_command(
     if (project_dir / NOTIFY_WRAP).is_file():
         return ["python", NOTIFY_WRAP, action.label, "--", *logged]
     return logged
+
+
+# --- autofix that would otherwise strand ------------------------------------
+#
+# `lint-all.py` rewrites the tree before it reports -- `ruff check --fix
+# --unsafe-fixes`, `ruff format`, and in the projects that ship it a detect-secrets
+# baseline that auto-acknowledges its own new findings. Nobody authored those edits,
+# so nobody feels responsible for committing them, and the checkout they land in is
+# the static one parked on its home branch: exactly the write `worktree-guard.py`
+# routes into a box when an *agent* makes it. The lint task is the hole in that
+# guarantee. It writes the same files with no task branch underneath, and the churn
+# surfaces days later as a `needs-branch` verdict that reads as though a human left
+# it there.
+#
+# So the dispatcher finishes what the task started. `sweep.py` already takes stranded
+# work from a home branch to an open PR -- `--branch`, then `--ship` -- and the only
+# new judgement needed is whether that is the honest thing to do with what this run
+# left behind.
+AUTOFIX_SLUG = "lint-autofix"
+
+
+@dataclass(frozen=True)
+class AutofixOutcome:
+    """What to do with the files an autofix action rewrote: commands, or a reason not to.
+
+    Never both. A note is the mode's way of declining out loud -- the churn is real
+    either way, and a silent decline is how it goes unnoticed until the sweep finds it.
+    """
+
+    commands: tuple[tuple[str, ...], ...] = ()
+    note: str = ""
+
+
+def autofix_ship_plan(
+    project: str,
+    branch: str,
+    before: tuple[str, ...] | list[str],
+    after: tuple[str, ...] | list[str],
+    *,
+    lint_ok: bool,
+    workspace: Path,
+    devkit_root: Path = REPO_ROOT,
+    slug: str = AUTOFIX_SLUG,
+) -> AutofixOutcome:
+    """Whether to ship what an autofix run rewrote, given the tree before and after.
+
+    Pure: it decides from two `git status --porcelain` snapshots and a branch name,
+    so every refusal below is asserted without a repository on disk.
+
+    Ships only the case it can honestly attribute -- a checkout that was **clean**,
+    on a **home branch**, whose lint run came back **green**. Each of the other three
+    is a decline with a reason, and each reason is a different next action:
+
+    - **Dirty before the run.** The diff is now part autofix and part whatever was
+      already there, and nothing here read either. Sweeping both into a PR titled
+      after the sweep would bury someone's work under a mechanical subject; that work
+      deserves `/ship` and a real message.
+    - **On a task branch.** The fixes belong to the task in progress and travel with
+      its next commit. `worktree-guard.py` put agent work here precisely so this
+      needs no rescue.
+    - **Lint still failed.** The autofix pass fixed what it could and the report is
+      non-empty, so shipping now opens a PR whose gate is already red -- and pushes a
+      commit the project's own pre-commit hook would likely refuse first. The
+      remaining findings get fixed, then the whole diff ships together.
+    """
+    fixed = sorted(set(after) - set(before))
+    if not fixed:
+        return AutofixOutcome()
+    churn = f"autofix rewrote {len(fixed)} file(s) ({', '.join(fixed[:4])}"
+    churn += ", ...)" if len(fixed) > 4 else ")"
+    if not branch:
+        return AutofixOutcome(
+            note=f"{churn} on a detached HEAD -- check out a branch, then sweep.py --branch --yes"
+        )
+    if sweep.is_task_branch(branch):
+        return AutofixOutcome(
+            note=f"{churn} on the task branch {branch} -- they ship with the task, nothing to do"
+        )
+    if before:
+        return AutofixOutcome(
+            note=(
+                f"{churn} on top of {len(before)} change(s) that were already there -- "
+                f"not shipping a diff nothing has read. Review it, then /ship it"
+            )
+        )
+    if not lint_ok:
+        return AutofixOutcome(
+            note=(
+                f"{churn} but the run still reported findings -- fix those first, then the "
+                f"whole diff ships together (a PR opened now starts with a red gate)"
+            )
+        )
+    sweep_py = str(devkit_root / "scripts" / "sweep.py")
+    common = ("python", sweep_py, "--workspace", str(workspace), "--only", project)
+    return AutofixOutcome(
+        commands=(
+            (*common, "--branch", "--slug", slug, "--yes"),
+            (*common, "--ship", "--yes"),
+        )
+    )
+
+
+def autofix_state(directory: Path) -> tuple[str, tuple[str, ...]]:
+    """(branch, changed paths) for one checkout -- the snapshot the plan compares.
+
+    Through `sweep.git_for` so the dispatcher and the sweep read a checkout the same
+    way, including the no-console-window flag a scheduled run depends on.
+    """
+    git = sweep.git_for(directory)
+    head = git("branch", "--show-current")
+    branch = head.stdout.strip() if head.returncode == 0 else ""
+    return branch, sweep.parse_porcelain(git("status", "--porcelain").stdout or "")
 
 
 # --- registering a new project ----------------------------------------------
@@ -552,9 +682,10 @@ def register(text: str, names: list[str]) -> str:
 CANONICAL_TASKS = REPO_ROOT / "workspace-tasks.jsonc"
 
 CANONICAL_HEADER = """// Canonical shared task block — devkit owns this; alex-projects.code-workspace
-// carries a copy under its "tasks" key. Edit the workspace file, then adopt the
-// change here:
+// carries a copy under its "tasks" key. Check for pre-existing drift, edit the
+// workspace file, then adopt the intentional change here:
 //
+//     python scripts/devkit_project.py --check-tasks
 //     python scripts/devkit_project.py --adopt-tasks
 //
 // and verify with `--check-tasks`. The workspace file is not inside any repo, so it
@@ -701,6 +832,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     parser.add_argument(
+        "--no-ship-fixes",
+        action="store_true",
+        help=(
+            "leave an autofix action's rewrites in the working tree instead of branching "
+            "and shipping them (see autofix_ship_plan) -- for inspecting the fixes locally"
+        ),
+    )
+    parser.add_argument(
         "--list", action="store_true", help="print the known projects, one per line"
     )
     parser.add_argument(
@@ -797,12 +936,44 @@ def main(argv: list[str] | None = None) -> int:
         print(f"devkit_project: {exc}", file=sys.stderr)
         return 2
 
+    action = ACTIONS[args.action]
+    ship_fixes = action.autofix and not args.no_ship_fixes
     result = 0
     for directory, command in planned:
         print(f"[{directory.name}] {' '.join(command)}\n", flush=True)
+        branch, before = autofix_state(directory) if ship_fixes else ("", ())
         returncode = subprocess.run(command, cwd=directory, check=False).returncode
         if returncode and not result:
             result = returncode
+        if not ship_fixes:
+            continue
+        _, after = autofix_state(directory)
+        outcome = autofix_ship_plan(
+            directory.name,
+            branch,
+            before,
+            after,
+            lint_ok=returncode == 0,
+            workspace=args.workspace,
+        )
+        if outcome.note:
+            print(f"\n[{directory.name}] {outcome.note}", flush=True)
+        for step in outcome.commands:
+            print(f"\n[{directory.name}] {' '.join(step)}\n", flush=True)
+            code = subprocess.run(step, cwd=root, check=False).returncode
+            if code:
+                # Stop at the first failure rather than shipping from a branch that was
+                # never cut: the second command would then read the *home* branch and
+                # sweep.ship_plan would refuse it, reporting a confusing second error
+                # for the same cause.
+                print(
+                    f"[{directory.name}] shipping the autofix churn failed (exit {code}) -- "
+                    f"the fixes are still in the working tree",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                result = result or code
+                break
     return result
 
 

@@ -13,13 +13,14 @@ Nothing in `logs/` could have reported it, because the job that would have writt
 log is the job that was not running.
 
 So this reads the **scheduler's** view rather than the jobs' own output, which is the
-only place three of the four failure modes are visible at all:
+only place all but one of these failure modes are visible at all:
 
 | what went wrong | where it shows |
 | --- | --- |
 | someone disabled it | `Scheduled Task State` |
 | it ran and failed | `Last Result` |
 | it has silently stopped firing | `Last Run Time` against its own cadence |
+| it runs, and opens a window every time | `Task To Run` -- see `virtualenv_interpreter` |
 | it ran, and declined to do anything | the job's own artifact, not here |
 
 The last row is the one this deliberately does not cover: "ran fine, did nothing" is a
@@ -48,9 +49,14 @@ from __future__ import annotations
 import csv
 import datetime as _dt
 import io
+import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import devkit_schtasks
 
 # `ARTIFACTS` holds repo-relative paths, and the caller is `workspace-status.py`, whose
 # cwd is the workspace rather than this checkout. Resolving against this file keeps the
@@ -113,6 +119,7 @@ STALE_INTERVALS = 2.0
 # invites is caught in the suite rather than by the next person to read a bare exit code.
 ARTIFACTS: dict[str, str] = {
     "devkit-worktree-reconcile": "logs/reconcile.log",
+    "devkit-release": "logs/scheduled-devkit-release.log",
     "devkit-upgrade-projects": "logs/upgrade.log",
     "devkit-docker-prune": "logs/scheduled-docker-prune.log",
     "devkit-docker-stop-idle": "logs/scheduled-docker-stop-idle.log",
@@ -192,6 +199,24 @@ class Job:
     last_result: int
     last_run: _dt.datetime | None = None
     next_run: _dt.datetime | None = None
+    command: str = ""
+
+    @property
+    def interpreter(self) -> str:
+        """The executable out of the whole registered command line, or `""`.
+
+        `Task To Run` is `<Command>` and `<Arguments>` joined back together with a space,
+        and `schtasks` leaves the command unquoted however the arguments are quoted -- so
+        the first whitespace token is wrong for any path containing a space, which every
+        one of these does on a machine whose profile name is two words. Everything up to
+        the first `.exe` is right for both, and `schtasks` truncates the tail of a long
+        command line, which is another reason not to depend on anything but the head.
+        """
+        text = self.command.strip().lstrip('"')
+        match = re.match(r"(?i)(.*?\.exe)", text)
+        if match:
+            return match.group(1)
+        return text.split(" ", 1)[0]
 
     @property
     def interval(self) -> _dt.timedelta | None:
@@ -250,9 +275,41 @@ def parse_tasks(stdout: str, prefix: str = PREFIX) -> list[Job]:
                 last_result=result,
                 last_run=parse_time(row.get("Last Run Time") or ""),
                 next_run=parse_time(row.get("Next Run Time") or ""),
+                command=(row.get("Task To Run") or "").strip(),
             )
         )
     return jobs
+
+
+def virtualenv_interpreter(job: Job) -> Path | None:
+    """The base install behind a job registered against a venv interpreter, else None.
+
+    **This is the one check here that reads the registration rather than the run**, and
+    it exists because the failure it catches is invisible to every other row of this
+    module's table: the job fires, exits 0, writes its artifact, and puts a console
+    window on the desktop anyway.
+
+    `pythonw.exe` inside a virtualenv is not an interpreter. It is a stub deferring to the
+    base install named in `pyvenv.cfg`, and **uv builds that stub as a trampoline that
+    spawns the base as a child process**. A scheduled task running it is correctly
+    console-less, so Windows hands its console-*less* child a brand new visible one --
+    which is how `devkit-global-tools`, the only job whose interpreter came from a
+    `.venv`, went on flashing a window through two rounds of fixing exactly this bug.
+    Both rounds were reported by a human watching windows flash, because every guard was
+    a source-level scan of devkit's own files and no scan can tell that a file *named*
+    `pythonw.exe` is a trampoline rather than an interpreter. This one asks the machine.
+
+    A venv `<Command>` is worth a line even where the stub is CPython's in-process copy:
+    `install-global-tools.interpreter` prefers a checkout's `.venv`, and a box's `.venv`
+    is deleted the moment its PR merges, taking the task's command with it.
+
+    None for a job with no command recorded, so a scheduler front end that stops
+    reporting one degrades to silence rather than to a false alarm.
+    """
+    executable = job.interpreter
+    if not executable:
+        return None
+    return devkit_schtasks.venv_home(executable)
 
 
 def problems(jobs: list[Job], now: _dt.datetime | None = None) -> list[str]:
@@ -261,6 +318,10 @@ def problems(jobs: list[Job], now: _dt.datetime | None = None) -> list[str]:
     Ordered so the most actionable comes first, and **at most one line per job** -- a
     disabled job is also stale and also has a stale result, and reporting all three
     would bury the one fact that explains the other two.
+
+    The registration check goes last for that reason and not because it matters least: a
+    misregistered command is permanent, so it is still there to report next session,
+    while a failing run is the thing that may not be.
     """
     moment = now or _dt.datetime.now()
     found: list[str] = []
@@ -299,6 +360,15 @@ def problems(jobs: list[Job], now: _dt.datetime | None = None) -> list[str]:
             found.append(
                 f"{job.name}: has not run since {job.last_run:%Y-%m-%d %H:%M} "
                 f"({missed:.0f} intervals ago)"
+            )
+            continue
+        base = virtualenv_interpreter(job)
+        if base is not None:
+            found.append(
+                f"{job.name}: runs {job.interpreter}, a virtualenv stub that defers to "
+                f"{base} -- under uv it spawns that as a child, and Windows gives the "
+                f"child of a console-less task a visible console. Re-run the job's "
+                f"installer with --yes to re-register it against the base interpreter"
             )
     return found
 

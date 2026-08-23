@@ -161,13 +161,30 @@ Each of these has already been violated by something:
   `sweep.py`'s scope, and then both tools would own its lifecycle. The cost is that
   nothing else can see boxes, which is why `workspace-status.py` reports them at session
   start, split by whether each holds work or is a pure leaked slot.
+- **The guard re-aims the call rather than refusing it, and the refusal is the
+  fallback.** For a year this hook could only exit 2, because a PreToolUse hook could
+  only allow or deny — so every guarded session paid a failed tool call per routed edit,
+  the agent re-sent arguments it had already sent (for a `Write`, a whole file), and the
+  transcript filled with hook errors that described correct behaviour. Claude Code's
+  `hookSpecificOutput.updatedInput` rewrites the arguments the tool is called with, so
+  the edit now lands in the box on the first attempt with the prose arriving as
+  `additionalContext`. Two properties keep it honest, both of them silent when broken:
+  the rewrite is applied **only when the same object sets no `permissionDecision`**, so
+  an `"allow"` added for symmetry drops it and lands the edit on the home branch; and
+  an unrecognised path key is logged as `permission_updated_input_invalid` and the
+  **original** arguments are used, which is why the path is written back under the key
+  it was read from rather than under `file_path`. `redirect_blocker` is the single
+  predicate for falling back to the old block, and every case in it is a way the rewrite
+  would fail *quietly* rather than loudly — a hook adapter that would drop the member
+  (`DEVKIT_HOOK_ADAPTER`), a tool whose argument shape the guard does not model, or an
+  `Edit` whose `old_string` the box's copy of the file does not contain.
 - **The guard is the one caller that skips provisioning.** A linked worktree checks out
   tracked files only, so a fresh box has no installed toolchain and nothing else was
   going to create one — `session-start.sh` returns early on a local machine. `worktree.py
   new` therefore installs it, walking the same ladder in the same order. But an install
   takes minutes and a PreToolUse hook that takes minutes is one the agent experiences as
-  a hang, so the guard passes `provision=False` and puts the `provision` command in its
-  block message instead.
+  a hang, so the guard passes `provision=False` and puts the `provision` command in the
+  message it hands back instead.
 - **The ladder detects the dependency model but cannot detect the interpreter.** No
   marker file names one: a lockfile pins packages, and `requires-python` is a floor that
   a newer release satisfies. So provisioning built every box's `.venv` from
@@ -227,7 +244,8 @@ with different working directories. Without it every guard-cut box was named
 ## A scheduled task is registered from XML, never from `schtasks` flags
 
 Every unattended job — `install-reconcile-task.py`, `install-upgrade-schedule.py`,
-`install-docker-prune.py`, `install-vanillaland-merge.py`, `install-global-tools.py` —
+`install-release-schedule.py`, `install-docker-prune.py`, `install-vanillaland-merge.py`,
+`install-global-tools.py` —
 goes through
 `scripts/devkit_schtasks.py`, which builds a
 task document and registers it with `/XML`. That is not a style preference. **The three settings that decide whether a
@@ -368,6 +386,36 @@ and flagging it alone would have emptied `logs/scheduled-docker-prune.log` of ev
 docker said — an artifact reporting an exit code and nothing to diagnose it with, which
 is the failure that made artifacts mandatory two sections up. Capture, or name the
 streams (`docker-maint.inherited_streams`); never just add the flag.
+
+### A file named `pythonw.exe` need not be an interpreter
+
+Both sections above were in place — the pair was the rule, every spawn carried the flag,
+and the checks were in `tests/test_scheduled_jobs.py` — when a console window came back
+at boot on 2026-08-21. **Every guard for this bug was a source scan of devkit's own
+files, and every one of them was checking a name.**
+
+Inside a virtualenv, `Scripts\pythonw.exe` is not an interpreter. It is a stub deferring
+to the base install named in `pyvenv.cfg`, and the two builders differ in the one way
+that matters here: CPython's stub loads the base **in-process**, while uv's is a
+trampoline that **spawns it as a child**. So `devkit-global-tools` — the only job whose
+interpreter comes from a `.venv`, because `install-global-tools.interpreter` prefers the
+checkout's — was registered against a GUI-subsystem file correctly named `pythonw.exe`,
+opened no console of its own, and handed its console child a brand new visible one. That
+is the same mechanism as the section above, arriving through the *scheduler boundary*
+rather than through a spawn site.
+
+Two consequences, both now enforced rather than written down:
+
+- **`devkit_schtasks.windowless` owns the resolution, and no installer keeps a copy.**
+  Six of them did, identically, on the stated reasoning that six lines are cheaper to
+  repeat than to couple — and all six were wrong at once for as long as it took one
+  job's interpreter to come from a venv. It resolves through `home`, which also settles
+  the hazard `interpreter` warned about from the other end: a box's `.venv` disappears
+  when its PR merges, and the base install outlives every venv.
+- **A source scan cannot close this class of bug, so one check reads the machine.**
+  `schedule_health.virtualenv_interpreter` compares each registered task's `Task To Run`
+  against `pyvenv.cfg` and reports it at session start. All three rounds of this bug were
+  found by a human watching windows flash; that is the loop this replaces.
 
 ### The scheduled pass carries the static tier too
 

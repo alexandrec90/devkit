@@ -51,15 +51,43 @@ def ledger_root(tmp_path, monkeypatch):
     return base
 
 
-def payload(tool: str = "Edit", path: str = "", cwd: str = "", session: str = "s1") -> str:
+def payload(
+    tool: str = "Edit",
+    path: str = "",
+    cwd: str = "",
+    session: str = "s1",
+    key: str = "file_path",
+    **arguments,
+) -> str:
     return json.dumps(
         {
             "tool_name": tool,
-            "tool_input": {"file_path": path},
+            "tool_input": {key: path, **arguments},
             "cwd": cwd,
             "session_id": session,
         }
     )
+
+
+def guidance(capsys) -> str:
+    """The text the hook put in front of the agent, whichever way it routed the edit.
+
+    Both outcomes deliver the same prose; only the channel differs, because only one of
+    them is a block. A refusal writes it to stderr, which Claude Code surfaces as the
+    hook error; a re-aim carries it as `additionalContext` in the structured response on
+    stdout. Nearly every assertion below is about the prose rather than the channel, so
+    they read it through here -- the two tests that ARE about the channel read `capsys`
+    directly, and are named for it.
+    """
+    captured = capsys.readouterr()
+    if not captured.out.strip():
+        return captured.err
+    return json.loads(captured.out)["hookSpecificOutput"]["additionalContext"]
+
+
+def response(capsys) -> dict:
+    """The `hookSpecificOutput` object the hook wrote to stdout."""
+    return json.loads(capsys.readouterr().out)["hookSpecificOutput"]
 
 
 # --- reading the hook payload -----------------------------------------------
@@ -481,11 +509,10 @@ def test_the_reap_check_reads_the_prose_and_not_the_checkout_path(monkeypatch, t
     assert "reap" not in prose_of(message)  # ...and it is not prose
 
 
-def test_the_block_message_gives_an_absolute_path_from_a_relative_workspace(
-    root, monkeypatch, capsys
-):
-    """The path in the message is the actionable part, and the agent's next tool call
-    does not necessarily run in the cwd this hook was invoked from."""
+def test_the_routed_path_is_absolute_from_a_relative_workspace(root, monkeypatch, capsys):
+    """The path is the actionable part, and it is now also the argument the tool is
+    about to be called with -- which cannot be relative to a cwd this hook happens to
+    have been invoked from and the tool does not necessarily share."""
     workspace = _workspace(root)
     _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
     monkeypatch.chdir(root)
@@ -494,8 +521,9 @@ def test_the_block_message_gives_an_absolute_path_from_a_relative_workspace(
     )
 
     guard.main(["--workspace", workspace.name])
-    quoted = capsys.readouterr().err
-    assert str(root / ".worktrees" / "carameli--ws-s1-0806") in quoted
+    assert response(capsys)["updatedInput"]["file_path"] == str(
+        root / ".worktrees" / "carameli--ws-s1-0806" / "a.py"
+    )
 
 
 def test_the_deny_message_names_the_install_the_box_did_not_get():
@@ -655,7 +683,7 @@ def test_a_project_scoped_session_may_still_edit_a_reference_checkout(root, monk
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
 
 
-def test_an_in_checkout_edit_on_a_home_branch_is_blocked_and_says_why(root, monkeypatch, capsys):
+def test_an_in_checkout_edit_on_a_home_branch_is_re_aimed_and_says_why(root, monkeypatch, capsys):
     """The message must not tell a session sitting in carameli that it "is not inside
     carameli" -- that reads as a hook bug and invites working around it."""
     workspace = _workspace(root)
@@ -666,13 +694,13 @@ def test_an_in_checkout_edit_on_a_home_branch_is_blocked_and_says_why(root, monk
         "sys.stdin",
         _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root / "carameli"))),
     )
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
-    err = capsys.readouterr().err
-    assert "parked on 'master', a home branch" in err
-    assert "not inside" not in err
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    said = guidance(capsys)
+    assert "parked on 'master', a home branch" in said
+    assert "not inside" not in said
 
 
-def test_the_block_message_names_the_branch_the_decision_was_made_on(root, monkeypatch, capsys):
+def test_the_message_names_the_branch_the_decision_was_made_on(root, monkeypatch, capsys):
     """The wiring, not the wording: `main` judges the branch and then has to report the
     same one. Reading it a second time for the message would be a second subprocess and
     could name a different branch than the one that was judged.
@@ -691,10 +719,10 @@ def test_the_block_message_names_the_branch_the_decision_was_made_on(root, monke
         _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root / "carameli"))),
     )
 
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
-    err = capsys.readouterr().err
-    assert "claude/dual-vendor-status-audit-0813" in err
-    assert "home branch" not in err
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    said = guidance(capsys)
+    assert "claude/dual-vendor-status-audit-0813" in said
+    assert "home branch" not in said
 
 
 def test_a_session_reuses_the_box_it_already_has(root, monkeypatch, capsys):
@@ -705,13 +733,13 @@ def test_a_session_reuses_the_box_it_already_has(root, monkeypatch, capsys):
     monkeypatch.setattr(
         "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
     )
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
-    err = capsys.readouterr().err
-    assert "carameli--ws-s1-0806" in err
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    said = guidance(capsys)
+    assert "carameli--ws-s1-0806" in said
     # "a box has been spawned" on the fortieth edit is simply untrue, and a message
     # that misdescribes what happened is how an agent concludes it is looping.
-    assert "already has a box" in err
-    assert "has been spawned" not in err
+    assert "already has a box" in said
+    assert "has been spawned" not in said
 
 
 def test_the_hook_never_waits_for_an_install(root, monkeypatch, capsys):
@@ -733,9 +761,9 @@ def test_the_hook_never_waits_for_an_install(root, monkeypatch, capsys):
         "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
     )
 
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
     assert seen == {"timeout": guard.SPAWN_TIMEOUT, "provision": False}
-    assert "provision carameli--ws-s1-0806 --yes" in capsys.readouterr().err
+    assert "provision carameli--ws-s1-0806 --yes" in guidance(capsys)
 
 
 def test_the_spawn_is_planned_quietly(root, monkeypatch, capsys):
@@ -759,7 +787,7 @@ def test_the_spawn_is_planned_quietly(root, monkeypatch, capsys):
         "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
     )
 
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
     assert seen.get("quiet") is True
 
 
@@ -782,7 +810,7 @@ def test_an_edit_into_the_sessions_own_box_is_left_alone(root, monkeypatch):
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
 
 
-def test_an_edit_into_another_sessions_box_is_blocked_toward_its_own(root, monkeypatch, capsys):
+def test_an_edit_into_another_sessions_box_is_routed_toward_its_own(root, monkeypatch, capsys):
     """The collision this prevents happened: a second session found a live box through
     `worktree.py list`, adopted it because the topic matched its task, and two sessions'
     edits interleaved in one worktree until one noticed files changing under it
@@ -794,12 +822,12 @@ def test_an_edit_into_another_sessions_box_is_blocked_toward_its_own(root, monke
     monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
     target = root / ".worktrees" / "carameli--x-0806" / "app" / "main.py"
     monkeypatch.setattr("sys.stdin", _stdin(payload(path=str(target), cwd=str(root))))
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
-    err = capsys.readouterr().err
-    assert "carameli--x-0806" in err and "different session" in err
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    said = guidance(capsys)
+    assert "carameli--x-0806" in said and "different session" in said
     # Routed to a box of its own, and told how a sanctioned takeover looks instead.
-    assert "carameli--ws-s1-0806" in err
-    assert "claim carameli--x-0806 --session s1 --yes" in err
+    assert "carameli--ws-s1-0806" in said
+    assert "claim carameli--x-0806 --session s1 --yes" in said
 
 
 def test_a_foreign_box_edit_reuses_the_sessions_existing_box(root, monkeypatch, capsys):
@@ -826,9 +854,9 @@ def test_a_foreign_box_edit_reuses_the_sessions_existing_box(root, monkeypatch, 
     )
     target = root / ".worktrees" / "carameli--x-0806" / "app" / "main.py"
     monkeypatch.setattr("sys.stdin", _stdin(payload(path=str(target), cwd=str(root))))
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
-    err = capsys.readouterr().err
-    assert "carameli--mine-0806" in err and "already has a box" in err
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    said = guidance(capsys)
+    assert "carameli--mine-0806" in said and "already has a box" in said
 
 
 def test_a_box_leased_under_an_abbreviated_session_id_still_admits_its_session(root, monkeypatch):
@@ -872,16 +900,38 @@ def test_a_non_box_path_under_worktrees_is_left_alone(root, monkeypatch):
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
 
 
-def test_the_reason_goes_to_stderr_because_stdout_is_not_surfaced(root, monkeypatch, capsys):
+def test_a_refusal_puts_its_reason_on_stderr_because_a_blocked_hooks_stdout_is_dropped(
+    root, monkeypatch, capsys
+):
+    """The two channels are not interchangeable. Claude Code reads an exit-2 hook's
+    stderr and discards its stdout, so a fallback block that wrote JSON would refuse the
+    edit and say nothing about why."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setenv(guard.ADAPTER_ENV, "codex")
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err
+
+
+def test_a_re_aim_puts_its_response_on_stdout_because_that_is_where_the_rewrite_is_read(
+    root, monkeypatch, capsys
+):
+    """And the mirror image: `updatedInput` is only read off a rc-0 hook's stdout, so an
+    allow whose reason went to stderr would re-aim the edit and explain nothing."""
     workspace = _workspace(root)
     _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
     monkeypatch.setattr(
         "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
     )
-    guard.main(["--workspace", str(workspace)])
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
     captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err
+    assert captured.err == ""
+    assert json.loads(captured.out)["hookSpecificOutput"]["updatedInput"]
 
 
 # --- helpers ----------------------------------------------------------------
@@ -942,7 +992,7 @@ def test_the_guard_asks_for_a_resume_before_it_cuts_a_new_branch(root, monkeypat
     monkeypatch.setattr(
         "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
     )
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
     assert asked["project"] == "carameli"
     assert asked["session"] == "s1"
 
@@ -957,10 +1007,10 @@ def test_a_resumed_box_says_it_already_carries_this_sessions_commits(root, monke
     monkeypatch.setattr(
         "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
     )
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
-    err = capsys.readouterr().err
-    assert "resumed agent/voicemail-0806" in err
-    assert "reaped" in err and "commits are on this branch" in err
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    said = guidance(capsys)
+    assert "resumed agent/voicemail-0806" in said
+    assert "reaped" in said and "commits are on this branch" in said
 
 
 def test_a_freshly_cut_box_is_not_announced_as_a_resume(root, monkeypatch, capsys):
@@ -971,8 +1021,291 @@ def test_a_freshly_cut_box_is_not_announced_as_a_resume(root, monkeypatch, capsy
     monkeypatch.setattr(
         "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
     )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    assert "resumed" not in guidance(capsys)
+
+
+# --- re-aiming the call, and the four ways it falls back to a refusal ----------
+
+
+def test_the_edit_is_re_aimed_rather_than_refused(root, monkeypatch, capsys):
+    """The whole point of the change. A refusal costs a failed tool call, the agent's
+    re-issue of the same arguments -- for a `Write`, the entire file content a second
+    time -- and a block message in the transcript on every one of them. `updatedInput`
+    rewrites the arguments the tool is called with, so the edit lands in the box on the
+    first attempt and the prose arrives as context rather than as an error."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    said = response(capsys)
+    assert said["hookEventName"] == "PreToolUse"
+    assert said["updatedInput"]["file_path"] == str(
+        root / ".worktrees" / "carameli--ws-s1-0806" / "a.py"
+    )
+    assert said["additionalContext"]
+
+
+def test_the_re_aim_names_no_permission_decision(root, monkeypatch, capsys):
+    """The reversion check for the one line that makes any of this work. Claude Code
+    applies `updatedInput` only when the same object sets no `permissionDecision` --
+    adding an explicit `"allow"` for symmetry, which reads as harmless, silently drops
+    the rewrite and lands the edit on the home branch."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    assert "permissionDecision" not in response(capsys)
+
+
+def test_the_re_aim_keeps_every_other_argument(root, monkeypatch, capsys):
+    """`updatedInput` replaces the arguments wholesale rather than merging into them,
+    so anything not copied across is dropped -- a `Write` would arrive with no content
+    and truncate the file it was re-aimed at."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            payload(
+                tool="Write",
+                path=str(root / "carameli" / "a.py"),
+                cwd=str(root),
+                content="print('hi')\n",
+            )
+        ),
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    assert response(capsys)["updatedInput"]["content"] == "print('hi')\n"
+
+
+def test_the_re_aim_writes_the_path_back_under_the_key_it_was_read_from(root, monkeypatch, capsys):
+    """An unrecognised key is not an error: Claude Code logs the mismatch as
+    `permission_updated_input_invalid` and calls the tool with the ORIGINAL arguments,
+    so guessing `file_path` for a `NotebookEdit` is a silent landing on the home
+    branch."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            payload(
+                tool="NotebookEdit",
+                path=str(root / "carameli" / "a.ipynb"),
+                cwd=str(root),
+                key="notebook_path",
+            )
+        ),
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    arguments = response(capsys)["updatedInput"]
+    assert "file_path" not in arguments
+    assert arguments["notebook_path"] == str(
+        root / ".worktrees" / "carameli--ws-s1-0806" / "a.ipynb"
+    )
+
+
+def test_the_re_aim_says_the_original_path_will_now_disagree(root, monkeypatch, capsys):
+    """The cost of re-aiming rather than refusing: the agent asked to edit one file and
+    a different one changed. Left unsaid, its next `Read` of the path it named returns
+    the file without the change, and the obvious reading of that is that the write
+    failed."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    said = guidance(capsys)
+    assert "Nothing was written to carameli" in said
+    assert "contradict" in said
+
+
+def test_a_tool_whose_arguments_the_guard_cannot_re_aim_is_still_refused(root, monkeypatch, capsys):
+    """`MUTATING_TOOLS` is deliberately wider than `REWRITABLE_TOOLS`: it carries
+    Codex's `apply_patch` and `create_file`, whose argument shapes this hook does not
+    model. Rewriting a shape you are guessing at is the one failure mode with no
+    symptom -- the tool is called with something it accepts and the guard reports
+    success."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(payload(tool="apply_patch", path=str(root / "carameli" / "a.py"), cwd=str(root))),
+    )
+
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
-    assert "resumed" not in capsys.readouterr().err
+    assert "not re-aimed automatically" in capsys.readouterr().err
+
+
+def test_under_a_hook_adapter_the_edit_is_refused_rather_than_re_aimed(root, monkeypatch, capsys):
+    """`updatedInput` is Claude Code's. `codex-hook-adapter.py` passes a rc-0 hook's
+    stdout through verbatim, and Codex has no such member, so the response would read
+    as a bare allow and the edit would land on the home branch -- the exact outcome
+    this hook exists to prevent, arriving silently. Fail closed to the old block."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setenv(guard.ADAPTER_ENV, "codex")
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert guard.ADAPTER_ENV in capsys.readouterr().err
+
+
+def test_the_adapter_seam_is_spelled_the_same_way_in_both_files(root):
+    """The two cannot import each other -- the adapter is vendored into every project
+    and this hook is devkit's alone -- so the constant is duplicated, and a rename on
+    either side turns the fallback above off with nothing red. This is the only tree
+    where both files exist, so it is the only place the pair can be compared."""
+    adapter = Path(guard.__file__).resolve().parent / "hooks" / "codex-hook-adapter.py"
+    assert f'ADAPTER_ENV = "{guard.ADAPTER_ENV}"' in adapter.read_text(encoding="utf-8")
+
+
+def test_an_old_string_the_box_copy_does_not_have_is_refused(root, monkeypatch, capsys):
+    """The box holds `origin/<default>`'s copy of the file; the agent read the
+    checkout's, which may be ahead of it. Re-aiming an `Edit` whose `old_string` is not
+    in the box copy turns a clear block into `String to replace not found`, reported
+    against a path the agent never named and cannot account for."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    box_copy = root / ".worktrees" / "carameli--ws-s1-0806" / "a.py"
+    box_copy.parent.mkdir(parents=True, exist_ok=True)
+    box_copy.write_text("what origin has\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            payload(
+                path=str(root / "carameli" / "a.py"),
+                cwd=str(root),
+                old_string="what the checkout has",
+                new_string="something else",
+            )
+        ),
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert "not re-aimed automatically" in capsys.readouterr().err
+
+
+def test_an_old_string_the_box_copy_does_have_is_re_aimed(root, monkeypatch, capsys):
+    """The check is narrow on purpose: it refuses only the edits that would fail, not
+    every `Edit`. A box copy that already carries the text is the ordinary case."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    box_copy = root / ".worktrees" / "carameli--ws-s1-0806" / "a.py"
+    box_copy.parent.mkdir(parents=True, exist_ok=True)
+    box_copy.write_text("what origin has\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            payload(
+                path=str(root / "carameli" / "a.py"),
+                cwd=str(root),
+                old_string="what origin has",
+                new_string="something else",
+            )
+        ),
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    assert response(capsys)["updatedInput"]["new_string"] == "something else"
+
+
+def test_a_multi_edit_is_judged_by_every_one_of_its_edits(root, monkeypatch, capsys):
+    """`MultiEdit` applies its edits in sequence and fails the whole call on the first
+    `old_string` it cannot find, so one absent string makes the re-aim unsafe however
+    many of the others are present."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    box_copy = root / ".worktrees" / "carameli--ws-s1-0806" / "a.py"
+    box_copy.parent.mkdir(parents=True, exist_ok=True)
+    box_copy.write_text("first\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            payload(
+                tool="MultiEdit",
+                path=str(root / "carameli" / "a.py"),
+                cwd=str(root),
+                edits=[
+                    {"old_string": "first", "new_string": "1"},
+                    {"old_string": "second", "new_string": "2"},
+                ],
+            )
+        ),
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert "not re-aimed automatically" in capsys.readouterr().err
+
+
+def test_a_box_copy_that_does_not_exist_yet_is_refused_rather_than_guessed_at(
+    root, monkeypatch, capsys
+):
+    """A fresh box has only tracked files, and an `Edit` naming an `old_string` for a
+    file that is not there cannot succeed. Refusing says so; re-aiming produces a file
+    -not-found against the box path instead."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            payload(
+                path=str(root / "carameli" / "a.py"),
+                cwd=str(root),
+                old_string="anything",
+                new_string="else",
+            )
+        ),
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert "not re-aimed automatically" in capsys.readouterr().err
+
+
+def test_a_refused_re_aim_still_carries_the_whole_way_out(root, monkeypatch, capsys):
+    """A fallback block is the old behaviour and has to stay as actionable as it was:
+    the box path, the provision command and the ship instructions, plus the one new
+    sentence saying why this particular call was not re-aimed."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setenv(guard.ADAPTER_ENV, "codex")
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    err = capsys.readouterr().err
+    assert str(root / ".worktrees" / "carameli--ws-s1-0806" / "a.py") in err
+    assert "provision carameli--ws-s1-0806 --yes" in err
+    assert "Do NOT reap" in err
+
+
+def test_a_refused_re_aim_is_recorded_as_a_block_and_not_as_a_route(
+    root, monkeypatch, ledger_root, capsys
+):
+    """The ledger is read by grep, so the two outcomes have to stay distinguishable:
+    a route costs the agent nothing and is background, while a block is a failed tool
+    call and is the thing worth triaging."""
+    workspace = _guarded_edit(root, monkeypatch)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setenv(guard.ADAPTER_ENV, "codex")
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    (line,) = _events(ledger_root)
+    assert "\tevent=guard-block\t" in line
+    capsys.readouterr()
 
 
 # --- the harness-events ledger ------------------------------------------------
@@ -983,7 +1316,7 @@ def _events(base: Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 
 
-def _blocked_edit(root, monkeypatch, target=None):
+def _guarded_edit(root, monkeypatch, target=None):
     monkeypatch.setattr(
         "sys.stdin",
         _stdin(payload(path=str(target or root / "carameli" / "a.py"), cwd=str(root))),
@@ -991,13 +1324,13 @@ def _blocked_edit(root, monkeypatch, target=None):
     return _workspace(root)
 
 
-def test_a_block_that_spawns_lands_on_the_ledger(root, monkeypatch, ledger_root, capsys):
-    workspace = _blocked_edit(root, monkeypatch)
+def test_a_route_that_spawns_lands_on_the_ledger(root, monkeypatch, ledger_root, capsys):
+    workspace = _guarded_edit(root, monkeypatch)
     monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
     monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
     (line,) = _events(ledger_root)
-    assert "\tevent=guard-block\t" in line
+    assert "\tevent=guard-route\t" in line
     assert "\tproject=carameli\t" in line and "\tsession=s1\t" in line
     assert "\tkind=checkout\t" in line and "\toutcome=spawned\t" in line
     assert "\tbox=carameli--ws-s1-0806\t" in line
@@ -1006,10 +1339,10 @@ def test_a_block_that_spawns_lands_on_the_ledger(root, monkeypatch, ledger_root,
 
 
 def test_a_resumed_box_is_recorded_as_a_resume(root, monkeypatch, ledger_root, capsys):
-    workspace = _blocked_edit(root, monkeypatch)
+    workspace = _guarded_edit(root, monkeypatch)
     monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _resumed_plan(root))
     monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
     (line,) = _events(ledger_root)
     assert "\toutcome=resumed\t" in line
     assert "\tbranch=agent/voicemail-0806\t" in line
@@ -1017,16 +1350,16 @@ def test_a_resumed_box_is_recorded_as_a_resume(root, monkeypatch, ledger_root, c
 
 
 def test_a_reused_box_is_recorded_as_a_reuse(root, monkeypatch, ledger_root, capsys):
-    workspace = _blocked_edit(root, monkeypatch)
+    workspace = _guarded_edit(root, monkeypatch)
     _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
     (line,) = _events(ledger_root)
-    assert "\tevent=guard-block\t" in line and "\toutcome=reused\t" in line
+    assert "\tevent=guard-route\t" in line and "\toutcome=reused\t" in line
     capsys.readouterr()
 
 
 def test_a_failed_spawn_is_recorded_with_its_detail(root, monkeypatch, ledger_root, capsys):
-    workspace = _blocked_edit(root, monkeypatch)
+    workspace = _guarded_edit(root, monkeypatch)
     monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
     monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (False, ["boom"]))
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
@@ -1037,7 +1370,7 @@ def test_a_failed_spawn_is_recorded_with_its_detail(root, monkeypatch, ledger_ro
 
 
 def test_a_spawn_that_raises_is_recorded_with_the_exception(root, monkeypatch, ledger_root, capsys):
-    workspace = _blocked_edit(root, monkeypatch)
+    workspace = _guarded_edit(root, monkeypatch)
 
     def explode(*a, **k):
         raise RuntimeError("kaput")
@@ -1050,14 +1383,14 @@ def test_a_spawn_that_raises_is_recorded_with_the_exception(root, monkeypatch, l
     capsys.readouterr()
 
 
-def test_a_foreign_box_block_is_recorded_with_its_kind(root, monkeypatch, ledger_root, capsys):
+def test_a_foreign_box_route_is_recorded_with_its_kind(root, monkeypatch, ledger_root, capsys):
     workspace = _workspace(root)
     _lease(root, "carameli--x-0806", project="carameli", session="other-session")
     monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
     monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
     target = root / ".worktrees" / "carameli--x-0806" / "app" / "main.py"
     monkeypatch.setattr("sys.stdin", _stdin(payload(path=str(target), cwd=str(root))))
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
     (line,) = _events(ledger_root)
     assert "\tkind=foreign-box\t" in line
     capsys.readouterr()
@@ -1075,12 +1408,13 @@ def test_an_allowed_edit_leaves_no_ledger_line(root, monkeypatch, ledger_root):
 
 
 def test_a_missing_ledger_module_never_changes_the_decision(root, monkeypatch, capsys):
-    """The guarded import is the guard's own safety: an unhandled exception in a
-    PreToolUse hook exits non-2, which Claude Code treats as non-blocking -- the edit
-    would PROCEED onto the home branch. Diagnostics must degrade to silence instead."""
-    workspace = _blocked_edit(root, monkeypatch)
+    """The guarded import is the guard's own safety, and the re-aim raises the stakes
+    rather than lowering them: an unhandled exception in a PreToolUse hook exits non-2
+    with nothing on stdout, so there is no `updatedInput` and the edit PROCEEDS at the
+    path it named -- onto the home branch. Diagnostics must degrade to silence."""
+    workspace = _guarded_edit(root, monkeypatch)
     monkeypatch.setattr(guard, "harness_events", None)
     monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
     monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
-    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
-    capsys.readouterr()
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    assert response(capsys)["updatedInput"]

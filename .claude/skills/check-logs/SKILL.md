@@ -45,7 +45,7 @@ If `LastRunTime` predates `LastWriteTime`, **the result describes a command that
 longer exists**. Say so and stop; there is no failure to fix. Confirm what changed with
 `git log` on the installer -- `scripts/install-docker-prune.py`,
 `scripts/install-reconcile-task.py`, `scripts/install-upgrade-schedule.py`,
-`scripts/install-vanillaland-merge.py`.
+`scripts/install-release-schedule.py`, `scripts/install-vanillaland-merge.py`.
 
 ## 3. Read the registered command against its installer
 
@@ -120,8 +120,12 @@ checkouts synced. Two readings that are easy to get backwards:
 
 `logs/harness-events.log` in the devkit checkout is the reap ledger's pattern applied
 to the rest of the harness: one line per event, ISO stamp then tab-separated
-`key=value`, append-only. Every guard block names the box and branch it routed to
-(`guard-block`), every capped-Bash and lint-fix block records the command or finding
+`key=value`, append-only. Every guard decision names the box and branch it routed to,
+under one of two event names that are worth keeping apart: `guard-route` is the ordinary
+case, where the edit was re-aimed at the box and the agent paid nothing, while
+`guard-block` is a call the guard could not re-aim and refused instead -- a failed tool
+call, and the one of the pair worth looking at. Every capped-Bash and lint-fix block
+records the command or finding
 (`capped-bash-block`, `lint-fix-block`, written by the *vendored* copies through
 `$DEVKIT_DIR`, so consumer sessions land here too), and two event names mean someone
 should look rather than "the harness worked":
