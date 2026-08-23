@@ -896,6 +896,37 @@ def workspace_drift(live: dict, canonical: dict) -> list[str]:
     )
 
 
+RENDER_PUBLISHED = "published"
+RENDER_CURRENT = "current"
+RENDER_REFUSED = "refused"
+
+
+def publish_workspace(live: Path, *, force: bool = False) -> tuple[str, list[str]]:
+    """Render the canonical copy over `live`, unless that would discard someone's edit.
+
+    Extracted from `main()` so the session-start hook can publish on the same terms the
+    CLI does. That is the whole point of the extraction: a second implementation of
+    "is it safe to overwrite the file every window on the machine reads" is the last
+    thing this should grow.
+
+    Returns `(outcome, differences)`. `RENDER_CURRENT` stamps and writes nothing --
+    an unstamped-but-identical live file is the normal state right after an adopt, and
+    leaving it unstamped would make the NEXT render refuse for a hand edit that never
+    happened. `RENDER_REFUSED` writes nothing at all.
+    """
+    text = live.read_text(encoding="utf-8")
+    canonical = canonical_text()
+    problems = workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical))
+    if not problems:
+        write_stamp(live, semantic_digest(text))
+        return RENDER_CURRENT, []
+    if not force and semantic_digest(text) != read_stamp(live):
+        return RENDER_REFUSED, problems
+    live.write_text(canonical, encoding="utf-8", newline="\n")
+    write_stamp(live, semantic_digest(canonical))
+    return RENDER_PUBLISHED, problems
+
+
 def expected_actions(project: str) -> set[str]:
     """The PROJECT-owned actions `project` is on the hook for.
 
@@ -1030,8 +1061,7 @@ def main(argv: list[str] | None = None) -> int:
         if not CANONICAL_WORKSPACE.is_file():
             print(f"devkit_project: no canonical copy at {CANONICAL_WORKSPACE}", file=sys.stderr)
             return 2
-        canonical_text = CANONICAL_WORKSPACE.read_text(encoding="utf-8")
-        problems = workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical_text))
+        problems = workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical_text()))
 
         if args.check_workspace:
             if not problems:
@@ -1044,16 +1074,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  -> publish the canonical: {RENDER_HINT} --render-workspace")
             return 1
 
-        if not problems:
-            # Already current. Stamp anyway: an unstamped-but-identical live file is
-            # the normal state right after adoption, and leaving it unstamped would
-            # make the NEXT render refuse for a hand edit that never happened.
-            write_stamp(args.workspace, semantic_digest(text))
+        rendered, problems = publish_workspace(args.workspace, force=args.force)
+        if rendered == RENDER_CURRENT:
             print(f"{args.workspace.name}: already current")
             return 0
 
-        live_digest = semantic_digest(text)
-        if not args.force and live_digest != read_stamp(args.workspace):
+        if rendered == RENDER_REFUSED:
             print(
                 f"devkit_project: {args.workspace.name} carries edits devkit did not"
                 " write -- refusing to overwrite them:",
@@ -1068,8 +1094,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
-        args.workspace.write_text(canonical_text, encoding="utf-8", newline="\n")
-        write_stamp(args.workspace, semantic_digest(canonical_text))
         print(f"rendered {CANONICAL_WORKSPACE.name} -> {args.workspace.name}")
         for problem in problems:
             print(f"  {problem}")

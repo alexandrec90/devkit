@@ -81,6 +81,21 @@ python scripts/devkit_project.py --check-workspace    # do they agree?
 python scripts/devkit_project.py --render-workspace   # workspace.jsonc -> the live file
 ```
 
+**The last step runs itself.** `workspace_sync_line` in `scripts/workspace-status.py`
+publishes at session start, on exactly the terms `--render-workspace` does — it calls
+`publish_workspace`, the same function the CLI does, so there is one answer to "is it
+safe to overwrite the file every window on this machine reads" rather than two. It adds
+two conditions of its own, in `publish_verdict`: devkit's checkout is on its default
+branch and its `workspace.jsonc` is committed. A task branch's copy is a proposal and an
+uncommitted one is not even that, so from a box, or mid-edit, the line reports the drift
+and publishes nothing. When it does publish it says so and asks for a window reload —
+VS Code reads the file once, at open.
+
+That is a wire-up rather than a convenience. The step it removes had already failed the
+way a remembered step does: three tasks merged, the checkout was synced, and the tasks
+were still not in anyone's window, because nothing on the machine was going to render
+them until someone typed the command.
+
 All three are one click as well — the *Workspace:* tasks, which are deliberately not
 dispatches: there is one workspace file, so there is no checkout to pick, and they carry
 their own `notify-wrap`/`log-wrap` because `plan_command` never sees them.
@@ -103,7 +118,9 @@ beside it. `--force` overrides that, and it discards.
 
 The pairing is held by `test_the_live_workspace_matches_the_canonical_copy`, which is
 `@needs_live_workspace`: skipped in CI, so drift is caught locally or not at all. That
-is what the session-start line in `scripts/workspace-status.py` exists to backstop.
+is what the session-start publish exists to backstop — and why it reports rather than
+publishes whenever it is not certain, since the only alternative to a session start
+noticing is nothing noticing.
 
 **Red there is not evidence of drift.** The live file is a single file shared by every
 concurrent session, and the order above has each one editing it *before* the PR that
