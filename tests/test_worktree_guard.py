@@ -1511,6 +1511,23 @@ def test_spawn_and_route_blocks_on_its_own_when_no_box_can_be_cut(root, monkeypa
     assert "boom" in guidance(capsys)
 
 
+def test_after_failed_spawn_routes_into_whatever_box_now_exists(root, capsys):
+    """The recovery reads as a decision of its own, so it is driven as one: given a
+    failure and a box for this session, it aims the edit there rather than at the
+    checkout. The block half is `..._with_no_box_anywhere_still_blocks` above."""
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    call = json.loads(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    code = guard.after_failed_spawn(
+        call, "carameli", "a.py", root, "s1", "fatal: a branch named 'x' already exists"
+    )
+    assert code == guard.EXIT_ALLOW
+    answer = response(capsys)
+    assert answer["updatedInput"]["file_path"] == str(
+        root / ".worktrees" / "carameli--ws-s1-0806" / "a.py"
+    )
+    assert "already exists" in answer["additionalContext"]
+
+
 def test_current_boxes_falls_back_to_the_snapshot_it_was_given(root, monkeypatch):
     """An unreadable lease file must not turn a re-read into a second box: the caller's
     snapshot is stale at worst, while `{}` would spawn one this session already has."""
