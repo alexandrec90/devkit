@@ -85,9 +85,10 @@ Two halves, and both are needed:
   the fate of the attempt it retries. Putting the logic in a stdlib script also makes the
   guards unit-testable, which inline `bash` in a workflow never was.
 - **A `schedule:` sweep re-derives every guard and merges whatever was dropped.** It is
-  strictly narrower than the event path, not wider: Dependabot as author, the classifier's
-  `automerge` label, a successful `PR Gate` on the *current* head SHA, and every other
-  check green as well.
+  stricter than the event path: the `automerge` label applied by Dependabot classification
+  or another trusted producer, a successful `PR Gate` on the *current* head SHA, and every
+  other check green as well. The label is the authorization; author is deliberately not a
+  second policy, so labelled devkit upgrades and mechanical autofixes use the same path.
 
 That last asymmetry is deliberate. The event job merges on the gate alone because the gate
 completing is why it woke; a scheduled pass has no such excuse and looks at everything.
