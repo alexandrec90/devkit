@@ -1127,7 +1127,7 @@
 			},
 			{
 				"label": "Devkit: Upgrade Projects",
-				"detail": "DRY RUN by default. Adopt the current devkit release in each selected consumer, one PR per repo. Skips duplicate worktree siblings and refuses dirty or unvendored explicit targets; one refusal does not stop the rest.",
+				"detail": "DRY RUN by default. Adopt the current devkit release in every consumer that is behind, one PR per repo — the catch-up click for a night the 03:00 pass did not run. A consumer already current costs a fetch; one whose adoption PR is already open is left alone.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -1140,7 +1140,7 @@
 					"--",
 					"python",
 					"scripts/upgrade-project.py",
-					"${input:upgradeScope}",
+					"--all",
 					"${input:sweepApply}"
 				],
 				"options": {
@@ -1920,37 +1920,6 @@
 					}
 				],
 				"default": "--fetch"
-			},
-			{
-				// Separate from `project` because devkit is absent on purpose: it is the
-				// source the release is pulled *from*, and naming it is rejected — that
-				// exclusion is written down in `SCOPE_PICKERS` in tests/test_devkit_project.py,
-				// which otherwise requires this list to cover every checkout. Being listed
-				// here is not a claim that a project has vendored devkit; an explicitly
-				// selected checkout that has not is refused by name.
-				"id": "upgradeScope",
-				"type": "command",
-				"command": "extension.commandvariable.pickStringRemember",
-				"args": {
-					"description": "Which checkouts should adopt the devkit release?",
-					"key": "upgradeScope",
-					"multiPick": true,
-					"multiPickStorage": "workspace",
-					"separator": ",",
-					"optionGroups": [
-						{
-							"label": "Select one or more consumers (devkit is the source)",
-							"minCount": 1,
-							"options": [
-								"carameli",
-								"ibkr_trader",
-								"data-lake",
-								"apt-finder",
-								"sports_betting"
-							]
-						}
-					]
-				}
 			},
 			{
 				"id": "reconcileMerge",
