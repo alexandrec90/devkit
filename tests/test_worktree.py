@@ -3588,6 +3588,37 @@ def test_build_env_inherits_the_environment_rather_than_replacing_it(monkeypatch
     assert env["CARRIED_THROUGH"] == "yes"
 
 
+def test_compose_up_names_a_dead_engine_instead_of_blaming_the_stack(monkeypatch):
+    """The real message from 2026-08-24, when the engine had died behind a Docker Desktop
+    window that still looked healthy. `the stack did not come up` is true of a build
+    error, a port collision and a dead daemon alike, and only one of the three is fixed
+    by starting Docker -- so the reader went to the branch, the compose file and the port
+    registry first."""
+    stderr = (
+        'error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine'
+        '/v1.51/images/json": open //./pipe/dockerDesktopLinuxEngine: The system cannot '
+        "find the file specified."
+    )
+    monkeypatch.setattr(
+        worktree.subprocess, "run", lambda argv, **k: _completed(returncode=1, stderr=stderr)
+    )
+    ok, message = worktree.compose_up(Path("x"), "c--y")
+    assert not ok
+    assert "Docker's engine is not running" in message
+    # The original text survives: it is what distinguishes one dead-engine cause from
+    # another, and dropping it would trade one unactionable message for a tidier one.
+    assert "dockerDesktopLinuxEngine" in message
+
+
+def test_daemon_down_note_stays_silent_on_an_ordinary_build_failure():
+    """A note that fires on its own uncertainty is one people learn to scroll past --
+    and telling someone to start Docker when Docker is up costs them the real error."""
+    assert worktree.daemon_down_note("") == ""
+    assert worktree.daemon_down_note("target app: failed to solve: image …: already exists") == ""
+    assert worktree.daemon_down_note("Error response from daemon: port is already allocated") == ""
+    assert worktree.daemon_down_note("Cannot connect to the Docker daemon at unix:///var/run")
+
+
 def test_build_env_wins_over_an_inherited_bake_setting(monkeypatch):
     """A machine that exports `COMPOSE_BAKE=1` -- Docker Desktop suggests it, and it is
     sticky in a shell profile -- must not re-enable the path this exists to avoid."""

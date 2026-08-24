@@ -2563,6 +2563,44 @@ def is_tracked(repo: Path, relative: str) -> bool:
     return completed.returncode == 0
 
 
+# What a Docker CLI says when the engine is not there to talk to. Windows names the
+# missing named pipe, Linux and macOS the missing socket; both spellings appear as the
+# tail of a much longer connect error, so this is a substring test rather than a match.
+DAEMON_DOWN_SIGNS = (
+    "cannot connect to the docker daemon",
+    "error during connect",
+    "the docker daemon is not running",
+    "open //./pipe/",
+)
+
+DAEMON_DOWN_NOTE = (
+    "Docker's engine is not running, so nothing could be built or started. "
+    "Start Docker Desktop and wait for it to say `Engine running`, then run this again. "
+    "If Docker Desktop is already open, its engine has died behind the UI and only a "
+    "full restart of it brings the engine back — the window looking healthy is not "
+    "evidence that it is."
+)
+
+
+def daemon_down_note(text: str) -> str:
+    """`DAEMON_DOWN_NOTE` when `text` is a Docker CLI failing to reach the engine, else "".
+
+    The distinction is worth a function because the two failures are indistinguishable
+    to the reviewer and their remedies share nothing. Every compose call in this file
+    reports a non-zero exit as "the stack did not come up", which is true of a build
+    error, a port collision *and* an engine that is not running — and on 2026-08-24 the
+    engine had died behind a Docker Desktop window that still looked healthy, so the
+    task's report sent the reader to the branch, the compose file and the port registry
+    before anyone thought to ask whether Docker was up at all.
+
+    Substring rather than exact, and lower-cased, because the sign is the tail of a
+    connect error whose leading half carries an API version and a URL-encoded path that
+    change between releases.
+    """
+    haystack = (text or "").lower()
+    return DAEMON_DOWN_NOTE if any(sign in haystack for sign in DAEMON_DOWN_SIGNS) else ""
+
+
 def build_env() -> dict[str, str]:
     """The environment a box's `compose up --build` runs in: this one, plus bake off.
 
@@ -2635,7 +2673,9 @@ def compose_up(
             f"`docker compose -p {project_name} ps` says where it got to"
         )
     if completed.returncode != 0:
-        return False, (completed.stderr or completed.stdout or "").strip()
+        detail = (completed.stderr or completed.stdout or "").strip()
+        note = daemon_down_note(detail)
+        return False, (f"{note}\n  ({detail})" if note else detail)
     return True, f"stack {project_name} is up"
 
 
