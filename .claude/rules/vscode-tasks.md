@@ -174,6 +174,16 @@ after the PR merges; a box never renders.
 - Label convention: `"Domain: Title Case Action"`, and **every task carries a `detail`**
   — that is the second line in the quick-pick, and the only place a one-click action can
   state its cost or blast radius.
+- **No label, detail or option states a version.** Nothing renders this file from the
+  tag list, so a number written into a quick-pick is a claim with no owner and no bump
+  will ever move it. `releaseLevel` carried a worked example per option — the newest tag
+  the day they were written, and what each level would make of it — which is the most
+  useful thing that dropdown could say and was wrong from the very next release, offering
+  "the usual" patch as a tag that had already shipped. Let the run say it instead: *Devkit:
+  Cut Release* is a dry run by default and `release-pipeline.py` resolves the version from
+  `git tag` and prints it first. `test_no_task_or_picker_states_a_release_version` is the
+  ratchet, and it reads the parsed block — a version in a **comment** is reasoning, not a
+  claim, and stays allowed.
 - **Every task carries an `icon`, and no two share the same id+colour pair.** With one
   consolidated list, colour is what makes it scannable; the `terminal.ansiBright*`
   variants mark the project-scoped tasks, so you can see before clicking that a task

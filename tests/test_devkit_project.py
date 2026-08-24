@@ -1296,6 +1296,55 @@ def test_every_input_referenced_is_defined(canonical):
     assert defined <= referenced, f"unused inputs: {defined - referenced}"
 
 
+# A release tag as this file could come to carry one: `v1.2.3` in a label, a detail or a
+# task argument. Comments are already gone by the time `canonical` is parsed, so a
+# version written as *reasoning* is out of scope and stays allowed -- what this catches
+# is a version presented to whoever is deciding, or handed to a script.
+_RELEASE_TAG = re.compile(r"\bv\d+\.\d+\.\d+\b")
+
+
+def _strings(node, path: str = "") -> list[tuple[str, str]]:
+    """Every string in the task block, paired with where it sits."""
+    if isinstance(node, dict):
+        return [
+            pair
+            for key, value in node.items()
+            for pair in _strings(value, f"{path}.{key}" if path else str(key))
+        ]
+    if isinstance(node, list):
+        return [
+            pair for index, item in enumerate(node) for pair in _strings(item, f"{path}[{index}]")
+        ]
+    return [(path, node)] if isinstance(node, str) else []
+
+
+def test_no_task_or_picker_states_a_release_version(canonical):
+    """Nothing renders this file from the tag list, so a version written here cannot move.
+
+    `releaseLevel` carried a worked example per option -- the newest tag on the day they
+    were written, and what each bump would make of it -- which is genuinely the most
+    useful thing a three-option dropdown could say and was wrong from the next release
+    onwards, offering "the usual" patch as a version that had already shipped. A stale
+    number in a quick-pick is worse than no number: it is read as the answer, by someone
+    who clicked the task precisely because they did not want to work the version out.
+
+    The remedy is not a fresher literal, which is the same defect with a later date on
+    it. It is that the run says it -- `release-pipeline.py` resolves the version from
+    `git tag` and prints it as its first line, and the task is a dry run by default, so
+    the concrete number is one click away and cannot be stale. Anything else here that
+    needs a version has the same option: read it, do not write it down.
+    """
+    pinned = [
+        f"{where} = {text!r}" for where, text in _strings(canonical) if _RELEASE_TAG.search(text)
+    ]
+    assert not pinned, (
+        "the workspace task block states a release version:\n  "
+        + "\n  ".join(sorted(pinned))
+        + "\nNothing bumps it when a release is cut. Let the script that reads `git tag` "
+        "print it instead, or describe the move without the number."
+    )
+
+
 def test_the_sweep_has_no_workspace_task(canonical):
     """`sweep.py` is a CLI and an import, and nothing in the quick-pick calls it.
 
