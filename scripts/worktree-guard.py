@@ -46,6 +46,14 @@ their operator's, to prefer `sed`/heredocs over Edit and Write; that made the bl
 a route. A shell command is never re-aimed, because the rewrite replaces a path argument
 and a command line has none, so this tier always blocks toward the box.
 
+**A `git checkout`/`git switch` onto a task branch is blocked outright** — see the branch
+tier below the shell one. It is the only judgement here that ends in neither a rewrite nor
+a box, because the call was never going to write anything: parking a static checkout on
+somebody else's `agent/...` branch freezes its home branch *and* turns this hook off for
+that checkout, since an edit onto a task branch carrying commits is the one case
+`needs_box` declines. That is how carameli spent two days on another session's branch with
+every tier here working exactly as designed.
+
 **Silent on everything else**, which is most calls:
 
   - an edit inside a checkout on a managed task branch **that carries commits of its
@@ -410,6 +418,206 @@ def shell_note(target: str) -> str:
         f"`{target}`; re-issue it with that word replaced by the path above. A shell "
         f"write is not re-aimed automatically because the guard rewrites path arguments, "
         f"and a command line has none."
+    )
+
+
+# --- The branch tier -------------------------------------------------------------------
+#
+# `git checkout` writes no file, so neither tier above can see it -- and it is exactly the
+# act that parked carameli's static checkout on another session's `agent/...` branch for
+# two days in August 2026. Nothing had edited that checkout. The boxing tier had done its
+# job: that session's edits went to a box, and their PR was open. Something simply ran
+# `git checkout agent/seems-only-1-preview-time-0821` in the static copy, and it stayed
+# there, because a clean fully-pushed task branch is a state `sweep.py` *reports* and
+# could not clear (`sweep.PARKED`, added in the same change, is that half).
+#
+# A parked checkout is worse than untidy, and the second-order effect is the one worth
+# writing down: the boxing tier goes **quiet** there. An edit onto a task branch that
+# carries commits of its own is the "fix PR #42" case `needs_box` deliberately declines,
+# so the moment a checkout is parked on somebody else's live branch it becomes unguarded
+# space, and every later edit lands on that branch with no block and no box. Meanwhile its
+# home branch stops advancing and every session start reports stranded work.
+#
+# So this tier judges the move rather than the write, and it is the one tier that neither
+# re-aims nor spawns: nothing was going to be written, and the answer to "I want to be on
+# that branch" is one of `worktree.py`'s verbs, not a worktree cut behind the agent's back.
+#
+# Scoped to task branches, both ways round. Moving a checkout *home* is the repair, never
+# the problem, so it is allowed; and a box moved onto a branch its lease does not name is
+# blocked too, because `reconcile` looks a box's PR up by the branch the registry records
+# and a box that has wandered off it can be reaped as never-used with the work still in it.
+
+# Git's own options, before the subcommand. Only `-C` changes which checkout the command
+# lands in; the rest are here because they consume the token after them and would
+# otherwise be misread as the subcommand.
+GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+
+# The two subcommands that move HEAD onto another ref.
+SWITCH_VERBS = frozenset({"checkout", "switch"})
+
+# Flags that name a branch being *created*, so the ref is the token after them rather than
+# the first bare operand: `-b`/`-B` for checkout, `-c`/`-C` for switch. Creating a task
+# branch in a static checkout is the same park as moving onto one -- it is what
+# `branch-on-write.py` used to do, and retiring that hook is what the box tier replaced.
+SWITCH_CREATE_FLAGS = frozenset({"-b", "-B", "-c", "-C", "--orphan"})
+
+# `git checkout -- file`, `git checkout -p`: these restore file content and leave HEAD
+# exactly where it was. Ordinary, frequent, and not a park -- so their presence anywhere in
+# the operands abandons the statement rather than trying to tell the two shapes apart.
+SWITCH_RESTORES = frozenset({"--", "-p", "--patch", "--pathspec-from-file"})
+
+
+def _switch_ref(operands: list[str]) -> str:
+    """The ref a `checkout`/`switch` moves onto: a created name, else the first operand."""
+    for index, token in enumerate(operands):
+        if token in SWITCH_CREATE_FLAGS:
+            return operands[index + 1] if index + 1 < len(operands) else ""
+        if not token.startswith("-"):
+            return token
+    return ""
+
+
+def switch_targets(command: str) -> list[tuple[str, str]]:
+    """`(directory, ref)` for every `git checkout`/`git switch` on this command line.
+
+    `directory` is git's `-C` when the call gave one and `""` otherwise, meaning the tool
+    call's own cwd. Same crude statement splitter and the same closed-list discipline as
+    the shell tier above: a spelling this does not recognise yields nothing and is
+    allowed, because the cost of the two mistakes is not symmetric here either.
+    """
+    found: list[tuple[str, str]] = []
+    for statement in STATEMENTS.split(command or ""):
+        tokens = shell_tokens(statement)
+        while tokens and (_verb(tokens[0]) in SHELL_PREFIXES or ENV_ASSIGN.match(tokens[0])):
+            tokens = tokens[1:]
+        if not tokens or _verb(tokens[0]) != "git":
+            continue
+        rest = tokens[1:]
+        directory = ""
+        while rest and rest[0].startswith("-"):
+            if rest[0] in GIT_VALUE_OPTIONS and len(rest) > 1:
+                if rest[0] == "-C":
+                    directory = rest[1]
+                rest = rest[2:]
+            else:
+                rest = rest[1:]
+        if not rest or rest[0].lower() not in SWITCH_VERBS:
+            continue
+        operands = rest[1:]
+        if any(token in SWITCH_RESTORES for token in operands):
+            continue
+        ref = _switch_ref(operands)
+        if ref:
+            found.append((directory, ref))
+    return found
+
+
+def switch_branch(ref: str) -> str:
+    """The task branch `ref` names, or "" when it names anything else.
+
+    `refs/heads/agent/x` and `origin/agent/x` are the same park as `agent/x`. The second
+    detaches HEAD rather than moving onto the branch, which is if anything worse: a
+    detached checkout is a state `sweep.py` can only report, and `needs_box` declines a
+    branch git will not name, so the box tier is quiet there too.
+
+    Exactly one remote segment is stripped, and only when what remains is a managed
+    prefix, so no home branch can become a task branch by being spelled with a slash.
+    """
+    for prefix in ("refs/heads/", "refs/remotes/"):
+        if ref.startswith(prefix):
+            ref = ref[len(prefix) :]
+    if worktree.sweep.is_task_branch(ref):
+        return ref
+    head, _, tail = ref.partition("/")
+    if head and tail and worktree.sweep.is_task_branch(tail):
+        return tail
+    return ""
+
+
+def switch_decision(
+    directory: str,
+    branch: str,
+    cwd: str,
+    root: Path,
+    projects: list[str],
+    boxes: Mapping[str, Box],
+) -> tuple[str, str, str] | None:
+    """`(kind, name, registered)` when this move is a park; None when it is ordinary.
+
+    `kind` is `"checkout"` for a registered static checkout and `"box"` for an ephemeral
+    one whose lease records a different branch; `registered` carries that lease's branch
+    and is `""` for a checkout, which has none to compare against.
+
+    Three cases allow, and each is somebody else's decision already made:
+
+    - a directory under no registered checkout at all -- a scratch clone, `VanillaLand`,
+      anything outside the workspace. Same silence every other tier keeps there;
+    - a box already standing on this branch, which is what `worktree.py resume` leaves
+      behind and what re-attaching after a detached HEAD does;
+    - a path under `.worktrees/` that is in no live box -- a husk, a stray directory.
+      There is no lease to desync, so there is nothing to protect.
+    """
+    here = resolve_target(directory or ".", cwd)
+    if here is None:
+        return None
+    try:
+        root = root.resolve()
+        boxes_root = worktree.boxes_root(root).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if _within(here, boxes_root):
+        for box in boxes.values():
+            if not _within(here, worktree.box_path(root, box.name).resolve()):
+                continue
+            return None if box.branch == branch else ("box", box.name, box.branch)
+        return None
+    project = owning_project(here, root, projects)
+    return ("checkout", project, "") if project else None
+
+
+def switch_message(kind: str, name: str, branch: str, registered: str = "") -> str:
+    """What the agent reads when a branch move is refused. No box, and nothing to re-issue.
+
+    Every other block in this file ends with a path to write to instead. This one cannot:
+    the call was not going to write anything, so the useful content is the three things
+    the move is usually a proxy for, each spelled as the command that does it properly.
+    """
+    worktree_py = Path(__file__).parent / "worktree.py"
+    if kind == "box":
+        return "\n".join(
+            [
+                f"Blocked: the box {name} is registered on '{registered}', and this would "
+                f"move it onto '{branch}'.",
+                "",
+                "worktree.py records a box's branch in its lease registry, and `reconcile` "
+                "looks that box's PR up by that name. A box standing on a branch its lease "
+                "does not name is invisible to the reaper as shipped work and reapable as "
+                "work that never happened - which destroys the worktree with the commits "
+                "still in it.",
+                "",
+                "To continue that branch's work, resume its own box instead:",
+                f"    python {worktree_py} resume <box> --yes",
+            ]
+        )
+    return "\n".join(
+        [
+            f"Blocked: this would park the static checkout {name} on '{branch}', a task branch.",
+            "",
+            "A parked checkout is not merely untidy. Its home branch stops advancing, every "
+            "session start reports it as stranded work, and - the part that is easy to miss "
+            "- this hook goes QUIET there: an edit onto a task branch carrying commits is "
+            "deliberately left alone, so the checkout becomes unguarded space and every "
+            "later edit lands on that branch with no box and no block.",
+            "",
+            "One of these is almost certainly what was wanted:",
+            "",
+            "  - to EDIT that work: just edit it. This hook cuts a box on its own branch, "
+            "or resumes the one this session already had:",
+            f"        python {worktree_py} resume <box> --yes",
+            "  - to RUN it in a browser: a preview is a copy, and never moves the checkout:",
+            f"        python {worktree_py} preview {name} --branch {branch} --yes",
+            f"  - to READ it: `git -C {name} log/show/diff {branch}` needs no checkout.",
+        ]
     )
 
 
@@ -1264,11 +1472,15 @@ def main(argv: list[str] | None = None) -> int:
     if payload is None or _tool_name(payload) not in MUTATING_TOOLS:
         return EXIT_ALLOW
 
+    shell = _tool_name(payload) in SHELL_TOOLS
+
     # Before the registry read, because widening the matcher to the shell tools put this
     # hook on *every* Bash call rather than on the handful that edit files. A command that
-    # writes nothing has to cost a payload parse and nothing else.
+    # writes nothing and moves no branch has to cost a payload parse and nothing else --
+    # both of these are string work over the argv, with no subprocess and no file read.
     targets = guarded_targets(payload)
-    if not targets:
+    switches = switch_targets(str(tool_input(payload).get("command") or "")) if shell else []
+    if not targets and not switches:
         return EXIT_ALLOW
 
     try:
@@ -1279,7 +1491,33 @@ def main(argv: list[str] | None = None) -> int:
     cwd = str(payload.get("cwd") or "")
     root = workspace.parent
     session = str(payload.get("session_id") or payload.get("sessionId") or "")
-    shell = _tool_name(payload) in SHELL_TOOLS
+
+    # The branch tier, ahead of the write tiers: a command doing both is pathological, and
+    # of the two outcomes the park is the one that would silence the write tier afterwards.
+    # `switch_branch` is checked first so the lease registry is read only for a git call
+    # that actually names a task branch -- which is the case being blocked anyway.
+    for directory, ref in switches:
+        moving_to = switch_branch(ref)
+        if not moving_to:
+            continue
+        parked = switch_decision(
+            directory, moving_to, cwd, root, projects, worktree.live_boxes(root)
+        )
+        if parked is None:
+            continue
+        kind, name, registered = parked
+        _record_event(
+            "guard-branch-block",
+            (
+                ("project", name),
+                ("session", session),
+                ("kind", kind),
+                ("branch", moving_to),
+                ("registered", registered),
+            ),
+        )
+        print(switch_message(kind, name, moving_to, registered), file=sys.stderr)
+        return EXIT_BLOCK
 
     # The branch is what the decision turns on, so it is also what the block message has
     # to name -- and reading it a second time would be a second subprocess per blocked

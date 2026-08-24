@@ -180,12 +180,35 @@ def _claude_md_files() -> list:
     )
 
 
+def _sibling_references() -> list:
+    """Reference material a `CLAUDE.md` extracts to a file beside it.
+
+    The 500-line cap makes this the sanctioned way to shed depth — `authoring.md`
+    prescribes it — so the overflow has to stay as gated as the file it left. It was
+    not: `.claude/skills/*/*.md` already swept a skill's siblings in, and nothing swept
+    a `CLAUDE.md`'s, so `scripts/windowless-jobs.md` was the first 105 lines in this
+    repo that no doc gate read. Splitting a file is exactly when its paths are most
+    likely to go stale, which makes the un-gated moment the wrong one.
+    """
+    return sorted(
+        sibling
+        for parent in {path.parent for path in _claude_md_files()}
+        for sibling in parent.glob("*.md")
+        if sibling.name != "CLAUDE.md"
+    )
+
+
 def _documented_files() -> list:
     roots = [REPO_ROOT / "README.md", REPO_ROOT / "RELEASING.md"]
     roots += _claude_md_files()
+    roots += _sibling_references()
     roots += sorted((REPO_ROOT / ".claude" / "rules").glob("*.md"))
     roots += sorted((REPO_ROOT / ".claude" / "skills").glob("*/*.md"))
-    return [path for path in roots if path.is_file()]
+    seen: dict = {}
+    for path in roots:
+        if path.is_file():
+            seen.setdefault(path.resolve(), path)
+    return list(seen.values())
 
 
 def _instruction_files() -> list:
@@ -340,6 +363,28 @@ def test_every_claude_md_is_checked_not_only_the_root_one():
     assert "CLAUDE.md" in covered
     assert nested, "no nested CLAUDE.md is being checked; did the tier collapse back?"
     assert not any(name.startswith("templates/") for name in covered)
+
+
+def test_material_extracted_beside_a_claude_md_is_checked_too():
+    """The overflow from a 500-line split stays as gated as the file it left.
+
+    `test_every_claude_md_is_checked_not_only_the_root_one` closes the same hole one
+    axis over — moving a paragraph *down* the tier — and this closes moving it
+    *sideways*, into a sibling that is not named `CLAUDE.md`. Both are the sanctioned
+    remedy for an oversized instruction file, so neither can be the way a claim stops
+    being checked. A skill's siblings were already swept in by the `*/*.md` glob; a
+    `CLAUDE.md`'s were not, and the first extraction to exercise that was 105 lines no
+    gate read.
+    """
+    covered = {path.relative_to(REPO_ROOT).as_posix() for path in _documented_files()}
+    siblings = {path.relative_to(REPO_ROOT).as_posix() for path in _sibling_references()}
+    assert siblings <= covered
+    assert siblings <= {path.relative_to(REPO_ROOT).as_posix() for path in _instruction_files()} | {
+        "README.md",
+        "RELEASING.md",
+    }, "a sibling reference must be read as instruction"
+    assert len(covered) == len(_documented_files()), "a file is listed twice"
+    assert not any(name.startswith(".pytest_cache/") for name in covered)
 
 
 def test_the_root_file_names_every_other_instruction_file():

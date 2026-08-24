@@ -191,6 +191,7 @@ NEEDS_BRANCH = "needs-branch"  # work sitting on a branch it cannot be shipped f
 NEEDS_REBRANCH = "needs-rebranch"  # work on a task branch the policy has retired
 READY = "ready"  # task branch with content -- /ship it
 NEEDS_PR = "needs-pr"  # task branch pushed, PR may not exist
+PARKED = "parked-branch"  # task branch pushed and its PR is open -- sync it home
 NEEDS_PULL = "needs-pull"  # clean on its home branch, just behind
 SPENT = "spent-branch"  # parked on a task branch with nothing on it -- sync it home
 CLEAN = "clean"  # nothing to do
@@ -198,7 +199,7 @@ SKIPPED = "skipped"  # not a git checkout
 
 # Verdicts that mean "there is work here". `--check` exits non-zero on these.
 ACTIONABLE: frozenset[str] = frozenset({
-    BLOCKED, NEEDS_BRANCH, NEEDS_REBRANCH, READY, NEEDS_PR, NEEDS_PULL, SPENT
+    BLOCKED, NEEDS_BRANCH, NEEDS_REBRANCH, READY, NEEDS_PR, PARKED, NEEDS_PULL, SPENT
 })  # fmt: skip
 # Verdicts with no next action. Every *other* verdict must yield a plan.
 TERMINAL: frozenset[str] = frozenset({CLEAN, SKIPPED})
@@ -209,7 +210,7 @@ TERMINAL: frozenset[str] = frozenset({CLEAN, SKIPPED})
 # another one owns.
 BRANCHABLE: frozenset[str] = frozenset({NEEDS_BRANCH, NEEDS_REBRANCH})
 SHIPPABLE: frozenset[str] = frozenset({READY, NEEDS_PR})
-SYNCABLE: frozenset[str] = frozenset({SPENT, NEEDS_PULL, CLEAN})
+SYNCABLE: frozenset[str] = frozenset({SPENT, PARKED, NEEDS_PULL, CLEAN})
 
 # How many changed paths the generated PR body lists before it summarises the
 # rest. A sweep that parks a long-neglected tree can carry hundreds; the point of
@@ -263,6 +264,9 @@ class State:
     # True when GitHub has a *merged* PR for this branch name. The second, authoritative
     # answer to the same question `upstream_gone` asks cheaply -- see `is_retired`.
     pr_merged: bool = False
+    # True when GitHub has an *open* PR for this branch name. Only ever read for a
+    # checkout that is otherwise `needs-pr` -- see `has_open_pr` and `classify`.
+    pr_open: bool = False
     remote_url: str = ""
     # True for a linked worktree (`.git` is a file, not a directory).
     linked: bool = False
@@ -621,6 +625,16 @@ def classify(state: State) -> tuple[str, str]:
         return READY, f"{state.ahead} commit(s), never pushed"
     if state.unpushed > 0:
         return READY, f"{state.unpushed} commit(s) not yet pushed to {state.upstream}"
+    if state.pr_open:
+        # Everything is on the remote and a PR is open for it, so the checkout is not
+        # holding the work -- it is merely standing on the branch. That is a *sync*, not
+        # a ship, and saying so is the whole point of this verdict: `needs-pr` is not in
+        # SYNCABLE and nothing in the sweep ever confirms the PR, so a checkout left here
+        # reported "confirm a PR is open" forever while its home branch stopped advancing.
+        return (
+            PARKED,
+            f"{state.ahead} commit(s) pushed to {state.upstream}, PR open -- sync it home",
+        )
     return NEEDS_PR, f"{state.ahead} commit(s) pushed to {state.upstream} -- confirm a PR is open"
 
 
@@ -652,19 +666,26 @@ def plan_for(state: State, verdict: str) -> list[str]:
             f"-- sweep.py --branch --yes",
             "then: /ship -- or sweep.py --ship --yes",
         ]
-    if verdict == SPENT:
+    if verdict in (SPENT, PARKED):
         home = home_ref(state)
         if not home:
             return [
                 f"cannot resolve a home branch for the linked worktree {state.name} -- "
                 f"check out its anchor branch by hand, then sweep.py --sync"
             ]
-        return [
+        home_steps = [
             f"git -C {state.name} checkout {home} && git merge --ff-only "
             f"origin/{state.default_branch}",
-            f"git -C {state.name} branch -d {state.branch} (spent)",
-            "or: sweep.py --sync --yes",
         ]
+        if verdict == SPENT:
+            home_steps.append(f"git -C {state.name} branch -d {state.branch} (spent)")
+        else:
+            # Deliberately not deleted: the PR is open, so the branch is still the one
+            # under review. `sync_plan` scopes its reap to `verdict == SPENT` for the
+            # same reason -- the checkout leaves the branch, the branch stays.
+            home_steps.append(f"({state.branch} stays -- its PR is still open)")
+        home_steps.append("or: sweep.py --sync --yes")
+        return home_steps
 
     steps: list[str] = []
     if verdict == NEEDS_BRANCH:
@@ -861,10 +882,18 @@ def ship_plan(state: State, verdict: str) -> Plan:
 def sync_plan(state: State, verdict: str, fetch: bool = True) -> Plan:
     """`--sync`: park a checkout on its home branch, current, with the spent branches gone.
 
-    Refuses outright on anything holding unshipped work. That is the ordering the
-    two steps depend on -- syncing a checkout that still has a PR in flight would
-    move it off the branch under review -- and it is why `--sync` is safe to run
-    over the whole workspace while some repos are mid-flight.
+    Refuses outright on anything holding unshipped work -- that is what makes `--sync`
+    safe to run over the whole workspace while some repos are mid-flight.
+
+    "Unshipped" is the test, and it is not the same as "no PR in flight". A `parked`
+    checkout has an open PR and is still synced: every commit is on the remote, the tree
+    is clean, and the branch itself survives (the reap below is scoped to `SPENT`), so
+    what the checkout loses is its position and nothing else. Treating an open PR as a
+    hold was the older reading, and its cost was a checkout that could never come home:
+    `needs-pr` is not syncable, nothing in the sweep ever confirmed the PR, and the
+    verdict therefore had no exit. A workspace checkout was found parked that way on
+    another session's task branch, its home branch frozen days behind, reported as
+    stranded at every session start with no action that would clear it.
 
     The reap is `branch -d`, never `-D`, and a branch whose upstream would make
     `-d` refuse gets that upstream unset first rather than the refusal forced --
@@ -1151,6 +1180,37 @@ def has_merged_pr(gh: Git, branch: str) -> bool:
     return isinstance(payload, list) and bool(payload)
 
 
+def has_open_pr(gh: Git, branch: str) -> bool:
+    """True when GitHub reports an *open* PR for `branch`.
+
+    Fails **closed** on every error path, which is the opposite of `has_merged_pr`
+    directly above, and the asymmetry follows from what each answer is used for. A
+    missed merge costs nothing new: git still refuses the commit and says why. A missed
+    *open* PR costs nothing new either -- the verdict stays `needs-pr`, exactly today's
+    behaviour. But a wrongly *asserted* open PR would send `--sync` to move a checkout
+    off the branch it is standing on, on the say-so of an offline or unauthenticated
+    `gh`. So the direction of the safe default is set by which mode consumes it, not by
+    a house style: this one feeds SYNCABLE and the one above feeds `--branch`.
+
+    Same catch set as `has_merged_pr`, and for the same reason -- `gh_for` is a bare
+    `subprocess.run`, so a machine with no `gh` on PATH raises rather than returning a
+    code, out of the middle of a function whose contract is to report and not to guess.
+    """
+    try:
+        result = gh(
+            "pr", "list", "--head", branch, "--state", "open", "--limit", "1", "--json", "number"
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, list) and bool(payload)
+
+
 def inspect(
     name: str,
     path: Path,
@@ -1205,6 +1265,22 @@ def inspect(
         and (dirty_files or ahead)
     ):
         pr_merged = has_merged_pr(gh or gh_for(path), branch)
+    # The mirror of the gate above, and just as tight: only for a task branch that is
+    # fully pushed and clean -- the single state that would otherwise classify as
+    # `needs-pr`. Every other state is decided without this answer, so asking would be a
+    # network round trip per checkout that changes nothing. The two gates are mutually
+    # exclusive by their `upstream` terms, so a sweep makes at most one `gh` call per
+    # checkout, which is what it made before this existed.
+    pr_open = False
+    if (
+        fetch
+        and upstream
+        and unpushed == 0
+        and is_task_branch(branch)
+        and ahead
+        and not dirty_files
+    ):
+        pr_open = has_open_pr(gh or gh_for(path), branch)
 
     # One listing answers both questions -- which branches exist, and which of them
     # `branch -d` will refuse -- so the two can never disagree about a branch.
@@ -1247,6 +1323,7 @@ def inspect(
         unpushed=unpushed,
         upstream_gone=upstream_gone,
         pr_merged=pr_merged,
+        pr_open=pr_open,
         remote_url=remote_url,
         # A linked worktree's `.git` is a file pointing at the primary's git dir.
         linked=dot_git.is_file(),
