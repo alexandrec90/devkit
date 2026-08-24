@@ -269,6 +269,26 @@ UserPromptSubmit, the box is cut on PreToolUse, and the two run in different pro
 with different working directories. Without it every guard-cut box was named
 `ws-<8 hex of session id>` and no PR title said what it did.
 
+### A scheduled job's branch says so, inside `agent/` rather than beside it
+
+`worktree.py new --auto` cuts under `tb.AUTOMATION_PREFIX`, and `upgrade-project.py` is
+its only caller. The namespace exists because the nightly vendoring sweep cuts one
+branch per consumer, none of it anyone's task, and `preview-task.py` was offering all of
+them ahead of the change a reviewer had asked to look at — twenty-eight of that menu's
+first twenty-nine rows.
+
+Two decisions are worth not relitigating. It is a **sub-namespace of `agent/`**, so
+`is_managed_task_branch` still answers yes and `/ship`, `sweep`, `reap`, `reconcile` and
+the guard behave exactly as before; a namespace *beside* `agent/` would have made every
+one of those a second question, for a menu's benefit. And it is a **path segment, not a
+word in the slug**, because `agent/auto-merge-label-0823` is a task somebody dictated
+and no substring test separates the two.
+
+The consequence to hold onto is that `managed_branch_prefix` now returns the **longest**
+match. Every caller uses that answer to strip a prefix off a topic, so a first-match
+`agent/` would leave `auto/` inside a box directory name and inside a
+`COMPOSE_PROJECT_NAME` that compose rejects.
+
 ## A scheduled task is registered from XML, never from `schtasks` flags
 
 Every unattended job — `install-reconcile-task.py`, `install-upgrade-schedule.py`,

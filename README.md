@@ -294,6 +294,7 @@ when the work leaves it:
 
 ```bash
 python scripts/worktree.py new carameli --slug voicemail --yes  # cut, lease, install
+python scripts/worktree.py new carameli --slug bump --auto --yes  # ... for a scheduled job
 python scripts/worktree.py list                                 # what exists, and its verdict
 python scripts/worktree.py reap --all --yes                     # everything already shipped
 python scripts/worktree.py claim <box> --session <id> --yes     # hand a box to another session
@@ -307,6 +308,15 @@ tracked files only, so it starts with no `.venv`. `reap` **refuses while the box
 holds unshipped work**, which is the difference that matters: the static tier's
 stranded work is found afterwards by `sweep.py`, and a box's cannot be stranded at all,
 because being stranded is what stops the cleanup.
+
+`new --auto` cuts the branch under `agent/auto/` instead of `agent/`, and is for a
+*scheduler* calling this rather than a session — the nightly upgrade sweep is the one
+caller today. It nests inside `agent/`, so `is_managed_task_branch` still says yes and
+shipping, sweeping, reaping and the worktree guard all behave exactly as before; what
+changes is that a reader can tell whose work it is, which is what keeps a job's branches
+out of the preview menu. The marker is a path segment rather than a word in the slug
+because `agent/auto-merge-label-0823` is a task somebody gave an agent, and no substring
+test can separate the two.
 
 `resume` is the way back in. `reconcile` destroys a box whose PR is still *open* when
 the disk is tight, on the grounds that the remote has every commit — a trade that is
@@ -398,7 +408,12 @@ the port it had before. Two VS Code tasks — *Preview: Open a UI Branch* and *P
 Restart Standing Previews* — are those two invocations, one click each.
 
 A checkout with no compose stack contributes no rows, which keeps devkit out of a menu it
-would publish nothing for.
+would publish nothing for. Neither does a branch, box or PR under `agent/auto/`: that
+namespace is what an unattended job cuts, and the nightly upgrade sweep alone would put
+one row per consuming project in front of every reviewer. The menu answers "what has an
+agent session changed that I could look at", so a scheduler's work is discovery it
+declines — but a *standing* preview is never filtered out, because somebody asked for
+that one by name.
 
 ### The scheduled pass
 
