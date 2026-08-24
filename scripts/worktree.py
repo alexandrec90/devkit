@@ -3845,7 +3845,46 @@ def human_bytes(size: int) -> str:
     return f"{value:.1f} GB"
 
 
-def render_survey(rows: list[dict]) -> str:
+def slot_summary(rows: list[dict], registry: devkit_ports.Registry | None) -> str:
+    """`slots: 15/16 held -- ...` -- how close the workspace is to refusing the next box.
+
+    Every row already prints the slot it holds and nothing printed how many were left,
+    which is the number that decides whether the next box can be cut at all. A slot is
+    held for a box's whole life, running or stopped, so a machine with an empty
+    `docker ps` can still be one box from full -- and the tier's own refusal
+    (`next_lease_slot`) is the first place anyone would find that out, which is the
+    worst place.
+
+    `ports.toml` cannot answer it either, and reading it is actively misleading: its
+    `[slots]` table names only the pinned static checkouts. A reader told that some
+    slots were "already allocated" went looking for eleven of them in a file that lists
+    four, found nothing, and concluded the allocation was phantom. Both halves are named
+    here for that reason.
+
+    Empty string when there is no registry -- a workspace of stackless repos leases no
+    slots, and a summary of nothing is a line that only has to be read past.
+    """
+    if registry is None:
+        return ""
+    # No range filter on the pins: `devkit_ports.validate` refuses to load a registry
+    # whose `[slots]` names a slot outside `[0, max_slots)`, so one cannot reach here.
+    pinned = set(registry.slots.values())
+    leased = {row["slot"] for row in rows if row.get("slot", -1) >= 0}
+    free = [slot for slot in range(registry.max_slots) if slot not in pinned | leased]
+    held = registry.max_slots - len(free)
+    tail = (
+        f"free: {', '.join(str(slot) for slot in free)}"
+        if free
+        else "free: none -- the next box that needs a stack cannot be cut until one is released"
+    )
+    return (
+        f"slots: {held}/{registry.max_slots} held -- "
+        f"{len(pinned)} pinned to checkouts in {devkit_ports.REGISTRY_NAME}, "
+        f"{len(leased)} leased by boxes below; {tail}"
+    )
+
+
+def render_survey(rows: list[dict], registry: devkit_ports.Registry | None = None) -> str:
     if not rows:
         return "No ephemeral boxes. `worktree.py new <project>` cuts one."
     sized = any("bytes" in row for row in rows)
@@ -3878,6 +3917,10 @@ def render_survey(rows: list[dict]) -> str:
         lines.append(f"{len(held)} box(es) not reapable yet:")
         for row in held:
             lines.append(f"  {row['box']} [{row['verdict']}] -- {row['reason']}")
+    summary = slot_summary(rows, registry)
+    if summary:
+        lines.append("")
+        lines.append(summary)
     return "\n".join(lines)
 
 
@@ -4367,7 +4410,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.mode == "list":
             rows = survey(args.workspace, fetch=args.fetch, sizes=args.sizes)
-            print(json.dumps(rows, indent=2) if args.json else render_survey(rows))
+            print(
+                json.dumps(rows, indent=2)
+                if args.json
+                else render_survey(rows, load_registry(args.workspace))
+            )
             return 0
 
         if args.mode == "reconcile":

@@ -2290,6 +2290,58 @@ def test_an_empty_survey_says_how_to_make_a_box():
     assert "new <project>" in worktree.render_survey([])
 
 
+def _slot_rows(*slots: int) -> list[dict]:
+    return [
+        {
+            "box": f"demo--b{index}-0824",
+            "branch": f"agent/b{index}-0824",
+            "slot": slot,
+            "verdict": sweep.READY,
+            "reason": "work here",
+            "reapable": False,
+        }
+        for index, slot in enumerate(slots)
+    ]
+
+
+def test_the_survey_says_how_many_slots_are_left_and_which_ones():
+    rendered = worktree.render_survey(_slot_rows(2), registry(max_slots=4, alpha=0))
+    assert "slots: 2/4 held" in rendered
+    # Both halves are named because the reader who went looking for the leases in
+    # ports.toml found only the pins and concluded the rest were phantom.
+    assert "1 pinned to checkouts in ports.toml" in rendered
+    assert "1 leased by boxes below" in rendered
+    assert "free: 1, 3" in rendered
+
+
+def test_a_full_registry_says_the_next_box_cannot_be_cut():
+    rendered = worktree.render_survey(_slot_rows(1, 2), registry(max_slots=3, alpha=0))
+    assert "slots: 3/3 held" in rendered
+    # The point of the line: the refusal is knowable before `next_lease_slot` raises it.
+    assert "free: none" in rendered
+    assert "cannot be cut until one is released" in rendered
+
+
+def test_a_box_holding_no_slot_is_not_counted_as_holding_one():
+    rendered = worktree.render_survey(_slot_rows(-1, -1), registry(max_slots=2, alpha=0))
+    assert "slots: 1/2 held" in rendered
+    assert "0 leased by boxes below" in rendered
+
+
+def test_the_survey_stays_silent_about_slots_when_there_is_no_registry():
+    # A workspace of stackless repos leases nothing; a summary of nothing is noise.
+    assert "slots:" not in worktree.render_survey(_slot_rows(-1))
+    assert worktree.slot_summary(_slot_rows(3), None) == ""
+
+
+def test_a_pin_past_the_slot_ceiling_cannot_reach_the_summary_at_all():
+    # Why `slot_summary` filters no range: the registry refuses to parse one. Asserted
+    # here rather than defended there, so the day that stops being true fails loudly
+    # instead of being absorbed by a silent clamp.
+    with pytest.raises(devkit_ports.RegistryError, match="outside"):
+        registry(max_slots=2, alpha=0, beta=9)
+
+
 def test_a_dry_run_shows_the_install_before_it_costs_three_minutes():
     plan = worktree.SpawnPlan(
         box=box("demo--x-0806", project="demo"),
