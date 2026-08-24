@@ -495,7 +495,6 @@ def test_picker_registration_updates_the_multi_test_picker_too():
                 {"id": "project", "options": ["alpha"]},
                 {"id": "daemonProject", "options": ["alpha"]},
                 {"id": "worktreeProject", "options": ["alpha"]},
-                {"id": "upgradeScope", "options": ["alpha"]},
                 {"id": "mergeCheckout", "options": ["alpha"]}
             ]
         }
@@ -555,7 +554,6 @@ def test_registering_against_the_real_workspace_file():
     for picker_id in (
         "daemonProject",
         "worktreeProject",
-        "upgradeScope",
         "mergeCheckout",
     ):
         assert _input_options(inputs[picker_id])[-2:] == ["probe", "probe-b"]
@@ -1152,26 +1150,26 @@ def test_the_live_smoke_task_names_the_only_checkout_that_can_run_it(canonical):
     assert checked, "no literal-checkout dispatch found — this test now guards nothing"
 
 
-# The pickers that choose a CHECKOUT for a workspace-scoped task, and who each one is
-# allowed to leave out. `register()` now extends these with the project registry; this
-# comparison is the backstop for hand edits and for intentional exclusions such as
-# devkit being the source rather than an upgrade target.
+# `SCOPE_PICKERS` and `test_every_scope_picker_can_aim_at_every_checkout` lived here.
+# They gated a class with no members left: a picker that chooses WHICH CHECKOUTS a
+# workspace-scoped batch task should act on. `sweepScope` went first, `upgradeScope`
+# with the change that added this comment -- both for the same reason, which is worth
+# keeping rather than the check that guarded them. A release is one upstream revision,
+# so adopting it in a subset of consumers is not an operation anyone wants (see
+# `upgrade-project.upgrade_one` -- a consumer already current costs a fetch, so `--all`
+# is both cheaper to reason about and cheaper to run than the question was). The list
+# of options such a picker needs is a second copy of the project registry, and every
+# copy of it has drifted at least once.
 #
-# An exclusion needs its reason written here. That is the same bargain
-# `tests/test_dispatch_coherence.py` strikes for an unvendored dispatch target: leaving a
-# checkout out stays possible, but as a decision someone recorded rather than a list
-# nobody updated.
-SCOPE_PICKERS: dict[str, dict[str, str]] = {
-    "upgradeScope": {
-        "devkit": (
-            "is the source a release is pulled FROM, not a consumer of it; "
-            "upgrade-project.py refuses it by name"
-        ),
-    },
-}
-
-# Option values that mean "every checkout" rather than naming one.
-SCOPE_ALL = {"--all"}
+# So: a batch task that acts on the workspace takes `--all`, and a task that acts on
+# ONE checkout uses `project`, which `register()` maintains. What the ratchet actually
+# guaranteed is not lost with it -- `test_picker_registration_updates_the_multi_test_
+# picker_too` covers the registration side, and the tail of
+# `test_project_scope_inputs_are_real_multi_picks` still requires `daemonProject` and
+# `worktreeProject` to reach every checkout `project` knows. Only the *scope* dimension
+# is gone. Reintroduce a scope picker and this is the check it needs back: the failure
+# it was written for is a newly generated project that every generic task can reach and
+# no batch task can.
 
 
 def _input_options(spec: dict) -> list:
@@ -1188,31 +1186,6 @@ def _picker_values(spec: dict) -> set[str]:
     }
 
 
-def _scope_names(spec: dict) -> set[str]:
-    """The checkouts a multi-select scope picker can aim at."""
-    return _picker_values(spec) - SCOPE_ALL
-
-
-def test_every_scope_picker_can_aim_at_every_checkout(canonical):
-    """A workspace-scoped task must be able to name any checkout the registry knows.
-
-    Measured against the `project` picker rather than the live `folders` list on purpose:
-    `project` is the one list `register()` maintains, it ships inside this repo, and this
-    assertion therefore runs in CI. The consequence is the useful one — generating a
-    project now fails devkit's own suite until these lists are extended too, instead of
-    being discovered the first time someone tries to sweep just that repo.
-    """
-    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
-    registry = _picker_values(inputs["project"])
-    for picker_id, exclusions in SCOPE_PICKERS.items():
-        expected = registry - set(exclusions)
-        offered = _scope_names(inputs[picker_id])
-        assert offered == expected, (
-            f"{picker_id} cannot aim at {sorted(expected - offered)} "
-            f"and offers unknown {sorted(offered - expected)}"
-        )
-
-
 def test_project_scope_inputs_are_real_multi_picks(canonical):
     """Every batch scope uses checkboxes and requires at least one selection."""
     inputs = {spec["id"]: spec for spec in canonical["inputs"]}
@@ -1221,7 +1194,6 @@ def test_project_scope_inputs_are_real_multi_picks(canonical):
         "carameliCheckout",
         "ibkrCheckout",
         "dbCheckout",
-        "upgradeScope",
     ):
         spec = inputs[picker_id]
         assert spec["type"] == "command"
@@ -1229,27 +1201,12 @@ def test_project_scope_inputs_are_real_multi_picks(canonical):
         assert spec["args"]["optionGroups"][0]["minCount"] == 1
 
     # The single-pick ones are single-pick on purpose -- one Docker daemon, one repo a
-    # box is cut from -- but they still have to reach every checkout the registry knows,
-    # which is the half that was silently skipped before `SCOPE_PICKERS` existed.
+    # box is cut from -- but they still have to reach every checkout the registry knows.
+    # That is the half a per-picker option list keeps losing: `project` gains the new
+    # project because `register()` writes it, and a hand-maintained sibling does not.
     for picker_id in ("daemonProject", "worktreeProject"):
         assert inputs[picker_id]["type"] == "pickString"
         assert _picker_values(inputs[picker_id]) == _picker_values(inputs["project"])
-
-
-def test_every_scope_exclusion_names_a_real_checkout_and_a_reason(canonical):
-    """A stale exclusion is the failure mode above, wearing the test's own uniform.
-
-    Left unchecked, a checkout removed from the workspace would keep its entry here and
-    keep one picker exempt from the rule for a project that no longer exists — and the
-    next real omission could be papered over by adding a line to `SCOPE_PICKERS` rather
-    than to the picker.
-    """
-    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
-    registry = _picker_values(inputs["project"])
-    for picker_id, exclusions in SCOPE_PICKERS.items():
-        for name, reason in exclusions.items():
-            assert name in registry, f"{picker_id} excludes {name}, which is not a checkout"
-            assert reason.strip(), f"{picker_id} excludes {name} with no reason given"
 
 
 # The one task that reaches a checkout `NOT_PROJECTS` excludes. Named once, because two
@@ -1259,10 +1216,11 @@ MERGE_TASK = "Git: Merge Origin Default into Current Branch"
 
 
 def test_the_merge_picker_reaches_the_reference_checkouts_too(canonical):
-    """The exception to `SCOPE_PICKERS`, and the reason it is not simply listed there.
+    """The one picker whose option list is not the registry, and why.
 
-    Every other picker offers the registry minus its documented exclusions. This one
-    offers the registry PLUS `NOT_PROJECTS`: merging origin's default branch in is pure
+    Every other picker offers the registry, or the registry minus a documented
+    exclusion. This one offers the registry PLUS `NOT_PROJECTS`: merging origin's
+    default branch in is pure
     git — no `.devkit.toml`, no virtualenv, no vendored tier — so it is the one action a
     reference checkout can take, and the checkout it was written for is one.
 

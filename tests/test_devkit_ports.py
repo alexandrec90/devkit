@@ -226,11 +226,11 @@ def test_no_two_shipped_checkouts_share_a_port():
 # library needs a port number. Registering them anyway would not be harmless — it would
 # consume slots and push the next real stack further along the registry.
 #
-# Same bargain as `SCOPE_PICKERS` in test_devkit_project.py: staying out stays possible,
-# as a decision someone recorded rather than a line nobody added. The failure this
-# prevents runs in both directions — a generated project whose slot reminder was ignored
-# is handed the same slot as the next one, and a slotless project "fixed" by assigning it
-# a slot silently renumbers nothing but wastes one forever.
+# Same bargain the picker exclusions in test_devkit_project.py strike: staying out
+# stays possible, as a decision someone recorded rather than a line nobody added. The
+# failure this prevents runs in both directions — a generated project whose slot
+# reminder was ignored is handed the same slot as the next one, and a slotless project
+# "fixed" by assigning it a slot silently renumbers nothing but wastes one forever.
 SLOTLESS: dict[str, str] = {
     "devkit": (
         "no Docker stack, no database, no frontend — .devkit.toml declares "

@@ -207,14 +207,18 @@ after the PR merges; a box never renders.
   `test_the_live_smoke_task_names_the_only_checkout_that_can_run_it` asserts the same
   agreement against `Action.projects` directly; a literal that outgrows its scope fails
   there rather than in a terminal.
-- **A new project has to reach more than the `project` picker.** `register()` extends the
-  `folders` list and that one picker; the workspace-scoped pickers — `sweepScope`,
-  `upgradeScope` — are hand-maintained and were silently skipped, so a newly generated
-  project could run every generic task while `--all` was the only way to sweep or upgrade
-  it. `SCOPE_PICKERS` in `tests/test_devkit_project.py` now requires each of them to
-  cover every checkout the `project` picker lists, and a deliberate omission (devkit is
-  not a target of a devkit upgrade) to carry its reason in writing. Pickers scoped by
-  `Action.projects` are a separate case and are gated separately.
+- **A batch task that acts on the workspace takes `--all`, not a scope picker.** There
+  used to be two of those — `sweepScope`, then `upgradeScope` — each a hand-maintained
+  second copy of the project registry, and each silently skipped when `register()` added
+  a project, so a newly generated project could run every generic task while `--all` was
+  the only way to sweep or upgrade it. Both are gone, and the reason they are not coming
+  back is in `tests/test_devkit_project.py` above `MERGE_TASK`: the question a scope
+  picker asks has no answer worth the copy. Only `register()`-maintained pickers remain
+  — `project`, `daemonProject`, `worktreeProject`, `mergeCheckout` — so a new project
+  reaches every task by being registered, which is the one thing that cannot be
+  forgotten. `insert_picker_option` names that list, and
+  `test_registering_against_the_real_workspace_file` holds it to the workspace file.
+  Pickers scoped by `Action.projects` are a separate case and are gated separately.
 
 - **A task meant to run twice at once says so with `runOptions.instanceLimit`.** The
   default is **1**, and re-running a task that is already active offers to terminate it
