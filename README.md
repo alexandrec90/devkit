@@ -699,8 +699,10 @@ When the sync changes committed artifacts, the dispatcher moves those outputs to
 `codex-context-sync` task branch and opens a PR labelled `autofix` and `automerge`.
 The first label distinguishes generated maintenance from authored task work; the second
 lets the shared auto-merge workflow land it after `PR Gate` passes. The same handoff is
-used for lint autofixes. Pre-existing changes, task branches, and failed generator runs
-are left untouched and reported instead of being mixed into a mechanical PR.
+used for lint autofixes, but lint keeps its existing unlabelled review policy; only the
+Codex mirror opts into auto-merge here. Pre-existing changes, task branches, and failed
+generator runs are left untouched and reported instead of being mixed into a mechanical
+PR.
 
 The conversion is semantic, not a byte-for-byte copy. Generated Codex hooks carry
 `commandWindows` overrides, while a too-short authored SessionStart timeout is raised

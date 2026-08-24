@@ -82,10 +82,10 @@ class Action:
     # changes strand on a home branch unless something ships them -- see
     # `autofix_ship_plan`.
     autofix: bool = False
-    # Mechanical PRs must say what produced them and carry the authorization that lets
-    # the shared auto-merge workflow land them after the gate. Keeping this metadata on
-    # the action makes a new file-rewriting task opt in deliberately rather than inherit
-    # lint's branch name or silently open an unlabelled PR.
+    # A file-rewriting action may label the PR it produces. Keeping this metadata on the
+    # action makes auto-merge an explicit per-producer decision: an empty tuple preserves
+    # lint's existing unlabelled review path, while Codex context declares that its
+    # deterministic mirror is safe for the shared workflow to land after the gate.
     autofix_slug: str = ""
     autofix_labels: tuple[str, ...] = ()
     # Which checkouts this action applies to; empty means every one of them. Naming the
@@ -143,7 +143,6 @@ ACTIONS: dict[str, Action] = {
         "Lint: Everything",
         autofix=True,
         autofix_slug="lint-autofix",
-        autofix_labels=(sweep.AUTOFIX_LABEL, sweep.AUTOMERGE_LABEL),
     ),
     "lint-changed": Action(
         "scripts/lint-all.py",
@@ -151,7 +150,6 @@ ACTIONS: dict[str, Action] = {
         ("--changed",),
         autofix=True,
         autofix_slug="lint-autofix",
-        autofix_labels=(sweep.AUTOFIX_LABEL, sweep.AUTOMERGE_LABEL),
     ),
     "sync-codex": Action(
         "scripts/sync-codex-context.py",
@@ -427,8 +425,9 @@ def plan_command(
 # So the dispatcher finishes what the task started. `sweep.py` already takes stranded
 # work from a home branch to an open PR -- `--branch`, then `--ship` -- and the only
 # new judgement needed is whether that is the honest thing to do with what this run
-# left behind. The distinct branch slug and `autofix` label say this is generated churn,
-# while `automerge` authorizes the shared gate-driven workflow to land it unattended.
+# left behind. Each action's distinct branch slug names the producer. Labels are also
+# per-action: Codex's deterministic mirror carries `autofix` provenance and `automerge`
+# authorization, while lint keeps its established unlabelled review path.
 AUTOFIX_SLUG = "lint-autofix"
 
 

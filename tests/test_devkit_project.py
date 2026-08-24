@@ -1420,7 +1420,6 @@ def plan(before=(), after=("app/main.py",), branch="master", lint_ok=True):
         lint_ok=lint_ok,
         workspace=Path(WORKSPACE_FILE),
         slug="lint-autofix",
-        labels=(devkit_project.sweep.AUTOFIX_LABEL, devkit_project.sweep.AUTOMERGE_LABEL),
     )
 
 
@@ -1429,7 +1428,7 @@ def test_a_green_autofix_run_on_a_clean_home_branch_is_branched_then_shipped():
     assert not outcome.note
     assert [step[-4:] for step in outcome.commands] == [
         ("--branch", "--slug", "lint-autofix", "--yes"),
-        ("--label", "automerge", "--ship", "--yes"),
+        ("--only", "alpha", "--ship", "--yes"),
     ]
     for step in outcome.commands:
         assert step[1].endswith("sweep.py")
@@ -1497,19 +1496,17 @@ def test_only_declared_generated_actions_rewrite_the_tree():
     }
 
 
-def test_generated_actions_get_distinct_branches_and_the_same_automation_labels():
+def test_generated_actions_get_distinct_branches_and_only_codex_opts_into_automerge():
     lint = ACTIONS["lint"]
+    lint_changed = ACTIONS["lint-changed"]
     codex = ACTIONS["sync-codex"]
 
     assert lint.autofix_slug == "lint-autofix"
     assert codex.autofix_slug == "codex-context-sync"
-    assert (
-        lint.autofix_labels
-        == codex.autofix_labels
-        == (
-            devkit_project.sweep.AUTOFIX_LABEL,
-            devkit_project.sweep.AUTOMERGE_LABEL,
-        )
+    assert lint.autofix_labels == lint_changed.autofix_labels == ()
+    assert codex.autofix_labels == (
+        devkit_project.sweep.AUTOFIX_LABEL,
+        devkit_project.sweep.AUTOMERGE_LABEL,
     )
 
 
@@ -1540,6 +1537,7 @@ def test_the_lint_task_hands_its_churn_to_the_sweep(tmp_path, monkeypatch):
     assert len(calls) == 3, calls
     assert [c[-1] for c in calls[1:]] == ["--yes", "--yes"]
     assert all(c[1].endswith("sweep.py") for c in calls[1:])
+    assert "--label" not in calls[-1], "lint's existing review policy changed"
 
 
 def test_the_codex_sync_hands_its_churn_to_a_labelled_automerge_pr(tmp_path, monkeypatch):
