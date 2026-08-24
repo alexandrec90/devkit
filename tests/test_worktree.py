@@ -2290,6 +2290,58 @@ def test_an_empty_survey_says_how_to_make_a_box():
     assert "new <project>" in worktree.render_survey([])
 
 
+def _slot_rows(*slots: int) -> list[dict]:
+    return [
+        {
+            "box": f"demo--b{index}-0824",
+            "branch": f"agent/b{index}-0824",
+            "slot": slot,
+            "verdict": sweep.READY,
+            "reason": "work here",
+            "reapable": False,
+        }
+        for index, slot in enumerate(slots)
+    ]
+
+
+def test_the_survey_says_how_many_slots_are_left_and_which_ones():
+    rendered = worktree.render_survey(_slot_rows(2), registry(max_slots=4, alpha=0))
+    assert "slots: 2/4 held" in rendered
+    # Both halves are named because the reader who went looking for the leases in
+    # ports.toml found only the pins and concluded the rest were phantom.
+    assert "1 pinned to checkouts in ports.toml" in rendered
+    assert "1 leased by boxes below" in rendered
+    assert "free: 1, 3" in rendered
+
+
+def test_a_full_registry_says_the_next_box_cannot_be_cut():
+    rendered = worktree.render_survey(_slot_rows(1, 2), registry(max_slots=3, alpha=0))
+    assert "slots: 3/3 held" in rendered
+    # The point of the line: the refusal is knowable before `next_lease_slot` raises it.
+    assert "free: none" in rendered
+    assert "cannot be cut until one is released" in rendered
+
+
+def test_a_box_holding_no_slot_is_not_counted_as_holding_one():
+    rendered = worktree.render_survey(_slot_rows(-1, -1), registry(max_slots=2, alpha=0))
+    assert "slots: 1/2 held" in rendered
+    assert "0 leased by boxes below" in rendered
+
+
+def test_the_survey_stays_silent_about_slots_when_there_is_no_registry():
+    # A workspace of stackless repos leases nothing; a summary of nothing is noise.
+    assert "slots:" not in worktree.render_survey(_slot_rows(-1))
+    assert worktree.slot_summary(_slot_rows(3), None) == ""
+
+
+def test_a_pin_past_the_slot_ceiling_cannot_reach_the_summary_at_all():
+    # Why `slot_summary` filters no range: the registry refuses to parse one. Asserted
+    # here rather than defended there, so the day that stops being true fails loudly
+    # instead of being absorbed by a silent clamp.
+    with pytest.raises(devkit_ports.RegistryError, match="outside"):
+        registry(max_slots=2, alpha=0, beta=9)
+
+
 def test_a_dry_run_shows_the_install_before_it_costs_three_minutes():
     plan = worktree.SpawnPlan(
         box=box("demo--x-0806", project="demo"),
@@ -3545,6 +3597,85 @@ def test_compose_up_for_a_ui_box_scopes_to_its_services_with_no_deps(monkeypatch
     assert seen[0][-3:] == ["--build", "--no-deps", "frontend"]
     worktree.compose_up(Path("x"), "c--y")
     assert seen[1][-1] == "--build"
+
+
+def test_compose_up_disables_bake_so_two_services_can_share_one_image_tag(monkeypatch):
+    """Compose delegates builds to `bake` by default now, and bake refuses a plan whose
+    targets export the same tag twice -- which is what an `app` and a `worker` built from
+    one Dockerfile are. Measured on carameli, 2026-08-24, engine 29.2.0:
+
+        target app: failed to solve: image "docker.io/library/carameli-app-...": already
+        exists
+
+    Every preview of that stack died there, reported as `the stack did not come up`, and
+    the same `compose build` with `COMPOSE_BAKE=0` succeeded. Sharing a tag is legal in
+    compose and the classic builder exports the two sequentially, so the bake path is the
+    regression -- disable it here rather than asking every consumer to restructure a
+    compose file that was always valid.
+    """
+    seen = {}
+    monkeypatch.setattr(
+        worktree.subprocess,
+        "run",
+        lambda argv, **k: seen.update(env=k.get("env")) or _completed(),
+    )
+    monkeypatch.setenv("PATH", "/sentinel-path")
+    ok, _ = worktree.compose_up(Path("x"), "c--y")
+    assert ok
+    assert seen["env"]["COMPOSE_BAKE"] == "0"
+    # Inherited, not replaced: a bare `{"COMPOSE_BAKE": "0"}` would take `docker` off
+    # PATH and turn every build into "docker is not on PATH".
+    assert seen["env"]["PATH"] == "/sentinel-path"
+
+
+def test_build_env_inherits_the_environment_rather_than_replacing_it(monkeypatch):
+    """The half that fails as a total outage rather than as a wrong build: `compose_up`
+    resolves `docker` off PATH, so an env that drops it reports `docker is not on PATH`
+    for every box on the machine."""
+    monkeypatch.setenv("PATH", "/sentinel-path")
+    monkeypatch.setenv("CARRIED_THROUGH", "yes")
+    env = worktree.build_env()
+    assert env["COMPOSE_BAKE"] == "0"
+    assert env["PATH"] == "/sentinel-path"
+    assert env["CARRIED_THROUGH"] == "yes"
+
+
+def test_compose_up_names_a_dead_engine_instead_of_blaming_the_stack(monkeypatch):
+    """The real message from 2026-08-24, when the engine had died behind a Docker Desktop
+    window that still looked healthy. `the stack did not come up` is true of a build
+    error, a port collision and a dead daemon alike, and only one of the three is fixed
+    by starting Docker -- so the reader went to the branch, the compose file and the port
+    registry first."""
+    stderr = (
+        'error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine'
+        '/v1.51/images/json": open //./pipe/dockerDesktopLinuxEngine: The system cannot '
+        "find the file specified."
+    )
+    monkeypatch.setattr(
+        worktree.subprocess, "run", lambda argv, **k: _completed(returncode=1, stderr=stderr)
+    )
+    ok, message = worktree.compose_up(Path("x"), "c--y")
+    assert not ok
+    assert "Docker's engine is not running" in message
+    # The original text survives: it is what distinguishes one dead-engine cause from
+    # another, and dropping it would trade one unactionable message for a tidier one.
+    assert "dockerDesktopLinuxEngine" in message
+
+
+def test_daemon_down_note_stays_silent_on_an_ordinary_build_failure():
+    """A note that fires on its own uncertainty is one people learn to scroll past --
+    and telling someone to start Docker when Docker is up costs them the real error."""
+    assert worktree.daemon_down_note("") == ""
+    assert worktree.daemon_down_note("target app: failed to solve: image …: already exists") == ""
+    assert worktree.daemon_down_note("Error response from daemon: port is already allocated") == ""
+    assert worktree.daemon_down_note("Cannot connect to the Docker daemon at unix:///var/run")
+
+
+def test_build_env_wins_over_an_inherited_bake_setting(monkeypatch):
+    """A machine that exports `COMPOSE_BAKE=1` -- Docker Desktop suggests it, and it is
+    sticky in a shell profile -- must not re-enable the path this exists to avoid."""
+    monkeypatch.setenv("COMPOSE_BAKE", "1")
+    assert worktree.build_env()["COMPOSE_BAKE"] == "0"
 
 
 def test_apply_preview_of_a_ui_box_scopes_the_up_and_says_what_is_borrowed(monkeypatch):

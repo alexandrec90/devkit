@@ -2563,6 +2563,73 @@ def is_tracked(repo: Path, relative: str) -> bool:
     return completed.returncode == 0
 
 
+# What a Docker CLI says when the engine is not there to talk to. Windows names the
+# missing named pipe, Linux and macOS the missing socket; both spellings appear as the
+# tail of a much longer connect error, so this is a substring test rather than a match.
+DAEMON_DOWN_SIGNS = (
+    "cannot connect to the docker daemon",
+    "error during connect",
+    "the docker daemon is not running",
+    "open //./pipe/",
+)
+
+DAEMON_DOWN_NOTE = (
+    "Docker's engine is not running, so nothing could be built or started. "
+    "Start Docker Desktop and wait for it to say `Engine running`, then run this again. "
+    "If Docker Desktop is already open, its engine has died behind the UI and only a "
+    "full restart of it brings the engine back — the window looking healthy is not "
+    "evidence that it is."
+)
+
+
+def daemon_down_note(text: str) -> str:
+    """`DAEMON_DOWN_NOTE` when `text` is a Docker CLI failing to reach the engine, else "".
+
+    The distinction is worth a function because the two failures are indistinguishable
+    to the reviewer and their remedies share nothing. Every compose call in this file
+    reports a non-zero exit as "the stack did not come up", which is true of a build
+    error, a port collision *and* an engine that is not running — and on 2026-08-24 the
+    engine had died behind a Docker Desktop window that still looked healthy, so the
+    task's report sent the reader to the branch, the compose file and the port registry
+    before anyone thought to ask whether Docker was up at all.
+
+    Substring rather than exact, and lower-cased, because the sign is the tail of a
+    connect error whose leading half carries an API version and a URL-encoded path that
+    change between releases.
+    """
+    haystack = (text or "").lower()
+    return DAEMON_DOWN_NOTE if any(sign in haystack for sign in DAEMON_DOWN_SIGNS) else ""
+
+
+def build_env() -> dict[str, str]:
+    """The environment a box's `compose up --build` runs in: this one, plus bake off.
+
+    Recent Compose delegates building to **`docker buildx bake`**, and bake rejects a
+    plan in which two targets export the same tag:
+
+        target app: failed to solve: image "docker.io/library/carameli-app-…": already
+        exists
+
+    An `app` and a `worker` built from one Dockerfile and sharing one `image:` are
+    exactly that plan, and it is a legal, common compose file -- the classic builder
+    exports the two sequentially and is fine with it. So this is a regression in the
+    build path rather than a defect in the stack, and it is total: it fires before any
+    container starts, so **every** preview of such a project failed, reported through
+    `apply_preview` as the generic `the stack did not come up`. Measured on carameli,
+    2026-08-24, against engine 29.2.0; the identical `compose build` with
+    `COMPOSE_BAKE=0` succeeded.
+
+    Turning bake off here rather than in each consumer is the narrow fix: the alternative
+    asks every project with a shared-tag service to restructure a compose file that was
+    never wrong, and misses the next one. What it costs is bake's parallel build, which
+    a preview does once per box.
+
+    **Inherited, never replaced.** A bare `{"COMPOSE_BAKE": "0"}` would drop `PATH`, and
+    `compose_up` would report `docker is not on PATH` for every box on the machine.
+    """
+    return {**os.environ, "COMPOSE_BAKE": "0"}
+
+
 def compose_up(
     path: Path,
     project_name: str,
@@ -2596,6 +2663,7 @@ def compose_up(
             timeout=timeout,
             check=False,
             creationflags=sweep.NO_WINDOW,
+            env=build_env(),
         )
     except FileNotFoundError:
         return False, "docker is not on PATH — the stack was not started"
@@ -2605,7 +2673,9 @@ def compose_up(
             f"`docker compose -p {project_name} ps` says where it got to"
         )
     if completed.returncode != 0:
-        return False, (completed.stderr or completed.stdout or "").strip()
+        detail = (completed.stderr or completed.stdout or "").strip()
+        note = daemon_down_note(detail)
+        return False, (f"{note}\n  ({detail})" if note else detail)
     return True, f"stack {project_name} is up"
 
 
@@ -3775,7 +3845,46 @@ def human_bytes(size: int) -> str:
     return f"{value:.1f} GB"
 
 
-def render_survey(rows: list[dict]) -> str:
+def slot_summary(rows: list[dict], registry: devkit_ports.Registry | None) -> str:
+    """`slots: 15/16 held -- ...` -- how close the workspace is to refusing the next box.
+
+    Every row already prints the slot it holds and nothing printed how many were left,
+    which is the number that decides whether the next box can be cut at all. A slot is
+    held for a box's whole life, running or stopped, so a machine with an empty
+    `docker ps` can still be one box from full -- and the tier's own refusal
+    (`next_lease_slot`) is the first place anyone would find that out, which is the
+    worst place.
+
+    `ports.toml` cannot answer it either, and reading it is actively misleading: its
+    `[slots]` table names only the pinned static checkouts. A reader told that some
+    slots were "already allocated" went looking for eleven of them in a file that lists
+    four, found nothing, and concluded the allocation was phantom. Both halves are named
+    here for that reason.
+
+    Empty string when there is no registry -- a workspace of stackless repos leases no
+    slots, and a summary of nothing is a line that only has to be read past.
+    """
+    if registry is None:
+        return ""
+    # No range filter on the pins: `devkit_ports.validate` refuses to load a registry
+    # whose `[slots]` names a slot outside `[0, max_slots)`, so one cannot reach here.
+    pinned = set(registry.slots.values())
+    leased = {row["slot"] for row in rows if row.get("slot", -1) >= 0}
+    free = [slot for slot in range(registry.max_slots) if slot not in pinned | leased]
+    held = registry.max_slots - len(free)
+    tail = (
+        f"free: {', '.join(str(slot) for slot in free)}"
+        if free
+        else "free: none -- the next box that needs a stack cannot be cut until one is released"
+    )
+    return (
+        f"slots: {held}/{registry.max_slots} held -- "
+        f"{len(pinned)} pinned to checkouts in {devkit_ports.REGISTRY_NAME}, "
+        f"{len(leased)} leased by boxes below; {tail}"
+    )
+
+
+def render_survey(rows: list[dict], registry: devkit_ports.Registry | None = None) -> str:
     if not rows:
         return "No ephemeral boxes. `worktree.py new <project>` cuts one."
     sized = any("bytes" in row for row in rows)
@@ -3808,6 +3917,10 @@ def render_survey(rows: list[dict]) -> str:
         lines.append(f"{len(held)} box(es) not reapable yet:")
         for row in held:
             lines.append(f"  {row['box']} [{row['verdict']}] -- {row['reason']}")
+    summary = slot_summary(rows, registry)
+    if summary:
+        lines.append("")
+        lines.append(summary)
     return "\n".join(lines)
 
 
@@ -4297,7 +4410,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.mode == "list":
             rows = survey(args.workspace, fetch=args.fetch, sizes=args.sizes)
-            print(json.dumps(rows, indent=2) if args.json else render_survey(rows))
+            print(
+                json.dumps(rows, indent=2)
+                if args.json
+                else render_survey(rows, load_registry(args.workspace))
+            )
             return 0
 
         if args.mode == "reconcile":
