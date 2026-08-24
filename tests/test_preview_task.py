@@ -474,7 +474,9 @@ def test_serve_passes_ui_through_to_the_planner(monkeypatch, tmp_path, capsys):
     def plan(**kwargs):
         seen.update(kwargs)
         return worktree.PreviewPlan(
-            box=worktree.Box(name="b", project="carameli", branch="preview/ui/x"), path="p"
+            box=worktree.Box(name="b", project="carameli", branch="preview/ui/x"),
+            path="p",
+            up=True,
         )
 
     monkeypatch.setattr(preview_task.worktree, "plan_preview", plan)
@@ -1209,12 +1211,13 @@ def test_an_unreadable_registry_is_not_this_tool_s_news(monkeypatch, tmp_path):
 URL = "http://127.0.0.1:5180/"
 
 
-def _up(monkeypatch, urls=(("frontend", 5180, URL),)):
+def _up(monkeypatch, urls=(("frontend", 5180, URL),), up=True):
     """`plan_preview`/`apply_preview` stubbed to a box that came up publishing `urls`."""
     plan = worktree.PreviewPlan(
         box=worktree.Box(name="carameli--preview-x", project="carameli", branch="preview/x"),
         path="p",
         urls=tuple(urls),
+        up=up,
     )
     monkeypatch.setattr(preview_task.worktree, "plan_preview", lambda **k: plan)
     monkeypatch.setattr(preview_task.worktree, "apply_preview", lambda p, w: (True, []))
@@ -1225,6 +1228,26 @@ def _up(monkeypatch, urls=(("frontend", 5180, URL),)):
 
 def _candidate():
     return preview_task.Candidate(project="carameli", ref="agent/x", kind=preview_task.KIND_BRANCH)
+
+
+def test_a_plan_that_brings_nothing_up_fails_fast_rather_than_waiting(
+    monkeypatch, tmp_path, capsys
+):
+    """The measured failure (2026-08-23): a half-reaped box's plan collapsed `up` to
+    False, so nothing was started -- while the slot's URLs were still published, so
+    `serve` printed "containers started in 0s" and polled a dead port for the whole
+    READY_TIMEOUT, seven minutes of what read as a working preview coming up."""
+    opened = _up(monkeypatch, up=False)
+    monkeypatch.setattr(
+        preview_task,
+        "wait_for_ready",
+        lambda *a, **k: pytest.fail("nothing was started, so there is nothing to wait for"),
+    )
+    assert preview_task.serve(_candidate(), tmp_path) is False
+    out = capsys.readouterr().out
+    assert "nothing was started" in out
+    assert "containers started" not in out
+    assert opened == []
 
 
 def test_serve_waits_for_the_page_then_opens_it(monkeypatch, tmp_path, capsys):

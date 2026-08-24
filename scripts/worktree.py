@@ -2782,9 +2782,29 @@ def serve_preview(
     force: bool = False,
     fetch: bool = True,
 ) -> PreviewPlan:
-    """The plan for a box that already exists: refresh it if it may be, then run it."""
+    """The plan for a box that already exists: refresh it if it may be, then run it.
+
+    A box whose lease outlived its checkout — a removal that died partway leaves the
+    directory without its `.git` link — is refused rather than served. Serving one used
+    to succeed vacuously: no compose file means `up` resolves to False, nothing starts,
+    and the registry still publishes the slot's URLs, so the caller waited out its whole
+    ready timeout on ports nothing had been asked to answer.
+    """
     path = box_path(workspace_root, box.name)
     state = sweep.inspect(box.name, path, fetch=False)
+    if not state.is_git:
+        subject = box.tracks or box.branch
+        return PreviewPlan(
+            box=box,
+            path=str(path),
+            refusal=(
+                f"{box.name} is leased but {path} is not a git checkout -- a removal "
+                f"died partway and left a husk, so there is nothing to bring up. The "
+                f"branch survives in {box.project}'s own repo; preview it by ref "
+                f"instead (`worktree.py preview {box.project} --branch {subject}`), "
+                f"and `worktree.py list` says what state the box is in."
+            ),
+        )
     allowed, why = preview_refresh_decision(box.kind, state.dirty, force)
     refresh = preview_refresh_steps(box.tracks) if allowed and box.tracks and fetch else ()
     return PreviewPlan(
