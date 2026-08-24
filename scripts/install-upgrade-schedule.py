@@ -106,7 +106,7 @@ class Schedule:
 
 
 def windowless_python(executable: str = sys.executable) -> str:
-    """`pythonw.exe` beside `executable` when it exists, else `executable` unchanged.
+    """The windowless interpreter for `executable`, defaulting to this one.
 
     **A scheduled task must not put a console on the desktop.** `python.exe` is a
     console application, so Windows allocates one every time the task fires -- a black
@@ -116,17 +116,17 @@ def windowless_python(executable: str = sys.executable) -> str:
     task uses, and matching it is the point: two scheduled devkit jobs should not differ
     in whether they interrupt you.
 
-    Falls back rather than failing: a POSIX machine has no `pythonw`, and neither does
-    every Windows Python layout. There the console question does not arise the same way.
-
     The cost is real and worth stating: `pythonw` has no stdout or stderr at all, so
     anything printed goes nowhere. That is survivable only because every failure this
     run can produce is written to `logs/upgrade.log` -- see `upgrade-project.py`'s
     `_finish`, which writes the artifact on *every* exit path including the ones that
     never reach a project.
+
+    A wrapper rather than an alias for `devkit_schtasks.windowless`, which owns the
+    resolution and the venv-stub failure behind it: the default argument is the whole
+    call site (`windowless_python()` at `schedule_for`), and an alias would drop it.
     """
-    candidate = Path(executable).with_name("pythonw.exe")
-    return str(candidate) if candidate.is_file() else executable
+    return devkit_schtasks.windowless(executable)
 
 
 def schedule_for(at: str = DEFAULT_TIME, root: Path = REPO_ROOT) -> Schedule:

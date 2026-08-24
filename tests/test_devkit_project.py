@@ -8,6 +8,7 @@ script exists to prevent.
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 from support import (
@@ -368,6 +369,12 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # in the menu -- and the task pins `--project devkit` and asks the one question
         # worth asking instead.
         "preview",
+        # Born scoped, and the third of the no-project-dimension kind -- but for a
+        # sharper reason than `reclaim`'s: repeating a release is not merely a no-op on
+        # runs 2..N, it is a failure. The second run would find the tag it just pushed
+        # and refuse, so a two-checkout pick would report a red task for a release that
+        # actually succeeded. Scoped, the task pins `--project devkit`.
+        "release",
     }
 
 
@@ -488,8 +495,6 @@ def test_picker_registration_updates_the_multi_test_picker_too():
                 {"id": "project", "options": ["alpha"]},
                 {"id": "daemonProject", "options": ["alpha"]},
                 {"id": "worktreeProject", "options": ["alpha"]},
-                {"id": "sweepScope", "options": ["alpha"]},
-                {"id": "upgradeScope", "options": ["alpha"]},
                 {"id": "mergeCheckout", "options": ["alpha"]}
             ]
         }
@@ -549,8 +554,6 @@ def test_registering_against_the_real_workspace_file():
     for picker_id in (
         "daemonProject",
         "worktreeProject",
-        "sweepScope",
-        "upgradeScope",
         "mergeCheckout",
     ):
         assert _input_options(inputs[picker_id])[-2:] == ["probe", "probe-b"]
@@ -566,7 +569,7 @@ workspace_tasks = devkit_project.workspace_tasks
 
 @pytest.fixture
 def canonical():
-    return devkit_jsonc_loads(devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8"))
+    return devkit_project.canonical_tasks()
 
 
 def test_the_canonical_block_exists_and_parses(canonical):
@@ -578,14 +581,200 @@ def test_no_drift_against_itself(canonical):
     assert tasks_drift(canonical, canonical) == []
 
 
-def test_task_adoption_instructions_require_a_preflight_check():
-    """Without the first check, adoption absorbs unrelated live-workspace drift."""
+def test_the_rule_sends_an_editor_to_the_canonical_copy_first():
+    """The rule must name `workspace.jsonc` as the thing to edit before it names a render.
+
+    The old ordering assertion guarded a preflight `--check-tasks` before an adopt,
+    which was the best available advice while the LIVE file was the source. It is the
+    wrong shape now: the point is not to sequence two commands but to send the edit to
+    the copy that has a branch. A rule that mentioned rendering first would read as
+    "publish, then edit", which is the failure again.
+    """
     rule = (REPO_ROOT / ".claude" / "rules" / "vscode-tasks.md").read_text(encoding="utf-8")
     section = rule[rule.index("## Changing a task") :]
-    assert section.index("--check-tasks") < section.index("--adopt-tasks")
-    assert devkit_project.CANONICAL_HEADER.index(
-        "--check-tasks"
-    ) < devkit_project.CANONICAL_HEADER.index("--adopt-tasks")
+    assert section.index("workspace.jsonc") < section.index("--render-workspace")
+    assert "Never hand-edit the live file" in section
+
+    header = devkit_project.canonical_text()[:4000]
+    assert "--render-workspace" in header, "the canonical copy must say how it is published"
+    assert header.index("--check-workspace") < header.index("--adopt-workspace")
+
+
+# --- the whole file: drift, render, adopt ------------------------------------
+
+
+@pytest.fixture
+def workspace_pair(tmp_path, monkeypatch):
+    """A canonical copy and a live file, both writable, wired into the module.
+
+    The real pair cannot be used: rendering WRITES the live workspace file, which every
+    VS Code window on this machine is reading.
+    """
+    canonical = tmp_path / "workspace.jsonc"
+    canonical.write_text(devkit_project.canonical_text(), encoding="utf-8", newline="\n")
+    live = tmp_path / "alex-projects.code-workspace"
+    live.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
+    return canonical, live
+
+
+def _run(live, *flags):
+    return devkit_project.main(["--workspace", str(live), *flags])
+
+
+def test_drift_names_a_checkout_that_appeared_only_in_the_live_file():
+    """`folders` is the registry every sweep reads, so "differs" is not an answer."""
+    canonical = {"folders": [{"path": "carameli"}]}
+    live = {"folders": [{"path": "carameli"}, {"path": "sports_betting"}]}
+    problems = devkit_project.workspace_drift(live, canonical)
+    assert "folder in the workspace but not in devkit: sports_betting" in problems
+
+
+def test_drift_names_a_checkout_missing_from_the_live_file():
+    canonical = {"folders": [{"path": "carameli"}, {"path": "devkit"}]}
+    problems = devkit_project.workspace_drift({"folders": [{"path": "carameli"}]}, canonical)
+    assert "folder missing from the workspace: devkit" in problems
+
+
+def test_drift_reports_a_changed_setting():
+    problems = devkit_project.workspace_drift(
+        {"settings": {"powershell.cwd": "devkit"}}, {"settings": {"powershell.cwd": "carameli"}}
+    )
+    assert "settings differs" in problems
+
+
+def test_drift_ignores_layout_and_comments(workspace_pair):
+    """VS Code rewrites this file itself; a byte comparison would cry wolf every time."""
+    canonical, live = workspace_pair
+    payload = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))
+    live.write_text(json.dumps(payload, indent=8), encoding="utf-8", newline="\n")
+    assert _run(live, "--check-workspace") == 0
+
+
+def test_render_publishes_the_canonical_copy(workspace_pair):
+    canonical, live = workspace_pair
+    live.write_text(
+        live.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli"', '"x": "y"'),
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert _run(live, "--render-workspace", "--force") == 0
+    assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
+    assert _run(live, "--check-workspace") == 0
+
+
+def test_render_refuses_to_overwrite_an_unadopted_live_edit(workspace_pair):
+    """The whole point of the stamp. A render that silently discarded a hand edit would
+    be the old last-writer-wins failure wearing devkit's name."""
+    canonical, live = workspace_pair
+    canonical.write_text(
+        canonical.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli"', '"a": "b"'),
+        encoding="utf-8",
+        newline="\n",
+    )
+    live.write_text(
+        live.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli"', '"c": "d"'),
+        encoding="utf-8",
+        newline="\n",
+    )
+    before = live.read_text(encoding="utf-8")
+    assert _run(live, "--render-workspace") == 1
+    assert live.read_text(encoding="utf-8") == before, "the live edit was overwritten anyway"
+
+
+def test_render_proceeds_once_the_live_edit_is_adopted(workspace_pair):
+    canonical, live = workspace_pair
+    live.write_text(
+        live.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli"', '"c": "d"'),
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert _run(live, "--adopt-workspace") == 0
+    assert devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"] == {"c": "d"}
+    assert _run(live, "--check-workspace") == 0
+
+
+def test_render_stamps_so_the_next_one_is_not_mistaken_for_a_hand_edit(workspace_pair):
+    """A rendered file differs from what was there before; without the stamp the very
+    next render would read its own output as somebody else's edit."""
+    canonical, live = workspace_pair
+    canonical.write_text(
+        canonical.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli"', '"a": "b"'),
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert _run(live, "--render-workspace", "--force") == 0
+    canonical.write_text(
+        canonical.read_text(encoding="utf-8").replace('"a": "b"', '"e": "f"'),
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert _run(live, "--render-workspace") == 0, "the second render refused its own output"
+    assert devkit_jsonc_loads(live.read_text(encoding="utf-8"))["settings"] == {"e": "f"}
+
+
+def test_a_current_live_file_is_stamped_without_being_rewritten(workspace_pair):
+    """Adoption leaves the pair equal but unstamped, which must not arm the refusal."""
+    _canonical, live = workspace_pair
+    assert devkit_project.read_stamp(live) is None
+    assert _run(live, "--render-workspace") == 0
+    assert devkit_project.read_stamp(live) == devkit_project.semantic_digest(
+        live.read_text(encoding="utf-8")
+    )
+
+
+def _add_a_folder(canonical):
+    """One unambiguous difference, in the key the drift report names rather than diffs."""
+    payload = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))
+    payload["folders"] = [*payload.get("folders", []), {"path": "invented"}]
+    canonical.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
+
+
+def test_publish_workspace_reports_which_of_the_three_things_it_did(workspace_pair):
+    """The CLI and the session-start hook publish through this one function, so the
+    verdict has to be readable rather than inferred from an exit code. It is the whole
+    reason the render logic left `main()`: a second answer to "is it safe to overwrite
+    the file every window on this machine reads" is the last thing this should grow."""
+    canonical, live = workspace_pair
+    assert devkit_project.publish_workspace(live) == (devkit_project.RENDER_CURRENT, [])
+
+    _add_a_folder(canonical)
+    outcome, problems = devkit_project.publish_workspace(live)
+    assert outcome == devkit_project.RENDER_PUBLISHED and problems
+    assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
+
+
+def test_publish_workspace_refuses_a_live_file_it_did_not_stamp(workspace_pair):
+    """The refusal belongs here and not in each caller -- the hook publishes unattended,
+    so a caller that forgot the check would discard a hand edit with nobody watching."""
+    canonical, live = workspace_pair
+    devkit_project.stamp_path(live).unlink(missing_ok=True)
+    _add_a_folder(canonical)
+    before = live.read_text(encoding="utf-8")
+
+    outcome, problems = devkit_project.publish_workspace(live)
+
+    assert outcome == devkit_project.RENDER_REFUSED and problems
+    assert live.read_text(encoding="utf-8") == before
+    assert devkit_project.publish_workspace(live, force=True)[0] == devkit_project.RENDER_PUBLISHED
+
+
+def test_a_written_stamp_reads_back_and_a_missing_one_is_not_an_error(tmp_path):
+    """`write_stamp`/`read_stamp` are what make a render refusable, so the round trip is
+    pinned directly rather than only through `--render-workspace`. A live file devkit
+    has never written has no stamp, and that has to read as "unknown", not as a crash --
+    it is the state every machine is in before the first render."""
+    live = tmp_path / devkit_project.DEFAULT_WORKSPACE.name
+    assert devkit_project.read_stamp(live) is None
+    devkit_project.write_stamp(live, "cafef00d")
+    assert devkit_project.read_stamp(live) == "cafef00d"
+
+
+def test_the_stamp_sits_beside_the_live_file_not_under_devkit_logs(tmp_path):
+    """An ephemeral box has its own empty `logs/`; a stamp there would make every box's
+    first render believe the live file had been hand-edited."""
+    live = tmp_path / devkit_project.DEFAULT_WORKSPACE.name
+    assert devkit_project.stamp_path(live).parent == live.parent
 
 
 def test_drift_reports_a_missing_task(canonical):
@@ -706,13 +895,40 @@ def test_every_workspace_scoped_task_writes_a_failure_artifact(canonical):
     for task in canonical["tasks"]:
         args = [str(a) for a in task.get("args", ())]
         label = task["label"]
-        if any("devkit_project.py" in a for a in args):
-            continue  # wrapped by the dispatcher
+        if args and args[0].endswith("devkit_project.py"):
+            continue  # a dispatch: wrapped inside plan_command, where the checkout is known
         if any(reason in label for reason in UNLOGGED_TASKS):
             continue
         if not any("log-wrap.py" in a for a in args):
             missing.append(label)
     assert not missing, f"tasks with no failure artifact: {missing}"
+
+
+def test_every_workspace_file_command_is_reachable_from_a_task(canonical):
+    """The three directions between the live file and `workspace.jsonc` are one click.
+
+    A flag nobody can click is how the old arrangement stayed broken: `--check-tasks`
+    existed for years, was correct, and was never wired to anything -- so the only
+    thing that ever ran it was a test that CI skips. Reachability is the difference
+    between a gate and a documented intention.
+    """
+    spelled = {arg for task in canonical["tasks"] for arg in map(str, task.get("args", ()))}
+    for flag in ("--check-workspace", "--render-workspace", "--adopt-workspace"):
+        assert flag in spelled, f"{flag} is reachable only by typing it"
+
+
+def test_the_workspace_file_tasks_are_not_dispatches(canonical):
+    """There is exactly one workspace file, so there is no checkout to pick -- and a
+    task that named the `project` picker would ask a question with no bearing on what
+    it does. They call the script directly, which is why they carry their own
+    `log-wrap.py` (see the artifact test above)."""
+    for task in canonical["tasks"]:
+        if not task["label"].startswith("Workspace: "):
+            continue
+        args = [str(a) for a in task.get("args", ())]
+        assert not args[0].endswith("devkit_project.py"), task["label"]
+        assert "${input:project}" not in args, task["label"]
+        assert "scripts/log-wrap.py" in args, task["label"]
 
 
 def test_the_unlogged_exceptions_are_all_real_tasks(canonical):
@@ -760,6 +976,117 @@ def test_no_two_tasks_share_an_icon_and_colour(canonical):
             clashes.append(f"{seen[key]} and {task['label']} both use {key[0]}/{key[1]}")
         seen[key] = task["label"]
     assert not clashes, "; ".join(clashes)
+
+
+# The settings every task carries, and what each one is for. A task is a one-click
+# action with no review step, so what makes the set navigable is that they all behave
+# the same way — and the way drift arrives is a new task written by copying whichever
+# neighbour happened to be nearest.
+#
+# `panel: "new"` is the one with a history. The VS Code default, `shared`, puts every
+# task in one terminal, so starting any task erases what the last one printed, with no
+# warning and nothing to scroll back to; `dedicated` is half a fix, separating task from
+# task while still overwriting the previous run of the *same* task, which is the pair a
+# reader most often wants side by side. The `logs/` artifacts do not cover the gap —
+# `log-wrap.py` empties a task's log when it passes, so a successful run exists only in
+# its terminal. Terminals accumulate instead, and that is the accepted trade.
+TASK_CONTRACT = {
+    "type": "process",  # VS Code watches the process, so the exit-code icon is real
+    "presentation.panel": "new",  # one run, one terminal; nothing is overwritten
+    "presentation.close": False,  # the terminal stays open for review
+    "presentation.reveal": "always",  # a task you clicked shows you what it did
+}
+
+# Tasks that deliberately finish without a toast, for the same reason `UNLOGGED_TASKS`
+# exists: a toast reports that something you were not watching has ended, and these
+# either end instantly or hand you a window that is itself the notification.
+UNTOASTED_TASKS = {
+    "Agents: Open Tabs (External Terminal)": "the tabs it opens are the notification",
+    "Agents: Resume Recent Sessions": "same — reopens sessions in tabs, then exits",
+    "Agents: Import Limited Claude Sessions": "same — opens imported sessions in tabs",
+    "Ports: Show Checkout Allocations": "prints a table and exits; you are already looking",
+}
+
+# Deviations, each with the reason it is one. A new task does not belong here: this is
+# for the handful whose *output is not in their terminal at all*.
+CONTRACT_EXCEPTIONS = {
+    ("Agent: Sync Codex Context", "presentation.reveal"): (
+        "silent: a context sync that prints nothing worth stealing focus for"
+    ),
+    ("Agents: Open Tabs (External Terminal)", "presentation.reveal"): (
+        "silent: the tabs it opens are the output; its own terminal holds one line"
+    ),
+    ("Agents: Open Tabs (External Terminal)", "presentation.close"): (
+        "closes: same — nothing is left in this terminal to review"
+    ),
+}
+
+
+def _setting(task: dict, dotted: str):
+    value = task
+    for key in dotted.split("."):
+        value = value.get(key, {}) if isinstance(value, dict) else {}
+    return value if value != {} else None
+
+
+def test_every_task_matches_the_presentation_contract(canonical):
+    """One table for the whole task block, so a new task cannot pick up half of it.
+
+    Before this test the block had drifted exactly the way it drifts: 33 tasks pinned
+    `close: false` and 8 left it to the default, and `panel` was `shared` on most and
+    `dedicated` on five — a distinction nobody had decided, arrived at by each task being
+    copied from a different neighbour.
+    """
+    wrong = []
+    for task in canonical["tasks"]:
+        for dotted, expected in TASK_CONTRACT.items():
+            if (task["label"], dotted) in CONTRACT_EXCEPTIONS:
+                continue
+            actual = _setting(task, dotted)
+            if actual != expected:
+                wrong.append(f"{task['label']}: {dotted} is {actual!r}, want {expected!r}")
+    assert not wrong, "\n".join(wrong)
+
+
+def test_every_contract_exception_names_a_real_task_and_still_deviates(canonical):
+    """The same ratchet `UNLOGGED_TASKS` and the scope exclusions carry.
+
+    An exemption outlives what it exempted twice over: the label is renamed and it
+    matches nothing, or the task is brought back into line and the entry now licenses a
+    future deviation nobody argued for.
+    """
+    tasks = {task["label"]: task for task in canonical["tasks"]}
+    for (label, dotted), reason in CONTRACT_EXCEPTIONS.items():
+        assert reason, f"{label}/{dotted} is exempt with no reason"
+        assert label in tasks, f"{label} names no task"
+        assert _setting(tasks[label], dotted) != TASK_CONTRACT[dotted], (
+            f"{label} now matches the contract on {dotted}; drop its exception"
+        )
+
+
+def test_every_direct_task_toasts_when_it_finishes(canonical):
+    """`notify-wrap.py` outermost on every task that is not a dispatch.
+
+    The dispatched ones get it from `plan_command`; these are written by hand and are
+    where it goes missing. Outermost matters: the toast needs only an exit code, so it
+    wraps `log-wrap.py`, which needs the output.
+    """
+    missing = []
+    for task in canonical["tasks"]:
+        args = [str(a) for a in task.get("args", ())]
+        if any("devkit_project.py" in a for a in args):
+            continue  # the dispatcher wraps it
+        if any(exempt in task["label"] for exempt in UNTOASTED_TASKS):
+            continue
+        if not args or "notify-wrap.py" not in args[0]:
+            missing.append(task["label"])
+    assert not missing, f"tasks that finish without a toast: {missing}"
+
+
+def test_the_untoasted_exceptions_are_all_real_tasks(canonical):
+    labels = {task["label"] for task in canonical["tasks"]}
+    for exempt in UNTOASTED_TASKS:
+        assert any(exempt in label for label in labels), f"{exempt} names no task"
 
 
 def test_a_scoped_task_offers_exactly_the_checkouts_its_action_allows(canonical):
@@ -823,27 +1150,26 @@ def test_the_live_smoke_task_names_the_only_checkout_that_can_run_it(canonical):
     assert checked, "no literal-checkout dispatch found — this test now guards nothing"
 
 
-# The pickers that choose a CHECKOUT for a workspace-scoped task, and who each one is
-# allowed to leave out. `register()` now extends these with the project registry; this
-# comparison is the backstop for hand edits and for intentional exclusions such as
-# devkit being the source rather than an upgrade target.
+# `SCOPE_PICKERS` and `test_every_scope_picker_can_aim_at_every_checkout` lived here.
+# They gated a class with no members left: a picker that chooses WHICH CHECKOUTS a
+# workspace-scoped batch task should act on. `sweepScope` went first, `upgradeScope`
+# with the change that added this comment -- both for the same reason, which is worth
+# keeping rather than the check that guarded them. A release is one upstream revision,
+# so adopting it in a subset of consumers is not an operation anyone wants (see
+# `upgrade-project.upgrade_one` -- a consumer already current costs a fetch, so `--all`
+# is both cheaper to reason about and cheaper to run than the question was). The list
+# of options such a picker needs is a second copy of the project registry, and every
+# copy of it has drifted at least once.
 #
-# An exclusion needs its reason written here. That is the same bargain
-# `tests/test_dispatch_coherence.py` strikes for an unvendored dispatch target: leaving a
-# checkout out stays possible, but as a decision someone recorded rather than a list
-# nobody updated.
-SCOPE_PICKERS: dict[str, dict[str, str]] = {
-    "sweepScope": {},
-    "upgradeScope": {
-        "devkit": (
-            "is the source a release is pulled FROM, not a consumer of it; "
-            "upgrade-project.py refuses it by name"
-        ),
-    },
-}
-
-# Option values that mean "every checkout" rather than naming one.
-SCOPE_ALL = {"--all"}
+# So: a batch task that acts on the workspace takes `--all`, and a task that acts on
+# ONE checkout uses `project`, which `register()` maintains. What the ratchet actually
+# guaranteed is not lost with it -- `test_picker_registration_updates_the_multi_test_
+# picker_too` covers the registration side, and the tail of
+# `test_project_scope_inputs_are_real_multi_picks` still requires `daemonProject` and
+# `worktreeProject` to reach every checkout `project` knows. Only the *scope* dimension
+# is gone. Reintroduce a scope picker and this is the check it needs back: the failure
+# it was written for is a newly generated project that every generic task can reach and
+# no batch task can.
 
 
 def _input_options(spec: dict) -> list:
@@ -860,31 +1186,6 @@ def _picker_values(spec: dict) -> set[str]:
     }
 
 
-def _scope_names(spec: dict) -> set[str]:
-    """The checkouts a multi-select scope picker can aim at."""
-    return _picker_values(spec) - SCOPE_ALL
-
-
-def test_every_scope_picker_can_aim_at_every_checkout(canonical):
-    """A workspace-scoped task must be able to name any checkout the registry knows.
-
-    Measured against the `project` picker rather than the live `folders` list on purpose:
-    `project` is the one list `register()` maintains, it ships inside this repo, and this
-    assertion therefore runs in CI. The consequence is the useful one — generating a
-    project now fails devkit's own suite until these lists are extended too, instead of
-    being discovered the first time someone tries to sweep just that repo.
-    """
-    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
-    registry = _picker_values(inputs["project"])
-    for picker_id, exclusions in SCOPE_PICKERS.items():
-        expected = registry - set(exclusions)
-        offered = _scope_names(inputs[picker_id])
-        assert offered == expected, (
-            f"{picker_id} cannot aim at {sorted(expected - offered)} "
-            f"and offers unknown {sorted(offered - expected)}"
-        )
-
-
 def test_project_scope_inputs_are_real_multi_picks(canonical):
     """Every batch scope uses checkboxes and requires at least one selection."""
     inputs = {spec["id"]: spec for spec in canonical["inputs"]}
@@ -893,8 +1194,6 @@ def test_project_scope_inputs_are_real_multi_picks(canonical):
         "carameliCheckout",
         "ibkrCheckout",
         "dbCheckout",
-        "sweepScope",
-        "upgradeScope",
     ):
         spec = inputs[picker_id]
         assert spec["type"] == "command"
@@ -902,27 +1201,12 @@ def test_project_scope_inputs_are_real_multi_picks(canonical):
         assert spec["args"]["optionGroups"][0]["minCount"] == 1
 
     # The single-pick ones are single-pick on purpose -- one Docker daemon, one repo a
-    # box is cut from -- but they still have to reach every checkout the registry knows,
-    # which is the half that was silently skipped before `SCOPE_PICKERS` existed.
+    # box is cut from -- but they still have to reach every checkout the registry knows.
+    # That is the half a per-picker option list keeps losing: `project` gains the new
+    # project because `register()` writes it, and a hand-maintained sibling does not.
     for picker_id in ("daemonProject", "worktreeProject"):
         assert inputs[picker_id]["type"] == "pickString"
         assert _picker_values(inputs[picker_id]) == _picker_values(inputs["project"])
-
-
-def test_every_scope_exclusion_names_a_real_checkout_and_a_reason(canonical):
-    """A stale exclusion is the failure mode above, wearing the test's own uniform.
-
-    Left unchecked, a checkout removed from the workspace would keep its entry here and
-    keep one picker exempt from the rule for a project that no longer exists — and the
-    next real omission could be papered over by adding a line to `SCOPE_PICKERS` rather
-    than to the picker.
-    """
-    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
-    registry = _picker_values(inputs["project"])
-    for picker_id, exclusions in SCOPE_PICKERS.items():
-        for name, reason in exclusions.items():
-            assert name in registry, f"{picker_id} excludes {name}, which is not a checkout"
-            assert reason.strip(), f"{picker_id} excludes {name} with no reason given"
 
 
 # The one task that reaches a checkout `NOT_PROJECTS` excludes. Named once, because two
@@ -932,10 +1216,11 @@ MERGE_TASK = "Git: Merge Origin Default into Current Branch"
 
 
 def test_the_merge_picker_reaches_the_reference_checkouts_too(canonical):
-    """The exception to `SCOPE_PICKERS`, and the reason it is not simply listed there.
+    """The one picker whose option list is not the registry, and why.
 
-    Every other picker offers the registry minus its documented exclusions. This one
-    offers the registry PLUS `NOT_PROJECTS`: merging origin's default branch in is pure
+    Every other picker offers the registry, or the registry minus a documented
+    exclusion. This one offers the registry PLUS `NOT_PROJECTS`: merging origin's
+    default branch in is pure
     git — no `.devkit.toml`, no virtualenv, no vendored tier — so it is the one action a
     reference checkout can take, and the checkout it was written for is one.
 
@@ -969,24 +1254,78 @@ def test_every_input_referenced_is_defined(canonical):
     assert defined <= referenced, f"unused inputs: {defined - referenced}"
 
 
-def test_every_mutating_sweep_task_offers_the_scope_picker(canonical):
-    """`--only` restricts every sweep mode, so every step that changes a checkout has
-    to let you aim it at one.
+# A release tag as this file could come to carry one: `v1.2.3` in a label, a detail or a
+# task argument. Comments are already gone by the time `canonical` is parsed, so a
+# version written as *reasoning* is out of scope and stays allowed -- what this catches
+# is a version presented to whoever is deciding, or handed to a script.
+_RELEASE_TAG = re.compile(r"\bv\d+\.\d+\.\d+\b")
 
-    Step 3 shipped without the picker and so was all-or-nothing: when a sync failed in
-    one repo, the only way to retry it was the CLI, and the fallback for a one-click
-    workflow being unable to express "just this one" is re-running it over every
-    checkout. The read-only modes are deliberately exempt — an unscoped sweep IS the
-    report, and a scoped one answers a question nobody asked of it.
+
+def _strings(node, path: str = "") -> list[tuple[str, str]]:
+    """Every string in the task block, paired with where it sits."""
+    if isinstance(node, dict):
+        return [
+            pair
+            for key, value in node.items()
+            for pair in _strings(value, f"{path}.{key}" if path else str(key))
+        ]
+    if isinstance(node, list):
+        return [
+            pair for index, item in enumerate(node) for pair in _strings(item, f"{path}[{index}]")
+        ]
+    return [(path, node)] if isinstance(node, str) else []
+
+
+def test_no_task_or_picker_states_a_release_version(canonical):
+    """Nothing renders this file from the tag list, so a version written here cannot move.
+
+    `releaseLevel` carried a worked example per option -- the newest tag on the day they
+    were written, and what each bump would make of it -- which is genuinely the most
+    useful thing a three-option dropdown could say and was wrong from the next release
+    onwards, offering "the usual" patch as a version that had already shipped. A stale
+    number in a quick-pick is worse than no number: it is read as the answer, by someone
+    who clicked the task precisely because they did not want to work the version out.
+
+    The remedy is not a fresher literal, which is the same defect with a later date on
+    it. It is that the run says it -- `release-pipeline.py` resolves the version from
+    `git tag` and prints it as its first line, and the task is a dry run by default, so
+    the concrete number is one click away and cannot be stale. Anything else here that
+    needs a version has the same option: read it, do not write it down.
+    """
+    pinned = [
+        f"{where} = {text!r}" for where, text in _strings(canonical) if _RELEASE_TAG.search(text)
+    ]
+    assert not pinned, (
+        "the workspace task block states a release version:\n  "
+        + "\n  ".join(sorted(pinned))
+        + "\nNothing bumps it when a release is cut. Let the script that reads `git tag` "
+        "print it instead, or describe the move without the number."
+    )
+
+
+def test_the_sweep_has_no_workspace_task(canonical):
+    """`sweep.py` is a CLI and an import, and nothing in the quick-pick calls it.
+
+    There were five: two read-only reports and the three shipping steps. None had ever
+    been run on the machine they were written for -- `log-wrap` writes `logs/<slug>.log`
+    per run and nothing prunes that directory, and no `ship-*.log` was ever created --
+    because every reader the sweep has is automatic now. `workspace-status.py` runs it
+    at session start and prints the stranded-work line; `worktree.py reconcile` runs
+    `--sync` every fifteen minutes and reports what it refused to park. A one-click
+    duplicate of either is a second owner for one tier's lifecycle, and `--ship`'s
+    sweep-shaped commit message lost to `/ship` per repo once an agent was a box away.
+
+    So this is not "we removed some tasks" -- it is that the quick-pick is the wrong
+    surface for this tool entirely. Re-adding one means naming which automatic reader
+    it replaces, not just deleting this test. Nothing stops anyone typing
+    `python scripts/sweep.py --branch --yes`, and the modes are covered by
+    `tests/test_sweep.py` either way.
     """
     for task in canonical["tasks"]:
         args = [str(a) for a in task.get("args", [])]
-        if not any("sweep.py" in a for a in args):
-            continue
-        if not {"--branch", "--ship", "--sync"} & set(args):
-            continue
-        assert any("${input:sweepScope}" in arg for arg in args), (
-            f"{task['label']} changes checkouts but cannot be scoped to one"
+        assert not any("sweep.py" in a for a in args), (
+            f"{task['label']} puts sweep.py back in the quick-pick; the readers that "
+            "replaced it are workspace-status.py and worktree.py reconcile"
         )
 
 
@@ -1006,12 +1345,21 @@ def test_some_task_still_routes_through_the_dispatcher(canonical):
 
 
 @needs_live_workspace
-def test_the_live_workspace_matches_the_canonical_block(canonical):
-    """The check `--check-tasks` runs, as a test so devkit's own gate catches drift."""
+def test_the_live_workspace_matches_the_canonical_copy():
+    """The check `--check-workspace` runs, as a test so devkit's own gate catches drift.
+
+    Whole-file now, not the task block alone. `folders` had no gate of any kind before:
+    `new-project.py` registers a checkout by editing the live file, so a generated
+    project existed only in the copy with no history — and that list is what every
+    sweep, status line and `--project` picker resolves against.
+    """
     text = LIVE_WORKSPACE.read_text(encoding="utf-8")
-    problems = tasks_drift(workspace_tasks(text), canonical)
-    assert not problems, "run `python scripts/devkit_project.py --adopt-tasks`: " + "; ".join(
-        problems
+    problems = devkit_project.workspace_drift(
+        devkit_jsonc_loads(text), devkit_jsonc_loads(devkit_project.canonical_text())
+    )
+    assert not problems, (
+        "run `python scripts/devkit_project.py --render-workspace` (or --adopt-workspace "
+        "to keep the live edits): " + "; ".join(problems)
     )
 
 
@@ -1053,3 +1401,168 @@ def test_every_devkit_owned_script_exists():
         if a.owner == devkit_project.DEVKIT and not (REPO_ROOT / a.script).is_file()
     ]
     assert not missing, f"devkit-owned scripts missing: {missing}"
+
+
+# --- shipping what an autofix action rewrote ---------------------------------
+#
+# The reversion check for this block: revert `autofix_ship_plan` to "always ship" and
+# three of these fail; revert it to "never ship" and the first one does.
+
+WORKSPACE_FILE = "/ws/projects.code-workspace"
+
+
+def plan(before=(), after=("app/main.py",), branch="master", lint_ok=True):
+    return devkit_project.autofix_ship_plan(
+        "alpha",
+        branch,
+        before,
+        after,
+        lint_ok=lint_ok,
+        workspace=Path(WORKSPACE_FILE),
+    )
+
+
+def test_a_green_autofix_run_on_a_clean_home_branch_is_branched_then_shipped():
+    outcome = plan()
+    assert not outcome.note
+    assert [step[-4:] for step in outcome.commands] == [
+        ("--branch", "--slug", "lint-autofix", "--yes"),
+        ("--only", "alpha", "--ship", "--yes"),
+    ]
+    for step in outcome.commands:
+        assert step[1].endswith("sweep.py")
+        assert "--only" in step and "alpha" in step
+        assert str(Path(WORKSPACE_FILE)) in step
+
+
+def test_the_branch_step_comes_first():
+    """Order is load-bearing: `--ship` refuses a home branch, by its own design."""
+    branch, ship = plan().commands
+    assert "--branch" in branch and "--ship" not in branch
+    assert "--ship" in ship and "--branch" not in ship
+
+
+def test_a_run_that_rewrote_nothing_does_nothing_and_says_nothing():
+    assert plan(before=("app/main.py",), after=("app/main.py",)) == devkit_project.AutofixOutcome()
+
+
+def test_pre_existing_changes_are_not_swept_into_a_mechanical_pr():
+    outcome = plan(before=("app/main.py",), after=("app/main.py", "app/util.py"))
+    assert not outcome.commands
+    assert "/ship" in outcome.note
+
+
+def test_fixes_on_a_task_branch_ride_the_task_they_belong_to():
+    outcome = plan(branch="agent/comic-book-ui-0819")
+    assert not outcome.commands
+    assert "agent/comic-book-ui-0819" in outcome.note
+
+
+def test_a_run_that_still_reported_findings_is_not_shipped():
+    outcome = plan(lint_ok=False)
+    assert not outcome.commands
+    assert "red gate" in outcome.note
+
+
+def test_a_detached_head_is_declined_rather_than_branched():
+    outcome = plan(branch="")
+    assert not outcome.commands
+    assert "detached" in outcome.note
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"before": ("app/main.py",), "after": ("app/main.py", "app/util.py")},
+        {"branch": "agent/x-0819"},
+        {"lint_ok": False},
+        {"branch": ""},
+    ],
+)
+def test_every_decline_names_the_churn_it_is_declining(kwargs):
+    """A silent decline is how this churn went unnoticed in the first place."""
+    outcome = plan(**kwargs)
+    assert not outcome.commands
+    assert "autofix rewrote" in outcome.note
+
+
+def test_only_the_lint_actions_rewrite_the_tree():
+    """A new autofix action must be a deliberate entry here, not an inherited default."""
+    assert {name for name, a in ACTIONS.items() if a.autofix} == {"lint", "lint-changed"}
+
+
+def autofix_run(tmp_path, monkeypatch, argv, dirty=("app/main.py",), returncode=0):
+    """Dispatch a lint action over one checkout, recording every command it runs."""
+    workspace = tmp_path / "projects.code-workspace"
+    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    scripts = tmp_path / "alpha" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "lint-all.py").write_text("")
+
+    calls = []
+    snapshots = iter([("master", ()), ("master", dirty)])
+    monkeypatch.setattr(devkit_project, "autofix_state", lambda _directory: next(snapshots))
+
+    def fake_run(command, *, cwd, check):
+        calls.append(command)
+        return type("Result", (), {"returncode": returncode if len(calls) == 1 else 0})()
+
+    monkeypatch.setattr(devkit_project.subprocess, "run", fake_run)
+    code = devkit_project.main(["--workspace", str(workspace), *argv])
+    return code, calls
+
+
+def test_the_lint_task_hands_its_churn_to_the_sweep(tmp_path, monkeypatch):
+    _, calls = autofix_run(tmp_path, monkeypatch, ["--project", "alpha", "lint"])
+    assert len(calls) == 3, calls
+    assert [c[-1] for c in calls[1:]] == ["--yes", "--yes"]
+    assert all(c[1].endswith("sweep.py") for c in calls[1:])
+
+
+def test_no_ship_fixes_leaves_the_churn_in_the_working_tree(tmp_path, monkeypatch):
+    _, calls = autofix_run(tmp_path, monkeypatch, ["--no-ship-fixes", "--project", "alpha", "lint"])
+    assert len(calls) == 1, "the dispatcher shipped despite --no-ship-fixes"
+
+
+def test_a_non_autofix_action_is_never_snapshotted(tmp_path, monkeypatch):
+    """`autofix_state` shells out to git; a `test` run must not pay for that."""
+    workspace = tmp_path / "projects.code-workspace"
+    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    scripts = tmp_path / "alpha" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "run-tests.py").write_text("")
+
+    def boom(_directory):
+        raise AssertionError("a non-autofix action snapshotted the tree")
+
+    monkeypatch.setattr(devkit_project, "autofix_state", boom)
+    monkeypatch.setattr(
+        devkit_project.subprocess,
+        "run",
+        lambda command, *, cwd, check: type("Result", (), {"returncode": 0})(),
+    )
+    assert devkit_project.main(["--workspace", str(workspace), "--project", "alpha", "test"]) == 0
+
+
+def test_a_failed_sweep_step_stops_the_chain_and_reports(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "projects.code-workspace"
+    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    scripts = tmp_path / "alpha" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "lint-all.py").write_text("")
+
+    snapshots = iter([("master", ()), ("master", ("app/main.py",))])
+    monkeypatch.setattr(devkit_project, "autofix_state", lambda _directory: next(snapshots))
+    calls = []
+
+    def fake_run(command, *, cwd, check):
+        calls.append(command)
+        # The lint run passes; the `--branch` step fails.
+        return type("Result", (), {"returncode": 0 if len(calls) == 1 else 3})()
+
+    monkeypatch.setattr(devkit_project.subprocess, "run", fake_run)
+    code = devkit_project.main(["--workspace", str(workspace), "--project", "alpha", "lint"])
+
+    assert code == 3
+    assert len(calls) == 2, "the --ship step ran after --branch failed"
+    assert "still in the working tree" in capsys.readouterr().err

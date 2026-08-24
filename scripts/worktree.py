@@ -1025,6 +1025,7 @@ def spawn_plan(
     today: _dt.date | None = None,
     provision: tuple[ProvisionStep, ...] = (),
     env_templates: Mapping[str, str] | None = None,
+    branch_prefix: str = tb.BRANCH_PREFIX,
 ) -> SpawnPlan:
     """Everything `new` will run, decided without touching git.
 
@@ -1039,8 +1040,13 @@ def spawn_plan(
     a remote-tracking ref makes `origin/<default>` the new branch's upstream, and a
     later bare `git push` then lands the task's commits straight on the default
     branch.
+
+    `branch_prefix` is how an unattended job says so in the ref itself
+    (`tb.AUTOMATION_PREFIX`). It reaches nothing but the branch name: `box_name` strips
+    whichever managed prefix it finds, so the box, its `COMPOSE_PROJECT_NAME` and its
+    lease are spelled identically whichever namespace cut it.
     """
-    branch = tb.branch_name(tb.slugify(slug), existing_branches, today)
+    branch = tb.branch_name(tb.slugify(slug), existing_branches, today, prefix=branch_prefix)
     name = box_name(project, branch)
     path = box_path(workspace_root, name)
     slot = next_lease_slot(registry, boxes) if registry is not None else -1
@@ -2474,6 +2480,7 @@ def plan_new(
     session: str = "",
     fetch: bool = True,
     quiet: bool = False,
+    branch_prefix: str = tb.BRANCH_PREFIX,
 ) -> SpawnPlan:
     """Resolve everything `new` needs from disk, then hand off to the pure planner."""
     root = workspace.parent
@@ -2503,6 +2510,7 @@ def plan_new(
         fetch=fetch,
         provision=plan_provision(source, quiet=quiet),
         env_templates=plan_env_templates(source),
+        branch_prefix=branch_prefix,
     )
 
 
@@ -3349,10 +3357,27 @@ def sync_checkouts(
     finished with rather than one it is halfway through.
 
     Nothing here can strand work. `sweep.sync_plan` acts only on `SYNCABLE` verdicts --
-    a checkout holding uncommitted changes, unpushed commits or an open PR is refused
-    and reported, never parked -- and its steps are `merge --ff-only` and `branch -d`,
-    both of which refuse rather than destroy. This adds no new authority to the
-    scheduled run; it runs the same plan the workspace task has always printed.
+    a checkout holding uncommitted changes or unpushed commits is refused and reported,
+    never parked -- and its steps are `merge --ff-only` and `branch -d`, both of which
+    refuse rather than destroy. This adds no new authority to the scheduled run; it runs
+    the same plan `sweep.py --sync` has always printed.
+
+    An **open PR** is not on that refusal list, and the difference is worth stating
+    because the sentence here used to say it was. A checkout that is clean and fully
+    pushed with a PR open is `sweep.PARKED`: the work is on the remote and under review,
+    so parking the checkout home costs it its position and nothing else, and the branch
+    survives -- `sync_plan` scopes its `branch -d` to `SPENT`. Holding instead was the
+    older behaviour and it had no exit: the verdict was `needs-pr`, which is not
+    syncable and which nothing in the sweep ever resolves, so a checkout that reached it
+    stayed there and its home branch stopped advancing. That is the state this pass
+    exists to clear, so it is the one it must not step over.
+
+    That schedule is now the *only* caller. The workspace once carried a `Ship:
+    Sync Worktrees (step 3)` task that hand-cranked the same plan, and a one-click
+    duplicate of a job that already runs every fifteen minutes is a second owner
+    for one tier's lifecycle -- the thing the box/checkout split exists to avoid.
+    It was retired once this pass had been syncing every checkout unattended for
+    long enough to prove it; `sweep.py --sync` remains reachable on the CLI.
     """
     try:
         registry = workspace.read_text(encoding="utf-8")
@@ -3823,6 +3848,12 @@ def main(argv: list[str] | None = None) -> int:
     new.add_argument("project")
     new.add_argument("--slug", default="", help="topic for the branch name (default: the project)")
     new.add_argument("--session", default="", help="tag the lease with an agent session id")
+    new.add_argument(
+        "--auto",
+        action="store_true",
+        help=f"an unattended job cut this, not a session: name the branch {tb.AUTOMATION_PREFIX}... "
+        "so a UI-review menu can leave it out",
+    )
     install = new.add_mutually_exclusive_group()
     install.add_argument(
         "--provision",
@@ -4055,6 +4086,7 @@ def main(argv: list[str] | None = None) -> int:
                 slug=args.slug or args.project,
                 session=args.session,
                 fetch=args.fetch,
+                branch_prefix=tb.AUTOMATION_PREFIX if args.auto else tb.BRANCH_PREFIX,
             )
             notes: list[str] = []
             ok = True

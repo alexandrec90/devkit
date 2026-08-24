@@ -38,6 +38,7 @@ Pure helpers (`resolve_project`, `in_scope`, `plan_command`) are unit-tested in
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -77,6 +78,9 @@ class Action:
     # *with cwd set to the chosen checkout* — for work that is the same everywhere but
     # still has to happen inside a specific repo, like the git sync.
     owner: str = "project"
+    # Whether this action rewrites tracked files with fixes nobody authored. Those fixes
+    # strand on a home branch unless something ships them -- see `autofix_ship_plan`.
+    autofix: bool = False
     # Which checkouts this action applies to; empty means every one of them. Naming the
     # checkout (`("carameli",)`) is how a genuinely project-specific action lives here
     # instead of in that repo's `.vscode/tasks.json`. Names rather than a capability
@@ -127,8 +131,10 @@ DB_PROJECTS = CARAMELI + IBKR
 ACTIONS: dict[str, Action] = {
     # --- implemented by each checkout ---
     "test": Action("scripts/run-tests.py", "Test: Run Suite"),
-    "lint": Action("scripts/lint-all.py", "Lint: Everything"),
-    "lint-changed": Action("scripts/lint-all.py", "Lint: Changed Files", ("--changed",)),
+    "lint": Action("scripts/lint-all.py", "Lint: Everything", autofix=True),
+    "lint-changed": Action(
+        "scripts/lint-all.py", "Lint: Changed Files", ("--changed",), autofix=True
+    ),
     "sync-codex": Action("scripts/sync-codex-context.py", "Agent: Sync Codex Context"),
     "sync-devkit": Action("scripts/sync-devkit.py", "Harness: Check Drift"),
     # --- implemented once, here ---
@@ -197,6 +203,19 @@ ACTIONS: dict[str, Action] = {
     # No picker, per the literal-over-single-option convention: the task pins
     # `--project devkit` and the only question asked is the one worth asking.
     "preview": Action("scripts/preview-task.py", "Preview: Open a UI Branch", projects=DEVKIT_ONLY),
+    # Cutting a devkit release. DEVKIT_ONLY because a release is devkit's own act and
+    # has no project dimension at all -- run per selected checkout it would try to tag
+    # this repo two or three times, and the second attempt would refuse a tag that now
+    # exists. The consumers appear at the END of the run, as `upgrade-project.py --all`,
+    # which is a different thing from the task being scoped to them.
+    #
+    # It is an ACTIONS entry rather than a hand-written task like `Devkit: Upgrade
+    # Projects` because it needs the wrapping more than that one does, not less: the run
+    # spans a PR gate and a workflow dispatch, so its useful output arrives minutes apart
+    # and the reader is not watching. `plan_command` gives it the notify toast and the
+    # `logs/` artifact for free, and the level picker rides through as a trailing
+    # argument the same way `db-revision`'s `-m` does.
+    "release": Action("scripts/release-pipeline.py", "Devkit: Cut Release", projects=DEVKIT_ONLY),
     # --- scoped to one repo's worktree pair ---
     #
     # These are the tasks that used to live in `carameli/.vscode/tasks.json` and
@@ -366,6 +385,118 @@ def plan_command(
     return logged
 
 
+# --- autofix that would otherwise strand ------------------------------------
+#
+# `lint-all.py` rewrites the tree before it reports -- `ruff check --fix
+# --unsafe-fixes`, `ruff format`, and in the projects that ship it a detect-secrets
+# baseline that auto-acknowledges its own new findings. Nobody authored those edits,
+# so nobody feels responsible for committing them, and the checkout they land in is
+# the static one parked on its home branch: exactly the write `worktree-guard.py`
+# routes into a box when an *agent* makes it. The lint task is the hole in that
+# guarantee. It writes the same files with no task branch underneath, and the churn
+# surfaces days later as a `needs-branch` verdict that reads as though a human left
+# it there.
+#
+# So the dispatcher finishes what the task started. `sweep.py` already takes stranded
+# work from a home branch to an open PR -- `--branch`, then `--ship` -- and the only
+# new judgement needed is whether that is the honest thing to do with what this run
+# left behind.
+AUTOFIX_SLUG = "lint-autofix"
+
+
+@dataclass(frozen=True)
+class AutofixOutcome:
+    """What to do with the files an autofix action rewrote: commands, or a reason not to.
+
+    Never both. A note is the mode's way of declining out loud -- the churn is real
+    either way, and a silent decline is how it goes unnoticed until the sweep finds it.
+    """
+
+    commands: tuple[tuple[str, ...], ...] = ()
+    note: str = ""
+
+
+def autofix_ship_plan(
+    project: str,
+    branch: str,
+    before: tuple[str, ...] | list[str],
+    after: tuple[str, ...] | list[str],
+    *,
+    lint_ok: bool,
+    workspace: Path,
+    devkit_root: Path = REPO_ROOT,
+    slug: str = AUTOFIX_SLUG,
+) -> AutofixOutcome:
+    """Whether to ship what an autofix run rewrote, given the tree before and after.
+
+    Pure: it decides from two `git status --porcelain` snapshots and a branch name,
+    so every refusal below is asserted without a repository on disk.
+
+    Ships only the case it can honestly attribute -- a checkout that was **clean**,
+    on a **home branch**, whose lint run came back **green**. Each of the other three
+    is a decline with a reason, and each reason is a different next action:
+
+    - **Dirty before the run.** The diff is now part autofix and part whatever was
+      already there, and nothing here read either. Sweeping both into a PR titled
+      after the sweep would bury someone's work under a mechanical subject; that work
+      deserves `/ship` and a real message.
+    - **On a task branch.** The fixes belong to the task in progress and travel with
+      its next commit. `worktree-guard.py` put agent work here precisely so this
+      needs no rescue.
+    - **Lint still failed.** The autofix pass fixed what it could and the report is
+      non-empty, so shipping now opens a PR whose gate is already red -- and pushes a
+      commit the project's own pre-commit hook would likely refuse first. The
+      remaining findings get fixed, then the whole diff ships together.
+    """
+    fixed = sorted(set(after) - set(before))
+    if not fixed:
+        return AutofixOutcome()
+    churn = f"autofix rewrote {len(fixed)} file(s) ({', '.join(fixed[:4])}"
+    churn += ", ...)" if len(fixed) > 4 else ")"
+    if not branch:
+        return AutofixOutcome(
+            note=f"{churn} on a detached HEAD -- check out a branch, then sweep.py --branch --yes"
+        )
+    if sweep.is_task_branch(branch):
+        return AutofixOutcome(
+            note=f"{churn} on the task branch {branch} -- they ship with the task, nothing to do"
+        )
+    if before:
+        return AutofixOutcome(
+            note=(
+                f"{churn} on top of {len(before)} change(s) that were already there -- "
+                f"not shipping a diff nothing has read. Review it, then /ship it"
+            )
+        )
+    if not lint_ok:
+        return AutofixOutcome(
+            note=(
+                f"{churn} but the run still reported findings -- fix those first, then the "
+                f"whole diff ships together (a PR opened now starts with a red gate)"
+            )
+        )
+    sweep_py = str(devkit_root / "scripts" / "sweep.py")
+    common = ("python", sweep_py, "--workspace", str(workspace), "--only", project)
+    return AutofixOutcome(
+        commands=(
+            (*common, "--branch", "--slug", slug, "--yes"),
+            (*common, "--ship", "--yes"),
+        )
+    )
+
+
+def autofix_state(directory: Path) -> tuple[str, tuple[str, ...]]:
+    """(branch, changed paths) for one checkout -- the snapshot the plan compares.
+
+    Through `sweep.git_for` so the dispatcher and the sweep read a checkout the same
+    way, including the no-console-window flag a scheduled run depends on.
+    """
+    git = sweep.git_for(directory)
+    head = git("branch", "--show-current")
+    branch = head.stdout.strip() if head.returncode == 0 else ""
+    return branch, sweep.parse_porcelain(git("status", "--porcelain").stdout or "")
+
+
 # --- registering a new project ----------------------------------------------
 #
 # The write side of the same registry. These edit the workspace file as TEXT rather
@@ -485,8 +616,6 @@ def insert_picker_option(text: str, name: str) -> str:
         "project",
         "daemonProject",
         "worktreeProject",
-        "sweepScope",
-        "upgradeScope",
         # Lists MORE than the registry -- the reference checkouts too -- so a new
         # project still has to be added to it, and this is the only place that can.
         "mergeCheckout",
@@ -537,31 +666,86 @@ def register(text: str, names: list[str]) -> str:
     return updated
 
 
-# --- drift between devkit and the live workspace ------------------------------
+# --- devkit owns the workspace file -------------------------------------------
 #
 # The workspace file is not inside any repo, so it cannot be vendored the way
-# `sync-devkit.py`'s MANIFEST files are. devkit keeps the canonical task block here
-# instead and compares the live file against it.
+# `sync-devkit.py`'s MANIFEST files are. devkit keeps the canonical copy here instead.
+#
+# **The direction used to run the other way**, and that is the failure this section
+# exists to stop repeating. The live file was the source and `workspace-tasks.jsonc`
+# was a mirror adopted from it, which made the authoritative copy of a 2,000-line file
+# the one with no branch, no history and no review. Three consequences, all of which
+# happened:
+#
+#   - Two sessions editing it raced, last writer winning silently, with no way to
+#     recover the loser's edit -- there was nothing to recover it *from*.
+#   - `--adopt-tasks` mirrored the WHOLE block, so one session's adopt swallowed
+#     whatever another session had left in the live file and carried it into an
+#     unrelated PR.
+#   - An agent's in-flight edit was live for every window on the machine the moment it
+#     was written. On 2026-08-21 the live file was found running the task block of PR
+#     #177, still open: 38 tasks reformatted and five deleted, in main's name.
+#
+# So the canonical copy is now the WHOLE file and the live one is rendered from it. An
+# agent edits `workspace.jsonc` on a task branch; git carries the conflict, where a
+# conflict is a visible thing with two sides rather than a silent overwrite.
 #
 # The comparison is SEMANTIC, not byte-for-byte. Vendored files are compared byte-wise
 # because they are copied verbatim and a stray reformat downstream shows up as drift
-# the consumer did not cause; this block is embedded in a larger hand-edited file, so
-# its indentation and comment wrapping are not meaningful and flagging them would
-# train everyone to ignore the check.
+# the consumer did not cause; this file is hand-edited *and* rewritten by VS Code
+# itself whenever a workspace setting is changed through its UI, so indentation and
+# key order are not meaningful and flagging them would train everyone to ignore it.
 
-CANONICAL_TASKS = REPO_ROOT / "workspace-tasks.jsonc"
+CANONICAL_WORKSPACE = REPO_ROOT / "workspace.jsonc"
 
-CANONICAL_HEADER = """// Canonical shared task block — devkit owns this; alex-projects.code-workspace
-// carries a copy under its "tasks" key. Check for pre-existing drift, edit the
-// workspace file, then adopt the intentional change here:
-//
-//     python scripts/devkit_project.py --check-tasks
-//     python scripts/devkit_project.py --adopt-tasks
-//
-// and verify with `--check-tasks`. The workspace file is not inside any repo, so it
-// cannot be vendored the way sync-devkit.py's MANIFEST files are; this pairing is the
-// drift check that replaces that. Comparison is semantic (parsed), not byte-for-byte.
-"""
+# Spelled once so every remedy line in this module names the same command. It is
+# printed, not run: the caller may be in a box, in devkit, or in neither.
+RENDER_HINT = "python scripts/devkit_project.py"
+
+# Compared whole. `tasks` is compared entry-by-entry instead (see `tasks_drift`),
+# because "the tasks block differs" on a 2,000-line object names nothing actionable.
+PLAIN_KEYS = ("folders", "extensions", "settings", "launch", "remoteAuthority")
+
+
+def stamp_path(workspace: Path) -> Path:
+    """Where the render stamp for `workspace` lives.
+
+    Beside the live file, NOT under devkit's `logs/`. The stamp describes a
+    machine-global file, and an ephemeral box has its own empty `logs/` -- putting it
+    there would make every box's first `--render-workspace` believe the live file had
+    been hand-edited, which is the one case it must not get wrong.
+    """
+    return workspace.with_name(".devkit-workspace-render.json")
+
+
+def semantic_digest(text: str) -> str:
+    """A digest of what a workspace file MEANS, ignoring layout and comments.
+
+    A byte digest would report a hand edit every time VS Code rewrote the file after a
+    settings change of its own -- an alarm nobody caused and nobody can act on.
+    """
+    payload = devkit_jsonc.loads(text)
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def read_stamp(workspace: Path) -> str | None:
+    """The digest devkit last rendered to `workspace`, or None if it never has."""
+    try:
+        recorded = json.loads(stamp_path(workspace).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = recorded.get("digest")
+    return value if isinstance(value, str) else None
+
+
+def write_stamp(workspace: Path, digest: str) -> None:
+    stamp_path(workspace).write_text(
+        json.dumps({"digest": digest, "workspace": workspace.name}, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def workspace_tasks(text: str) -> dict:
@@ -647,6 +831,101 @@ def tasks_drift(live: dict, canonical: dict) -> list[str]:
     return problems
 
 
+def canonical_text() -> str:
+    """devkit's copy of the workspace file, as source."""
+    return CANONICAL_WORKSPACE.read_text(encoding="utf-8")
+
+
+def canonical_tasks() -> dict:
+    """The canonical `tasks` block, parsed.
+
+    A named accessor rather than a second file. The task block used to live in its own
+    `workspace-tasks.jsonc`, and seven call sites read that path directly; folding it
+    into the whole-file canonical without this would have replaced one duplicate
+    source of truth with seven hard-coded ways to find the new one.
+    """
+    return workspace_tasks(canonical_text())
+
+
+def canonical_tasks_text() -> str:
+    """The canonical `tasks` block as SOURCE, comments intact."""
+    return extract_tasks_text(canonical_text())
+
+
+def _folder_names(block: object) -> set[str]:
+    """The checkouts a `folders` list names, by `path` (falling back to `name`)."""
+    if not isinstance(block, list):
+        return set()
+    names: set[str] = set()
+    for entry in block:
+        if isinstance(entry, dict):
+            names.add(str(entry.get("path") or entry.get("name") or "?"))
+    return names
+
+
+def workspace_drift(live: dict, canonical: dict) -> list[str]:
+    """Human-readable differences across the WHOLE workspace file; empty when it agrees.
+
+    `folders` is the one that used to have no gate at all: `new-project.py` registers a
+    project by editing the live file, so a newly generated checkout existed only in the
+    copy with no history -- and every sweep, every status line and every `--project`
+    picker reads that list.
+    """
+    problems: list[str] = []
+    for key in PLAIN_KEYS:
+        before, after = canonical.get(key), live.get(key)
+        if before == after:
+            continue
+        if key == "folders":
+            # Named, not diffed. "folders differs" on the project registry is the one
+            # place a reader most needs to know WHICH checkout appeared or vanished.
+            canon_names, live_names = _folder_names(before), _folder_names(after)
+            for gone in sorted(canon_names - live_names):
+                problems.append(f"folder missing from the workspace: {gone}")
+            for new in sorted(live_names - canon_names):
+                problems.append(f"folder in the workspace but not in devkit: {new}")
+            if canon_names == live_names:
+                problems.append("folders: same checkouts, different entries")
+        else:
+            problems.append(f"{key} differs")
+    live_tasks, canon_tasks = live.get("tasks"), canonical.get("tasks")
+    return problems + tasks_drift(
+        live_tasks if isinstance(live_tasks, dict) else {},
+        canon_tasks if isinstance(canon_tasks, dict) else {},
+    )
+
+
+RENDER_PUBLISHED = "published"
+RENDER_CURRENT = "current"
+RENDER_REFUSED = "refused"
+
+
+def publish_workspace(live: Path, *, force: bool = False) -> tuple[str, list[str]]:
+    """Render the canonical copy over `live`, unless that would discard someone's edit.
+
+    Extracted from `main()` so the session-start hook can publish on the same terms the
+    CLI does. That is the whole point of the extraction: a second implementation of
+    "is it safe to overwrite the file every window on the machine reads" is the last
+    thing this should grow.
+
+    Returns `(outcome, differences)`. `RENDER_CURRENT` stamps and writes nothing --
+    an unstamped-but-identical live file is the normal state right after an adopt, and
+    leaving it unstamped would make the NEXT render refuse for a hand edit that never
+    happened. `RENDER_REFUSED` writes nothing at all.
+    """
+    text = live.read_text(encoding="utf-8")
+    canonical = canonical_text()
+    problems = workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical))
+    if not problems:
+        write_stamp(live, semantic_digest(text))
+        return RENDER_CURRENT, []
+    if not force and semantic_digest(text) != read_stamp(live):
+        return RENDER_REFUSED, problems
+    live.write_text(canonical, encoding="utf-8", newline="\n")
+    write_stamp(live, semantic_digest(canonical))
+    return RENDER_PUBLISHED, problems
+
+
 def expected_actions(project: str) -> set[str]:
     """The PROJECT-owned actions `project` is on the hook for.
 
@@ -702,6 +981,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     parser.add_argument(
+        "--no-ship-fixes",
+        action="store_true",
+        help=(
+            "leave an autofix action's rewrites in the working tree instead of branching "
+            "and shipping them (see autofix_ship_plan) -- for inspecting the fixes locally"
+        ),
+    )
+    parser.add_argument(
         "--list", action="store_true", help="print the known projects, one per line"
     )
     parser.add_argument(
@@ -710,14 +997,29 @@ def main(argv: list[str] | None = None) -> int:
         help="print which projects implement which actions, then exit",
     )
     parser.add_argument(
+        "--check-workspace",
         "--check-tasks",
+        dest="check_workspace",
         action="store_true",
-        help="compare the workspace's task block against devkit's canonical copy",
+        help="report how the live workspace file differs from devkit's canonical copy",
     )
     parser.add_argument(
-        "--adopt-tasks",
+        "--render-workspace",
+        dest="render_workspace",
         action="store_true",
-        help="rewrite workspace-tasks.jsonc from the live workspace, adopting an intentional edit",
+        help="publish workspace.jsonc to the live workspace file (the normal direction)",
+    )
+    parser.add_argument(
+        "--adopt-workspace",
+        "--adopt-tasks",
+        dest="adopt_workspace",
+        action="store_true",
+        help="record a live hand edit back into workspace.jsonc, for committing on a branch",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="with --render-workspace: overwrite live edits devkit did not write",
     )
     parser.add_argument("action", nargs="?", default="", choices=["", *sorted(ACTIONS)])
     parser.add_argument("extra", nargs=argparse.REMAINDER, help="extra args for the script")
@@ -745,31 +1047,56 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(projects))
         return 0
 
-    if args.adopt_tasks:
-        # Written directly rather than printed for redirection: the block contains
+    if args.adopt_workspace:
+        # Written directly rather than printed for redirection: the file carries
         # en-dashes and arrows, and a redirected stdout on Windows is cp1252.
-        try:
-            body = CANONICAL_HEADER + extract_tasks_text(text) + "\n"
-        except RegistryEditError as exc:
-            print(f"devkit_project: {exc}", file=sys.stderr)
-            return 2
-        CANONICAL_TASKS.write_text(body, encoding="utf-8", newline="\n")
-        print(f"adopted {args.workspace.name}'s task block into {CANONICAL_TASKS.name}")
+        CANONICAL_WORKSPACE.write_text(text, encoding="utf-8", newline="\n")
+        write_stamp(args.workspace, semantic_digest(text))
+        print(f"adopted {args.workspace.name} into {CANONICAL_WORKSPACE.name}")
+        print("commit it on a task branch -- that is what gives the edit a reviewer")
         return 0
 
-    if args.check_tasks:
-        if not CANONICAL_TASKS.is_file():
-            print(f"devkit_project: no canonical block at {CANONICAL_TASKS}", file=sys.stderr)
+    if args.render_workspace or args.check_workspace:
+        if not CANONICAL_WORKSPACE.is_file():
+            print(f"devkit_project: no canonical copy at {CANONICAL_WORKSPACE}", file=sys.stderr)
             return 2
-        canonical = devkit_jsonc.loads(CANONICAL_TASKS.read_text(encoding="utf-8"))
-        problems = tasks_drift(workspace_tasks(text), canonical)
-        if not problems:
-            print(f"{args.workspace.name}: task block matches devkit")
+        problems = workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical_text()))
+
+        if args.check_workspace:
+            if not problems:
+                print(f"{args.workspace.name}: matches {CANONICAL_WORKSPACE.name}")
+                return 0
+            print(f"{args.workspace.name} has drifted from {CANONICAL_WORKSPACE.name}:")
+            for problem in problems:
+                print(f"  {problem}")
+            print(f"  -> keep the live edits:  {RENDER_HINT} --adopt-workspace")
+            print(f"  -> publish the canonical: {RENDER_HINT} --render-workspace")
+            return 1
+
+        rendered, problems = publish_workspace(args.workspace, force=args.force)
+        if rendered == RENDER_CURRENT:
+            print(f"{args.workspace.name}: already current")
             return 0
-        print(f"{args.workspace.name} has drifted from {CANONICAL_TASKS.name}:")
+
+        if rendered == RENDER_REFUSED:
+            print(
+                f"devkit_project: {args.workspace.name} carries edits devkit did not"
+                " write -- refusing to overwrite them:",
+                file=sys.stderr,
+            )
+            for problem in problems:
+                print(f"  {problem}", file=sys.stderr)
+            print(
+                f"  -> keep them:    {RENDER_HINT} --adopt-workspace\n"
+                f"  -> discard them: {RENDER_HINT} --render-workspace --force",
+                file=sys.stderr,
+            )
+            return 1
+
+        print(f"rendered {CANONICAL_WORKSPACE.name} -> {args.workspace.name}")
         for problem in problems:
             print(f"  {problem}")
-        return 1
+        return 0
 
     if args.check:
         for name, actions in conformance(projects, root).items():
@@ -798,12 +1125,44 @@ def main(argv: list[str] | None = None) -> int:
         print(f"devkit_project: {exc}", file=sys.stderr)
         return 2
 
+    action = ACTIONS[args.action]
+    ship_fixes = action.autofix and not args.no_ship_fixes
     result = 0
     for directory, command in planned:
         print(f"[{directory.name}] {' '.join(command)}\n", flush=True)
+        branch, before = autofix_state(directory) if ship_fixes else ("", ())
         returncode = subprocess.run(command, cwd=directory, check=False).returncode
         if returncode and not result:
             result = returncode
+        if not ship_fixes:
+            continue
+        _, after = autofix_state(directory)
+        outcome = autofix_ship_plan(
+            directory.name,
+            branch,
+            before,
+            after,
+            lint_ok=returncode == 0,
+            workspace=args.workspace,
+        )
+        if outcome.note:
+            print(f"\n[{directory.name}] {outcome.note}", flush=True)
+        for step in outcome.commands:
+            print(f"\n[{directory.name}] {' '.join(step)}\n", flush=True)
+            code = subprocess.run(step, cwd=root, check=False).returncode
+            if code:
+                # Stop at the first failure rather than shipping from a branch that was
+                # never cut: the second command would then read the *home* branch and
+                # sweep.ship_plan would refuse it, reporting a confusing second error
+                # for the same cause.
+                print(
+                    f"[{directory.name}] shipping the autofix churn failed (exit {code}) -- "
+                    f"the fixes are still in the working tree",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                result = result or code
+                break
     return result
 
 

@@ -1,7 +1,7 @@
 ---
-description: Where VS Code tasks live, how a task is defined and dispatched, and the one-way adoption flow that records them
+description: Where VS Code tasks live, how a task is defined and dispatched, and how devkit's canonical copy is rendered to the live workspace file
 paths:
-  - workspace-tasks.jsonc
+  - workspace.jsonc
   - scripts/devkit_project.py
   - scripts/git-merge-default.py
   - scripts/vanillaland-e2e.py
@@ -31,6 +31,26 @@ way is not blocked from hoisting — write the seam. `scripts/backtest-task.py` 
 ibkr_trader exists for exactly that reason: its two tasks invoked a console-script
 executable directly, which the dispatcher cannot call.
 
+## A task that rewrites the tree ships what it wrote
+
+The lint actions do not only report: `lint-all.py` runs `ruff check --fix`, `ruff format`
+and — where a project ships it — a detect-secrets baseline that acknowledges its own new
+findings. Those writes land in the static checkout, on its home branch, which is the one
+write `worktree-guard.py` would have routed into a box had an agent made it. Nobody
+authored them, so nobody committed them, and they surfaced days later as a `needs-branch`
+verdict that read like abandoned human work.
+
+So an `Action` marked `autofix=True` is followed by `sweep.py --branch` and `--ship` for
+that checkout, and `autofix_ship_plan` decides whether that is honest. It ships one case
+only — clean tree, home branch, green run — and declines the rest out loud; its docstring
+owns each reason. `--no-ship-fixes` is the escape hatch for inspecting fixes locally.
+
+Two consequences worth knowing before adding an action. **Marking one `autofix` is a
+claim that its writes belong in a PR of their own**, so a task that edits the tree as its
+*purpose* (a migration, a devkit `--pull`) is not one of these — that diff wants a real
+commit message. And the plan is pure, so a new decline is a test in
+`tests/test_devkit_project.py`, not a manual trial against a live checkout.
+
 ## The tasks that must not be a dispatch
 
 Two of them, for the same reason twice. The dispatcher subtracts `NOT_PROJECTS` because
@@ -48,34 +68,98 @@ registry instead, and neither moves the dispatcher's contract:
 
 Both docstrings carry the rest.
 
-## Changing a task: check the live file, edit it, then adopt
+## Changing a task: edit devkit's copy, on a branch, then render
 
-`workspace-tasks.jsonc` is devkit's copy of the block, and the workspace file — which
-lives outside every repo and so cannot be vendored — is the one VS Code actually runs.
-**Check for existing drift before editing**, so adoption cannot mistake stale or unrelated
-workspace changes for part of yours. Resolve that drift or preserve its reported list,
-then edit the workspace's `.code-workspace` file and record the intentional result:
+`workspace.jsonc` is devkit's canonical copy of the **whole** workspace file, and the
+live `.code-workspace` — which lives outside every repo and so cannot be vendored — is
+what VS Code actually runs. **Edit the canonical one.** It is the only copy with a
+branch, a diff and a reviewer:
 
 ```bash
-python scripts/devkit_project.py --check-tasks   # preflight: run before editing
-python scripts/devkit_project.py --adopt-tasks   # live file -> workspace-tasks.jsonc
-python scripts/devkit_project.py --check-tasks   # verify they agree
+python scripts/devkit_project.py --check-workspace    # do they agree?
+# ...edit workspace.jsonc on a task branch, ship it, let the PR merge...
+python scripts/devkit_project.py --render-workspace   # workspace.jsonc -> the live file
 ```
 
-**One-way, with no flag for the other direction.** Editing `workspace-tasks.jsonc`
-directly looks right — it is the file in the repo, the diff is clean, and the drift test
-even names `--adopt-tasks` as the remedy — and running that *deletes the edit*, because
-it regenerates the canonical copy from the live file. One test holds the pair together
-(`test_the_live_workspace_matches_the_canonical_block`) and it is
-`@needs_live_workspace`: skipped in CI, so drift is caught locally or not at all.
+**The last step runs itself.** `workspace_sync_line` in `scripts/workspace-status.py`
+publishes at session start, on exactly the terms `--render-workspace` does — it calls
+`publish_workspace`, the same function the CLI does, so there is one answer to "is it
+safe to overwrite the file every window on this machine reads" rather than two. It adds
+two conditions of its own, in `publish_verdict`: devkit's checkout is on its default
+branch and its `workspace.jsonc` is committed. A task branch's copy is a proposal and an
+uncommitted one is not even that, so from a box, or mid-edit, the line reports the drift
+and publishes nothing. When it does publish it says so and asks for a window reload —
+VS Code reads the file once, at open.
+
+That is a wire-up rather than a convenience. The step it removes had already failed the
+way a remembered step does: three tasks merged, the checkout was synced, and the tasks
+were still not in anyone's window, because nothing on the machine was going to render
+them until someone typed the command.
+
+All three are one click as well — the *Workspace:* tasks, which are deliberately not
+dispatches: there is one workspace file, so there is no checkout to pick, and they carry
+their own `notify-wrap`/`log-wrap` because `plan_command` never sees them.
+
+**Never hand-edit the live file to make a change.** It has no branch dimension: one
+copy serves every window on the machine, so an in-flight edit is globally live before
+anyone reviews it, and two agents editing it race with last-writer-wins and nothing to
+recover the loser's edit *from*. That is not hypothetical — on 2026-08-21 the live file
+was found running PR #177's task block, still open, with five tasks deleted and 38
+reformatted, in `main`'s name. Editing `workspace.jsonc` on a branch instead puts the
+conflict in git, where a conflict has two visible sides.
+
+**The other direction still exists, for the edits that are not yours to route.** VS
+Code rewrites the file itself when a workspace setting is changed through its UI, and a
+hand edit in the editor is legitimate. `--adopt-workspace` records the live file back
+into `workspace.jsonc` for committing on a branch, and `--render-workspace` *refuses*
+rather than overwriting an unadopted edit — it renders only when the live file is
+byte-for-meaning what devkit last wrote, recorded in `.devkit-workspace-render.json`
+beside it. `--force` overrides that, and it discards.
+
+The pairing is held by `test_the_live_workspace_matches_the_canonical_copy`, which is
+`@needs_live_workspace`: skipped in CI, so drift is caught locally or not at all. That
+is what the session-start publish exists to backstop — and why it reports rather than
+publishes whenever it is not certain, since the only alternative to a session start
+noticing is nothing noticing.
+
+**Red there is not evidence of drift.** The live file is rendered from a *merged*
+canonical copy, and the order above has you editing `workspace.jsonc` before that merge
+— so from a box on an open task branch the test reports your own unlanded edit, every
+time: an added task as `missing from the workspace`, a changed one as
+`definition differs`. Another branch's edit reads the same way once its PR lands and
+this box has not merged main yet. With several boxes open at once that is the normal
+state, not a defect. What the live file should match is `workspace.jsonc` **as it stands
+on `origin/main`** — `git show` that revision of it, and the difference against your own
+copy is what your branch adds.
+
+**And the remedy the failure names is the wrong direction here.** `--adopt-workspace`
+takes the *live* file — which is still main's render — over your canonical copy, so
+running it in a box to get green deletes the edit the branch exists for. Render only
+after the PR merges; a box never renders.
 
 ## Conventions for the tasks themselves
 
-- Use `"type": "process"` so VS Code monitors the process directly — that is what makes
-  the spinner stop and the exit-code icon appear reliably.
-- Set `"close": false` in `presentation` so the terminal stays open for review.
+- **The settings a task carries are a table in the tests, not a habit.**
+  `TASK_CONTRACT` in `tests/test_devkit_project.py` holds `type`, `presentation.panel`,
+  `presentation.close` and `presentation.reveal` with what each is for, and
+  `CONTRACT_EXCEPTIONS` holds the two deviations and why. Copy the nearest neighbour
+  when you add a task and the test tells you what you missed — which is the failure it
+  was written for: the block had 33 tasks pinning `close: false` and 8 leaving it to the
+  default, and a `panel` split between `shared` and `dedicated` that nobody had decided.
+  A run's terminal is the only place a *passing* run's output exists, because
+  `log-wrap.py` empties the log when the task passes, so `panel: "new"` is the one
+  setting there is no artifact to fall back on.
 - **Wrap with `notify-wrap.py`** for the completion toast; never call `notify.py` from
-  inside a script. Notifications are a task-layer concern only.
+  inside a script. Notifications are a task-layer concern only. A task that ends too
+  fast to notify about, or whose own window is the notification, goes in
+  `UNTOASTED_TASKS` with its reason.
+- **The toast is stdlib, and it must stay that way.** `notify.py` shells out to
+  *Windows PowerShell 5.1* — `pwsh` cannot load a WinRT type — because devkit's runtime
+  dependency list is empty by contract. It previously imported `win11toast`, which no
+  project has ever installed, behind a bare `except Exception: pass`; every call was a
+  silent no-op for the wrapper's whole life, and nothing was red anywhere. That is why
+  a failed toast now prints one line to stderr: it must never break the task, and it
+  must never again be invisible.
 - **And with `log-wrap.py`, inside it**, so the run's output survives the terminal as a
   log under `logs/` named for the task — emptied when the task passes, so it never
   describes a failure that is already fixed. The nesting is `notify-wrap → log-wrap →
@@ -90,6 +174,16 @@ it regenerates the canonical copy from the live file. One test holds the pair to
 - Label convention: `"Domain: Title Case Action"`, and **every task carries a `detail`**
   — that is the second line in the quick-pick, and the only place a one-click action can
   state its cost or blast radius.
+- **No label, detail or option states a version.** Nothing renders this file from the
+  tag list, so a number written into a quick-pick is a claim with no owner and no bump
+  will ever move it. `releaseLevel` carried a worked example per option — the newest tag
+  the day they were written, and what each level would make of it — which is the most
+  useful thing that dropdown could say and was wrong from the very next release, offering
+  "the usual" patch as a tag that had already shipped. Let the run say it instead: *Devkit:
+  Cut Release* is a dry run by default and `release-pipeline.py` resolves the version from
+  `git tag` and prints it first. `test_no_task_or_picker_states_a_release_version` is the
+  ratchet, and it reads the parsed block — a version in a **comment** is reasoning, not a
+  claim, and stays allowed.
 - **Every task carries an `icon`, and no two share the same id+colour pair.** With one
   consolidated list, colour is what makes it scannable; the `terminal.ansiBright*`
   variants mark the project-scoped tasks, so you can see before clicking that a task
@@ -123,11 +217,25 @@ it regenerates the canonical copy from the live file. One test holds the pair to
   `test_the_live_smoke_task_names_the_only_checkout_that_can_run_it` asserts the same
   agreement against `Action.projects` directly; a literal that outgrows its scope fails
   there rather than in a terminal.
-- **A new project has to reach more than the `project` picker.** `register()` extends the
-  `folders` list and that one picker; the workspace-scoped pickers — `sweepScope`,
-  `upgradeScope` — are hand-maintained and were silently skipped, so a newly generated
-  project could run every generic task while `--all` was the only way to sweep or upgrade
-  it. `SCOPE_PICKERS` in `tests/test_devkit_project.py` now requires each of them to
-  cover every checkout the `project` picker lists, and a deliberate omission (devkit is
-  not a target of a devkit upgrade) to carry its reason in writing. Pickers scoped by
-  `Action.projects` are a separate case and are gated separately.
+- **A batch task that acts on the workspace takes `--all`, not a scope picker.** There
+  used to be two of those — `sweepScope`, then `upgradeScope` — each a hand-maintained
+  second copy of the project registry, and each silently skipped when `register()` added
+  a project, so a newly generated project could run every generic task while `--all` was
+  the only way to sweep or upgrade it. Both are gone, and the reason they are not coming
+  back is in `tests/test_devkit_project.py` above `MERGE_TASK`: the question a scope
+  picker asks has no answer worth the copy. Only `register()`-maintained pickers remain
+  — `project`, `daemonProject`, `worktreeProject`, `mergeCheckout` — so a new project
+  reaches every task by being registered, which is the one thing that cannot be
+  forgotten. `insert_picker_option` names that list, and
+  `test_registering_against_the_real_workspace_file` holds it to the workspace file.
+  Pickers scoped by `Action.projects` are a separate case and are gated separately.
+
+- **A task meant to run twice at once says so with `runOptions.instanceLimit`.** The
+  default is **1**, and re-running a task that is already active offers to terminate it
+  instead — which is what the preview tasks did for months, so comparing two branches
+  side by side looked impossible from the outside while `worktree.py` underneath had
+  been concurrency-safe all along (a lease lock, a port slot and a
+  `COMPOSE_PROJECT_NAME` per box). `presentation.panel` is *not* this setting: `new`
+  gives each run its own terminal and still refuses the second run. Raising it also
+  gives that task's `log-wrap.py` artifact two writers, which is what `write_artifact`'s
+  `since` argument handles.

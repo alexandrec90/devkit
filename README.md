@@ -48,6 +48,7 @@ the same hook set the generator emits, against devkit's own scripts.
 | Work isolation | `scripts/worktree-guard.py` routes an edit that would land on a home branch into an ephemeral box |
 | Auto-lint on edit | `scripts/hooks/lint-fix.py` |
 | Pre-stop verification | `scripts/hooks/stop.py` → `scripts/lint-all.py`, `scripts/run-tests.py`, both test trees |
+| Tests must exist | `tests/test_test_contract.py` (a `test_<stem>.py` per script) and `scripts/hooks/untested_symbols.py` (every public callable named by a test, ratcheted against `.devkit-untested.txt`) |
 | Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log`, `logs/stop-verify.log` |
 | Scheduled-failure reporting | `.github/workflows/scheduled-failure-issue.yml` → `scripts/report-workflow-failure.py` opens one assigned issue when `Nightly` fails, and closes it when it passes |
 | VS Code tasks | the multi-root workspace file — devkit owns no `.vscode/tasks.json`, which is the rule it prescribes |
@@ -293,6 +294,7 @@ when the work leaves it:
 
 ```bash
 python scripts/worktree.py new carameli --slug voicemail --yes  # cut, lease, install
+python scripts/worktree.py new carameli --slug bump --auto --yes  # ... for a scheduled job
 python scripts/worktree.py list                                 # what exists, and its verdict
 python scripts/worktree.py reap --all --yes                     # everything already shipped
 python scripts/worktree.py claim <box> --session <id> --yes     # hand a box to another session
@@ -306,6 +308,15 @@ tracked files only, so it starts with no `.venv`. `reap` **refuses while the box
 holds unshipped work**, which is the difference that matters: the static tier's
 stranded work is found afterwards by `sweep.py`, and a box's cannot be stranded at all,
 because being stranded is what stops the cleanup.
+
+`new --auto` cuts the branch under `agent/auto/` instead of `agent/`, and is for a
+*scheduler* calling this rather than a session — the nightly upgrade sweep is the one
+caller today. It nests inside `agent/`, so `is_managed_task_branch` still says yes and
+shipping, sweeping, reaping and the worktree guard all behave exactly as before; what
+changes is that a reader can tell whose work it is, which is what keeps a job's branches
+out of the preview menu. The marker is a path segment rather than a word in the slug
+because `agent/auto-merge-label-0823` is a task somebody gave an agent, and no substring
+test can separate the two.
 
 `resume` is the way back in. `reconcile` destroys a box whose PR is still *open* when
 the disk is tight, on the grounds that the remote has every commit — a trade that is
@@ -397,7 +408,12 @@ the port it had before. Two VS Code tasks — *Preview: Open a UI Branch* and *P
 Restart Standing Previews* — are those two invocations, one click each.
 
 A checkout with no compose stack contributes no rows, which keeps devkit out of a menu it
-would publish nothing for.
+would publish nothing for. Neither does a branch, box or PR under `agent/auto/`: that
+namespace is what an unattended job cuts, and the nightly upgrade sweep alone would put
+one row per consuming project in front of every reviewer. The menu answers "what has an
+agent session changed that I could look at", so a scheduler's work is discovery it
+declines — but a *standing* preview is never filtered out, because somebody asked for
+that one by name.
 
 ### The scheduled pass
 
@@ -426,8 +442,12 @@ the task was installed with `--merge`, which squash-merges a green box PR only w
 carries the `automerge` label — applying the label is the review decision, and
 `upgrade-project.py` labels its PRs at creation (`--merge-label ""` at install time
 drops the gate and merges anything green). The checkout half destroys nothing: it
-refuses any checkout holding uncommitted work, unpushed commits or an open PR, names
-it, and moves on.
+refuses any checkout holding uncommitted work or unpushed commits, names it, and moves
+on. A checkout that is clean and fully pushed with a PR **open** is parked home anyway —
+the work is on the remote, and the branch it leaves behind is not deleted. Holding those
+too was the older rule, and it meant a checkout that landed on `needs-pr` had no way
+out of it: nothing in the sweep confirms a PR, so the verdict never cleared and the home
+branch never moved again.
 
 The run is windowless, so its only record is `logs/reconcile.log`, overwritten per
 pass and written on success too — a log that appears only on failure cannot be told
@@ -453,6 +473,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | Job | Installer | Cadence | Its record |
 | --- | --- | --- | --- |
 | `devkit-worktree-reconcile` | `scripts/install-reconcile-task.py` | every 15 min | `logs/reconcile.log` |
+| `devkit-release` | `scripts/install-release-schedule.py` | daily 02:00 | `logs/scheduled-devkit-release.log` |
 | `devkit-upgrade-projects` | `scripts/install-upgrade-schedule.py` | daily 03:00 | `logs/upgrade.log` |
 | `devkit-docker-stop-idle` | `scripts/install-docker-stop-idle.py` | daily 03:30 | `logs/scheduled-docker-stop-idle.log` |
 | `devkit-docker-prune` | `scripts/install-docker-prune.py` | daily 04:00 | `logs/scheduled-docker-prune.log` |
@@ -529,7 +550,7 @@ python scripts/new-project.py sports_betting --preset data --yes
 ```
 
 There is also a VS Code task, **"Project: New from devkit"**, in the shared workspace
-block (`workspace-tasks.jsonc` here, the multi-root workspace file live). A user-level
+block (`workspace.jsonc` here, the multi-root workspace file live). A user-level
 copy in `%APPDATA%/Code/User/tasks.json` is callable from any window, which matters
 because a window opened on the project it creates sees no task list at all.
 
@@ -704,6 +725,8 @@ once without a denial, wrapper retry, or repeated call. Normal test runs exclude
 `python -m pytest tests/test_codex_hooks_live.py -m "codex_live and paid" -s`. The smokes
 default to `gpt-5.6-luna` with low reasoning, no reasoning summary, and low verbosity;
 `CODEX_LIVE_HOOK_MODEL` and `CODEX_LIVE_HOOK_REASONING_EFFORT` override those defaults.
+Those settings are written only to the smoke's throwaway `CODEX_HOME`; human sessions
+continue to take their model and reasoning effort from `~/.codex/config.toml`.
 Keep these tests manual, nightly, or release-only. The converter and adapter tests are the
 zero-model-cost gate for every hook change.
 

@@ -30,13 +30,17 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import subprocess
 import sys
 import time as _time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import devkit_jsonc
+import devkit_project
 import schedule_health
 import sweep
+import task_branch
 import worktree
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +85,13 @@ def stranded_line(results: list[sweep.Result]) -> str:
     Names the checkouts rather than counting them: "3 checkouts need action" makes
     you go run something else to find out which, and at the top of a session the
     whole point is to not send you on an errand.
+
+    This line and `worktree.py reconcile`'s checkout pass are now the *only* readers
+    the static tier has. The workspace used to carry `Ship: Sweep Workspace` and `Ship:
+    Check Workspace` for the same answer on demand; neither was ever run, because a
+    report you have to remember to ask for loses to one printed at the top of every
+    session. So a checkout missing from the workspace file's `folders` is not merely
+    unsweepable -- nothing anywhere will mention its stranded work.
     """
     actionable = [r for r in results if r.verdict in sweep.ACTIONABLE]
     if not actionable:
@@ -459,6 +470,93 @@ def events_line(source: Path = SOURCE_ROOT, now: float = 0.0, window_days: float
     )
 
 
+def publish_verdict(branch: str, default: str, canonical_dirty: bool) -> str:
+    """Why devkit's copy may NOT be published from this checkout; "" when it may.
+
+    Pure, so the two conditions that make an automatic render dishonest are testable
+    without a git tree. Both are about *which* copy is about to become every window's:
+    a task branch's `workspace.jsonc` is a proposal, and an uncommitted one is not even
+    that. The third condition -- the live file carrying an edit devkit never wrote --
+    is not checked here because `publish_workspace` already refuses it, and a second
+    implementation of that decision is exactly what the extraction avoided.
+    """
+    if branch != default:
+        return f"devkit is on {branch}, not {default}"
+    if canonical_dirty:
+        return f"{devkit_project.CANONICAL_WORKSPACE.name} has uncommitted changes"
+    return ""
+
+
+def workspace_sync_line(workspace: Path) -> str:
+    """Publish devkit's canonical copy to the live workspace file, and say what changed.
+
+    Reporting the drift was not enough, and the way it failed is worth keeping: a PR
+    adding three tasks merged, the checkout was synced, and the tasks still were not
+    there -- because a render is a step someone has to remember, and the whole point of
+    putting the file under devkit was to stop that being true. So a session start
+    publishes it, on the same terms `--render-workspace` does.
+
+    That is safe only because it cannot overwrite anyone: `publish_workspace` refuses a
+    live file carrying an edit devkit did not write, and `publish_verdict` refuses a
+    canonical copy that is not what merged. Anything else is reported and left alone.
+
+    Never raises -- a session start is not the place to fail over a workspace file.
+    """
+    try:
+        if not devkit_project.CANONICAL_WORKSPACE.is_file() or not workspace.is_file():
+            return ""
+        problems = devkit_project.workspace_drift(
+            devkit_jsonc.loads(workspace.read_text(encoding="utf-8")),
+            devkit_jsonc.loads(devkit_project.canonical_text()),
+        )
+        if not problems:
+            return ""
+        blocked = publish_verdict(
+            _git("rev-parse", "--abbrev-ref", "HEAD"),
+            task_branch.detect_default_branch(_git_run),
+            bool(_git("status", "--porcelain", "--", devkit_project.CANONICAL_WORKSPACE.name)),
+        )
+        if blocked:
+            return (
+                f"{workspace.name}: {len(problems)} difference(s) from devkit's copy, "
+                f"not published ({blocked}) -- "
+                "run `python devkit/scripts/devkit_project.py --check-workspace`"
+            )
+        outcome, published = devkit_project.publish_workspace(workspace)
+        if outcome == devkit_project.RENDER_REFUSED:
+            return (
+                f"{workspace.name}: {len(problems)} difference(s), and the live file "
+                "carries edits devkit never wrote -- `--adopt-workspace` keeps them, "
+                "`--render-workspace --force` discards them"
+            )
+        if outcome != devkit_project.RENDER_PUBLISHED:
+            return ""
+        return (
+            f"{workspace.name}: published {len(published)} change(s) from devkit -- "
+            "reload the window (File > Reopen Workspace) to pick up new tasks"
+        )
+    except Exception:
+        # Never the reason a session start fails. A malformed or missing canonical copy
+        # is a real problem, but `--check-workspace` is where it should be reported.
+        return ""
+
+
+def _git_run(*args: str) -> subprocess.CompletedProcess[str]:
+    """git in devkit's own checkout, capturing stdout. The shape `task_branch` injects."""
+    return subprocess.run(
+        ["git", "-C", str(REPO_ROOT), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _git(*args: str) -> str:
+    """`_git_run`'s stdout, stripped; "" on any failure."""
+    result = _git_run(*args)
+    return (result.stdout or "").strip() if result.returncode == 0 else ""
+
+
 def render(
     results: list[sweep.Result],
     behind: dict[str, str],
@@ -471,6 +569,7 @@ def render(
     scheduler: str = "",
     schedule: list[str] | None = None,
     events: str = "",
+    workspace_sync: str = "",
 ) -> str:
     """The whole message, or "" when there is nothing worth saying."""
     halves = (
@@ -487,6 +586,7 @@ def render(
         guard,
         retired,
         events,
+        workspace_sync,
     )
     lines = [line for line in halves if line]
     if not lines:
@@ -586,6 +686,7 @@ def main(argv: list[str] | None = None) -> int:
             scheduler,
             schedule,
             events_line(),
+            workspace_sync_line(workspace),
         )
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)

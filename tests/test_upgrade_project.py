@@ -94,7 +94,7 @@ def test_an_argparse_failure_still_writes_the_artifact():
 
 
 def test_the_slug_is_what_the_box_tier_names_the_branch_from():
-    """`worktree.plan_new` turns it into `agent/devkit-upgrade-<tag>-<mmdd>`, so this
+    """`worktree.plan_new` turns it into `<AUTOMATION_PREFIX><slug>-<mmdd>`, so this
     file no longer builds the branch name itself -- one namer, not two that can
     disagree."""
     assert up.upgrade_slug("v0.9.1") == "devkit upgrade v0.9.1"
@@ -122,10 +122,36 @@ def test_the_branch_stem_is_built_from_the_box_tiers_own_namer():
     """Restating `agent/` or the slug rules here would give the stem a second author,
     and a rename in `task_branch` would stop matching without failing anything."""
     stem = up.upgrade_branch_stem("v0.10.2")
-    assert stem == f"{up.tb.BRANCH_PREFIX}{up.tb.slugify(up.upgrade_slug('v0.10.2'))}-"
+    assert stem == f"{up.tb.AUTOMATION_PREFIX}{up.tb.slugify(up.upgrade_slug('v0.10.2'))}-"
     # And it really is a prefix of what the box tier would cut, on any day.
-    cut = up.tb.branch_name(up.tb.slugify(up.upgrade_slug("v0.10.2")), set(), _dt.date(2026, 8, 20))
+    cut = up.tb.branch_name(
+        up.tb.slugify(up.upgrade_slug("v0.10.2")),
+        set(),
+        _dt.date(2026, 8, 20),
+        prefix=up.tb.AUTOMATION_PREFIX,
+    )
     assert cut.startswith(stem)
+
+
+def test_the_upgrade_branch_says_no_session_asked_for_it():
+    """This sweep cuts the same vendoring commit in every consumer, nightly, and a
+    reviewer opening `preview-task.py` was being offered all of them ahead of the change
+    they had asked to look at. The namespace is what that menu filters on, so it is a
+    contract here rather than a naming preference -- and it stays inside `agent/`, so
+    the branch still ships like any other."""
+    stem = up.upgrade_branch_stem("v0.11.2")
+    assert up.tb.is_automation_branch(stem)
+    assert up.tb.is_managed_task_branch(stem)
+
+
+def test_only_one_stem_is_ever_cut_however_many_are_searched_for():
+    """`upgrade_branch_stems` widens the *lookup* and must never widen the *naming* --
+    a run that cut the legacy stem back would undo the move on the next nightly."""
+    stems = up.upgrade_branch_stems("v0.11.2")
+    assert stems[0] == up.upgrade_branch_stem("v0.11.2")
+    assert any(not up.tb.is_automation_branch(stem) for stem in stems)
+    # `str.startswith` takes the tuple as-is; a list would raise at the call site.
+    assert isinstance(stems, tuple)
 
 
 def test_an_open_pr_for_this_release_is_found(tmp_path, monkeypatch):
@@ -135,7 +161,11 @@ def test_an_open_pr_for_this_release_is_found(tmp_path, monkeypatch):
     gh = gh_listing(
         [
             {"number": 173, "headRefName": "agent/baseline-drift-0819", "url": "u/173"},
-            {"number": 170, "headRefName": "agent/devkit-upgrade-v0-10-2-0819", "url": "u/170"},
+            {
+                "number": 170,
+                "headRefName": "agent/auto/devkit-upgrade-v0-10-2-0819",
+                "url": "u/170",
+            },
         ]
     )
     monkeypatch.setattr(up.sweep, "gh_for", lambda _p: gh)
@@ -143,11 +173,24 @@ def test_an_open_pr_for_this_release_is_found(tmp_path, monkeypatch):
     assert gh.calls[0][:4] == ("pr", "list", "--state", "open")
 
 
+def test_an_adoption_opened_before_the_namespace_move_is_still_found(tmp_path, monkeypatch):
+    """The one-run window this whole plural stem exists for. Moving the namespace renames
+    what the sweep *cuts*; it cannot rename a PR already open on the old spelling, and on
+    the first run after the move every in-flight adoption is on one. Match only the new
+    stem and the sweep opens a second PR against every consumer that was mid-adoption --
+    the exact failure `open_adoption_pr` was written to stop."""
+    gh = gh_listing(
+        [{"number": 170, "headRefName": "agent/devkit-upgrade-v0-10-2-0819", "url": "u/170"}]
+    )
+    monkeypatch.setattr(up.sweep, "gh_for", lambda _p: gh)
+    assert up.open_adoption_pr(tmp_path, "v0.10.2") == "#170 u/170"
+
+
 def test_a_same_day_rerun_of_the_same_release_is_still_a_duplicate(tmp_path, monkeypatch):
     """The second run of a day gets `-2` appended, which is exactly the shape that has
     to keep matching -- #175 was `...-0820-2`."""
     gh = gh_listing(
-        [{"number": 174, "headRefName": "agent/devkit-upgrade-v0-10-2-0820-2", "url": "u"}]
+        [{"number": 174, "headRefName": "agent/auto/devkit-upgrade-v0-10-2-0820-2", "url": "u"}]
     )
     monkeypatch.setattr(up.sweep, "gh_for", lambda _p: gh)
     assert up.open_adoption_pr(tmp_path, "v0.10.2").startswith("#174")
@@ -155,9 +198,13 @@ def test_a_same_day_rerun_of_the_same_release_is_still_a_duplicate(tmp_path, mon
 
 def test_an_open_pr_for_a_different_release_is_not_this_one(tmp_path, monkeypatch):
     """v0.10.1's adoption sitting open must not suppress v0.10.2's -- that would be the
-    mirror-image bug, an upgrade that never happens."""
+    mirror-image bug, an upgrade that never happens. Neither spelling of it may match,
+    since the legacy stem widens what counts as a hit."""
     gh = gh_listing(
-        [{"number": 161, "headRefName": "agent/devkit-upgrade-v0-10-1-0817", "url": "u"}]
+        [
+            {"number": 161, "headRefName": "agent/auto/devkit-upgrade-v0-10-1-0817", "url": "u"},
+            {"number": 160, "headRefName": "agent/devkit-upgrade-v0-10-1-0816", "url": "u"},
+        ]
     )
     monkeypatch.setattr(up.sweep, "gh_for", lambda _p: gh)
     assert up.open_adoption_pr(tmp_path, "v0.10.2") == ""
@@ -414,6 +461,7 @@ class BoxRun:
         self.box = tmp_path / "boxes" / "data-lake--devkit-upgrade-0812"
         self.box.mkdir(parents=True)
         self.spawned: list[tuple[str, str]] = []
+        self.prefixes: list[str] = []
         self.pulled: list[Path] = []
         self.git = RecordingGit()
         plan = types.SimpleNamespace(
@@ -425,8 +473,9 @@ class BoxRun:
             ),
         )
 
-        def plan_new(project, _workspace, slug, **_kw):
+        def plan_new(project, _workspace, slug, **kw):
             self.spawned.append((project, slug))
+            self.prefixes.append(kw.get("branch_prefix", ""))
             return plan
 
         def apply_new(_plan, _workspace, **_kw):
@@ -472,6 +521,11 @@ def test_the_adoption_is_pulled_into_the_box_not_the_checkout(tmp_path, monkeypa
     run = BoxRun(tmp_path, monkeypatch)
     assert run.run(tmp_path).code == 0
     assert run.spawned == [("data-lake", up.upgrade_slug("v0.8.0"))]
+    # And it asks the box tier for the automation namespace, which is the only place
+    # `upgrade_branch_stem`'s promise is actually kept -- the stem is what finds a rerun's
+    # earlier PR, so a box cut under the session namespace would be a stem that matches
+    # nothing and a duplicate PR per run.
+    assert run.prefixes == [up.tb.AUTOMATION_PREFIX]
     assert run.pulled == [run.box]
 
 
@@ -822,7 +876,13 @@ def test_a_stale_project_whose_adoption_is_already_open_is_left_alone(
         up.sweep,
         "gh_for",
         lambda _p: gh_listing(
-            [{"number": 170, "headRefName": "agent/devkit-upgrade-v0-5-3-0819", "url": "u/170"}]
+            [
+                {
+                    "number": 170,
+                    "headRefName": "agent/auto/devkit-upgrade-v0-5-3-0819",
+                    "url": "u/170",
+                }
+            ]
         ),
     )
     (tmp_path / "carameli").mkdir()
@@ -1314,7 +1374,16 @@ def test_the_warning_names_the_files_rather_than_counting_them():
     for is in it."""
     line = up.unreleased_line(["scripts/hooks/enforce-capped-bash.py"], "v0.5.3")
     assert "scripts/hooks/enforce-capped-bash.py" in line
-    assert "v0.5.3" in line and "RELEASING.md" in line
+    assert "v0.5.3" in line
+
+
+def test_the_warning_names_a_remedy_that_can_be_run():
+    """It used to end "Cut a release first (RELEASING.md)" -- a pointer to a five-step
+    checklist, i.e. a session's work, quoted at someone who was only running an upgrade.
+    The remedy is one task now, so the line names the task and the command behind it."""
+    line = up.unreleased_line(["scripts/hooks/lint-fix.py"], "v0.5.3")
+    assert up.RELEASE_TASK in line
+    assert up.RELEASE_COMMAND in line
 
 
 def test_no_gap_says_nothing():
@@ -1334,5 +1403,52 @@ def test_the_gap_is_reported_once_for_the_run_before_any_box(tmp_path, capsys, m
         (tmp_path / name).mkdir()
         (tmp_path / name / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
     ws = workspace(tmp_path, "carameli", "ibkr_trader")
-    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
     assert capsys.readouterr().err.count("enforce-capped-bash.py") == 1
+
+
+def test_the_undelivered_release_reaches_the_artifact_and_the_exit_code(
+    tmp_path, capsys, monkeypatch
+):
+    """The gap this script exists to report was the one thing it reported *only* to
+    stderr -- and the nightly pass runs under `pythonw`, whose stderr goes nowhere. So
+    the machine's entire record of "every consumer is about to adopt a release missing
+    the fix you merged" was an exit code of 0 beside a log saying the run was clean.
+
+    Reverting either half fails here: drop the outcome and the artifact is empty, drop
+    the exit code and `schedule_health` never surfaces the log at session start."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    monkeypatch.setattr(up, "unreleased_vendored_changes", lambda *_a: ["scripts/hooks/hook.py"])
+    stamps_on_main(monkeypatch)
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli")
+
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
+    written = (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8")
+    assert "scripts/hooks/hook.py" in written
+    assert up.RELEASE_TASK in written
+
+
+def test_a_run_level_outcome_is_not_offered_as_a_retry_target():
+    """`(run)` and `(release)` belong to no checkout, and the header used to feed them
+    to the retry line anyway -- handing whoever found the artifact
+    `upgrade-project.py (run) --yes`, a command that exits 2 on its own argument,
+    offered as the way out of a failure."""
+    only_run_scoped = up.artifact_body(
+        "v0.7.0", False, [up.Outcome(up.RUN_SCOPED, 2, "upgrade: no workspace file at X")]
+    )
+    assert "no workspace file" in only_run_scoped
+    assert "# retry:" not in only_run_scoped
+
+    mixed = up.artifact_body(
+        "v0.7.0",
+        False,
+        [
+            up.Outcome(up.RELEASE_SCOPED, 1, "cut a release"),
+            up.Outcome("carameli", 2, "FAILED at `git commit`"),
+        ],
+    )
+    assert "# retry: python scripts/upgrade-project.py carameli --yes" in mixed
+    assert up.RELEASE_SCOPED not in mixed.split("# unresolved:")[0]

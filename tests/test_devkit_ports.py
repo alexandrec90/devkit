@@ -1,7 +1,7 @@
 """Tests for the host-port registry."""
 
 import pytest
-from support import REPO_ROOT, devkit_jsonc, devkit_ports, devkit_project
+from support import REPO_ROOT, devkit_ports, devkit_project
 
 Registry = devkit_ports.Registry
 RegistryError = devkit_ports.RegistryError
@@ -226,11 +226,11 @@ def test_no_two_shipped_checkouts_share_a_port():
 # library needs a port number. Registering them anyway would not be harmless — it would
 # consume slots and push the next real stack further along the registry.
 #
-# Same bargain as `SCOPE_PICKERS` in test_devkit_project.py: staying out stays possible,
-# as a decision someone recorded rather than a line nobody added. The failure this
-# prevents runs in both directions — a generated project whose slot reminder was ignored
-# is handed the same slot as the next one, and a slotless project "fixed" by assigning it
-# a slot silently renumbers nothing but wastes one forever.
+# Same bargain the picker exclusions in test_devkit_project.py strike: staying out
+# stays possible, as a decision someone recorded rather than a line nobody added. The
+# failure this prevents runs in both directions — a generated project whose slot
+# reminder was ignored is handed the same slot as the next one, and a slotless project
+# "fixed" by assigning it a slot silently renumbers nothing but wastes one forever.
 SLOTLESS: dict[str, str] = {
     "devkit": (
         "no Docker stack, no database, no frontend — .devkit.toml declares "
@@ -262,7 +262,7 @@ def test_every_checkout_either_holds_a_slot_or_says_why_not():
     hand, which is the part this test replaces.
     """
     registry = load(REPO_ROOT)
-    canonical = devkit_jsonc.loads(devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8"))
+    canonical = devkit_project.canonical_tasks()
     picker = next(i for i in canonical["inputs"] if i["id"] == "project")
     options = picker.get("options", picker["args"]["optionGroups"][0]["options"])
     known = {o if isinstance(o, str) else o["value"] for o in options}
@@ -279,7 +279,7 @@ def test_every_slotless_exclusion_names_a_real_checkout_and_a_reason():
     checkout exempt forever, and invite the next omission to be silenced by adding a
     line here rather than a slot there."""
     registry = load(REPO_ROOT)
-    canonical = devkit_jsonc.loads(devkit_project.CANONICAL_TASKS.read_text(encoding="utf-8"))
+    canonical = devkit_project.canonical_tasks()
     picker = next(i for i in canonical["inputs"] if i["id"] == "project")
     options = picker.get("options", picker["args"]["optionGroups"][0]["options"])
     known = {o if isinstance(o, str) else o["value"] for o in options}

@@ -646,3 +646,100 @@ def test_the_events_line_reaches_the_rendered_message():
     """A helper nothing calls is a check that reports nothing."""
     message = ws.render([], {}, "", events="1 harness event(s) need triage -- x")
     assert "[workspace] 1 harness event(s) need triage" in message
+
+
+# --- the live workspace file vs devkit's canonical copy -----------------------
+
+
+def _live(tmp_path, settings):
+    """A minimal live workspace file with `settings` as its only interesting key."""
+    path = tmp_path / "alex-projects.code-workspace"
+    path.write_text(
+        json.dumps({"folders": [{"path": "devkit"}], "settings": settings}),
+        encoding="utf-8",
+        newline="\n",
+    )
+    return path
+
+
+def _canonical(tmp_path, monkeypatch, folders, settings):
+    """devkit's copy, standing in for the real `workspace.jsonc`."""
+    canonical = tmp_path / "workspace.jsonc"
+    canonical.write_text(
+        json.dumps({"folders": folders, "settings": settings}), encoding="utf-8", newline="\n"
+    )
+    monkeypatch.setattr(ws.devkit_project, "CANONICAL_WORKSPACE", canonical)
+    return canonical
+
+
+def _checkout(monkeypatch, branch="main", dirty=""):
+    """The two git answers `publish_verdict` reads, without spawning git."""
+    monkeypatch.setattr(
+        ws, "_git", lambda *args: branch if args[0] == "rev-parse" else dirty, raising=True
+    )
+    monkeypatch.setattr(ws.task_branch, "detect_default_branch", lambda *_a, **_k: "main")
+
+
+def test_no_workspace_line_when_the_pair_agrees(tmp_path, monkeypatch):
+    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"a": "b"})
+    assert ws.workspace_sync_line(_live(tmp_path, {"a": "b"})) == ""
+
+
+def test_a_publishable_difference_is_published_not_merely_reported(tmp_path, monkeypatch):
+    """The failure this replaced: a merged PR, a synced checkout, and no new tasks."""
+    canonical = _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
+    _checkout(monkeypatch)
+    live = _live(tmp_path, {"a": "b"})
+    ws.devkit_project.write_stamp(live, ws.devkit_project.semantic_digest(live.read_text("utf-8")))
+
+    line = ws.workspace_sync_line(live)
+
+    assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
+    assert "published 1 change(s) from devkit" in line
+    assert "reload the window" in line
+
+
+def test_a_live_edit_devkit_never_wrote_is_refused_rather_than_overwritten(tmp_path, monkeypatch):
+    """No stamp means someone else's edit. `publish_workspace` owns that refusal."""
+    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
+    _checkout(monkeypatch)
+    live = _live(tmp_path, {"a": "b"})
+    before = live.read_text(encoding="utf-8")
+
+    line = ws.workspace_sync_line(live)
+
+    assert live.read_text(encoding="utf-8") == before
+    assert "carries edits devkit never wrote" in line
+    assert "--adopt-workspace" in line
+
+
+def test_a_task_branch_checkout_reports_the_drift_and_publishes_nothing(tmp_path, monkeypatch):
+    """A branch's copy is a proposal. Publishing it would ship it to every window."""
+    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
+    _checkout(monkeypatch, branch="agent/whatever-0823")
+    live = _live(tmp_path, {"a": "b"})
+    before = live.read_text(encoding="utf-8")
+
+    line = ws.workspace_sync_line(live)
+
+    assert live.read_text(encoding="utf-8") == before
+    assert "not published (devkit is on agent/whatever-0823, not main)" in line
+    assert "--check-workspace" in line
+
+
+def test_publish_verdict_names_each_reason_and_is_empty_when_there_is_none():
+    assert ws.publish_verdict("main", "main", False) == ""
+    assert "not master" in ws.publish_verdict("main", "master", False)
+    assert "uncommitted changes" in ws.publish_verdict("main", "main", True)
+
+
+def test_a_missing_canonical_copy_is_silence_not_a_failed_session(tmp_path, monkeypatch):
+    """This file's whole contract: never the reason a session start goes wrong."""
+    monkeypatch.setattr(ws.devkit_project, "CANONICAL_WORKSPACE", tmp_path / "gone.jsonc")
+    assert ws.workspace_sync_line(_live(tmp_path, {"a": "b"})) == ""
+
+
+def test_the_workspace_sync_line_reaches_the_rendered_message():
+    """A helper nothing calls is a check that reports nothing."""
+    message = ws.render([], {}, "", workspace_sync="alex-projects.code-workspace: published 3")
+    assert "[workspace] alex-projects.code-workspace: published 3" in message

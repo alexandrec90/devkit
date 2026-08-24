@@ -15,12 +15,44 @@ thing: it **spawns the box the edit should have been made in** and hands the pat
 back. One box per (session, project), so a session that touches three repos gets
 three boxes and a session that makes forty edits in one repo gets one.
 
-The block is still a block — a PreToolUse hook cannot rewrite a tool's arguments, so
-the edit has to be re-issued at the returned path. What it is not is a dead end: by
-the time the agent reads the message, the worktree exists, is on a fresh task branch
-off `origin/<default>`, and has its own `COMPOSE_PROJECT_NAME` and port lease. It does
-*not* have a toolchain — installing one is minutes and a hook may not take minutes — so
-the message carries the provision command along with the rest of the route out.
+**The edit is re-aimed, not refused.** Claude Code honours `updatedInput` from a
+PreToolUse hook, so the guard rewrites the tool's path argument to the same file
+inside the box and lets the call through; the route-out text arrives as
+`additionalContext` rather than as an error. That closes the cost the old design could
+not — every guarded session paid one failed tool call, and a blocked `Write` had its
+entire payload re-sent at the returned path. The rewrite is honoured **only when the
+same object sets no `permissionDecision`** (the runner reads `updatedInput &&
+permissionBehavior === undefined`), so this hook sets none and the call goes on to be
+permission-checked at its new path like any other.
+
+It still blocks wherever a rewrite cannot honestly express the outcome, and
+`redirect_blocker` is the single predicate: a spawn that failed, so there is no box to
+aim at; a tool whose arguments it does not know how to rewrite; an `old_string` the
+box's copy does not contain, which would turn a clear block into an opaque "string not
+found"; and any session reached through Codex's hook adapter, which has no
+`updatedInput` contract and would read the allow as permission to write the *original*
+path. The block message is the same one as before, with the reason added as a note.
+
+Either way, by the time the agent reads the message the worktree exists, is on a fresh
+task branch off `origin/<default>`, and has its own `COMPOSE_PROJECT_NAME` and port
+lease. It does *not* have a toolchain — installing one is minutes and a hook may not
+take minutes — so the message carries the provision command along with the rest of the
+route out.
+
+**A shell command is judged too**, on the paths its own command line names as writes —
+see the shell tier below `old_strings`. Editor calls were the whole scope until Claude
+Code's bypass-permissions mode began telling sessions, in text indistinguishable from
+their operator's, to prefer `sed`/heredocs over Edit and Write; that made the blind side
+a route. A shell command is never re-aimed, because the rewrite replaces a path argument
+and a command line has none, so this tier always blocks toward the box.
+
+**A `git checkout`/`git switch` onto a task branch is blocked outright** — see the branch
+tier below the shell one. It is the only judgement here that ends in neither a rewrite nor
+a box, because the call was never going to write anything: parking a static checkout on
+somebody else's `agent/...` branch freezes its home branch *and* turns this hook off for
+that checkout, since an edit onto a task branch carrying commits is the one case
+`needs_box` declines. That is how carameli spent two days on another session's branch with
+every tier here working exactly as designed.
 
 **Silent on everything else**, which is most calls:
 
@@ -48,6 +80,9 @@ spawns and reports.
 from __future__ import annotations
 
 import json
+import os
+import re
+import shlex
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -91,9 +126,27 @@ LEDGER_ROOT = Path(__file__).resolve().parents[1]
 
 # Claude Code hook contract, matching `enforce-capped-bash.py`: 0 allows the call, 2
 # blocks it and feeds stderr back to the model. A blocking hook MUST write its reason
-# to stderr — stdout is not surfaced.
+# to stderr — stdout is not surfaced *as an error*. On the allow path stdout is read as
+# the structured hook response, which is what carries the rewrite (see `emit_redirect`).
 EXIT_ALLOW = 0
 EXIT_BLOCK = 2
+
+# Set by `scripts/hooks/codex-hook-adapter.py` around every hook it runs. Codex's
+# PreToolUse response has no `updatedInput` member, and the adapter passes a rc-0 hook's
+# stdout through verbatim — so an unrecognised rewrite there is read as a plain allow and
+# the edit lands on the home branch, silently, which is the one outcome this hook exists
+# to prevent. Absence of the marker is the only thing that licenses the rewrite; a
+# session whose harness is unknown gets the block, which is correct under every contract.
+ADAPTER_ENV = "DEVKIT_HOOK_ADAPTER"
+
+# Tools whose path argument the guard knows how to rewrite. Deliberately narrower than
+# `MUTATING_TOOLS`: `apply_patch` and `create_file` are Codex's, and Codex is on the
+# blocked side of `ADAPTER_ENV` anyway, so there is no shape here worth guessing at.
+REWRITABLE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+# Where the tools keep the path, most specific first. `path` is last because it is the
+# generic one; a payload carrying both wants the named key.
+PATH_KEYS = ("file_path", "filePath", "notebook_path", "notebookPath", "path")
 
 
 def _record_event(event: str, fields: tuple[tuple[str, object], ...]) -> None:
@@ -103,10 +156,16 @@ def _record_event(event: str, fields: tuple[tuple[str, object], ...]) -> None:
     harness_events.record(event, fields, root=LEDGER_ROOT)
 
 
+# Tools that hand a shell a command line rather than a path. They write files too — see
+# the shell tier below — but nothing in their arguments says which, so every helper that
+# reads a path out of a payload has to ask whether it is looking at one of these.
+SHELL_TOOLS = frozenset({"Bash", "PowerShell"})
+
 # Tools that write a file — the question this hook exists to answer is "is the agent
 # about to change a file, and may it land where it is pointing?".
-MUTATING_TOOLS = frozenset(
-    {"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch", "create_file"}
+MUTATING_TOOLS = (
+    frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch", "create_file"})
+    | SHELL_TOOLS
 )
 
 # Per-git-step ceiling while spawning. Lower than `worktree.apply_new`'s default
@@ -131,21 +190,435 @@ def _tool_name(payload: dict) -> str:
     return str(payload.get("tool_name") or payload.get("toolName") or "")
 
 
+def tool_input(payload: dict) -> dict:
+    """The tool's arguments, tolerating snake_case and camelCase as the other hooks do."""
+    raw = payload.get("tool_input") or payload.get("toolInput") or {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def edited_path_key(payload: dict) -> str:
+    """Which key of the tool's input holds the path, or "".
+
+    Split out from `edited_path` because a rewrite has to put the box path back under
+    the **same** key it was read from. `updatedInput` replaces the input object whole
+    and the runner re-validates it against the tool's own schema, so adding a `path`
+    beside the `file_path` an Edit still carries fails that validation — at which point
+    Claude Code logs `permission_updated_input_invalid` and calls the tool with the
+    ORIGINAL input. That failure mode is the reason to read the key rather than assume
+    it: it lands the edit on the home branch with nothing red anywhere.
+    """
+    arguments = tool_input(payload)
+    for key in PATH_KEYS:
+        value = arguments.get(key)
+        if isinstance(value, str) and value:
+            return key
+    return ""
+
+
 def edited_path(payload: dict) -> str:
     """The path a mutating tool is about to write, or "".
 
-    Tolerates snake_case and camelCase keys as the other hooks do, and reads the
-    several spellings the tools use for the same argument (`file_path` for Edit and
-    Write, `path` for apply_patch/create_file, `notebook_path` for NotebookEdit).
+    Reads the several spellings the tools use for the same argument (`file_path` for
+    Edit and Write, `path` for apply_patch/create_file, `notebook_path` for
+    NotebookEdit).
     """
-    tool_input = payload.get("tool_input") or payload.get("toolInput") or {}
-    if not isinstance(tool_input, dict):
-        return ""
-    for key in ("file_path", "filePath", "path", "notebook_path", "notebookPath"):
-        value = tool_input.get(key)
-        if isinstance(value, str) and value:
-            return value
+    key = edited_path_key(payload)
+    return str(tool_input(payload)[key]) if key else ""
+
+
+def old_strings(payload: dict) -> list[str]:
+    """Every literal this call expects to already be present in the file it targets.
+
+    The precondition an Edit carries and a Write does not, and the whole reason the
+    rewrite is not unconditional: the box holds `origin/<default>`'s copy of the file
+    while the agent read the checkout's, and a checkout that has drifted turns a
+    re-aimed Edit into `String to replace not found` — an error about the agent's own
+    argument, at a path it never named, which is strictly worse than the block it
+    replaced. `MultiEdit` keeps its literals in `edits`; a missing or non-string
+    `old_string` yields nothing, which reads as "no precondition" and is right for
+    `Write` and for an Edit creating a new file.
+    """
+    arguments = tool_input(payload)
+    edits = arguments.get("edits")
+    if isinstance(edits, list):
+        return [
+            edit["old_string"]
+            for edit in edits
+            if isinstance(edit, dict) and isinstance(edit.get("old_string"), str)
+        ]
+    value = arguments.get("old_string")
+    return [value] if isinstance(value, str) else []
+
+
+# --- The shell tier ------------------------------------------------------------------
+#
+# Everything above reads the path out of a tool argument, which is why for a year `Bash`
+# was the guard's blind side: `sed -i`, `cat > file <<EOF` or a `cp` writes a checkout's
+# tracked file with nothing between it and the home branch, and the hook never saw the
+# call. A hole, but a quiet one, while the agent's habit was to reach for `Edit`.
+#
+# Claude Code's own bypass-permissions guidance is what turned it into a route. In that
+# mode the session is told, in text it cannot tell apart from its operator's: *"make file
+# changes with sed, heredocs, or short scripts, rather than using the dedicated Read,
+# Edit, or Write tools."* So the one tier the workspace is built to protect was a single
+# nudge away from being bypassed by an agent doing exactly as it was told — and the agent
+# that reported this had to reason its way to disobeying, on every session, from first
+# principles. A guarantee that depends on that is not one.
+#
+# This tier recognises spellings; it does **not** model the shell. That is
+# `enforce-capped-bash.py`'s lesson taken as read: the gate that made every command prove
+# itself had to model the shell, and 46% of every block it ever issued was its own false
+# positive. So the verb list is closed and short, an unrecognised command is allowed, and
+# the paths it does extract go through the same `redirect_decision` an `Edit` would — so a
+# git-ignored path, a path in a box, a checkout on a task branch holding work, and
+# anything outside a registered checkout are all still allowed, silently.
+#
+# The gap it cannot close is an interpreter: `python -c`, or a `python - <<'EOF'` script,
+# computes its target at runtime and names it nowhere in the argv. Written down rather
+# than left implicit, because a silent gap in a guard reads as coverage.
+
+# Verbs whose every non-option operand is a file they write.
+SHELL_WRITE_ALL = frozenset(
+    {
+        "tee",
+        "truncate",
+        "touch",
+        "rm",
+        "unlink",
+        "shred",
+        # PowerShell, which is this workspace's other shell and has its own tool.
+        "set-content",
+        "add-content",
+        "out-file",
+        "new-item",
+        "remove-item",
+        "clear-content",
+    }
+)
+
+# Copy-shaped verbs, where every operand but the last is a source being *read*. Taking
+# them all would block `cp devkit/x.py /tmp/`, which writes nothing a branch can carry.
+SHELL_WRITE_LAST = frozenset(
+    {"cp", "mv", "install", "rsync", "ln", "copy-item", "move-item", "rename-item"}
+)
+
+# Wrappers that stand in front of the real verb rather than being one.
+SHELL_PREFIXES = frozenset({"sudo", "env", "command", "exec", "time", "nohup", "nice"})
+
+# A leading `FOO=bar` assignment, same case as the wrappers.
+ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+# `cmd >file`, `cmd >> file`, `cmd 2> file` — the heredoc route's other half, since
+# `cat > x <<EOF` is a redirect like any other. `>&1` duplicates a descriptor and names
+# no file, hence the exclusion; a `>` inside a quoted string can only invent a candidate,
+# and an invented candidate resolves to no checkout.
+REDIRECT = re.compile(r"\d?>>?\s*(?![&>])([^\s;|&<>]+)")
+
+# Statement separators. Splitting inside a quoted string can only lose a detection or
+# invent an unrecognised verb, and both of those allow — the safe direction for a
+# splitter this crude.
+STATEMENTS = re.compile(r"(?:&&|\|\||[;\n|]|&(?!\d))")
+
+
+def _unquote(token: str) -> str:
+    """Strip one layer of matching quotes; `shlex(posix=False)` leaves them attached."""
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+        return token[1:-1]
+    return token
+
+
+def _verb(token: str) -> str:
+    """The command word, normalised: basename, no `.exe`, case-folded.
+
+    Case-folded because PowerShell's cmdlets are conventionally `Set-Content` and its
+    parser does not care, so a matcher that did would be one capital away from useless.
+    """
+    name = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def shell_tokens(statement: str) -> list[str]:
+    """Split one statement into tokens, keeping Windows backslashes intact.
+
+    `posix=True` eats them — `C:\\Users\\x` arrives as `C:Usersx` — and every path this
+    hook judges on this machine is a Windows path.
+    """
+    try:
+        tokens = shlex.split(statement, posix=False)
+    except ValueError:  # an unbalanced quote; whitespace is a good enough fallback
+        tokens = statement.split()
+    return [_unquote(token) for token in tokens if token]
+
+
+def shell_write_targets(command: str) -> list[str]:
+    """Every path this command line names as something it is about to write.
+
+    Order-preserving and deduplicated, so a block names the first target the command
+    would have hit rather than an arbitrary one. Operands that are not paths at all — a
+    `sed` script, a `-Value` string — are left in: they resolve to no checkout, and
+    picking the "real" one out of a verb's argv is more shell modelling than this tier
+    is willing to do.
+    """
+    found: list[str] = []
+
+    def add(value: str) -> None:
+        value = _unquote(value.strip())
+        if value and value not in found:
+            found.append(value)
+
+    for statement in STATEMENTS.split(command or ""):
+        for match in REDIRECT.finditer(statement):
+            add(match.group(1))
+        tokens = shell_tokens(statement)
+        while tokens and (_verb(tokens[0]) in SHELL_PREFIXES or ENV_ASSIGN.match(tokens[0])):
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        verb = _verb(tokens[0])
+        operands = [token for token in tokens[1:] if not token.startswith("-")]
+        if verb == "sed":
+            # Only `-i`/`--in-place` writes. Every other `sed` reads, and `sed -n '1,5p'`
+            # over a checkout's file is how half the reading in a guarded session is done.
+            if any(t.startswith(("-i", "--in-place")) for t in tokens[1:]):
+                for operand in operands:
+                    add(operand)
+        elif verb == "dd":
+            for token in tokens[1:]:
+                if token.startswith("of="):
+                    add(token[3:])
+        elif verb in SHELL_WRITE_ALL:
+            for operand in operands:
+                add(operand)
+        elif verb in SHELL_WRITE_LAST and operands:
+            add(operands[-1])
+    return found
+
+
+def guarded_targets(payload: dict) -> list[str]:
+    """Every path this call is about to write, whichever kind of tool it is.
+
+    One list for both tiers, because `main` asks the same questions of each element and
+    a shell command can name more than one.
+    """
+    if _tool_name(payload) in SHELL_TOOLS:
+        return shell_write_targets(str(tool_input(payload).get("command") or ""))
+    path = edited_path(payload)
+    return [path] if path else []
+
+
+def shell_note(target: str) -> str:
+    """The extra line a routed shell command gets, which a routed `Edit` does not need.
+
+    An `Edit` names its path, so the block message's path is self-evidently the thing to
+    change. A command does not: the agent has to be told *which* of its words was read as
+    a write, or it re-issues the same line with the box path bolted somewhere else.
+    """
+    return (
+        f"This was a shell command, not an editor call. It was read as writing "
+        f"`{target}`; re-issue it with that word replaced by the path above. A shell "
+        f"write is not re-aimed automatically because the guard rewrites path arguments, "
+        f"and a command line has none."
+    )
+
+
+# --- The branch tier -------------------------------------------------------------------
+#
+# `git checkout` writes no file, so neither tier above can see it -- and it is exactly the
+# act that parked carameli's static checkout on another session's `agent/...` branch for
+# two days in August 2026. Nothing had edited that checkout. The boxing tier had done its
+# job: that session's edits went to a box, and their PR was open. Something simply ran
+# `git checkout agent/seems-only-1-preview-time-0821` in the static copy, and it stayed
+# there, because a clean fully-pushed task branch is a state `sweep.py` *reports* and
+# could not clear (`sweep.PARKED`, added in the same change, is that half).
+#
+# A parked checkout is worse than untidy, and the second-order effect is the one worth
+# writing down: the boxing tier goes **quiet** there. An edit onto a task branch that
+# carries commits of its own is the "fix PR #42" case `needs_box` deliberately declines,
+# so the moment a checkout is parked on somebody else's live branch it becomes unguarded
+# space, and every later edit lands on that branch with no block and no box. Meanwhile its
+# home branch stops advancing and every session start reports stranded work.
+#
+# So this tier judges the move rather than the write, and it is the one tier that neither
+# re-aims nor spawns: nothing was going to be written, and the answer to "I want to be on
+# that branch" is one of `worktree.py`'s verbs, not a worktree cut behind the agent's back.
+#
+# Scoped to task branches, both ways round. Moving a checkout *home* is the repair, never
+# the problem, so it is allowed; and a box moved onto a branch its lease does not name is
+# blocked too, because `reconcile` looks a box's PR up by the branch the registry records
+# and a box that has wandered off it can be reaped as never-used with the work still in it.
+
+# Git's own options, before the subcommand. Only `-C` changes which checkout the command
+# lands in; the rest are here because they consume the token after them and would
+# otherwise be misread as the subcommand.
+GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+
+# The two subcommands that move HEAD onto another ref.
+SWITCH_VERBS = frozenset({"checkout", "switch"})
+
+# Flags that name a branch being *created*, so the ref is the token after them rather than
+# the first bare operand: `-b`/`-B` for checkout, `-c`/`-C` for switch. Creating a task
+# branch in a static checkout is the same park as moving onto one -- it is what
+# `branch-on-write.py` used to do, and retiring that hook is what the box tier replaced.
+SWITCH_CREATE_FLAGS = frozenset({"-b", "-B", "-c", "-C", "--orphan"})
+
+# `git checkout -- file`, `git checkout -p`: these restore file content and leave HEAD
+# exactly where it was. Ordinary, frequent, and not a park -- so their presence anywhere in
+# the operands abandons the statement rather than trying to tell the two shapes apart.
+SWITCH_RESTORES = frozenset({"--", "-p", "--patch", "--pathspec-from-file"})
+
+
+def _switch_ref(operands: list[str]) -> str:
+    """The ref a `checkout`/`switch` moves onto: a created name, else the first operand."""
+    for index, token in enumerate(operands):
+        if token in SWITCH_CREATE_FLAGS:
+            return operands[index + 1] if index + 1 < len(operands) else ""
+        if not token.startswith("-"):
+            return token
     return ""
+
+
+def switch_targets(command: str) -> list[tuple[str, str]]:
+    """`(directory, ref)` for every `git checkout`/`git switch` on this command line.
+
+    `directory` is git's `-C` when the call gave one and `""` otherwise, meaning the tool
+    call's own cwd. Same crude statement splitter and the same closed-list discipline as
+    the shell tier above: a spelling this does not recognise yields nothing and is
+    allowed, because the cost of the two mistakes is not symmetric here either.
+    """
+    found: list[tuple[str, str]] = []
+    for statement in STATEMENTS.split(command or ""):
+        tokens = shell_tokens(statement)
+        while tokens and (_verb(tokens[0]) in SHELL_PREFIXES or ENV_ASSIGN.match(tokens[0])):
+            tokens = tokens[1:]
+        if not tokens or _verb(tokens[0]) != "git":
+            continue
+        rest = tokens[1:]
+        directory = ""
+        while rest and rest[0].startswith("-"):
+            if rest[0] in GIT_VALUE_OPTIONS and len(rest) > 1:
+                if rest[0] == "-C":
+                    directory = rest[1]
+                rest = rest[2:]
+            else:
+                rest = rest[1:]
+        if not rest or rest[0].lower() not in SWITCH_VERBS:
+            continue
+        operands = rest[1:]
+        if any(token in SWITCH_RESTORES for token in operands):
+            continue
+        ref = _switch_ref(operands)
+        if ref:
+            found.append((directory, ref))
+    return found
+
+
+def switch_branch(ref: str) -> str:
+    """The task branch `ref` names, or "" when it names anything else.
+
+    `refs/heads/agent/x` and `origin/agent/x` are the same park as `agent/x`. The second
+    detaches HEAD rather than moving onto the branch, which is if anything worse: a
+    detached checkout is a state `sweep.py` can only report, and `needs_box` declines a
+    branch git will not name, so the box tier is quiet there too.
+
+    Exactly one remote segment is stripped, and only when what remains is a managed
+    prefix, so no home branch can become a task branch by being spelled with a slash.
+    """
+    for prefix in ("refs/heads/", "refs/remotes/"):
+        if ref.startswith(prefix):
+            ref = ref[len(prefix) :]
+    if worktree.sweep.is_task_branch(ref):
+        return ref
+    head, _, tail = ref.partition("/")
+    if head and tail and worktree.sweep.is_task_branch(tail):
+        return tail
+    return ""
+
+
+def switch_decision(
+    directory: str,
+    branch: str,
+    cwd: str,
+    root: Path,
+    projects: list[str],
+    boxes: Mapping[str, Box],
+) -> tuple[str, str, str] | None:
+    """`(kind, name, registered)` when this move is a park; None when it is ordinary.
+
+    `kind` is `"checkout"` for a registered static checkout and `"box"` for an ephemeral
+    one whose lease records a different branch; `registered` carries that lease's branch
+    and is `""` for a checkout, which has none to compare against.
+
+    Three cases allow, and each is somebody else's decision already made:
+
+    - a directory under no registered checkout at all -- a scratch clone, `VanillaLand`,
+      anything outside the workspace. Same silence every other tier keeps there;
+    - a box already standing on this branch, which is what `worktree.py resume` leaves
+      behind and what re-attaching after a detached HEAD does;
+    - a path under `.worktrees/` that is in no live box -- a husk, a stray directory.
+      There is no lease to desync, so there is nothing to protect.
+    """
+    here = resolve_target(directory or ".", cwd)
+    if here is None:
+        return None
+    try:
+        root = root.resolve()
+        boxes_root = worktree.boxes_root(root).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if _within(here, boxes_root):
+        for box in boxes.values():
+            if not _within(here, worktree.box_path(root, box.name).resolve()):
+                continue
+            return None if box.branch == branch else ("box", box.name, box.branch)
+        return None
+    project = owning_project(here, root, projects)
+    return ("checkout", project, "") if project else None
+
+
+def switch_message(kind: str, name: str, branch: str, registered: str = "") -> str:
+    """What the agent reads when a branch move is refused. No box, and nothing to re-issue.
+
+    Every other block in this file ends with a path to write to instead. This one cannot:
+    the call was not going to write anything, so the useful content is the three things
+    the move is usually a proxy for, each spelled as the command that does it properly.
+    """
+    worktree_py = Path(__file__).parent / "worktree.py"
+    if kind == "box":
+        return "\n".join(
+            [
+                f"Blocked: the box {name} is registered on '{registered}', and this would "
+                f"move it onto '{branch}'.",
+                "",
+                "worktree.py records a box's branch in its lease registry, and `reconcile` "
+                "looks that box's PR up by that name. A box standing on a branch its lease "
+                "does not name is invisible to the reaper as shipped work and reapable as "
+                "work that never happened - which destroys the worktree with the commits "
+                "still in it.",
+                "",
+                "To continue that branch's work, resume its own box instead:",
+                f"    python {worktree_py} resume <box> --yes",
+            ]
+        )
+    return "\n".join(
+        [
+            f"Blocked: this would park the static checkout {name} on '{branch}', a task branch.",
+            "",
+            "A parked checkout is not merely untidy. Its home branch stops advancing, every "
+            "session start reports it as stranded work, and - the part that is easy to miss "
+            "- this hook goes QUIET there: an edit onto a task branch carrying commits is "
+            "deliberately left alone, so the checkout becomes unguarded space and every "
+            "later edit lands on that branch with no box and no block.",
+            "",
+            "One of these is almost certainly what was wanted:",
+            "",
+            "  - to EDIT that work: just edit it. This hook cuts a box on its own branch, "
+            "or resumes the one this session already had:",
+            f"        python {worktree_py} resume <box> --yes",
+            "  - to RUN it in a browser: a preview is a copy, and never moves the checkout:",
+            f"        python {worktree_py} preview {name} --branch {branch} --yes",
+            f"  - to READ it: `git -C {name} log/show/diff {branch}` needs no checkout.",
+        ]
+    )
 
 
 def _within(child: Path, parent: Path) -> bool:
@@ -403,8 +876,15 @@ def session_slug(session: str, recorded: str = "") -> str:
     return recorded or (f"ws-{session[:8]}" if session else "ws")
 
 
-def block_reason(project: str, relative: str, branch: str, inside: bool) -> str:
+def block_reason(
+    project: str, relative: str, branch: str, inside: bool, prefix: str = "Blocked"
+) -> str:
     """The opening line: why this edit is being routed, naming the branch it was judged on.
+
+    `prefix` is the one word that differs between the two outcomes. The *judgement* does
+    not: an edit that is re-aimed into a box was judged on exactly the state that used to
+    refuse it, so a second wording would be a second thing to keep true, and this
+    docstring's own lesson is what that costs.
 
     Three different facts arrive here and they used to share one sentence. A session
     sitting in `carameli` on a freshly cut `claude/...` branch was therefore told the
@@ -423,20 +903,20 @@ def block_reason(project: str, relative: str, branch: str, inside: bool) -> str:
     lands = f"an edit to {relative} would land on it with no task branch under it."
     if worktree.sweep.is_task_branch(branch):
         return (
-            f"Blocked: {project} is on '{branch}', which is a task branch but carries no "
+            f"{prefix}: {project} is on '{branch}', which is a task branch but carries no "
             f"commits of its own - so it is either freshly cut or already merged, there is "
             f"no open work on it for this edit to belong to, and a box strands nothing. (A "
             f"task branch WITH commits is left alone; this one has none.)"
         )
     if not branch:
         return (
-            f"Blocked: git would not name a branch for {project} (detached HEAD, or git did "
+            f"{prefix}: git would not name a branch for {project} (detached HEAD, or git did "
             f"not answer) and this session is not inside that checkout, so {lands}"
         )
     if inside:
-        return f"Blocked: {project} is parked on '{branch}', a home branch, so {lands}"
+        return f"{prefix}: {project} is parked on '{branch}', a home branch, so {lands}"
     return (
-        f"Blocked: this session is not inside {project}, which is on '{branch}' "
+        f"{prefix}: this session is not inside {project}, which is on '{branch}' "
         f"(a home branch), so {lands}"
     )
 
@@ -481,7 +961,6 @@ def deny_message(
     foreign-box case is not a branch judgement, so every sentence `block_reason` can
     produce would misdescribe it, which is this docstring's own first lesson.
     """
-    devkit_worktree = Path(__file__).parent / "worktree.py"
     lines = [
         reason or block_reason(project, relative, branch, inside),
         "",
@@ -492,6 +971,24 @@ def deny_message(
         ),
         f"    {Path(box_path) / relative}",
         "",
+        *route_out_lines(project, box, box_path),
+    ]
+    if notes:
+        lines += ["", *[f"note: {note}" for note in notes]]
+    return "\n".join(lines)
+
+
+def route_out_lines(project: str, box: str, box_path: str) -> list[str]:
+    """The steps that hold whether the edit was re-aimed into the box or refused.
+
+    Shared rather than duplicated because the two messages are read in the same
+    situation and differ only in what already happened. The install and the `cd` are the
+    two an agent cannot infer from anywhere else — see `deny_message` for why each is
+    spelled as a command — and the reap paragraph has to survive both, since an agent
+    that has just been *allowed* is the more likely of the two to go straight to /ship.
+    """
+    devkit_worktree = Path(__file__).parent / "worktree.py"
+    return [
         f"The box is on a fresh agent/... branch cut from origin/<default>, with its own "
         f"COMPOSE_PROJECT_NAME ({box}) and port lease, so its stack cannot collide with "
         f"{project}'s.",
@@ -514,9 +1011,102 @@ def deny_message(
         f"For a task worth naming, `worktree.py new {project} --slug <topic> --yes` cuts "
         f"a better-named one.",
     ]
+
+
+def redirect_blocker(payload: dict, destination: Path, env: Mapping[str, str] | None = None) -> str:
+    """ "" when this call can be re-aimed at `destination`, else why it must be blocked.
+
+    Fails closed in every branch, because the two outcomes are not symmetric: a needless
+    block costs a turn and says exactly what to do about it, while a rewrite that the
+    harness does not honour puts the edit on the home branch and reports success.
+    """
+    if (env if env is not None else os.environ).get(ADAPTER_ENV):
+        return (
+            f"the session is running under a hook adapter ({ADAPTER_ENV} is set), whose "
+            f"PreToolUse response has no updatedInput member"
+        )
+    if _tool_name(payload) not in REWRITABLE_TOOLS:
+        return f"{_tool_name(payload) or 'this tool'}'s arguments are not rewritable by this hook"
+    if not edited_path_key(payload):
+        return "the call names no path to rewrite"
+    literals = [literal for literal in old_strings(payload) if literal]
+    if not literals:
+        return ""
+    try:
+        content = destination.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"the box's copy of the file could not be read ({type(exc).__name__})"
+    if any(literal not in content for literal in literals):
+        return "the box's copy of the file does not contain the text this edit replaces"
+    return ""
+
+
+def redirect_message(
+    project: str,
+    relative: str,
+    box_path: str,
+    box: str,
+    notes: list[str],
+    spawned: bool = True,
+    inside: bool = False,
+    branch: str = "",
+    reason: str = "",
+) -> str:
+    """What the agent reads when the edit went through at the box path instead.
+
+    Leads with the fact that the write already happened, because the failure this text
+    exists to prevent is the agent trusting its own request over the hook: it asked to
+    write `<project>/<relative>`, got no error, and will read that path back unchanged
+    unless something says otherwise. Naming the stale-read trap explicitly is the half
+    the block message never needed — a refused edit leaves nothing to be wrong about.
+
+    `spawned` carries the same distinction it carries in `deny_message`, for the same
+    reason: "a box has been spawned" on the fortieth edit is untrue, and a message that
+    misdescribes what just happened is how an agent concludes it is in a loop.
+    """
+    lines = [
+        reason or block_reason(project, relative, branch, inside, prefix="Re-aimed"),
+        "",
+        (
+            "A box has been spawned for it, and the edit was applied there instead, at:"
+            if spawned
+            else "This session already has a box for this project, and the edit was "
+            "applied there instead, at:"
+        ),
+        f"    {Path(box_path) / relative}",
+        "",
+        f"Nothing was written to {project}. Read, edit, test and ship against the box from "
+        f"here on: reading {relative} under {project} returns the file WITHOUT this change "
+        f"and will contradict what you just wrote.",
+        "",
+        *route_out_lines(project, box, box_path),
+    ]
     if notes:
         lines += ["", *[f"note: {note}" for note in notes]]
     return "\n".join(lines)
+
+
+def emit_redirect(payload: dict, destination: Path, message: str) -> None:
+    """Write the structured PreToolUse response that re-aims this call.
+
+    No `permissionDecision`: the runner honours `updatedInput` only when the same object
+    leaves the permission behaviour undefined, so setting even `"allow"` here would send
+    the rewrite down the permission path and, worse, waive a decision that is not this
+    hook's to make. The input is echoed whole with one key changed, because it replaces
+    the original rather than merging into it.
+    """
+    arguments = dict(tool_input(payload))
+    arguments[edited_path_key(payload)] = str(destination)
+    json.dump(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "updatedInput": arguments,
+                "additionalContext": message,
+            }
+        },
+        sys.stdout,
+    )
 
 
 def failure_message(
@@ -624,6 +1214,60 @@ def claim_hint(box: Box, session: str) -> str:
     )
 
 
+def deliver(
+    payload: dict,
+    project: str,
+    relative: str,
+    box_path: str,
+    box: str,
+    notes: list[str],
+    spawned: bool = True,
+    inside: bool = False,
+    branch: str = "",
+    reason: str = "",
+) -> tuple[int, str]:
+    """Re-aim the call into the box, or block toward it. Returns (exit code, outcome).
+
+    One function decides, because the two callers below differ only in whether the box
+    was just cut — and a second copy of this choice is a second place for the adapter
+    check in `redirect_blocker` to be forgotten, which fails by allowing the write.
+    """
+    destination = Path(box_path) / relative
+    blocker = redirect_blocker(payload, destination)
+    if blocker:
+        print(
+            deny_message(
+                project,
+                relative,
+                box_path,
+                box,
+                [*notes, f"not re-aimed automatically: {blocker}"],
+                spawned=spawned,
+                inside=inside,
+                branch=branch,
+                reason=reason,
+            ),
+            file=sys.stderr,
+        )
+        return EXIT_BLOCK, "block"
+    emit_redirect(
+        payload,
+        destination,
+        redirect_message(
+            project,
+            relative,
+            box_path,
+            box,
+            notes,
+            spawned=spawned,
+            inside=inside,
+            branch=branch,
+            reason=reason,
+        ),
+    )
+    return EXIT_ALLOW, "redirect"
+
+
 def route_to_own_box(
     project: str,
     relative: str,
@@ -631,22 +1275,38 @@ def route_to_own_box(
     root: Path,
     session: str,
     boxes: Mapping[str, Box],
+    payload: dict,
     inside: bool = False,
     branch: str = "",
     reason: str = "",
     kind: str = "checkout",
     extra_notes: tuple[str, ...] = (),
 ) -> int:
-    """Block toward the session's box for `project`, reusing or spawning it.
+    """Route toward the session's box for `project`, reusing or spawning it.
 
-    The one blocking flow both entry points share: an edit that would land on a
-    checkout's home branch, and an edit aimed into another session's box. Always
-    returns `EXIT_BLOCK`; the message is the variable part.
+    The one flow both entry points share: an edit that would land on a checkout's home
+    branch, and an edit aimed into another session's box. The box is the outcome either
+    way; `deliver` decides whether the edit reaches it by rewrite or by re-issue.
+
+    A failed spawn is the one case that cannot be either, and it stays a block: there is
+    no box to aim at, and allowing the edit is the outcome this hook exists to prevent.
     """
     existing = worktree.find_session_box(boxes, project, session)
     if existing is not None:
+        code, routed = deliver(
+            payload,
+            project,
+            relative,
+            str(worktree.box_path(root, existing.name)),
+            existing.name,
+            list(extra_notes),
+            spawned=False,
+            inside=inside,
+            branch=branch,
+            reason=reason,
+        )
         _record_event(
-            "guard-block",
+            "guard-route" if routed == "redirect" else "guard-block",
             (
                 ("project", project),
                 ("session", session),
@@ -657,21 +1317,7 @@ def route_to_own_box(
                 ("target", relative),
             ),
         )
-        print(
-            deny_message(
-                project,
-                relative,
-                str(worktree.box_path(root, existing.name)),
-                existing.name,
-                list(extra_notes),
-                spawned=False,
-                inside=inside,
-                branch=branch,
-                reason=reason,
-            ),
-            file=sys.stderr,
-        )
-        return EXIT_BLOCK
+        return code
 
     try:
         slug = session_slug(session, task_slug.read(root, session))
@@ -710,6 +1356,46 @@ def route_to_own_box(
         return EXIT_BLOCK
 
     if not ok:
+        # A spawn can fail because someone else just did it. Two guards run on every
+        # call in a session whose settings register this hook twice — a user-level
+        # absolute path and a project-level `$CLAUDE_PROJECT_DIR` one resolving to the
+        # same file — and neither can see the other's box, because the loser reads the
+        # lease registry before the winner writes it. It then dies on
+        # `git worktree add: a branch named 'agent/…' already exists` and exits 2, which
+        # blocks the call the winner had just re-aimed successfully. The agent gets both
+        # messages: "the edit was applied at <box>" on stdout, "spawning a box failed" on
+        # stderr, and neither is true — the box exists and the edit went nowhere.
+        #
+        # So the collision is re-read rather than reported: the box this session needs is
+        # on disk by now, and reusing it is what the winner did. Only a genuine failure —
+        # no box afterwards either — is still a block.
+        settled = worktree.find_session_box(worktree.live_boxes(root), project, session)
+        if settled is not None:
+            code, routed = deliver(
+                payload,
+                project,
+                relative,
+                str(worktree.box_path(root, settled.name)),
+                settled.name,
+                list(extra_notes),
+                spawned=False,
+                inside=inside,
+                branch=branch,
+                reason=reason,
+            )
+            _record_event(
+                "guard-route" if routed == "redirect" else "guard-block",
+                (
+                    ("project", project),
+                    ("session", session),
+                    ("kind", kind),
+                    ("outcome", "raced"),
+                    ("box", settled.name),
+                    ("branch", settled.branch),
+                    ("target", relative),
+                ),
+            )
+            return code
         _record_event(
             "guard-spawn-failed",
             (
@@ -744,8 +1430,19 @@ def route_to_own_box(
         if plan.resumed
         else []
     )
+    code, routed = deliver(
+        payload,
+        project,
+        relative,
+        plan.path,
+        plan.box.name,
+        [*resumed, *notes, *extra_notes],
+        inside=inside,
+        branch=branch,
+        reason=reason,
+    )
     _record_event(
-        "guard-block",
+        "guard-route" if routed == "redirect" else "guard-block",
         (
             ("project", project),
             ("session", session),
@@ -756,20 +1453,7 @@ def route_to_own_box(
             ("target", relative),
         ),
     )
-    print(
-        deny_message(
-            project,
-            relative,
-            plan.path,
-            plan.box.name,
-            [*resumed, *notes, *extra_notes],
-            inside=inside,
-            branch=branch,
-            reason=reason,
-        ),
-        file=sys.stderr,
-    )
-    return EXIT_BLOCK
+    return code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -788,6 +1472,17 @@ def main(argv: list[str] | None = None) -> int:
     if payload is None or _tool_name(payload) not in MUTATING_TOOLS:
         return EXIT_ALLOW
 
+    shell = _tool_name(payload) in SHELL_TOOLS
+
+    # Before the registry read, because widening the matcher to the shell tools put this
+    # hook on *every* Bash call rather than on the handful that edit files. A command that
+    # writes nothing and moves no branch has to cost a payload parse and nothing else --
+    # both of these are string work over the argv, with no subprocess and no file read.
+    targets = guarded_targets(payload)
+    switches = switch_targets(str(tool_input(payload).get("command") or "")) if shell else []
+    if not targets and not switches:
+        return EXIT_ALLOW
+
     try:
         projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
     except OSError:
@@ -797,56 +1492,98 @@ def main(argv: list[str] | None = None) -> int:
     root = workspace.parent
     session = str(payload.get("session_id") or payload.get("sessionId") or "")
 
-    # The box tier first: `redirect_decision` allows everything under `.worktrees/`,
-    # so the ownership question has to be asked before it swallows the path. The
-    # lease read happens only for edits actually aimed at the box tier — the common
-    # checkout edit never pays it here.
-    target = resolve_target(edited_path(payload), cwd)
-    if target is not None and _within(target, worktree.boxes_root(root).resolve()):
-        boxes = worktree.live_boxes(root)
-        conflict = foreign_box(target, root, boxes, session)
-        if conflict is None:
-            return EXIT_ALLOW
-        box, relative = conflict
-        return route_to_own_box(
-            box.project,
-            relative,
-            workspace,
-            root,
-            session,
-            boxes,
-            reason=foreign_box_reason(box, relative),
-            kind="foreign-box",
-            extra_notes=(claim_hint(box, session),),
+    # The branch tier, ahead of the write tiers: a command doing both is pathological, and
+    # of the two outcomes the park is the one that would silence the write tier afterwards.
+    # `switch_branch` is checked first so the lease registry is read only for a git call
+    # that actually names a task branch -- which is the case being blocked anyway.
+    for directory, ref in switches:
+        moving_to = switch_branch(ref)
+        if not moving_to:
+            continue
+        parked = switch_decision(
+            directory, moving_to, cwd, root, projects, worktree.live_boxes(root)
         )
+        if parked is None:
+            continue
+        kind, name, registered = parked
+        _record_event(
+            "guard-branch-block",
+            (
+                ("project", name),
+                ("session", session),
+                ("kind", kind),
+                ("branch", moving_to),
+                ("registered", registered),
+            ),
+        )
+        print(switch_message(kind, name, moving_to, registered), file=sys.stderr)
+        return EXIT_BLOCK
 
     # The branch is what the decision turns on, so it is also what the block message has
     # to name -- and reading it a second time would be a second subprocess per blocked
     # edit and, worse, could report a different branch than the one that was judged.
     # `redirect_decision` calls its lookup at most once, so recording it is enough.
+    # Defined outside the loop so it closes over nothing that changes under it.
     observed: list[str] = []
 
     def observe(checkout: Path) -> str:
         observed.append(current_branch(checkout))
         return observed[-1]
 
-    decision = redirect_decision(edited_path(payload), cwd, root, projects, branch_of=observe)
-    if decision is None:
-        return EXIT_ALLOW
-    project, relative = decision
-    branch = observed[-1] if observed else ""
-    inside = _within(Path(cwd or "."), (root / project).resolve())
+    # An editor call names one path; a shell command can name several, and the first one
+    # that needs a box decides the whole call — there is no partial outcome for a command
+    # line. Everything below is what used to run once, run per candidate.
+    for candidate in targets:
+        # The box tier first: `redirect_decision` allows everything under `.worktrees/`,
+        # so the ownership question has to be asked before it swallows the path. The
+        # lease read happens only for edits actually aimed at the box tier — the common
+        # checkout edit never pays it here.
+        target = resolve_target(candidate, cwd)
+        if target is not None and _within(target, worktree.boxes_root(root).resolve()):
+            boxes = worktree.live_boxes(root)
+            conflict = foreign_box(target, root, boxes, session)
+            if conflict is None:
+                continue
+            box, relative = conflict
+            return route_to_own_box(
+                box.project,
+                relative,
+                workspace,
+                root,
+                session,
+                boxes,
+                payload,
+                reason=foreign_box_reason(box, relative),
+                kind="foreign-box",
+                extra_notes=(
+                    claim_hint(box, session),
+                    *((shell_note(candidate),) if shell else ()),
+                ),
+            )
 
-    return route_to_own_box(
-        project,
-        relative,
-        workspace,
-        root,
-        session,
-        worktree.live_boxes(root),
-        inside=inside,
-        branch=branch,
-    )
+        observed.clear()
+        decision = redirect_decision(candidate, cwd, root, projects, branch_of=observe)
+        if decision is None:
+            continue
+        project, relative = decision
+        branch = observed[-1] if observed else ""
+        inside = _within(Path(cwd or "."), (root / project).resolve())
+
+        return route_to_own_box(
+            project,
+            relative,
+            workspace,
+            root,
+            session,
+            worktree.live_boxes(root),
+            payload,
+            inside=inside,
+            branch=branch,
+            kind="shell" if shell else "checkout",
+            extra_notes=(shell_note(candidate),) if shell else (),
+        )
+
+    return EXIT_ALLOW
 
 
 if __name__ == "__main__":
