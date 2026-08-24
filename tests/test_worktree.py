@@ -672,6 +672,35 @@ def test_a_caller_that_does_not_say_gets_no_safe_verdict_either(verdict):
     assert not worktree.reapable(verdict)
 
 
+def test_a_husk_is_reapable_whatever_the_caller_claims_about_dirtiness():
+    """`skipped` is the one verdict that ignores `holds_uncommitted`, deliberately.
+
+    It means the leased path is not a git checkout -- a removal that died partway -- so
+    git has already stopped tracking it: there is no index, no branch to commit to and
+    no `/ship` that could get anything out of it. `sweep.inspect` therefore reports 0
+    dirty files through a missing `.git` whatever is on disk, which made the gate inert
+    for an honest caller and permanently refusing for one taking the `True` default.
+
+    The verdict was in none of the reapable sets, so `reap` refused it and `reconcile`
+    returned HOLD forever. Four husks held four of sixteen port slots for four days, and
+    the nightly `upgrade-project.py --all` then failed every consumer with a stack on
+    "all 16 port slots are in use".
+    """
+    assert worktree.reapable(sweep.SKIPPED)
+    assert worktree.reapable(sweep.SKIPPED, holds_uncommitted=True)
+    assert worktree.reapable(sweep.SKIPPED, pr_merged=False, holds_uncommitted=True)
+
+
+def test_a_husk_needs_no_force_to_be_reaped():
+    """The leak's whole cost was that `--force` -- the flag documented as discarding
+    work -- was the only way to reclaim a directory holding none."""
+    allowed, note = worktree.reap_decision(
+        sweep.SKIPPED, "not a git checkout", force=False, holds_uncommitted=True
+    )
+    assert allowed
+    assert not note
+
+
 # --- the destruction ledger ---------------------------------------------------
 
 
@@ -865,6 +894,29 @@ def test_a_forced_reap_still_deletes_a_branch_that_is_safe_to_delete():
     accumulation `branch_delete_flag` was written to stop."""
     plan = reap(sweep.NEEDS_PR, force=True)
     assert plan.steps[-1] == ("branch", "-D", box().branch)
+
+
+def test_a_husk_reap_removes_the_tree_and_plans_no_branch_delete():
+    """The same "plan no delete git will refuse" rule, one step further back.
+
+    A husk's `state` was read through a missing `.git`, so `ahead`, `upstream` and
+    `unpushed` are defaults rather than observations and `branch_delete_flag` can only
+    answer `-d` -- which refuses the branch the dead box's work went to. `apply_reap`
+    runs that step after the tree is gone and before the lease is released, so the reap
+    that finally cleared the husk would have exited 1 and leaked the port slot it was
+    run to reclaim.
+    """
+    plan = reap(sweep.SKIPPED, state=state(is_git=False), reason="not a git checkout")
+    assert not plan.refusal
+    assert plan.steps == (("worktree", "remove", plan.path),)
+    assert "is kept" in plan.warning
+    assert f"branch -d {box().branch}" in plan.warning
+
+
+def test_a_husk_reap_still_releases_the_slot_it_was_holding():
+    """The point of reaping one: the lease, and the port slot in it, is all it holds."""
+    plan = reap(sweep.SKIPPED, state=state(is_git=False), reason="not a git checkout")
+    assert plan.slot == box().slot
 
 
 def test_no_reap_plan_ever_emits_a_capital_D_without_the_remote_having_it():
@@ -2389,6 +2441,30 @@ def test_a_box_holding_work_is_held_even_when_its_pr_merged():
     action, why = decide(sweep.READY, "3 uncommitted file(s)", merged)
     assert action == worktree.HOLD
     assert "ready" in why
+
+
+def test_reconcile_reaps_a_husk_instead_of_calling_it_unused():
+    """A husk fell through every PR case to "the box was never used", which is the one
+    thing it is evidence against: it is the remains of a box that *was* used and whose
+    removal died partway. The reason matters as much as the action here -- this is the
+    line a human reads in `reconcile.log` when a slot goes missing."""
+    action, why = decide(sweep.SKIPPED, "not a git checkout", holds_uncommitted=True)
+    assert action == worktree.REAP
+    assert "never used" not in why
+    assert "not a git checkout" in why
+
+
+def test_a_husk_is_reaped_even_while_its_pr_is_open():
+    """Every other open-PR case waits because the checkout is where review comments get
+    answered. A husk has no checkout, so the wait has nowhere to happen and costs a port
+    slot for as long as the PR sits there."""
+    action, _ = decide(
+        sweep.SKIPPED,
+        "not a git checkout",
+        worktree.PullRequest(number=162, state="OPEN"),
+        holds_uncommitted=True,
+    )
+    assert action == worktree.REAP
 
 
 def test_a_box_holding_work_survives_disk_pressure_and_any_age():

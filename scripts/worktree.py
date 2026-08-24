@@ -259,7 +259,29 @@ def reapable(verdict: str, *, pr_merged: bool = False, holds_uncommitted: bool =
     ignorant caller fails towards keeping -- silently inert on the three commonest
     verdicts a box is destroyed under. A predicate whose safety argument is "the caller
     cannot construct that state" should still refuse the state.
+
+    **A husk is reapable, and it is the one verdict decided without consulting
+    `holds_uncommitted` at all.** `skipped` means the leased path is not a git checkout
+    -- a removal that died partway, or a `worktree add` that never landed -- so git has
+    already stopped tracking it and there is no index, no branch to commit to and no
+    `/ship` that could get anything out of it. What is left is files nothing can turn
+    into a commit, beside a lease still holding a port slot and a volume set. That
+    verdict is in none of the sets above, so `reap` refused it and `reconcile` returned
+    `HOLD` forever: the same permanent leak `MERGE_CAN_BE_STALE_ABOUT` and a closed PR
+    each document, reached from a third direction -- and this is the one that has
+    actually cost something. Four husks held four of sixteen port slots for four days,
+    and the nightly `upgrade-project.py --all` then failed every consumer that has a
+    stack with "all 16 port slots are in use".
+
+    Not gated on `holds_uncommitted`, because nothing can read dirtiness through a
+    missing `.git`: `sweep.inspect` reports 0 for a husk whatever is on disk, so the
+    gate would be inert for the honest caller and permanently refusing for the ignorant
+    one that takes the `True` default -- which is exactly how this leaked. The gate
+    exists to protect work a commit could still rescue; a husk has no such state for it
+    to be wrong about.
     """
+    if verdict == sweep.SKIPPED:
+        return True
     if verdict == PREVIEW_VERDICT:
         return not holds_uncommitted
     if verdict in SAFE_TO_REAP:
@@ -1517,6 +1539,15 @@ def reap_plan(
     rest of the forced-reap consequences are already reported. Discarding those commits
     stays possible and stays a separate, typed decision: the warning names the
     `git branch -D` that does it.
+
+    **A husk plans no branch delete for the same reason, one step further back.** Its
+    `state` was read through a missing `.git`, so `ahead`, `upstream` and `unpushed` are
+    defaults rather than observations and `branch_delete_flag` can only return `-d` --
+    which refuses the branch the dead box's work went to. That refusal lands in
+    `apply_reap` after the tree is gone and before the lease is released, so the reap
+    that finally cleared the husk would exit 1 and leak the port slot it was run to
+    reclaim. The branch is named in the warning instead; it is a ref in the source
+    checkout and outlives the box either way.
     """
     path = str(box_path(workspace_root, box.name))
     allowed, note = reap_decision(
@@ -1536,7 +1567,25 @@ def reap_plan(
         remove = (*remove, "--force")
     steps: list[tuple[str, ...]] = [remove]
     warning = note
-    if box.branch:
+    if box.branch and not state.is_git:
+        # A husk: `state` was read through a missing `.git`, so every field it could
+        # decide the flag from is a default rather than an observation. `-d` is what
+        # `branch_delete_flag` returns for it, and `-d` refuses a branch carrying
+        # commits -- which is the ordinary case, since the branch is where the work of
+        # the box that died went. That refusal lands in `apply_reap` *after* the tree
+        # is gone and *before* the lease is released, so a reap that did the one thing
+        # this box needed would exit 1 and leave the slot leaked exactly as before.
+        warning = "; ".join(
+            part
+            for part in (
+                note,
+                f"{box.branch} is kept -- the box is a husk, so nothing here can say "
+                f"whether that branch still holds work. To retire it once you have "
+                f"looked: git -C {box.project} branch -d {box.branch}",
+            )
+            if part
+        )
+    elif box.branch:
         flag = (
             preview_branch_delete_flag(state)
             if box.kind == PREVIEW_KIND
@@ -1712,6 +1761,10 @@ def reconcile_action(
 
     After that the cases are disjoint by construction:
 
+    - **husk** -- the leased path is not a git checkout at all, so every case below it
+      is about a checkout that no longer exists. It is tested first for that reason,
+      and it is the only one that ignores the PR: a review has nowhere to be answered
+      in a directory git stopped tracking, and what the box still holds is a port slot.
     - **merged** -- the work is on the default branch. Nothing is left to lose and the
       box is pure cost, so it goes regardless of age or pressure.
     - **closed** -- declined rather than landed, which changes where the content ended
@@ -1734,6 +1787,15 @@ def reconcile_action(
     """
     if not reapable(verdict, pr_merged=pr.merged, holds_uncommitted=holds_uncommitted):
         return HOLD, f"{verdict} -- {reason}"
+
+    if verdict == sweep.SKIPPED:
+        # Every case below reads the PR to decide what the *checkout* is still worth,
+        # and a husk has none: git stopped tracking the path, so there is nowhere left
+        # to answer a review or finish a branch. Falling through said "the box was never
+        # used", which is the one thing a husk is evidence against -- it is the remains
+        # of a box that was used and whose removal died partway. What it holds now is a
+        # port slot, and holding it is what took a whole night's vendoring run down.
+        return REAP, f"{reason} -- a previous removal died partway and left the lease"
 
     if verdict == PREVIEW_VERDICT:
         # A preview is never merged and never shipped: it is a copy of a ref someone is

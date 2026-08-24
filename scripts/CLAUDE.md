@@ -151,6 +151,20 @@ Each of these has already been violated by something:
   merge escape above exists to keep holding. `reap` reads the state from the same
   `pr_for` call `reconcile` makes, so the two can no longer describe one box in two
   ways — the disagreement `AWAITS_A_MERGE` was added to end.
+- **A box can also stop being a checkout, and that was the third spelling of the same
+  leak.** When a `git worktree remove` deletes most of the tree and then dies —
+  MAX_PATH, a locked file — what is left is a *husk*: a directory with no `.git`, which
+  `sweep.classify` calls `skipped`. That verdict was in none of the reapable sets, so
+  `reap` refused and `reconcile` held, forever, over a directory git had already stopped
+  tracking and out of which nothing could ever be committed. `reapable` answers it
+  directly now and ignores `holds_uncommitted` doing so, because nothing can read
+  dirtiness through a missing `.git` — a gate that is inert for the honest caller and
+  permanently refusing for the ignorant one is how this leaked. The cost was not
+  hypothetical: four husks held four of sixteen port slots until the nightly
+  `upgrade-project.py --all` failed every consumer that has a stack. `reap_plan` plans
+  **no branch delete** for one, for the reason a forced reap plans none — the flag
+  `branch_delete_flag` can derive from a husk's empty state is `-d`, git refuses it, and
+  that refusal lands after the tree is gone and before the lease is released.
 - **`reap` is the one place in the workspace that passes `-v` to `compose down`.**
   `docker-maint.py` must never do it — its target is a static checkout whose named
   volumes hold a dev database costing hours to re-ingest. A box's volumes were created
