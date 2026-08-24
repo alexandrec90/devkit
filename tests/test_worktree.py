@@ -3547,6 +3547,54 @@ def test_compose_up_for_a_ui_box_scopes_to_its_services_with_no_deps(monkeypatch
     assert seen[1][-1] == "--build"
 
 
+def test_compose_up_disables_bake_so_two_services_can_share_one_image_tag(monkeypatch):
+    """Compose delegates builds to `bake` by default now, and bake refuses a plan whose
+    targets export the same tag twice -- which is what an `app` and a `worker` built from
+    one Dockerfile are. Measured on carameli, 2026-08-24, engine 29.2.0:
+
+        target app: failed to solve: image "docker.io/library/carameli-app-...": already
+        exists
+
+    Every preview of that stack died there, reported as `the stack did not come up`, and
+    the same `compose build` with `COMPOSE_BAKE=0` succeeded. Sharing a tag is legal in
+    compose and the classic builder exports the two sequentially, so the bake path is the
+    regression -- disable it here rather than asking every consumer to restructure a
+    compose file that was always valid.
+    """
+    seen = {}
+    monkeypatch.setattr(
+        worktree.subprocess,
+        "run",
+        lambda argv, **k: seen.update(env=k.get("env")) or _completed(),
+    )
+    monkeypatch.setenv("PATH", "/sentinel-path")
+    ok, _ = worktree.compose_up(Path("x"), "c--y")
+    assert ok
+    assert seen["env"]["COMPOSE_BAKE"] == "0"
+    # Inherited, not replaced: a bare `{"COMPOSE_BAKE": "0"}` would take `docker` off
+    # PATH and turn every build into "docker is not on PATH".
+    assert seen["env"]["PATH"] == "/sentinel-path"
+
+
+def test_build_env_inherits_the_environment_rather_than_replacing_it(monkeypatch):
+    """The half that fails as a total outage rather than as a wrong build: `compose_up`
+    resolves `docker` off PATH, so an env that drops it reports `docker is not on PATH`
+    for every box on the machine."""
+    monkeypatch.setenv("PATH", "/sentinel-path")
+    monkeypatch.setenv("CARRIED_THROUGH", "yes")
+    env = worktree.build_env()
+    assert env["COMPOSE_BAKE"] == "0"
+    assert env["PATH"] == "/sentinel-path"
+    assert env["CARRIED_THROUGH"] == "yes"
+
+
+def test_build_env_wins_over_an_inherited_bake_setting(monkeypatch):
+    """A machine that exports `COMPOSE_BAKE=1` -- Docker Desktop suggests it, and it is
+    sticky in a shell profile -- must not re-enable the path this exists to avoid."""
+    monkeypatch.setenv("COMPOSE_BAKE", "1")
+    assert worktree.build_env()["COMPOSE_BAKE"] == "0"
+
+
 def test_apply_preview_of_a_ui_box_scopes_the_up_and_says_what_is_borrowed(monkeypatch):
     calls = []
     monkeypatch.setattr(

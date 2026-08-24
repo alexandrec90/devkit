@@ -2563,6 +2563,35 @@ def is_tracked(repo: Path, relative: str) -> bool:
     return completed.returncode == 0
 
 
+def build_env() -> dict[str, str]:
+    """The environment a box's `compose up --build` runs in: this one, plus bake off.
+
+    Recent Compose delegates building to **`docker buildx bake`**, and bake rejects a
+    plan in which two targets export the same tag:
+
+        target app: failed to solve: image "docker.io/library/carameli-app-…": already
+        exists
+
+    An `app` and a `worker` built from one Dockerfile and sharing one `image:` are
+    exactly that plan, and it is a legal, common compose file -- the classic builder
+    exports the two sequentially and is fine with it. So this is a regression in the
+    build path rather than a defect in the stack, and it is total: it fires before any
+    container starts, so **every** preview of such a project failed, reported through
+    `apply_preview` as the generic `the stack did not come up`. Measured on carameli,
+    2026-08-24, against engine 29.2.0; the identical `compose build` with
+    `COMPOSE_BAKE=0` succeeded.
+
+    Turning bake off here rather than in each consumer is the narrow fix: the alternative
+    asks every project with a shared-tag service to restructure a compose file that was
+    never wrong, and misses the next one. What it costs is bake's parallel build, which
+    a preview does once per box.
+
+    **Inherited, never replaced.** A bare `{"COMPOSE_BAKE": "0"}` would drop `PATH`, and
+    `compose_up` would report `docker is not on PATH` for every box on the machine.
+    """
+    return {**os.environ, "COMPOSE_BAKE": "0"}
+
+
 def compose_up(
     path: Path,
     project_name: str,
@@ -2596,6 +2625,7 @@ def compose_up(
             timeout=timeout,
             check=False,
             creationflags=sweep.NO_WINDOW,
+            env=build_env(),
         )
     except FileNotFoundError:
         return False, "docker is not on PATH — the stack was not started"
