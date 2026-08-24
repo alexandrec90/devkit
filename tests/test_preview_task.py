@@ -853,6 +853,23 @@ def test_a_pick_naming_an_unknown_checkout_is_reported_not_traced(monkeypatch, t
     assert "failed: unknown project 'nope'" in capsys.readouterr().out
 
 
+def test_a_full_port_registry_is_reported_not_traced(monkeypatch, tmp_path, capsys):
+    """The failure this task actually hit. `next_lease_slot` raises `RegistryError` when
+    every slot is leased, and it carries the three ways out in its own message -- so the
+    one thing that must not happen is the reader having to find that remedy under a
+    stack trace in `logs/preview-open-a-ui-branch.log`."""
+
+    def full(**kwargs):
+        raise preview_task.devkit_ports.RegistryError("all 16 port slots are in use. Reap a box")
+
+    monkeypatch.setattr(preview_task.worktree, "plan_preview", full)
+    candidate = preview_task.Candidate(
+        project="carameli", ref="agent/x", kind=preview_task.KIND_BRANCH
+    )
+    assert preview_task.serve(candidate, tmp_path) is False
+    assert "failed: all 16 port slots are in use. Reap a box" in capsys.readouterr().out
+
+
 def test_list_json_emits_every_field_of_every_row(stub, capsys):
     _menu(
         stub,
