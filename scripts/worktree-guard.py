@@ -26,12 +26,24 @@ permissionBehavior === undefined`), so this hook sets none and the call goes on 
 permission-checked at its new path like any other.
 
 It still blocks wherever a rewrite cannot honestly express the outcome, and
-`redirect_blocker` is the single predicate: a spawn that failed, so there is no box to
-aim at; a tool whose arguments it does not know how to rewrite; an `old_string` the
+`redirect_blocker` is the single predicate: a spawn that failed **with no box left
+behind by anyone else**, so there is nothing to aim at; a tool whose arguments it does
+not know how to rewrite; an `old_string` the
 box's copy does not contain, which would turn a clear block into an opaque "string not
 found"; and any session reached through Codex's hook adapter, which has no
 `updatedInput` contract and would read the allow as permission to write the *original*
 path. The block message is the same one as before, with the reason added as a note.
+
+**Two copies of this hook run on every tool call**, because it is registered in the
+user's `settings.json` and in the project's, and Claude Code fires both. They race to
+cut the same box, and the loser's `git worktree add` dies on the branch the winner has
+just created. Both responses then reach the agent as one object: an error saying the
+spawn failed and nothing was written, beside an `additionalContext` saying the edit was
+applied in the box. Whichever half it believes, the other is a lie — and believing the
+context is the expensive one, because the agent goes on to build on a change that was
+never made. So the spawn is held under `worktree.spawn_lock`, and a spawn that fails
+anyway looks for the box the winner registered before it blocks; `after_failed_spawn`
+is that recovery.
 
 Either way, by the time the agent reads the message the worktree exists, is on a fresh
 task branch off `origin/<default>`, and has its own `COMPOSE_PROJECT_NAME` and port
@@ -173,6 +185,13 @@ MUTATING_TOOLS = (
 # answered in 30s is a network problem, and the box is better cut from a stale local
 # `origin/<default>` than not cut at all.
 SPAWN_TIMEOUT = 30.0
+
+# How long to wait for the other registration of this hook to finish cutting the same
+# box before giving up on the lock and trying anyway. `worktree.SPAWN_LOCK_WAIT` owns
+# the number and the reasoning behind it; it is named here so a test can drive the wait
+# without pausing for it, and so the ceiling is read from one place if the harness's
+# hook timeout ever moves.
+SPAWN_LOCK_WAIT = worktree.SPAWN_LOCK_WAIT
 
 
 def parse_hook_input(raw: str) -> dict | None:
@@ -1268,6 +1287,100 @@ def deliver(
     return EXIT_ALLOW, "redirect"
 
 
+def current_boxes(root: Path, fallback: Mapping[str, Box]) -> Mapping[str, Box]:
+    """The lease file as it stands *now*, or the caller's snapshot if it cannot be read.
+
+    `main` reads the leases before this process waits on the spawn lock, and the whole
+    point of the wait is that a box appears during it — so the mapping it passed is
+    exactly the one that cannot answer "does this session have a box yet?".
+    """
+    try:
+        return worktree.live_boxes(root)
+    except Exception:
+        return fallback
+
+
+def after_failed_spawn(
+    payload: dict,
+    project: str,
+    relative: str,
+    root: Path,
+    session: str,
+    error: str,
+    locked: bool = True,
+    kind: str = "checkout",
+    inside: bool = False,
+    branch: str = "",
+    reason: str = "",
+    extra_notes: tuple[str, ...] = (),
+) -> int:
+    """Block toward a box — unless another run of this hook has just cut one.
+
+    The recovery for the double registration described at the top of this module. Both
+    copies handle the *same* tool call, so a failure here is very often not a failure at
+    all: the winner's box is cut, registered, and about to be re-aimed into by the other
+    process. Blocking on that reported the exact opposite of what the agent was told in
+    the same object — "spawning a box for it failed" beside "the edit was applied there
+    instead" — and nothing had been written either way.
+
+    Blind to *why* the spawn failed, deliberately. Matching on `a branch named ... already
+    exists` would model git's message; asking whether the box exists asks the question the
+    decision actually turns on, and answers it correctly for any other way of losing a
+    race. When there is genuinely no box, this is the block it always was.
+    """
+    raced = worktree.find_session_box(current_boxes(root, {}), project, session)
+    if raced is None:
+        _record_event(
+            "guard-spawn-failed",
+            (
+                ("project", project),
+                ("session", session),
+                ("kind", kind),
+                ("target", relative),
+                ("locked", locked),
+                ("detail", error),
+            ),
+        )
+        print(
+            failure_message(project, relative, error, inside=inside, branch=branch, reason=reason),
+            file=sys.stderr,
+        )
+        return EXIT_BLOCK
+
+    code, routed = deliver(
+        payload,
+        project,
+        relative,
+        str(worktree.box_path(root, raced.name)),
+        raced.name,
+        [
+            *extra_notes,
+            f"this hook's own spawn failed ({error}), but a concurrent run of it had "
+            f"already cut this session's box - the edit was routed there rather than "
+            f"refused",
+        ],
+        spawned=False,
+        inside=inside,
+        branch=branch,
+        reason=reason,
+    )
+    _record_event(
+        "guard-spawn-raced",
+        (
+            ("project", project),
+            ("session", session),
+            ("kind", kind),
+            ("outcome", "raced" if routed == "redirect" else "raced-block"),
+            ("box", raced.name),
+            ("branch", raced.branch),
+            ("target", relative),
+            ("locked", locked),
+            ("detail", error),
+        ),
+    )
+    return code
+
+
 def route_to_own_box(
     project: str,
     relative: str,
@@ -1288,37 +1401,82 @@ def route_to_own_box(
     branch, and an edit aimed into another session's box. The box is the outcome either
     way; `deliver` decides whether the edit reaches it by rewrite or by re-issue.
 
-    A failed spawn is the one case that cannot be either, and it stays a block: there is
-    no box to aim at, and allowing the edit is the outcome this hook exists to prevent.
+    A failed spawn is the one case that can be neither, and it blocks — unless the
+    failure was this hook's other registration winning the race, which `after_failed_spawn`
+    checks for. Allowing the edit where no box exists is the outcome this hook exists to
+    prevent; the whole sequence runs under `worktree.spawn_lock` so that race is normally
+    settled by waiting rather than by recovering from it.
     """
-    existing = worktree.find_session_box(boxes, project, session)
-    if existing is not None:
-        code, routed = deliver(
-            payload,
+    with worktree.spawn_lock(
+        root, f"{project}--{session or 'anon'}", wait=SPAWN_LOCK_WAIT
+    ) as locked:
+        # Read the leases again here rather than trusting `main`'s snapshot: the box this
+        # session needs may have been cut by the other registration of this hook while
+        # this process waited on the lock, and seeing it is what turns a lost race into
+        # an ordinary reuse.
+        existing = worktree.find_session_box(current_boxes(root, boxes), project, session)
+        if existing is not None:
+            code, routed = deliver(
+                payload,
+                project,
+                relative,
+                str(worktree.box_path(root, existing.name)),
+                existing.name,
+                list(extra_notes),
+                spawned=False,
+                inside=inside,
+                branch=branch,
+                reason=reason,
+            )
+            _record_event(
+                "guard-route" if routed == "redirect" else "guard-block",
+                (
+                    ("project", project),
+                    ("session", session),
+                    ("kind", kind),
+                    ("outcome", "reused"),
+                    ("box", existing.name),
+                    ("branch", existing.branch),
+                    ("target", relative),
+                ),
+            )
+            return code
+
+        return spawn_and_route(
             project,
             relative,
-            str(worktree.box_path(root, existing.name)),
-            existing.name,
-            list(extra_notes),
-            spawned=False,
+            workspace,
+            root,
+            session,
+            payload,
+            locked=locked,
             inside=inside,
             branch=branch,
             reason=reason,
+            kind=kind,
+            extra_notes=extra_notes,
         )
-        _record_event(
-            "guard-route" if routed == "redirect" else "guard-block",
-            (
-                ("project", project),
-                ("session", session),
-                ("kind", kind),
-                ("outcome", "reused"),
-                ("box", existing.name),
-                ("branch", existing.branch),
-                ("target", relative),
-            ),
-        )
-        return code
 
+
+def spawn_and_route(
+    project: str,
+    relative: str,
+    workspace: Path,
+    root: Path,
+    session: str,
+    payload: dict,
+    locked: bool = True,
+    inside: bool = False,
+    branch: str = "",
+    reason: str = "",
+    kind: str = "checkout",
+    extra_notes: tuple[str, ...] = (),
+) -> int:
+    """Cut this session's box for `project` and route the edit into it.
+
+    Split from `route_to_own_box` so the spawn is one flat function under the lock its
+    caller holds, rather than a second level of indentation inside the reuse decision.
+    """
     try:
         slug = session_slug(session, task_slug.read(root, session))
         # quiet=True: this process's stderr is the block message, and a plan-time
@@ -1332,92 +1490,36 @@ def route_to_own_box(
         )
         ok, notes = worktree.apply_new(plan, workspace, timeout=SPAWN_TIMEOUT, provision=False)
     except Exception as exc:
-        _record_event(
-            "guard-spawn-failed",
-            (
-                ("project", project),
-                ("session", session),
-                ("kind", kind),
-                ("target", relative),
-                ("detail", f"{type(exc).__name__}: {exc}"),
-            ),
+        return after_failed_spawn(
+            payload,
+            project,
+            relative,
+            root,
+            session,
+            f"{type(exc).__name__}: {exc}",
+            locked=locked,
+            kind=kind,
+            inside=inside,
+            branch=branch,
+            reason=reason,
+            extra_notes=extra_notes,
         )
-        print(
-            failure_message(
-                project,
-                relative,
-                f"{type(exc).__name__}: {exc}",
-                inside=inside,
-                branch=branch,
-                reason=reason,
-            ),
-            file=sys.stderr,
-        )
-        return EXIT_BLOCK
 
     if not ok:
-        # A spawn can fail because someone else just did it. Two guards run on every
-        # call in a session whose settings register this hook twice — a user-level
-        # absolute path and a project-level `$CLAUDE_PROJECT_DIR` one resolving to the
-        # same file — and neither can see the other's box, because the loser reads the
-        # lease registry before the winner writes it. It then dies on
-        # `git worktree add: a branch named 'agent/…' already exists` and exits 2, which
-        # blocks the call the winner had just re-aimed successfully. The agent gets both
-        # messages: "the edit was applied at <box>" on stdout, "spawning a box failed" on
-        # stderr, and neither is true — the box exists and the edit went nowhere.
-        #
-        # So the collision is re-read rather than reported: the box this session needs is
-        # on disk by now, and reusing it is what the winner did. Only a genuine failure —
-        # no box afterwards either — is still a block.
-        settled = worktree.find_session_box(worktree.live_boxes(root), project, session)
-        if settled is not None:
-            code, routed = deliver(
-                payload,
-                project,
-                relative,
-                str(worktree.box_path(root, settled.name)),
-                settled.name,
-                list(extra_notes),
-                spawned=False,
-                inside=inside,
-                branch=branch,
-                reason=reason,
-            )
-            _record_event(
-                "guard-route" if routed == "redirect" else "guard-block",
-                (
-                    ("project", project),
-                    ("session", session),
-                    ("kind", kind),
-                    ("outcome", "raced"),
-                    ("box", settled.name),
-                    ("branch", settled.branch),
-                    ("target", relative),
-                ),
-            )
-            return code
-        _record_event(
-            "guard-spawn-failed",
-            (
-                ("project", project),
-                ("session", session),
-                ("kind", kind),
-                ("target", relative),
-                ("detail", "; ".join(notes) or "no detail"),
-            ),
+        return after_failed_spawn(
+            payload,
+            project,
+            relative,
+            root,
+            session,
+            "; ".join(notes) or "no detail",
+            locked=locked,
+            kind=kind,
+            inside=inside,
+            branch=branch,
+            reason=reason,
+            extra_notes=extra_notes,
         )
-        print(
-            failure_message(
-                project,
-                relative,
-                "; ".join(notes) or "no detail",
-                inside=inside,
-                branch=branch,
-                reason=reason,
-            ),
-            file=sys.stderr,
-        )
-        return EXIT_BLOCK
 
     # Said out loud because the alternative is an agent silently assuming an empty box.
     # A resumed one already carries this session's commits and an open PR, so `/ship`

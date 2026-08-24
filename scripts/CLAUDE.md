@@ -214,13 +214,18 @@ Each of these has already been violated by something:
   compares `MUTATING_TOOLS` against devkit's matcher so at least the source of truth
   cannot drift; a machine's user-level registration is outside every repo and has to be
   widened by hand.
-- **Two registrations race for one box, and the loser used to contradict the winner.**
-  A workstation registers this hook at user level *and* through the project's own
-  settings, so both fire on one edit and both reach `apply_new`. The loser fails with
-  *a branch named `agent/…` already exists* — and, before it looked further, blocked the
-  call while the winner was re-aiming it, which is one edit answered two mutually
-  exclusive ways in the same turn. It now looks the settled box up with
-  `find_session_box` and delivers the winner's decision, recorded as `outcome=raced`.
+- **Two copies of the guard run on every call, and they race for the box.** It is
+  registered in the user's `settings.json` and in the project's, and Claude Code fires
+  both; each plans a box for the same `(session, project)` and the loser's `git worktree
+  add` dies on the branch the winner has just created. Because the two responses are
+  merged into one object, the agent was handed a spawn-failure error *beside* an
+  `additionalContext` saying the edit had been applied in the box — and nothing had been
+  written either way, so believing the context meant building on a change that did not
+  exist. `worktree.spawn_lock` brackets plan-and-apply so the second process waits and
+  finds the first one's box; `after_failed_spawn` is the fallback for when the wait runs
+  out, and it asks whether a box exists rather than matching on git's message, because
+  the box is what the decision turns on. Deduplicating the registration would fix the
+  race and cost every project without its own copy of the hook, so the hook absorbs it.
 - **The guard is the one caller that skips provisioning.** A linked worktree checks out
   tracked files only, so a fresh box has no installed toolchain and nothing else was
   going to create one — `session-start.sh` returns early on a local machine. `worktree.py

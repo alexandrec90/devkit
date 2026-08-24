@@ -119,6 +119,22 @@ LEASE_LOCK_NAME = "leases.lock"
 LEASE_LOCK_WAIT = 10.0
 LEASE_LOCK_STALE = 60.0
 
+# Mutual exclusion around a whole *spawn*, keyed by the (project, session) whose box is
+# being cut and held by `worktree-guard.py`. `lease_lock` cannot serve: it is held for
+# milliseconds by design, and `apply_new` takes it in the middle of the very sequence
+# this has to bracket. The window is the one the guard's double registration opens — the
+# user's `settings.json` and the project's both fire that hook on the same tool call, so
+# two processes plan a box for the same session at the same instant and the loser's
+# `git worktree add` dies on a branch the winner has just created.
+#
+# `stale` is minutes rather than `LEASE_LOCK_STALE`'s one, because a spawn legitimately
+# holds this across a `git fetch`; `wait` has to stay under the harness's own hook
+# timeout, since a guard killed mid-wait says nothing at all and the edit it was judging
+# lands wherever it was pointing.
+SPAWN_LOCK_PREFIX = "spawn-"
+SPAWN_LOCK_WAIT = 45.0
+SPAWN_LOCK_STALE = 120.0
+
 # Separates the project from the branch topic in a box name. Two hyphens rather than
 # one because project names already contain hyphens (`apt-finder`) and the box name is
 # parsed back apart by `list`. Spelled in `sweep` for the same reason as BOXES_DIR_NAME:
@@ -1971,19 +1987,16 @@ def read_leases(workspace_root: Path) -> dict[str, Box]:
 
 
 @contextlib.contextmanager
-def lease_lock(
-    workspace_root: Path, wait: float = LEASE_LOCK_WAIT, stale: float = LEASE_LOCK_STALE
-):
-    """Hold the inter-process mutex around one lease read-modify-write.
+def _dir_lock(path: Path, wait: float, stale: float):
+    """The mkdir mutex both named locks below are made of. Yields whether it was had.
 
-    A holder that died is broken after `stale` seconds — the lock is held for
-    milliseconds, so anything older is a corpse. If the lock cannot be had within
-    `wait` seconds the caller proceeds *unlocked*: this tier fails toward
-    availability (see `parse_leases`), and an unlocked write is the status quo
-    ante, not a new failure mode. Same for a filesystem that cannot create the
-    lock directory at all.
+    A holder that died is broken after `stale` seconds. If the lock cannot be had
+    within `wait` seconds the caller proceeds *unlocked*: this tier fails toward
+    availability (see `parse_leases`), and an unlocked run is the status quo ante,
+    not a new failure mode. Same for a filesystem that cannot create the lock
+    directory at all. Callers that can do something better than proceed blindly read
+    the yielded flag; `lease_lock`'s cannot, and ignore it.
     """
-    path = boxes_root(workspace_root) / LEASE_LOCK_NAME
     acquired = False
     deadline = time.monotonic() + wait
     while True:
@@ -2007,11 +2020,49 @@ def lease_lock(
         except OSError:
             break
     try:
-        yield
+        yield acquired
     finally:
         if acquired:
             with contextlib.suppress(OSError):
                 os.rmdir(path)
+
+
+@contextlib.contextmanager
+def lease_lock(
+    workspace_root: Path, wait: float = LEASE_LOCK_WAIT, stale: float = LEASE_LOCK_STALE
+):
+    """Hold the inter-process mutex around one lease read-modify-write."""
+    with _dir_lock(boxes_root(workspace_root) / LEASE_LOCK_NAME, wait, stale):
+        yield
+
+
+def spawn_lock_name(key: str) -> str:
+    """The lock directory for `key`, which is a (project, session) pair spelled out.
+
+    Sanitised rather than hashed: this directory sits beside the boxes, and a human
+    who finds one left behind by a killed hook should be able to read whose spawn it
+    was without a decoder.
+    """
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", key).strip("._-") or "unkeyed"
+    return f"{SPAWN_LOCK_PREFIX}{safe[:80]}.lock"
+
+
+@contextlib.contextmanager
+def spawn_lock(
+    workspace_root: Path,
+    key: str,
+    wait: float = SPAWN_LOCK_WAIT,
+    stale: float = SPAWN_LOCK_STALE,
+):
+    """Serialise the spawns racing for one `key`. Yields whether the lock was had.
+
+    Held across `plan_*` + `apply_new` by the guard, so the second process to arrive
+    finds the first one's box in the lease file instead of dying on the branch it
+    created. A caller that did *not* get the lock has to assume a spawn it cannot see
+    is in flight — see `worktree-guard.py`'s recovery, which is what the flag is for.
+    """
+    with _dir_lock(boxes_root(workspace_root) / spawn_lock_name(key), wait, stale) as held:
+        yield held
 
 
 def write_leases(workspace_root: Path, boxes: Mapping[str, Box]) -> None:

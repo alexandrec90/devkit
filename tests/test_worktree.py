@@ -1510,6 +1510,85 @@ def test_a_lock_whose_holder_died_is_broken(tmp_path):
     assert not lock.exists()  # we owned it, so exit removed it
 
 
+# --- and the spawn itself is exclusive too -------------------------------------
+#
+# A tier up from the lease write, and for a failure the lease lock cannot touch: the
+# guard hook is registered twice (the user's settings and the project's), so two copies
+# of it plan a box for the SAME session at the same instant, and the loser's `git
+# worktree add` dies on the branch the winner has just created. `spawn_lock` brackets
+# plan-and-apply, which is longer than `lease_lock` may ever be held and takes
+# `lease_lock` in the middle of itself.
+
+
+def _spawn_lock_dir(tmp_path: Path, key: str = "devkit--s1") -> Path:
+    return worktree.boxes_root(tmp_path) / worktree.spawn_lock_name(key)
+
+
+def test_the_spawn_lock_is_held_inside_released_after_and_says_it_was_had(tmp_path):
+    with worktree.spawn_lock(tmp_path, "devkit--s1") as held:
+        assert held is True
+        assert _spawn_lock_dir(tmp_path).is_dir()
+    assert not _spawn_lock_dir(tmp_path).exists()
+
+
+def test_a_spawn_lock_someone_else_holds_reports_that_it_was_not_had(tmp_path):
+    """The flag is the whole point: the caller that could not wait its turn has to
+    assume a spawn it cannot see is in flight, and `worktree-guard.py` recovers by
+    looking for that spawn's box instead of reporting a failure."""
+    _spawn_lock_dir(tmp_path).mkdir(parents=True)
+    with worktree.spawn_lock(tmp_path, "devkit--s1", wait=0.2, stale=60.0) as held:
+        assert held is False
+    assert _spawn_lock_dir(tmp_path).is_dir()  # the other holder's, left untouched
+
+
+def test_spawns_for_different_sessions_do_not_wait_on_each_other(tmp_path):
+    """One box per (session, project) is the tier's whole shape, so two sessions
+    spawning at once are not a race and must not be serialised into one."""
+    with worktree.spawn_lock(tmp_path, "devkit--s1") as first:
+        with worktree.spawn_lock(tmp_path, "devkit--s2", wait=0.2) as second:
+            assert first and second
+
+
+def test_a_spawn_lock_whose_holder_died_is_broken(tmp_path):
+    """A hook killed at the harness's timeout leaves the directory behind, and every
+    later spawn for that session would wait the full `wait` for a corpse."""
+    lock = _spawn_lock_dir(tmp_path)
+    lock.mkdir(parents=True)
+    dead = worktree.time.time() - 600
+    worktree.os.utime(lock, (dead, dead))
+    with worktree.spawn_lock(tmp_path, "devkit--s1", wait=5.0, stale=120.0) as held:
+        assert held is True
+    assert not lock.exists()
+
+
+@pytest.mark.parametrize(
+    "key, expected",
+    [
+        ("devkit--s1", "spawn-devkit--s1.lock"),
+        ("carameli--cc0f25c0-9839-4216-9d2a-1ce67f4dd93b", None),
+        ("dev/kit--a b:c", "spawn-dev_kit--a_b_c.lock"),
+        ("", "spawn-unkeyed.lock"),
+        ("...", "spawn-unkeyed.lock"),
+    ],
+)
+def test_a_spawn_lock_name_is_a_readable_path_component(key, expected):
+    """Sanitised rather than hashed, and a session id must survive intact: a lock left
+    behind by a killed hook is read by a human, who has to see whose spawn it was."""
+    name = worktree.spawn_lock_name(key)
+    assert name == (expected or f"spawn-{key}.lock")
+    assert "/" not in name and "\\" not in name and ":" not in name
+
+
+def test_a_spawn_lock_name_stays_a_legal_filename_for_any_key(tmp_path):
+    """The reversion check for the length cap: `mkdir` on an over-long name fails with
+    OSError, which `_dir_lock` treats as 'could not lock' -- so every spawn for that
+    session would silently run unlocked."""
+    lock = worktree.boxes_root(tmp_path) / worktree.spawn_lock_name("x" * 500)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.mkdir()
+    assert lock.is_dir()
+
+
 def test_write_leases_replaces_the_file_leaving_no_partial_state(tmp_path):
     worktree.write_leases(tmp_path, {"a--x-0806": box("a--x-0806")})
     assert "a--x-0806" in worktree.read_leases(tmp_path)
