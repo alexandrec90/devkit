@@ -27,6 +27,42 @@ class TestClean:
     def test_non_string_values_are_stringified(self):
         assert events.clean(42) == "42"
 
+    def test_an_explicit_limit_wins(self):
+        assert events.clean("x" * 50, limit=10) == "x" * 10
+
+
+class TestFieldLimits:
+    """A report's proposed fix is at the *end* of it, so a flat cap deletes exactly
+    the half a triager needs. `message` and `detail` get their own ceiling."""
+
+    def test_a_reports_message_keeps_its_proposed_fix(self):
+        assert events.limit_for("message") > events.VALUE_LIMIT
+
+    def test_a_spawn_failures_detail_keeps_gits_reason(self):
+        assert events.limit_for("detail") > events.VALUE_LIMIT
+
+    def test_every_other_field_takes_the_flat_cap(self):
+        assert events.limit_for("command") == events.VALUE_LIMIT
+        assert events.limit_for("project") == events.VALUE_LIMIT
+
+    def test_a_long_message_survives_into_the_line(self):
+        # The exact shape that lost its recommendation: a diagnosis longer than the
+        # flat cap, with the fix in its last sentence.
+        report = "d" * events.VALUE_LIMIT + " Slug the branch from the box name instead."
+        line = events.event_line("s", "agent-report", (("message", report),))
+        assert line.endswith("Slug the branch from the box name instead.")
+
+    def test_a_long_message_is_still_bounded(self):
+        report = "d" * (events.limit_for("message") * 2)
+        line = events.event_line("s", "agent-report", (("message", report),))
+        assert line == "s\tevent=agent-report\tmessage=" + "d" * events.limit_for("message")
+
+    def test_a_long_message_is_still_one_line(self):
+        report = "a\nb\t" * 500
+        line = events.event_line("s", "agent-report", (("message", report),))
+        assert "\n" not in line
+        assert line.count("\t") == 2
+
 
 class TestEventLine:
     def test_format(self):
