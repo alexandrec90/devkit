@@ -1405,7 +1405,21 @@ def preview_spawn_plan(
     steps: list[tuple[str, ...]] = []
     if fetch:
         steps.append(("fetch", "--quiet", "origin", f"+refs/heads/{ref}:refs/remotes/origin/{ref}"))
-    steps.append(("worktree", "add", "--no-track", "-b", local, str(path), f"origin/{ref}"))
+    # `-B`, not `-b`: the branch outlives its box. A reap keeps it, and so does a
+    # `git worktree remove` run by hand, so the next preview of the same ref died on
+    # `fatal: a branch named 'preview/resume-0820' already exists` -- with no box, no
+    # lease and no slot anywhere to point at, which reads as the task being broken
+    # rather than as one stale ref. `resume_plan` preserves an orphaned *task* branch
+    # for a reason that does not carry over: a task branch may hold commits no remote
+    # has, and `reap` is what leaves it behind. A preview branch reaches that state by
+    # one route only -- a hand-run `git worktree remove`, since `reap` already refuses
+    # a preview that grew a commit -- and resetting is still the answer, because a
+    # preview of `<ref>` that showed somebody's stray commits on top would not be a
+    # preview of `<ref>`. That is the same force-reset `preview_refresh_steps` performs
+    # on a live box at every re-open, arriving one box later. git still refuses `-B`
+    # for a branch checked out in another worktree, which is the live case, and
+    # adoption handles that long before anything reaches this plan.
+    steps.append(("worktree", "add", "--no-track", "-B", local, str(path), f"origin/{ref}"))
     box = Box(
         name=name,
         project=project,
