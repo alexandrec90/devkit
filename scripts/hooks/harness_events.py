@@ -46,6 +46,26 @@ LEDGER = Path("logs") / "harness-events.log"
 VALUE_LIMIT = 300
 
 
+# `<project>--<slug>-<MMDD>` is `worktree.py`'s box-naming rule, and `project_of` there
+# owns it. This is the stdlib-only half a hook can reach: hooks run before the venv
+# exists, so importing that module is not available to them.
+BOX_NAME_SEP = "--"
+
+
+def project_name(root: Path) -> str:
+    """The project a checkout belongs to -- the repo name, never a box directory's.
+
+    Every writer used `root.name`, which for an agent session is usually an *ephemeral
+    box*: `devkit--guard-quoted-redirect-0823`. Grouping by project months later is the
+    ledger's whole purpose, and 28% of its rows named a project that does not exist and
+    never will -- twenty pseudo-projects in three days, one per box, none of them
+    greppable as the repo the work was actually in. The guard already recorded the real
+    name because it resolves a project to decide anything at all; the three writers that
+    had no such reason to know were the ones that got it wrong.
+    """
+    return root.name.split(BOX_NAME_SEP, 1)[0] or root.name
+
+
 def clean(value: object) -> str:
     """One field value, made safe for the line format: whitespace collapsed (tabs and
     newlines are the field and record separators), truncated, never empty."""

@@ -12,6 +12,7 @@ import os
 from support import LIVE_WORKSPACE, REPO_ROOT, load_script, needs_live_workspace, sweep
 
 ws = load_script("scripts/workspace-status.py")
+harness_triage = load_script("scripts/harness_triage.py")
 
 
 def result(name: str, verdict: str) -> sweep.Result:
@@ -589,36 +590,62 @@ NOW = 1_755_000_000.0  # any fixed instant; the ledger stamps are written relati
 
 
 def _ledger(root, *entries):
-    """Write a harness-events ledger of (age_seconds, event) pairs under `root`."""
+    """Write a harness-events ledger of (age_seconds, event) pairs under `root`.
+
+    A third element, when present, is appended as extra `key=value` fields -- which is
+    how a `triage-resolved` line names the item it retires.
+    """
     import datetime as dt
 
     lines = []
-    for age, event in entries:
+    for entry in entries:
+        age, event = entry[0], entry[1]
+        extra = entry[2] if len(entry) > 2 else ""
         stamp = dt.datetime.fromtimestamp(NOW - age, dt.UTC).isoformat(timespec="seconds")
-        lines.append(f"{stamp}\tevent={event}\tproject=carameli\tsession=s1")
+        line = f"{stamp}\tevent={event}\tproject=carameli\tsession=s1"
+        lines.append(line + (f"\t{extra}" if extra else ""))
     (root / "logs").mkdir(parents=True, exist_ok=True)
     (root / "logs" / "harness-events.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return lines
 
 
 def test_no_ledger_file_is_silence(tmp_path):
-    assert ws.events_line(source=tmp_path, now=NOW) == ""
+    assert ws.events_line(source=tmp_path) == ""
 
 
-def test_a_recent_agent_report_is_surfaced_with_the_grep_to_run(tmp_path):
+def test_an_agent_report_is_surfaced_with_the_command_to_run(tmp_path):
     _ledger(tmp_path, (3600, "agent-report"))
-    line = ws.events_line(source=tmp_path, now=NOW)
-    assert "1 harness event(s) need triage" in line
-    assert "agent-report" in line and "harness-events.log" in line
+    line = ws.events_line(source=tmp_path)
+    assert "1 harness defect(s) open" in line
+    assert "harness_triage.py" in line
 
 
 def test_a_failed_spawn_is_surfaced(tmp_path):
     _ledger(tmp_path, (3600, "guard-spawn-failed"), (7200, "agent-report"))
-    assert "2 harness event(s)" in ws.events_line(source=tmp_path, now=NOW)
+    assert "2 harness defect(s)" in ws.events_line(source=tmp_path)
 
 
-def test_events_older_than_the_window_are_not_resurfaced(tmp_path):
-    _ledger(tmp_path, (8 * 86400, "agent-report"))
-    assert ws.events_line(source=tmp_path, now=NOW) == ""
+def test_an_old_event_still_counts_until_someone_retires_it(tmp_path):
+    """The reversion check for dropping the seven-day window.
+
+    A defect nobody answered used to leave this line on day eight, which is the one
+    thing a backlog must never do: it made silence mean "handled" and "forgotten"
+    interchangeably. Restore the window and this fails.
+    """
+    _ledger(tmp_path, (400 * 86400, "agent-report"))
+    assert "1 harness defect(s) open" in ws.events_line(source=tmp_path)
+
+
+def test_a_resolved_event_leaves_the_line(tmp_path):
+    """And the other direction: the count falls only for a written-down reason."""
+    written = _ledger(tmp_path, (3600, "agent-report"))
+    ref = harness_triage.item_id(written[0])
+    _ledger(
+        tmp_path,
+        (3600, "agent-report"),
+        (60, "triage-resolved", f"ref={ref}\tnote=fixed in PR 42"),
+    )
+    assert ws.events_line(source=tmp_path) == ""
 
 
 def test_routine_events_never_reach_the_session_start(tmp_path):
@@ -631,21 +658,27 @@ def test_routine_events_never_reach_the_session_start(tmp_path):
         (60, "capped-bash-block"),
         (60, "lint-fix-block"),
     )
-    assert ws.events_line(source=tmp_path, now=NOW) == ""
+    assert ws.events_line(source=tmp_path) == ""
 
 
 def test_a_malformed_ledger_line_is_skipped_not_fatal(tmp_path):
+    """A torn line is skipped, and one with an unreadable *stamp* still counts.
+
+    The stamp used to decide membership, so an unparseable one silently dropped a real
+    report; nothing needs it now, and an event that was recorded is open whatever its
+    first field says.
+    """
     (tmp_path / "logs").mkdir(parents=True)
     (tmp_path / "logs" / "harness-events.log").write_text(
         "not a stamp\tevent=agent-report\tx=y\ngarbage line\n", encoding="utf-8"
     )
-    assert ws.events_line(source=tmp_path, now=NOW) == ""
+    assert "1 harness defect(s) open" in ws.events_line(source=tmp_path)
 
 
 def test_the_events_line_reaches_the_rendered_message():
     """A helper nothing calls is a check that reports nothing."""
-    message = ws.render([], {}, "", events="1 harness event(s) need triage -- x")
-    assert "[workspace] 1 harness event(s) need triage" in message
+    message = ws.render([], {}, "", events="1 harness defect(s) open -- x")
+    assert "[workspace] 1 harness defect(s) open" in message
 
 
 # --- the live workspace file vs devkit's canonical copy -----------------------

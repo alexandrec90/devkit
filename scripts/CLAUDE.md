@@ -467,3 +467,28 @@ Two properties to keep:
   only in the one state whose verdict the answer changes, and their `upstream` terms are
   mutually exclusive, so a sweep still makes at most one `gh` call per checkout. A
   network round trip per repo per pass is what the gates exist to bound.
+
+## The events ledger: append-only, and that is why resolution is an event
+
+`harness_events.py` is the write half and `harness_triage.py` the read half. Two
+decisions in the seam between them are worth knowing, because both were bugs first.
+
+**"Open" is a state, never an age.** `workspace-status.events_line` counted the last
+seven days, so an item left the session-start line by *ageing out*: a defect fixed within
+the hour kept being counted for a week, and one nobody looked at vanished silently on day
+eight. Both failure directions at once. Open now means an event with no `triage-resolved`
+naming it, at any age — which is why `resolve()` refuses a blank `--note` and why the ids
+are content-addressed rather than positional. A separate state file was the alternative
+and is the thing an append-only single file exists to avoid.
+
+**`project=` names the repo, not the directory the writer ran in.** Three of the four
+writers recorded `REPO_ROOT.name`, and from a box that is the box directory, so 28% of
+this machine's rows named a pseudo-project — twenty of them in three days, one per box.
+`harness_events.project_name` is the fix on write; `Item.project` applies the same rule on
+**read**, because the ledger is append-only and those rows are there forever.
+`BOX_NAME_SEP` duplicates `worktree.py`'s naming rule deliberately: hooks run before a
+venv exists, so importing that module is not available to them.
+
+The skill that works the backlog is `triage-harness`, and it is devkit-only on purpose —
+every defect on this ledger is a defect in devkit, whatever project the session that hit
+it was scoped to.

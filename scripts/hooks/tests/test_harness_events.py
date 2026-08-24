@@ -40,6 +40,34 @@ class TestEventLine:
         assert line == "s\tevent=e"
 
 
+class TestProjectName:
+    """The `project=` field has to name a repo, not whichever directory the writer ran in.
+
+    Three of the four writers recorded `REPO_ROOT.name` directly, and from an ephemeral
+    box that is the box directory -- so 28% of this machine's ledger named a project that
+    does not exist and never will, one pseudo-project per box. Grouping the backlog by
+    project was meaningless until this normalised.
+    """
+
+    def test_a_checkout_is_its_own_name(self, tmp_path):
+        assert events.project_name(tmp_path / "carameli") == "carameli"
+
+    def test_a_box_reads_as_the_project_it_was_cut_from(self, tmp_path):
+        box = tmp_path / f"carameli{events.BOX_NAME_SEP}some-task-0824"
+        assert events.project_name(box) == "carameli"
+
+    def test_a_hyphenated_project_survives_the_split(self, tmp_path):
+        """`--` is the separator, so a single hyphen in a repo name is not one."""
+        assert events.project_name(tmp_path / "data-lake") == "data-lake"
+        assert (
+            events.project_name(tmp_path / f"data-lake{events.BOX_NAME_SEP}fix-0824") == "data-lake"
+        )
+
+    def test_a_name_that_is_only_the_separator_falls_back_to_itself(self, tmp_path):
+        """Never return an empty string: the ledger field would read as a missing value."""
+        assert events.project_name(tmp_path / events.BOX_NAME_SEP) == events.BOX_NAME_SEP
+
+
 class TestLedgerPath:
     def test_explicit_root_wins(self, tmp_path, monkeypatch):
         monkeypatch.delenv("DEVKIT_DIR", raising=False)
