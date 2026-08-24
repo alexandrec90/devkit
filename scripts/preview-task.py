@@ -27,7 +27,8 @@ close each already is to being on screen:
      -- so this is how you look at a change that has not been pushed yet.
   3. **Open pull requests**, via `gh`. The review-before-merge case, and the only source
      that works when the machine that made the change was not this one.
-  4. **Recent `agent/...` branches on origin** that none of the above already covers.
+  4. **Recent `agent/...` branches on origin** that none of the above already covers,
+     minus the ones an unattended job cut for itself -- see `IGNORED_REF_PREFIXES`.
 
 A row that several sources agree on is merged, not repeated: a standing preview of the
 head branch of PR #164 is one row that says both. `merge_candidates` owns that, and is
@@ -103,6 +104,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_project
 import sweep
+import task_branch as tb
 import worktree
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -114,11 +116,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PR_LIMIT = 8
 BRANCH_LIMIT = 8
 
+# How many refs to ask git for per `BRANCH_LIMIT` slot, so that `ignored_ref` has
+# something left to keep. Four, because a nightly job cutting one branch per consumer
+# fills a whole page of `--sort=-committerdate` on its own, and the cost of asking for
+# more is a longer string from a command already being run.
+BRANCH_OVERFETCH = 4
+
 # A bare branch on origin that nobody has touched in this many days is not what anyone
 # opened this task to look at. Six checkouts times `BRANCH_LIMIT` is forty rows, and the
 # first version of this menu printed all of them: twenty-eight of the twenty-nine rows
-# were `agent/devkit-upgrade-v0-10-2-...` copies of the same vendoring commit in six
-# repos, none of them a UI change and none of them from this week.
+# were the nightly upgrade sweep's copies of the same vendoring commit in six repos,
+# none of them a UI change and none of them from this week. Those refs now name
+# themselves (`tb.AUTOMATION_PREFIX`) and are dropped outright rather than aged out,
+# which is what this cap was standing in for -- it is back to being about age alone.
 #
 # Boxes and open PRs deliberately bypass it. A box exists because someone is working in
 # it, and an open PR is open -- neither needs a date to justify its row, and cutting one
@@ -136,13 +146,21 @@ MENU_LIMIT = 20
 # this tool's own scratch copy and previewing one would nest a copy of a copy.
 BRANCH_NAMESPACES = ("agent",)
 
-# Head-branch namespaces that are never the UI change anyone opened this task to see.
-# The branch source is already scoped by `BRANCH_NAMESPACES`; this filters the PR
-# source, where dependabot's bumps are the case that actually happened -- every open
-# bump PR earned a row, above the branches a human might want. A standing preview of
-# such a ref keeps its row: someone deliberately brought it up, and only the sources
-# that *discover* refs are filtered, never the boxes already serving one.
-IGNORED_REF_PREFIXES = ("dependabot/",)
+# Head-branch namespaces that are never the UI change anyone opened this task to see:
+# dependabot's bumps, and every branch an unattended job cut for itself. Both are the
+# case that actually happened rather than a category invented here -- every open bump PR
+# earned a row above the branches a human might want, and the nightly vendoring sweep
+# supplied twenty-eight of this menu's first twenty-nine rows.
+#
+# The reason this is a *namespace* test and not a slug match is that the two are
+# indistinguishable as text: `agent/auto-merge-label-0823` is a task somebody gave an
+# agent. `tb.AUTOMATION_PREFIX` is a path segment the job puts there itself, which is
+# the only spelling that cannot be arrived at by accident -- see `upgrade_branch_stem`.
+#
+# A STANDING preview of such a ref keeps its row. Someone typed the ref to bring that
+# box up, so it is no longer a discovered row, and hiding what is already serving on a
+# port would leave a preview nothing in this menu could stop.
+IGNORED_REF_PREFIXES = ("dependabot/", tb.AUTOMATION_PREFIX)
 
 # Where a row came from, and the order the menu puts them in. The ranking is "how few
 # seconds until it is on screen", which is also how likely each is to be the answer.
@@ -284,6 +302,24 @@ def box_ref(box: worktree.Box) -> str:
     return box.tracks or box.branch
 
 
+def ignored_ref(ref: str) -> bool:
+    """Whether `ref` is one the menu never offers on its own: a bot's, or a job's."""
+    return ref.startswith(IGNORED_REF_PREFIXES)
+
+
+def keeps_row(candidate: Candidate) -> bool:
+    """Whether a merged row survives `IGNORED_REF_PREFIXES`.
+
+    The kind is the whole test, because the prefixes describe how a ref was *discovered*
+    rather than what it contains. A standing preview was asked for by name and is serving
+    on a port right now; dropping it would leave a running box that nothing in this menu
+    could stop, which is worse than the row it saves. Everything else here -- a task box,
+    an open PR, a branch on origin -- is this script guessing that someone might want it,
+    and for these prefixes that guess is always wrong.
+    """
+    return candidate.kind == KIND_STANDING or not ignored_ref(candidate.ref)
+
+
 def merge_candidates(
     project: str,
     boxes: list[worktree.Box],
@@ -328,8 +364,6 @@ def merge_candidates(
         if not ref:
             continue
         current = found.get(ref)
-        if current is None and ref.startswith(IGNORED_REF_PREFIXES):
-            continue
         title = str(entry.get("title") or "")
         number = int(entry.get("number") or 0)
         updated = str(entry.get("updatedAt") or "")
@@ -349,7 +383,10 @@ def merge_candidates(
             project=project, ref=ref, kind=KIND_BRANCH, title=subject, updated=updated
         )
 
-    return sorted(found.values(), key=lambda candidate: candidate.sort_key)
+    return sorted(
+        (candidate for candidate in found.values() if keeps_row(candidate)),
+        key=lambda candidate: candidate.sort_key,
+    )
 
 
 def age(stamp: str, now: _dt.datetime | None = None) -> str:
@@ -767,6 +804,14 @@ def recent_branches(
     checks a ref out from `origin/<ref>`, so a branch that exists only locally is a row
     that could be picked and could not be served. `--prune` is what stops a merged and
     deleted branch from lingering in the menu for weeks.
+
+    `ignored_ref` is applied here as well as in `merge_candidates`, and this is the
+    application that matters: git sorts and counts before this process sees anything, so
+    filtering only downstream would spend the whole `--count` budget on refs about to be
+    dropped -- and the sweep that cuts them runs nightly in every consumer, so `limit`
+    automation branches in a row is the normal case, not the pathological one. Over-fetch
+    and cap afterwards, rather than `--exclude`, which is younger than the git a consumer
+    may be on.
     """
     git = sweep.git_for(project_dir)
     if fetch:
@@ -779,7 +824,7 @@ def recent_branches(
         result = git(
             "for-each-ref",
             "--sort=-committerdate",
-            f"--count={limit}",
+            f"--count={max(limit, 0) * BRANCH_OVERFETCH}",
             "--format=%(refname:short)%09%(committerdate:iso-strict)%09%(contents:subject)",
             *patterns,
         )
@@ -793,8 +838,12 @@ def recent_branches(
         if len(parts) < 2:
             continue
         ref = strip_remote(parts[0].strip())
+        if ignored_ref(ref):
+            continue
         subject = parts[2].strip() if len(parts) > 2 else ""
         found.append((ref, parts[1].strip(), subject))
+        if limit > 0 and len(found) >= limit:
+            break
     return found
 
 

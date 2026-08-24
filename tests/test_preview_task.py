@@ -127,6 +127,35 @@ def test_a_box_a_pr_and_a_branch_of_different_ages_sort_by_age_alone():
     assert [c.ref for c in sorted(rows, key=lambda c: c.sort_key)] == ["pr", "br", "box"]
 
 
+# --- what the menu declines to offer ------------------------------------------
+
+
+def test_ignored_ref_reads_a_namespace_and_never_a_slug():
+    """The two prefixes and the trap between them. `dependabot/` and the automation
+    namespace are path segments a producer puts there; `auto-merge-label` is a topic a
+    human dictated, and it has to survive."""
+    assert preview_task.ignored_ref("dependabot/npm_and_yarn/vite-5.4.6")
+    assert preview_task.ignored_ref(f"{preview_task.tb.AUTOMATION_PREFIX}devkit-upgrade-0823")
+    assert not preview_task.ignored_ref("agent/auto-merge-label-0823")
+    assert not preview_task.ignored_ref("agent/comic-book-ui-0820")
+
+
+def test_keeps_row_spares_a_standing_preview_and_nothing_else():
+    """The filter describes how a ref was *discovered*, so the kind is the whole test: a
+    standing preview is serving on a port because somebody named it, and hiding it would
+    leave a running box no row in this menu could stop."""
+    ref = f"{preview_task.tb.AUTOMATION_PREFIX}devkit-upgrade-v0-11-2-0823"
+    standing = preview_task.Candidate(project="p", ref=ref, kind=preview_task.KIND_STANDING)
+    assert preview_task.keeps_row(standing)
+    for kind in (preview_task.KIND_BOX, preview_task.KIND_PR, preview_task.KIND_BRANCH):
+        assert not preview_task.keeps_row(preview_task.Candidate(project="p", ref=ref, kind=kind))
+    # And the filter is the only thing dropping it -- an ordinary ref of every kind stays.
+    for kind in (preview_task.KIND_BOX, preview_task.KIND_PR, preview_task.KIND_BRANCH):
+        assert preview_task.keeps_row(
+            preview_task.Candidate(project="p", ref="agent/comic-book-ui-0820", kind=kind)
+        )
+
+
 # --- merging the four sources -------------------------------------------------
 
 
@@ -229,6 +258,51 @@ def test_a_standing_preview_of_an_ignored_ref_keeps_its_row():
         [],
     )
     assert [(r.kind, r.pr) for r in rows] == [(preview_task.KIND_STANDING, 9)]
+
+
+def test_an_unattended_jobs_branch_contributes_no_row():
+    """The row this menu was asked to stop printing. The nightly vendoring sweep cuts the
+    same commit in every consumer, so on any given morning it owns most of the list --
+    twenty-eight of twenty-nine rows, the day the menu was first printed -- and none of
+    it is a UI change anyone asked to look at."""
+    auto = f"{preview_task.tb.AUTOMATION_PREFIX}devkit-upgrade-v0-11-2-0823"
+    rows = preview_task.merge_candidates(
+        "carameli",
+        [],
+        [pr(9, auto, title="Adopt devkit v0.11.2")],
+        [(auto, "2026-08-23T09:00:00Z", "Adopt devkit v0.11.2")],
+    )
+    assert rows == []
+
+
+def test_an_unattended_jobs_box_contributes_no_row_either():
+    """A live box is discovery too. The old rule kept every box on the grounds that "a
+    box exists because someone is working in it" -- true of a session's box, and false of
+    one a scheduler cut at 03:00 in six repos at once."""
+    auto = f"{preview_task.tb.AUTOMATION_PREFIX}devkit-upgrade-v0-11-2-0823"
+    rows = preview_task.merge_candidates("carameli", [box("carameli--x", branch=auto)], [], [])
+    assert rows == []
+
+
+def test_a_session_branch_that_merely_reads_as_automatic_keeps_its_row():
+    """Why the marker is a path segment and not a word in the slug: `auto-merge-label` is
+    a task somebody gave an agent, and a substring test would hide the very change they
+    then asked to see."""
+    rows = preview_task.merge_candidates(
+        "carameli", [], [], [("agent/auto-merge-label-0823", "2026-08-23T09:00:00Z", "Label it")]
+    )
+    assert [row.ref for row in rows] == ["agent/auto-merge-label-0823"]
+
+
+def test_a_standing_preview_of_an_unattended_jobs_branch_keeps_its_row():
+    """Someone typed that ref to bring the box up, so it is no longer discovery -- and a
+    hidden row is a preview holding a port that nothing in this menu could stop."""
+    auto = f"{preview_task.tb.AUTOMATION_PREFIX}devkit-upgrade-v0-11-2-0823"
+    standing = box(
+        "carameli--pv-2", kind=worktree.PREVIEW_KIND, branch=f"preview/{auto}", tracks=auto
+    )
+    rows = preview_task.merge_candidates("carameli", [standing], [], [])
+    assert [row.kind for row in rows] == [preview_task.KIND_STANDING]
 
 
 def test_a_branch_never_overwrites_a_row_a_box_or_pr_already_claimed():
@@ -503,6 +577,44 @@ def test_recent_branches_parses_the_ref_listing(monkeypatch):
         ("agent/ui", "2026-08-21T09:00:00-04:00", "Comic book UI"),
         ("agent/bare", "2026-08-20T09:00:00Z", ""),
     ]
+
+
+def test_recent_branches_spends_its_count_on_refs_it_can_keep(monkeypatch):
+    """Filtering only downstream would have been a filter that did nothing on a busy
+    remote: git sorts and counts before this process sees a byte, and the sweep that cuts
+    these runs nightly in every consumer -- so a whole `--count` page of them is the
+    normal case. The over-fetch is what leaves a real branch to return, and the cap is
+    still honoured on what survives."""
+    asked = []
+    auto = preview_task.tb.AUTOMATION_PREFIX
+    listing = (
+        "".join(
+            f"origin/{auto}devkit-upgrade-v0-11-{n}-0823\t2026-08-23T0{n}:00:00Z\tAdopt\n"
+            for n in range(1, 4)
+        )
+        + "origin/agent/comic-book-ui-0820\t2026-08-20T09:00:00Z\tComic book UI\n"
+    )
+
+    def git(*argv):
+        asked.append(argv)
+        return result(listing)
+
+    monkeypatch.setattr(preview_task.sweep, "git_for", lambda _dir: git)
+
+    found = preview_task.recent_branches(preview_task.REPO_ROOT, limit=2, fetch=False)
+
+    assert [ref for ref, _date, _subject in found] == ["agent/comic-book-ui-0820"]
+    count = next(arg for arg in asked[0] if arg.startswith("--count="))
+    assert count == f"--count={2 * preview_task.BRANCH_OVERFETCH}"
+
+
+def test_recent_branches_caps_what_survives_the_filter(monkeypatch):
+    """The over-fetch widens the query, not the answer."""
+    listing = "".join(
+        f"origin/agent/ui-{n}-0820\t2026-08-2{n}T09:00:00Z\tUI {n}\n" for n in range(1, 5)
+    )
+    monkeypatch.setattr(preview_task.sweep, "git_for", lambda _dir: lambda *argv: result(listing))
+    assert len(preview_task.recent_branches(preview_task.REPO_ROOT, limit=2, fetch=False)) == 2
 
 
 def test_recent_branches_skips_a_line_it_cannot_split(monkeypatch):

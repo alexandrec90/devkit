@@ -10,11 +10,12 @@ cut a worktree per edit rather than one per (session, project).
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
-from support import devkit_project, load_script
+from support import REPO_ROOT, devkit_project, load_script
 
 guard = load_script("scripts/worktree-guard.py")
 
@@ -1575,3 +1576,611 @@ def test_a_missing_ledger_module_never_changes_the_decision(root, monkeypatch, c
     monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
     assert response(capsys)["updatedInput"]
+
+
+# --- the shell tier ---------------------------------------------------------
+#
+# Editor calls were the guard's whole scope until Claude Code's bypass-permissions mode
+# began telling sessions, in text they cannot tell apart from their operator's, to make
+# file changes with `sed`, heredocs or short scripts rather than with Edit and Write.
+# That turned a quiet blind side into a route: the hook matched `^(Edit|Write|...)$`, so
+# a `sed -i` onto a checkout's home branch was not merely unguarded but *recommended*.
+# Every test here is about a command line, and the ones that assert an ALLOW are the
+# load-bearing half -- a tier that reads shell is one false positive away from being
+# switched off again, which is how the capped-Bash gate was lost.
+
+
+def shell_payload(command: str, cwd: str = "", session: str = "s1", tool: str = "Bash") -> str:
+    return json.dumps(
+        {
+            "tool_name": tool,
+            "tool_input": {"command": command},
+            "cwd": cwd,
+            "session_id": session,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        # redirection, which is also the whole heredoc route: `cat > x <<EOF` is this
+        ("cat > devkit/a.py", ["devkit/a.py"]),
+        ("cat >devkit/a.py", ["devkit/a.py"]),
+        ("cat >> devkit/a.py", ["devkit/a.py"]),
+        ("cat > devkit/a.py <<'EOF'", ["devkit/a.py"]),
+        ("python x.py 2> devkit/a.log", ["devkit/a.log"]),
+        ('echo x > "C:\\ws\\devkit\\a.py"', ["C:\\ws\\devkit\\a.py"]),
+        # the named verbs
+        ("sed -i 's/a/b/' devkit/a.py", ["s/a/b/", "devkit/a.py"]),
+        ("sed -i.bak s/a/b/ devkit/a.py", ["s/a/b/", "devkit/a.py"]),
+        ("tee devkit/a.py", ["devkit/a.py"]),
+        ("cat x | tee -a devkit/a.py", ["devkit/a.py"]),
+        ("rm devkit/a.py", ["devkit/a.py"]),
+        ("touch devkit/a.py", ["devkit/a.py"]),
+        ("dd if=/dev/zero of=devkit/a.bin", ["devkit/a.bin"]),
+        # copy-shaped: the last operand is the destination, the rest are reads
+        ("cp devkit/a.py /elsewhere/b", ["/elsewhere/b"]),
+        ("mv old.py devkit/a.py", ["devkit/a.py"]),
+        # wrappers standing in front of the real verb
+        ("sudo tee devkit/a.py", ["devkit/a.py"]),
+        ("FOO=1 tee devkit/a.py", ["devkit/a.py"]),
+        # PowerShell has its own tool in this harness, and its own spelling
+        ("Set-Content -Path devkit/a.py -Value x", ["devkit/a.py", "x"]),
+        ("Copy-Item -Path a -Destination devkit/a.py", ["devkit/a.py"]),
+        ("remove-item devkit/a.py", ["devkit/a.py"]),
+        # more than one, in the order the command names them
+        ("touch devkit/a.py && rm devkit/b.py", ["devkit/a.py", "devkit/b.py"]),
+    ],
+)
+def test_shell_write_targets_reads_the_spellings_that_write(command, expected):
+    assert guard.shell_write_targets(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat devkit/a.py",
+        "sed -n '1,5p' devkit/a.py",  # -n reads; only -i writes
+        "grep -rn thing devkit/",
+        "python -m pytest tests/ -q",
+        "git diff --stat devkit/a.py",
+        "python x.py 2>&1",  # a descriptor duplication names no file
+        "wc -l devkit/a.py",
+        "",
+    ],
+)
+def test_a_command_that_writes_nothing_names_no_target(command):
+    """The half that keeps this tier alive. `enforce-capped-bash.py` had to be reversed
+    because 46% of its blocks were its own false positives, and it earned them by trying
+    to model the shell; this one recognises verbs and allows everything else, so a read
+    has to stay invisible even when its argument is a checkout's file."""
+    assert guard.shell_write_targets(command) == []
+
+
+def test_an_interpreter_script_is_the_documented_gap():
+    """`python -c` computes its target at runtime and names it nowhere in the argv, so no
+    argv scan can see it. Pinned as a test rather than left implicit: a silent gap in a
+    guard reads as coverage, and whoever widens this tier should find the limit written
+    where closing it will show up as a failure."""
+    assert guard.shell_write_targets("python -c \"open('devkit/a.py','w').write('x')\"") == []
+
+
+def test_an_unbalanced_quote_falls_back_to_whitespace_splitting():
+    """`shlex` raises on it, and an unhandled raise in a PreToolUse hook exits non-2 --
+    which Claude Code reports as a non-blocking error and lets the write PROCEED."""
+    assert "devkit/a.py" in guard.shell_write_targets("tee devkit/a.py 'unclosed")
+
+
+def test_shell_tokens_keeps_windows_backslashes():
+    """`posix=True` eats them, and every path this hook judges on this machine has them."""
+    assert guard.shell_tokens(r"tee C:\ws\devkit\a.py") == ["tee", r"C:\ws\devkit\a.py"]
+
+
+def test_guarded_targets_reads_a_command_for_a_shell_tool_and_a_path_for_an_editor():
+    edit = json.loads(payload(path="/ws/carameli/a.py"))
+    assert guard.guarded_targets(edit) == ["/ws/carameli/a.py"]
+    assert guard.guarded_targets(json.loads(shell_payload("tee /ws/carameli/a.py"))) == [
+        "/ws/carameli/a.py"
+    ]
+    assert guard.guarded_targets(json.loads(shell_payload("cat /ws/carameli/a.py"))) == []
+
+
+def test_a_shell_write_onto_a_home_branch_is_routed_to_the_box(root, monkeypatch, capsys):
+    """The reversion check for the whole tier: take `Bash` back out of `MUTATING_TOOLS`
+    and this write lands on carameli's home branch with nothing under it."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload(f"sed -i s/a/b/ {root / 'carameli' / 'a.py'}", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    said = guidance(capsys)
+    assert "carameli--ws-s1-0806" in said
+    assert "shell command, not an editor call" in said
+
+
+def test_a_shell_write_is_blocked_rather_than_re_aimed(root, monkeypatch, capsys):
+    """The rewrite replaces a path *argument*, and a command line has none. Re-aiming one
+    would mean editing the command text -- guessing at quoting, at a heredoc body, at
+    which of `cp`'s operands moved -- and a rewrite this hook gets wrong lands the write
+    on the home branch while reporting success."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload(f"tee {root / 'carameli' / 'a.py'}", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    captured = capsys.readouterr()
+    assert captured.out.strip() == ""  # no updatedInput anywhere near this
+    assert "not re-aimed automatically" in captured.err
+
+
+def test_a_command_that_writes_nothing_never_reads_the_registry(root, monkeypatch):
+    """Widening the matcher put this hook on every Bash call in the session, not on the
+    handful that edit files. The overwhelming majority write nothing, and what they must
+    cost is a payload parse -- not a workspace read and a project list per `grep`."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        guard.devkit_project,
+        "known_projects",
+        lambda *a, **k: pytest.fail("a read-only command must not reach the registry"),
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload(f"grep -n foo {root / 'carameli' / 'a.py'}", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_the_shell_note_quotes_the_word_the_command_actually_used():
+    """The note's whole job is to be greppable against the command the agent just sent.
+    So it repeats the target *as written* -- an absolute Windows path, a relative one, a
+    quoted one -- rather than the resolved path the guard reasoned about, which appears
+    nowhere in the command line and so cannot be the word anyone replaces."""
+    for target in (r"C:\repo\app\a.py", "app/a.py", "'a file.py'"):
+        note = guard.shell_note(target)
+        assert f"`{target}`" in note
+        assert "shell command, not an editor call" in note
+        assert "not re-aimed automatically" in note
+
+
+def test_a_shell_command_that_only_reads_never_spawns(root, monkeypatch, capsys):
+    """A guard that cut a box per `cat` would be switched off within the hour."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        guard.worktree,
+        "plan_respawn",
+        lambda *a, **k: pytest.fail("a read must not spawn a box"),
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload(f"cat {root / 'carameli' / 'a.py'}", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    assert capsys.readouterr().out.strip() == ""
+
+
+def test_a_shell_write_outside_every_checkout_is_left_alone(root, monkeypatch):
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        guard.worktree,
+        "plan_respawn",
+        lambda *a, **k: pytest.fail("nothing outside a checkout has a branch to protect"),
+    )
+    monkeypatch.setattr("sys.stdin", _stdin(shell_payload("cat x > /dev/null", cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_a_shell_write_into_the_sessions_own_box_is_left_alone(root, monkeypatch):
+    """The commonest command in a guarded session, once the routing has worked."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setattr(
+        guard.worktree,
+        "plan_respawn",
+        lambda *a, **k: pytest.fail("the write is already where it belongs"),
+    )
+    box = root / ".worktrees" / "carameli--ws-s1-0806" / "a.py"
+    monkeypatch.setattr("sys.stdin", _stdin(shell_payload(f"tee {box}", cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_the_first_guarded_target_decides_the_whole_command(root, monkeypatch, capsys):
+    """There is no partial outcome for a command line: it runs or it does not. So a
+    command that writes somewhere harmless *and* onto a home branch is routed on the
+    second, and the message names the word that did it."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    command = f"touch /elsewhere/scratch && touch {root / 'carameli' / 'a.py'}"
+    monkeypatch.setattr("sys.stdin", _stdin(shell_payload(command, cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert str(root / "carameli" / "a.py") in guidance(capsys)
+
+
+def test_a_routed_shell_command_is_recorded_as_one(root, monkeypatch, ledger_root, capsys):
+    """`kind` is what tells a triage pass whether the shell tier is earning its keep or
+    manufacturing false positives, and the two cannot be told apart after the fact."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload(f"rm {root / 'carameli' / 'a.py'}", cwd=str(root))),
+    )
+    guard.main(["--workspace", str(workspace)])
+    capsys.readouterr()
+    assert any("kind=shell" in line for line in _events(ledger_root))
+
+
+def test_the_hook_is_wired_for_every_tool_it_judges():
+    """The code half is useless without the matcher half, and they live in different
+    files: `MUTATING_TOOLS` in the hook, a regex in `.claude/settings.json`. devkit runs
+    the harness it ships, so its own settings are the copy this can check."""
+    settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    matchers = [
+        entry["matcher"]
+        for entry in settings["hooks"]["PreToolUse"]
+        if any("worktree-guard" in hook.get("command", "") for hook in entry["hooks"])
+    ]
+    assert matchers, "worktree-guard.py is not wired in devkit's own settings"
+    for tool in guard.MUTATING_TOOLS:
+        assert any(re.fullmatch(matcher, tool) for matcher in matchers), tool
+
+
+# --- two guards, one call ---------------------------------------------------
+
+
+def test_a_spawn_that_lost_a_race_reuses_the_box_instead_of_blocking(root, monkeypatch, capsys):
+    """Found by this hook firing on itself. The guard is registered twice in a devkit
+    session -- a user-level absolute path and a project-level `$CLAUDE_PROJECT_DIR` one
+    resolving to the same file -- so two processes judge every call. Neither can see the
+    other's box, because the loser reads the lease registry before the winner writes it;
+    it then dies on `a branch named 'agent/...' already exists` and exits 2, blocking the
+    call the winner had just re-aimed. The agent is handed both messages at once -- "the
+    edit was applied at <box>" on stdout, "spawning a box failed" on stderr -- with the
+    box on disk and the edit nowhere."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(
+        guard.worktree,
+        "apply_new",
+        lambda *a, **k: (
+            False,
+            ["FAILED at `git worktree add`: a branch named ... already exists"],
+        ),
+    )
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    said = guidance(capsys)
+    assert "carameli--ws-s1-0806" in said
+    assert "failed" not in said.lower()
+
+
+def test_a_spawn_that_failed_with_no_box_afterwards_still_blocks(root, monkeypatch, capsys):
+    """The reuse above must not swallow a genuine failure: with no box on disk there is
+    nothing to aim at, and allowing the edit is the outcome this hook exists to prevent."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (False, ["boom"]))
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"), cwd=str(root)))
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert "boom" in capsys.readouterr().err
+
+
+# --- the branch tier --------------------------------------------------------
+#
+# The regression suite for the incident that produced it: carameli's static checkout was
+# found parked on `agent/seems-only-1-preview-time-0821`, another session's task branch,
+# for two days. Every tier above had worked -- that session's edits went to a box and
+# their PR was open -- and something had simply run `git checkout` in the static copy,
+# which writes no file and so was invisible to all of them.
+#
+# As with the shell tier, the ALLOW tests are the load-bearing half: a branch tier that
+# blocks `git checkout master` is one that gets switched off, and moving a checkout home
+# is the repair rather than the problem.
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        ("git checkout agent/thing-0821", [("", "agent/thing-0821")]),
+        ("git switch agent/thing-0821", [("", "agent/thing-0821")]),
+        ("git checkout -b agent/thing-0821", [("", "agent/thing-0821")]),
+        ("git checkout -B agent/thing-0821", [("", "agent/thing-0821")]),
+        ("git switch -c agent/thing-0821", [("", "agent/thing-0821")]),
+        ("git switch -C agent/thing-0821", [("", "agent/thing-0821")]),
+        ("git checkout --orphan agent/thing-0821", [("", "agent/thing-0821")]),
+        # git's own -C, which decides WHICH checkout the move lands in
+        ("git -C carameli checkout agent/thing-0821", [("carameli", "agent/thing-0821")]),
+        ("git -c core.x=1 checkout agent/thing-0821", [("", "agent/thing-0821")]),
+        # options before the ref, and a tracking spelling
+        ("git checkout --track origin/agent/thing-0821", [("", "origin/agent/thing-0821")]),
+        # wrappers, exactly as the shell tier strips them
+        ("sudo git checkout agent/thing-0821", [("", "agent/thing-0821")]),
+        ("GIT_PAGER=cat git checkout agent/thing-0821", [("", "agent/thing-0821")]),
+        # more than one statement, in the order the command names them
+        (
+            "git checkout master && git -C ibkr_trader switch agent/b-0821",
+            [("", "master"), ("ibkr_trader", "agent/b-0821")],
+        ),
+    ],
+)
+def test_switch_targets_reads_the_moves_a_command_makes(command, expected):
+    assert guard.switch_targets(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # restores: HEAD does not move, and these are ordinary and frequent
+        "git checkout -- app/a.py",
+        "git checkout master -- app/a.py",
+        "git checkout -p app/a.py",
+        "git checkout --patch",
+        # not a move at all
+        "git status",
+        "git log --oneline -5",
+        "git branch --show-current",
+        "git worktree add ../box agent/thing-0821",
+        # not git
+        "checkout agent/thing-0821",
+        "gh pr checkout 42",
+        "",
+    ],
+)
+def test_a_command_that_moves_no_branch_names_no_switch(command):
+    assert guard.switch_targets(command) == []
+
+
+@pytest.mark.parametrize(
+    "ref, expected",
+    [
+        ("agent/thing-0821", "agent/thing-0821"),
+        ("claude/thing-0727", "claude/thing-0727"),
+        ("codex/thing-0801", "codex/thing-0801"),
+        # a detached HEAD at the remote ref is the same park, and arguably worse: the box
+        # tier declines a branch git will not name, so it is quiet there too
+        ("origin/agent/thing-0821", "agent/thing-0821"),
+        ("refs/heads/agent/thing-0821", "agent/thing-0821"),
+        ("refs/remotes/origin/agent/thing-0821", "agent/thing-0821"),
+    ],
+)
+def test_switch_branch_recognises_a_task_branch_however_it_is_spelled(ref, expected):
+    assert guard.switch_branch(ref) == expected
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "master",
+        "main",
+        "develop",
+        "carameli-b",  # a long-lived worktree anchor: a home branch, not a task branch
+        "preview/agent-thing-0821",  # what `worktree.py preview` cuts; lives in a box
+        "feature/agent-thing",  # only ONE segment is stripped, and only to a real prefix
+        "abc1234",
+        "HEAD",
+        "",
+    ],
+)
+def test_a_home_branch_is_never_read_as_a_task_branch(ref):
+    """The allow half. Moving a checkout home is the repair for a park, so a tier that
+    blocked it would have no exit -- the same defect `sweep.NEEDS_PR` had."""
+    assert guard.switch_branch(ref) == ""
+
+
+def test_a_checkout_moved_onto_a_task_branch_is_a_park(root):
+    assert guard.switch_decision("carameli", "agent/x-0821", str(root), root, PROJECTS, {}) == (
+        "checkout",
+        "carameli",
+        "",
+    )
+
+
+def test_a_move_in_the_sessions_cwd_is_judged_on_that_cwd(root):
+    """`git checkout` with no `-C` lands wherever the tool call is running, which for a
+    project-scoped session is the checkout itself -- the exact shape of the incident."""
+    assert guard.switch_decision(
+        "", "agent/x-0821", str(root / "carameli"), root, PROJECTS, {}
+    ) == ("checkout", "carameli", "")
+
+
+def test_a_move_outside_every_checkout_is_ordinary(root, tmp_path):
+    assert guard.switch_decision("", "agent/x-0821", str(tmp_path), root, PROJECTS, {}) is None
+
+
+def test_a_box_moved_off_the_branch_its_lease_records_is_blocked(root):
+    """`reconcile` looks a box's PR up by the branch the registry names. A box standing
+    somewhere else is invisible to the reaper as shipped work and reapable as work that
+    never happened -- which destroys the worktree with the commits still in it."""
+    box = guard.worktree.Box(
+        name="carameli--x-0806", project="carameli", branch="agent/x-0806", session="s1"
+    )
+    assert guard.switch_decision(
+        "",
+        "agent/other-0821",
+        str(root / ".worktrees" / "carameli--x-0806"),
+        root,
+        PROJECTS,
+        {box.name: box},
+    ) == ("box", "carameli--x-0806", "agent/x-0806")
+
+
+def test_a_box_re_attaching_to_its_own_branch_is_ordinary(root):
+    """What `worktree.py resume` leaves behind, and what re-attaching after a detached
+    HEAD does. Blocking it would make the recovery unreachable from inside the box."""
+    box = guard.worktree.Box(
+        name="carameli--x-0806", project="carameli", branch="agent/x-0806", session="s1"
+    )
+    assert (
+        guard.switch_decision(
+            "",
+            "agent/x-0806",
+            str(root / ".worktrees" / "carameli--x-0806"),
+            root,
+            PROJECTS,
+            {box.name: box},
+        )
+        is None
+    )
+
+
+def test_a_path_under_worktrees_that_is_in_no_live_box_is_ordinary(root):
+    """A husk, or a stray directory. There is no lease to desync, so nothing to protect."""
+    assert (
+        guard.switch_decision(
+            "", "agent/x-0821", str(root / ".worktrees" / "carameli--x-0806"), root, PROJECTS, {}
+        )
+        is None
+    )
+
+
+def test_the_park_message_names_the_three_things_the_move_stands_in_for():
+    """This is the only block in the hook that ends in neither a box nor a path to write
+    to -- nothing was going to be written -- so the whole value of the message is that
+    each alternative is spelled as the command that performs it."""
+    said = guard.switch_message("checkout", "carameli", "agent/x-0821")
+    assert "agent/x-0821" in said and "carameli" in said
+    assert "worktree.py resume" in said
+    assert "worktree.py preview carameli --branch agent/x-0821" in said
+    assert "log/show/diff" in said
+
+
+def test_the_park_message_says_why_a_park_silences_this_very_hook():
+    """The second-order effect, and the one an agent cannot see from anywhere else: once a
+    checkout is parked on a live task branch, `needs_box` declines every later edit there
+    as the "fix PR #42" case, so the checkout becomes unguarded space."""
+    said = guard.switch_message("checkout", "carameli", "agent/x-0821")
+    assert "QUIET" in said
+    assert "no box and no block" in said
+
+
+def test_the_box_message_explains_the_registry_rather_than_the_home_branch():
+    said = guard.switch_message("box", "carameli--x-0806", "agent/other-0821", "agent/x-0806")
+    assert "agent/x-0806" in said and "agent/other-0821" in said
+    assert "lease registry" in said
+    assert "worktree.py resume" in said
+
+
+def test_a_checkout_switch_onto_a_task_branch_is_blocked(root, monkeypatch, capsys):
+    """The reversion check for the whole tier: drop `switch_targets` out of `main` and
+    this is once again the one act in the workspace that nothing judges."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        guard.worktree,
+        "plan_respawn",
+        lambda *a, **k: pytest.fail("a branch move writes nothing, so it needs no box"),
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload("git -C carameli checkout agent/x-0821", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    captured = capsys.readouterr()
+    assert captured.out.strip() == ""  # no box, no updatedInput, nothing to re-aim
+    assert "park the static checkout carameli" in captured.err
+
+
+def test_moving_a_checkout_home_is_allowed_because_it_is_the_repair(root, monkeypatch):
+    workspace = _workspace(root)
+    monkeypatch.setattr("sys.stdin", _stdin(shell_payload("git checkout master", cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_a_branch_move_that_names_no_task_branch_never_reads_the_registry(root, monkeypatch):
+    """Same bound the shell tier keeps: the tiers run on every Bash call in the session,
+    so the lease registry is read only once a command names a task branch -- which is the
+    case being blocked anyway."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        guard.worktree,
+        "live_boxes",
+        lambda *a, **k: pytest.fail("an ordinary branch move must not read the lease registry"),
+    )
+    monkeypatch.setattr("sys.stdin", _stdin(shell_payload("git checkout main", cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_a_restore_is_not_a_park_even_from_a_task_branch(root, monkeypatch):
+    """`git checkout <branch> -- <path>` restores file content and leaves HEAD where it
+    is. It is ordinary, and blocking it is how a tier earns its way out of the config."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload("git -C carameli checkout agent/x-0821 -- app/a.py", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_creating_a_task_branch_in_a_checkout_is_the_same_park(root, monkeypatch, capsys):
+    """`branch-on-write.py` used to cut a task branch in place, and retiring it is what the
+    box tier replaced. `git checkout -b` is that hook by hand: it solves the branch and
+    keeps the problem, because the checkout still outlives the task."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload("git -C carameli switch -c agent/new-0823", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert "agent/new-0823" in capsys.readouterr().err
+
+
+def test_a_park_is_recorded_on_the_ledger_with_its_own_event(
+    root, monkeypatch, ledger_root, capsys
+):
+    """Its own event name, not `guard-block`: a triage pass has to be able to tell a write
+    that was routed to a box from a move that was refused outright, and the two have
+    nothing in common but the exit code."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload("git -C carameli checkout agent/x-0821", cwd=str(root))),
+    )
+    guard.main(["--workspace", str(workspace)])
+    capsys.readouterr()
+    lines = _events(ledger_root)
+    assert any("guard-branch-block" in line and "branch=agent/x-0821" in line for line in lines)
+
+
+def test_a_park_is_judged_before_anything_the_same_command_would_write(root, monkeypatch, capsys):
+    """A command doing both is pathological, but the order is not arbitrary: the park is
+    what would silence the write tier afterwards, so it is the one that has to decide."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    command = f"git -C carameli checkout agent/x-0821 && touch {root / 'carameli' / 'a.py'}"
+    monkeypatch.setattr("sys.stdin", _stdin(shell_payload(command, cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert "park the static checkout" in capsys.readouterr().err
+
+
+def test_an_editor_call_is_never_read_for_a_branch_move(root, monkeypatch):
+    """`switch_targets` reads a `command` key, and only a shell tool has one. An Edit whose
+    payload happens to carry that word must not be parsed as a git call."""
+    assert guard.switch_targets("") == []
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            payload(
+                path=str(root / "carameli" / "a.py"),
+                cwd=str(root),
+                command="git checkout agent/x-0821",
+            )
+        ),
+    )
+    # Routed as an ordinary edit -- re-aimed into the box, not refused as a park.
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW

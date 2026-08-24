@@ -294,6 +294,7 @@ when the work leaves it:
 
 ```bash
 python scripts/worktree.py new carameli --slug voicemail --yes  # cut, lease, install
+python scripts/worktree.py new carameli --slug bump --auto --yes  # ... for a scheduled job
 python scripts/worktree.py list                                 # what exists, and its verdict
 python scripts/worktree.py reap --all --yes                     # everything already shipped
 python scripts/worktree.py claim <box> --session <id> --yes     # hand a box to another session
@@ -307,6 +308,15 @@ tracked files only, so it starts with no `.venv`. `reap` **refuses while the box
 holds unshipped work**, which is the difference that matters: the static tier's
 stranded work is found afterwards by `sweep.py`, and a box's cannot be stranded at all,
 because being stranded is what stops the cleanup.
+
+`new --auto` cuts the branch under `agent/auto/` instead of `agent/`, and is for a
+*scheduler* calling this rather than a session — the nightly upgrade sweep is the one
+caller today. It nests inside `agent/`, so `is_managed_task_branch` still says yes and
+shipping, sweeping, reaping and the worktree guard all behave exactly as before; what
+changes is that a reader can tell whose work it is, which is what keeps a job's branches
+out of the preview menu. The marker is a path segment rather than a word in the slug
+because `agent/auto-merge-label-0823` is a task somebody gave an agent, and no substring
+test can separate the two.
 
 `resume` is the way back in. `reconcile` destroys a box whose PR is still *open* when
 the disk is tight, on the grounds that the remote has every commit — a trade that is
@@ -398,7 +408,12 @@ the port it had before. Two VS Code tasks — *Preview: Open a UI Branch* and *P
 Restart Standing Previews* — are those two invocations, one click each.
 
 A checkout with no compose stack contributes no rows, which keeps devkit out of a menu it
-would publish nothing for.
+would publish nothing for. Neither does a branch, box or PR under `agent/auto/`: that
+namespace is what an unattended job cuts, and the nightly upgrade sweep alone would put
+one row per consuming project in front of every reviewer. The menu answers "what has an
+agent session changed that I could look at", so a scheduler's work is discovery it
+declines — but a *standing* preview is never filtered out, because somebody asked for
+that one by name.
 
 ### The scheduled pass
 
@@ -427,8 +442,12 @@ the task was installed with `--merge`, which squash-merges a green box PR only w
 carries the `automerge` label — applying the label is the review decision, and
 `upgrade-project.py` labels its PRs at creation (`--merge-label ""` at install time
 drops the gate and merges anything green). The checkout half destroys nothing: it
-refuses any checkout holding uncommitted work, unpushed commits or an open PR, names
-it, and moves on.
+refuses any checkout holding uncommitted work or unpushed commits, names it, and moves
+on. A checkout that is clean and fully pushed with a PR **open** is parked home anyway —
+the work is on the remote, and the branch it leaves behind is not deleted. Holding those
+too was the older rule, and it meant a checkout that landed on `needs-pr` had no way
+out of it: nothing in the sweep confirms a PR, so the verdict never cleared and the home
+branch never moved again.
 
 The run is windowless, so its only record is `logs/reconcile.log`, overwritten per
 pass and written on success too — a log that appears only on failure cannot be told

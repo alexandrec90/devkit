@@ -366,6 +366,29 @@ def test_spawn_cuts_from_origin_not_from_the_source_checkouts_head():
     assert add[-1] == "origin/master"
 
 
+def test_an_unattended_job_gets_its_namespace_in_the_branch_and_nowhere_else():
+    """`branch_prefix` is the seam the nightly upgrade sweep names itself through, so
+    `preview-task.py` can leave its branches out of a menu that answers "show me the
+    change I asked for". It must reach the ref and stop there: the box directory and the
+    `COMPOSE_PROJECT_NAME` come from `box_name`, which strips whichever managed prefix it
+    finds -- and a `/` surviving into either is a nested directory and a name compose
+    rejects."""
+    plan = spawn(branch_prefix=worktree.tb.AUTOMATION_PREFIX)
+
+    assert plan.box.branch == "agent/auto/voicemail-0806"
+    assert plan.box.name == "carameli--voicemail-0806"
+    assert "/" not in plan.box.name
+    # A box is named for its topic, so the namespace is invisible here by design. Two
+    # branches would have to share a topic *and* a date to want one box, and the topic
+    # carries the release tag (`upgrade_slug`) precisely so that two runs cannot.
+    assert plan.box.name == spawn().box.name
+
+
+def test_spawn_names_a_session_branch_by_default():
+    """Only a job passes the prefix; nothing else in the tier changes spelling."""
+    assert spawn().box.branch == "agent/voicemail-0806"
+
+
 def test_spawn_never_tracks_the_base():
     """`--no-track` for the reason `tb.checkout_argv` documents: otherwise a bare
     `git push` from the box lands the task's commits on the default branch."""

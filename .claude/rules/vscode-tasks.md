@@ -174,6 +174,16 @@ after the PR merges; a box never renders.
 - Label convention: `"Domain: Title Case Action"`, and **every task carries a `detail`**
   — that is the second line in the quick-pick, and the only place a one-click action can
   state its cost or blast radius.
+- **No label, detail or option states a version.** Nothing renders this file from the
+  tag list, so a number written into a quick-pick is a claim with no owner and no bump
+  will ever move it. `releaseLevel` carried a worked example per option — the newest tag
+  the day they were written, and what each level would make of it — which is the most
+  useful thing that dropdown could say and was wrong from the very next release, offering
+  "the usual" patch as a tag that had already shipped. Let the run say it instead: *Devkit:
+  Cut Release* is a dry run by default and `release-pipeline.py` resolves the version from
+  `git tag` and prints it first. `test_no_task_or_picker_states_a_release_version` is the
+  ratchet, and it reads the parsed block — a version in a **comment** is reasoning, not a
+  claim, and stays allowed.
 - **Every task carries an `icon`, and no two share the same id+colour pair.** With one
   consolidated list, colour is what makes it scannable; the `terminal.ansiBright*`
   variants mark the project-scoped tasks, so you can see before clicking that a task
@@ -207,14 +217,18 @@ after the PR merges; a box never renders.
   `test_the_live_smoke_task_names_the_only_checkout_that_can_run_it` asserts the same
   agreement against `Action.projects` directly; a literal that outgrows its scope fails
   there rather than in a terminal.
-- **A new project has to reach more than the `project` picker.** `register()` extends the
-  `folders` list and that one picker; the workspace-scoped pickers — `sweepScope`,
-  `upgradeScope` — are hand-maintained and were silently skipped, so a newly generated
-  project could run every generic task while `--all` was the only way to sweep or upgrade
-  it. `SCOPE_PICKERS` in `tests/test_devkit_project.py` now requires each of them to
-  cover every checkout the `project` picker lists, and a deliberate omission (devkit is
-  not a target of a devkit upgrade) to carry its reason in writing. Pickers scoped by
-  `Action.projects` are a separate case and are gated separately.
+- **A batch task that acts on the workspace takes `--all`, not a scope picker.** There
+  used to be two of those — `sweepScope`, then `upgradeScope` — each a hand-maintained
+  second copy of the project registry, and each silently skipped when `register()` added
+  a project, so a newly generated project could run every generic task while `--all` was
+  the only way to sweep or upgrade it. Both are gone, and the reason they are not coming
+  back is in `tests/test_devkit_project.py` above `MERGE_TASK`: the question a scope
+  picker asks has no answer worth the copy. Only `register()`-maintained pickers remain
+  — `project`, `daemonProject`, `worktreeProject`, `mergeCheckout` — so a new project
+  reaches every task by being registered, which is the one thing that cannot be
+  forgotten. `insert_picker_option` names that list, and
+  `test_registering_against_the_real_workspace_file` holds it to the workspace file.
+  Pickers scoped by `Action.projects` are a separate case and are gated separately.
 
 - **A task meant to run twice at once says so with `runOptions.instanceLimit`.** The
   default is **1**, and re-running a task that is already active offers to terminate it

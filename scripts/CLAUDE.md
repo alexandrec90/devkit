@@ -178,6 +178,42 @@ Each of these has already been violated by something:
   would fail *quietly* rather than loudly — a hook adapter that would drop the member
   (`DEVKIT_HOOK_ADAPTER`), a tool whose argument shape the guard does not model, or an
   `Edit` whose `old_string` the box's copy of the file does not contain.
+- **A shell command is judged too, and it is never re-aimed.** Editor calls were the
+  whole scope until Claude Code's bypass-permissions mode began telling sessions — in
+  text arriving inside tool results, indistinguishable from their operator's — to prefer
+  `sed`, heredocs and short scripts over Edit and Write. An agent that complies writes to
+  a checkout's home branch through a tool the guard was not watching, so the blind side
+  stopped being an omission and became a route. `SHELL_WRITE_ALL`, `SHELL_WRITE_LAST` and
+  `REDIRECT` are a **closed list of write verbs**, deliberately shaped like
+  `enforce-capped-bash.py`'s blocklist rather than like the proof obligation it replaced:
+  requiring a command to demonstrate it does not write means modelling the shell, and
+  that design was 46% false positives there. What the list cannot see — an interpreter
+  script, `python -c 'open(...)'` — is a documented gap with a test naming it, not an
+  oversight. The verdict is always the block path, because the rewrite replaces a path
+  *argument* and a command line has none; `shell_note` tells the agent which of its own
+  words was read as the write, or it re-issues the line with the box path bolted on
+  somewhere else.
+- **A branch move is judged as well, and it is the one verdict that ends in neither a box
+  nor a rewrite.** `git checkout` writes no file, so both tiers above are blind to it —
+  and it is the act that parked carameli's static checkout on another session's
+  `agent/...` branch for two days in August 2026, with every other tier working exactly as
+  designed. The second-order effect is what makes it worth a tier of its own rather than a
+  tidiness rule: a checkout parked on a live task branch **turns this hook off for that
+  checkout**, because an edit onto a task branch carrying commits is precisely the "fix PR
+  #42" case `needs_box` declines. So `switch_targets`/`switch_branch`/`switch_decision`
+  block a `checkout`/`switch` onto a managed task branch — including `-b`/`-c` creation,
+  and including `origin/agent/...`, which detaches HEAD there instead — and the message
+  spells the three things the move usually stands in for (`worktree.py resume`,
+  `worktree.py preview --branch`, a plain `git log/show/diff`) as commands. Moving a
+  checkout **home** stays allowed: that is the repair, and a tier with no exit is the
+  defect `sweep.NEEDS_PR` had. A box is judged too, against the branch its lease records,
+  because `reconcile` looks a box's PR up by that name.
+- **The matcher is the other half, and it is not vendored.** A tool the guard judges but
+  `.claude/settings.json` does not list is a tier that silently covers nothing, and each
+  project owns its own copy of that file. `test_the_hook_is_wired_for_every_tool_it_judges`
+  compares `MUTATING_TOOLS` against devkit's matcher so at least the source of truth
+  cannot drift; a machine's user-level registration is outside every repo and has to be
+  widened by hand.
 - **Two copies of the guard run on every call, and they race for the box.** It is
   registered in the user's `settings.json` and in the project's, and Claude Code fires
   both; each plans a box for the same `(session, project)` and the loser's `git worktree
@@ -253,6 +289,26 @@ UserPromptSubmit, the box is cut on PreToolUse, and the two run in different pro
 with different working directories. Without it every guard-cut box was named
 `ws-<8 hex of session id>` and no PR title said what it did.
 
+### A scheduled job's branch says so, inside `agent/` rather than beside it
+
+`worktree.py new --auto` cuts under `tb.AUTOMATION_PREFIX`, and `upgrade-project.py` is
+its only caller. The namespace exists because the nightly vendoring sweep cuts one
+branch per consumer, none of it anyone's task, and `preview-task.py` was offering all of
+them ahead of the change a reviewer had asked to look at — twenty-eight of that menu's
+first twenty-nine rows.
+
+Two decisions are worth not relitigating. It is a **sub-namespace of `agent/`**, so
+`is_managed_task_branch` still answers yes and `/ship`, `sweep`, `reap`, `reconcile` and
+the guard behave exactly as before; a namespace *beside* `agent/` would have made every
+one of those a second question, for a menu's benefit. And it is a **path segment, not a
+word in the slug**, because `agent/auto-merge-label-0823` is a task somebody dictated
+and no substring test separates the two.
+
+The consequence to hold onto is that `managed_branch_prefix` now returns the **longest**
+match. Every caller uses that answer to strip a prefix off a topic, so a first-match
+`agent/` would leave `auto/` inside a box directory name and inside a
+`COMPOSE_PROJECT_NAME` that compose rejects.
+
 ## A scheduled task is registered from XML, never from `schtasks` flags
 
 Every unattended job — `install-reconcile-task.py`, `install-upgrade-schedule.py`,
@@ -321,113 +377,23 @@ Two mechanics that make the wrapper work from a scheduler, both of which fail si
 if forgotten: pass `working_dir` to `task_xml`, because a task's cwd is `system32` and
 `log-wrap.py` resolves `logs/` from the cwd; and give the *inner* interpreter — the one
 inside the wrapped argv — the **console** spelling, `python.exe`, which is the opposite
-of what this paragraph said until 2026-08-20 and the reason the next section exists.
+of what this paragraph said until 2026-08-20 and the reason the file below exists.
 
-### A job's reach is longer than the script the scheduler names
+### Keeping a job window-less: [`windowless-jobs.md`](windowless-jobs.md)
 
-`pythonw.exe` stops the job opening a console. It does nothing about the console child
-that job spawns: a process with no console of its own makes Windows allocate a **brand
-new console window** for each console child, so `creationflags=CREATE_NO_WINDOW` has to
-be on the spawn as well. That much was known, and `sweep.py`, `worktree.py` and
-`worktree-guard.py` were fixed for it — with a check that read exactly those three files.
+Three rounds of the same bug — a console window flashing on a scheduled run — and the
+mechanic that closed each: why `CREATE_NO_WINDOW` has to be on every spawn in a job's
+**reachable set** rather than in the job's own scripts, why it is worthless unless
+paired with a **console** `python.exe`, and why a venv's `pythonw.exe` is not an
+interpreter at all. Read it before touching an installer, a spawn inside an `UNATTENDED`
+module, or anything that resolves an interpreter for a task; the rules it states are
+enforced by `tests/test_scheduled_jobs.py` and by `schedule_health`, so a change that
+contradicts it fails rather than merely disagreeing.
 
-The flicker came back anyway, from `git` spawned by `sync-devkit.py` on the nightly
-upgrade pass, and the shape of the miss is the part worth keeping. **The flag stops at a
-process boundary**: `upgrade-project.py` flags its spawn of `sync-devkit.py`, Windows
-*ignores* the flag because the interpreter it launches is `pythonw.exe` and the flag
-applies only to console-subsystem children, and the fresh console-less process then
-spawns `git` per project with nothing set. A check scoped to one job's own scripts could
-not have seen it, because the script at fault belongs to no job.
-
-So the rule is about the reachable set, and `tests/test_scheduled_jobs.py` holds both
-halves: every module in `UNATTENDED` flags every spawn, and every script an installer
-names has to be in `UNATTENDED`. Only the outermost spawn strictly needs the flag — a
-window-less console *is* inherited, which is why nothing below `git` needs to know — but
-"outermost" is not checkable, so every site carries it.
-
-### The flag is half of it. The interpreter is the other half
-
-Everything above was in place, every spawn carried `NO_WINDOW`, and a console window
-still opened every night for about sixteen seconds. The paragraph above even names the
-mechanism in passing — *Windows ignores the flag for a GUI-subsystem child* — without
-drawing the conclusion, and the wrapper section above it drew the opposite one.
-
-`CREATE_NO_WINDOW` is a **console** flag. Passing it alongside `pythonw.exe` suppresses
-nothing, because there is no console to suppress; the child is left console-*less*,
-which is the precise condition that makes Windows allocate a fresh visible console for
-each of *its* children. The flag protects the hop it is passed to and loses the whole
-subtree behind it. Pass it with a console `python.exe` instead and the child gets a real
-console that is merely hidden — and **every descendant inherits that**, including the
-`ensurepip` that `python -m venv` re-spawns, and every hook `python -m pre_commit` runs.
-
-Measured under `pythonw.exe`, flag set on both spawns:
-
-| Spawn | Result |
-| --- | --- |
-| `sys.executable -m venv X` | rc 0 in 16.5s, **and a console window** for `ensurepip` |
-| `python.exe -m venv Y` | rc 0 in 11.7s, no window |
-
-So the pair is the rule, and neither half works alone:
-
-- **`pythonw.exe` only at the scheduler boundary** — the task's own `<Command>`, and
-  nowhere else. That is what `windowless()` is for in each installer.
-- **`console_python()` plus `creationflags=NO_WINDOW` for every Python child a job
-  spawns**, including the interpreter *inside* a `log-wrap.py --always ... -- <python>`
-  argv, which is what `console()` is for in the three wrapped installers.
-
-`sys.executable` is therefore banned outright in `UNATTENDED`, not merely inspected at
-spawn sites: `git_policy` builds its argv in one helper and spawns it three functions
-away through an injected `runner`, so a site-scoped check reads it as clean. The ban and
-its one exemption — the body of `console_python` itself — are
-`test_no_scheduled_job_spawns_the_interpreter_that_is_running_it`.
-
-Three further checks in that file exist because each was a way this could come back
-unseen: the `creationflags` **value** is now compared against a `NO_WINDOW` spelling
-rather than the keyword merely being present; `os.system` and the other spawns that
-accept no `creationflags` at all are refused; and the **import closure** of `UNATTENDED`
-is walked, so a helper module that gains a spawn joins the check by being imported
-rather than by being remembered. `IMPORTED_NOT_ENTERED` is the one exemption to that
-last, and it is mechanically narrow: the module's spawns must all be inside its own
-`main()`, which nothing imports its way into.
-
-Its cost is the second half, and it is the one that trades a visible bug for an invisible
-one: **the flag binds a child that captures nothing to the console it was just given**,
-so such a child's output stops reaching the handles it inherited. Every spawn in the
-reconcile path captures, which is why this never bit there. `docker-maint.py` streams,
-and flagging it alone would have emptied `logs/scheduled-docker-prune.log` of everything
-docker said — an artifact reporting an exit code and nothing to diagnose it with, which
-is the failure that made artifacts mandatory two sections up. Capture, or name the
-streams (`docker-maint.inherited_streams`); never just add the flag.
-
-### A file named `pythonw.exe` need not be an interpreter
-
-Both sections above were in place — the pair was the rule, every spawn carried the flag,
-and the checks were in `tests/test_scheduled_jobs.py` — when a console window came back
-at boot on 2026-08-21. **Every guard for this bug was a source scan of devkit's own
-files, and every one of them was checking a name.**
-
-Inside a virtualenv, `Scripts\pythonw.exe` is not an interpreter. It is a stub deferring
-to the base install named in `pyvenv.cfg`, and the two builders differ in the one way
-that matters here: CPython's stub loads the base **in-process**, while uv's is a
-trampoline that **spawns it as a child**. So `devkit-global-tools` — the only job whose
-interpreter comes from a `.venv`, because `install-global-tools.interpreter` prefers the
-checkout's — was registered against a GUI-subsystem file correctly named `pythonw.exe`,
-opened no console of its own, and handed its console child a brand new visible one. That
-is the same mechanism as the section above, arriving through the *scheduler boundary*
-rather than through a spawn site.
-
-Two consequences, both now enforced rather than written down:
-
-- **`devkit_schtasks.windowless` owns the resolution, and no installer keeps a copy.**
-  Six of them did, identically, on the stated reasoning that six lines are cheaper to
-  repeat than to couple — and all six were wrong at once for as long as it took one
-  job's interpreter to come from a venv. It resolves through `home`, which also settles
-  the hazard `interpreter` warned about from the other end: a box's `.venv` disappears
-  when its PR merges, and the base install outlives every venv.
-- **A source scan cannot close this class of bug, so one check reads the machine.**
-  `schedule_health.virtualenv_interpreter` compares each registered task's `Task To Run`
-  against `pyvenv.cfg` and reports it at session start. All three rounds of this bug were
-  found by a human watching windows flash; that is the loop this replaces.
+It lives beside this file because the three sections are **reference**, not policy: 105
+lines of measurement and mechanism that a session needs only when it is in that code,
+carried in an instruction file every session pays for. The 500-line cap is what forced
+the question, and this was the cheaper half to move.
 
 ### The scheduled pass carries the static tier too
 
@@ -445,11 +411,39 @@ not a failure of anything.
 
 Two things a change here must not do. **The checkout half never gains authority the
 hand-run sweep does not have** — it acts only on `sweep.SYNCABLE`, so a checkout
-holding uncommitted work, unpushed commits or an open PR is named and stepped over;
-its steps stay `merge --ff-only` and `branch -d`, both of which refuse rather than
-destroy. And **it must not redden a healthy pass**: `sweep.run_mode` returns 1 from a
+holding uncommitted work or unpushed commits is named and stepped over; its steps stay
+`merge --ff-only` and `branch -d`, both of which refuse rather than destroy. And **it
+must not redden a healthy pass**: `sweep.run_mode` returns 1 from a
 dry run that merely found something to do, so `checkout_sync_summary` reinterprets the
 code and only a failed git step under `--yes` counts. A scheduled runner whose alerts
 fire on the normal case is a runner whose alerts nobody reads — and this one has
 already been found *disabled*, with every box and checkout it manages left to rot,
 which is the failure mode that costs the most and shows the least.
+
+### A verdict outside SYNCABLE has to be one somebody can act on
+
+`needs-pr` was not. It reads *confirm a PR is open*, it is the verdict a clean,
+fully-pushed task branch gets, and **the sweep never asks GitHub whether that PR
+exists** — so the only thing that could clear it was a human noticing the line and
+checking by hand. It is not in `SYNCABLE` either, so neither `sweep.py --sync` nor the
+scheduled pass above would bring the checkout home. A checkout that reached that state
+stayed in it: carameli sat on another session's `agent/…` branch for two days, reported
+as stranded at every session start, with its `master` frozen at whatever it had been.
+
+`PARKED` is the missing half. `has_open_pr` asks the question the verdict's own text
+asks, and a checkout with an open PR, a clean tree and nothing unpushed is syncable —
+the work is on the remote and under review, so what it loses by going home is its
+position and nothing else. The branch survives: `sync_plan`'s reap stays scoped to
+`SPENT`.
+
+Two properties to keep:
+
+- **`has_open_pr` fails closed while `has_merged_pr` fails open**, and the direction is
+  set by the consumer rather than by symmetry. A wrongly asserted *merge* only fails to
+  retire a branch git would refuse anyway; a wrongly asserted *open PR* moves a checkout
+  off the branch it is standing on, on the say-so of an offline `gh`. Failing closed
+  lands back on `needs-pr`, which is exactly the old behaviour.
+- **Its gate in `inspect` is the mirror of `pr_merged`'s and just as tight.** Both fire
+  only in the one state whose verdict the answer changes, and their `upstream` terms are
+  mutually exclusive, so a sweep still makes at most one `gh` call per checkout. A
+  network round trip per repo per pass is what the gates exist to bound.
