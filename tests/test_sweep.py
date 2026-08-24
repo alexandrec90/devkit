@@ -675,6 +675,12 @@ def test_shipping_commits_pushes_and_opens_a_pr():
     assert plan.pr_title
 
 
+def test_shipping_carries_the_callers_labels_to_the_pr_plan():
+    labels = (sweep.AUTOFIX_LABEL, sweep.AUTOMERGE_LABEL)
+    plan = sweep.ship_plan(on_feature(dirty=1), sweep.READY, labels=labels)
+    assert plan.pr_labels == labels
+
+
 def test_the_commit_message_describes_the_sweep_not_the_diff():
     """Nothing read the diff. A subject claiming to summarise it would be invented."""
     message = sweep.commit_message(on_feature(dirty=14, branch="claude/sweep-0802"))
@@ -798,6 +804,21 @@ def test_the_pr_body_degrades_to_the_count_without_a_file_list():
     body = sweep.pr_body(on_feature(dirty=5))
     assert "Changed paths" not in body
     assert body.strip()
+
+
+def test_ship_mode_passes_labels_to_every_ship_plan(monkeypatch):
+    state = on_feature(dirty=1)
+    result = sweep.Result(state, sweep.READY, "ready")
+    seen = []
+
+    def labelled_plan(candidate, verdict, *, labels=()):
+        seen.append((candidate, verdict, labels))
+        return sweep.Plan(refusal="captured")
+
+    monkeypatch.setattr(sweep, "ship_plan", labelled_plan)
+    sweep.run_mode(Path("/ws"), [result], "ship", apply=False, labels=("autofix",))
+
+    assert seen == [(state, sweep.READY, ("autofix",))]
 
 
 # --- step 3: --sync ----------------------------------------------------------
@@ -1457,6 +1478,12 @@ LABELED_PLAN = sweep.Plan(
     pr_base="main",
     pr_labels=(sweep.AUTOMERGE_LABEL,),
 )
+
+
+def test_the_autofix_label_explains_that_the_pr_is_mechanical():
+    color, description = sweep.LABEL_SPECS[sweep.AUTOFIX_LABEL]
+    assert color != "ededed"
+    assert "Mechanical" in description
 
 
 def test_a_labelled_plan_creates_the_label_before_the_pr_that_wears_it():

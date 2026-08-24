@@ -50,9 +50,6 @@
 			"path": "data-lake"
 		},
 		{
-			"path": "apt-finder"
-		},
-		{
 			"path": "sports_betting"
 		},
 		{
@@ -260,7 +257,7 @@
 			},
 			{
 				"label": "Agent: Sync Codex Context",
-				"detail": "Regenerate Codex repository skills and hook configuration in each selected checkout, sequentially.",
+				"detail": "Regenerate Codex repository skills and hook configuration in each selected checkout, sequentially. Changes from a clean home branch are packaged as autofix-labelled PRs and auto-merged after the gate passes.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -1442,7 +1439,6 @@
 								"ibkr_trader",
 								"devkit",
 								"data-lake",
-								"apt-finder",
 								"sports_betting"
 							]
 						}
@@ -1460,7 +1456,6 @@
 					"ibkr_trader",
 					"devkit",
 					"data-lake",
-					"apt-finder",
 					"sports_betting"
 				],
 				"default": "carameli"
@@ -1478,7 +1473,6 @@
 					"ibkr_trader",
 					"devkit",
 					"data-lake",
-					"apt-finder",
 					"sports_betting"
 				],
 				"default": "carameli"
@@ -2026,7 +2020,6 @@
 					"ibkr_trader",
 					"devkit",
 					"data-lake",
-					"apt-finder",
 					"sports_betting"
 				],
 				"default": "VanillaLand"

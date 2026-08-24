@@ -160,7 +160,6 @@ scripts/sweep.py::gh_for
 scripts/sweep.py::is_retired
 scripts/sweep.py::is_task_branch
 scripts/sweep.py::read_anchor
-scripts/sweep.py::run_mode
 scripts/sweep.py::write_anchor
 scripts/sync-codex-hooks.py::adapter_command
 scripts/sync-codex-hooks.py::is_redundant_handler
