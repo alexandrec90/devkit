@@ -1658,6 +1658,78 @@ def test_a_command_that_writes_nothing_names_no_target(command):
     assert guard.shell_write_targets(command) == []
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        # every one of these was blocked as a write in a single session on 2026-08-24,
+        # and each block cut a box that `reconcile` reaped as "never used" minutes later
+        "awk -F'\\t' '$1 > \"2026-08-24T01:53\"' logs/harness-events.log",
+        'grep -n "shlex|REDIRECT|redirect|\'>\'|\\">>\\"" scripts/worktree-guard.py',
+        "grep -rn '>>>>>>>' devkit/frontend/src",
+        'python -c "print([l for l in xs if l[:16] >= cut])"',
+        "python - <<'PY'\nafter = [x for x in xs if x[:16] >= cut]\nPY",
+        "python - <<'PY'\ndef f(x: int) -> None:\n    return None\nPY",
+        # a heredoc body is program text; only its marker line can carry a redirection
+        "cat <<'EOF'\nsee devkit/a.py > devkit/b.py for the rewrite\nEOF",
+    ],
+)
+def test_a_greater_than_that_is_not_a_redirection_names_no_target(command):
+    """The claim this replaced -- "an invented candidate resolves to no checkout" -- was
+    false because an invented candidate is *relative*, and a relative path resolves
+    against the cwd, which in a guarded session is the checkout being guarded. So a quote
+    character was named as the file the block was protecting.
+
+    Reversion check: restore the `REDIRECT` regex and every case here fails, each naming
+    the punctuation it read as a path."""
+    assert guard.shell_write_targets(command) == []
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        # respecting quotes must not cost a detection: the target itself may be quoted
+        ('echo x > "devkit/a b.py"', ["devkit/a b.py"]),
+        ("echo x > 'devkit/a.py'", ["devkit/a.py"]),
+        ('echo x > "C:\\ws\\devkit\\a.py"', ["C:\\ws\\devkit\\a.py"]),
+        # the marker line of a heredoc is a command line like any other
+        ("cat > devkit/a.py <<'EOF'\nbody > not-a-file\nEOF", ["devkit/a.py"]),
+        # a write after a quoted argument still reads
+        ("grep -n '>' devkit/a.py && tee devkit/b.py", ["devkit/b.py"]),
+    ],
+)
+def test_quote_awareness_costs_no_detection(command, expected):
+    assert guard.shell_write_targets(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'S=/scratch/x.py; printf a > "$S"',
+        "tee $OUT",
+        "echo x > %TEMP%\\a.py",
+        "cp a ${DEST}",
+    ],
+)
+def test_an_unexpanded_variable_is_not_a_path(command):
+    """The shell has not substituted yet, so `$S` arrives as a relative word and resolves
+    against the cwd -- the checkout. Blocked a write to a scratch directory that way."""
+    assert guard.shell_write_targets(command) == []
+
+
+def test_strip_heredocs_keeps_the_marker_line_and_drops_the_body():
+    """The marker line carries the redirection; the body carries the false positives."""
+    command = "cat > devkit/a.py <<'EOF'\na >= b\nEOF\ntee devkit/b.py"
+    assert guard.strip_heredocs(command) == "cat > devkit/a.py <<'EOF'\ntee devkit/b.py"
+
+
+def test_an_unterminated_heredoc_swallows_the_rest_like_a_shell_does():
+    assert guard.strip_heredocs("cat <<EOF\na\nb") == "cat <<EOF"
+
+
+def test_redirect_targets_reads_a_descriptor_duplication_as_no_file():
+    assert guard.redirect_targets("python x.py 2>&1") == []
+
+
 def test_an_interpreter_script_is_the_documented_gap():
     """`python -c` computes its target at runtime and names it nowhere in the argv, so no
     argv scan can see it. Pinned as a test rather than left implicit: a silent gap in a

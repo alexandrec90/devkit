@@ -211,4 +211,3 @@ scripts/worktree.py::render_reap
 scripts/worktree.py::render_reconcile
 scripts/worktree.py::run_steps
 scripts/worktree.py::seed_env
-scripts/worktree.py::serve_preview

@@ -184,12 +184,18 @@ Each of these has already been violated by something:
   `sed`, heredocs and short scripts over Edit and Write. An agent that complies writes to
   a checkout's home branch through a tool the guard was not watching, so the blind side
   stopped being an omission and became a route. `SHELL_WRITE_ALL`, `SHELL_WRITE_LAST` and
-  `REDIRECT` are a **closed list of write verbs**, deliberately shaped like
+  `redirect_targets` are a **closed list of write verbs**, deliberately shaped like
   `enforce-capped-bash.py`'s blocklist rather than like the proof obligation it replaced:
   requiring a command to demonstrate it does not write means modelling the shell, and
   that design was 46% false positives there. What the list cannot see — an interpreter
   script, `python -c 'open(...)'` — is a documented gap with a test naming it, not an
-  oversight. The verdict is always the block path, because the rewrite replaces a path
+  oversight. Redirections are the one member that needed *more* shell modelling rather
+  than less: a regex over `>` read `awk '$1 > "…"'`, a `>=` inside a `python -c`, and a
+  heredoc body quoting a path as writes, and the sixth such block in a single session
+  had cut a sixth box that `reconcile` reaped minutes later as never used. So
+  `redirect_targets` walks the statement tracking quote state, `strip_heredocs` drops
+  bodies before either tier reads them, and an unexpanded `$VAR` names no path.
+  The verdict is always the block path, because the rewrite replaces a path
   *argument* and a command line has none; `shell_note` tells the agent which of its own
   words was read as the write, or it re-issues the line with the box path bolted on
   somewhere else.
