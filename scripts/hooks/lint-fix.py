@@ -285,7 +285,7 @@ def record_block(paths: list[str], failures: list[str]) -> None:
     harness_events.record(
         "lint-fix-block",
         (
-            ("project", REPO_ROOT.name),
+            ("project", harness_events.project_name(REPO_ROOT)),
             ("version", harness_config.harness_version(REPO_ROOT)),
             ("files", ";".join(paths)),
             ("detail", failures[0]),

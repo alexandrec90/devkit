@@ -137,9 +137,17 @@ should look rather than "the harness worked":
   to could not be cut. The session that hit it was left with a failure message and no
   box, so the `detail=` field is the start of a real diagnosis.
 
-The session-start status line counts only those two, over the last week; everything
-else is forensics to grep when a session's account of a block needs corroborating.
-Grep by `project=`, `session=`, or event name -- never parse it as a document.
+Those two are a **backlog**, and this skill's job stops at noticing it: read it with
+`python scripts/harness_triage.py`, and work it with the `triage-harness` skill, which
+owns verifying a report against current code and recording what retired it. The
+session-start line counts what that tool calls open — an event with no `triage-resolved`
+naming it, at any age. It counted a seven-day window until 2026-08-24, so an item left
+the line by ageing out rather than by being dealt with; do not reintroduce a date filter
+here.
+
+Everything else is forensics to grep when a session's account of a block needs
+corroborating. Grep by `project=`, `session=`, or event name -- never parse it as a
+document.
 
 ## Reporting
 
