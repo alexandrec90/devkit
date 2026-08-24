@@ -248,9 +248,10 @@ def reapable(verdict: str, *, pr_merged: bool = False, holds_uncommitted: bool =
     and a cleanup pass is not the right moment to find out.
 
     `SAFE_TO_REAP` is gated on it too, and that gate is **deliberately redundant**.
-    `sweep.classify` tests `state.dirty` -- which counts untracked files, since it reads
-    an unfiltered `git status --porcelain` -- before it can reach `spent-branch`,
-    `needs-pr` or `clean`, so one of those verdicts already implies a clean tree *for
+    `sweep.classify` tests `state.dirty` -- which counts untracked files, and, per
+    `sweep.real_changes`, only the tracked paths `git diff` confirms -- before it can
+    reach `spent-branch`, `needs-pr` or `clean`, so one of those verdicts already
+    implies a clean tree *for
     the snapshot it was computed from*. The parameter exists for the case where that
     stops being true: a verdict cached across a step, a second snapshot taken later, a
     caller that assembles the two from different reads. Ignoring it there was the same
@@ -873,6 +874,7 @@ def provision_steps(
     frontend_dir: str = "",
     windows: bool = os.name == "nt",
     python_version: str = "",
+    frontend_locked: bool = False,
 ) -> tuple[ProvisionStep, ...]:
     """What makes a fresh box runnable, from the marker files the project ships.
 
@@ -925,12 +927,21 @@ def provision_steps(
             )
         )
     if frontend_dir:
+        # `ci` when a lockfile is there, and the difference is not about speed.
+        # **`npm install` writes `package-lock.json`**, so provisioning a box left a
+        # tracked file modified before anyone had edited anything -- and a box that
+        # holds a tracked change is one `reapable` refuses to destroy, on any verdict,
+        # forever. Two carameli preview boxes sat on a port slot each for that reason
+        # alone, and the registry filling is what made `Preview: Open a UI Branch` fail.
+        # `ci` installs the lock exactly and never rewrites it, which is also what the
+        # lock is for.
+        verb = "ci" if frontend_locked else "install"
         steps.append(
             ProvisionStep(
-                f"npm install ({frontend_dir})",
+                f"npm {verb} ({frontend_dir})",
                 (
                     npm_executable(windows),
-                    "install",
+                    verb,
                     "--prefix",
                     frontend_dir,
                     "--no-audit",
@@ -1029,8 +1040,17 @@ def plan_provision(
                 f"override it.",
                 file=sys.stderr,
             )
+    # Read off the SOURCE checkout, like every other marker here: the lockfile is
+    # tracked, so the box is guaranteed the same answer and the dry run shows the verb
+    # that will actually run.
+    frontend_locked = bool(frontend_dir) and (source / frontend_dir / "package-lock.json").is_file()
     return provision_steps(
-        present, install_command, frontend_dir, windows=windows, python_version=python_version
+        present,
+        install_command,
+        frontend_dir,
+        windows=windows,
+        python_version=python_version,
+        frontend_locked=frontend_locked,
     )
 
 
@@ -1786,6 +1806,17 @@ def reconcile_action(
       whether that is finished is a person's decision, not a cleanup's.
     """
     if not reapable(verdict, pr_merged=pr.merged, holds_uncommitted=holds_uncommitted):
+        if verdict == PREVIEW_VERDICT:
+            # Same hold, different remedy, and the report cannot tell them apart on its
+            # own: it heads every HOLD row "only place it exists, ship it", which for a
+            # preview is advice that cannot be taken. A preview sits on a `preview/...`
+            # copy nobody will open a PR for, so an edit made in one ships nowhere and
+            # the box is held until a person moves it. Left unsaid, the reader retries
+            # `reap`, is refused, and the slot stays leased.
+            return HOLD, (
+                f"{reason} -- edits in a preview ship nowhere; copy anything worth "
+                f"keeping out, then `reap --yes`"
+            )
         return HOLD, f"{verdict} -- {reason}"
 
     if verdict == sweep.SKIPPED:

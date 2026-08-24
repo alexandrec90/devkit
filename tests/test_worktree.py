@@ -1225,6 +1225,36 @@ def test_a_project_with_no_frontend_tier_runs_no_npm():
     assert not any("npm" in s.argv for s in steps)
 
 
+def test_a_locked_frontend_is_installed_without_rewriting_its_lockfile():
+    """`npm install` writes `package-lock.json`, so provisioning left a box holding a
+    tracked modification before anyone edited anything -- and `reapable` refuses to
+    destroy a box holding a tracked change, on any verdict, forever. Two preview boxes
+    leaked a port slot each on that alone, until the registry was full and
+    `Preview: Open a UI Branch` died on it."""
+    steps = worktree.provision_steps(
+        {"uv.lock"}, frontend_dir="frontend", windows=False, frontend_locked=True
+    )
+    assert steps[-1].argv == ("npm", "ci", "--prefix", "frontend", "--no-audit", "--no-fund")
+    assert steps[-1].label == "npm ci (frontend)"
+
+
+def test_an_unlocked_frontend_still_installs():
+    """`npm ci` refuses to run without a lockfile, so the fallback is not optional."""
+    steps = worktree.provision_steps({"uv.lock"}, frontend_dir="frontend", windows=False)
+    assert steps[-1].argv[1] == "install"
+
+
+def test_plan_provision_reads_the_lockfile_off_the_source_checkout(tmp_path):
+    (tmp_path / ".devkit.toml").write_text(
+        '[frontend]\nenabled = true\ndir = "frontend"\n', encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+    (tmp_path / "frontend").mkdir()
+    assert worktree.plan_provision(tmp_path, windows=False)[-1].argv[1] == "install"
+    (tmp_path / "frontend" / "package-lock.json").write_text("{}", encoding="utf-8")
+    assert worktree.plan_provision(tmp_path, windows=False)[-1].argv[1] == "ci"
+
+
 def test_an_unpinned_project_gets_a_venv_from_the_running_interpreter():
     """No `[python] version` is the common case and must stay exactly as it was: the
     interpreter running the provisioner, with no dependency on uv for the venv itself."""
@@ -3238,6 +3268,19 @@ def test_reconcile_never_reaps_a_preview_someone_is_editing():
             worktree.PREVIEW_VERDICT, "x", pr, pressure=True, age_days=1e6, holds_uncommitted=True
         )
         assert action == worktree.HOLD, pr.state
+
+
+def test_a_held_preview_is_told_what_it_can_actually_do():
+    """The report heads every HOLD row "only place it exists, ship it", and a preview
+    cannot be shipped: it sits on a `preview/...` copy no PR will ever be opened for.
+    Left at the generic wording the reader retries `reap`, is refused, and the slot
+    stays leased -- which is how the registry filled."""
+    action, reason = decide(worktree.PREVIEW_VERDICT, "editing", holds_uncommitted=True)
+    assert action == worktree.HOLD
+    assert "ship nowhere" in reason
+    assert "reap --yes" in reason
+    # The ordinary hold keeps the generic wording, which is correct for a task box.
+    assert "reap --yes" not in decide(sweep.NEEDS_PR, "pushed", holds_uncommitted=True)[1]
 
 
 def test_reaping_a_preview_deletes_the_copy_it_made():
