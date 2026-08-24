@@ -248,9 +248,10 @@ def reapable(verdict: str, *, pr_merged: bool = False, holds_uncommitted: bool =
     and a cleanup pass is not the right moment to find out.
 
     `SAFE_TO_REAP` is gated on it too, and that gate is **deliberately redundant**.
-    `sweep.classify` tests `state.dirty` -- which counts untracked files, since it reads
-    an unfiltered `git status --porcelain` -- before it can reach `spent-branch`,
-    `needs-pr` or `clean`, so one of those verdicts already implies a clean tree *for
+    `sweep.classify` tests `state.dirty` -- which counts untracked files, and, per
+    `sweep.real_changes`, only the tracked paths `git diff` confirms -- before it can
+    reach `spent-branch`, `needs-pr` or `clean`, so one of those verdicts already
+    implies a clean tree *for
     the snapshot it was computed from*. The parameter exists for the case where that
     stops being true: a verdict cached across a step, a second snapshot taken later, a
     caller that assembles the two from different reads. Ignoring it there was the same
@@ -410,6 +411,13 @@ class SpawnPlan:
     # other caller of `managed_env` on the single-slot path.
     ui_env_templates: dict[str, str] = field(default_factory=dict)
     donor_slot: int = -1
+    # Why this box got no port lease, when the project has a stack and wanted one --
+    # `lease_slot`'s refusal, empty on the ordinary path (and on a stackless project,
+    # which asks for no slot in the first place). Reported, never decided on: the box
+    # is cut either way, because writing a file needs no ports. What reads it is the
+    # renderer, the guard's message, and `apply_preview`, which refuses to bring a
+    # slotless box's stack up onto the source checkout's ports.
+    slotless: str = ""
     # True when the branch predates this plan -- `resume` putting a box back on a
     # branch whose own box is gone. Reported, never decided on: every step is already
     # in `steps` by the time this is read, and the two flows differ only in what the
@@ -640,6 +648,38 @@ def next_lease_slot(registry: devkit_ports.Registry, boxes: Mapping[str, Box]) -
         f"box, raise registry.max_slots, or stop the project's stack publishing to the "
         f"host — a box that runs its tests inside the compose network needs no slot."
     )
+
+
+def lease_slot(registry: devkit_ports.Registry | None, boxes: Mapping[str, Box]) -> tuple[int, str]:
+    """`(slot, refusal)` — a port lease for a new box, or -1 and why there is none.
+
+    **Cutting a box and running its stack are two different needs, and only the second
+    one wants a slot.** `next_lease_slot` raises when all of them are taken, and for a
+    year that exception aborted the whole spawn — so an agent asked to change one
+    TypeScript file was refused a *checkout* because two standing previews and nine
+    boxes awaiting a merge were holding the ports. It is the most-recurring entry on
+    this machine's harness ledger: seven blocked edits across two sessions on
+    2026-08-24 alone, none of which was going to start a container.
+
+    So exhaustion degrades here instead of raising, and the refusal string travels with
+    the plan (`SpawnPlan.slotless`) so both the renderer and the guard's message say the
+    box cannot bring its stack up. `preview` deliberately does **not** go through this:
+    a preview whose whole purpose is a running stack should fail loudly at the point it
+    asks, not silently produce a box that cannot serve.
+
+    What a slotless box must never do is `compose up`. Seeding copies the source
+    checkout's `.env`, the managed block overrides the port keys, and with no slot there
+    are no port keys to override with — so the seeded values stand and the stack binds
+    the ports the *checkout* is publishing on. That is the second copy `compose_up`'s
+    own docstring describes, and `apply_preview` refuses it rather than trusting every
+    future caller to remember.
+    """
+    if registry is None:
+        return -1, ""
+    try:
+        return next_lease_slot(registry, boxes), ""
+    except devkit_ports.RegistryError as exc:
+        return -1, str(exc)
 
 
 # The shortest abbreviation of a session id a lease is trusted to name. Eight hex
@@ -873,6 +913,7 @@ def provision_steps(
     frontend_dir: str = "",
     windows: bool = os.name == "nt",
     python_version: str = "",
+    frontend_locked: bool = False,
 ) -> tuple[ProvisionStep, ...]:
     """What makes a fresh box runnable, from the marker files the project ships.
 
@@ -925,12 +966,21 @@ def provision_steps(
             )
         )
     if frontend_dir:
+        # `ci` when a lockfile is there, and the difference is not about speed.
+        # **`npm install` writes `package-lock.json`**, so provisioning a box left a
+        # tracked file modified before anyone had edited anything -- and a box that
+        # holds a tracked change is one `reapable` refuses to destroy, on any verdict,
+        # forever. Two carameli preview boxes sat on a port slot each for that reason
+        # alone, and the registry filling is what made `Preview: Open a UI Branch` fail.
+        # `ci` installs the lock exactly and never rewrites it, which is also what the
+        # lock is for.
+        verb = "ci" if frontend_locked else "install"
         steps.append(
             ProvisionStep(
-                f"npm install ({frontend_dir})",
+                f"npm {verb} ({frontend_dir})",
                 (
                     npm_executable(windows),
-                    "install",
+                    verb,
                     "--prefix",
                     frontend_dir,
                     "--no-audit",
@@ -1029,8 +1079,17 @@ def plan_provision(
                 f"override it.",
                 file=sys.stderr,
             )
+    # Read off the SOURCE checkout, like every other marker here: the lockfile is
+    # tracked, so the box is guaranteed the same answer and the dry run shows the verb
+    # that will actually run.
+    frontend_locked = bool(frontend_dir) and (source / frontend_dir / "package-lock.json").is_file()
     return provision_steps(
-        present, install_command, frontend_dir, windows=windows, python_version=python_version
+        present,
+        install_command,
+        frontend_dir,
+        windows=windows,
+        python_version=python_version,
+        frontend_locked=frontend_locked,
     )
 
 
@@ -1087,7 +1146,7 @@ def spawn_plan(
     branch = tb.branch_name(tb.slugify(slug), existing_branches, today, prefix=branch_prefix)
     name = box_name(project, branch)
     path = box_path(workspace_root, name)
-    slot = next_lease_slot(registry, boxes) if registry is not None else -1
+    slot, slotless = lease_slot(registry, boxes)
 
     steps: list[tuple[str, ...]] = []
     if fetch:
@@ -1110,6 +1169,7 @@ def spawn_plan(
         env=managed_env(name, registry, slot, env_templates),
         provision=provision,
         env_templates=dict(env_templates or {}),
+        slotless=slotless,
     )
 
 
@@ -1168,7 +1228,7 @@ def resume_plan(
             f"worktree.py claim {name} --session {session or '<your session id>'} --yes"
         )
     path = box_path(workspace_root, name)
-    slot = next_lease_slot(registry, boxes) if registry is not None else -1
+    slot, slotless = lease_slot(registry, boxes)
 
     steps: list[tuple[str, ...]] = []
     if fetch:
@@ -1196,6 +1256,7 @@ def resume_plan(
         env=managed_env(name, registry, slot, env_templates),
         provision=provision,
         env_templates=dict(env_templates or {}),
+        slotless=slotless,
         resumed=True,
     )
 
@@ -1786,6 +1847,17 @@ def reconcile_action(
       whether that is finished is a person's decision, not a cleanup's.
     """
     if not reapable(verdict, pr_merged=pr.merged, holds_uncommitted=holds_uncommitted):
+        if verdict == PREVIEW_VERDICT:
+            # Same hold, different remedy, and the report cannot tell them apart on its
+            # own: it heads every HOLD row "only place it exists, ship it", which for a
+            # preview is advice that cannot be taken. A preview sits on a `preview/...`
+            # copy nobody will open a PR for, so an edit made in one ships nowhere and
+            # the box is held until a person moves it. Left unsaid, the reader retries
+            # `reap`, is refused, and the slot stays leased.
+            return HOLD, (
+                f"{reason} -- edits in a preview ship nowhere; copy anything worth "
+                f"keeping out, then `reap --yes`"
+            )
         return HOLD, f"{verdict} -- {reason}"
 
     if verdict == sweep.SKIPPED:
@@ -2813,6 +2885,17 @@ def apply_new(
         notes.append(f"released {len(dropped)} stale lease(s): {', '.join(dropped)}")
 
     stack = has_stack(path)
+    if plan.slotless:
+        # The box exists and is writable; only its stack is unavailable. Said here rather
+        # than raised at plan time, because an agent routed into a box wanted somewhere
+        # to edit, not a container. See `lease_slot`.
+        notes.append(
+            f"[warn] no port slot was free, so this box has no ports of its own and "
+            f"`compose up` here would bind the {box.project} checkout's — it is refused "
+            f"until one is. {plan.slotless} Then re-cut the box, or "
+            f"`worktree.py reap <box> --yes` one that is done and let the next spawn "
+            f"take its slot."
+        )
     if should_seed_env(stack, is_tracked(path, ".env")):
         seed_env(source / ".env", path / ".env", env)
         notes.append(f"seeded {path.name}/.env (COMPOSE_PROJECT_NAME={box.name})")
@@ -3020,6 +3103,19 @@ def apply_preview(
         ok, message = compose_down(path, plan.box.name)
         notes.append(message if ok else f"[warn] {message}")
         return ok, notes
+
+    if plan.up and plan.box.slot < 0:
+        # `plan.up` already implies `has_stack`, so a slot is exactly what this box is
+        # missing — and without one its `.env` carries the seeded copy's ports, which are
+        # the source checkout's. Starting here is the "second copy of the source
+        # checkout's stack" `compose_up`'s docstring names, so refuse instead.
+        notes.append(
+            f"[warn] {plan.box.name} holds no port slot, so its stack was NOT started: "
+            f"its .env still names the {plan.box.project} checkout's ports and compose "
+            f"would bind those. Free a slot (`worktree.py reap <box> --yes`, or raise "
+            f"registry.max_slots in ports.toml) and cut it again."
+        )
+        return False, notes
 
     if plan.up:
         ok, message = compose_up(path, plan.box.name, services=plan.box.services)
@@ -3871,7 +3967,16 @@ def render_spawn(plan: SpawnPlan, applied: bool, notes: list[str]) -> str:
     lines = [f"{verb} {plan.box.name}"]
     lines.append(f"  path    {plan.path}")
     lines.append(f"  branch  {plan.box.branch}")
-    lines.append(f"  slot    {plan.box.slot if plan.box.slot >= 0 else '- (no Docker tier)'}")
+    # A slot of -1 has two very different meanings and the renderer used to give both
+    # the reassuring one: a stackless project asks for no lease, while a *stack* project
+    # that could not get one has a box whose `compose up` is refused.
+    if plan.box.slot >= 0:
+        slot = str(plan.box.slot)
+    elif plan.slotless:
+        slot = "- (NONE FREE -- this box cannot start its stack)"
+    else:
+        slot = "- (no Docker tier)"
+    lines.append(f"  slot    {slot}")
     for n, step in enumerate(plan.steps, 1):
         lines.append(f"    {n}. git -C {plan.box.project} {' '.join(step)}")
     if plan.env:

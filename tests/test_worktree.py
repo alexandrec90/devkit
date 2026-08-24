@@ -143,6 +143,95 @@ def test_next_lease_slot_raises_when_the_registry_is_full():
         worktree.next_lease_slot(reg, {})
 
 
+class TestLeaseSlot:
+    """Exhaustion degrades to a slotless box; it does not cost the checkout.
+
+    The regression is the most-recurring entry on the harness ledger: seven edits
+    blocked across two sessions on 2026-08-24 with `RegistryError: all 16 port slots
+    are in use`, none of which was going to start a container.
+    """
+
+    def test_a_free_slot_is_leased_with_no_refusal(self):
+        assert worktree.lease_slot(registry(carameli=0), {}) == (1, "")
+
+    def test_no_registry_is_a_stackless_project_not_a_refusal(self):
+        assert worktree.lease_slot(None, {}) == (-1, "")
+
+    def test_a_full_registry_degrades_instead_of_raising(self):
+        reg = registry(max_slots=2, carameli=0, ibkr_trader=1)
+        slot, refusal = worktree.lease_slot(reg, {})
+        assert slot == -1
+        assert "all 2 port slots" in refusal
+
+    def test_a_full_registry_still_cuts_the_box(self):
+        plan = worktree.spawn_plan(
+            project="carameli",
+            workspace_root=Path("/ws"),
+            slug="fix-a-typo",
+            default_branch="master",
+            existing_branches=set(),
+            boxes={},
+            registry=registry(max_slots=2, carameli=0, ibkr_trader=1),
+        )
+        assert plan.box.slot == -1
+        assert "all 2 port slots" in plan.slotless
+        # The point of the whole change: there is still a worktree to write into.
+        assert any(step[:2] == ("worktree", "add") for step in plan.steps)
+
+    def test_a_full_registry_still_resumes_a_branch(self):
+        plan = worktree.resume_plan(
+            project="carameli",
+            workspace_root=Path("/ws"),
+            branch="agent/fix-a-typo-0824",
+            remote_branches={"agent/fix-a-typo-0824"},
+            existing_branches=set(),
+            boxes={},
+            registry=registry(max_slots=2, carameli=0, ibkr_trader=1),
+        )
+        assert plan.box.slot == -1
+        assert "all 2 port slots" in plan.slotless
+
+    def test_a_leased_box_carries_no_refusal(self):
+        plan = worktree.spawn_plan(
+            project="carameli",
+            workspace_root=Path("/ws"),
+            slug="fix-a-typo",
+            default_branch="master",
+            existing_branches=set(),
+            boxes={},
+            registry=registry(carameli=0),
+        )
+        assert plan.box.slot == 1
+        assert plan.slotless == ""
+
+    def test_a_slotless_box_gets_no_port_env(self):
+        """Without this the seeded .env's ports stand -- the checkout's own."""
+        plan = worktree.spawn_plan(
+            project="carameli",
+            workspace_root=Path("/ws"),
+            slug="fix-a-typo",
+            default_branch="master",
+            existing_branches=set(),
+            boxes={},
+            registry=registry(max_slots=2, carameli=0, ibkr_trader=1),
+        )
+        assert set(plan.env) == {"COMPOSE_PROJECT_NAME"}
+
+    def test_the_renderer_does_not_call_it_a_stackless_project(self):
+        plan = worktree.spawn_plan(
+            project="carameli",
+            workspace_root=Path("/ws"),
+            slug="fix-a-typo",
+            default_branch="master",
+            existing_branches=set(),
+            boxes={},
+            registry=registry(max_slots=2, carameli=0, ibkr_trader=1),
+        )
+        rendered = worktree.render_spawn(plan, applied=True, notes=[])
+        assert "no Docker tier" not in rendered
+        assert "NONE FREE" in rendered
+
+
 def test_find_session_box_is_scoped_to_one_project():
     boxes = {
         "carameli--ws-abc-0806": box("carameli--ws-abc-0806", session="abc"),
@@ -1223,6 +1312,36 @@ def test_the_frontend_step_is_runnable_on_windows():
 def test_a_project_with_no_frontend_tier_runs_no_npm():
     steps = worktree.provision_steps({"uv.lock"})
     assert not any("npm" in s.argv for s in steps)
+
+
+def test_a_locked_frontend_is_installed_without_rewriting_its_lockfile():
+    """`npm install` writes `package-lock.json`, so provisioning left a box holding a
+    tracked modification before anyone edited anything -- and `reapable` refuses to
+    destroy a box holding a tracked change, on any verdict, forever. Two preview boxes
+    leaked a port slot each on that alone, until the registry was full and
+    `Preview: Open a UI Branch` died on it."""
+    steps = worktree.provision_steps(
+        {"uv.lock"}, frontend_dir="frontend", windows=False, frontend_locked=True
+    )
+    assert steps[-1].argv == ("npm", "ci", "--prefix", "frontend", "--no-audit", "--no-fund")
+    assert steps[-1].label == "npm ci (frontend)"
+
+
+def test_an_unlocked_frontend_still_installs():
+    """`npm ci` refuses to run without a lockfile, so the fallback is not optional."""
+    steps = worktree.provision_steps({"uv.lock"}, frontend_dir="frontend", windows=False)
+    assert steps[-1].argv[1] == "install"
+
+
+def test_plan_provision_reads_the_lockfile_off_the_source_checkout(tmp_path):
+    (tmp_path / ".devkit.toml").write_text(
+        '[frontend]\nenabled = true\ndir = "frontend"\n', encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+    (tmp_path / "frontend").mkdir()
+    assert worktree.plan_provision(tmp_path, windows=False)[-1].argv[1] == "install"
+    (tmp_path / "frontend" / "package-lock.json").write_text("{}", encoding="utf-8")
+    assert worktree.plan_provision(tmp_path, windows=False)[-1].argv[1] == "ci"
 
 
 def test_an_unpinned_project_gets_a_venv_from_the_running_interpreter():
@@ -3240,6 +3359,19 @@ def test_reconcile_never_reaps_a_preview_someone_is_editing():
         assert action == worktree.HOLD, pr.state
 
 
+def test_a_held_preview_is_told_what_it_can_actually_do():
+    """The report heads every HOLD row "only place it exists, ship it", and a preview
+    cannot be shipped: it sits on a `preview/...` copy no PR will ever be opened for.
+    Left at the generic wording the reader retries `reap`, is refused, and the slot
+    stays leased -- which is how the registry filled."""
+    action, reason = decide(worktree.PREVIEW_VERDICT, "editing", holds_uncommitted=True)
+    assert action == worktree.HOLD
+    assert "ship nowhere" in reason
+    assert "reap --yes" in reason
+    # The ordinary hold keeps the generic wording, which is correct for a task box.
+    assert "reap --yes" not in decide(sweep.NEEDS_PR, "pushed", holds_uncommitted=True)[1]
+
+
 def test_reaping_a_preview_deletes_the_copy_it_made():
     """`-d` refuses a preview branch by definition, so planning it would fail every reap."""
     plan = reap(
@@ -3435,6 +3567,30 @@ def test_apply_preview_of_a_ui_box_scopes_the_up_and_says_what_is_borrowed(monke
         worktree.PreviewPlan(box=preview_box(), path="x", up=True), Path("ws")
     )
     assert not any("borrowed" in note for note in full_notes)
+
+
+def test_a_slotless_box_is_never_brought_up_on_the_checkouts_ports(monkeypatch):
+    """`plan.up` implies a compose file, so slot=-1 here means the lease was refused.
+
+    Its `.env` is then the seeded copy of the source checkout's, ports and all, and
+    `compose up` would start a second stack on the ports that checkout is publishing
+    on -- the failure `compose_up`'s own docstring names.
+    """
+    calls = []
+    monkeypatch.setattr(worktree, "compose_up", lambda *a, **k: (calls.append(a), (True, "up"))[1])
+    plan = worktree.PreviewPlan(box=preview_box(slot=-1), path="x", up=True)
+    ok, notes = worktree.apply_preview(plan, Path("ws"))
+    assert not ok
+    assert calls == []
+    assert any("holds no port slot" in note for note in notes)
+
+
+def test_a_leased_box_is_still_brought_up(monkeypatch):
+    """The refusal above must not fire on the ordinary path."""
+    monkeypatch.setattr(worktree, "compose_up", lambda *a, **k: (True, "stack is up"))
+    plan = worktree.PreviewPlan(box=preview_box(slot=5), path="x", up=True)
+    ok, _ = worktree.apply_preview(plan, Path("ws"))
+    assert ok
 
 
 def test_a_re_leased_ui_box_keeps_its_two_slot_env(tmp_path, monkeypatch):

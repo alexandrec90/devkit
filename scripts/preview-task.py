@@ -102,6 +102,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import devkit_ports
 import devkit_project
 import sweep
 import task_branch as tb
@@ -997,9 +998,20 @@ def serve(
             down=down,
             **preview_kwargs(candidate, ui=ui),
         )
-    except (worktree.WorktreeError, devkit_project.ProjectError) as exc:
+    except (
+        worktree.WorktreeError,
+        devkit_project.ProjectError,
+        devkit_ports.RegistryError,
+    ) as exc:
         # ProjectError is a stale or hand-typed pick naming a checkout the workspace
         # does not list -- a wrong answer, not a wrong program, so no traceback.
+        #
+        # RegistryError is the machine being full rather than the request being wrong:
+        # `next_lease_slot` raises it when every port slot is leased, and it carries the
+        # three ways out in its own message. It was missing from this tuple, so a full
+        # registry reached the user as a traceback in `logs/preview-open-a-ui-branch.log`
+        # -- the one shape of failure a one-click task must never produce, because the
+        # remedy was already written and the reader had to find it under a stack trace.
         echo(f"  failed: {exc}")
         return False
     ok, notes = worktree.apply_preview(plan, workspace)

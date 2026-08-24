@@ -196,6 +196,77 @@ def test_an_empty_porcelain_is_no_files():
     assert sweep.parse_porcelain("\n  \n") == ()
 
 
+def test_a_status_only_modification_is_not_a_real_change():
+    """The leak that filled the port registry. detect-secrets rewrites
+    `.secrets.baseline` to something git reports as ` M` and `git diff --quiet` reports
+    as identical; `worktree.reapable` reads that as work only this box holds and refuses
+    to destroy it on any verdict, so the box keeps its port slot forever."""
+    porcelain = " M .secrets.baseline\n M app/main.py\n"
+    assert sweep.real_changes(porcelain, ["app/main.py"]) == ("app/main.py",)
+
+
+def test_an_untracked_file_survives_having_no_diff():
+    """`git diff` cannot name a path git has never tracked, so the two halves are
+    unioned. Filtering on the diff alone would delete a box's only new file."""
+    porcelain = "?? logs/new.txt\n M .secrets.baseline\n"
+    assert sweep.real_changes(porcelain, []) == ("logs/new.txt",)
+
+
+def test_a_quoted_path_matches_the_diff_that_named_it_plainly():
+    """Both sides go through `_unquote`, or a path with a space is filtered out for
+    looking different to itself."""
+    assert sweep.real_changes(' M "with space.py"\n', ['"with space.py"']) == ("with space.py",)
+    assert sweep.real_changes(' M "with space.py"\n', ["with space.py"]) == ("with space.py",)
+
+
+def test_real_changes_keeps_the_order_git_reported():
+    porcelain = " M b.py\n?? c.txt\n M a.py\n"
+    assert sweep.real_changes(porcelain, ["a.py", "b.py"]) == ("b.py", "c.txt", "a.py")
+
+
+def test_untracked_paths_reads_only_the_question_marks():
+    assert sweep.untracked_paths(" M a.py\n?? b.txt\nA  c.py\n") == frozenset({"b.txt"})
+
+
+def test_inspect_drops_a_tracked_path_no_diff_confirms(tmp_path):
+    state = inspect_with(
+        tmp_path,
+        {
+            **INSPECT_REPLIES,
+            ("status", "--porcelain"): " M .secrets.baseline\n M app.py\n",
+            ("diff", "--name-only", "HEAD"): "app.py\n",
+        },
+    )
+    assert state.dirty_files == ("app.py",)
+    assert state.dirty == 1
+
+
+def test_inspect_keeps_every_path_when_the_diff_call_fails(tmp_path):
+    """Fails towards holding. A checkout with no HEAD answers nothing, and a box is
+    never destroyed on the strength of a git call that did not run."""
+    state = inspect_with(
+        tmp_path,
+        {**INSPECT_REPLIES, ("status", "--porcelain"): " M .secrets.baseline\n M app.py\n"},
+    )
+    assert state.dirty_files == (".secrets.baseline", "app.py")
+
+
+def test_inspect_does_not_ask_for_a_diff_when_the_tree_is_clean(tmp_path):
+    """One process per checkout matters at sweep's scale, and there is nothing to
+    filter: no porcelain line, no path to drop."""
+    asked: list[tuple[str, ...]] = []
+
+    class Recording(ScriptedGit):
+        def __call__(self, *args: str):
+            asked.append(args)
+            return super().__call__(*args)
+
+    (tmp_path / ".git").mkdir()
+    git = Recording({**INSPECT_REPLIES, ("status", "--porcelain"): ""})
+    sweep.inspect("proj", tmp_path, git=git, fetch=False)
+    assert not [args for args in asked if args[:1] == ("diff",)]
+
+
 def test_ahead_behind_survives_unparseable_output():
     assert sweep.parse_ahead_behind("4\t2") == (4, 2)
     assert sweep.parse_ahead_behind("") == (0, 0)

@@ -62,7 +62,7 @@ import json
 import re
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -429,13 +429,65 @@ def parse_porcelain(text: str) -> tuple[str, ...]:
         path = line[3:].strip() if len(line) > 3 else line.strip()
         if " -> " in path:
             path = path.split(" -> ", 1)[1].strip()
-        # Git quotes paths containing spaces or non-ASCII; the quotes are display
-        # only and would read as part of the name in the PR body.
-        if len(path) > 1 and path.startswith('"') and path.endswith('"'):
-            path = path[1:-1]
+        path = _unquote(path)
         if path:
             paths.append(path)
     return tuple(paths)
+
+
+def _unquote(path: str) -> str:
+    """Strip the quotes git wraps a path in when it holds a space or non-ASCII byte.
+
+    Display only: they would read as part of the name in the PR body, and they would
+    stop a `git status` path matching the same path as `git diff` printed it.
+    """
+    path = path.strip()
+    if len(path) > 1 and path.startswith('"') and path.endswith('"'):
+        path = path[1:-1]
+    return path
+
+
+def untracked_paths(text: str) -> frozenset[str]:
+    """The `??` paths in `git status --porcelain` output.
+
+    Separated from the rest because they are the half `git diff` cannot see: an
+    untracked file is real work and has no diff against anything.
+    """
+    lines = [line for line in text.splitlines() if line.startswith("??")]
+    return frozenset(parse_porcelain("\n".join(lines)))
+
+
+def real_changes(porcelain: str, diffed: Iterable[str]) -> tuple[str, ...]:
+    """`parse_porcelain`'s paths, minus tracked ones that carry no actual diff.
+
+    **`git status --porcelain` and `git diff` can disagree, and only the second one is
+    about content.** Status compares the working file against the index entry; a tool
+    that rewrites a file byte-differently but *equivalently* -- detect-secrets
+    regenerating `.secrets.baseline`, anything that lands CRLF where a `text=auto,
+    eol=lf` attribute normalises it back -- leaves a path git reports as ` M` and
+    `git diff --quiet` reports as clean. `git update-index --refresh` does not clear it,
+    so it survives every later read.
+
+    That divergence was not cosmetic. `State.dirty` is what `worktree.reapable` asks
+    through `holds_uncommitted`, and that gate is tested **before** every case that
+    destroys -- so a box whose only change was one of these phantoms was held forever:
+    not on a merged PR, not under disk pressure, not at any age. Two carameli boxes
+    whose PRs had merged days earlier were found holding a port slot apiece on nothing
+    but a rewritten `.secrets.baseline`, and with the registry full the next
+    `Preview: Open a UI Branch` died on `all 16 port slots are in use`. It is the same
+    leak `reapable`'s docstring records for husks and squash merges, arriving from a
+    third direction.
+
+    `diffed` is what `git diff --name-only HEAD` named -- staged and unstaged tracked
+    changes, after git's own filters. A porcelain path survives if git can show a diff
+    for it or if it is untracked. Order is preserved, because these paths are what the
+    generated PR body lists.
+
+    Fails towards **keeping** work: a caller that cannot run the diff passes every
+    porcelain path through, which is exactly the old behaviour.
+    """
+    keep = {_unquote(path) for path in diffed if path.strip()} | untracked_paths(porcelain)
+    return tuple(path for path in parse_porcelain(porcelain) if path in keep)
 
 
 def parse_worktree_branches(text: str) -> tuple[str, ...]:
@@ -1233,7 +1285,16 @@ def inspect(
     remote_url = _out(git("remote", "get-url", "origin"))
     default_branch = tb.detect_default_branch(git, fallback="")
     branch = _out(git("branch", "--show-current"))
-    dirty_files = parse_porcelain(git("status", "--porcelain").stdout or "")
+    porcelain = git("status", "--porcelain").stdout or ""
+    dirty_files = parse_porcelain(porcelain)
+    if dirty_files:
+        # Only ask git for a diff when status claims there is one -- and only trust the
+        # answer when the call succeeded, so a checkout with no HEAD keeps every path.
+        # See `real_changes` for what the two commands disagree about and what that
+        # disagreement cost.
+        diff = git("diff", "--name-only", "HEAD")
+        if diff.returncode == 0:
+            dirty_files = real_changes(porcelain, (diff.stdout or "").splitlines())
 
     behind = ahead = 0
     if default_branch:
