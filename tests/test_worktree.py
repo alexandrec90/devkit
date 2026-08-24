@@ -3172,12 +3172,65 @@ def test_a_preview_checks_out_a_copy_and_never_the_ref_itself():
     )
     add = next(step for step in plan.steps if step[0] == "worktree")
     assert "--no-track" in add
-    assert add[add.index("-b") + 1] == "preview/ui-editor-0817"
+    assert add[add.index("-B") + 1] == "preview/ui-editor-0817"
     assert add[-1] == f"origin/{PREVIEW_REF}"
     assert plan.box.branch == "preview/ui-editor-0817"
     assert plan.box.tracks == PREVIEW_REF
     assert plan.box.kind == worktree.PREVIEW_KIND
     assert plan.box.session == ""
+
+
+def test_a_preview_reuses_the_branch_name_an_earlier_preview_left_behind():
+    """`-b` on an orphaned `preview/<topic>` is a dead task with nothing to point at.
+
+    The branch outlives the box -- `reap` keeps it, so does a hand-run
+    `git worktree remove` -- and the next preview of the same ref then died on
+    `fatal: a branch named 'preview/resume-0820' already exists`. Nothing in
+    `worktree.py list`, the lease file or the port registry mentioned that branch, so
+    the only reading available to the user was that `Preview: Open a UI Branch` is
+    broken. It happened to carameli's `agent/resume-0820` on 2026-08-24.
+
+    `-B` is the reversion check: swap it back and this fails while the test above still
+    passes, because `-b` and `-B` agree on every field except the one that matters.
+    """
+    plan = worktree.preview_spawn_plan(
+        project="carameli",
+        workspace_root=Path("/ws"),
+        ref=PREVIEW_REF,
+        boxes={},
+        registry=registry(),
+    )
+    add = next(step for step in plan.steps if step[0] == "worktree")
+    # `-b` refuses an existing branch; `-B` resets it to the ref being previewed, which
+    # is what a preview means. Asserted as an absence too: both spellings would satisfy
+    # a bare `"-B" in add` if some later edit passed both.
+    assert "-B" in add
+    assert "-b" not in add
+
+
+def test_a_preview_never_force_resets_a_branch_git_could_be_using():
+    """`-B` is safe here only because the live case never reaches this plan.
+
+    A preview whose box still exists is *adopted* and refreshed, never re-cut, so the
+    branch `-B` names is either absent or orphaned. The remaining guard is git's own:
+    it refuses `-B` for a branch checked out in another worktree, which covers a box
+    this workspace does not know about.
+    """
+    boxes = {
+        "carameli--preview-ui-editor-0817": worktree.Box(
+            name="carameli--preview-ui-editor-0817",
+            project="carameli",
+            branch="preview/ui-editor-0817",
+            slot=4,
+            session="",
+            created="2026-08-17T00:00:00+00:00",
+            kind=worktree.PREVIEW_KIND,
+            tracks=PREVIEW_REF,
+        )
+    }
+    # The name a second preview of the same ref would compute is the one already leased,
+    # so the caller adopts rather than planning a spawn.
+    assert worktree.preview_box_name("carameli", PREVIEW_REF) in boxes
 
 
 def test_a_preview_fetches_the_ref_into_its_own_remote_tracking_branch():
