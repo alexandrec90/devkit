@@ -327,11 +327,38 @@ SHELL_PREFIXES = frozenset({"sudo", "env", "command", "exec", "time", "nohup", "
 # A leading `FOO=bar` assignment, same case as the wrappers.
 ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
-# `cmd >file`, `cmd >> file`, `cmd 2> file` — the heredoc route's other half, since
-# `cat > x <<EOF` is a redirect like any other. `>&1` duplicates a descriptor and names
-# no file, hence the exclusion; a `>` inside a quoted string can only invent a candidate,
-# and an invented candidate resolves to no checkout.
-REDIRECT = re.compile(r"\d?>>?\s*(?![&>])([^\s;|&<>]+)")
+# `cat > x <<EOF` is a redirect like any other, so the heredoc route's other half is
+# ordinary redirection. It is read by `redirect_targets`, which walks a statement rather
+# than matching a pattern inside it.
+#
+# A regex stood here until 2026-08-24, and its comment claimed that "a `>` inside a quoted
+# string can only invent a candidate, and an invented candidate resolves to no checkout".
+# The second half is false, and it is the half everything rested on: an invented candidate
+# is nearly always *relative*, and a relative path resolves against the cwd — which in a
+# guarded session is the very checkout being guarded. So the block fired, and named a
+# quote character as the file it was protecting.
+#
+# Three spellings reached it, none of them a redirection: a `>` inside a quoted argument
+# (`awk '$1 > "x"'`, a `grep` for a conflict marker), a comparison (`>=`), and an arrow
+# (`->`) in a heredoc'd script. Six blocks in one session — and because a block cuts a box
+# before it refuses, `reconcile` reaped each one minutes later as `spent-branch -- the box
+# was never used`. A false positive here is not just a failed call; it is a branch.
+#
+# Tracking quotes is lexical, not shell modelling: `shell_tokens` already pays `shlex` to
+# do exactly this for the verb half.
+
+# A heredoc body is program text, not a command line, so no scanner here should read it.
+# `<<'PY' … PY` is where `>=` and `->` come from, and closing that costs nothing this tier
+# claimed: an interpreter's runtime target is the documented gap below.
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+# Inside double quotes a backslash escapes only these. Everything else keeps its
+# backslash — `C:\ws\devkit` is a path on this machine, which is the same reason
+# `shell_tokens` runs `shlex` with `posix=False`.
+DQ_ESCAPABLE = '"\\$`'
+
+# Characters that end a redirection's target word.
+TARGET_END = " \t;|&<>"
 
 # Statement separators. Splitting inside a quoted string can only lose a detection or
 # invent an unrecognised verb, and both of those allow — the safe direction for a
@@ -369,6 +396,107 @@ def shell_tokens(statement: str) -> list[str]:
     return [_unquote(token) for token in tokens if token]
 
 
+def strip_heredocs(command: str) -> str:
+    """`command` with every heredoc *body* dropped and its `<<TAG` marker kept.
+
+    The marker line is where a redirection would be (`cat > x <<'EOF'`), so keeping it
+    loses no detection; the body is a script, and reading a script as a command line is
+    what turned `if a >= b` into a write to `=`.
+
+    An unterminated heredoc swallows the rest, which is what a shell does with it too.
+    """
+    lines = (command or "").split("\n")
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        kept.append(line)
+        index += 1
+        for tag in (match.group(2) for match in HEREDOC.finditer(line)):
+            while index < len(lines) and lines[index].strip() != tag:
+                index += 1
+            index += 1  # the terminator line itself
+    return "\n".join(kept)
+
+
+def _skip_quoted(text: str, index: int, quote: str) -> int:
+    """One character on from `index` inside a `quote` run, honouring `\\"` in a double one.
+
+    Returns the index of the next character to look at; the caller keeps the quote open
+    unless this lands on its closing character.
+    """
+    if (
+        quote == '"'
+        and text[index] == "\\"
+        and index + 1 < len(text)
+        and text[index + 1] in DQ_ESCAPABLE
+    ):
+        return index + 2
+    return index + 1
+
+
+def redirect_targets(statement: str) -> list[str]:
+    """Every path a redirection in `statement` names, with quotes respected.
+
+    Three things that look like `>` and are not a redirection are stepped over, each of
+    which used to invent a candidate: a `>` inside quotes, `>=`, and `->`/`=>`. `>&1`
+    duplicates a descriptor and names no file, which was already excluded.
+
+    A *quoted* target is still read (`echo x > "C:\\ws\\a.py"`), so respecting quotes
+    costs no detection — that is why this reads the target word itself rather than
+    blanking quoted spans and re-running a pattern over what is left.
+    """
+    found: list[str] = []
+    index, end = 0, len(statement)
+    quote = ""
+    while index < end:
+        char = statement[index]
+        if quote:
+            index = _skip_quoted(statement, index, quote)
+            if char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            quote = char
+            index += 1
+            continue
+        if char != ">" or (index and statement[index - 1] in "-="):
+            index += 1
+            continue
+        index += 1
+        if index < end and statement[index] == ">":
+            index += 1
+        while index < end and statement[index] in " \t":
+            index += 1
+        if index < end and statement[index] in "&>=":
+            continue  # `2>&1`, and a comparison the previous-character test cannot see
+        word: list[str] = []
+        inner = ""
+        while index < end:
+            char = statement[index]
+            if inner:
+                step = _skip_quoted(statement, index, inner)
+                if char == inner:
+                    inner = ""
+                elif step - index == 2:  # `\"` and friends: the escaped character itself
+                    word.append(statement[index + 1])
+                else:
+                    word.append(char)
+                index = step
+                continue
+            if char in "\"'":
+                inner = char
+                index += 1
+                continue
+            if char in TARGET_END:
+                break
+            word.append(char)
+            index += 1
+        if word:
+            found.append("".join(word))
+    return found
+
+
 def shell_write_targets(command: str) -> list[str]:
     """Every path this command line names as something it is about to write.
 
@@ -377,17 +505,26 @@ def shell_write_targets(command: str) -> list[str]:
     `sed` script, a `-Value` string — are left in: they resolve to no checkout, and
     picking the "real" one out of a verb's argv is more shell modelling than this tier
     is willing to do.
+
+    The one operand dropped is an **unexpanded variable**: `tee "$OUT"`, `echo x > %TMP%`.
+    "Resolves to no checkout" is the reason the rest are kept, and for these it is simply
+    untrue — the shell has not substituted yet, so what arrives is a *relative* word, and
+    a relative word resolves against the cwd, which in a guarded session is the checkout.
+    Expanding it is out of the question at this tier, and reading `$S` as a filename named
+    `$S` blocks a command that writes to a scratch directory.
     """
     found: list[str] = []
 
     def add(value: str) -> None:
         value = _unquote(value.strip())
+        if value.startswith(("$", "%", "`")):
+            return
         if value and value not in found:
             found.append(value)
 
-    for statement in STATEMENTS.split(command or ""):
-        for match in REDIRECT.finditer(statement):
-            add(match.group(1))
+    for statement in STATEMENTS.split(strip_heredocs(command)):
+        for target in redirect_targets(statement):
+            add(target)
         tokens = shell_tokens(statement)
         while tokens and (_verb(tokens[0]) in SHELL_PREFIXES or ENV_ASSIGN.match(tokens[0])):
             tokens = tokens[1:]
@@ -505,7 +642,11 @@ def switch_targets(command: str) -> list[tuple[str, str]]:
     allowed, because the cost of the two mistakes is not symmetric here either.
     """
     found: list[tuple[str, str]] = []
-    for statement in STATEMENTS.split(command or ""):
+    # Heredoc bodies dropped here for the same reason as in `shell_write_targets`: a
+    # `git checkout agent/x` quoted inside a script is text, and this tier's verdict --
+    # a refusal with no box and nothing to re-issue -- is the most expensive one to
+    # earn by accident.
+    for statement in STATEMENTS.split(strip_heredocs(command)):
         tokens = shell_tokens(statement)
         while tokens and (_verb(tokens[0]) in SHELL_PREFIXES or ENV_ASSIGN.match(tokens[0])):
             tokens = tokens[1:]
