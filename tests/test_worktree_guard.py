@@ -1719,3 +1719,311 @@ def test_a_spawn_that_failed_with_no_box_afterwards_still_blocks(root, monkeypat
     )
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
     assert "boom" in capsys.readouterr().err
+
+
+# --- the branch tier --------------------------------------------------------
+#
+# The regression suite for the incident that produced it: carameli's static checkout was
+# found parked on `agent/seems-only-1-preview-time-0821`, another session's task branch,
+# for two days. Every tier above had worked -- that session's edits went to a box and
+# their PR was open -- and something had simply run `git checkout` in the static copy,
+# which writes no file and so was invisible to all of them.
+#
+# As with the shell tier, the ALLOW tests are the load-bearing half: a branch tier that
+# blocks `git checkout master` is one that gets switched off, and moving a checkout home
+# is the repair rather than the problem.
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        ("git checkout agent/thing-0821", [("", "agent/thing-0821")]),
+        ("git switch agent/thing-0821", [("", "agent/thing-0821")]),
+        ("git checkout -b agent/thing-0821", [("", "agent/thing-0821")]),
+        ("git checkout -B agent/thing-0821", [("", "agent/thing-0821")]),
+        ("git switch -c agent/thing-0821", [("", "agent/thing-0821")]),
+        ("git switch -C agent/thing-0821", [("", "agent/thing-0821")]),
+        ("git checkout --orphan agent/thing-0821", [("", "agent/thing-0821")]),
+        # git's own -C, which decides WHICH checkout the move lands in
+        ("git -C carameli checkout agent/thing-0821", [("carameli", "agent/thing-0821")]),
+        ("git -c core.x=1 checkout agent/thing-0821", [("", "agent/thing-0821")]),
+        # options before the ref, and a tracking spelling
+        ("git checkout --track origin/agent/thing-0821", [("", "origin/agent/thing-0821")]),
+        # wrappers, exactly as the shell tier strips them
+        ("sudo git checkout agent/thing-0821", [("", "agent/thing-0821")]),
+        ("GIT_PAGER=cat git checkout agent/thing-0821", [("", "agent/thing-0821")]),
+        # more than one statement, in the order the command names them
+        (
+            "git checkout master && git -C ibkr_trader switch agent/b-0821",
+            [("", "master"), ("ibkr_trader", "agent/b-0821")],
+        ),
+    ],
+)
+def test_switch_targets_reads_the_moves_a_command_makes(command, expected):
+    assert guard.switch_targets(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # restores: HEAD does not move, and these are ordinary and frequent
+        "git checkout -- app/a.py",
+        "git checkout master -- app/a.py",
+        "git checkout -p app/a.py",
+        "git checkout --patch",
+        # not a move at all
+        "git status",
+        "git log --oneline -5",
+        "git branch --show-current",
+        "git worktree add ../box agent/thing-0821",
+        # not git
+        "checkout agent/thing-0821",
+        "gh pr checkout 42",
+        "",
+    ],
+)
+def test_a_command_that_moves_no_branch_names_no_switch(command):
+    assert guard.switch_targets(command) == []
+
+
+@pytest.mark.parametrize(
+    "ref, expected",
+    [
+        ("agent/thing-0821", "agent/thing-0821"),
+        ("claude/thing-0727", "claude/thing-0727"),
+        ("codex/thing-0801", "codex/thing-0801"),
+        # a detached HEAD at the remote ref is the same park, and arguably worse: the box
+        # tier declines a branch git will not name, so it is quiet there too
+        ("origin/agent/thing-0821", "agent/thing-0821"),
+        ("refs/heads/agent/thing-0821", "agent/thing-0821"),
+        ("refs/remotes/origin/agent/thing-0821", "agent/thing-0821"),
+    ],
+)
+def test_switch_branch_recognises_a_task_branch_however_it_is_spelled(ref, expected):
+    assert guard.switch_branch(ref) == expected
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "master",
+        "main",
+        "develop",
+        "carameli-b",  # a long-lived worktree anchor: a home branch, not a task branch
+        "preview/agent-thing-0821",  # what `worktree.py preview` cuts; lives in a box
+        "feature/agent-thing",  # only ONE segment is stripped, and only to a real prefix
+        "abc1234",
+        "HEAD",
+        "",
+    ],
+)
+def test_a_home_branch_is_never_read_as_a_task_branch(ref):
+    """The allow half. Moving a checkout home is the repair for a park, so a tier that
+    blocked it would have no exit -- the same defect `sweep.NEEDS_PR` had."""
+    assert guard.switch_branch(ref) == ""
+
+
+def test_a_checkout_moved_onto_a_task_branch_is_a_park(root):
+    assert guard.switch_decision("carameli", "agent/x-0821", str(root), root, PROJECTS, {}) == (
+        "checkout",
+        "carameli",
+        "",
+    )
+
+
+def test_a_move_in_the_sessions_cwd_is_judged_on_that_cwd(root):
+    """`git checkout` with no `-C` lands wherever the tool call is running, which for a
+    project-scoped session is the checkout itself -- the exact shape of the incident."""
+    assert guard.switch_decision(
+        "", "agent/x-0821", str(root / "carameli"), root, PROJECTS, {}
+    ) == ("checkout", "carameli", "")
+
+
+def test_a_move_outside_every_checkout_is_ordinary(root, tmp_path):
+    assert guard.switch_decision("", "agent/x-0821", str(tmp_path), root, PROJECTS, {}) is None
+
+
+def test_a_box_moved_off_the_branch_its_lease_records_is_blocked(root):
+    """`reconcile` looks a box's PR up by the branch the registry names. A box standing
+    somewhere else is invisible to the reaper as shipped work and reapable as work that
+    never happened -- which destroys the worktree with the commits still in it."""
+    box = guard.worktree.Box(
+        name="carameli--x-0806", project="carameli", branch="agent/x-0806", session="s1"
+    )
+    assert guard.switch_decision(
+        "",
+        "agent/other-0821",
+        str(root / ".worktrees" / "carameli--x-0806"),
+        root,
+        PROJECTS,
+        {box.name: box},
+    ) == ("box", "carameli--x-0806", "agent/x-0806")
+
+
+def test_a_box_re_attaching_to_its_own_branch_is_ordinary(root):
+    """What `worktree.py resume` leaves behind, and what re-attaching after a detached
+    HEAD does. Blocking it would make the recovery unreachable from inside the box."""
+    box = guard.worktree.Box(
+        name="carameli--x-0806", project="carameli", branch="agent/x-0806", session="s1"
+    )
+    assert (
+        guard.switch_decision(
+            "",
+            "agent/x-0806",
+            str(root / ".worktrees" / "carameli--x-0806"),
+            root,
+            PROJECTS,
+            {box.name: box},
+        )
+        is None
+    )
+
+
+def test_a_path_under_worktrees_that_is_in_no_live_box_is_ordinary(root):
+    """A husk, or a stray directory. There is no lease to desync, so nothing to protect."""
+    assert (
+        guard.switch_decision(
+            "", "agent/x-0821", str(root / ".worktrees" / "carameli--x-0806"), root, PROJECTS, {}
+        )
+        is None
+    )
+
+
+def test_the_park_message_names_the_three_things_the_move_stands_in_for():
+    """This is the only block in the hook that ends in neither a box nor a path to write
+    to -- nothing was going to be written -- so the whole value of the message is that
+    each alternative is spelled as the command that performs it."""
+    said = guard.switch_message("checkout", "carameli", "agent/x-0821")
+    assert "agent/x-0821" in said and "carameli" in said
+    assert "worktree.py resume" in said
+    assert "worktree.py preview carameli --branch agent/x-0821" in said
+    assert "log/show/diff" in said
+
+
+def test_the_park_message_says_why_a_park_silences_this_very_hook():
+    """The second-order effect, and the one an agent cannot see from anywhere else: once a
+    checkout is parked on a live task branch, `needs_box` declines every later edit there
+    as the "fix PR #42" case, so the checkout becomes unguarded space."""
+    said = guard.switch_message("checkout", "carameli", "agent/x-0821")
+    assert "QUIET" in said
+    assert "no box and no block" in said
+
+
+def test_the_box_message_explains_the_registry_rather_than_the_home_branch():
+    said = guard.switch_message("box", "carameli--x-0806", "agent/other-0821", "agent/x-0806")
+    assert "agent/x-0806" in said and "agent/other-0821" in said
+    assert "lease registry" in said
+    assert "worktree.py resume" in said
+
+
+def test_a_checkout_switch_onto_a_task_branch_is_blocked(root, monkeypatch, capsys):
+    """The reversion check for the whole tier: drop `switch_targets` out of `main` and
+    this is once again the one act in the workspace that nothing judges."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        guard.worktree,
+        "plan_respawn",
+        lambda *a, **k: pytest.fail("a branch move writes nothing, so it needs no box"),
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload("git -C carameli checkout agent/x-0821", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    captured = capsys.readouterr()
+    assert captured.out.strip() == ""  # no box, no updatedInput, nothing to re-aim
+    assert "park the static checkout carameli" in captured.err
+
+
+def test_moving_a_checkout_home_is_allowed_because_it_is_the_repair(root, monkeypatch):
+    workspace = _workspace(root)
+    monkeypatch.setattr("sys.stdin", _stdin(shell_payload("git checkout master", cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_a_branch_move_that_names_no_task_branch_never_reads_the_registry(root, monkeypatch):
+    """Same bound the shell tier keeps: the tiers run on every Bash call in the session,
+    so the lease registry is read only once a command names a task branch -- which is the
+    case being blocked anyway."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        guard.worktree,
+        "live_boxes",
+        lambda *a, **k: pytest.fail("an ordinary branch move must not read the lease registry"),
+    )
+    monkeypatch.setattr("sys.stdin", _stdin(shell_payload("git checkout main", cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_a_restore_is_not_a_park_even_from_a_task_branch(root, monkeypatch):
+    """`git checkout <branch> -- <path>` restores file content and leaves HEAD where it
+    is. It is ordinary, and blocking it is how a tier earns its way out of the config."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload("git -C carameli checkout agent/x-0821 -- app/a.py", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_creating_a_task_branch_in_a_checkout_is_the_same_park(root, monkeypatch, capsys):
+    """`branch-on-write.py` used to cut a task branch in place, and retiring it is what the
+    box tier replaced. `git checkout -b` is that hook by hand: it solves the branch and
+    keeps the problem, because the checkout still outlives the task."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload("git -C carameli switch -c agent/new-0823", cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert "agent/new-0823" in capsys.readouterr().err
+
+
+def test_a_park_is_recorded_on_the_ledger_with_its_own_event(
+    root, monkeypatch, ledger_root, capsys
+):
+    """Its own event name, not `guard-block`: a triage pass has to be able to tell a write
+    that was routed to a box from a move that was refused outright, and the two have
+    nothing in common but the exit code."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(shell_payload("git -C carameli checkout agent/x-0821", cwd=str(root))),
+    )
+    guard.main(["--workspace", str(workspace)])
+    capsys.readouterr()
+    lines = _events(ledger_root)
+    assert any("guard-branch-block" in line and "branch=agent/x-0821" in line for line in lines)
+
+
+def test_a_park_is_judged_before_anything_the_same_command_would_write(root, monkeypatch, capsys):
+    """A command doing both is pathological, but the order is not arbitrary: the park is
+    what would silence the write tier afterwards, so it is the one that has to decide."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    command = f"git -C carameli checkout agent/x-0821 && touch {root / 'carameli' / 'a.py'}"
+    monkeypatch.setattr("sys.stdin", _stdin(shell_payload(command, cwd=str(root))))
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert "park the static checkout" in capsys.readouterr().err
+
+
+def test_an_editor_call_is_never_read_for_a_branch_move(root, monkeypatch):
+    """`switch_targets` reads a `command` key, and only a shell tool has one. An Edit whose
+    payload happens to carry that word must not be parsed as a git call."""
+    assert guard.switch_targets("") == []
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            payload(
+                path=str(root / "carameli" / "a.py"),
+                cwd=str(root),
+                command="git checkout agent/x-0821",
+            )
+        ),
+    )
+    # Routed as an ordinary edit -- re-aimed into the box, not refused as a park.
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
