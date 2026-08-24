@@ -694,6 +694,14 @@ second instruction tree that can drift.
 block when a repository has opted into `.codex/`. Both scripts are in the `MANIFEST`,
 and `new-project.py` runs the compatibility sync at creation.
 
+The shared `Agent: Sync Codex Context` task snapshots a clean home branch before it runs.
+When the sync changes committed artifacts, the dispatcher moves those outputs to a
+`codex-context-sync` task branch and opens a PR labelled `autofix` and `automerge`.
+The first label distinguishes generated maintenance from authored task work; the second
+lets the shared auto-merge workflow land it after `PR Gate` passes. The same handoff is
+used for lint autofixes. Pre-existing changes, task branches, and failed generator runs
+are left untouched and reported instead of being mixed into a mechanical PR.
+
 The conversion is semantic, not a byte-for-byte copy. Generated Codex hooks carry
 `commandWindows` overrides, while a too-short authored SessionStart timeout is raised
 to 60 seconds. Explicit `commandWindows` values remain authoritative. Claude's Bash

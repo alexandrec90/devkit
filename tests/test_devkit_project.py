@@ -1419,6 +1419,8 @@ def plan(before=(), after=("app/main.py",), branch="master", lint_ok=True):
         after,
         lint_ok=lint_ok,
         workspace=Path(WORKSPACE_FILE),
+        slug="lint-autofix",
+        labels=(devkit_project.sweep.AUTOFIX_LABEL, devkit_project.sweep.AUTOMERGE_LABEL),
     )
 
 
@@ -1427,7 +1429,7 @@ def test_a_green_autofix_run_on_a_clean_home_branch_is_branched_then_shipped():
     assert not outcome.note
     assert [step[-4:] for step in outcome.commands] == [
         ("--branch", "--slug", "lint-autofix", "--yes"),
-        ("--only", "alpha", "--ship", "--yes"),
+        ("--label", "automerge", "--ship", "--yes"),
     ]
     for step in outcome.commands:
         assert step[1].endswith("sweep.py")
@@ -1486,9 +1488,29 @@ def test_every_decline_names_the_churn_it_is_declining(kwargs):
     assert "autofix rewrote" in outcome.note
 
 
-def test_only_the_lint_actions_rewrite_the_tree():
+def test_only_declared_generated_actions_rewrite_the_tree():
     """A new autofix action must be a deliberate entry here, not an inherited default."""
-    assert {name for name, a in ACTIONS.items() if a.autofix} == {"lint", "lint-changed"}
+    assert {name for name, a in ACTIONS.items() if a.autofix} == {
+        "lint",
+        "lint-changed",
+        "sync-codex",
+    }
+
+
+def test_generated_actions_get_distinct_branches_and_the_same_automation_labels():
+    lint = ACTIONS["lint"]
+    codex = ACTIONS["sync-codex"]
+
+    assert lint.autofix_slug == "lint-autofix"
+    assert codex.autofix_slug == "codex-context-sync"
+    assert (
+        lint.autofix_labels
+        == codex.autofix_labels
+        == (
+            devkit_project.sweep.AUTOFIX_LABEL,
+            devkit_project.sweep.AUTOMERGE_LABEL,
+        )
+    )
 
 
 def autofix_run(tmp_path, monkeypatch, argv, dirty=("app/main.py",), returncode=0):
@@ -1497,7 +1519,8 @@ def autofix_run(tmp_path, monkeypatch, argv, dirty=("app/main.py",), returncode=
     workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
     scripts = tmp_path / "alpha" / "scripts"
     scripts.mkdir(parents=True)
-    (scripts / "lint-all.py").write_text("")
+    action_name = argv[-1]
+    (tmp_path / "alpha" / ACTIONS[action_name].script).write_text("")
 
     calls = []
     snapshots = iter([("master", ()), ("master", dirty)])
@@ -1517,6 +1540,26 @@ def test_the_lint_task_hands_its_churn_to_the_sweep(tmp_path, monkeypatch):
     assert len(calls) == 3, calls
     assert [c[-1] for c in calls[1:]] == ["--yes", "--yes"]
     assert all(c[1].endswith("sweep.py") for c in calls[1:])
+
+
+def test_the_codex_sync_hands_its_churn_to_a_labelled_automerge_pr(tmp_path, monkeypatch):
+    _, calls = autofix_run(
+        tmp_path,
+        monkeypatch,
+        ["--project", "alpha", "sync-codex"],
+        dirty=(".agents/skills/ship/SKILL.md",),
+    )
+
+    branch, ship = calls[1:]
+    assert branch[-4:] == ("--branch", "--slug", "codex-context-sync", "--yes")
+    assert ship[-6:] == (
+        "--label",
+        "autofix",
+        "--label",
+        "automerge",
+        "--ship",
+        "--yes",
+    )
 
 
 def test_no_ship_fixes_leaves_the_churn_in_the_working_tree(tmp_path, monkeypatch):

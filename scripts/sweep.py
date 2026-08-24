@@ -305,12 +305,14 @@ class Result:
 # someone with write access can apply a label, which is what makes it an
 # authorization rather than a request.
 AUTOMERGE_LABEL = "automerge"
+AUTOFIX_LABEL = "autofix"
 
 # Colour and description per label `ensure_pr` may need to create. The `automerge`
 # spelling matches `dependabot-automerge.yml`'s `gh label create` exactly -- both
 # use `--force`, so two spellings would flip the label back and forth per run.
 LABEL_SPECS: dict[str, tuple[str, str]] = {
     AUTOMERGE_LABEL: ("0e8a16", "PR the harness may merge once the gate passes"),
+    AUTOFIX_LABEL: ("1d76db", "Mechanical changes produced by a repository task"),
 }
 
 
@@ -815,7 +817,7 @@ def pr_body(state: State, limit: int = PR_BODY_FILE_LIMIT) -> str:
     return "\n".join(lines)
 
 
-def ship_plan(state: State, verdict: str) -> Plan:
+def ship_plan(state: State, verdict: str, *, labels: tuple[str, ...] = ()) -> Plan:
     """`--ship`: commit whatever is on a task branch, push it, and open its PR.
 
     The mode that exists because the previous split -- branch here, commit and PR
@@ -876,6 +878,7 @@ def ship_plan(state: State, verdict: str) -> Plan:
         pr_body=pr_body(state),
         pr_head=state.branch,
         pr_base=state.default_branch,
+        pr_labels=labels,
     )
 
 
@@ -1617,6 +1620,7 @@ def run_mode(
     apply: bool,
     fetch: bool = True,
     slug: str = "sweep",
+    labels: tuple[str, ...] = (),
 ) -> tuple[str, int]:
     """Plan (and optionally apply) `--branch` or `--sync` across the swept checkouts.
 
@@ -1633,7 +1637,7 @@ def run_mode(
             )
         elif mode == "ship":
             # No slug: the branch it is standing on already carries the topic.
-            plan = ship_plan(result.state, result.verdict)
+            plan = ship_plan(result.state, result.verdict, labels=labels)
         else:
             plan = sync_plan(result.state, result.verdict, fetch=fetch)
         # A skipped non-git directory is noise in this report, not a refusal.
@@ -1773,6 +1777,15 @@ def main(argv: list[str] | None = None) -> int:
             "which one sweep cannot supply -- it spans every repo in the workspace"
         ),
     )
+    parser.add_argument(
+        "--label",
+        action="append",
+        default=[],
+        help=(
+            "--ship only: label to create and apply to each opened or reused PR; "
+            "repeat for more than one"
+        ),
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if not args.dry_run and not (args.branch or args.ship or args.sync):
         parser.error("--yes has no effect without --branch, --ship or --sync")
@@ -1805,6 +1818,7 @@ def main(argv: list[str] | None = None) -> int:
             apply=not args.dry_run,
             fetch=args.fetch,
             slug=args.slug,
+            labels=tuple(args.label),
         )
         print(report)
         return code

@@ -78,9 +78,16 @@ class Action:
     # *with cwd set to the chosen checkout* — for work that is the same everywhere but
     # still has to happen inside a specific repo, like the git sync.
     owner: str = "project"
-    # Whether this action rewrites tracked files with fixes nobody authored. Those fixes
-    # strand on a home branch unless something ships them -- see `autofix_ship_plan`.
+    # Whether this action rewrites tracked files with output nobody authored. Those
+    # changes strand on a home branch unless something ships them -- see
+    # `autofix_ship_plan`.
     autofix: bool = False
+    # Mechanical PRs must say what produced them and carry the authorization that lets
+    # the shared auto-merge workflow land them after the gate. Keeping this metadata on
+    # the action makes a new file-rewriting task opt in deliberately rather than inherit
+    # lint's branch name or silently open an unlabelled PR.
+    autofix_slug: str = ""
+    autofix_labels: tuple[str, ...] = ()
     # Which checkouts this action applies to; empty means every one of them. Naming the
     # checkout (`("carameli",)`) is how a genuinely project-specific action lives here
     # instead of in that repo's `.vscode/tasks.json`. Names rather than a capability
@@ -131,11 +138,28 @@ DB_PROJECTS = CARAMELI + IBKR
 ACTIONS: dict[str, Action] = {
     # --- implemented by each checkout ---
     "test": Action("scripts/run-tests.py", "Test: Run Suite"),
-    "lint": Action("scripts/lint-all.py", "Lint: Everything", autofix=True),
-    "lint-changed": Action(
-        "scripts/lint-all.py", "Lint: Changed Files", ("--changed",), autofix=True
+    "lint": Action(
+        "scripts/lint-all.py",
+        "Lint: Everything",
+        autofix=True,
+        autofix_slug="lint-autofix",
+        autofix_labels=(sweep.AUTOFIX_LABEL, sweep.AUTOMERGE_LABEL),
     ),
-    "sync-codex": Action("scripts/sync-codex-context.py", "Agent: Sync Codex Context"),
+    "lint-changed": Action(
+        "scripts/lint-all.py",
+        "Lint: Changed Files",
+        ("--changed",),
+        autofix=True,
+        autofix_slug="lint-autofix",
+        autofix_labels=(sweep.AUTOFIX_LABEL, sweep.AUTOMERGE_LABEL),
+    ),
+    "sync-codex": Action(
+        "scripts/sync-codex-context.py",
+        "Agent: Sync Codex Context",
+        autofix=True,
+        autofix_slug="codex-context-sync",
+        autofix_labels=(sweep.AUTOFIX_LABEL, sweep.AUTOMERGE_LABEL),
+    ),
     "sync-devkit": Action("scripts/sync-devkit.py", "Harness: Check Drift"),
     # --- implemented once, here ---
     "sync-branch": Action("scripts/git-sync-keep.py", "Git: Sync Branch", owner=DEVKIT),
@@ -395,12 +419,16 @@ def plan_command(
 # routes into a box when an *agent* makes it. The lint task is the hole in that
 # guarantee. It writes the same files with no task branch underneath, and the churn
 # surfaces days later as a `needs-branch` verdict that reads as though a human left
-# it there.
+# it there. `sync-codex-context.py` has the same shape: its entire purpose is to rewrite
+# committed generated artifacts, and the scheduled checkout sync correctly refuses to
+# move a dirty home branch. Waiting for reconcile therefore strands those outputs by
+# design; the producer has to package them while it can still attribute them.
 #
 # So the dispatcher finishes what the task started. `sweep.py` already takes stranded
 # work from a home branch to an open PR -- `--branch`, then `--ship` -- and the only
 # new judgement needed is whether that is the honest thing to do with what this run
-# left behind.
+# left behind. The distinct branch slug and `autofix` label say this is generated churn,
+# while `automerge` authorizes the shared gate-driven workflow to land it unattended.
 AUTOFIX_SLUG = "lint-autofix"
 
 
@@ -426,6 +454,7 @@ def autofix_ship_plan(
     workspace: Path,
     devkit_root: Path = REPO_ROOT,
     slug: str = AUTOFIX_SLUG,
+    labels: tuple[str, ...] = (),
 ) -> AutofixOutcome:
     """Whether to ship what an autofix run rewrote, given the tree before and after.
 
@@ -477,10 +506,11 @@ def autofix_ship_plan(
         )
     sweep_py = str(devkit_root / "scripts" / "sweep.py")
     common = ("python", sweep_py, "--workspace", str(workspace), "--only", project)
+    label_args = tuple(arg for label in labels for arg in ("--label", label))
     return AutofixOutcome(
         commands=(
             (*common, "--branch", "--slug", slug, "--yes"),
-            (*common, "--ship", "--yes"),
+            (*common, *label_args, "--ship", "--yes"),
         )
     )
 
@@ -1144,6 +1174,8 @@ def main(argv: list[str] | None = None) -> int:
             after,
             lint_ok=returncode == 0,
             workspace=args.workspace,
+            slug=action.autofix_slug,
+            labels=action.autofix_labels,
         )
         if outcome.note:
             print(f"\n[{directory.name}] {outcome.note}", flush=True)
