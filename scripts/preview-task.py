@@ -1011,6 +1011,16 @@ def serve(
     if down:
         echo(f"  {candidate.ref} stopped; its box and port lease are kept.")
         return True
+    if not plan.up:
+        # `plan.up` false on an up-run means the checkout has no compose stack, so
+        # nothing was started -- and the slot's URLs may still be published, so waiting
+        # on one would spend the whole READY_TIMEOUT on a port nothing was asked to
+        # answer, reporting a working preview the entire time.
+        echo(
+            f"  nothing was started: {plan.path} has no compose stack to bring up. "
+            f"`python scripts/worktree.py list` says what state the box is in."
+        )
+        return False
     echo(f"  containers started in {time.monotonic() - started:.0f}s")
     primary = worktree.primary_url(plan.urls)
     ready = True

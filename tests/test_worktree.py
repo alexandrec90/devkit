@@ -2903,6 +2903,19 @@ def test_a_preview_with_edits_in_it_needs_force_to_refresh():
     assert worktree.preview_refresh_decision(worktree.PREVIEW_KIND, 0, force=False)[0]
 
 
+def test_a_husk_box_is_refused_rather_than_served_vacuously(tmp_path):
+    """A lease that outlived its checkout (a removal died partway, taking `.git`) used
+    to serve: no compose file collapsed `up` to False, nothing started, and the caller
+    waited out its whole ready timeout on the slot's still-published URLs (2026-08-23)."""
+    husk = tmp_path / ".worktrees" / "carameli--x-0820"
+    husk.mkdir(parents=True)
+    (husk / "README.md").write_text("left behind", encoding="utf-8")
+    plan = worktree.serve_preview(box(name="carameli--x-0820", branch="agent/x-0820"), tmp_path)
+    assert "not a git checkout" in plan.refusal
+    assert "--branch agent/x-0820" in plan.refusal
+    assert not plan.up
+
+
 def test_the_lease_file_round_trips_a_preview():
     boxes = {"carameli--preview-ui-editor-0817": preview_box()}
     back = worktree.parse_leases(worktree.render_leases(boxes))
