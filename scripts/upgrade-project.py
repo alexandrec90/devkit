@@ -163,8 +163,8 @@ def select_all(candidates: list[Candidate]) -> list[tuple[str, str]]:
 
     Worktree siblings are deduplicated because upgrading both would not merely be
     redundant, it would fail: they share a ref store, so the second worktree cut for
-    `agent/devkit-upgrade-<tag>-<mmdd>` hits a branch that already exists, and both
-    PRs would target the same repo with the same change.
+    the branch `upgrade_branch_stem` names hits one that already exists, and both PRs
+    would target the same repo with the same change.
 
     First in workspace order claims the repo. That is arbitrary when the claimant
     turns out to be un-upgradable (dirty, or parked on a task branch), so the skip
@@ -252,8 +252,32 @@ def upgrade_branch_stem(tag: str) -> str:
     stem is as much of the name as is fixed by the release. Built from `tb` rather
     than spelled out, because the two halves are the box tier's to decide: a rename
     there that this file restated would silently stop matching.
+
+    Under `tb.AUTOMATION_PREFIX`, because nobody asked for this branch. It is the same
+    vendoring commit in every consumer, cut nightly by a scheduled job, and it was
+    crowding out the change a reviewer had actually asked to see -- twenty-eight of
+    `preview-task.py`'s twenty-nine rows, on the day that menu was first printed. The
+    namespace is what lets that menu drop them without guessing from a slug.
     """
-    return f"{tb.BRANCH_PREFIX}{tb.slugify(upgrade_slug(tag))}-"
+    return f"{tb.AUTOMATION_PREFIX}{tb.slugify(upgrade_slug(tag))}-"
+
+
+def upgrade_branch_stems(tag: str) -> tuple[str, ...]:
+    """Every stem an open adoption PR for `tag` might be on: what this cuts, and what it
+    cut before the automation namespace existed.
+
+    The legacy spelling is not tidiness -- dropping it would reintroduce the exact
+    duplicate this file already collected three PRs from. `open_adoption_pr` is the only
+    thing standing between an in-flight adoption and a second one, and on the first run
+    after this change every adoption in flight is on the old name. It costs one extra
+    `startswith` per open PR and stops mattering once those merge; delete it when no
+    consumer has an open PR under `tb.BRANCH_PREFIX` for an upgrade, which is a fact
+    about the fleet rather than about this file.
+    """
+    return (
+        upgrade_branch_stem(tag),
+        f"{tb.BRANCH_PREFIX}{tb.slugify(upgrade_slug(tag))}-",
+    )
 
 
 def open_adoption_pr(project: Path, tag: str) -> str:
@@ -284,9 +308,9 @@ def open_adoption_pr(project: Path, tag: str) -> str:
         rows = json.loads(listed.stdout or "[]")
     except json.JSONDecodeError:
         return ""
-    stem = upgrade_branch_stem(tag)
+    stems = upgrade_branch_stems(tag)
     for row in rows if isinstance(rows, list) else []:
-        if str(row.get("headRefName", "")).startswith(stem):
+        if str(row.get("headRefName", "")).startswith(stems):
             return f"#{row.get('number')} {row.get('url', '')}".strip()
     return ""
 
@@ -746,7 +770,8 @@ def upgrade_one(
 
     print(f"upgrade: {name} {previous or '(unstamped)'} -> {tag}")
     print(
-        f"  1. worktree.py new {name} --slug {upgrade_slug(tag)!r} (fresh off origin/{default_branch})"
+        f"  1. worktree.py new {name} --slug {upgrade_slug(tag)!r} --auto"
+        f" (fresh off origin/{default_branch})"
     )
     print(f"  2. {SYNC_SCRIPT} --pull --src <devkit worktree at {tag}>  [in the box]")
     print(f"  3. git add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths")
@@ -757,7 +782,13 @@ def upgrade_one(
         return Outcome(name, 0)
 
     try:
-        spawn = worktree.plan_new(name, workspace, slug=upgrade_slug(tag), fetch=True)
+        spawn = worktree.plan_new(
+            name,
+            workspace,
+            slug=upgrade_slug(tag),
+            fetch=True,
+            branch_prefix=tb.AUTOMATION_PREFIX,
+        )
     except (worktree.WorktreeError, ValueError) as exc:
         return failed(2, f"upgrade: {name} -- could not plan a box: {exc}")
     ok, notes = worktree.apply_new(spawn, workspace)
