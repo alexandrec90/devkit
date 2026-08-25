@@ -103,10 +103,8 @@ scripts/new-project.py::register_slot_hint
 scripts/new-project.py::scripted_setup_env
 scripts/precommit/check_harness_drift.py::is_same_repo
 scripts/precommit/check_stdlib_only.py::imported_roots
-scripts/preview-task.py::build_parser
 scripts/preview-task.py::collect
 scripts/preview-task.py::describe
-scripts/preview-task.py::echo
 scripts/preview-task.py::menu_row
 scripts/preview-task.py::project_note
 scripts/preview-task.py::read_choice

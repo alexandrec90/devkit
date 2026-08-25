@@ -707,6 +707,46 @@
 				"problemMatcher": []
 			},
 			{
+				// The cheapest preview of all: the same two dropdowns, and then NO Docker —
+				// host Vite serves each ticked ref's frontend from a plain worktree copy,
+				// which is all a UI-only review needs. Boxes are still first-class: a ref
+				// with a live box is served from that box's worktree as it stands, unpushed
+				// work included. See ACTIONS["preview-ui-host"].
+				//
+				// `focus` for the same reason as the full preview: the Rescan row falls
+				// through to the terminal.
+				"label": "Preview: Serve UI Branches on Host",
+				"detail": "No Docker, no backend: serves each ticked ref's frontend straight from a host Vite dev server on its own port and opens the URLs — seconds to start, after a one-off npm install per new ref (about a minute). A ref with a live agent box is served from that box's worktree, unpushed work included; anything else gets a kept copy under .ui-previews/. API-backed views show real data when the static checkout's stack happens to be up and their offline state when it is not — a change that needs the backend wants one of the two box previews above. The servers live in this terminal: closing it, or Ctrl+C, stops them all.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"devkit",
+					"preview-ui-host",
+					"--picks",
+					"${input:previewRow}"
+				],
+				"icon": {
+					"id": "preview",
+					"color": "terminal.ansiBrightYellow"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"focus": true,
+					"clear": true,
+					"close": false
+				},
+				// Same reason as its siblings — though one run already serves several refs,
+				// a second batch later in the day should not offer to kill the first. Ports
+				// are free-scanned per server, so instances cannot collide.
+				"runOptions": {
+					"instanceLimit": 4
+				},
+				"problemMatcher": []
+			},
+			{
 				// The same action with the menu skipped, and deliberately WITHOUT `focus`: after
 				// a reboot the answer is always "all of them", so the one task that needs no
 				// keyboard is the one that should not take it.

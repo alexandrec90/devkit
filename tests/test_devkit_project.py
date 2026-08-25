@@ -372,6 +372,10 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # in the menu -- and the task pins `--project devkit` and asks the one question
         # worth asking instead.
         "preview",
+        # Born scoped, for `preview`'s reason exactly: it serves picks from the same
+        # machine-wide menu, so the checkout is a column in the answer rather than a
+        # scope for the task, and the task pins `--project devkit`.
+        "preview-ui-host",
         # Born scoped, and the third of the no-project-dimension kind -- but for a
         # sharper reason than `reclaim`'s: repeating a release is not merely a no-op on
         # runs 2..N, it is a failure. The second run would find the tag it just pushed
