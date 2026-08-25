@@ -4067,6 +4067,62 @@ def test_plan_preview_reads_the_ui_tier_from_the_manifest(workspace, monkeypatch
     assert [service for service, _, _ in plan.urls] == ["frontend"]
 
 
+class _Inspected:
+    """Enough of `sweep.inspect` for `serve_preview`: a clean checkout that is still git."""
+
+    is_git = True
+    dirty = 0
+
+
+def test_a_ref_already_standing_on_a_port_is_refreshed_rather_than_cut_again(
+    workspace, monkeypatch
+):
+    """The no-duplicates guarantee, at the tier that owns it.
+
+    `preview-task.py` collapses two picks that name one box before either is served, but
+    that only covers picks made in the same run. The reviewer who ticks a branch today
+    that they previewed yesterday, or clicks the task twice, reaches here -- and the
+    answer has to be the same box on the same slot, because the alternative is a second
+    `worktree add`, a second port lease off a registry with sixteen of them, and a second
+    URL for one ref that nobody can tell apart from the first.
+    """
+    name = worktree.preview_box_name("demo", "agent/x-0824")
+    standing = box(
+        name=name,
+        project="demo",
+        branch="preview/agent/x-0824",
+        slot=3,
+        kind=worktree.PREVIEW_KIND,
+        tracks="agent/x-0824",
+        services=("frontend",),
+    )
+
+    def never(*args, **kwargs):
+        raise AssertionError("a second box was cut for a ref that is already standing")
+
+    monkeypatch.setattr(worktree, "live_boxes", lambda r: {name: standing})
+    monkeypatch.setattr(worktree, "has_stack", lambda path: True)
+    monkeypatch.setattr(worktree, "load_registry", lambda r: with_frontend(demo=0))
+    monkeypatch.setattr(worktree, "preview_spawn_plan", never)
+    monkeypatch.setattr(worktree.sweep, "inspect", lambda *a, **k: _Inspected())
+
+    plan = worktree.plan_preview("demo", workspace, branch="agent/x-0824")
+
+    assert plan.box is standing
+    assert plan.spawn is None  # nothing to cut, nothing to lease
+    assert plan.box.slot == 3  # the slot it was already published on
+    assert plan.refresh  # fetched and reset onto the ref, which is the refresh
+
+
+def test_the_ui_and_full_previews_of_one_ref_are_deliberately_two_boxes():
+    """The one case where two picks of the same ref are *not* a duplicate. A UI-only box
+    runs the frontend and borrows the rest; a full box runs everything. Serving the second
+    pick in the first's box would hand the reviewer whichever of the two came first."""
+    full = worktree.preview_box_name("demo", "agent/x-0824")
+    ui = worktree.preview_box_name("demo", "agent/x-0824", ui=True)
+    assert full != ui
+
+
 # --- resume -----------------------------------------------------------------
 #
 # The counterpart to the `spawn` block above, and it exists because of a gap those

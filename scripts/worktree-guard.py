@@ -153,7 +153,8 @@ ADAPTER_ENV = "DEVKIT_HOOK_ADAPTER"
 
 # Tools whose path argument the guard knows how to rewrite. Deliberately narrower than
 # `MUTATING_TOOLS`: `apply_patch` and `create_file` are Codex's, and Codex is on the
-# blocked side of `ADAPTER_ENV` anyway, so there is no shape here worth guessing at.
+# blocked side of `ADAPTER_ENV`, so a rewrite there would be read as a plain allow.
+# Those two are *judged* like any other write -- see `PATCH_TOOLS` -- and blocked.
 REWRITABLE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 
 # Where the tools keep the path, most specific first. `path` is last because it is the
@@ -172,6 +173,21 @@ def _record_event(event: str, fields: tuple[tuple[str, object], ...]) -> None:
 # the shell tier below — but nothing in their arguments says which, so every helper that
 # reads a path out of a payload has to ask whether it is looking at one of these.
 SHELL_TOOLS = frozenset({"Bash", "PowerShell"})
+
+# Tools that hand the harness a patch envelope rather than a path. Codex's editor is one
+# of these, and until 2026-08-24 that was a silent hole rather than a shape: `apply_patch`
+# was in `MUTATING_TOOLS`, but its target lives *inside* the envelope, so `edited_path`
+# found no path key, `guarded_targets` returned nothing and `main` allowed the write --
+# every Codex file edit on this machine, for as long as the box tier has existed. What it
+# cost is on the record: on 2026-08-24 a Codex session edited carameli's static checkout
+# directly, committed to `feat/comic-bubble-text-input` and pushed it, and the checkout
+# was still parked there when a human noticed.
+#
+# The comment that used to sit on `REWRITABLE_TOOLS` said there was "no shape here worth
+# guessing at". There was no guessing needed: Codex normalises its own tool vocabulary to
+# Claude's before a hook sees it -- its shell arrives as `Bash` with `{"command": ...}`
+# and its editor as `apply_patch` with the envelope under that *same* `command` key.
+PATCH_TOOLS = frozenset({"apply_patch"})
 
 # Tools that write a file — the question this hook exists to answer is "is the agent
 # about to change a file, and may it land where it is pointing?".
@@ -550,14 +566,69 @@ def shell_write_targets(command: str) -> list[str]:
     return found
 
 
+# --- The patch tier --------------------------------------------------------------------
+#
+# The header lines of an apply_patch envelope that name a file. There is no shell modelling
+# to do here and no closed list to argue about: the format is line-oriented, every file it
+# touches is introduced by one of these four, and content lines carry a `+`/`-`/space
+# prefix, so a line that *starts* with `*** ` is a header and nothing else can be one --
+# including a patch that adds a file whose own content is a patch envelope.
+#
+# `*** Move to:` is the rename half of an `Update File:` stanza. Both paths are kept: the
+# old one is a file being rewritten and the new one is a file being created, and either
+# landing on a checkout's home branch is the thing this hook exists to stop.
+PATCH_HEADERS = ("*** Add File:", "*** Update File:", "*** Delete File:", "*** Move to:")
+
+# Where the envelope arrives. Codex puts it under `command` -- the same key its shell tool
+# uses, which is why reading `command` unconditionally would have been wrong and reading it
+# only for `SHELL_TOOLS` left this tier blind. The other two are defensive: nothing observed
+# emits them, and a harness that does costs a `dict.get` rather than another silent hole.
+PATCH_KEYS = ("command", "patch", "input")
+
+
+def patch_body(payload: dict) -> str:
+    """The patch envelope this call carries, or ""."""
+    arguments = tool_input(payload)
+    for key in PATCH_KEYS:
+        value = arguments.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def patch_targets(patch: str) -> list[str]:
+    """Every path an apply_patch envelope names as something it is about to write.
+
+    Order-preserving and deduplicated, like `shell_write_targets`, so a block names the
+    first target the patch would have hit rather than an arbitrary one.
+    """
+    found: list[str] = []
+    for line in patch.splitlines():
+        for header in PATCH_HEADERS:
+            if not line.startswith(header):
+                continue
+            target = line[len(header) :].strip()
+            if target and target not in found:
+                found.append(target)
+            break
+    return found
+
+
 def guarded_targets(payload: dict) -> list[str]:
     """Every path this call is about to write, whichever kind of tool it is.
 
-    One list for both tiers, because `main` asks the same questions of each element and
-    a shell command can name more than one.
+    One list for all three tiers, because `main` asks the same questions of each element
+    and both a shell command and a patch envelope can name more than one.
     """
     if _tool_name(payload) in SHELL_TOOLS:
         return shell_write_targets(str(tool_input(payload).get("command") or ""))
+    if _tool_name(payload) in PATCH_TOOLS:
+        # Falls through to the path key when the envelope names nothing, rather than
+        # returning empty: `apply_patch` is a name two harnesses could spell differently,
+        # and this tier's failure mode is a silent allow.
+        targets = patch_targets(patch_body(payload))
+        if targets:
+            return targets
     path = edited_path(payload)
     return [path] if path else []
 
@@ -574,6 +645,21 @@ def shell_note(target: str) -> str:
         f"`{target}`; re-issue it with that word replaced by the path above. A shell "
         f"write is not re-aimed automatically because the guard rewrites path arguments, "
         f"and a command line has none."
+    )
+
+
+def patch_note(target: str) -> str:
+    """The extra line a routed `apply_patch` gets, for the reason `shell_note` exists.
+
+    The path is in the envelope rather than in an argument, so an agent handed only the
+    box path re-issues the same patch with the same header. It says which header was read
+    and that the header is the thing to change.
+    """
+    return (
+        f"This was an apply_patch envelope, not a path argument. Its `*** ... File:` "
+        f"header was read as writing `{target}`; re-issue the patch with that header "
+        f"naming the path above. A patch is not re-aimed automatically because the guard "
+        f"rewrites path arguments, and an envelope has none."
     )
 
 
@@ -1716,6 +1802,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ALLOW
 
     shell = _tool_name(payload) in SHELL_TOOLS
+    patching = _tool_name(payload) in PATCH_TOOLS
 
     # Before the registry read, because widening the matcher to the shell tools put this
     # hook on *every* Bash call rather than on the handful that edit files. A command that
@@ -1801,6 +1888,7 @@ def main(argv: list[str] | None = None) -> int:
                 extra_notes=(
                     claim_hint(box, session),
                     *((shell_note(candidate),) if shell else ()),
+                    *((patch_note(candidate),) if patching else ()),
                 ),
             )
 
@@ -1822,8 +1910,10 @@ def main(argv: list[str] | None = None) -> int:
             payload,
             inside=inside,
             branch=branch,
-            kind="shell" if shell else "checkout",
-            extra_notes=(shell_note(candidate),) if shell else (),
+            kind="shell" if shell else "patch" if patching else "checkout",
+            extra_notes=(
+                (shell_note(candidate),) if shell else (patch_note(candidate),) if patching else ()
+            ),
         )
 
     return EXIT_ALLOW

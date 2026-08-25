@@ -16,7 +16,10 @@ from support import (
     REPO_ROOT,
     devkit_jsonc,
     devkit_project,
+    in_an_ephemeral_box,
     needs_live_workspace,
+    needs_the_static_checkout,
+    worktree,
 )
 
 devkit_jsonc_loads = devkit_jsonc.loads
@@ -1344,7 +1347,18 @@ def test_some_task_still_routes_through_the_dispatcher(canonical):
     assert dispatched, "no task routes through the dispatcher — the wiring is gone"
 
 
+def test_a_box_is_told_apart_from_a_checkout_by_the_directory_above_it():
+    """What `needs_the_static_checkout` turns on. Both halves matter: a false positive
+    turns this drift check off on the machine it is the only gate for, and a false
+    negative is the Stop-gate dead end it exists to end."""
+    boxes = Path("C:/ws") / worktree.BOXES_DIR_NAME
+    assert in_an_ephemeral_box(boxes / "devkit--some-task-0824")
+    assert not in_an_ephemeral_box(Path("C:/ws/devkit"))
+    assert not in_an_ephemeral_box(boxes)  # the boxes directory is not itself a box
+
+
 @needs_live_workspace
+@needs_the_static_checkout
 def test_the_live_workspace_matches_the_canonical_copy():
     """The check `--check-workspace` runs, as a test so devkit's own gate catches drift.
 
@@ -1352,6 +1366,11 @@ def test_the_live_workspace_matches_the_canonical_copy():
     `new-project.py` registers a checkout by editing the live file, so a generated
     project existed only in the copy with no history — and that list is what every
     sweep, status line and `--project` picker resolves against.
+
+    Skipped from a box: the live file is rendered from the static checkout *after* a
+    branch merges, so there the comparison asks whether an un-merged edit has already
+    landed. See `support.needs_the_static_checkout` for why rendering early is not the
+    way out of that.
     """
     text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     problems = devkit_project.workspace_drift(

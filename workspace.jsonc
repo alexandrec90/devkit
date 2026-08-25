@@ -636,7 +636,7 @@
 				// through to it — and without it that answer is typed into whatever had focus
 				// when the task was clicked.
 				"label": "Preview: Open a UI Branch",
-				"detail": "Asks which checkout, then which of its refs — preview boxes already standing, live agent boxes, open PRs, recent agent/ branches on origin — and brings that one's stack up in a box of its own, opening the URL it publishes. Both lists are what the last run found; every checkout ends in a 'Rescan' row that looks again and then asks in the terminal. Cutting a box for the first time builds its images and installs the frontend's dependencies — about three minutes, reported stage by stage, and the tab opens only once the page answers; re-serving one that is already standing takes seconds. A running preview costs CPU until 'Machine: Reclaim Resources' stops it.",
+				"detail": "Asks which checkout, then which of its refs — preview boxes already standing, live agent boxes, open PRs, recent agent/ branches on origin — and brings each one's stack up in a box of its own, opening the URL it publishes. Tick as many refs as you want: the boxes start in turn and then wait together, so several cost the slowest rather than the sum, and a ref already standing on a port is refreshed there instead of being cut a second time. Both lists are what the last run found; every checkout ends in a 'Rescan' row that looks again and then asks in the terminal. Cutting a box for the first time builds its images and installs the frontend's dependencies — about three minutes, reported stage by stage, and the tab opens only once the page answers; re-serving one that is already standing takes seconds. A running preview costs CPU until 'Machine: Reclaim Resources' stops it.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -675,7 +675,7 @@
 				// checkout's running stack on its usual ports. A project that has not declared
 				// a UI tier in `.devkit.toml` says so and points at the full task above.
 				"label": "Preview: Open a UI Branch (Frontend Only)",
-				"detail": "The cheap preview: same two dropdowns as 'Open a UI Branch', but the box starts only the project's declared UI services (e.g. the Vite frontend) and points them at the static checkout's already-running backend instead of cloning the whole stack — one container and no image builds, so about a minute the first time a box is cut (the frontend installs its dependencies) and seconds after that. Needs that checkout's stack up ('Docker: Start Stack'); it says so before it starts when nothing is listening on that port. Refs whose change is not frontend-only will not show it here; use the full preview.",
+				"detail": "The cheap preview: same two dropdowns as 'Open a UI Branch' — tick as many refs as you want — but each box starts only the project's declared UI services (e.g. the Vite frontend) and points them at the static checkout's already-running backend instead of cloning the whole stack — one container and no image builds, so about a minute the first time a box is cut (the frontend installs its dependencies) and seconds after that. Needs that checkout's stack up ('Docker: Start Stack'); it says so before it starts when nothing is listening on that port. Refs whose change is not frontend-only will not show it here; use the full preview.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -2077,12 +2077,30 @@
 				// The value is one token, `<project>:<ref>`, because a VS Code input resolves to
 				// one string. `git check-ref-format` refuses a ref containing a colon, so the
 				// first one always separates the two halves.
+				//
+				// Several rows at a time: `multiPick` draws the list with checkboxes and joins
+				// the ticked values with `separator`. A SPACE, rather than the comma the
+				// `project` picker uses, for the same reason the colon above was chosen over
+				// something merely conventional — a comma is legal in a git ref name and a
+				// space is not, so the separator cannot fall inside the half that varies.
+				// `preview-task.py` splits on it, drops any pick that would land in a box
+				// another pick has already claimed, then starts the boxes in turn and waits on
+				// all of them at once.
+				//
+				// No `multiPickStorage`, which is the one place this deliberately differs from
+				// the `project` picker: that picker's options are the checkout registry, which
+				// does not move, so pre-ticking last time's answer is a convenience. These
+				// options are refs the previous scan happened to find, so remembering the
+				// ticked set would turn "also show me this one" into "re-serve everything I
+				// have looked at since Tuesday".
 				"id": "previewRow",
 				"type": "command",
 				"command": "extension.commandvariable.pickStringRemember",
 				"args": {
-					"description": "Which branch, PR or box should be brought up?",
+					"description": "Which branch, PR or box should be brought up? Tick as many as you want.",
 					"key": "previewRow",
+					"multiPick": true,
+					"separator": " ",
 					"fileName": "${workspaceFolder:devkit}/logs/preview-menu.json",
 					"fileFormat": "json",
 					"jsonOption": {

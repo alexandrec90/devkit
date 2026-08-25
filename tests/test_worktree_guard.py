@@ -1890,6 +1890,221 @@ def test_a_routed_shell_command_is_recorded_as_one(root, monkeypatch, ledger_roo
     assert any("kind=shell" in line for line in _events(ledger_root))
 
 
+# --- the patch tier ---------------------------------------------------------
+#
+# Codex edits files with `apply_patch`, which reaches this hook as a tool named
+# `apply_patch` carrying an envelope under `command` -- the same key `Bash` uses. That
+# name was in `MUTATING_TOOLS` from the beginning and every one of its writes was allowed
+# anyway: `guarded_targets` read the path keys, found none, returned nothing, and `main`
+# exits ALLOW on an empty target list. So the tier was wired, matched, judged and blind,
+# which is the only failure shape this hook can have that reports nothing.
+#
+# It ran that way until 2026-08-24, when a Codex session edited carameli's static checkout
+# through seventeen `apply_patch` calls, committed them onto `feat/comic-bubble-text-input`
+# and pushed it. The tests below are the reversion check: revert `PATCH_TOOLS` out of
+# `guarded_targets` and the first two pass ALLOW where they now demand a box.
+
+
+def patch_payload(patch: str, cwd: str = "", session: str = "s1", key: str = "command") -> str:
+    return json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": {key: patch},
+            "cwd": cwd,
+            "session_id": session,
+        }
+    )
+
+
+def envelope(*body: str) -> str:
+    return "\n".join(["*** Begin Patch", *body, "*** End Patch"])
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        (["*** Add File: devkit/a.py", "+x = 1"], ["devkit/a.py"]),
+        (["*** Update File: devkit/a.py", "@@", "-x = 1", "+x = 2"], ["devkit/a.py"]),
+        (["*** Delete File: devkit/a.py"], ["devkit/a.py"]),
+        # a rename names both: the old file is rewritten, the new one is created
+        (
+            ["*** Update File: devkit/a.py", "*** Move to: devkit/b.py", "@@", "+x"],
+            ["devkit/a.py", "devkit/b.py"],
+        ),
+        # several stanzas, in the order the envelope names them
+        (
+            ["*** Add File: devkit/a.py", "+x", "*** Add File: devkit/b.py", "+y"],
+            ["devkit/a.py", "devkit/b.py"],
+        ),
+        # the same file twice is one target, so a block names it once
+        (
+            ["*** Delete File: devkit/a.py", "*** Add File: devkit/a.py", "+x"],
+            ["devkit/a.py"],
+        ),
+        # absolute Windows paths are what Codex actually sends
+        ([r"*** Add File: C:\ws\devkit\a.py", "+x"], [r"C:\ws\devkit\a.py"]),
+    ],
+)
+def test_patch_targets_reads_every_header_that_names_a_file(body, expected):
+    assert guard.patch_targets(envelope(*body)) == expected
+
+
+def test_a_patch_body_is_content_and_not_a_header():
+    """The one way this parser could be talked into a false positive: a patch that adds a
+    file whose own content is a patch. Content lines carry a `+`/`-`/space prefix, so the
+    header test is anchored at column zero and the inner envelope is just text."""
+    inner = envelope("*** Add File: devkit/victim.py", "+x")
+    body = ["*** Add File: devkit/outer.md", *[f"+{line}" for line in inner.splitlines()]]
+    assert guard.patch_targets(envelope(*body)) == ["devkit/outer.md"]
+
+
+def test_a_context_line_quoting_a_header_is_not_a_header():
+    body = ["*** Update File: devkit/a.py", "@@", " *** Add File: devkit/ghost.py", "+x"]
+    assert guard.patch_targets(envelope(*body)) == ["devkit/a.py"]
+
+
+@pytest.mark.parametrize("patch", ["", "*** Begin Patch\n*** End Patch", "not a patch at all"])
+def test_a_patch_that_names_no_file_yields_no_targets(patch):
+    assert guard.patch_targets(patch) == []
+
+
+def test_patch_body_reads_the_key_codex_actually_uses():
+    """`command` first, because that is the observed one -- Codex normalises its editor
+    call to the same key its shell tool uses. The others are defensive."""
+    for key in ("command", "patch", "input"):
+        assert "Add File" in guard.patch_body(
+            json.loads(patch_payload(envelope("*** Add File: a.py", "+x"), key=key))
+        )
+    assert guard.patch_body({"tool_input": {"file_path": "a.py"}}) == ""
+
+
+def test_guarded_targets_reads_the_envelope_for_a_patch_tool():
+    call = json.loads(patch_payload(envelope("*** Add File: /ws/carameli/a.py", "+x")))
+    assert guard.guarded_targets(call) == ["/ws/carameli/a.py"]
+
+
+def test_a_patch_tool_still_falls_back_to_a_path_argument():
+    """`apply_patch` is a name two harnesses could spell differently. A payload carrying a
+    plain path keeps working, because this tier's failure mode is a silent allow."""
+    call = json.loads(payload(tool="apply_patch", path="/ws/carameli/a.py", key="path"))
+    assert guard.guarded_targets(call) == ["/ws/carameli/a.py"]
+
+
+def test_a_patch_onto_a_home_branch_is_routed_to_the_box(root, monkeypatch, capsys):
+    """The reversion check for the whole tier, and for the carameli incident above."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            patch_payload(
+                envelope(f"*** Add File: {root / 'carameli' / 'a.py'}", "+x"), cwd=str(root)
+            )
+        ),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    said = guidance(capsys)
+    assert "carameli--ws-s1-0806" in said
+    assert "apply_patch envelope, not a path argument" in said
+
+
+def test_a_patch_is_blocked_rather_than_re_aimed(root, monkeypatch, capsys):
+    """Same reason a shell write is: the rewrite replaces a path *argument*, and the path
+    here is inside the envelope. Editing it would mean rewriting the patch."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            patch_payload(
+                envelope(f"*** Update File: {root / 'carameli' / 'a.py'}", "@@", "+x"),
+                cwd=str(root),
+            )
+        ),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    captured = capsys.readouterr()
+    assert captured.out.strip() == ""
+    assert "not re-aimed automatically" in captured.err
+
+
+def test_the_patch_note_quotes_the_header_the_envelope_actually_used():
+    for target in (r"C:\repo\app\a.py", "app/a.py"):
+        note = guard.patch_note(target)
+        assert f"`{target}`" in note
+        assert "apply_patch envelope, not a path argument" in note
+
+
+def test_a_patch_into_the_sessions_own_box_is_left_alone(root, monkeypatch):
+    """What every Codex edit looks like once the routing has worked."""
+    workspace = _workspace(root)
+    _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
+    monkeypatch.setattr(
+        guard.worktree,
+        "plan_respawn",
+        lambda *a, **k: pytest.fail("the patch is already where it belongs"),
+    )
+    box = root / ".worktrees" / "carameli--ws-s1-0806" / "a.py"
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(patch_payload(envelope(f"*** Add File: {box}", "+x"), cwd=str(root)))
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_a_patch_outside_every_checkout_is_left_alone(root, monkeypatch):
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        guard.worktree,
+        "plan_respawn",
+        lambda *a, **k: pytest.fail("nothing outside a checkout has a branch to protect"),
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(patch_payload(envelope("*** Add File: /elsewhere/a.py", "+x"), cwd=str(root))),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_a_routed_patch_is_recorded_as_one(root, monkeypatch, ledger_root, capsys):
+    """A Codex block and a Claude one are indistinguishable in the ledger otherwise, and
+    this tier's whole history is that nobody could see it doing nothing."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(guard.worktree, "plan_respawn", lambda *a, **k: _plan(root))
+    monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            patch_payload(envelope(f"*** Delete File: {root / 'carameli' / 'a.py'}"), cwd=str(root))
+        ),
+    )
+    guard.main(["--workspace", str(workspace)])
+    capsys.readouterr()
+    assert any("kind=patch" in line for line in _events(ledger_root))
+
+
+def test_a_patch_names_no_branch_move(root, monkeypatch):
+    """`switch_targets` reads `command`, and so, now, does the patch tier. An envelope
+    whose content happens to contain a `git checkout` line must not be read as one."""
+    workspace = _workspace(root)
+    monkeypatch.setattr(
+        guard.worktree,
+        "live_boxes",
+        lambda *a, **k: pytest.fail("a patch body is not a command line"),
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            patch_payload(
+                envelope("*** Add File: /elsewhere/a.sh", "+git checkout agent/x-0821"),
+                cwd=str(root),
+            )
+        ),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
 def test_the_hook_is_wired_for_every_tool_it_judges():
     """The code half is useless without the matcher half, and they live in different
     files: `MUTATING_TOOLS` in the hook, a regex in `.claude/settings.json`. devkit runs
