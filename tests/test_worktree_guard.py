@@ -1632,9 +1632,13 @@ def shell_payload(command: str, cwd: str = "", session: str = "s1", tool: str = 
         ("sudo tee devkit/a.py", ["devkit/a.py"]),
         ("FOO=1 tee devkit/a.py", ["devkit/a.py"]),
         # PowerShell has its own tool in this harness, and its own spelling
-        ("Set-Content -Path devkit/a.py -Value x", ["devkit/a.py", "x"]),
+        ("Set-Content -Path devkit/a.py -Value x", ["devkit/a.py"]),
         ("Copy-Item -Path a -Destination devkit/a.py", ["devkit/a.py"]),
         ("remove-item devkit/a.py", ["devkit/a.py"]),
+        (
+            "Remove-Item devkit/a.py -ErrorAction SilentlyContinue",
+            ["devkit/a.py"],
+        ),
         # more than one, in the order the command names them
         ("touch devkit/a.py && rm devkit/b.py", ["devkit/a.py", "devkit/b.py"]),
     ],
@@ -1653,6 +1657,9 @@ def test_shell_write_targets_reads_the_spellings_that_write(command, expected):
         "git diff --stat devkit/a.py",
         "python x.py 2>&1",  # a descriptor duplication names no file
         "wc -l devkit/a.py",
+        # PowerShell providers are process state, not paths in the current checkout.
+        "$env:DEVKIT_HOOK_ADAPTER = 'codex'; "
+        "Remove-Item Env:DEVKIT_HOOK_ADAPTER -ErrorAction SilentlyContinue",
         "",
     ],
 )
