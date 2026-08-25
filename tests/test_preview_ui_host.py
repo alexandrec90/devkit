@@ -509,6 +509,30 @@ def test_adopting_into_no_job_is_a_quiet_false():
     assert host.adopt(None, os.getpid()) is False
 
 
+def test_the_kernel_calls_are_prototyped_for_64_bit_handles():
+    """Every Win32 call in this file goes through one loader, and this is what the
+    loader is for: ctypes defaults an unprototyped argument to `c_int`, which truncates
+    a 64-bit HANDLE. The call then fails with a Win32 error nothing prints, and the net
+    it belonged to is silently not a net -- the failure mode the whole tier exists to
+    end. Asserting the prototypes is cheaper than diagnosing that twice."""
+    if os.name != "nt":
+        pytest.skip("kernel32 is a Windows facility")
+    from ctypes import wintypes
+
+    kernel32 = host._kernel32()
+    assert kernel32.OpenProcess.restype is wintypes.HANDLE
+    assert kernel32.CreateJobObjectW.restype is wintypes.HANDLE
+    assert kernel32.AssignProcessToJobObject.argtypes == [wintypes.HANDLE, wintypes.HANDLE]
+    assert kernel32.CloseHandle.argtypes == [wintypes.HANDLE]
+
+
+def test_there_is_no_kernel32_to_load_off_windows(monkeypatch):
+    """The POSIX branch of every net: `stop` uses the process handle, and the job object
+    and the adopt are simply absent rather than an ImportError on `ctypes.WinDLL`."""
+    monkeypatch.setattr(host.os, "name", "posix")
+    assert host._kernel32() is None
+
+
 # --- the registry ---------------------------------------------------------------
 
 

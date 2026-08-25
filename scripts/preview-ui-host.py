@@ -89,6 +89,7 @@ import tomllib
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
@@ -418,6 +419,34 @@ def stop(server, run=subprocess.run) -> None:
         server.terminate()
 
 
+def _kernel32() -> Any:
+    """`kernel32.dll` with the prototypes this file calls; None anywhere but Windows.
+
+    One place rather than three, because the `argtypes` are the part that must not
+    drift: a HANDLE is 64-bit and ctypes defaults its arguments to `c_int`, so an
+    unprototyped call truncates one and fails for a reason nothing prints.
+
+    Reached through `getattr` because `ctypes.WinDLL` genuinely does not exist off
+    Windows, mypy runs in CI on Linux, and an `os.name` guard is not something it
+    narrows on. A `type: ignore` is the obvious fix and the wrong one: it is *unused* on
+    the machine this code runs on, where the attribute is real, so `warn_unused_ignores`
+    fails the same check here instead of there. `Any` is here for the related reason --
+    off Windows there is no type to name.
+    """
+    if os.name != "nt":  # pragma: no cover - the tests run the Windows branch
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return kernel32
+
+
 def pid_alive(pid: int) -> bool:
     """Whether `pid` names a process that has not exited.
 
@@ -438,13 +467,7 @@ def pid_alive(pid: int) -> bool:
         except PermissionError:
             return True
         return True
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32 = _kernel32()
     handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
     if not handle:
         return False
@@ -509,9 +532,7 @@ def kill_on_close_job():
             ("PeakJobMemoryUsed", ctypes.c_size_t),
         ]
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32 = _kernel32()
     job = kernel32.CreateJobObjectW(None, None)
     if not job:
         return None
@@ -538,14 +559,9 @@ def adopt(job, pid: int) -> bool:
     """
     if job is None or os.name != "nt":  # pragma: no cover - POSIX has no job objects
         return False
-    import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32 = _kernel32()
     handle = kernel32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
     if not handle:
         return False
