@@ -360,3 +360,93 @@ def test_the_stamp_is_never_needed_to_decide_membership():
 
 def test_an_unparseable_stamp_no_longer_drops_a_real_report():
     assert len(triage.open_items(triage.read_items("not a stamp\tevent=agent-report\tx=y"))) == 1
+
+
+# --- which runtime wrote it ---------------------------------------------------
+#
+# The ledger records what the harness did to an agent; until `agent=` existed it did not
+# record *which* agent, and the two are not interchangeable. The capped-Bash gate is
+# deliberately unported to Codex; a PreToolUse response that re-aims a call under Claude
+# is dropped under Codex. So a hook reporting an error for one says nothing about the
+# other, and grouping them let one fix retire the other's evidence.
+
+
+def test_a_row_without_the_field_reads_as_unknown_not_as_claude():
+    """Every row written before the field existed is on an append-only file forever."""
+    item = triage.parse_line(_line("agent-report", message="old"))
+    assert item is not None
+    assert item.agent == "unknown"
+
+
+def test_the_recorded_runtime_is_what_is_reported():
+    item = triage.parse_line(_line("agent-report", agent="codex", message="m"))
+    assert item is not None and item.agent == "codex"
+
+
+def test_the_same_defect_under_two_runtimes_is_two_groups():
+    items = triage.read_items(
+        "\n".join(
+            (
+                _line("agent-report", agent="codex", stamp=_STAMPS[0], message="guard blocked rg"),
+                _line("agent-report", agent="claude", stamp=_STAMPS[1], message="guard blocked rg"),
+            )
+        )
+    )
+    assert len(triage.groups(triage.open_items(items))) == 2
+
+
+def test_resolving_a_codex_report_does_not_retire_the_claude_one():
+    """The user's case, stated exactly: one runtime's error is not the other's."""
+    items = triage.read_items(
+        "\n".join(
+            (
+                _line("agent-report", agent="codex", stamp=_STAMPS[0], message="same words"),
+                _line("agent-report", agent="claude", stamp=_STAMPS[1], message="same words"),
+            )
+        )
+    )
+    opened = triage.open_items(items)
+    codex_id = next(i.id for i in opened if i.agent == "codex")
+    assert triage.expand_like([codex_id], items) == [codex_id]
+
+
+def test_for_agent_filters_and_an_empty_filter_keeps_everything():
+    items = triage.read_items(
+        "\n".join(
+            (
+                _line("agent-report", agent="codex", stamp=_STAMPS[0], message="a"),
+                _line("agent-report", agent="claude", stamp=_STAMPS[1], message="b"),
+                _line("agent-report", stamp=STAMP, message="c"),
+            )
+        )
+    )
+    assert len(triage.for_agent(items, "")) == 3
+    assert [i.agent for i in triage.for_agent(items, "CODEX ")] == ["codex"]
+    assert [i.detail for i in triage.for_agent(items, "unknown")] == ["c"]
+
+
+def test_the_rendering_names_the_runtime():
+    text = triage.render(triage.open_items(triage.read_items(_line("agent-report", agent="codex"))))
+    assert "[codex]" in text
+
+
+def test_the_artifact_is_the_whole_backlog_even_under_a_filter(tmp_path, monkeypatch):
+    """A filtered artifact would read as 'this is everything' while hiding a runtime."""
+    _ledger(
+        tmp_path,
+        _line("agent-report", agent="codex", stamp=_STAMPS[0], message="codex one"),
+        _line("agent-report", agent="claude", stamp=_STAMPS[1], message="claude one"),
+    )
+    monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+    monkeypatch.setattr(triage, "REPO_ROOT", tmp_path)
+    assert triage.main(["--agent", "codex"]) == 0
+    artifact = (tmp_path / triage.ARTIFACT).read_text(encoding="utf-8")
+    assert "codex one" in artifact
+    assert "claude one" in artifact
+
+
+def test_a_translation_gap_is_a_triage_event():
+    """The adapter records one when Codex would drop a member nobody has classified."""
+    assert "codex-translation-gap" in triage.TRIAGE_EVENTS
+    items = triage.read_items(_line("codex-translation-gap", agent="codex", detail="novelMember"))
+    assert len(triage.open_items(items)) == 1

@@ -37,7 +37,6 @@ scripts/git_policy.py::release_tag_decision
 scripts/global-tools.py::npm_executable
 scripts/global-tools.py::run_command
 scripts/hook-tests-live.py::Suite
-scripts/hooks/codex-hook-adapter.py::failure_output
 scripts/hooks/codex-session-start.py::git_path
 scripts/hooks/enforce-capped-bash.py::block_message
 scripts/hooks/enforce-capped-bash.py::closes_group
@@ -182,7 +181,6 @@ scripts/worktree-guard.py::emit_redirect
 scripts/worktree-guard.py::foreign_box
 scripts/worktree-guard.py::foreign_box_reason
 scripts/worktree-guard.py::old_strings
-scripts/worktree-guard.py::redirect_blocker
 scripts/worktree-guard.py::redirect_message
 scripts/worktree-guard.py::resolve_target
 scripts/worktree-guard.py::route_out_lines

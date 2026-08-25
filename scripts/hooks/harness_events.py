@@ -41,6 +41,7 @@ import contextlib
 import datetime as _dt
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 LEDGER = Path("logs") / "harness-events.log"
@@ -73,6 +74,34 @@ FIELD_LIMITS = {"message": 4000, "detail": 2000}
 # owns it. This is the stdlib-only half a hook can reach: hooks run before the venv
 # exists, so importing that module is not available to them.
 BOX_NAME_SEP = "--"
+
+
+# Which agent runtime the hook ran under. Spelled here as a literal for the reason
+# `codex-hook-adapter.py` spells it as one: that file is vendored and this one is too,
+# but neither may import the other -- a hook loads this module by path from
+# `worktree-guard.py`, where `scripts/hooks/` is not on `sys.path`.
+ADAPTER_ENV = "DEVKIT_HOOK_ADAPTER"
+NATIVE_AGENT = "claude"
+UNKNOWN_AGENT = "unknown"
+
+
+def agent_name(env: Mapping[str, str] | None = None) -> str:
+    """The agent runtime this hook is running under: `claude`, `codex`, ...
+
+    Every row on this ledger was written by a hook, and until now no row said **which
+    agent's** hook. That is not bookkeeping: the same hook does not behave the same
+    under both. A Claude session's PreToolUse response can re-aim a call, a Codex
+    session's cannot; the capped-Bash gate is wired for one and deliberately unported
+    to the other. So a block recorded under Codex is evidence about the *translation*,
+    and a triage pass that reads it as evidence about Claude retires a defect nobody
+    fixed -- and the reverse loses a Codex-only one behind a Claude fix.
+
+    The answer is not inferred. `codex-hook-adapter.py` exports `DEVKIT_HOOK_ADAPTER`
+    before it spawns a ported hook, precisely so a hook can tell; unset means nothing
+    translated this call, which is Claude Code running the hook natively.
+    """
+    source = os.environ if env is None else env
+    return (source.get(ADAPTER_ENV, "") or "").strip().lower() or NATIVE_AGENT
 
 
 def project_name(root: Path) -> str:
@@ -179,11 +208,19 @@ def record(
     Best-effort by contract: every caller is a hook mid-block or a CLI mid-report, and
     failing *their* work over bookkeeping would invert the priorities this file exists
     to serve.
+
+    `agent=` is stamped **here** rather than passed by each writer, for the reason the
+    workspace states as a rule: a remedy that depends on every caller remembering is the
+    same defect again. Several writers reach this ledger and most of them have no reason
+    to know what a hook adapter is. A caller recording an event on some *other* runtime's
+    behalf passes its own `agent` field, and that one is kept.
     """
     try:
         path = ledger_path(root)
         if path is None:
             return None
+        if not any(key == "agent" for key, _ in fields):
+            fields = (("agent", agent_name()), *fields)
         stamp = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8", newline="\n") as handle:

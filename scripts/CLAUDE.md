@@ -32,26 +32,17 @@ The move that has actually gone wrong is the other one — vendoring something w
 
 ## Vendoring a generator does not vendor its output
 
-`.codex/hooks.json` is written by `sync-codex-hooks.py` from the project's own
-`.claude/settings.json`, so the script is in the `MANIFEST` and the file it produces
-cannot be — its content is per-project. That asymmetry is a **third** delivery path,
-and it was the one with no gate on it: a `--pull` adopts a new generator and changes
-nothing about what Codex actually runs, because the file Codex reads was written by the
-generator before it.
+`.codex/hooks.json` is generated *from* a vendored script rather than vendored itself — a
+**third** delivery path beside the two in the root `CLAUDE.md`, and the one that had no
+gate on it for months. The rule that came out of it generalises past Codex, so it stays
+here: **anything generated from a vendored script needs a check that regenerates it and
+compares**, running in the consumer's own gate where no `$DEVKIT_DIR` exists.
+Regenerating on `--pull` is not enough alone — a project only pulls when asked to.
 
-It cost months. `REDUNDANT_HANDLERS` stopped porting the Claude-only Bash cap into Codex
-the day it landed, and Codex sessions in every already-generated project went on being
-blocked by it — with the block's own suggested remedy, `invoke-capped.py`, being a
-wrapper the session then applied to every command after it. Half the shell calls in one
-project's Codex sessions were the wrapper. Nothing was red anywhere, because both halves
-were individually correct.
-
-So: **anything generated from a vendored script needs a check that regenerates it and
-compares.** `sync_devkit.codex_hooks_stale` is that check, `regenerate_codex_hooks` runs
-it on `--pull`, and the vendored
-`test_the_committed_codex_artifact_matches_the_generator` runs it in a consumer's PR
-gate where no `$DEVKIT_DIR` exists. Regenerating on pull is not enough on its own —
-a project only pulls when someone asks it to.
+The cost that bought that rule, the check itself (`sync_devkit.codex_hooks_stale`), and
+the second gap behind it — regenerating the wiring says nothing about whether Codex acts
+on what a ported hook *answers* — are in `scripts/hooks/CLAUDE.md`, which this section
+was split into at this file's line ceiling.
 
 ## `templates/` is content, not source
 
@@ -493,6 +484,15 @@ this machine's rows named a pseudo-project — twenty of them in three days, one
 **read**, because the ledger is append-only and those rows are there forever.
 `BOX_NAME_SEP` duplicates `worktree.py`'s naming rule deliberately: hooks run before a
 venv exists, so importing that module is not available to them.
+
+**`agent=` names the runtime, and a row without it is `unknown`, not Claude.**
+`harness_events.agent_name` reads `DEVKIT_HOOK_ADAPTER`, which `codex-hook-adapter.py`
+sets. The load-bearing half is that it is part of `Item.signature`: the same hook failing
+under both runtimes is **two** items, so `--resolve-like` on a Codex fix cannot retire the
+Claude report of the same symptom. A hook that misbehaves under one runtime routinely
+behaves under the other (`scripts/hooks/CLAUDE.md`), so a ledger that cannot tell them
+apart aims every fix at whichever tier was guessed. Pre-field rows read `unknown`, which
+is honest; back-filling them as `claude` would be a guess.
 
 The skill that works the backlog is `triage-harness`, and it is devkit-only on purpose —
 every defect on this ledger is a defect in devkit, whatever project the session that hit

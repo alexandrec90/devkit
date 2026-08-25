@@ -313,6 +313,53 @@ def test_the_runner_never_calls_pytest_without_the_paid_selector(tmp_path, never
     assert "and paid" in command[marker + 1]
 
 
+# --- what a green run is evidence *about* -------------------------------------
+#
+# This task reported "passed, N live test(s)" and nothing else, while its default suite
+# is `claude` -- the cheapest, and the one that cannot exercise the Claude-to-Codex
+# translation at all. So the reading an operator took from a green task ("the ported
+# hooks work") was the one claim the run had made no observation about.
+
+
+def test_a_single_suite_run_names_the_one_it_skipped():
+    line = live.pass_line(live.resolve_suites("claude"), 3)
+    assert "codex" in line
+    assert "NOT exercised" in line
+
+
+def test_a_both_run_claims_no_gap():
+    line = live.pass_line(live.resolve_suites("both"), 5)
+    assert "NOT exercised" not in line
+    assert "claude, codex" in line
+
+
+def test_the_pass_line_still_reports_how_many_ran():
+    """The count is the half that catches a green run which launched nothing."""
+    for choice in ("claude", "both"):
+        assert "7 live test(s)" in live.pass_line(live.resolve_suites(choice), 7)
+
+
+def test_unexercised_is_the_complement_in_order():
+    assert live.unexercised(live.resolve_suites("codex")) == ["claude"]
+    assert live.unexercised(live.resolve_suites("both")) == []
+
+
+def test_a_passing_run_prints_the_gap_rather_than_a_bare_pass(tmp_path, monkeypatch, capsys):
+    """The reversion check: revert `pass_line` and this is the assertion that fails."""
+    (tmp_path / "tests").mkdir()
+    for suite in live.SUITES.values():
+        (tmp_path / suite.path).write_text("", encoding="utf-8")
+    monkeypatch.setattr(live.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        live.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="1 passed in 2s\n", stderr=""),
+    )
+
+    assert live.main(["claude", "--root", str(tmp_path)]) == 0
+    assert "NOT exercised: codex" in capsys.readouterr().out
+
+
 def test_subprocess_is_the_only_way_this_script_spends(tmp_path):
     """A guard on the guard: the fixture above only protects `subprocess.run`, so a
     future edit reaching for `os.system` or `subprocess.call` would slip past it."""

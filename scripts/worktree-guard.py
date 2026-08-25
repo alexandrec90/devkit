@@ -1392,9 +1392,17 @@ def redirect_blocker(payload: dict, destination: Path, env: Mapping[str, str] | 
     harness does not honour puts the edit on the home branch and reports success.
     """
     if (env if env is not None else os.environ).get(ADAPTER_ENV):
+        # This used to claim the adapter's runtime "has no updatedInput member", which
+        # was wrong: Codex's own `pre-tool-use.command.output` schema carries it (see
+        # `scripts/hooks/codex-hook-schema.json`, extracted from the binary). What is
+        # still unobserved is whether Codex *acts* on it, and a schema is not a
+        # behaviour. The asymmetry in this function's docstring decides the rest: a
+        # needless block costs a turn and names the box, an unhonoured rewrite lands on
+        # the home branch and reports success. Lift this when a live Codex session has
+        # been watched honouring a re-aim -- `tests/test_codex_hooks_live.py`.
         return (
-            f"the session is running under a hook adapter ({ADAPTER_ENV} is set), whose "
-            f"PreToolUse response has no updatedInput member"
+            f"the session is running under a hook adapter ({ADAPTER_ENV} is set), and no "
+            f"live session on that runtime has yet been observed honouring updatedInput"
         )
     if _tool_name(payload) not in REWRITABLE_TOOLS:
         return f"{_tool_name(payload) or 'this tool'}'s arguments are not rewritable by this hook"
