@@ -1472,18 +1472,56 @@ def preview_spawn_plan(
     )
 
 
-def preview_branch_delete_flag(state: sweep.State) -> str:
+def preview_branch_delete_flag(state: sweep.State, copy_intact: bool | None = None) -> str:
     """`-D` for a preview branch that is still a copy, `-d` for one that is not.
 
     `-d` refuses any branch that is not an ancestor of the checkout's HEAD, which a
     `preview/...` branch never is — so planning `-d` here would end every preview reap in
     the `FAILED at git branch -d` that `reap_plan` documents at length for forced reaps.
     `-D` is safe *because* the branch is a copy of a remote ref, and only while it is
-    one, which is what `state.ahead` is asked. A commit made inside a preview box exists
-    nowhere else, and destroying it in a cleanup is the one thing this tier promises not
-    to do.
+    one. A commit made inside a preview box exists nowhere else, and destroying it in a
+    cleanup is the one thing this tier promises not to do.
+
+    "Still a copy" is `copy_intact` — whether the tip is an ancestor of the
+    `refs/remotes/origin/<tracks>` ref the preview fetched (`preview_copy_intact`).
+    `state.ahead` was asked first and is the wrong field: it counts against
+    `origin/<default>`, so a preview of any branch not yet merged there read as "not a
+    copy", and after a squash merge it *always* did — every reap of a squash-merged
+    preview failed at `git branch -d` and leaked the `preview/...` ref, which is how
+    two of the three merged previews reaped on 2026-08-25 exited 1. `ahead <= 0` is
+    kept as the licence that needs no lookup (every commit is on the default branch, so
+    nothing can be lost) and as the fallback when the tracking ref is gone and the
+    question is unanswerable (`copy_intact=None`).
     """
-    return "-D" if state.ahead <= 0 else "-d"
+    if state.ahead <= 0:
+        return "-D"
+    if copy_intact:
+        return "-D"
+    return "-d"
+
+
+def preview_copy_intact(git: sweep.Git, branch: str, tracks: str) -> bool | None:
+    """Whether `branch` still only holds commits the ref it copied has. Never raises.
+
+    `merge-base --is-ancestor` against `refs/remotes/origin/<tracks>` — the tracking
+    ref `preview_spawn_plan` and every refresh fetch explicitly, which survives the
+    remote branch's deletion after a squash merge (fetching a refspec never prunes).
+    Exit 0 is yes, 1 is no (the preview grew a commit of its own), anything else —
+    either ref missing, no git — is `None`: unanswerable, and the caller must not
+    treat that as either answer.
+    """
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        result = git(
+            "merge-base",
+            "--is-ancestor",
+            f"refs/heads/{branch}",
+            f"refs/remotes/origin/{tracks}",
+        )
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+    return None
 
 
 def reap_decision(
@@ -1610,6 +1648,7 @@ def reap_plan(
     keep_stack: bool = False,
     has_stack: bool = False,
     awaiting_pr: bool = False,
+    copy_intact: bool | None = None,
 ) -> ReapPlan:
     """Everything `reap` will run, in the only order that is safe.
 
@@ -1702,7 +1741,7 @@ def reap_plan(
         )
     elif box.branch:
         flag = (
-            preview_branch_delete_flag(state)
+            preview_branch_delete_flag(state, copy_intact=copy_intact)
             if box.kind == PREVIEW_KIND
             else branch_delete_flag(state, pr_merged)
         )
@@ -1713,6 +1752,23 @@ def reap_plan(
                     note,
                     f"{box.branch} is kept -- it carries commits no remote has, and "
                     f"--force never destroys commits. To discard those too: "
+                    f"git -C {box.project} branch -D {box.branch}",
+                )
+                if part
+            )
+        elif box.kind == PREVIEW_KIND and flag == "-d":
+            # The same rule as the forced arm above, one case further out: `-d` refuses
+            # any branch that is not an ancestor of HEAD, which a `preview/...` branch
+            # never is, so planning it ends a reap that did everything it should in
+            # `FAILED at git branch -d` and exit 1. The branch is kept deliberately —
+            # it carries commits the tracked ref cannot account for, and a cleanup
+            # never destroys commits — and the warning names the command that does.
+            warning = "; ".join(
+                part
+                for part in (
+                    warning,
+                    f"{box.branch} is kept -- it carries commits the ref it copied does "
+                    f"not have, and a cleanup never destroys commits. To discard them: "
                     f"git -C {box.project} branch -D {box.branch}",
                 )
                 if part
@@ -3501,6 +3557,11 @@ def plan_reap(
         keep_stack=keep_stack,
         has_stack=has_stack(path),
         awaiting_pr=pr is None and verdict in AWAITS_A_MERGE,
+        copy_intact=(
+            preview_copy_intact(sweep.git_for(root / box.project), box.branch, box.tracks)
+            if box.kind == PREVIEW_KIND and box.branch and box.tracks and state.is_git
+            else None
+        ),
     )
 
 

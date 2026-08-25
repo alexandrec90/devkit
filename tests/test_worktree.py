@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -3523,14 +3524,69 @@ def test_reaping_a_preview_deletes_the_copy_it_made():
     assert plan.steps[-1] == ("branch", "-D", "preview/ui-editor-0817")
 
 
-def test_reaping_a_preview_that_grew_a_commit_leaves_git_to_refuse():
-    """A commit made inside a preview exists nowhere else; -D would be the one loss."""
+def test_reaping_a_preview_that_grew_a_commit_keeps_the_branch_and_says_so():
+    """A commit made inside a preview exists nowhere else; -D would be the one loss.
+
+    And `-d` refuses a `preview/...` branch by definition, so planning it ended a reap
+    that did everything it should in `FAILED at git branch -d`, exit 1. The branch is
+    kept deliberately instead, with the discarding command named in the warning -- the
+    same design the forced-reap arm already uses."""
     plan = reap(
         verdict=worktree.PREVIEW_VERDICT,
         box=preview_box(),
         state=state(branch="preview/ui-editor-0817", upstream="", ahead=1, dirty=0),
+        copy_intact=False,
     )
-    assert plan.steps[-1] == ("branch", "-d", "preview/ui-editor-0817")
+    assert not plan.refusal
+    assert not any(step[0] == "branch" for step in plan.steps)
+    assert "preview/ui-editor-0817 is kept" in plan.warning
+    assert "branch -D preview/ui-editor-0817" in plan.warning
+
+
+def test_a_squash_merged_previews_branch_is_still_deleted():
+    """The reconcile run of 2026-08-25: `state.ahead` counts against the *default*
+    branch, so a squash-merged preview -- whose commits are never ancestors of it --
+    read as "not a copy" and every reap failed at `git branch -d`, leaking the
+    `preview/...` ref. The ancestor check against the tracked ref is the field that
+    actually answers the question."""
+    plan = reap(
+        verdict=worktree.PREVIEW_VERDICT,
+        box=preview_box(),
+        state=state(branch="preview/ui-editor-0817", upstream="", ahead=5, dirty=0),
+        pr_merged=True,
+        copy_intact=True,
+    )
+    assert not plan.refusal
+    assert plan.steps[-1] == ("branch", "-D", "preview/ui-editor-0817")
+
+
+def test_the_preview_delete_flag_asks_the_tracked_ref_not_the_default_branch():
+    ahead = state(branch="preview/x", upstream="", ahead=5, dirty=0)
+    assert worktree.preview_branch_delete_flag(ahead, copy_intact=True) == "-D"
+    assert worktree.preview_branch_delete_flag(ahead, copy_intact=False) == "-d"
+    # Unanswerable falls back to the licence that needs no lookup: ahead of the
+    # default branch and unprovable is kept, on the default branch is disposable.
+    assert worktree.preview_branch_delete_flag(ahead, copy_intact=None) == "-d"
+    on_default = state(branch="preview/x", upstream="", ahead=0, dirty=0)
+    assert worktree.preview_branch_delete_flag(on_default, copy_intact=None) == "-D"
+
+
+def test_preview_copy_intact_reads_gits_three_answers():
+    def git_returning(code):
+        def fake_git(*args):
+            assert args[:2] == ("merge-base", "--is-ancestor")
+            return subprocess.CompletedProcess(args, code)
+
+        return fake_git
+
+    assert worktree.preview_copy_intact(git_returning(0), "preview/x", "agent/x") is True
+    assert worktree.preview_copy_intact(git_returning(1), "preview/x", "agent/x") is False
+    assert worktree.preview_copy_intact(git_returning(128), "preview/x", "agent/x") is None
+
+    def raising_git(*args):
+        raise OSError("no git")
+
+    assert worktree.preview_copy_intact(raising_git, "preview/x", "agent/x") is None
 
 
 def test_reaping_a_dirty_ended_preview_forces_the_remove_and_says_what_goes():
