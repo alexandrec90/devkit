@@ -2616,7 +2616,13 @@ def daemon_down_note(text: str) -> str:
 
 
 def build_env() -> dict[str, str]:
-    """The environment a box's `compose up --build` runs in: this one, plus bake off.
+    """The environment a box's build runs in: this one, plus bake off where that works.
+
+    **Compose v5 removed the opt-out**, so this is necessary-but-not-sufficient and
+    `build_targets` is the half that actually holds. Kept because it is still the whole
+    fix on Compose v2, which consuming projects and CI runners are still on, and it
+    costs nothing where it is ignored. See `build_targets` for the evidence that v5
+    ignores it and for what replaces it.
 
     Recent Compose delegates building to **`docker buildx bake`**, and bake rejects a
     plan in which two targets export the same tag:
@@ -2644,6 +2650,92 @@ def build_env() -> dict[str, str]:
     return {**os.environ, "COMPOSE_BAKE": "0"}
 
 
+def build_targets(
+    config: Mapping[str, object] | None, services: tuple[str, ...] = ()
+) -> tuple[str, ...]:
+    """One buildable service per distinct `image:` tag — the set bake can export at once.
+
+    Compose v5 builds through `docker buildx bake` and, unlike v2, offers no way back:
+    `compose build --print` emits a bake file, and `--dry-run` with `COMPOSE_BAKE=0`
+    still shows every target naming its image. Two targets that export the **same** tag
+    then race, and the loser dies:
+
+        target app: failed to solve: image "docker.io/library/carameli-app-…": already
+        exists
+
+    An `app` and a `worker` built from one Dockerfile behind one `image:` are exactly
+    that, and it is a legal, common compose file — the classic builder exported the two
+    sequentially and never minded. Reproduced on carameli against Compose v5.0.2 /
+    engine 29.2.0 on 2026-08-24, from a cleared image state, with `COMPOSE_BAKE=0` set:
+    it fails every time, before any container starts, so **every** preview of such a
+    project failed with the generic `the stack did not come up`.
+
+    Naming one service per tag is what makes the plan legal again while keeping bake's
+    parallelism for the tags that genuinely differ — the alternative, building every
+    service in its own invocation, serialises builds that were never in conflict. The
+    services left out are not skipped: they share a tag with one that is named, so the
+    build they wanted has already happened, and the `up` that follows finds the image.
+
+    Two services sharing a tag but declaring *different* builds is the one case this
+    picks a winner for. It is already ambiguous — compose's own answer was whichever
+    target won the export race — and a stack that means it should give them two tags.
+
+    `services` non-empty (a UI-only box) narrows the set to what that box will start.
+    A `None` config (docker could not be asked) returns empty, and `compose_up` falls
+    back to the single `up --build` that was there before.
+    """
+    raw = (config or {}).get("services")
+    seen: set[object] = set()
+    targets: list[str] = []
+    for name, svc in (raw if isinstance(raw, dict) else {}).items():
+        if not isinstance(svc, dict) or "build" not in svc:
+            continue
+        if services and name not in services:
+            continue
+        # `compose config` resolves the default `<project>-<service>` tag, so `image` is
+        # normally there; the fallback keys on the service instead, which is unique by
+        # construction and so can never make two of them look like one.
+        tag = svc.get("image") or ("\0unnamed", name)
+        if tag in seen:
+            continue
+        seen.add(tag)
+        targets.append(name)
+    return tuple(targets)
+
+
+def compose_config(
+    path: Path, project_name: str, timeout: float = 120.0
+) -> Mapping[str, object] | None:
+    """The fully resolved compose file as a dict, or `None` when docker cannot say.
+
+    Every failure — no docker, a compose file that does not parse, output that is not a
+    JSON object — collapses to `None` on purpose. This is a *build planning* aid, and a
+    box that cannot be planned for must still be brought up the old way rather than
+    failing here; `compose_up` is where a real error gets reported, with the message
+    docker actually gave.
+    """
+    try:
+        completed = subprocess.run(
+            ["docker", "compose", "-p", project_name, "config", "--format", "json"],
+            cwd=str(path),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            creationflags=sweep.NO_WINDOW,
+            env=build_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        parsed = json.loads(completed.stdout)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def compose_up(
     path: Path,
     project_name: str,
@@ -2666,30 +2758,49 @@ def compose_up(
     Half an hour, because the first `up` in a fresh box builds the project's images from
     nothing. A timeout is reported rather than retried — `up` is idempotent, so running
     it again resumes the build instead of repeating it.
+
+    **Two commands, not one, when the stack shares an image tag between services.**
+    `build_targets` has the reason; the effect here is that the build is asked for by
+    name and the `up` that follows carries no `--build`, so bake is never handed the
+    duplicate-export plan it refuses. Each command gets the full `timeout`: the build is
+    the half that can take half an hour, and an `up` that has nothing left to build
+    cannot meaningfully spend it. Where the config cannot be read the old single
+    `up --build` runs unchanged, which is also the path for every stack that has no
+    duplicate to plan around.
     """
     scope = ["--no-deps", *services] if services else []
-    try:
-        completed = subprocess.run(
-            ["docker", "compose", "-p", project_name, "up", "-d", "--build", *scope],
-            cwd=str(path),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            creationflags=sweep.NO_WINDOW,
-            env=build_env(),
-        )
-    except FileNotFoundError:
-        return False, "docker is not on PATH — the stack was not started"
-    except subprocess.TimeoutExpired:
-        return False, (
-            f"compose up timed out after {timeout:g}s — the build may still be running; "
-            f"`docker compose -p {project_name} ps` says where it got to"
-        )
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        note = daemon_down_note(detail)
-        return False, (f"{note}\n  ({detail})" if note else detail)
+    targets = build_targets(compose_config(path, project_name), services)
+    plan = (
+        [
+            ["build", *targets],
+            ["up", "-d", *scope],
+        ]
+        if targets
+        else [["up", "-d", "--build", *scope]]
+    )
+    for step in plan:
+        try:
+            completed = subprocess.run(
+                ["docker", "compose", "-p", project_name, *step],
+                cwd=str(path),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+                creationflags=sweep.NO_WINDOW,
+                env=build_env(),
+            )
+        except FileNotFoundError:
+            return False, "docker is not on PATH — the stack was not started"
+        except subprocess.TimeoutExpired:
+            return False, (
+                f"compose {step[0]} timed out after {timeout:g}s — the build may still "
+                f"be running; `docker compose -p {project_name} ps` says where it got to"
+            )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            note = daemon_down_note(detail)
+            return False, (f"{note}\n  ({detail})" if note else detail)
     return True, f"stack {project_name} is up"
 
 
