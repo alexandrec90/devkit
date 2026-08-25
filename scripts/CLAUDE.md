@@ -213,6 +213,11 @@ Each of these has already been violated by something:
   *argument* and a command line has none; `shell_note` tells the agent which of its own
   words was read as the write, or it re-issues the line with the box path bolted on
   somewhere else.
+- **Codex's `apply_patch` was the same hole in a third shape.** Its target sits inside a
+  `*** Add File:` header, not in a path argument, so `guarded_targets` found none and
+  `main` allowed every Codex write until 2026-08-24 — seventeen onto carameli's static
+  checkout, pushed on a `feat/` branch. `patch_targets` reads the envelope out of
+  `command` (the key `Bash` also uses); it blocks, for the shell tier's reason.
 - **A branch move is judged as well, and it is the one verdict that ends in neither a box
   nor a rewrite.** `git checkout` writes no file, so both tiers above are blind to it —
   and it is the act that parked carameli's static checkout on another session's
