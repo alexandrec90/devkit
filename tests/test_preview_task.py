@@ -414,21 +414,34 @@ def test_a_row_shows_its_kind_its_pr_and_its_age():
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("3", ("pick", 3)),
-        (" 3 \n", ("pick", 3)),
-        ("a", ("all", 0)),
-        ("ALL", ("all", 0)),
-        ("", ("quit", 0)),
-        ("\n", ("quit", 0)),
-        ("q", ("quit", 0)),
-        ("no", ("quit", 0)),
-        ("0", ("again", 0)),
-        ("6", ("again", 0)),
-        ("frontend", ("again", 0)),
+        ("3", ("pick", [3])),
+        (" 3 \n", ("pick", [3])),
+        ("1 3", ("pick", [1, 3])),
+        ("1,3", ("pick", [1, 3])),
+        (" 1, 3 \n", ("pick", [1, 3])),
+        ("3 1", ("pick", [3, 1])),
+        ("2 2", ("pick", [2])),
+        ("a", ("all", [])),
+        ("ALL", ("all", [])),
+        ("", ("quit", [])),
+        ("\n", ("quit", [])),
+        ("q", ("quit", [])),
+        ("no", ("quit", [])),
+        ("0", ("again", [])),
+        ("6", ("again", [])),
+        ("frontend", ("again", [])),
+        ("1 6", ("again", [])),
+        ("1 frontend", ("again", [])),
     ],
 )
 def test_the_answer_grammar(text, expected):
     assert preview_task.parse_choice(text, count=5) == expected
+
+
+def test_one_bad_number_rejects_the_whole_line():
+    """The numbers are positions in a menu the reader is looking at, so serving two of the
+    three they typed is the one outcome they have no way of noticing."""
+    assert preview_task.parse_choice("2 9", count=5) == ("again", [])
 
 
 def test_a_blank_line_quits_rather_than_looping():
@@ -797,16 +810,139 @@ def test_a_ref_with_a_slash_survives_the_round_trip():
     )
 
 
+# --- several picks at once ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("carameli:agent/x", ["carameli:agent/x"]),
+        ("carameli:agent/x carameli:agent/y", ["carameli:agent/x", "carameli:agent/y"]),
+        ("  carameli:agent/x   carameli:agent/y \n", ["carameli:agent/x", "carameli:agent/y"]),
+        ("carameli:agent/x carameli:agent/x", ["carameli:agent/x"]),
+        ("", []),
+        ("   ", []),
+    ],
+)
+def test_the_ticked_rows_split_on_whitespace(text, expected):
+    """A space is the one character `git check-ref-format` refuses that the extension will
+    also emit, so it cannot fall inside the half that varies."""
+    assert preview_task.split_picks(text) == expected
+
+
+def test_several_picks_resolve_in_the_order_they_were_ticked():
+    rows = [_branch("agent/x"), _branch("agent/y"), _branch("agent/z")]
+    picked, rescan = preview_task.resolve_picks("carameli:agent/z carameli:agent/x", rows)
+    assert [row.ref for row in picked] == ["agent/z", "agent/x"]
+    assert rescan is False
+
+
+def test_rescan_ticked_beside_real_rows_serves_the_rows_and_still_says_the_list_was_stale():
+    """A checkbox list makes this reasonable to do, and it means "these, and look again"
+    rather than "nothing" -- which is what a single-pick read of the value would make of it."""
+    rows = [_branch("agent/x")]
+    value = f"carameli:{preview_task.RESCAN} carameli:agent/x"
+    picked, rescan = preview_task.resolve_picks(value, rows)
+    assert [row.ref for row in picked] == ["agent/x"]
+    assert rescan is True
+
+
+def test_one_unservable_token_fails_the_whole_value():
+    """`--pick-ref` is machine-written, so serving the other two would hide the bug behind
+    a preview that worked."""
+    with pytest.raises(ValueError, match="names no checkout"):
+        preview_task.resolve_picks("carameli:agent/x agent/gone", [_branch("agent/x")])
+
+
+def _standing(ref, box, *, project="carameli"):
+    return preview_task.Candidate(
+        project=project, ref=ref, kind=preview_task.KIND_STANDING, box=box
+    )
+
+
+def test_a_rows_serve_target_is_the_box_it_would_land_in():
+    box_row = _standing("agent/x", "carameli--preview-x-0824")
+    assert preview_task.serve_target(box_row) == "carameli--preview-x-0824"
+    assert preview_task.serve_target(_branch("agent/x-0824")) == worktree.preview_box_name(
+        "carameli", "agent/x-0824"
+    )
+
+
+def test_a_ui_pick_targets_the_ui_box_even_for_a_row_that_carries_a_full_one():
+    """`preview_kwargs` sends a `--ui` row by ref whatever box it names, so the identity
+    has to follow it there -- otherwise a full-preview row and a branch row for the same
+    ref look like two boxes under `--ui` and are one."""
+    box_row = _standing("agent/x-0824", "carameli--preview-x-0824")
+    assert preview_task.serve_target(box_row, ui=True) == worktree.preview_box_name(
+        "carameli", "agent/x-0824", ui=True
+    )
+    assert preview_task.serve_target(box_row, ui=True) == preview_task.serve_target(
+        _branch("agent/x-0824"), ui=True
+    )
+
+
+# Two distinct refs, one box: `preview_box_name` slugifies the topic, so an underscore
+# and a hyphen spelling of the same one collide. Two menu rows, and `plan_preview` would
+# serve the second as a refresh of the first -- correct, and for the price of a second
+# wait nobody could explain.
+COLLIDING = ("agent/fix_login-0824", "agent/fix-login-0824")
+
+
+def test_the_refs_this_file_calls_colliding_really_do_land_in_one_box():
+    """Stated rather than assumed: the pair above is a fixture, and a slug rule that stops
+    collapsing it would leave every test below asserting nothing."""
+    assert worktree.preview_box_name("carameli", COLLIDING[0]) == worktree.preview_box_name(
+        "carameli", COLLIDING[1]
+    )
+
+
+def test_two_picks_that_land_in_one_box_are_served_once_and_said_so():
+    rows = [_branch(COLLIDING[0]), _branch(COLLIDING[1])]
+    kept, notes = preview_task.dedupe(rows)
+    assert kept == [rows[0]]
+    assert len(notes) == 1 and "picked once, not twice" in notes[0]
+    assert COLLIDING[1] in notes[0] and COLLIDING[0] in notes[0]
+
+
+def test_dedupe_keeps_rows_that_land_in_different_boxes():
+    rows = [_branch("agent/x-0824"), _branch("agent/y-0824")]
+    kept, notes = preview_task.dedupe(rows)
+    assert kept == rows and notes == []
+
+
+def test_a_ui_pick_collapses_a_standing_full_box_onto_the_branch_row_beside_it():
+    """`--ui` names how to CUT a box rather than which one is standing, so the full
+    preview's row and a plain branch row for the same ref are one UI box -- and are two
+    rows in a menu drawn before anyone said `--ui`."""
+    rows = [_standing("agent/x-0824", "carameli--preview-x-0824"), _branch("agent/x-0824")]
+    kept, notes = preview_task.dedupe(rows, ui=True)
+    assert kept == [rows[0]] and len(notes) == 1
+    # ...and stay two boxes without it: the full preview is the box, the branch is a
+    # second full preview of the same ref, which is the same box again -- so this pair
+    # collapses either way, for two different reasons. Assert the reason, not the count.
+    assert preview_task.serve_target(rows[0]) != preview_task.serve_target(rows[0], ui=True)
+
+
 # --- the CLI ------------------------------------------------------------------
 
 
 @pytest.fixture
 def stub(monkeypatch, tmp_path):
-    """A workspace file that exists, a fixed menu, and `serve` recorded rather than run."""
+    """A workspace file that exists, a fixed menu, and `serve_all` recorded rather than run.
+
+    `serve_all` rather than `serve` because that is what `main` calls, and it is the seam
+    that carries the whole answer: the refs recorded here are the rows `main` decided on,
+    in order, after `dedupe` has had them.
+    """
     workspace = tmp_path / "alex-projects.code-workspace"
     workspace.write_text("{}", encoding="utf-8")
     served = []
-    monkeypatch.setattr(preview_task, "serve", lambda c, *a, **k: served.append(c.ref) or True)
+
+    def serve_all(rows, *a, **k):
+        served.extend(row.ref for row in rows)
+        return 0
+
+    monkeypatch.setattr(preview_task, "serve_all", serve_all)
     monkeypatch.setattr(preview_task, "MENU_CACHE", tmp_path / "logs" / "preview-menu.json")
     return types.SimpleNamespace(
         workspace=workspace,
@@ -944,7 +1080,7 @@ def test_main_passes_ui_to_serve(stub):
     _menu(stub, [preview_task.Candidate(project="p", ref="agent/ui", kind=preview_task.KIND_PR)])
     kwargs_seen = []
     stub.monkeypatch.setattr(
-        preview_task, "serve", lambda c, *a, **k: kwargs_seen.append(k) or True
+        preview_task, "serve_all", lambda rows, *a, **k: kwargs_seen.append(k) or 0
     )
     assert preview_task.main(["--workspace", str(stub.workspace), "--pick", "1", "--ui"]) == 0
     assert kwargs_seen[0]["ui"] is True
@@ -961,7 +1097,7 @@ def test_all_with_no_standing_preview_says_so(stub, capsys):
 
 def test_a_failed_serve_is_a_nonzero_exit(stub):
     _menu(stub, [preview_task.Candidate(project="p", ref="a", kind=preview_task.KIND_PR)])
-    stub.monkeypatch.setattr(preview_task, "serve", lambda *a, **k: False)
+    stub.monkeypatch.setattr(preview_task, "serve_all", lambda *a, **k: 1)
     assert preview_task.main(["--workspace", str(stub.workspace), "--pick", "1"]) == 1
 
 
@@ -1060,6 +1196,44 @@ def test_the_rescan_row_falls_through_to_the_terminal_menu(stub, capsys, monkeyp
     assert stub.served == ["agent/x"]
 
 
+def test_several_ticked_rows_are_all_served_in_one_run(stub, monkeypatch):
+    """The whole point of the checkbox list: two branches on screen from one click."""
+    monkeypatch.setattr(preview_task.sys, "stdin", types.SimpleNamespace(readline=lambda: ""))
+    _menu(stub, [_branch("agent/x"), _branch("agent/y"), _branch("agent/z")])
+    value = "carameli:agent/z carameli:agent/x"
+    assert preview_task.main(["--workspace", str(stub.workspace), "--pick-ref", value]) == 0
+    assert stub.served == ["agent/z", "agent/x"]
+
+
+def test_two_ticked_rows_sharing_a_box_are_served_once_and_the_drop_is_named(stub, capsys):
+    """The half of the no-duplicates guarantee this script owns. `worktree.plan_preview`
+    holds the other half -- it refreshes a box of that name rather than cutting one -- so
+    a duplicate here would have been correct and merely wasteful, which is the kind of
+    waste nothing reports."""
+    _menu(stub, [_branch(COLLIDING[0]), _branch(COLLIDING[1])])
+    value = f"carameli:{COLLIDING[0]} carameli:{COLLIDING[1]}"
+    assert preview_task.main(["--workspace", str(stub.workspace), "--pick-ref", value]) == 0
+    assert stub.served == [COLLIDING[0]]
+    assert "picked once, not twice" in capsys.readouterr().out
+
+
+def test_rescan_ticked_beside_a_real_row_does_not_fall_through_to_the_terminal(stub, capsys):
+    _menu(stub, [_branch("agent/x")])
+    value = f"carameli:{preview_task.RESCAN} carameli:agent/x"
+    assert preview_task.main(["--workspace", str(stub.workspace), "--pick-ref", value]) == 0
+    assert "Rescanned" not in capsys.readouterr().out
+    assert stub.served == ["agent/x"]
+
+
+def test_the_terminal_menu_takes_several_numbers_too(stub, monkeypatch):
+    """The dropdown's fallback is where `Rescan` lands, so a single-select one would
+    dead-end the caller who ticked `Rescan` because they wanted two rows."""
+    monkeypatch.setattr(preview_task.sys, "stdin", types.SimpleNamespace(readline=lambda: "2 1\n"))
+    _menu(stub, [_branch("agent/x"), _branch("agent/y")])
+    assert preview_task.main(["--workspace", str(stub.workspace)]) == 0
+    assert stub.served == ["agent/y", "agent/x"]
+
+
 def test_a_pick_ref_that_names_no_checkout_is_reported_not_traced(stub, capsys):
     _menu(stub, [])
     assert preview_task.main(["--workspace", str(stub.workspace), "--pick-ref", "agent/gone"]) == 2
@@ -1153,6 +1327,78 @@ def test_the_wait_speaks_on_the_tick_and_not_on_every_poll(capsys):
         clock=clock,
     )
     assert capsys.readouterr().out.count("is not answering yet") == 2
+
+
+# --- waiting on several boxes against ONE deadline ----------------------------
+
+
+def test_several_urls_cost_the_slowest_rather_than_the_sum():
+    """The regression the multi-pick exists to avoid. Two cold boxes install their
+    dependencies simultaneously whether or not anything is watching, so waiting on them in
+    turn would charge the reviewer 2x for work the machine had already overlapped -- and
+    ticking two boxes would come out slower than clicking the task twice."""
+    clock = Clock()
+    polls = {"http://fast": 0, "http://slow": 0}
+
+    def check(url):
+        polls[url] += 1
+        return polls[url] >= (2 if url == "http://fast" else 6)
+
+    outcomes = preview_task.wait_for_all(
+        ["http://fast", "http://slow"],
+        poll=2.0,
+        tick=1000.0,
+        check=check,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert outcomes["http://fast"] == (True, 2.0)
+    assert outcomes["http://slow"] == (True, 10.0)
+    # Sequentially the slow box would not have been probed until the fast one had
+    # finished; the total is the slow one alone, not the two added together.
+    assert clock.now == 10.0
+
+
+def test_the_fast_box_is_not_held_behind_one_that_never_answers():
+    clock = Clock()
+    outcomes = preview_task.wait_for_all(
+        ["http://up", "http://wedged"],
+        timeout=10.0,
+        poll=2.0,
+        tick=1000.0,
+        check=lambda url: url == "http://up",
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert outcomes == {"http://up": (True, 0.0), "http://wedged": (False, 10.0)}
+
+
+def test_the_shared_wait_says_how_many_are_still_silent(capsys):
+    clock = Clock()
+    preview_task.wait_for_all(
+        ["http://a", "http://b"],
+        timeout=40.0,
+        poll=5.0,
+        tick=15.0,
+        check=lambda url: False,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    out = capsys.readouterr().out
+    assert out.count("not answering yet") == 2
+    assert "2 of 2" in out and "http://a, http://b" in out
+
+
+def test_one_url_is_the_single_wait_and_not_a_second_implementation_of_it(monkeypatch):
+    """With nothing to interleave the two are the same wait, and one spelling of "is it up
+    yet" is one place for that to be wrong. It is also what keeps `serve`'s output tests
+    able to substitute the wait they are not about."""
+    monkeypatch.setattr(preview_task, "wait_for_ready", lambda url, **k: (True, 7.0))
+    assert preview_task.wait_for_all(["http://only"]) == {"http://only": (True, 7.0)}
+
+
+def test_no_urls_is_no_wait_at_all():
+    assert preview_task.wait_for_all([]) == {}
 
 
 # --- the backend a UI-only preview borrows ------------------------------------
@@ -1308,11 +1554,80 @@ def test_a_box_that_publishes_nothing_is_not_waited_on(monkeypatch, tmp_path):
     assert opened == []
 
 
+# --- several boxes in one run -------------------------------------------------
+
+
+def _serve_all_harness(monkeypatch, failing=""):
+    """`plan_preview` giving each branch its own box and URL, with the order recorded."""
+    events: list[str] = []
+
+    def plan_preview(**kwargs):
+        branch = kwargs["branch"]
+        events.append(f"start {branch}")
+        if branch == failing:
+            raise worktree.WorktreeError(f"no such ref {branch}")
+        return worktree.PreviewPlan(
+            box=worktree.Box(
+                name=f"carameli--preview-{branch[-1]}",
+                project="carameli",
+                branch=f"preview/{branch}",
+            ),
+            path="p",
+            urls=(("frontend", 5180, f"http://127.0.0.1/{branch[-1]}"),),
+            up=True,
+        )
+
+    monkeypatch.setattr(preview_task.worktree, "plan_preview", plan_preview)
+    monkeypatch.setattr(preview_task.worktree, "apply_preview", lambda p, w: (True, []))
+    opened: list[str] = []
+    monkeypatch.setattr(preview_task.webbrowser, "open", opened.append)
+
+    def wait_for_all(urls, **kwargs):
+        events.append("wait " + " ".join(urls))
+        return {url: (True, 12.0) for url in urls}
+
+    monkeypatch.setattr(preview_task, "wait_for_all", wait_for_all)
+    return events, opened
+
+
+def test_the_boxes_start_in_turn_and_then_wait_as_one(monkeypatch, tmp_path):
+    """Which half is sequential is the design. Starting is -- one git repo, one port
+    registry, one image builder. Waiting is not, and a wait per row would hand back the
+    time the containers were already spending simultaneously."""
+    events, opened = _serve_all_harness(monkeypatch)
+    rows = [_branch("agent/a"), _branch("agent/b")]
+    assert preview_task.serve_all(rows, tmp_path) == 0
+    assert events == [
+        "start agent/a",
+        "start agent/b",
+        "wait http://127.0.0.1/a http://127.0.0.1/b",
+    ]
+    assert opened == ["http://127.0.0.1/a", "http://127.0.0.1/b"]
+
+
+def test_a_row_that_never_started_is_counted_and_the_rest_still_come_up(monkeypatch, tmp_path):
+    """One bad ref among four must not cost the other three their preview -- and must not
+    be reported as a run that worked."""
+    events, opened = _serve_all_harness(monkeypatch, failing="agent/b")
+    rows = [_branch("agent/a"), _branch("agent/b"), _branch("agent/c")]
+    assert preview_task.serve_all(rows, tmp_path) == 1
+    assert "wait http://127.0.0.1/a http://127.0.0.1/c" in events
+    assert opened == ["http://127.0.0.1/a", "http://127.0.0.1/c"]
+
+
+def test_no_wait_skips_the_shared_wait_entirely(monkeypatch, tmp_path):
+    events, opened = _serve_all_harness(monkeypatch)
+    rows = [_branch("agent/a"), _branch("agent/b")]
+    assert preview_task.serve_all(rows, tmp_path, wait=False) == 0
+    assert not any(event.startswith("wait") for event in events)
+    assert opened == ["http://127.0.0.1/a", "http://127.0.0.1/b"]
+
+
 def test_main_passes_no_wait_through_to_serve(stub):
     _menu(stub, [preview_task.Candidate(project="p", ref="agent/ui", kind=preview_task.KIND_PR)])
     kwargs_seen = []
     stub.monkeypatch.setattr(
-        preview_task, "serve", lambda c, *a, **k: kwargs_seen.append(k) or True
+        preview_task, "serve_all", lambda rows, *a, **k: kwargs_seen.append(k) or 0
     )
     argv = ["--workspace", str(stub.workspace), "--pick", "1", "--no-wait"]
     assert preview_task.main(argv) == 0
@@ -1323,7 +1638,7 @@ def test_the_wait_is_on_by_default(stub):
     _menu(stub, [preview_task.Candidate(project="p", ref="agent/ui", kind=preview_task.KIND_PR)])
     kwargs_seen = []
     stub.monkeypatch.setattr(
-        preview_task, "serve", lambda c, *a, **k: kwargs_seen.append(k) or True
+        preview_task, "serve_all", lambda rows, *a, **k: kwargs_seen.append(k) or 0
     )
     assert preview_task.main(["--workspace", str(stub.workspace), "--pick", "1"]) == 0
     assert kwargs_seen[0]["wait"] is True
