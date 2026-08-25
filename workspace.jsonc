@@ -670,43 +670,6 @@
 				"problemMatcher": []
 			},
 			{
-				// The same two dropdowns, cutting the CHEAP kind of box: only the project's
-				// `[worktree] ui_services` start, and the backend is borrowed from the static
-				// checkout's running stack on its usual ports. A project that has not declared
-				// a UI tier in `.devkit.toml` says so and points at the full task above.
-				"label": "Preview: Open a UI Branch (Frontend Only)",
-				"detail": "The cheap preview: same two dropdowns as 'Open a UI Branch' — tick as many refs as you want — but each box starts only the project's declared UI services (e.g. the Vite frontend) and points them at the static checkout's already-running backend instead of cloning the whole stack — one container and no image builds, so about a minute the first time a box is cut (the frontend installs its dependencies) and seconds after that. Needs that checkout's stack up ('Docker: Start Stack'); it says so before it starts when nothing is listening on that port. Refs whose change is not frontend-only will not show it here; use the full preview.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"devkit",
-					"preview",
-					"--pick-ref",
-					"${input:previewRow}",
-					"--ui"
-				],
-				"icon": {
-					"id": "preview",
-					"color": "terminal.ansiBrightCyan"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"focus": true,
-					"clear": true,
-					"close": false
-				},
-				// Same reason as the full preview above: several of these at once is the
-				// point of them, and the default limit of 1 turns the second click into an
-				// offer to kill the first.
-				"runOptions": {
-					"instanceLimit": 4
-				},
-				"problemMatcher": []
-			},
-			{
 				// The cheapest preview of all: the same two dropdowns, and then NO Docker —
 				// host Vite serves each ticked ref's frontend from a plain worktree copy,
 				// which is all a UI-only review needs. Boxes are still first-class: a ref
@@ -716,7 +679,7 @@
 				// `focus` for the same reason as the full preview: the Rescan row falls
 				// through to the terminal.
 				"label": "Preview: Serve UI Branches on Host",
-				"detail": "No Docker, no backend: serves each ticked ref's frontend straight from a host Vite dev server on its own port and opens the URLs — seconds to start, after a one-off npm install per new ref (about a minute). A ref with a live agent box is served from that box's worktree, unpushed work included; anything else gets a kept copy under .ui-previews/. API-backed views show real data when the static checkout's stack happens to be up and their offline state when it is not — a change that needs the backend wants one of the two box previews above. The servers live in this terminal: closing it, or Ctrl+C, stops them all.",
+				"detail": "No Docker, no backend: serves each ticked ref's frontend straight from a host Vite dev server on its own port and opens the URLs — seconds to start, after a one-off npm install per new ref (about a minute). A ref with a live agent box is served from that box's worktree, unpushed work included; anything else gets a kept copy under .ui-previews/. API-backed views show real data when the static checkout's stack happens to be up and their offline state when it is not — a change that needs the backend wants the full box preview above. The servers live in this terminal: closing it, or Ctrl+C, stops them all.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -2161,6 +2124,11 @@
 				"args": {
 					"description": "Which branch, PR or box should be brought up? Tick as many as you want.",
 					"key": "previewRow",
+					// Cancelling either dropdown (Escape) aborts the task instead of running
+					// it with the literal `${input:previewRow}` — the scripts treat that
+					// literal as a graceful no-op, but a terminal still opened for nothing,
+					// which no other task in this file does on a cancelled input.
+					"checkEscapedUI": true,
 					"multiPick": true,
 					"separator": " ",
 					"fileName": "${workspaceFolder:devkit}/logs/preview-menu.json",
@@ -2175,6 +2143,7 @@
 						"previewProject": {
 							"description": "Which checkout has the branch you want to look at?",
 							"key": "previewProject",
+							"checkEscapedUI": true,
 							"fileName": "${workspaceFolder:devkit}/logs/preview-menu.json",
 							"fileFormat": "json",
 							"jsonOption": {

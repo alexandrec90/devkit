@@ -199,7 +199,6 @@ scripts/worktree.py::lease_file
 scripts/worktree.py::plan_env_templates
 scripts/worktree.py::plan_resume
 scripts/worktree.py::pr_head_branch
-scripts/worktree.py::preview_branch_delete_flag
 scripts/worktree.py::recovered_slot
 scripts/worktree.py::remove_tree_longpath
 scripts/worktree.py::render_preview

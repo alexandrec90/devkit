@@ -210,7 +210,13 @@ HTTP_SERVICES: frozenset[str] = frozenset(
 )
 
 
-def reapable(verdict: str, *, pr_merged: bool = False, holds_uncommitted: bool = True) -> bool:
+def reapable(
+    verdict: str,
+    *,
+    pr_merged: bool = False,
+    pr_closed: bool = False,
+    holds_uncommitted: bool = True,
+) -> bool:
     """May this box be destroyed? The one predicate `reap` and `reconcile` both ask.
 
     `SAFE_TO_REAP` alone is not the whole answer, because **a squash merge is invisible
@@ -244,8 +250,23 @@ def reapable(verdict: str, *, pr_merged: bool = False, holds_uncommitted: bool =
 
     A **preview** box answers the question by construction: every commit in it came from
     a remote ref, so there is nothing in it to strand. It is still gated on
-    `holds_uncommitted`, because someone reading a diff may well have poked at a file,
-    and a cleanup pass is not the right moment to find out.
+    `holds_uncommitted` while the thing it shows is live, because someone reading a diff
+    may well have poked at a file, and a cleanup pass is not the right moment to find
+    out.
+
+    **An ended PR overrides that gate, and only for a preview.** The ordinary preview
+    dirt is machine-made, not a person's: the frontend container's install step rewrites
+    `package-lock.json` through the bind mount the moment the stack comes up, so most
+    previews are dirty within minutes of being cut and stay that way. Gating a merged
+    preview on dirt therefore held it *forever* — three merged-PR previews accumulated
+    27 exited containers, kept their menu rows, and leased the port registry to 16/16 —
+    while protecting nothing, because `preview_refresh_steps` already discards the same
+    dirt with `reset --hard` on every refresh, without asking. Once the PR the preview
+    shows has merged or closed, the review it existed for is over, so the box is pure
+    cost and goes. `pr_closed` is consulted **only** in this arm: for a task box a close
+    is a policy signal `reap_decision` weighs, never a licence here, because
+    `needs-rebranch` plus a closed PR is an abandoned branch — exactly the case
+    `MERGE_CAN_BE_STALE_ABOUT` exists to keep holding.
 
     `SAFE_TO_REAP` is gated on it too, and that gate is **deliberately redundant**.
     `sweep.classify` tests `state.dirty` -- which counts untracked files, and, per
@@ -284,7 +305,7 @@ def reapable(verdict: str, *, pr_merged: bool = False, holds_uncommitted: bool =
     if verdict == sweep.SKIPPED:
         return True
     if verdict == PREVIEW_VERDICT:
-        return not holds_uncommitted
+        return pr_merged or pr_closed or not holds_uncommitted
     if verdict in SAFE_TO_REAP:
         return not holds_uncommitted
     return pr_merged and not holds_uncommitted and verdict in MERGE_CAN_BE_STALE_ABOUT
@@ -1451,18 +1472,56 @@ def preview_spawn_plan(
     )
 
 
-def preview_branch_delete_flag(state: sweep.State) -> str:
+def preview_branch_delete_flag(state: sweep.State, copy_intact: bool | None = None) -> str:
     """`-D` for a preview branch that is still a copy, `-d` for one that is not.
 
     `-d` refuses any branch that is not an ancestor of the checkout's HEAD, which a
     `preview/...` branch never is — so planning `-d` here would end every preview reap in
     the `FAILED at git branch -d` that `reap_plan` documents at length for forced reaps.
     `-D` is safe *because* the branch is a copy of a remote ref, and only while it is
-    one, which is what `state.ahead` is asked. A commit made inside a preview box exists
-    nowhere else, and destroying it in a cleanup is the one thing this tier promises not
-    to do.
+    one. A commit made inside a preview box exists nowhere else, and destroying it in a
+    cleanup is the one thing this tier promises not to do.
+
+    "Still a copy" is `copy_intact` — whether the tip is an ancestor of the
+    `refs/remotes/origin/<tracks>` ref the preview fetched (`preview_copy_intact`).
+    `state.ahead` was asked first and is the wrong field: it counts against
+    `origin/<default>`, so a preview of any branch not yet merged there read as "not a
+    copy", and after a squash merge it *always* did — every reap of a squash-merged
+    preview failed at `git branch -d` and leaked the `preview/...` ref, which is how
+    two of the three merged previews reaped on 2026-08-25 exited 1. `ahead <= 0` is
+    kept as the licence that needs no lookup (every commit is on the default branch, so
+    nothing can be lost) and as the fallback when the tracking ref is gone and the
+    question is unanswerable (`copy_intact=None`).
     """
-    return "-D" if state.ahead <= 0 else "-d"
+    if state.ahead <= 0:
+        return "-D"
+    if copy_intact:
+        return "-D"
+    return "-d"
+
+
+def preview_copy_intact(git: sweep.Git, branch: str, tracks: str) -> bool | None:
+    """Whether `branch` still only holds commits the ref it copied has. Never raises.
+
+    `merge-base --is-ancestor` against `refs/remotes/origin/<tracks>` — the tracking
+    ref `preview_spawn_plan` and every refresh fetch explicitly, which survives the
+    remote branch's deletion after a squash merge (fetching a refspec never prunes).
+    Exit 0 is yes, 1 is no (the preview grew a commit of its own), anything else —
+    either ref missing, no git — is `None`: unanswerable, and the caller must not
+    treat that as either answer.
+    """
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        result = git(
+            "merge-base",
+            "--is-ancestor",
+            f"refs/heads/{branch}",
+            f"refs/remotes/origin/{tracks}",
+        )
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+    return None
 
 
 def reap_decision(
@@ -1510,11 +1569,13 @@ def reap_decision(
     documents for squash merges, reached from the opposite end, and it happened here:
     two boxes whose duplicate PRs were closed on 2026-08-20 had to be forced.
 
-    A close does **not** stand in for a merge anywhere else, and `reapable` is the
-    line: `needs-rebranch` plus a closed PR is an abandoned branch, which is precisely
-    the case `MERGE_CAN_BE_STALE_ABOUT` exists to keep holding. What is cleared here
-    is a *policy* refusal about a box whose commits are already on the remote, never
-    the safety predicate underneath it.
+    A close does **not** stand in for a merge on any task verdict, and `reapable` is
+    the line: `needs-rebranch` plus a closed PR is an abandoned branch, which is
+    precisely the case `MERGE_CAN_BE_STALE_ABOUT` exists to keep holding. What is
+    cleared here is a *policy* refusal about a box whose commits are already on the
+    remote, never the safety predicate underneath it. The one place `pr_closed` does
+    reach `reapable` is its preview arm, where a close and a merge mean the same
+    thing — the review the copy was cut for is over.
     """
     if awaiting_pr and not (pr_merged or pr_closed):
         if force:
@@ -1527,7 +1588,9 @@ def reap_decision(
             f"once its PR lands, and until then the checkout is where review comments "
             f"get answered. Wait for the merge, or pass --force."
         )
-    if reapable(verdict, pr_merged=pr_merged, holds_uncommitted=holds_uncommitted):
+    if reapable(
+        verdict, pr_merged=pr_merged, pr_closed=pr_closed, holds_uncommitted=holds_uncommitted
+    ):
         return True, ""
     if force:
         return True, f"forced past `{verdict}` ({reason}) — uncommitted changes will be discarded"
@@ -1585,6 +1648,7 @@ def reap_plan(
     keep_stack: bool = False,
     has_stack: bool = False,
     awaiting_pr: bool = False,
+    copy_intact: bool | None = None,
 ) -> ReapPlan:
     """Everything `reap` will run, in the only order that is safe.
 
@@ -1637,8 +1701,23 @@ def reap_plan(
     if not allowed:
         return ReapPlan(box=box.name, path=path, project=box.project, refusal=note)
 
+    if box.kind == PREVIEW_KIND and state.dirty and not force:
+        # Reached only through `reapable`'s ended-PR arm: dirt alone still refuses.
+        # `git worktree remove` refuses a dirty tree, so the step must carry `--force`
+        # or every reap of an ended preview fails at its first step — and the discard
+        # is said out loud, because it is the one thing this plan does that `--force`
+        # normally gates.
+        note = "; ".join(
+            part
+            for part in (
+                note,
+                f"{state.dirty} uncommitted change(s) in the preview are discarded -- "
+                f"the same dirt a refresh already resets, in a copy whose review is over",
+            )
+            if part
+        )
     remove: tuple[str, ...] = ("worktree", "remove", path)
-    if force:
+    if force or (box.kind == PREVIEW_KIND and bool(state.dirty)):
         remove = (*remove, "--force")
     steps: list[tuple[str, ...]] = [remove]
     warning = note
@@ -1662,7 +1741,7 @@ def reap_plan(
         )
     elif box.branch:
         flag = (
-            preview_branch_delete_flag(state)
+            preview_branch_delete_flag(state, copy_intact=copy_intact)
             if box.kind == PREVIEW_KIND
             else branch_delete_flag(state, pr_merged)
         )
@@ -1673,6 +1752,23 @@ def reap_plan(
                     note,
                     f"{box.branch} is kept -- it carries commits no remote has, and "
                     f"--force never destroys commits. To discard those too: "
+                    f"git -C {box.project} branch -D {box.branch}",
+                )
+                if part
+            )
+        elif box.kind == PREVIEW_KIND and flag == "-d":
+            # The same rule as the forced arm above, one case further out: `-d` refuses
+            # any branch that is not an ancestor of HEAD, which a `preview/...` branch
+            # never is, so planning it ends a reap that did everything it should in
+            # `FAILED at git branch -d` and exit 1. The branch is kept deliberately —
+            # it carries commits the tracked ref cannot account for, and a cleanup
+            # never destroys commits — and the warning names the command that does.
+            warning = "; ".join(
+                part
+                for part in (
+                    warning,
+                    f"{box.branch} is kept -- it carries commits the ref it copied does "
+                    f"not have, and a cleanup never destroys commits. To discard them: "
                     f"git -C {box.project} branch -D {box.branch}",
                 )
                 if part
@@ -1860,7 +1956,12 @@ def reconcile_action(
       merged: the commits are safe on the remote but nobody will ever look at them, and
       whether that is finished is a person's decision, not a cleanup's.
     """
-    if not reapable(verdict, pr_merged=pr.merged, holds_uncommitted=holds_uncommitted):
+    if not reapable(
+        verdict,
+        pr_merged=pr.merged,
+        pr_closed=pr.is_closed,
+        holds_uncommitted=holds_uncommitted,
+    ):
         if verdict == PREVIEW_VERDICT:
             # Same hold, different remedy, and the report cannot tell them apart on its
             # own: it heads every HOLD row "only place it exists, ship it", which for a
@@ -3456,6 +3557,11 @@ def plan_reap(
         keep_stack=keep_stack,
         has_stack=has_stack(path),
         awaiting_pr=pr is None and verdict in AWAITS_A_MERGE,
+        copy_intact=(
+            preview_copy_intact(sweep.git_for(root / box.project), box.branch, box.tracks)
+            if box.kind == PREVIEW_KIND and box.branch and box.tracks and state.is_git
+            else None
+        ),
     )
 
 
