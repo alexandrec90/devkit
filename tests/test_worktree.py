@@ -3645,26 +3645,38 @@ def test_compose_up_for_a_ui_box_scopes_to_its_services_with_no_deps(monkeypatch
     monkeypatch.setattr(
         worktree.subprocess, "run", lambda argv, **k: seen.append(argv) or _completed()
     )
+
+    # `compose_up` probes `compose config` first; a stub that answers nothing sends it
+    # down the fallback path, which is the one this test is about.
+    def ups():
+        return [argv for argv in seen if "up" in argv]
+
     ok, _ = worktree.compose_up(Path("x"), "c--preview-ui--y", services=("frontend",))
     assert ok
-    assert seen[0][-3:] == ["--build", "--no-deps", "frontend"]
+    assert ups()[0][-3:] == ["--build", "--no-deps", "frontend"]
     worktree.compose_up(Path("x"), "c--y")
-    assert seen[1][-1] == "--build"
+    assert ups()[1][-1] == "--build"
 
 
 def test_compose_up_disables_bake_so_two_services_can_share_one_image_tag(monkeypatch):
-    """Compose delegates builds to `bake` by default now, and bake refuses a plan whose
-    targets export the same tag twice -- which is what an `app` and a `worker` built from
-    one Dockerfile are. Measured on carameli, 2026-08-24, engine 29.2.0:
+    """`COMPOSE_BAKE=0` still goes out, but it is no longer the whole fix.
+
+    Compose delegates builds to `bake`, and bake refuses a plan whose targets export the
+    same tag twice -- which is what an `app` and a `worker` built from one Dockerfile
+    are. Measured on carameli, 2026-08-24, engine 29.2.0:
 
         target app: failed to solve: image "docker.io/library/carameli-app-...": already
         exists
 
-    Every preview of that stack died there, reported as `the stack did not come up`, and
-    the same `compose build` with `COMPOSE_BAKE=0` succeeded. Sharing a tag is legal in
-    compose and the classic builder exports the two sequentially, so the bake path is the
-    regression -- disable it here rather than asking every consumer to restructure a
-    compose file that was always valid.
+    On Compose v2 this variable was the answer. **Compose v5 dropped the opt-out**, and
+    setting it changes nothing there -- re-measured the same day against v5.0.2 from a
+    cleared image state, where `up --build` fails identically with it set. So the
+    variable stays, because consumers and CI runners are still on v2 and it is the whole
+    fix there, and `build_targets` carries the case it no longer covers.
+
+    That is why this asserts the variable is *sent*, and not that the build succeeded:
+    the second claim was true when written and stopped being true under the reader's
+    feet, with the test still green.
     """
     seen = {}
     monkeypatch.setattr(
@@ -3679,6 +3691,138 @@ def test_compose_up_disables_bake_so_two_services_can_share_one_image_tag(monkey
     # Inherited, not replaced: a bare `{"COMPOSE_BAKE": "0"}` would take `docker` off
     # PATH and turn every build into "docker is not on PATH".
     assert seen["env"]["PATH"] == "/sentinel-path"
+
+
+#: carameli's shape, and the one that broke: `worker` shares `app`'s tag, `db-backup`
+#: has its own, `db` is a stock image with nothing to build.
+_SHARED_TAG_CONFIG = {
+    "services": {
+        "app": {"build": {"context": "."}, "image": "carameli-app-c--preview-x"},
+        "worker": {"build": {"context": "."}, "image": "carameli-app-c--preview-x"},
+        "db-backup": {"build": {"context": "ops"}, "image": "carameli-db-backup-c--preview-x"},
+        "db": {"image": "postgres:16"},
+    }
+}
+
+
+def test_two_services_sharing_a_tag_are_built_once_and_not_twice():
+    """The whole defect in one assertion: bake gets one target per tag, never two.
+
+    `app` and `worker` name the same image, so a plan containing both exports it twice
+    and the loser dies with `already exists`. `worker` is not skipped by being left out
+    -- the tag it wants is the tag `app` builds.
+    """
+    assert worktree.build_targets(_SHARED_TAG_CONFIG) == ("app", "db-backup")
+
+
+def test_a_service_with_nothing_to_build_is_not_named_as_a_build_target():
+    """`db` is a stock image. Naming it makes `compose build` fail on a service that has
+    no `build:` at all, which would turn this fix into a worse outage than the bug."""
+    assert "db" not in worktree.build_targets(_SHARED_TAG_CONFIG)
+
+
+def test_a_ui_box_builds_only_what_it_is_going_to_start():
+    """A UI-only box starts `--no-deps frontend`; building the backend it borrows would
+    be minutes of work for an image the box never runs."""
+    config = {
+        "services": {
+            "frontend": {"build": {"context": "frontend"}, "image": "c-frontend-x"},
+            "app": {"build": {"context": "."}, "image": "c-app-x"},
+        }
+    }
+    assert worktree.build_targets(config, services=("frontend",)) == ("frontend",)
+
+
+def test_two_unnamed_services_are_never_collapsed_into_one():
+    """`compose config` resolves the default `<project>-<service>` tag, so `image` is
+    normally present -- but a fallback that keyed every unnamed service to one constant
+    would build the first and silently skip the rest, which is the failure mode this fix
+    exists to remove."""
+    config = {
+        "services": {
+            "app": {"build": {"context": "."}},
+            "worker": {"build": {"context": "."}},
+        }
+    }
+    assert worktree.build_targets(config) == ("app", "worker")
+
+
+def test_an_unreadable_config_plans_no_targets_rather_than_guessing():
+    """`compose_config` collapses every failure to `None`, and this is what that buys:
+    `compose_up` falls back to the single `up --build` it always ran, so a box docker
+    cannot describe is still brought up the old way instead of failing here."""
+    assert worktree.build_targets(None) == ()
+    assert worktree.build_targets({}) == ()
+    assert worktree.build_targets({"services": None}) == ()
+
+
+def test_compose_config_reads_the_resolved_stack_and_swallows_every_failure(monkeypatch):
+    """A build-planning aid, so it must never be the thing that fails a box.
+
+    Docker missing, a compose file that will not parse, a non-zero exit, output that is
+    not JSON, output that is JSON but not an object: all `None`, and `compose_up` then
+    runs the single `up --build` it always ran. The real error still gets reported --
+    by `compose_up`, with the message docker actually gave.
+    """
+    monkeypatch.setattr(
+        worktree.subprocess,
+        "run",
+        lambda argv, **k: _completed(stdout='{"services": {"app": {}}}'),
+    )
+    assert worktree.compose_config(Path("x"), "c--y") == {"services": {"app": {}}}
+
+    for answer in (
+        _completed(returncode=1, stderr="no configuration file provided"),
+        _completed(stdout="not json at all"),
+        _completed(stdout="[1, 2, 3]"),
+    ):
+        monkeypatch.setattr(worktree.subprocess, "run", lambda argv, a=answer, **k: a)
+        assert worktree.compose_config(Path("x"), "c--y") is None
+
+    for boom in (FileNotFoundError("docker"), worktree.subprocess.TimeoutExpired("docker", 1)):
+        monkeypatch.setattr(
+            worktree.subprocess, "run", lambda argv, e=boom, **k: (_ for _ in ()).throw(e)
+        )
+        assert worktree.compose_config(Path("x"), "c--y") is None
+
+
+def test_compose_up_builds_by_name_then_starts_without_build(monkeypatch):
+    """The two-command shape. `--build` on the `up` would hand bake the same duplicate
+    plan again, so its absence is the assertion that matters."""
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(argv)
+        if "config" in argv:
+            return _completed(stdout=json.dumps(_SHARED_TAG_CONFIG))
+        return _completed()
+
+    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    ok, message = worktree.compose_up(Path("x"), "c--preview-x")
+    assert ok
+    build, up = (argv for argv in seen if "config" not in argv)
+    assert build[-3:] == ["build", "app", "db-backup"]
+    assert up[-2:] == ["up", "-d"]
+    assert "--build" not in up
+    assert "c--preview-x" in message
+
+
+def test_a_failed_build_is_reported_and_the_up_never_runs(monkeypatch):
+    """Two commands mean two places to fail. Starting a stack whose build just failed
+    would run the *previous* images and report a preview of the wrong code."""
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(argv)
+        if "config" in argv:
+            return _completed(stdout=json.dumps(_SHARED_TAG_CONFIG))
+        return _completed(returncode=1, stderr="target app: failed to solve")
+
+    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    ok, message = worktree.compose_up(Path("x"), "c--preview-x")
+    assert not ok
+    assert "failed to solve" in message
+    assert not any("up" in argv for argv in seen)
 
 
 def test_build_env_inherits_the_environment_rather_than_replacing_it(monkeypatch):
