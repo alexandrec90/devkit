@@ -225,6 +225,12 @@ ACTIONS: dict[str, Action] = {
     # No picker, per the literal-over-single-option convention: the task pins
     # `--project devkit` and the only question asked is the one worth asking.
     "preview": Action("scripts/preview-task.py", "Preview: Open a UI Branch", projects=DEVKIT_ONLY),
+    # The cheap sibling: host Vite on the picked branches' frontends, no Docker and no
+    # backend, for when the question is only what the UI looks like. Same DEVKIT_ONLY
+    # reasoning as `preview` -- the project dimension lives inside the shared menu.
+    "preview-ui-host": Action(
+        "scripts/preview-ui-host.py", "Preview: Serve UI Branches on Host", projects=DEVKIT_ONLY
+    ),
     # Cutting a devkit release. DEVKIT_ONLY because a release is devkit's own act and
     # has no project dimension at all -- run per selected checkout it would try to tag
     # this repo two or three times, and the second attempt would refuse a tag that now

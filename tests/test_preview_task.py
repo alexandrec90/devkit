@@ -1724,3 +1724,18 @@ def test_the_dispatcher_registers_the_action_against_devkit_alone():
     assert action.script == "scripts/preview-task.py"
     assert action.projects == devkit_project.DEVKIT_ONLY
     assert (preview_task.REPO_ROOT / action.script).is_file()
+
+
+# --- the small CLI surface ----------------------------------------------------
+
+
+def test_echo_prints_a_whole_flushed_line(capsys):
+    preview_task.echo("hello")
+    assert capsys.readouterr().out == "hello\n"
+
+
+def test_build_parser_defaults_to_an_interactive_fetching_run():
+    args = preview_task.build_parser().parse_args([])
+    assert args.pick == 0 and args.pick_ref == ""
+    assert args.fetch and not args.refresh and not args.all and not args.down and not args.ui
+    assert args.limit == preview_task.MENU_LIMIT and args.workspace is None
