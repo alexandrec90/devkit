@@ -405,10 +405,26 @@ DQ_ESCAPABLE = '"\\$`'
 # Characters that end a redirection's target word.
 TARGET_END = " \t;|&<>"
 
-# Statement separators. Splitting inside a quoted string can only lose a detection or
-# invent an unrecognised verb, and both of those allow — the safe direction for a
-# splitter this crude.
-STATEMENTS = re.compile(r"(?:&&|\|\||[;\n|]|&(?!\d))")
+# Statement separators, honoured **outside quotes only**.
+#
+# A regex stood here and split on every separator it matched, quoted or not, under the
+# claim that "splitting inside a quoted string can only lose a detection or invent an
+# unrecognised verb, and both of those allow". Both halves are false once the separator
+# sits *inside* a quote: the split hands the scanners a fragment whose quote is already
+# open, so a `>` the quote had covered reads as a redirection, and the fragment's tail
+# reads as the file it redirects to. Quoting was made lexical in `redirect_targets` the
+# same day and stayed positional here, one layer above it.
+#
+# `rg -n "^(<<<<<<<|=======|>>>>>>>)" scripts tests` is what found it: split at the two
+# quoted `|`, its last fragment is `>>>>>>>)" scripts tests`, read as a redirect writing
+# `) scripts tests`. Relative, so it resolved against the cwd — the checkout — and the
+# block named a closing paren as the file it was protecting, having cut a box
+# `reconcile` then reaped as never used.
+#
+# An *unbalanced* quote now swallows the rest of the line rather than being split at.
+# That direction loses detections and allows, which is the one this tier is willing to
+# be wrong in.
+SEPARATORS = ";\n|&"
 
 
 def _unquote(token: str) -> str:
@@ -478,6 +494,50 @@ def _skip_quoted(text: str, index: int, quote: str) -> int:
     ):
         return index + 2
     return index + 1
+
+
+def split_statements(command: str) -> list[str]:
+    """`command` cut at each of its statement separators that is not inside quotes.
+
+    `&&`, `||`, `;`, a newline, a bare `|` and a bare `&`. `&` followed by a digit is
+    left alone (`2>&1` duplicates a descriptor), which is what the regex this replaced
+    spelled `&(?!\\d)`.
+
+    Fragments are returned with their separators dropped and empties kept, because both
+    callers ask the same two questions of each — what does it redirect to, and what is
+    its verb — and an empty fragment answers neither.
+    """
+    statements: list[str] = []
+    start = index = 0
+    end = len(command)
+    quote = ""
+    while index < end:
+        char = command[index]
+        if quote:
+            step = _skip_quoted(command, index, quote)
+            if char == quote:
+                quote = ""
+            index = step
+            continue
+        if char in "\"'":
+            quote = char
+            index += 1
+            continue
+        width = 0
+        if char in "|&" and index + 1 < end and command[index + 1] == char:
+            width = 2  # `&&`, `||`
+        elif char in SEPARATORS and not (
+            char == "&" and index + 1 < end and command[index + 1].isdigit()
+        ):
+            width = 1
+        if width:
+            statements.append(command[start:index])
+            index += width
+            start = index
+            continue
+        index += 1
+    statements.append(command[start:])
+    return statements
 
 
 def redirect_targets(statement: str) -> list[str]:
@@ -595,7 +655,7 @@ def shell_write_targets(command: str) -> list[str]:
         if value and value not in found:
             found.append(value)
 
-    for statement in STATEMENTS.split(strip_heredocs(command)):
+    for statement in split_statements(strip_heredocs(command)):
         for target in redirect_targets(statement):
             add(target)
         tokens = shell_tokens(statement)
@@ -797,7 +857,7 @@ def switch_targets(command: str) -> list[tuple[str, str]]:
     # `git checkout agent/x` quoted inside a script is text, and this tier's verdict --
     # a refusal with no box and nothing to re-issue -- is the most expensive one to
     # earn by accident.
-    for statement in STATEMENTS.split(strip_heredocs(command)):
+    for statement in split_statements(strip_heredocs(command)):
         tokens = shell_tokens(statement)
         while tokens and (_verb(tokens[0]) in SHELL_PREFIXES or ENV_ASSIGN.match(tokens[0])):
             tokens = tokens[1:]

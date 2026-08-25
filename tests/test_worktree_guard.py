@@ -1717,6 +1717,74 @@ def test_quote_awareness_costs_no_detection(command, expected):
 @pytest.mark.parametrize(
     "command",
     [
+        # the two that blocked a Codex session on 2026-08-24, verbatim in shape: a
+        # conflict-marker search, whose alternation carries both a `|` and a `>`
+        "git merge --no-edit origin/main; git status --short; "
+        'rg -n "^(<<<<<<<|=======|>>>>>>>)" scripts tests',
+        'rg -n -C 30 "^(<<<<<<<|=======|>>>>>>>)" "$box\\scripts\\preview-task.py"',
+        # the same shape without the `>`-run, which is enough on its own
+        'grep -n "a|b>c" devkit/a.py',
+        "awk -F'|' '$1 > \"x\"' logs/harness-events.log",
+        # a separator inside quotes is not a separator, whichever one it is
+        'grep -n "a;b>c" devkit/a.py',
+        'grep -n "a&&b>c" devkit/a.py',
+    ],
+)
+def test_a_separator_inside_quotes_does_not_split_the_statement(command):
+    """Splitting at a quoted separator hands the scanner a fragment whose quote is
+    already open, so the `>` the quote covered reads as a redirection and the rest of
+    the fragment reads as its target: `rg -n "^(<<<<<<<|=======|>>>>>>>)" scripts tests`
+    was blocked as a write to `) scripts tests`, and the box that block cut was reaped
+    as never used minutes later.
+
+    Reversion check: restore the `STATEMENTS` regex and every case here fails, each
+    naming the tail of a quoted pattern as the file the guard is protecting."""
+    assert guard.shell_write_targets(command) == []
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        # the old splitter lost this one: split at the quoted `|`, the redirection ends
+        # up in a fragment whose quote is open, and a quoted span names no target
+        ("git log --format='%h|%s' > devkit/a.log", ["devkit/a.log"]),
+        # and it must still see every write a real separator does divide
+        ("cat x | tee devkit/a.py", ["devkit/a.py"]),
+        ('grep -n "a|b" x; tee devkit/a.py', ["devkit/a.py"]),
+        ("rg 'a|b' x && rm devkit/a.py", ["devkit/a.py"]),
+    ],
+)
+def test_quote_aware_splitting_costs_no_detection(command, expected):
+    assert guard.shell_write_targets(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        ("a && b", ["a ", " b"]),
+        ("a || b", ["a ", " b"]),
+        ("a; b", ["a", " b"]),
+        ("a\nb", ["a", "b"]),
+        ("a | b", ["a ", " b"]),
+        ("a & b", ["a ", " b"]),
+        # a descriptor duplication is not a background `&`, which is what the regex
+        # this replaced spelled `&(?!\d)`
+        ("python x.py 2>&1", ["python x.py 2>&1"]),
+        # quoted separators of every kind stay inside their statement
+        ("rg 'a|b;c&&d' x", ["rg 'a|b;c&&d' x"]),
+        ('rg "a|b" x', ['rg "a|b" x']),
+        # an unbalanced quote swallows the rest: it loses detections, and losing a
+        # detection allows, which is the direction this tier is willing to be wrong in
+        ('echo "x | tee devkit/a.py', ['echo "x | tee devkit/a.py']),
+    ],
+)
+def test_split_statements_cuts_at_unquoted_separators_only(command, expected):
+    assert guard.split_statements(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         'S=/scratch/x.py; printf a > "$S"',
         "tee $OUT",
         "echo x > %TEMP%\\a.py",

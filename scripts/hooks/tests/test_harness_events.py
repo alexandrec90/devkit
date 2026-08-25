@@ -12,6 +12,17 @@ from conftest import load_module
 events = load_module("scripts/hooks/harness_events.py")
 
 
+def _repo(root, name):
+    """A checkout `harness_config.is_devkit_source` will answer `name == "devkit"` for.
+
+    Read from `pyproject.toml` and never from the directory name, which is what lets a
+    box named `devkit--<slug>` still be devkit -- and a `tmp_path` still be a consumer.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(f'[project]\nname = "{name}"\n', encoding="utf-8")
+    return root
+
+
 class TestClean:
     def test_collapses_tabs_and_newlines(self):
         assert events.clean("a\tb\nc  d") == "a b c d"
@@ -113,12 +124,38 @@ class TestLedgerPath:
         monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
         assert events.ledger_path() == tmp_path / "logs" / "harness-events.log"
 
-    def test_unset_means_no_ledger(self, monkeypatch):
+    def test_unset_means_no_ledger_in_a_project_that_vendored_devkit(self, tmp_path, monkeypatch):
         monkeypatch.delenv("DEVKIT_DIR", raising=False)
+        monkeypatch.setattr(events, "REPO_ROOT", _repo(tmp_path, "someproject"))
         assert events.ledger_path() is None
 
-    def test_blank_env_means_no_ledger(self, monkeypatch):
+    def test_unset_falls_back_to_this_copy_when_it_is_devkit_itself(self, tmp_path, monkeypatch):
+        """`$DEVKIT_DIR` is a property of one agent harness's settings, not of the
+        machine, so a session started by another one has no ledger seam at all -- and
+        was told so by `report-harness-defect.py` while standing in the checkout the
+        ledger lives in. Where the copy *is* devkit, no seam is needed."""
+        monkeypatch.delenv("DEVKIT_DIR", raising=False)
+        monkeypatch.setattr(events, "REPO_ROOT", _repo(tmp_path, "devkit"))
+        assert events.ledger_path() == tmp_path / "logs" / "harness-events.log"
+
+    def test_the_fallback_resolves_a_worktree_to_the_checkout_it_was_cut_from(
+        self, tmp_path, monkeypatch
+    ):
+        """devkit develops itself in ephemeral boxes, and a box is destroyed once its
+        PR merges -- so a ledger written inside one takes every report with it."""
+        main = _repo(tmp_path / "devkit", "devkit")
+        (main / ".git" / "worktrees" / "box").mkdir(parents=True)
+        box = _repo(tmp_path / "box", "devkit")
+        (box / ".git").write_text(
+            f"gitdir: {main / '.git' / 'worktrees' / 'box'}\n", encoding="utf-8"
+        )
+        monkeypatch.delenv("DEVKIT_DIR", raising=False)
+        monkeypatch.setattr(events, "REPO_ROOT", box)
+        assert events.ledger_path() == main / "logs" / "harness-events.log"
+
+    def test_blank_env_means_no_ledger(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DEVKIT_DIR", "   ")
+        monkeypatch.setattr(events, "REPO_ROOT", _repo(tmp_path, "someproject"))
         assert events.ledger_path() is None
 
     def test_env_pointing_nowhere_means_no_ledger(self, tmp_path, monkeypatch):
@@ -142,8 +179,11 @@ class TestRecord:
         parsed = dt.datetime.fromisoformat(stamp)
         assert parsed.tzinfo is not None
 
-    def test_no_ledger_is_a_silent_noop(self, monkeypatch):
+    def test_no_ledger_is_a_silent_noop(self, tmp_path, monkeypatch):
+        """Pinned to a consuming copy: in devkit itself there is always a ledger now,
+        and an unpinned run of this would append a test record to the real one."""
         monkeypatch.delenv("DEVKIT_DIR", raising=False)
+        monkeypatch.setattr(events, "REPO_ROOT", _repo(tmp_path, "someproject"))
         assert events.record("agent-report", (("k", "v"),)) is None
 
     def test_unwritable_root_never_raises(self, tmp_path):
