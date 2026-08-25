@@ -56,6 +56,29 @@ needs_live_workspace = pytest.mark.skipif(
     reason=f"{LIVE_WORKSPACE.name} is a workstation-local registry, not part of the checkout",
 )
 
+
+def in_an_ephemeral_box(root: Path) -> bool:
+    """True when `root` is one of the workspace's disposable boxes, not a static checkout.
+
+    Keyed off `worktree.BOXES_DIR_NAME` rather than the literal, so the two cannot drift.
+    """
+    return root.parent.name == worktree.BOXES_DIR_NAME
+
+
+# The narrower marker, for the one assertion that compares the live file against *this*
+# checkout's canonical copy. The live workspace is rendered from the static checkout once
+# a branch merges, so from a box the comparison reads a file describing merged `main`
+# against a canonical copy carrying an un-merged edit -- and reports the edit as drift.
+# Every task that touches `workspace.jsonc` therefore failed the Stop gate at the finish
+# line, with the failure's own first suggestion (`--adopt-workspace`) being the one move
+# that deletes the branch's edit. Rendering early is not the answer either: the live file
+# would then point VS Code at a task shape the *static* checkout's scripts cannot serve
+# until the same branch merges. So the check stays exactly where it means something.
+needs_the_static_checkout = pytest.mark.skipif(
+    in_an_ephemeral_box(REPO_ROOT),
+    reason="the live workspace is rendered from the static checkout after a branch merges",
+)
+
 __all__ = [
     "LIVE_WORKSPACE",
     "REPO_ROOT",
@@ -67,8 +90,10 @@ __all__ = [
     "gh_steps_without_repo_context",
     "git_policy",
     "harness_config",
+    "in_an_ephemeral_box",
     "load_script",
     "needs_live_workspace",
+    "needs_the_static_checkout",
     "sweep",
     "task_slug",
     "vendor_manifest",

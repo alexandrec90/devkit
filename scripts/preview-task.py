@@ -36,12 +36,13 @@ pure, because "the same branch reached by two routes" is exactly the shape that 
 tedious to reproduce by hand and cheap to assert.
 
 Usage:
-    python preview-task.py                 # menu, then preview the row you pick
+    python preview-task.py                 # menu, then preview the row(s) you pick
     python preview-task.py --list          # print the menu and exit (agents: --json)
     python preview-task.py --pick 3        # take row 3 without asking
     python preview-task.py --all           # re-serve every standing preview (post-reboot)
     python preview-task.py --down          # menu, then STOP the picked row's stack
     python preview-task.py --pick-ref carameli:agent/comic-book-ui-0820  # what the task sends
+    python preview-task.py --pick-ref "carameli:agent/a-0824 carameli:agent/b-0824"  # several
     python preview-task.py --refresh       # rebuild the dropdown's option file and exit
     python preview-task.py --pick 3 --no-wait  # return when the containers start, not
                                                # when what they serve answers
@@ -52,6 +53,25 @@ reaches by clicking a task, so the task resolves one `${input:...}` -- a checkou
 the refs belonging to it -- and sends the answer as `--pick-ref <project>:<ref>`. The
 colon is a safe separator rather than a hopeful one: `git check-ref-format` refuses a ref
 that contains one.
+
+**The row list is a checkbox list, and several rows are one run.** Comparing two branches
+side by side is the ordinary way to use this task, so `previewRow` is a `multiPick` and
+the ticked rows arrive joined by `PICK_LIST_SEP` -- a space, refused inside a ref for the
+same reason the colon is, so neither separator can fall inside the half that varies.
+`serve_all` starts the boxes **in turn** and then waits on all of them **at once**: one
+git repo, one port registry and one image builder say the starts must not overlap, while
+the wait is a cold container running `npm install` and has nothing to serialise. So N
+boxes cost roughly the slowest one rather than the sum, and no tab opens on a refused
+connection because each row is still reported only once its own URL has answered.
+
+**Nothing here can spin up a second copy of a ref that is already on a port**, and two
+tiers say so. `serve_target` names the box a row would be served in and `dedupe` drops a
+later pick that resolves to one an earlier pick already claimed -- the case where a stale
+row and a standing row name the same box, or where `--ui` collapses two rows onto one
+name. Underneath, `worktree.plan_preview` looks that name up among the live boxes and
+*refreshes* what it finds rather than cutting anything, so a re-pick lands back on the
+port the box already holds whether it was picked as a standing row, as a stale branch row
+drawn before the box existed, or typed by hand.
 
 The extension that draws those lists (`rioj7.command-variable`) cannot run a command to
 build them; it can only read a **file**. So `write_menu` saves one on every run of this
@@ -195,6 +215,14 @@ MENU_CACHE = REPO_ROOT / "logs" / "preview-menu.json"
 # The separator is safe rather than merely conventional: `git check-ref-format` refuses a
 # ref containing a colon, so the first one is always the one between the two halves.
 PICK_SEP = ":"
+
+# What joins several ticked rows into that one string, and it is chosen on the same terms
+# as the colon above rather than to match the `project` picker's comma: a comma is legal
+# in a ref name and a space is not, so this is the only separator that cannot land inside
+# the half that varies. It does assume no checkout is named with a space in it, which is
+# the registry's own assumption -- `register()` builds the first dropdown from directory
+# names, and a `COMPOSE_PROJECT_NAME` could not carry one anyway.
+PICK_LIST_SEP = " "
 
 # The ref half of a pick that means "this list is stale, look again".
 RESCAN = "__rescan__"
@@ -484,6 +512,19 @@ def parse_pick(text: str) -> tuple[str, str]:
     return (project, ref) if sep else ("", project)
 
 
+def split_picks(text: str) -> list[str]:
+    """The `<project>:<ref>` tokens in one `--pick-ref` value, in the order they were ticked.
+
+    Splitting on **any** run of whitespace rather than on `PICK_LIST_SEP` exactly, because
+    the value also reaches this script through a shell prompt and a task argv, and the one
+    thing that survives all of those unchanged is that no token contains a space. Repeats
+    are dropped here so the caller never has to think about a value the extension emitted
+    twice; picks that merely *land in the same box* are a different question and belong to
+    `dedupe`, which can name what it dropped.
+    """
+    return list(dict.fromkeys(text.split()))
+
+
 def unresolved(text: str) -> bool:
     """True when `--pick-ref` carries VS Code's own placeholder rather than an answer.
 
@@ -520,6 +561,29 @@ def resolve_pick(text: str, candidates: list[Candidate]) -> Candidate | None:
     if project and ref:
         return Candidate(project=project, ref=ref, kind=KIND_BRANCH)
     raise ValueError(f"--pick-ref {text!r} matches no row and names no checkout to serve it from")
+
+
+def resolve_picks(text: str, candidates: list[Candidate]) -> tuple[list[Candidate], bool]:
+    """Every row a `--pick-ref` value names, and whether one of them asked for a rescan.
+
+    The two answers are separate because a multi-pick can carry both: ticking `Rescan`
+    alongside three real rows is a reasonable thing to do with a checkbox list, and it
+    means *serve these, and the list was stale* rather than *serve nothing*. `main` prints
+    the rescan note only when nothing else was picked, since the rescan itself has already
+    happened by the time either is read.
+
+    A single unservable token fails the whole value rather than being skipped: `--pick-ref`
+    is machine-written, so a token nothing can be made of is a bug upstream, and quietly
+    serving the other three would hide it behind a preview that worked.
+    """
+    picked, rescan = [], False
+    for token in split_picks(text):
+        row = resolve_pick(token, candidates)
+        if row is None:
+            rescan = True
+        else:
+            picked.append(row)
+    return picked, rescan
 
 
 def rescan_row(project: str, as_of: str) -> dict[str, str]:
@@ -603,21 +667,29 @@ def menu_payload(
     return {"generated": stamp.isoformat(), "asOf": as_of, "projects": entries, "rows": rows}
 
 
-def parse_choice(text: str, count: int) -> tuple[str, int]:
-    """`("pick", n)`, `("all", 0)`, `("quit", 0)`, or `("again", 0)` for a retry.
+def parse_choice(text: str, count: int) -> tuple[str, list[int]]:
+    """`("pick", [n, ...])`, `("all", [])`, `("quit", [])`, or `("again", [])` for a retry.
 
     Separated from the reading so the whole grammar can be asserted without a terminal.
     A blank line is `quit` rather than `again`: pressing Enter at a menu is how someone
     who opened the wrong task gets out of it, and looping there would trap them.
+
+    Several numbers are one answer -- `1 3`, `1,3`, `1, 3` -- because the dropdown this
+    menu is the fallback for is a checkbox list, and a fallback that can only take one row
+    turns `Rescan` into a dead end for exactly the caller who wanted two. **One bad token
+    rejects the whole line** rather than being skipped: the numbers are positions in a
+    menu the reader is looking at, so silently serving two of the three they typed is the
+    one outcome they cannot see happen.
     """
     answer = text.strip().lower()
     if answer in ("", "q", "quit", "n", "no"):
-        return ("quit", 0)
+        return ("quit", [])
     if answer in ("a", "all"):
-        return ("all", 0)
-    if answer.isdigit() and 1 <= int(answer) <= count:
-        return ("pick", int(answer))
-    return ("again", 0)
+        return ("all", [])
+    tokens = answer.replace(",", " ").split()
+    if tokens and all(t.isdigit() and 1 <= int(t) <= count for t in tokens):
+        return ("pick", list(dict.fromkeys(int(t) for t in tokens)))
+    return ("again", [])
 
 
 def preview_kwargs(candidate: Candidate, ui: bool = False) -> dict:
@@ -637,6 +709,51 @@ def preview_kwargs(candidate: Candidate, ui: bool = False) -> dict:
     if candidate.box:
         return {"target": candidate.box}
     return {"target": candidate.project, "branch": candidate.ref}
+
+
+def serve_target(candidate: Candidate, ui: bool = False) -> str:
+    """The name of the box this row would be served in. Two rows sharing one are one row.
+
+    This is `preview_kwargs` read as an identity rather than as arguments, and it has to
+    agree with it exactly -- a row carrying a live box is served in that box, and every
+    other row is served in whatever `worktree.preview_box_name` calls the ref. Deriving it
+    from the same two branches of the same question is what stops the two drifting: a
+    dedupe keyed on `(project, ref)` instead would miss two rows whose refs slug to one
+    name, and would split a `--ui` pick from the row it collapses onto.
+    """
+    kwargs = preview_kwargs(candidate, ui=ui)
+    branch = kwargs.get("branch")
+    if branch is None:
+        return kwargs["target"]
+    return worktree.preview_box_name(kwargs["target"], branch, ui=ui)
+
+
+def dedupe(chosen: list[Candidate], ui: bool = False) -> tuple[list[Candidate], list[str]]:
+    """The picks worth serving, and a line about each one dropped for landing in a box
+    an earlier pick already claimed.
+
+    `worktree.plan_preview` is idempotent -- it refreshes a standing box rather than
+    cutting a second one -- so serving a duplicate would be correct and merely wasteful:
+    a second `compose up` on a stack the previous pick had just brought up, and a second
+    wait on the URL it publishes, both of them silent about why the same branch was
+    reported twice. Dropping it here is what makes the checkbox list safe to be careless
+    with, and the note is what stops the drop looking like a lost pick.
+    """
+    kept: list[Candidate] = []
+    seen: dict[str, Candidate] = {}
+    notes: list[str] = []
+    for candidate in chosen:
+        target = serve_target(candidate, ui=ui)
+        first = seen.get(target)
+        if first is None:
+            seen[target] = candidate
+            kept.append(candidate)
+            continue
+        notes.append(
+            f"{candidate.project} {candidate.ref} is served by the same box as "
+            f"{first.ref} ({target}) -- picked once, not twice."
+        )
+    return kept, notes
 
 
 def url_report(candidate: Candidate, urls: tuple[tuple[str, int, str], ...]) -> str:
@@ -718,6 +835,62 @@ def wait_for_ready(
         if waited - spoken >= tick:
             spoken = waited
             echo(f"  ... {waited:.0f}s: {url} is not answering yet (the container is up)")
+        sleep(poll)
+
+
+def wait_for_all(
+    urls: list[str],
+    timeout: float = READY_TIMEOUT,
+    poll: float = READY_POLL,
+    tick: float = READY_TICK,
+    check=probe,
+    sleep=time.sleep,
+    clock=time.monotonic,
+) -> dict[str, tuple[bool, float]]:
+    """Poll every URL against ONE deadline, round-robin. `{url: (ready, seconds waited)}`.
+
+    This is the half of a multi-row run that must not be sequential. Starting the boxes
+    one after another is forced -- a shared git repo, one port registry, one image builder
+    -- but a cold box's minutes are spent inside a container that is already running, so
+    waiting on them in turn would charge the reviewer the *sum* of those minutes for
+    something the machine was doing simultaneously anyway. Ticking two branches would then
+    be slower than clicking the task twice, which is the whole feature undone.
+
+    A single URL delegates to `wait_for_ready`, which is not merely an optimisation: with
+    nothing to interleave the two are the same wait, and one implementation of "is it up
+    yet" is one place for that to be wrong.
+    """
+    if len(urls) < 2:
+        # By keyword, every one of them: `serve`'s tests substitute a two-argument stand-in
+        # for `wait_for_ready`, and a positional call here would hand that stand-in five
+        # collaborators it never asked for -- a TypeError from inside the wait, in the one
+        # test whose subject is what the wait printed.
+        return {
+            url: wait_for_ready(
+                url, timeout=timeout, poll=poll, tick=tick, check=check, sleep=sleep, clock=clock
+            )
+            for url in urls
+        }
+    started = clock()
+    pending, outcomes, spoken = list(dict.fromkeys(urls)), {}, 0.0
+    while True:
+        for url in list(pending):
+            if check(url):
+                outcomes[url] = (True, clock() - started)
+                pending.remove(url)
+        if not pending:
+            return outcomes
+        waited = clock() - started
+        if waited >= timeout:
+            # Whoever has not answered by the shared deadline gets the same verdict, and
+            # the elapsed total rather than a per-URL one: they were all waited on at once.
+            return {**outcomes, **{url: (False, waited) for url in pending}}
+        if waited - spoken >= tick:
+            spoken = waited
+            echo(
+                f"  ... {waited:.0f}s: {len(pending)} of {len(urls)} not answering yet "
+                f"({', '.join(pending)})"
+            )
         sleep(poll)
 
 
@@ -941,7 +1114,7 @@ def write_menu(payload: dict, path: Path | None = None) -> Path | None:
 
 def read_choice(
     candidates: list[Candidate], now: _dt.datetime | None = None, dropped: int = 0
-) -> tuple[str, int]:
+) -> tuple[str, list[int]]:
     """Show the menu and read one answer, retrying on anything unparseable.
 
     EOF is `quit`, not an error: the non-interactive callers that produce it -- an agent,
@@ -952,33 +1125,50 @@ def read_choice(
     echo()
     standing = sum(1 for candidate in candidates if candidate.kind == KIND_STANDING)
     while True:
-        prompt = f"Pick a number 1-{len(candidates)}"
+        prompt = f"Pick a number 1-{len(candidates)}, or several (`1 3`)"
         if standing:
             prompt += f", `a` for all {standing} standing preview(s)"
         echo(f"{prompt}, or Enter to quit:")
         line = sys.stdin.readline()
         if line == "":
-            return ("quit", 0)
+            return ("quit", [])
         action, index = parse_choice(line, len(candidates))
         if action != "again":
             return (action, index)
         echo("  not one of the options -- try again.")
 
 
-def serve(
+@dataclass(frozen=True)
+class Started:
+    """What `start` hands `finish`: one row, part-way up.
+
+    `plan` is None whenever there is nothing further to say -- a failure, or a `--down`
+    run, which has already said all of it. That is the flag `finish` reads rather than a
+    second boolean, because "is there a stack to report on" and "is there a plan" are one
+    question and two spellings of it would eventually disagree.
+    """
+
+    candidate: Candidate
+    ok: bool
+    began: float = 0.0
+    primary: str = ""
+    plan: worktree.PreviewPlan | None = None
+
+
+def start(
     candidate: Candidate,
     workspace: Path,
     down: bool = False,
     fetch: bool = True,
-    open_it: bool = True,
     ui: bool = False,
-    wait: bool = True,
-) -> bool:
-    """Preview one candidate through `worktree.py`, then say where it is. True on success.
+) -> Started:
+    """Bring one row's containers up (or stop them), reporting as far as compose gets.
 
     The three things printed around the `worktree.py` call are the whole difference
     between this and running that tool by hand, and each answers a question a reviewer
-    asked out loud: how long did that take, why is the page empty, and where is it.
+    asked out loud: how long did that take, why is the page empty, and where is it. The
+    last belongs to `finish`, because on a multi-row run it cannot be answered until every
+    box has been given the same deadline.
     """
     verb = "Stopping" if down else "Bringing up"
     mode = " (UI only)" if ui and not down else ""
@@ -1013,16 +1203,16 @@ def serve(
         # -- the one shape of failure a one-click task must never produce, because the
         # remedy was already written and the reader had to find it under a stack trace.
         echo(f"  failed: {exc}")
-        return False
+        return Started(candidate, ok=False)
     ok, notes = worktree.apply_preview(plan, workspace)
     for note in notes:
         echo(f"  {note}")
     if not ok:
         echo(f"  failed: {plan.refusal or 'the stack did not come up'}")
-        return False
+        return Started(candidate, ok=False)
     if down:
         echo(f"  {candidate.ref} stopped; its box and port lease are kept.")
-        return True
+        return Started(candidate, ok=True)
     if not plan.up:
         # `plan.up` false on an up-run means the checkout has no compose stack, so
         # nothing was started -- and the slot's URLs may still be published, so waiting
@@ -1032,31 +1222,107 @@ def serve(
             f"  nothing was started: {plan.path} has no compose stack to bring up. "
             f"`python scripts/worktree.py list` says what state the box is in."
         )
-        return False
+        return Started(candidate, ok=False)
     echo(f"  containers started in {time.monotonic() - started:.0f}s")
-    primary = worktree.primary_url(plan.urls)
+    return Started(
+        candidate,
+        ok=True,
+        began=started,
+        primary=worktree.primary_url(plan.urls),
+        plan=plan,
+    )
+
+
+def finish(
+    started: Started,
+    outcome: tuple[bool, float] | None = None,
+    open_it: bool = True,
+) -> bool:
+    """Report where one row landed, and open it. True on success.
+
+    `outcome` is what the wait made of this row's URL, or None when there was no wait to
+    make anything of it -- `--no-wait`, or a slot that publishes nothing.
+    """
+    if started.plan is None:
+        return started.ok
     ready = True
-    if wait and primary:
-        echo(f"  waiting for {primary} -- a cold box installs its dependencies first ...")
-        ready, waited = wait_for_ready(primary)
+    if outcome is not None:
+        ready, waited = outcome
         echo(
-            f"  {primary} answered after {waited:.0f}s"
+            f"  {started.primary} answered after {waited:.0f}s"
             if ready
-            else f"  [warn] {primary} still silent after {waited:.0f}s -- it may still be "
-            f"starting: `docker compose -p {plan.box.name} logs -f` says what it is doing"
+            else f"  [warn] {started.primary} still silent after {waited:.0f}s -- it may still "
+            f"be starting: `docker compose -p {started.plan.box.name} logs -f` says what it "
+            f"is doing"
         )
-        echo(f"  total: {time.monotonic() - started:.0f}s")
+        echo(f"  total: {time.monotonic() - started.began:.0f}s")
     echo()
-    echo(url_report(candidate, plan.urls))
+    echo(url_report(started.candidate, started.plan.urls))
     # Never opened on a URL that has not answered: a tab on a refused connection is the
     # failure this whole wait exists to stop reporting, and reloading it by hand is the
     # step the reviewer should not have to know to take.
-    if open_it and primary and ready:
+    if open_it and started.primary and ready:
         try:
-            webbrowser.open(primary)
+            webbrowser.open(started.primary)
         except OSError:  # pragma: no cover - a headless host has no browser to fail with
             pass
     return True
+
+
+def serve_all(
+    chosen: list[Candidate],
+    workspace: Path,
+    down: bool = False,
+    fetch: bool = True,
+    open_it: bool = True,
+    ui: bool = False,
+    wait: bool = True,
+) -> int:
+    """Preview every picked row. Returns how many of them failed.
+
+    Two phases, and which half is sequential is the whole design. **Starting is** -- the
+    boxes come off one git repo, one port registry and one image builder, and `worktree.py`
+    serialises the parts of that which need it, so overlapping the starts would buy
+    contention rather than time. **Waiting is not**: a cold box spends its minutes running
+    `npm install` inside a container that is already up, which the machine does for all of
+    them at once whether or not anything is watching. Waiting in turn would therefore
+    charge the reviewer the sum of those minutes for work that had already overlapped, and
+    ticking two boxes would come out slower than clicking the task twice.
+
+    Each row is still reported and opened only once **its own** URL has answered, so the
+    fast box is not held behind the slow one and no tab opens on a refused connection.
+    """
+    started = [start(row, workspace, down=down, fetch=fetch, ui=ui) for row in chosen]
+    pending = [row.primary for row in started if row.primary] if wait else []
+    if len(pending) == 1:
+        echo(f"  waiting for {pending[0]} -- a cold box installs its dependencies first ...")
+    elif pending:
+        echo(f"\n  waiting for all {len(pending)} at once -- a cold box installs first ...")
+        for url in pending:
+            echo(f"    {url}")
+    outcomes = wait_for_all(pending) if pending else {}
+    return sum(1 for row in started if not finish(row, outcomes.get(row.primary), open_it))
+
+
+def serve(
+    candidate: Candidate,
+    workspace: Path,
+    down: bool = False,
+    fetch: bool = True,
+    open_it: bool = True,
+    ui: bool = False,
+    wait: bool = True,
+) -> bool:
+    """One row, through `serve_all`. True on success.
+
+    Kept as its own name because one row is what a caller usually has, and because a
+    single-row run is the shape every assertion about the *output* of a preview is written
+    against -- there is nothing here for a second box to change.
+    """
+    return (
+        serve_all([candidate], workspace, down=down, fetch=fetch, open_it=open_it, ui=ui, wait=wait)
+        == 0
+    )
 
 
 # --- CLI --------------------------------------------------------------------
@@ -1075,7 +1341,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--pick-ref",
         default="",
         metavar="PROJECT:REF",
-        help="take this ref without asking -- what the VS Code dropdown sends",
+        help="take these refs without asking, space-separated -- what the VS Code dropdown sends",
     )
     parser.add_argument(
         "--refresh",
@@ -1160,21 +1426,22 @@ def main(argv: list[str] | None = None) -> int:
             echo(render_menu(candidates, dropped=dropped))
         return 0
 
-    picked = None
+    picked: list[Candidate] = []
     if args.pick_ref:
         try:
-            picked = resolve_pick(args.pick_ref, everything)
+            picked, rescan = resolve_picks(args.pick_ref, everything)
         except ValueError as exc:
             echo(str(exc))
             return 2
-        if picked is None:
+        if rescan and not picked:
             # The `Rescan` row picks nothing on purpose, and the scan it asked for has
             # already happened above. All that is left of it is to ask, which is what the
-            # terminal menu below already is.
+            # terminal menu below already is. Ticked ALONGSIDE real rows it says only that
+            # the list was stale, and those rows are still the answer.
             echo("\nRescanned. Pick from the fresh list below -- the dropdown gets it next time.")
 
-    if picked is not None:
-        chosen = [picked]
+    if picked:
+        chosen = picked
     elif not candidates:
         echo(render_menu(candidates))
         return 0
@@ -1197,22 +1464,25 @@ def main(argv: list[str] | None = None) -> int:
         chosen = (
             [c for c in candidates if c.kind == KIND_STANDING]
             if action == "all"
-            else [candidates[index - 1]]
+            else [candidates[n - 1] for n in index]
         )
 
-    failures = 0
-    for candidate in chosen:
-        served = serve(
-            candidate,
-            workspace,
-            down=args.down,
-            fetch=args.fetch,
-            open_it=args.open,
-            ui=args.ui,
-            wait=args.wait,
-        )
-        if not served:
-            failures += 1
+    # Last, so it covers every route in: the dropdown can tick a stale row and the standing
+    # box that replaced it, `--all` and a `--pick-ref` can name one box between them, and
+    # `--ui` collapses rows that are distinct in the menu onto a single box name.
+    chosen, collapsed = dedupe(chosen, ui=args.ui)
+    for note in collapsed:
+        echo(f"  {note}")
+
+    failures = serve_all(
+        chosen,
+        workspace,
+        down=args.down,
+        fetch=args.fetch,
+        open_it=args.open,
+        ui=args.ui,
+        wait=args.wait,
+    )
     return 1 if failures else 0
 
 
