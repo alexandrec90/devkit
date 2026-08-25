@@ -632,11 +632,11 @@
 				// `previewProject` asks which one, `previewRow` lists that one's refs. See
 				// ACTIONS["preview"].
 				//
-				// `focus` because the terminal menu is still reachable — the `Rescan` row falls
-				// through to it — and without it that answer is typed into whatever had focus
-				// when the task was clicked.
+				// `focus` because the terminal menu is still reachable — a pick that no longer
+				// matches a row lands there — and without it that answer is typed into
+				// whatever had focus when the task was clicked.
 				"label": "Preview: Open a UI Branch",
-				"detail": "Asks which checkout, then which of its refs — preview boxes already standing, live agent boxes, open PRs, recent agent/ branches on origin — and brings each one's stack up in a box of its own, opening the URL it publishes. Tick as many refs as you want: the boxes start in turn and then wait together, so several cost the slowest rather than the sum, and a ref already standing on a port is refreshed there instead of being cut a second time. Both lists are what the last run found; every checkout ends in a 'Rescan' row that looks again and then asks in the terminal. Cutting a box for the first time builds its images and installs the frontend's dependencies — about three minutes, reported stage by stage, and the tab opens only once the page answers; re-serving one that is already standing takes seconds. A running preview costs CPU until 'Machine: Reclaim Resources' stops it.",
+				"detail": "Asks which checkout, then which of its refs — its default branch first, then preview boxes already standing, live agent boxes, open PRs and recent agent/ branches on origin — and brings each one's stack up in a box of its own, opening the URL it publishes. Tick as many refs as you want: the boxes start in turn and then wait together, so several cost the slowest rather than the sum, and a ref already standing on a port is refreshed there instead of being cut a second time. The lists track GitHub on their own — the scheduled reconcile pass rebuilds them every quarter hour, so a PR that opened shows up and one that merged drops off. Cutting a box for the first time builds its images and installs the frontend's dependencies — about three minutes, reported stage by stage, and the tab opens only once the page answers; re-serving one that is already standing takes seconds. A running preview costs CPU until 'Machine: Reclaim Resources' stops it.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -676,10 +676,10 @@
 				// with a live box is served from that box's worktree as it stands, unpushed
 				// work included. See ACTIONS["preview-ui-host"].
 				//
-				// `focus` for the same reason as the full preview: the Rescan row falls
-				// through to the terminal.
+				// `focus` for the same reason as the full preview: the terminal menu is
+				// still reachable when a pick matches no row.
 				"label": "Preview: Serve UI Branches on Host",
-				"detail": "No Docker, no backend: serves each ticked ref's frontend straight from a host Vite dev server on its own port and opens the URLs — seconds to start, after a one-off npm install per new ref (about a minute). A ref with a live agent box is served from that box's worktree, unpushed work included; anything else gets a kept copy under .ui-previews/. API-backed views show real data when the static checkout's stack happens to be up and their offline state when it is not — a change that needs the backend wants the full box preview above. The servers live in this terminal: closing it, or Ctrl+C, stops them all.",
+				"detail": "No Docker, no backend: serves each ticked ref's frontend straight from a host Vite dev server on its own port and opens the URLs — seconds to start, after a one-off npm install per new ref (about a minute). A ref with a live agent box is served from that box's worktree, unpushed work included; anything else gets a kept copy under .ui-previews/. API-backed views show real data when the static checkout's stack happens to be up and their offline state when it is not — a change that needs the backend wants the full box preview above. The servers end when this terminal does, by three separate means — Ctrl+C, a job object the kernel enforces, and a watch on the terminal itself — and 'Preview: Stop Host UI Servers' ends any that outlived all three.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -706,6 +706,38 @@
 				// are free-scanned per server, so instances cannot collide.
 				"runOptions": {
 					"instanceLimit": 4
+				},
+				"problemMatcher": []
+			},
+			{
+				// The way out when a host preview outlived its terminal. It should never be
+				// needed — the script's job object and its owner watch both end the servers
+				// without anyone clicking anything — and it exists anyway because for months
+				// nothing did, and three Vite servers sat on ports 5300–5303 for a whole
+				// afternoon with no way to find them short of Task Manager. A guarantee you
+				// cannot check by hand is one you end up trusting on faith.
+				//
+				// No picker and no `focus`: it asks nothing, prints what it stopped, and is
+				// over in under a second. See ACTIONS["preview-ui-stop"].
+				"label": "Preview: Stop Host UI Servers",
+				"detail": "Stops every host Vite preview server running on this machine, whichever terminal started it, and says which ones it stopped. Nothing to stop is the normal answer — closing a preview's terminal already ends its servers — so this is for the one that got away. Docker previews are untouched: 'Machine: Reclaim Resources' is the verb for those.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"devkit",
+					"preview-ui-stop"
+				],
+				"icon": {
+					"id": "debug-stop",
+					"color": "terminal.ansiBrightRed"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"clear": true,
+					"close": false
 				},
 				"problemMatcher": []
 			},
@@ -2080,11 +2112,13 @@
 			{
 				// The dropdown pair this task asks with. The extension cannot RUN anything to
 				// build a list, so both read the option file `preview-task.py` writes under
-				// devkit's `logs/` on every run — which makes the list the PREVIOUS scan. Every
-				// checkout's rows therefore end in a `Rescan` row that says so, and picking it
-				// rescans and falls through to the terminal menu. `Preview: Restart Standing
-				// Previews` asks nothing and writes the same file, so it is the way to bootstrap
-				// one on a machine that has never run either task.
+				// devkit's `logs/` — which makes the list a SCAN, not live state. What keeps it
+				// current is not a task run: `worktree.py reconcile` rewrites the file on every
+				// pass, and the scheduled pass runs every fifteen minutes, so open PRs appear
+				// and merged ones leave without anyone asking. Each project's first row is its
+				// default branch, and the header row carries the scan's timestamp. `Preview:
+				// Restart Standing Previews` writes the same file and is the way to bootstrap
+				// one on a machine where the scheduled pass has never run.
 				//
 				// `previewProject` is NESTED inside this input rather than declared beside it,
 				// because the second list depends on the first: the extension resolves a nested

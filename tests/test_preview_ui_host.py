@@ -10,6 +10,7 @@ touching a real filesystem uses `tmp_path`; nothing here starts npm, git or a so
 
 from __future__ import annotations
 
+import os
 import types
 from pathlib import Path
 
@@ -431,6 +432,236 @@ def test_watch_stops_everything_on_ctrl_c(monkeypatch, capsys):
     assert "Stopping every server" in capsys.readouterr().out
 
 
+# --- the teardown nets ----------------------------------------------------------
+#
+# Three of them, because the one this file used to rely on -- the `finally` around
+# `watch` -- turned out not to fire in the case that actually happens. Closing a VS Code
+# terminal does not always deliver a Ctrl+C to the task's python, and on 2026-08-25 three
+# Vite servers were found still serving on 5300/5301/5303 hours after their terminals had
+# gone, with their owning pythons still sitting in the poll loop. Each test below pins one
+# net; none of them can be checked by looking at a terminal, which is why they exist.
+
+
+def test_watch_stops_everything_when_the_terminal_that_started_it_is_gone(monkeypatch, capsys):
+    """The net for the exact failure this tier exists for: nobody interrupts.
+
+    The departed owner is a third way out of the loop, joining "the last server exited"
+    and Ctrl+C, and it leaves by the same `finally` they do -- so the stopping is written
+    once and this stays a decision about *when*.
+    """
+    stopped = []
+    monkeypatch.setattr(host, "stop", lambda server: stopped.append(server))
+    servers = [(types.SimpleNamespace(ref="a"), FakeServer(polls=(None,)))]
+    host.watch(servers, sleep=lambda s: None, owner=99, alive=lambda pid: False)
+    assert stopped == [servers[0][1]]
+    assert "terminal that started these servers is gone" in capsys.readouterr().out
+
+
+def test_watch_keeps_going_while_the_terminal_lives(monkeypatch):
+    """The other half: a live owner must never end a preview somebody is looking at."""
+    monkeypatch.setattr(host, "stop", lambda server: None)
+    servers = [(types.SimpleNamespace(ref="a"), FakeServer(polls=(None, None, 0)))]
+    polls = []
+    host.watch(servers, sleep=lambda s: polls.append(s), owner=99, alive=lambda pid: True)
+    assert polls  # it waited rather than returning on the first check
+
+
+def test_watch_with_no_owner_never_asks_whether_one_is_alive():
+    """An owner of 0 means "started by nothing this can watch" -- an agent's detached
+    shell, or a parent that had already gone by the time `main` looked."""
+
+    def explode(pid):
+        raise AssertionError("liveness must not be probed when there is no owner")
+
+    servers = [(types.SimpleNamespace(ref="a"), FakeServer(polls=(0,)))]
+    host.watch(servers, sleep=lambda s: None, owner=0, alive=explode)
+
+
+def test_this_process_is_alive_and_pid_zero_is_not():
+    """`pid_alive` against the two answers a machine can always be asked for."""
+    assert host.pid_alive(os.getpid()) is True
+    assert host.pid_alive(0) is False
+
+
+def test_stop_pid_kills_the_tree_on_windows(monkeypatch):
+    calls = []
+    monkeypatch.setattr(host.os, "name", "nt")
+    host.stop_pid(77, run=lambda argv, **kwargs: calls.append(argv) or result())
+    assert calls == [["taskkill", "/T", "/F", "/PID", "77"]]
+
+
+def test_a_job_object_is_available_and_adopts_this_process(scratch_registry):
+    """The strongest net, and the only one that survives `main` being killed outright.
+
+    Adopting THIS process is safe -- the handle is dropped at the end of the test, and a
+    job whose only member is a process that outlives it kills nothing. It goes through
+    `scratch_registry.real_job` because the autouse fixture has stubbed the module
+    attribute out for everyone else, this being the one test that wants the real thing.
+    """
+    if os.name != "nt":
+        pytest.skip("job objects are a Windows facility")
+    job = scratch_registry.real_job()
+    assert job is not None
+    assert host.adopt(job, os.getpid()) is True
+
+
+def test_adopting_into_no_job_is_a_quiet_false():
+    assert host.adopt(None, os.getpid()) is False
+
+
+def test_the_kernel_calls_are_prototyped_for_64_bit_handles():
+    """Every Win32 call in this file goes through one loader, and this is what the
+    loader is for: ctypes defaults an unprototyped argument to `c_int`, which truncates
+    a 64-bit HANDLE. The call then fails with a Win32 error nothing prints, and the net
+    it belonged to is silently not a net -- the failure mode the whole tier exists to
+    end. Asserting the prototypes is cheaper than diagnosing that twice."""
+    if os.name != "nt":
+        pytest.skip("kernel32 is a Windows facility")
+    from ctypes import wintypes
+
+    kernel32 = host._kernel32()
+    assert kernel32.OpenProcess.restype is wintypes.HANDLE
+    assert kernel32.CreateJobObjectW.restype is wintypes.HANDLE
+    assert kernel32.AssignProcessToJobObject.argtypes == [wintypes.HANDLE, wintypes.HANDLE]
+    assert kernel32.CloseHandle.argtypes == [wintypes.HANDLE]
+
+
+def test_there_is_no_kernel32_to_load_off_windows(monkeypatch):
+    """The POSIX branch of every net: `stop` uses the process handle, and the job object
+    and the adopt are simply absent rather than an ImportError on `ctypes.WinDLL`.
+
+    Patches `sys.platform` and not `os.name` on purpose -- that is the guard the loader
+    reads, because it is the only one mypy narrows on, and CI typechecks this file on
+    Linux. A test that patched the other one would pass while the real guard went
+    unexercised.
+    """
+    monkeypatch.setattr(host.sys, "platform", "linux")
+    assert host._kernel32() is None
+
+
+# --- the registry ---------------------------------------------------------------
+
+
+def test_a_registry_that_will_not_read_is_empty_rather_than_fatal(tmp_path):
+    """Both failure shapes, because a corrupt file must cost `--stop`, never a preview."""
+    assert host.read_registry(tmp_path / "absent.json") == []
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    assert host.read_registry(broken) == []
+
+
+def test_the_registry_is_moved_into_place_and_leaves_no_scratch_behind(tmp_path):
+    """Named on `write_registry` itself rather than reached through `record`, because
+    both properties are its own. The directory is created, so the first run on a fresh
+    clone records like every later one; and the JSON arrives by a rename, so a reader
+    never sees the truncated-then-refilled middle -- a session-start report that caught
+    that file mid-write would call every live server dead and advertise no leak.
+    """
+    path = tmp_path / "logs" / "preview-servers.json"
+    host.write_registry([{"pid": 7, "port": 5300}], path)
+    assert host.read_registry(path) == [{"pid": 7, "port": 5300}]
+    assert [p.name for p in path.parent.iterdir()] == [path.name]
+
+
+def test_a_registry_that_will_not_write_costs_the_record_not_the_preview(tmp_path):
+    """The write half of the same totality the reader has: a server that cannot be
+    written down still has its job object and its owner watch, so the preview is worth
+    more than the note about it."""
+    wall = tmp_path / "not-a-directory"
+    wall.write_text("", encoding="utf-8")
+    host.write_registry([{"pid": 7}], wall / "preview-servers.json")
+    wrong_shape = tmp_path / "shape.json"
+    wrong_shape.write_text('{"pid": 1}', encoding="utf-8")
+    assert host.read_registry(wrong_shape) == []
+
+
+def test_recording_replaces_an_entry_with_the_same_pid(scratch_registry):
+    """Windows recycles pids, so the same number can name two servers over a machine's
+    life. The newer record is the true one; keeping both would offer `--stop` a port that
+    moved."""
+    host.record([{"pid": 7, "port": 5300, "ref": "old"}])
+    host.record([{"pid": 7, "port": 5301, "ref": "new"}, {"pid": 8, "port": 5302}])
+    entries = host.read_registry()
+    assert [entry["pid"] for entry in entries] == [7, 8]
+    assert entries[0]["ref"] == "new"
+
+
+def test_forgetting_drops_only_the_pids_named(scratch_registry):
+    host.record([{"pid": 7, "port": 5300}, {"pid": 8, "port": 5301}])
+    host.forget([7])
+    assert [entry["pid"] for entry in host.read_registry()] == [8]
+
+
+def test_a_server_whose_owner_still_watches_is_not_an_orphan():
+    """A concurrent run's server. `instanceLimit` is 4, so this is the ordinary case."""
+    entry = {"pid": 7, "owner": 8, "port": 5300}
+    assert host.orphaned(entry, alive=lambda pid: True, listening=lambda port: True) is False
+
+
+def test_an_owner_less_server_still_serving_its_port_is_an_orphan():
+    entry = {"pid": 7, "owner": 8, "port": 5300}
+    alive = {7: True, 8: False}
+    assert host.orphaned(entry, alive=alive.get, listening=lambda port: True) is True
+
+
+def test_a_recycled_pid_not_serving_the_recorded_port_is_left_alone():
+    """The pid-recycle guard, and the reason `orphaned` asks two questions.
+
+    An entry days old can name a pid that now belongs to a stranger's process; without
+    the port check, reaping would `taskkill /T` that stranger's whole tree.
+    """
+    entry = {"pid": 7, "owner": 8, "port": 5300}
+    alive = {7: True, 8: False}
+    assert host.orphaned(entry, alive=alive.get, listening=lambda port: False) is False
+
+
+def test_reaping_stops_the_orphans_and_forgets_the_dead(scratch_registry, monkeypatch):
+    monkeypatch.setattr(host.os, "name", "nt")
+    host.record(
+        [
+            {"pid": 7, "owner": 8, "port": 5300, "ref": "orphan"},
+            {"pid": 9, "owner": 10, "port": 5301, "ref": "watched"},
+            {"pid": 11, "owner": 12, "port": 5302, "ref": "long gone"},
+        ]
+    )
+    alive = {7: True, 8: False, 9: True, 10: True, 11: False, 12: False}
+    killed = []
+    stopped = host.reap_orphans(
+        alive=alive.get,
+        listening=lambda port: True,
+        run=lambda argv, **kwargs: killed.append(argv) or result(),
+    )
+    assert [entry["ref"] for entry in stopped] == ["orphan"]
+    assert killed == [["taskkill", "/T", "/F", "/PID", "7"]]
+    assert [entry["pid"] for entry in host.read_registry()] == [9]
+
+
+def test_reaping_an_empty_registry_writes_nothing(tmp_path):
+    absent = tmp_path / "absent.json"
+    assert host.reap_orphans(absent, alive=lambda pid: True, run=None) == []
+    assert not absent.exists()
+
+
+def test_stopping_ends_even_a_server_whose_owner_is_still_watching(scratch_registry, monkeypatch):
+    """The difference between `--stop` and the reap: `--stop` is the request itself.
+
+    The owner needs no separate kill -- `watch` returns the moment its last server exits.
+    """
+    monkeypatch.setattr(host.os, "name", "nt")
+    host.record(
+        [
+            {"pid": 7, "owner": 8, "port": 5300, "ref": "watched"},
+            {"pid": 9, "owner": 10, "port": 5301, "ref": "already dead"},
+        ]
+    )
+    alive = {7: True, 8: True, 9: False, 10: True}
+    stopped = host.stop_recorded(
+        alive=alive.get, listening=lambda port: True, run=lambda argv, **kwargs: result()
+    )
+    assert [entry["ref"] for entry in stopped] == ["watched"]
+    assert host.read_registry() == []
+
+
 # --- clean ----------------------------------------------------------------------
 
 
@@ -473,6 +704,7 @@ def test_build_parser_defaults():
     args = host.build_parser().parse_args([])
     assert args.picks == "" and args.fetch and args.open
     assert not args.refresh and not args.clean and args.workspace is None
+    assert not args.stop
 
 
 @pytest.fixture
@@ -480,6 +712,24 @@ def workspace(tmp_path):
     ws = tmp_path / "vs_code.code-workspace"
     ws.write_text("{}", encoding="utf-8")
     return ws
+
+
+@pytest.fixture(autouse=True)
+def scratch_registry(tmp_path, monkeypatch):
+    """Point the server registry at a throwaway file for every test in this module.
+
+    Autouse because forgetting it once is not a failing test -- it is a run that edits
+    the developer's real `logs/preview-ui-servers.json` and, through `reap_orphans`, can
+    `taskkill` a preview they are looking at. The default has to be the safe one.
+    """
+    monkeypatch.setattr(host, "SERVER_REGISTRY", tmp_path / "servers.json")
+    # And no real job object, for a sharper version of the same hazard: `FakeServer.pid`
+    # is a made-up number, and on a machine where it happens to name a live process,
+    # `adopt` would put a stranger into a job that kills its members when this test
+    # process exits. The job object is tested directly, with this process's own pid.
+    real_job = host.kill_on_close_job
+    monkeypatch.setattr(host, "kill_on_close_job", lambda: None)
+    return types.SimpleNamespace(path=tmp_path / "servers.json", real_job=real_job)
 
 
 @pytest.fixture
@@ -537,10 +787,24 @@ def test_main_fails_loudly_on_an_unservable_token(workspace, quiet_scan, capsys)
     assert "matches no row" in capsys.readouterr().out
 
 
-def test_main_treats_a_lone_rescan_as_done(workspace, quiet_scan, capsys):
-    rescan = f"demo:{host.preview_task.RESCAN}"
-    assert host.main(["--workspace", str(workspace), "--no-fetch", "--picks", rescan]) == 0
-    assert "Rescanned" in capsys.readouterr().out
+def test_main_stops_every_recorded_server_and_names_them(workspace, monkeypatch, capsys):
+    """`--stop` is the fourth net, and the only one a person can reach on purpose."""
+    entry = {"pid": 4242, "owner": 1, "port": 5300, "project": "demo", "ref": "agent/x"}
+    monkeypatch.setattr(host, "stop_recorded", lambda: [entry])
+    assert host.main(["--workspace", str(workspace), "--stop"]) == 0
+    out = capsys.readouterr().out
+    assert "demo agent/x on port 5300" in out
+    assert "1 host preview server(s) stopped" in out
+
+
+def test_main_stop_runs_before_the_scan(workspace, monkeypatch):
+    """No fetch, no menu, no npm check: stopping must work on a machine mid-anything.
+
+    `quiet_scan` is deliberately absent here -- if `--stop` ever grew a dependency on the
+    scan, this test would hit the real `collect` and hang or fail rather than pass.
+    """
+    monkeypatch.setattr(host, "stop_recorded", lambda: [])
+    assert host.main(["--workspace", str(workspace), "--stop"]) == 0
 
 
 def test_main_counts_a_refused_plan_as_a_failure(workspace, quiet_scan, monkeypatch, capsys):
@@ -564,7 +828,7 @@ def test_main_serves_opens_and_watches(workspace, quiet_scan, monkeypatch, capsy
     opened = []
     monkeypatch.setattr(host.webbrowser, "open", lambda url: opened.append(url))
     watched = []
-    monkeypatch.setattr(host, "watch", lambda servers: watched.append(servers))
+    monkeypatch.setattr(host, "watch", lambda servers, **kwargs: watched.append(servers))
     code = host.main(["--workspace", str(workspace), "--no-fetch", "--picks", "demo:agent/x"])
     assert code == 0
     assert opened == ["http://127.0.0.1:5300/"]
@@ -579,6 +843,6 @@ def test_main_counts_a_server_that_died_before_answering(workspace, quiet_scan, 
     monkeypatch.setattr(host, "plan_host", lambda *a: plan)
     monkeypatch.setattr(host, "apply_host", lambda p, npm: FakeServer(polls=(1,), returncode=1))
     monkeypatch.setattr(host, "wait_for_server", lambda url, srv: ("died", 2.0))
-    monkeypatch.setattr(host, "watch", lambda servers: None)
+    monkeypatch.setattr(host, "watch", lambda servers, **kwargs: None)
     code = host.main(["--workspace", str(workspace), "--no-fetch", "--picks", "demo:agent/x"])
     assert code == 1

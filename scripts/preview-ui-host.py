@@ -37,17 +37,36 @@ What one run does, per picked row:
      loopback port when nothing does: requests are refused in microseconds instead
      of stalling on `http://app:8000`, a name that only resolves inside compose.
 
-The servers stay CHILDREN of this process: the task's terminal is the lifecycle, and
-Ctrl+C -- or the terminal's trash can -- stops every one of them. Detaching instead
-would need a `--down` verb, a pid file and a reaper; a terminal someone can see is
-all three. The copies under `.ui-previews/` are deliberately kept between runs
-(`--clean` removes them all, through git so the checkout forgets them too), and they
-are invisible to `worktree.py` on purpose: no port lease, no compose project, nothing
-for `reconcile` to own.
+The servers stay CHILDREN of this process, and **three independent nets** end them,
+because for months the claim that the terminal was the lifecycle was simply untrue:
+on 2026-08-25 three Vite servers were found listening on 5300, 5301 and 5303, hours
+after their terminals had been closed, held by two of these processes still sitting
+in `watch()` -- no Ctrl+C had ever arrived, so nothing had ever run the teardown, and
+nothing anywhere would have said so.
+
+  1. **A Windows Job Object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`kill_on_close_job`),
+     which every server is assigned to. The kernel enforces it when this process's
+     last handle closes, so it holds even where no code of ours gets a turn -- a
+     `taskkill` on this pid, a crash, a machine that swept the process away.
+  2. **The owner watch** in `watch()`: the pid this process was started by is polled,
+     and its exit ends the run. That is the leak above, fixed at the exact place it
+     happened -- the terminal going away without a signal.
+  3. **The registry and the reap.** Each run records its servers in
+     `logs/preview-ui-servers.json`, the next run stops any whose owner is gone before
+     it serves anything, `--stop` ends every one of them from anywhere, and
+     `workspace-status.py` names what is still up at session start. This is the net
+     for the run that predates the other two, and the one that makes an accumulation
+     visible rather than merely impossible.
+
+The copies under `.ui-previews/` are a separate lifetime and are deliberately kept
+between runs (`--clean` removes them all, through git so the checkout forgets them
+too). They are invisible to `worktree.py` on purpose: no port lease, no compose
+project, nothing for `reconcile` to own.
 
 Usage:
     python preview-ui-host.py --picks="carameli:agent/foo carameli:agent/bar"
     python preview-ui-host.py --refresh      # rebuild the dropdown's option file only
+    python preview-ui-host.py --stop         # stop every host preview server
     python preview-ui-host.py --clean        # remove every .ui-previews copy
 
 The scan, the option file, the pick grammar and the probe are all `preview-task.py`'s,
@@ -59,8 +78,10 @@ drift-check. Tested in `tests/test_preview_ui_host.py`.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -68,6 +89,7 @@ import tomllib
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
@@ -98,6 +120,22 @@ DEAD_PROXY = f"http://{preview_task.LOOPBACK}:9"
 # by the time this clock starts, so this is dev-server startup alone -- seconds, with
 # a margin for a cold module graph.
 READY_TIMEOUT = 90.0
+
+# What this run's servers are recorded in, so a *different* process can see them: the
+# `--stop` verb, the next run's orphan reap, and the session-start line in
+# `workspace-status.py`. Under `logs/` on the same terms as the menu cache -- machine
+# state, gitignored, worth nothing to a fresh clone.
+SERVER_REGISTRY = REPO_ROOT / "logs" / "preview-ui-servers.json"
+
+# Win32 constants for the teardown tier. Spelled out rather than imported because
+# `ctypes.wintypes` carries types, not values, and a devkit script has no third-party
+# dependency to borrow them from.
+SYNCHRONIZE = 0x00100000
+PROCESS_TERMINATE = 0x0001
+PROCESS_SET_QUOTA = 0x0100
+WAIT_TIMEOUT = 0x00000102
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 
 
 @dataclass(frozen=True)
@@ -353,30 +391,334 @@ def wait_for_server(
         sleep(poll)
 
 
-def stop(server, run=subprocess.run) -> None:
-    """End one server and everything it spawned.
+def stop_pid(pid: int, run=subprocess.run) -> None:
+    """End one process and everything it spawned.
 
-    On Windows `npm.cmd` wraps a `node` child, and `terminate()` would kill the
-    wrapper while the actual server keeps the port -- `taskkill /T` takes the tree.
-    Best-effort by design: a server that already exited makes taskkill complain, and
-    that is not a failure of stopping.
+    On Windows `npm.cmd` wraps a `node` child, and terminating the wrapper would leave
+    the actual server holding the port -- `taskkill /T` takes the tree. Best-effort by
+    design: a process that already exited makes taskkill complain, and that is not a
+    failure of stopping.
     """
     if os.name == "nt":
-        run(["taskkill", "/T", "/F", "/PID", str(server.pid)], capture_output=True)
+        run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
+    else:  # pragma: no cover - the tests run the Windows branch
+        os.kill(pid, signal.SIGTERM)
+
+
+def stop(server, run=subprocess.run) -> None:
+    """End one server we still hold the handle for.
+
+    The Windows branch is `stop_pid`'s, because the tree is what has to go there whether
+    or not a handle exists. Elsewhere the handle is strictly better than its pid: it
+    cannot have been recycled, so `terminate()` is guaranteed to reach the process this
+    run started and `os.kill` on the bare number is not.
+    """
+    if os.name == "nt":
+        stop_pid(server.pid, run)
     else:
         server.terminate()
 
 
-def watch(servers, sleep=time.sleep) -> None:
-    """Hold the terminal while any server lives; Ctrl+C -- or the last exit -- ends all.
+def _kernel32() -> Any:
+    """`kernel32.dll` with the prototypes this file calls; None anywhere but Windows.
+
+    One place rather than three, because the `argtypes` are the part that must not
+    drift: a HANDLE is 64-bit and ctypes defaults its arguments to `c_int`, so an
+    unprototyped call truncates one and fails for a reason nothing prints.
+
+    Guarded on `sys.platform` rather than `os.name` -- the only spelling of "not
+    Windows" that mypy acts on. `ctypes.WinDLL` does not exist off Windows and CI runs
+    mypy on Linux, so the attribute has to be behind something the checker itself calls
+    unreachable there; `os.name` reads as an ordinary comparison and narrows nothing,
+    which is what failed the gate on this line twice. Two fixes that look simpler are
+    not: a `type: ignore` is *unused* on the machine this actually runs on, so
+    `warn_unused_ignores` moves the same failure here from there -- and `getattr(ctypes,
+    "WinDLL")` is rewritten straight back to the attribute access by ruff's B009 in the
+    PostToolUse hook, silently, so it never even reaches a commit. `Any` is the return
+    for the related reason: off Windows there is no type to name.
+    """
+    if sys.platform != "win32":  # pragma: no cover - the tests run the Windows branch
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return kernel32
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether `pid` names a process that has not exited.
+
+    The one question the whole teardown tier is built on, so it is asked in the way
+    that cannot be wrong for the wrong reason. On Windows an `OpenProcess` handle
+    survives the process it names -- a handle alone would report a long-dead pid as
+    alive -- so the handle is *waited on* with a zero timeout: signalled means exited,
+    `WAIT_TIMEOUT` means running. On POSIX, signal 0. A pid we may not open (another
+    user's) is reported alive, because "cannot tell" must never become "kill it".
+    """
+    if pid <= 0:
+        return False
+    if os.name != "nt":  # pragma: no cover - the tests run the Windows branch
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    kernel32 = _kernel32()
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+    if not handle:
+        return False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def kill_on_close_job():
+    """A Windows Job Object whose members die when this process's handle to it closes.
+
+    The teardown net that needs no code to run at the right moment, which is what the
+    other two cannot promise: `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is enforced by the
+    kernel when the last handle to the job goes away, and every handle a process owns
+    is closed when it exits -- including when it is killed outright, where no `finally`
+    and no signal handler gets a turn. Assign each server to it (`adopt`) and the
+    servers cannot outlive this process by any route.
+
+    None on any failure, and on POSIX, where the caller falls back to the explicit
+    stops alone. A preview that came up is worth more than a preview that came up with
+    a guaranteed teardown, so nothing here is allowed to be fatal.
+    """
+    if os.name != "nt":  # pragma: no cover - the tests run the Windows branch
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class _BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [
+            (name, ctypes.c_uint64)
+            for name in (
+                "ReadOperationCount",
+                "WriteOperationCount",
+                "OtherOperationCount",
+                "ReadTransferCount",
+                "WriteTransferCount",
+                "OtherTransferCount",
+            )
+        ]
+
+    class _ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _BasicLimits),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = _kernel32()
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    limits = _ExtendedLimits()
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    ok = kernel32.SetInformationJobObject(
+        wintypes.HANDLE(job),
+        JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+        ctypes.byref(limits),
+        ctypes.sizeof(limits),
+    )
+    if not ok:
+        kernel32.CloseHandle(job)
+        return None
+    return job
+
+
+def adopt(job, pid: int) -> bool:
+    """Put one process into `job`, so it dies with this one. False when it could not be.
+
+    False is not worth reporting to the reader: the explicit stop in `watch` and the
+    orphan reap on the next run both still cover this server, and a line about a job
+    object in the middle of a preview is noise about a net that did not have to hold.
+    """
+    if job is None or os.name != "nt":  # pragma: no cover - POSIX has no job objects
+        return False
+    from ctypes import wintypes
+
+    kernel32 = _kernel32()
+    handle = kernel32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
+    if not handle:
+        return False
+    try:
+        return bool(kernel32.AssignProcessToJobObject(wintypes.HANDLE(job), handle))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def read_registry(path: Path | None = None) -> list[dict]:
+    """Every server run recorded on this machine. Empty for a file that will not read.
+
+    Empty rather than raising for the reason every reader here is total: this file is
+    a convenience for `--stop` and the session-start report, and a corrupt one must
+    cost those two and never a preview.
+    """
+    path = path or SERVER_REGISTRY
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [entry for entry in raw if isinstance(entry, dict)] if isinstance(raw, list) else []
+
+
+def write_registry(entries: list[dict], path: Path | None = None) -> None:
+    """Save the registry atomically, swallowing every write failure."""
+    path = path or SERVER_REGISTRY
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        scratch = path.with_suffix(".json.tmp")
+        scratch.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+        scratch.replace(path)
+    except OSError:
+        pass
+
+
+def record(entries: list[dict], path: Path | None = None) -> None:
+    """Add this run's servers to the registry, replacing any entry with the same pid.
+
+    Read-modify-write, and two runs starting in the same instant can lose one of their
+    entries to each other -- `instanceLimit` is 4, so that is reachable. It is left
+    unlocked because of what the loss costs: the job object and the owner watch are
+    what actually stop a server, and the registry is how `--stop` and the session-start
+    line can SEE one. A lost entry is a server that stops on time and is invisible to a
+    report until the next run's scan; a lock file is a new way for a preview to fail.
+    """
+    keep = [
+        entry
+        for entry in read_registry(path)
+        if entry.get("pid") not in {e["pid"] for e in entries}
+    ]
+    write_registry([*keep, *entries], path)
+
+
+def forget(pids: list[int], path: Path | None = None) -> None:
+    """Drop `pids` from the registry."""
+    write_registry([e for e in read_registry(path) if e.get("pid") not in set(pids)], path)
+
+
+def orphaned(entry: dict, alive=pid_alive, listening=None) -> bool:
+    """Whether one recorded server is a leak: still serving, with nobody left to stop it.
+
+    Both halves are required, and the second is a **pid-recycle guard** rather than a
+    nicety. Windows reuses pids freely, so an entry whose owner has been gone for days
+    can name a pid that now belongs to something else entirely; killing on the pid
+    alone would eventually kill a stranger's process tree. A recycled pid that is also
+    listening on the exact port this entry recorded is, for practical purposes, the
+    server itself.
+
+    An entry whose owner is still alive is left alone whatever its port says: that is a
+    concurrent run's server, and its owner will stop it.
+    """
+    listening = listening or preview_task.port_is_open
+    if alive(int(entry.get("owner") or 0)):
+        return False
+    return alive(int(entry.get("pid") or 0)) and listening(int(entry.get("port") or 0))
+
+
+def reap_orphans(
+    path: Path | None = None, alive=pid_alive, listening=None, run=subprocess.run
+) -> list[dict]:
+    """Stop every recorded server whose owner is gone, and forget every dead one.
+
+    Returns what it stopped, so the caller can say so out loud. This is the net for a
+    run that predates the job object, or one whose python was killed in a way that
+    lost both other nets -- and it is deliberately at the START of a run rather than on
+    a timer, because a leaked server costs nothing until somebody wants the port or the
+    memory, and both of those are this task.
+    """
+    entries = read_registry(path)
+    if not entries:
+        return []
+    stopped, keep = [], []
+    for entry in entries:
+        if orphaned(entry, alive, listening):
+            stop_pid(int(entry["pid"]), run)
+            stopped.append(entry)
+            continue
+        if alive(int(entry.get("pid") or 0)):
+            keep.append(entry)
+    if len(keep) != len(entries):
+        write_registry(keep, path)
+    return stopped
+
+
+def stop_recorded(
+    path: Path | None = None, alive=pid_alive, listening=None, run=subprocess.run
+) -> list[dict]:
+    """`--stop`: end every recorded server, whoever owns it. Returns what it stopped.
+
+    Unlike `reap_orphans` this does not care whether an owner is still watching, since
+    that is the whole request -- and the owner needs no separate kill: `watch` returns
+    the moment its last server exits, and `main` returns with it.
+    """
+    listening = listening or preview_task.port_is_open
+    stopped, keep = [], []
+    for entry in read_registry(path):
+        pid, port = int(entry.get("pid") or 0), int(entry.get("port") or 0)
+        if alive(pid) and listening(port):
+            stop_pid(pid, run)
+            stopped.append(entry)
+        elif alive(pid):
+            keep.append(entry)
+    write_registry(keep, path)
+    return stopped
+
+
+def watch(servers, sleep=time.sleep, owner: int = 0, alive=pid_alive, poll: float = 2.0) -> None:
+    """Hold the terminal while any server lives; the terminal going away ends them all.
 
     A poll loop rather than `wait()` so the KeyboardInterrupt always lands between
     polls, where the `finally` can reach every server -- including the ones still
     healthy when one of their siblings died.
+
+    `owner` is the pid this process was started by, and watching it is the fix for the
+    leak this whole tier exists for. Closing a VS Code terminal does not always reach
+    the task's python: measured on 2026-08-25, two `preview-ui-host.py` processes were
+    still sitting in this loop hours after their terminals were closed, holding three
+    Vite servers on ports 5300, 5301 and 5303 -- no Ctrl+C ever arrived, so the
+    `finally` below never ran and the module docstring's promise that "the terminal's
+    trash can stops every one of them" was simply false. Nothing was going to notice.
+    Now the loop asks.
+
+    `owner` of 0 disables the check, which is what a run whose parent had already
+    exited at startup gets -- there is no exit left to wait for, and treating an absent
+    parent as a departed one would stop every server the instant it came up.
     """
     try:
         while any(server.poll() is None for _, server in servers):
-            sleep(2.0)
+            if owner and not alive(owner):
+                echo("\nThe terminal that started these servers is gone -- stopping every one.")
+                return
+            sleep(poll)
         for plan, server in servers:
             if server.returncode:
                 echo(f"  [warn] the {plan.ref} server exited with code {server.returncode}")
@@ -447,6 +789,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"remove every {UI_PREVIEWS_DIR_NAME} copy and exit",
     )
     parser.add_argument(
+        "--stop",
+        action="store_true",
+        help="stop every host preview server running on this machine and exit",
+    )
+    parser.add_argument(
         "--no-fetch",
         dest="fetch",
         action="store_false",
@@ -466,8 +813,23 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     root = workspace.parent
 
+    if args.stop:
+        stopped = stop_recorded()
+        for entry in stopped:
+            echo(f"  stopped {entry.get('project')} {entry.get('ref')} on port {entry.get('port')}")
+        echo(f"{len(stopped)} host preview server(s) stopped.")
+        return 0
+
     if args.clean:
         return clean(root)
+
+    # Before anything is served, so a leaked server never competes with this run for a
+    # port -- and so the report of one lands where the person who caused it is looking.
+    for entry in reap_orphans():
+        echo(
+            f"[reaped] a preview server for {entry.get('ref')} was still running on port "
+            f"{entry.get('port')} with nothing left watching it -- stopped."
+        )
 
     if args.picks and preview_task.unresolved(args.picks):
         echo("Nothing picked -- the dropdown was cancelled.")
@@ -494,18 +856,17 @@ def main(argv: list[str] | None = None) -> int:
         echo("Nothing picked. --picks takes the dropdown's space-joined <project>:<ref> tokens.")
         return 0
     try:
-        resolved, rescanned = preview_task.resolve_picks(args.picks, everything)
+        resolved = preview_task.resolve_picks(args.picks, everything)
     except ValueError as exc:
         echo(str(exc))
         return 2
-    if rescanned:
-        echo("Rescanned -- the dropdown offers the fresh list on its next run.")
     if not resolved:
         return 0
 
     failures = 0
 
     listening = preview_task.port_is_open
+    job = kill_on_close_job()
     taken: set[int] = set()
     servers = []
     proxies: dict[str, str] = {}
@@ -527,7 +888,22 @@ def main(argv: list[str] | None = None) -> int:
         if server is None:
             failures += 1
             continue
+        adopt(job, server.pid)
         servers.append((plan, server))
+
+    record(
+        [
+            {
+                "pid": server.pid,
+                "owner": os.getpid(),
+                "port": plan.port,
+                "project": plan.project,
+                "ref": plan.ref,
+                "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            for plan, server in servers
+        ]
+    )
 
     reachable = []
     for plan, server in servers:
@@ -556,9 +932,17 @@ def main(argv: list[str] | None = None) -> int:
     for plan, url in reachable:
         echo(f"  {url}  {plan.project}  {plan.ref}")
     echo(rule)
-    echo("Serving. Ctrl+C here (or the terminal's trash can) stops every server; the")
-    echo(f"copies under {UI_PREVIEWS_DIR_NAME}/ are kept for next time (--clean removes them).")
-    watch(servers)
+    echo("Serving. Ctrl+C here, or closing this terminal, stops every server; so does")
+    echo("`Preview: Stop Host UI Servers`, from anywhere. The copies under")
+    echo(f"{UI_PREVIEWS_DIR_NAME}/ are kept for next time (--clean removes them).")
+    # The parent as it stands NOW: a run whose parent has already gone (an agent's
+    # detached shell) gets 0 and no watch, because there is no exit left to wait for and
+    # treating an absent parent as a departed one would stop everything on the spot.
+    owner = os.getppid()
+    try:
+        watch(servers, owner=owner if pid_alive(owner) else 0)
+    finally:
+        forget([server.pid for _, server in servers])
     return 1 if failures else 0
 
 

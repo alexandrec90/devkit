@@ -376,6 +376,11 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # machine-wide menu, so the checkout is a column in the answer rather than a
         # scope for the task, and the task pins `--project devkit`.
         "preview-ui-host",
+        # The teardown half of the pair above, scoped for the same reason and one more:
+        # there is a single registry of running host preview servers on this machine, so
+        # "stop them" is a machine-wide verb with no checkout to ask about. Per-checkout
+        # it would stop the same servers N times.
+        "preview-ui-stop",
         # Born scoped, and the third of the no-project-dimension kind -- but for a
         # sharper reason than `reclaim`'s: repeating a release is not merely a no-op on
         # runs 2..N, it is a failure. The second run would find the tag it just pushed
@@ -416,6 +421,26 @@ def test_the_two_backtest_actions_share_a_script_and_differ_by_subcommand():
     assert ACTIONS["backtest"].script == ACTIONS["backtest-oos"].script
     assert ACTIONS["backtest"].args == ("run",)
     assert ACTIONS["backtest-oos"].args == ("oos",)
+
+
+def test_the_host_preview_pair_is_one_script_told_apart_by_a_flag():
+    """Serving and stopping share a script because they share a registry: `--stop` reads
+    the file the serving run wrote. Split them and the stopper would be guessing which
+    ports and pids to end, which is the state this pair exists to get out of."""
+    assert ACTIONS["preview-ui-stop"].script == ACTIONS["preview-ui-host"].script
+    assert ACTIONS["preview-ui-stop"].args == ("--stop",)
+    assert ACTIONS["preview-ui-host"].args == ()
+
+
+def test_stopping_the_host_previews_asks_nothing(canonical):
+    """A teardown task is clicked when servers are already unwanted, often after the
+    terminal that owned them is gone. A picker there would be a question about which
+    checkout, and the answer -- all of them -- is the only one the registry can give."""
+    task = next(t for t in canonical["tasks"] if t["label"] == "Preview: Stop Host UI Servers")
+    args = [str(a) for a in task["args"]]
+    assert not [a for a in args if "${input:" in a]
+    assert args[args.index("--project") + 1] == "devkit"
+    assert args[-1] == "preview-ui-stop"
 
 
 # --- conformance ------------------------------------------------------------

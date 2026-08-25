@@ -17,6 +17,7 @@ import datetime as _dt
 import json
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -2919,6 +2920,164 @@ def test_reconcile_dry_run_changes_nothing(workspace, monkeypatch):
 def test_reconcile_cli_reports_and_exits_zero_on_an_empty_workspace(workspace, capsys):
     assert worktree.main(["reconcile", "--no-fetch", "--workspace", str(workspace)]) == 0
     assert "Nothing to reconcile" in capsys.readouterr().out
+
+
+# --- the rider that keeps the Preview: dropdowns current ---------------------
+
+
+@pytest.fixture(autouse=True)
+def preview_rider(monkeypatch):
+    """Keep the preview-menu rider out of every *other* test, and hand it to these.
+
+    `reconcile(apply=True)` ends by rebuilding the dropdown's options file, which loads
+    `preview-task.py` and scans the machine -- a `git` and a `gh` per project, then a
+    write to the real `logs/preview-menu.json`. Left alone, every test in this module
+    about reaping a box would pay for that scan and would edit the file the developer's
+    own dropdown reads. Autouse because remembering it per test is not a failing test,
+    it is a slow suite with a side effect.
+
+    The tests that are *about* the rider take the real function off this fixture, which
+    is also what proves they are exercising it rather than the stub.
+    """
+    real = worktree.refresh_preview_menu
+    monkeypatch.setattr(worktree, "refresh_preview_menu", lambda ws, *, apply, fetch=True: "")
+    return real
+
+
+def _fake_preview_task(**namespace) -> types.SimpleNamespace:
+    """Stand in for `preview-task.py`, injected through the `_loader` the rider imports.
+
+    `refresh_preview_menu` loads that module by path on every call, so there is no
+    attribute on `worktree` to patch. `from _loader import load_by_path` consults
+    `sys.modules` first, though, so a fake `_loader` is the seam -- and asserting on the
+    `(name, path)` it was asked for is what catches the file being renamed out from
+    under the rider.
+    """
+    return types.SimpleNamespace(**namespace)
+
+
+def _with_loader(monkeypatch, module, asked: list | None = None):
+    def load_by_path(name, path):
+        if asked is not None:
+            asked.append((name, Path(path)))
+        return module
+
+    monkeypatch.setitem(sys.modules, "_loader", types.SimpleNamespace(load_by_path=load_by_path))
+
+
+def test_reconcile_refreshes_the_dropdown_at_the_end_of_the_pass(workspace, monkeypatch):
+    """The whole point of the rider: the menu is rebuilt by a scheduled pass rather than
+    by whoever last clicked a preview task. Revert this and the dropdown is a cache of
+    an arbitrarily old scan again -- open PRs missing, merged branches still offered."""
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        worktree,
+        "refresh_preview_menu",
+        lambda ws, *, apply, fetch=True: (seen.append((ws, apply, fetch)), "C:/logs/menu.json")[1],
+    )
+
+    _, report = worktree.reconcile(workspace, apply=True, fetch=False)
+
+    assert seen == [(workspace, True, False)]
+    assert report["preview_menu"] == "C:/logs/menu.json"
+
+
+def test_a_dry_run_rebuilds_no_menu(workspace, preview_rider):
+    """`--dry-run` promises to change nothing on disk, and the options file is on disk."""
+    assert preview_rider(workspace, apply=False) == ""
+
+
+def test_the_rider_reports_the_path_the_menu_was_written_to(workspace, monkeypatch, preview_rider):
+    asked: list = []
+    _with_loader(
+        monkeypatch,
+        _fake_preview_task(refresh_menu=lambda ws, fetch=True: Path("C:/logs/preview-menu.json")),
+        asked,
+    )
+
+    written = preview_rider(workspace, apply=True, fetch=False)
+
+    assert written == str(Path("C:/logs/preview-menu.json"))
+    assert asked and asked[0][0] == "preview_task"
+    assert asked[0][1].name == "preview-task.py"
+    assert asked[0][1].is_file(), "the rider is loading a file that no longer exists"
+
+
+def test_the_riders_fetch_follows_the_pass(workspace, monkeypatch, preview_rider):
+    """A `--no-fetch` reconcile must not be the one thing on the machine that goes to
+    the network anyway -- that is the flag's only meaning."""
+    seen: list = []
+    _with_loader(
+        monkeypatch,
+        _fake_preview_task(
+            refresh_menu=lambda ws, fetch=True: (seen.append((ws, fetch)), Path("m.json"))[1]
+        ),
+    )
+
+    preview_rider(workspace, apply=True, fetch=False)
+
+    assert seen == [(workspace, False)]
+
+
+def test_a_menu_that_could_not_be_written_is_an_empty_string(workspace, monkeypatch, preview_rider):
+    """`refresh_menu` answers None for a failure it swallowed itself, and None would
+    render as the word "None" in the reconcile log -- which reads like a path."""
+    _with_loader(monkeypatch, _fake_preview_task(refresh_menu=lambda ws, fetch=True: None))
+    assert preview_rider(workspace, apply=True) == ""
+
+
+def test_a_rider_that_raises_never_reddens_the_pass(workspace, monkeypatch, preview_rider):
+    """The reversion check for the containment: a convenience that cannot be rebuilt
+    must not stop the pass that destroys merged boxes. Anything that escapes here fails
+    `reconcile` itself, and the machine quietly stops reaping."""
+
+    def explode(ws, fetch=True):
+        raise RuntimeError("the registry is a directory today")
+
+    _with_loader(monkeypatch, _fake_preview_task(refresh_menu=explode))
+    assert preview_rider(workspace, apply=True) == ""
+
+
+def test_a_missing_preview_task_is_survived_too(workspace, monkeypatch, preview_rider):
+    """The other half of the same containment -- the loader itself failing, which is
+    what a renamed or deleted `preview-task.py` looks like from here."""
+
+    def missing(name, path):
+        raise ImportError(f"cannot load {name} from {path}")
+
+    monkeypatch.setitem(sys.modules, "_loader", types.SimpleNamespace(load_by_path=missing))
+    assert preview_rider(workspace, apply=True) == ""
+
+
+def _reconcile_report(**extra) -> dict:
+    """A report with one reaped box in it -- enough that `render_reconcile` renders at
+    all rather than short-circuiting on "nothing to reconcile"."""
+    return {
+        "applied": True,
+        "boxes": [{"action": worktree.REAP, "box": "demo--x-0806", "reason": "PR merged"}],
+        "checkouts": {},
+        **extra,
+    }
+
+
+def test_the_pass_says_where_the_menu_landed():
+    rendered = worktree.render_reconcile(_reconcile_report(preview_menu="C:/logs/menu.json"))
+    assert "preview menu: refreshed (C:/logs/menu.json)" in rendered
+
+
+def test_a_stale_dropdown_is_warned_about_rather_than_left_silent():
+    """The rider is deliberately total, so its failure has no exit code to carry it. The
+    log line is the only place a person can find out the menu they are picking from was
+    not rebuilt this pass."""
+    rendered = worktree.render_reconcile(_reconcile_report(preview_menu=""))
+    assert "[warn] not refreshed" in rendered
+    assert "dropdowns are stale" in rendered
+
+
+def test_a_dry_run_claims_nothing_about_the_menu():
+    """It did not rebuild one, so neither line would be true."""
+    rendered = worktree.render_reconcile(_reconcile_report(applied=False))
+    assert "preview menu" not in rendered
 
 
 # --- the static half of the scheduled pass ----------------------------------
