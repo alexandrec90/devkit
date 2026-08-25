@@ -231,6 +231,21 @@ ACTIONS: dict[str, Action] = {
     "preview-ui-host": Action(
         "scripts/preview-ui-host.py", "Preview: Serve UI Branches on Host", projects=DEVKIT_ONLY
     ),
+    # The teardown half of the pair above, and the reason it is a task at all rather than
+    # something the serving task promises to do on its way out: a Vite server outlives the
+    # run that started it whenever the terminal is closed instead of interrupted, and the
+    # `finally` clause that would have stopped it never runs. Three nets catch that inside
+    # `preview-ui-host.py`; this is the fourth, the one a human can click when they want
+    # every server on the machine gone now, regardless of which terminal owns it.
+    #
+    # DEVKIT_ONLY and no picker for the same reason as its siblings -- there is one
+    # registry of running servers on this machine, so there is no checkout to pick.
+    "preview-ui-stop": Action(
+        "scripts/preview-ui-host.py",
+        "Preview: Stop Host UI Servers",
+        ("--stop",),
+        projects=DEVKIT_ONLY,
+    ),
     # Cutting a devkit release. DEVKIT_ONLY because a release is devkit's own act and
     # has no project dimension at all -- run per selected checkout it would try to tag
     # this repo two or three times, and the second attempt would refuse a tag that now

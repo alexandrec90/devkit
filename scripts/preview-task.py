@@ -79,13 +79,24 @@ script, which makes the dropdown the previous scan rather than the current one. 
 machine that has never run this, `--refresh` writes the file and picks nothing -- and so
 does `Preview: Restart Standing Previews`, which is the task that asks no question.
 
-That is admitted rather than hidden. Every checkout's list ends in a `Rescan` row whose
-description carries the timestamp the list was built at, and picking it lands in the
-terminal menu below with the scan already done -- `main` collects before it looks at the
-pick, so the file is rewritten either way. "The branch I just pushed is missing" costs
-one click and never dead-ends. A ref picked from a row this scan no longer produces is
-still served, as a plain branch: a stale row is a good guess about a ref, and
-`worktree.py` is the half that knows whether one resolves.
+**`--refresh` is also on a schedule**, which is what keeps that gap down to minutes
+instead of down to whenever somebody last previewed something. `worktree.py reconcile`
+calls `refresh_menu` at the end of every pass, and that already runs every fifteen
+minutes under the `devkit-worktree-reconcile` scheduled task -- so a PR opened, merged or
+retitled is in the dropdown within the quarter hour with nobody having asked for it.
+
+There used to be a `Rescan` row at the end of every checkout's list for this, picking
+nothing and falling through to the terminal menu below with the scan already done. It was
+the right answer while the file's only writer was the previous click, and it was a wrong
+answer to keep once the file had a writer of its own: it cost a row in every list, it
+asked the reader to know that the list they were looking at might be a lie, and the
+question it answered had already been asked and answered fifteen minutes ago. Each list's
+`asOf` stamp survives it, on the checkout row, because a timestamp is worth reading even
+when it is nearly always fresh.
+
+A ref picked from a row a later scan no longer produces is still served, as a plain
+branch: a stale row is a good guess about a ref, and `worktree.py` is the half that knows
+whether one resolves.
 
 Interactive when nothing has picked for it, which is unusual for this directory and is
 why the prompt is written the way it is: the task runs under `log-wrap.py`, whose
@@ -118,6 +129,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from collections.abc import Container
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -134,8 +146,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # human under a terminal's worth of scrollback, so the cap is a readability budget
 # rather than a cost one -- and both sources are already sorted newest-first, so what
 # it drops is always the least likely row to be wanted.
-PR_LIMIT = 8
+#
+# The two caps are deliberately different sizes now. A branch on origin is a guess, and
+# `BRANCH_MAX_AGE_DAYS` already bounds it; an **open PR is not a guess** -- somebody
+# opened it and it is still open, which is the exact thing this task exists to put on
+# screen. Eight was cutting real ones: carameli carried five open PRs the day this was
+# raised and had carried more than eight the week before, and the rows that fell off
+# were silently absent from the dropdown with nothing saying a cap had been reached.
+# `MENU_LIMIT` still trims the printed terminal menu, out loud.
+PR_LIMIT = 30
 BRANCH_LIMIT = 8
+
+# How many recently merged PRs to ask for per checkout, so their refs can be dropped
+# from the menu. Larger than `PR_LIMIT` because it is a *filter* rather than a source:
+# what it needs to cover is every ref that could still be offered by some other source,
+# and a live box whose branch was squash-merged and deleted weeks ago is exactly that
+# row -- it never ages out and it is not reapable, so without this it sat in the menu
+# indefinitely. `gh` sorts merged PRs newest-first, so the ones this cannot reach are
+# the ones whose boxes are long gone anyway.
+MERGED_LIMIT = 60
 
 # How many refs to ask git for per `BRANCH_LIMIT` slot, so that `ignored_ref` has
 # something left to keep. Four, because a nightly job cutting one branch per consumer
@@ -185,21 +214,30 @@ IGNORED_REF_PREFIXES = ("dependabot/", tb.AUTOMATION_PREFIX)
 
 # Where a row came from, and the order the menu puts them in. The ranking is "how few
 # seconds until it is on screen", which is also how likely each is to be the answer.
+KIND_TRUNK = "trunk"
 KIND_STANDING = "standing"
 KIND_BOX = "box"
 KIND_PR = "pr"
 KIND_BRANCH = "branch"
 
-# Standing previews first, and then **recency decides** -- a box, a PR and a branch of
-# the same age are interchangeable to the person reading, because the `kind` column
-# already tells them what each will cost. Ranking the kinds against each other instead,
-# which the first version did, put a box cut 39 hours ago above the PR opened an hour
-# ago; the change someone has just asked to look at is always the newest thing on the
-# list, so any ordering that does not float it is answering a different question.
-KIND_RANK = {KIND_STANDING: 0}
+# The trunk first, then standing previews, and then **recency decides** -- a box, a PR
+# and a branch of the same age are interchangeable to the person reading, because the
+# `kind` column already tells them what each will cost. Ranking the kinds against each
+# other instead, which the first version did, put a box cut 39 hours ago above the PR
+# opened an hour ago; the change someone has just asked to look at is always the newest
+# thing on the list, so any ordering that does not float it is answering a different
+# question.
+#
+# The trunk is the exception that proves it, and it is pinned to the top by rank rather
+# than by date on purpose: it is almost always the OLDEST row here -- every branch under
+# review was cut from it -- and it is the only row that answers "what does this look like
+# without the change", which is the question every other row is asked against. A row that
+# is the baseline for the whole list belongs at the top of the whole list.
+KIND_RANK = {KIND_TRUNK: -1, KIND_STANDING: 0}
 OTHER_RANK = 1
 
 KIND_NOTE = {
+    KIND_TRUNK: "default branch",
     KIND_STANDING: "preview box standing",
     KIND_BOX: "agent box (served as-is)",
     KIND_PR: "open PR",
@@ -223,9 +261,6 @@ PICK_SEP = ":"
 # the registry's own assumption -- `register()` builds the first dropdown from directory
 # names, and a `COMPOSE_PROJECT_NAME` could not carry one anyway.
 PICK_LIST_SEP = " "
-
-# The ref half of a pick that means "this list is stale, look again".
-RESCAN = "__rescan__"
 
 # How long to keep waiting for the URL the box publishes, and how often to say so.
 #
@@ -349,17 +384,27 @@ def ignored_ref(ref: str) -> bool:
     return ref.startswith(IGNORED_REF_PREFIXES)
 
 
-def keeps_row(candidate: Candidate) -> bool:
-    """Whether a merged row survives `IGNORED_REF_PREFIXES`.
+def keeps_row(candidate: Candidate, merged: Container[str] = ()) -> bool:
+    """Whether a folded row survives `IGNORED_REF_PREFIXES` and the merged-PR filter.
 
-    The kind is the whole test, because the prefixes describe how a ref was *discovered*
-    rather than what it contains. A standing preview was asked for by name and is serving
-    on a port right now; dropping it would leave a running box that nothing in this menu
-    could stop, which is worse than the row it saves. Everything else here -- a task box,
-    an open PR, a branch on origin -- is this script guessing that someone might want it,
-    and for these prefixes that guess is always wrong.
+    The kind is the whole test for both, because the prefixes describe how a ref was
+    *discovered* rather than what it contains. A standing preview was asked for by name
+    and is serving on a port right now; dropping it would leave a running box that
+    nothing in this menu could stop, which is worse than the row it saves. Everything
+    else here -- a task box, an open PR, a branch on origin -- is this script guessing
+    that someone might want it, and once the PR is merged that guess is always wrong.
+
+    `merged` is what makes a **box** row disappear on time, which is the case that
+    actually happened: a squash-merged PR deletes its remote branch, so the branch and PR
+    sources both stop offering the ref immediately -- and the box, which is neither
+    reapable nor subject to `BRANCH_MAX_AGE_DAYS`, kept offering it indefinitely.
+    `agent/project-number-pad-0824` was still the second row of carameli's menu days after
+    it landed. Nothing here reaps that box; `reconcile` owns that, and this only stops the
+    menu claiming the branch is still worth looking at.
     """
-    return candidate.kind == KIND_STANDING or not ignored_ref(candidate.ref)
+    if candidate.kind == KIND_STANDING:
+        return True
+    return not ignored_ref(candidate.ref) and candidate.ref not in merged
 
 
 def merge_candidates(
@@ -368,6 +413,7 @@ def merge_candidates(
     prs: list[dict],
     branches: list[tuple[str, str, str]],
     dates: dict[str, str] | None = None,
+    merged: Container[str] = (),
 ) -> list[Candidate]:
     """One `Candidate` per distinct ref, folding in whatever each source knows about it.
 
@@ -383,6 +429,10 @@ def merge_candidates(
     being asked: a box cut yesterday and committed to a minute ago is the freshest thing
     on this machine, and dating it by when it was cut sinks it below every PR opened
     since. `box.created` remains the fallback for a box whose branch git cannot date.
+
+    `merged` is the set of refs whose PR has already landed; see `keeps_row`, which is
+    where it is spent. It is applied at the END, after the fold rather than per source,
+    so that a ref only has to be recognised once however many sources still offer it.
     """
     found: dict[str, Candidate] = {}
     dates = dates or {}
@@ -426,7 +476,7 @@ def merge_candidates(
         )
 
     return sorted(
-        (candidate for candidate in found.values() if keeps_row(candidate)),
+        (candidate for candidate in found.values() if keeps_row(candidate, merged)),
         key=lambda candidate: candidate.sort_key,
     )
 
@@ -551,8 +601,8 @@ def unresolved(text: str) -> bool:
     return text.lstrip().startswith("${")
 
 
-def resolve_pick(text: str, candidates: list[Candidate]) -> Candidate | None:
-    """The row a `--pick-ref` value names, or None when the value asks for a rescan.
+def resolve_pick(text: str, candidates: list[Candidate]) -> Candidate:
+    """The row a `--pick-ref` value names.
 
     A value matching no row is not an error, and that is the whole reason this is a
     function rather than an index lookup: the dropdown is drawn from a file the previous
@@ -566,8 +616,6 @@ def resolve_pick(text: str, candidates: list[Candidate]) -> Candidate | None:
     above means a bare ref that matched nothing: it names no checkout to serve it from.
     """
     project, ref = parse_pick(text)
-    if ref == RESCAN:
-        return None
     for candidate in candidates:
         if candidate.ref == ref and project in ("", candidate.project):
             return candidate
@@ -576,43 +624,14 @@ def resolve_pick(text: str, candidates: list[Candidate]) -> Candidate | None:
     raise ValueError(f"--pick-ref {text!r} matches no row and names no checkout to serve it from")
 
 
-def resolve_picks(text: str, candidates: list[Candidate]) -> tuple[list[Candidate], bool]:
-    """Every row a `--pick-ref` value names, and whether one of them asked for a rescan.
-
-    The two answers are separate because a multi-pick can carry both: ticking `Rescan`
-    alongside three real rows is a reasonable thing to do with a checkbox list, and it
-    means *serve these, and the list was stale* rather than *serve nothing*. `main` prints
-    the rescan note only when nothing else was picked, since the rescan itself has already
-    happened by the time either is read.
+def resolve_picks(text: str, candidates: list[Candidate]) -> list[Candidate]:
+    """Every row a `--pick-ref` value names, in the order they were ticked.
 
     A single unservable token fails the whole value rather than being skipped: `--pick-ref`
     is machine-written, so a token nothing can be made of is a bug upstream, and quietly
     serving the other three would hide it behind a preview that worked.
     """
-    picked, rescan = [], False
-    for token in split_picks(text):
-        row = resolve_pick(token, candidates)
-        if row is None:
-            rescan = True
-        else:
-            picked.append(row)
-    return picked, rescan
-
-
-def rescan_row(project: str, as_of: str) -> dict[str, str]:
-    """The row every checkout's list ends in: the way out of a stale options file.
-
-    It is also what stops a checkout with nothing found from drawing an EMPTY pick list,
-    which is the state the branch you pushed thirty seconds ago arrives in -- the one
-    moment the list is most wrong is the one moment it would otherwise offer no way to
-    correct it.
-    """
-    return {
-        "value": f"{project}{PICK_SEP}{RESCAN}",
-        "label": "Rescan",
-        "description": f"this list was built {as_of}",
-        "detail": "picks nothing -- rescans boxes, PRs and branches, then asks in the terminal",
-    }
+    return [resolve_pick(token, candidates) for token in split_picks(text)]
 
 
 def menu_row(candidate: Candidate, now: _dt.datetime | None = None) -> dict[str, str]:
@@ -626,9 +645,16 @@ def menu_row(candidate: Candidate, now: _dt.datetime | None = None) -> dict[str,
 
 
 def project_note(found: list[Candidate], as_of: str) -> str:
-    """The first dropdown's second column: what picking this checkout will offer."""
+    """The first dropdown's second column: what picking this checkout will offer.
+
+    The trunk row is not counted. It is in every checkout's list unconditionally, so
+    counting it would report `1 to look at` for a checkout with no branch, no PR and no
+    box -- a number that is true of the rows and false about the question being asked,
+    and identical for the checkout that genuinely has one thing to review.
+    """
+    found = [candidate for candidate in found if candidate.kind != KIND_TRUNK]
     if not found:
-        return f"nothing to preview -- as of {as_of}"
+        return f"nothing under review -- trunk only, as of {as_of}"
     standing = sum(1 for candidate in found if candidate.kind == KIND_STANDING)
     note = f"{len(found)} to look at"
     if standing:
@@ -654,10 +680,19 @@ def menu_payload(
         ends in a property access. `rows[project][i].value` raises past the end, which is
         what the extension is watching for; a bare `list[i]` would merely be undefined.
 
-    Every checkout with a stack is listed even when it contributed no row, so a checkout
-    can always be picked -- see `rescan_row`. Checkouts are ordered by their freshest
-    row, for the same reason `sort_key` puts recency above kind: the change someone has
-    just asked to look at is the newest thing on the machine.
+    Every checkout with a stack is listed even when it contributed no discovered row, and
+    what stops such a checkout drawing an EMPTY pick list is its trunk row -- `collect`
+    adds one per checkout unconditionally, so there is always something to pick. That
+    guarantee used to belong to the `Rescan` row, which was the only way out of an options
+    file the previous run had written; it is gone because the file is no longer only
+    written by the previous run (`reconcile` refreshes it every fifteen minutes), so the
+    row's real job was covering a staleness that has been fixed at the source.
+
+    Checkouts are ordered by their freshest row, for the same reason `sort_key` puts
+    recency above kind: the change someone has just asked to look at is the newest thing
+    on the machine. The trunk row is excluded from that comparison -- it is the same age
+    in every checkout and dating a checkout by it would rank the quiet ones by how long
+    ago somebody last landed anything.
     """
     stamp = now or _dt.datetime.now(_dt.UTC)
     as_of = stamp.astimezone().strftime("%Y-%m-%d %H:%M")
@@ -666,14 +701,13 @@ def menu_payload(
         grouped.setdefault(candidate.project, []).append(candidate)
 
     def freshest(project: str) -> tuple[float, str]:
-        rows = grouped[project]
+        rows = [row for row in grouped[project] if row.kind != KIND_TRUNK]
         return (-max((_epoch(row.updated) for row in rows), default=float("-inf")), project)
 
     entries, rows = [], {}
     for project in sorted(grouped, key=freshest):
         found = sorted(grouped[project], key=lambda candidate: candidate.sort_key)
         rows[project] = [menu_row(candidate, stamp) for candidate in found]
-        rows[project].append(rescan_row(project, as_of))
         entries.append(
             {"name": project, "label": project, "description": project_note(found, as_of)}
         )
@@ -689,7 +723,7 @@ def parse_choice(text: str, count: int) -> tuple[str, list[int]]:
 
     Several numbers are one answer -- `1 3`, `1,3`, `1, 3` -- because the dropdown this
     menu is the fallback for is a checkbox list, and a fallback that can only take one row
-    turns `Rescan` into a dead end for exactly the caller who wanted two. **One bad token
+    is a downgrade for exactly the caller who wanted two. **One bad token
     rejects the whole line** rather than being skipped: the numbers are positions in a
     menu the reader is looking at, so silently serving two of the three they typed is the
     one outcome they cannot see happen.
@@ -1050,6 +1084,87 @@ def open_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
+def merged_refs(project_dir: Path, limit: int = MERGED_LIMIT) -> set[str]:
+    """The head branches of recently merged PRs for one checkout. Empty on every failure.
+
+    Empty rather than raising, on the same terms as `open_prs` and for a sharper reason:
+    this is a **subtractive** source, so its failure mode has to be "offer a row that has
+    already landed", never "hide a row that has not". An offline machine loses the filter
+    and keeps every row it would have had before this existed.
+
+    A ref appearing here is the closest thing available to "this branch is done". The
+    alternative -- asking git whether the ref is an ancestor of the default branch --
+    cannot answer for the case this exists for, because a squash merge leaves no ancestry
+    and a deleted remote branch leaves no ref to ask about.
+    """
+    try:
+        result = sweep.gh_for(project_dir)(
+            "pr",
+            "list",
+            "--state",
+            "merged",
+            "--limit",
+            str(limit),
+            "--json",
+            "headRefName",
+        )
+    except OSError:
+        return set()
+    if result.returncode != 0:
+        return set()
+    try:
+        entries = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return set()
+    return {
+        str(entry.get("headRefName") or "")
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("headRefName")
+    }
+
+
+def trunk_row(project: str, project_dir: Path) -> Candidate:
+    """The one row every checkout always offers: its default branch, as origin has it.
+
+    Always present, and dated from `origin/<default>` rather than from the local checkout
+    -- what a preview serves is `origin/<ref>`, so dating it by a local `main` that is
+    three days behind would put a stamp on the row that does not describe what comes up.
+    An undated row is fine (`age` returns empty and `describe` drops the column); a wrong
+    date is not.
+
+    Nothing here checks that the branch exists. `detect_default_branch` already probes
+    `origin/HEAD`, then `origin/main`, then `origin/master`, and its `fallback` only
+    survives when none of the three resolved -- at which point the checkout has no origin
+    worth previewing from and the row will fail loudly at `plan_preview` rather than
+    quietly here.
+    """
+    git = sweep.git_for(project_dir)
+    try:
+        ref = tb.detect_default_branch(git)
+    except OSError:
+        ref = "main"
+    return Candidate(project=project, ref=ref, kind=KIND_TRUNK, updated=origin_ref_date(git, ref))
+
+
+def origin_ref_date(git: sweep.Git, ref: str) -> str:
+    """`origin/<ref>`'s last commit as an ISO stamp, or "" when git cannot say.
+
+    Separate from `local_branch_dates`, which asks one question of a whole namespace;
+    this asks about a single ref that is deliberately outside those namespaces.
+    """
+    try:
+        result = git(
+            "for-each-ref",
+            "--format=%(committerdate:iso-strict)",
+            f"refs/remotes/origin/{ref}",
+        )
+    except OSError:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return (result.stdout or "").strip().splitlines()[0].strip() if result.stdout.strip() else ""
+
+
 def recent_branches(
     project_dir: Path, limit: int = BRANCH_LIMIT, fetch: bool = True
 ) -> list[tuple[str, str, str]]:
@@ -1149,7 +1264,14 @@ def stack_projects(workspace: Path) -> list[str]:
 def collect(
     workspace: Path, fetch: bool = True, now: _dt.datetime | None = None
 ) -> list[Candidate]:
-    """Every previewable ref on this machine, merged and ranked."""
+    """Every previewable ref on this machine, merged and ranked.
+
+    Each checkout contributes its trunk row unconditionally, and it is added AFTER the
+    fold rather than as a source of it -- so a checkout that has a live box or an open PR
+    on its own default branch keeps that richer row and does not get a second, plainer one
+    saying the same thing. `merge_candidates` already owns "one row per distinct ref"; the
+    membership test here is what defers to it.
+    """
     root = workspace.parent
     boxes = worktree.live_boxes(root)
     candidates: list[Candidate] = []
@@ -1158,15 +1280,18 @@ def collect(
         branches = [
             entry for entry in recent_branches(project_dir, fetch=fetch) if fresh(entry[1], now=now)
         ]
-        candidates.extend(
-            merge_candidates(
-                project,
-                [box for box in boxes.values() if box.project == project],
-                open_prs(project_dir),
-                branches,
-                local_branch_dates(project_dir),
-            )
+        found = merge_candidates(
+            project,
+            [box for box in boxes.values() if box.project == project],
+            open_prs(project_dir),
+            branches,
+            local_branch_dates(project_dir),
+            merged_refs(project_dir),
         )
+        trunk = trunk_row(project, project_dir)
+        if not any(candidate.ref == trunk.ref for candidate in found):
+            found.append(trunk)
+        candidates.extend(found)
     return sorted(candidates, key=lambda candidate: candidate.sort_key)
 
 
@@ -1175,8 +1300,9 @@ def write_menu(payload: dict, path: Path | None = None) -> Path | None:
 
     Never raises, and that is the point: this runs on the way to bringing a stack up, and
     a preview that worked is not worth failing because the *next* one's menu could not be
-    cached. The cost of a swallowed error is one stale dropdown, which the `Rescan` row
-    in every list already exists to answer.
+    cached. The cost of a swallowed error is one stale dropdown, and the scheduled
+    `--refresh` pass (`worktree.py reconcile`) writes the file again within the quarter
+    hour regardless of what happened here.
 
     The destination defaults at CALL time rather than in the signature, so a test can
     point `MENU_CACHE` somewhere disposable and the caller in `main` -- which passes no
@@ -1191,6 +1317,27 @@ def write_menu(payload: dict, path: Path | None = None) -> Path | None:
     except OSError:
         return None
     return path
+
+
+def refresh_menu(workspace: Path, fetch: bool = True, path: Path | None = None) -> Path | None:
+    """Rebuild the dropdown's options file. The path on success, None on any failure.
+
+    The whole of `--refresh` as one call, for the scheduled caller: `worktree.reconcile`
+    runs it at the end of every pass so that the dropdown tracks open PRs on the
+    reconcile task's cadence rather than on how recently somebody previewed something.
+
+    Total, like `write_menu` and for a stronger reason: this is a rider on somebody
+    else's pass, and a menu that could not be built must never be able to fail a
+    reconcile that reaped boxes correctly. `collect` is already the forgiving kind --
+    every source in it returns empty rather than raising on an offline or unauthenticated
+    machine -- so the `Exception` here is for the shapes that are not source failures at
+    all: an unreadable registry, a workspace file that has been replaced by a directory.
+    """
+    try:
+        candidates = collect(workspace, fetch=fetch)
+        return write_menu(menu_payload(candidates, stack_projects(workspace)), path)
+    except Exception:
+        return None
 
 
 def read_choice(
@@ -1515,16 +1662,10 @@ def main(argv: list[str] | None = None) -> int:
     picked: list[Candidate] = []
     if args.pick_ref:
         try:
-            picked, rescan = resolve_picks(args.pick_ref, everything)
+            picked = resolve_picks(args.pick_ref, everything)
         except ValueError as exc:
             echo(str(exc))
             return 2
-        if rescan and not picked:
-            # The `Rescan` row picks nothing on purpose, and the scan it asked for has
-            # already happened above. All that is left of it is to ask, which is what the
-            # terminal menu below already is. Ticked ALONGSIDE real rows it says only that
-            # the list was stale, and those rows are still the answer.
-            echo("\nRescanned. Pick from the fresh list below -- the dropdown gets it next time.")
 
     if picked:
         chosen = picked

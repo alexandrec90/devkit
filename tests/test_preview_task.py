@@ -156,6 +156,39 @@ def test_keeps_row_spares_a_standing_preview_and_nothing_else():
         )
 
 
+def test_a_ref_whose_pr_has_merged_is_dropped_whatever_found_it():
+    """The bug this filter was written for, stated as its test.
+
+    A squash merge deletes the remote branch, so the branch and PR sources stop offering
+    the ref the moment it lands -- and the BOX does not: it is not reapable while its
+    worktree exists and no age cutoff applies to it. `agent/project-number-pad-0824` was
+    still the second row of carameli's menu days after merging.
+    """
+    merged = {"agent/landed-0824"}
+    for kind in (preview_task.KIND_BOX, preview_task.KIND_PR, preview_task.KIND_BRANCH):
+        row = preview_task.Candidate(project="p", ref="agent/landed-0824", kind=kind)
+        assert not preview_task.keeps_row(row, merged)
+    fresh = preview_task.Candidate(
+        project="p", ref="agent/still-open-0825", kind=preview_task.KIND_PR
+    )
+    assert preview_task.keeps_row(fresh, merged)
+
+
+def test_a_standing_preview_survives_its_prs_merge():
+    """Same reasoning as the ignored-prefix case: it is serving on a port right now, and
+    a row is the only way anything in this menu can reach it."""
+    row = preview_task.Candidate(
+        project="p", ref="agent/landed-0824", kind=preview_task.KIND_STANDING, box="b"
+    )
+    assert preview_task.keeps_row(row, {"agent/landed-0824"})
+
+
+def test_the_merged_filter_defaults_to_empty_so_an_offline_scan_loses_nothing():
+    """`merged_refs` is subtractive, so its failure has to add rows, never remove them."""
+    row = preview_task.Candidate(project="p", ref="agent/x", kind=preview_task.KIND_PR)
+    assert preview_task.keeps_row(row)
+
+
 # --- merging the four sources -------------------------------------------------
 
 
@@ -314,6 +347,20 @@ def test_a_branch_never_overwrites_a_row_a_box_or_pr_already_claimed():
     )
     assert merged[0].title == "from the PR"
     assert merged[0].kind == preview_task.KIND_PR
+
+
+def test_merge_candidates_spends_the_merged_set_after_the_fold():
+    """Applied once at the end, not per source: a ref only has to be recognised as landed
+    once however many of the three still offer it."""
+    rows = preview_task.merge_candidates(
+        "carameli",
+        [box("carameli--ui", branch="agent/ui")],
+        [pr(164, "agent/ui", title="Comic book UI")],
+        [("agent/ui", "2026-08-21T09:00:00Z", "subject")],
+        None,
+        {"agent/ui"},
+    )
+    assert rows == []
 
 
 def test_strip_remote_only_strips_the_remote():
@@ -585,6 +632,83 @@ def test_open_prs_drops_anything_that_is_not_an_object(monkeypatch):
     ]
 
 
+def test_merged_refs_reads_the_head_branch_of_each_landed_pr(monkeypatch):
+    payload = json.dumps(
+        [{"headRefName": "agent/landed"}, {"headRefName": ""}, "junk", {"other": 1}]
+    )
+    monkeypatch.setattr(preview_task.sweep, "gh_for", lambda _dir: lambda *argv: result(payload))
+    assert preview_task.merged_refs(preview_task.REPO_ROOT) == {"agent/landed"}
+
+
+def test_merged_refs_is_empty_on_every_failure_path(monkeypatch):
+    """Empty is the SAFE answer for this source, unlike every other one here.
+
+    It subtracts rows, so a failure that guessed would hide a branch somebody is waiting
+    to look at. An offline machine loses the filter and keeps the menu it had before.
+    """
+    for outcome in (result("not json"), result("[]", returncode=1), OSError("no gh")):
+        monkeypatch.setattr(
+            preview_task.sweep,
+            "gh_for",
+            lambda _dir, outcome=outcome: lambda *argv: _raise_or(outcome),
+        )
+        assert preview_task.merged_refs(preview_task.REPO_ROOT) == set()
+
+
+def test_merged_refs_asks_for_merged_prs_and_nothing_else(monkeypatch):
+    """`--state merged`, because `open_prs` next door asks the same command the other way
+    and a copied argv would make this filter subtract the rows it exists to keep."""
+    seen = []
+    monkeypatch.setattr(
+        preview_task.sweep,
+        "gh_for",
+        lambda _dir: lambda *argv: (seen.append(argv), result("[]"))[1],
+    )
+    preview_task.merged_refs(preview_task.REPO_ROOT, limit=12)
+    assert "merged" in seen[0]
+    assert "12" in seen[0]
+
+
+def test_the_trunk_row_is_dated_from_origin_rather_than_the_local_branch(monkeypatch):
+    """What a preview serves is `origin/<ref>`, so a local `master` three days behind
+    would stamp the row with a date that does not describe what comes up."""
+    monkeypatch.setattr(preview_task.tb, "detect_default_branch", lambda git: "master")
+    monkeypatch.setattr(
+        preview_task.sweep,
+        "git_for",
+        lambda _dir: lambda *argv: result("2026-08-21T09:00:00-04:00\n"),
+    )
+    row = preview_task.trunk_row("carameli", preview_task.REPO_ROOT)
+    assert row == preview_task.Candidate(
+        project="carameli",
+        ref="master",
+        kind=preview_task.KIND_TRUNK,
+        updated="2026-08-21T09:00:00-04:00",
+    )
+
+
+def test_the_trunk_row_survives_a_checkout_git_cannot_answer_for(monkeypatch):
+    """An undated row is fine -- `describe` drops the column. No row at all is not: the
+    trunk row is what stops a quiet checkout drawing an empty pick list."""
+    monkeypatch.setattr(
+        preview_task.tb, "detect_default_branch", lambda git: _raise_or(OSError("no git"))
+    )
+    monkeypatch.setattr(
+        preview_task.sweep, "git_for", lambda _dir: lambda *argv: _raise_or(OSError("no git"))
+    )
+    row = preview_task.trunk_row("carameli", preview_task.REPO_ROOT)
+    assert row.ref == "main"
+    assert row.updated == ""
+
+
+def test_origin_ref_date_is_empty_when_git_has_no_such_ref(monkeypatch):
+    """`for-each-ref` exits 0 and prints nothing for a ref that does not exist, which is
+    the failure that would otherwise read as a successful empty stamp elsewhere."""
+    for outcome in (result(""), result("x", returncode=1), OSError("no git")):
+        git = lambda *argv, outcome=outcome: _raise_or(outcome)
+        assert preview_task.origin_ref_date(git, "master") == ""
+
+
 def test_recent_branches_parses_the_ref_listing(monkeypatch):
     listing = "origin/agent/ui\t2026-08-21T09:00:00-04:00\tComic book UI\norigin/agent/bare\t2026-08-20T09:00:00Z\t\n"
     monkeypatch.setattr(preview_task.sweep, "git_for", lambda _dir: lambda *argv: result(listing))
@@ -659,7 +783,7 @@ def _raise_or(outcome):
 # and all three are asserted here because none of them fails loudly: the extension builds
 # a list by evaluating one expression per field against rising indices until one THROWS,
 # so a malformed payload does not error -- it draws ten thousand blank rows, or silently
-# omits a checkout that has nothing to offer but still needs a way to be rescanned.
+# omits a checkout whose only offer is its trunk.
 
 
 def _payload(rows, projects=("carameli",), now=NOW):
@@ -669,6 +793,12 @@ def _payload(rows, projects=("carameli",), now=NOW):
 def _branch(ref, *, project="carameli", updated=""):
     return preview_task.Candidate(
         project=project, ref=ref, kind=preview_task.KIND_BRANCH, updated=updated
+    )
+
+
+def _trunk(ref="master", *, project="carameli", updated=""):
+    return preview_task.Candidate(
+        project=project, ref=ref, kind=preview_task.KIND_TRUNK, updated=updated
     )
 
 
@@ -697,25 +827,42 @@ def test_a_row_is_picked_by_project_and_ref_in_one_token():
     assert payload["rows"]["carameli"][0]["label"] == "agent/x"
 
 
-def test_every_checkout_ends_in_a_rescan_row():
-    payload = _payload([_branch("agent/x")], projects=("carameli", "ibkr_trader"))
+def test_no_row_is_a_control_row():
+    """Every row is servable, which is what removing `Rescan` bought.
+
+    The old last row of every checkout resolved to no candidate at all, so `resolve_pick`
+    had to be allowed to return nothing and every caller had to handle it. Now a value
+    that survives to the resolver always names something that can be brought up.
+    """
+    payload = _payload([_trunk(), _branch("agent/x")], projects=("carameli", "ibkr_trader"))
     for project in ("carameli", "ibkr_trader"):
-        last = payload["rows"][project][-1]
-        assert last["value"] == f"{project}:{preview_task.RESCAN}"
-        assert payload["asOf"] in last["description"]
+        for row in payload["rows"][project]:
+            assert "__" not in row["value"]
 
 
-def test_a_checkout_with_nothing_to_preview_is_still_offered():
+def test_the_scans_age_is_on_the_checkout_rather_than_a_row():
+    """Removing the `Rescan` row removed the only place the timestamp was shown.
+
+    It moved up a level rather than away: the first dropdown's second column carries it,
+    so it is read once per run instead of once per checkout's worth of scrolling.
+    """
+    payload = _payload([_trunk(), _branch("agent/x")])
+    assert payload["asOf"] in payload["projects"][0]["description"]
+
+
+def test_a_checkout_with_nothing_under_review_still_offers_its_trunk():
     """Otherwise the branch pushed thirty seconds ago picks an empty list and stops.
 
-    That is the one moment the cached options are most wrong, so it is the one moment a
-    checkout most needs to be reachable -- to get at its `Rescan` row, which is all its
-    list has.
+    `collect` adds a trunk row per checkout unconditionally, which is what makes an empty
+    pick list unreachable now that no control row exists to fill one.
     """
-    payload = _payload([], projects=("carameli", "ibkr_trader"))
+    payload = _payload(
+        [_trunk(), _trunk(project="ibkr_trader", ref="main")],
+        projects=("carameli", "ibkr_trader"),
+    )
     assert sorted(entry["name"] for entry in payload["projects"]) == ["carameli", "ibkr_trader"]
-    assert len(payload["rows"]["carameli"]) == 1
-    assert "nothing to preview" in payload["projects"][0]["description"]
+    assert [row["label"] for row in payload["rows"]["carameli"]] == ["master"]
+    assert "trunk only" in payload["projects"][0]["description"]
 
 
 def test_checkouts_are_ordered_by_their_freshest_row():
@@ -743,7 +890,7 @@ def test_a_row_the_scan_found_is_present_even_though_the_menu_would_trim_it():
     """The cache is written from the untrimmed scan: a dropdown has no screen to fill."""
     rows = [_branch(f"agent/{n}") for n in range(preview_task.MENU_LIMIT + 5)]
     payload = _payload(rows)
-    assert len(payload["rows"]["carameli"]) == len(rows) + 1
+    assert len(payload["rows"]["carameli"]) == len(rows)
 
 
 # --- resolving what the dropdown sent back -------------------------------------
@@ -796,10 +943,16 @@ def test_an_unsubstituted_input_token_reads_as_a_cancel(text, expected):
     assert preview_task.unresolved(text) is expected
 
 
-def test_the_rescan_value_resolves_to_no_row():
-    assert (
-        preview_task.resolve_pick(f"carameli:{preview_task.RESCAN}", [_branch("agent/x")]) is None
-    )
+def test_a_trunk_row_resolves_back_to_a_plain_branch_preview():
+    """The first row of every checkout, and the whole point is that it needs no special case.
+
+    `preview_kwargs` sees a ref like any other, so previewing `master` cuts a `preview/`
+    copy of it exactly the way previewing a PR branch does -- the static checkout is never
+    touched and never has to be on that branch.
+    """
+    picked = preview_task.resolve_pick("carameli:master", [_trunk()])
+    assert picked.kind == preview_task.KIND_TRUNK
+    assert preview_task.preview_kwargs(picked) == {"target": "carameli", "branch": "master"}
 
 
 def test_a_ref_with_a_slash_survives_the_round_trip():
@@ -832,19 +985,20 @@ def test_the_ticked_rows_split_on_whitespace(text, expected):
 
 def test_several_picks_resolve_in_the_order_they_were_ticked():
     rows = [_branch("agent/x"), _branch("agent/y"), _branch("agent/z")]
-    picked, rescan = preview_task.resolve_picks("carameli:agent/z carameli:agent/x", rows)
+    picked = preview_task.resolve_picks("carameli:agent/z carameli:agent/x", rows)
     assert [row.ref for row in picked] == ["agent/z", "agent/x"]
-    assert rescan is False
 
 
-def test_rescan_ticked_beside_real_rows_serves_the_rows_and_still_says_the_list_was_stale():
-    """A checkbox list makes this reasonable to do, and it means "these, and look again"
-    rather than "nothing" -- which is what a single-pick read of the value would make of it."""
-    rows = [_branch("agent/x")]
-    value = f"carameli:{preview_task.RESCAN} carameli:agent/x"
-    picked, rescan = preview_task.resolve_picks(value, rows)
-    assert [row.ref for row in picked] == ["agent/x"]
-    assert rescan is True
+def test_every_ticked_row_resolves_to_something_servable():
+    """The return is a plain list now, not a list plus a "and rescan" flag.
+
+    Nothing a checkbox list can send back is a control any more, so there is no second
+    thing for the caller to be told and no branch in `main` that serves zero rows on
+    purpose. Trunk ticked beside a branch is two previews, like any other pair.
+    """
+    rows = [_trunk(), _branch("agent/x")]
+    picked = preview_task.resolve_picks("carameli:master carameli:agent/x", rows)
+    assert [row.ref for row in picked] == ["master", "agent/x"]
 
 
 def test_one_unservable_token_fails_the_whole_value():
@@ -954,6 +1108,78 @@ def stub(monkeypatch, tmp_path):
 
 def _menu(stub, rows):
     stub.monkeypatch.setattr(preview_task, "collect", lambda *a, **k: rows)
+
+
+# --- the scan, and the scheduled pass that keeps it current ---------------------
+
+
+@pytest.fixture
+def scan(monkeypatch, tmp_path):
+    """`collect` with every source stubbed: one checkout, and whatever the test gives it."""
+    workspace = tmp_path / "alex-projects.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(preview_task, "stack_projects", lambda ws: ["carameli"])
+    monkeypatch.setattr(preview_task.worktree, "live_boxes", lambda root: {})
+    monkeypatch.setattr(preview_task, "recent_branches", lambda d, fetch=True: [])
+    monkeypatch.setattr(preview_task, "open_prs", lambda d: [])
+    monkeypatch.setattr(preview_task, "local_branch_dates", lambda d: {})
+    monkeypatch.setattr(preview_task, "merged_refs", lambda d: set())
+    monkeypatch.setattr(
+        preview_task,
+        "trunk_row",
+        lambda project, d: preview_task.Candidate(
+            project=project, ref="master", kind=preview_task.KIND_TRUNK
+        ),
+    )
+    return types.SimpleNamespace(workspace=workspace, monkeypatch=monkeypatch, tmp=tmp_path)
+
+
+def test_every_checkout_contributes_its_trunk_row(scan):
+    rows = preview_task.collect(scan.workspace, fetch=False)
+    assert [(row.ref, row.kind) for row in rows] == [("master", preview_task.KIND_TRUNK)]
+
+
+def test_the_trunk_row_sorts_above_everything_else(scan):
+    """The user-visible half of the request: the default branch is the FIRST option.
+
+    Rank, not recency -- `master` is usually older than the branch under review, so a
+    date-only sort would bury the row that exists to be reached without scrolling.
+    """
+    scan.monkeypatch.setattr(
+        preview_task, "recent_branches", lambda d, fetch=True: [("agent/x", NOW.isoformat(), "s")]
+    )
+    rows = preview_task.collect(scan.workspace, fetch=False, now=NOW)
+    assert [row.ref for row in rows] == ["master", "agent/x"]
+
+
+def test_a_richer_row_for_the_default_branch_is_not_duplicated_by_the_trunk_row(scan):
+    """A live box or an open PR on `master` keeps its own row rather than getting a
+    second, plainer one saying the same thing."""
+    scan.monkeypatch.setattr(
+        preview_task, "open_prs", lambda d: [pr(9, "master", title="a release PR")]
+    )
+    rows = preview_task.collect(scan.workspace, fetch=False)
+    assert [row.ref for row in rows] == ["master"]
+    assert rows[0].kind == preview_task.KIND_PR
+    assert rows[0].title == "a release PR"
+
+
+def test_refresh_menu_writes_the_options_file(scan):
+    path = scan.tmp / "logs" / "menu.json"
+    assert preview_task.refresh_menu(scan.workspace, fetch=False, path=path) == path
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["rows"]["carameli"][0]["label"] == "master"
+
+
+def test_refresh_menu_swallows_a_failure_rather_than_raising(scan):
+    """It is a rider on `worktree.py reconcile`, so it must never fail a pass that reaped
+    boxes correctly. A menu that could not be built costs one stale dropdown."""
+    scan.monkeypatch.setattr(
+        preview_task,
+        "stack_projects",
+        lambda ws: _raise_or(RuntimeError("registry is a directory")),
+    )
+    assert preview_task.refresh_menu(scan.workspace, fetch=False) is None
 
 
 def test_a_missing_workspace_registry_is_reported_not_traced(tmp_path, capsys):
@@ -1187,15 +1413,6 @@ def test_pick_ref_on_an_empty_machine_still_serves_the_ref(stub):
     assert stub.served == ["agent/brand-new"]
 
 
-def test_the_rescan_row_falls_through_to_the_terminal_menu(stub, capsys, monkeypatch):
-    monkeypatch.setattr(preview_task.sys, "stdin", types.SimpleNamespace(readline=lambda: "1\n"))
-    _menu(stub, [_branch("agent/x")])
-    argv = ["--workspace", str(stub.workspace), "--pick-ref", f"carameli:{preview_task.RESCAN}"]
-    assert preview_task.main(argv) == 0
-    assert "Rescanned" in capsys.readouterr().out
-    assert stub.served == ["agent/x"]
-
-
 def test_several_ticked_rows_are_all_served_in_one_run(stub, monkeypatch):
     """The whole point of the checkbox list: two branches on screen from one click."""
     monkeypatch.setattr(preview_task.sys, "stdin", types.SimpleNamespace(readline=lambda: ""))
@@ -1217,17 +1434,17 @@ def test_two_ticked_rows_sharing_a_box_are_served_once_and_the_drop_is_named(stu
     assert "picked once, not twice" in capsys.readouterr().out
 
 
-def test_rescan_ticked_beside_a_real_row_does_not_fall_through_to_the_terminal(stub, capsys):
-    _menu(stub, [_branch("agent/x")])
-    value = f"carameli:{preview_task.RESCAN} carameli:agent/x"
-    assert preview_task.main(["--workspace", str(stub.workspace), "--pick-ref", value]) == 0
-    assert "Rescanned" not in capsys.readouterr().out
-    assert stub.served == ["agent/x"]
+def test_the_trunk_row_is_served_like_any_other_pick(stub):
+    """The first row of every checkout's list, and it goes through no special path."""
+    _menu(stub, [_trunk(), _branch("agent/x")])
+    argv = ["--workspace", str(stub.workspace), "--pick-ref", "carameli:master"]
+    assert preview_task.main(argv) == 0
+    assert stub.served == ["master"]
 
 
 def test_the_terminal_menu_takes_several_numbers_too(stub, monkeypatch):
-    """The dropdown's fallback is where `Rescan` lands, so a single-select one would
-    dead-end the caller who ticked `Rescan` because they wanted two rows."""
+    """The terminal menu is the dropdown's fallback, so a single-select one would
+    dead-end the caller who reached it wanting two rows."""
     monkeypatch.setattr(preview_task.sys, "stdin", types.SimpleNamespace(readline=lambda: "2 1\n"))
     _menu(stub, [_branch("agent/x"), _branch("agent/y")])
     assert preview_task.main(["--workspace", str(stub.workspace)]) == 0

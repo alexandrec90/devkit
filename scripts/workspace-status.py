@@ -319,6 +319,56 @@ def boxes_line(rows: list[dict]) -> str:
     return line
 
 
+def previews_line(source: Path = SOURCE_ROOT, loader=None) -> str:
+    """Host Vite preview servers still serving; "" when there are none.
+
+    The third resource tier this file reports, after checkouts and boxes, and the one
+    that leaks most quietly: `preview-ui-host.py` starts a dev server per picked branch
+    and holds them for as long as its terminal lives, so a terminal closed rather than
+    interrupted leaves node processes serving forever. Measured on 2026-08-25 there were
+    three of them, on 5300/5301/5303, hours old and invisible to everything -- no box, no
+    container, no port lease, nothing in `docker ps`. `preview-ui-host.py` grew three nets
+    against that; this line is what makes the ones that still get through *visible*,
+    which is the half a net cannot do for itself.
+
+    Two states, because they want different things. A server whose owning run is still
+    watching is somebody's open preview and wants nothing said beyond that it is up. One
+    whose owner is gone is a leak, and the next serving run reaps it -- but "the next
+    run" may be tomorrow, so this offers the stop task's command now.
+
+    Loaded by path rather than reimplemented: `pid_alive` and `orphaned` are the whole
+    judgement, and a second copy of them here would be a copy that drifts. Guarded like
+    everything else in this file -- an unreadable registry or an unloadable module is
+    silence, never a failed session start.
+    """
+    loader = loader or load_by_path
+    if loader is None:
+        return ""
+    try:
+        host = loader("preview_ui_host", source / "scripts" / "preview-ui-host.py")
+        entries = host.read_registry(source / "logs" / "preview-ui-servers.json")
+        live = [entry for entry in entries if host.pid_alive(int(entry.get("pid") or 0))]
+        loose = [entry for entry in live if host.orphaned(entry)]
+    except Exception:
+        return ""
+    if not live:
+        return ""
+
+    def where(entry: dict) -> str:
+        return f"{entry.get('project', '?')}:{entry.get('ref', '?')} on {entry.get('port', '?')}"
+
+    watched = [entry for entry in live if entry not in loose]
+    parts = []
+    if watched:
+        parts.append(f"{len(watched)} open ({', '.join(where(e) for e in watched)})")
+    if loose:
+        parts.append(f"{len(loose)} orphaned ({', '.join(where(e) for e in loose)})")
+    line = f"{len(live)} host UI preview server(s): {'; '.join(parts)}"
+    if loose:
+        line += " (fix: run the Preview: Stop Host UI Servers task)"
+    return line
+
+
 def scheduler_line(source: Path = SOURCE_ROOT, now: float = 0.0, stale_hours: float = 2.0) -> str:
     """Reports an unattended pass that has stopped running; "" while it is running.
 
@@ -553,6 +603,7 @@ def render(
     schedule: list[str] | None = None,
     events: str = "",
     workspace_sync: str = "",
+    previews: str = "",
 ) -> str:
     """The whole message, or "" when there is nothing worth saying."""
     halves = (
@@ -566,6 +617,7 @@ def render(
         policy,
         adoption,
         boxes,
+        previews,
         guard,
         retired,
         events,
@@ -670,6 +722,7 @@ def main(argv: list[str] | None = None) -> int:
             schedule,
             events_line(),
             workspace_sync_line(workspace),
+            previews_line(),
         )
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)

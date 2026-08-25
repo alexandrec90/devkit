@@ -4102,6 +4102,8 @@ def reconcile(
         code, synced = sync_checkouts(workspace, apply=apply, fetch=fetch)
         worst = max(worst, code)
 
+    menu = refresh_preview_menu(workspace, apply=apply, fetch=fetch)
+
     report = {
         "applied": apply,
         "free_gb": round(free, 1),
@@ -4110,8 +4112,44 @@ def reconcile(
         "automerge": automerge,
         "boxes": outcomes,
         "checkouts": synced,
+        "preview_menu": menu,
     }
     return worst, report
+
+
+def refresh_preview_menu(workspace: Path, *, apply: bool, fetch: bool = True) -> str:
+    """Rebuild the preview tasks' dropdown options. The path written, or "" for anything else.
+
+    A rider on this pass rather than a schedule of its own, and that is the whole design:
+    the options file is what the two `Preview:` dropdowns read, `rioj7.command-variable`
+    can only read a *file*, and the only writer used to be the previous click on one of
+    those tasks. So the list a person picked from was however stale their last preview
+    was -- open PRs missing for days, and boxes on branches that had long since merged
+    still offered. This pass already runs every fifteen minutes, already fetches, and has
+    just finished reaping exactly the boxes whose rows should go: it knows more about
+    what belongs in that menu than any other scheduled thing on the machine.
+
+    Loaded by path and INSIDE the function on purpose. `preview-task.py` imports this
+    module, so importing it at the top of this one is a cycle; and it is hyphenated, so
+    it cannot be a plain `import` either way. `worktree.py` is the lower layer of the two
+    and this call is the one place the arrow points back, which is a good reason to keep
+    it narrow and total -- never raising, and never affecting `worst`. A menu that could
+    not be rebuilt is a stale dropdown; a reconcile that failed on one is a machine that
+    stops reaping boxes because a *convenience* broke.
+    """
+    if not apply:
+        return ""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+        from _loader import load_by_path
+
+        preview_task = load_by_path(
+            "preview_task", Path(__file__).resolve().parent / "preview-task.py"
+        )
+        written = preview_task.refresh_menu(workspace, fetch=fetch)
+    except Exception:
+        return ""
+    return str(written) if written else ""
 
 
 # --- reporting --------------------------------------------------------------
@@ -4282,6 +4320,13 @@ def render_reconcile(report: dict) -> str:
             lines.append(f"    {row['box']} -- {row['reason']}{url}")
             lines.extend(f"        {note}" for note in row.get("notes") or [])
     lines.extend(render_checkout_sync(checkouts, applied=bool(applied)))
+    if applied:
+        menu = report.get("preview_menu")
+        lines.append(
+            f"  preview menu: refreshed ({menu})"
+            if menu
+            else "  preview menu: [warn] not refreshed -- the Preview: dropdowns are stale"
+        )
     if not applied:
         lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")
     return "\n".join(lines)

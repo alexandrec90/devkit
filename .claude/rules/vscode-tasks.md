@@ -199,10 +199,22 @@ after the PR merges; a box never renders.
   file, and cannot run a command — so a list of live branches or boxes has to be *cached*
   by the previous run rather than gathered by this one. Three things that costs, all of
   which `previewRow` pays and a new one has to: the list is stale by construction, so it
-  needs a visible timestamp and a `Rescan` entry that falls through to a terminal prompt;
-  a pick that no longer matches anything must still resolve to something servable, since
+  needs a visible timestamp **and something other than a task run that refreshes it** —
+  `previewRow`'s file is rewritten by `worktree.py reconcile`, which the scheduled pass
+  runs every fifteen minutes, so the menu tracks open PRs without anyone asking it to; a
+  pick that no longer matches anything must still resolve to something servable, since
   the world moved on after the file was written; and **every row must carry every
-  templated field, as a string.** The extension appends options until an expression
+  templated field, as a string.**
+
+  That refresh replaced a `Rescan` row that rescanned and fell through to a terminal
+  prompt, and the swap is the general lesson rather than a detail of this picker: a
+  self-service row makes staleness the *reader's* problem every single time they open
+  the list, and it was picked because the list was wrong — an open PR missing from it is
+  not something a human should have to notice, ask about, and wait on. Give the file a
+  writer that runs on its own and the row has nothing left to do. Ride on an existing
+  scheduled pass rather than adding a daemon, and make the rider unable to fail it: the
+  refresh is wrapped so any exception leaves `reconcile`'s own verdict untouched and
+  prints one warning line. The extension appends options until an expression
   *throws*, and `undefined` does not throw — a row missing one field draws ten thousand
   blank entries instead of ending the list.
 - **Two dependent pickers are one input, not two.** VS Code resolves sibling

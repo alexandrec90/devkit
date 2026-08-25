@@ -348,6 +348,94 @@ def _raise(*args, **kwargs):
     raise RuntimeError("git said no")
 
 
+# --- the host preview tier ---------------------------------------------------
+
+
+def server(port: int, ref: str = "pr-190", project: str = "carameli", pid: int = 111) -> dict:
+    return {"pid": pid, "port": port, "project": project, "ref": ref, "root": "x"}
+
+
+def _host(entries, alive=True, orphans=()):
+    """A stand-in for `preview-ui-host.py`, loaded the way `previews_line` loads it.
+
+    The judgement it borrows -- is this pid alive, is it an orphan -- is tested in
+    `tests/test_preview_ui_host.py` against real processes. What is worth asserting here
+    is only what this line does with the two answers.
+    """
+    ports = {entry["port"] for entry in orphans}
+    return lambda name, path: type(
+        "Host",
+        (),
+        {
+            "read_registry": staticmethod(lambda path: entries),
+            "pid_alive": staticmethod(lambda pid: alive),
+            "orphaned": staticmethod(lambda entry: entry["port"] in ports),
+        },
+    )
+
+
+def test_no_preview_servers_is_silence():
+    """The common case, and the one where a line would be pure noise."""
+    assert ws.previews_line(loader=_host([])) == ""
+
+
+def test_a_dead_pid_in_the_registry_is_not_a_running_server():
+    """The registry outlives the servers in it -- a machine that rebooted has a full file
+    and nothing serving. Reporting those would make the line permanently wrong."""
+    assert ws.previews_line(loader=_host([server(5300)], alive=False)) == ""
+
+
+def test_an_open_preview_is_named_with_its_ref_and_port():
+    line = ws.previews_line(loader=_host([server(5300)]))
+    assert "1 host UI preview server(s)" in line
+    assert "1 open (carameli:pr-190 on 5300)" in line
+    assert "orphaned" not in line
+
+
+def test_an_open_preview_is_not_advertised_as_something_to_stop():
+    """It is somebody's browser tab. Offering the stop task for it is advice to kill the
+    thing they are looking at, printed at every session start."""
+    assert "Stop Host UI Servers" not in ws.previews_line(loader=_host([server(5300)]))
+
+
+def test_an_orphan_is_reported_as_the_leak_it_is_with_the_task_that_ends_it():
+    """The whole reason this tier is reported at all: nothing else on the machine shows
+    it. No box, no port lease, no container -- just node, serving a branch nobody is
+    reading, until the next serving run happens to reap it."""
+    orphan = server(5301, ref="pr-205")
+    line = ws.previews_line(loader=_host([orphan], orphans=[orphan]))
+    assert "1 orphaned (carameli:pr-205 on 5301)" in line
+    assert "Preview: Stop Host UI Servers" in line
+
+
+def test_the_two_preview_states_are_reported_separately():
+    """They want opposite things, exactly like the two box states: one wants leaving
+    alone, the other wants stopping."""
+    open_one, orphan = server(5300), server(5301, ref="pr-205")
+    line = ws.previews_line(loader=_host([open_one, orphan], orphans=[orphan]))
+    assert "2 host UI preview server(s)" in line
+    assert "1 open (carameli:pr-190 on 5300)" in line
+    assert "1 orphaned (carameli:pr-205 on 5301)" in line
+
+
+def test_an_unreadable_registry_costs_the_line_not_the_session():
+    assert ws.previews_line(loader=_raise) == ""
+
+
+def test_the_line_loads_the_real_script_from_the_source_tree():
+    """The path is the one thing the fakes above cannot check, and a rename of
+    `preview-ui-host.py` would otherwise turn this line silent rather than red."""
+    asked: list = []
+    ws.previews_line(loader=lambda name, path: (asked.append(path), _raise())[1])
+    assert asked and asked[0].name == "preview-ui-host.py"
+    assert asked[0].is_file()
+
+
+def test_the_preview_line_reaches_the_rendered_message():
+    line = ws.render([], {}, "v0.5.3", previews="2 host UI preview server(s): ...")
+    assert "2 host UI preview server(s)" in line
+
+
 # --- the guard that is wired outside every repo -------------------------------
 
 
