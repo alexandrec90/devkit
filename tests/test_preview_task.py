@@ -1554,6 +1554,75 @@ def test_a_box_that_publishes_nothing_is_not_waited_on(monkeypatch, tmp_path):
     assert opened == []
 
 
+# --- the two halves a multi-row run is made of --------------------------------
+#
+# `serve` used to be one function, and the split is what lets several rows share a wait.
+# These name `start`, `finish` and `Started` directly; the section below drives them
+# through `serve_all`, which is how they are actually called.
+
+
+def test_start_reports_a_ref_it_could_not_plan_and_carries_no_plan_forward(
+    monkeypatch, tmp_path, capsys
+):
+    def blow_up(**kwargs):
+        raise worktree.WorktreeError("no such ref agent/x")
+
+    monkeypatch.setattr(preview_task.worktree, "plan_preview", blow_up)
+
+    started = preview_task.start(_branch("agent/x"), tmp_path)
+
+    assert isinstance(started, preview_task.Started)
+    assert not started.ok
+    assert started.plan is None
+    assert started.primary == ""  # nothing for the shared wait to poll
+    assert "failed: no such ref agent/x" in capsys.readouterr().out
+
+
+def test_finish_adds_nothing_for_a_row_that_never_came_up(capsys):
+    """`plan is None` is the whole flag, rather than a second boolean beside `ok`.
+
+    A failed row has already said why and a `--down` row has already said where it
+    stopped, so anything printed here would be the second line about the same event --
+    and on a multi-row run it would land after the other rows' reports, detached from it.
+    """
+    started = preview_task.Started(_branch("agent/x"), ok=False)
+    assert preview_task.finish(started) is False
+    assert preview_task.finish(preview_task.Started(_branch("agent/y"), ok=True)) is True
+    assert capsys.readouterr().out == ""
+
+
+def test_finish_opens_the_tab_only_once_the_wait_has_answered(monkeypatch, tmp_path):
+    """A tab on a refused connection is the failure the wait exists to stop reporting."""
+    opened = _up(monkeypatch)
+    started = preview_task.start(_candidate(), tmp_path)
+
+    preview_task.finish(started, outcome=(False, 420.0))
+    assert opened == []
+
+    preview_task.finish(started, outcome=(True, 12.0))
+    assert opened == [URL]
+
+
+def test_finish_says_how_long_the_row_took_only_when_something_waited(
+    monkeypatch, tmp_path, capsys
+):
+    """`outcome=None` is `--no-wait`, or a slot publishing nothing -- no elapsed time to
+    report, and no silence to warn about."""
+    _up(monkeypatch)
+    started = preview_task.start(_candidate(), tmp_path)
+    capsys.readouterr()
+
+    preview_task.finish(started, outcome=None, open_it=False)
+    quiet = capsys.readouterr().out
+    assert "total:" not in quiet
+    assert "answered after" not in quiet
+
+    preview_task.finish(started, outcome=(True, 9.0), open_it=False)
+    spoken = capsys.readouterr().out
+    assert "answered after 9s" in spoken
+    assert "total:" in spoken
+
+
 # --- several boxes in one run -------------------------------------------------
 
 
