@@ -170,8 +170,8 @@ class TestRecord:
         assert path == tmp_path / "logs" / "harness-events.log"
         lines = path.read_text(encoding="utf-8").splitlines()
         assert len(lines) == 2
-        assert lines[0].endswith("\tevent=guard-block\tproject=p")
-        assert lines[1].endswith("\tevent=guard-block\tproject=q")
+        assert lines[0].endswith("\tevent=guard-block\tagent=claude\tproject=p")
+        assert lines[1].endswith("\tevent=guard-block\tagent=claude\tproject=q")
 
     def test_stamp_is_parseable_iso(self, tmp_path):
         path = events.record("agent-report", (), root=tmp_path)
@@ -190,3 +190,37 @@ class TestRecord:
         blocker = tmp_path / "blocker"
         blocker.write_text("a file where logs/ needs a directory", encoding="utf-8")
         assert events.record("agent-report", (), root=blocker) is None
+
+
+class TestAgentName:
+    """Which runtime's hook wrote a row -- the field that makes triage per-agent.
+
+    Every one of these is a regression test for the same defect: the ledger recorded
+    what the harness did to an agent without recording *which* agent, so a Codex-only
+    block and a Claude one were the same row shape, and a triage pass could retire one
+    on the strength of the other's fix.
+    """
+
+    def test_no_adapter_means_the_native_runtime(self):
+        assert events.agent_name({}) == "claude"
+        assert events.agent_name({events.ADAPTER_ENV: ""}) == "claude"
+
+    def test_the_adapters_own_marker_is_the_answer(self):
+        assert events.agent_name({events.ADAPTER_ENV: "codex"}) == "codex"
+        assert events.agent_name({events.ADAPTER_ENV: " CODEX "}) == "codex"
+
+    def test_the_environment_is_the_default_source(self, monkeypatch):
+        monkeypatch.setenv(events.ADAPTER_ENV, "codex")
+        assert events.agent_name() == "codex"
+
+    def test_record_stamps_it_without_the_writer_asking(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(events.ADAPTER_ENV, "codex")
+        path = events.record("guard-block", (("project", "p"),), root=tmp_path)
+        assert "\tagent=codex\t" in path.read_text(encoding="utf-8")
+
+    def test_a_writer_that_knows_better_keeps_its_own_value(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(events.ADAPTER_ENV, "codex")
+        path = events.record("agent-report", (("agent", "claude"),), root=tmp_path)
+        text = path.read_text(encoding="utf-8")
+        assert "\tagent=claude" in text
+        assert "codex" not in text

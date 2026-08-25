@@ -16,6 +16,7 @@ decisions, and the failures that produced them.
 | [`.claude/rules/authoring.md`](.claude/rules/authoring.md) | writing rules, skills and instruction files |
 | [`.claude/rules/vscode-tasks.md`](.claude/rules/vscode-tasks.md) | the workspace task block and its dispatcher |
 | [`scripts/CLAUDE.md`](scripts/CLAUDE.md) | vendoring, ephemeral boxes, scheduled jobs, loading a module by path |
+| [`scripts/hooks/CLAUDE.md`](scripts/hooks/CLAUDE.md) | the Codex translation tier: ported wiring, the response contract, the adapter |
 | [`.github/CLAUDE.md`](.github/CLAUDE.md) | the CI surface every project has |
 
 The first two are vendored *out* of here, so devkit is also the first place they have to

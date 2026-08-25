@@ -1155,10 +1155,17 @@ def test_a_tool_whose_arguments_the_guard_cannot_re_aim_is_still_refused(root, m
 
 
 def test_under_a_hook_adapter_the_edit_is_refused_rather_than_re_aimed(root, monkeypatch, capsys):
-    """`updatedInput` is Claude Code's. `codex-hook-adapter.py` passes a rc-0 hook's
-    stdout through verbatim, and Codex has no such member, so the response would read
-    as a bare allow and the edit would land on the home branch -- the exact outcome
-    this hook exists to prevent, arriving silently. Fail closed to the old block."""
+    """`codex-hook-adapter.py` passes a rc-0 hook's stdout through verbatim, so whether a
+    re-aim takes effect is decided entirely by the other runtime. If it does not, the
+    response reads as a bare allow and the edit lands on the home branch -- the exact
+    outcome this hook exists to prevent, arriving silently.
+
+    Note this is caution, not a known absence: Codex's PreToolUse schema *does* carry
+    `updatedInput` (`scripts/hooks/codex-hook-schema.json`). Nobody has yet watched a
+    live Codex session honour one, and this hook's asymmetry says an unverified rewrite
+    is worse than a needless block. An earlier version of this docstring asserted Codex
+    had no such member, which was a guess stated as a fact -- the same guess that got
+    the adapter's member classification wrong."""
     workspace = _workspace(root)
     _lease(root, "carameli--ws-s1-0806", project="carameli", session="s1")
     monkeypatch.setenv(guard.ADAPTER_ENV, "codex")

@@ -150,7 +150,7 @@
 			},
 			{
 				"label": "Test: Harness Hook Tests — free",
-				"detail": "The vendored tier's own stdlib-only tests in each selected checkout, run sequentially. Separate from 'Test: Run Suite' because pytest's testpaths deliberately excludes scripts/hooks/tests/ in EVERY consumer. Fails loudly on a checkout that does not vendor the harness.",
+				"detail": "The vendored tier's own stdlib-only tests in each selected checkout, run sequentially. Separate from 'Test: Run Suite' because pytest's testpaths deliberately excludes scripts/hooks/tests/ in EVERY consumer. Fails loudly on a checkout that does not vendor the harness. Includes test_codex_translation.py, which judges every response this project's hooks can emit against Codex's own published output schema — statically, with no CLI and no cost.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -176,7 +176,7 @@
 			},
 			{
 				"label": "Test: Harness Hook Tests — paid, live CLI",
-				"detail": "PAID — launches a real authenticated agent CLI against a throwaway project and proves the hooks change what it actually does. devkit only: these smokes live in tests/, which is never vendored. 'Claude only' is the cheapest run; each suite's model and budget are set in its own test file. Failures go to devkit/logs/hook-test-live-failures.log.",
+				"detail": "PAID — launches a real authenticated agent CLI against a throwaway project and proves the hooks change what it actually does. devkit only: these smokes live in tests/, which is never vendored. 'Claude only' is the cheapest run and is evidence about Claude ONLY — it says nothing about Codex, and the run now names the suite it skipped so a green line cannot be read as a clean bill of health for both. Each suite's model and budget are set in its own test file. Failures go to devkit/logs/hook-test-live-failures.log.",
 				"type": "process",
 				"command": "python",
 				"args": [

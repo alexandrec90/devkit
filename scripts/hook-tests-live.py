@@ -150,6 +150,39 @@ def cap(text: str, limit: int = MAX_LINES) -> str:
     return "\n".join(kept).strip()
 
 
+def unexercised(suites: list[Suite]) -> list[str]:
+    """The suite keys this run did not launch, in `ORDER`."""
+    ran = {suite.key for suite in suites}
+    return [key for key in ORDER if key not in ran]
+
+
+def pass_line(suites: list[Suite], executed: int) -> str:
+    """The one line a passing run prints -- and it has to name what it did *not* cover.
+
+    This used to read `passed, N live test(s)`, which is a clean bill of health for the
+    harness as a whole. It is not one. The default suite here is `claude`, the cheapest,
+    so the run that reads as proving the hooks work is precisely the run that never
+    launched Codex -- while the failures worth catching are translation failures, which
+    only a Codex session can produce. A green line naming no gap is how a real Codex
+    defect coexisted with a passing task for months.
+
+    The free `hook-tests.py` tier now carries a static translation gate
+    (`scripts/hooks/tests/test_codex_translation.py`), so an unexercised `codex` here is
+    no longer *nothing* -- but it is still not a live session, and this line must not
+    let the two be confused.
+    """
+    ran = ", ".join(suite.key for suite in suites)
+    missing = unexercised(suites)
+    if not missing:
+        return f"hook-tests-live: passed, {executed} live test(s) across {ran} — artifact cleared"
+    names = ", ".join(missing)
+    return (
+        f"hook-tests-live: passed, {executed} live test(s) in {ran} — "
+        f"NOT exercised: {names}. This run is no evidence about {names}; "
+        f"re-run as `{' '.join(missing)}` or `both` for that."
+    )
+
+
 def preflight_report(suites: list[Suite]) -> str:
     """What is about to be launched and what sets its cost. Printed before spending."""
     lines = ["hook-tests-live: PAID — this launches real, authenticated CLI sessions."]
@@ -234,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
     if result.returncode == 0 and executed:
         (root / ARTIFACT).parent.mkdir(parents=True, exist_ok=True)
         (root / ARTIFACT).write_text("", encoding="utf-8")
-        print(f"hook-tests-live: passed, {executed} live test(s) — artifact cleared")
+        print(pass_line(suites, executed))
         return 0
 
     if result.returncode == 0:

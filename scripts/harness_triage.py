@@ -43,7 +43,7 @@ import harness_events  # noqa: E402 - sibling hooks dir, put on the path just ab
 # The event names that mean a human or an agent should look. Kept here rather than in
 # `workspace-status.py` so the session-start line and this tool cannot disagree about
 # what the backlog is; `workspace-status` imports it.
-TRIAGE_EVENTS = ("agent-report", "guard-spawn-failed")
+TRIAGE_EVENTS = ("agent-report", "guard-spawn-failed", "codex-translation-gap")
 RESOLVED_EVENT = "triage-resolved"
 
 # The field each event name carries its human-readable substance in, in preference
@@ -81,6 +81,17 @@ class Item:
         return harness_events.project_name(Path(self.fields.get("project", "-")))
 
     @property
+    def agent(self) -> str:
+        """Which runtime's hook wrote this row -- `claude`, `codex`, or `unknown`.
+
+        Unknown is not a degenerate case to paper over: every row written before
+        `harness_events.agent_name` existed has no `agent=` field and never will, the
+        ledger being append-only, so the honest answer for those is that nobody
+        recorded it.
+        """
+        return self.fields.get("agent", "").strip(" -") or harness_events.UNKNOWN_AGENT
+
+    @property
     def detail(self) -> str:
         for key in DETAIL_KEYS:
             if self.fields.get(key, "").strip(" -"):
@@ -88,9 +99,18 @@ class Item:
         return "-"
 
     @property
-    def signature(self) -> tuple[str, str, str]:
-        """What `--resolve-like` treats as the same defect recurring."""
-        return (self.event, self.project, self.detail[:SIGNATURE_WIDTH])
+    def signature(self) -> tuple[str, str, str, str]:
+        """What `--resolve-like` treats as the same defect recurring.
+
+        `agent` is in here because the same hook does not behave the same under both
+        runtimes, so identical prose from Codex and from Claude is **not** one defect
+        recurring -- the capped-Bash gate is unported to Codex, and a PreToolUse
+        response that re-aims a call under Claude is dropped under Codex. Grouping the
+        two together let one fix retire the other's evidence, which is the failure the
+        user of this ledger described: a hook reporting an error for Codex says nothing
+        about whether Claude has it too.
+        """
+        return (self.event, self.agent, self.project, self.detail[:SIGNATURE_WIDTH])
 
 
 def item_id(raw: str) -> str:
@@ -148,14 +168,25 @@ def open_items(items: list[Item], events: tuple[str, ...] = TRIAGE_EVENTS) -> li
     return list(reversed(found))
 
 
-def groups(items: list[Item]) -> list[tuple[tuple[str, str, str], list[Item]]]:
+def for_agent(items: list[Item], agent: str) -> list[Item]:
+    """Only the rows some runtime's hooks wrote. `""` keeps everything.
+
+    Triage is per-agent work far more often than not: a Codex-only block is evidence
+    about the translation layer, and reading it while fixing Claude's side wastes the
+    pass. `unknown` selects the rows that predate the field.
+    """
+    wanted = agent.strip().lower()
+    return [i for i in items if not wanted or i.agent == wanted]
+
+
+def groups(items: list[Item]) -> list[tuple[tuple[str, str, str, str], list[Item]]]:
     """Open items collected by signature, most recurrences first.
 
     24 of the first 39 items in this machine's backlog were one spawn race recorded 24
     times. Listing them flat reads as 24 problems, which is how a backlog stops being
     read at all.
     """
-    buckets: dict[tuple[str, str, str], list[Item]] = {}
+    buckets: dict[tuple[str, str, str, str], list[Item]] = {}
     for item in items:
         buckets.setdefault(item.signature, []).append(item)
     return sorted(buckets.items(), key=lambda kv: (-len(kv[1]), kv[0]))
@@ -166,10 +197,10 @@ def render(items: list[Item]) -> str:
     if not items:
         return "harness-triage: nothing open\n"
     lines = ["# source: scripts/harness_triage.py", f"# open: {len(items)}", ""]
-    for (event, project, _), bucket in groups(items):
+    for (event, agent, project, _), bucket in groups(items):
         head = bucket[0]
         seen = f" (x{len(bucket)}, since {bucket[-1].stamp})" if len(bucket) > 1 else ""
-        lines.append(f"=== {event}  {project}  [{head.id}]{seen} ===")
+        lines.append(f"=== {event}  [{agent}]  {project}  [{head.id}]{seen} ===")
         lines.append(f"  when   {head.stamp}")
         lines.append(f"  detail {head.detail}")
         if head.fields.get("version", "").strip(" -"):
@@ -224,9 +255,16 @@ def expand_like(ids: list[str], items: list[Item]) -> list[str]:
     return [i.id for i in opened if i.signature in wanted]
 
 
-def write_artifact(text: str, root: Path = REPO_ROOT) -> Path:
-    """Persist the backlog, per the failure-artifact rule: fix from a file."""
-    path = root / ARTIFACT
+def write_artifact(text: str, root: Path | None = None) -> Path:
+    """Persist the backlog, per the failure-artifact rule: fix from a file.
+
+    `root` resolves inside rather than as `root: Path = REPO_ROOT` in the signature: a
+    default is bound once at import, so the parameter would keep pointing at the real
+    checkout however `REPO_ROOT` is repointed afterwards -- and every test of `main()`
+    wrote its fixture backlog over this repo's own `logs/harness-triage.log`, silently,
+    while appearing to be pinned to a `tmp_path`.
+    """
+    path = (root or REPO_ROOT) / ARTIFACT
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
@@ -241,6 +279,11 @@ def main(argv: list[str] | None = None) -> int:
         nargs="+",
         metavar="ID",
         help="mark these ids and every open item with the same signature resolved",
+    )
+    parser.add_argument(
+        "--agent",
+        default="",
+        help="only rows this runtime's hooks wrote: claude, codex, or unknown",
     )
     parser.add_argument("--note", default="", help="what fixed it -- required to resolve")
     parser.add_argument("--pr", default="", help="the PR that fixed it, when there is one")
@@ -259,9 +302,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"harness-triage: resolved {len(written)} item(s): {' '.join(written)}")
         items = load()
 
-    shown = items if args.all else open_items(items)
+    shown = for_agent(items if args.all else open_items(items), args.agent)
     text = render(shown)
-    path = write_artifact(text)
+    # The artifact is always the *whole* backlog, whatever the terminal was filtered to:
+    # `logs/harness-triage.log` is what the next session reads, and one written under a
+    # `--agent` filter would read as "this is everything" while hiding the other runtime.
+    path = write_artifact(render(open_items(items)))
     print(text, end="")
     print(f"harness-triage: {len(open_items(items))} open -- {path}")
     return 0
