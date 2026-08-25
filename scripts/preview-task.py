@@ -240,7 +240,20 @@ RESCAN = "__rescan__"
 # The wait is therefore part of the report rather than something the reviewer does by
 # reloading: every tick prints the elapsed total, which is also the only place the cost
 # of a cold box is ever stated in seconds.
-READY_TIMEOUT = 420.0
+#
+# **The deadline is measured from the last sign of life, not from the start**, and that
+# is the correction the 57s measurement above was not enough to reach. A flat 420s was
+# chosen from it with a 7x margin and was still too small: the same box on 2026-08-24
+# printed `added 702 packages, and audited 703 packages in 8m` and then served its page
+# fine -- so the task had already given up on a preview that was working, and reported
+# it as one that may be starting. Every flat number is that bug waiting for a slower
+# machine or a bigger lockfile. Silence across the whole stack is the property that
+# actually distinguishes a box making progress from a box that is wedged, so `READY_QUIET`
+# bounds *that*, and `READY_CEILING` is a backstop against the case silence cannot see:
+# a chatty sibling container keeping the stack noisy while the one service being waited
+# on is dead.
+READY_QUIET = 420.0
+READY_CEILING = 1800.0
 READY_POLL = 2.0
 READY_TICK = 15.0
 
@@ -810,14 +823,38 @@ def probe(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
 
 def wait_for_ready(
     url: str,
-    timeout: float = READY_TIMEOUT,
+    timeout: float = READY_QUIET,
     poll: float = READY_POLL,
     tick: float = READY_TICK,
+    ceiling: float = READY_CEILING,
+    progress=None,
     check=probe,
     sleep=time.sleep,
     clock=time.monotonic,
 ) -> tuple[bool, float]:
     """Poll `url` until it answers. `(ready, seconds waited)`, printing a line per tick.
+
+    `timeout` is **seconds without a sign of life, not seconds since the start** -- the
+    clock it bounds resets every time `progress()` returns something it has not returned
+    before. That is what lets a box be slow without being abandoned: whatever `npm
+    install` costs on this machine today, the wait only ends when the stack goes quiet
+    for `timeout` or the run reaches `ceiling`. With no `progress` the two collapse and
+    it is the plain elapsed timeout it has always been, which is the shape the injected
+    tests assert.
+
+    `progress` is sampled on the tick and never on the poll: it is a subprocess, and one
+    every two seconds for half an hour would cost more than the thing being waited for.
+    Its return value is also the tick line's detail, so the same call answers "is this
+    alive" and "what is it doing" -- the second being the half the reviewer needed, since
+    a bare "not answering yet" repeated twenty times is what a hang looks like too.
+
+    What gets shown is the line that *appeared* since the last sample, not the whole
+    sample and not a fixed line out of it. A stack answers for every container at once,
+    and none of "the first", "the last" or "all eight" is the useful one: the first two
+    pick by container name, which has nothing to do with which container is the slow
+    one, and the third is eight lines every fifteen seconds. What changed is exactly
+    what the reviewer is trying to find out, and it is already computed -- it is the
+    same comparison that decides whether to keep waiting.
 
     Every collaborator is injected because the alternative is a test that really sleeps:
     the thing worth asserting is the *shape* of the wait -- that it returns the moment
@@ -826,23 +863,35 @@ def wait_for_ready(
     """
     started = clock()
     spoken = 0.0
+    quiet_since = started
+    seen = ""
+    shown = ""
     while True:
         if check(url):
             return True, clock() - started
         waited = clock() - started
-        if waited >= timeout:
+        if clock() - quiet_since >= timeout or waited >= ceiling:
             return False, waited
         if waited - spoken >= tick:
             spoken = waited
-            echo(f"  ... {waited:.0f}s: {url} is not answering yet (the container is up)")
+            note = progress() if progress else ""
+            if note and note != seen:
+                fresh = [line for line in note.splitlines() if line not in seen.splitlines()]
+                shown = fresh[-1] if fresh else shown
+                seen = note
+                quiet_since = clock()
+            detail = f" -- {shown}" if shown else " (the container is up)"
+            echo(f"  ... {waited:.0f}s: {url} is not answering yet{detail}")
         sleep(poll)
 
 
 def wait_for_all(
     urls: list[str],
-    timeout: float = READY_TIMEOUT,
+    timeout: float = READY_QUIET,
     poll: float = READY_POLL,
     tick: float = READY_TICK,
+    ceiling: float = READY_CEILING,
+    progress=None,
     check=probe,
     sleep=time.sleep,
     clock=time.monotonic,
@@ -856,9 +905,11 @@ def wait_for_all(
     something the machine was doing simultaneously anyway. Ticking two branches would then
     be slower than clicking the task twice, which is the whole feature undone.
 
-    A single URL delegates to `wait_for_ready`, which is not merely an optimisation: with
-    nothing to interleave the two are the same wait, and one implementation of "is it up
-    yet" is one place for that to be wrong.
+    Each URL owns its quiet clock and progress source. A chatty box therefore cannot keep
+    a silent neighbour alive, while two boxes that are both installing can keep their own
+    waits alive independently. A single URL delegates to `wait_for_ready`, which is not
+    merely an optimisation: with nothing to interleave the two are the same wait, and one
+    implementation of "is it up yet" is one place for that to be wrong.
     """
     if len(urls) < 2:
         # By keyword, every one of them: `serve`'s tests substitute a two-argument stand-in
@@ -867,12 +918,23 @@ def wait_for_all(
         # test whose subject is what the wait printed.
         return {
             url: wait_for_ready(
-                url, timeout=timeout, poll=poll, tick=tick, check=check, sleep=sleep, clock=clock
+                url,
+                timeout=timeout,
+                poll=poll,
+                tick=tick,
+                ceiling=ceiling,
+                progress=progress.get(url) if progress else None,
+                check=check,
+                sleep=sleep,
+                clock=clock,
             )
             for url in urls
         }
     started = clock()
     pending, outcomes, spoken = list(dict.fromkeys(urls)), {}, 0.0
+    quiet_since = {url: started for url in pending}
+    seen = {url: "" for url in pending}
+    shown = {url: "" for url in pending}
     while True:
         for url in list(pending):
             if check(url):
@@ -881,16 +943,35 @@ def wait_for_all(
         if not pending:
             return outcomes
         waited = clock() - started
-        if waited >= timeout:
-            # Whoever has not answered by the shared deadline gets the same verdict, and
-            # the elapsed total rather than a per-URL one: they were all waited on at once.
-            return {**outcomes, **{url: (False, waited) for url in pending}}
+        expired = [
+            url for url in pending if clock() - quiet_since[url] >= timeout or waited >= ceiling
+        ]
+        for url in expired:
+            outcomes[url] = (False, waited)
+            pending.remove(url)
+        if not pending:
+            return outcomes
         if waited - spoken >= tick:
             spoken = waited
+            details = []
+            for url in pending:
+                source = progress.get(url) if progress else None
+                note = source() if source else ""
+                if note and note != seen[url]:
+                    fresh = [
+                        line for line in note.splitlines() if line not in seen[url].splitlines()
+                    ]
+                    shown[url] = fresh[-1] if fresh else shown[url]
+                    seen[url] = note
+                    quiet_since[url] = clock()
+                if shown[url]:
+                    details.append(f"    {url} -- {shown[url]}")
             echo(
                 f"  ... {waited:.0f}s: {len(pending)} of {len(urls)} not answering yet "
                 f"({', '.join(pending)})"
             )
+            for detail in details:
+                echo(detail)
         sleep(poll)
 
 
@@ -1216,7 +1297,7 @@ def start(
     if not plan.up:
         # `plan.up` false on an up-run means the checkout has no compose stack, so
         # nothing was started -- and the slot's URLs may still be published, so waiting
-        # on one would spend the whole READY_TIMEOUT on a port nothing was asked to
+        # on one would spend the whole READY_QUIET on a port nothing was asked to
         # answer, reporting a working preview the entire time.
         echo(
             f"  nothing was started: {plan.path} has no compose stack to bring up. "
@@ -1251,9 +1332,9 @@ def finish(
         echo(
             f"  {started.primary} answered after {waited:.0f}s"
             if ready
-            else f"  [warn] {started.primary} still silent after {waited:.0f}s -- it may still "
-            f"be starting: `docker compose -p {started.plan.box.name} logs -f` says what it "
-            f"is doing"
+            else f"  [warn] {started.primary} still silent after {waited:.0f}s, and so is the "
+            f"rest of the stack -- `docker compose -p {started.plan.box.name} logs -f` says "
+            f"what it is doing"
         )
         echo(f"  total: {time.monotonic() - started.began:.0f}s")
     echo()
@@ -1300,7 +1381,12 @@ def serve_all(
         echo(f"\n  waiting for all {len(pending)} at once -- a cold box installs first ...")
         for url in pending:
             echo(f"    {url}")
-    outcomes = wait_for_all(pending) if pending else {}
+    progress = {
+        row.primary: lambda row=row: worktree.compose_tail(Path(row.plan.path), row.plan.box.name)
+        for row in started
+        if row.primary and row.plan is not None
+    }
+    outcomes = wait_for_all(pending, progress=progress) if pending else {}
     return sum(1 for row in started if not finish(row, outcomes.get(row.primary), open_it))
 
 

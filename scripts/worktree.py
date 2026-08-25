@@ -2736,6 +2736,57 @@ def compose_config(
     return parsed if isinstance(parsed, dict) else None
 
 
+def compose_tail(path: Path, project_name: str, timeout: float = 20.0) -> str:
+    """The latest line from each of a box's containers, or `""` when docker cannot say.
+
+    A progress fingerprint for a caller waiting on a URL. A cold box spends minutes in
+    `npm install` with nothing listening, and a wait that watches only the port cannot
+    tell that from a container wedged on a build -- so it prints the same line for both
+    and, worse, gives up on the one that was working. The log is what separates them: an
+    installing box keeps emitting, a stuck one does not.
+
+    Every service and not one named service, because which container is the slow one is
+    a fact about the project. **Sorted**, which is the part that had to be measured:
+    `docker compose logs --tail 1` streams the containers concurrently, so two calls a
+    second apart against an idle two-service stack came back in opposite orders (probed
+    on engine 29.2.0, 2026-08-24). Returned in docker's order, a caller comparing this
+    value to the last one would read that churn as progress and never time out at all.
+    Sorting costs the ability to say which line is newest -- nothing here needed that --
+    and buys a value that changes only when some container has actually said something.
+    Runs of whitespace collapse for the same reason and it is the same measurement:
+    docker pads the container-name column to the widest name it has attached to so far,
+    and gets there by a race, so `beta-1  |` and `beta-1   |` came back from consecutive
+    calls to an idle stack. Sorted but unsquashed, that is still churn reading as news.
+
+    Blank lines are dropped and each line is truncated: it is printed on a progress tick,
+    and one container logging a minified bundle would wrap the report into unreadability
+    every fifteen seconds. What is returned is the whole set, newline-joined, because the
+    caller needs both halves -- the set to compare, and a line from it to show.
+
+    `""` on every failure, for the reason `compose_config` gives: something whose whole
+    job is to make a wait more informative must never be the thing that ends it.
+    """
+    try:
+        completed = subprocess.run(
+            ["docker", "compose", "-p", project_name, "logs", "--tail", "1"],
+            cwd=str(path),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            creationflags=sweep.NO_WINDOW,
+            env=build_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if completed.returncode != 0:
+        return ""
+    lines = sorted(
+        " ".join(line.split())[:120] for line in completed.stdout.splitlines() if line.strip()
+    )
+    return "\n".join(lines)
+
+
 def compose_up(
     path: Path,
     project_name: str,
