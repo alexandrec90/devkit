@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from support import REPO_ROOT, devkit_project, load_script
 
 rs = load_script("scripts/resume-sessions.py")
@@ -94,10 +96,10 @@ def write_codex_rollout(
     return path
 
 
-def session(name: str, mtime: float, cwd: Path, prompt: str = "topic"):
+def session(name: str, mtime: float, cwd: Path, prompt: str = "topic", agent: str = "claude"):
     """One `Session`. Deliberately unannotated: `rs` is loaded by path, so mypy has no
     name to resolve `rs.Session` against and reports the annotation as undefined."""
-    return rs.Session(session_id=name, cwd=cwd, prompt=prompt, mtime=mtime)
+    return rs.Session(agent=agent, session_id=name, cwd=cwd, prompt=prompt, mtime=mtime)
 
 
 # --- reading a transcript ----------------------------------------------------
@@ -324,6 +326,20 @@ def test_select_returns_everything_when_there_are_fewer_than_asked(tmp_path):
     assert [s.session_id for s in rs.select(sessions, 4)] == ["b", "a"]
 
 
+def test_select_any_takes_one_global_recency_slice_across_agents(tmp_path):
+    sessions = [
+        session("claude-old", 1.0, tmp_path, agent="claude"),
+        session("claude-new", 4.0, tmp_path, agent="claude"),
+        session("codex-middle", 2.0, tmp_path, agent="codex"),
+        session("codex-new", 3.0, tmp_path, agent="codex"),
+    ]
+    assert [(s.agent, s.session_id) for s in rs.select(sessions, 3)] == [
+        ("codex", "codex-middle"),
+        ("codex", "codex-new"),
+        ("claude", "claude-new"),
+    ]
+
+
 def test_a_reaped_box_is_partitioned_out(tmp_path):
     """`--resume` is keyed to a directory; a reaped box has nothing to reopen."""
     live_dir = tmp_path / "checkout"
@@ -370,6 +386,22 @@ def test_each_agent_uses_its_own_resume_syntax(tmp_path):
         "0",
     ]
     assert codex[codex.index("codex") :] == ["codex", "resume", "a", ";", "focus-tab", "-t", "0"]
+
+
+def test_a_mixed_window_uses_each_sessions_own_resume_syntax(tmp_path):
+    args = rs.wt_args(
+        [
+            session("claude-id", 1.0, tmp_path, agent="claude"),
+            session("codex-id", 2.0, tmp_path, agent="codex"),
+        ]
+    )
+    assert args[args.index("claude") : args.index(";")] == [
+        "claude",
+        "--resume",
+        "claude-id",
+    ]
+    codex_index = args.index("codex")
+    assert args[codex_index : codex_index + 3] == ["codex", "resume", "codex-id"]
 
 
 def test_a_prompt_cannot_rearrange_the_window(tmp_path):
@@ -470,6 +502,37 @@ def test_codex_list_reads_rollouts_instead_of_claude_transcripts(tmp_path, capsy
     assert "Codex topic" in out
 
 
+def test_any_list_merges_both_stores_before_applying_the_count(tmp_path, capsys, monkeypatch):
+    claude_root = tmp_path / "claude"
+    codex_root = tmp_path / "codex"
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    write_transcript(claude_root, "claude-old", cwd=cwd, prompt="claude-old", mtime=1.0)
+    write_transcript(claude_root, "claude-new", cwd=cwd, prompt="claude-new", mtime=4.0)
+    write_codex_rollout(codex_root, "codex-middle", cwd=cwd, prompt="codex-middle", mtime=2.0)
+    write_codex_rollout(codex_root, "codex-new", cwd=cwd, prompt="codex-new", mtime=3.0)
+    monkeypatch.setattr(
+        rs,
+        "sessions_root",
+        lambda agent: claude_root if agent == "claude" else codex_root,
+    )
+
+    assert rs.main(["--agent", "claude,codex", "--count", "3", "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "claude-old" not in out
+    assert out.index("codex-middle") < out.index("codex-new") < out.index("claude-new")
+
+
+def test_any_is_the_cli_alias_for_both_agents():
+    assert rs._parse_agents("any") == ("claude", "codex")
+    assert rs._parse_agents("codex,claude") == ("claude", "codex")
+
+
+def test_an_unknown_agent_selection_is_rejected():
+    with pytest.raises(rs.argparse.ArgumentTypeError, match="choose one of"):
+        rs._parse_agents("claude,other")
+
+
 def test_without_windows_terminal_it_prints_the_commands_and_fails(tmp_path, capsys, monkeypatch):
     """A launcher that could not launch must not report success."""
     store, cwd = tmp_path / "store", tmp_path / "repo"
@@ -515,9 +578,16 @@ def test_the_script_is_stdlib_only():
             }, f"non-stdlib import: {line}"
 
 
-def test_the_workspace_task_passes_the_shared_agent_picker():
+def test_the_workspace_task_passes_the_resume_agent_checkboxes():
     source = devkit_project.canonical_tasks_text()
     task = source[source.index('"label": "Agents: Resume Recent Sessions"') :]
     task = task[: task.index('"problemMatcher"')]
     assert '"--agent"' in task
-    assert '"${input:agentCli}"' in task
+    assert '"${input:resumeAgents}"' in task
+
+    picker = source[source.index('"id": "resumeAgents"') :]
+    picker = picker[: picker.index('"id": "resumeSessionCount"')]
+    assert '"multiPick": true' in picker
+    assert '"minCount": 1' in picker
+    assert '"claude"' in picker
+    assert '"codex"' in picker
