@@ -321,7 +321,15 @@ SHELL_WRITE_ALL = frozenset(
         "rm",
         "unlink",
         "shred",
-        # PowerShell, which is this workspace's other shell and has its own tool.
+    }
+)
+
+# PowerShell is this workspace's other shell and has its own tool. Its cmdlets take
+# common parameters after the path (`-ErrorAction SilentlyContinue`) and content after
+# it (`-Value x`), so treating every bare word as a path turns their values into files
+# inside the current checkout. They need their own small operand parser below.
+POWERSHELL_WRITE_ALL = frozenset(
+    {
         "set-content",
         "add-content",
         "out-file",
@@ -333,8 +341,29 @@ SHELL_WRITE_ALL = frozenset(
 
 # Copy-shaped verbs, where every operand but the last is a source being *read*. Taking
 # them all would block `cp devkit/x.py /tmp/`, which writes nothing a branch can carry.
-SHELL_WRITE_LAST = frozenset(
-    {"cp", "mv", "install", "rsync", "ln", "copy-item", "move-item", "rename-item"}
+SHELL_WRITE_LAST = frozenset({"cp", "mv", "install", "rsync", "ln"})
+POWERSHELL_WRITE_LAST = frozenset({"copy-item", "move-item", "rename-item"})
+
+POWERSHELL_PATH_OPTIONS = frozenset({"-path", "-literalpath", "-filepath"})
+POWERSHELL_DESTINATION_OPTIONS = frozenset({"-destination"})
+POWERSHELL_SWITCHES = frozenset(
+    {
+        "-confirm",
+        "-debug",
+        "-force",
+        "-nonewline",
+        "-passthru",
+        "-recurse",
+        "-verbose",
+        "-whatif",
+    }
+)
+
+# PowerShell providers address process, registry and certificate state rather than the
+# filesystem. On Windows `Path("Env:NAME")` otherwise looks relative and resolves under
+# the current checkout, producing a branch-protection block for an environment cleanup.
+POWERSHELL_NON_FILESYSTEM_PROVIDER = re.compile(
+    r"^(?:Alias|Cert|Env|Function|HKCU|HKLM|Registry|Variable):", re.I
 )
 
 # Wrappers that stand in front of the real verb rather than being one.
@@ -513,14 +542,42 @@ def redirect_targets(statement: str) -> list[str]:
     return found
 
 
+def _powershell_named_value(tokens: list[str], names: frozenset[str]) -> str:
+    """The value after the first matching PowerShell path option, or ""."""
+    for index, token in enumerate(tokens[:-1]):
+        if token.lower() in names:
+            return tokens[index + 1]
+    return ""
+
+
+def _powershell_positionals(tokens: list[str]) -> list[str]:
+    """Positional operands, excluding common-parameter and option values.
+
+    Unknown options consume one following token. That deliberately prefers missing an
+    unfamiliar spelling over treating its value as a checkout-relative file — the same
+    closed-list direction as the rest of the shell tier. Known switches consume none.
+    """
+    found: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.lower() in POWERSHELL_SWITCHES:
+            index += 1
+        elif token.startswith("-"):
+            index += 2
+        else:
+            found.append(token)
+            index += 1
+    return found
+
+
 def shell_write_targets(command: str) -> list[str]:
     """Every path this command line names as something it is about to write.
 
     Order-preserving and deduplicated, so a block names the first target the command
-    would have hit rather than an arbitrary one. Operands that are not paths at all — a
-    `sed` script, a `-Value` string — are left in: they resolve to no checkout, and
-    picking the "real" one out of a verb's argv is more shell modelling than this tier
-    is willing to do.
+    would have hit rather than an arbitrary one. Simple Unix verbs keep every operand;
+    PowerShell cmdlets select their path/destination parameters so `-Value x` and common
+    parameter values do not become checkout-relative filenames.
 
     The one operand dropped is an **unexpanded variable**: `tee "$OUT"`, `echo x > %TMP%`.
     "Resolves to no checkout" is the reason the rest are kept, and for these it is simply
@@ -533,7 +590,7 @@ def shell_write_targets(command: str) -> list[str]:
 
     def add(value: str) -> None:
         value = _unquote(value.strip())
-        if value.startswith(("$", "%", "`")):
+        if value.startswith(("$", "%", "`")) or POWERSHELL_NON_FILESYSTEM_PROVIDER.match(value):
             return
         if value and value not in found:
             found.append(value)
@@ -561,8 +618,16 @@ def shell_write_targets(command: str) -> list[str]:
         elif verb in SHELL_WRITE_ALL:
             for operand in operands:
                 add(operand)
+        elif verb in POWERSHELL_WRITE_ALL:
+            path = _powershell_named_value(tokens[1:], POWERSHELL_PATH_OPTIONS)
+            positionals = _powershell_positionals(tokens[1:])
+            add(path or (positionals[0] if positionals else ""))
         elif verb in SHELL_WRITE_LAST and operands:
             add(operands[-1])
+        elif verb in POWERSHELL_WRITE_LAST:
+            destination = _powershell_named_value(tokens[1:], POWERSHELL_DESTINATION_OPTIONS)
+            positionals = _powershell_positionals(tokens[1:])
+            add(destination or (positionals[-1] if positionals else ""))
     return found
 
 

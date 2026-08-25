@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reopen the most recently active Claude or Codex sessions, one terminal tab each.
+"""Reopen the most recently active Claude and/or Codex sessions, one tab each.
 
 Backs the workspace-level VS Code task "Agents: Resume Recent Sessions".
 
@@ -7,10 +7,12 @@ Backs the workspace-level VS Code task "Agents: Resume Recent Sessions".
 checkout: it asks which project, and the answer bounds what it can touch. Picking up
 yesterday's work is the opposite shape — what you want back is the last few *sessions*,
 wherever they happened to run, and a session's directory is a fact about it rather than
-a question to answer. Three of the last four may be in one repo and the fourth in an
+a question to answer. Three of the last few may be in one repo and another in an
 ephemeral box that no picker lists (boxes are absent from the workspace file by design,
-so `${input:project}` could not offer one). So this reads the chosen agent's transcript
-store, which knows every session's directory, and takes no project argument at all.
+so `${input:project}` could not offer one). So this reads the selected agents' transcript
+stores, which know every session's directory, and takes no project argument at all. When
+both agents are selected, they are merged before the recency limit is applied: "last 10"
+means ten sessions total, regardless of which agent owns them.
 
 Recency is the transcript's **mtime**, not a timestamp parsed out of it: the store
 appends to a session's file for as long as the session lives, so the file's mtime is its
@@ -22,7 +24,7 @@ The tabs are laid out **oldest first**, so reading left to right walks forward t
 the day.
 
 Two kinds of transcript are deliberately skipped, and both would otherwise displace a
-real session out of the four:
+real session out of the requested set:
 
 - **Claude sidechains.** A subagent's transcript is a session file like any other and is
   written more recently than the parent that spawned it. `--resume` on one reopens a
@@ -83,6 +85,7 @@ _CODEX_CONTEXT_PREFIXES = ("# AGENTS.md instructions", "<environment_context>")
 class Session:
     """One resumable agent session."""
 
+    agent: str  # which CLI owns the transcript and must resume it
     session_id: str  # what the chosen agent's resume command takes
     cwd: Path  # where it ran — resume semantics are directory-sensitive
     prompt: str  # its opening prompt, for the tab title
@@ -202,7 +205,7 @@ def parse_claude_session(path: Path) -> Session | None:
         return None
     # The filename, not the records' `sessionId`: the filename is the key `--resume`
     # looks up, and a transcript copied or renamed by hand would disagree.
-    return Session(session_id=path.stem, cwd=Path(cwd), prompt=prompt, mtime=mtime)
+    return Session(agent="claude", session_id=path.stem, cwd=Path(cwd), prompt=prompt, mtime=mtime)
 
 
 def codex_first_prompt(records: list[dict]) -> str:
@@ -240,7 +243,7 @@ def parse_codex_session(path: Path) -> Session | None:
         mtime = path.stat().st_mtime
     except OSError:
         return None
-    return Session(session_id=session_id, cwd=Path(cwd), prompt=prompt, mtime=mtime)
+    return Session(agent="codex", session_id=session_id, cwd=Path(cwd), prompt=prompt, mtime=mtime)
 
 
 def collect(root: Path, agent: str) -> list[Session]:
@@ -286,7 +289,7 @@ def tab_title(session: Session) -> str:
 def describe(session: Session) -> str:
     """One report line: when it was last active, where it ran, and what it was about."""
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(session.mtime))
-    return f"{when}  {tab_title(session)}  [{session.session_id[:8]}]"
+    return f"{when}  {tab_title(session)}  [{session.agent}:{session.session_id[:8]}]"
 
 
 # --- launching ---------------------------------------------------------------
@@ -299,7 +302,7 @@ def resume_args(agent: str, session_id: str) -> list[str]:
     return [agent, "resume", session_id]
 
 
-def wt_args(sessions: list[Session], agent: str = "claude") -> list[str]:
+def wt_args(sessions: list[Session], agent: str | None = None) -> list[str]:
     """The wt.exe argument list: one tab per session, each resuming it in its own cwd.
 
     `-w -1` forces a new window rather than tabs bolted onto whichever one has focus.
@@ -323,16 +326,16 @@ def wt_args(sessions: list[Session], agent: str = "claude") -> list[str]:
             "-NoLogo",
             "-NoExit",
             "-Command",
-            *resume_args(agent, session.session_id),
+            *resume_args(agent or session.agent, session.session_id),
         ]
     args += [";", "focus-tab", "-t", "0"]
     return args
 
 
-def shell_lines(sessions: list[Session], agent: str = "claude") -> list[str]:
+def shell_lines(sessions: list[Session], agent: str | None = None) -> list[str]:
     """The same work as one command per session, for a machine with no Windows Terminal."""
     return [
-        f'cd "{session.cwd}" && {" ".join(resume_args(agent, session.session_id))}'
+        f'cd "{session.cwd}" && {" ".join(resume_args(agent or session.agent, session.session_id))}'
         for session in sessions
     ]
 
@@ -345,6 +348,17 @@ def find_terminal() -> str:
 # --- entrypoint -------------------------------------------------------------
 
 
+def _parse_agents(value: str) -> tuple[str, ...]:
+    """A CLI agent name or the checkbox picker's comma-separated selection."""
+    selected = SUPPORTED_AGENTS if value == "any" else tuple(value.split(","))
+    if not selected or any(agent not in SUPPORTED_AGENTS for agent in selected):
+        choices = ", ".join((*SUPPORTED_AGENTS, "any"))
+        raise argparse.ArgumentTypeError(f"choose one of {choices}, or select both agents")
+    # The checkbox extension can return either click order. Canonical order makes the
+    # report stable; the global mtime sort, not this order, decides which sessions win.
+    return tuple(agent for agent in SUPPORTED_AGENTS if agent in selected)
+
+
 def main(argv: list[str] | None = None) -> int:
     # Prompts carry arrows, dashes and emoji; a Windows console is cp1252 and would
     # raise UnicodeEncodeError mid-report rather than printing the sessions it found.
@@ -353,7 +367,7 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
 
     parser = argparse.ArgumentParser(
-        description="Reopen the most recently active Claude or Codex sessions, one tab each."
+        description="Reopen the most recently active Claude and/or Codex sessions."
     )
     parser.add_argument(
         "--count",
@@ -365,13 +379,15 @@ def main(argv: list[str] | None = None) -> int:
         "--sessions-dir",
         type=Path,
         default=None,
-        help="transcript store to read (default: the chosen agent's config home)",
+        help="transcript store to read (default: each selected agent's config home)",
     )
     parser.add_argument(
         "--agent",
-        choices=SUPPORTED_AGENTS,
-        default="claude",
-        help="whose sessions to select and resume (default claude)",
+        dest="agents",
+        type=_parse_agents,
+        default=("claude",),
+        metavar="AGENT",
+        help="claude, codex, any, or a comma-separated checkbox selection (default claude)",
     )
     parser.add_argument(
         "--list", action="store_true", help="print what would be reopened, launch nothing"
@@ -385,14 +401,17 @@ def main(argv: list[str] | None = None) -> int:
         print("resume-sessions: --count must be at least 1", file=sys.stderr)
         return 2
 
-    root = args.sessions_dir or sessions_root(args.agent)
-    live, orphaned = partition(collect(root, args.agent))
+    roots = {agent: args.sessions_dir or sessions_root(agent) for agent in args.agents}
+    sessions = [session for agent, root in roots.items() for session in collect(root, agent)]
+    live, orphaned = partition(sessions)
     if not live:
-        print(f"resume-sessions: no resumable sessions found under {root}", file=sys.stderr)
+        locations = ", ".join(str(root) for root in roots.values())
+        print(f"resume-sessions: no resumable sessions found under {locations}", file=sys.stderr)
         return 1
 
     selected = select(live, args.count)
-    print(f"Resuming {len(selected)} {args.agent.title()} session(s), oldest tab first:")
+    owners = "/".join(agent.title() for agent in args.agents)
+    print(f"Resuming {len(selected)} {owners} session(s), oldest tab first:")
     for index, session in enumerate(selected, start=1):
         print(f"  {index}. {describe(session)}")
 
@@ -411,11 +430,11 @@ def main(argv: list[str] | None = None) -> int:
     terminal = find_terminal()
     if not terminal:
         print("\nWindows Terminal (wt.exe) not found; run these yourself:", file=sys.stderr)
-        for line in shell_lines(selected, args.agent):
+        for line in shell_lines(selected):
             print(f"  {line}", file=sys.stderr)
         return 0 if args.dry_run else 1
 
-    command = wt_args(selected, args.agent)
+    command = wt_args(selected)
     if args.dry_run:
         print("\nwt.exe " + subprocess.list2cmdline(command))
         return 0

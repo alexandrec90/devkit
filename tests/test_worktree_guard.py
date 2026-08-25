@@ -39,15 +39,21 @@ def root(tmp_path):
 
 @pytest.fixture(autouse=True)
 def ledger_root(tmp_path, monkeypatch):
-    """Redirect the harness-events ledger into tmp for every test.
+    """Isolate process-global hook state and redirect the ledger into tmp.
 
     `guard.LEDGER_ROOT` resolves to the checkout the hook lives in -- during a test
     run, the real one -- and many tests here drive blocking flows, each of which
     appends a ledger line. Without this, a green run would salt the workspace's actual
     `logs/harness-events.log` with phantom `guard-spawn-failed` events, which is
     exactly the class `workspace-status.py` surfaces for triage.
+
+    The Stop hook can run this suite as a descendant of `codex-hook-adapter.py`, whose
+    marker is meaningful to the hook process but is not a default scenario for these
+    unit tests. Tests of the adapter branch set it explicitly; every other case must
+    start from the ordinary Claude response contract regardless of its parent process.
     """
     base = tmp_path / "ledger"
+    monkeypatch.delenv(guard.ADAPTER_ENV, raising=False)
     monkeypatch.setattr(guard, "LEDGER_ROOT", base)
     return base
 
@@ -1626,9 +1632,13 @@ def shell_payload(command: str, cwd: str = "", session: str = "s1", tool: str = 
         ("sudo tee devkit/a.py", ["devkit/a.py"]),
         ("FOO=1 tee devkit/a.py", ["devkit/a.py"]),
         # PowerShell has its own tool in this harness, and its own spelling
-        ("Set-Content -Path devkit/a.py -Value x", ["devkit/a.py", "x"]),
+        ("Set-Content -Path devkit/a.py -Value x", ["devkit/a.py"]),
         ("Copy-Item -Path a -Destination devkit/a.py", ["devkit/a.py"]),
         ("remove-item devkit/a.py", ["devkit/a.py"]),
+        (
+            "Remove-Item devkit/a.py -ErrorAction SilentlyContinue",
+            ["devkit/a.py"],
+        ),
         # more than one, in the order the command names them
         ("touch devkit/a.py && rm devkit/b.py", ["devkit/a.py", "devkit/b.py"]),
     ],
@@ -1647,6 +1657,9 @@ def test_shell_write_targets_reads_the_spellings_that_write(command, expected):
         "git diff --stat devkit/a.py",
         "python x.py 2>&1",  # a descriptor duplication names no file
         "wc -l devkit/a.py",
+        # PowerShell providers are process state, not paths in the current checkout.
+        "$env:DEVKIT_HOOK_ADAPTER = 'codex'; "
+        "Remove-Item Env:DEVKIT_HOOK_ADAPTER -ErrorAction SilentlyContinue",
         "",
     ],
 )
