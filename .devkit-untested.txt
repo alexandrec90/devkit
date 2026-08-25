@@ -101,12 +101,10 @@ scripts/new-project.py::register_slot_hint
 scripts/new-project.py::scripted_setup_env
 scripts/precommit/check_harness_drift.py::is_same_repo
 scripts/precommit/check_stdlib_only.py::imported_roots
-scripts/preview-task.py::collect
 scripts/preview-task.py::describe
 scripts/preview-task.py::menu_row
 scripts/preview-task.py::project_note
 scripts/preview-task.py::read_choice
-scripts/preview-task.py::rescan_row
 scripts/preview-task.py::stack_projects
 scripts/preview-task.py::write_menu
 scripts/reclaim.py::SweepTarget
@@ -201,6 +199,5 @@ scripts/worktree.py::recovered_slot
 scripts/worktree.py::remove_tree_longpath
 scripts/worktree.py::render_preview
 scripts/worktree.py::render_reap
-scripts/worktree.py::render_reconcile
 scripts/worktree.py::run_steps
 scripts/worktree.py::seed_env

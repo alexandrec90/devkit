@@ -528,8 +528,14 @@ def test_the_kernel_calls_are_prototyped_for_64_bit_handles():
 
 def test_there_is_no_kernel32_to_load_off_windows(monkeypatch):
     """The POSIX branch of every net: `stop` uses the process handle, and the job object
-    and the adopt are simply absent rather than an ImportError on `ctypes.WinDLL`."""
-    monkeypatch.setattr(host.os, "name", "posix")
+    and the adopt are simply absent rather than an ImportError on `ctypes.WinDLL`.
+
+    Patches `sys.platform` and not `os.name` on purpose -- that is the guard the loader
+    reads, because it is the only one mypy narrows on, and CI typechecks this file on
+    Linux. A test that patched the other one would pass while the real guard went
+    unexercised.
+    """
+    monkeypatch.setattr(host.sys, "platform", "linux")
     assert host._kernel32() is None
 
 
@@ -542,6 +548,28 @@ def test_a_registry_that_will_not_read_is_empty_rather_than_fatal(tmp_path):
     broken = tmp_path / "broken.json"
     broken.write_text("{not json", encoding="utf-8")
     assert host.read_registry(broken) == []
+
+
+def test_the_registry_is_moved_into_place_and_leaves_no_scratch_behind(tmp_path):
+    """Named on `write_registry` itself rather than reached through `record`, because
+    both properties are its own. The directory is created, so the first run on a fresh
+    clone records like every later one; and the JSON arrives by a rename, so a reader
+    never sees the truncated-then-refilled middle -- a session-start report that caught
+    that file mid-write would call every live server dead and advertise no leak.
+    """
+    path = tmp_path / "logs" / "preview-servers.json"
+    host.write_registry([{"pid": 7, "port": 5300}], path)
+    assert host.read_registry(path) == [{"pid": 7, "port": 5300}]
+    assert [p.name for p in path.parent.iterdir()] == [path.name]
+
+
+def test_a_registry_that_will_not_write_costs_the_record_not_the_preview(tmp_path):
+    """The write half of the same totality the reader has: a server that cannot be
+    written down still has its job object and its owner watch, so the preview is worth
+    more than the note about it."""
+    wall = tmp_path / "not-a-directory"
+    wall.write_text("", encoding="utf-8")
+    host.write_registry([{"pid": 7}], wall / "preview-servers.json")
     wrong_shape = tmp_path / "shape.json"
     wrong_shape.write_text('{"pid": 1}', encoding="utf-8")
     assert host.read_registry(wrong_shape) == []

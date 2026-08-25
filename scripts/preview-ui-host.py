@@ -426,14 +426,18 @@ def _kernel32() -> Any:
     drift: a HANDLE is 64-bit and ctypes defaults its arguments to `c_int`, so an
     unprototyped call truncates one and fails for a reason nothing prints.
 
-    Reached through `getattr` because `ctypes.WinDLL` genuinely does not exist off
-    Windows, mypy runs in CI on Linux, and an `os.name` guard is not something it
-    narrows on. A `type: ignore` is the obvious fix and the wrong one: it is *unused* on
-    the machine this code runs on, where the attribute is real, so `warn_unused_ignores`
-    fails the same check here instead of there. `Any` is here for the related reason --
-    off Windows there is no type to name.
+    Guarded on `sys.platform` rather than `os.name` -- the only spelling of "not
+    Windows" that mypy acts on. `ctypes.WinDLL` does not exist off Windows and CI runs
+    mypy on Linux, so the attribute has to be behind something the checker itself calls
+    unreachable there; `os.name` reads as an ordinary comparison and narrows nothing,
+    which is what failed the gate on this line twice. Two fixes that look simpler are
+    not: a `type: ignore` is *unused* on the machine this actually runs on, so
+    `warn_unused_ignores` moves the same failure here from there -- and `getattr(ctypes,
+    "WinDLL")` is rewritten straight back to the attribute access by ruff's B009 in the
+    PostToolUse hook, silently, so it never even reaches a commit. `Any` is the return
+    for the related reason: off Windows there is no type to name.
     """
-    if os.name != "nt":  # pragma: no cover - the tests run the Windows branch
+    if sys.platform != "win32":  # pragma: no cover - the tests run the Windows branch
         return None
     import ctypes
     from ctypes import wintypes
