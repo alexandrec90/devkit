@@ -39,15 +39,21 @@ def root(tmp_path):
 
 @pytest.fixture(autouse=True)
 def ledger_root(tmp_path, monkeypatch):
-    """Redirect the harness-events ledger into tmp for every test.
+    """Isolate process-global hook state and redirect the ledger into tmp.
 
     `guard.LEDGER_ROOT` resolves to the checkout the hook lives in -- during a test
     run, the real one -- and many tests here drive blocking flows, each of which
     appends a ledger line. Without this, a green run would salt the workspace's actual
     `logs/harness-events.log` with phantom `guard-spawn-failed` events, which is
     exactly the class `workspace-status.py` surfaces for triage.
+
+    The Stop hook can run this suite as a descendant of `codex-hook-adapter.py`, whose
+    marker is meaningful to the hook process but is not a default scenario for these
+    unit tests. Tests of the adapter branch set it explicitly; every other case must
+    start from the ordinary Claude response contract regardless of its parent process.
     """
     base = tmp_path / "ledger"
+    monkeypatch.delenv(guard.ADAPTER_ENV, raising=False)
     monkeypatch.setattr(guard, "LEDGER_ROOT", base)
     return base
 
