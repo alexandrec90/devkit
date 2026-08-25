@@ -277,8 +277,8 @@ def record_block(paths: list[str], failures: list[str]) -> None:
     """One harness-events ledger line per blocking run, so a false-positive finding --
     the S603/T201-on-a-scratch-file class this hook has already shipped -- is
     diagnosable from `logs/harness-events.log` in the devkit checkout rather than from
-    the chat of whichever session it blocked. Best-effort: `harness_events.record`
-    resolves the ledger through `$DEVKIT_DIR` and no-ops (never raises) without one.
+    the chat of whichever session it blocked. Best-effort: `harness_events.ledger_path`
+    owns where that is, and `record` no-ops (never raises) when the answer is nowhere.
     """
     if harness_events is None:
         return
