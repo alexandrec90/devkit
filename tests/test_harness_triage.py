@@ -332,8 +332,17 @@ def test_main_resolves_a_whole_group(tmp_path, monkeypatch, capsys):
 
 
 def test_main_with_no_ledger_anywhere_still_exits_zero(tmp_path, monkeypatch, capsys):
+    """Both roots are pinned, because there are now two ways to find the live ledger.
+
+    `harness_events.ledger_path` falls back to its own checkout when `$DEVKIT_DIR` is
+    unset and that checkout is devkit -- which this one is. Pinning only `triage`'s root
+    left the *other* module resolving the real machine-wide ledger, so "no ledger
+    anywhere" quietly became "the backlog this workstation happens to hold", and the
+    test passed or failed on how many reports were open at the time.
+    """
     monkeypatch.delenv("DEVKIT_DIR", raising=False)
     monkeypatch.setattr(triage, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(triage.harness_events, "REPO_ROOT", tmp_path)
     assert triage.main([]) == 0
     assert "nothing open" in capsys.readouterr().out
 
