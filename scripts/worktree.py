@@ -210,7 +210,13 @@ HTTP_SERVICES: frozenset[str] = frozenset(
 )
 
 
-def reapable(verdict: str, *, pr_merged: bool = False, holds_uncommitted: bool = True) -> bool:
+def reapable(
+    verdict: str,
+    *,
+    pr_merged: bool = False,
+    pr_closed: bool = False,
+    holds_uncommitted: bool = True,
+) -> bool:
     """May this box be destroyed? The one predicate `reap` and `reconcile` both ask.
 
     `SAFE_TO_REAP` alone is not the whole answer, because **a squash merge is invisible
@@ -244,8 +250,23 @@ def reapable(verdict: str, *, pr_merged: bool = False, holds_uncommitted: bool =
 
     A **preview** box answers the question by construction: every commit in it came from
     a remote ref, so there is nothing in it to strand. It is still gated on
-    `holds_uncommitted`, because someone reading a diff may well have poked at a file,
-    and a cleanup pass is not the right moment to find out.
+    `holds_uncommitted` while the thing it shows is live, because someone reading a diff
+    may well have poked at a file, and a cleanup pass is not the right moment to find
+    out.
+
+    **An ended PR overrides that gate, and only for a preview.** The ordinary preview
+    dirt is machine-made, not a person's: the frontend container's install step rewrites
+    `package-lock.json` through the bind mount the moment the stack comes up, so most
+    previews are dirty within minutes of being cut and stay that way. Gating a merged
+    preview on dirt therefore held it *forever* — three merged-PR previews accumulated
+    27 exited containers, kept their menu rows, and leased the port registry to 16/16 —
+    while protecting nothing, because `preview_refresh_steps` already discards the same
+    dirt with `reset --hard` on every refresh, without asking. Once the PR the preview
+    shows has merged or closed, the review it existed for is over, so the box is pure
+    cost and goes. `pr_closed` is consulted **only** in this arm: for a task box a close
+    is a policy signal `reap_decision` weighs, never a licence here, because
+    `needs-rebranch` plus a closed PR is an abandoned branch — exactly the case
+    `MERGE_CAN_BE_STALE_ABOUT` exists to keep holding.
 
     `SAFE_TO_REAP` is gated on it too, and that gate is **deliberately redundant**.
     `sweep.classify` tests `state.dirty` -- which counts untracked files, and, per
@@ -284,7 +305,7 @@ def reapable(verdict: str, *, pr_merged: bool = False, holds_uncommitted: bool =
     if verdict == sweep.SKIPPED:
         return True
     if verdict == PREVIEW_VERDICT:
-        return not holds_uncommitted
+        return pr_merged or pr_closed or not holds_uncommitted
     if verdict in SAFE_TO_REAP:
         return not holds_uncommitted
     return pr_merged and not holds_uncommitted and verdict in MERGE_CAN_BE_STALE_ABOUT
@@ -1510,11 +1531,13 @@ def reap_decision(
     documents for squash merges, reached from the opposite end, and it happened here:
     two boxes whose duplicate PRs were closed on 2026-08-20 had to be forced.
 
-    A close does **not** stand in for a merge anywhere else, and `reapable` is the
-    line: `needs-rebranch` plus a closed PR is an abandoned branch, which is precisely
-    the case `MERGE_CAN_BE_STALE_ABOUT` exists to keep holding. What is cleared here
-    is a *policy* refusal about a box whose commits are already on the remote, never
-    the safety predicate underneath it.
+    A close does **not** stand in for a merge on any task verdict, and `reapable` is
+    the line: `needs-rebranch` plus a closed PR is an abandoned branch, which is
+    precisely the case `MERGE_CAN_BE_STALE_ABOUT` exists to keep holding. What is
+    cleared here is a *policy* refusal about a box whose commits are already on the
+    remote, never the safety predicate underneath it. The one place `pr_closed` does
+    reach `reapable` is its preview arm, where a close and a merge mean the same
+    thing — the review the copy was cut for is over.
     """
     if awaiting_pr and not (pr_merged or pr_closed):
         if force:
@@ -1527,7 +1550,9 @@ def reap_decision(
             f"once its PR lands, and until then the checkout is where review comments "
             f"get answered. Wait for the merge, or pass --force."
         )
-    if reapable(verdict, pr_merged=pr_merged, holds_uncommitted=holds_uncommitted):
+    if reapable(
+        verdict, pr_merged=pr_merged, pr_closed=pr_closed, holds_uncommitted=holds_uncommitted
+    ):
         return True, ""
     if force:
         return True, f"forced past `{verdict}` ({reason}) — uncommitted changes will be discarded"
@@ -1637,8 +1662,23 @@ def reap_plan(
     if not allowed:
         return ReapPlan(box=box.name, path=path, project=box.project, refusal=note)
 
+    if box.kind == PREVIEW_KIND and state.dirty and not force:
+        # Reached only through `reapable`'s ended-PR arm: dirt alone still refuses.
+        # `git worktree remove` refuses a dirty tree, so the step must carry `--force`
+        # or every reap of an ended preview fails at its first step — and the discard
+        # is said out loud, because it is the one thing this plan does that `--force`
+        # normally gates.
+        note = "; ".join(
+            part
+            for part in (
+                note,
+                f"{state.dirty} uncommitted change(s) in the preview are discarded -- "
+                f"the same dirt a refresh already resets, in a copy whose review is over",
+            )
+            if part
+        )
     remove: tuple[str, ...] = ("worktree", "remove", path)
-    if force:
+    if force or (box.kind == PREVIEW_KIND and bool(state.dirty)):
         remove = (*remove, "--force")
     steps: list[tuple[str, ...]] = [remove]
     warning = note
@@ -1860,7 +1900,12 @@ def reconcile_action(
       merged: the commits are safe on the remote but nobody will ever look at them, and
       whether that is finished is a person's decision, not a cleanup's.
     """
-    if not reapable(verdict, pr_merged=pr.merged, holds_uncommitted=holds_uncommitted):
+    if not reapable(
+        verdict,
+        pr_merged=pr.merged,
+        pr_closed=pr.is_closed,
+        holds_uncommitted=holds_uncommitted,
+    ):
         if verdict == PREVIEW_VERDICT:
             # Same hold, different remedy, and the report cannot tell them apart on its
             # own: it heads every HOLD row "only place it exists, ship it", which for a

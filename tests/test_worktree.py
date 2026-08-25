@@ -3407,6 +3407,26 @@ def test_a_clean_preview_is_reapable_and_an_edited_one_is_not():
     assert not worktree.reapable(worktree.PREVIEW_VERDICT, holds_uncommitted=True)
 
 
+def test_an_ended_pr_makes_even_an_edited_preview_reapable():
+    """The regression that filled the registry: preview dirt is machine-made (the
+    frontend container's install rewrites `package-lock.json` through the bind mount),
+    so gating a merged preview on dirt held it forever -- three merged-PR previews
+    stranded 27 exited containers and leased the registry to 16/16. A refresh already
+    discards the same dirt with `reset --hard`, so the hold protected nothing."""
+    assert worktree.reapable(worktree.PREVIEW_VERDICT, pr_merged=True, holds_uncommitted=True)
+    assert worktree.reapable(worktree.PREVIEW_VERDICT, pr_closed=True, holds_uncommitted=True)
+    # Without word of the PR, dirt still refuses -- the caller that does not know holds.
+    assert not worktree.reapable(worktree.PREVIEW_VERDICT, holds_uncommitted=True)
+
+
+def test_a_closed_pr_frees_no_task_box_through_reapable():
+    """`pr_closed` reaches only the preview arm. On a task verdict a close is a policy
+    signal `reap_decision` weighs; `needs-rebranch` beside a closed PR is an abandoned
+    branch holding the only copy of its commits."""
+    assert not worktree.reapable(sweep.NEEDS_REBRANCH, pr_closed=True, holds_uncommitted=False)
+    assert not worktree.reapable(sweep.READY, pr_closed=True, holds_uncommitted=True)
+
+
 def test_reconcile_reaps_a_preview_once_the_work_it_shows_has_landed():
     for state_name in ("MERGED", "CLOSED"):
         action, why = decide(
@@ -3452,16 +3472,31 @@ def test_a_preview_is_reclaimed_under_pressure_and_at_age():
     )
 
 
-def test_reconcile_never_reaps_a_preview_someone_is_editing():
+def test_reconcile_never_reaps_an_edited_preview_while_its_pr_is_live():
+    """Pressure and age never override dirt on their own -- only an ended PR does."""
     for pr in (
         worktree.PullRequest(),
-        worktree.PullRequest(number=162, state="MERGED"),
         worktree.PullRequest(number=162, state="OPEN"),
     ):
         action, _ = decide(
             worktree.PREVIEW_VERDICT, "x", pr, pressure=True, age_days=1e6, holds_uncommitted=True
         )
         assert action == worktree.HOLD, pr.state
+
+
+def test_reconcile_reaps_an_edited_preview_once_its_pr_ends():
+    """The other half of the regression: `reconcile_action` already had the merged ->
+    REAP arm for previews, but the `reapable` gate above it held every dirty preview
+    first, so merged previews kept their menu rows, containers and slots forever."""
+    for state_name in ("MERGED", "CLOSED"):
+        action, why = decide(
+            worktree.PREVIEW_VERDICT,
+            "a read-only copy",
+            worktree.PullRequest(number=162, state=state_name),
+            holds_uncommitted=True,
+        )
+        assert action == worktree.REAP, state_name
+        assert "#162" in why
 
 
 def test_a_held_preview_is_told_what_it_can_actually_do():
@@ -3496,6 +3531,34 @@ def test_reaping_a_preview_that_grew_a_commit_leaves_git_to_refuse():
         state=state(branch="preview/ui-editor-0817", upstream="", ahead=1, dirty=0),
     )
     assert plan.steps[-1] == ("branch", "-d", "preview/ui-editor-0817")
+
+
+def test_reaping_a_dirty_ended_preview_forces_the_remove_and_says_what_goes():
+    """`git worktree remove` refuses a dirty tree, so a reap `reapable` licensed through
+    the ended-PR arm must carry `--force` on that step or fail every time -- leaving the
+    exact leak the arm exists to clear. The discard is named in the warning because it
+    is the one thing this plan does that `--force` normally gates."""
+    plan = reap(
+        verdict=worktree.PREVIEW_VERDICT,
+        box=preview_box(),
+        state=state(branch="preview/ui-editor-0817", upstream="", ahead=0, dirty=2),
+        pr_merged=True,
+    )
+    assert not plan.refusal
+    assert plan.steps[0] == ("worktree", "remove", plan.path, "--force")
+    assert "2 uncommitted change(s)" in plan.warning
+    assert plan.steps[-1] == ("branch", "-D", "preview/ui-editor-0817")
+    assert not plan.forced  # nobody passed --force; the licence is the ended PR
+
+
+def test_a_dirty_preview_with_no_word_of_its_pr_is_still_refused():
+    """Dirt alone never licenses the discard -- someone may still be looking."""
+    plan = reap(
+        verdict=worktree.PREVIEW_VERDICT,
+        box=preview_box(),
+        state=state(branch="preview/ui-editor-0817", upstream="", ahead=0, dirty=2),
+    )
+    assert plan.refusal
 
 
 def test_the_one_line_summary_points_at_the_ui_not_the_api():
