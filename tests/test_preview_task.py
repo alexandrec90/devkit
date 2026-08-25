@@ -1124,8 +1124,10 @@ def test_the_wait_returns_the_moment_the_url_answers():
 
 
 def test_the_wait_gives_up_rather_than_hanging_forever():
-    """`npm install` in a cold box takes about a minute; a box wedged on a build takes
-    forever. The timeout is what keeps the second one from holding the terminal."""
+    """A box wedged on a build takes forever; the timeout is what keeps it from holding
+    the terminal. With no `progress` to reset it, the deadline is plain elapsed time --
+    the shape this had before it learned to watch the logs, and still the shape any
+    caller gets that has nothing to watch."""
     clock = Clock()
     ready, waited = preview_task.wait_for_ready(
         "http://x",
@@ -1153,6 +1155,140 @@ def test_the_wait_speaks_on_the_tick_and_not_on_every_poll(capsys):
         clock=clock,
     )
     assert capsys.readouterr().out.count("is not answering yet") == 2
+
+
+def test_a_slow_install_is_not_abandoned_while_it_is_still_talking():
+    """The measured failure, 2026-08-24: carameli's frontend box printed `added 702
+    packages, and audited 703 packages in 8m` and then served its page fine -- but the
+    flat 420s deadline had expired at 7m, so the task reported a working preview as one
+    that "may still be starting" and never opened the tab.
+
+    Raising the number would only move the edge. What is asserted here is that elapsed
+    time no longer ends the wait at all while the stack is still saying things: this run
+    passes 420s of silence-budget more than once over and still returns ready.
+    """
+    clock = Clock()
+    ready, waited = preview_task.wait_for_ready(
+        "http://x",
+        timeout=420.0,
+        poll=5.0,
+        tick=15.0,
+        progress=lambda: f"frontend-1  | npm install ... {clock.now:.0f}s",
+        check=lambda url: clock.now >= 1000.0,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert (ready, waited) == (True, 1000.0)
+
+
+def test_a_stack_that_stops_saying_anything_new_is_given_up_on():
+    """The other half: silence is the give-up condition, so a box repeating one line
+    forever is as dead as a box printing nothing. The clock starts at the last *new*
+    line -- here 15s, so it ends at 55s and not at 40s."""
+    clock = Clock()
+    ready, waited = preview_task.wait_for_ready(
+        "http://x",
+        timeout=40.0,
+        poll=5.0,
+        tick=15.0,
+        progress=lambda: "worker-1  | waiting for db",
+        check=lambda url: False,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert (ready, waited) == (False, 55.0)
+
+
+def test_the_ceiling_ends_a_wait_that_a_chatty_neighbour_would_not():
+    """Progress is sampled across the whole stack, not per service, so a database
+    checkpointing every second keeps the box looking alive while the one container being
+    waited on is dead. The ceiling is the only bound that case has."""
+    clock = Clock()
+    ready, waited = preview_task.wait_for_ready(
+        "http://x",
+        timeout=40.0,
+        poll=5.0,
+        tick=15.0,
+        ceiling=100.0,
+        progress=lambda: f"db-1  | checkpoint {clock.now:.0f}",
+        check=lambda url: False,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert (ready, waited) == (False, 100.0)
+
+
+def test_the_tick_says_what_the_container_is_doing(capsys):
+    """A bare "not answering yet", repeated, is exactly what a hang looks like -- which
+    is how a box that was installing got reported as spinning forever. The last log line
+    separates the two, and it is free: the same sample already decides whether to wait."""
+    clock = Clock()
+    preview_task.wait_for_ready(
+        "http://x",
+        timeout=40.0,
+        poll=5.0,
+        tick=15.0,
+        progress=lambda: "frontend-1  | added 702 packages",
+        check=lambda url: False,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    out = capsys.readouterr().out
+    assert "-- frontend-1  | added 702 packages" in out
+    assert "(the container is up)" not in out
+
+
+def test_the_tick_shows_the_line_that_appeared_and_not_a_fixed_one(capsys):
+    """A stack answers for every container at once, so something has to pick. Picking by
+    position picks by container name, which has nothing to do with which container is the
+    slow one -- here the db never changes and would be shown forever. What appeared since
+    the last sample is the answer, and it costs nothing: it is the same comparison that
+    decides whether to keep waiting."""
+    clock = Clock()
+    samples = iter(
+        [
+            "db-1  | ready to accept connections\nfrontend-1  | npm install",
+            "db-1  | ready to accept connections\nfrontend-1  | added 702 packages",
+        ]
+    )
+    preview_task.wait_for_ready(
+        "http://x",
+        timeout=40.0,
+        poll=5.0,
+        tick=15.0,
+        progress=lambda: next(samples, "db-1  | ready to accept connections"),
+        check=lambda url: False,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    ticks = [
+        line for line in capsys.readouterr().out.splitlines() if "is not answering yet" in line
+    ]
+    assert ticks[0].endswith("-- frontend-1  | npm install")
+    assert ticks[1].endswith("-- frontend-1  | added 702 packages")
+    # The third sample drops a line rather than adding one, which is not news: the last
+    # thing that actually happened stays on screen instead of a container going quiet
+    # being reported as the newest event.
+    assert ticks[2].endswith("-- frontend-1  | added 702 packages")
+
+
+def test_the_progress_source_is_sampled_on_the_tick_and_not_on_every_poll():
+    """It shells out to docker. One call every two seconds for the length of an install
+    would cost more than the thing being waited for, and the ticks are the only moment
+    the answer is used -- for the line printed and for the deadline behind it."""
+    clock = Clock()
+    calls = []
+    preview_task.wait_for_ready(
+        "http://x",
+        timeout=40.0,
+        poll=5.0,
+        tick=15.0,
+        progress=lambda: calls.append(clock.now) or "the same line every time",
+        check=lambda url: False,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert calls == [15.0, 30.0, 45.0]
 
 
 # --- the backend a UI-only preview borrows ------------------------------------
@@ -1253,7 +1389,7 @@ def test_a_plan_that_brings_nothing_up_fails_fast_rather_than_waiting(
     """The measured failure (2026-08-23): a half-reaped box's plan collapsed `up` to
     False, so nothing was started -- while the slot's URLs were still published, so
     `serve` printed "containers started in 0s" and polled a dead port for the whole
-    READY_TIMEOUT, seven minutes of what read as a working preview coming up."""
+    READY_QUIET, seven minutes of what read as a working preview coming up."""
     opened = _up(monkeypatch, up=False)
     monkeypatch.setattr(
         preview_task,
@@ -1274,6 +1410,30 @@ def test_serve_waits_for_the_page_then_opens_it(monkeypatch, tmp_path, capsys):
     assert opened == [URL]
     out = capsys.readouterr().out
     assert "containers started in" in out and "answered after 61s" in out and "total:" in out
+
+
+def test_serve_gives_the_wait_this_boxs_logs_to_watch(monkeypatch, tmp_path):
+    """The deadline is silence, so the wait needs a source of noise -- and it has to be
+    *this* box's. `compose_tail` is asked for the box's own project name and its own
+    path, which is what keeps a neighbouring stack's chatter from holding this wait open
+    (or, on the other side, this box's own progress from being invisible)."""
+    _up(monkeypatch)
+    asked: dict[str, object] = {}
+    monkeypatch.setattr(
+        preview_task.worktree,
+        "compose_tail",
+        lambda path, project: asked.update(path=path, project=project) or "db-1  | ready",
+    )
+    relayed: dict[str, object] = {}
+
+    def fake_wait(url, **kwargs):
+        relayed["note"] = kwargs["progress"]()
+        return True, 1.0
+
+    monkeypatch.setattr(preview_task, "wait_for_ready", fake_wait)
+    assert preview_task.serve(_candidate(), tmp_path) is True
+    assert relayed["note"] == "db-1  | ready"
+    assert asked == {"path": preview_task.Path("p"), "project": "carameli--preview-x"}
 
 
 def test_serve_never_opens_a_url_that_has_not_answered(monkeypatch, tmp_path, capsys):

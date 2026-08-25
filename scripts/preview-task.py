@@ -212,7 +212,20 @@ RESCAN = "__rescan__"
 # The wait is therefore part of the report rather than something the reviewer does by
 # reloading: every tick prints the elapsed total, which is also the only place the cost
 # of a cold box is ever stated in seconds.
-READY_TIMEOUT = 420.0
+#
+# **The deadline is measured from the last sign of life, not from the start**, and that
+# is the correction the 57s measurement above was not enough to reach. A flat 420s was
+# chosen from it with a 7x margin and was still too small: the same box on 2026-08-24
+# printed `added 702 packages, and audited 703 packages in 8m` and then served its page
+# fine -- so the task had already given up on a preview that was working, and reported
+# it as one that may be starting. Every flat number is that bug waiting for a slower
+# machine or a bigger lockfile. Silence across the whole stack is the property that
+# actually distinguishes a box making progress from a box that is wedged, so `READY_QUIET`
+# bounds *that*, and `READY_CEILING` is a backstop against the case silence cannot see:
+# a chatty sibling container keeping the stack noisy while the one service being waited
+# on is dead.
+READY_QUIET = 420.0
+READY_CEILING = 1800.0
 READY_POLL = 2.0
 READY_TICK = 15.0
 
@@ -693,14 +706,38 @@ def probe(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
 
 def wait_for_ready(
     url: str,
-    timeout: float = READY_TIMEOUT,
+    timeout: float = READY_QUIET,
     poll: float = READY_POLL,
     tick: float = READY_TICK,
+    ceiling: float = READY_CEILING,
+    progress=None,
     check=probe,
     sleep=time.sleep,
     clock=time.monotonic,
 ) -> tuple[bool, float]:
     """Poll `url` until it answers. `(ready, seconds waited)`, printing a line per tick.
+
+    `timeout` is **seconds without a sign of life, not seconds since the start** -- the
+    clock it bounds resets every time `progress()` returns something it has not returned
+    before. That is what lets a box be slow without being abandoned: whatever `npm
+    install` costs on this machine today, the wait only ends when the stack goes quiet
+    for `timeout` or the run reaches `ceiling`. With no `progress` the two collapse and
+    it is the plain elapsed timeout it has always been, which is the shape the injected
+    tests assert.
+
+    `progress` is sampled on the tick and never on the poll: it is a subprocess, and one
+    every two seconds for half an hour would cost more than the thing being waited for.
+    Its return value is also the tick line's detail, so the same call answers "is this
+    alive" and "what is it doing" -- the second being the half the reviewer needed, since
+    a bare "not answering yet" repeated twenty times is what a hang looks like too.
+
+    What gets shown is the line that *appeared* since the last sample, not the whole
+    sample and not a fixed line out of it. A stack answers for every container at once,
+    and none of "the first", "the last" or "all eight" is the useful one: the first two
+    pick by container name, which has nothing to do with which container is the slow
+    one, and the third is eight lines every fifteen seconds. What changed is exactly
+    what the reviewer is trying to find out, and it is already computed -- it is the
+    same comparison that decides whether to keep waiting.
 
     Every collaborator is injected because the alternative is a test that really sleeps:
     the thing worth asserting is the *shape* of the wait -- that it returns the moment
@@ -709,15 +746,25 @@ def wait_for_ready(
     """
     started = clock()
     spoken = 0.0
+    quiet_since = started
+    seen = ""
+    shown = ""
     while True:
         if check(url):
             return True, clock() - started
         waited = clock() - started
-        if waited >= timeout:
+        if clock() - quiet_since >= timeout or waited >= ceiling:
             return False, waited
         if waited - spoken >= tick:
             spoken = waited
-            echo(f"  ... {waited:.0f}s: {url} is not answering yet (the container is up)")
+            note = progress() if progress else ""
+            if note and note != seen:
+                fresh = [line for line in note.splitlines() if line not in seen.splitlines()]
+                shown = fresh[-1] if fresh else shown
+                seen = note
+                quiet_since = clock()
+            detail = f" -- {shown}" if shown else " (the container is up)"
+            echo(f"  ... {waited:.0f}s: {url} is not answering yet{detail}")
         sleep(poll)
 
 
@@ -1026,7 +1073,7 @@ def serve(
     if not plan.up:
         # `plan.up` false on an up-run means the checkout has no compose stack, so
         # nothing was started -- and the slot's URLs may still be published, so waiting
-        # on one would spend the whole READY_TIMEOUT on a port nothing was asked to
+        # on one would spend the whole READY_QUIET on a port nothing was asked to
         # answer, reporting a working preview the entire time.
         echo(
             f"  nothing was started: {plan.path} has no compose stack to bring up. "
@@ -1038,12 +1085,16 @@ def serve(
     ready = True
     if wait and primary:
         echo(f"  waiting for {primary} -- a cold box installs its dependencies first ...")
-        ready, waited = wait_for_ready(primary)
+        ready, waited = wait_for_ready(
+            primary,
+            progress=lambda: worktree.compose_tail(Path(plan.path), plan.box.name),
+        )
         echo(
             f"  {primary} answered after {waited:.0f}s"
             if ready
-            else f"  [warn] {primary} still silent after {waited:.0f}s -- it may still be "
-            f"starting: `docker compose -p {plan.box.name} logs -f` says what it is doing"
+            else f"  [warn] {primary} still silent after {waited:.0f}s, and so is the "
+            f"rest of the stack -- `docker compose -p {plan.box.name} logs -f` says "
+            f"what it is doing"
         )
         echo(f"  total: {time.monotonic() - started:.0f}s")
     echo()

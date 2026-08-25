@@ -3786,6 +3786,70 @@ def test_compose_config_reads_the_resolved_stack_and_swallows_every_failure(monk
         assert worktree.compose_config(Path("x"), "c--y") is None
 
 
+def test_compose_tail_sorts_what_the_stack_said_so_churn_is_not_progress(monkeypatch):
+    """`--tail 1` answers once per container, streamed concurrently -- so two calls a
+    second apart against an idle stack come back in different orders. Measured on engine
+    29.2.0, 2026-08-24. A caller comparing this value against the previous one to decide
+    whether a box is still alive would read that reordering as progress and never time
+    out, so the order docker chose must not survive into the result.
+
+    Blank lines are dropped rather than returned: an empty answer is this function's
+    word for "no sign of life", and a stack whose output ends in a newline would
+    otherwise read as dead every time it was asked.
+    """
+    seen = []
+    answers = iter(
+        [
+            "frontend-1  | vite ready\ndb-1  | ready to accept connections\n\n  \n",
+            "db-1     | ready to accept connections\nfrontend-1  | vite ready\n",
+        ]
+    )
+
+    def fake_run(argv, **kwargs):
+        seen.append(argv)
+        return _completed(stdout=next(answers))
+
+    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    first = worktree.compose_tail(Path("x"), "c--preview-x")
+    assert first == "db-1 | ready to accept connections\nfrontend-1 | vite ready"
+    # Reordered *and* repadded, which is the second half of the same measurement: docker
+    # sizes the name column by a race, so the identical line came back with a different
+    # gap. Squashing the runs is what keeps that from reading as a container speaking.
+    assert worktree.compose_tail(Path("x"), "c--preview-x") == first
+    assert seen[0][-3:] == ["logs", "--tail", "1"]
+    assert seen[0][1:4] == ["compose", "-p", "c--preview-x"]
+
+
+def test_compose_tail_is_never_the_thing_that_ends_a_wait(monkeypatch):
+    """Every failure is `""`, which the caller reads as "no news", not as "give up".
+
+    The distinction is the whole point: a caller polling a URL uses this to decide
+    whether a slow box is still working, so a docker hiccup that raised -- or that
+    returned a plausible-looking error string -- would abandon a preview that was fine.
+    That is the bug this function was added to fix, in a new place.
+    """
+    for answer in (_completed(returncode=1, stderr="no such project"), _completed(stdout="  \n")):
+        monkeypatch.setattr(worktree.subprocess, "run", lambda argv, a=answer, **k: a)
+        assert worktree.compose_tail(Path("x"), "c--y") == ""
+
+    for boom in (FileNotFoundError("docker"), worktree.subprocess.TimeoutExpired("docker", 1)):
+        monkeypatch.setattr(
+            worktree.subprocess, "run", lambda argv, e=boom, **k: (_ for _ in ()).throw(e)
+        )
+        assert worktree.compose_tail(Path("x"), "c--y") == ""
+
+
+def test_compose_tail_truncates_a_line_that_would_take_the_terminal(monkeypatch):
+    """It is printed inline on a progress tick. One container logging a stack trace or a
+    minified bundle would wrap the report into unreadability every fifteen seconds."""
+    monkeypatch.setattr(
+        worktree.subprocess,
+        "run",
+        lambda argv, **k: _completed(stdout="x" * 4000 + "\n" + "y" * 4000 + "\n"),
+    )
+    assert worktree.compose_tail(Path("x"), "c--y") == "x" * 120 + "\n" + "y" * 120
+
+
 def test_compose_up_builds_by_name_then_starts_without_build(monkeypatch):
     """The two-command shape. `--build` on the `up` would hand bake the same duplicate
     plan again, so its absence is the assertion that matters."""
