@@ -1377,7 +1377,7 @@
 				// wherever they happened, so the script reads the transcript store — which
 				// records each session's own directory — instead of asking.
 				"label": "Agents: Resume Recent Sessions",
-				"detail": "Check Claude, Codex, or both and choose how many sessions, then reopen the globally most recent matching sessions in a new Windows Terminal window, one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it.",
+				"detail": "Check Claude, Codex, or both and choose how many sessions, then reopen the globally most recent matching sessions in a new Windows Terminal window, one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it. The checked CLIs are updated first, which takes a few seconds and is the one moment they can be — an update cannot replace a binary a running agent is executing, so any agent already up is skipped.",
 				"type": "process",
 				"command": "python",
 				"args": [
