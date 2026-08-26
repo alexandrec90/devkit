@@ -553,7 +553,7 @@ def autofix_state(directory: Path) -> tuple[str, tuple[str, ...]]:
     return branch, sweep.parse_porcelain(git("status", "--porcelain").stdout or "")
 
 
-# --- registering a new project ----------------------------------------------
+# --- registering a project, and retiring one --------------------------------
 #
 # The write side of the same registry. These edit the workspace file as TEXT rather
 # than round-tripping it through `json.dumps`: the file is heavily commented, and the
@@ -719,6 +719,151 @@ def register(text: str, names: list[str]) -> str:
     missing = [n for n in names if n not in known_projects(updated)]
     if missing:
         raise RegistryEditError(f"registration did not take effect for: {', '.join(missing)}")
+    return updated
+
+
+def _drop_element(text: str, scan: str, start: int, end: int) -> str:
+    """Remove the array element at `text[start:end]`, taking one comma with it.
+
+    Two shapes, because a JSON array's separator belongs to whichever neighbour
+    survives: an element with a comma after it takes that comma and the rest of its
+    line, while the last element takes the comma *before* it instead. Getting this
+    wrong is not a formatting complaint — a stray comma is a trailing comma the
+    workspace file's own parser rejects, which is why `unregister` reparses.
+
+    Offsets are read from `scan`, the comment-blanked copy, so a `//` line sitting
+    between two entries cannot contribute a comma the parser never saw.
+    """
+    after = end
+    while after < len(scan) and scan[after] in " \t\r\n":
+        after += 1
+    if after < len(scan) and scan[after] == ",":
+        line_start = text.rfind("\n", 0, start) + 1
+        if text[line_start:start].strip():
+            line_start = start  # something else shares the line; keep it
+        cut = after + 1
+        while cut < len(scan) and scan[cut] in " \t":
+            cut += 1  # a trailing comment belonged to the element being removed
+        if scan.startswith("\r\n", cut):
+            cut += 2
+        elif cut < len(scan) and scan[cut] == "\n":
+            cut += 1
+        return text[:line_start] + text[cut:]
+
+    before = start
+    while before > 0 and scan[before - 1] in " \t\r\n":
+        before -= 1
+    if before > 0 and scan[before - 1] == ",":
+        return text[: before - 1] + text[end:]
+    raise RegistryEditError("cannot remove the only element of an array")
+
+
+def remove_folder(text: str, name: str) -> str:
+    """Drop `name`'s entry from `folders`. The inverse of `insert_folder`.
+
+    Matched on `path`, whitespace-insensitively, because VS Code rewrites this file
+    itself whenever a workspace setting is changed through its UI and its spacing is
+    not ours to predict. `name` is deliberately not consulted: a folder may carry a
+    display label (`VanillaLand (reference)`) and the path is what every reader keys on.
+    """
+    scan = devkit_jsonc.blank_comments(text)
+    key = scan.find('"folders"')
+    if key < 0:
+        raise RegistryEditError('the workspace file has no "folders" array')
+    open_at, close_at = _array_span(scan, key)
+    for start, end in _entry_spans(scan, open_at, close_at):
+        if f'"path":"{name}"' in "".join(scan[start:end].split()):
+            return _drop_element(text, scan, start, end)
+    raise RegistryEditError(f'"{name}" is not in the workspace folders list')
+
+
+def _retarget_default(text: str, scan: str, close_at: int, replacement: str) -> str:
+    """Repoint an input's `default` when the option it named has just been removed.
+
+    A `pickString` whose default is not among its options renders that dead value as
+    the pre-filled answer, so retiring `carameli` would leave three pickers offering it
+    as the one checkout that no longer exists. Bounded by the next `"id":` because
+    these inputs are a flat list and `default` always follows `options` within one.
+    """
+    limit = scan.find('"id":', close_at)
+    limit = len(scan) if limit < 0 else limit
+    at = scan.find('"default"', close_at, limit)
+    if at < 0:
+        return text
+    value_open = scan.find('"', scan.index(":", at) + 1)
+    value_close = scan.find('"', value_open + 1)
+    if value_open < 0 or value_close < 0 or value_close > limit:
+        return text
+    return text[: value_open + 1] + replacement + text[value_close:]
+
+
+def remove_picker_option(text: str, name: str) -> str:
+    """Drop `name` from every maintained picker. The inverse of `insert_picker_option`.
+
+    A picker that never listed it is left alone rather than failed on: `mergeCheckout`
+    lists more than the registry and an older workspace file may carry fewer pickers,
+    so "not there" is the same outcome as "removed" and neither is an error.
+    """
+    updated = text
+    for picker_id in ("project", "daemonProject", "worktreeProject", "mergeCheckout"):
+        scan = devkit_jsonc.blank_comments(updated)
+        marker = scan.find(f'"id": "{picker_id}"')
+        if marker < 0:
+            if picker_id == "project":
+                raise RegistryEditError('the workspace file has no "project" input to trim')
+            continue
+        options_at = scan.find('"options"', marker)
+        if options_at < 0:
+            raise RegistryEditError(f'the "{picker_id}" input has no options array')
+        open_at, close_at = _array_span(scan, options_at)
+
+        token = f'"{name}"'
+        at = scan.find(token, open_at, close_at)
+        if at < 0:
+            continue
+        # An element, not the value half of a `{"label": …, "value": …}` option: those
+        # would need the whole object removed, and silently deleting half of one is how
+        # a picker starts offering an entry that resolves to nothing.
+        preceding = scan[open_at + 1 : at].rstrip()
+        if preceding and preceding[-1] not in ",":
+            raise RegistryEditError(f'the "{picker_id}" options are not a plain string list')
+
+        remaining = [o for o in devkit_jsonc.loads(scan[open_at : close_at + 1]) if o != name]
+        updated = _drop_element(updated, scan, at, at + len(token))
+        if not remaining:
+            continue
+        # Re-derive the span from the UPDATED text rather than reusing `close_at`: the
+        # last-element branch of `_drop_element` cuts backwards, so every offset past
+        # the removal has moved and a stale one lands mid-token.
+        after = devkit_jsonc.blank_comments(updated)
+        options_at = after.find('"options"', after.find(f'"id": "{picker_id}"'))
+        updated = _retarget_default(updated, after, _array_span(after, options_at)[1], remaining[0])
+    return updated
+
+
+def unregister(text: str, names: list[str]) -> str:
+    """Retire each of `names`: drop its folder entry and every picker option.
+
+    The inverse of `register`, and verified the same way for the same reason — a
+    half-applied removal leaves the file unparseable, and `sweep.parse_workspace`
+    swallows that as "no checkouts", which is the silent failure the registration side
+    was written to avoid. Nothing on disk is touched: unplugging a project is a
+    registry edit, so it stays reversible by plugging it back in.
+    """
+    updated = text
+    for name in names:
+        if name not in known_projects(updated):
+            continue  # already retired; re-running the picker must not fail on it
+        updated = remove_folder(updated, name)
+        updated = remove_picker_option(updated, name)
+
+    try:
+        devkit_jsonc.loads(updated)
+    except json.JSONDecodeError as exc:
+        raise RegistryEditError(f"retirement produced invalid JSONC: {exc}") from exc
+    still = [n for n in names if n in known_projects(updated)]
+    if still:
+        raise RegistryEditError(f"retirement did not take effect for: {', '.join(still)}")
     return updated
 
 

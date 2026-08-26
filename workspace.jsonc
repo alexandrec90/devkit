@@ -406,6 +406,38 @@
 				"problemMatcher": []
 			},
 			{
+				// The one interactive task in this file, and the one with no `log-wrap.py`:
+				// log-wrap pipes the child's stdout and reads it a line at a time, so a
+				// prompt that never ends its line would never reach the terminal and the
+				// checkbox list would hang waiting for input nobody can see. The script
+				// writes `logs/plug-projects.log` itself instead.
+				"label": "Workspace: Plug / Unplug Projects",
+				"detail": "Interactive checkbox list of every project — in the workspace registry, on disk, and on GitHub. Ticking an unplugged one clones its repo, or creates the repo when only the folder exists; unticking removes it from the registry and touches NOTHING on disk. Edits devkit's workspace.jsonc and republishes the live .code-workspace, so it refuses from a task branch or a box.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Workspace: Plug / Unplug Projects",
+					"--",
+					"python",
+					"scripts/plug-projects.py"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "checklist",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
 				"label": "Git: Sync Branch onto Origin Default (Keep Changes)",
 				"detail": "For each selected checkout, sequentially: detect origin's default branch, then fetch → stash if dirty → rebase → pop. Keeps unstaged/untracked changes.",
 				"type": "process",
