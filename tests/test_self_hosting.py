@@ -897,7 +897,7 @@ def test_devkit_ships_no_project_level_tasks():
     )
 
 
-# Both of these carry an empty option, and both are exempt for the SAME real reason:
+# All three carry an empty option, and all three are exempt for the SAME real reason:
 # they feed `devkit_project.py`, which strips empty arguments before exec
 # (`plan_command`'s `[a for a in extra if a]`, pinned by
 # `tests/test_devkit_project.py`), so the empty branch cannot reach argparse at all.
@@ -913,7 +913,11 @@ def test_devkit_ships_no_project_level_tasks():
 #
 # Listed rather than exempted silently so the deviation stays visible, and so nothing
 # joins it on the weaker justification.
-_EMPTY_OPTION_ALLOWED: frozenset[str] = frozenset({"testScope", "e2eMode"})
+#
+# `lintScope` is `testScope`'s counterpart and joined it when the two lint tasks became
+# one task and a dropdown; it is a dispatch, so it has the strong reason rather than the
+# accidental one.
+_EMPTY_OPTION_ALLOWED: frozenset[str] = frozenset({"testScope", "lintScope", "e2eMode"})
 
 
 def test_every_picker_option_supplies_a_real_token():
