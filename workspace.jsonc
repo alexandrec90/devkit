@@ -121,16 +121,28 @@
 		"tasks": [
 			// --- generic: pick a project ---------------------------------------
 			{
+				// Five tasks became this one. "Test: Run Suite" and its scope dropdown,
+				// "Test: Harness Hook Tests — free", and carameli's "Run Carameli Target",
+				// "Run Browser E2E" and "Run Local Integration E2E" all asked the same two
+				// questions — which checkouts, and which tests — and answered the second
+				// with a different single-pick each. Both are checkbox lists now and the
+				// answers run as a cross-product: `TEST_KINDS` in devkit_project.py is the
+				// menu, and a kind a checkout cannot run is skipped BY NAME rather than
+				// dropped, because one menu is offered for every checkout.
+				//
+				// The paid live-CLI smoke below stays a task of its own: a menu row is one
+				// keystroke from every free row above it, and a cost nobody consented to is
+				// the difference a picker must not carry.
 				"label": "Test: Run Suite",
-				"detail": "Each selected checkout's own test suite, run sequentially via its scripts/run-tests.py. Failures go to that checkout's logs/test-failures.log — read the artifact, not the terminal.",
+				"detail": "Tick one or more checkouts, then tick the kinds of test to run in them. Every pair runs sequentially and writes its own artifact under that checkout's logs/ — read the artifact, not the terminal. A kind only Carameli implements (its free targets, Playwright, the local integration suite) is skipped by name for the checkouts that cannot run it, so ticking widely is safe.",
 				"type": "process",
 				"command": "python",
 				"args": [
 					"${workspaceFolder:devkit}/scripts/devkit_project.py",
 					"--project",
 					"${input:project}",
-					"test",
-					"${input:testScope}"
+					"tests",
+					"${input:testKinds}"
 				],
 				"group": {
 					"kind": "test",
@@ -138,32 +150,6 @@
 				},
 				"icon": {
 					"id": "beaker",
-					"color": "terminal.ansiGreen"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Test: Harness Hook Tests — free",
-				"detail": "The vendored tier's own stdlib-only tests in each selected checkout, run sequentially. Separate from 'Test: Run Suite' because pytest's testpaths deliberately excludes scripts/hooks/tests/ in EVERY consumer. Fails loudly on a checkout that does not vendor the harness. Includes test_codex_translation.py, which judges every response this project's hooks can emit against Codex's own published output schema — statically, with no CLI and no cost.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:project}",
-					"test-hooks"
-				],
-				"group": "test",
-				// Not `beaker`/green: that is "Test: Run Suite", and the two sat
-				// side by side in the picker as an identical icon under two labels.
-				"icon": {
-					"id": "zap",
 					"color": "terminal.ansiGreen"
 				},
 				"presentation": {
@@ -241,8 +227,9 @@
 					"lint-changed"
 				],
 				"group": "build",
-				// Same reason as the hook tests above — `checklist`/yellow is
-				// "Lint: Everything"; the narrower scope gets the narrower icon.
+				// `checklist`/yellow is "Lint: Everything"; the narrower scope gets the
+				// narrower icon, so the two are told apart in the quick-pick without
+				// reading to the end of two near-identical labels.
 				"icon": {
 					"id": "list-selection",
 					"color": "terminal.ansiYellow"
@@ -792,37 +779,15 @@
 			// schedule. `worktree.py preview` is still there for a full-stack preview, and
 			// `--all` still restarts whatever one of those left standing.
 			// --- scoped: carameli's worktree pair --------------------------------
-			// These three came up out of `carameli/.vscode/tasks.json`. The picker lists
-			// two checkouts rather than five because that is what the action is defined
-			// for — see `Action.projects` in devkit_project.py.
-			{
-				"label": "Test: Run Carameli Target — free",
-				"detail": "Run the chosen free target sequentially in each selected Carameli checkout. '--all' merges pytest + hooks + frontend into one artifact per checkout. Paid tiers remain CLI-only.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:carameliCheckout}",
-					"test-target",
-					"${input:carameliTestTarget}"
-				],
-				// Deliberately not `isDefault`: "Test: Run Suite" holds that, and two
-				// defaults in one multi-root workspace makes Run Test Task ambiguous.
-				// That collision was real while this task lived in the repo.
-				"group": "test",
-				"icon": {
-					"id": "beaker",
-					"color": "terminal.ansiBrightGreen"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
+			// These came up out of `carameli/.vscode/tasks.json`. The picker lists two
+			// checkouts rather than five because that is what the action is defined for —
+			// see `Action.projects` in devkit_project.py.
+			//
+			// Three of them were test runners — the free-target picker, Playwright and the
+			// local integration suite — and they are rows on "Test: Run Suite"'s kind menu
+			// now. Their scope did not move with them: `Action.projects` still refuses a
+			// checkout that cannot run them, and the menu says which checkouts each row is
+			// for rather than hiding rows it cannot know the audience of.
 			{
 				"label": "Assets: Encode Comic-Book Art",
 				"detail": "Encode every master in frontend/assets-src/comic-book/ that has no .webp in public/comic-book/ yet, and add each one to the ?edit=1 picture dropdown. Existing exports are skipped, so it is safe to repeat. Reports public/ against MAX_PUBLIC_BYTES and never raises it.",
@@ -837,55 +802,6 @@
 				"icon": {
 					"id": "file-media",
 					"color": "terminal.ansiBrightMagenta"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Test: Run Browser E2E — free",
-				"detail": "Run Playwright sequentially against each selected Carameli checkout. NEEDS each stack and Vite server up first. Failures go to that checkout's logs/e2e-failures.log.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:carameliCheckout}",
-					"e2e",
-					"${input:e2eMode}"
-				],
-				"group": "test",
-				"icon": {
-					"id": "browser",
-					"color": "terminal.ansiBrightGreen"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Test: Run Local Integration E2E — free",
-				"detail": "Both directions of the carameli <-> VanillaLand integration: boots local IIS Express + vs-sql via VS_REPO_DIR, runs tests/local_e2e, then the .NET outbound driver. Needs a filled .env.local-e2e (see .env.local-e2e.example); no telephony, no cost.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:carameliCheckout}",
-					"local-e2e"
-				],
-				"group": "test",
-				"icon": {
-					"id": "plug",
-					"color": "terminal.ansiBrightGreen"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1570,31 +1486,114 @@
 				"default": ""
 			},
 			{
-				// Every project's run-tests.py accepts both of these, which is what lets
-				// this be a picker rather than a free-text box. `--changed` is the
-				// canonical spelling everywhere — devkit, the template, and the vendored
-				// Stop hook's own remediation line. carameli used to spell it `--fast`,
-				// which meant the Stop hook's advice died on "Unknown argument"; it now
-				// accepts `--changed` and keeps `--fast` as a deprecated alias.
+				// The second question "Test: Run Suite" asks, and a checkbox list for the
+				// same reason `project` above is one: more than one of these is routinely
+				// wanted at once — a suite plus the vendored hook tests, or Vitest plus the
+				// bundle budgets it can never reach on its own — and single-picks made that
+				// two clicks through two prompts and two artifacts.
 				//
-				// The empty value is safe HERE specifically: devkit_project.py drops empty
-				// arguments before exec, so it cannot reach argparse as a stray positional
-				// (tests/test_devkit_project.py pins that). A picker feeding a script
-				// directly still needs one real token per branch.
-				"id": "testScope",
-				"type": "pickString",
-				"description": "How much of the suite to run",
-				"options": [
-					{
-						"label": "Full suite (default)",
-						"value": ""
-					},
-					{
-						"label": "Changed only — the working-tree diff",
-						"value": "--changed"
-					}
-				],
-				"default": ""
+				// It does NOT hide the rows a ticked checkout cannot run, and that is a
+				// decision rather than a limitation. Sibling `${input:...}` resolve in no
+				// defined order with no sight of one another, and this extension's own
+				// `dependsOn` filters the RESULT rather than the list — a tick that
+				// silently disappears, which is the one outcome worse than an irrelevant
+				// row. So every row states its scope, and devkit_project.py prints the
+				// pairs it skipped and why.
+				//
+				// `value` is what travels (the extension joins the checked VALUES with
+				// `separator`); the remembered set is stored by LABEL, so editing a label
+				// costs the next reader one re-tick and nothing else. `picked` seeds the
+				// first run only — a remembered set replaces it. devkit_project.py's
+				// TEST_KINDS is the same list from the other side, and
+				// `test_the_menu_and_the_dispatcher_offer_the_same_kinds` pins the two
+				// together in both directions.
+				"id": "testKinds",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which kinds of test? (space ticks, enter runs)",
+					"key": "testKinds",
+					"multiPick": true,
+					"multiPickStorage": "workspace",
+					"separator": ",",
+					"optionGroups": [
+						{
+							"label": "Select one or more kinds",
+							"minCount": 1,
+							"options": [
+								{
+									"label": "Suite — the checkout's own pytest run",
+									"value": "suite",
+									"description": "every checkout · scripts/run-tests.py",
+									"picked": true
+								},
+								{
+									// `--changed` is the canonical spelling everywhere: devkit,
+									// the template, and the vendored Stop hook's remediation
+									// line. carameli used to spell it `--fast`, which meant that
+									// advice died on "Unknown argument"; it now accepts
+									// `--changed` and keeps `--fast` as a deprecated alias.
+									"label": "Suite — changed files only",
+									"value": "suite-changed",
+									"description": "every checkout · the working-tree diff, vs HEAD plus untracked"
+								},
+								{
+									// Its own row rather than part of the suite because
+									// pytest's testpaths deliberately excludes
+									// scripts/hooks/tests/ in EVERY consumer. Includes
+									// test_codex_translation.py, which judges every response
+									// the project's hooks can emit against Codex's published
+									// output schema — statically, with no CLI and no cost.
+									"label": "Harness hook tests — the vendored tier",
+									"value": "hooks",
+									"description": "every checkout · fails loudly where the harness is not vendored"
+								},
+								{
+									"label": "Carameli free targets — all of them, one artifact",
+									"value": "all-targets",
+									"description": "carameli only · pytest + hooks + frontend + bundle budgets merged; paid tiers stay CLI-only"
+								},
+								{
+									"label": "Carameli frontend (Vitest)",
+									"value": "frontend",
+									"description": "carameli only · unit tests, no build"
+								},
+								{
+									// Separate from the Vitest row above because `test:run`
+									// never builds, and so can never reach these budgets.
+									"label": "Carameli frontend bundle budgets",
+									"value": "bundle-budgets",
+									"description": "carameli only · production build, measured against frontend/bundlePolicy.ts"
+								},
+								{
+									"label": "Carameli public webhook reachability",
+									"value": "webhook",
+									"description": "carameli only · needs the public URL to be live"
+								},
+								{
+									"label": "Browser E2E — headless",
+									"value": "e2e",
+									"description": "carameli only · NEEDS the stack and the Vite server up first"
+								},
+								{
+									"label": "Browser E2E — headed, watch the browser",
+									"value": "e2e-headed",
+									"description": "carameli only · NEEDS the stack and the Vite server up first"
+								},
+								{
+									"label": "Browser E2E — cross-browser",
+									"value": "e2e-cross",
+									"description": "carameli only · Chromium, Firefox, WebKit; NEEDS the stack and Vite up"
+								},
+								{
+									"label": "Local integration E2E — carameli ↔ VanillaLand",
+									"value": "local-e2e",
+									"description": "carameli only · boots local IIS Express + vs-sql via VS_REPO_DIR; needs a filled .env.local-e2e"
+								}
+							]
+						}
+					]
+				}
 			},
 			{
 				// The one picker in this file where an accidental Enter spends money, so the
@@ -1621,12 +1620,17 @@
 				"default": "claude"
 			},
 			{
-				// The two-option pickers for the project-SCOPED tasks. Deliberately not
-				// the `project` picker above: three of the five checkouts it lists cannot
-				// run a Playwright suite, and offering them would make the wrong answer
-				// available at exactly the moment you are least likely to notice. The
-				// dispatcher validates the same restriction from its side
-				// (`Action.projects`), so these lists are UX, never the guarantee.
+				// The checkout picker for the project-SCOPED tasks. Deliberately not the
+				// `project` picker above: three of the five checkouts it lists have no
+				// comic-book art and no ngrok tunnel, and offering them would make the
+				// wrong answer available at exactly the moment you are least likely to
+				// notice. The dispatcher validates the same restriction from its side
+				// (`Action.projects`), so this list is UX, never the guarantee.
+				//
+				// It used to front for the three carameli TEST tasks as well. Those are
+				// rows on `testKinds` now, where the scope is stated per row rather than
+				// per picker — a menu shared by every checkout cannot narrow its list to
+				// the ticked ones, and saying so beats dropping the tick silently.
 				//
 				// The extension remembers checked items per workspace. The dispatcher
 				// still validates the action's scope before starting either checkout.
@@ -1702,63 +1706,6 @@
 				"id": "migrationMessage",
 				"type": "promptString",
 				"description": "Short description of the schema change (becomes part of the migration filename)",
-				"default": ""
-			},
-			{
-				// `hook-tests` is absent: it is the workspace's own "Test: Harness Hook
-				// Tests" now, identical in every consumer, and a second spelling of it
-				// here would be a third copy of the same run.
-				"id": "carameliTestTarget",
-				"type": "pickString",
-				"description": "Which Carameli-only free target to run",
-				"options": [
-					{
-						"label": "All free targets (pytest + hooks + frontend + bundle budgets), one merged artifact",
-						"value": "--all"
-					},
-					{
-						"label": "Frontend (Vitest)",
-						"value": "--target=frontend-tests"
-					},
-					{
-						// Builds the frontend, then measures what the build produced
-						// against frontend/bundlePolicy.ts. Separate from the Vitest
-						// entry above because `test:run` never builds and so can never
-						// reach those budgets.
-						"label": "Frontend bundle budgets (production build + Vitest)",
-						"value": "--target=bundle-budgets"
-					},
-					{
-						"label": "Public webhook reachability",
-						"value": "--target=webhook-e2e"
-					}
-				],
-				"default": "--all"
-			},
-			{
-				// Carries an empty branch, and is safe for the same reason `testScope`
-				// is: it feeds `devkit_project.py`, which drops empty arguments before
-				// exec. While this picker lived in carameli's own task file it fed
-				// `run-e2e.py` directly and survived only because that script happens to
-				// test membership rather than parse arguments — an accident, and one of
-				// the things hoisting these actually FIXED.
-				"id": "e2eMode",
-				"type": "pickString",
-				"description": "Which Playwright mode to run",
-				"options": [
-					{
-						"label": "Headless (default)",
-						"value": ""
-					},
-					{
-						"label": "Headed — watch the browser",
-						"value": "--headed"
-					},
-					{
-						"label": "Cross-browser — Chromium, Firefox, WebKit",
-						"value": "--cross-browser"
-					}
-				],
 				"default": ""
 			},
 			{

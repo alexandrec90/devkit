@@ -192,8 +192,8 @@ after the PR merges; a box never renders.
   string reaches argparse as a stray positional and is rejected, which is why
   `scripts/new-project.py` carries the redundant-looking `--dry-run` and `--remote`
   flags alongside their negations. The exception is a picker feeding
-  `scripts/devkit_project.py`, which strips empties before exec — `testScope` and
-  `e2eMode` rely on that, and say so.
+  `scripts/devkit_project.py`, which strips empties before exec — a scope option spelled
+  as the empty string relies on that, and says so where it is defined.
 - **A picker whose options are not knowable in advance reads a file, and the script that
   answers it writes that file.** `rioj7.command-variable` can read and template a JSON
   file, and cannot run a command — so a list of live branches or boxes has to be *cached*
