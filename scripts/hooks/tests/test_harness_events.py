@@ -224,3 +224,37 @@ class TestAgentName:
         text = path.read_text(encoding="utf-8")
         assert "\tagent=claude" in text
         assert "codex" not in text
+
+
+class TestTheSuiteCannotReachTheRealLedger:
+    """`conftest._ledger_off_the_machine` is the fixture under test.
+
+    `record(root=None)` resolves `$DEVKIT_DIR`, so any test that drives a hook end to end
+    appends to **this machine's** harness-events ledger -- the backlog `harness_triage.py`
+    reads as things an agent hit. `test_codex_translation.py`'s refusal case did exactly
+    that, filing 18 `codex-translation-gap` items against a project named
+    `test_a_lost_decision_is_refuse0`, which is a pytest `tmp_path` basename. They read as
+    a recurring harness failure nobody could reproduce, because the only thing producing
+    them was the suite.
+
+    A diagnostic a test can quietly poison is a diagnostic nobody can trust, so the
+    isolation is autouse and this is the test that says so.
+    """
+
+    def test_devkit_dir_points_somewhere_disposable(self, tmp_path):
+        import os
+
+        pointed_at = os.environ.get("DEVKIT_DIR", "")
+        assert pointed_at, "the fixture must set it, not merely unset it"
+        # Same tmp root pytest hands this test: a scratch tree, not a checkout.
+        assert str(tmp_path.parent.parent) in str(pointed_at)
+
+    def test_an_unrooted_record_lands_off_the_machine(self):
+        """The whole point: a hook driven end to end writes where nothing reads it."""
+        path = events.record("codex-translation-gap", (("project", "whatever"),))
+        assert path is not None
+        assert "harness-events" in path.name
+        text = path.read_text(encoding="utf-8")
+        assert "project=whatever" in text
+        # And it is this test's own scratch ledger, freshly made, not one with history.
+        assert len(text.strip().splitlines()) == 1

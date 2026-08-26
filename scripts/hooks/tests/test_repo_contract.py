@@ -792,3 +792,90 @@ def test_every_capture_in_a_vendored_hook_declares_its_codec():
         + " -- pass encoding='utf-8', errors='replace' as well, per the codec note "
         "under VERIFY_IMPORT in scripts/hooks/stop.py"
     )
+
+
+# --- and a hook that reads its own payload names it too -----------------------
+
+
+def undecoded_stdin(source: str) -> list[int]:
+    """Line numbers where `source` reads stdin through whatever codec the platform picked.
+
+    The mirror image of `undecoded_captures`, on the *input* side and with the same
+    failure: `sys.stdin.read()` decodes through `locale.getencoding()`, cp1252 on a
+    Windows workstation, and the harness writes every hook UTF-8 JSON.
+
+    A read is excused by either of the two spellings that fix it, taken file-wide rather
+    than per-call: reading `sys.stdin.buffer` and decoding once, or `reconfigure`-ing the
+    stream before reading it. File-wide because both fixes put the excusing line in a
+    different statement from the read -- a `buffer` reader keeps `sys.stdin.read()` as
+    its fallback for a stub with no buffer, which is the very line this looks for.
+    """
+    if "sys.stdin.buffer" in source or 'getattr(sys.stdin, "buffer"' in source:
+        return []
+    if "sys.stdin.reconfigure(" in source:
+        return []
+    lines = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr not in {"read", "readline"}:
+            continue
+        inner = func.value
+        if isinstance(inner, ast.Attribute) and inner.attr == "stdin":
+            lines.append(node.lineno)
+    return lines
+
+
+def test_undecoded_stdin_scanner_reads_the_call_not_the_spelling():
+    """The scanner's own cases, so a rewrite of it cannot quietly stop finding any."""
+    assert undecoded_stdin("import sys\nraw = sys.stdin.read()\n") == [2]
+    assert undecoded_stdin("data = json.loads(sys.stdin.read())\n") == [1]
+    assert undecoded_stdin("sys.stdin.reconfigure(encoding='utf-8')\nsys.stdin.read()\n") == []
+    assert undecoded_stdin("raw = sys.stdin.buffer.read().decode('utf-8')\n") == []
+    # A file object that is not stdin decodes through whatever opened it, which is the
+    # opener's business.
+    assert undecoded_stdin("handle.read()\n") == []
+
+
+def test_every_vendored_hook_decodes_its_payload_as_utf8():
+    """A hook reads UTF-8 JSON from the harness; the platform codec is never what it is.
+
+    Two reports, one root cause, and both landed in the agent's own work rather than in a
+    stack trace. `worktree-guard.py` is the hook that *echoes the payload back* through
+    `updatedInput`, so a `Write` carrying U+2192 was re-aimed into a box with the arrow
+    mangled to three characters -- only the first write of a session, the one the guard
+    re-aims, so nothing but a spellchecker ever caught it. The same read made
+    `redirect_blocker` refuse an `Edit` with "the box's copy of the file does not contain
+    the text this edit replaces" against a byte-identical file: the box copy is read as
+    UTF-8 and the `old_string` had come through cp1252, so any em dash in the replaced
+    text made them disagree.
+
+    Neither hook raised, which is what makes this worth a ratchet rather than a fix: a
+    codec error on the *output* side crashes and gets found, and on the input side it
+    quietly rewrites what the agent typed.
+
+    Scoped like its sibling above: the vendored hooks, where the fix ships. The two
+    non-vendored entry points that also read a payload -- `worktree-guard.py` and
+    `task_slug.py` -- are devkit's own and covered by `tests/test_worktree_guard.py`.
+    """
+    sync = load_module("scripts/sync-devkit.py")
+    offenders = {}
+    for rel in sync.MANIFEST:
+        if not rel.startswith("scripts/hooks/") or not rel.endswith(".py"):
+            continue
+        if "/tests/" in rel:
+            continue
+        path = REPO_ROOT / rel
+        if not path.is_file():
+            continue
+        found = undecoded_stdin(path.read_text(encoding="utf-8"))
+        if found:
+            offenders[rel] = found
+    assert not offenders, (
+        "these hooks read their payload through the platform codec: "
+        + "; ".join(f"{rel}:{lines}" for rel, lines in sorted(offenders.items()))
+        + " -- read sys.stdin.buffer and decode('utf-8', errors='replace') once, or "
+        "reconfigure the stream first, per the codec note under VERIFY_IMPORT in "
+        "scripts/hooks/stop.py"
+    )

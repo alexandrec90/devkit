@@ -2579,3 +2579,159 @@ def test_the_guards_git_helper_decodes_utf8_rather_than_the_platform_codec():
     assert 'encoding="utf-8"' in call and 'errors="replace"' in call, (
         "worktree-guard._git must name its codec: encoding='utf-8', errors='replace'"
     )
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        # The two commands the ledger reported verbatim. Both wrote inside the directory
+        # they had just moved to; both were judged against the session cwd instead and
+        # matched a same-named file in a checkout.
+        (
+            "cd /c/Users/a/.claude/projects/C--x/memory && printf '%s\\n' x >> MEMORY.md",
+            ["/c/Users/a/.claude/projects/C--x/memory/MEMORY.md"],
+        ),
+        (
+            "cd /c/Users/a/AppData/Local/Temp/claude/s/scratchpad"
+            " && gh api repos/o/r/actions/runs/1/logs > lint.zip",
+            ["/c/Users/a/AppData/Local/Temp/claude/s/scratchpad/lint.zip"],
+        ),
+        # A relative move composes onto the base rather than replacing it.
+        ("cd a && cd b && tee out.txt", ["a/b/out.txt"]),
+        # A rooted move replaces it. `/b` has no drive letter, so `Path.is_absolute()`
+        # answers False on Windows and only `_is_rooted` gets this right.
+        ("cd /a && cd /b && tee out.txt", ["/b/out.txt"]),
+        # A rooted *target* is never rebased, whatever the base is.
+        ("cd /tmp && tee /etc/thing", ["/etc/thing"]),
+        # No `cd`: unchanged, which is the behaviour every existing caller relies on.
+        ("tee out.txt", ["out.txt"]),
+        # Moves this cannot follow leave the base alone rather than guessing.
+        ("cd - && tee out.txt", ["out.txt"]),
+        ("cd ~ && tee out.txt", ["out.txt"]),
+        ("cd $HOME && tee out.txt", ["out.txt"]),
+        ("cd a b && tee out.txt", ["out.txt"]),
+        # PowerShell and cmd spellings of the same move.
+        ("Set-Location /a; Out-File out.txt", ["/a/out.txt"]),
+        ("cd /d C:/a && tee out.txt", ["C:/a/out.txt"]),
+    ],
+)
+def test_a_cd_earlier_in_the_command_moves_what_a_relative_write_is_relative_to(command, expected):
+    """`shell_write_targets` used to hand every relative operand back as written, and the
+    caller resolved it against the session cwd. A `cd` in the same command line makes that
+    the wrong directory, and the guard's most-reported false positive is what follows: a
+    write to `memory/MEMORY.md` after `cd`-ing there matched devkit's own `MEMORY.md` by
+    basename, and a `gh api ... > lint.zip` in the scratchpad read as a write to
+    `devkit/lint.zip`. Neither could be re-aimed -- "Bash arguments are not rewritable by
+    this hook" -- so both were flat blocks on correct commands.
+    """
+    assert guard.shell_write_targets(command) == expected
+
+
+def test_a_write_under_a_dot_git_directory_is_never_routed_to_a_box(root):
+    """Deleting a stale `.git/index.lock` was blocked and pointed at a box path that
+    cannot exist: a worktree's `.git` is a *file*, not a directory, so there is nothing
+    under it to write to. The agent got through only by spelling the delete as a Python
+    one-liner, which is the shape of a gate teaching people to route around it.
+
+    Git's own state is not content: no branch is at stake, nothing is committed from it,
+    and the box has nowhere to put it. `branch_of` is injected so the decline is the
+    `.git` rule rather than `root`'s checkouts not being real repositories -- the same
+    call one directory over must still get a box.
+    """
+    checkout = str(root / "carameli")
+    assert (
+        guard.redirect_decision(
+            str(root / "carameli" / ".git" / "index.lock"),
+            checkout,
+            root,
+            PROJECTS,
+            branch_of=on_branch("master"),
+        )
+        is None
+    )
+    assert guard.redirect_decision(
+        str(root / "carameli" / "app" / "index.lock"),
+        checkout,
+        root,
+        PROJECTS,
+        branch_of=on_branch("master"),
+    ) == ("carameli", str(Path("app/index.lock")))
+
+
+@pytest.mark.parametrize(
+    "relative, internal",
+    [
+        (".git/index.lock", True),
+        (".git/worktrees/box/HEAD", True),
+        ("app/.git/config", True),
+        # The `.git` *file* a worktree carries is content-shaped: it is the last part,
+        # not a directory above, so it is not what this rule exempts.
+        (".git", False),
+        ("app/main.py", False),
+        ("docs/gitignore.md", False),
+    ],
+)
+def test_is_git_internal_names_directories_above_the_file_only(root, relative, internal):
+    """The predicate on its own, because `redirect_decision` can decline for half a dozen
+    other reasons and a test that only reads its `None` cannot tell which one fired."""
+    assert guard._is_git_internal(root / "carameli" / relative) is internal
+
+
+def test_the_hook_reads_its_payload_through_read_stdin():
+    """`sys.stdin.read()` decodes through cp1252 on this machine while the harness writes
+    UTF-8, and this is the hook that echoes the payload back through `updatedInput` -- so
+    the corruption lands in the agent's own file. Asserted on the source: a test that fed
+    a `read()` stub would pass whichever call `main` makes.
+    """
+    source = (REPO_ROOT / "scripts" / "worktree-guard.py").read_text(encoding="utf-8")
+    body = source[source.index("\ndef main(") :]
+    assert "parse_hook_input(read_stdin())" in body
+    assert "sys.stdin.read()" not in body
+
+
+def test_read_stdin_decodes_utf8_bytes_the_platform_codec_would_mangle():
+    """The exact corruption from the report: U+2192 written as UTF-8 and read back
+    through cp1252 becomes three mojibake characters, which is what reached the box."""
+
+    class _bytes_stdin:
+        def __init__(self, raw: bytes):
+            self.buffer = self
+            self._raw = raw
+
+        def read(self) -> bytes:
+            return self._raw
+
+        def close(self):  # pragma: no cover - never called
+            pass
+
+    text = "a \u2192 b \u2014 c"
+    raw = text.encode("utf-8")
+    assert raw.decode("cp1252") != text, "pick a payload cp1252 actually mangles"
+    import sys as _sys
+
+    saved = _sys.stdin
+    try:
+        _sys.stdin = _bytes_stdin(raw)
+        assert guard.read_stdin() == text
+    finally:
+        _sys.stdin = saved
+
+
+def test_read_stdin_survives_a_byte_it_cannot_decode():
+    """A hook that raises on PreToolUse blocks every edit in the workspace, so an
+    undecodable byte must cost a character and never the turn."""
+
+    class _bad_stdin:
+        buffer = None
+
+        def read(self) -> str:
+            raise ValueError("stdin is closed")
+
+    import sys as _sys
+
+    saved = _sys.stdin
+    try:
+        _sys.stdin = _bad_stdin()
+        assert guard.read_stdin() == ""
+    finally:
+        _sys.stdin = saved
