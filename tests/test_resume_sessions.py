@@ -427,6 +427,33 @@ def test_shell_lines_are_the_no_windows_terminal_fallback(tmp_path):
 # --- the entrypoint ----------------------------------------------------------
 
 
+class StubPass:
+    """An `agent_clis.run_pass` that spawns nothing and remembers how it was called."""
+
+    def __init__(self, lines=("  updated claude 1.0.0 -> 1.1.0",)):
+        self.calls: list[tuple] = []
+        self.report = rs.agent_clis.Report((), tuple(lines))
+
+    def __call__(self, agents=(), **kwargs):
+        self.calls.append((tuple(agent.name for agent in agents), kwargs))
+        return self.report
+
+
+@pytest.fixture(autouse=True)
+def no_real_agent_pass(monkeypatch):
+    """No test in this file may reach this machine's real updaters.
+
+    Autouse rather than per-test because the launch path runs the pass whether or not a
+    test thought about it, and the failure mode of forgetting is `claude update` running
+    against the developer's own install in the middle of a unit test.
+    """
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("a test reached the real agent-CLI updater")
+
+    monkeypatch.setattr(rs.agent_clis, "run_pass", refuse)
+
+
 def test_list_reports_the_four_most_recent_and_launches_nothing(tmp_path, capsys, monkeypatch):
     store, cwd = tmp_path / "store", tmp_path / "repo"
     cwd.mkdir()
@@ -543,6 +570,95 @@ def test_without_windows_terminal_it_prints_the_commands_and_fails(tmp_path, cap
     assert "claude --resume sess" in capsys.readouterr().err
 
 
+# --- updating the CLIs in the gap before the tabs open -------------------------
+
+
+def launchable(tmp_path, monkeypatch, calls: list):
+    """A store with one session and a wt.exe that records rather than launches."""
+    store, cwd = tmp_path / "store", tmp_path / "repo"
+    cwd.mkdir()
+    write_transcript(store, "sess", cwd=cwd, prompt="a task", mtime=1000.0)
+    monkeypatch.setattr(rs, "find_terminal", lambda: r"C:\wt.exe")
+
+    class Result:
+        returncode = 0
+
+    def record(argv, **_kwargs):
+        calls.append(argv)
+        return Result()
+
+    monkeypatch.setattr(rs.subprocess, "run", record)
+    return store
+
+
+def test_the_clis_are_updated_before_the_tabs_open(tmp_path, capsys, monkeypatch):
+    """Order is the whole point: launching first hands the new tabs the old binary and
+    then rewrites it underneath them."""
+    launched: list = []
+    store = launchable(tmp_path, monkeypatch, launched)
+    stub = StubPass()
+    assert rs.main(["--sessions-dir", str(store)], agent_pass=stub) == 0
+    assert stub.calls and launched
+    out = capsys.readouterr().out
+    assert out.index("updated claude") < out.index("Opening 1 tab")
+
+
+def test_only_the_agents_being_resumed_are_updated(tmp_path, monkeypatch):
+    """`--agent codex` is a statement about what you are about to run. Moving `claude`
+    on the strength of it would update a CLI whose sessions are still open."""
+    launched: list = []
+    store = launchable(tmp_path, monkeypatch, launched)
+    write_codex_rollout(store, "codex-sess", cwd=tmp_path / "repo", prompt="a codex task")
+    stub = StubPass()
+    rs.main(["--agent", "codex", "--sessions-dir", str(store)], agent_pass=stub)
+    assert stub.calls[0][0] == ("codex",)
+
+
+def test_the_update_pass_is_asked_to_actually_install(tmp_path, monkeypatch):
+    launched: list = []
+    store = launchable(tmp_path, monkeypatch, launched)
+    stub = StubPass()
+    rs.main(["--sessions-dir", str(store)], agent_pass=stub)
+    assert stub.calls[0][1] == {"yes": True}
+
+
+def test_no_update_opts_out_and_still_opens_the_tabs(tmp_path, monkeypatch):
+    launched: list = []
+    store = launchable(tmp_path, monkeypatch, launched)
+    stub = StubPass()
+    assert rs.main(["--sessions-dir", str(store), "--no-update"], agent_pass=stub) == 0
+    assert stub.calls == []
+    assert launched
+
+
+def test_a_read_only_run_updates_nothing(tmp_path, monkeypatch):
+    """`--list` and `--dry-run` promise to launch nothing; replacing two binaries on the
+    way past would be the largest side effect in the script."""
+    launched: list = []
+    store = launchable(tmp_path, monkeypatch, launched)
+    stub = StubPass()
+    rs.main(["--sessions-dir", str(store), "--list"], agent_pass=stub)
+    rs.main(["--sessions-dir", str(store), "--dry-run"], agent_pass=stub)
+    assert stub.calls == []
+
+
+def test_a_failed_update_does_not_withhold_the_sessions(tmp_path, capsys, monkeypatch):
+    """The exit code belongs to wt.exe. A stale CLI is worth a line, not a lost window."""
+    launched: list = []
+    store = launchable(tmp_path, monkeypatch, launched)
+    stub = StubPass(lines=("  FAILED  claude 1.0.0: EACCES",))
+    assert rs.main(["--sessions-dir", str(store)], agent_pass=stub) == 0
+    assert "FAILED  claude" in capsys.readouterr().out
+    assert launched
+
+
+def test_update_clis_prints_every_line_the_pass_produced(capsys):
+    stub = StubPass(lines=("  one", "  two"))
+    rs.update_clis(("claude",), stub)
+    out = capsys.readouterr().out
+    assert "  one" in out and "  two" in out
+
+
 def test_each_agent_store_honours_its_config_home(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "elsewhere"))
     assert rs.sessions_root("claude") == tmp_path / "elsewhere" / "projects"
@@ -558,14 +674,22 @@ def test_each_agent_store_honours_its_config_home(monkeypatch, tmp_path):
 
 
 def test_the_script_is_stdlib_only():
-    """devkit ships no runtime dependencies, and this runs from a VS Code task."""
+    """devkit ships no runtime dependencies, and this runs from a VS Code task.
+
+    `agent_clis` is the one non-stdlib name allowed, and it is not a dependency: it is a
+    sibling script in the same directory, reached through the `sys.path` insert above
+    it. Naming it here rather than widening the rule keeps a real third-party import from
+    slipping in behind the exception.
+    """
     source = (REPO_ROOT / "scripts" / "resume-sessions.py").read_text(encoding="utf-8")
     for line in source.splitlines():
         if line.startswith(("import ", "from ")) and "support" not in line:
             module = line.split()[1].split(".")[0]
             assert module in {
                 "__future__",
+                "agent_clis",
                 "argparse",
+                "collections",
                 "json",
                 "os",
                 "re",

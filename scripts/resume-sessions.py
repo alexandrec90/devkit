@@ -34,6 +34,20 @@ real session out of the requested set:
   than passed over silently — a session you remember working in, missing from the
   list, should say why.
 
+**The CLIs are updated in the gap before the tabs open**, which is the one moment on
+this machine when that is possible at all: an update replaces the binary a running agent
+is executing, so the nightly pass in `global-tools.py` steps over any agent that is up,
+and on a desk where a window is nearly always open it steps over them most nights. Here
+the answer is different by construction — you are about to open the sessions, so they are
+not open yet. Only the agents being resumed are touched (`--agent codex` never moves
+`claude`), any that is somehow already running is still skipped, and `--no-update` opts
+out. `agent_clis.py` owns the pass and the reasoning; this module owns only the moment.
+
+It runs before `wt.exe` rather than after, and blocks: launching first would hand the new
+tabs the old binary and then rewrite it underneath them. The cost is a few seconds of
+"updating…" before the window appears, and it is the price of the tabs being current.
+`--list` and `--dry-run` stay read-only, so neither updates anything.
+
 Pure helpers are unit-tested in `tests/test_resume_sessions.py`; `main` is the thin
 subprocess shell around them.
 """
@@ -48,8 +62,16 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agent_clis
+
+# The update stage, taken as an argument so a test of the launch path cannot spawn a real
+# updater by forgetting to stub one. `agent_clis.run_pass` is its only production value.
+AgentPass = Callable[..., agent_clis.Report]
 
 DEFAULT_COUNT = 4
 SUPPORTED_AGENTS = ("claude", "codex")
@@ -359,7 +381,19 @@ def _parse_agents(value: str) -> tuple[str, ...]:
     return tuple(agent for agent in SUPPORTED_AGENTS if agent in selected)
 
 
-def main(argv: list[str] | None = None) -> int:
+def update_clis(agents: Sequence[str], agent_pass: AgentPass | None = None) -> None:
+    """Run the update pass for `agents` and print its account of itself.
+
+    Reported rather than returned, and never fatal: a failed update is a stale CLI, not a
+    reason to withhold the sessions somebody asked for. The exit code belongs to `wt.exe`.
+    """
+    print(f"\nUpdating {'/'.join(agent.title() for agent in agents)} before opening...")
+    report = (agent_pass or agent_clis.run_pass)(agent_clis.select_agents(agents), yes=True)
+    for line in report.lines:
+        print(line)
+
+
+def main(argv: list[str] | None = None, agent_pass: AgentPass | None = None) -> int:
     # Prompts carry arrows, dashes and emoji; a Windows console is cp1252 and would
     # raise UnicodeEncodeError mid-report rather than printing the sessions it found.
     for stream in (sys.stdout, sys.stderr):
@@ -394,6 +428,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="print the wt.exe command line, launch nothing"
+    )
+    parser.add_argument(
+        "--no-update",
+        dest="update",
+        action="store_false",
+        help="skip the CLI update pass that otherwise runs just before the tabs open",
     )
     args = parser.parse_args(argv)
 
@@ -438,6 +478,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print("\nwt.exe " + subprocess.list2cmdline(command))
         return 0
+    if args.update:
+        update_clis(args.agents, agent_pass)
     print(f"\nOpening {len(selected)} tab(s) in a new Windows Terminal window...")
     return subprocess.run([terminal, *command], check=False).returncode
 

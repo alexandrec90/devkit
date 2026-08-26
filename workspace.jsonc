@@ -782,6 +782,29 @@
 				"problemMatcher": []
 			},
 			{
+				"label": "Assets: Encode Comic-Book Art",
+				"detail": "Encode every master in frontend/assets-src/comic-book/ that has no .webp in public/comic-book/ yet, and add each one to the ?edit=1 picture dropdown. Existing exports are skipped, so it is safe to repeat. Reports public/ against MAX_PUBLIC_BYTES and never raises it.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:carameliCheckout}",
+					"encode-art"
+				],
+				"icon": {
+					"id": "file-media",
+					"color": "terminal.ansiBrightMagenta"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
 				"label": "Test: Run Browser E2E — free",
 				"detail": "Run Playwright sequentially against each selected Carameli checkout. NEEDS each stack and Vite server up first. Failures go to that checkout's logs/e2e-failures.log.",
 				"type": "process",
@@ -1377,7 +1400,7 @@
 				// wherever they happened, so the script reads the transcript store — which
 				// records each session's own directory — instead of asking.
 				"label": "Agents: Resume Recent Sessions",
-				"detail": "Check Claude, Codex, or both and choose how many sessions, then reopen the globally most recent matching sessions in a new Windows Terminal window, one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it.",
+				"detail": "Check Claude, Codex, or both and choose how many sessions, then reopen the globally most recent matching sessions in a new Windows Terminal window, one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it. The checked CLIs are updated first, which takes a few seconds and is the one moment they can be — an update cannot replace a binary a running agent is executing, so any agent already up is skipped.",
 				"type": "process",
 				"command": "python",
 				"args": [
