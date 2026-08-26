@@ -28,11 +28,14 @@ Tested in `tests/test_workspace_status.py`.
 
 from __future__ import annotations
 
+import ctypes
 import json
+import shutil
 import subprocess
 import sys
 import time as _time
 from pathlib import Path
+from typing import ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
@@ -60,6 +63,7 @@ POLICY_TARGET = Path.home() / ".devkit" / "git-hooks"
 # any repo -- see `guard_line` for why that is exactly why it needs reporting.
 ROOT_SETTINGS = Path(".claude") / "settings.json"
 GUARD_SCRIPT = "worktree-guard.py"
+_GB = 1024**3
 
 # `install-git-policy.py` is hyphenated and so cannot be imported by name. Going
 # through the shared loader keeps the file list and the comparison in one place --
@@ -410,6 +414,102 @@ def scheduler_line(source: Path = SOURCE_ROOT, now: float = 0.0, stale_hours: fl
     )
 
 
+class _MEMORYSTATUSEX(ctypes.Structure):
+    """The Win32 `MEMORYSTATUSEX` record, for `GlobalMemoryStatusEx`.
+
+    `ullTotalPageFile` is misnamed in the API and reads as the pagefile's size; it is
+    the **commit limit** -- RAM plus the pagefile. That is the field that matters
+    here, and mistaking it for the pagefile is what makes this hard to eyeball.
+    """
+
+    # ctypes reads `_fields_` off the class and requires a plain mutable sequence.
+    _fields_: ClassVar[list[tuple[str, type]]] = [
+        ("dwLength", ctypes.c_ulong),
+        ("dwMemoryLoad", ctypes.c_ulong),
+        ("ullTotalPhys", ctypes.c_ulonglong),
+        ("ullAvailPhys", ctypes.c_ulonglong),
+        ("ullTotalPageFile", ctypes.c_ulonglong),
+        ("ullAvailPageFile", ctypes.c_ulonglong),
+        ("ullTotalVirtual", ctypes.c_ulonglong),
+        ("ullAvailVirtual", ctypes.c_ulonglong),
+        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+    ]
+
+
+def _commit_status() -> tuple[int, int, int]:
+    """`(physical, commit_limit, commit_available)` in bytes; zeros when unknowable.
+
+    One in-process call, no spawn, so it costs nothing at session start. Zeros off
+    Windows and on any failure -- the caller reads that as "stay silent", which is
+    this file's contract for everything it cannot measure.
+    """
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        return (0, 0, 0)
+    try:
+        status = _MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+        if not windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return (0, 0, 0)
+    except (AttributeError, OSError):  # pragma: no cover - Windows-only failure path
+        return (0, 0, 0)
+    return (status.ullTotalPhys, status.ullTotalPageFile, status.ullAvailPageFile)
+
+
+def headroom_line(
+    volume: Path = REPO_ROOT,
+    usage=None,
+    memory=None,
+    free_floor: float = 25.0,
+    growth_slack: float = 1.25,
+    commit_ceiling: float = 0.85,
+) -> str:
+    """Reports disk the machine is losing to *commit pressure* rather than to files.
+
+    Every other disk answer on this workstation is a folder: a box's `node_modules`,
+    a Docker VHDX, a cache. `pagefile.sys` is not, and it is the one that moves
+    fastest under this workspace's actual load -- a dozen live boxes, their dev
+    servers, several browsers and a WSL VM, all on 16 GB of RAM. Windows grows a
+    system-managed pagefile a gigabyte at a time to cover the commit charge, and
+    every gigabyte is real disk that **no folder scan can see**.
+
+    That invisibility is the whole reason for this line. A day of parallel work took
+    23 GB with nothing to show for it in any directory; tearing down every container
+    freed none of it, because the space was never in the container store. A reboot
+    returned all of it at once, which reads as "Windows was hoarding" and teaches the
+    wrong lesson: the pagefile is a *symptom*, and rebooting resets the symptom while
+    leaving the twenty processes that caused it running by lunchtime.
+
+    So the line names the mechanism and the delta, not just the free-space number:
+    free space alone sends you hunting through folders for something that is not
+    there. Silent unless the disk is genuinely tight, the pagefile has grown past its
+    boot size, or commit is close enough to the limit that it is about to.
+    """
+    try:
+        free = (usage or shutil.disk_usage)(volume).free
+    except OSError:
+        return ""
+    phys, limit, avail = (memory or _commit_status)()
+    pagefile = max(limit - phys, 0)
+    parts = []
+    if free < free_floor * _GB:
+        parts.append(f"{free / _GB:.0f} GB free")
+    if phys and pagefile > phys * growth_slack:
+        parts.append(
+            f"pagefile is {pagefile / _GB:.0f} GB, "
+            f"{(pagefile - phys) / _GB:.0f} GB past its boot size"
+        )
+    if limit and (limit - avail) / limit >= commit_ceiling:
+        parts.append(f"commit at {(limit - avail) / limit:.0%} of {limit / _GB:.0f} GB and growing")
+    if not parts:
+        return ""
+    return (
+        f"headroom: {' -- '.join(parts)} "
+        f"(fix: close idle dev servers and browsers -- a reboot returns the pagefile's "
+        f"share and none of the cause)"
+    )
+
+
 def _age(seconds: float) -> str:
     """`93600` -> `1d 2h`. Coarse on purpose: this line is about days, not minutes."""
     hours = int(seconds // 3600)
@@ -604,6 +704,7 @@ def render(
     events: str = "",
     workspace_sync: str = "",
     previews: str = "",
+    headroom: str = "",
 ) -> str:
     """The whole message, or "" when there is nothing worth saying."""
     halves = (
@@ -612,6 +713,10 @@ def render(
         # reading the same list tomorrow.
         *(schedule or []),
         scheduler,
+        # Above the repo lines because it is about the machine they all run on: a
+        # workstation this close to full fails a provision or a container pull, which
+        # then reads as the box being broken.
+        headroom,
         stranded_line(results),
         behind_line(behind, latest),
         policy,
@@ -723,6 +828,7 @@ def main(argv: list[str] | None = None) -> int:
             events_line(),
             workspace_sync_line(workspace),
             previews_line(),
+            headroom=headroom_line(root),
         )
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)
