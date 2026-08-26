@@ -6,6 +6,17 @@ The clickable task carried the box version below until 2026-08-25, so "let me lo
 this branch" meant a compose stack every time, and the fast path here was a second task
 with a different name that nobody found. One label, one behaviour: `npm run dev`.
 
+It keeps coming back. Every round of "fix the preview" so far has reached for a
+backend, because the offline state on screen looks like the bug being reported. It is
+not: a UI review is a UI review, and a stack costs three minutes and a machine's worth
+of RAM to answer a question about CSS.
+`test_the_preview_never_grows_a_docker_or_backend_tier` in
+`tests/test_preview_ui_host.py` fails that change rather than trusting this paragraph
+to be read -- no `docker`, `compose` or `podman` token in this file's *code* (prose and
+comments are exempt, which is why this paragraph may say the words), and the only
+programs it spawns are `git` and `npm`. When the real stack IS what is under review,
+that is `preview-task.py` from a terminal -- a different task, deliberately.
+
 `preview-task.py` answers "show me the thing I asked for" with a BOX: a worktree, a
 port lease, a compose stack, an image build and an `npm ci` into a fresh named volume
 -- about three minutes cold, all of it buying an environment this machine can already
@@ -39,9 +50,23 @@ What one run does, per picked row:
      Docker tier -- with `--strictPort` so the URL printed is the URL served.
      `VITE_API_BASE_URL` is forced empty so the app's calls stay same-origin and go
      through Vite's proxy, and the proxy points at the static checkout's API when
-     something answers on its registered port (real data for free) or at a dead
-     loopback port when nothing does: requests are refused in microseconds instead
-     of stalling on `http://app:8000`, a name that only resolves inside compose.
+     something answers on its registered port (real data for free) or at this
+     process's own **offline stub** when nothing does -- never at `http://app:8000`,
+     a name that only resolves inside compose.
+
+The offline stub is `start_offline_stub`: a stdlib handler on an ephemeral loopback
+port that answers every request 502 and logs nothing. It replaced a dead loopback port
+(`DEAD_PROXY`, still the fallback if the bind fails), and what the replacement buys is
+the terminal. A *refused* connection makes Vite log `http proxy error` and a full Node
+stack trace per request, so one page load of an app that probes a session endpoint
+reads as a wall of red for behaviour working exactly as designed -- and the traces are
+connection-refused internals with no app frames in them. A project can condense that
+from its own side (carameli's `frontend/proxyErrorPolicy.ts` does), but a *branch
+preview* serves whatever config the branch it was handed carries: on 2026-08-25 the
+two older of three previewed branches printed the full traces regardless, because the
+condensing landed on main after they were cut. Answering the connection is the only
+fix that reaches every branch, and no app can tell the difference -- Vite's own error
+handler was already turning the refusal into the same 502.
 
 The servers stay CHILDREN of this process, and **three independent nets** end them,
 because for months the claim that the terminal was the lifecycle was simply untrue:
@@ -84,12 +109,14 @@ drift-check. Tested in `tests/test_preview_ui_host.py`.
 from __future__ import annotations
 
 import argparse
+import http.server
 import json
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 from dataclasses import dataclass
@@ -117,9 +144,15 @@ UI_PREVIEWS_DIR_NAME = ".ui-previews"
 PORT_START = 5300
 PORT_SPAN = 200
 
-# Where proxied API calls go when the static stack is down: the discard-protocol port
-# on loopback, where nothing ever listens, so every request fails instantly.
+# Where proxied API calls go when the static stack is down and the stub could not bind:
+# the discard-protocol port on loopback, where nothing ever listens, so every request
+# fails instantly. A refused connection, which is the noisy half `start_offline_stub`
+# exists to avoid -- so this is the fallback and not the plan.
 DEAD_PROXY = f"http://{preview_task.LOOPBACK}:9"
+
+# What the offline stub answers with. JSON because every caller here is an app's fetch
+# of an API route, and a JSON error body is the one shape they all already parse.
+OFFLINE_BODY = b'{"detail":"no backend is running for this UI preview"}'
 
 # How long to wait for Vite to answer. The install has already happened synchronously
 # by the time this clock starts, so this is dev-server startup alone -- seconds, with
@@ -198,28 +231,91 @@ def next_port(taken: set[int], listening, start: int = PORT_START, span: int = P
     raise RuntimeError(f"no free port between {start} and {start + span - 1}")
 
 
-def donor_target(project: str, root: Path, listening) -> str:
-    """Where the dev server's API proxy points: the static stack, or nowhere fast.
+class _OfflineHandler(http.server.BaseHTTPRequestHandler):
+    """Answers 502 to everything, drains the request body, and says nothing.
+
+    Draining is not politeness: an unread body means the socket is closed with bytes
+    still in flight, which the dev server's proxy reports as a connection reset -- the
+    same red block, one layer along, for the failure this stub exists to stop
+    printing. `log_message` is silenced for the same reason the stub exists at all: a
+    preview's terminal is for URLs, not for a refusal per request.
+    """
+
+    # Every response is self-contained and the connection closes after it, so no
+    # keep-alive state can outlive a request the stub declined to understand.
+    protocol_version = "HTTP/1.0"
+
+    def _refuse(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length > 0:
+            self.rfile.read(length)
+        self.send_response(502)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(OFFLINE_BODY)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(OFFLINE_BODY)
+
+    do_GET = _refuse
+    do_HEAD = _refuse
+    do_POST = _refuse
+    do_PUT = _refuse
+    do_PATCH = _refuse
+    do_DELETE = _refuse
+    do_OPTIONS = _refuse
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        """Silence. The terminal belongs to the preview URLs."""
+
+
+def start_offline_stub(bind: str = "", factory=http.server.ThreadingHTTPServer):
+    """Bring up the 502 responder. `(url, server)`, or `(DEAD_PROXY, None)` if it cannot bind.
+
+    Port 0, so the kernel picks one and two concurrent runs cannot collide -- and it is
+    deliberately NOT scanned out of `PORT_START`, which is the space a reviewer's URLs
+    come from. The thread is a daemon: this is an in-process convenience with no
+    lifecycle of its own, and it must not be able to hold the task open the way a real
+    server would.
+
+    A failure to bind is not fatal, on the same terms as the job object: a preview that
+    came up is worth more than a preview that came up quietly, so the caller falls back
+    to the dead port and the reviewer gets stack traces rather than nothing.
+    """
+    bind = bind or preview_task.LOOPBACK
+    try:
+        server = factory((bind, 0), _OfflineHandler)
+    except OSError:
+        return DEAD_PROXY, None
+    threading.Thread(target=server.serve_forever, name="preview-offline-stub", daemon=True).start()
+    return f"http://{bind}:{server.server_address[1]}", server
+
+
+def donor_target(project: str, root: Path, listening, offline: str = DEAD_PROXY) -> str:
+    """Where the dev server's API proxy points: the static stack, or `offline`.
 
     The same registry walk as `preview-task.donor_warning`, ending in a URL instead of
     a warning: when the checkout's own stack answers on its registered `app` port the
-    preview gets real data for free, and when it does not the target is `DEAD_PROXY`
-    so every call fails instantly instead of waiting out a connect timeout. Every
-    failure path lands on `DEAD_PROXY` too -- a proxy target must always be a URL.
+    preview gets real data for free, and when it does not the target is `offline` --
+    the stub, so every call fails instantly and quietly instead of waiting out a
+    connect timeout. Every failure path lands on `offline` too: a proxy target must
+    always be a URL, and one that is merely absent aims Vite at its own default.
     """
     try:
         registry = worktree.load_registry(root)
         if registry is None:
-            return DEAD_PROXY
+            return offline
         slot = registry.slots.get(project, -1)
         if slot < 0:
-            return DEAD_PROXY
+            return offline
         port = registry.ports_for_slot(slot).get("app", 0)
     except (OSError, ValueError):  # ValueError covers devkit_ports.RegistryError
-        return DEAD_PROXY
+        return offline
     if port and listening(port):
         return f"http://{preview_task.LOOPBACK}:{port}"
-    return DEAD_PROXY
+    return offline
 
 
 def dev_env(base: dict, proxy: str) -> dict:
@@ -761,7 +857,9 @@ def clean(root: Path, run=subprocess.run) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="preview-ui-host.py",
-        description="Serve picked branches' frontends from host Vite -- no Docker, no backend.",
+        # Says "containers" rather than naming the engine so the guardrail test needs no
+        # exception list: the word belongs to this file's prose, not to its code.
+        description="Serve picked branches' frontends from host Vite -- no containers, no backend.",
     )
     parser.add_argument("--workspace", type=Path, default=None, help="the .code-workspace registry")
     parser.add_argument(
@@ -861,12 +959,15 @@ def main(argv: list[str] | None = None) -> int:
 
     listening = preview_task.port_is_open
     job = kill_on_close_job()
+    # Held for the lifetime of the run: the servers proxy to it, and it dies with this
+    # process because its thread is a daemon and it owns nothing outside it.
+    offline, _stub = start_offline_stub()
     taken: set[int] = set()
     servers = []
     proxies: dict[str, str] = {}
     for candidate in resolved:
         proxy = proxies.setdefault(
-            candidate.project, donor_target(candidate.project, root, listening)
+            candidate.project, donor_target(candidate.project, root, listening, offline)
         )
         plan = plan_host(candidate, root, taken, listening, proxy)
         echo(f"\nServing {plan.project} {plan.ref} from the host ...")
@@ -876,8 +977,9 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if plan.note:
             echo(f"  {plan.note}")
-        if plan.proxy == DEAD_PROXY:
-            echo("  the static stack is down, so API-backed views will show their offline state")
+        if plan.proxy == offline:
+            echo("  no backend is running, so API calls answer 502 at once and API-backed")
+            echo("  views show their offline state -- that is the preview working, not a fault")
         server = apply_host(plan, npm)
         if server is None:
             failures += 1
