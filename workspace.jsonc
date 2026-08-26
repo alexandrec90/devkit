@@ -206,45 +206,26 @@
 				"problemMatcher": []
 			},
 			{
-				"label": "Lint: Everything",
-				"detail": "Full-repo lint for each selected checkout, run sequentially via scripts/lint-all.py. Findings go to that checkout's logs/lint-errors.log.",
+				// One task, two scopes. It was two tasks — "Lint: Everything" and
+				// "Lint: Changed Files" — sitting adjacent in the picker under near-identical
+				// labels, which is the shape "Test: Run Suite" has never had: there the scope
+				// is a dropdown, and the second question is asked only once the first has
+				// been answered. `lintScope` is that dropdown, and `lint-changed` is gone
+				// from the dispatcher with it.
+				"label": "Lint: Run",
+				"detail": "Lint each selected checkout, sequentially, via its scripts/lint-all.py — the whole repo, or only the working-tree diff (vs HEAD, plus untracked), as the scope dropdown asks. Rewrites the tree before it reports (ruff --fix, ruff format) and ships what it wrote. Findings go to that checkout's logs/lint-errors.log.",
 				"type": "process",
 				"command": "python",
 				"args": [
 					"${workspaceFolder:devkit}/scripts/devkit_project.py",
 					"--project",
 					"${input:project}",
-					"lint"
+					"lint",
+					"${input:lintScope}"
 				],
 				"group": "build",
 				"icon": {
 					"id": "checklist",
-					"color": "terminal.ansiYellow"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Lint: Changed Files",
-				"detail": "Lint only the working-tree diff (vs HEAD, plus untracked) in each selected checkout. Runs sequentially; same artifact as 'Lint: Everything'.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:project}",
-					"lint-changed"
-				],
-				"group": "build",
-				// Same reason as the hook tests above — `checklist`/yellow is
-				// "Lint: Everything"; the narrower scope gets the narrower icon.
-				"icon": {
-					"id": "list-selection",
 					"color": "terminal.ansiYellow"
 				},
 				"presentation": {
@@ -1587,6 +1568,31 @@
 				"options": [
 					{
 						"label": "Full suite (default)",
+						"value": ""
+					},
+					{
+						"label": "Changed only — the working-tree diff",
+						"value": "--changed"
+					}
+				],
+				"default": ""
+			},
+			{
+				// `testScope`'s counterpart, and the same two branches for the same
+				// reason: every project's lint-all.py accepts `--changed`, and the
+				// empty value is dropped by devkit_project.py before exec rather than
+				// reaching argparse as a stray positional.
+				//
+				// The default is the WIDE scope, unlike a "changed only" default would
+				// be, because lint rewrites what it reads: a run scoped to the diff
+				// leaves the rest of the tree unformatted, and the click that most
+				// often precedes a commit should be the one that cannot miss a file.
+				"id": "lintScope",
+				"type": "pickString",
+				"description": "How much of the checkout to lint",
+				"options": [
+					{
+						"label": "Everything (default)",
 						"value": ""
 					},
 					{

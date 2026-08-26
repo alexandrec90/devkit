@@ -138,16 +138,15 @@ DB_PROJECTS = CARAMELI + IBKR
 ACTIONS: dict[str, Action] = {
     # --- implemented by each checkout ---
     "test": Action("scripts/run-tests.py", "Test: Run Suite"),
+    # Scope is a picker argument, not a second action -- `lintScope` in the workspace
+    # file answers "everything or changed?" and the answer travels as `--changed` or as
+    # nothing at all. There used to be a `lint-changed` twin here, and it bought a second
+    # task, a second icon and a second label for one flag; `test` has never had one, and
+    # the two now differ only in the script they call. Empty picker tokens are dropped in
+    # `plan_command`, which is what lets the wide branch pass no argument.
     "lint": Action(
         "scripts/lint-all.py",
-        "Lint: Everything",
-        autofix=True,
-        autofix_slug="lint-autofix",
-    ),
-    "lint-changed": Action(
-        "scripts/lint-all.py",
-        "Lint: Changed Files",
-        ("--changed",),
+        "Lint: Run",
         autofix=True,
         autofix_slug="lint-autofix",
     ),
