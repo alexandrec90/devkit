@@ -49,6 +49,12 @@ one PR each -- the release is one upstream revision, so adopting it everywhere i
 one operation. Each project is still upgraded on its own terms: a refusal in one
 does not stop the others, and the exit code reports the worst outcome.
 
+**Which consumers is a click, not an argument.** `Devkit: Upgrade Projects` asks with a
+checkbox quick-pick and passes the ticked names in as the positional -- so choosing four
+of five is a gesture rather than a comma-delimited string somebody has to spell from
+memory, in a terminal, correctly. `--all` remains what the unattended callers use, and
+escaping the checklist means *never mind*: see `picked_nothing`.
+
 Safe to run unattended, which is the point: `scripts/install-upgrade-schedule.py`
 registers exactly that.
 
@@ -140,6 +146,20 @@ def project_selection(value: str | None) -> list[str]:
     if not value:
         return []
     return list(dict.fromkeys(name.strip() for name in value.split(",") if name.strip()))
+
+
+def picked_nothing(value: str | None) -> bool:
+    """Did the VS Code checklist never open at all?
+
+    Escape leaves the input unresolved and VS Code passes the literal
+    `${input:adoptProjects}` straight through to the task, so what reaches argv is a
+    placeholder rather than a selection. Read as a checkout name it lands on "not in
+    workspace.code-workspace" with exit 2 -- an operator error reported for the one
+    gesture that means *never mind*, and written to `logs/upgrade.log` where the next
+    reader finds it as a failure. `plug-projects.picked_nothing` reads an escaped pick
+    the same way and for the same reason.
+    """
+    return "${input:" in value if value else False
 
 
 @dataclass(frozen=True)
@@ -995,7 +1015,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "project",
         nargs="?",
-        help="checkout name(s) to upgrade, comma-delimited, as listed in the workspace",
+        help=(
+            "checkout name(s) to upgrade, comma-delimited, as listed in the workspace. "
+            "This is what the `Devkit: Upgrade Projects` checklist emits"
+        ),
     )
     parser.add_argument(
         "--all",
@@ -1016,6 +1039,13 @@ def main(argv: list[str] | None = None) -> int:
     apply_mode.add_argument("--yes", dest="dry_run", action="store_false")
     parser.raw_argv = tuple(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(list(parser.raw_argv))
+    if picked_nothing(args.project):
+        # Backing out of the checklist is a decision, not a failure. Said out loud and
+        # the artifact emptied, because the alternative -- leaving the previous run's
+        # log in place -- makes "I cancelled it" indistinguishable from "it broke".
+        print("upgrade: nothing was picked -- no checkout was upgraded.")
+        write_artifact(REPO_ROOT, "")
+        return 0
     requested = project_selection(args.project)
     if args.every and requested:
         parser.error(f"--all upgrades every project; drop {args.project} or drop --all")
