@@ -35,9 +35,12 @@ def test_the_scheduled_command_applies_the_upgrade_rather_than_planning_it():
 
 def test_the_interpreter_is_this_one_not_a_bare_python():
     """A scheduled task runs with no activated virtualenv and often a different PATH,
-    and the script imports `sweep`/`worktree` from beside it."""
+    and the script imports `sweep`/`worktree` from beside it.
+
+    Lowercased for the reason its twin in `test_install_release_schedule.py` gives:
+    `sys.executable` keeps the launcher's casing, and `python.EXE` is the same file."""
     resolved = sched.schedule_for()
-    assert resolved.python.endswith(("pythonw.exe", "python.exe", "python", "python3"))
+    assert resolved.python.lower().endswith(("pythonw.exe", "python.exe", "python", "python3"))
     assert resolved.python != "python"
 
 

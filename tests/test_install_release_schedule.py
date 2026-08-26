@@ -136,10 +136,15 @@ def test_the_wrapped_interpreter_is_console_even_when_the_task_is_not(tmp_path):
 def test_the_interpreter_is_this_one_not_a_bare_python():
     """A scheduled task runs with no activated virtualenv and often a different PATH,
     and `release-pipeline.py` imports `release`, `sweep` and `task_branch` from beside
-    it."""
-    assert sched.schedule_for(root=REPO_ROOT).python.endswith(
-        ("pythonw.exe", "python.exe", "python", "python3")
-    )
+    it.
+
+    Lowercased first, because `sys.executable` keeps whatever casing the launcher used
+    and Windows does not care which: a run started through PATHEXT reports
+    `C:\\Python314\\python.EXE`, which this read as a bare name and failed. The claim is
+    about the *file*, not its spelling — and it failed only under the Stop hook, where
+    a red suite reads as the change under test having broken something."""
+    resolved = sched.schedule_for(root=REPO_ROOT).python.lower()
+    assert resolved.endswith(("pythonw.exe", "python.exe", "python", "python3"))
 
 
 # --- the task document ---------------------------------------------------------
