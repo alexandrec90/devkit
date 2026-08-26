@@ -343,6 +343,59 @@ def test_run_checks_oserror_is_skip_not_failure(monkeypatch):
     assert hook.run_checks([hook.CHECK_LINT]) == []
 
 
+class TestOutputIsDecodedNotGuessed:
+    """A tool's bytes must not be able to kill the hook that is reporting on them.
+
+    `text=True` alone decodes through the platform's locale codec -- cp1252 here,
+    strict UTF-8 on a CI runner -- and both raise on bytes real tools emit. The raise
+    happens inside subprocess's reader thread, where the `try` around the call cannot
+    see it, and `subprocess.run` hands back `stdout=None, stderr=None`. The failure a
+    user sees is then a `TypeError` in `run_checks`, several hundred lines from the
+    cause:
+
+        tail = (result.stdout + result.stderr).strip().splitlines()[-15:]
+        TypeError: unsupported operand type(s) for +: 'NoneType' and 'NoneType'
+
+    Revert either half and one of these fails: the codec test crashes the way the
+    reported session did, and the `None` test restores the `TypeError` itself.
+    """
+
+    def test_a_check_whose_output_is_not_utf8_is_reported_not_crashed(self, monkeypatch):
+        # A lone 0x9d: undefined in cp1252, invalid UTF-8, and the exact byte that ended
+        # a session from a lint tail. The check must still be reported as a failure.
+        argv = [
+            sys.executable,
+            "-c",
+            "import sys; sys.stderr.buffer.write(b'ruff: \\x9d line too long\\n'); sys.exit(1)",
+        ]
+        monkeypatch.setattr(
+            hook, "_command_for", lambda name, root=None: (argv, hook.REPO_ROOT, None)
+        )
+        failures = hook.run_checks([hook.CHECK_LINT])
+        assert len(failures) == 1
+        assert "line too long" in failures[0][2]
+
+    def test_run_checks_survives_streams_that_were_never_captured(self, monkeypatch):
+        import subprocess as sp
+
+        monkeypatch.setattr(
+            hook, "_command_for", lambda name, root=None: (["true"], hook.REPO_ROOT, None)
+        )
+        monkeypatch.setattr(
+            hook.subprocess, "run", lambda *a, **k: sp.CompletedProcess([], 1, None, None)
+        )
+        failures = hook.run_checks([hook.CHECK_LINT])
+        assert failures == [(hook.CHECK_LINT, None, "")]
+
+    def test_combined_output_joins_what_it_has(self):
+        import subprocess as sp
+
+        assert hook.combined_output(sp.CompletedProcess([], 1, "out\n", "err\n")) == "out\nerr\n"
+        assert hook.combined_output(sp.CompletedProcess([], 1, None, "err\n")) == "err\n"
+        assert hook.combined_output(sp.CompletedProcess([], 1, "out\n", None)) == "out\n"
+        assert hook.combined_output(sp.CompletedProcess([], 1, None, None)) == ""
+
+
 class TestTheGateIsBounded:
     """A Stop hook that outruns its harness's ceiling is killed, and a killed hook
     writes no artifact and prints nothing -- the session ends on "stop hook failed"

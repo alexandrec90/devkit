@@ -2559,3 +2559,23 @@ def test_an_editor_call_is_never_read_for_a_branch_move(root, monkeypatch):
     )
     # Routed as an ordinary edit -- re-aimed into the box, not refused as a park.
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
+def test_the_guards_git_helper_decodes_utf8_rather_than_the_platform_codec():
+    """`text=True` alone decodes git's output through cp1252 on this machine, and a byte
+    it cannot map -- in a branch name, a path, a commit subject -- raises inside
+    subprocess's reader thread, past this helper's `check=False`. That crash would land
+    in a PreToolUse hook, which is every edit in the workspace.
+
+    Asserted on the source because the failure is in the arguments, not in the return:
+    a stub git emitting a bad byte would prove nothing about the real call's keywords.
+    The vendored half of this ratchet is
+    `test_every_capture_in_a_vendored_hook_declares_its_codec`; the guard is
+    devkit-only, so it needs its own.
+    """
+    source = (REPO_ROOT / "scripts" / "worktree-guard.py").read_text(encoding="utf-8")
+    call = source[source.index("def _git(") :]
+    call = call[: call.index("\n\n\n")]
+    assert 'encoding="utf-8"' in call and 'errors="replace"' in call, (
+        "worktree-guard._git must name its codec: encoding='utf-8', errors='replace'"
+    )

@@ -134,6 +134,26 @@ PATH_PYTHONS = ("python", "py")
 # Importing this is the cheapest proof an interpreter can run the checks at all.
 VERIFY_IMPORT = "pytest"
 
+# Every capture below decodes as UTF-8 with replacement, never through the platform's
+# locale codec. `text=True` alone picks cp1252 on Windows, and a byte that codepage does
+# not map -- 0x9d, which ruff, pytest and docker all emit inside box-drawing and curly
+# quotes -- raises `UnicodeDecodeError` *inside subprocess's reader thread*, where no
+# `try` in this file can see it. `subprocess.run` then returns a CompletedProcess whose
+# `stdout` and `stderr` are both **None** (`stdout[0] if stdout else None`, over the
+# buffer the dead thread never filled), so the visible failure is a TypeError a hundred
+# lines away in `run_checks`: `unsupported operand type(s) for +: 'NoneType' and
+# 'NoneType'`, with two thread tracebacks above it and nothing naming the tool whose
+# output could not be read. That is how this reached a user -- as a Stop hook crash
+# pointing at the line that assembles a tail rather than at the line that decodes one.
+#
+# A tail is diagnostic text. A replacement character in it costs a reader nothing;
+# failing to decode one costs the whole verification tier.
+#
+# Spelled out at every call site rather than shared through a constant, because
+# `subprocess.run` is an overloaded signature: a `**kwargs` dict makes the arguments
+# opaque to mypy and to `test_every_capture_in_a_hook_declares_its_codec`, which is the
+# ratchet that keeps the next capture from being added without one.
+
 
 @functools.cache
 def _can_verify(executable: str) -> bool:
@@ -251,6 +271,8 @@ def _git_skin_status(repo_root: Path) -> str:
             cwd=repo_root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except OSError:
         return ""
@@ -514,7 +536,13 @@ def _git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     """
     try:
         return subprocess.run(
-            ["git", *args], cwd=repo_root, capture_output=True, text=True, check=False
+            ["git", *args],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return subprocess.CompletedProcess(list(args), 1, "", "")
@@ -590,6 +618,8 @@ def _compose_running_services(repo_root: Path = REPO_ROOT) -> set[str]:
             cwd=repo_root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -612,6 +642,8 @@ def _compose_up_db_redis(repo_root: Path = REPO_ROOT) -> bool:
             cwd=repo_root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=180,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -629,6 +661,8 @@ def _compose_stop(services: list[str], repo_root: Path = REPO_ROOT) -> None:
             cwd=repo_root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
         )
 
@@ -652,6 +686,8 @@ def _compose_host_port(
             cwd=repo_root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -732,9 +768,35 @@ def _bounded_run(
     if left is not None and left <= 0:
         return None
     try:
-        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=left, env=env)
+        return subprocess.run(
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=left,
+            env=env,
+        )
     except subprocess.TimeoutExpired:
         return None
+
+
+def combined_output(result: subprocess.CompletedProcess) -> str:
+    """`stdout` and `stderr` as one string, tolerating either being `None`.
+
+    The codec above removes the only known way a capture returns `None` streams, and
+    this stays anyway, because the two failures are not the same size. An undecodable
+    byte in a lint tail is a cosmetic loss; a `TypeError` raised while *reporting* a
+    failure takes the whole Stop hook down, and a hook that dies writes no artifact,
+    prints nothing, and ends the session on "stop hook failed" -- the same worst-of-three
+    outcome `VERIFY_BUDGET_SECONDS` exists to prevent, arriving from the other end.
+
+    So: nothing on the reporting path may assume a stream was captured. `stdout=DEVNULL`
+    on a future call, or a test stubbing `subprocess.run`, produces `None` here too, and
+    neither should be able to end a session.
+    """
+    return (result.stdout or "") + (result.stderr or "")
 
 
 def _pytest_failures(
@@ -769,7 +831,7 @@ def _pytest_failures(
     # with "no tests ran", which no source edit can resolve.
     if result.returncode in (0, PYTEST_NO_TESTS_COLLECTED):
         return []
-    tail = (result.stdout + result.stderr).strip().splitlines()[-20:]
+    tail = combined_output(result).strip().splitlines()[-20:]
     return [(CHECK_TESTS, artifact, "\n".join(tail))]
 
 
@@ -918,7 +980,7 @@ def run_checks(
             failures.append((name, artifact, timeout_tail(argv)))
             continue
         if result.returncode != 0:
-            tail = (result.stdout + result.stderr).strip().splitlines()[-15:]
+            tail = combined_output(result).strip().splitlines()[-15:]
             failures.append((name, artifact, "\n".join(tail)))
     return failures
 
