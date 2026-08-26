@@ -650,14 +650,27 @@ that decides whether an agent's edit needs a box. Editing that list by hand mean
 editing the canonical copy, remembering the four pickers that mirror it, and
 republishing; missing any of the three leaves a project half-registered.
 
-`scripts/plug-projects.py` is the whole operation as a checkbox list, and the VS Code
-task **"Workspace: Plug / Unplug Projects"** is the same thing one click away.
+`scripts/plug-projects.py` is the whole operation as a checkbox list. The VS Code task
+**"Workspace: Plug / Unplug Projects"** draws that list as a quick-pick with real
+checkboxes, ticked exactly as the registry stands, each row saying what its own tick
+will do; OK applies it and Escape changes nothing. The pick is the confirmation, so the
+task asks nothing in the terminal.
 
 ```bash
 python scripts/plug-projects.py            # the list, then tick and apply
 python scripts/plug-projects.py --list     # read-only; works from a box too
 python scripts/plug-projects.py --plug apt-finder --unplug geo --yes
+python scripts/plug-projects.py --refresh-menu   # rebuild the quick-pick's options
 ```
+
+The quick-pick reads `logs/plug-menu.json`, because the extension behind a VS Code
+input can read a file and cannot run a command. `--refresh-menu` writes it, this script
+rewrites it after every apply, and `worktree.py reconcile` rewrites it on its scheduled
+pass — so nobody has to remember. Two consequences follow from the file being written
+before the click rather than during it: a refresh whose `gh` listing failed writes
+nothing at all, rather than rows offering to create repositories that already exist;
+and the answer is read as an **edit of the rows it offered**, so a project registered
+since the file was written is left alone instead of silently retired.
 
 It inventories three sources and shows the union, so a project is visible whether or
 not the workspace currently knows about it:

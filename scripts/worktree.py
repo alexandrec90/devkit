@@ -4182,6 +4182,7 @@ def reconcile(
         worst = max(worst, code)
 
     menu = refresh_preview_menu(workspace, apply=apply, fetch=fetch)
+    plug_menu = refresh_plug_menu(apply=apply)
 
     report = {
         "applied": apply,
@@ -4192,6 +4193,7 @@ def reconcile(
         "boxes": outcomes,
         "checkouts": synced,
         "preview_menu": menu,
+        "plug_menu": plug_menu,
     }
     return worst, report
 
@@ -4226,6 +4228,37 @@ def refresh_preview_menu(workspace: Path, *, apply: bool, fetch: bool = True) ->
             "preview_task", Path(__file__).resolve().parent / "preview-task.py"
         )
         written = preview_task.refresh_menu(workspace, fetch=fetch)
+    except Exception:
+        return ""
+    return str(written) if written else ""
+
+
+def refresh_plug_menu(*, apply: bool) -> str:
+    """Rebuild the plug/unplug checklist's options. The path written, or "" for anything else.
+
+    The second rider on this pass, and it is here for the first one's reason with one
+    addition of its own: those rows are pre-*ticked* from the workspace registry, so a
+    stale file is not merely a short list but a checklist that disagrees with the state
+    it claims to show -- and unticking a row is how a project leaves the registry.
+
+    Takes no workspace: `plug-projects.py` resolves the live workspace file and its own
+    `logs/` from module constants, so the checkout this module was loaded from is
+    already the one whose menu gets written. Loaded by path and inside the function for
+    the reason above it -- the name is hyphenated, and this is a convenience whose
+    failure must never reach `worst`. `refresh_menu` is itself total and returns None
+    rather than writing when `gh` could not be reached, so an outage leaves the previous
+    menu in place instead of one offering to create repositories that already exist.
+    """
+    if not apply:
+        return ""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+        from _loader import load_by_path
+
+        plug_projects = load_by_path(
+            "plug_projects", Path(__file__).resolve().parent / "plug-projects.py"
+        )
+        written = plug_projects.refresh_menu()
     except Exception:
         return ""
     return str(written) if written else ""
@@ -4405,6 +4438,12 @@ def render_reconcile(report: dict) -> str:
             f"  preview menu: refreshed ({menu})"
             if menu
             else "  preview menu: [warn] not refreshed -- the Preview: dropdowns are stale"
+        )
+        plug_menu = report.get("plug_menu")
+        lines.append(
+            f"  plug menu: refreshed ({plug_menu})"
+            if plug_menu
+            else "  plug menu: [warn] not refreshed -- the Plug / Unplug checklist is stale"
         )
     if not applied:
         lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")

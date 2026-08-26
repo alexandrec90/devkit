@@ -1090,8 +1090,9 @@ UNLOGGED_TASKS = {
     "Agents: Import Limited Claude Sessions": "same — opens imported sessions in tabs",
     "IBKR: Open Gateway VNC Viewer": "launches a GUI viewer; nothing to parse when it closes",
     "Workspace: Plug / Unplug Projects": (
-        "interactive — log-wrap pipes stdout and reads it by line, so the checkbox "
-        "prompt would never appear; the script writes logs/plug-projects.log itself"
+        "the script writes logs/plug-projects.log itself, naming the registry it ended "
+        "with rather than transcribing the run; the checkboxes are VS Code's quick-pick, "
+        "so a bare `python scripts/plug-projects.py` is the only entry point that prompts"
     ),
 }
 
