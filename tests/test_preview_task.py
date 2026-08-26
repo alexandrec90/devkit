@@ -1182,7 +1182,10 @@ def test_the_dropdown_offers_only_checkouts_that_declare_a_frontend(tmp_path, mo
     backend-only service that switches the tier off, and a registered checkout that is
     not on this disk at all.
     """
-    workspace = tmp_path / "alex-projects.code-workspace"
+    # Not named for the live registry: `known_projects` is stubbed, so the name is
+    # arbitrary here -- and a test that *spells* the live one is required to carry
+    # `@needs_live_workspace`, which this does not need and CI would then skip.
+    workspace = tmp_path / "scratch.code-workspace"
     workspace.write_text("{}", encoding="utf-8")
     _checkout(tmp_path, "carameli", '[frontend]\nenabled = true\ndir = "frontend"\n')
     _checkout(tmp_path, "ibkr_trader", "[frontend]\nenabled = false\n")
