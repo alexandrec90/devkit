@@ -259,6 +259,11 @@ def _option_text(option: object, default: object) -> str:
     return f"* {text}" if default is not None and value == default else f"  {text}"
 
 
+def _source_of(args: dict) -> str:
+    """The `${workspaceFolder:x}`-stripped path a picker reads its answers from."""
+    return WORKSPACE_FOLDER.sub("", str(args.get("fileName", ""))) or "an unnamed file"
+
+
 def input_choices(spec: dict) -> tuple[str, ...]:
     """The answers on offer, as display lines. `*` marks the default.
 
@@ -272,12 +277,21 @@ def input_choices(spec: dict) -> tuple[str, ...]:
     for option in spec.get("options", ()):
         lines.append(_option_text(option, default))
     args = spec.get("args") or {}
-    for group in args.get("optionGroups", ()):
-        for option in group.get("options", ()):
-            lines.append(_option_text(option, default))
+    # `optionGroups` has two shapes, and only the list one was modelled. Given the
+    # mapping form -- `{"fileName": ..., "fileFormat": "load"}`, which is how
+    # command-variable reads the *groups* out of a file rather than the options -- the
+    # loop iterated the dict's keys and died on `"fileName".get`. That crashed the whole
+    # report the moment any task in the live workspace used it, which is a report about
+    # every other task lost to one input's spelling.
+    groups = args.get("optionGroups")
+    if isinstance(groups, dict):
+        lines.append(f"  groups read at pick time from {_source_of(groups)}")
+    else:
+        for group in groups or ():
+            for option in group.get("options", ()) if isinstance(group, dict) else ():
+                lines.append(_option_text(option, default))
     if args.get("fileName"):
-        source = WORKSPACE_FOLDER.sub("", str(args["fileName"]))
-        lines.append(f"  read at pick time from {source}")
+        lines.append(f"  read at pick time from {_source_of(args)}")
     for key, nested in (args.get("pickStringRemember") or {}).items():
         asked = str(nested.get("description", "")).strip()
         lines.append(f"  asks {key} first: {asked}")

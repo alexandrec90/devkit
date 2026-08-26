@@ -337,6 +337,35 @@ def test_input_choices_says_when_the_menu_comes_from_a_file(block: dict):
     assert any("asks previewProject first: Which checkout?" in line for line in lines)
 
 
+def test_input_choices_reads_file_backed_option_groups():
+    """Regression, found by `test_the_live_workspace_renders` going red on a task
+    another session had just added. `optionGroups` is a **list** of groups or a
+    **mapping** naming the file to read them from; only the list was modelled, so the
+    loop walked the mapping's keys and died on `"fileName".get`. One input's spelling
+    took the whole report with it, including every task that parses fine."""
+    spec = {
+        "id": "plugSelection",
+        "type": "command",
+        "command": "extension.commandvariable.pickStringRemember",
+        "args": {
+            "description": "Which plug?",
+            "optionGroups": {
+                "fileName": "${workspaceFolder:devkit}/logs/plug-menu.json",
+                "fileFormat": "load",
+            },
+        },
+    }
+    lines = index.input_choices(spec)
+    assert any("logs/plug-menu.json" in line for line in lines)
+
+
+def test_input_choices_survives_a_group_that_is_not_a_mapping():
+    """The same crash one level down. A hand-edited workspace file is the input here,
+    and a report that dies on it tells you nothing about the other forty tasks."""
+    spec = {"args": {"optionGroups": ["carameli", {"options": ["devkit"]}]}}
+    assert [line.strip() for line in index.input_choices(spec)] == ["devkit"]
+
+
 def test_input_choices_spells_out_a_blank_default(block: dict):
     assert index.input_choices(block["inputs"][3]) == ("  (blank)",)
 
