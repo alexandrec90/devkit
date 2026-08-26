@@ -214,22 +214,28 @@ ACTIONS: dict[str, Action] = {
     "reclaim": Action(
         "scripts/reclaim.py", "Machine: Reclaim Resources", ("--yes",), projects=DEVKIT_ONLY
     ),
-    # Reviewing a UI change before its PR merges. DEVKIT_ONLY for the same reason
-    # `reclaim` is, and the reasoning is worth repeating because this one looks far more
-    # like a per-project action than it is: the menu it prints is assembled from the box
-    # registry and the port registry, and there is exactly ONE of each on this machine.
-    # Run once per selected checkout it would print the same machine-wide menu two or
-    # three times over, and the second copy's row numbers would mean something different
-    # from the first's. The project dimension lives INSIDE the menu instead, as a column.
+    # Reviewing a UI change before its PR merges: host Vite on the picked branches'
+    # frontends -- `npm run dev`, one port each, no Docker anywhere in it.
     #
-    # No picker, per the literal-over-single-option convention: the task pins
-    # `--project devkit` and the only question asked is the one worth asking.
-    "preview": Action("scripts/preview-task.py", "Preview: Open a UI Branch", projects=DEVKIT_ONLY),
-    # The cheap sibling: host Vite on the picked branches' frontends, no Docker and no
-    # backend, for when the question is only what the UI looks like. Same DEVKIT_ONLY
-    # reasoning as `preview` -- the project dimension lives inside the shared menu.
+    # There used to be a second, clickable preview here (`preview`, on
+    # `scripts/preview-task.py`) that answered the same question with a compose stack per
+    # branch: a box, a port lease, an image build and an `npm ci` into a fresh named
+    # volume, about three minutes cold. It carried this label, so the task called
+    # *Open a UI Branch* was the expensive one, and the cheap one that does exactly what
+    # the label promises sat below it under a name nobody reads as the same question.
+    # Looking at a UI change needs node, the branch's files and a free port; the stack it
+    # was buying is one the reviewer never calls. `worktree.py preview` is still the CLI
+    # verb for the full-stack kind -- it is just not a thing anyone can click by mistake.
+    #
+    # DEVKIT_ONLY for `reclaim`'s reason rather than its own, and it is worth repeating
+    # because this looks far more like a per-project action than it is: the menu it picks
+    # from is assembled from the box registry and the port registry, and there is exactly
+    # ONE of each on this machine. Run once per selected checkout it would print the same
+    # machine-wide menu two or three times over. The project dimension lives INSIDE the
+    # menu instead, as the first dropdown -- so no picker here, per the
+    # literal-over-single-option convention: the task pins `--project devkit`.
     "preview-ui-host": Action(
-        "scripts/preview-ui-host.py", "Preview: Serve UI Branches on Host", projects=DEVKIT_ONLY
+        "scripts/preview-ui-host.py", "Preview: Open a UI Branch", projects=DEVKIT_ONLY
     ),
     # The teardown half of the pair above, and the reason it is a task at all rather than
     # something the serving task promises to do on its way out: a Vite server outlives the

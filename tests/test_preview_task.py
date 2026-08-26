@@ -25,6 +25,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import socket
+import tomllib
 import types
 
 import pytest
@@ -1119,6 +1120,7 @@ def scan(monkeypatch, tmp_path):
     workspace = tmp_path / "alex-projects.code-workspace"
     workspace.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(preview_task, "stack_projects", lambda ws: ["carameli"])
+    monkeypatch.setattr(preview_task, "ui_projects", lambda ws: ["carameli"])
     monkeypatch.setattr(preview_task.worktree, "live_boxes", lambda root: {})
     monkeypatch.setattr(preview_task, "recent_branches", lambda d, fetch=True: [])
     monkeypatch.setattr(preview_task, "open_prs", lambda d: [])
@@ -1132,6 +1134,89 @@ def scan(monkeypatch, tmp_path):
         ),
     )
     return types.SimpleNamespace(workspace=workspace, monkeypatch=monkeypatch, tmp=tmp_path)
+
+
+# --- which checkouts each menu is allowed to offer ------------------------------
+
+
+def _checkout(root, name: str, manifest: str = "") -> None:
+    """A directory beside the workspace file, with the `.devkit.toml` a test asks for."""
+    (root / name).mkdir(parents=True, exist_ok=True)
+    if manifest:
+        (root / name / ".devkit.toml").write_text(manifest, encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "manifest, expected",
+    [
+        ('[frontend]\nenabled = true\ndir = "frontend"\n', "frontend"),
+        ('[frontend]\nenabled = false\ndir = "frontend"\n', ""),
+        ("[frontend]\nenabled = true\n", ""),
+        ("[project]\nname = 'x'\n", ""),
+    ],
+)
+def test_frontend_rel_reads_an_enabled_frontend(manifest, expected):
+    assert preview_task.frontend_rel(tomllib.loads(manifest)) == expected
+
+
+def test_frontend_dir_for_reads_the_checkouts_manifest(tmp_path):
+    _checkout(tmp_path, "carameli", '[frontend]\nenabled = true\ndir = "frontend"\n')
+    assert preview_task.frontend_dir_for(tmp_path / "carameli") == "frontend"
+
+
+@pytest.mark.parametrize("manifest", ["", "[frontend\nenabled = true\n"])
+def test_frontend_dir_for_is_empty_when_the_manifest_cannot_be_read(tmp_path, manifest):
+    """A missing manifest and an unparseable one are both "cannot be served", not a crash.
+
+    The caller is either a refusal that names the project or the list that leaves it out,
+    and neither has anything better to do with an exception.
+    """
+    _checkout(tmp_path, "carameli", manifest)
+    assert preview_task.frontend_dir_for(tmp_path / "carameli") == ""
+
+
+def test_the_dropdown_offers_only_checkouts_that_declare_a_frontend(tmp_path, monkeypatch):
+    """`ui_projects` is what stops the task offering a checkout it would then refuse.
+
+    The three cases are the three real ones on this machine: a frontend project, a
+    backend-only service that switches the tier off, and a registered checkout that is
+    not on this disk at all.
+    """
+    # Not named for the live registry: `known_projects` is stubbed, so the name is
+    # arbitrary here -- and a test that *spells* the live one is required to carry
+    # `@needs_live_workspace`, which this does not need and CI would then skip.
+    workspace = tmp_path / "scratch.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    _checkout(tmp_path, "carameli", '[frontend]\nenabled = true\ndir = "frontend"\n')
+    _checkout(tmp_path, "ibkr_trader", "[frontend]\nenabled = false\n")
+    monkeypatch.setattr(
+        preview_task.worktree,
+        "known_projects",
+        lambda ws: ["carameli", "ibkr_trader", "not_cloned"],
+    )
+    assert preview_task.ui_projects(workspace) == ["carameli"]
+
+
+def test_collect_scans_only_the_checkouts_it_is_given(scan, monkeypatch):
+    """The narrowing is a parameter, not a filter on the result: each checkout in the list
+    costs a `git fetch` and a `gh pr list`, and this runs every fifteen minutes."""
+    scanned = []
+    monkeypatch.setattr(preview_task, "open_prs", lambda d: scanned.append(d.name) or [])
+    preview_task.collect(scan.workspace, fetch=False, projects=["ibkr_trader"])
+    assert scanned == ["ibkr_trader"]
+
+
+def test_menu_payload_drops_a_row_from_an_unlisted_checkout():
+    """Belt and braces over `collect`'s narrowing, and the same reason: the file this
+    builds is read by a task that can only serve a frontend, so a row from anywhere else
+    is an option that refuses when it is picked."""
+    rows = [
+        preview_task.Candidate(project="carameli", ref="agent/x", kind=preview_task.KIND_BRANCH),
+        preview_task.Candidate(project="ibkr_trader", ref="agent/y", kind=preview_task.KIND_BRANCH),
+    ]
+    payload = preview_task.menu_payload(rows, ["carameli"])
+    assert [entry["name"] for entry in payload["projects"]] == ["carameli"]
+    assert list(payload["rows"]) == ["carameli"]
 
 
 def test_every_checkout_contributes_its_trunk_row(scan):
@@ -1176,7 +1261,7 @@ def test_refresh_menu_swallows_a_failure_rather_than_raising(scan):
     boxes correctly. A menu that could not be built costs one stale dropdown."""
     scan.monkeypatch.setattr(
         preview_task,
-        "stack_projects",
+        "ui_projects",
         lambda ws: _raise_or(RuntimeError("registry is a directory")),
     )
     assert preview_task.refresh_menu(scan.workspace, fetch=False) is None
@@ -1362,7 +1447,7 @@ def test_the_prompt_offers_all_only_when_something_is_standing(stub, capsys, mon
 
 def test_every_run_leaves_the_dropdown_a_fresh_option_file(stub, monkeypatch):
     """Nothing schedules this refresh: the previous preview is what keeps the list warm."""
-    monkeypatch.setattr(preview_task, "stack_projects", lambda w: ["carameli"])
+    monkeypatch.setattr(preview_task, "ui_projects", lambda w: ["carameli"])
     _menu(stub, [_branch("agent/x")])
     assert preview_task.main(["--workspace", str(stub.workspace), "--pick", "1"]) == 0
     payload = json.loads(stub.cache.read_text(encoding="utf-8"))
@@ -1370,7 +1455,7 @@ def test_every_run_leaves_the_dropdown_a_fresh_option_file(stub, monkeypatch):
 
 
 def test_refresh_writes_the_options_and_picks_nothing(stub, capsys, monkeypatch):
-    monkeypatch.setattr(preview_task, "stack_projects", lambda w: ["carameli"])
+    monkeypatch.setattr(preview_task, "ui_projects", lambda w: ["carameli"])
     _menu(stub, [_branch("agent/x")])
     assert preview_task.main(["--workspace", str(stub.workspace), "--refresh"]) == 0
     assert stub.served == []
@@ -2116,14 +2201,23 @@ def test_the_wait_is_on_by_default(stub):
 # --- the task that runs it ----------------------------------------------------
 
 
-def test_the_dispatcher_registers_the_action_against_devkit_alone():
-    """Machine-scoped: one box registry and one port registry, so no project picker."""
+def test_no_task_dispatches_this_script():
+    """A terminal tool since 2026-08-25, and the ratchet is the point.
+
+    It held `Preview: Open a UI Branch` while that label meant a compose stack, so one
+    click on "show me this branch" cut a box and built images to look at a button. The
+    label belongs to `preview-ui-host.py` now. Re-registering this one would not merely
+    add a task -- there is one label, and taking it back is how the expensive behaviour
+    would return under the name of the cheap one.
+    """
     from support import devkit_project
 
-    action = devkit_project.ACTIONS["preview"]
-    assert action.script == "scripts/preview-task.py"
-    assert action.projects == devkit_project.DEVKIT_ONLY
-    assert (preview_task.REPO_ROOT / action.script).is_file()
+    assert "preview" not in devkit_project.ACTIONS
+    assert not [
+        name
+        for name, action in devkit_project.ACTIONS.items()
+        if action.script == "scripts/preview-task.py"
+    ]
 
 
 # --- the small CLI surface ----------------------------------------------------

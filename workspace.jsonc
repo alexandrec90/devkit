@@ -626,60 +626,29 @@
 				"problemMatcher": []
 			},
 			{
-				// Reviewing a UI change before its PR merges. Machine scope, not project
-				// scope — there is one box registry and one port registry on this machine, so
-				// the checkout is a dimension inside the ANSWER rather than a scope for the task:
-				// `previewProject` asks which one, `previewRow` lists that one's refs. See
-				// ACTIONS["preview"].
+				// Reviewing a UI change before its PR merges, and the whole task is a Vite dev
+				// server: `npm run dev` on each ticked ref's frontend, one free port each. NO
+				// Docker — no box, no compose stack, no image build, no named volume.
+				//
+				// There were two preview tasks under this heading until 2026-08-25, and the
+				// expensive one carried this label. It answered the same question with a
+				// compose stack per branch (about three minutes cold), while the cheap one that
+				// is all a UI review needs sat below it named `Serve UI Branches on Host` —
+				// which nobody reads as "open a UI branch". Clicking the obvious label
+				// therefore brought a stack up every time. There is one task now, it is the
+				// cheap one, and `worktree.py preview` remains the CLI verb for the full-stack
+				// kind: available to type, impossible to click by accident.
+				//
+				// Machine scope, not project scope — one box registry and one port registry on
+				// this machine, so the checkout is a dimension inside the ANSWER rather than a
+				// scope for the task: `previewProject` asks which one, `previewRow` lists that
+				// one's refs. See ACTIONS["preview-ui-host"].
 				//
 				// `focus` because the terminal menu is still reachable — a pick that no longer
 				// matches a row lands there — and without it that answer is typed into
 				// whatever had focus when the task was clicked.
 				"label": "Preview: Open a UI Branch",
-				"detail": "Asks which checkout, then which of its refs — its default branch first, then preview boxes already standing, live agent boxes, open PRs and recent agent/ branches on origin — and brings each one's stack up in a box of its own, opening the URL it publishes. Tick as many refs as you want: the boxes start in turn and then wait together, so several cost the slowest rather than the sum, and a ref already standing on a port is refreshed there instead of being cut a second time. The lists track GitHub on their own — the scheduled reconcile pass rebuilds them every quarter hour, so a PR that opened shows up and one that merged drops off. Cutting a box for the first time builds its images and installs the frontend's dependencies — about three minutes, reported stage by stage, and the tab opens only once the page answers; re-serving one that is already standing takes seconds. A running preview costs CPU until 'Machine: Reclaim Resources' stops it.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"devkit",
-					"preview",
-					"--pick-ref",
-					"${input:previewRow}"
-				],
-				"icon": {
-					"id": "preview",
-					"color": "terminal.ansiBrightMagenta"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"focus": true,
-					"clear": true,
-					"close": false
-				},
-				// VS Code allows ONE instance of a task by default, and re-running a task
-				// that is already active offers to terminate it. Comparing two branches
-				// side by side is the normal way to use this one, and every box has its own
-				// port lease and COMPOSE_PROJECT_NAME, so nothing below the task was ever
-				// the thing serialising them. Four rather than unbounded: a cold box builds
-				// images and each running preview costs CPU until it is stopped.
-				"runOptions": {
-					"instanceLimit": 4
-				},
-				"problemMatcher": []
-			},
-			{
-				// The cheapest preview of all: the same two dropdowns, and then NO Docker —
-				// host Vite serves each ticked ref's frontend from a plain worktree copy,
-				// which is all a UI-only review needs. Boxes are still first-class: a ref
-				// with a live box is served from that box's worktree as it stands, unpushed
-				// work included. See ACTIONS["preview-ui-host"].
-				//
-				// `focus` for the same reason as the full preview: the terminal menu is
-				// still reachable when a pick matches no row.
-				"label": "Preview: Serve UI Branches on Host",
-				"detail": "No Docker, no backend: serves each ticked ref's frontend straight from a host Vite dev server on its own port and opens the URLs — seconds to start, after a one-off npm install per new ref (about a minute). A ref with a live agent box is served from that box's worktree, unpushed work included; anything else gets a kept copy under .ui-previews/. API-backed views show real data when the static checkout's stack happens to be up and their offline state when it is not — a change that needs the backend wants the full box preview above. The servers end when this terminal does, by three separate means — Ctrl+C, a job object the kernel enforces, and a watch on the terminal itself — and 'Preview: Stop Host UI Servers' ends any that outlived all three.",
+				"detail": "Asks which checkout, then which of its refs — its default branch first, then live agent boxes, open PRs and recent agent/ branches on origin — and serves each ticked one's frontend from a plain host Vite dev server on its own port, opening the URL once it answers. No Docker and no backend: seconds to start, after a one-off npm install per new ref (about a minute). A ref with a live agent box is served from that box's worktree, unpushed work included; anything else gets a kept copy under .ui-previews/. API-backed views show real data when the static checkout's stack happens to be up and their offline state when it is not. The lists track GitHub on their own — the scheduled reconcile pass rebuilds them every quarter hour, so a PR that opened shows up and one that merged drops off. The servers end when this terminal does, by three separate means — Ctrl+C, a job object the kernel enforces, and a watch on the terminal itself — and 'Preview: Stop Host UI Servers' ends any that outlived all three.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -741,33 +710,13 @@
 				},
 				"problemMatcher": []
 			},
-			{
-				// The same action with the menu skipped, and deliberately WITHOUT `focus`: after
-				// a reboot the answer is always "all of them", so the one task that needs no
-				// keyboard is the one that should not take it.
-				"label": "Preview: Restart Standing Previews",
-				"detail": "Brings every preview box that is already cut back up — the one-click answer after a reboot, when Docker stopped every container while the boxes, their branches and their port leases all survived, so each lands back on the port it had before. Asks nothing; a machine with no preview boxes says so and exits.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"devkit",
-					"preview",
-					"--all"
-				],
-				"icon": {
-					"id": "debug-restart",
-					"color": "terminal.ansiBrightGreen"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"clear": true,
-					"close": false
-				},
-				"problemMatcher": []
-			},
+			// `Preview: Restart Standing Previews` stood here until 2026-08-25. It brought
+			// every standing preview BOX back up after a reboot — a verb with nothing left
+			// to act on once the clickable preview stopped cutting boxes, and its second job
+			// (writing the dropdown's option file on a machine where nothing had yet) now
+			// belongs to `worktree.py reconcile`, which does it every fifteen minutes on a
+			// schedule. `worktree.py preview` is still there for a full-stack preview, and
+			// `--all` still restarts whatever one of those left standing.
 			// --- scoped: carameli's worktree pair --------------------------------
 			// These three came up out of `carameli/.vscode/tasks.json`. The picker lists
 			// two checkouts rather than five because that is what the action is defined
@@ -2116,9 +2065,14 @@
 				// current is not a task run: `worktree.py reconcile` rewrites the file on every
 				// pass, and the scheduled pass runs every fifteen minutes, so open PRs appear
 				// and merged ones leave without anyone asking. Each project's first row is its
-				// default branch, and the header row carries the scan's timestamp. `Preview:
-				// Restart Standing Previews` writes the same file and is the way to bootstrap
-				// one on a machine where the scheduled pass has never run.
+				// default branch, and the header row carries the scan's timestamp. On a machine
+				// where that pass has never run, `python devkit/scripts/preview-ui-host.py
+				// --refresh` writes the file and picks nothing.
+				//
+				// There is no `Rescan` row and there must not be one again: a self-service row
+				// makes staleness the reader's problem on every single open, and the thing it
+				// asked them to notice — an open PR missing from the list — is the file's
+				// writer's job. `.claude/rules/vscode-tasks.md` carries the general form.
 				//
 				// `previewProject` is NESTED inside this input rather than declared beside it,
 				// because the second list depends on the first: the extension resolves a nested
@@ -2158,11 +2112,20 @@
 				"args": {
 					"description": "Which branch, PR or box should be brought up? Tick as many as you want.",
 					"key": "previewRow",
-					// Cancelling either dropdown (Escape) aborts the task instead of running
-					// it with the literal `${input:previewRow}` — the scripts treat that
-					// literal as a graceful no-op, but a terminal still opened for nothing,
-					// which no other task in this file does on a cancelled input.
-					"checkEscapedUI": true,
+					// NO `checkEscapedUI`, and its absence is the fix for a task that could be
+					// used exactly once per window. That flag is how the extension aborts a
+					// launch on Escape, and it is implemented as a STICKY bit rather than as a
+					// return value: escaping stores `__escapedUI: true` in the extension's
+					// `rememberStore` (`storeEscapedUI` in extension-common.js), and every
+					// later command that opts in returns `undefined` immediately — the check
+					// runs BEFORE the quick-pick opens. Nothing clears the bit except a
+					// successful pick from a command that opted in, and no such pick can
+					// happen while the bit is set. So one Escape here retired both dropdowns
+					// for the life of the window: every later click ran the task with the
+					// literal `${input:previewRow}` and printed "nothing was picked", with no
+					// list ever appearing. Without the flag the bit is still written and never
+					// read, and a cancelled run costs one terminal saying it picked nothing —
+					// which both scripts already treat as a graceful no-op.
 					"multiPick": true,
 					"separator": " ",
 					"fileName": "${workspaceFolder:devkit}/logs/preview-menu.json",
@@ -2177,7 +2140,10 @@
 						"previewProject": {
 							"description": "Which checkout has the branch you want to look at?",
 							"key": "previewProject",
-							"checkEscapedUI": true,
+							// No `checkEscapedUI` here either, and for the sharper half of the
+							// reason above: this is the FIRST pick of the pair, so it is the
+							// one an Escape usually lands on, and the bit it would set is read
+							// by the outer command on the next run.
 							"fileName": "${workspaceFolder:devkit}/logs/preview-menu.json",
 							"fileFormat": "json",
 							"jsonOption": {

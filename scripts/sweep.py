@@ -473,8 +473,8 @@ def real_changes(porcelain: str, diffed: Iterable[str]) -> tuple[str, ...]:
     destroys -- so a box whose only change was one of these phantoms was held forever:
     not on a merged PR, not under disk pressure, not at any age. Two carameli boxes
     whose PRs had merged days earlier were found holding a port slot apiece on nothing
-    but a rewritten `.secrets.baseline`, and with the registry full the next
-    `Preview: Open a UI Branch` died on `all 16 port slots are in use`. It is the same
+    but a rewritten `.secrets.baseline`, and with the registry full the next box preview
+    died on `all 16 port slots are in use`. It is the same
     leak `reapable`'s docstring records for husks and squash merges, arriving from a
     third direction.
 

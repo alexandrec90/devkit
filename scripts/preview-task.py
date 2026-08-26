@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pick a branch to look at, and bring its stack up. Backs "Preview: Open a UI Branch".
+"""Pick a branch to look at, and bring its whole stack up. A terminal tool, and a menu.
 
 `worktree.py preview` already does the hard half -- cut a box on a copy of a ref, seed
 its port lease, start its compose stack, print the URLs the slot publishes. What it
@@ -47,12 +47,18 @@ Usage:
     python preview-task.py --pick 3 --no-wait  # return when the containers start, not
                                                # when what they serve answers
 
-**The VS Code task asks with two dropdowns, and this menu is what it falls back to.**
-Typing a row number into a terminal is the wrong verb for a thing every real caller
-reaches by clicking a task, so the task resolves one `${input:...}` -- a checkout, then
-the refs belonging to it -- and sends the answer as `--pick-ref <project>:<ref>`. The
-colon is a safe separator rather than a hopeful one: `git check-ref-format` refuses a ref
-that contains one.
+**No VS Code task runs this any more, and the menu it writes is why it still matters.**
+Until 2026-08-25 the clickable `Preview: Open a UI Branch` dispatched this script, so a
+click on "show me that branch" cut a box, built images and brought a whole compose stack
+up -- minutes of Docker to look at a button. That label now belongs to
+`preview-ui-host.py`, which runs `npm run dev` on the frontend and nothing else; this
+stays as the terminal verb for the times the *stack* is the thing under review, and as
+the writer of the option file both of them read. `worktree.py preview` is the layer under
+both.
+
+The pick still arrives as `--pick-ref <project>:<ref>` whoever sends it, and the colon is
+a safe separator rather than a hopeful one: `git check-ref-format` refuses a ref that
+contains one.
 
 **The row list is a checkbox list, and several rows are one run.** Comparing two branches
 side by side is the ordinary way to use this task, so `previewRow` is a `multiPick` and
@@ -76,8 +82,13 @@ drawn before the box existed, or typed by hand.
 The extension that draws those lists (`rioj7.command-variable`) cannot run a command to
 build them; it can only read a **file**. So `write_menu` saves one on every run of this
 script, which makes the dropdown the previous scan rather than the current one. On a
-machine that has never run this, `--refresh` writes the file and picks nothing -- and so
-does `Preview: Restart Standing Previews`, which is the task that asks no question.
+machine that has never run either, `python preview-ui-host.py --refresh` writes the file
+and picks nothing.
+
+**The file lists fewer checkouts than this menu does**, and `ui_projects` is that line.
+Its reader serves a frontend with `npm run dev`, so a checkout that declares no
+`[frontend] dir` is an option that can only refuse; the terminal menu here brings stacks
+up and keeps offering every checkout that has one.
 
 **`--refresh` is also on a schedule**, which is what keeps that gap down to minutes
 instead of down to whenever somebody last previewed something. `worktree.py reconcile`
@@ -99,7 +110,7 @@ branch: a stale row is a good guess about a ref, and `worktree.py` is the half t
 whether one resolves.
 
 Interactive when nothing has picked for it, which is unusual for this directory and is
-why the prompt is written the way it is: the task runs under `log-wrap.py`, whose
+why the prompt is written the way it is: a dispatched run is under `log-wrap.py`, whose
 `stream()` gives this process a **pipe** for stdout while leaving stdin inherited. A
 prompt that does not end in a newline therefore sits in the pipe's buffer and never
 reaches the terminal, and the user waits at what looks like a hung task. Every prompt
@@ -107,15 +118,15 @@ here is a whole flushed line for that reason. When stdin is not there at all -- 
 agent, a scheduled run -- reading it returns EOF, and that is reported as "nothing was
 picked" with the non-interactive spelling, never as an error.
 
-Devkit-scoped (`DEVKIT_ONLY` in `devkit_project.py`) though it previews other projects:
-the machine has one box registry and one port registry, so the *task* is owned by no
-single checkout. The checkout is a dimension inside the answer instead -- a column in
-the terminal menu, and the first of the two dropdowns. Restricting the sources to
+The machine has one box registry and one port registry, so a preview is owned by no
+single checkout. The checkout is a dimension inside the answer instead -- a column in the
+terminal menu, and the first of the dropdown's two questions. Restricting the sources to
 checkouts with a compose stack is what keeps devkit itself -- which has no stack, by
 contract -- out of its own menu.
 
-Writes no artifact of its own: `devkit_project.py` wraps every dispatched action in
-`log-wrap.py`. Tested in `tests/test_preview_task.py`.
+Writes no artifact of its own. Nothing dispatches it today, and a run from a terminal is
+its own record; `preview-ui-host.py`, which is dispatched, gets `log-wrap.py` from
+`devkit_project.py` the way every action does. Tested in `tests/test_preview_task.py`.
 """
 
 from __future__ import annotations
@@ -126,6 +137,7 @@ import json
 import socket
 import sys
 import time
+import tomllib
 import urllib.error
 import urllib.request
 import webbrowser
@@ -680,7 +692,15 @@ def menu_payload(
         ends in a property access. `rows[project][i].value` raises past the end, which is
         what the extension is watching for; a bare `list[i]` would merely be undefined.
 
-    Every checkout with a stack is listed even when it contributed no discovered row, and
+    `projects` is the whole list of checkouts to draw, and a candidate belonging to none of
+    them is **dropped** rather than adding a group of its own. That is the half that makes
+    the list servable: the dropdown feeds `preview-ui-host.py`, which can only serve a
+    checkout declaring `[frontend] dir`, so a row from anywhere else is an option that
+    refuses when picked. Callers pass `ui_projects`, and this is what stops a wider
+    `collect` -- the default one, over every checkout with a compose stack -- reaching the
+    file through the back door.
+
+    Every listed checkout is drawn even when it contributed no discovered row, and
     what stops such a checkout drawing an EMPTY pick list is its trunk row -- `collect`
     adds one per checkout unconditionally, so there is always something to pick. That
     guarantee used to belong to the `Rescan` row, which was the only way out of an options
@@ -698,7 +718,8 @@ def menu_payload(
     as_of = stamp.astimezone().strftime("%Y-%m-%d %H:%M")
     grouped: dict[str, list[Candidate]] = {project: [] for project in projects}
     for candidate in candidates:
-        grouped.setdefault(candidate.project, []).append(candidate)
+        if candidate.project in grouped:
+            grouped[candidate.project].append(candidate)
 
     def freshest(project: str) -> tuple[float, str]:
         rows = [row for row in grouped[project] if row.kind != KIND_TRUNK]
@@ -1261,8 +1282,67 @@ def stack_projects(workspace: Path) -> list[str]:
     ]
 
 
+def frontend_rel(manifest: dict) -> str:
+    """The `[frontend] dir` a project declares, or "" when it declares no frontend."""
+    front = manifest.get("frontend")
+    if not isinstance(front, dict) or not front.get("enabled"):
+        return ""
+    return str(front.get("dir") or "")
+
+
+def frontend_dir_for(project_dir: Path) -> str:
+    """`frontend_rel` read from the checkout's `.devkit.toml`; "" on any failure.
+
+    "" rather than raising, because both callers' next line treats it as "this checkout
+    cannot be served": `preview-ui-host.py` refuses the pick by name, and `ui_projects`
+    leaves the checkout out of the dropdown. A missing manifest and a manifest with no
+    frontend need the same answer.
+
+    Lives here rather than in `preview-ui-host.py`, which is where it was written and
+    which still exposes it under the same names: this module owns *which checkouts can be
+    previewed*, so the menu and the server that honours a pick from it read the manifest
+    through one function. Two readers of the same table would eventually disagree about
+    what `enabled = false` means, and the dropdown would be the last place anyone looked.
+    """
+    try:
+        manifest = tomllib.loads((project_dir / ".devkit.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # ValueError covers TOMLDecodeError
+        return ""
+    return frontend_rel(manifest)
+
+
+def ui_projects(workspace: Path) -> list[str]:
+    """The checkouts the host Vite task can serve: registered, present, with a frontend.
+
+    A narrower list than `stack_projects`, and deliberately a *different* one rather than
+    a replacement for it. The two answer different questions, because the two consumers of
+    this module do different things with a row:
+
+      - the terminal menu here brings a **compose stack** up, so a checkout qualifies by
+        having one -- `stack_projects`, which is what `collect` still defaults to.
+      - the `Preview: Open a UI Branch` task runs `npm run dev` on one directory and
+        nothing else, so a checkout qualifies by declaring `[frontend] dir`. A row from a
+        checkout that declares none is a dead end: the pick resolves, the task starts, and
+        `preview-ui-host.py` refuses it with "declares no [frontend] in .devkit.toml".
+
+    Until 2026-08-25 the dropdown was built from `stack_projects` because the task behind
+    it brought a stack up. The task is host-Vite-only now, so two of the three checkouts
+    it offered could not be served at all -- and a dropdown whose first question is a
+    checkout that answers nothing is worse than one that does not ask.
+    """
+    root = workspace.parent
+    return [
+        project
+        for project in worktree.known_projects(workspace)
+        if (root / project).is_dir() and frontend_dir_for(root / project)
+    ]
+
+
 def collect(
-    workspace: Path, fetch: bool = True, now: _dt.datetime | None = None
+    workspace: Path,
+    fetch: bool = True,
+    now: _dt.datetime | None = None,
+    projects: list[str] | None = None,
 ) -> list[Candidate]:
     """Every previewable ref on this machine, merged and ranked.
 
@@ -1271,11 +1351,17 @@ def collect(
     on its own default branch keeps that richer row and does not get a second, plainer one
     saying the same thing. `merge_candidates` already owns "one row per distinct ref"; the
     membership test here is what defers to it.
+
+    `projects` narrows the sources, and the caller that passes it is the one building the
+    dropdown (`ui_projects`, a strict subset). It is a parameter rather than a filter on
+    the result because every checkout in the list costs a `git fetch` and a `gh pr list`:
+    discarding those rows afterwards would spend the whole scan and then throw two thirds
+    of it away, on a pass that rides on `worktree.py reconcile` every fifteen minutes.
     """
     root = workspace.parent
     boxes = worktree.live_boxes(root)
     candidates: list[Candidate] = []
-    for project in stack_projects(workspace):
+    for project in stack_projects(workspace) if projects is None else projects:
         project_dir = root / project
         branches = [
             entry for entry in recent_branches(project_dir, fetch=fetch) if fresh(entry[1], now=now)
@@ -1334,8 +1420,9 @@ def refresh_menu(workspace: Path, fetch: bool = True, path: Path | None = None) 
     all: an unreadable registry, a workspace file that has been replaced by a directory.
     """
     try:
-        candidates = collect(workspace, fetch=fetch)
-        return write_menu(menu_payload(candidates, stack_projects(workspace)), path)
+        projects = ui_projects(workspace)
+        candidates = collect(workspace, fetch=fetch, projects=projects)
+        return write_menu(menu_payload(candidates, projects), path)
     except Exception:
         return None
 
@@ -1639,8 +1726,10 @@ def main(argv: list[str] | None = None) -> int:
     everything = collect(workspace, fetch=args.fetch)
     # Cached before anything can fail, and from the UNTRIMMED scan: the dropdown has no
     # screen to run out of, so the row `--limit` drops from a terminal menu is exactly the
-    # row that only the dropdown can still offer.
-    written = write_menu(menu_payload(everything, stack_projects(workspace)))
+    # row that only the dropdown can still offer. Narrower in the other dimension, though
+    # -- `menu_payload` keeps only the checkouts `ui_projects` names, because this menu is
+    # a terminal one and that file is read by a task that serves frontends alone.
+    written = write_menu(menu_payload(everything, ui_projects(workspace)))
     if args.refresh:
         echo(
             f"Dropdown options written to {written}" if written else "Could not write the options."

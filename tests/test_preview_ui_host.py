@@ -736,9 +736,9 @@ def scratch_registry(tmp_path, monkeypatch):
 def quiet_scan(monkeypatch):
     """Stub the collaborators `main` borrows from preview-task; return the mutable list."""
     everything: list = []
-    monkeypatch.setattr(host.preview_task, "collect", lambda ws, fetch: everything)
+    monkeypatch.setattr(host.preview_task, "collect", lambda ws, fetch, projects: everything)
     monkeypatch.setattr(host.preview_task, "menu_payload", lambda cands, projects: {})
-    monkeypatch.setattr(host.preview_task, "stack_projects", lambda ws: [])
+    monkeypatch.setattr(host.preview_task, "ui_projects", lambda ws: [])
     monkeypatch.setattr(host.preview_task, "write_menu", lambda payload: Path("menu.json"))
     monkeypatch.setattr(host.shutil, "which", lambda name: "npm")
     return everything
@@ -770,6 +770,31 @@ def test_main_refuses_to_serve_without_npm(workspace, quiet_scan, monkeypatch, c
 def test_main_refresh_rewrites_the_menu_and_serves_nothing(workspace, quiet_scan, capsys):
     assert host.main(["--workspace", str(workspace), "--refresh", "--no-fetch"]) == 0
     assert "Dropdown options written" in capsys.readouterr().out
+
+
+def test_main_scans_and_draws_only_the_checkouts_it_can_serve(workspace, quiet_scan, monkeypatch):
+    """The dropdown must not offer a checkout this script would refuse to serve.
+
+    Both halves of that in one test because they are one decision: `collect` is asked for
+    the frontend-declaring checkouts alone -- so a backend-only checkout costs no `git
+    fetch` and no `gh pr list` on a pass that runs every fifteen minutes -- and the
+    payload is grouped by the same list, so nothing wider can reach the file.
+    """
+    seen: dict[str, list[str]] = {}
+
+    def fake_collect(ws, fetch, projects):
+        seen["scanned"] = projects
+        return []
+
+    def fake_payload(candidates, projects):
+        seen["drawn"] = projects
+        return {}
+
+    monkeypatch.setattr(host.preview_task, "ui_projects", lambda ws: ["carameli"])
+    monkeypatch.setattr(host.preview_task, "collect", fake_collect)
+    monkeypatch.setattr(host.preview_task, "menu_payload", fake_payload)
+    assert host.main(["--workspace", str(workspace), "--refresh", "--no-fetch"]) == 0
+    assert seen == {"scanned": ["carameli"], "drawn": ["carameli"]}
 
 
 def test_main_refresh_fails_when_the_menu_cannot_be_written(workspace, quiet_scan, monkeypatch):

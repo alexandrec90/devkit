@@ -1320,8 +1320,8 @@ def test_a_locked_frontend_is_installed_without_rewriting_its_lockfile():
     """`npm install` writes `package-lock.json`, so provisioning left a box holding a
     tracked modification before anyone edited anything -- and `reapable` refuses to
     destroy a box holding a tracked change, on any verdict, forever. Two preview boxes
-    leaked a port slot each on that alone, until the registry was full and
-    `Preview: Open a UI Branch` died on it."""
+    leaked a port slot each on that alone, until the registry was full and the next box
+    preview died on it."""
     steps = worktree.provision_steps(
         {"uv.lock"}, frontend_dir="frontend", windows=False, frontend_locked=True
     )
@@ -3347,8 +3347,8 @@ def test_a_preview_reuses_the_branch_name_an_earlier_preview_left_behind():
     `git worktree remove` -- and the next preview of the same ref then died on
     `fatal: a branch named 'preview/resume-0820' already exists`. Nothing in
     `worktree.py list`, the lease file or the port registry mentioned that branch, so
-    the only reading available to the user was that `Preview: Open a UI Branch` is
-    broken. It happened to carameli's `agent/resume-0820` on 2026-08-24.
+    the only reading available to the user was that previewing is broken. It happened to
+    carameli's `agent/resume-0820` on 2026-08-24.
 
     `-B` is the reversion check: swap it back and this fails while the test above still
     passes, because `-b` and `-B` agree on every field except the one that matters.
