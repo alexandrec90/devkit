@@ -579,8 +579,17 @@ def test_a_workspace_without_a_folders_array_is_refused():
 
 
 @needs_live_workspace
+@needs_the_static_checkout
 def test_registering_against_the_real_workspace_file():
-    """The shape assertions above are on a fixture; this proves them on the live file."""
+    """The shape assertions above are on a fixture; this proves them on the live file.
+
+    Skipped from a box for the reason `test_the_live_workspace_matches_the_canonical_copy`
+    is: the live file is main's render, so a branch that ADDS a picker is asserting here
+    that its own un-merged edit has already landed. That is not hypothetical — adding
+    `adoptProjects` reddened exactly this test and its retirement twin, at the Stop gate,
+    with nothing wrong. The marker's comment in `support.py` describes the drift check
+    alone; the pair below reads the same file and needed it just as much.
+    """
     text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     updated = register(text, ["probe", "probe-b"])
     assert "probe" in devkit_project.known_projects(updated)
@@ -717,9 +726,12 @@ def test_a_half_applied_retirement_is_refused_rather_than_written():
 
 
 @needs_live_workspace
+@needs_the_static_checkout
 def test_retiring_against_the_real_workspace_file():
     """The fixtures above are three inputs deep; the live file's `project` picker nests
-    its options two levels inside `args`, and every picker carries comments."""
+    its options two levels inside `args`, and every picker carries comments.
+
+    Skipped from a box; see its registration twin above."""
     text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     victim = devkit_project.known_projects(text)[0]
     updated = unregister(text, [victim])
