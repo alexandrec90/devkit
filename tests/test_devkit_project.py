@@ -349,6 +349,9 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # From the GENERATOR template rather than a live repo — the last task anywhere
         # to leave a `.vscode/tasks.json`.
         "db-revision",
+        # Never hoisted — born scoped, and scoped by content rather than by capability:
+        # the script encodes the comic-book skin's art, which only carameli has.
+        "encode-art",
         # Never hoisted — born scoped. The integration suite spans carameli and the
         # VanillaLand checkout, and VanillaLand is in NOT_PROJECTS, so carameli fronts
         # for the pair and no other checkout can run it.
