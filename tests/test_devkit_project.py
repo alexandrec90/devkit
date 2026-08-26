@@ -365,16 +365,18 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # job N times and report nothing on runs 2..N. Scoping it to devkit is what lets
         # the task pin `--project devkit` and offer no picker.
         "reclaim",
-        # Born scoped, for `reclaim`'s reason rather than its own: the menu
-        # `preview-task.py` prints is assembled from the box registry and the port
-        # registry, and there is exactly one of each on this machine. So the question
-        # "which checkout" has no answer to give -- every checkout is already a column
-        # in the menu -- and the task pins `--project devkit` and asks the one question
-        # worth asking instead.
-        "preview",
-        # Born scoped, for `preview`'s reason exactly: it serves picks from the same
-        # machine-wide menu, so the checkout is a column in the answer rather than a
-        # scope for the task, and the task pins `--project devkit`.
+        # Born scoped, for `reclaim`'s reason rather than its own: the menu it picks from
+        # is assembled from the box registry and the port registry, and there is exactly
+        # one of each on this machine. So the question "which checkout" has no answer to
+        # give -- every checkout is already a column in the menu -- and the task pins
+        # `--project devkit` and asks the one question worth asking instead.
+        #
+        # There were two of these until 2026-08-25. A `preview` action ran
+        # `preview-task.py`, held the `Preview: Open a UI Branch` label, and answered a
+        # click with a worktree, an image build and a compose stack; this one runs `npm
+        # run dev` on the frontend and was reachable only under a name nobody went
+        # looking for. One label now, and the cheap script has it.
+        # `test_no_task_dispatches_this_script` is what stops the other coming back.
         "preview-ui-host",
         # The teardown half of the pair above, scoped for the same reason and one more:
         # there is a single registry of running host preview servers on this machine, so
@@ -859,6 +861,40 @@ def test_the_preview_row_dropdown_asks_for_the_project_exactly_once(canonical):
     assert prompting == ["value"], f"fields that would each open a project pick: {prompting}"
     reading = [f for f, expr in template.items() if "${remember:previewProject}" in expr]
     assert reading == ["label", "description", "detail"]
+
+
+def _picker_args(spec: dict) -> list[dict]:
+    """A picker's `args`, and every nested `pickStringRemember` picker's, flattened."""
+    args = spec.get("args")
+    found = [args] if isinstance(args, dict) else []
+    for nested in (args or {}).get("pickStringRemember", {}).values():
+        if isinstance(nested, dict):
+            found.append(nested)
+    return found
+
+
+def test_no_picker_opts_into_the_extensions_escaped_ui_flag(canonical):
+    """`checkEscapedUI` makes a dropdown usable ONCE per window, and it looks like a fix.
+
+    It reads as "abort the launch when the user escapes", which is what a cancelled pick
+    should do. It is implemented as a sticky bit: an Escape stores `__escapedUI` in the
+    extension's `rememberStore`, every later command that opts in returns `undefined`
+    BEFORE opening its quick-pick, and nothing clears the bit except a successful pick
+    from a command that opted in -- which can no longer happen. So `Preview: Open a UI
+    Branch` could be cancelled exactly once, and every click after that went straight to
+    "Nothing picked -- the dropdown was cancelled" with no list ever drawn.
+
+    A ratchet over the whole block rather than over `previewRow`, because the flag is
+    per-command and the next picker to copy one of these will copy whatever is here.
+    Without it a cancelled run costs one terminal saying it picked nothing, which every
+    dispatched script already treats as a graceful no-op.
+    """
+    opted_in = [
+        spec["id"]
+        for spec in canonical["inputs"]
+        if any(args.get("checkEscapedUI") for args in _picker_args(spec))
+    ]
+    assert opted_in == []
 
 
 def _dispatched_actions(canonical) -> dict[str, str]:

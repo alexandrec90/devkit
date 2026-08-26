@@ -404,8 +404,8 @@ python scripts/preview-task.py --all      # re-serve every standing preview
 
 `--all` is the post-reboot case: Docker stops every container on a restart while the
 boxes, their branches and their port leases all survive, so each preview lands back on
-the port it had before. Two VS Code tasks — *Preview: Open a UI Branch* and *Preview:
-Restart Standing Previews* — are those two invocations, one click each.
+the port it had before. It is a terminal tool: no VS Code task dispatches it, because a
+click asking "show me this branch" should not cost an image build (see below).
 
 A checkout with no compose stack contributes no rows, which keeps devkit out of a menu it
 would publish nothing for. Neither does a branch, box or PR under `agent/auto/`: that
@@ -414,6 +414,24 @@ one row per consuming project in front of every reviewer. The menu answers "what
 agent session changed that I could look at", so a scheduler's work is discovery it
 declines — but a *standing* preview is never filtered out, because somebody asked for
 that one by name.
+
+#### The one-click version serves the frontend and nothing else
+
+`scripts/preview-ui-host.py` reads the same menu and answers a pick with `npm run dev`
+on the branch's frontend directory — no box, no image build, no backend — one host port
+per ticked row, each opened once it answers. That is the *Preview: Open a UI Branch*
+task, and it is the only preview task there is.
+
+```bash
+python scripts/preview-ui-host.py --picks="carameli:agent/foo carameli:agent/bar"
+python scripts/preview-ui-host.py --refresh   # rebuild the dropdown's option file
+python scripts/preview-ui-host.py --stop      # stop every host preview server
+```
+
+The dropdown lists only checkouts declaring `[frontend] dir` in `.devkit.toml`
+(`ui_projects`), since a pick from anywhere else is an option that can only refuse. When
+the *stack* is what you need — an API, a worker, a database — that is the terminal menu
+above, or `worktree.py preview` under it.
 
 ### The scheduled pass
 

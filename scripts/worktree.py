@@ -992,7 +992,7 @@ def provision_steps(
         # tracked file modified before anyone had edited anything -- and a box that
         # holds a tracked change is one `reapable` refuses to destroy, on any verdict,
         # forever. Two carameli preview boxes sat on a port slot each for that reason
-        # alone, and the registry filling is what made `Preview: Open a UI Branch` fail.
+        # alone, and the registry filling is what made the next box preview fail.
         # `ci` installs the lock exactly and never rewrites it, which is also what the
         # lock is for.
         verb = "ci" if frontend_locked else "install"

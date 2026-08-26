@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Serve picked branches' frontends straight from host Vite -- no Docker, no backend.
+"""Serve picked branches' frontends from host Vite. Backs "Preview: Open a UI Branch".
+
+**No Docker and no backend, and that is the requirement rather than an optimisation.**
+The clickable task carried the box version below until 2026-08-25, so "let me look at
+this branch" meant a compose stack every time, and the fast path here was a second task
+with a different name that nobody found. One label, one behaviour: `npm run dev`.
 
 `preview-task.py` answers "show me the thing I asked for" with a BOX: a worktree, a
 port lease, a compose stack, an image build and an `npm ci` into a fresh named volume
@@ -10,10 +15,11 @@ degrades gracefully with no backend at all (the auth probe flips `ready` in a
 `.finally`, API-backed views render their offline state), so a UI-only review pays for
 a stack it never calls.
 
-This is the cheap path, as the same clickable shape: the SAME option file the preview
-dropdowns read -- written by the same scan -- picked from with checkboxes
-(`multiPick`), so several branches come up side by side in one run, each on its own
-port, each opened in the browser once it answers.
+So this is the cheap path wearing the clickable shape: the same option file, written by
+the same scan, picked from with checkboxes (`multiPick`), so several branches come up
+side by side in one run, each on its own port, each opened in the browser once it
+answers. `preview-task.py` stays a terminal tool for the times the stack really is what
+is under review.
 
 What one run does, per picked row:
 
@@ -85,7 +91,6 @@ import signal
 import subprocess
 import sys
 import time
-import tomllib
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
@@ -163,26 +168,13 @@ def echo(line: str = "") -> None:
     print(line, flush=True)
 
 
-def frontend_rel(manifest: dict) -> str:
-    """The `[frontend] dir` a project declares, or "" when it declares no frontend."""
-    front = manifest.get("frontend")
-    if not isinstance(front, dict) or not front.get("enabled"):
-        return ""
-    return str(front.get("dir") or "")
-
-
-def frontend_dir_for(project_dir: Path) -> str:
-    """`frontend_rel` read from the checkout's `.devkit.toml`; "" on any failure.
-
-    "" rather than raising, because the caller's next line is a refusal that names the
-    project -- a checkout with no manifest and one with no frontend need the same
-    answer, which is "this task cannot serve you".
-    """
-    try:
-        manifest = tomllib.loads((project_dir / ".devkit.toml").read_text(encoding="utf-8"))
-    except (OSError, ValueError):  # ValueError covers TOMLDecodeError
-        return ""
-    return frontend_rel(manifest)
+# Both were written here and now live in `preview-task.py`, re-exported under the same
+# names so a caller and a test can keep reading them off this module. The move is not
+# cosmetic: that module decides which checkouts the dropdown offers, and offering one this
+# module would then refuse is the exact failure `ui_projects` exists to stop -- so the
+# manifest gets one reader, and it is the one the menu already consults.
+frontend_rel = preview_task.frontend_rel
+frontend_dir_for = preview_task.frontend_dir_for
 
 
 def ref_slug(ref: str) -> str:
@@ -837,10 +829,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.fetch:
         echo("Reading boxes, open PRs and recent branches ...")
-    everything = preview_task.collect(workspace, fetch=args.fetch)
-    written = preview_task.write_menu(
-        preview_task.menu_payload(everything, preview_task.stack_projects(workspace))
-    )
+    # Scoped to the checkouts this script can actually serve, in both dimensions at once:
+    # the scan skips a frontend-less checkout's `git fetch` and `gh pr list` entirely, and
+    # the file it writes cannot offer a row that would land back here as a refusal.
+    projects = preview_task.ui_projects(workspace)
+    everything = preview_task.collect(workspace, fetch=args.fetch, projects=projects)
+    written = preview_task.write_menu(preview_task.menu_payload(everything, projects))
     if args.refresh:
         echo(
             f"Dropdown options written to {written}" if written else "Could not write the options."
