@@ -31,14 +31,23 @@ has no branch dimension, so a hand edit there is globally live before anyone rev
 `edit_verdict` is the gate on that, and the canonical edit is deliberately left
 uncommitted for a task branch — the same shape `--adopt-workspace` has.
 
-Pure helpers (`inventory`, `render`, `parse_command`, `plan`, `edit_verdict`) carry the
-decisions and are unit-tested in `tests/test_plug_projects.py`; `main` is the
-subprocess-and-prompt shell around them.
+**The checkboxes live in VS Code, not in this terminal.** `--refresh-menu` writes
+`logs/plug-menu.json`, the `plugSelection` input draws it as a `multiPick` quick-pick
+with the registry's own rows pre-ticked, and `--ticked` reads the answer back. The
+terminal loop below is what a bare `python scripts/plug-projects.py` still gets, and the
+task never reaches it. The task stays unwrapped by `log-wrap.py` all the same: this
+script writes `logs/plug-projects.log` itself, and that artifact names the registry it
+ended with rather than transcribing what scrolled past.
+
+Pure helpers (`inventory`, `render`, `parse_command`, `plan`, `edit_verdict`,
+`menu_payload`, `selection_from_ticks`) carry the decisions and are unit-tested in
+`tests/test_plug_projects.py`; `main` is the subprocess-and-prompt shell around them.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 import os
 import subprocess
@@ -57,6 +66,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 LIVE_WORKSPACE = devkit_project.DEFAULT_WORKSPACE
 WORKSPACE_ROOT = LIVE_WORKSPACE.parent
 ARTIFACT = REPO_ROOT / "logs" / "plug-projects.log"
+MENU_CACHE = REPO_ROOT / "logs" / "plug-menu.json"
 
 # The GitHub account these checkouts live under. Hard-coded exactly as
 # `new-project.py --github-owner` hard-codes it, and overridable the same way: `gh`
@@ -296,6 +306,153 @@ def interactive(
                 state.symmetric_difference_update({name})
 
 
+# --- the same list, drawn by VS Code ----------------------------------------------
+
+
+def menu_detail(candidate: Candidate, owner: str) -> str:
+    """What ticking — or unticking — this row costs, for the quick-pick's second line.
+
+    The pick is the confirmation: the task runs `--ticked ... --yes`, so this string is
+    the last thing anyone reads before a private GitHub repo is created. Every row says
+    what its *own* tick does, because the consequence of unticking is uniform and the
+    consequence of ticking is not.
+    """
+    if candidate.plugged:
+        return "in the registry -- untick to retire it (registry only; nothing on disk is touched)"
+    if not candidate.on_disk:
+        return f"not on disk -- ticking clones {owner}/{candidate.name} first"
+    if not candidate.on_github:
+        return f"no repo -- ticking CREATES the private {owner}/{candidate.name} and pushes it"
+    return "on disk and on GitHub -- ticking registers it, and nothing else"
+
+
+def menu_payload(candidates: list[Candidate], owner: str, now: _dt.datetime | None = None) -> list:
+    """The quick-pick's option groups, as `pickStringRemember` loads them from a file.
+
+    One group, whose label is where the **timestamp** goes: the extension can only read
+    a *file*, so this list is stale by construction and `.claude/rules/vscode-tasks.md`
+    requires the reader be told how stale. A group label is drawn as a separator row
+    above the options, which is the only line in a quick-pick nothing can tick.
+
+    `picked` is what makes this a checklist rather than a menu: the box opens ticked for
+    exactly the projects the registry currently holds, so the pick is an *edit* of the
+    live state and an unchanged pick is a no-op. The extension honours the field only
+    while it has no remembered tick set of its own, which is why the input carries
+    `clearStorage` — see the comment on `plugSelection` in `workspace.jsonc`.
+
+    `fileFormat: "load"` takes this array as the groups verbatim, so nothing here is a
+    JS expression evaluated against rising indices. That is deliberate: the templated
+    form (`jsonOption`, what `previewRow` uses) ends its list when an expression
+    *throws*, so a row missing one field draws ten thousand blank entries instead.
+    """
+    stamp = now or _dt.datetime.now(_dt.UTC)
+    as_of = stamp.astimezone().strftime("%Y-%m-%d %H:%M")
+    return [
+        {
+            "label": f"as of {as_of} -- ticked = in the workspace registry",
+            "options": [
+                {
+                    "value": candidate.name,
+                    "label": candidate.name,
+                    "description": candidate.where
+                    + (
+                        ""
+                        if candidate.harnessed or not candidate.on_disk
+                        else "  (no .devkit.toml)"
+                    ),
+                    "detail": menu_detail(candidate, owner),
+                    "picked": candidate.plugged,
+                }
+                for candidate in candidates
+            ],
+        }
+    ]
+
+
+def write_menu(payload: list, path: Path | None = None) -> Path | None:
+    """Save the quick-pick's options, atomically. The path on success, None on failure.
+
+    Never raises, for `refresh_menu`'s reason: this runs as a rider on other people's
+    passes, and a menu that could not be cached must never fail the work that carried
+    it. The destination defaults at CALL time so a test can point `MENU_CACHE` somewhere
+    disposable and the callers that pass no path follow it there.
+    """
+    path = path or MENU_CACHE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        scratch = path.with_suffix(".json.tmp")
+        scratch.write_text(json.dumps(payload, indent=2), encoding="utf-8", newline="\n")
+        scratch.replace(path)
+    except OSError:
+        return None
+    return path
+
+
+def read_menu(path: Path | None = None) -> list[str] | None:
+    """The names the quick-pick offered, in order. None when there is no readable menu.
+
+    The **offered** set, not the ticked one, and it is what makes `--ticked` safe to
+    interpret: an answer of "alpha,beta" says nothing about a project registered after
+    this file was written, so `selection_from_ticks` must be able to tell an untick from
+    a row that was never drawn.
+    """
+    try:
+        groups = json.loads((path or MENU_CACHE).read_text(encoding="utf-8"))
+        return [option["value"] for group in groups for option in group["options"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def refresh_menu(path: Path | None = None, owner: str = DEFAULT_OWNER) -> Path | None:
+    """Rebuild the quick-pick's options file. The path on success, None on anything else.
+
+    Total, because `worktree.py reconcile` runs it as a rider every fifteen minutes and
+    a menu that could not be built must never redden a pass that reaped boxes correctly.
+
+    A run whose `gh` listing failed writes **nothing**, which is the one refusal worth
+    spelling out: `gather` degrades to the folder half alone, and a candidate that is
+    on GitHub then reads as `folder only` — a row whose detail offers to *create* the
+    repo it already has. A stale menu is a wrong list; that one would be a wrong act.
+    """
+    try:
+        candidates, warnings = gather()
+        if warnings:
+            return None
+        return write_menu(menu_payload(candidates, owner), path)
+    except Exception:
+        return None
+
+
+def parse_ticks(value: str) -> tuple[str, ...]:
+    """Split the checklist's one-string answer. A VS Code input resolves to one string,
+    so `separator` joins the ticked values and this is the other half of that."""
+    return tuple(name for name in value.replace(",", " ").split() if name)
+
+
+def picked_nothing(value: str) -> bool:
+    """Did the quick-pick never open at all?
+
+    Escape leaves the input unresolved and VS Code passes the literal `${input:...}`
+    through to the task — the shape `preview-task.py` treats as a graceful no-op, for
+    the reason its input carries no `checkEscapedUI`: the extension's abort flag is
+    sticky, so opting into it retires the dropdown for the life of the window.
+    """
+    return "${input:" in value
+
+
+def selection_from_ticks(
+    ticked: tuple[str, ...], offered: list[str], plugged: set[str]
+) -> set[str]:
+    """The registry the ticks ask for: current state, edited by the rows that were drawn.
+
+    An unticked row is an unplug **only if the menu offered it**. The file is written by
+    a previous pass, so a project registered since is absent from the list and therefore
+    absent from the answer — reading the answer as the whole intended registry would
+    retire it, silently, on a click that never mentioned it.
+    """
+    return (plugged | set(ticked)) - (set(offered) - set(ticked))
+
+
 # --- deciding what to do ----------------------------------------------------------
 
 
@@ -507,12 +664,16 @@ def apply_registry(text: str, steps: list[Step]) -> str:
 def write_artifact(problems: list[str]) -> None:
     """Persist this run's failures under `logs/`, per `.claude/rules/engineering.md`.
 
-    The task writes its own artifact instead of being wrapped in `log-wrap.py`, which
-    is the ordinary way: that wrapper pipes the child's stdout and reads it a line at a
-    time, so a prompt that has not ended its line never reaches the terminal and the
-    checkbox list hangs waiting for input nobody can see. Emptied on a clean run, the
-    way `log-wrap.py` empties its own log, so it never describes a failure already
-    fixed.
+    The script writes its own artifact instead of the task being wrapped in
+    `log-wrap.py`, which is the ordinary way. That wrapper pipes the child's stdout and
+    reads it a line at a time, so a prompt that has not ended its line never reaches the
+    terminal and the checkbox loop below hangs waiting for input nobody can see — true
+    of a bare `python scripts/plug-projects.py` whichever way the task is spelled. One
+    artifact covering both entry points is also the only version of this that stays
+    right when someone runs the CLI, which is where the confirmations still live.
+
+    Emptied on a clean run, the way `log-wrap.py` empties its own log, so it never
+    describes a failure already fixed.
     """
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
     body = "\n".join(problems)
@@ -586,6 +747,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--list", action="store_true", help="print the checkbox list and exit")
     parser.add_argument("--json", action="store_true", help="with --list, emit JSON")
+    parser.add_argument(
+        "--refresh-menu",
+        action="store_true",
+        help=f"rebuild {MENU_CACHE.name}, the VS Code quick-pick's options, and exit",
+    )
+    parser.add_argument(
+        "--ticked",
+        metavar="NAMES",
+        help="the VS Code checklist's answer: the ticked names, comma-separated",
+    )
     parser.add_argument("--plug", action="append", default=[], metavar="NAME")
     parser.add_argument("--unplug", action="append", default=[], metavar="NAME")
     parser.add_argument("--yes", action="store_true", help="skip the confirmation")
@@ -608,6 +779,20 @@ def main(argv: list[str] | None = None) -> int:
     for warning in warnings:
         print(f"  NOTE    {warning}")
 
+    if args.refresh_menu:
+        if warnings:
+            print("ERROR   the menu was not rewritten: it would offer to create repos that exist")
+            write_artifact(["gh could not list repos, so the menu was left as it was"])
+            return 2
+        written = write_menu(menu_payload(candidates, args.owner))
+        if written is None:
+            print(f"ERROR   could not write {MENU_CACHE}", file=sys.stderr)
+            write_artifact([f"could not write {MENU_CACHE}"])
+            return 2
+        print(f"  wrote {written} ({len(candidates)} row(s))")
+        write_artifact([])
+        return 0
+
     if args.list:
         if args.json:
             print(json.dumps([asdict(c) | {"where": c.where} for c in candidates], indent=2))
@@ -629,6 +814,43 @@ def main(argv: list[str] | None = None) -> int:
         write_artifact([f"unknown project(s): {', '.join(unknown)}"])
         return 2
 
+    # Resolved before the gate below, so that Escaping the quick-pick from a box costs a
+    # line rather than an error about branches: nothing was picked, so nothing is being
+    # published and none of the gate's three reasons is about to be true.
+    ticks: tuple[str, ...] = ()
+    offered: list[str] = []
+    if args.ticked is not None:
+        if picked_nothing(args.ticked):
+            print("  nothing was picked -- nothing changed")
+            write_artifact([])
+            return 0
+        from_file = read_menu()
+        if from_file is None:
+            problem = (
+                f"the checklist has not been built yet ({MENU_CACHE.name} is missing or "
+                "unreadable) -- run `python scripts/plug-projects.py --refresh-menu`"
+            )
+            print(f"ERROR   {problem}", file=sys.stderr)
+            write_artifact([problem])
+            return 2
+        offered = from_file
+        picked = parse_ticks(args.ticked)
+        # A menu row is only as fresh as the pass that wrote it, and the world moved on
+        # after that: a name that has since stopped being a candidate is dropped with a
+        # note rather than failing the run, because the *other* ticks are still true.
+        stale = sorted(set(picked) - known)
+        if stale:
+            print(f"  NOTE    no longer on disk, on GitHub or in the registry: {', '.join(stale)}")
+        ticks = tuple(name for name in picked if name in known)
+        if not ticks:
+            problem = (
+                "nothing is ticked -- that would retire the whole registry. Untick one "
+                "project at a time, or use --unplug NAME"
+            )
+            print(f"ERROR   {problem}", file=sys.stderr)
+            write_artifact([problem])
+            return 1
+
     git = sweep.git_for(REPO_ROOT)
     # Asked before the list is drawn, not after it is ticked: every reason it refuses is
     # true of the checkout rather than of the choice, so making someone tick twelve boxes
@@ -646,7 +868,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     checked = {c.name for c in candidates if c.plugged}
-    if args.plug or args.unplug:
+    if args.ticked is not None:
+        checked = selection_from_ticks(ticks, offered, checked)
+    elif args.plug or args.unplug:
         checked = (checked | set(args.plug)) - set(args.unplug)
     else:
         print("")
@@ -699,6 +923,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR   {exc}", file=sys.stderr)
         write_artifact([str(exc)])
         return 1
+
+    # The registry just moved, so the cached quick-pick is now wrong in the one way that
+    # matters: its rows are pre-ticked from the state this run replaced. `reconcile`
+    # would fix it within the quarter hour, and a second click inside that window is
+    # exactly when someone is most likely to look.
+    if refresh_menu(owner=args.owner) is None:
+        print(f"  NOTE    {MENU_CACHE.name} was not rewritten -- the next pick may be stale")
 
     print("")
     print(f"  commit {devkit_project.CANONICAL_WORKSPACE.name} on a task branch -- it is devkit's")

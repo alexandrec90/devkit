@@ -248,6 +248,9 @@ ALLOWED_MISSING = {
     ".devkit-workspace-render.json": "the render stamp, written beside the LIVE "
     "workspace file -- which lives outside every repo, so the stamp can never be in one; "
     "test_the_stamp_sits_beside_the_live_file_not_under_devkit_logs pins where it goes",
+    "logs/plug-menu.json": "the plug/unplug checklist's cached options -- a generated "
+    "file under the gitignored `logs/`, written by `--refresh-menu` and by `worktree.py "
+    "reconcile`, so it exists on a machine that has run either and never in a clone",
     "pyvenv.cfg": "the file that makes a directory a virtualenv, named as the thing "
     "`devkit_schtasks.windowless` reads at runtime; it exists in every `.venv`, all of "
     "which are untracked, and never at the root of the repo",

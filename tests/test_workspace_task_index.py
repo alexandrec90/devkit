@@ -337,6 +337,25 @@ def test_input_choices_says_when_the_menu_comes_from_a_file(block: dict):
     assert any("asks previewProject first: Which checkout?" in line for line in lines)
 
 
+def test_input_choices_reads_option_groups_that_name_a_file():
+    """`optionGroups` is two shapes wearing one key, and the object form loads the whole
+    group array from a file. Iterating it as a list yields its *keys*, so the report
+    crashed with an `AttributeError` on the first input that used it — a whole-file
+    failure from one picker, since `build_report` renders every input or none."""
+    spec = {
+        "id": "plugSelection",
+        "type": "command",
+        "args": {
+            "multiPick": True,
+            "optionGroups": {
+                "fileName": "${workspaceFolder:devkit}/logs/plug-menu.json",
+                "fileFormat": "load",
+            },
+        },
+    }
+    assert index.input_choices(spec) == ("  read at pick time from logs/plug-menu.json",)
+
+
 def test_input_choices_spells_out_a_blank_default(block: dict):
     assert index.input_choices(block["inputs"][3]) == ("  (blank)",)
 
