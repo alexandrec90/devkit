@@ -474,6 +474,64 @@ class TestTheGateIsBounded:
         assert "unknown" in tail
         assert "python -m pytest tests/test_x.py" in tail
 
+    def test_a_stopped_check_is_recognised_as_unfinished(self):
+        """`unfinished` reads the tail's prefix, so `timeout_tail` and `UNFINISHED_MARK`
+        have to stay spelled the same. A drift between them is silent: every stopped
+        check would read as a finished failure again, which is the defect this fixes."""
+        stopped = ("tests", None, hook.timeout_tail(["pytest"]))
+        red = ("lint", None, "E999 SyntaxError")
+        assert hook.unfinished([stopped, red]) == ["tests"]
+
+    def test_a_round_of_nothing_but_stopped_checks_does_not_block(
+        self, monkeypatch, sandboxed_verify
+    ):
+        """The budget running out says nothing about the branch, and blocking on it just
+        buys the same non-answer one turn later — twice in a row on devkit#237, at the
+        tail of a session, with the suite already green by hand in between."""
+        monkeypatch.setattr(
+            hook,
+            "run_checks",
+            lambda names, root=None, deadline=None: [
+                ("tests", "logs/test-failures.log", hook.timeout_tail(["pytest"]))
+            ],
+        )
+        monkeypatch.setattr(hook, "run_host_tests", lambda paths, env, root=None, deadline=None: [])
+        assert hook.verify("{}", {}) == 0
+        # And it costs no round: the next *real* failure gets the full two chances.
+        assert sandboxed_verify["value"] == 0
+
+    def test_a_finished_failure_still_blocks_when_a_stopped_check_rides_along(
+        self, monkeypatch, sandboxed_verify
+    ):
+        """The stand-down is for a round that learned nothing, not for one that learned
+        something and ran out of time afterwards."""
+        monkeypatch.setattr(
+            hook,
+            "run_checks",
+            lambda names, root=None, deadline=None: [
+                ("lint", None, "E999 SyntaxError"),
+                ("tests", None, hook.timeout_tail(["pytest"])),
+            ],
+        )
+        monkeypatch.setattr(hook, "run_host_tests", lambda paths, env, root=None, deadline=None: [])
+        assert hook.verify("{}", {}) == 2
+
+    def test_the_status_line_calls_a_stopped_check_unknown_not_failed(self, capsys):
+        """`failed: tests` under an artifact reading "its result is unknown" is the gate
+        contradicting its own evidence, and the agent has to open the file to find out
+        which half to believe."""
+        hook._print_verify_failures(
+            [
+                ("lint", None, "E999 SyntaxError"),
+                ("tests", None, hook.timeout_tail(["pytest"])),
+            ],
+            blocking=True,
+        )
+        err = capsys.readouterr().err
+        assert "failed: lint" in err
+        assert "unknown" in err and "tests" in err
+        assert "failed: lint, tests" not in err
+
     def test_the_budget_leaves_room_to_report(self):
         """Set at or above a harness ceiling and the kill happens first, which is the
         failure this exists to remove rather than relocate."""
