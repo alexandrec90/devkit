@@ -1060,6 +1060,14 @@ def _git(checkout: Path, *args: str):
         ["git", "-C", str(checkout), *args],
         capture_output=True,
         text=True,
+        # UTF-8 with replacement, never the platform codec. `text=True` alone decodes
+        # through cp1252 here, and a byte it cannot map -- in a branch name, a path, a
+        # commit subject -- raises inside subprocess's reader thread, where this
+        # function's `check=False` cannot see it. That would crash the guard on a
+        # PreToolUse call, which is every edit in the workspace. The full account is the
+        # codec note under `VERIFY_IMPORT` in scripts/hooks/stop.py.
+        encoding="utf-8",
+        errors="replace",
         timeout=10,
         check=False,
         creationflags=worktree.sweep.NO_WINDOW,

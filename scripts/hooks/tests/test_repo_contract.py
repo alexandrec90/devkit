@@ -709,3 +709,86 @@ def test_vendored_skills_are_not_locally_edited():
             f"{skill.relative_to(REPO_ROOT)} names a specific default branch; the "
             "vendored copy must defer to the one detect_default_branch() resolves"
         )
+
+
+# --- a hook that decodes a child's output names the codec --------------------
+
+DECODES_OUTPUT = {"text", "universal_newlines"}
+NAMES_A_CODEC = {"encoding", "errors"}
+
+
+def undecoded_captures(source: str) -> list[int]:
+    """Line numbers where a subprocess in `source` decodes output with no codec named.
+
+    Read with `ast` rather than by importing: these are hook modules, and importing one
+    to inspect it runs its config load against whatever repo the test happens to sit in.
+    Matching is on the *call* (`run`, `Popen`, `check_output`) plus a `text=`/
+    `universal_newlines=` keyword, which no other API in this tier takes -- so an alias
+    or a `sp.run` spelling is caught, and nothing else is.
+    """
+    lines = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if name not in {"run", "Popen", "check_output"}:
+            continue
+        kwargs = {kw.arg for kw in node.keywords if kw.arg}
+        if kwargs & DECODES_OUTPUT and not NAMES_A_CODEC <= kwargs:
+            lines.append(node.lineno)
+    return lines
+
+
+def test_undecoded_capture_scanner_reads_the_keywords_not_the_spelling():
+    """The scanner's own cases, so a rewrite of it cannot quietly stop finding any."""
+    assert undecoded_captures("subprocess.run(argv, capture_output=True, text=True)") == [1]
+    assert undecoded_captures("sp.run(argv, text=True, encoding='utf-8')") == [1]
+    assert undecoded_captures("run(argv, universal_newlines=True)") == [1]
+    assert (
+        undecoded_captures("subprocess.run(argv, text=True, encoding='utf-8', errors='replace')")
+        == []
+    )
+    # No decoding asked for: bytes come back, and there is no codec to get wrong.
+    assert undecoded_captures("subprocess.run(argv, capture_output=True)") == []
+
+
+def test_every_capture_in_a_vendored_hook_declares_its_codec():
+    """A hook that decodes a child's output names its codec and its error policy.
+
+    `text=True` on its own decodes through `locale.getencoding()` -- cp1252 on a Windows
+    workstation, strict UTF-8 on a CI runner -- and real tools emit bytes that both
+    reject: box-drawing and curly quotes from ruff, a path or branch name from git. The
+    `UnicodeDecodeError` is raised in subprocess's **reader thread**, so no `try` around
+    the call can see it, and `subprocess.run` returns a `CompletedProcess` whose `stdout`
+    and `stderr` are both `None`. The crash therefore surfaces wherever those are first
+    used -- a Stop hook died on `unsupported operand type(s) for +: 'NoneType' and
+    'NoneType'` while assembling a failure tail, hundreds of lines from the call that
+    could not read one, with the decode error visible only as two orphan thread
+    tracebacks above it.
+
+    Scoped to the vendored hooks, which is where it costs the most and where the fix
+    ships: a crashing PostToolUse hook blocks every edit, and a crashing Stop hook ends
+    the session having written no artifact. The vendored *tests* are deliberately out of
+    scope -- a decode failure there is a red test that names itself, in CI, where
+    somebody reads it.
+    """
+    sync = load_module("scripts/sync-devkit.py")
+    offenders = {}
+    for rel in sync.MANIFEST:
+        if not rel.startswith("scripts/hooks/") or not rel.endswith(".py"):
+            continue
+        if "/tests/" in rel:
+            continue
+        path = REPO_ROOT / rel
+        if not path.is_file():
+            continue
+        found = undecoded_captures(path.read_text(encoding="utf-8"))
+        if found:
+            offenders[rel] = found
+    assert not offenders, (
+        "these hooks capture a child's output without naming a codec: "
+        + "; ".join(f"{rel}:{lines}" for rel, lines in sorted(offenders.items()))
+        + " -- pass encoding='utf-8', errors='replace' as well, per the codec note "
+        "under VERIFY_IMPORT in scripts/hooks/stop.py"
+    )

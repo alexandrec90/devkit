@@ -212,6 +212,14 @@ def _run(ruff: str, *args: str, cwd: Path = REPO_ROOT) -> subprocess.CompletedPr
         capture_output=True,
         check=False,
         text=True,
+        # UTF-8 rather than the platform codec: ruff's diagnostics carry box-drawing and
+        # curly quotes, and `text=True` alone decodes them through cp1252 on Windows,
+        # where an unmapped byte raises inside subprocess's reader thread. That would
+        # fail this hook -- which runs after *every* edit -- on the tool's output rather
+        # than on the file's contents. The full account is the codec note under
+        # `VERIFY_IMPORT` in stop.py, which is where this crashed a session first.
+        encoding="utf-8",
+        errors="replace",
     )
 
 
