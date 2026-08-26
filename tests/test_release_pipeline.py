@@ -12,6 +12,7 @@ than by mocking a subprocess tree, which would pin `gh`'s flag spellings and not
 else.
 """
 
+import inspect
 import subprocess
 from pathlib import Path
 
@@ -208,6 +209,72 @@ def test_the_plan_says_whether_consumers_will_be_upgraded():
     "opens a PR in five repositories" is the part worth seeing first."""
     assert any("upgrade-project.py" in step for step in rp.plan_steps("v1.0.0", adopt=True))
     assert not any("upgrade-project.py" in step for step in rp.plan_steps("v1.0.0", adopt=False))
+
+
+def test_the_plan_names_the_consumers_that_were_ticked():
+    """Blast radius is the whole point of the dry run, so a narrowed run must not print
+    the sentence a full one does. `every consumer` is the honest phrasing of `--all`."""
+    narrowed = rp.plan_steps("v1.0.0", adopt=True, projects=["carameli", "data-lake"])
+    step = next(s for s in narrowed if "upgrade-project.py" in s)
+    assert "carameli, data-lake" in step
+    assert "every consumer" not in step
+
+    everywhere = next(s for s in rp.plan_steps("v1.0.0", adopt=True) if "upgrade-project.py" in s)
+    assert "every consumer" in everywhere
+
+
+# --- which consumers adopt: the checklist, not `--all` ------------------------
+
+
+def test_an_unticked_checklist_still_reaches_every_consumer():
+    """`--all` is what the scheduled pass wants and what this script did unconditionally
+    before the picker existed: a release nobody is watching should reach every consumer,
+    and only a human at the dropdown has a reason to narrow it."""
+    assert rp.adoption_scope([]) == "--all"
+
+
+def test_a_ticked_selection_is_one_argv_token():
+    """`upgrade-project.py` takes the names as a positional, and `plan_command` drops
+    empty arguments -- so a flag and a value could leave a dangling flag. One token."""
+    assert rp.adoption_scope(["carameli", "data-lake"]) == "carameli,data-lake"
+
+
+def test_the_run_never_spells_the_scope_a_second_time():
+    """The scope appears three times -- the argv handed to `upgrade-project.py`, the dry
+    run's plan, and the retry line printed when adoption fails -- and a retry naming a
+    different scope from the run it retries is a remedy for something else. So
+    `adoption_scope` is the only place `--all` is written."""
+    source = inspect.getsource(rp.run_pipeline)
+    assert "adoption_scope(" in source
+    assert '"--all"' not in source
+
+    step = next(
+        s
+        for s in rp.plan_steps("v1.0.0", adopt=True, projects=["carameli"])
+        if "upgrade-project.py" in s
+    )
+    assert rp.adoption_scope(["carameli"]) in step
+
+
+def test_backing_out_of_the_consumer_checklist_cuts_no_release(capsys):
+    """The other half of the pair in `upgrade-project`: there an escaped picker is a
+    graceful no-op, because the picker IS the subject. Here the click is the whole
+    release, so escaping refuses before anything is tagged -- and it must refuse before
+    `gh` is even probed, or a machine without it would report the wrong reason."""
+    assert rp.main(["--projects=${input:adoptProjects}"]) == 1
+    err = capsys.readouterr().err
+    assert "nothing was picked" in err
+    # `--no-adopt` is the spelling for "release, but adopt nowhere"; the refusal has to
+    # name it, or the reader's only way out of the loop is to tick a box they don't want.
+    assert "--no-adopt" in err
+
+
+def test_the_projects_flag_is_the_checklists_own_spelling():
+    """The task passes `--projects=${input:adoptProjects}`, so the flag has to exist,
+    default to every consumer, and read through the same splitter the positional does."""
+    assert rp.build_parser().parse_args([]).projects == ""
+    parsed = rp.build_parser().parse_args(["--projects=carameli,data-lake"])
+    assert rp.upgrade_module().project_selection(parsed.projects) == ["carameli", "data-lake"]
 
 
 # --- the seams between this script and the two files that quote it ------------

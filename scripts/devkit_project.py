@@ -255,8 +255,12 @@ ACTIONS: dict[str, Action] = {
     # Cutting a devkit release. DEVKIT_ONLY because a release is devkit's own act and
     # has no project dimension at all -- run per selected checkout it would try to tag
     # this repo two or three times, and the second attempt would refuse a tag that now
-    # exists. The consumers appear at the END of the run, as `upgrade-project.py --all`,
-    # which is a different thing from the task being scoped to them.
+    # exists. The consumers appear at the END of the run, as the adoption pass this hands
+    # off to, which is a different thing from the task being scoped to them -- and it is
+    # why the release task asks *two* project questions that must not be confused: this
+    # `--project devkit`, fixed, deciding where the release is cut; and the
+    # `adoptProjects` checklist, riding through as `--projects=`, deciding whose adoption
+    # PR opens afterwards.
     #
     # It is an ACTIONS entry rather than a hand-written task like `Devkit: Upgrade
     # Projects` because it needs the wrapping more than that one does, not less: the run
@@ -683,6 +687,12 @@ def insert_picker_option(text: str, name: str) -> str:
         # Lists MORE than the registry -- the reference checkouts too -- so a new
         # project still has to be added to it, and this is the only place that can.
         "mergeCheckout",
+        # And this one lists LESS: every consumer that adopts a devkit release, which
+        # is the registry minus devkit itself. Inserting into it is still right --
+        # `register` never names devkit, since devkit is already registered -- and the
+        # alternative, a hand-kept list of consumers, is exactly the drift that
+        # retired `sweepScope` and `upgradeScope`.
+        "adoptProjects",
     ):
         scan = devkit_jsonc.blank_comments(updated)
         marker = scan.find(f'"id": "{picker_id}"')
@@ -809,11 +819,18 @@ def remove_picker_option(text: str, name: str) -> str:
     """Drop `name` from every maintained picker. The inverse of `insert_picker_option`.
 
     A picker that never listed it is left alone rather than failed on: `mergeCheckout`
-    lists more than the registry and an older workspace file may carry fewer pickers,
-    so "not there" is the same outcome as "removed" and neither is an error.
+    lists more than the registry, `adoptProjects` lists less, and an older workspace file
+    may carry fewer pickers, so "not there" is the same outcome as "removed" and neither
+    is an error.
     """
     updated = text
-    for picker_id in ("project", "daemonProject", "worktreeProject", "mergeCheckout"):
+    for picker_id in (
+        "project",
+        "daemonProject",
+        "worktreeProject",
+        "mergeCheckout",
+        "adoptProjects",
+    ):
         scan = devkit_jsonc.blank_comments(updated)
         marker = scan.find(f'"id": "{picker_id}"')
         if marker < 0:
