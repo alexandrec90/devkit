@@ -40,6 +40,11 @@ second stop skipped the checks entirely — a wrong fix ended the session lookin
 per-worktree round counter lets each fix be re-checked, and the final round reports
 without blocking so the cycle always terminates.
 
+**A check the budget stopped is unknown, and unknown does not block.** It reported
+nothing about the branch, so a round holding only stopped checks stands down after
+saying so — a retry would spend the same budget in the same place and ask again. A
+check that finished and failed still blocks, in the same round or any other.
+
 Failures are written to `logs/stop-verify.log` (and the tier-owned artifacts
 `logs/lint-errors.log` / `logs/test-failures.log`); the terminal gets a status line and
 the paths, per the failure-artifact rule in `.claude/rules/engineering.md`.
@@ -121,6 +126,12 @@ MAX_VERIFY_ROUNDS = 3
 # a 600s ceiling: a timeout has to be reportable, which means leaving room to write the
 # artifact and print.
 VERIFY_BUDGET_SECONDS = 420
+
+# How a stopped check announces itself, in the artifact and to `unfinished`. A check the
+# budget stopped reported nothing about the branch, and the gate must not read it as red:
+# see `verify`, where a round of nothing-but-these stands down instead of blocking.
+UNFINISHED_MARK = "Stopped: "
+
 # The pre-verification frontend typecheck, whose output goes to DEVNULL, gets its own
 # smaller cap: it is a side effect, and it must not be able to spend the gate's ceiling.
 TYPECHECK_TIMEOUT_SECONDS = 120
@@ -748,10 +759,20 @@ def timeout_tail(argv: list[str]) -> str:
     see for itself, which is the one thing a killed hook never let it do.
     """
     return (
-        f"Stopped: the {VERIFY_BUDGET_SECONDS}s budget for the whole verification tier "
-        "ran out while this check was running, so its result is unknown (an earlier "
+        f"{UNFINISHED_MARK}the {VERIFY_BUDGET_SECONDS}s budget for the whole verification "
+        "tier ran out while this check was running, so its result is unknown (an earlier "
         "tier may have spent it).\nRe-run it by hand: " + " ".join(argv)
     )
+
+
+def unfinished(failures: list[tuple[str, str | None, str]]) -> list[str]:
+    """The names of the checks the budget stopped, in order.
+
+    Recognised by the tail's prefix rather than by a fourth tuple field, so the shape
+    `run_checks` and `run_host_tests` both return -- and every test that builds one by
+    hand -- is unchanged.
+    """
+    return [name for name, _artifact, tail in failures if tail.startswith(UNFINISHED_MARK)]
 
 
 def _bounded_run(
@@ -1027,17 +1048,27 @@ def _print_verify_failures(
     `.claude/rules/engineering.md`): streamed output scrolls away, and a 20-line tail
     inlined here is both too little to diagnose from and too much to skim.
     """
-    verdict = (
-        "Pre-stop verification found issues that would fail CI -- fix before finishing:"
-        if blocking
-        else (
+    stopped = unfinished(failures)
+    ran = [name for name, _artifact, _tail in failures if name not in stopped]
+    if blocking:
+        verdict = "Pre-stop verification found issues that would fail CI -- fix before finishing:"
+    elif ran:
+        verdict = (
             f"Pre-stop verification still failing after {MAX_VERIFY_ROUNDS} attempts. "
             "Not blocking again -- but the branch is red and CI will say so:"
         )
-    )
+    else:
+        verdict = (
+            "Pre-stop verification did not finish, so it found nothing -- not blocking. "
+            "Run the command in the artifact if you have not already:"
+        )
     lines = [verdict]
-    tiers = ", ".join(name for name, _artifact, _tail in failures)
-    lines.append(f"  failed: {tiers}")
+    if ran:
+        lines.append(f"  failed: {', '.join(ran)}")
+    if stopped:
+        lines.append(
+            f"  unknown -- the {VERIFY_BUDGET_SECONDS}s budget stopped it: {', '.join(stopped)}"
+        )
     # Artifact paths are relative to the tree that was checked, and that is not always
     # this one -- say which, or the agent opens the checkout's stale copy of the file.
     if root != REPO_ROOT:
@@ -1076,6 +1107,18 @@ def verify(raw_stdin: str, env: Mapping[str, str]) -> int:
     write_verify_artifact(failures, root)
     if not failures:
         write_rounds(0, root)  # green: the next failure starts from a full budget.
+        return 0
+
+    # A round with nothing but stopped checks is not a red branch -- it is a gate that ran
+    # out of time, and blocking on it buys nothing: the retry gets the same budget, spends
+    # it in the same place, and asks again. That happened twice in a row on devkit#237,
+    # each time at the tail of a long session where a turn is at its most expensive, with
+    # the suite already run green by hand in between. So report it, keep the artifact
+    # naming the command, and leave the answer to that run or to CI. A round that also
+    # holds a check which *did* finish and fail still blocks on that check.
+    if unfinished(failures) == [name for name, _artifact, _tail in failures]:
+        write_rounds(0, root)
+        _print_verify_failures(failures, blocking=False, root=root)
         return 0
 
     rounds_used = blocked_rounds(read_rounds(root), stop_hook_active(raw_stdin))
