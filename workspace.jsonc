@@ -439,13 +439,19 @@
 				"problemMatcher": []
 			},
 			{
-				// The one interactive task in this file, and the one with no `log-wrap.py`:
-				// log-wrap pipes the child's stdout and reads it a line at a time, so a
-				// prompt that never ends its line would never reach the terminal and the
-				// checkbox list would hang waiting for input nobody can see. The script
-				// writes `logs/plug-projects.log` itself instead.
+				// The checkboxes are VS Code's, not the terminal's: `plugSelection` draws
+				// every candidate as a `multiPick` quick-pick, pre-ticked from the registry,
+				// and this task hands the answer back with `--ticked`. The pick IS the
+				// confirmation — Escape cancels, every row's second line says what ticking
+				// it costs, and a hazardous untick still refuses — which is what `--yes`
+				// rests on and why no question is asked once the terminal opens.
+				//
+				// Still no `log-wrap.py`, and now for one reason rather than two: the script
+				// writes `logs/plug-projects.log` itself, so the one artifact covers this
+				// task and the bare CLI, whose checkbox loop log-wrap could not carry
+				// anyway (it pipes stdout by line, so an unfinished prompt never appears).
 				"label": "Workspace: Plug / Unplug Projects",
-				"detail": "Interactive checkbox list of every project — in the workspace registry, on disk, and on GitHub. Ticking an unplugged one clones its repo, or creates the repo when only the folder exists; unticking removes it from the registry and touches NOTHING on disk. Edits devkit's workspace.jsonc and republishes the live .code-workspace, so it refuses from a task branch or a box.",
+				"detail": "Checklist of every project — in the workspace registry, on disk, and on GitHub — ticked as the registry has them. Ticking an unplugged one clones its repo, or creates the repo when only the folder exists; unticking removes it from the registry and touches NOTHING on disk. Edits devkit's workspace.jsonc and republishes the live .code-workspace, so it refuses from a task branch or a box.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -453,7 +459,10 @@
 					"Workspace: Plug / Unplug Projects",
 					"--",
 					"python",
-					"scripts/plug-projects.py"
+					"scripts/plug-projects.py",
+					"--ticked",
+					"${input:plugSelection}",
+					"--yes"
 				],
 				"options": {
 					"cwd": "${workspaceFolder:devkit}"
@@ -2188,12 +2197,20 @@
 				// another pick has already claimed, then starts the boxes in turn and waits on
 				// all of them at once.
 				//
-				// No `multiPickStorage`, which is the one place this deliberately differs from
-				// the `project` picker: that picker's options are the checkout registry, which
-				// does not move, so pre-ticking last time's answer is a convenience. These
-				// options are refs the previous scan happened to find, so remembering the
-				// ticked set would turn "also show me this one" into "re-serve everything I
-				// have looked at since Tuesday".
+				// `clearStorage`, which is the one place this deliberately differs from the
+				// `project` picker: that picker's options are the checkout registry, which does
+				// not move, so pre-ticking last time's answer is a convenience. These options
+				// are refs the previous scan happened to find, so remembering the ticked set
+				// turns "also show me this one" into "re-serve everything I have looked at
+				// since Tuesday".
+				//
+				// Omitting `multiPickStorage` does NOT buy that, which is what this comment
+				// claimed until the extension's source was read: a `multiPick` stores its
+				// ticked labels either way, and the argument only chooses global over
+				// workspace storage. The remembered set then overwrites each option's own
+				// `picked`, so the second click reopened on the previous answer with nothing
+				// in this file asking for it. `clearStorage` drops the set before the list is
+				// built, which is the behaviour the paragraph above always described.
 				"id": "previewRow",
 				"type": "command",
 				"command": "extension.commandvariable.pickStringRemember",
@@ -2215,6 +2232,7 @@
 					// read, and a cancelled run costs one terminal saying it picked nothing —
 					// which both scripts already treat as a graceful no-op.
 					"multiPick": true,
+					"clearStorage": true,
 					"separator": " ",
 					"fileName": "${workspaceFolder:devkit}/logs/preview-menu.json",
 					"fileFormat": "json",
@@ -2263,6 +2281,48 @@
 					}
 				],
 				"default": "--live"
+			},
+			{
+				// The checkbox list that used to be drawn in a terminal by the script it
+				// feeds. `scripts/plug-projects.py --refresh-menu` writes the options file;
+				// `worktree.py reconcile` rewrites it every fifteen minutes, and so does a
+				// run that changes the registry, because the rows' TICKS are the registry
+				// and a menu whose ticks predate the last edit is wrong in the one way that
+				// matters. `.claude/rules/vscode-tasks.md` carries the general form.
+				//
+				// `fileFormat: "load"` takes the file as the option groups verbatim, which
+				// is the difference from `previewRow` above: no `__itemIdx__` expression is
+				// evaluated per field, so a row missing one cannot draw ten thousand blank
+				// entries. Python writes the whole structure, each row's `picked` included.
+				//
+				// `clearStorage` is what makes `picked` mean anything. Every `multiPick`
+				// remembers its ticked LABELS in workspace state whether or not
+				// `multiPickStorage` was asked for — that argument only chooses global over
+				// workspace storage — and `pickStringRemember` overwrites each option's own
+				// `picked` with the remembered set whenever it finds one. So without this
+				// flag the second click would open on what was ticked last time rather than
+				// on what is registered now, which for this list is not a stale convenience
+				// but a wrong answer: the ticks ARE the state being edited.
+				//
+				// No `checkEscapedUI`, for the reason spelled out on `previewRow`: the flag
+				// is a sticky bit nothing else clears, so one Escape would retire this
+				// dropdown for the life of the window. Escape here leaves the literal
+				// `${input:plugSelection}` in the argument instead, and the script reads
+				// that as "nothing was picked" and changes nothing.
+				"id": "plugSelection",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which projects belong in the workspace registry? Ticked = plugged in. OK applies, Esc cancels.",
+					"key": "plugSelection",
+					"multiPick": true,
+					"clearStorage": true,
+					"separator": ",",
+					"optionGroups": {
+						"fileName": "${workspaceFolder:devkit}/logs/plug-menu.json",
+						"fileFormat": "load"
+					}
+				}
 			}
 		]
 	}

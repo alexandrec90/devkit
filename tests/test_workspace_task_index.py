@@ -337,31 +337,29 @@ def test_input_choices_says_when_the_menu_comes_from_a_file(block: dict):
     assert any("asks previewProject first: Which checkout?" in line for line in lines)
 
 
-def test_input_choices_reads_file_backed_option_groups():
-    """Regression, found by `test_the_live_workspace_renders` going red on a task
-    another session had just added. `optionGroups` is a **list** of groups or a
-    **mapping** naming the file to read them from; only the list was modelled, so the
-    loop walked the mapping's keys and died on `"fileName".get`. One input's spelling
-    took the whole report with it, including every task that parses fine."""
+def test_input_choices_reads_option_groups_that_name_a_file():
+    """`optionGroups` is two shapes wearing one key, and the object form loads the whole
+    group array from a file. Iterating it as a list yields its *keys*, so the report
+    crashed with an `AttributeError` on the first input that used it — a whole-file
+    failure from one picker, since `build_report` renders every input or none."""
     spec = {
         "id": "plugSelection",
         "type": "command",
-        "command": "extension.commandvariable.pickStringRemember",
         "args": {
-            "description": "Which plug?",
+            "multiPick": True,
             "optionGroups": {
                 "fileName": "${workspaceFolder:devkit}/logs/plug-menu.json",
                 "fileFormat": "load",
             },
         },
     }
-    lines = index.input_choices(spec)
-    assert any("logs/plug-menu.json" in line for line in lines)
+    assert index.input_choices(spec) == ("  read at pick time from logs/plug-menu.json",)
 
 
 def test_input_choices_survives_a_group_that_is_not_a_mapping():
-    """The same crash one level down. A hand-edited workspace file is the input here,
-    and a report that dies on it tells you nothing about the other forty tasks."""
+    """The same crash one level down, and the array form has no guard of its own. A
+    hand-edited workspace file is this script's input, so a group that is a bare string
+    must cost that group and not the report about the other forty tasks."""
     spec = {"args": {"optionGroups": ["carameli", {"options": ["devkit"]}]}}
     assert [line.strip() for line in index.input_choices(spec)] == ["devkit"]
 

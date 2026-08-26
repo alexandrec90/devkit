@@ -267,26 +267,28 @@ def _source_of(args: dict) -> str:
 def input_choices(spec: dict) -> tuple[str, ...]:
     """The answers on offer, as display lines. `*` marks the default.
 
-    Three shapes reach here and all three matter to a reviewer: a literal option list, a
+    Four shapes reach here and all four matter to a reviewer: a literal option list, a
     list the `command-variable` extension reads out of a JSON file at pick time (so the
     menu is only as fresh as whatever last wrote that file), and a nested
     `pickStringRemember`, which is a *second* question asked before this one.
+
+    `optionGroups` is the fourth, and it is two shapes wearing one key: an **array** of
+    literal groups, or an **object** naming a file to load them from. Iterating the
+    object yields its keys, so reading the second as the first is an `AttributeError`
+    at report time -- which is what `plugSelection` hit the day it was added.
     """
     default = spec.get("default")
     lines: list[str] = []
     for option in spec.get("options", ()):
         lines.append(_option_text(option, default))
     args = spec.get("args") or {}
-    # `optionGroups` has two shapes, and only the list one was modelled. Given the
-    # mapping form -- `{"fileName": ..., "fileFormat": "load"}`, which is how
-    # command-variable reads the *groups* out of a file rather than the options -- the
-    # loop iterated the dict's keys and died on `"fileName".get`. That crashed the whole
-    # report the moment any task in the live workspace used it, which is a report about
-    # every other task lost to one input's spelling.
     groups = args.get("optionGroups")
     if isinstance(groups, dict):
-        lines.append(f"  groups read at pick time from {_source_of(groups)}")
+        lines.append(f"  read at pick time from {_source_of(groups)}")
     else:
+        # A group that is not a mapping either is the same crash one level down: the
+        # input here is a hand-edited workspace file, and one input's spelling must
+        # cost that input's line rather than the whole report.
         for group in groups or ():
             for option in group.get("options", ()) if isinstance(group, dict) else ():
                 lines.append(_option_text(option, default))
