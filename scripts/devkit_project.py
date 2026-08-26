@@ -288,6 +288,14 @@ ACTIONS: dict[str, Action] = {
         "scripts/local-e2e.py", "Test: Run Local Integration E2E", projects=CARAMELI
     ),
     "ngrok": Action("scripts/start-ngrok.py", "Start: ngrok + Sync URLs", projects=CARAMELI),
+    # Takes no argument on purpose. The script encodes every master in
+    # `frontend/assets-src/comic-book/` that has no export yet and skips the rest, so
+    # the task is "I dropped pictures in, pick them up" rather than a prompt for a
+    # filename the picker cannot validate. Naming one is still a CLI call, where
+    # `--label` and `--max-edge` live.
+    "encode-art": Action(
+        "scripts/encode-comic-art.py", "Assets: Encode Comic-Book Art", projects=CARAMELI
+    ),
     "vnc": Action("scripts/vnc-viewer.py", "IBKR: Open Gateway VNC Viewer", projects=IBKR),
     "ingest": Action("scripts/ingest-task.py", "Ingest: Run Source", projects=IBKR),
     "snapshot-monthly": Action(
