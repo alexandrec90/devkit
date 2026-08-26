@@ -708,7 +708,7 @@ insufficiently-spaced service bases rather than letting either reach
 
 ```bash
 python scripts/devkit_ports.py                 # the whole registry
-python scripts/devkit_ports.py carameli-b      # one checkout's *_HOST_PORT block
+python scripts/devkit_ports.py carameli        # one checkout's *_HOST_PORT block
 ```
 
 The generator **does not** edit `ports.toml` itself — it prints the lines to add.

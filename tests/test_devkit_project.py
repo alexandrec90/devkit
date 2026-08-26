@@ -1221,7 +1221,6 @@ UNTOASTED_TASKS = {
     "Agents: Open Tabs (External Terminal)": "the tabs it opens are the notification",
     "Agents: Resume Recent Sessions": "same — reopens sessions in tabs, then exits",
     "Agents: Import Limited Claude Sessions": "same — opens imported sessions in tabs",
-    "Ports: Show Checkout Allocations": "prints a table and exits; you are already looking",
     "Workspace: List Tasks as a Table": "same — the table is the output, in front of you",
 }
 

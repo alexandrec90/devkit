@@ -1381,34 +1381,6 @@
 				"problemMatcher": []
 			},
 			{
-				"label": "Ports: Show Checkout Allocations",
-				"detail": "Print the *_HOST_PORT block for each selected checkout. Use it to rebuild .env files after worktree changes rather than picking free-looking numbers.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/log-wrap.py",
-					"Ports: Show Checkout Allocations",
-					"--",
-					"python",
-					"scripts/devkit_ports.py",
-					"${input:project}"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "plug",
-					"color": "terminal.ansiBlue"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
 				"label": "Agents: Open Tabs (External Terminal)",
 				"detail": "Choose Claude or Codex, then open a new Windows Terminal window with one tab per worktree. Machine-scoped, so it takes no project. The Carameli tabs also mount ../VanillaLand as writable.",
 				"type": "process",

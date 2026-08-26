@@ -77,17 +77,9 @@ otel_http = 4318
 #   them. Four permanent numbers spent on a second checkout per repo is exactly what a
 #   LEASE is for, and freeing them raised the concurrent-box ceiling from 8 to 12.)
 #
-#   carameli-b    slot 2 -> db 5434   db and minio match; app/frontend/redis/
-#                                     minio-console in its (gitignored) .env predate
-#                                     this file and are one below slot 2. Nothing
-#                                     collides, so they are left alone — re-sync that
-#                                     .env from `devkit_ports.py carameli-b` the next
-#                                     time that stack is recreated.
-#
-# ibkr_trader-b holds a slot for symmetry but does not use it: that project pins
-# `name: ibkr_trader` in its compose file so both worktrees deliberately share ONE
-# db container (see its docs/parallel-worktrees.md). Carameli takes the opposite
-# approach — a full stack per worktree — which is why it needs the offsets.
+# Only checkouts that publish something are listed. A stackless repo — devkit,
+# data-lake — has no slot on purpose, and `slot_of` raising for it is the right
+# answer rather than a gap to backfill.
 carameli = 0
 ibkr_trader = 1
 sports_betting = 4
