@@ -349,6 +349,9 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # From the GENERATOR template rather than a live repo — the last task anywhere
         # to leave a `.vscode/tasks.json`.
         "db-revision",
+        # Never hoisted — born scoped, and scoped by content rather than by capability:
+        # the script encodes the comic-book skin's art, which only carameli has.
+        "encode-art",
         # Never hoisted — born scoped. The integration suite spans carameli and the
         # VanillaLand checkout, and VanillaLand is in NOT_PROJECTS, so carameli fronts
         # for the pair and no other checkout can run it.
@@ -593,6 +596,144 @@ def test_registering_against_the_real_workspace_file():
         assert _input_options(inputs[picker_id])[-2:] == ["probe", "probe-b"]
     # VanillaLand is a reference checkout and must not drift into the middle.
     assert [f["path"] for f in devkit_jsonc_loads(updated)["folders"]][-1] == "VanillaLand"
+
+
+# --- retirement, the inverse ------------------------------------------------
+
+unregister = devkit_project.unregister
+remove_folder = devkit_project.remove_folder
+remove_picker_option = devkit_project.remove_picker_option
+
+
+def test_retirement_drops_the_project_from_the_registry():
+    updated = unregister(register(COMMENTED, ["newproj"]), ["newproj"])
+    assert "newproj" not in devkit_project.known_projects(updated)
+
+
+def test_retirement_drops_every_picker_option():
+    text = """{
+        "folders": [{"path": "alpha"}, {"path": "beta"}],
+        "tasks": {
+            "inputs": [
+                {"id": "project", "options": ["alpha", "beta"], "default": "alpha"},
+                {"id": "daemonProject", "options": ["alpha", "beta"], "default": "alpha"},
+                {"id": "worktreeProject", "options": ["alpha", "beta"], "default": "alpha"},
+                {"id": "mergeCheckout", "options": ["alpha", "beta"], "default": "alpha"}
+            ]
+        }
+    }"""
+    updated = devkit_jsonc_loads(unregister(text, ["alpha"]))
+    for picker in updated["tasks"]["inputs"]:
+        assert picker["options"] == ["beta"]
+
+
+def test_retiring_the_default_repoints_it():
+    """A `pickString` whose default names a retired checkout offers it as the pre-filled
+    answer, so the one option that resolves to nothing is the one already selected."""
+    text = """{
+        "folders": [{"path": "alpha"}, {"path": "beta"}],
+        "tasks": {"inputs": [{"id": "project", "options": ["alpha", "beta"], "default": "alpha"}]}
+    }"""
+    picker = devkit_jsonc_loads(unregister(text, ["alpha"]))["tasks"]["inputs"][0]
+    assert picker["default"] == "beta"
+
+
+def test_a_default_that_survives_is_left_alone():
+    text = """{
+        "folders": [{"path": "alpha"}, {"path": "beta"}],
+        "tasks": {"inputs": [{"id": "project", "options": ["alpha", "beta"], "default": "beta"}]}
+    }"""
+    picker = devkit_jsonc_loads(unregister(text, ["alpha"]))["tasks"]["inputs"][0]
+    assert picker["default"] == "beta"
+
+
+def test_retirement_preserves_comments():
+    """The reason the whole tier is text surgery rather than a load/dump round trip."""
+    updated = unregister(register(COMMENTED, ["newproj"]), ["newproj"])
+    assert "sweep.py reads this as the project registry" in updated
+    assert "MAINTAINED BY new-project.py" in updated
+
+
+def test_registration_and_retirement_round_trip_byte_for_byte():
+    """The strongest statement of `_drop_element`'s comma handling there is: a stray or
+    missing separator is a trailing comma the workspace file's own parser rejects, and
+    `sweep.parse_workspace` reads an unparseable registry as "no checkouts" rather than
+    as a failure."""
+    assert unregister(register(COMMENTED, ["newproj"]), ["newproj"]) == COMMENTED
+
+
+def test_retiring_a_project_that_is_not_registered_is_a_no_op():
+    """The picker re-runs over its own result: a name already gone must not fail."""
+    assert unregister(COMMENTED, ["never-was-here"]) == COMMENTED
+
+
+def test_retiring_the_last_folder_entry_takes_the_comma_before_it():
+    """An element with nothing after it owns the *preceding* comma, not a following one.
+    Taking the wrong side leaves `[..., ]`, which is the trailing comma above."""
+    text = '{"folders": [{"path": "alpha"}, {"path": "beta"}]}'
+    assert devkit_jsonc_loads(remove_folder(text, "beta"))["folders"] == [{"path": "alpha"}]
+
+
+def test_a_folder_entry_is_matched_by_path_not_by_label():
+    """VS Code rewrites this file whenever a workspace setting is changed through its UI,
+    so its spacing is not ours to predict, and a folder may carry a display `name` that
+    is not its path."""
+    text = '{"folders": [{ "name" : "Alpha (reference)" , "path" :  "alpha" }, {"path": "beta"}]}'
+    assert devkit_jsonc_loads(remove_folder(text, "alpha"))["folders"] == [{"path": "beta"}]
+
+
+def test_removing_the_only_folder_entry_is_refused():
+    with pytest.raises(RegistryEditError, match="only element"):
+        remove_folder('{"folders": [{"path": "alpha"}]}', "alpha")
+
+
+def test_removing_a_folder_that_is_not_there_is_refused():
+    with pytest.raises(RegistryEditError, match="not in the workspace folders list"):
+        remove_folder('{"folders": [{"path": "alpha"}, {"path": "beta"}]}', "gamma")
+
+
+def test_a_picker_that_never_listed_the_name_is_left_alone():
+    """`mergeCheckout` lists more than the registry, and an older workspace file may
+    carry fewer pickers, so "not there" is the same outcome as "removed"."""
+    text = '{"tasks": {"inputs": [{"id": "project", "options": ["alpha", "beta"]}]}}'
+    assert remove_picker_option(text, "gamma") == text
+
+
+def test_a_workspace_without_a_project_picker_is_refused():
+    with pytest.raises(RegistryEditError, match=r"no .project. input"):
+        remove_picker_option('{"tasks": {"inputs": []}}', "alpha")
+
+
+def test_a_half_applied_retirement_is_refused_rather_than_written():
+    """`unregister` verifies its own result for the reason `register` does: the failure
+    it guards against is silent everywhere it matters."""
+    text = '{"folders": [{"path": "alpha"}, {"path": "beta"}]}'
+    with pytest.raises(RegistryEditError, match=r"no .project. input"):
+        unregister(text, ["alpha"])
+
+
+@needs_live_workspace
+def test_retiring_against_the_real_workspace_file():
+    """The fixtures above are three inputs deep; the live file's `project` picker nests
+    its options two levels inside `args`, and every picker carries comments."""
+    text = LIVE_WORKSPACE.read_text(encoding="utf-8")
+    victim = devkit_project.known_projects(text)[0]
+    updated = unregister(text, [victim])
+    assert victim not in devkit_project.known_projects(updated)
+    inputs = {i["id"]: i for i in devkit_jsonc_loads(updated)["tasks"]["inputs"]}
+    for picker_id in ("project", "daemonProject", "worktreeProject", "mergeCheckout"):
+        options = _input_options(inputs[picker_id])
+        assert victim not in options
+        default = inputs[picker_id].get("default")
+        assert default is None or default in options
+    # VanillaLand is not a project, so no checkbox can retire it out of the registry.
+    assert [f["path"] for f in devkit_jsonc_loads(updated)["folders"]][-1] == "VanillaLand"
+
+
+@needs_live_workspace
+def test_the_real_workspace_file_round_trips():
+    text = LIVE_WORKSPACE.read_text(encoding="utf-8")
+    assert unregister(register(text, ["probe"]), ["probe"]) == text
 
 
 # --- the canonical task block ------------------------------------------------
@@ -948,6 +1089,10 @@ UNLOGGED_TASKS = {
     "Agents: Resume Recent Sessions": "same — reopens sessions in tabs, then exits",
     "Agents: Import Limited Claude Sessions": "same — opens imported sessions in tabs",
     "IBKR: Open Gateway VNC Viewer": "launches a GUI viewer; nothing to parse when it closes",
+    "Workspace: Plug / Unplug Projects": (
+        "interactive — log-wrap pipes stdout and reads it by line, so the checkbox "
+        "prompt would never appear; the script writes logs/plug-projects.log itself"
+    ),
 }
 
 
@@ -989,14 +1134,17 @@ def test_the_workspace_file_tasks_are_not_dispatches(canonical):
     """There is exactly one workspace file, so there is no checkout to pick -- and a
     task that named the `project` picker would ask a question with no bearing on what
     it does. They call the script directly, which is why they carry their own
-    `log-wrap.py` (see the artifact test above)."""
+    `log-wrap.py` -- asserted by the artifact test above, and only there: this test used
+    to assert it a second time with no exemption path, so the first `Workspace:` task
+    that legitimately could not be piped (the interactive one) failed a rule the table
+    it was listed in had already excused it from.
+    """
     for task in canonical["tasks"]:
         if not task["label"].startswith("Workspace: "):
             continue
         args = [str(a) for a in task.get("args", ())]
         assert not args[0].endswith("devkit_project.py"), task["label"]
         assert "${input:project}" not in args, task["label"]
-        assert "scripts/log-wrap.py" in args, task["label"]
 
 
 def test_the_unlogged_exceptions_are_all_real_tasks(canonical):

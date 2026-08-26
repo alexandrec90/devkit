@@ -26,6 +26,22 @@ things that would have to still work in order to undo a bad update.
 Each is reported as skipped in the artifact rather than silently omitted, so a reader
 who wonders why npm is still behind finds the reason instead of a bug.
 
+**The agent CLIs are a second stage, because npm cannot see them.** `claude` and
+`codex` are installed natively on this machine -- `~/.local/bin` and
+`AppData/Local/Programs/OpenAI` -- so `npm outdated --global` reports neither, and the
+skip above describes an installation shape that is not the one here. `agent_clis.run_pass`
+runs at the head of every pass, calling each CLI's own updater and stepping over any
+agent that is running; `scripts/agent_clis.py` owns that half and says why it is spelled
+that way.
+
+It is **not** a flag, deliberately. The scheduled command is registered once, in a task
+document on the machine, and an installer whose argv has to change is one whose already-
+registered task keeps doing half the job until somebody remembers to re-run it --
+`drifted` compares the script path, so nothing would even report the gap. Folding the
+stage into the same argv means the merge that adds it is the whole rollout. The cost is
+that this module's tests must stub `agent_clis.run_pass` rather than merely not asking
+for it, which `tests/test_global_tools.py` does once, autouse, for the whole file.
+
 **There is no post-update smoke test, on purpose.** The tempting one -- run each
 updated package's bin with `--version` -- is a false-positive generator: an MCP stdio
 server started with no arguments does not exit, and a package with no `--version` flag
@@ -62,6 +78,9 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agent_clis
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -113,6 +132,11 @@ INSTALL_TIMEOUT = 300
 OUTDATED_TIMEOUT = 180
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
+
+# The agent-CLI stage, taken as an argument so this module's own tests cannot spawn a
+# real updater by forgetting to stub one. `agent_clis.run_pass` is the only production
+# value it ever takes.
+AgentPass = Callable[..., agent_clis.Report]
 
 
 @dataclass(frozen=True)
@@ -249,12 +273,17 @@ def render(
     outcomes: Sequence[Outcome],
     skipped: Sequence[tuple[Behind, str]] = (),
     note: str = "",
+    agents: Sequence[str] = (),
 ) -> str:
     """One pass's block of the artifact.
 
     Every updated package gets its rollback command on its own line, because that is
     the line a reader has come here for: the session broke this morning, and the
     question is which version it was working on yesterday.
+
+    The agent-CLI stage's lines arrive already formatted, under a heading of their own:
+    they are versions this pass moved, but not npm packages, and a `claude` line loose
+    among the npm ones reads as a global package that does not exist.
     """
     lines = [f"{RUN_MARKER}{stamp}"]
     if note:
@@ -271,6 +300,9 @@ def render(
         lines.append(f"  skipped {entry.name} {entry.current} -> {entry.latest} ({reason})")
     if not outcomes and not skipped and not note:
         lines.append("  every global package is current")
+    if agents:
+        lines.append("  agent CLIs:")
+        lines += [f"  {line}" for line in agents]
     return "\n".join(lines) + "\n"
 
 
@@ -322,6 +354,7 @@ def main(
     root: Path | None = None,
     now: Callable[[], _dt.datetime] = _dt.datetime.now,
     which: Callable[[str], str | None] = shutil.which,
+    agent_pass: AgentPass | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(description="Keep globally-installed npm tooling current.")
     parser.add_argument(
@@ -333,10 +366,19 @@ def main(
     runner: Runner = run or (lambda command: run_command(command, INSTALL_TIMEOUT))
     stamp = now().strftime("%Y-%m-%d %H:%M")
 
+    # Before npm, and outside every early return below: the agent CLIs are installed
+    # natively here, so nothing about their pass depends on npm being present or the
+    # registry being reachable. Running it after the npm lookup would tie the two
+    # together, and the npm-missing branch would silently skip it.
+    report = (agent_pass or agent_clis.run_pass)(yes=options.yes)
+    agents, agent_failures, agent_summary = report.lines, report.failures, report.summary
+
     npm = npm_executable(which)
     if not npm:
         path = write_artifact(
-            render(stamp, [], note="npm is not on PATH -- nothing to do"), root, options.kept
+            render(stamp, [], note="npm is not on PATH -- nothing to do", agents=agents),
+            root,
+            options.kept,
         )
         print(f"global-tools: npm not found; see {path}", file=sys.stderr)
         return 1
@@ -347,9 +389,9 @@ def main(
         note = (
             "registry unreachable" if offline else "npm outdated failed"
         ) + f": {problem.splitlines()[-1]}"
-        path = write_artifact(render(stamp, [], note=note), root, options.kept)
+        path = write_artifact(render(stamp, [], note=note, agents=agents), root, options.kept)
         print(f"global-tools: {note} (see {path})", file=sys.stderr)
-        return 0 if offline else 1
+        return 1 if agent_failures or not offline else 0
 
     updating, skipped = partition(behind)
     if not options.yes:
@@ -357,18 +399,20 @@ def main(
             Outcome(item.name, item.current, item.latest, True, "dry run") for item in updating
         ]
         note = "dry run -- pass --yes to install" if updating else ""
-        path = write_artifact(render(stamp, outcomes, skipped, note), root, options.kept)
+        path = write_artifact(render(stamp, outcomes, skipped, note, agents), root, options.kept)
         print(f"global-tools: {len(updating)} behind, nothing installed; see {path}")
-        return 0
+        return 1 if agent_failures else 0
 
     outcomes = [update_one(npm, item, runner) for item in updating]
-    path = write_artifact(render(stamp, outcomes, skipped), root, options.kept)
+    path = write_artifact(render(stamp, outcomes, skipped, agents=agents), root, options.kept)
     failed = [item for item in outcomes if not item.ok]
     updated = len(outcomes) - len(failed)
+    tail = f"; agent CLIs: {agent_summary}" if agent_summary else ""
     print(
-        f"global-tools: {updated} updated, {len(failed)} failed, {len(skipped)} skipped; see {path}"
+        f"global-tools: {updated} updated, {len(failed)} failed, "
+        f"{len(skipped)} skipped{tail}; see {path}"
     )
-    return 1 if failed else 0
+    return 1 if failed or agent_failures else 0
 
 
 if __name__ == "__main__":

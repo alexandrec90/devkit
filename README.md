@@ -518,11 +518,28 @@ records `npm install -g <name>@<old>` for everything it moved. A registry it can
 is recorded and exits 0 — a laptop offline at 04:30 is the system working, and a job whose
 alerts fire on the normal case is a job whose alerts nobody reads.
 
+**The agent CLIs move in the same pass, through their own updaters.** `claude` and
+`codex` are native installs here, not npm globals, so `npm outdated --global` reports
+neither and the two binaries this workspace runs most were the ones nothing was moving.
+`scripts/agent_clis.py` runs `<cli> update` for each, having first asked the machine what
+is running: **an agent with a live process is skipped**, because an update replaces the
+binary that session is executing. A machine that cannot be asked what is running counts
+as running. A CLI whose update failed gets its `doctor` report recorded next to the
+failure; a healthy one does not, so the artifact stays readable.
+
 ```bash
 python scripts/install-global-tools.py            # what it would register
 python scripts/install-global-tools.py --yes      # daily 04:30
 python scripts/global-tools.py                    # what is behind, installing nothing
+python scripts/agent_clis.py --yes                # the agent CLIs alone
+python scripts/agent_clis.py --agent codex --doctor
 ```
+
+On a desk where an agent window is nearly always open, that nightly pass skips nearly
+every night — so the other half of it runs where the answer is different by construction.
+`scripts/resume-sessions.py`, the "Agents: Resume Recent Sessions" task, updates the
+agents it is **about to** resume in the gap before the tabs open. Only those agents, only
+while none of them is running, and `--no-update` opts out.
 
 The prune runs `--idle-only`, so it declines whenever containers are up; reclaiming the
 VHDX needs `wsl --shutdown`, and stopping a running stack at 04:00 for disk is not a
@@ -622,6 +639,46 @@ Individual `--with-*` flags add to a preset; they never subtract.
 Everything local and reversible happens before the two outward-facing steps
 (creating the GitHub repo, pushing). A failure before that leaves a directory you
 can delete.
+
+### Plugging a project in and out
+
+Creating one is not the only way a project enters the workspace, and deleting the
+folder is not how it leaves. The registry is the `folders` list in the workspace
+file, and **every tool here reads it** — `sweep.py`, `worktree.py`,
+`workspace-status.py`, the task dispatcher's project pickers, and the worktree guard
+that decides whether an agent's edit needs a box. Editing that list by hand means
+editing the canonical copy, remembering the four pickers that mirror it, and
+republishing; missing any of the three leaves a project half-registered.
+
+`scripts/plug-projects.py` is the whole operation as a checkbox list, and the VS Code
+task **"Workspace: Plug / Unplug Projects"** is the same thing one click away.
+
+```bash
+python scripts/plug-projects.py            # the list, then tick and apply
+python scripts/plug-projects.py --list     # read-only; works from a box too
+python scripts/plug-projects.py --plug apt-finder --unplug geo --yes
+```
+
+It inventories three sources and shows the union, so a project is visible whether or
+not the workspace currently knows about it:
+
+| Source | Read from |
+| --- | --- |
+| plugged | the `folders` list, minus `NOT_PROJECTS` |
+| on disk | directories beside the workspace file carrying a `.git` or a `.devkit.toml` |
+| on GitHub | `gh repo list --no-archived` |
+
+Ticking an unplugged project clones its repo when only the repo exists, and creates
+the repo when only the folder does — so the checkbox is the whole action in both
+directions. Unticking **touches nothing on disk**: it removes the entry and leaves
+the folder exactly where it was, which is what makes the toggle safe to experiment
+with. Before it unplugs, it names anything that would be stranded — a live box on
+that project, uncommitted files, unpushed commits — and refuses without `--force`.
+
+The write path is canonical-then-publish, never a hand edit of the live file, so the
+run refuses from a task branch, from inside a box, and over a live workspace file
+carrying an edit devkit never wrote. Its own edit to `workspace.jsonc` is left
+uncommitted, on the same terms as `--adopt-workspace`: ship it on a task branch.
 
 ### Host ports: `ports.toml`
 

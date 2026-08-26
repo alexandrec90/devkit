@@ -5,7 +5,17 @@ The machine-wide half of the same idea `install-upgrade-schedule.py` covers for
 repositories: something has to move the versions nobody is watching. Four of this
 workspace's MCP servers, and every linter reachable without a project venv, run from a
 **globally installed** npm package -- a version pinned by whoever typed `npm i -g` once
-and moved by nothing since. `global-tools.py`'s docstring has the full argument.
+and moved by nothing since. The two binaries this workspace runs *most*, `claude` and
+`codex`, are not even npm packages here, so nothing was moving them at all; the same
+pass now runs their own updaters first. `global-tools.py`'s docstring has the full
+argument, and `agent_clis.py`'s the agent half.
+
+That second stage is deliberately not a flag on the command below. The argv registered
+in a task document is a fact about the machine, not about the repo: an installer that
+had to grow an argument would leave the already-registered task doing half the job until
+somebody re-ran this script, and `drifted` compares the script path, so nothing would
+report the gap. Widening what the runner does, rather than what the schedule asks for,
+makes the merge the whole rollout.
 
 Why devkit owns this at all, rather than a hand-registered `schtasks /Create`: the
 hand-registered job is a failure this repo has already had. `devkit-docker-prune` was
@@ -232,9 +242,10 @@ def render_plan(schedule: Schedule, windows: bool = WINDOWS) -> str:
         f"schedule: {schedule.name} -- daily at {schedule.at}",
         f"  runs: {subprocess.list2cmdline(schedule.command)}",
         "",
-        "Every globally-installed npm package that is behind is updated to its newest",
-        f"release, except npm and Claude Code. Each move is recorded in {ARTIFACT}",
-        "with the command that undoes it.",
+        "The agent CLIs (claude, codex) are updated through their own updaters, skipping",
+        "any that is running. Then every globally-installed npm package that is behind is",
+        "updated to its newest release, except npm and Claude Code. Each move is recorded",
+        f"in {ARTIFACT} with the command that undoes it.",
         "",
     ]
     if windows:

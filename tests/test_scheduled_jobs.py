@@ -242,6 +242,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/sync-devkit.py": "upgrade-project.py spawns it per project, once per pass",
     "scripts/release.py": "release-pipeline.py imports it for the version and bump helpers",
     "scripts/git_policy.py": "the single spawn point git-merge-default.py runs git through",
+    "scripts/agent_clis.py": "global-tools.py runs the agent-CLI stage of every nightly pass",
     # not scheduled, but the same failure: an agent hook's parent is whatever launched
     # the agent, and an editor's extension host has no console either.
     "scripts/worktree-guard.py": "PreToolUse hook, parent may itself be console-less",

@@ -439,6 +439,38 @@
 				"problemMatcher": []
 			},
 			{
+				// The one interactive task in this file, and the one with no `log-wrap.py`:
+				// log-wrap pipes the child's stdout and reads it a line at a time, so a
+				// prompt that never ends its line would never reach the terminal and the
+				// checkbox list would hang waiting for input nobody can see. The script
+				// writes `logs/plug-projects.log` itself instead.
+				"label": "Workspace: Plug / Unplug Projects",
+				"detail": "Interactive checkbox list of every project — in the workspace registry, on disk, and on GitHub. Ticking an unplugged one clones its repo, or creates the repo when only the folder exists; unticking removes it from the registry and touches NOTHING on disk. Edits devkit's workspace.jsonc and republishes the live .code-workspace, so it refuses from a task branch or a box.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Workspace: Plug / Unplug Projects",
+					"--",
+					"python",
+					"scripts/plug-projects.py"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "checklist",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
 				"label": "Git: Sync Branch onto Origin Default (Keep Changes)",
 				"detail": "For each selected checkout, sequentially: detect origin's default branch, then fetch → stash if dirty → rebase → pop. Keeps unstaged/untracked changes.",
 				"type": "process",
@@ -773,6 +805,29 @@
 				"icon": {
 					"id": "beaker",
 					"color": "terminal.ansiBrightGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Assets: Encode Comic-Book Art",
+				"detail": "Encode every master in frontend/assets-src/comic-book/ that has no .webp in public/comic-book/ yet, and add each one to the ?edit=1 picture dropdown. Existing exports are skipped, so it is safe to repeat. Reports public/ against MAX_PUBLIC_BYTES and never raises it.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:carameliCheckout}",
+					"encode-art"
+				],
+				"icon": {
+					"id": "file-media",
+					"color": "terminal.ansiBrightMagenta"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1378,7 +1433,7 @@
 				// wherever they happened, so the script reads the transcript store — which
 				// records each session's own directory — instead of asking.
 				"label": "Agents: Resume Recent Sessions",
-				"detail": "Check Claude, Codex, or both and choose how many sessions, then reopen the globally most recent matching sessions in a new Windows Terminal window, one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it.",
+				"detail": "Check Claude, Codex, or both and choose how many sessions, then reopen the globally most recent matching sessions in a new Windows Terminal window, one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it. The checked CLIs are updated first, which takes a few seconds and is the one moment they can be — an update cannot replace a binary a running agent is executing, so any agent already up is skipped.",
 				"type": "process",
 				"command": "python",
 				"args": [

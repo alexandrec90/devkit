@@ -338,6 +338,22 @@ DEFAULT_MIN_FREE_GB = 20.0
 # the chance a review comment arrives is a poor trade against a full disk.
 DEFAULT_MAX_AGE_DAYS = 3.0
 
+# How young a box has to be for "spent-branch and no PR" to mean a race rather than a
+# finding. The verdict is read as "cut and never used", and every box is exactly that
+# for the first minute of its life: the guard cuts one before the session has written
+# anything into it, and `new` returns before the agent has made its first edit.
+#
+# A pass caught one 90 seconds after `worktree.py new` created it, destroyed the branch,
+# and released the slot out from under the session holding its lease -- so the workaround
+# an agent had to know was to `git commit --allow-empty` the instant it got a box. The
+# scheduled pass runs every 15 minutes (`install-reconcile-task.DEFAULT_INTERVAL_MINUTES`),
+# so a grace of one hour is several intervals of margin and costs a genuinely abandoned
+# box four extra passes on disk -- against destroying live work, which is unrecoverable.
+#
+# Only the "never used" branch consults it. Every case above that one is evidence the box
+# *was* used, and a merged or closed PR is not less true for being recent.
+NEWBORN_GRACE_DAYS = 1.0 / 24.0
+
 # `gh pr view` fields. `statusCheckRollup` is per-head-commit, so a stale green from
 # before the last push cannot be read as current.
 PR_VIEW_FIELDS = "number,url,state,labels,statusCheckRollup"
@@ -741,13 +757,55 @@ def find_session_box(boxes: Mapping[str, Box], project: str, session: str) -> Bo
     return None
 
 
-def claim_box(workspace: Path, name: str, session: str, apply: bool = True) -> Box:
+def claim_refusal(box: Box, session: str, dirty: bool) -> str:
+    """Why this claim must not go through unforced, or "" when it may.
+
+    Pure, so the whole rule is testable without a worktree on disk.
+
+    A claim is a *handover*, and the two things it is asked to do are not equally safe.
+    Taking over a box whose tree is clean costs nothing: every commit is on the branch,
+    and the previous session has nothing in flight to lose. Taking over one that holds
+    uncommitted work makes two sessions owners of the same working tree, and the loser
+    is whichever one is not the next to push -- the other session's push resets the box
+    and the edits are simply gone.
+
+    That has happened. The guard blocked an edit into a live session's box, its block
+    message offered `claim --yes` as the remedy, the claim was granted silently, and
+    both sessions then edited the same branch until one push discarded the other's
+    working tree. The block message is the reason this refusal has to live here rather
+    than in the caller's judgement: the agent reading it is being *told* to run claim,
+    with nothing in front of it to say the box is somebody's live workspace.
+
+    `dirty` is the whole test, and it is the right one because it is exactly what a
+    takeover can destroy -- the same predicate `reapable` uses to refuse a reap, for the
+    same reason. An unowned box (no lease session) and a re-claim by the session that
+    already holds it are handovers to nobody, so neither is refused.
+    """
+    if not box.session or sessions_match(box.session, session):
+        return ""
+    if not dirty:
+        return ""
+    return (
+        f"{box.name} is leased to session {box.session} and its tree holds uncommitted "
+        f"changes, so it is somebody's live workspace rather than work that was handed "
+        f"over. Claiming it makes two sessions owners of one tree, and the next push "
+        f"from either discards the other's edits. Ask that session to commit or ship "
+        f"first, or pass --force if you know it has stopped."
+    )
+
+
+def claim_box(
+    workspace: Path, name: str, session: str, apply: bool = True, force: bool = False
+) -> Box:
     """Re-lease a live box to `session` — the sanctioned takeover.
 
     The guard blocks an edit into a box leased to a different session and names this
     as the way through when the user really has handed the work over. It is a lease
     rewrite only: nothing in the worktree moves, so the new session inherits the old
     one's uncommitted state as-is.
+
+    `force` is what gets past `claim_refusal`, which declines a box that is still
+    somebody's live workspace. See there for why that refusal exists.
     """
     if not session:
         raise WorktreeError(
@@ -761,6 +819,13 @@ def claim_box(workspace: Path, name: str, session: str, apply: bool = True) -> B
         if box is None:
             known = ", ".join(sorted(boxes)) or "(none)"
             raise WorktreeError(f"no live box called {name!r}; live boxes: {known}")
+        if not force:
+            # Read inside the lock and without a fetch: the question is what this
+            # worktree holds right now, and the remote has no part in it.
+            state = sweep.inspect(box.name, box_path(root, box.name), fetch=False)
+            refusal = claim_refusal(box, session, bool(state.dirty))
+            if refusal:
+                raise WorktreeError(refusal)
         claimed = replace(box, session=session)
         if apply:
             boxes[name] = claimed
@@ -1912,6 +1977,7 @@ def reconcile_action(
     age_days: float = 0.0,
     max_age_days: float = DEFAULT_MAX_AGE_DAYS,
     holds_uncommitted: bool = True,
+    newborn_grace_days: float = NEWBORN_GRACE_DAYS,
 ) -> tuple[str, str]:
     """`(action, why)` for one box. Pure; every IO decision above it collapses to these.
 
@@ -1950,7 +2016,9 @@ def reconcile_action(
       have its box thrown away while it waits.
     - **no PR** -- a box that was cut and never used, which is the commonest kind: the
       guard hook cuts one per (session, project) whether or not that session writes
-      anything. Nothing was ever at stake, so it goes immediately.
+      anything. Nothing was ever at stake, so it goes immediately -- but not before it
+      is old enough for "never used" to be a finding rather than a race. See
+      `newborn_grace_days`.
     - **no PR but pushed** -- `needs-pr` with nothing on GitHub *at all*, which is the
       one case here where no person has ruled on the branch. Never destroyed and never
       merged: the commits are safe on the remote but nobody will ever look at them, and
@@ -2029,6 +2097,12 @@ def reconcile_action(
     if verdict == sweep.NEEDS_PR:
         return WAIT, "branch is pushed but has no PR -- /ship it, or open one by hand"
 
+    if age_days < newborn_grace_days:
+        return WAIT, (
+            f"{verdict} and no PR, but the box is {age_days * 24 * 60:.0f}m old -- too "
+            f"young for that to mean anything but a box whose session has not written "
+            f"to it yet"
+        )
     return REAP, f"{verdict} and no PR -- the box was never used"
 
 
@@ -3857,6 +3931,11 @@ def survey(workspace: Path, fetch: bool = False, sizes: bool = False) -> list[di
             "age_days": round(box_age_days(box.created), 2),
             "verdict": verdict,
             "reason": reason,
+            # Leased-idle vs leased-active, which `session` alone cannot tell apart: a
+            # lease says who owns the box, not whether anything is in flight in it. It
+            # is what `claim_refusal` decides on, and a reader picking a box to take
+            # over needs the same fact in front of them before they run the command.
+            "dirty": bool(state.dirty),
             # `reapable(...)` rather than the set, so a preview — which the set cannot
             # contain without making `spent-branch` mean two things — is not reported as
             # a box holding work. `AWAITS_A_MERGE` is then subtracted for the same reason
@@ -4702,6 +4781,11 @@ def main(argv: list[str] | None = None) -> int:
     takeover.add_argument(
         "--session", required=True, help="the full session id taking the box over"
     )
+    takeover.add_argument(
+        "--force",
+        action="store_true",
+        help="claim a box that still holds uncommitted work (two owners, one tree)",
+    )
     add_common_args(takeover)
 
     reap = sub.add_parser("reap", help="destroy a box once its work has shipped")
@@ -4863,7 +4947,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if ok else 1
 
         if args.mode == "claim":
-            claimed = claim_box(args.workspace, args.box, args.session, apply=not args.dry_run)
+            claimed = claim_box(
+                args.workspace,
+                args.box,
+                args.session,
+                apply=not args.dry_run,
+                force=args.force,
+            )
             if args.json:
                 print(json.dumps({"box": asdict(claimed), "applied": not args.dry_run}, indent=2))
             else:

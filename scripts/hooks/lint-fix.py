@@ -302,10 +302,20 @@ def record_block(paths: list[str], failures: list[str]) -> None:
 
 
 def _read_stdin() -> str:
-    """Best-effort read of the hook payload; '' when stdin is a tty or unreadable."""
+    """Best-effort read of the hook payload; '' when stdin is a tty or unreadable.
+
+    Decoded as UTF-8 rather than through the platform codec, for the reason
+    `worktree-guard.read_stdin` sets out: the harness writes UTF-8 JSON and Windows
+    decodes stdin as cp1252. What this hook takes from the payload is a file path, so
+    the cost is a non-ASCII path silently missing the formatter rather than a corrupted
+    edit -- a quiet skip, which is the shape of failure this repo treats as worst.
+    """
     try:
         if sys.stdin is None or sys.stdin.isatty():
             return ""
+        buffer = getattr(sys.stdin, "buffer", None)
+        if buffer is not None:
+            return buffer.read().decode("utf-8", errors="replace")
         return sys.stdin.read()
     except (OSError, ValueError):
         return ""

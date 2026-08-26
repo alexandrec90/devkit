@@ -12,6 +12,12 @@ become worse than not having it:
    case is a job whose alerts nobody reads.
 
 Nothing here spawns npm. Every function that would is given a runner.
+
+Nothing here spawns an **agent CLI** either, and that one is enforced rather than
+observed: `no_real_agent_pass` is autouse, so a test added later cannot reach the real
+updater by leaving `agent_pass` out. The stage runs on every path through `main` --
+including the ones that return before npm is ever consulted -- which is exactly why a
+per-test stub would have been the wrong shape.
 """
 
 from __future__ import annotations
@@ -46,6 +52,37 @@ class FakeRunner:
     @property
     def installed(self) -> list[str]:
         return [call[-1] for call in self.calls if "install" in call]
+
+
+class StubPass:
+    """An `agent_clis.run_pass` that spawns nothing and remembers how it was called."""
+
+    def __init__(self, *, lines=("  current claude 1.2.3",), failures: int = 0):
+        self.calls: list[dict] = []
+        self.report = global_tools.agent_clis.Report(
+            tuple(
+                global_tools.agent_clis.Outcome("claude", global_tools.agent_clis.FAILED)
+                for _ in range(failures)
+            ),
+            tuple(lines),
+        )
+
+    def __call__(self, agents=(), **kwargs):
+        self.calls.append({"agents": tuple(agents), **kwargs})
+        return self.report
+
+
+@pytest.fixture(autouse=True)
+def no_real_agent_pass(monkeypatch):
+    """Every `main` runs the agent stage; none of them may run the real one.
+
+    Autouse because the hazard is a test that *forgets*: the stage is not opt-in, so
+    omitting `agent_pass` silently means "spawn this machine's updaters" rather than
+    "skip that part". Patched on the module object so both spellings are covered.
+    """
+    stub = StubPass()
+    monkeypatch.setattr(global_tools.agent_clis, "run_pass", stub)
+    return stub
 
 
 def outdated_payload(**packages: tuple[str, str]) -> str:
@@ -360,3 +397,70 @@ def test_every_exit_path_leaves_an_artifact(tmp_path):
         target = tmp_path / str(id(kwargs["run"]))
         global_tools.main(["--yes"], root=target, now=at(), **kwargs)
         assert (target / global_tools.ARTIFACT).is_file()
+
+
+# --- the agent CLIs, which npm cannot see --------------------------------------
+
+
+def test_the_agent_pass_runs_even_when_npm_is_missing(tmp_path):
+    """The whole reason it is called before the npm lookup. `claude` and `codex` are
+    native installs, so a machine with no npm is still a machine whose agents move."""
+    stub = StubPass(lines=("  updated codex 0.1.0 -> 0.2.0",))
+    code = global_tools.main(
+        ["--yes"],
+        run=FakeRunner(),
+        root=tmp_path,
+        now=at(),
+        which=lambda _name: None,
+        agent_pass=stub,
+    )
+    assert code == 1  # npm is still missing; that verdict is unchanged
+    assert stub.calls == [{"agents": (), "yes": True}]
+    assert "updated codex" in (tmp_path / global_tools.ARTIFACT).read_text(encoding="utf-8")
+
+
+def test_an_offline_registry_still_gets_the_agent_pass_recorded(tmp_path):
+    stub = StubPass(lines=("  updated claude 1.0.0 -> 1.1.0",))
+    code = global_tools.main(
+        ["--yes"],
+        run=FakeRunner(outdated="npm ERR! code ENOTFOUND registry.npmjs.org"),
+        root=tmp_path,
+        now=at(),
+        which=lambda _name: "npm",
+        agent_pass=stub,
+    )
+    assert code == 0
+    assert "updated claude" in (tmp_path / global_tools.ARTIFACT).read_text(encoding="utf-8")
+
+
+def test_a_dry_run_asks_the_agent_pass_not_to_install_either(tmp_path):
+    stub = StubPass()
+    global_tools.main(
+        [], run=FakeRunner(), root=tmp_path, now=at(), which=lambda _name: "npm", agent_pass=stub
+    )
+    assert stub.calls == [{"agents": (), "yes": False}]
+
+
+def test_an_agent_that_failed_to_update_reddens_the_pass(tmp_path):
+    """Otherwise the one thing this stage exists to move can fail every night at 04:30
+    and never show up in session-start's schedule line."""
+    stub = StubPass(lines=("  FAILED  codex 0.1.0: exit 1",), failures=1)
+    code = global_tools.main(
+        ["--yes"],
+        run=FakeRunner(),
+        root=tmp_path,
+        now=at(),
+        which=lambda _name: "npm",
+        agent_pass=stub,
+    )
+    assert code == 1
+
+
+def test_the_agent_lines_are_written_under_their_own_heading():
+    text = global_tools.render("2026-08-19 04:30", [], agents=("  current claude 1.2.3",))
+    assert "  agent CLIs:" in text
+    assert "    current claude 1.2.3" in text
+
+
+def test_a_pass_with_no_agent_lines_grows_no_empty_heading():
+    assert "agent CLIs" not in global_tools.render("2026-08-19 04:30", [])
