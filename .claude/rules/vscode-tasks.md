@@ -171,6 +171,14 @@ after the PR merges; a box never renders.
   deliberately writes no artifact goes in `UNLOGGED_TASKS` in
   `tests/test_devkit_project.py` with its reason; the two launcher tasks are there
   because the window they open *is* the output.
+- **The quick-pick is the human's surface, so a task needs a human caller.** An agent
+  reaches every script here through the CLI and never through VS Code, so a row whose
+  only plausible clicker is an agent — or one that duplicates a scheduled pass — is
+  clutter in the one menu a person reads, and a second owner for a tier's lifecycle.
+  Three of the four box tasks went for exactly that;
+  `test_the_box_tier_keeps_one_task_and_it_is_read_only` holds the line and carries the
+  case per task, and `test_the_sweep_has_no_workspace_task` is the same judgement about
+  `sweep.py`.
 - Label convention: `"Domain: Title Case Action"`, and **every task carries a `detail`**
   — that is the second line in the quick-pick, and the only place a one-click action can
   state its cost or blast radius.
@@ -236,7 +244,7 @@ after the PR merges; a box never renders.
   the only way to sweep or upgrade it. Both are gone, and the reason they are not coming
   back is in `tests/test_devkit_project.py` above `MERGE_TASK`: the question a scope
   picker asks has no answer worth the copy. Only `register()`-maintained pickers remain
-  — `project`, `daemonProject`, `worktreeProject`, `mergeCheckout` — so a new project
+  — `project`, `daemonProject`, `mergeCheckout` — so a new project
   reaches every task by being registered, which is the one thing that cannot be
   forgotten. `insert_picker_option` names that list, and
   `test_registering_against_the_real_workspace_file` holds it to the workspace file.

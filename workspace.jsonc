@@ -1238,46 +1238,27 @@
 			},
 			// --- the ephemeral tier: a box per task, destroyed when the work leaves it ---
 			//
-			// Deliberately three tasks and not four: there is no "reap one box" entry,
-			// because a picker cannot enumerate boxes that are created between clicks.
-			// Reaping by name is the CLI (`worktree.py reap <box> --yes`), and the one-click
-			// shape is the sweep, which steps over every box still holding work.
-			{
-				"label": "Worktree: New Box",
-				"detail": "Cut a disposable worktree for one task: a fresh claude/… branch off origin/<default>, its own port-slot lease and COMPOSE_PROJECT_NAME, and its toolchain installed (uv sync / pip locks / npm, whichever the project uses — a cold install can take minutes). Leave the topic blank to name it after the project. DRY RUN by default.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/notify-wrap.py",
-					"Worktree: New Box",
-					"--",
-					"python",
-					"scripts/log-wrap.py",
-					"Worktree: New Box",
-					"--",
-					"python",
-					"scripts/worktree.py",
-					"new",
-					"${input:worktreeProject}",
-					"--slug",
-					"${input:worktreeSlug}",
-					"${input:sweepApply}"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "repo-forked",
-					"color": "terminal.ansiCyan"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
+			// Deliberately one task and not four. `New Box`, `Reap Finished Boxes` and
+			// `Reconcile` were retired because none of them had a caller who was not an
+			// agent, and an agent reaches every one of them through the CLI:
+			//
+			//   - New Box cut a box with no `--session`, and `worktree-guard.py` keys its
+			//     lookup on the lease (one box per session+project). So a hand-cut box is
+			//     adopted by nobody, costs a cold toolchain install and a port slot out of
+			//     a fixed ceiling, and `reconcile_action` reaps it as "never used".
+			//   - Reconcile is the `devkit-worktree-reconcile` scheduled task, which runs
+			//     the same pass every fifteen minutes; `install-reconcile-task.py` owns its
+			//     arguments. The one-click copy was also the more dangerous of the two: it
+			//     passed no `--merge-label`, so "also merge every green PR" meant every
+			//     green PR, where the schedule merges only what carries the label.
+			//   - Reap Finished Boxes could never reap anything reconcile would not, and
+			//     usually less: `reap_decision`'s `awaiting_pr` refuses a pushed box that
+			//     has no PR in hand, which reconcile reaps under disk pressure or past
+			//     `max_age_days`.
+			//
+			// What is left is the read-only view, because boxes are absent from `folders`
+			// by design and nothing else reports them. Doing any of the three by name is
+			// `worktree.py new|reap|reconcile`.
 			{
 				"label": "Worktree: List Boxes — read-only",
 				"detail": "Every live box, its branch, its port slot, and whether its work has left it yet. Boxes are absent from this workspace's folder list by design, so nothing else reports them — a forgotten one holds a slot out of a fixed ceiling and, if its project has a stack, a container and volume set. Touches nothing.",
@@ -1302,75 +1283,6 @@
 				"icon": {
 					"id": "list-tree",
 					"color": "terminal.ansiCyan"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Worktree: Reap Finished Boxes",
-				"detail": "DRY RUN by default. For every box whose work has left it: tear its stack down (containers, network and its own volumes), remove the worktree, delete the branch, release the port lease. REFUSES any box still holding unshipped work and names it instead — so nothing can be stranded — and never forces, whatever the answer.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/notify-wrap.py",
-					"Worktree: Reap Finished Boxes",
-					"--",
-					"python",
-					"scripts/log-wrap.py",
-					"Worktree: Reap Finished Boxes",
-					"--",
-					"python",
-					"scripts/worktree.py",
-					"reap",
-					"--all",
-					"${input:sweepFetch}",
-					"${input:sweepApply}"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "trash",
-					"color": "terminal.ansiBrightRed"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Worktree: Reconcile — merge, reap, reclaim disk",
-				"detail": "DRY RUN by default. The unattended pass a schedule runs: reap every box whose PR has MERGED, reap unused boxes, and — when free space is at or under the floor — reap boxes whose PR is merely open (the remote holds every commit, so only the checkout is lost). NEVER touches a box holding unshipped work; it names those instead. Merging is off unless you pick it.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/notify-wrap.py",
-					"Worktree: Reconcile",
-					"--",
-					"python",
-					"scripts/log-wrap.py",
-					"Worktree: Reconcile",
-					"--",
-					"python",
-					"scripts/worktree.py",
-					"reconcile",
-					"${input:reconcileMerge}",
-					"${input:sweepApply}"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "git-merge",
-					"color": "terminal.ansiBrightGreen"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1540,34 +1452,6 @@
 					"sports_betting"
 				],
 				"default": "carameli"
-			},
-			{
-				// Which repo a box is cut FROM. Single-pick, like daemonProject: a box
-				// belongs to exactly one checkout, and `worktree.py new` takes one name.
-				// register() maintains this list along with the other pickers, so a newly
-				// generated project can be boxed the day it exists.
-				"id": "worktreeProject",
-				"type": "pickString",
-				"description": "Which repo should the box be cut from?",
-				"options": [
-					"carameli",
-					"ibkr_trader",
-					"devkit",
-					"data-lake",
-					"sports_betting"
-				],
-				"default": "carameli"
-			},
-			{
-				// The branch topic, so the box is named after the work rather than after
-				// the session that asked for it. Safe to leave blank -- it is the value of
-				// `--slug`, which consumes it whatever it is, and worktree.py falls back to
-				// the project name. That is why it is spelled as a flag here and not as a
-				// bare positional, which an empty answer would turn into a stray argument.
-				"id": "worktreeSlug",
-				"type": "promptString",
-				"description": "Topic for the branch name (blank = name it after the project)",
-				"default": ""
 			},
 			{
 				// Every project's run-tests.py accepts both of these, which is what lets
@@ -1995,22 +1879,6 @@
 					}
 				],
 				"default": "--fetch"
-			},
-			{
-				"id": "reconcileMerge",
-				"type": "pickString",
-				"description": "Merge green PRs, or only clean up?",
-				"options": [
-					{
-						"label": "Clean up only — merging PRs stays yours",
-						"value": "--no-merge"
-					},
-					{
-						"label": "Also squash-merge every PR whose gate is green",
-						"value": "--merge"
-					}
-				],
-				"default": "--no-merge"
 			},
 			{
 				"id": "sweepApply",

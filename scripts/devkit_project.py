@@ -679,7 +679,6 @@ def insert_picker_option(text: str, name: str) -> str:
     for picker_id in (
         "project",
         "daemonProject",
-        "worktreeProject",
         # Lists MORE than the registry -- the reference checkouts too -- so a new
         # project still has to be added to it, and this is the only place that can.
         "mergeCheckout",
@@ -813,7 +812,7 @@ def remove_picker_option(text: str, name: str) -> str:
     so "not there" is the same outcome as "removed" and neither is an error.
     """
     updated = text
-    for picker_id in ("project", "daemonProject", "worktreeProject", "mergeCheckout"):
+    for picker_id in ("project", "daemonProject", "mergeCheckout"):
         scan = devkit_jsonc.blank_comments(updated)
         marker = scan.find(f'"id": "{picker_id}"')
         if marker < 0:

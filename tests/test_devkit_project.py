@@ -531,7 +531,6 @@ def test_picker_registration_updates_the_multi_test_picker_too():
             "inputs": [
                 {"id": "project", "options": ["alpha"]},
                 {"id": "daemonProject", "options": ["alpha"]},
-                {"id": "worktreeProject", "options": ["alpha"]},
                 {"id": "mergeCheckout", "options": ["alpha"]}
             ]
         }
@@ -590,7 +589,6 @@ def test_registering_against_the_real_workspace_file():
     inputs = {i["id"]: i for i in devkit_jsonc_loads(updated)["tasks"]["inputs"]}
     for picker_id in (
         "daemonProject",
-        "worktreeProject",
         "mergeCheckout",
     ):
         assert _input_options(inputs[picker_id])[-2:] == ["probe", "probe-b"]
@@ -617,7 +615,6 @@ def test_retirement_drops_every_picker_option():
             "inputs": [
                 {"id": "project", "options": ["alpha", "beta"], "default": "alpha"},
                 {"id": "daemonProject", "options": ["alpha", "beta"], "default": "alpha"},
-                {"id": "worktreeProject", "options": ["alpha", "beta"], "default": "alpha"},
                 {"id": "mergeCheckout", "options": ["alpha", "beta"], "default": "alpha"}
             ]
         }
@@ -721,7 +718,7 @@ def test_retiring_against_the_real_workspace_file():
     updated = unregister(text, [victim])
     assert victim not in devkit_project.known_projects(updated)
     inputs = {i["id"]: i for i in devkit_jsonc_loads(updated)["tasks"]["inputs"]}
-    for picker_id in ("project", "daemonProject", "worktreeProject", "mergeCheckout"):
+    for picker_id in ("project", "daemonProject", "mergeCheckout"):
         options = _input_options(inputs[picker_id])
         assert victim not in options
         default = inputs[picker_id].get("default")
@@ -1383,8 +1380,8 @@ def test_the_live_smoke_task_names_the_only_checkout_that_can_run_it(canonical):
 # ONE checkout uses `project`, which `register()` maintains. What the ratchet actually
 # guaranteed is not lost with it -- `test_picker_registration_updates_the_multi_test_
 # picker_too` covers the registration side, and the tail of
-# `test_project_scope_inputs_are_real_multi_picks` still requires `daemonProject` and
-# `worktreeProject` to reach every checkout `project` knows. Only the *scope* dimension
+# `test_project_scope_inputs_are_real_multi_picks` still requires `daemonProject`
+# to reach every checkout `project` knows. Only the *scope* dimension
 # is gone. Reintroduce a scope picker and this is the check it needs back: the failure
 # it was written for is a newly generated project that every generic task can reach and
 # no batch task can.
@@ -1418,11 +1415,13 @@ def test_project_scope_inputs_are_real_multi_picks(canonical):
         assert spec["args"]["multiPick"] is True
         assert spec["args"]["optionGroups"][0]["minCount"] == 1
 
-    # The single-pick ones are single-pick on purpose -- one Docker daemon, one repo a
-    # box is cut from -- but they still have to reach every checkout the registry knows.
-    # That is the half a per-picker option list keeps losing: `project` gains the new
-    # project because `register()` writes it, and a hand-maintained sibling does not.
-    for picker_id in ("daemonProject", "worktreeProject"):
+    # The single-pick one is single-pick on purpose -- there is one Docker daemon -- but
+    # it still has to reach every checkout the registry knows. That is the half a
+    # per-picker option list keeps losing: `project` gains the new project because
+    # `register()` writes it, and a hand-maintained sibling does not. `worktreeProject`
+    # was the second of these until the `Worktree: New Box` task it fed was retired --
+    # `test_the_box_tier_keeps_one_task_and_it_is_read_only` says why.
+    for picker_id in ("daemonProject",):
         assert inputs[picker_id]["type"] == "pickString"
         assert _picker_values(inputs[picker_id]) == _picker_values(inputs["project"])
 
@@ -1545,6 +1544,48 @@ def test_the_sweep_has_no_workspace_task(canonical):
             f"{task['label']} puts sweep.py back in the quick-pick; the readers that "
             "replaced it are workspace-status.py and worktree.py reconcile"
         )
+
+
+def test_the_box_tier_keeps_one_task_and_it_is_read_only(canonical):
+    """`worktree.py` reaches the quick-pick once, as `list`. The other three went.
+
+    The box tier had four rows, and three of them had no caller who was not an agent --
+    which is the test, because an agent reaches every subcommand through the CLI and
+    never through VS Code:
+
+    - **New Box** passed no `--session`, and `worktree-guard.py` finds a box by its
+      lease (one per session+project). A hand-cut box is therefore adopted by nobody: it
+      costs a cold toolchain install and a port slot out of a fixed ceiling, and
+      `reconcile_action` reaps it as "never used" once it is past the newborn grace.
+    - **Reconcile** is the `devkit-worktree-reconcile` scheduled task, which runs the
+      same pass every fifteen minutes -- `install-reconcile-task.py` owns its arguments.
+      The one-click copy was also the more dangerous of the two, because it passed no
+      `--merge-label`: its "also merge every green PR" option meant every green PR,
+      where the schedule merges only what carries the label.
+    - **Reap Finished Boxes** could not reap anything reconcile would not, and usually
+      less -- `reap_decision` sets `awaiting_pr` for a caller with no PR in hand, so it
+      refuses a pushed box that reconcile reaps under disk pressure or past
+      `max_age_days`.
+
+    `list` stays because boxes are absent from `folders` by design, so it is the only
+    thing that reports them to a human at all. Re-adding one of the three means naming
+    the human it is for, not just deleting this test.
+    """
+    callers = [
+        task
+        for task in canonical["tasks"]
+        if any("worktree.py" in str(a) for a in task.get("args", []))
+    ]
+    assert [task["label"] for task in callers] == ["Worktree: List Boxes — read-only"]
+    args = [str(a) for a in callers[0]["args"]]
+    assert "list" in args, "the surviving box task must be the read-only one"
+
+    retired = {"worktreeProject", "worktreeSlug", "reconcileMerge"}
+    defined = {spec["id"] for spec in canonical["inputs"]}
+    assert not (retired & defined), (
+        f"{sorted(retired & defined)} feeds a task that no longer exists -- a picker "
+        "with no caller is a question nobody asks"
+    )
 
 
 def test_some_task_still_routes_through_the_dispatcher(canonical):
