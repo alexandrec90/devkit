@@ -575,9 +575,11 @@ own definition in the file.
 The default target is the **live** file rather than the canonical one, because the
 question this answers is usually "what will the button in my window do". Pass
 `--canonical` to review a branch's proposal instead; with no live file on the machine (CI)
-it falls back to the canonical copy and says so in the header. Output also lands in
-`logs/workspace-tasks.txt`, which is git-ignored -- a generated view of a file already in
-the repo is not a second copy anyone should have to keep true.
+it falls back to the canonical copy and says so in the header. Every run also writes the
+report under `logs/`, which is git-ignored -- a generated view of a file already in the
+repo is not a second copy anyone should have to keep true. (The file name is not spelled
+here on purpose: `test_doc_claims.py` reads a path in prose as a claim that it exists, and
+this one exists only after a run.)
 
 **"Workspace: List Tasks as a Table"** is the one-click form, and its picker chooses which
 copy. It is a report, not a gate: nothing fails, and nothing is written outside `logs/`.

@@ -535,3 +535,19 @@ def test_the_markdown_report_cannot_fail_a_commit():
     ignores = config.split("ignores:", 1)[1].split("\nconfig:", 1)[0]
     assert '"logs/**"' in ignores
     assert index.output_path("markdown", None).parent == REPO_ROOT / "logs"
+
+
+def test_no_document_spells_the_generated_report_path():
+    """`test_doc_claims.test_documented_paths_exist` reads a path in prose as a claim
+    that the file is there — and this one is there only after a run. So the README
+    naming it passed on any machine that had run the script and failed in CI, which is
+    the worst way round: the gate that caught it is the one whose artifact has to be
+    downloaded to read. Asserted here instead, where the answer does not depend on
+    whether `logs/` happens to be populated."""
+    from test_doc_claims import _documented_files, cited_paths
+
+    stems = {f"{index.OUTPUT_STEM}.txt", f"{index.OUTPUT_STEM}.md"}
+    for document in _documented_files():
+        cited = cited_paths(document.read_text(encoding="utf-8"))
+        named = [path for path in cited if Path(path).name in stems]
+        assert not named, f"{document.name} names {named}; say `logs/` and stop there"
