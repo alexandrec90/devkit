@@ -313,6 +313,97 @@ def test_claim_refuses_an_empty_session(tmp_path):
         worktree.claim_box(ws, "carameli--x-0806", "")
 
 
+@pytest.mark.parametrize(
+    "leased_to, dirty, refused",
+    [
+        # The reported case: another session is *working* in there right now.
+        ("old-session", True, True),
+        # Clean tree: every commit is on the branch, so a handover loses nothing.
+        ("old-session", False, False),
+        # Nobody's box, and the session's own box: handovers to nobody.
+        ("", True, False),
+        ("new-session", True, False),
+    ],
+)
+def test_claim_refuses_only_a_live_workspace_it_would_destroy(leased_to, dirty, refused):
+    """Reported: the guard blocked an edit into a box leased to a *live* session, its
+    block message offered `claim --yes` as the way through, claim granted it silently,
+    and both sessions then edited one tree until a push from the other discarded this
+    one's work. The agent had no way to know: it was being told to run the command.
+
+    `dirty` is the test because it is exactly what a takeover can destroy -- the same
+    predicate `reapable` refuses a reap on.
+    """
+    refusal = worktree.claim_refusal(
+        box("carameli--x-0806", session=leased_to), "new-session", dirty
+    )
+    assert bool(refusal) is refused
+    if refused:
+        assert "old-session" in refusal and "--force" in refusal
+
+
+def test_claim_reads_the_tree_and_refuses_before_rewriting_the_lease(tmp_path, monkeypatch):
+    """The refusal has to reach `claim_box`, not just exist: the lease must still name
+    the old session afterwards, or the refusal happened after the damage."""
+    ws = _claim_root(tmp_path)
+    monkeypatch.setattr(worktree.sweep, "inspect", lambda *a, **k: state(dirty=3))
+    with pytest.raises(worktree.WorktreeError, match="live workspace"):
+        worktree.claim_box(ws, "carameli--x-0806", "new-session")
+    assert worktree.read_leases(tmp_path)["carameli--x-0806"].session == "old-session"
+
+
+def test_claim_force_takes_over_a_dirty_box(tmp_path, monkeypatch):
+    """`--force` is the escape for the case the refusal cannot see: the other session has
+    stopped. Refusing that outright would leave a box nobody can reach."""
+    ws = _claim_root(tmp_path)
+    monkeypatch.setattr(worktree.sweep, "inspect", lambda *a, **k: state(dirty=3))
+    claimed = worktree.claim_box(ws, "carameli--x-0806", "new-session", force=True)
+    assert claimed.session == "new-session"
+    assert worktree.read_leases(tmp_path)["carameli--x-0806"].session == "new-session"
+
+
+def test_claim_does_not_ask_the_remote_what_the_tree_holds(tmp_path, monkeypatch):
+    """`sweep.inspect` fetches by default, and a claim runs inside `lease_lock` -- a
+    network round trip there holds the lock for every other box in the workspace, to
+    answer a question the remote has no part in."""
+    seen = {}
+    monkeypatch.setattr(
+        worktree.sweep,
+        "inspect",
+        lambda *a, **k: seen.update(k) or state(dirty=0),
+    )
+    worktree.claim_box(_claim_root(tmp_path), "carameli--x-0806", "new-session")
+    assert seen.get("fetch") is False
+
+
+@pytest.mark.parametrize("argv_force, expected", [([], False), (["--force"], True)])
+def test_the_claim_cli_carries_force_through(tmp_path, monkeypatch, argv_force, expected):
+    """A refusal nothing can get past would strand a box whose session has stopped, and a
+    flag the parser accepts but the dispatch drops is the same thing with a friendlier
+    error. Both halves are one line each and neither is visible from `claim_box`."""
+    seen = {}
+    ws = _claim_root(tmp_path)
+    monkeypatch.setattr(
+        worktree,
+        "claim_box",
+        lambda *a, **k: seen.update(k) or box("carameli--x-0806", session="new-session"),
+    )
+    code = worktree.main(
+        [
+            "claim",
+            "carameli--x-0806",
+            "--session",
+            "new-session",
+            "--yes",
+            "--workspace",
+            str(ws),
+            *argv_force,
+        ]
+    )
+    assert code == 0
+    assert seen.get("force") is expected
+
+
 # --- env seeding ------------------------------------------------------------
 
 
@@ -2254,6 +2345,24 @@ def test_the_survey_still_calls_a_clean_preview_reapable(workspace, monkeypatch)
     assert rows[0]["reapable"] is True
 
 
+@pytest.mark.parametrize("dirty", [0, 3])
+def test_the_survey_says_whether_a_leased_box_is_somebody_working(workspace, monkeypatch, dirty):
+    """`session` names an owner; it cannot say whether anything is in flight. A reader
+    picking a box to `claim` needs that second fact, because it is the one `claim_refusal`
+    decides on -- and the report that produced this had an agent take over a box whose
+    session was still editing in it."""
+    root = workspace.parent
+    worktree.write_leases(
+        root, {"demo--x-0806": box("demo--x-0806", project="demo", session="other-session")}
+    )
+    (root / worktree.BOXES_DIR_NAME / "demo--x-0806").mkdir(parents=True)
+    monkeypatch.setattr(
+        worktree, "inspect_box", lambda *a, **k: (state(dirty=dirty), sweep.READY, "-")
+    )
+
+    assert worktree.survey(workspace)[0]["dirty"] is bool(dirty)
+
+
 def test_reaping_a_box_that_never_existed_names_the_ones_that_do(workspace):
     worktree.write_leases(workspace.parent, {"demo--x-0806": box("demo--x-0806", project="demo")})
     with pytest.raises(worktree.WorktreeError, match="demo--x-0806"):
@@ -2689,12 +2798,52 @@ def test_a_young_open_pr_is_not_reaped_by_age():
     assert action == worktree.WAIT
 
 
-def test_an_unused_box_with_no_pr_is_reaped_immediately():
-    """The commonest kind: the guard cuts one per session whether or not it writes."""
+def test_an_unused_box_with_no_pr_is_reaped():
+    """The commonest kind: the guard cuts one per session whether or not it writes.
+
+    Was `..._immediately`, and immediacy was the defect -- see the grace test below.
+    """
     for verdict in (sweep.SPENT, sweep.CLEAN):
-        action, why = decide(verdict, "nothing here")
+        action, why = decide(verdict, "nothing here", age_days=1.0)
         assert action == worktree.REAP
         assert "never used" in why
+
+
+def test_a_box_minutes_old_is_not_yet_evidence_that_it_was_never_used():
+    """Reported: `reconcile` destroyed a box **90 seconds** after `worktree.py new`, with
+    "spent-branch and no PR -- the box was never used". Nothing was wrong with the box;
+    the session that had just been handed it had not written to it yet, and every box is
+    spent-and-PR-less for the whole gap between `new` and the first commit. A scheduled
+    pass that runs every 15 minutes (`install-reconcile-task.DEFAULT_INTERVAL_MINUTES`)
+    is guaranteed to land inside that gap sooner or later.
+
+    The grace window is what separates "never used" from "not used *yet*", and only the
+    no-PR arm needs it -- every arm above this one has a PR to reason from.
+    """
+    for verdict in (sweep.SPENT, sweep.CLEAN):
+        action, why = decide(verdict, "nothing here", age_days=90 / 86400)
+        assert action == worktree.WAIT
+        assert "never used" not in why
+        assert "2m old" in why, why
+
+
+def test_the_grace_window_is_several_reconcile_passes_wide():
+    """A window narrower than the schedule's interval would still fire on the same race,
+    just less often. One hour is four passes of margin, and it costs an abandoned box
+    four extra passes on disk -- which is what the `max_age_days` sweep exists for."""
+    interval_days = 15 / (24 * 60)
+    assert worktree.NEWBORN_GRACE_DAYS >= 4 * interval_days
+    # And it stays small enough that it is a race guard, not a second age policy.
+    assert worktree.NEWBORN_GRACE_DAYS < worktree.DEFAULT_MAX_AGE_DAYS / 10
+
+
+def test_a_newborn_box_that_holds_work_is_held_not_waited_on():
+    """The grace window sits below every safety arm, so it cannot be the reason a box
+    survives -- if it were, the arms above it would be reachable only by luck."""
+    action, _ = decide(
+        sweep.READY, "3 uncommitted file(s)", age_days=90 / 86400, holds_uncommitted=True
+    )
+    assert action == worktree.HOLD
 
 
 def test_a_pushed_branch_with_no_pr_is_reported_never_destroyed():

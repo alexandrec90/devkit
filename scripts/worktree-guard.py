@@ -210,6 +210,39 @@ SPAWN_TIMEOUT = 30.0
 SPAWN_LOCK_WAIT = worktree.SPAWN_LOCK_WAIT
 
 
+def read_stdin() -> str:
+    """The hook payload, decoded as UTF-8 rather than through the platform codec.
+
+    `sys.stdin.read()` decodes through the console codepage on Windows -- cp1252 here --
+    and the harness hands every hook UTF-8 JSON. For most hooks that is a latent bug;
+    for this one it is a silent corruption of the agent's work, because this is the hook
+    that *echoes the payload back*. Two reports, both from the same root cause:
+
+    - A `Write` whose content carried `->` as U+2192 was re-aimed into a box and landed
+      as `C3 A2 E2 80 A0 E2 80 99` -- the UTF-8 bytes decoded as cp1252 and re-encoded on
+      the way out through `updatedInput`. Only the *first* write of a session was wrong,
+      which is exactly the one this hook re-aims; every later write to the same box path
+      goes straight to the tool and is correct. Nothing but a spellchecker caught it.
+    - `redirect_blocker` refused an `Edit` with "the box's copy of the file does not
+      contain the text this edit replaces" when the two copies were byte-identical. It
+      reads the box file as UTF-8 and compared it against an `old_string` that had come
+      through cp1252, so any em dash in the replaced text made the two disagree.
+
+    Reading bytes and decoding once removes both. `errors="replace"` keeps the failure
+    inert: a hook that raises on a PreToolUse call blocks every edit in the workspace,
+    so a byte this cannot decode must cost a mangled character, never the turn. The
+    full account of why the platform codec is never the right one here is the codec note
+    under `VERIFY_IMPORT` in `scripts/hooks/stop.py`.
+    """
+    try:
+        buffer = getattr(sys.stdin, "buffer", None)
+        if buffer is not None:
+            return buffer.read().decode("utf-8", errors="replace")
+        return sys.stdin.read() if sys.stdin is not None else ""
+    except (OSError, ValueError):
+        return ""
+
+
 def parse_hook_input(raw: str) -> dict | None:
     """Parse raw stdin into a dict, or None when absent/malformed."""
     if not raw:
@@ -631,6 +664,54 @@ def _powershell_positionals(tokens: list[str]) -> list[str]:
     return found
 
 
+def _is_rooted(value: str) -> bool:
+    """Whether this name is anchored, so no `cd` can move what it points at.
+
+    `Path.is_absolute()` alone is the wrong test on Windows: `/etc/thing` has no drive,
+    so it answers False, and a `cd` would then be prepended to a path the shell reads as
+    rooted. Both spellings reach this hook -- the Bash tool writes POSIX paths and the
+    PowerShell tool writes drive-lettered ones -- so both have to count.
+    """
+    return value.startswith(("/", "\\")) or Path(value).is_absolute()
+
+
+CHDIR_VERBS = frozenset({"cd", "pushd", "chdir", "set-location", "sl"})
+
+# `cd` spellings that move somewhere this tier cannot name: the previous directory, the
+# home directory, or a directory stack entry. Each one is a base it would have to model
+# shell state to follow, so it yields None and the base is left where it was.
+CHDIR_UNFOLLOWABLE = frozenset({"-", "~", "+"})
+
+# `cmd.exe` spells its cross-drive switch with a slash, so the `startswith("-")` test
+# every other operand filter here uses does not see it and it reads as a second operand.
+CHDIR_SWITCHES = frozenset({"/d"})
+
+
+def _chdir_operand(tokens: list[str]) -> str | None:
+    """The directory this statement changes to, or None when it is not a plain `cd`.
+
+    None means "no move this tier can follow", and every caller treats that as leaving
+    the base alone rather than as clearing it -- see `shell_write_targets`. A bare `cd`
+    (home) and `cd -` (previous) are deliberately in that class: both are real moves and
+    neither is a directory anything here could name.
+    """
+    while tokens and (_verb(tokens[0]) in SHELL_PREFIXES or ENV_ASSIGN.match(tokens[0])):
+        tokens = tokens[1:]
+    if not tokens or _verb(tokens[0]) not in CHDIR_VERBS:
+        return None
+    operands = [
+        _unquote(token)
+        for token in tokens[1:]
+        if not token.startswith("-") and token.lower() not in CHDIR_SWITCHES
+    ]
+    if len(operands) != 1:
+        return None
+    target = operands[0].strip()
+    if not target or target in CHDIR_UNFOLLOWABLE or target.startswith(("$", "%", "`", "~")):
+        return None
+    return target.replace("\\", "/").rstrip("/") or None
+
+
 def shell_write_targets(command: str) -> list[str]:
     """Every path this command line names as something it is about to write.
 
@@ -645,20 +726,45 @@ def shell_write_targets(command: str) -> list[str]:
     a relative word resolves against the cwd, which in a guarded session is the checkout.
     Expanding it is out of the question at this tier, and reading `$S` as a filename named
     `$S` blocks a command that writes to a scratch directory.
+
+    **A `cd` earlier in the same command line moves what a relative operand is relative
+    to**, and not honouring that was the guard's most-reported false positive. The caller
+    resolves every name returned here against the *tool call's* cwd, which in a guarded
+    session is the checkout -- so `cd <scratchpad> && gh api ... > lint.zip` read as a
+    write to `devkit/lint.zip`, and `cd <memory dir> && printf ... >> MEMORY.md` matched
+    devkit's own `MEMORY.md`. Both were refused with "Bash arguments are not rewritable
+    by this hook", both were writes to a path outside every checkout, and re-issuing with
+    an absolute path was all either needed. So a recognised `cd` rebases the operands
+    after it, and the caller's resolution then lands where the shell would have.
+
+    Only the plain, single-operand spellings count -- `cd x`, `pushd x`, `Set-Location x`.
+    Anything else (`cd -`, a variable, a switch-laden cmdlet) leaves the base alone,
+    which restores exactly today's behaviour: judged against the call's own cwd. That is
+    the conservative direction, because a base this cannot follow means a *relative*
+    name, and a relative name still resolves into the checkout.
     """
     found: list[str] = []
+    base = ""
 
     def add(value: str) -> None:
         value = _unquote(value.strip())
         if value.startswith(("$", "%", "`")) or POWERSHELL_NON_FILESYSTEM_PROVIDER.match(value):
             return
-        if value and value not in found:
-            found.append(value)
+        if not value or _is_rooted(value):
+            if value and value not in found:
+                found.append(value)
+            return
+        rebased = f"{base}/{value}" if base else value
+        if rebased not in found:
+            found.append(rebased)
 
     for statement in split_statements(strip_heredocs(command)):
         for target in redirect_targets(statement):
             add(target)
         tokens = shell_tokens(statement)
+        moved = _chdir_operand(tokens)
+        if moved is not None:
+            base = moved if _is_rooted(moved) or not base else f"{base}/{moved}"
         while tokens and (_verb(tokens[0]) in SHELL_PREFIXES or ENV_ASSIGN.match(tokens[0])):
             tokens = tokens[1:]
         if not tokens:
@@ -1074,6 +1180,28 @@ def _git(checkout: Path, *args: str):
     )
 
 
+def _is_git_internal(resolved: Path) -> bool:
+    """True when this path is inside a `.git` directory -- git's own state, not content.
+
+    Nothing under `.git/` is versioned, so there is no home branch for a box to protect
+    and no branch the edit could land on: the premise every block here rests on is
+    simply absent. Routing one into a box is worse than merely useless, because a
+    worktree's `.git` is a *file*, so the path the block tells the agent to re-issue
+    against does not exist and cannot be made to.
+
+    The case that earned this is a stale `index.lock`, which is git's own documented
+    failure mode -- "remove the file manually to continue" -- and which wedges the
+    checkout completely until it is gone: no pull, no commit, not even an index refresh,
+    so unrelated files stay permanently stat-dirty. Both the `Remove-Item` and the
+    `rm -f` spellings were blocked and only a Python one-liner got through, which is the
+    shape of a gate teaching people to route around it.
+
+    Matched on the path components rather than by asking git, because this runs on every
+    edit and the answer is decidable from the name alone.
+    """
+    return ".git" in resolved.parts[:-1]
+
+
 def path_is_ignored(checkout: Path, target: Path) -> bool:
     """True when `target` is git-ignored inside `checkout`.
 
@@ -1177,6 +1305,8 @@ def redirect_decision(
       already merged, so there is no PR for a box to bypass;
     - anything outside a registered checkout, including the workspace file itself and
       any scratch directory beside the projects;
+    - anything under a `.git` directory — see `_is_git_internal`. It is git's own state
+      rather than content, so no branch is at stake and the box has nowhere to put it;
     - a **git-ignored** path inside a checkout — see `path_is_ignored`. It cannot land
       on the home branch, so there is no branch for a box to protect, and the box would
       swallow the edit whole.
@@ -1200,6 +1330,8 @@ def redirect_decision(
         return None
 
     if _within(resolved, worktree.boxes_root(root)):
+        return None
+    if _is_git_internal(resolved):
         return None
     project = owning_project(resolved, root, projects)
     if not project:
@@ -1938,7 +2070,7 @@ def main(argv: list[str] | None = None) -> int:
     if not workspace.is_file():
         return EXIT_ALLOW
 
-    payload = parse_hook_input(sys.stdin.read())
+    payload = parse_hook_input(read_stdin())
     if payload is None or _tool_name(payload) not in MUTATING_TOOLS:
         return EXIT_ALLOW
 

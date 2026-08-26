@@ -138,8 +138,16 @@ def main(argv: list[str] | None = None) -> int:
     if not workspace.is_file():
         return 0
 
+    # UTF-8, never the platform codec: the payload this reads is a *prompt*, which is
+    # where non-ASCII is a certainty rather than a possibility, and the slug it derives
+    # becomes a branch name. `worktree-guard.read_stdin` owns the reasoning.
     try:
-        raw = sys.stdin.read()
+        buffer = getattr(sys.stdin, "buffer", None)
+        raw = (
+            buffer.read().decode("utf-8", errors="replace")
+            if buffer is not None
+            else sys.stdin.read()
+        )
     except (OSError, ValueError):
         return 0
 
