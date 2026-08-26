@@ -2218,22 +2218,23 @@
 					"description": "Which branch, PR or box should be brought up? Tick as many as you want.",
 					"key": "previewRow",
 					// NO `checkEscapedUI`, and its absence is the fix for a task that could be
-					// used exactly once per window. The flag does NOT abort a launch — nothing
-					// an extension returns can, because VS Code cancels a task run only for its
-					// own `promptString`/`pickString` inputs; a `command` input that returns
-					// nothing records no substitution and the task starts anyway, carrying the
-					// literal `${input:…}`. What the flag actually does is SUPPRESS THE REST of
-					// a multi-prompt sequence, via a STICKY bit: escaping stores
+					// used exactly once per window. The flag is a STICKY bit: escaping stores
 					// `__escapedUI: true` in the extension's `rememberStore` (`storeEscapedUI`
-					// in extension-common.js), and every later command that opts in returns
-					// `undefined` immediately — the check runs BEFORE the quick-pick opens, and
-					// returns without clearing the bit it just read. Nothing clears it except a
-					// successful pick from a command that opted in, and no such pick can happen
-					// while it is set. So one Escape here retired both dropdowns for the life of
-					// the window, with no list ever appearing again. Without the flag the bit is
-					// still written and never read, and a cancelled run costs one terminal line
-					// saying the run was cancelled — see `scripts/task_input.py`, which is where
-					// every picker task's Escape is actually turned into a no-op.
+					// in extension-common.js), every later command that opts in returns
+					// `undefined` BEFORE its quick-pick opens, and that early return is the one
+					// path that never clears the bit it just read. Nothing else clears it, so one
+					// Escape retired both dropdowns for the life of the window, with no list ever
+					// appearing again.
+					//
+					// What that leaves behind is the half the extension's README denies. It says
+					// an escaped UI "will not start the task/launch" — and on this VS Code the
+					// task starts: a dismissed `project` picker on 2026-08-26 left
+					// `devkit-ports: no slot registered for '${input:project}'`, exit 1, in
+					// `logs/ports-show-checkout-allocations.log` (overwritten per run, hence the
+					// quote). That is a task running on the same `undefined` this flag returns,
+					// so opting in would buy a dropdown that stops opening and no cancel at all.
+					// The cancel is `scripts/task_input.py`, in the script that receives the
+					// literal — which is the only tier that observably gets a say.
 					"multiPick": true,
 					"clearStorage": true,
 					"separator": " ",
@@ -2307,10 +2308,10 @@
 				// on what is registered now, which for this list is not a stale convenience
 				// but a wrong answer: the ticks ARE the state being edited.
 				//
-				// No `checkEscapedUI`, for the reason spelled out on `previewRow`: the flag
-				// aborts no launch, and is a sticky bit nothing else clears, so one Escape
-				// would retire this dropdown for the life of the window. Escape here leaves
-				// the literal `${input:plugSelection}` in the argument instead, which
+				// No `checkEscapedUI`, for the reason spelled out on `previewRow`: it is a
+				// sticky bit nothing clears, so one Escape would retire this dropdown for the
+				// life of the window without buying the cancel its README promises. Escape
+				// here leaves the literal `${input:plugSelection}` in the argument, which
 				// `notify-wrap.py` recognises as a cancel and refuses to run — and which the
 				// script reads as "nothing was picked" if it is reached any other way.
 				"id": "plugSelection",

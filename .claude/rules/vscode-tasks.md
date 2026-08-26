@@ -200,10 +200,14 @@ after the PR merges; a box never renders.
   only in `rioj7.command-variable` — returns nothing, VS Code records no substitution,
   and the task **starts anyway** with the literal `${input:<id>}` in its argument list.
   So *"New Migration"* cancels on Escape and *"Preview: Open a UI Branch"* used to run
-  parameterless, purely because the first happens to end on a `promptString`. Nothing in
-  the extension fixes this: `checkEscapedUI` aborts no launch, and is a sticky bit that
-  retires the dropdown for the life of the window (`previewRow`'s comment has the
-  detail). The receiving script therefore recognises the literal itself, via
+  parameterless, purely because the first happens to end on a `promptString`. The
+  extension's `checkEscapedUI` is not the fix, on two counts: its README says an escaped
+  UI "will not start the task/launch", and a dismissed `project` picker on 2026-08-26
+  started one anyway — `devkit-ports: no slot registered for '${input:project}'`, exit 1;
+  and the flag is a sticky bit that no path clears, so one Escape retires the dropdown
+  for the life of the window (`previewRow`'s comment has the detail, and the second half
+  is what a session actually reported hitting). The receiving script therefore
+  recognises the literal itself, via
   `scripts/task_input.py`, and exits 0 having run nothing — ahead of `argparse`, because
   a cancel reported as a usage error is a red icon, a toast and a `logs/` artifact for a
   run the user called off. `test_every_task_with_a_command_picker_can_be_cancelled` is
