@@ -137,7 +137,14 @@ def test_command_runs_the_projects_own_script(checkouts):
 
 
 def test_fixed_action_args_come_before_caller_args(checkouts):
-    command = plan_command(ACTIONS["lint-changed"], checkouts / "alpha", ["--verbose"])
+    """An action's own arguments are part of what it is; the picker's come after.
+
+    `lint-changed` used to pin this with a real entry. Lint's scope is a picker now, so
+    the ordering is asserted against a stand-in rather than deleted along with the twin
+    — `docker-up`'s `--build` and `backtest`'s subcommand both still depend on it.
+    """
+    scoped = devkit_project.Action("scripts/lint-all.py", "Lint: Run", ("--changed",))
+    command = plan_command(scoped, checkouts / "alpha", ["--verbose"])
     assert inner(command) == ["python", "scripts/lint-all.py", "--changed", "--verbose"]
 
 
@@ -164,7 +171,7 @@ def test_the_plan_is_wrapped_for_logging(checkouts, tmp_path):
     assert command[:4] == [
         "python",
         str(devkit_root / "scripts" / "log-wrap.py"),
-        "Lint: Everything",
+        "Lint: Run",
         "--",
     ]
 
@@ -184,7 +191,7 @@ def test_the_wrapper_is_devkits_copy_not_the_targets(checkouts, tmp_path):
 def test_notify_wrap_is_used_when_the_project_ships_it(checkouts):
     (checkouts / "alpha" / "scripts" / "notify-wrap.py").write_text("")
     command = plan_command(ACTIONS["lint"], checkouts / "alpha", [])
-    assert command[:3] == ["python", "scripts/notify-wrap.py", "Lint: Everything"]
+    assert command[:3] == ["python", "scripts/notify-wrap.py", "Lint: Run"]
     assert command[3] == "--"
     assert inner(command) == ["python", "scripts/lint-all.py"]
 
@@ -461,12 +468,12 @@ def test_a_scoped_action_is_not_expected_of_other_projects():
 
 
 def test_unscoped_actions_are_expected_of_everyone():
-    assert {"test", "lint", "lint-changed"} <= expected_actions("devkit")
+    assert {"test", "lint"} <= expected_actions("devkit")
 
 
 def test_conformance_reports_per_project_support(checkouts):
     report = conformance(["alpha", "beta"], checkouts)
-    assert set(report["alpha"]) == {"lint", "lint-changed", "test"}
+    assert set(report["alpha"]) == {"lint", "test"}
     assert report["beta"] == []
 
 
@@ -1078,6 +1085,33 @@ def test_every_action_is_reachable_from_a_task(canonical):
     """
     unreachable = set(ACTIONS) - set(_dispatched_actions(canonical))
     assert not unreachable, f"actions with no task to invoke them: {sorted(unreachable)}"
+
+
+def test_the_lint_task_asks_for_its_scope_rather_than_splitting_in_two(canonical):
+    """One task and a dropdown — the shape `Test: Run Suite` has always had.
+
+    Lint was two adjacent entries whose labels differed only in scope, each needing its
+    own icon, its own detail and — in the dispatcher — its own `lint-changed` action for
+    one flag. A scope that fits in a picker is a picker: the list gets shorter, and the
+    second question is asked only after the first has been answered.
+    """
+    lint = [task for task in canonical["tasks"] if task["label"].startswith("Lint:")]
+    assert [task["label"] for task in lint] == ["Lint: Run"]
+    assert [str(a) for a in lint[0]["args"]][-2:] == ["lint", "${input:lintScope}"]
+
+    scope = next(i for i in canonical["inputs"] if i["id"] == "lintScope")
+    assert [option["value"] for option in scope["options"]] == ["", "--changed"]
+    # The wide scope is the default: lint rewrites what it reads, so the click that most
+    # often precedes a commit must not be the one that leaves half the tree unformatted.
+    assert scope["default"] == ""
+
+
+@pytest.mark.parametrize("picked, expected", [("", []), ("--changed", ["--changed"])])
+def test_both_lint_scopes_reach_the_one_action(checkouts, picked, expected):
+    """The picker's two branches are one action plus a token — the empty one being
+    dropped by `plan_command` is what lets the wide branch pass nothing at all."""
+    command = plan_command(ACTIONS["lint"], checkouts / "alpha", [picked])
+    assert inner(command) == ["python", "scripts/lint-all.py", *expected]
 
 
 # Tasks that deliberately do not persist a failure artifact. Both launch a window and
@@ -1724,19 +1758,17 @@ def test_only_declared_generated_actions_rewrite_the_tree():
     """A new autofix action must be a deliberate entry here, not an inherited default."""
     assert {name for name, a in ACTIONS.items() if a.autofix} == {
         "lint",
-        "lint-changed",
         "sync-codex",
     }
 
 
 def test_generated_actions_get_distinct_branches_and_only_codex_opts_into_automerge():
     lint = ACTIONS["lint"]
-    lint_changed = ACTIONS["lint-changed"]
     codex = ACTIONS["sync-codex"]
 
     assert lint.autofix_slug == "lint-autofix"
     assert codex.autofix_slug == "codex-context-sync"
-    assert lint.autofix_labels == lint_changed.autofix_labels == ()
+    assert lint.autofix_labels == ()
     assert codex.autofix_labels == (
         devkit_project.sweep.AUTOFIX_LABEL,
         devkit_project.sweep.AUTOMERGE_LABEL,
