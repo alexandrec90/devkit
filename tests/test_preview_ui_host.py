@@ -5,13 +5,19 @@ and the pick grammar are that module's and are tested next door, so the weight h
 on what this script adds -- resolving a pick to a directory and a port (`plan_host`),
 making the plan real without owning a subprocess of its own in tests (`apply_host`
 takes its runners as arguments), and the small pure helpers around them. Everything
-touching a real filesystem uses `tmp_path`; nothing here starts npm, git or a socket.
+touching a real filesystem uses `tmp_path`, and nothing here starts npm or git. The one
+socket is the offline stub's own, on an ephemeral loopback port: "the connection is
+answered rather than refused" is the entire content of that helper, so a test that
+faked the socket would be asserting nothing.
 """
 
 from __future__ import annotations
 
+import ast
 import os
 import types
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -57,6 +63,133 @@ class FakeServer:
 
     def terminate(self):
         self.terminated = True
+
+
+# --- the guardrail: this task is host Vite, and stays that way -------------------
+
+PREVIEW_UI_HOST = Path(__file__).resolve().parents[1] / "scripts" / "preview-ui-host.py"
+
+# Words this script's PROSE needs in order to explain itself, and its code must not
+# contain. `compose` covers the file and the command; `docker`/`podman`, the engines.
+NO_STACK_TOKENS = ("docker", "compose", "podman")
+
+
+def code_only(source: str) -> str:
+    """`source` with every docstring dropped -- `ast.unparse` has already dropped comments.
+
+    Which is the whole trick: the file is allowed to argue at length for why it has no
+    container tier, in the words that argument needs, and a change that adds one still
+    fails.
+    """
+    tree = ast.parse(source)
+    holders = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    for node in ast.walk(tree):
+        if not isinstance(node, holders) or not node.body:
+            continue
+        first = node.body[0]
+        if isinstance(first, ast.Expr) and isinstance(getattr(first.value, "value", None), str):
+            node.body.pop(0)
+            if not node.body:
+                node.body.append(ast.Pass())
+    return ast.unparse(tree)
+
+
+def test_the_preview_never_grows_a_docker_or_backend_tier():
+    """The requirement in this script's opening paragraph, as something that can fail.
+
+    Every round of "fix the UI preview" so far has reached for a backend, because a
+    view rendering its offline state looks like the bug being reported. It is not. This
+    task is one `npm run dev` per picked branch and the entire value of it is that it
+    costs a port and a few seconds, against the three minutes and the RAM a stack costs
+    to answer a question about CSS -- `preview-task.py` is where the stack lives, and
+    keeping the two apart is why this one is worth having.
+    """
+    code = code_only(PREVIEW_UI_HOST.read_text(encoding="utf-8")).lower()
+    for token in NO_STACK_TOKENS:
+        assert token not in code, (
+            f"scripts/preview-ui-host.py grew a {token!r} reference in CODE (prose and "
+            "comments are exempt and were stripped before this check). This task is a "
+            "bare Vite dev server per branch, deliberately -- the full-stack preview is "
+            "preview-task.py, and a UI review must not have to pay for one."
+        )
+
+
+def test_the_only_programs_the_preview_runs_are_git_and_npm(tmp_path):
+    """The other half of the guardrail, because a stack can also arrive as a subprocess.
+
+    The token check reads the file, so a run of some engine spelled through a variable
+    would pass it. This watches what `apply_host` actually shells out to.
+    """
+    calls, spawns = [], []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return result()
+
+    def spawn(argv, cwd=None, env=None):
+        spawns.append(argv)
+        return FakeServer()
+
+    plan = make_plan(tmp_path, steps=((str(tmp_path), ("worktree", "add", "x", "y")),))
+    assert host.apply_host(plan, "npm", run=run, spawn=spawn, environ={}) is not None
+    assert [argv[0] for argv in calls] == ["git", "npm"]
+    assert spawns == [
+        ["npm", "run", "dev", "--", "--host", "127.0.0.1", "--port", "5300", "--strictPort"]
+    ]
+
+
+# --- the offline stub: a 502, not a refused connection ---------------------------
+
+
+def test_the_offline_stub_answers_502_rather_than_refusing_the_connection():
+    """Why the stub exists, stated as what a dev server's proxy sees.
+
+    A refused connection is what Vite logs `http proxy error` and a full Node stack
+    trace for, once per request -- so a UI that probes a session endpoint on load turns
+    a working preview into a wall of red. A 502 it never mentions. The app cannot tell
+    the two apart, because Vite's own error handler answered the refusal with a 502 as
+    well, which is what makes this purely a noise fix.
+    """
+    url, server = host.start_offline_stub()
+    assert server is not None
+    try:
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(f"{url}/auth/session", timeout=5)  # noqa: S310 - loopback
+        assert caught.value.code == 502
+        assert b"no backend" in caught.value.read()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_offline_stub_drains_a_posted_body_instead_of_resetting():
+    """A POST with a body -- the `frontend-logs` call in the noise this fixed.
+
+    An unread body means the socket closes with bytes still in flight, which the proxy
+    reports as a reset: the same red block one layer along, for the same non-failure.
+    """
+    url, server = host.start_offline_stub()
+    try:
+        request = urllib.request.Request(  # noqa: S310 - loopback http, built above
+            f"{url}/vg/1.0.0/frontend-logs",
+            data=b'{"level":"error","message":"x"}',
+            headers={"Content-Type": "application/json"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request, timeout=5)  # noqa: S310 - loopback
+        assert caught.value.code == 502
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_offline_stub_falls_back_to_the_dead_port_when_it_cannot_bind():
+    """A stub that will not bind costs the quiet, never the preview."""
+
+    def factory(address, handler):
+        raise OSError("address already in use")
+
+    assert host.start_offline_stub(factory=factory) == (host.DEAD_PROXY, None)
 
 
 # --- the pure helpers ----------------------------------------------------------
@@ -166,6 +299,19 @@ def test_donor_target_uses_the_static_stack_when_it_answers(tmp_path, monkeypatc
 def test_donor_target_is_dead_when_nothing_listens(tmp_path, monkeypatch):
     monkeypatch.setattr(host.worktree, "load_registry", lambda root: FakeRegistry({"demo": 0}))
     assert host.donor_target("demo", tmp_path, lambda p: False) == host.DEAD_PROXY
+
+
+def test_donor_target_hands_back_the_offline_stub_it_was_given(tmp_path, monkeypatch):
+    """Every no-stack path returns the caller's `offline` URL, not the dead-port default.
+
+    `main` passes the stub it started, so this is what decides whether a preview with
+    no backend is quiet or is a stack trace per request.
+    """
+    stub = "http://127.0.0.1:57231"
+    monkeypatch.setattr(host.worktree, "load_registry", lambda root: FakeRegistry({"demo": 0}))
+    assert host.donor_target("demo", tmp_path, lambda p: False, stub) == stub
+    monkeypatch.setattr(host.worktree, "load_registry", lambda root: None)
+    assert host.donor_target("demo", tmp_path, lambda p: True, stub) == stub
 
 
 def test_donor_target_is_dead_without_a_registry_or_slot(tmp_path, monkeypatch):
@@ -741,6 +887,8 @@ def quiet_scan(monkeypatch):
     monkeypatch.setattr(host.preview_task, "ui_projects", lambda ws: [])
     monkeypatch.setattr(host.preview_task, "write_menu", lambda payload: Path("menu.json"))
     monkeypatch.setattr(host.shutil, "which", lambda name: "npm")
+    # No listening socket in a `main` test: the real one binds a port for the run.
+    monkeypatch.setattr(host, "start_offline_stub", lambda: ("http://127.0.0.1:57231", None))
     return everything
 
 
@@ -834,7 +982,7 @@ def test_main_stop_runs_before_the_scan(workspace, monkeypatch):
 
 def test_main_counts_a_refused_plan_as_a_failure(workspace, quiet_scan, monkeypatch, capsys):
     quiet_scan.append(candidate())
-    monkeypatch.setattr(host, "donor_target", lambda project, root, listening: host.DEAD_PROXY)
+    monkeypatch.setattr(host, "donor_target", lambda *a: host.DEAD_PROXY)
     refusal = host.HostPlan(project="demo", ref="agent/x", refusal="no dice")
     monkeypatch.setattr(host, "plan_host", lambda *a: refusal)
     code = host.main(["--workspace", str(workspace), "--no-fetch", "--picks", "demo:agent/x"])
@@ -842,9 +990,27 @@ def test_main_counts_a_refused_plan_as_a_failure(workspace, quiet_scan, monkeypa
     assert "no dice" in capsys.readouterr().out
 
 
+def test_main_gives_the_started_stub_to_every_proxy_decision(workspace, quiet_scan, monkeypatch):
+    """The wiring that IS the noise fix: what the stub bound is what a stackless project
+    proxies to, so its API calls are answered 502 rather than refused."""
+    quiet_scan.append(candidate())
+    seen: list[str] = []
+
+    def donor(project, root, listening, offline):
+        seen.append(offline)
+        return offline
+
+    monkeypatch.setattr(host, "donor_target", donor)
+    monkeypatch.setattr(
+        host, "plan_host", lambda *a: host.HostPlan(project="demo", ref="agent/x", refusal="stop")
+    )
+    host.main(["--workspace", str(workspace), "--no-fetch", "--picks", "demo:agent/x"])
+    assert seen == ["http://127.0.0.1:57231"]
+
+
 def test_main_serves_opens_and_watches(workspace, quiet_scan, monkeypatch, capsys):
     quiet_scan.append(candidate())
-    monkeypatch.setattr(host, "donor_target", lambda project, root, listening: "http://b:1")
+    monkeypatch.setattr(host, "donor_target", lambda *a: "http://b:1")
     plan = host.HostPlan(project="demo", ref="agent/x", serve_dir="d", frontend="f", port=5300)
     monkeypatch.setattr(host, "plan_host", lambda *a: plan)
     server = FakeServer()
@@ -863,7 +1029,7 @@ def test_main_serves_opens_and_watches(workspace, quiet_scan, monkeypatch, capsy
 
 def test_main_counts_a_server_that_died_before_answering(workspace, quiet_scan, monkeypatch):
     quiet_scan.append(candidate())
-    monkeypatch.setattr(host, "donor_target", lambda project, root, listening: host.DEAD_PROXY)
+    monkeypatch.setattr(host, "donor_target", lambda *a: host.DEAD_PROXY)
     plan = host.HostPlan(project="demo", ref="agent/x", serve_dir="d", frontend="f", port=5300)
     monkeypatch.setattr(host, "plan_host", lambda *a: plan)
     monkeypatch.setattr(host, "apply_host", lambda p, npm: FakeServer(polls=(1,), returncode=1))
