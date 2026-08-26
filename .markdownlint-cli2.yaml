@@ -3,6 +3,12 @@ globs:
   - ".claude/**/*.md"
 
 ignores:
+  # `globs` above is absolute, not "whatever pre-commit staged", so this linter sees
+  # every .md in the tree including the git-ignored ones. `logs/` is the failure-artifact
+  # directory: everything in it is generated, none of it is reviewed as prose, and it is
+  # not in git — so a report written there could fail the commit of the code that wrote
+  # it. Nothing wrote a .md there until `workspace-task-index.py --format markdown` did.
+  - "logs/**"
   - ".agents/**"
   - "**/node_modules/**"
   - "**/.venv/**"

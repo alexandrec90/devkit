@@ -406,6 +406,39 @@
 				"problemMatcher": []
 			},
 			{
+				// Read-only, and the fourth of the workspace-file tasks for the same
+				// reason the other three exist: this file is the one place a reviewer
+				// cannot see what it is reviewing. Forty tasks and forty pickers spread
+				// over two thousand lines of JSONC, with `presentation`, `icon` and
+				// `problemMatcher` between every pair of facts worth reading.
+				"label": "Workspace: List Tasks as a Table",
+				"detail": "Read-only. Prints every task in the workspace — what it runs, which ${input:...} pickers it asks first, and its detail — as a wrapped table, then the pickers themselves with every answer on offer and the tasks that ask for each. A picker no task uses shows as (unused). Also written to devkit/logs/workspace-tasks.txt, which is git-ignored: it is a generated view of a file already in the repo.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/log-wrap.py",
+					"Workspace: List Tasks as a Table",
+					"--",
+					"python",
+					"scripts/workspace-task-index.py",
+					"${input:taskIndexSource}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "table",
+					"color": "terminal.ansiBlue"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
 				// The one interactive task in this file, and the one with no `log-wrap.py`:
 				// log-wrap pipes the child's stdout and reads it a line at a time, so a
 				// prompt that never ends its line would never reach the terminal and the
@@ -2209,6 +2242,27 @@
 						}
 					}
 				}
+			},
+			{
+				// Both branches carry a real flag rather than one being an empty default:
+				// this picker feeds the script directly, not devkit_project.py, so an
+				// empty branch would reach argparse as a stray positional. `--live` is
+				// what the script already does with no argument at all, and exists for
+				// that rule.
+				"id": "taskIndexSource",
+				"type": "pickString",
+				"description": "Which copy of the workspace file should be listed?",
+				"options": [
+					{
+						"label": "The live workspace — what VS Code is running now",
+						"value": "--live"
+					},
+					{
+						"label": "devkit's workspace.jsonc — the reviewable copy on this branch",
+						"value": "--canonical"
+					}
+				],
+				"default": "--live"
 			}
 		]
 	}

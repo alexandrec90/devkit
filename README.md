@@ -564,6 +564,43 @@ locally and never pushes. A conflict is left **in progress** with every unmerged
 named in the log, and uncommitted work it had to set aside stays in a named stash — the
 installer's docstring is the place that explains why, and the log repeats the recovery.
 
+## Reading the workspace task block
+
+`workspace.jsonc` is devkit's canonical copy of the multi-root workspace file, and the
+part of it worth reviewing -- every VS Code task and every `${input:...}` picker they ask
+-- is the part JSONC hides best: each task's label, what it actually runs and its `detail`
+are separated by `presentation`, `icon` and `problemMatcher` blocks that never differ.
+
+`scripts/workspace-task-index.py` prints that block as tables instead.
+
+```bash
+python scripts/workspace-task-index.py                 # the LIVE workspace VS Code is running
+python scripts/workspace-task-index.py --canonical     # devkit's copy, i.e. this branch's proposal
+python scripts/workspace-task-index.py --format markdown --out review.md
+```
+
+Tasks are grouped by the domain in their label, one table per domain, with the wrapper
+layers (`notify-wrap.py`, `log-wrap.py`) stripped so the *Runs* column shows what
+executes. Then the pickers get a table of their own -- kind, the question asked, and every
+answer on offer with the default starred -- followed by a *Parameter | Asked by*
+cross-reference, which is where a picker no task uses shows up as `(unused)`.
+
+The parameter half is not an afterthought: a one-click task takes its blast radius from
+whatever its picker defaults to, and that default is the value furthest from the task's
+own definition in the file.
+
+The default target is the **live** file rather than the canonical one, because the
+question this answers is usually "what will the button in my window do". Pass
+`--canonical` to review a branch's proposal instead; with no live file on the machine (CI)
+it falls back to the canonical copy and says so in the header. Every run also writes the
+report under `logs/`, which is git-ignored -- a generated view of a file already in the
+repo is not a second copy anyone should have to keep true. (The file name is not spelled
+here on purpose: `test_doc_claims.py` reads a path in prose as a claim that it exists, and
+this one exists only after a run.)
+
+**"Workspace: List Tasks as a Table"** is the one-click form, and its picker chooses which
+copy. It is a report, not a gate: nothing fails, and nothing is written outside `logs/`.
+
 ## Authoring changes
 
 The harness repo is the source of truth. Edit here, open a PR, let CI test it, merge.
