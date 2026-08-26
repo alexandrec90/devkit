@@ -467,6 +467,18 @@ too was the older rule, and it meant a checkout that landed on `needs-pr` had no
 out of it: nothing in the sweep confirms a PR, so the verdict never cleared and the home
 branch never moved again.
 
+There is a third ending, and it is the one nothing was watching: a branch pushed by an
+interrupted `/ship`, for which no PR was ever opened. `needs-pr` said *wait for the
+merge* about a merge nobody was going to make, so the box held its port slot, its
+volumes and its row in the preview menu until a human found it. Past
+`--unclaimed-age-days` (7 by default, more than double the open-PR limit, because an
+open PR has a reviewer attached and this state has nobody) the checkout is reclaimed.
+Only the checkout: every commit is on the remote, the branch is not deleted, and
+`worktree.py resume <project> --branch <it>` brings the box back in full. The rule
+fires only where `gh` **answered** that the branch has no PR — an offline or
+unauthenticated `gh` exits with the same code, so absence of an answer keeps waiting
+forever, and a box holding uncommitted work is held at any age like every other.
+
 The run is windowless, so its only record is `logs/reconcile.log`, overwritten per
 pass and written on success too — a log that appears only on failure cannot be told
 apart from a task that has stopped running. That log's timestamp is also what
@@ -708,7 +720,7 @@ insufficiently-spaced service bases rather than letting either reach
 
 ```bash
 python scripts/devkit_ports.py                 # the whole registry
-python scripts/devkit_ports.py carameli-b      # one checkout's *_HOST_PORT block
+python scripts/devkit_ports.py carameli        # one checkout's *_HOST_PORT block
 ```
 
 The generator **does not** edit `ports.toml` itself — it prints the lines to add.

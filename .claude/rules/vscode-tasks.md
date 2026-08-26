@@ -60,8 +60,10 @@ without turning that exclusion into an exception. Each resolves against the **ra
 registry instead, and neither moves the dispatcher's contract:
 
 - `scripts/git-merge-default.py` merges a trunk in and needs git alone. Its picker,
-  `mergeCheckout`, is the only one listing *more* than the registry —
+  `mergeCheckout`, is the one listing *more* than the registry —
   `insert_picker_option` maintains it, and a test pins the equality both ways.
+  (`adoptProjects` is the mirror image, listing one *less*; see the `--all` bullet
+  below.)
 - `scripts/vanillaland-e2e.py` runs the start script VanillaLand itself ships and needs
   PowerShell alone. It carries **no** picker: one checkout owns that stack, so the name
   is a constant and `--checkout` stays a flag only so the tests can aim it elsewhere.
@@ -200,8 +202,17 @@ after the PR merges; a box never renders.
   string reaches argparse as a stray positional and is rejected, which is why
   `scripts/new-project.py` carries the redundant-looking `--dry-run` and `--remote`
   flags alongside their negations. The exception is a picker feeding
-  `scripts/devkit_project.py`, which strips empties before exec — `testScope` and
-  `e2eMode` rely on that, and say so.
+  `scripts/devkit_project.py`, which strips empties before exec — `testScope`,
+  `lintScope` and `e2eMode` rely on that, and say so.
+- **A scope that fits in a picker is a picker, not a second task.** Two tasks whose
+  labels differ only in how much they cover sit adjacent in the quick-pick, cost an icon
+  and a `detail` apiece, and — where they are dispatches — a second `ACTIONS` entry for
+  one flag. *Lint: Everything* and *Lint: Changed Files* were that, beside a *Test: Run
+  Suite* that had asked the same question as a dropdown since it was written. They are
+  one task and `lintScope` now, and `lint-changed` left `ACTIONS` with them. What earns
+  a task of its own instead is a difference the picker cannot carry back: a cost nobody
+  consented to (`test-hooks-live` is a separate action so the free one's flag cannot
+  reach it by a mistyped argument), or a different script.
 - **A picker whose options are not knowable in advance reads a file, and the script that
   answers it writes that file.** `rioj7.command-variable` can read and template a JSON
   file, and cannot run a command — so a list of live branches or boxes has to be *cached*
@@ -237,18 +248,33 @@ after the PR merges; a box never renders.
   `test_the_live_smoke_task_names_the_only_checkout_that_can_run_it` asserts the same
   agreement against `Action.projects` directly; a literal that outgrows its scope fails
   there rather than in a terminal.
-- **A batch task that acts on the workspace takes `--all`, not a scope picker.** There
-  used to be two of those — `sweepScope`, then `upgradeScope` — each a hand-maintained
-  second copy of the project registry, and each silently skipped when `register()` added
-  a project, so a newly generated project could run every generic task while `--all` was
-  the only way to sweep or upgrade it. Both are gone, and the reason they are not coming
-  back is in `tests/test_devkit_project.py` above `MERGE_TASK`: the question a scope
-  picker asks has no answer worth the copy. Only `register()`-maintained pickers remain
-  — `project`, `daemonProject`, `mergeCheckout` — so a new project
-  reaches every task by being registered, which is the one thing that cannot be
-  forgotten. `insert_picker_option` names that list, and
-  `test_registering_against_the_real_workspace_file` holds it to the workspace file.
-  Pickers scoped by `Action.projects` are a separate case and are gated separately.
+- **A scope picker is only allowed if `register()` maintains it.** There used to be two
+  that did not — `sweepScope`, then `upgradeScope` — each a hand-maintained second copy
+  of the project registry, and each silently skipped when `register()` added a project,
+  so a newly generated project could run every generic task while `--all` was the only
+  way to sweep or upgrade it. That, and not the asking, is what was wrong with them:
+  the defect was the second copy, and it is a defect a maintained picker does not have.
+  So the rule is the maintenance, not the `--all` — a batch task that has no reason to
+  narrow still takes `--all`, and one that does gets a picker `insert_picker_option`
+  names. The list it names is `project`, `daemonProject`, `mergeCheckout`,
+  `adoptProjects`, and
+  `test_registering_against_the_real_workspace_file` holds it to the workspace file, so
+  a new project reaches every task by being registered — the one thing that cannot be
+  forgotten. Pickers scoped by `Action.projects` are a separate case and are gated
+  separately.
+- **`adoptProjects` is that exception, and what it costs is worth reading before adding
+  another.** *Devkit: Upgrade Projects* and *Devkit: Cut Release* both ask which
+  consumers should adopt the release, because choosing four of five is the one thing a
+  human is at the dropdown for and `--all` made it a terminal command. It lists the
+  registry **minus `devkit`** — a release is pulled *from* that checkout, and
+  `upgrade-project.py` treats a named checkout it cannot upgrade as an operator error
+  and stops the whole run, where `--all` skips it silently. Two consequences follow.
+  `insert_picker_option` inserts into it anyway, because `register()` never names
+  `devkit`; and the picker is not a pure mirror of the registry, so
+  `tests/test_devkit_project.py` pins it against *registry minus devkit* both ways
+  rather than against the registry. Escaping either checklist means *never mind*, and
+  the two scripts read it differently on purpose — see `upgrade-project.picked_nothing`
+  and its caller in `release-pipeline.main`.
 
 - **A task meant to run twice at once says so with `runOptions.instanceLimit`.** The
   default is **1**, and re-running a task that is already active offers to terminate it

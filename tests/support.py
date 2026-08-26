@@ -65,10 +65,13 @@ def in_an_ephemeral_box(root: Path) -> bool:
     return root.parent.name == worktree.BOXES_DIR_NAME
 
 
-# The narrower marker, for the one assertion that compares the live file against *this*
+# The narrower marker, for every assertion that reads the live file expecting *this*
 # checkout's canonical copy. The live workspace is rendered from the static checkout once
 # a branch merges, so from a box the comparison reads a file describing merged `main`
 # against a canonical copy carrying an un-merged edit -- and reports the edit as drift.
+# It began as the drift check alone, and the registration/retirement pair in
+# `test_devkit_project.py` was added to it after a branch that introduced a picker made
+# both of them assert that its own un-merged edit had already landed.
 # Every task that touches `workspace.jsonc` therefore failed the Stop gate at the finish
 # line, with the failure's own first suggestion (`--adopt-workspace`) being the one move
 # that deletes the branch's edit. Rendering early is not the answer either: the live file

@@ -259,6 +259,11 @@ def _option_text(option: object, default: object) -> str:
     return f"* {text}" if default is not None and value == default else f"  {text}"
 
 
+def _source_of(args: dict) -> str:
+    """The `${workspaceFolder:x}`-stripped path a picker reads its answers from."""
+    return WORKSPACE_FOLDER.sub("", str(args.get("fileName", ""))) or "an unnamed file"
+
+
 def input_choices(spec: dict) -> tuple[str, ...]:
     """The answers on offer, as display lines. `*` marks the default.
 
@@ -279,15 +284,16 @@ def input_choices(spec: dict) -> tuple[str, ...]:
     args = spec.get("args") or {}
     groups = args.get("optionGroups")
     if isinstance(groups, dict):
-        loaded = WORKSPACE_FOLDER.sub("", str(groups.get("fileName", "")))
-        lines.append(f"  read at pick time from {loaded}")
+        lines.append(f"  read at pick time from {_source_of(groups)}")
     else:
+        # A group that is not a mapping either is the same crash one level down: the
+        # input here is a hand-edited workspace file, and one input's spelling must
+        # cost that input's line rather than the whole report.
         for group in groups or ():
-            for option in group.get("options", ()):
+            for option in group.get("options", ()) if isinstance(group, dict) else ():
                 lines.append(_option_text(option, default))
     if args.get("fileName"):
-        source = WORKSPACE_FOLDER.sub("", str(args["fileName"]))
-        lines.append(f"  read at pick time from {source}")
+        lines.append(f"  read at pick time from {_source_of(args)}")
     for key, nested in (args.get("pickStringRemember") or {}).items():
         asked = str(nested.get("description", "")).strip()
         lines.append(f"  asks {key} first: {asked}")
