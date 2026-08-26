@@ -864,3 +864,77 @@ def test_the_workspace_sync_line_reaches_the_rendered_message():
     """A helper nothing calls is a check that reports nothing."""
     message = ws.render([], {}, "", workspace_sync="alex-projects.code-workspace: published 3")
     assert "[workspace] alex-projects.code-workspace: published 3" in message
+
+
+# --- headroom: the disk nothing else can see ---------------------------------
+
+_GB = 1024**3
+
+
+class _Usage:
+    def __init__(self, free):
+        self.free = free
+
+
+def _disk(free_gb):
+    return lambda _path: _Usage(int(free_gb * _GB))
+
+
+def _mem(phys_gb, pagefile_gb, used_fraction=0.5):
+    limit = int((phys_gb + pagefile_gb) * _GB)
+    return lambda: (int(phys_gb * _GB), limit, int(limit * (1 - used_fraction)))
+
+
+def test_a_roomy_machine_at_its_boot_pagefile_says_nothing():
+    """The default state of every other workstation -- and most of this one's days."""
+    line = ws.headroom_line(usage=_disk(300), memory=_mem(16, 16))
+    assert line == ""
+
+
+def test_a_grown_pagefile_is_reported_even_while_the_disk_looks_fine():
+    """The whole point: 20 GB can be gone with 90 GB still free and no folder to blame."""
+    line = ws.headroom_line(usage=_disk(90), memory=_mem(16, 38))
+    assert "pagefile is 38 GB, 22 GB past its boot size" in line
+    assert "90 GB free" not in line
+
+
+def test_a_tight_disk_is_reported_with_the_pagefile_that_took_it():
+    line = ws.headroom_line(usage=_disk(20), memory=_mem(16, 38, used_fraction=0.91))
+    assert "20 GB free" in line
+    assert "22 GB past its boot size" in line
+    assert "commit at 91% of 54 GB and growing" in line
+
+
+def test_commit_near_the_limit_is_reported_before_the_pagefile_grows():
+    """The pagefile grows *because* commit approached the limit, so this is the warning."""
+    line = ws.headroom_line(usage=_disk(300), memory=_mem(16, 16, used_fraction=0.93))
+    assert "commit at 93%" in line
+    assert "past its boot size" not in line
+
+
+def test_a_reboot_is_named_as_the_symptom_fix_not_the_cause():
+    """A line that only says "reboot" trains you to reboot daily and change nothing."""
+    line = ws.headroom_line(usage=_disk(20), memory=_mem(16, 40))
+    assert "close idle dev servers and browsers" in line
+    assert "none of the cause" in line
+
+
+def test_a_machine_that_cannot_be_measured_is_silence():
+    """Off Windows there is no commit story, and an unreadable volume is not a failure."""
+    assert ws.headroom_line(usage=_disk(300), memory=lambda: (0, 0, 0)) == ""
+
+    def explode(_path):
+        raise OSError("no such volume")
+
+    assert ws.headroom_line(usage=explode, memory=_mem(16, 40)) == ""
+
+
+def test_the_headroom_line_reaches_the_rendered_message():
+    message = ws.render([], {}, "", headroom="headroom: 20 GB free")
+    assert "[workspace] headroom: 20 GB free" in message
+
+
+def test_commit_status_answers_on_this_machine_without_raising():
+    """`_commit_status` is the one call here that leaves Python; it must never throw."""
+    phys, limit, avail = ws._commit_status()
+    assert (phys, limit, avail) == (0, 0, 0) or (phys > 0 and limit >= phys >= 0 and avail >= 0)
