@@ -142,6 +142,23 @@ Each of these has already been violated by something:
   merge escape above exists to keep holding. `reap` reads the state from the same
   `pr_for` call `reconcile` makes, so the two can no longer describe one box in two
   ways — the disagreement `AWAITS_A_MERGE` was added to end.
+- **A PR that is never opened at all is the third ending, and it had no exit either.**
+  The close above fixed the PR that ends; this is the one that never begins — an
+  interrupted `/ship` pushes the branch and dies before `gh pr create`, leaving
+  `needs-pr` to say *wait for the merge* forever. carameli's `agent/comic-book-ui-0819`
+  held a slot, a volume set and a row in the preview menu for 6.8 days that way, with
+  `--force` as the only exit, which is the same shape as both leaks above. What makes
+  this one different is that the trigger is an **absence**, and `pr_for` conflated two
+  of them: "GitHub says there is no PR" and "GitHub could not be asked" were both an
+  empty `PullRequest`. Waiting is right to conflate them; destroying is not, so
+  `PullRequest.absent` is set only where gh's own message says `no pull requests
+  found`, and an offline, unauthenticated or rate-limited `gh` — which exits 1 exactly
+  as the no-PR case does — waits forever. The age gate (`DEFAULT_UNCLAIMED_AGE_DAYS`,
+  more than double `DEFAULT_MAX_AGE_DAYS`) is not tidiness: an open PR has a reviewer
+  attached to it and this state has nobody, so the only thing that could ever clear it
+  is someone noticing. And the arm returns before `reapable`, so it re-asks
+  `holds_uncommitted` itself — that gate being inert for the honest caller is precisely
+  how the husk case below leaked.
 - **A box can also stop being a checkout, and that was the third spelling of the same
   leak.** When a `git worktree remove` deletes most of the tree and then dies —
   MAX_PATH, a locked file — what is left is a *husk*: a directory with no `.git`, which

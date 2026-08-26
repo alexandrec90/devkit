@@ -741,6 +741,55 @@ def test_a_closed_pr_still_never_destroys_uncommitted_work():
     assert "/ship" in note
 
 
+# --- reap: the box nobody ever opened a PR for -------------------------------
+
+
+def test_an_unclaimed_box_is_reapable_without_force():
+    """`--force` is the flag that also discards uncommitted work, so making it the only
+    exit from a state a *clean* box reaches by itself is what teaches the hammer. This
+    is the same argument the closed-PR case above won, arriving from the other side."""
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_PR,
+        "1 commit(s) pushed to origin/agent/x",
+        force=False,
+        holds_uncommitted=False,
+        awaiting_pr=True,
+        unclaimed=True,
+    )
+    assert allowed
+    assert "no PR" in note
+    assert "untouched" in note
+
+
+def test_an_unclaimed_box_holding_work_is_still_refused():
+    """The safety property at the predicate. This arm returns before `reapable` runs,
+    so the dirtiness gate has to be asked here too -- and an age nobody supervises is
+    the last place to be relying on a verdict implying cleanliness."""
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_PR,
+        "3 uncommitted file(s)",
+        force=False,
+        holds_uncommitted=True,
+        awaiting_pr=True,
+        unclaimed=True,
+    )
+    assert not allowed
+    assert "--force" in note
+
+
+def test_the_refusal_names_the_unclaimed_deadline():
+    """A refusal that reads "wait for the merge" about a branch with no PR sent people
+    to `--force`; it now names the second way the wait ends."""
+    _, note = worktree.reap_decision(
+        sweep.NEEDS_PR,
+        "1 commit(s) pushed to origin/agent/x",
+        force=False,
+        holds_uncommitted=False,
+        awaiting_pr=True,
+    )
+    assert f"{worktree.DEFAULT_UNCLAIMED_AGE_DAYS:g}d" in note
+
+
 def test_a_close_does_not_stand_in_for_a_merge_on_a_retired_branch():
     """The boundary, and the reason `reapable` never learns about closes. Plus a
     *merged* PR, `needs-rebranch` is a squash whose content is on the default branch;
@@ -2280,6 +2329,78 @@ def test_reap_asks_github_the_same_question_reconcile_does(workspace, monkeypatc
     assert [step[0] for step in plan.steps] == ["worktree", "branch"]
 
 
+def _unclaimed_box(workspace, monkeypatch, *, age_days: float, stderr: str):
+    """A pushed, clean, PR-less box `age_days` old, with `gh` answering `stderr`."""
+    root = workspace.parent
+    (root / worktree.BOXES_DIR_NAME / "demo--nopr-0819").mkdir(parents=True)
+    created = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=age_days)
+    worktree.write_leases(
+        root,
+        {
+            "demo--nopr-0819": box(
+                "demo--nopr-0819",
+                project="demo",
+                branch="agent/nopr-0819",
+                created=created.isoformat(),
+            )
+        },
+    )
+    monkeypatch.setattr(
+        worktree,
+        "inspect_box",
+        lambda *a, **k: (
+            state(upstream="origin/agent/nopr-0819", unpushed=0, ahead=1),
+            sweep.NEEDS_PR,
+            "1 commit(s) pushed to origin/agent/nopr-0819",
+        ),
+    )
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+    # `pr_for` itself is deliberately left real: what this test is about is the
+    # translation from gh's exit-1-plus-a-message into a decision.
+    monkeypatch.setattr(
+        worktree.sweep, "gh_for", lambda path: lambda *argv: _completed(1, "", stderr)
+    )
+    return worktree.plan_reap("demo--nopr-0819", workspace, fetch=True)
+
+
+def test_reap_frees_a_box_github_says_has_no_pr_once_it_is_old(workspace, monkeypatch):
+    """End to end through `plan_reap`, because the two halves it joins are what make
+    the rule safe: the `absent` flag comes from what gh *answered*, and the age from
+    the box's own lease."""
+    plan = _unclaimed_box(
+        workspace,
+        monkeypatch,
+        age_days=worktree.DEFAULT_UNCLAIMED_AGE_DAYS + 1,
+        stderr='no pull requests found for branch "agent/nopr-0819"',
+    )
+    assert plan.refusal == ""
+    assert [step[0] for step in plan.steps] == ["worktree", "branch"]
+
+
+def test_reap_still_refuses_a_recent_box_with_no_pr(workspace, monkeypatch):
+    """The user's constraint, at the tier that destroys: work from this week is not
+    touched, whatever GitHub says about it."""
+    plan = _unclaimed_box(
+        workspace,
+        monkeypatch,
+        age_days=1.0,
+        stderr='no pull requests found for branch "agent/nopr-0819"',
+    )
+    assert plan.refusal and not plan.steps
+
+
+def test_reap_still_refuses_an_old_box_when_gh_could_not_answer(workspace, monkeypatch):
+    """Same age, same verdict, same exit code -- only the message differs. A machine
+    with no network must not reap the workspace."""
+    plan = _unclaimed_box(
+        workspace,
+        monkeypatch,
+        age_days=worktree.DEFAULT_UNCLAIMED_AGE_DAYS + 1,
+        stderr="HTTP 401: Bad credentials",
+    )
+    assert plan.refusal and not plan.steps
+
+
 def test_no_fetch_learns_nothing_and_therefore_still_refuses(workspace, monkeypatch):
     """`--no-fetch` skips the lookup, so it sees neither a merge nor a close. The
     refusal it keeps is the cautious answer, which is the one it must fail to."""
@@ -2606,6 +2727,48 @@ def test_pr_for_fails_closed_when_gh_is_missing_or_errors():
     assert not worktree.pr_for(lambda *a: _completed(0, pr_json()), "").exists
 
 
+# --- pr_for: "there is no PR" is an answer, not a silence --------------------
+# `exists` is False for both "gh says this branch has no PR" and "gh could not be
+# asked", and everything that merely *waits* is right to conflate them. `absent` is
+# the affirmative half, and it exists because one rule -- reclaiming an unclaimed box
+# -- destroys on the strength of the answer, so it must never fire on the silence.
+
+
+def test_pr_for_records_an_affirmative_no_pull_requests_found():
+    found = worktree.pr_for(
+        lambda *a: _completed(1, "", 'no pull requests found for branch "agent/x-0819"'),
+        "agent/x-0819",
+    )
+    assert not found.exists
+    assert found.absent
+
+
+def test_pr_for_leaves_absent_unset_when_gh_could_not_answer():
+    """The safety property of the whole feature. An unauthenticated, rate-limited or
+    offline `gh` exits 1 exactly as the no-PR case does -- only the message differs --
+    so keying on the exit code would reap every box in the workspace on the first pass
+    run without a network."""
+
+    def exploding(*args):
+        raise OSError("gh not found")
+
+    unanswerable = (
+        exploding,
+        lambda *a: _completed(1, "", "gh: To use GitHub CLI in a GitHub Actions workflow"),
+        lambda *a: _completed(1, "", "HTTP 401: Bad credentials"),
+        lambda *a: _completed(1, "", "dial tcp: lookup api.github.com: no such host"),
+        lambda *a: _completed(1, "", "API rate limit exceeded"),
+    )
+    for runner in unanswerable:
+        found = worktree.pr_for(runner, "agent/x-0819")
+        assert not found.exists
+        assert not found.absent, runner
+
+
+def test_pr_for_leaves_absent_unset_when_a_pr_was_found():
+    assert not worktree.pr_for(lambda *a: _completed(0, pr_json()), "agent/x-0819").absent
+
+
 # --- reconcile: merging ------------------------------------------------------
 
 # The observed failure: `gh pr merge --delete-branch` run from a box merges, then tries
@@ -2846,11 +3009,85 @@ def test_a_newborn_box_that_holds_work_is_held_not_waited_on():
     assert action == worktree.HOLD
 
 
-def test_a_pushed_branch_with_no_pr_is_reported_never_destroyed():
-    """Safe on the remote, but nobody will look at it, and that is a person's call."""
+def test_a_pushed_branch_gh_could_not_be_asked_about_waits_forever():
+    """A bare `PullRequest()` is *unknown*, not *absent*: it is what an offline,
+    unauthenticated or rate-limited `gh` produces, and the age of the box says nothing
+    about a question nobody managed to ask. So this arm keeps waiting at any age."""
     action, why = decide(sweep.NEEDS_PR, "pushed")
     assert action == worktree.WAIT
     assert "no PR" in why
+
+    aged, _ = decide(sweep.NEEDS_PR, "pushed", age_days=999.0)
+    assert aged == worktree.WAIT
+
+
+# --- reconcile: the box nobody ever opened a PR for --------------------------
+# `needs-pr` plus an affirmative "no pull requests found" was a permanent WAIT -- the
+# tier telling a scheduler to keep waiting for a merge nobody was going to make. It is
+# what an interrupted `/ship` leaves behind every time, and carameli's
+# `agent/comic-book-ui-0819` sat that way for 6.8 days holding a port slot, a volume
+# set and a row in the preview menu, with `--force` as the only exit.
+
+
+def test_an_unclaimed_box_is_reclaimed_once_it_is_old_enough():
+    action, why = decide(
+        sweep.NEEDS_PR,
+        "pushed",
+        worktree.PullRequest(absent=True),
+        age_days=worktree.DEFAULT_UNCLAIMED_AGE_DAYS + 0.5,
+    )
+    assert action == worktree.REAP
+    # The line a human reads in reconcile.log has to say what survives, or the reap
+    # reads as the work being gone.
+    assert "no PR" in why
+    assert "resume" in why
+
+
+def test_an_unclaimed_box_is_left_alone_while_it_is_recent():
+    """The user-facing half of the request this came from: recent work is never
+    touched, and the wait names the deadline instead of being silent about it."""
+    action, why = decide(
+        sweep.NEEDS_PR,
+        "pushed",
+        worktree.PullRequest(absent=True),
+        age_days=worktree.DEFAULT_UNCLAIMED_AGE_DAYS - 0.5,
+    )
+    assert action == worktree.WAIT
+    assert "/ship" in why
+    assert f"{worktree.DEFAULT_UNCLAIMED_AGE_DAYS:g}d" in why
+
+
+def test_the_unclaimed_limit_is_far_longer_than_the_open_pr_one():
+    """Not a tidiness assertion -- the two waits differ in kind. An open PR has a
+    person attached to it; this state has nobody, so the only thing that could clear it
+    is somebody noticing. Shortening it towards `max_age_days` would start reclaiming
+    boxes whose session is still working in them."""
+    assert worktree.DEFAULT_UNCLAIMED_AGE_DAYS > 2 * worktree.DEFAULT_MAX_AGE_DAYS
+
+
+def test_the_unclaimed_limit_is_configurable_per_pass():
+    action, why = decide(
+        sweep.NEEDS_PR,
+        "pushed",
+        worktree.PullRequest(absent=True),
+        age_days=3.0,
+        unclaimed_age_days=2.0,
+    )
+    assert action == worktree.REAP
+    assert "limit 2d" in why
+
+
+def test_an_unclaimed_box_still_holding_work_is_held_at_any_age():
+    """`HOLD` is tested before anything that destroys, and no age changes that."""
+    action, why = decide(
+        sweep.READY,
+        "3 uncommitted file(s)",
+        worktree.PullRequest(absent=True),
+        age_days=999.0,
+        holds_uncommitted=True,
+    )
+    assert action == worktree.HOLD
+    assert "ready" in why
 
 
 def test_a_closed_pr_reaps_its_box():
@@ -2882,6 +3119,7 @@ def test_no_decision_destroys_a_box_holding_work():
     for verdict in (sweep.READY, sweep.BLOCKED, sweep.NEEDS_BRANCH, sweep.NEEDS_REBRANCH):
         for pr in (
             worktree.PullRequest(),
+            worktree.PullRequest(absent=True),
             worktree.parse_pr_view(pr_json(state="MERGED")),
             worktree.parse_pr_view(pr_json(state="CLOSED")),
         ):
