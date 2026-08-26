@@ -289,3 +289,17 @@ def test_every_slotless_exclusion_names_a_real_checkout_and_a_reason():
         assert name not in registry.slots, (
             f"SLOTLESS says {name} needs no slot, but ports.toml gives it one"
         )
+
+
+def test_a_dismissed_project_picker_prints_no_allocations(capsys):
+    """*Ports: Show Checkout Allocations* hands this script the picker's value directly.
+
+    Dismissed, that value is the literal `${input:project}`, which would otherwise be
+    read as a checkout name and reported as unknown — a failure report for a run the
+    user called off. `log-wrap.py` sits in front but passes its tail through untouched,
+    so the check has to be here.
+    """
+    assert devkit_ports.main(["${input:project}"]) == 0
+    out = capsys.readouterr().out
+    assert "cancelled" in out
+    assert "5432" not in out

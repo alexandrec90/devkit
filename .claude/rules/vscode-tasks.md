@@ -194,6 +194,21 @@ after the PR merges; a box never renders.
   flags alongside their negations. The exception is a picker feeding
   `scripts/devkit_project.py`, which strips empties before exec — `testScope` and
   `e2eMode` rely on that, and say so.
+- **Escape cancels the task only for VS Code's own inputs; a `command` input has to be
+  cancelled by the script.** `promptString` and `pickString` abort the run when
+  dismissed. A `command` input — every multi-select picker, since `multiPick` exists
+  only in `rioj7.command-variable` — returns nothing, VS Code records no substitution,
+  and the task **starts anyway** with the literal `${input:<id>}` in its argument list.
+  So *"New Migration"* cancels on Escape and *"Preview: Open a UI Branch"* used to run
+  parameterless, purely because the first happens to end on a `promptString`. Nothing in
+  the extension fixes this: `checkEscapedUI` aborts no launch, and is a sticky bit that
+  retires the dropdown for the life of the window (`previewRow`'s comment has the
+  detail). The receiving script therefore recognises the literal itself, via
+  `scripts/task_input.py`, and exits 0 having run nothing — ahead of `argparse`, because
+  a cancel reported as a usage error is a red icon, a toast and a `logs/` artifact for a
+  run the user called off. `test_every_task_with_a_command_picker_can_be_cancelled` is
+  the ratchet, and it checks the **innermost** command: a wrapper passes its tail
+  through, so a guard in the outer layer would prove nothing.
 - **A picker whose options are not knowable in advance reads a file, and the script that
   answers it writes that file.** `rioj7.command-variable` can read and template a JSON
   file, and cannot run a command — so a list of live branches or boxes has to be *cached*

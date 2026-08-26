@@ -676,10 +676,10 @@ def test_each_agent_store_honours_its_config_home(monkeypatch, tmp_path):
 def test_the_script_is_stdlib_only():
     """devkit ships no runtime dependencies, and this runs from a VS Code task.
 
-    `agent_clis` is the one non-stdlib name allowed, and it is not a dependency: it is a
-    sibling script in the same directory, reached through the `sys.path` insert above
-    it. Naming it here rather than widening the rule keeps a real third-party import from
-    slipping in behind the exception.
+    `agent_clis` and `task_input` are the only non-stdlib names allowed, and neither is a
+    dependency: both are sibling scripts in the same directory, reached through the
+    `sys.path` insert above them. Naming them here rather than widening the rule keeps a
+    real third-party import from slipping in behind the exception.
     """
     source = (REPO_ROOT / "scripts" / "resume-sessions.py").read_text(encoding="utf-8")
     for line in source.splitlines():
@@ -696,6 +696,7 @@ def test_the_script_is_stdlib_only():
                 "shutil",
                 "subprocess",
                 "sys",
+                "task_input",
                 "time",
                 "dataclasses",
                 "pathlib",
@@ -715,3 +716,20 @@ def test_the_workspace_task_passes_the_resume_agent_checkboxes():
     assert '"minCount": 1' in picker
     assert '"claude"' in picker
     assert '"codex"' in picker
+
+
+def test_a_dismissed_agent_checkbox_list_opens_no_tabs(monkeypatch, capsys):
+    """Escaping that checkbox list must reopen nothing, and say so as a cancel.
+
+    This is the one picker task with no wrapper in front of it, so the guard lives in
+    `main` — and ahead of `argparse`, because `--agent` carries a `type=` that would
+    reject the literal `${input:resumeAgents}` as a usage error rather than recognise it
+    as the dismissal it is.
+    """
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a cancelled task must not launch a terminal")
+
+    monkeypatch.setattr(rs.subprocess, "run", refuse)
+    assert rs.main(["--agent", "${input:resumeAgents}", "--count", "4"]) == 0
+    assert "cancelled" in capsys.readouterr().out
