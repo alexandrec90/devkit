@@ -1073,6 +1073,7 @@ UNTOASTED_TASKS = {
     "Agents: Resume Recent Sessions": "same — reopens sessions in tabs, then exits",
     "Agents: Import Limited Claude Sessions": "same — opens imported sessions in tabs",
     "Ports: Show Checkout Allocations": "prints a table and exits; you are already looking",
+    "Workspace: List Tasks as a Table": "same — the table is the output, in front of you",
 }
 
 # Deviations, each with the reason it is one. A new task does not belong here: this is
