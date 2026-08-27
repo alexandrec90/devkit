@@ -442,8 +442,12 @@ def generic_prune(idle_only: bool = False) -> int:
     """Reclaim image/build-cache space, then hand the freed space back to Windows.
 
     No --volumes and no `docker volume prune`, ever: named volumes are where dev
-    databases live. Compose is left alone here -- a workspace that needs its stack
-    torn down and brought back should ship its own docker-prune.py (see DELEGATES).
+    databases live. **No container removal either**, for the neighbouring reason: a
+    stopped container is a stack someone intends to start again, and deleting it costs
+    a rebuild while freeing megabytes. Both guarantees are pinned by
+    `test_the_prune_never_removes_containers_or_volumes`. Compose is left alone here --
+    a workspace that needs its stack torn down and brought back should ship its own
+    docker-prune.py (see DELEGATES).
 
     **The two halves have very different blast radii, and only the second reclaims
     anything Windows can see.** `docker system prune` frees space *inside* the VM; the
@@ -475,7 +479,23 @@ def generic_prune(idle_only: bool = False) -> int:
             print(banner("ENGINE UNAVAILABLE -- nothing pruned"))
             return 1
 
-    run(["docker", "system", "prune", "-af"], timeout=600)
+    # `image`, not `system`, and the distinction is the whole reason this line is spelled
+    # out. `system prune -af` removes stopped containers FIRST and then every image
+    # nothing references -- so a stack that `stop-idle` parked at 03:30 has its
+    # containers deleted at 04:00, which un-references its images inside the same
+    # command, and the next `docker-up` is a cold rebuild rather than a start. That is
+    # not a hypothetical: carameli lost its whole stack and every `carameli-*` image to
+    # this pair on 2026-08-27, having been stopped by the job whose docstring calls
+    # handing this one an idle machine a feature.
+    #
+    # `image prune -a` counts a *stopped* container as a reference, so a parked stack
+    # survives the night and a genuinely orphaned image still goes -- which is where the
+    # GB are. Containers are deliberately not pruned here at all: their writable layers
+    # are megabytes, and an `until=` filter cannot rescue the case, because it reads
+    # creation time rather than stop time and so cannot tell a stack parked last night
+    # from one abandoned in June.
+    run(["docker", "image", "prune", "-af"], timeout=600)
+    run(["docker", "network", "prune", "-f"], timeout=600)
     run(["docker", "builder", "prune", "-af"], timeout=600)
 
     print("\n  Stopping Docker for exclusive VHDX access ...")
