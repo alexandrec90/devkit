@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Merge a remote's default branch into whatever branch a checkout is on.
 
-The sibling of `git-sync-keep.py`, and deliberately not a mode of it. That one
-**rebases** the current branch onto `origin/<default>`, which is what a task branch
-wants: a clean series of commits on top of the trunk, ending in a fast-forward PR.
-This one **merges** the trunk in, which is what long-lived work wants -- the history
-is already published, so it must not be rewritten, and the integration deserves a
-commit of its own.
+It **merges** the trunk in, which is what long-lived work wants -- the history is
+already published, so it must not be rewritten, and the integration deserves a commit
+of its own.
+
+There was a sibling, `git-sync-keep.py`, and this was deliberately not a mode of it:
+that one **rebased** the current branch onto `origin/<default>`, which is what a task
+branch wants. It is gone, with its task, because VS Code's own Source Control view
+rebases a checkout onto its trunk without a picker or a script. Nothing there does what
+the rest of this file is for.
 
 Two consequences, and they are the whole design:
 

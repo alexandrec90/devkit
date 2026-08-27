@@ -38,8 +38,13 @@ What it does, in order:
 6.  squash-merge it
 7.  dispatch `release.yml phase=tag`, which runs the suite against the tagged commit
     before pushing the tag, and wait for it
-8.  fetch the new tag and hand off to `upgrade-project.py --all --yes`, which opens an
-    adoption PR per consumer and labels each one for auto-merge
+8.  fetch the new tag and hand off to `upgrade-project.py`, which opens an adoption PR
+    per consumer and labels each one for auto-merge
+
+Step 8's *scope* is the one thing the click asks that the schedule cannot: `--projects`
+takes the consumers ticked in `Devkit: Cut Release`'s checklist, and omitting it means
+`--all`, which is what the 2am pass wants. Narrowing it does not narrow the release --
+the tag is the tag -- it decides only whose adoption PR opens tonight.
 
 Step 5 is the one that earns the script. Every other step is a command someone could
 type; that one is a judgement -- *this* failing check, and only this one, is the
@@ -355,7 +360,23 @@ def deliverable_changes(paths: Sequence[str], vendored: Sequence[str]) -> list[s
     return sorted(hit)
 
 
-def plan_steps(version: str, adopt: bool) -> list[str]:
+def adoption_scope(projects: Sequence[str]) -> str:
+    """The one argv token that tells `upgrade-project.py` which consumers to adopt in.
+
+    `--all` when the checklist ticked nothing, which is what the scheduled pass wants and
+    what this script did unconditionally before the picker existed -- a release nobody is
+    watching should reach every consumer, and only a human at the dropdown has a reason
+    to narrow it.
+
+    One token rather than a flag and a value, because a ticked selection is a positional
+    for that script; and spelled once here because it appears three times -- the command,
+    the dry run's plan, and the retry line printed when the adoption pass fails. A retry
+    naming a different scope from the run it retries is a remedy for something else.
+    """
+    return ",".join(projects) if projects else "--all"
+
+
+def plan_steps(version: str, adopt: bool, projects: Sequence[str] = ()) -> list[str]:
     """The dry run's account of itself: what `--yes` would do, in order."""
     steps = [
         f"cut {release.branch_for(version)} from origin/main in a throwaway worktree",
@@ -367,7 +388,11 @@ def plan_steps(version: str, adopt: bool) -> list[str]:
         "fetch the new tag",
     ]
     if adopt:
-        steps.append("run upgrade-project.py --all --yes to open every consumer's adoption PR")
+        who = ", ".join(projects) if projects else "every consumer"
+        steps.append(
+            f"run upgrade-project.py {adoption_scope(projects)} --yes "
+            f"to open an adoption PR in {who}"
+        )
     return steps
 
 
@@ -442,6 +467,24 @@ def existing_tags(devkit: Path) -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
+def upgrade_module():
+    """`scripts/upgrade-project.py`, loaded by path.
+
+    Hyphenated filename, hence the loader. Two questions are answered from there rather
+    than reimplemented here -- what the `MANIFEST` vendors, and how a VS Code checklist
+    spells its selection -- and both for the same reason: the adoption pass *is* that
+    script, so a second spelling in this file would agree with it until the day one of
+    them was the reason a release did not fire, or adopted somewhere nobody ticked.
+    """
+    loader_dir = SCRIPTS_DIR / "precommit"
+    if str(loader_dir) not in sys.path:
+        sys.path.insert(0, str(loader_dir))
+    # Resolved by the insert above; `scripts/precommit/` is not an importable package.
+    from _loader import load_by_path
+
+    return load_by_path("_upgrade_project", SCRIPTS_DIR / "upgrade-project.py")
+
+
 def vendored_paths() -> list[str]:
     """Every path in the vendored `MANIFEST`, or [] when it cannot be read.
 
@@ -450,14 +493,7 @@ def vendored_paths() -> list[str]:
     spelling of "what is vendored" is the kind of copy that nothing compares -- the two
     would agree until one of them was the reason a release did not fire.
     """
-    loader_dir = SCRIPTS_DIR / "precommit"
-    if str(loader_dir) not in sys.path:
-        sys.path.insert(0, str(loader_dir))
-    # Resolved by the insert above; `scripts/precommit/` is not an importable package.
-    from _loader import load_by_path
-
-    upgrade = load_by_path("_upgrade_project", SCRIPTS_DIR / "upgrade-project.py")
-    return list(upgrade.manifest_paths())
+    return list(upgrade_module().manifest_paths())
 
 
 def changed_since_tag(devkit: Path, tag: str) -> list[str]:
@@ -666,7 +702,13 @@ def _stop(message: str) -> int:
     return 1
 
 
-def run_pipeline(devkit: Path, version: str, adopt: bool, workspace: Path | None) -> int:
+def run_pipeline(
+    devkit: Path,
+    version: str,
+    adopt: bool,
+    workspace: Path | None,
+    projects: Sequence[str] = (),
+) -> int:
     """Execute the release. 0 done, 1 refused, 2 a step failed."""
     branch = release.branch_for(version)
 
@@ -761,7 +803,8 @@ def run_pipeline(devkit: Path, version: str, adopt: bool, workspace: Path | None
     if not adopt:
         _say("skipping adoption (--no-adopt); consumers stay on the previous release")
         return 0
-    _say("opening an adoption PR per consumer")
+    scope = adoption_scope(projects)
+    _say(f"opening an adoption PR in {', '.join(projects) if projects else 'every consumer'}")
     command = [
         # Not `sys.executable`: under the scheduled pass that is `pythonw.exe`, and
         # Windows ignores `CREATE_NO_WINDOW` for a GUI-subsystem child -- leaving the
@@ -769,7 +812,7 @@ def run_pipeline(devkit: Path, version: str, adopt: bool, workspace: Path | None
         # window of its own. See `sweep.console_python`.
         sweep.console_python(),
         str(SCRIPTS_DIR / "upgrade-project.py"),
-        "--all",
+        scope,
         "--yes",
         "--devkit",
         str(devkit),
@@ -782,7 +825,7 @@ def run_pipeline(devkit: Path, version: str, adopt: bool, workspace: Path | None
         # per-consumer act with its own artifact, and `logs/upgrade.log` says which.
         return _stop(
             f"{version} is released, but the adoption pass exited {adopted.returncode} "
-            f"-- see logs/upgrade.log, then re-run `upgrade-project.py --all --yes`"
+            f"-- see logs/upgrade.log, then re-run `upgrade-project.py {scope} --yes`"
         )
     _say(f"{version} released and up for adoption everywhere.")
     return 0
@@ -817,6 +860,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--workspace", type=Path, default=None, help="workspace file for the adoption pass"
     )
     parser.add_argument(
+        "--projects",
+        default="",
+        help=(
+            "comma-delimited consumer names to open adoption PRs in, as the "
+            "`Devkit: Cut Release` checklist emits them. Omitted means every consumer"
+        ),
+    )
+    parser.add_argument(
         "--no-adopt",
         dest="adopt",
         action="store_false",
@@ -838,6 +889,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+
+    upgrade = upgrade_module()
+    if upgrade.picked_nothing(args.projects):
+        # Escaping the consumer checklist is backing out of the click, and the click is
+        # the whole release -- so nothing is cut. `--no-adopt` is the spelling for
+        # "release, but adopt nowhere"; an escaped picker is not a request for it.
+        print(
+            "release-pipeline: nothing was picked -- no release was cut. Tick the "
+            "consumers to adopt in, or pass --no-adopt to release without adopting.",
+            file=sys.stderr,
+        )
+        return 1
+    projects = upgrade.project_selection(args.projects)
 
     if _run(["gh", "--version"]).returncode != 0:
         print(
@@ -873,13 +937,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"release-pipeline: releasing because {reason}")
 
     print(f"release-pipeline: {version} ({args.level})")
-    for index, step in enumerate(plan_steps(version, args.adopt), 1):
+    for index, step in enumerate(plan_steps(version, args.adopt, projects), 1):
         print(f"  {index}. {step}")
     if args.dry_run:
         print("\nDry run -- nothing was changed. Re-run with --yes to apply.")
         return 0
     print()
-    return run_pipeline(args.devkit, version, args.adopt, args.workspace)
+    return run_pipeline(args.devkit, version, args.adopt, args.workspace, projects)
 
 
 if __name__ == "__main__":

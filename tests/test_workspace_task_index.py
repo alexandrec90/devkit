@@ -356,6 +356,14 @@ def test_input_choices_reads_option_groups_that_name_a_file():
     assert index.input_choices(spec) == ("  read at pick time from logs/plug-menu.json",)
 
 
+def test_input_choices_survives_a_group_that_is_not_a_mapping():
+    """The same crash one level down, and the array form has no guard of its own. A
+    hand-edited workspace file is this script's input, so a group that is a bare string
+    must cost that group and not the report about the other forty tasks."""
+    spec = {"args": {"optionGroups": ["carameli", {"options": ["devkit"]}]}}
+    assert [line.strip() for line in index.input_choices(spec)] == ["devkit"]
+
+
 def test_input_choices_spells_out_a_blank_default(block: dict):
     assert index.input_choices(block["inputs"][3]) == ("  (blank)",)
 

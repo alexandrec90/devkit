@@ -33,8 +33,8 @@ def result(stdout="", returncode=0, stderr=""):
     return types.SimpleNamespace(stdout=stdout, returncode=returncode, stderr=stderr)
 
 
-def candidate(project="demo", ref="agent/x", box=""):
-    return Candidate(project=project, ref=ref, kind=KIND_BRANCH, box=box)
+def candidate(project="demo", ref="agent/x", box="", pr=0, title=""):
+    return Candidate(project=project, ref=ref, kind=KIND_BRANCH, box=box, pr=pr, title=title)
 
 
 def write_manifest(root: Path, project: str, body: str) -> Path:
@@ -392,6 +392,16 @@ def test_plan_claims_a_distinct_port_per_call(tmp_path):
     assert first.port == host.PORT_START
     assert second.port == host.PORT_START + 1
     assert taken == {first.port, second.port}
+
+
+def test_plan_carries_the_pr_number_and_title_through(tmp_path):
+    """The closing summary's only source: nothing re-asks GitHub, so a plan that drops
+    these two fields makes the block unable to say what any row is."""
+    write_manifest(tmp_path, "demo", FRONTEND_MANIFEST)
+    plan = host.plan_host(
+        candidate(pr=42, title="Bubble chains"), tmp_path, set(), lambda p: False, host.DEAD_PROXY
+    )
+    assert (plan.pr, plan.title) == (42, "Bubble chains")
 
 
 def test_plan_refuses_when_no_port_is_free(tmp_path):
@@ -1037,3 +1047,93 @@ def test_main_counts_a_server_that_died_before_answering(workspace, quiet_scan, 
     monkeypatch.setattr(host, "watch", lambda servers, **kwargs: None)
     code = host.main(["--workspace", str(workspace), "--no-fetch", "--picks", "demo:agent/x"])
     assert code == 1
+
+
+# --- the closing summary block --------------------------------------------------
+
+
+def test_review_columns_pair_the_pr_number_with_the_title():
+    plan = host.HostPlan(project="demo", ref="agent/x", pr=7, title="Ship button")
+    assert host.review_columns(plan) == ("PR #7", '"Ship button"')
+
+
+def test_review_columns_keep_a_titled_branch_that_has_no_pr():
+    """A branch with no PR is titled by its commit subject, which is still the only
+    sentence anybody wrote about the row -- dropping it for want of a number says
+    nothing about a branch whose author did."""
+    plan = host.HostPlan(project="demo", ref="agent/x", title="WIP bubbles")
+    assert host.review_columns(plan) == ("", '"WIP bubbles"')
+
+
+def test_review_columns_are_empty_when_the_row_has_neither():
+    assert host.review_columns(host.HostPlan(project="demo", ref="agent/x")) == ("", "")
+
+
+def test_summary_lines_align_the_titles_of_a_row_with_a_pr_and_a_row_without():
+    """The regression the column split exists for: a bare branch's title used to slide
+    left into the PR column, so the one thing read downwards started in two places."""
+    reachable = [
+        (host.HostPlan(project="demo", ref="agent/x", pr=251, title="Panel shapes"), "http://a:1/"),
+        (host.HostPlan(project="demo", ref="agent/y", title="wip: bubbles"), "http://a:2/"),
+    ]
+    lines = host.summary_lines(reachable)
+    assert lines[0].index('"Panel shapes"') == lines[1].index('"wip: bubbles"')
+
+
+def test_summary_lines_drop_a_pr_column_no_row_can_fill():
+    """Padding it instead would put a gap in every line to align nothing."""
+    reachable = [
+        (host.HostPlan(project="demo", ref="agent/x", title="one"), "http://a:1/"),
+        (host.HostPlan(project="demo", ref="agent/y", title="two"), "http://a:2/"),
+    ]
+    assert host.summary_lines(reachable)[0] == '  http://a:1/  demo  agent/x  "one"'
+
+
+def test_summary_lines_size_their_columns_to_the_widest_row():
+    reachable = [
+        (host.HostPlan(project="demo", ref="agent/x", pr=7, title="Ship button"), "http://a:1/"),
+        (host.HostPlan(project="a-longer-project", ref="agent/much-longer-ref"), "http://b:22/"),
+    ]
+    lines = host.summary_lines(reachable)
+    assert lines[0].index("demo") == lines[1].index("a-longer-project")
+    assert lines[0].endswith('PR #7  "Ship button"')
+
+
+def test_summary_lines_do_not_trail_the_padding_of_a_row_with_nothing_to_say():
+    reachable = [
+        (host.HostPlan(project="demo", ref="agent/x"), "http://a:1/"),
+        (host.HostPlan(project="demo", ref="agent/much-longer-ref"), "http://b:22/"),
+    ]
+    assert [line for line in host.summary_lines(reachable) if line != line.rstrip()] == []
+
+
+def test_summary_lines_of_nothing_is_nothing():
+    """Every server can time out, and `main` draws its rule around whatever comes back."""
+    assert host.summary_lines([]) == []
+
+
+def test_main_names_the_pr_and_title_in_the_closing_block(
+    workspace, quiet_scan, monkeypatch, capsys
+):
+    """The whole path, end to end: a picked row's PR number and title reach the block a
+    reviewer clicks out of, and the rule is drawn wide enough to frame them."""
+    quiet_scan.append(candidate())
+    monkeypatch.setattr(host, "donor_target", lambda *a: "http://b:1")
+    plan = host.HostPlan(
+        project="demo",
+        ref="agent/x",
+        serve_dir="d",
+        frontend="f",
+        port=5300,
+        pr=99,
+        title="Editor ship button",
+    )
+    monkeypatch.setattr(host, "plan_host", lambda *a: plan)
+    monkeypatch.setattr(host, "apply_host", lambda p, npm: FakeServer())
+    monkeypatch.setattr(host, "wait_for_server", lambda url, srv: ("ready", 1.0))
+    monkeypatch.setattr(host.webbrowser, "open", lambda url: None)
+    monkeypatch.setattr(host, "watch", lambda servers, **kwargs: None)
+    host.main(["--workspace", str(workspace), "--no-fetch", "--picks", "demo:agent/x"])
+    row = '  http://127.0.0.1:5300/  demo  agent/x  PR #99  "Editor ship button"'
+    rule = "=" * len(row)
+    assert f"{rule}\n{row}\n{rule}" in capsys.readouterr().out

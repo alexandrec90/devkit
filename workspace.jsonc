@@ -121,16 +121,33 @@
 		"tasks": [
 			// --- generic: pick a project ---------------------------------------
 			{
+				// Six tasks became this one. "Test: Run Suite" and its scope dropdown,
+				// "Test: Harness Hook Tests — free", and carameli's "Run Carameli Target",
+				// "Run Browser E2E" and "Run Local Integration E2E" all asked the same two
+				// questions — which checkouts, and which tests — and answered the second
+				// with a different single-pick each. Both are checkbox lists now and the
+				// answers run as a cross-product: `TEST_KINDS` in devkit_project.py is the
+				// menu, and a kind a checkout cannot run is skipped BY NAME rather than
+				// dropped, because one menu is offered for every checkout.
+				//
+				// The sixth is the paid live-CLI smoke, which used to be a task of its own
+				// so that a cost could not be reached by a keystroke from a free row. It is
+				// two rows here now, one per CLI, and ticking both is what `both` was. The
+				// trade that bought is worth stating where it is read: `testKinds` REMEMBERS
+				// the ticked set per workspace, so a paid row ticked once is ticked on the
+				// next click too, and this task can spend money without asking again. The
+				// rows say PAID in their label, the runner prints what it is about to spend
+				// before it launches anything, and neither of those is a confirmation.
 				"label": "Test: Run Suite",
-				"detail": "Each selected checkout's own test suite, run sequentially via its scripts/run-tests.py. Failures go to that checkout's logs/test-failures.log — read the artifact, not the terminal.",
+				"detail": "Tick one or more checkouts, then tick the kinds of test to run in them. Every pair runs sequentially and writes its own artifact under that checkout's logs/ — read the artifact, not the terminal. A kind only Carameli implements (its free targets, Playwright, the local integration suite) is skipped by name for the checkouts that cannot run it, so ticking widely is safe. The two rows marked PAID launch real authenticated agent CLI sessions and are devkit-only; the ticked set is REMEMBERED, so untick them again.",
 				"type": "process",
 				"command": "python",
 				"args": [
 					"${workspaceFolder:devkit}/scripts/devkit_project.py",
 					"--project",
 					"${input:project}",
-					"test",
-					"${input:testScope}"
+					"tests",
+					"${input:testKinds}"
 				],
 				"group": {
 					"kind": "test",
@@ -149,102 +166,26 @@
 				"problemMatcher": []
 			},
 			{
-				"label": "Test: Harness Hook Tests — free",
-				"detail": "The vendored tier's own stdlib-only tests in each selected checkout, run sequentially. Separate from 'Test: Run Suite' because pytest's testpaths deliberately excludes scripts/hooks/tests/ in EVERY consumer. Fails loudly on a checkout that does not vendor the harness. Includes test_codex_translation.py, which judges every response this project's hooks can emit against Codex's own published output schema — statically, with no CLI and no cost.",
+				// One task, two scopes. It was two tasks — "Lint: Everything" and
+				// "Lint: Changed Files" — sitting adjacent in the picker under near-identical
+				// labels, which is the shape "Test: Run Suite" has never had: there the scope
+				// is asked as a picker, and the second question is asked only once the first
+				// has been answered. `lintScope` is that dropdown, and `lint-changed` is gone
+				// from the dispatcher with it.
+				"label": "Lint: Run",
+				"detail": "Lint each selected checkout, sequentially, via its scripts/lint-all.py — the whole repo, or only the working-tree diff (vs HEAD, plus untracked), as the scope dropdown asks. Rewrites the tree before it reports (ruff --fix, ruff format) and ships what it wrote. Findings go to that checkout's logs/lint-errors.log.",
 				"type": "process",
 				"command": "python",
 				"args": [
 					"${workspaceFolder:devkit}/scripts/devkit_project.py",
 					"--project",
 					"${input:project}",
-					"test-hooks"
-				],
-				"group": "test",
-				// Not `beaker`/green: that is "Test: Run Suite", and the two sat
-				// side by side in the picker as an identical icon under two labels.
-				"icon": {
-					"id": "zap",
-					"color": "terminal.ansiGreen"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Test: Harness Hook Tests — paid, live CLI",
-				"detail": "PAID — launches a real authenticated agent CLI against a throwaway project and proves the hooks change what it actually does. devkit only: these smokes live in tests/, which is never vendored. 'Claude only' is the cheapest run and is evidence about Claude ONLY — it says nothing about Codex, and the run now names the suite it skipped so a green line cannot be read as a clean bill of health for both. Each suite's model and budget are set in its own test file. Failures go to devkit/logs/hook-test-live-failures.log.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					// Written out rather than a picker: the action's scope is one checkout, so a
-					// picker here would be a list of length one asking a question with no second
-					// answer. `test_the_live_smoke_task_names_the_only_checkout_that_can_run_it`
-					// pins this literal against `Action.projects` so the two cannot drift.
-					"devkit",
-					"test-hooks-live",
-					"${input:liveHookSuite}"
-				],
-				"group": "test",
-				// Same `zap` family as the free hook tests, in red: the colour is the only
-				// warning a one-click paid task gets before it is clicked.
-				"icon": {
-					"id": "zap",
-					"color": "terminal.ansiRed"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Lint: Everything",
-				"detail": "Full-repo lint for each selected checkout, run sequentially via scripts/lint-all.py. Findings go to that checkout's logs/lint-errors.log.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:project}",
-					"lint"
+					"lint",
+					"${input:lintScope}"
 				],
 				"group": "build",
 				"icon": {
 					"id": "checklist",
-					"color": "terminal.ansiYellow"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Lint: Changed Files",
-				"detail": "Lint only the working-tree diff (vs HEAD, plus untracked) in each selected checkout. Runs sequentially; same artifact as 'Lint: Everything'.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:project}",
-					"lint-changed"
-				],
-				"group": "build",
-				// Same reason as the hook tests above — `checklist`/yellow is
-				// "Lint: Everything"; the narrower scope gets the narrower icon.
-				"icon": {
-					"id": "list-selection",
 					"color": "terminal.ansiYellow"
 				},
 				"presentation": {
@@ -278,69 +219,20 @@
 				},
 				"problemMatcher": []
 			},
-			{
-				"label": "Harness: Check Drift vs devkit",
-				"detail": "Byte-compares each selected checkout's vendored scripts/hooks/ against devkit, sequentially. Needs DEVKIT_DIR set. Defaults to the read-only check; --pull and --push both rewrite files.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:project}",
-					"sync-devkit",
-					"${input:harnessMode}"
-				],
-				"icon": {
-					"id": "diff",
-					"color": "terminal.ansiCyan"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
 			// --- the workspace file itself ------------------------------------
 			// This file has no branch: one copy serves every VS Code window on the
 			// machine, so an edit is globally live before anyone reviews it. devkit's
 			// `workspace.jsonc` is the copy with a branch and a reviewer, and these
-			// three are the only sanctioned way to move content between them. They are
+			// two are the only sanctioned way to move content between them. They are
 			// NOT dispatches -- there is one workspace file, so there is nothing to
 			// pick a checkout for, and the wrapping is written out here.
-			{
-				"label": "Workspace: Check Drift vs devkit's Copy",
-				"detail": "Read-only. Compares the live .code-workspace against devkit's canonical workspace.jsonc — folders, extensions, tasks, inputs, settings — and names every difference. The full list the session-start line only counts.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/notify-wrap.py",
-					"Workspace: Check Drift vs devkit's Copy",
-					"--",
-					"python",
-					"scripts/log-wrap.py",
-					"Workspace: Check Drift vs devkit's Copy",
-					"--",
-					"python",
-					"scripts/devkit_project.py",
-					"--check-workspace"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "multiple-windows",
-					"color": "terminal.ansiBlue"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
+			//
+			// There were three. "Workspace: Check Drift vs devkit's Copy" ran
+			// `--check-workspace`, which is the read-only half of the publish below --
+			// and the publish REFUSES an unadopted live edit and names every difference
+			// while refusing, so the check answered a question the click you were going
+			// to make answers anyway. The session-start line asks it every window as
+			// well. Nothing routed through it that publishing does not.
 			{
 				"label": "Workspace: Publish devkit's Copy",
 				"detail": "Renders devkit's workspace.jsonc over the live .code-workspace — the file every VS Code window on this machine reads. REFUSES rather than clobbering a live edit devkit never wrote; adopt that first. Publishes whatever branch the devkit checkout is on, so check it out before clicking.",
@@ -480,29 +372,6 @@
 				"problemMatcher": []
 			},
 			{
-				"label": "Git: Sync Branch onto Origin Default (Keep Changes)",
-				"detail": "For each selected checkout, sequentially: detect origin's default branch, then fetch → stash if dirty → rebase → pop. Keeps unstaged/untracked changes.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:project}",
-					"sync-branch"
-				],
-				"icon": {
-					"id": "git-merge",
-					"color": "terminal.ansiGreen"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"close": false,
-					"clear": true
-				},
-				"problemMatcher": []
-			},
-			{
 				// The one task that reaches a REFERENCE checkout, and the reason it is
 				// not a devkit_project.py dispatch: that dispatcher resolves through
 				// `known_projects`, which drops NOT_PROJECTS because every action it
@@ -510,8 +379,14 @@
 				// so this script resolves against the raw registry and its picker lists
 				// VanillaLand alongside the projects.
 				//
-				// The sibling above REBASES, which is right for a task branch and wrong
-				// for long-lived work whose history is already published. This merges.
+				// It MERGES, which is what long-lived work wants: the history is already
+				// published, so it must not be rewritten. There used to be a sibling above
+				// it, "Git: Sync Branch onto Origin Default (Keep Changes)", which rebased
+				// the current branch and stashed around it -- the task-branch case. It is
+				// gone because VS Code's own Source Control view already does exactly that,
+				// per checkout, without a picker. This one stays for what that view does
+				// not give: a conflict left in progress with every unmerged file named in
+				// a log file, which is what makes the outcome handable to an agent.
 				"label": "Git: Merge Origin Default into Current Branch",
 				"detail": "Fetch, then MERGE origin's default branch — auto-detected, so `develop` in VanillaLand — into whatever branch the chosen checkout is on. Commits locally and NEVER pushes. On conflict the merge is LEFT IN PROGRESS and every unmerged file is named in devkit's logs/git-merge-origin-default-into-current-branch.log; hand that file to a coding agent.",
 				"type": "process",
@@ -792,37 +667,15 @@
 			// schedule. `worktree.py preview` is still there for a full-stack preview, and
 			// `--all` still restarts whatever one of those left standing.
 			// --- scoped: carameli's worktree pair --------------------------------
-			// These three came up out of `carameli/.vscode/tasks.json`. The picker lists
-			// two checkouts rather than five because that is what the action is defined
-			// for — see `Action.projects` in devkit_project.py.
-			{
-				"label": "Test: Run Carameli Target — free",
-				"detail": "Run the chosen free target sequentially in each selected Carameli checkout. '--all' merges pytest + hooks + frontend into one artifact per checkout. Paid tiers remain CLI-only.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:carameliCheckout}",
-					"test-target",
-					"${input:carameliTestTarget}"
-				],
-				// Deliberately not `isDefault`: "Test: Run Suite" holds that, and two
-				// defaults in one multi-root workspace makes Run Test Task ambiguous.
-				// That collision was real while this task lived in the repo.
-				"group": "test",
-				"icon": {
-					"id": "beaker",
-					"color": "terminal.ansiBrightGreen"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
+			// These came up out of `carameli/.vscode/tasks.json`. The picker lists two
+			// checkouts rather than five because that is what the action is defined for —
+			// see `Action.projects` in devkit_project.py.
+			//
+			// Three of them were test runners — the free-target picker, Playwright and the
+			// local integration suite — and they are rows on "Test: Run Suite"'s kind menu
+			// now. Their scope did not move with them: `Action.projects` still refuses a
+			// checkout that cannot run them, and the menu says which checkouts each row is
+			// for rather than hiding rows it cannot know the audience of.
 			{
 				"label": "Assets: Encode Comic-Book Art",
 				"detail": "Encode every master in frontend/assets-src/comic-book/ that has no .webp in public/comic-book/ yet, and add each one to the ?edit=1 picture dropdown. Existing exports are skipped, so it is safe to repeat. Reports public/ against MAX_PUBLIC_BYTES and never raises it.",
@@ -837,55 +690,6 @@
 				"icon": {
 					"id": "file-media",
 					"color": "terminal.ansiBrightMagenta"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Test: Run Browser E2E — free",
-				"detail": "Run Playwright sequentially against each selected Carameli checkout. NEEDS each stack and Vite server up first. Failures go to that checkout's logs/e2e-failures.log.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:carameliCheckout}",
-					"e2e",
-					"${input:e2eMode}"
-				],
-				"group": "test",
-				"icon": {
-					"id": "browser",
-					"color": "terminal.ansiBrightGreen"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Test: Run Local Integration E2E — free",
-				"detail": "Both directions of the carameli <-> VanillaLand integration: boots local IIS Express + vs-sql via VS_REPO_DIR, runs tests/local_e2e, then the .NET outbound driver. Needs a filled .env.local-e2e (see .env.local-e2e.example); no telephony, no cost.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:carameliCheckout}",
-					"local-e2e"
-				],
-				"group": "test",
-				"icon": {
-					"id": "plug",
-					"color": "terminal.ansiBrightGreen"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1180,7 +984,7 @@
 				// the gate's own test artifact and refuses to merge on any other red,
 				// which is what makes "merge a failing PR" safe to put behind a click.
 				"label": "Devkit: Cut Release",
-				"detail": "DRY RUN by default — prints the plan and stops. Applied, this bumps FALLBACK_DEVKIT_REF, opens the prepare PR, WAITS for the PR gate, merges it if the only failure is the expected one, dispatches the tag workflow, then opens an adoption PR in EVERY consumer. Minutes, mostly waiting on CI.",
+				"detail": "DRY RUN by default — prints the plan and stops. Applied, this bumps FALLBACK_DEVKIT_REF, opens the prepare PR, WAITS for the PR gate, merges it if the only failure is the expected one, dispatches the tag workflow, then opens an adoption PR in each consumer you tick. Minutes, mostly waiting on CI.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -1189,6 +993,9 @@
 					"devkit",
 					"release",
 					"${input:releaseLevel}",
+					// One token, not a flag and a value: `plan_command` drops empty
+					// arguments, and a flag whose value went with them is left dangling.
+					"--projects=${input:adoptProjects}",
 					"${input:sweepApply}"
 				],
 				"icon": {
@@ -1204,8 +1011,13 @@
 				"problemMatcher": []
 			},
 			{
+				// The consumers are ticked, not typed. `--all` is still what the 03:00
+				// pass and the release pipeline pass, and it is what ticking every box
+				// amounts to -- but a click that could only ever mean "all five" made the
+				// one thing a human is at the dropdown for, adopting somewhere and not
+				// everywhere, a terminal command instead.
 				"label": "Devkit: Upgrade Projects",
-				"detail": "DRY RUN by default. Adopt the current devkit release in every consumer that is behind, one PR per repo — the catch-up click for a night the 03:00 pass did not run. A consumer already current costs a fetch; one whose adoption PR is already open is left alone.",
+				"detail": "DRY RUN by default. Adopt the current devkit release in each consumer you tick, one PR per repo — the catch-up click for a night the 03:00 pass did not run. A consumer already current costs a fetch; one whose adoption PR is already open is left alone.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -1218,7 +1030,7 @@
 					"--",
 					"python",
 					"scripts/upgrade-project.py",
-					"--all",
+					"${input:adoptProjects}",
 					"${input:sweepApply}"
 				],
 				"options": {
@@ -1238,46 +1050,27 @@
 			},
 			// --- the ephemeral tier: a box per task, destroyed when the work leaves it ---
 			//
-			// Deliberately three tasks and not four: there is no "reap one box" entry,
-			// because a picker cannot enumerate boxes that are created between clicks.
-			// Reaping by name is the CLI (`worktree.py reap <box> --yes`), and the one-click
-			// shape is the sweep, which steps over every box still holding work.
-			{
-				"label": "Worktree: New Box",
-				"detail": "Cut a disposable worktree for one task: a fresh claude/… branch off origin/<default>, its own port-slot lease and COMPOSE_PROJECT_NAME, and its toolchain installed (uv sync / pip locks / npm, whichever the project uses — a cold install can take minutes). Leave the topic blank to name it after the project. DRY RUN by default.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/notify-wrap.py",
-					"Worktree: New Box",
-					"--",
-					"python",
-					"scripts/log-wrap.py",
-					"Worktree: New Box",
-					"--",
-					"python",
-					"scripts/worktree.py",
-					"new",
-					"${input:worktreeProject}",
-					"--slug",
-					"${input:worktreeSlug}",
-					"${input:sweepApply}"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "repo-forked",
-					"color": "terminal.ansiCyan"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
+			// Deliberately one task and not four. `New Box`, `Reap Finished Boxes` and
+			// `Reconcile` were retired because none of them had a caller who was not an
+			// agent, and an agent reaches every one of them through the CLI:
+			//
+			//   - New Box cut a box with no `--session`, and `worktree-guard.py` keys its
+			//     lookup on the lease (one box per session+project). So a hand-cut box is
+			//     adopted by nobody, costs a cold toolchain install and a port slot out of
+			//     a fixed ceiling, and `reconcile_action` reaps it as "never used".
+			//   - Reconcile is the `devkit-worktree-reconcile` scheduled task, which runs
+			//     the same pass every fifteen minutes; `install-reconcile-task.py` owns its
+			//     arguments. The one-click copy was also the more dangerous of the two: it
+			//     passed no `--merge-label`, so "also merge every green PR" meant every
+			//     green PR, where the schedule merges only what carries the label.
+			//   - Reap Finished Boxes could never reap anything reconcile would not, and
+			//     usually less: `reap_decision`'s `awaiting_pr` refuses a pushed box that
+			//     has no PR in hand, which reconcile reaps under disk pressure or past
+			//     `max_age_days`.
+			//
+			// What is left is the read-only view, because boxes are absent from `folders`
+			// by design and nothing else reports them. Doing any of the three by name is
+			// `worktree.py new|reap|reconcile`.
 			{
 				"label": "Worktree: List Boxes — read-only",
 				"detail": "Every live box, its branch, its port slot, and whether its work has left it yet. Boxes are absent from this workspace's folder list by design, so nothing else reports them — a forgotten one holds a slot out of a fixed ceiling and, if its project has a stack, a container and volume set. Touches nothing.",
@@ -1312,130 +1105,7 @@
 				"problemMatcher": []
 			},
 			{
-				"label": "Worktree: Reap Finished Boxes",
-				"detail": "DRY RUN by default. For every box whose work has left it: tear its stack down (containers, network and its own volumes), remove the worktree, delete the branch, release the port lease. REFUSES any box still holding unshipped work and names it instead — so nothing can be stranded — and never forces, whatever the answer.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/notify-wrap.py",
-					"Worktree: Reap Finished Boxes",
-					"--",
-					"python",
-					"scripts/log-wrap.py",
-					"Worktree: Reap Finished Boxes",
-					"--",
-					"python",
-					"scripts/worktree.py",
-					"reap",
-					"--all",
-					"${input:sweepFetch}",
-					"${input:sweepApply}"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "trash",
-					"color": "terminal.ansiBrightRed"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Worktree: Reconcile — merge, reap, reclaim disk",
-				"detail": "DRY RUN by default. The unattended pass a schedule runs: reap every box whose PR has MERGED, reap unused boxes, and — when free space is at or under the floor — reap boxes whose PR is merely open (the remote holds every commit, so only the checkout is lost). NEVER touches a box holding unshipped work; it names those instead. Merging is off unless you pick it.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/notify-wrap.py",
-					"Worktree: Reconcile",
-					"--",
-					"python",
-					"scripts/log-wrap.py",
-					"Worktree: Reconcile",
-					"--",
-					"python",
-					"scripts/worktree.py",
-					"reconcile",
-					"${input:reconcileMerge}",
-					"${input:sweepApply}"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "git-merge",
-					"color": "terminal.ansiBrightGreen"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Ports: Show Checkout Allocations",
-				"detail": "Print the *_HOST_PORT block for each selected checkout. Use it to rebuild .env files after worktree changes rather than picking free-looking numbers.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/log-wrap.py",
-					"Ports: Show Checkout Allocations",
-					"--",
-					"python",
-					"scripts/devkit_ports.py",
-					"${input:project}"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "plug",
-					"color": "terminal.ansiBlue"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Agents: Open Tabs (External Terminal)",
-				"detail": "Choose Claude or Codex, then open a new Windows Terminal window with one tab per worktree. Machine-scoped, so it takes no project. The Carameli tabs also mount ../VanillaLand as writable.",
-				"type": "process",
-				"command": "pwsh.exe",
-				"args": [
-					"-NoProfile",
-					"-ExecutionPolicy",
-					"Bypass",
-					"-File",
-					"${workspaceFolder:devkit}/scripts/launch-agent-tabs.ps1",
-					"-Agent",
-					"${input:agentCli}"
-				],
-				"icon": {
-					"id": "rocket",
-					"color": "terminal.ansiMagenta"
-				},
-				"presentation": {
-					"reveal": "silent",
-					"panel": "new",
-					"clear": true,
-					"close": true
-				},
-				"problemMatcher": []
-			},
-			{
-				// These agent recovery tasks take NO checkout, and deliberately so. Every
+				// This agent recovery task takes NO checkout, and deliberately so. Every
 				// picker in this file lists the static checkouts; a session that ran in an
 				// ephemeral box is unreachable from all of them, because boxes are absent
 				// from `folders` by design. What you want back is the last few sessions
@@ -1458,35 +1128,6 @@
 				"icon": {
 					"id": "history",
 					"color": "terminal.ansiBrightMagenta"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				// Claude and Codex session IDs differ. This selects only Claude transcripts
-				// whose final assistant turn is the account/session limit error, passes those
-				// transcripts through Codex's native Claude importer, then resumes the returned
-				// Codex thread IDs. Codex's importer owns deduplication and import history.
-				"label": "Agents: Import Limited Claude Sessions",
-				"detail": "Choose how many recent Claude sessions that ended at a usage limit to import through Codex's native Claude importer and resume by their Codex thread IDs, one new Windows Terminal tab each, OLDEST TAB FIRST. Claude subagents and sessions whose directory has been reaped are skipped. Already imported transcripts resolve to their existing native Codex threads.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/import-claude-sessions.py",
-					"--count",
-					"${input:resumeSessionCount}"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "arrow-swap",
-					"color": "terminal.ansiBrightCyan"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1527,6 +1168,43 @@
 				}
 			},
 			{
+				// MAINTAINED BY new-project.py, like `project`: `insert_picker_option`
+				// names both, so a registered project reaches this list without anyone
+				// remembering, and a retired one leaves it.
+				//
+				// It lists the registry MINUS devkit, and that exclusion is a correctness
+				// requirement rather than tidiness. devkit is the checkout a release is
+				// pulled *from*, and `upgrade-project.py` treats a checkout that was named
+				// and cannot be a target as an operator error -- so one stray tick would
+				// exit 2 for the whole run, where `--all` skips devkit silently.
+				//
+				// Ticks are remembered rather than cleared: it is the same set of
+				// consumers most nights, and both clicks that ask this share one key, so
+				// the catch-up run offers whatever the release chose.
+				"id": "adoptProjects",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which consumers should adopt this devkit release?",
+					"key": "adoptProjects",
+					"multiPick": true,
+					"multiPickStorage": "workspace",
+					"separator": ",",
+					"optionGroups": [
+						{
+							"label": "Select one or more consumers",
+							"minCount": 1,
+							"options": [
+								"carameli",
+								"ibkr_trader",
+								"data-lake",
+								"sports_betting"
+							]
+						}
+					]
+				}
+			},
+			{
 				// The daemon restart/fix actions are machine-scoped. Running either once
 				// per checked project would restart the same Docker Desktop repeatedly.
 				"id": "daemonProject",
@@ -1542,51 +1220,151 @@
 				"default": "carameli"
 			},
 			{
-				// Which repo a box is cut FROM. Single-pick, like daemonProject: a box
-				// belongs to exactly one checkout, and `worktree.py new` takes one name.
-				// register() maintains this list along with the other pickers, so a newly
-				// generated project can be boxed the day it exists.
-				"id": "worktreeProject",
-				"type": "pickString",
-				"description": "Which repo should the box be cut from?",
-				"options": [
-					"carameli",
-					"ibkr_trader",
-					"devkit",
-					"data-lake",
-					"sports_betting"
-				],
-				"default": "carameli"
-			},
-			{
-				// The branch topic, so the box is named after the work rather than after
-				// the session that asked for it. Safe to leave blank -- it is the value of
-				// `--slug`, which consumes it whatever it is, and worktree.py falls back to
-				// the project name. That is why it is spelled as a flag here and not as a
-				// bare positional, which an empty answer would turn into a stray argument.
-				"id": "worktreeSlug",
-				"type": "promptString",
-				"description": "Topic for the branch name (blank = name it after the project)",
-				"default": ""
-			},
-			{
-				// Every project's run-tests.py accepts both of these, which is what lets
-				// this be a picker rather than a free-text box. `--changed` is the
-				// canonical spelling everywhere — devkit, the template, and the vendored
-				// Stop hook's own remediation line. carameli used to spell it `--fast`,
-				// which meant the Stop hook's advice died on "Unknown argument"; it now
-				// accepts `--changed` and keeps `--fast` as a deprecated alias.
+				// The second question "Test: Run Suite" asks, and a checkbox list for the
+				// same reason `project` above is one: more than one of these is routinely
+				// wanted at once — a suite plus the vendored hook tests, or Vitest plus the
+				// bundle budgets it can never reach on its own — and single-picks made that
+				// two clicks through two prompts and two artifacts.
 				//
-				// The empty value is safe HERE specifically: devkit_project.py drops empty
-				// arguments before exec, so it cannot reach argparse as a stray positional
-				// (tests/test_devkit_project.py pins that). A picker feeding a script
-				// directly still needs one real token per branch.
-				"id": "testScope",
+				// It does NOT hide the rows a ticked checkout cannot run, and that is a
+				// decision rather than a limitation. Sibling `${input:...}` resolve in no
+				// defined order with no sight of one another, and this extension's own
+				// `dependsOn` filters the RESULT rather than the list — a tick that
+				// silently disappears, which is the one outcome worse than an irrelevant
+				// row. So every row states its scope, and devkit_project.py prints the
+				// pairs it skipped and why.
+				//
+				// The two PAID rows at the foot are the one place remembering costs money
+				// rather than a keystroke. They are last, and their labels lead with the
+				// word, because a checkbox list has nowhere else to put a warning: there is
+				// no per-row confirmation, and `minCount` cannot express "not that one".
+				//
+				// `value` is what travels (the extension joins the checked VALUES with
+				// `separator`); the remembered set is stored by LABEL, so editing a label
+				// costs the next reader one re-tick and nothing else. `picked` seeds the
+				// first run only — a remembered set replaces it. devkit_project.py's
+				// TEST_KINDS is the same list from the other side, and
+				// `test_the_menu_and_the_dispatcher_offer_the_same_kinds` pins the two
+				// together in both directions.
+				"id": "testKinds",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which kinds of test? (space ticks, enter runs)",
+					"key": "testKinds",
+					"multiPick": true,
+					"multiPickStorage": "workspace",
+					"separator": ",",
+					"optionGroups": [
+						{
+							"label": "Select one or more kinds",
+							"minCount": 1,
+							"options": [
+								{
+									"label": "Suite — the checkout's own pytest run",
+									"value": "suite",
+									"description": "every checkout · scripts/run-tests.py",
+									"picked": true
+								},
+								{
+									// `--changed` is the canonical spelling everywhere: devkit,
+									// the template, and the vendored Stop hook's remediation
+									// line. carameli used to spell it `--fast`, which meant that
+									// advice died on "Unknown argument"; it now accepts
+									// `--changed` and keeps `--fast` as a deprecated alias.
+									"label": "Suite — changed files only",
+									"value": "suite-changed",
+									"description": "every checkout · the working-tree diff, vs HEAD plus untracked"
+								},
+								{
+									// Its own row rather than part of the suite because
+									// pytest's testpaths deliberately excludes
+									// scripts/hooks/tests/ in EVERY consumer. Includes
+									// test_codex_translation.py, which judges every response
+									// the project's hooks can emit against Codex's published
+									// output schema — statically, with no CLI and no cost.
+									"label": "Harness hook tests — the vendored tier",
+									"value": "hooks",
+									"description": "every checkout · fails loudly where the harness is not vendored"
+								},
+								{
+									"label": "Carameli free targets — all of them, one artifact",
+									"value": "all-targets",
+									"description": "carameli only · pytest + hooks + frontend + bundle budgets merged; paid tiers stay CLI-only"
+								},
+								{
+									"label": "Carameli frontend (Vitest)",
+									"value": "frontend",
+									"description": "carameli only · unit tests, no build"
+								},
+								{
+									// Separate from the Vitest row above because `test:run`
+									// never builds, and so can never reach these budgets.
+									"label": "Carameli frontend bundle budgets",
+									"value": "bundle-budgets",
+									"description": "carameli only · production build, measured against frontend/bundlePolicy.ts"
+								},
+								{
+									"label": "Carameli public webhook reachability",
+									"value": "webhook",
+									"description": "carameli only · needs the public URL to be live"
+								},
+								{
+									"label": "Browser E2E — headless",
+									"value": "e2e",
+									"description": "carameli only · NEEDS the stack and the Vite server up first"
+								},
+								{
+									"label": "Browser E2E — headed, watch the browser",
+									"value": "e2e-headed",
+									"description": "carameli only · NEEDS the stack and the Vite server up first"
+								},
+								{
+									"label": "Browser E2E — cross-browser",
+									"value": "e2e-cross",
+									"description": "carameli only · Chromium, Firefox, WebKit; NEEDS the stack and Vite up"
+								},
+								{
+									"label": "Local integration E2E — carameli ↔ VanillaLand",
+									"value": "local-e2e",
+									"description": "carameli only · boots local IIS Express + vs-sql via VS_REPO_DIR; needs a filled .env.local-e2e"
+								},
+								{
+									// The two paid rows, last in the list so that the distance
+									// from `suite` is as large as the menu can make it. They
+									// were one task with a single-pick of claude/codex/both;
+									// ticking both of these IS `both`, which is why there is no
+									// third row. Untick them: the set is remembered.
+									"label": "PAID — live Claude CLI hook smoke",
+									"value": "hooks-live-claude",
+									"description": "devkit only · SPENDS MONEY · one real authenticated Claude session"
+								},
+								{
+									"label": "PAID — live Codex CLI hook smoke",
+									"value": "hooks-live-codex",
+									"description": "devkit only · SPENDS MONEY · two real authenticated Codex sessions"
+								}
+							]
+						}
+					]
+				}
+			},
+			{
+				// `testScope`'s counterpart, and the same two branches for the same
+				// reason: every project's lint-all.py accepts `--changed`, and the
+				// empty value is dropped by devkit_project.py before exec rather than
+				// reaching argparse as a stray positional.
+				//
+				// The default is the WIDE scope, unlike a "changed only" default would
+				// be, because lint rewrites what it reads: a run scoped to the diff
+				// leaves the rest of the tree unformatted, and the click that most
+				// often precedes a commit should be the one that cannot miss a file.
+				"id": "lintScope",
 				"type": "pickString",
-				"description": "How much of the suite to run",
+				"description": "How much of the checkout to lint",
 				"options": [
 					{
-						"label": "Full suite (default)",
+						"label": "Everything (default)",
 						"value": ""
 					},
 					{
@@ -1597,36 +1375,17 @@
 				"default": ""
 			},
 			{
-				// The one picker in this file where an accidental Enter spends money, so the
-				// default is the smallest run that still proves something rather than the most
-				// thorough one. Single-pick for the same reason: "both" is a deliberate choice,
-				// not two checkboxes that are easy to leave ticked from last time.
-				"id": "liveHookSuite",
-				"type": "pickString",
-				"description": "Which live CLI smoke? Every option launches a paid session.",
-				"options": [
-					{
-						"label": "Claude only — cheapest, one session",
-						"value": "claude"
-					},
-					{
-						"label": "Codex only — two sessions",
-						"value": "codex"
-					},
-					{
-						"label": "Both — every live smoke",
-						"value": "both"
-					}
-				],
-				"default": "claude"
-			},
-			{
-				// The two-option pickers for the project-SCOPED tasks. Deliberately not
-				// the `project` picker above: three of the five checkouts it lists cannot
-				// run a Playwright suite, and offering them would make the wrong answer
-				// available at exactly the moment you are least likely to notice. The
-				// dispatcher validates the same restriction from its side
-				// (`Action.projects`), so these lists are UX, never the guarantee.
+				// The checkout picker for the project-SCOPED tasks. Deliberately not the
+				// `project` picker above: three of the five checkouts it lists have no
+				// comic-book art and no ngrok tunnel, and offering them would make the
+				// wrong answer available at exactly the moment you are least likely to
+				// notice. The dispatcher validates the same restriction from its side
+				// (`Action.projects`), so this list is UX, never the guarantee.
+				//
+				// It used to front for the three carameli TEST tasks as well. Those are
+				// rows on `testKinds` now, where the scope is stated per row rather than
+				// per picker — a menu shared by every checkout cannot narrow its list to
+				// the ticked ones, and saying so beats dropping the tick silently.
 				//
 				// The extension remembers checked items per workspace. The dispatcher
 				// still validates the action's scope before starting either checkout.
@@ -1702,63 +1461,6 @@
 				"id": "migrationMessage",
 				"type": "promptString",
 				"description": "Short description of the schema change (becomes part of the migration filename)",
-				"default": ""
-			},
-			{
-				// `hook-tests` is absent: it is the workspace's own "Test: Harness Hook
-				// Tests" now, identical in every consumer, and a second spelling of it
-				// here would be a third copy of the same run.
-				"id": "carameliTestTarget",
-				"type": "pickString",
-				"description": "Which Carameli-only free target to run",
-				"options": [
-					{
-						"label": "All free targets (pytest + hooks + frontend + bundle budgets), one merged artifact",
-						"value": "--all"
-					},
-					{
-						"label": "Frontend (Vitest)",
-						"value": "--target=frontend-tests"
-					},
-					{
-						// Builds the frontend, then measures what the build produced
-						// against frontend/bundlePolicy.ts. Separate from the Vitest
-						// entry above because `test:run` never builds and so can never
-						// reach those budgets.
-						"label": "Frontend bundle budgets (production build + Vitest)",
-						"value": "--target=bundle-budgets"
-					},
-					{
-						"label": "Public webhook reachability",
-						"value": "--target=webhook-e2e"
-					}
-				],
-				"default": "--all"
-			},
-			{
-				// Carries an empty branch, and is safe for the same reason `testScope`
-				// is: it feeds `devkit_project.py`, which drops empty arguments before
-				// exec. While this picker lived in carameli's own task file it fed
-				// `run-e2e.py` directly and survived only because that script happens to
-				// test membership rather than parse arguments — an accident, and one of
-				// the things hoisting these actually FIXED.
-				"id": "e2eMode",
-				"type": "pickString",
-				"description": "Which Playwright mode to run",
-				"options": [
-					{
-						"label": "Headless (default)",
-						"value": ""
-					},
-					{
-						"label": "Headed — watch the browser",
-						"value": "--headed"
-					},
-					{
-						"label": "Cross-browser — Chromium, Firefox, WebKit",
-						"value": "--cross-browser"
-					}
-				],
 				"default": ""
 			},
 			{
@@ -1879,32 +1581,6 @@
 				"default": "2026-07-01"
 			},
 			{
-				// Every branch supplies one real token — `--check` rather than "" for
-				// the default — for the reason spelled out on `newProjectRemote` below.
-				"id": "harnessMode",
-				"type": "pickString",
-				"description": "Drift-check, adopt upstream, or push a change authored here",
-				"options": [
-					{
-						"label": "Check for drift (safe, read-only)",
-						"value": "--check"
-					},
-					{
-						"label": "Pull — adopt devkit's version, overwriting local",
-						"value": "--pull"
-					},
-					{
-						"label": "Push — send this repo's version up to devkit",
-						"value": "--push"
-					},
-					{
-						"label": "List the manifest + vendored version",
-						"value": "--list"
-					}
-				],
-				"default": "--check"
-			},
-			{
 				"id": "newProjectName",
 				"type": "promptString",
 				"description": "New project name — becomes the directory, the Python package, and COMPOSE_PROJECT_NAME",
@@ -1997,22 +1673,6 @@
 				"default": "--fetch"
 			},
 			{
-				"id": "reconcileMerge",
-				"type": "pickString",
-				"description": "Merge green PRs, or only clean up?",
-				"options": [
-					{
-						"label": "Clean up only — merging PRs stays yours",
-						"value": "--no-merge"
-					},
-					{
-						"label": "Also squash-merge every PR whose gate is green",
-						"value": "--merge"
-					}
-				],
-				"default": "--no-merge"
-			},
-			{
 				"id": "sweepApply",
 				"type": "pickString",
 				"description": "Dry run, or actually change the checkouts?",
@@ -2069,16 +1729,6 @@
 					}
 				],
 				"default": "patch"
-			},
-			{
-				"id": "agentCli",
-				"type": "pickString",
-				"description": "Coding agent CLI to open in every worktree tab",
-				"options": [
-					"claude",
-					"codex"
-				],
-				"default": "claude"
 			},
 			{
 				// Selecting both agents means one global recency slice, not `count` from

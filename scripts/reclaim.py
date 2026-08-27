@@ -24,10 +24,30 @@ which is why a third scope exists rather than a fourth mode on one of the other 
      and the script says so rather than pretending: it is the user's own editors, browser
      and agent sessions, and the only honest output is a list of who is holding it.
 
+A fourth was added on 2026-08-27, when this script would have found nothing:
+
+  4. **Disk, the durable half.** The machine was at 20.9 GB free with the pagefile at its
+     boot size -- so no reboot could return a byte, and the commit story above did not
+     apply. Every tree in (2) was already clear, because none of the space was in %TEMP%
+     at all. It was in **superseded versions of the tools this workspace installs**: six
+     codex releases beside the one `current` names, two claude CLIs behind the running
+     one, twenty VS Code build caches for one live build, three interrupted extension
+     installs dating to March, and three generations of playwright chromium. 4.5 GB, in
+     no tool's own cleanup path -- each installer writes the new version and leaves the
+     old one, forever. `superseded_trees` is that sweep, and it is the only section here
+     whose targets grow with *elapsed weeks* rather than with a session's work, which is
+     why nothing had ever noticed them.
+
 The disk half feeds the memory half, which is why it is worth clearing even when disk is
 not the complaint: under commit pressure Windows grows the pagefile, and the pagefile
 lives on the same volume. It went 34.5 -> 37.5 GB in one session here, taking ~3 GB of
 disk with it while free space was already the binding constraint.
+
+What it will not touch is Windows' own feature-update staging -- `C:\\$GetCurrent` held
+5.67 GB on that machine, staged the previous September and still the largest single item
+on the volume. A delete under a `$`-prefixed system path is refused by Windows and by
+this workspace's shell guard, and a script that cannot do the thing should say so with
+the size and the remedy rather than stay quiet: `protected_staging`.
 
 Usage:  python reclaim.py [--yes] [--keep-stacks] [--min-age-days N]
 
@@ -46,6 +66,7 @@ from __future__ import annotations
 import argparse
 import csv
 import ctypes
+import re
 import shutil
 import subprocess
 import sys
@@ -68,6 +89,15 @@ DEFAULT_RECONCILE_FLOOR_GB = 20.0
 # morning may still be owned by something live.
 DEFAULT_MIN_AGE_DAYS = 3.0
 
+# Windows stages a feature update into one of these and never removes it -- `$GetCurrent`
+# alone was 5.67 GB here, eleven months old. Reported, never deleted: `Remove-Item` on a
+# `$`-prefixed system path is refused, and `Windows.old` needs `takeown` before it can be
+# touched at all. Neither belongs in an unattended pass.
+PROTECTED_STAGING = ("$GetCurrent", "$WINDOWS.~BT", "$WINDOWS.~WS", "Windows.old")
+
+# `<product>-<revision>` -- how playwright, and only playwright, names a browser build.
+_REVISIONED = re.compile(r"^(?P<product>.+?)-(?P<revision>\d+)$")
+
 
 @dataclass(frozen=True)
 class SweepTarget:
@@ -79,6 +109,20 @@ class SweepTarget:
     # Named trees are wholly disposable; only the loose sweep of %TEMP% itself needs an
     # age gate, because that directory also holds live scratch.
     min_age_days: float = 0.0
+
+
+@dataclass(frozen=True)
+class Disposable:
+    """Version directories a keep-rule has already decided are dead, and why they exist.
+
+    `paths` is the *result* of a rule rather than a rule to apply later, so every rule can
+    be its own small function with its own test -- and so nothing here has to grow a
+    boolean per tool, which is the shape this file's own vendoring rules warn about.
+    """
+
+    label: str
+    paths: tuple[Path, ...]
+    why: str
 
 
 @dataclass(frozen=True)
@@ -115,6 +159,175 @@ def sweep_targets(temp: Path, user: str) -> list[SweepTarget]:
             "node compile cache",
             temp / "node-compile-cache",
             "V8 compile cache; rebuilt on next run",
+        ),
+    ]
+
+
+def cache_targets(home: Path) -> list[SweepTarget]:
+    """Wholly disposable trees outside %TEMP%, under the user's profile.
+
+    Separate from `sweep_targets` because that list's guarantee is that everything in it
+    sits under the directory passed in, which a test asserts -- these are rooted in the
+    profile instead. A tree only belongs here if it is disposable *entire*; anything where
+    the newest copy has to survive is a keep-rule, and goes through `superseded_trees`.
+    """
+    code = home / "AppData" / "Roaming" / "Code"
+    return [
+        SweepTarget(
+            "VS Code .vsix installers",
+            code / "CachedExtensionVSIXs",
+            "the installer for every extension update, kept after it has been applied",
+        ),
+    ]
+
+
+def _subdirs(root: Path) -> list[Path]:
+    try:
+        return [item for item in root.iterdir() if item.is_dir()]
+    except OSError:
+        return []
+
+
+def _old_enough(paths: list[Path], min_age_days: float, now: float | None = None) -> list[Path]:
+    """Drop anything written within `min_age_days`, so a fresh install is never a victim.
+
+    The age gate is the second half of every keep-rule below and not a nicety: a keep-rule
+    reads the *current* state of a directory, and an install that is still in flight looks
+    exactly like a superseded version until its pointer is written.
+
+    Zero means no gate rather than "older than this instant": the strict comparison is a
+    race against Windows's coarser file timestamps, and `sweep` lost it on a file written
+    milliseconds before the cutoff was computed.
+    """
+    if min_age_days <= 0:
+        return list(paths)
+    cutoff = (now if now is not None else time.time()) - min_age_days * 86400
+    kept = []
+    for path in paths:
+        try:
+            if path.stat().st_mtime < cutoff:
+                kept.append(path)
+        except OSError:
+            continue
+    return kept
+
+
+def all_but_live(root: Path, pointer: Path) -> list[Path]:
+    """Version directories under `root` that `pointer` does not resolve to.
+
+    Fails closed on purpose: a keep-rule that cannot name its keeper returns nothing
+    rather than everything. `pointer` is a junction on Windows, and an unresolvable one
+    means the install is mid-update or broken -- either way not the moment to delete its
+    siblings.
+    """
+    try:
+        keeper = pointer.resolve(strict=True)
+    except OSError:
+        return []
+    if keeper.parent.resolve() != root.resolve():
+        return []
+    return [path for path in _subdirs(root) if path.resolve() != keeper]
+
+
+def all_but_newest(
+    root: Path, keep: int = 1, min_age_days: float = 0.0, now: float | None = None
+) -> list[Path]:
+    """Version directories under `root` except the `keep` most recently written.
+
+    For the tools that install a new version beside the old one and leave no pointer
+    behind: the claude CLI launches the newest it finds, and VS Code names its build cache
+    after a commit hash, so mtime is the only ordering either of them offers.
+    """
+    ranked = sorted(_subdirs(root), key=_mtime, reverse=True)
+    return _old_enough(ranked[keep:], min_age_days, now)
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def superseded_revisions(
+    root: Path, min_age_days: float = 0.0, now: float | None = None
+) -> list[Path]:
+    """`<product>-<revision>` directories beaten by a higher revision of the same product.
+
+    Playwright's layout, where three chromium generations had accumulated at ~400 MB each.
+    Grouping matters: the newest *directory* here is a firefox build, and keeping only that
+    would delete the chromium every checkout actually runs. A name that does not parse --
+    `.links`, anything hand-made -- is left alone rather than guessed about.
+    """
+    newest: dict[str, int] = {}
+    parsed: list[tuple[str, int, Path]] = []
+    for path in _subdirs(root):
+        match = _REVISIONED.match(path.name)
+        if not match:
+            continue
+        product, revision = match["product"], int(match["revision"])
+        parsed.append((product, revision, path))
+        newest[product] = max(newest.get(product, -1), revision)
+    dead = [path for product, revision, path in parsed if revision < newest[product]]
+    return _old_enough(dead, min_age_days, now)
+
+
+def orphaned_installs(
+    root: Path, min_age_days: float = 0.0, now: float | None = None
+) -> list[Path]:
+    """`.<uuid>` staging directories VS Code left behind when an extension install died.
+
+    It renames the staging directory into place on success, so a dot-prefixed one that has
+    survived the age gate is by construction a failure nobody is coming back for. Scoped
+    to the leading dot: everything else under `extensions/` is an installed extension.
+    """
+    return _old_enough([p for p in _subdirs(root) if p.name.startswith(".")], min_age_days, now)
+
+
+def superseded_trees(
+    home: Path, min_age_days: float = DEFAULT_MIN_AGE_DAYS, now: float | None = None
+) -> list[Disposable]:
+    """Every superseded-version group, in the order they are worth clearing.
+
+    Pure, so the whole set can be asserted without a filesystem. What each entry has in
+    common is that *some other copy is live and stays*, which is what separates this list
+    from `sweep_targets`: there the whole tree goes.
+    """
+    codex = home / ".codex" / "packages" / "standalone"
+    code = home / "AppData" / "Roaming" / "Code"
+    return [
+        Disposable(
+            "superseded codex releases",
+            tuple(all_but_live(codex / "releases", codex / "current")),
+            "~380 MB per release; `current` names the live one and nothing prunes the rest",
+        ),
+        Disposable(
+            "superseded claude versions",
+            tuple(
+                all_but_newest(
+                    home / ".local" / "share" / "claude" / "versions", 1, min_age_days, now
+                )
+            ),
+            "the launcher runs the newest; the rest are a rollback nobody performs",
+        ),
+        Disposable(
+            "VS Code build caches",
+            tuple(all_but_newest(code / "CachedData", 1, min_age_days, now)),
+            "one V8 cache per build ever run -- twenty of them here, for one live build",
+        ),
+        Disposable(
+            "interrupted extension installs",
+            tuple(orphaned_installs(home / ".vscode" / "extensions", min_age_days, now)),
+            "VS Code stages an install in `.<uuid>` and abandons it there when it fails",
+        ),
+        Disposable(
+            "superseded playwright browsers",
+            tuple(
+                superseded_revisions(
+                    home / "AppData" / "Local" / "ms-playwright", min_age_days, now
+                )
+            ),
+            "`npx playwright install` re-fetches one if a checkout still pins that revision",
         ),
     ]
 
@@ -296,6 +509,25 @@ def memory_verdict(snap: Snapshot) -> list[str]:
     return out
 
 
+def staging_verdict(drive: Path = Path("C:/")) -> list[str]:
+    """The GB this script found and may not touch, with the one remedy that works.
+
+    Same contract as `memory_verdict`: name what the reclaim cannot do rather than finish
+    on a total that reads as "the volume is as clear as it gets". On 2026-08-27 this was
+    5.67 GB -- larger than everything the rest of the run could free put together, and it
+    had been sitting there since the previous September with nothing reporting it.
+    """
+    found = protected_staging(drive)
+    if not found:
+        return []
+    out = ["  windows update staging -- real GB, and not this script's to delete:"]
+    for path, size in found:
+        out.append(f"    {path!s:<20} {size / GB:6.2f} GB")
+    out.append("  Disk Cleanup as admin (`cleanmgr /d C:`) -> Windows Update Cleanup;")
+    out.append("  a delete from a script or an agent shell is refused, by design.")
+    return out
+
+
 def running_container_names() -> list[str]:
     try:
         proc = subprocess.run(
@@ -336,7 +568,14 @@ def stop_stacks(names: list[str], apply: bool) -> None:
 
 
 def sweep(targets: list[SweepTarget], temp: Path, min_age_days: float, apply: bool) -> int:
-    """Delete the disposable trees and stale loose files. Returns bytes reclaimed."""
+    """Delete the disposable trees and stale loose files. Returns bytes reclaimed.
+
+    Under `--yes` the figure is what *went*, measured by re-reading the tree, rather than
+    what was there to go. The two differ whenever a file is held open or owned by another
+    account, and this script now sweeps trees where that is ordinary -- reporting the
+    optimistic number would put GB in the total that are still on the volume, under the
+    same banner as a `free disk` delta that disagrees with it.
+    """
     freed = 0
     for target in targets:
         size = dir_size(target.path)
@@ -344,14 +583,22 @@ def sweep(targets: list[SweepTarget], temp: Path, min_age_days: float, apply: bo
             print(f"  {target.label:<24} nothing to clear")
             continue
         print(f"  {target.label:<24} {size / GB:6.2f} GB  -- {target.why}")
-        freed += size
-        if apply:
-            for item in target.path.rglob("*"):
-                try:
-                    if item.is_file():
-                        item.unlink()
-                except OSError:
-                    continue
+        if not apply:
+            freed += size
+            continue
+        # `min_age_days` on the target had never been read, so a caller that set it got a
+        # full delete and no warning. Honouring it is the fix -- and 0.0 has to mean *no
+        # gate* rather than "older than this instant", which is a race a file written
+        # milliseconds earlier loses on Windows's coarser timestamps. It cost a green
+        # existing test to find, which is the only reason it was found.
+        cutoff = time.time() - target.min_age_days * 86400 if target.min_age_days else None
+        for item in target.path.rglob("*"):
+            try:
+                if item.is_file() and (cutoff is None or item.stat().st_mtime < cutoff):
+                    item.unlink()
+            except OSError:
+                continue
+        freed += size - dir_size(target.path)
 
     stale = stale_files(temp, min_age_days)
     stale_bytes = 0
@@ -365,14 +612,65 @@ def sweep(targets: list[SweepTarget], temp: Path, min_age_days: float, apply: bo
             f"  {'loose %TEMP% files':<24} {stale_bytes / GB:6.2f} GB  "
             f"-- {len(stale)} file(s) older than {min_age_days:g} days"
         )
-        freed += stale_bytes
-        if apply:
+        if not apply:
+            freed += stale_bytes
+        else:
             for item in stale:
                 try:
+                    size = item.stat().st_size
                     item.unlink()
+                    freed += size
                 except OSError:
                     continue
     return freed
+
+
+def purge_trees(paths: tuple[Path, ...], apply: bool) -> int:
+    """Remove whole version directories. Returns bytes that actually went away.
+
+    `ignore_errors` plus a re-measure rather than a raise: one locked file inside a
+    superseded playwright build must not abort the four groups after it, and it must not
+    be counted as freed either.
+    """
+    freed = 0
+    for path in paths:
+        size = dir_size(path)
+        if not apply:
+            freed += size
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        freed += size - dir_size(path)
+    return freed
+
+
+def sweep_versions(groups: list[Disposable], apply: bool) -> int:
+    """Report and clear every superseded-version group. Returns bytes reclaimed."""
+    freed = 0
+    for group in groups:
+        if not group.paths:
+            print(f"  {group.label:<30} nothing superseded")
+            continue
+        size = sum(dir_size(path) for path in group.paths)
+        print(f"  {group.label:<30} {size / GB:6.2f} GB  {len(group.paths)} dir(s) -- {group.why}")
+        freed += purge_trees(group.paths, apply)
+    return freed
+
+
+def protected_staging(drive: Path = Path("C:/")) -> list[tuple[Path, int]]:
+    """Windows update staging directories present on `drive`, largest first.
+
+    Report-only, and the point of reporting is that this is routinely the biggest single
+    item on the volume while being the one thing here nothing automated may delete. An
+    empty list is the good case and prints nothing.
+    """
+    found = []
+    for name in PROTECTED_STAGING:
+        path = drive / name
+        size = dir_size(path)
+        if size:
+            found.append((path, size))
+    found.sort(key=lambda item: item[1], reverse=True)
+    return found
 
 
 def banner(text: str) -> str:
@@ -419,10 +717,21 @@ def main(argv: list[str] | None = None) -> int:
         stop_stacks(running_container_names(), apply)
 
     print("\n-- 2. temp and cache trees (the disk half) --")
-    freed = sweep(sweep_targets(temp, username()), temp, args.min_age_days, apply)
+    profile = home()
+    freed = sweep(
+        [*sweep_targets(temp, username()), *cache_targets(profile)],
+        temp,
+        args.min_age_days,
+        apply,
+    )
     print(f"  {'total':<24} {freed / GB:6.2f} GB")
 
-    print("\n-- 3. boxes --")
+    print("\n-- 3. superseded tool versions (the half no reboot returns) --")
+    versions = sweep_versions(superseded_trees(profile, args.min_age_days), apply)
+    print(f"  {'total':<30} {versions / GB:6.2f} GB")
+    freed += versions
+
+    print("\n-- 4. boxes --")
     after_sweep = snapshot()
     safe, why = reconcile_is_safe(after_sweep.free_gb)
     print(f"  {why}")
@@ -440,8 +749,10 @@ def main(argv: list[str] | None = None) -> int:
         # is some other process on the machine, and rendering it as an arrow off this
         # script's own banner reads as a result it produced.
         print(f"  free disk   {after.free_gb:.1f} GB, unchanged")
-        print(f"  would free  {freed / GB:.2f} GB of temp trees")
+        print(f"  would free  {freed / GB:.2f} GB of caches and superseded versions")
     for line in memory_verdict(after):
+        print(line)
+    for line in staging_verdict():
         print(line)
     if not apply:
         print("\n  Nothing was changed. Re-run with --yes to apply.")
@@ -452,6 +763,11 @@ def tempdir() -> str:
     import tempfile
 
     return tempfile.gettempdir()
+
+
+def home() -> Path:
+    """Seam, for the same reason `tempdir` is one: the tests must not reach the profile."""
+    return Path.home()
 
 
 def username() -> str:

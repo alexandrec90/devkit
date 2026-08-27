@@ -33,7 +33,9 @@ lists behind a `.devkit.toml` field first, the way every other per-project value
 read — worth doing once the false-positive rate here is known, and not before.
 """
 
+import functools
 import re
+import subprocess
 
 from support import REPO_ROOT
 
@@ -161,6 +163,39 @@ def _exists(relpath: str) -> bool:
         not any(part in _UNSEARCHED for part in match.relative_to(REPO_ROOT).parts)
         for match in REPO_ROOT.rglob(relpath)
     )
+
+
+@functools.lru_cache(maxsize=1)
+def _tracked_paths() -> frozenset[str]:
+    """Every path git tracks, repo-relative and forward-slashed."""
+    listing = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return frozenset(entry for entry in listing.split("\0") if entry)
+
+
+def _is_tracked(relpath: str) -> bool:
+    """True when a *clone* of this repo would contain `relpath`.
+
+    `_exists` reads the working tree, which is the right question for "is this cited
+    path real" and the wrong one for "is this exemption still needed". The two differ
+    for anything generated: `logs/` is gitignored, so `logs/plug-menu.json` is present
+    for anyone who has run the plug menu or `worktree.py reconcile` and absent in a
+    fresh checkout — which is exactly what its own exemption says. Asking the working
+    tree made `test_exemptions_are_still_needed` fail on a developer machine and pass
+    in CI on the same commit, and the entry it demanded be dropped was the one entry
+    whose stated reason predicted the failure.
+
+    Basenames match by name, as in `_exists`, and get their `_UNSEARCHED` filter for
+    free: nothing tracks a `.venv`, so `pyvenv.cfg` is untracked without a list saying
+    where not to look.
+    """
+    if "/" in relpath:
+        return relpath in _tracked_paths()
+    return any(entry.rsplit("/", 1)[-1] == relpath for entry in _tracked_paths())
 
 
 def _claude_md_files() -> list:
@@ -328,10 +363,14 @@ def test_exemptions_are_still_needed():
 
     It has already paid for itself: four of the first ten entries were wrong. This test
     named them.
+
+    "Has become true" is read off what git tracks and not off the disk, per `_is_tracked`
+    — an exemption is a claim about a clone, and several entries name files that a
+    machine which has run the harness legitimately has.
     """
-    resurrected = sorted(path for path in ALLOWED_MISSING if _exists(path))
+    resurrected = sorted(path for path in ALLOWED_MISSING if _is_tracked(path))
     assert not resurrected, (
-        f"ALLOWED_MISSING names paths that now exist: {resurrected}. Drop the entries."
+        f"ALLOWED_MISSING names paths this repo now tracks: {resurrected}. Drop the entries."
     )
     everything_cited = {
         cited
@@ -350,6 +389,32 @@ def test_exemptions_are_still_needed():
         )
     )
     assert not unused, f"ALLOWED_VERSION_PINS names pins no longer written: {unused}."
+
+
+def test_a_generated_file_on_disk_does_not_retire_its_exemption():
+    """Running the harness must not redden the suite for having been run.
+
+    `logs/` is gitignored, so `logs/plug-menu.json` appears the first time anyone opens
+    the plug menu or lets `worktree.py reconcile` fire — and from then on
+    `test_exemptions_are_still_needed` demanded the removal of an exemption whose own
+    sentence says the file "exists on a machine that has run either and never in a
+    clone". The test contradicted the entry it was checking, and only ever off a clone,
+    so CI could not see it.
+
+    Written to fail deterministically wherever it runs: it puts the file there itself.
+    """
+    generated = REPO_ROOT / "logs" / "plug-menu.json"
+    ours = not generated.exists()
+    generated.parent.mkdir(parents=True, exist_ok=True)
+    if ours:
+        generated.write_text("{}", encoding="utf-8")
+    try:
+        assert _exists("logs/plug-menu.json"), "precondition: it is on disk"
+        assert not _is_tracked("logs/plug-menu.json"), "and still not in a clone"
+        test_exemptions_are_still_needed()
+    finally:
+        if ours:
+            generated.unlink()
 
 
 def test_every_claude_md_is_checked_not_only_the_root_one():

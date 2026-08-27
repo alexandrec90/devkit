@@ -90,6 +90,67 @@ def test_an_argparse_failure_still_writes_the_artifact():
     assert "--all" in text
 
 
+# --- the checklist that names the checkouts -----------------------------------
+#
+# `Devkit: Upgrade Projects` used to pass `--all` and nothing else, so adopting a release
+# in four consumers of five was a terminal command. The task ticks boxes now and hands
+# the ticked names in as the positional; these cover the two ends of that -- what a
+# selection is, and what backing out of one has to do.
+
+
+def test_the_checklist_arrives_as_one_comma_delimited_positional():
+    """A VS Code input resolves to ONE string, so the multi-pick joins on `separator`.
+    Splitting it back is this function, and it is the whole of the task's contract."""
+    assert up.project_selection("carameli,data-lake") == ["carameli", "data-lake"]
+    assert up.project_selection("") == []
+    assert up.project_selection(None) == []
+    # Order is the tick order and duplicates cannot survive: a checkout upgraded twice
+    # would cut a second box on a branch the first one already holds.
+    assert up.project_selection(" carameli , data-lake ,carameli") == ["carameli", "data-lake"]
+
+
+def test_an_escaped_checklist_is_never_mind_rather_than_a_checkout_name():
+    """Escaping leaves the input unresolved and VS Code passes the literal through.
+    Read as a name it is "not in workspace.code-workspace", exit 2 -- an operator error
+    reported for the one gesture that means cancel."""
+    assert up.picked_nothing("${input:adoptProjects}") is True
+    assert up.picked_nothing("carameli,data-lake") is False
+    assert up.picked_nothing("") is False
+    assert up.picked_nothing(None) is False
+
+
+def test_backing_out_of_the_checklist_upgrades_nothing_and_empties_the_artifact(capsys):
+    """Exit 0, because cancelling is a decision. And the log is emptied rather than
+    left: the previous run's failure still sitting in `logs/upgrade.log` is what makes
+    "I cancelled it" indistinguishable from "it broke".
+
+    Both literals, because that is what the task actually passes. `picked_nothing` reads
+    the first one, but it only ever sees an argv argparse already accepted -- and
+    `${input:sweepApply}` arrives as a second positional, so the run died at
+    `unrecognized arguments`, exit 2, with a failure artifact naming a usage error. The
+    guard therefore sits ahead of `argparse`, which is what this exercises."""
+    (up.REPO_ROOT / up.ARTIFACT).parent.mkdir(parents=True, exist_ok=True)
+    (up.REPO_ROOT / up.ARTIFACT).write_text("carameli: the previous run failed", encoding="utf-8")
+
+    assert up.main(["${input:adoptProjects}", "${input:sweepApply}"]) == 0
+    out = capsys.readouterr().out
+    assert "cancelled" in out
+    # Both prompts named: which one was dismissed is the only trace a quick-pick that
+    # never opened leaves behind.
+    assert "adoptProjects" in out and "sweepApply" in out
+    assert (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8") == ""
+
+
+def test_a_cancelled_checklist_upgrades_nothing(monkeypatch):
+    """The other half: exit 0 is only a cancel if nothing was spawned on the way out."""
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a cancelled task must not spawn anything")
+
+    monkeypatch.setattr(up.subprocess, "run", refuse)
+    assert up.main(["${input:adoptProjects}", "${input:sweepApply}"]) == 0
+
+
 # --- naming ------------------------------------------------------------------
 
 

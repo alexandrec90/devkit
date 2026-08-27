@@ -137,7 +137,14 @@ def test_command_runs_the_projects_own_script(checkouts):
 
 
 def test_fixed_action_args_come_before_caller_args(checkouts):
-    command = plan_command(ACTIONS["lint-changed"], checkouts / "alpha", ["--verbose"])
+    """An action's own arguments are part of what it is; the picker's come after.
+
+    `lint-changed` used to pin this with a real entry. Lint's scope is a picker now, so
+    the ordering is asserted against a stand-in rather than deleted along with the twin
+    — `docker-up`'s `--build` and `backtest`'s subcommand both still depend on it.
+    """
+    scoped = devkit_project.Action("scripts/lint-all.py", "Lint: Run", ("--changed",))
+    command = plan_command(scoped, checkouts / "alpha", ["--verbose"])
     assert inner(command) == ["python", "scripts/lint-all.py", "--changed", "--verbose"]
 
 
@@ -164,7 +171,7 @@ def test_the_plan_is_wrapped_for_logging(checkouts, tmp_path):
     assert command[:4] == [
         "python",
         str(devkit_root / "scripts" / "log-wrap.py"),
-        "Lint: Everything",
+        "Lint: Run",
         "--",
     ]
 
@@ -184,7 +191,7 @@ def test_the_wrapper_is_devkits_copy_not_the_targets(checkouts, tmp_path):
 def test_notify_wrap_is_used_when_the_project_ships_it(checkouts):
     (checkouts / "alpha" / "scripts" / "notify-wrap.py").write_text("")
     command = plan_command(ACTIONS["lint"], checkouts / "alpha", [])
-    assert command[:3] == ["python", "scripts/notify-wrap.py", "Lint: Everything"]
+    assert command[:3] == ["python", "scripts/notify-wrap.py", "Lint: Run"]
     assert command[3] == "--"
     assert inner(command) == ["python", "scripts/lint-all.py"]
 
@@ -212,9 +219,9 @@ def test_devkit_owned_action_uses_an_absolute_path(checkouts, tmp_path):
     """It runs with cwd set to the checkout, so a relative path would miss."""
     devkit_root = tmp_path / "dk"
     (devkit_root / "scripts").mkdir(parents=True)
-    (devkit_root / "scripts" / "git-sync-keep.py").write_text("")
-    command = plan_command(ACTIONS["sync-branch"], checkouts / "beta", [], devkit_root)
-    assert inner(command) == ["python", str(devkit_root / "scripts" / "git-sync-keep.py")]
+    (devkit_root / "scripts" / "hook-tests.py").write_text("")
+    command = plan_command(ACTIONS["test-hooks"], checkouts / "beta", [], devkit_root)
+    assert inner(command) == ["python", str(devkit_root / "scripts" / "hook-tests.py")]
 
 
 def test_devkit_owned_action_works_in_a_non_conforming_checkout(checkouts, tmp_path):
@@ -229,7 +236,7 @@ def test_devkit_owned_action_works_in_a_non_conforming_checkout(checkouts, tmp_p
 
 def test_a_broken_devkit_checkout_is_distinguished_from_a_project_gap(checkouts, tmp_path):
     with pytest.raises(ProjectError, match="devkit is missing"):
-        plan_command(ACTIONS["sync-branch"], checkouts / "alpha", [], tmp_path / "empty")
+        plan_command(ACTIONS["test-hooks"], checkouts / "alpha", [], tmp_path / "empty")
 
 
 def test_docker_up_forces_a_rebuild(checkouts, tmp_path):
@@ -448,6 +455,191 @@ def test_stopping_the_host_previews_asks_nothing(canonical):
     assert args[-1] == "preview-ui-stop"
 
 
+# --- the test menu ----------------------------------------------------------
+#
+# One task replaced six: `Test: Run Suite`, `Test: Run Carameli Target`, both browser
+# E2E tasks, the free hook-test run, and the paid live-CLI smoke. `TEST_KINDS` is the
+# table it spends -- a row is an (action, argument) pair, so every row reaches only
+# actions `ACTIONS` already defines, scopes and wraps for logging.
+
+TEST_KINDS = devkit_project.TEST_KINDS
+TESTS_VERB = devkit_project.TESTS_VERB
+SuiteKind = devkit_project.SuiteKind
+kind_selection = devkit_project.kind_selection
+plan_test_runs = devkit_project.plan_test_runs
+
+
+def test_a_kind_is_an_action_and_the_argument_that_shapes_it():
+    """`SuiteKind` carries no script, no label and no scope -- it borrows all three from
+    the action it names, which is what keeps the menu from becoming a second registry.
+
+    The empty-argument default is the common case (a row that runs an action plainly),
+    and it is what lets `hooks` and `suite` be rows at all: neither adds anything to the
+    command the deleted task ran.
+    """
+    assert SuiteKind("test").args == ()
+    assert TEST_KINDS["suite"] == SuiteKind("test")
+    assert TEST_KINDS["suite-changed"] == SuiteKind("test", ("--changed",))
+
+
+def test_the_kind_class_is_not_named_for_pytest_to_collect():
+    """Named `SuiteKind` rather than `TestKind` on purpose: pytest collects a
+    `Test`-prefixed class out of any test module that imports it, and this module
+    imports it by name. Collected, it would be reported as a test with a constructor
+    warning on every run -- noise nobody would trace back to a dataclass."""
+    assert not SuiteKind.__name__.startswith("Test")
+
+
+def test_every_test_kind_dispatches_an_action_the_dispatcher_defines():
+    """The menu cannot reach a script `ACTIONS` does not name.
+
+    That is why a kind is spelled as (action, argument) rather than as a command line.
+    The five tasks it replaced each carried their own script path and their own scope;
+    a menu that carried script paths would be a second registry to keep in step with
+    this one, and the first thing to drift would be the scope.
+    """
+    unknown = {kind: k.action for kind, k in TEST_KINDS.items() if k.action not in ACTIONS}
+    assert not unknown, f"test kinds naming actions the dispatcher does not define: {unknown}"
+
+
+def test_the_menu_verb_is_not_an_action():
+    """`tests` fans out to several scripts, so it cannot be an `ACTIONS` entry: an action
+    is one script, one label and one `logs/` artifact. It is a sibling of the action
+    choices in the parser, and a collision would make one of the two unreachable behind
+    whichever the parser resolved first -- silently, since both spellings are valid."""
+    assert TESTS_VERB not in ACTIONS
+
+
+def test_kinds_run_in_menu_order_however_they_were_ticked():
+    """A checkbox list hands back the clicking order. A run whose sequence nobody can
+    reproduce from the artifact is a run nobody can compare against the last one."""
+    assert kind_selection("e2e,suite") == ["suite", "e2e"]
+    assert kind_selection("suite,e2e") == ["suite", "e2e"]
+
+
+def test_a_kind_ticked_twice_runs_once():
+    assert kind_selection("suite,suite") == ["suite"]
+
+
+def test_empty_entries_from_the_picker_are_dropped():
+    """`separator: ","` on an empty tick, and the dispatcher's own empty-argument strip,
+    both leave bare commas in the token."""
+    assert kind_selection("suite,,") == ["suite"]
+    assert kind_selection("") == []
+
+
+def test_an_unknown_kind_is_refused_before_any_checkout_is_resolved():
+    """The pairs are a cross-product, so a typo caught late is worse than late: the
+    fourth of eight runs failing would leave three suites already run and five never
+    attempted, with a toast reporting the failure of a suite nobody chose to skip."""
+    with pytest.raises(ProjectError, match=r"unknown test kind.*sweet.*menu offers"):
+        kind_selection("suite,sweet")
+
+
+def test_the_cross_product_runs_one_checkout_at_a_time():
+    """Project-major, so a checkout's runs happen in one stretch and its `logs/`
+    artifacts are not interleaved with another checkout's."""
+    runs, skipped = plan_test_runs(["suite", "hooks"], ["devkit", "carameli"])
+    assert runs == [
+        ("devkit", "suite"),
+        ("devkit", "hooks"),
+        ("carameli", "suite"),
+        ("carameli", "hooks"),
+    ]
+    assert skipped == []
+
+
+def test_a_pair_the_checkout_cannot_run_is_skipped_by_name_not_refused():
+    """One menu is offered for every checkout, so `devkit` beside a Playwright row is the
+    ordinary case rather than a mistake -- ticking widely has to stay safe. `check_scope`
+    still refuses the single-action path, where an out-of-scope ask has nothing else to
+    run and is simply wrong."""
+    runs, skipped = plan_test_runs(["suite", "e2e"], ["devkit", "carameli"])
+    assert runs == [("devkit", "suite"), ("carameli", "suite"), ("carameli", "e2e")]
+    assert skipped == ["devkit: e2e is defined for carameli"]
+
+
+def menu_run(tmp_path, monkeypatch, kinds, projects=("alpha",), scripts=("run-tests.py",)):
+    """Dispatch the test menu over a throwaway workspace, recording what it ran."""
+    workspace = tmp_path / "projects.code-workspace"
+    workspace.write_text(json.dumps({"folders": [{"path": name} for name in projects]}))
+    for name in projects:
+        (tmp_path / name / "scripts").mkdir(parents=True)
+        for script in scripts:
+            (tmp_path / name / "scripts" / script).write_text("")
+
+    calls = []
+
+    def fake_run(command, *, cwd, check):
+        calls.append((inner(command), cwd.name))
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(devkit_project.subprocess, "run", fake_run)
+    code = devkit_project.main(
+        ["--workspace", str(workspace), "--project", ",".join(projects), TESTS_VERB, kinds]
+    )
+    return code, calls
+
+
+def test_the_menu_fans_out_to_one_run_per_checkout_and_kind(tmp_path, monkeypatch):
+    code, calls = menu_run(tmp_path, monkeypatch, "suite,suite-changed", projects=("alpha", "beta"))
+
+    assert code == 0
+    assert [cwd for _, cwd in calls] == ["alpha", "alpha", "beta", "beta"]
+    assert [command[1:] for command, _ in calls] == [
+        ["scripts/run-tests.py"],
+        ["scripts/run-tests.py", "--changed"],
+        ["scripts/run-tests.py"],
+        ["scripts/run-tests.py", "--changed"],
+    ]
+
+
+def test_two_kinds_of_one_action_are_told_apart_by_the_argument(tmp_path, monkeypatch):
+    """Four of the eleven rows share `run-tests.py` and three share `run-e2e.py`. The
+    argument is the whole difference, so it has to reach the script -- the deleted tasks
+    spelled theirs in the task block, where nothing checked them against the action."""
+    _, calls = menu_run(tmp_path, monkeypatch, "suite-changed")
+    assert calls[0][0][1:] == ["scripts/run-tests.py", "--changed"]
+
+
+def test_a_skipped_pair_is_printed_in_the_run_it_was_skipped_from(tmp_path, monkeypatch, capsys):
+    """On stdout, beside the runs that did happen. A pair silently dropped reads as a
+    suite that passed."""
+    code, calls = menu_run(tmp_path, monkeypatch, "suite,e2e")
+    assert code == 0
+    assert len(calls) == 1, "an out-of-scope kind ran anyway"
+    assert "[skipped] alpha: e2e is defined for carameli" in capsys.readouterr().out
+
+
+def test_a_selection_with_nothing_in_scope_is_a_refusal_not_a_green_run(
+    tmp_path, monkeypatch, capsys
+):
+    """Exiting 0 having run nothing would hand `notify-wrap.py` a pass and leave
+    `log-wrap.py` an empty artifact -- the exact shape of a suite that passed."""
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("something ran although every pair was out of scope")
+
+    monkeypatch.setattr(devkit_project.subprocess, "run", boom)
+    workspace = tmp_path / "projects.code-workspace"
+    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    (tmp_path / "alpha" / "scripts").mkdir(parents=True)
+
+    code = devkit_project.main(
+        ["--workspace", str(workspace), "--project", "alpha", TESTS_VERB, "e2e"]
+    )
+
+    assert code == 2
+    assert "nothing to run" in capsys.readouterr().err
+
+
+def test_the_menu_with_no_kind_ticked_names_the_kinds(tmp_path, monkeypatch, capsys):
+    """`minCount: 1` stops this at the picker; the CLI is public and has no such gate."""
+    code, calls = menu_run(tmp_path, monkeypatch, "")
+    assert (code, calls) == (2, [])
+    assert "no test kind given" in capsys.readouterr().err
+
+
 # --- conformance ------------------------------------------------------------
 
 
@@ -461,12 +653,12 @@ def test_a_scoped_action_is_not_expected_of_other_projects():
 
 
 def test_unscoped_actions_are_expected_of_everyone():
-    assert {"test", "lint", "lint-changed"} <= expected_actions("devkit")
+    assert {"test", "lint"} <= expected_actions("devkit")
 
 
 def test_conformance_reports_per_project_support(checkouts):
     report = conformance(["alpha", "beta"], checkouts)
-    assert set(report["alpha"]) == {"lint", "lint-changed", "test"}
+    assert set(report["alpha"]) == {"lint", "test"}
     assert report["beta"] == []
 
 
@@ -531,8 +723,8 @@ def test_picker_registration_updates_the_multi_test_picker_too():
             "inputs": [
                 {"id": "project", "options": ["alpha"]},
                 {"id": "daemonProject", "options": ["alpha"]},
-                {"id": "worktreeProject", "options": ["alpha"]},
-                {"id": "mergeCheckout", "options": ["alpha"]}
+                {"id": "mergeCheckout", "options": ["alpha"]},
+                {"id": "adoptProjects", "options": ["alpha"]}
             ]
         }
     }"""
@@ -578,8 +770,17 @@ def test_a_workspace_without_a_folders_array_is_refused():
 
 
 @needs_live_workspace
+@needs_the_static_checkout
 def test_registering_against_the_real_workspace_file():
-    """The shape assertions above are on a fixture; this proves them on the live file."""
+    """The shape assertions above are on a fixture; this proves them on the live file.
+
+    Skipped from a box for the reason `test_the_live_workspace_matches_the_canonical_copy`
+    is: the live file is main's render, so a branch that ADDS a picker is asserting here
+    that its own un-merged edit has already landed. That is not hypothetical — adding
+    `adoptProjects` reddened exactly this test and its retirement twin, at the Stop gate,
+    with nothing wrong. The marker's comment in `support.py` describes the drift check
+    alone; the pair below reads the same file and needed it just as much.
+    """
     text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     updated = register(text, ["probe", "probe-b"])
     assert "probe" in devkit_project.known_projects(updated)
@@ -590,8 +791,8 @@ def test_registering_against_the_real_workspace_file():
     inputs = {i["id"]: i for i in devkit_jsonc_loads(updated)["tasks"]["inputs"]}
     for picker_id in (
         "daemonProject",
-        "worktreeProject",
         "mergeCheckout",
+        "adoptProjects",
     ):
         assert _input_options(inputs[picker_id])[-2:] == ["probe", "probe-b"]
     # VanillaLand is a reference checkout and must not drift into the middle.
@@ -617,8 +818,8 @@ def test_retirement_drops_every_picker_option():
             "inputs": [
                 {"id": "project", "options": ["alpha", "beta"], "default": "alpha"},
                 {"id": "daemonProject", "options": ["alpha", "beta"], "default": "alpha"},
-                {"id": "worktreeProject", "options": ["alpha", "beta"], "default": "alpha"},
-                {"id": "mergeCheckout", "options": ["alpha", "beta"], "default": "alpha"}
+                {"id": "mergeCheckout", "options": ["alpha", "beta"], "default": "alpha"},
+                {"id": "adoptProjects", "options": ["alpha", "beta"], "default": "alpha"}
             ]
         }
     }"""
@@ -693,8 +894,9 @@ def test_removing_a_folder_that_is_not_there_is_refused():
 
 
 def test_a_picker_that_never_listed_the_name_is_left_alone():
-    """`mergeCheckout` lists more than the registry, and an older workspace file may
-    carry fewer pickers, so "not there" is the same outcome as "removed"."""
+    """`mergeCheckout` lists more than the registry, `adoptProjects` lists less, and an
+    older workspace file may carry fewer pickers, so "not there" is the same outcome as
+    "removed"."""
     text = '{"tasks": {"inputs": [{"id": "project", "options": ["alpha", "beta"]}]}}'
     assert remove_picker_option(text, "gamma") == text
 
@@ -713,15 +915,23 @@ def test_a_half_applied_retirement_is_refused_rather_than_written():
 
 
 @needs_live_workspace
+@needs_the_static_checkout
 def test_retiring_against_the_real_workspace_file():
     """The fixtures above are three inputs deep; the live file's `project` picker nests
-    its options two levels inside `args`, and every picker carries comments."""
+    its options two levels inside `args`, and every picker carries comments.
+
+    Skipped from a box; see its registration twin above."""
     text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     victim = devkit_project.known_projects(text)[0]
     updated = unregister(text, [victim])
     assert victim not in devkit_project.known_projects(updated)
     inputs = {i["id"]: i for i in devkit_jsonc_loads(updated)["tasks"]["inputs"]}
-    for picker_id in ("project", "daemonProject", "worktreeProject", "mergeCheckout"):
+    for picker_id in (
+        "project",
+        "daemonProject",
+        "mergeCheckout",
+        "adoptProjects",
+    ):
         options = _input_options(inputs[picker_id])
         assert victim not in options
         default = inputs[picker_id].get("default")
@@ -1038,8 +1248,34 @@ def test_no_picker_opts_into_the_extensions_escaped_ui_flag(canonical):
     assert opted_in == []
 
 
+def _test_kind_picker(canonical) -> str:
+    """The input id the test-menu task hands its ticked kinds through."""
+    for task in canonical["tasks"]:
+        args = [str(a) for a in task.get("args", [])]
+        if not args or not args[0].endswith("devkit_project.py"):
+            continue
+        index = args.index("--project")
+        if args[index + 2] == TESTS_VERB:
+            picker = re.fullmatch(r"\$\{input:(\w+)\}", args[index + 3])
+            assert picker, f"the menu's kinds argument is not a picker: {args[index + 3]}"
+            return picker.group(1)
+    raise AssertionError(f"no task dispatches the '{TESTS_VERB}' verb")
+
+
+def _test_kind_options(canonical) -> list[dict]:
+    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
+    return _input_options(inputs[_test_kind_picker(canonical)])
+
+
 def _dispatched_actions(canonical) -> dict[str, str]:
-    """{action key: task label} for every task routed through `devkit_project.py`."""
+    """{action key: task label} for every task routed through `devkit_project.py`.
+
+    The `tests` verb is not an action but a menu, so what it reaches is whatever its
+    kind picker offers -- expanded here because both reachability tests below depend on
+    it. Four actions stopped being tasks of their own when the five test tasks became
+    rows; without the expansion `test_every_action_is_reachable_from_a_task` would read
+    them as dead weight in `ACTIONS` and the consolidation could not have landed.
+    """
     found: dict[str, str] = {}
     for task in canonical["tasks"]:
         args = [str(a) for a in task.get("args", [])]
@@ -1047,8 +1283,60 @@ def _dispatched_actions(canonical) -> dict[str, str]:
             continue
         # The dispatcher's CLI is `--project <name> <action> [extra…]`.
         index = args.index("--project")
-        found[args[index + 2]] = task["label"]
+        verb = args[index + 2]
+        if verb != TESTS_VERB:
+            found[verb] = task["label"]
+            continue
+        for option in _test_kind_options(canonical):
+            # `.get`, not `[]`: a menu row naming no kind is a readable failure in
+            # `test_the_menu_offers_exactly_the_kinds_the_dispatcher_knows`, rather than
+            # a KeyError raised out of a helper three other tests share.
+            kind = TEST_KINDS.get(option["value"])
+            if kind:
+                found[kind.action] = task["label"]
     return found
+
+
+def test_the_menu_offers_exactly_the_kinds_the_dispatcher_knows(canonical):
+    """Both directions across the seam, which is stringly-typed like every other one
+    here: a row's `value` travels to the CLI verbatim.
+
+    A row naming no kind is rejected in a terminal after both dropdowns are answered. A
+    kind with no row is the quieter half -- it exists, it is tested, and it is reachable
+    only by typing a CLI nobody uses, which is what the whole task block exists to
+    replace.
+    """
+    offered = {option["value"] for option in _test_kind_options(canonical)}
+    assert offered == set(TEST_KINDS)
+
+
+def test_a_kind_only_some_checkouts_can_run_says_so_in_its_row(canonical):
+    """One menu is offered whatever was ticked first, so a row states its own scope.
+
+    A kind list narrowed by the ticked checkouts would be two dependent pickers, and VS
+    Code resolves sibling `${input:...}` in no defined order with neither given sight of
+    the other (`.claude/rules/vscode-tasks.md`). The extension's own `dependsOn` filters
+    the *result* rather than the list, so an out-of-scope tick would be dropped with
+    nothing said -- and the dispatcher prints `[skipped]` for exactly that reason. The
+    sentence in the row is what makes the skip expected rather than surprising.
+    """
+    unstated = []
+    for option in _test_kind_options(canonical):
+        action = ACTIONS[TEST_KINDS[option["value"]].action]
+        description = option.get("description", "")
+        expected = action.projects or ("every checkout",)
+        if any(name not in description for name in expected):
+            unstated.append((option["value"], expected, description))
+    assert not unstated, f"menu rows whose scope is not written where it is read: {unstated}"
+
+
+def test_the_test_task_asks_which_checkouts_before_which_kinds(canonical):
+    """The order the user asked for, and the order the args are read in: VS Code prompts
+    `${input:...}` in the order they appear in the command line it is building."""
+    task = next(t for t in canonical["tasks"] if t["label"] == "Test: Run Suite")
+    args = [str(a) for a in task["args"]]
+    assert args[args.index("--project") + 1] == "${input:project}"
+    assert args.index("${input:project}") < args.index(f"${{input:{_test_kind_picker(canonical)}}}")
 
 
 def test_every_dispatched_task_names_a_real_action(canonical):
@@ -1080,14 +1368,39 @@ def test_every_action_is_reachable_from_a_task(canonical):
     assert not unreachable, f"actions with no task to invoke them: {sorted(unreachable)}"
 
 
+def test_the_lint_task_asks_for_its_scope_rather_than_splitting_in_two(canonical):
+    """One task and a dropdown — the shape `Test: Run Suite` has always had.
+
+    Lint was two adjacent entries whose labels differed only in scope, each needing its
+    own icon, its own detail and — in the dispatcher — its own `lint-changed` action for
+    one flag. A scope that fits in a picker is a picker: the list gets shorter, and the
+    second question is asked only after the first has been answered.
+    """
+    lint = [task for task in canonical["tasks"] if task["label"].startswith("Lint:")]
+    assert [task["label"] for task in lint] == ["Lint: Run"]
+    assert [str(a) for a in lint[0]["args"]][-2:] == ["lint", "${input:lintScope}"]
+
+    scope = next(i for i in canonical["inputs"] if i["id"] == "lintScope")
+    assert [option["value"] for option in scope["options"]] == ["", "--changed"]
+    # The wide scope is the default: lint rewrites what it reads, so the click that most
+    # often precedes a commit must not be the one that leaves half the tree unformatted.
+    assert scope["default"] == ""
+
+
+@pytest.mark.parametrize("picked, expected", [("", []), ("--changed", ["--changed"])])
+def test_both_lint_scopes_reach_the_one_action(checkouts, picked, expected):
+    """The picker's two branches are one action plus a token — the empty one being
+    dropped by `plan_command` is what lets the wide branch pass nothing at all."""
+    command = plan_command(ACTIONS["lint"], checkouts / "alpha", [picked])
+    assert inner(command) == ["python", "scripts/lint-all.py", *expected]
+
+
 # Tasks that deliberately do not persist a failure artifact. Both launch a window and
 # exit — a Windows Terminal set, a VNC viewer — so their "output" is the thing they
 # opened, and there is no run text for anyone to read afterwards. Named here rather than
 # passed over, so a task that stops writing one has to say why in this list.
 UNLOGGED_TASKS = {
-    "Agents: Open Tabs (External Terminal)": "spawns terminal tabs; the window is the output",
-    "Agents: Resume Recent Sessions": "same — reopens sessions in tabs, then exits",
-    "Agents: Import Limited Claude Sessions": "same — opens imported sessions in tabs",
+    "Agents: Resume Recent Sessions": "reopens sessions in tabs, then exits",
     "IBKR: Open Gateway VNC Viewer": "launches a GUI viewer; nothing to parse when it closes",
     "Workspace: Plug / Unplug Projects": (
         "the script writes logs/plug-projects.log itself, naming the registry it ended "
@@ -1119,15 +1432,24 @@ def test_every_workspace_scoped_task_writes_a_failure_artifact(canonical):
 
 
 def test_every_workspace_file_command_is_reachable_from_a_task(canonical):
-    """The three directions between the live file and `workspace.jsonc` are one click.
+    """Both directions that WRITE between the live file and `workspace.jsonc` are one
+    click.
 
     A flag nobody can click is how the old arrangement stayed broken: `--check-tasks`
     existed for years, was correct, and was never wired to anything -- so the only
     thing that ever ran it was a test that CI skips. Reachability is the difference
     between a gate and a documented intention.
+
+    `--check-workspace` is the third direction and is deliberately not in this list.
+    It lost its task because the comparison it makes is the one `--render-workspace`
+    makes anyway: a publish REFUSES an unadopted live edit and names every difference
+    while refusing, and `workspace_sync_line` runs the same comparison at every session
+    start whether anyone clicks anything or not. So the flag is a convenience spelling
+    of a check that has two unclicked callers -- which is the opposite of `--check-tasks`,
+    and the reason the ratchet above does not apply to it.
     """
     spelled = {arg for task in canonical["tasks"] for arg in map(str, task.get("args", ()))}
-    for flag in ("--check-workspace", "--render-workspace", "--adopt-workspace"):
+    for flag in ("--render-workspace", "--adopt-workspace"):
         assert flag in spelled, f"{flag} is reachable only by typing it"
 
 
@@ -1218,10 +1540,7 @@ TASK_CONTRACT = {
 # exists: a toast reports that something you were not watching has ended, and these
 # either end instantly or hand you a window that is itself the notification.
 UNTOASTED_TASKS = {
-    "Agents: Open Tabs (External Terminal)": "the tabs it opens are the notification",
-    "Agents: Resume Recent Sessions": "same — reopens sessions in tabs, then exits",
-    "Agents: Import Limited Claude Sessions": "same — opens imported sessions in tabs",
-    "Ports: Show Checkout Allocations": "prints a table and exits; you are already looking",
+    "Agents: Resume Recent Sessions": "the tabs it reopens are the notification",
     "Workspace: List Tasks as a Table": "same — the table is the output, in front of you",
 }
 
@@ -1230,12 +1549,6 @@ UNTOASTED_TASKS = {
 CONTRACT_EXCEPTIONS = {
     ("Agent: Sync Codex Context", "presentation.reveal"): (
         "silent: a context sync that prints nothing worth stealing focus for"
-    ),
-    ("Agents: Open Tabs (External Terminal)", "presentation.reveal"): (
-        "silent: the tabs it opens are the output; its own terminal holds one line"
-    ),
-    ("Agents: Open Tabs (External Terminal)", "presentation.close"): (
-        "closes: same — nothing is left in this terminal to review"
     ),
 }
 
@@ -1338,12 +1651,17 @@ def test_a_scoped_task_offers_exactly_the_checkouts_its_action_allows(canonical)
     assert checked, "no scoped task found — the wiring this test guards is gone"
 
 
-def test_the_live_smoke_task_names_the_only_checkout_that_can_run_it(canonical):
+def test_a_literal_checkout_dispatch_agrees_with_its_actions_scope(canonical):
     """The test above skips a task whose `--project` is a literal rather than a picker,
-    which is exactly what "Test: Harness Hook Tests — paid, live CLI" is: its action is
-    defined for one checkout, and a picker of length one asks a question with no second
-    answer. That trade is only safe while the literal and the scope agree — so this is
-    the same assertion, made against the constant instead of against an option list.
+    which is what a task does when its action is defined for one checkout: a picker of
+    length one asks a question with no second answer. That trade is only safe while the
+    literal and the scope agree — so this is the same assertion, made against the
+    constant instead of against an option list.
+
+    "Test: Harness Hook Tests — paid, live CLI" used to be the case this was written
+    for, and it was named in the test's own name; it is two rows on the test menu now,
+    and "Machine: Reclaim Resources" is what still spells a checkout out. That the
+    rename was the only work the fold cost here is the paragraph below being true.
 
     Written for the general case rather than for one label: a second single-scope task
     spelled the same way is covered the day it is added, which is when it would
@@ -1369,25 +1687,31 @@ def test_the_live_smoke_task_names_the_only_checkout_that_can_run_it(canonical):
 
 
 # `SCOPE_PICKERS` and `test_every_scope_picker_can_aim_at_every_checkout` lived here.
-# They gated a class with no members left: a picker that chooses WHICH CHECKOUTS a
-# workspace-scoped batch task should act on. `sweepScope` went first, `upgradeScope`
-# with the change that added this comment -- both for the same reason, which is worth
-# keeping rather than the check that guarded them. A release is one upstream revision,
-# so adopting it in a subset of consumers is not an operation anyone wants (see
-# `upgrade-project.upgrade_one` -- a consumer already current costs a fetch, so `--all`
-# is both cheaper to reason about and cheaper to run than the question was). The list
-# of options such a picker needs is a second copy of the project registry, and every
-# copy of it has drifted at least once.
+# They gated a picker that chooses WHICH CHECKOUTS a workspace-scoped batch task should
+# act on -- `sweepScope`, then `upgradeScope`, both deleted, and for a while there was
+# no such picker left to gate. The reason they went is worth keeping and is narrower
+# than the sentence that used to stand here: each one's option list was a HAND-KEPT
+# second copy of the project registry, `register()` never wrote to it, and so a newly
+# generated project could run every generic task while `--all` was the only way to
+# sweep or upgrade it. Every copy of that list has drifted at least once.
 #
-# So: a batch task that acts on the workspace takes `--all`, and a task that acts on
-# ONE checkout uses `project`, which `register()` maintains. What the ratchet actually
-# guaranteed is not lost with it -- `test_picker_registration_updates_the_multi_test_
-# picker_too` covers the registration side, and the tail of
-# `test_project_scope_inputs_are_real_multi_picks` still requires `daemonProject` and
-# `worktreeProject` to reach every checkout `project` knows. Only the *scope* dimension
-# is gone. Reintroduce a scope picker and this is the check it needs back: the failure
-# it was written for is a newly generated project that every generic task can reach and
-# no batch task can.
+# The comment also used to argue the question itself was worthless -- that adopting a
+# release in a subset of consumers is not an operation anyone wants. That was wrong,
+# and `adoptProjects` is the correction: choosing four consumers of five is precisely
+# what a human is at the dropdown for, and `--all` made it a terminal command instead.
+# What that picker does NOT do is keep a second copy -- `insert_picker_option` names it
+# alongside `project`, so registration reaches it -- which is why it is allowed where
+# its two ancestors were not.
+#
+# The ratchet's guarantee is spread across three checks now rather than one:
+# `test_picker_registration_updates_the_multi_test_picker_too` covers the registration
+# side, the tail of `test_project_scope_inputs_are_real_multi_picks` requires
+# `daemonProject` to reach every checkout `project` knows, and
+# `test_the_adoption_picker_is_every_consumer_of_a_release` pins `adoptProjects` to the
+# registry minus devkit in both directions. Add a scope picker of your own and it needs
+# the third of those, written for its own option list: the failure they were all
+# written for is a newly generated project that every generic task can reach and no
+# batch task can.
 
 
 def _input_options(spec: dict) -> list:
@@ -1412,19 +1736,45 @@ def test_project_scope_inputs_are_real_multi_picks(canonical):
         "carameliCheckout",
         "ibkrCheckout",
         "dbCheckout",
+        "adoptProjects",
     ):
         spec = inputs[picker_id]
         assert spec["type"] == "command"
         assert spec["args"]["multiPick"] is True
         assert spec["args"]["optionGroups"][0]["minCount"] == 1
 
-    # The single-pick ones are single-pick on purpose -- one Docker daemon, one repo a
-    # box is cut from -- but they still have to reach every checkout the registry knows.
-    # That is the half a per-picker option list keeps losing: `project` gains the new
-    # project because `register()` writes it, and a hand-maintained sibling does not.
-    for picker_id in ("daemonProject", "worktreeProject"):
+    # The single-pick one is single-pick on purpose -- there is one Docker daemon -- but
+    # it still has to reach every checkout the registry knows. That is the half a
+    # per-picker option list keeps losing: `project` gains the new project because
+    # `register()` writes it, and a hand-maintained sibling does not. `worktreeProject`
+    # was the second of these until the `Worktree: New Box` task it fed was retired --
+    # `test_the_box_tier_keeps_one_task_and_it_is_read_only` says why.
+    for picker_id in ("daemonProject",):
         assert inputs[picker_id]["type"] == "pickString"
         assert _picker_values(inputs[picker_id]) == _picker_values(inputs["project"])
+
+
+def test_the_test_kinds_input_is_a_checkbox_list_the_dispatcher_can_split(canonical):
+    """Both of the test task's questions are checkboxes, and the second is this one.
+
+    The separator is the load-bearing part: an input resolves to ONE string, so a
+    multi-pick joins the ticked *values* with it and `kind_selection` splits on the same
+    character. A default separator is `,` too, but writing it keeps the two halves of
+    one contract in sight of each other rather than agreeing by coincidence.
+
+    `minCount` is what makes `main`'s empty-selection refusal a backstop rather than the
+    first thing a user meets.
+    """
+    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
+    spec = inputs[_test_kind_picker(canonical)]
+    assert spec["type"] == "command"
+    assert spec["args"]["multiPick"] is True
+    assert spec["args"]["separator"] == ","
+    assert spec["args"]["optionGroups"][0]["minCount"] == 1
+    # No value may contain the separator, or one tick would arrive as two kinds.
+    assert not [
+        option["value"] for option in _test_kind_options(canonical) if "," in option["value"]
+    ]
 
 
 # The one task that reaches a checkout `NOT_PROJECTS` excludes. Named once, because two
@@ -1450,6 +1800,45 @@ def test_the_merge_picker_reaches_the_reference_checkouts_too(canonical):
     registry = _picker_values(inputs["project"])
     expected = registry | set(devkit_project.NOT_PROJECTS)
     assert _picker_values(inputs["mergeCheckout"]) == expected
+
+
+# The two clicks that ask which consumers should adopt a devkit release. Named once for
+# the reason `MERGE_TASK` is: two tests assert about them, and a renamed label must break
+# those rather than quietly exempt itself.
+ADOPTION_TASKS = ("Devkit: Cut Release", "Devkit: Upgrade Projects")
+
+
+def test_the_adoption_picker_is_every_consumer_of_a_release(canonical):
+    """The other picker whose option list is not the registry, and why.
+
+    `mergeCheckout` offers the registry PLUS `NOT_PROJECTS`; this one offers it MINUS
+    `devkit`, and the exclusion is a correctness requirement rather than tidiness. A
+    release is pulled *from* that checkout, and `upgrade-project.py` treats a checkout
+    that was named and cannot be a target as an operator error — one stray tick would
+    stop a five-consumer run, where `--all` skips devkit silently.
+
+    An equality in both directions, for the same reason the merge picker gets one: a
+    newly generated project has to reach this list (`insert_picker_option` names it, and
+    `register()` never names devkit, so insertion stays correct), and a retired one has
+    to leave it. The hand-kept ancestors this replaces — `sweepScope`, `upgradeScope` —
+    had no such check and drifted; see the block above `_input_options`.
+    """
+    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
+    expected = _picker_values(inputs["project"]) - {"devkit"}
+    assert expected, "the registry is devkit alone — this test now guards nothing"
+    assert _picker_values(inputs["adoptProjects"]) == expected
+
+
+def test_the_adoption_tasks_ask_rather_than_assuming_every_consumer(canonical):
+    """`--all` in either of these is the regression: it is the spelling that made
+    adopting somewhere-but-not-everywhere a terminal command. The scheduled pass and the
+    release pipeline still pass `--all` — they are unattended, and nobody is at the
+    dropdown — but that is argv those callers build, never a task argument here."""
+    for label in ADOPTION_TASKS:
+        task = next(t for t in canonical["tasks"] if t["label"] == label)
+        args = [str(a) for a in task["args"]]
+        assert any("${input:adoptProjects}" in arg for arg in args), f"{label}: never asks"
+        assert "--all" not in args, f"{label}: hard-codes --all over the checklist"
 
 
 def test_the_merge_task_bypasses_the_dispatcher_on_purpose(canonical):
@@ -1481,6 +1870,7 @@ CANCEL_AWARE_RECEIVERS = {
     "devkit_ports.py",
     "resume-sessions.py",
     "plug-projects.py",
+    "upgrade-project.py",
 }
 
 
@@ -1616,6 +2006,48 @@ def test_the_sweep_has_no_workspace_task(canonical):
             f"{task['label']} puts sweep.py back in the quick-pick; the readers that "
             "replaced it are workspace-status.py and worktree.py reconcile"
         )
+
+
+def test_the_box_tier_keeps_one_task_and_it_is_read_only(canonical):
+    """`worktree.py` reaches the quick-pick once, as `list`. The other three went.
+
+    The box tier had four rows, and three of them had no caller who was not an agent --
+    which is the test, because an agent reaches every subcommand through the CLI and
+    never through VS Code:
+
+    - **New Box** passed no `--session`, and `worktree-guard.py` finds a box by its
+      lease (one per session+project). A hand-cut box is therefore adopted by nobody: it
+      costs a cold toolchain install and a port slot out of a fixed ceiling, and
+      `reconcile_action` reaps it as "never used" once it is past the newborn grace.
+    - **Reconcile** is the `devkit-worktree-reconcile` scheduled task, which runs the
+      same pass every fifteen minutes -- `install-reconcile-task.py` owns its arguments.
+      The one-click copy was also the more dangerous of the two, because it passed no
+      `--merge-label`: its "also merge every green PR" option meant every green PR,
+      where the schedule merges only what carries the label.
+    - **Reap Finished Boxes** could not reap anything reconcile would not, and usually
+      less -- `reap_decision` sets `awaiting_pr` for a caller with no PR in hand, so it
+      refuses a pushed box that reconcile reaps under disk pressure or past
+      `max_age_days`.
+
+    `list` stays because boxes are absent from `folders` by design, so it is the only
+    thing that reports them to a human at all. Re-adding one of the three means naming
+    the human it is for, not just deleting this test.
+    """
+    callers = [
+        task
+        for task in canonical["tasks"]
+        if any("worktree.py" in str(a) for a in task.get("args", []))
+    ]
+    assert [task["label"] for task in callers] == ["Worktree: List Boxes — read-only"]
+    args = [str(a) for a in callers[0]["args"]]
+    assert "list" in args, "the surviving box task must be the read-only one"
+
+    retired = {"worktreeProject", "worktreeSlug", "reconcileMerge"}
+    defined = {spec["id"] for spec in canonical["inputs"]}
+    assert not (retired & defined), (
+        f"{sorted(retired & defined)} feeds a task that no longer exists -- a picker "
+        "with no caller is a question nobody asks"
+    )
 
 
 def test_some_task_still_routes_through_the_dispatcher(canonical):
@@ -1796,19 +2228,17 @@ def test_only_declared_generated_actions_rewrite_the_tree():
     """A new autofix action must be a deliberate entry here, not an inherited default."""
     assert {name for name, a in ACTIONS.items() if a.autofix} == {
         "lint",
-        "lint-changed",
         "sync-codex",
     }
 
 
 def test_generated_actions_get_distinct_branches_and_only_codex_opts_into_automerge():
     lint = ACTIONS["lint"]
-    lint_changed = ACTIONS["lint-changed"]
     codex = ACTIONS["sync-codex"]
 
     assert lint.autofix_slug == "lint-autofix"
     assert codex.autofix_slug == "codex-context-sync"
-    assert lint.autofix_labels == lint_changed.autofix_labels == ()
+    assert lint.autofix_labels == ()
     assert codex.autofix_labels == (
         devkit_project.sweep.AUTOFIX_LABEL,
         devkit_project.sweep.AUTOMERGE_LABEL,

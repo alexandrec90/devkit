@@ -79,7 +79,7 @@ import string
 import subprocess
 import sys
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -338,6 +338,25 @@ DEFAULT_MIN_FREE_GB = 20.0
 # the chance a review comment arrives is a poor trade against a full disk.
 DEFAULT_MAX_AGE_DAYS = 3.0
 
+# How long a box may sit `needs-pr` with GitHub reporting **no PR at all** before the
+# checkout is reclaimed. Deliberately more than double `DEFAULT_MAX_AGE_DAYS`, because
+# the two waits are not the same wait: an open PR has a person attached to it, and this
+# state has nobody -- a session pushed a branch and never reached `gh pr create`, which
+# is what an interrupted `/ship` leaves behind every time.
+#
+# Until this existed the case was a permanent `WAIT`: not reapable, not mergeable, not
+# aged out, and invisible to `preview-task`'s menu filters because a ref with no PR is
+# one `merged_refs` can never subtract. carameli's `agent/comic-book-ui-0819` held a
+# port slot, a volume set and a dropdown row for 6.8 days that way, and the only exit
+# was `--force` -- the flag documented as discarding uncommitted work, spent on a box
+# that has none.
+#
+# What the reap costs is the checkout and nothing else: `needs-pr` means every commit
+# is on the remote, `branch_delete_flag` deletes only the *local* ref, and nothing here
+# has ever pushed a branch deletion. The branch stays on origin, so `worktree.py resume
+# <project> --branch <it>` brings the whole box back.
+DEFAULT_UNCLAIMED_AGE_DAYS = 7.0
+
 # How young a box has to be for "spent-branch and no PR" to mean a race rather than a
 # finding. The verdict is read as "cut and never used", and every box is exactly that
 # for the first minute of its life: the guard cuts one before the session has written
@@ -357,6 +376,11 @@ NEWBORN_GRACE_DAYS = 1.0 / 24.0
 # `gh pr view` fields. `statusCheckRollup` is per-head-commit, so a stale green from
 # before the last push cannot be read as current.
 PR_VIEW_FIELDS = "number,url,state,labels,statusCheckRollup"
+
+# How gh says "this branch has no PR", lowercased. Compared as a substring of stderr
+# because gh spells the failure in prose and exits 1 for it exactly as it does for an
+# auth or network failure -- see `pr_for`, which is the only place this is read.
+GH_NO_PR_MESSAGE = "no pull requests found"
 
 # Check-rollup conclusions, worst first. A rollup is only green when every check in it
 # is, so the reduction takes the worst present rather than the last.
@@ -520,11 +544,21 @@ class PreviewPlan:
 
 @dataclass(frozen=True)
 class PullRequest:
-    """What GitHub says about the PR for a box's branch. All-default means none exists.
+    """What GitHub says about the PR for a box's branch. All-default means none is known.
 
     `checks` is the *rollup*, reduced by `rollup_conclusion` to one of the `CHECKS_*`
     constants. It is deliberately not a boolean: "no checks reported" and "every check
     passed" are different answers, and only one of them may be merged on.
+
+    `absent` is the same distinction one layer out, and it exists because the default
+    instance is **two** answers at once: `pr_for` returns it when GitHub says there is
+    no PR *and* when GitHub could not be asked at all. Every reader before
+    `DEFAULT_UNCLAIMED_AGE_DAYS` could conflate them safely, since both meant "do less"
+    -- do not merge, do not reap on the strength of a merge. A rule that destroys on
+    the *absence* of a PR reads that same emptiness in the opposite direction, so it
+    needs the half that was actually observed. `absent` is set only where gh answered
+    the question; an offline, unauthenticated or rate-limited `gh` leaves it False and
+    the box is held, exactly as it was.
     """
 
     number: int = 0
@@ -532,6 +566,7 @@ class PullRequest:
     state: str = ""  # OPEN / MERGED / CLOSED, "" when there is no PR
     checks: str = CHECKS_NONE
     labels: tuple[str, ...] = ()
+    absent: bool = False  # gh was asked and answered: this branch has no PR
 
     @property
     def exists(self) -> bool:
@@ -1598,6 +1633,7 @@ def reap_decision(
     pr_closed: bool = False,
     holds_uncommitted: bool = True,
     awaiting_pr: bool = False,
+    unclaimed: bool = False,
 ) -> tuple[bool, str]:
     """`(allowed, note)` — may this box be destroyed, and what to say about it.
 
@@ -1641,8 +1677,33 @@ def reap_decision(
     remote, never the safety predicate underneath it. The one place `pr_closed` does
     reach `reapable` is its preview arm, where a close and a merge mean the same
     thing — the review the copy was cut for is over.
+
+    `unclaimed` is the third way the wait ends and the only one nobody records on
+    GitHub: no PR was ever opened, and the box is past `DEFAULT_UNCLAIMED_AGE_DAYS`.
+    The wait `awaiting_pr` names is a wait for a person to act, and after a week of a
+    branch sitting on the remote with nothing pointed at it, the honest reading is that
+    nobody is going to. It clears the same *policy* refusal a close clears and touches
+    `reapable` not at all — and it must be computed from `PullRequest.absent`, never
+    from an empty PR, or an offline `gh` becomes a licence to reap. `plan_reap` is
+    where that is assembled, because the age lives on the box and this function has
+    only the verdict.
+
+    Without it the state's one exit was `--force`, which is documented two paragraphs
+    up as the flag that discards uncommitted work — spent on the box that by definition
+    has none. A refusal whose only bypass is a bigger hammer teaches the hammer.
     """
     if awaiting_pr and not (pr_merged or pr_closed):
+        # `holds_uncommitted` is re-asked here rather than left to `reapable` below,
+        # because this arm returns before it. The verdicts in `AWAITS_A_MERGE` all
+        # imply a clean tree, so the gate is inert for an honest caller — which is
+        # exactly how the husk case leaked, and the reason to spell it out anyway:
+        # nothing else stands between an unattended pass and somebody's edits.
+        if unclaimed and not holds_uncommitted:
+            return True, (
+                f"`{verdict}` and GitHub has no PR for this branch -- past the "
+                f"{DEFAULT_UNCLAIMED_AGE_DAYS:g}d mark, so there is no review left to "
+                f"wait for; the commits and the remote branch are untouched"
+            )
         if force:
             return True, (
                 f"forced past `{verdict}` ({reason}) — the PR has not merged, so this "
@@ -1650,8 +1711,9 @@ def reap_decision(
             )
         return False, (
             f"{verdict} — {reason}. A push is not a merge: `reconcile` reaps this box "
-            f"once its PR lands, and until then the checkout is where review comments "
-            f"get answered. Wait for the merge, or pass --force."
+            f"once its PR lands, or at {DEFAULT_UNCLAIMED_AGE_DAYS:g}d if no PR is ever "
+            f"opened for the branch, and until then the checkout is where review "
+            f"comments get answered. Wait for it, or pass --force."
         )
     if reapable(
         verdict, pr_merged=pr_merged, pr_closed=pr_closed, holds_uncommitted=holds_uncommitted
@@ -1713,6 +1775,7 @@ def reap_plan(
     keep_stack: bool = False,
     has_stack: bool = False,
     awaiting_pr: bool = False,
+    unclaimed: bool = False,
     copy_intact: bool | None = None,
 ) -> ReapPlan:
     """Everything `reap` will run, in the only order that is safe.
@@ -1762,6 +1825,7 @@ def reap_plan(
         pr_closed=pr_closed,
         holds_uncommitted=bool(state.dirty),
         awaiting_pr=awaiting_pr,
+        unclaimed=unclaimed,
     )
     if not allowed:
         return ReapPlan(box=box.name, path=path, project=box.project, refusal=note)
@@ -1978,6 +2042,7 @@ def reconcile_action(
     max_age_days: float = DEFAULT_MAX_AGE_DAYS,
     holds_uncommitted: bool = True,
     newborn_grace_days: float = NEWBORN_GRACE_DAYS,
+    unclaimed_age_days: float = DEFAULT_UNCLAIMED_AGE_DAYS,
 ) -> tuple[str, str]:
     """`(action, why)` for one box. Pure; every IO decision above it collapses to these.
 
@@ -2020,9 +2085,18 @@ def reconcile_action(
       is old enough for "never used" to be a finding rather than a race. See
       `newborn_grace_days`.
     - **no PR but pushed** -- `needs-pr` with nothing on GitHub *at all*, which is the
-      one case here where no person has ruled on the branch. Never destroyed and never
-      merged: the commits are safe on the remote but nobody will ever look at them, and
-      whether that is finished is a person's decision, not a cleanup's.
+      one case here where no person has ruled on the branch. Never merged, and not
+      destroyed until `unclaimed_age_days`: whether the work is finished stays a
+      person's decision, but *keeping the checkout* is not the same question, and
+      answering the second one with the first held the box forever. See
+      `DEFAULT_UNCLAIMED_AGE_DAYS` for what the reap costs (the checkout, and nothing
+      else) and for the box it was measured on.
+
+      It is the only reap here that turns on an **absence**, so it is the only one that
+      needs `pr.absent` rather than `not pr.exists`: an unreachable `gh` produces the
+      same empty `PullRequest` as a branch nobody opened a PR for, and reaping on that
+      would destroy the checkout of an open, actively-reviewed PR the moment the
+      network blinked. Every other arm reads a state GitHub affirmatively reported.
     """
     if not reapable(
         verdict,
@@ -2095,7 +2169,21 @@ def reconcile_action(
         return WAIT, f"PR #{pr.number} is open: {why}"
 
     if verdict == sweep.NEEDS_PR:
-        return WAIT, "branch is pushed but has no PR -- /ship it, or open one by hand"
+        if not pr.absent:
+            # gh could not be asked (offline, unauthenticated, rate-limited), so the
+            # empty PR says nothing about this branch. Wait, and say nothing about a
+            # deadline that is not being counted.
+            return WAIT, "branch is pushed but has no PR -- /ship it, or open one by hand"
+        if age_days > unclaimed_age_days:
+            return REAP, (
+                f"pushed {age_days:.1f}d ago and GitHub has no PR for the branch "
+                f"(limit {unclaimed_age_days:g}d) -- the remote has every commit and "
+                f"keeps the branch, so only the checkout is lost (`resume` brings it back)"
+            )
+        return WAIT, (
+            f"branch is pushed but has no PR -- /ship it, or open one by hand; the "
+            f"checkout is reclaimed at {unclaimed_age_days:g}d ({age_days:.1f}d now)"
+        )
 
     if age_days < newborn_grace_days:
         return WAIT, (
@@ -2113,6 +2201,7 @@ def reconcile_plan(
     merge_label: str = "",
     pressure: bool = False,
     max_age_days: float = DEFAULT_MAX_AGE_DAYS,
+    unclaimed_age_days: float = DEFAULT_UNCLAIMED_AGE_DAYS,
     now: _dt.datetime | None = None,
 ) -> list[Reconciliation]:
     """`reconcile_action` over every box, in name order. Pure -- the whole pass, testable.
@@ -2145,6 +2234,7 @@ def reconcile_plan(
                 pressure=pressure,
                 age_days=box_age_days(box.created, now),
                 max_age_days=max_age_days,
+                unclaimed_age_days=unclaimed_age_days,
                 holds_uncommitted=bool(dirty),
             )
         ]
@@ -2241,6 +2331,15 @@ def pr_for(gh: sweep.Git, branch: str) -> PullRequest:
 
     `--state all` because the interesting answers include MERGED and CLOSED; the default
     would hide exactly the state that licenses a reap.
+
+    **`absent` is set from the message, because gh gives the two answers one exit code.**
+    "no pull requests found for branch X" and "HTTP 401: Bad credentials" both exit 1
+    with empty stdout, so the text is the only thing separating a branch GitHub has
+    ruled on from a GitHub that could not be reached. Matching prose is brittle in
+    exactly one direction, which is why it is done here rather than at the reader: a
+    wording change costs a cleanup that does not happen, never a box destroyed on an
+    answer nobody gave. Everything unrecognised stays the default, and the default is
+    "not known to be absent".
     """
     if not branch:
         return PullRequest()
@@ -2249,7 +2348,8 @@ def pr_for(gh: sweep.Git, branch: str) -> PullRequest:
     except (OSError, subprocess.SubprocessError):
         return PullRequest()
     if result.returncode != 0:
-        return PullRequest()
+        detail = f"{result.stderr or ''}{result.stdout or ''}".lower()
+        return PullRequest(absent=GH_NO_PR_MESSAGE in detail)
     return parse_pr_view(result.stdout)
 
 
@@ -2876,6 +2976,73 @@ def build_targets(
         seen.add(tag)
         targets.append(name)
     return tuple(targets)
+
+
+def box_image_tags(config: Mapping[str, object] | None, project_name: str) -> tuple[str, ...]:
+    """The images a box *built for itself*, which `reap` has to delete by name.
+
+    `compose down -v` removes containers, the network and the volumes, and does not
+    touch images -- `docker` has no per-project image verb, because an image is not
+    owned by the project that built it. So every reaped box left its build behind, and
+    nothing downstream collected them: `docker system prune -af` is the only thing that
+    would, and the scheduled prune is `--idle-only`, which skips whenever the engine is
+    down (`docker-maint.prune_verdict`). Measured on this workstation 2026-08-26, after
+    the leak had been running for a week: 17 orphan images from 9 destroyed boxes,
+    7.4 GB, against a machine reporting 22 GB free at session start.
+
+    **The gate is that the tag carries the box's own project name**, and it is the whole
+    safety argument rather than a tidiness rule. A project is free to pin a fixed
+    `image:` on a built service, and that tag is then shared by every box on the machine
+    -- deleting it would force a rebuild in each of them, which is the same leak
+    inverted and far more annoying. A tag containing `COMPOSE_PROJECT_NAME` cannot be
+    shared, because that name is unique to one box by construction. Nothing is guessed
+    about *how* a project spells its tags: compose resolves them and this reads the
+    answer, which is what keeps a vendored file free of one repo's naming.
+
+    Services with no `build` are skipped for the same reason from the other end: their
+    image came from a registry, is shared with every other stack on the machine, and was
+    never this box's to delete.
+    """
+    raw = (config or {}).get("services")
+    tags: list[str] = []
+    for _name, svc in (raw if isinstance(raw, dict) else {}).items():
+        if not isinstance(svc, dict) or "build" not in svc:
+            continue
+        tag = svc.get("image")
+        if not isinstance(tag, str) or project_name not in tag:
+            continue
+        if tag not in tags:
+            tags.append(tag)
+    return tuple(tags)
+
+
+def remove_images(tags: Sequence[str]) -> tuple[bool, str]:
+    """`docker image rm` the named tags. `(ok, message)`; never fatal.
+
+    A reap that cleaned everything else must not report failure because an image was
+    already gone or the daemon went away mid-teardown -- the box is destroyed either
+    way, and the caller's exit code is about the *stack*, per `apply_reap`. So the
+    message says what happened and the boolean only gates the wording.
+    """
+    if not tags:
+        return True, ""
+    try:
+        completed = subprocess.run(
+            ["docker", "image", "rm", *tags],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+            creationflags=sweep.NO_WINDOW,
+        )
+    except FileNotFoundError:
+        return False, "docker is not on PATH — the box's images were left behind"
+    except subprocess.TimeoutExpired:
+        return False, "docker image rm timed out after 120s — images may survive"
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        return False, f"could not remove {len(tags)} box image(s): {detail}"
+    return True, f"removed {len(tags)} image(s) built by the box: {', '.join(tags)}"
 
 
 def compose_config(
@@ -3631,6 +3798,13 @@ def plan_reap(
         keep_stack=keep_stack,
         has_stack=has_stack(path),
         awaiting_pr=pr is None and verdict in AWAITS_A_MERGE,
+        # Both halves are observations rather than absences: `absent` is set only where
+        # gh answered "no pull requests found" (so `--no-fetch`, an offline machine and
+        # a non-GitHub host all leave it False and the refusal stands), and the age is
+        # the box's own. `reconcile` reaches the same decision through
+        # `reconcile_action`; asking it here too is what keeps `reap` from refusing a
+        # box the scheduled pass would destroy a quarter of an hour later.
+        unclaimed=found.absent and box_age_days(box.created) > DEFAULT_UNCLAIMED_AGE_DAYS,
         copy_intact=(
             preview_copy_intact(sweep.git_for(root / box.project), box.branch, box.tracks)
             if box.kind == PREVIEW_KIND and box.branch and box.tracks and state.is_git
@@ -3846,11 +4020,24 @@ def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
     leak a container set and a volume set per task — which is the thing that makes the
     WSL2 VHDX the next bottleneck. So the box goes, and the exit code says the stack
     needs a look.
+
+    **The images the box built are read before the teardown and deleted after it**, and
+    both halves of that order are load-bearing. `compose config` is what resolves the
+    tags (`box_image_tags`), and it can only be asked while the box's compose file is
+    still on disk — which the `git worktree remove` below ends. The delete has to come
+    after `down`, because an image with a container on it is in use. Between those two
+    points is the only window where both are true.
+
+    A failed image removal does not fail the reap either, for the reason the stack
+    teardown gives: the box is destroyed and the slot is reclaimed regardless, and a
+    leaked image costs disk rather than work. It does count toward `stack_ok`, because
+    "the stack needs a look" is exactly what it means.
     """
     root = workspace.parent
     notes: list[str] = []
     stack_ok = True
     if plan.stack_down:
+        images = box_image_tags(compose_config(Path(plan.path), plan.box), plan.box)
         stack_ok, message = compose_down(Path(plan.path), plan.box)
         notes.append(f"{'' if stack_ok else '[warn] '}{message}")
         if not stack_ok:
@@ -3858,6 +4045,10 @@ def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
                 f"the box was still removed, but its containers and volumes may survive "
                 f"as project {plan.box} — check `docker compose ls` and prune by hand"
             )
+        if stack_ok and images:
+            images_ok, image_note = remove_images(images)
+            notes.append(f"{'' if images_ok else '[warn] '}{image_note}")
+            stack_ok = stack_ok and images_ok
 
     source = root / plan.project
     ran, failed, error = run_steps(source, plan.steps)
@@ -4065,6 +4256,7 @@ def reconcile(
     merge_label: str = "",
     min_free_gb: float = DEFAULT_MIN_FREE_GB,
     max_age_days: float = DEFAULT_MAX_AGE_DAYS,
+    unclaimed_age_days: float = DEFAULT_UNCLAIMED_AGE_DAYS,
     fetch: bool = True,
     keep_stack: bool = False,
     checkouts: bool = True,
@@ -4085,6 +4277,14 @@ def reconcile(
     Disk pressure is measured **once, before anything is destroyed**, so the escalation
     is a property of the pass rather than something that switches on halfway through
     and treats the last boxes differently from the first.
+
+    `unclaimed_age_days` is the one exit that does not go through a PR at all: a branch
+    pushed by an interrupted `/ship`, for which GitHub affirmatively reports no PR, had
+    no ending — `needs-pr` said *wait for the merge* about a merge nobody was going to
+    make, and the box held its slot until a human found it. Past that age the checkout
+    is reclaimed; the commits and the remote branch are untouched, so `resume` restores
+    the box in full. It is deliberately far longer than `max_age_days`, because an open
+    PR has a person attached to it and this state has nobody.
 
     The static checkouts follow, through `sync_checkouts`, unless `checkouts=False`.
     That half destroys nothing and is refused on anything holding work; it exists so a
@@ -4122,6 +4322,7 @@ def reconcile(
         merge_label=merge_label,
         pressure=pressure,
         max_age_days=max_age_days,
+        unclaimed_age_days=unclaimed_age_days,
     ):
         notes: list[str] = []
         action = decision.action
@@ -4748,6 +4949,16 @@ def main(argv: list[str] | None = None) -> int:
             f"disk pressure (default {DEFAULT_MAX_AGE_DAYS:g})"
         ),
     )
+    fix.add_argument(
+        "--unclaimed-age-days",
+        type=float,
+        default=DEFAULT_UNCLAIMED_AGE_DAYS,
+        help=(
+            f"reclaim a box this old whose branch is pushed and for which GitHub reports "
+            f"no PR at all -- the commits and the remote branch survive, so `resume` "
+            f"brings it back (default {DEFAULT_UNCLAIMED_AGE_DAYS:g})"
+        ),
+    )
     fix.add_argument("--keep-stack", action="store_true", help="leave Docker stacks running")
     # Paired with its negation for the same reason `--no-merge` is: the scheduled
     # command names every knob it passes, so `schtasks /query` shows what is on.
@@ -4875,6 +5086,7 @@ def main(argv: list[str] | None = None) -> int:
                 merge_label=args.merge_label,
                 min_free_gb=args.min_free_gb,
                 max_age_days=args.max_age_days,
+                unclaimed_age_days=args.unclaimed_age_days,
                 fetch=args.fetch,
                 keep_stack=args.keep_stack,
                 checkouts=args.checkouts,

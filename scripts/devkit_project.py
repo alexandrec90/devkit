@@ -139,16 +139,15 @@ DB_PROJECTS = CARAMELI + IBKR
 ACTIONS: dict[str, Action] = {
     # --- implemented by each checkout ---
     "test": Action("scripts/run-tests.py", "Test: Run Suite"),
+    # Scope is a picker argument, not a second action -- `lintScope` in the workspace
+    # file answers "everything or changed?" and the answer travels as `--changed` or as
+    # nothing at all. There used to be a `lint-changed` twin here, and it bought a second
+    # task, a second icon and a second label for one flag; `test` has never had one, and
+    # the two now differ only in the script they call. Empty picker tokens are dropped in
+    # `plan_command`, which is what lets the wide branch pass no argument.
     "lint": Action(
         "scripts/lint-all.py",
-        "Lint: Everything",
-        autofix=True,
-        autofix_slug="lint-autofix",
-    ),
-    "lint-changed": Action(
-        "scripts/lint-all.py",
-        "Lint: Changed Files",
-        ("--changed",),
+        "Lint: Run",
         autofix=True,
         autofix_slug="lint-autofix",
     ),
@@ -159,9 +158,17 @@ ACTIONS: dict[str, Action] = {
         autofix_slug="codex-context-sync",
         autofix_labels=(sweep.AUTOFIX_LABEL, sweep.AUTOMERGE_LABEL),
     ),
-    "sync-devkit": Action("scripts/sync-devkit.py", "Harness: Check Drift"),
+    # `sync-devkit` and `sync-branch` were here. Both lost their task and neither has
+    # another caller, so keeping them would have left `ACTIONS` naming two scripts
+    # nothing dispatches -- which `test_every_action_is_reachable_from_a_task` is there
+    # to refuse. "Harness: Check Drift vs devkit" ran `sync-devkit.py` in the STATIC
+    # checkout, on its home branch: `--check` is what the `devkit-drift` pre-commit hook
+    # and the PR gate already run, and `--pull` wrote an upgrade into a checkout with no
+    # branch and no PR under it, which is `upgrade-project.py`'s whole job and the reason
+    # it works in a box. The script stays and keeps every mode; only the click is gone.
+    # "Git: Sync Branch onto Origin Default (Keep Changes)" went with `git-sync-keep.py`
+    # itself -- VS Code's Source Control view rebases a checkout onto its trunk already.
     # --- implemented once, here ---
-    "sync-branch": Action("scripts/git-sync-keep.py", "Git: Sync Branch", owner=DEVKIT),
     # Stack lifecycle. DEVKIT-owned with a per-project override rather than
     # PROJECT-owned, which is the same shape `docker-prune` already uses: the compose
     # topologies genuinely differ (carameli waits on healthchecks, ibkr_trader scopes
@@ -256,8 +263,12 @@ ACTIONS: dict[str, Action] = {
     # Cutting a devkit release. DEVKIT_ONLY because a release is devkit's own act and
     # has no project dimension at all -- run per selected checkout it would try to tag
     # this repo two or three times, and the second attempt would refuse a tag that now
-    # exists. The consumers appear at the END of the run, as `upgrade-project.py --all`,
-    # which is a different thing from the task being scoped to them.
+    # exists. The consumers appear at the END of the run, as the adoption pass this hands
+    # off to, which is a different thing from the task being scoped to them -- and it is
+    # why the release task asks *two* project questions that must not be confused: this
+    # `--project devkit`, fixed, deciding where the release is cut; and the
+    # `adoptProjects` checklist, riding through as `--projects=`, deciding whose adoption
+    # PR opens afterwards.
     #
     # It is an ACTIONS entry rather than a hand-written task like `Devkit: Upgrade
     # Projects` because it needs the wrapping more than that one does, not less: the run
@@ -322,6 +333,71 @@ ACTIONS: dict[str, Action] = {
     "db-revision": Action("scripts/db-revision.py", "DB: New Migration", projects=DB_PROJECTS),
 }
 
+
+# --- the test menu ----------------------------------------------------------
+#
+# One task asks which checkouts and which kinds of test, and this table is the second
+# question's answer set. There were five tasks: a suite runner, the vendored hook-test
+# runner, and three carameli-only ones — each with its own icon, its own `detail` and
+# its own single-pick argument picker, all sitting adjacent in the quick-pick answering
+# the same question. `.claude/rules/vscode-tasks.md` calls that shape a picker rather
+# than a task.
+#
+# A kind is an (action, argument) pair rather than a new action, so nothing on the menu
+# can reach a script `ACTIONS` does not already name, and `Action.projects` still decides
+# which checkout may run it. `plan_test_runs` skips an out-of-scope pair BY NAME rather
+# than dropping it: one menu serves every checkout, so ticking `devkit` beside a
+# Playwright row is the ordinary way to use this, and a pair that vanishes silently is
+# indistinguishable from a suite that ran and passed.
+#
+# `test-hooks-live` is here as two rows, one per CLI, and it did not use to be. It was a
+# task of its own with a `claude`/`codex`/`both` single-pick, kept out of this table
+# because it launches a paid CLI session and a menu row is one keystroke away from every
+# free row above it. Ticking both rows is what `both` was, which is why there is no third
+# row -- `plan_test_runs` orders by this table, so the pair runs claude then codex.
+#
+# The cost did not stop being real, and the menu cannot ask a second time. What the fold
+# buys is one task instead of two adjacent ones asking the same question; what it costs
+# is that the workspace REMEMBERS a ticked row, so a paid row survives to the next click
+# unless it is unticked. That is stated on the rows themselves -- their labels lead with
+# PAID -- and `hook-tests-live.py` still prints what it is about to spend before it
+# launches anything. Neither is a confirmation, and there is nowhere in a checkbox
+# quick-pick to put one.
+@dataclass(frozen=True)
+class SuiteKind:
+    """One row of the test menu: the action it dispatches, and the argument shaping it.
+
+    Not spelled `TestKind` — pytest collects a `Test`-prefixed class out of any test
+    module that imports it, and the tests for this table import it by name.
+    """
+
+    action: str
+    args: tuple[str, ...] = ()
+
+
+TEST_KINDS: dict[str, SuiteKind] = {
+    "suite": SuiteKind("test"),
+    "suite-changed": SuiteKind("test", ("--changed",)),
+    "hooks": SuiteKind("test-hooks"),
+    "all-targets": SuiteKind("test-target", ("--all",)),
+    "frontend": SuiteKind("test-target", ("--target=frontend-tests",)),
+    "bundle-budgets": SuiteKind("test-target", ("--target=bundle-budgets",)),
+    "webhook": SuiteKind("test-target", ("--target=webhook-e2e",)),
+    "e2e": SuiteKind("e2e"),
+    "e2e-headed": SuiteKind("e2e", ("--headed",)),
+    "e2e-cross": SuiteKind("e2e", ("--cross-browser",)),
+    "local-e2e": SuiteKind("local-e2e"),
+    # Last, so the distance from `suite` is as large as the table can make it. The
+    # argument is the suite name `hook-tests-live.py` already takes, so nothing new is
+    # reachable here that its CLI did not already offer.
+    "hooks-live-claude": SuiteKind("test-hooks-live", ("claude",)),
+    "hooks-live-codex": SuiteKind("test-hooks-live", ("codex",)),
+}
+
+# The verb that spends that table. Not an `ACTIONS` key, because an action is one script
+# and this fans out to several — so it is a choice `main` handles beside them.
+TESTS_VERB = "tests"
+
 # Wrapper every generated project ships (`templates/core/scripts/notify-wrap.py`). When
 # present the command routes through it so a long task still notifies on completion;
 # when absent the command runs bare rather than failing.
@@ -358,6 +434,26 @@ def project_selection(value: str) -> list[str]:
     CLI remains a one-item instance of the same format.
     """
     return list(dict.fromkeys(name.strip() for name in value.split(",") if name.strip()))
+
+
+def kind_selection(value: str) -> list[str]:
+    """Test-menu kinds from a comma-delimited task input, returned in MENU order.
+
+    Menu order rather than the order they were ticked in: a checkbox list hands back
+    whatever the clicking order was, and a run whose sequence nobody can reproduce from
+    the artifact is a run nobody can compare against the last one.
+
+    An unknown kind is refused here, before any checkout is resolved, because the pairs
+    are a cross-product: the fourth of eight runs failing on a typo would leave three
+    suites already run and five never attempted.
+    """
+    picked = {name.strip() for name in value.split(",") if name.strip()}
+    unknown = sorted(picked - set(TEST_KINDS))
+    if unknown:
+        raise ProjectError(
+            f"unknown test kind(s) {', '.join(unknown)}; the menu offers: {', '.join(TEST_KINDS)}"
+        )
+    return [kind for kind in TEST_KINDS if kind in picked]
 
 
 def resolve_project(name: str, projects: list[str], root: Path, noun: str = "project") -> Path:
@@ -402,6 +498,37 @@ def check_scope(action: Action, project: str) -> None:
             f"{project} is out of scope for this action; it is defined for: "
             f"{', '.join(action.projects)}"
         )
+
+
+def plan_test_runs(
+    kinds: list[str], selected: list[str]
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Every (checkout, kind) pair the menu asks for that is in scope, and the rest by name.
+
+    Project-major, so one checkout's runs happen in one stretch and its `logs/` artifacts
+    are not interleaved with another's.
+
+    The skips are RETURNED rather than swallowed, and that is the whole reason this is a
+    function. A single menu is offered for every checkout — the alternative, a kind list
+    that narrows to the ticked checkouts, is a second dependent picker VS Code cannot
+    give sight of the first (`.claude/rules/vscode-tasks.md`), and the extension's
+    `dependsOn` filters the *result* rather than the list, which is the silent drop this
+    exists to avoid. So `devkit` beside a Playwright row is the ordinary case, and the
+    honest answer is a printed line naming the pair and the scope that excluded it.
+
+    `check_scope` stays the single-action path's refusal: asking for one out-of-scope
+    action is a mistake with nothing else to run, while asking for one of eight is not.
+    """
+    runs: list[tuple[str, str]] = []
+    skipped: list[str] = []
+    for project in selected:
+        for kind in kinds:
+            action = ACTIONS[TEST_KINDS[kind].action]
+            if in_scope(action, project):
+                runs.append((project, kind))
+            else:
+                skipped.append(f"{project}: {kind} is defined for {', '.join(action.projects)}")
+    return runs, skipped
 
 
 def plan_command(
@@ -680,10 +807,15 @@ def insert_picker_option(text: str, name: str) -> str:
     for picker_id in (
         "project",
         "daemonProject",
-        "worktreeProject",
         # Lists MORE than the registry -- the reference checkouts too -- so a new
         # project still has to be added to it, and this is the only place that can.
         "mergeCheckout",
+        # And this one lists LESS: every consumer that adopts a devkit release, which
+        # is the registry minus devkit itself. Inserting into it is still right --
+        # `register` never names devkit, since devkit is already registered -- and the
+        # alternative, a hand-kept list of consumers, is exactly the drift that
+        # retired `sweepScope` and `upgradeScope`.
+        "adoptProjects",
     ):
         scan = devkit_jsonc.blank_comments(updated)
         marker = scan.find(f'"id": "{picker_id}"')
@@ -810,11 +942,17 @@ def remove_picker_option(text: str, name: str) -> str:
     """Drop `name` from every maintained picker. The inverse of `insert_picker_option`.
 
     A picker that never listed it is left alone rather than failed on: `mergeCheckout`
-    lists more than the registry and an older workspace file may carry fewer pickers,
-    so "not there" is the same outcome as "removed" and neither is an error.
+    lists more than the registry, `adoptProjects` lists less, and an older workspace file
+    may carry fewer pickers, so "not there" is the same outcome as "removed" and neither
+    is an error.
     """
     updated = text
-    for picker_id in ("project", "daemonProject", "worktreeProject", "mergeCheckout"):
+    for picker_id in (
+        "project",
+        "daemonProject",
+        "mergeCheckout",
+        "adoptProjects",
+    ):
         scan = devkit_jsonc.blank_comments(updated)
         marker = scan.find(f'"id": "{picker_id}"')
         if marker < 0:
@@ -1191,7 +1329,12 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         description="Run a generic project action in a chosen checkout.",
-        epilog="Actions: " + ", ".join(sorted(ACTIONS)),
+        epilog=(
+            "Actions: "
+            + ", ".join(sorted(ACTIONS))
+            + f"\nTest kinds, for the '{TESTS_VERB}' verb: "
+            + ", ".join(TEST_KINDS)
+        ),
     )
     parser.add_argument(
         "--project",
@@ -1240,7 +1383,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="with --render-workspace: overwrite live edits devkit did not write",
     )
-    parser.add_argument("action", nargs="?", default="", choices=["", *sorted(ACTIONS)])
+    parser.add_argument("action", nargs="?", default="", choices=["", TESTS_VERB, *sorted(ACTIONS)])
     parser.add_argument("extra", nargs=argparse.REMAINDER, help="extra args for the script")
     args = parser.parse_args(argv)
 
@@ -1335,19 +1478,52 @@ def main(argv: list[str] | None = None) -> int:
 
         # Plan every selection before starting the first one. A stale picker entry or
         # missing project script must not leave a multi-project request half-executed.
-        planned: list[tuple[Path, list[str]]] = []
-        for name in selected:
-            directory = resolve_project(name, projects, root)
-            check_scope(ACTIONS[args.action], name)
-            planned.append((directory, plan_command(ACTIONS[args.action], directory, extra)))
+        directories = {name: resolve_project(name, projects, root) for name in selected}
+        planned: list[tuple[Path, Action, list[str]]] = []
+        skipped: list[str] = []
+        if args.action == TESTS_VERB:
+            # The test menu: a cross-product, so the plan carries its own action per
+            # entry rather than one for the whole run.
+            kinds = kind_selection(",".join(extra))
+            if not kinds:
+                raise ProjectError(f"no test kind given; the menu offers: {', '.join(TEST_KINDS)}")
+            runs, skipped = plan_test_runs(kinds, selected)
+            if not runs:
+                # Every pair was out of scope. Exiting 0 here would report a green test
+                # run to a toast and an empty artifact, having run nothing at all.
+                raise ProjectError(
+                    "nothing to run — every checkout/kind pair is out of scope:\n  "
+                    + "\n  ".join(skipped)
+                )
+            for name, kind in runs:
+                kind_action = ACTIONS[TEST_KINDS[kind].action]
+                planned.append(
+                    (
+                        directories[name],
+                        kind_action,
+                        plan_command(kind_action, directories[name], list(TEST_KINDS[kind].args)),
+                    )
+                )
+        else:
+            for name in selected:
+                check_scope(ACTIONS[args.action], name)
+                planned.append(
+                    (
+                        directories[name],
+                        ACTIONS[args.action],
+                        plan_command(ACTIONS[args.action], directories[name], extra),
+                    )
+                )
     except ProjectError as exc:
         print(f"devkit_project: {exc}", file=sys.stderr)
         return 2
 
-    action = ACTIONS[args.action]
-    ship_fixes = action.autofix and not args.no_ship_fixes
+    for note in skipped:
+        print(f"[skipped] {note}", flush=True)
+
     result = 0
-    for directory, command in planned:
+    for directory, action, command in planned:
+        ship_fixes = action.autofix and not args.no_ship_fixes
         print(f"[{directory.name}] {' '.join(command)}\n", flush=True)
         branch, before = autofix_state(directory) if ship_fixes else ("", ())
         returncode = subprocess.run(command, cwd=directory, check=False).returncode

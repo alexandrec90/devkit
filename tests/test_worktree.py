@@ -741,6 +741,55 @@ def test_a_closed_pr_still_never_destroys_uncommitted_work():
     assert "/ship" in note
 
 
+# --- reap: the box nobody ever opened a PR for -------------------------------
+
+
+def test_an_unclaimed_box_is_reapable_without_force():
+    """`--force` is the flag that also discards uncommitted work, so making it the only
+    exit from a state a *clean* box reaches by itself is what teaches the hammer. This
+    is the same argument the closed-PR case above won, arriving from the other side."""
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_PR,
+        "1 commit(s) pushed to origin/agent/x",
+        force=False,
+        holds_uncommitted=False,
+        awaiting_pr=True,
+        unclaimed=True,
+    )
+    assert allowed
+    assert "no PR" in note
+    assert "untouched" in note
+
+
+def test_an_unclaimed_box_holding_work_is_still_refused():
+    """The safety property at the predicate. This arm returns before `reapable` runs,
+    so the dirtiness gate has to be asked here too -- and an age nobody supervises is
+    the last place to be relying on a verdict implying cleanliness."""
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_PR,
+        "3 uncommitted file(s)",
+        force=False,
+        holds_uncommitted=True,
+        awaiting_pr=True,
+        unclaimed=True,
+    )
+    assert not allowed
+    assert "--force" in note
+
+
+def test_the_refusal_names_the_unclaimed_deadline():
+    """A refusal that reads "wait for the merge" about a branch with no PR sent people
+    to `--force`; it now names the second way the wait ends."""
+    _, note = worktree.reap_decision(
+        sweep.NEEDS_PR,
+        "1 commit(s) pushed to origin/agent/x",
+        force=False,
+        holds_uncommitted=False,
+        awaiting_pr=True,
+    )
+    assert f"{worktree.DEFAULT_UNCLAIMED_AGE_DAYS:g}d" in note
+
+
 def test_a_close_does_not_stand_in_for_a_merge_on_a_retired_branch():
     """The boundary, and the reason `reapable` never learns about closes. Plus a
     *merged* PR, `needs-rebranch` is a squash whose content is on the default branch;
@@ -2280,6 +2329,78 @@ def test_reap_asks_github_the_same_question_reconcile_does(workspace, monkeypatc
     assert [step[0] for step in plan.steps] == ["worktree", "branch"]
 
 
+def _unclaimed_box(workspace, monkeypatch, *, age_days: float, stderr: str):
+    """A pushed, clean, PR-less box `age_days` old, with `gh` answering `stderr`."""
+    root = workspace.parent
+    (root / worktree.BOXES_DIR_NAME / "demo--nopr-0819").mkdir(parents=True)
+    created = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=age_days)
+    worktree.write_leases(
+        root,
+        {
+            "demo--nopr-0819": box(
+                "demo--nopr-0819",
+                project="demo",
+                branch="agent/nopr-0819",
+                created=created.isoformat(),
+            )
+        },
+    )
+    monkeypatch.setattr(
+        worktree,
+        "inspect_box",
+        lambda *a, **k: (
+            state(upstream="origin/agent/nopr-0819", unpushed=0, ahead=1),
+            sweep.NEEDS_PR,
+            "1 commit(s) pushed to origin/agent/nopr-0819",
+        ),
+    )
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+    # `pr_for` itself is deliberately left real: what this test is about is the
+    # translation from gh's exit-1-plus-a-message into a decision.
+    monkeypatch.setattr(
+        worktree.sweep, "gh_for", lambda path: lambda *argv: _completed(1, "", stderr)
+    )
+    return worktree.plan_reap("demo--nopr-0819", workspace, fetch=True)
+
+
+def test_reap_frees_a_box_github_says_has_no_pr_once_it_is_old(workspace, monkeypatch):
+    """End to end through `plan_reap`, because the two halves it joins are what make
+    the rule safe: the `absent` flag comes from what gh *answered*, and the age from
+    the box's own lease."""
+    plan = _unclaimed_box(
+        workspace,
+        monkeypatch,
+        age_days=worktree.DEFAULT_UNCLAIMED_AGE_DAYS + 1,
+        stderr='no pull requests found for branch "agent/nopr-0819"',
+    )
+    assert plan.refusal == ""
+    assert [step[0] for step in plan.steps] == ["worktree", "branch"]
+
+
+def test_reap_still_refuses_a_recent_box_with_no_pr(workspace, monkeypatch):
+    """The user's constraint, at the tier that destroys: work from this week is not
+    touched, whatever GitHub says about it."""
+    plan = _unclaimed_box(
+        workspace,
+        monkeypatch,
+        age_days=1.0,
+        stderr='no pull requests found for branch "agent/nopr-0819"',
+    )
+    assert plan.refusal and not plan.steps
+
+
+def test_reap_still_refuses_an_old_box_when_gh_could_not_answer(workspace, monkeypatch):
+    """Same age, same verdict, same exit code -- only the message differs. A machine
+    with no network must not reap the workspace."""
+    plan = _unclaimed_box(
+        workspace,
+        monkeypatch,
+        age_days=worktree.DEFAULT_UNCLAIMED_AGE_DAYS + 1,
+        stderr="HTTP 401: Bad credentials",
+    )
+    assert plan.refusal and not plan.steps
+
+
 def test_no_fetch_learns_nothing_and_therefore_still_refuses(workspace, monkeypatch):
     """`--no-fetch` skips the lookup, so it sees neither a merge nor a close. The
     refusal it keeps is the cautious answer, which is the one it must fail to."""
@@ -2606,6 +2727,48 @@ def test_pr_for_fails_closed_when_gh_is_missing_or_errors():
     assert not worktree.pr_for(lambda *a: _completed(0, pr_json()), "").exists
 
 
+# --- pr_for: "there is no PR" is an answer, not a silence --------------------
+# `exists` is False for both "gh says this branch has no PR" and "gh could not be
+# asked", and everything that merely *waits* is right to conflate them. `absent` is
+# the affirmative half, and it exists because one rule -- reclaiming an unclaimed box
+# -- destroys on the strength of the answer, so it must never fire on the silence.
+
+
+def test_pr_for_records_an_affirmative_no_pull_requests_found():
+    found = worktree.pr_for(
+        lambda *a: _completed(1, "", 'no pull requests found for branch "agent/x-0819"'),
+        "agent/x-0819",
+    )
+    assert not found.exists
+    assert found.absent
+
+
+def test_pr_for_leaves_absent_unset_when_gh_could_not_answer():
+    """The safety property of the whole feature. An unauthenticated, rate-limited or
+    offline `gh` exits 1 exactly as the no-PR case does -- only the message differs --
+    so keying on the exit code would reap every box in the workspace on the first pass
+    run without a network."""
+
+    def exploding(*args):
+        raise OSError("gh not found")
+
+    unanswerable = (
+        exploding,
+        lambda *a: _completed(1, "", "gh: To use GitHub CLI in a GitHub Actions workflow"),
+        lambda *a: _completed(1, "", "HTTP 401: Bad credentials"),
+        lambda *a: _completed(1, "", "dial tcp: lookup api.github.com: no such host"),
+        lambda *a: _completed(1, "", "API rate limit exceeded"),
+    )
+    for runner in unanswerable:
+        found = worktree.pr_for(runner, "agent/x-0819")
+        assert not found.exists
+        assert not found.absent, runner
+
+
+def test_pr_for_leaves_absent_unset_when_a_pr_was_found():
+    assert not worktree.pr_for(lambda *a: _completed(0, pr_json()), "agent/x-0819").absent
+
+
 # --- reconcile: merging ------------------------------------------------------
 
 # The observed failure: `gh pr merge --delete-branch` run from a box merges, then tries
@@ -2846,11 +3009,85 @@ def test_a_newborn_box_that_holds_work_is_held_not_waited_on():
     assert action == worktree.HOLD
 
 
-def test_a_pushed_branch_with_no_pr_is_reported_never_destroyed():
-    """Safe on the remote, but nobody will look at it, and that is a person's call."""
+def test_a_pushed_branch_gh_could_not_be_asked_about_waits_forever():
+    """A bare `PullRequest()` is *unknown*, not *absent*: it is what an offline,
+    unauthenticated or rate-limited `gh` produces, and the age of the box says nothing
+    about a question nobody managed to ask. So this arm keeps waiting at any age."""
     action, why = decide(sweep.NEEDS_PR, "pushed")
     assert action == worktree.WAIT
     assert "no PR" in why
+
+    aged, _ = decide(sweep.NEEDS_PR, "pushed", age_days=999.0)
+    assert aged == worktree.WAIT
+
+
+# --- reconcile: the box nobody ever opened a PR for --------------------------
+# `needs-pr` plus an affirmative "no pull requests found" was a permanent WAIT -- the
+# tier telling a scheduler to keep waiting for a merge nobody was going to make. It is
+# what an interrupted `/ship` leaves behind every time, and carameli's
+# `agent/comic-book-ui-0819` sat that way for 6.8 days holding a port slot, a volume
+# set and a row in the preview menu, with `--force` as the only exit.
+
+
+def test_an_unclaimed_box_is_reclaimed_once_it_is_old_enough():
+    action, why = decide(
+        sweep.NEEDS_PR,
+        "pushed",
+        worktree.PullRequest(absent=True),
+        age_days=worktree.DEFAULT_UNCLAIMED_AGE_DAYS + 0.5,
+    )
+    assert action == worktree.REAP
+    # The line a human reads in reconcile.log has to say what survives, or the reap
+    # reads as the work being gone.
+    assert "no PR" in why
+    assert "resume" in why
+
+
+def test_an_unclaimed_box_is_left_alone_while_it_is_recent():
+    """The user-facing half of the request this came from: recent work is never
+    touched, and the wait names the deadline instead of being silent about it."""
+    action, why = decide(
+        sweep.NEEDS_PR,
+        "pushed",
+        worktree.PullRequest(absent=True),
+        age_days=worktree.DEFAULT_UNCLAIMED_AGE_DAYS - 0.5,
+    )
+    assert action == worktree.WAIT
+    assert "/ship" in why
+    assert f"{worktree.DEFAULT_UNCLAIMED_AGE_DAYS:g}d" in why
+
+
+def test_the_unclaimed_limit_is_far_longer_than_the_open_pr_one():
+    """Not a tidiness assertion -- the two waits differ in kind. An open PR has a
+    person attached to it; this state has nobody, so the only thing that could clear it
+    is somebody noticing. Shortening it towards `max_age_days` would start reclaiming
+    boxes whose session is still working in them."""
+    assert worktree.DEFAULT_UNCLAIMED_AGE_DAYS > 2 * worktree.DEFAULT_MAX_AGE_DAYS
+
+
+def test_the_unclaimed_limit_is_configurable_per_pass():
+    action, why = decide(
+        sweep.NEEDS_PR,
+        "pushed",
+        worktree.PullRequest(absent=True),
+        age_days=3.0,
+        unclaimed_age_days=2.0,
+    )
+    assert action == worktree.REAP
+    assert "limit 2d" in why
+
+
+def test_an_unclaimed_box_still_holding_work_is_held_at_any_age():
+    """`HOLD` is tested before anything that destroys, and no age changes that."""
+    action, why = decide(
+        sweep.READY,
+        "3 uncommitted file(s)",
+        worktree.PullRequest(absent=True),
+        age_days=999.0,
+        holds_uncommitted=True,
+    )
+    assert action == worktree.HOLD
+    assert "ready" in why
 
 
 def test_a_closed_pr_reaps_its_box():
@@ -2882,6 +3119,7 @@ def test_no_decision_destroys_a_box_holding_work():
     for verdict in (sweep.READY, sweep.BLOCKED, sweep.NEEDS_BRANCH, sweep.NEEDS_REBRANCH):
         for pr in (
             worktree.PullRequest(),
+            worktree.PullRequest(absent=True),
             worktree.parse_pr_view(pr_json(state="MERGED")),
             worktree.parse_pr_view(pr_json(state="CLOSED")),
         ):
@@ -4267,6 +4505,149 @@ def test_an_unreadable_config_plans_no_targets_rather_than_guessing():
     assert worktree.build_targets(None) == ()
     assert worktree.build_targets({}) == ()
     assert worktree.build_targets({"services": None}) == ()
+
+
+def test_the_images_a_box_built_for_itself_are_named_for_removal():
+    """`compose down -v` leaves images behind, so `reap` has to delete them by name.
+
+    Both built tags, deduplicated: `app` and `worker` share one, and removing it twice
+    would make the second `docker image rm` fail on an image that is already gone.
+    """
+    assert worktree.box_image_tags(_SHARED_TAG_CONFIG, "c--preview-x") == (
+        "carameli-app-c--preview-x",
+        "carameli-db-backup-c--preview-x",
+    )
+
+
+def test_a_built_tag_that_is_not_the_box_s_own_is_never_removed():
+    """The safety property, and the reason the gate is the project name rather than the
+    presence of a `build:`. A project is free to pin a fixed tag on a built service, and
+    every box on the machine then shares it -- deleting that on one reap forces a
+    rebuild in all the others, which is this leak inverted and worse."""
+    config = {
+        "services": {
+            "app": {"build": {"context": "."}, "image": "carameli-app:latest"},
+            "mine": {"build": {"context": "."}, "image": "carameli-app-c--preview-x"},
+        }
+    }
+    assert worktree.box_image_tags(config, "c--preview-x") == ("carameli-app-c--preview-x",)
+
+
+def test_a_stock_image_is_never_removed_by_a_reap():
+    """`db` came from a registry and is shared with every other stack on the machine.
+    `postgres:18` deleted on a reap is a 650 MB re-pull for the next box."""
+    assert "postgres:16" not in worktree.box_image_tags(_SHARED_TAG_CONFIG, "c--preview-x")
+
+
+def test_an_unreadable_config_removes_no_images_rather_than_guessing():
+    """Same collapse-to-`None` contract `build_targets` relies on, pointed at the
+    destructive half: a box docker cannot describe loses no images at all."""
+    assert worktree.box_image_tags(None, "c--preview-x") == ()
+    assert worktree.box_image_tags({}, "c--preview-x") == ()
+    assert worktree.box_image_tags({"services": None}, "c--preview-x") == ()
+
+
+def test_removing_no_images_asks_docker_nothing(monkeypatch):
+    """A box that built nothing must not spawn a `docker image rm` with no arguments --
+    which is a usage error, and would report a failed teardown on a clean reap."""
+    monkeypatch.setattr(
+        worktree.subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("docker was called with no images to remove"),
+    )
+    assert worktree.remove_images(()) == (True, "")
+
+
+def test_a_failed_image_removal_is_reported_but_is_not_fatal(monkeypatch):
+    """Disk, not work. The box is destroyed and its slot reclaimed either way, so the
+    message has to say what survived rather than aborting a reap that has already
+    removed the tree."""
+    monkeypatch.setattr(
+        worktree.subprocess, "run", lambda *a, **k: _completed(1, stderr="image is in use")
+    )
+    ok, message = worktree.remove_images(("carameli-app-c--x",))
+    assert not ok
+    assert "image is in use" in message
+
+
+def test_a_missing_docker_leaves_the_images_rather_than_raising(monkeypatch):
+    """`reap` runs when the daemon is down -- that is the case `compose_down` already
+    tolerates, and an unhandled `FileNotFoundError` here would abort the reap after the
+    stack teardown had already reported the same condition politely."""
+
+    def boom(*a, **k):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(worktree.subprocess, "run", boom)
+    ok, message = worktree.remove_images(("carameli-app-c--x",))
+    assert not ok
+    assert "docker is not on PATH" in message
+
+
+def test_the_reap_reads_the_image_tags_before_it_tears_the_stack_down(tmp_path, monkeypatch):
+    """The ordering is the fix. `compose config` can only be asked while the box's
+    compose file is on disk, and an image cannot be deleted while a container holds it
+    -- so the read must precede `down` and the delete must follow it. Getting this
+    backwards leaves the images behind exactly as before, silently.
+    """
+    workspace = tmp_path / "ws.jsonc"
+    workspace.write_text("{}", encoding="utf-8")
+    (tmp_path / "demo").mkdir()
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        worktree,
+        "compose_config",
+        lambda path, name, **k: (
+            calls.append("config")
+            or {"services": {"app": {"build": {}, "image": f"demo-app-{name}"}}}
+        ),
+    )
+    monkeypatch.setattr(
+        worktree, "compose_down", lambda *a: (calls.append("down"), (True, "torn down"))[1]
+    )
+    monkeypatch.setattr(
+        worktree,
+        "remove_images",
+        lambda tags: (calls.append(f"rm:{','.join(tags)}"), (True, "removed 1"))[1],
+    )
+    monkeypatch.setattr(worktree, "run_steps", lambda *a: ([], "", ""))
+    monkeypatch.setattr(worktree, "record_reap", lambda *a: None)
+
+    ok, notes = worktree.apply_reap(
+        reaped_plan(box="demo--x-0806", project="demo", stack_down=True), workspace
+    )
+    assert ok
+    assert calls == ["config", "down", "rm:demo-app-demo--x-0806"]
+    assert any("removed 1" in note for note in notes)
+
+
+def test_a_failed_teardown_removes_no_images(tmp_path, monkeypatch):
+    """An image whose container is still up cannot be deleted, and trying adds a second
+    confusing failure to a reap that has already said the stack needs a look."""
+    workspace = tmp_path / "ws.jsonc"
+    workspace.write_text("{}", encoding="utf-8")
+    (tmp_path / "demo").mkdir()
+
+    monkeypatch.setattr(
+        worktree,
+        "compose_config",
+        lambda path, name, **k: {"services": {"app": {"build": {}, "image": f"a-{name}"}}},
+    )
+    monkeypatch.setattr(worktree, "compose_down", lambda *a: (False, "docker is not on PATH"))
+    monkeypatch.setattr(
+        worktree,
+        "remove_images",
+        lambda tags: pytest.fail("images were removed after a failed teardown"),
+    )
+    monkeypatch.setattr(worktree, "run_steps", lambda *a: ([], "", ""))
+    monkeypatch.setattr(worktree, "record_reap", lambda *a: None)
+
+    ok, _ = worktree.apply_reap(
+        reaped_plan(box="demo--x-0806", project="demo", stack_down=True), workspace
+    )
+    # The box still went: a daemon that happened to be down must never pin a checkout.
+    assert not ok
 
 
 def test_compose_config_reads_the_resolved_stack_and_swallows_every_failure(monkeypatch):

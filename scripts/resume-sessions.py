@@ -329,8 +329,9 @@ def wt_args(sessions: list[Session], agent: str | None = None) -> list[str]:
     """The wt.exe argument list: one tab per session, each resuming it in its own cwd.
 
     `-w -1` forces a new window rather than tabs bolted onto whichever one has focus.
-    The `;` separators are their own tokens because wt parses its command line itself —
-    the same reason `launch-agent-tabs.ps1` builds an array rather than a string.
+    The `;` separators are their own tokens because wt parses its command line itself:
+    joined into one string they are swallowed by the outer shell, and every tab after
+    the first is lost.
     """
     args = ["-w", "-1"]
     for index, session in enumerate(sessions):

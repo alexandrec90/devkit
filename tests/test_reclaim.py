@@ -133,6 +133,234 @@ def test_sweep_with_yes_deletes(tmp_path):
     assert not victim.exists()
 
 
+def test_sweep_honours_a_targets_own_age_gate(tmp_path):
+    """`SweepTarget.min_age_days` was declared and never read, so a caller that set it got
+    a full delete and no way to notice. Nothing sets it yet -- which is exactly when the
+    field is worth pinning, because the first caller to set it will trust it."""
+    import os
+
+    tree = tmp_path / "gated"
+    tree.mkdir()
+    old, new = tree / "old.bin", tree / "new.bin"
+    old.write_bytes(b"x" * 400)
+    new.write_bytes(b"y" * 100)
+    os.utime(old, (0, 0))
+    target = reclaim.SweepTarget("gated", tree, "why", min_age_days=1.0)
+    freed = reclaim.sweep([target], tmp_path, 3.0, apply=True)
+    assert not old.exists()
+    assert new.exists(), "a file inside the age gate must survive"
+    assert freed == 400, "and must not be counted as freed"
+
+
+def test_an_age_gate_of_zero_means_no_gate_at_all(tmp_path):
+    """Regression: spelled as `mtime < now` it is a race against Windows's file-timestamp
+    granularity, and a file written milliseconds earlier survived a delete-everything
+    target. It failed `test_sweep_with_yes_deletes` -- the existing test -- which is the
+    only reason anyone saw it."""
+    tree = tmp_path / "DiagOutputDir"
+    tree.mkdir()
+    victim = tree / "written-just-now.etl"
+    victim.write_bytes(b"z" * 64)
+    reclaim.sweep(reclaim.sweep_targets(tmp_path, "u"), tmp_path, 3.0, apply=True)
+    assert not victim.exists()
+
+
+def test_an_applied_sweep_counts_what_went_not_what_was_there(tmp_path):
+    """The figure under `--yes` is re-measured. Reporting the optimistic size would put GB
+    in the total that are still on the volume, under the same banner as a `free disk`
+    delta that disagrees with it."""
+    diag = tmp_path / "DiagOutputDir"
+    diag.mkdir()
+    (diag / "a.etl").write_bytes(b"z" * 1024)
+    freed = reclaim.sweep(reclaim.sweep_targets(tmp_path, "u"), tmp_path, 3.0, apply=True)
+    assert freed == 1024
+    assert reclaim.dir_size(diag) == 0
+
+
+# --- superseded versions: the half no reboot returns ---------------------------
+
+
+def _aged(path: Path, days: float) -> Path:
+    import os
+
+    stamp = 1_000_000_000.0
+    os.utime(path, (stamp - days * 86400, stamp - days * 86400))
+    return path
+
+
+NOW = 1_000_000_000.0
+
+
+def test_cache_targets_sit_under_the_profile_and_say_why(tmp_path):
+    targets = reclaim.cache_targets(tmp_path)
+    assert targets
+    for target in targets:
+        assert tmp_path in target.path.parents
+        assert target.why
+
+
+def test_all_but_live_keeps_only_what_the_pointer_names(tmp_path):
+    for name in ("v1", "v2", "live"):
+        (tmp_path / name).mkdir()
+    dead = reclaim.all_but_live(tmp_path, tmp_path / "live")
+    assert sorted(p.name for p in dead) == ["v1", "v2"]
+
+
+def test_a_pointer_that_cannot_be_resolved_deletes_nothing(tmp_path):
+    """Fails closed. An unresolvable `current` means the install is mid-update or broken,
+    which is the worst possible moment to delete every sibling it has."""
+    (tmp_path / "v1").mkdir()
+    assert reclaim.all_but_live(tmp_path, tmp_path / "current") == []
+
+
+def test_a_pointer_outside_the_root_deletes_nothing(tmp_path):
+    """A keeper that is not one of the candidates means the layout is not what this rule
+    was written for, and `[p for p in candidates if p != keeper]` would be all of them."""
+    (tmp_path / "releases").mkdir()
+    (tmp_path / "releases" / "v1").mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    assert reclaim.all_but_live(tmp_path / "releases", tmp_path / "elsewhere") == []
+
+
+def test_all_but_newest_keeps_the_newest_and_gates_on_age(tmp_path):
+    fresh = _aged(_mkdir(tmp_path / "2.1.247"), days=0.5)
+    recent = _aged(_mkdir(tmp_path / "2.1.246"), days=1.0)
+    old = _aged(_mkdir(tmp_path / "2.1.237"), days=30.0)
+    dead = reclaim.all_but_newest(tmp_path, keep=1, min_age_days=3.0, now=NOW)
+    assert dead == [old]
+    assert fresh.exists() and recent.exists()
+
+
+def test_all_but_newest_can_keep_more_than_one(tmp_path):
+    for days in (1.0, 10.0, 20.0, 30.0):
+        _aged(_mkdir(tmp_path / f"v{days:g}"), days=days)
+    dead = reclaim.all_but_newest(tmp_path, keep=2, min_age_days=3.0, now=NOW)
+    assert sorted(p.name for p in dead) == ["v20", "v30"]
+
+
+def test_superseded_revisions_keeps_the_newest_of_each_product(tmp_path):
+    """Grouping is the whole rule. The newest *directory* under ms-playwright was a
+    firefox build, so a plain keep-newest would have deleted the chromium every checkout
+    runs."""
+    for name in ("chromium-1208", "chromium-1223", "chromium-1228"):
+        _aged(_mkdir(tmp_path / name), days=30.0)
+    for name in ("firefox-1509", "chromium_headless_shell-1228"):
+        _aged(_mkdir(tmp_path / name), days=30.0)
+    dead = sorted(p.name for p in reclaim.superseded_revisions(tmp_path, 3.0, NOW))
+    assert dead == ["chromium-1208", "chromium-1223"]
+
+
+def test_a_directory_whose_name_does_not_parse_is_left_alone(tmp_path):
+    """`.links` is playwright's own registry. Anything unparsed is a guess, and this rule
+    does not guess."""
+    _aged(_mkdir(tmp_path / ".links"), days=90.0)
+    _aged(_mkdir(tmp_path / "hand-made"), days=90.0)
+    _aged(_mkdir(tmp_path / "chromium-1"), days=90.0)
+    _aged(_mkdir(tmp_path / "chromium-2"), days=90.0)
+    dead = [p.name for p in reclaim.superseded_revisions(tmp_path, 3.0, NOW)]
+    assert dead == ["chromium-1"]
+
+
+def test_orphaned_installs_are_the_dot_prefixed_ones_only(tmp_path):
+    _aged(_mkdir(tmp_path / ".7ad0a680-ecfc-4e47-af2f-9e73ecba9493"), days=90.0)
+    installed = _aged(_mkdir(tmp_path / "ms-python.python-2026.1.0"), days=90.0)
+    dead = reclaim.orphaned_installs(tmp_path, 3.0, NOW)
+    assert [p.name for p in dead] == [".7ad0a680-ecfc-4e47-af2f-9e73ecba9493"]
+    assert installed.exists()
+
+
+def test_a_fresh_orphan_is_left_for_the_install_that_may_still_own_it(tmp_path):
+    _aged(_mkdir(tmp_path / ".in-flight"), days=0.1)
+    assert reclaim.orphaned_installs(tmp_path, 3.0, NOW) == []
+
+
+def test_superseded_trees_needs_no_filesystem_and_still_explains_itself(tmp_path):
+    """Pure: an empty profile yields every group, each empty, each with its reason. That
+    is what lets the set be asserted at all -- the rules underneath it are what touch
+    disk."""
+    groups = reclaim.superseded_trees(tmp_path, min_age_days=3.0, now=NOW)
+    assert len(groups) == 5
+    for group in groups:
+        assert group.paths == ()
+        assert group.why, f"{group.label} must say why the older copies are dead"
+
+
+def test_purge_trees_without_yes_removes_nothing_but_still_reports(tmp_path):
+    victim = _mkdir(tmp_path / "v1")
+    (victim / "big.bin").write_bytes(b"x" * 2048)
+    assert reclaim.purge_trees((victim,), apply=False) == 2048
+    assert victim.exists()
+
+
+def test_purge_trees_with_yes_removes_the_whole_directory(tmp_path):
+    victim = _mkdir(tmp_path / "v1")
+    (victim / "nested").mkdir()
+    (victim / "nested" / "big.bin").write_bytes(b"x" * 2048)
+    assert reclaim.purge_trees((victim,), apply=True) == 2048
+    assert not victim.exists()
+
+
+def test_purge_trees_counts_only_what_actually_went(tmp_path, monkeypatch):
+    """A locked file inside a superseded build must neither abort the groups after it nor
+    be counted as freed. `rmtree(ignore_errors=True)` covers the first; the re-measure is
+    the only thing covering the second."""
+    victim = _mkdir(tmp_path / "v1")
+    (victim / "stuck.bin").write_bytes(b"x" * 4096)
+    monkeypatch.setattr(reclaim.shutil, "rmtree", lambda *a, **kw: None)
+    assert reclaim.purge_trees((victim,), apply=True) == 0
+
+
+def test_sweep_versions_says_so_when_nothing_is_superseded(tmp_path, capsys):
+    group = reclaim.Disposable("codex releases", (), "why")
+    assert reclaim.sweep_versions([group], apply=False) == 0
+    assert "nothing superseded" in capsys.readouterr().out
+
+
+def test_sweep_versions_names_the_group_and_its_reason(tmp_path, capsys):
+    victim = _mkdir(tmp_path / "v1")
+    (victim / "a.bin").write_bytes(b"x" * 512)
+    group = reclaim.Disposable("codex releases", (victim,), "current names the live one")
+    reclaim.sweep_versions([group], apply=False)
+    out = capsys.readouterr().out
+    assert "codex releases" in out
+    assert "current names the live one" in out
+    assert "1 dir(s)" in out
+
+
+# --- what it cannot reclaim ----------------------------------------------------
+
+
+def test_protected_staging_reports_what_is_there_largest_first(tmp_path):
+    big = _mkdir(tmp_path / "$GetCurrent")
+    (big / "media.esd").write_bytes(b"x" * 4096)
+    small = _mkdir(tmp_path / "Windows.old")
+    (small / "leftover.bin").write_bytes(b"y" * 16)
+    found = reclaim.protected_staging(tmp_path)
+    assert [p.name for p, _ in found] == ["$GetCurrent", "Windows.old"]
+    assert found[0][1] == 4096
+
+
+def test_a_drive_with_no_staging_reports_nothing(tmp_path):
+    assert reclaim.protected_staging(tmp_path) == []
+    assert reclaim.staging_verdict(tmp_path) == []
+
+
+def test_the_staging_verdict_names_the_one_remedy_that_works(tmp_path):
+    """5.67 GB, larger than everything the rest of the run could free put together, and
+    the only section whose whole value is admitting the script cannot do it."""
+    staged = _mkdir(tmp_path / "$GetCurrent")
+    (staged / "media.esd").write_bytes(b"x" * 2048)
+    body = "\n".join(reclaim.staging_verdict(tmp_path))
+    assert "$GetCurrent" in body
+    assert "cleanmgr" in body
+    assert "not this script's to delete" in body
+
+
+def _mkdir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 # --- containers ----------------------------------------------------------------
 
 
@@ -236,8 +464,15 @@ def test_an_unreadable_memory_status_reports_that(monkeypatch):
 
 
 def _isolate(monkeypatch, tmp_path, free_gb):
-    """Point `main` at a scratch %TEMP% and stub everything that touches the machine."""
+    """Point `main` at a scratch %TEMP% and stub everything that touches the machine.
+
+    `home` is in that list and the reason is sharper than isolation: without it a
+    `main(["--yes"])` test deletes the developer's own superseded playwright browsers and
+    VS Code caches while the suite runs, and passes.
+    """
     monkeypatch.setattr(reclaim, "tempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(reclaim, "home", lambda: tmp_path)
+    monkeypatch.setattr(reclaim, "staging_verdict", lambda *a, **kw: [])
     monkeypatch.setattr(reclaim, "username", lambda: "u")
     monkeypatch.setattr(reclaim, "running_container_names", lambda: [])
     monkeypatch.setattr(reclaim, "top_memory_holders", lambda *a, **kw: [])
@@ -274,6 +509,40 @@ def test_keep_stacks_says_what_it_is_giving_up(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(reclaim, "running_container_names", lambda: pytest_fail())
     reclaim.main(["--keep-stacks"])
     assert "bind-mount spin stays" in capsys.readouterr().out
+
+
+def test_a_run_reports_the_superseded_versions_section(monkeypatch, tmp_path, capsys):
+    """The 2026-08-27 gap, end to end: the machine was 21 GB from full with every %TEMP%
+    tree already clear, and a run that only reported those found nothing to say."""
+    _isolate(monkeypatch, tmp_path, free_gb=21.0)
+    releases = tmp_path / ".codex" / "packages" / "standalone" / "releases"
+    _mkdir(releases / "0.149.0")
+    (releases / "0.149.0" / "codex.exe").write_bytes(b"x" * 4096)
+    _mkdir(releases / "0.150.1")
+    (tmp_path / ".codex" / "packages" / "standalone" / "current").mkdir()
+    monkeypatch.setattr(
+        reclaim,
+        "superseded_trees",
+        lambda *a, **kw: [
+            reclaim.Disposable("superseded codex releases", (releases / "0.149.0",), "why")
+        ],
+    )
+    assert reclaim.main([]) == 0
+    out = capsys.readouterr().out
+    assert "superseded tool versions" in out
+    assert "no reboot returns" in out
+    assert "superseded codex releases" in out
+    assert (releases / "0.149.0").exists(), "dry run must not delete a version directory"
+
+
+def test_the_run_reaches_the_profile_only_through_the_home_seam(monkeypatch, tmp_path, capsys):
+    """Reversion check for the stub above: with `home` un-stubbed this run would sweep the
+    developer's own profile. Assert `main` asks for it rather than calling `Path.home`."""
+    _isolate(monkeypatch, tmp_path, free_gb=24.0)
+    asked = []
+    monkeypatch.setattr(reclaim, "home", lambda: asked.append(1) or tmp_path)
+    reclaim.main([])
+    assert asked, "main must resolve the profile through home()"
 
 
 def test_a_full_disk_skips_reconcile_rather_than_reaping_open_prs(monkeypatch, tmp_path, capsys):

@@ -24,7 +24,6 @@ scripts/git-merge-default.py::refused_over_local_changes
 scripts/git-merge-default.py::restore
 scripts/git-merge-default.py::runner_for
 scripts/git-merge-default.py::said
-scripts/git-sync-keep.py::git
 scripts/git_policy.py::Decision
 scripts/git_policy.py::MergedPR
 scripts/git_policy.py::PushUpdate
@@ -53,14 +52,6 @@ scripts/hooks/enforce-capped-bash.py::statements
 scripts/hooks/enforce-capped-bash.py::strip_prefixes
 scripts/hooks/enforce-capped-bash.py::strip_quoted
 scripts/hooks/session-sync.py::run_git
-scripts/import-claude-sessions.py::AppServerClient
-scripts/import-claude-sessions.py::Session
-scripts/import-claude-sessions.py::describe
-scripts/import-claude-sessions.py::find_codex
-scripts/import-claude-sessions.py::find_terminal
-scripts/import-claude-sessions.py::is_limit_record
-scripts/import-claude-sessions.py::partition
-scripts/import-claude-sessions.py::tab_title
 scripts/install-docker-prune.py::query_argv
 scripts/install-docker-prune.py::uninstall_argv
 scripts/install-docker-stop-idle.py::query_argv
@@ -107,7 +98,6 @@ scripts/preview-task.py::project_note
 scripts/preview-task.py::read_choice
 scripts/preview-task.py::stack_projects
 scripts/preview-task.py::write_menu
-scripts/reclaim.py::SweepTarget
 scripts/reclaim.py::banner
 scripts/reclaim.py::devkit_dir
 scripts/reclaim.py::run_reconcile
@@ -124,7 +114,6 @@ scripts/release-pipeline.py::open_release_pr
 scripts/release-pipeline.py::parse_version
 scripts/release-pipeline.py::pr_rollup
 scripts/release-pipeline.py::prepare
-scripts/release-pipeline.py::run_pipeline
 scripts/release-pipeline.py::wait_for_checks
 scripts/release.py::existing_tags
 scripts/release.py::main_fallback

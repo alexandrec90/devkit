@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Run the paid live-CLI hook smokes and write failures to a parseable artifact.
 
-The backend for the workspace's "Test: Harness Hook Tests — paid, live CLI" task, and
-the deliberate counterpart to `scripts/hook-tests.py`. The free script runs the vendored
+The backend for the two rows marked PAID on "Test: Run Suite"'s menu -- one per CLI,
+where the argument this takes used to be a picker on a task of its own -- and the
+deliberate counterpart to `scripts/hook-tests.py`. The free script runs the vendored
 tier's pure-function tests in any checkout; this one launches a **real, authenticated
 agent CLI** against a throwaway project and proves the hooks change what the agent
 actually does. Only devkit has those tests -- they live in `tests/`, which is never
