@@ -125,6 +125,12 @@ memories "reflect what was true when written."
   pointer to a deleted memory costs tokens forever and resolves to nothing.
 - **Orphaned slugs** — a directory no live checkout's path produces — are pure waste:
   nothing can ever recall them. `--orphans` finds them; delete the whole directory.
+  **Verify every one before you do.** This is the only finding whose remedy is
+  deletion, and it rests on a heuristic about paths, so a bug in it destroys live
+  memories rather than stale ones — which is exactly what happened on 2026-08-27, when
+  all three it reported were false positives covering 50 recallable memories, one with
+  a session transcript from that morning. The `*.jsonl` mtimes in the directory settle
+  it: a slug nothing produces has no recent transcripts either.
 
 ## Workflow
 
@@ -147,7 +153,9 @@ memories "reflect what was true when written."
    points at its reference; a root `CLAUDE.md` points at a scoped rule. Never restate:
    a second copy is not drift-checked and the two disagree on the first edit.
 
-4. **Run the memory pass** against the report's stale list.
+4. **Run the memory pass.** The report's stale list covers only _this_ root's own slug;
+   the orphan scan is what reaches the rest, and its findings are deletions — verify
+   each against the directory's transcripts before acting on one.
 
 5. **Re-measure and record the delta.** `hot: N tok/session` before and after belongs in
    the commit message — it is the only evidence the pass did anything.
