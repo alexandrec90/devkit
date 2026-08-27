@@ -2296,6 +2296,40 @@ def test_switch_targets_reads_the_moves_a_command_makes(command, expected):
 
 
 @pytest.mark.parametrize(
+    "command, expected",
+    [
+        # the report: a rescue branch cut inside a UI-preview copy, judged against the
+        # session's cwd and refused as parking the carameli checkout
+        (
+            'cd "/ws/.ui-previews/carameli/master" && git switch -c agent/rescue-0827',
+            [("/ws/.ui-previews/carameli/master", "agent/rescue-0827")],
+        ),
+        # `-C` still decides, and an absolute one ignores the move entirely
+        ("cd /ws/a && git -C /ws/b checkout agent/x-0827", [("/ws/b", "agent/x-0827")]),
+        # a relative `-C` hangs off the move, exactly as the shell tier rebases a path
+        ("cd /ws/a && git -C sub checkout agent/x-0827", [("/ws/a/sub", "agent/x-0827")]),
+        # two moves in one line: the second `cd` is the one the second git call sees
+        (
+            "cd /ws/a && git switch agent/x-0827 && cd /ws/b && git switch agent/y-0827",
+            [("/ws/a", "agent/x-0827"), ("/ws/b", "agent/y-0827")],
+        ),
+        # a move this tier cannot follow leaves the base alone rather than clearing it
+        ("cd /ws/a && cd - && git switch agent/x-0827", [("/ws/a", "agent/x-0827")]),
+        ("cd $HOME && git switch agent/x-0827", [("", "agent/x-0827")]),
+    ],
+)
+def test_a_switch_is_judged_where_the_cd_before_it_landed(command, expected):
+    """The reversion check for the `cd` half, and it is a *false positive* that motivated
+    it: `switch_targets` read git's `-C` and nothing else, so
+    `cd <workspace>/.ui-previews/carameli/master && git switch -c agent/...` was judged
+    against the session's own cwd and refused as parking the carameli checkout. The
+    preview copy is a detached `git worktree add` that `--clean` deletes, so the block
+    landed on the one move that rescues work out of it. `shell_write_targets` had tracked
+    `cd` since it was written; this tier simply never did."""
+    assert guard.switch_targets(command) == expected
+
+
+@pytest.mark.parametrize(
     "command",
     [
         # restores: HEAD does not move, and these are ordinary and frequent
@@ -2509,6 +2543,47 @@ def test_creating_a_task_branch_in_a_checkout_is_the_same_park(root, monkeypatch
     )
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
     assert "agent/new-0823" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "payload, blocked",
+    [
+        ({"tool_name": "Write", "tool_input": {"file_path": "a.py", "content": "x"}}, False),
+        ({"tool_name": "Edit", "tool_input": {"file_path": "a.py", "old_string": "here"}}, False),
+        # the precondition the box cannot meet: it holds origin/<default>'s copy
+        ({"tool_name": "Edit", "tool_input": {"file_path": "a.py", "old_string": "gone"}}, True),
+        # a tool whose arguments this hook does not know how to rewrite
+        ({"tool_name": "Bash", "tool_input": {"command": "x"}}, True),
+        # rewritable, but naming no path to put the box's copy under
+        ({"tool_name": "Write", "tool_input": {"content": "x"}}, True),
+    ],
+)
+def test_redirect_blocker_re_aims_only_what_the_box_can_satisfy(tmp_path, payload, blocked):
+    """The predicate that decides block-vs-re-aim, and it has to fail closed: a needless
+    block costs a turn and names the box, while a rewrite the runtime does not honour
+    lands the edit on the home branch and reports success. So an `old_string` the box's
+    copy does not contain is refused rather than re-aimed into
+    `String to replace not found` at a path the agent never named."""
+    destination = tmp_path / "a.py"
+    destination.write_text("here it is\n", encoding="utf-8")
+    assert bool(guard.redirect_blocker(payload, destination, env={})) is blocked
+
+
+def test_redirect_blocker_refuses_every_call_under_the_hook_adapter(tmp_path):
+    """Codex's schema carries `updatedInput`, but no live session on that runtime has been
+    watched honouring it -- and a schema is not a behaviour. Same asymmetry: block."""
+    destination = tmp_path / "a.py"
+    destination.write_text("here\n", encoding="utf-8")
+    payload = {"tool_name": "Write", "tool_input": {"file_path": "a.py", "content": "x"}}
+    assert guard.redirect_blocker(payload, destination, env={}) == ""
+    assert guard.redirect_blocker(payload, destination, env={guard.ADAPTER_ENV: "1"})
+
+
+def test_redirect_blocker_refuses_when_the_boxs_copy_cannot_be_read(tmp_path):
+    """Unreadable is not "no precondition": it is an unanswered question, and the fail-closed
+    rule makes an unanswered question a block."""
+    payload = {"tool_name": "Edit", "tool_input": {"file_path": "a.py", "old_string": "here"}}
+    assert guard.redirect_blocker(payload, tmp_path / "missing.py", env={})
 
 
 def test_a_park_is_recorded_on_the_ledger_with_its_own_event(

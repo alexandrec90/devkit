@@ -79,7 +79,7 @@ import string
 import subprocess
 import sys
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -87,6 +87,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import devkit_ports
 import devkit_project
+import git_policy
 
 # Resolved by the sys.path insert above; `scripts/hooks/` is not a package. Read for
 # `[python] install_command`, `[python] version` and `[frontend]` — the same per-project
@@ -1230,6 +1231,45 @@ def plan_env_templates(source: Path) -> dict[str, str]:
     return {}
 
 
+# How many names `_unretired_branch` will try before it stops asking. Each attempt is a
+# `gh` round trip, and the realistic collision depth is one: past that, something is wrong
+# with the answer rather than with the name, and a box that spawns beats a box that hangs.
+MAX_RETIRED_ATTEMPTS = 4
+
+
+def _unretired_branch(
+    slug: str,
+    taken: set[str],
+    today: _dt.date | None,
+    prefix: str,
+    retired: Callable[[str], bool] | None,
+) -> str:
+    """`tb.branch_name`, re-rolled while `retired` claims the name is permanently spent.
+
+    The re-roll goes through `taken` rather than through a counter of its own, so a
+    retired name is disambiguated by the same `-N` suffix a live one gets and the two
+    cases cannot drift apart.
+
+    Fails **open**: `retired` is asked inside `contextlib.suppress`, and the last
+    candidate stands once the attempts run out. A lookup that raises, or a remote that
+    answers slowly enough to be wrong, must not be able to stop a box being cut -- the
+    branch policy still refuses a genuinely retired name at commit time, which is the
+    same place it is refused today.
+    """
+    branch = tb.branch_name(slug, taken, today, prefix=prefix)
+    if retired is None:
+        return branch
+    for _attempt in range(MAX_RETIRED_ATTEMPTS):
+        spent = False
+        with contextlib.suppress(Exception):
+            spent = retired(branch)
+        if not spent:
+            return branch
+        taken.add(branch)
+        branch = tb.branch_name(slug, taken, today, prefix=prefix)
+    return branch
+
+
 def spawn_plan(
     project: str,
     workspace_root: Path,
@@ -1244,6 +1284,7 @@ def spawn_plan(
     provision: tuple[ProvisionStep, ...] = (),
     env_templates: Mapping[str, str] | None = None,
     branch_prefix: str = tb.BRANCH_PREFIX,
+    retired: Callable[[str], bool] | None = None,
 ) -> SpawnPlan:
     """Everything `new` will run, decided without touching git.
 
@@ -1263,8 +1304,21 @@ def spawn_plan(
     (`tb.AUTOMATION_PREFIX`). It reaches nothing but the branch name: `box_name` strips
     whichever managed prefix it finds, so the box, its `COMPOSE_PROJECT_NAME` and its
     lease are spelled identically whichever namespace cut it.
+
+    `retired` answers "has a PR from this name already merged?", and a name it claims is
+    disambiguated exactly as a live collision is. `existing_branches` cannot cover that
+    case on its own: a merged branch is *deleted*, locally and on the remote, so nothing
+    on disk remembers it while the branch policy refuses it forever. Two sessions naming
+    a task after the same file on the same day produce the same slug, which is not
+    hypothetical -- it happened twice in three days (`agent/scripts-preview-task-0824`
+    after devkit#211, `agent/resume-0826` after devkit#226). The cost lands as late as it
+    possibly can: the box provisions, the edits apply, the suite passes, and the *first
+    commit* is refused, with no `rebranch` verb to recover and a dirty box that will not
+    reap. None means no lookup -- the default, and what an offline or dry-run plan gets.
     """
-    branch = tb.branch_name(tb.slugify(slug), existing_branches, today, prefix=branch_prefix)
+    branch = _unretired_branch(
+        tb.slugify(slug), set(existing_branches), today, branch_prefix, retired
+    )
     name = box_name(project, branch)
     path = box_path(workspace_root, name)
     slot, slotless = lease_slot(registry, boxes)
@@ -3246,6 +3300,33 @@ def compose_down(path: Path, project_name: str) -> tuple[bool, str]:
 # --- modes ------------------------------------------------------------------
 
 
+def retired_branch_probe(source: Path) -> Callable[[str], bool] | None:
+    """ "Has a PR from this branch already merged?", asked of `source`'s own remote.
+
+    The same question `git_policy` asks in the pre-commit hook, and deliberately the same
+    code: a second implementation would be a second answer, and the whole point is that
+    `spawn_plan` refuses a name for exactly the reason the commit later would.
+
+    None when the remote is not a GitHub repo -- there is no ledger to consult, so a name
+    can only be judged by `existing_branches`, which is today's behaviour and correct
+    there.
+    """
+
+    def runner(argv, **kwargs):
+        kwargs.setdefault("cwd", source)
+        return git_policy.run_command(argv, **kwargs)
+
+    remote = runner(["git", "remote", "get-url", git_policy.DEFAULT_REMOTE])
+    repo = git_policy.github_repo(remote.stdout if remote.returncode == 0 else "")
+    if not repo:
+        return None
+    # An *error* is not a merge. `merged_pr` already falls back from GraphQL to REST
+    # before reporting one, and the branch policy asks again at commit time, so treating
+    # an outage as "name is free" costs at worst the collision this exists to prevent --
+    # while treating it as "name is taken" would rename every box during one.
+    return lambda branch: bool(git_policy.merged_pr(runner, repo, branch).url)
+
+
 def plan_new(
     project: str,
     workspace: Path,
@@ -3272,6 +3353,7 @@ def plan_new(
     boxes = live_boxes(root)
     registry = load_registry(root) if has_stack(source) else None
     return spawn_plan(
+        retired=retired_branch_probe(source) if fetch else None,
         project=project,
         workspace_root=root,
         slug=slug,

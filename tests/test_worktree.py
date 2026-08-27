@@ -535,6 +535,99 @@ def spawn(**kwargs) -> worktree.SpawnPlan:
     return worktree.spawn_plan(**{**defaults, **kwargs})
 
 
+def test_a_name_whose_pr_already_merged_is_disambiguated_like_a_live_collision():
+    """The reversion check for the retired-name tier, and the failure it replaces is the
+    latest-landing one in the whole box lifecycle: the box provisions, the edits apply,
+    the suite passes, and the *first commit* is refused --
+    `branch 'agent/resume-0826' is permanently retired because its PR merged` -- with no
+    `rebranch` verb to recover and a dirty box that will not reap. `existing_branches`
+    cannot see it, because a merged branch is deleted both locally and on the remote.
+    Twice in three days on this machine, from slugs two sessions derived independently."""
+    plan = spawn(slug="resume", retired={"agent/resume-0806"}.__contains__)
+    assert plan.box.branch == "agent/resume-0806-2"
+    assert plan.box.name == "carameli--resume-0806-2"
+
+
+def test_a_retired_name_and_a_live_one_share_the_same_suffix_counter():
+    """One counter, so the two cases cannot drift into disagreeing about the next name."""
+    plan = spawn(
+        slug="resume",
+        existing_branches={"agent/resume-0806"},
+        retired={"agent/resume-0806-2"}.__contains__,
+    )
+    assert plan.box.branch == "agent/resume-0806-3"
+
+
+def test_no_retired_lookup_leaves_the_name_exactly_as_it_was():
+    """`None` is the offline and dry-run path, and it must be today's behaviour."""
+    assert spawn(slug="resume", retired=None).box.branch == "agent/resume-0806"
+
+
+def test_a_retired_lookup_that_raises_cannot_stop_a_box_being_cut():
+    """Fails open on purpose. The branch policy still refuses a genuinely retired name at
+    commit time, which is where it is refused today, so an outage in the lookup costs at
+    worst the collision this prevents -- while failing closed would rename every box
+    during one, or hang the spawn behind a lookup that never answers."""
+
+    def explode(_branch: str) -> bool:
+        raise RuntimeError("gh: 503")
+
+    assert spawn(slug="resume", retired=explode).box.branch == "agent/resume-0806"
+
+
+def test_a_lookup_that_claims_every_name_gives_up_rather_than_asking_forever():
+    """Each attempt is a `gh` round trip and the realistic collision depth is one: past
+    the cap, something is wrong with the answer rather than with the name, and a box that
+    spawns beats a box that hangs."""
+    plan = spawn(slug="resume", retired=lambda _branch: True)
+    assert plan.box.branch == f"agent/resume-0806-{worktree.MAX_RETIRED_ATTEMPTS + 1}"
+
+
+def test_retired_branch_probe_asks_only_where_there_is_a_github_ledger_to_ask(
+    tmp_path, monkeypatch
+):
+    """No GitHub remote means no merged-PR ledger, so there is nothing to consult and the
+    name can only be judged by `existing_branches` -- which is correct there, not a gap."""
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "git@ssh.dev.azure.com:v3/x/y/z\n", "")
+
+    monkeypatch.setattr(worktree.git_policy, "run_command", fake_run)
+    assert worktree.retired_branch_probe(tmp_path) is None
+    assert calls and calls[0][:3] == ["git", "remote", "get-url"]
+
+
+def test_retired_branch_probe_reports_a_merged_pr_and_only_a_merged_pr(tmp_path, monkeypatch):
+    """An *error* is not a merge: `merged_pr` already falls back from GraphQL to REST
+    before it reports one, and treating an outage as "taken" would rename every box."""
+    monkeypatch.setattr(
+        worktree.git_policy,
+        "run_command",
+        lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 0, "https://github.com/acme/widget.git\n", ""
+        ),
+    )
+    asked = []
+
+    def fake_merged(runner, repo, branch):
+        asked.append((repo, branch))
+        return worktree.git_policy.MergedPR(url="https://github.com/acme/widget/pull/7")
+
+    monkeypatch.setattr(worktree.git_policy, "merged_pr", fake_merged)
+    probe = worktree.retired_branch_probe(tmp_path)
+    assert probe("agent/resume-0826") is True
+    assert asked == [("acme/widget", "agent/resume-0826")]
+
+    monkeypatch.setattr(
+        worktree.git_policy,
+        "merged_pr",
+        lambda runner, repo, branch: worktree.git_policy.MergedPR(error="gh: 503"),
+    )
+    assert worktree.retired_branch_probe(tmp_path)("agent/resume-0826") is False
+
+
 def test_spawn_cuts_from_origin_not_from_the_source_checkouts_head():
     """The one place this differs from `sweep.branch_plan`, and the reason is the tier.
 

@@ -25,7 +25,6 @@ scripts/git-merge-default.py::restore
 scripts/git-merge-default.py::runner_for
 scripts/git-merge-default.py::said
 scripts/git_policy.py::Decision
-scripts/git_policy.py::MergedPR
 scripts/git_policy.py::PushUpdate
 scripts/git_policy.py::TagUpdate
 scripts/git_policy.py::default_branch
