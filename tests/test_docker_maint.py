@@ -285,6 +285,44 @@ def test_an_interactive_prune_never_consults_the_guard(monkeypatch):
     assert docker_maint.generic_prune() == 1
 
 
+def test_the_prune_never_removes_containers_or_volumes(monkeypatch, tmp_path):
+    """The disk half must never cost a rebuild.
+
+    `docker system prune -af`, which this used to run, deletes stopped containers first
+    and then every image that leaves unreferenced. Paired with the 03:30 `stop-idle`
+    job it therefore undid that job's careful `stop`-not-`down` half an hour later:
+    carameli was parked at 03:30 and by 04:00 had no containers and no `carameli-*`
+    images at all, so the next "Docker: Start Stack" was a cold rebuild. `image prune
+    -a` counts a stopped container as a reference, which is the whole fix -- a parked
+    stack survives, a genuinely orphaned layer still goes.
+
+    Asserted on the verbs rather than one exact argv, so any later line reaching for
+    `system prune` or `container prune` fails here whatever else it changes.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker_maint, "run", lambda cmd, **_kw: (calls.append(list(cmd)), 0)[1])
+    monkeypatch.setattr(docker_maint, "docker_info_ok", lambda *_a, **_kw: True)
+    monkeypatch.setattr(docker_maint, "stop_docker", lambda: None)
+    monkeypatch.setattr(docker_maint, "start_docker", lambda: None)
+    monkeypatch.setattr(docker_maint, "poll_engine", lambda *_a, **_kw: True)
+    # An empty tmp home holds no VHDX, so the Optimize-VHD branch reports [skip]
+    # instead of shelling out to PowerShell against this machine's real disk.
+    monkeypatch.setattr(docker_maint.Path, "home", staticmethod(lambda: tmp_path))
+
+    assert docker_maint.generic_prune() == 0
+    assert calls, "the prune ran nothing at all"
+
+    for argv in calls:
+        assert "--volumes" not in argv, f"named volumes are dev databases: {argv}"
+        assert argv[:3] != ["docker", "system", "prune"], f"removes stopped containers: {argv}"
+        assert argv[:3] != ["docker", "container", "prune"], f"costs a rebuild: {argv}"
+        assert argv[:3] != ["docker", "volume", "prune"], f"named volumes are data: {argv}"
+
+    # And it still reclaims: the two lines that are where the GB actually are.
+    assert ["docker", "image", "prune", "-af"] in calls
+    assert ["docker", "builder", "prune", "-af"] in calls
+
+
 def test_the_flag_reaches_the_generic_prune(monkeypatch):
     """`--idle-only` is forwarded like any other argument, so it has to be read off the
     forwarded list rather than parsed as a mode."""

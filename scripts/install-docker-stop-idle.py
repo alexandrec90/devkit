@@ -25,6 +25,16 @@ one of them times out. Landing *before* the prune also means a night where every
 opted-in stack was idle hands the prune the container-free machine its `--idle-only`
 guard is waiting for.
 
+That last sentence used to end "which is the point", and for a while the point was
+the opposite of what it says. `generic_prune` ran `docker system prune -af`, which
+deletes stopped containers and then everything they were the last reference to -- so
+this job's careful `stop`-not-`down` was undone half an hour later by the job it was
+scheduled to enable, and an opted-in project woke up to a cold rebuild. carameli lost
+its containers and every `carameli-*` image that way on 2026-08-27. The prune no
+longer touches containers (see `generic_prune`), which is what makes the handoff
+described above safe to want. Preserve the pairing when either job moves: this one
+must keep parking stacks in a state the other one leaves alone.
+
 Everything else follows `install-docker-prune.py`, deliberately: same argv builders,
 same `--status` / `--uninstall` / dry-run-unless-`--yes` shape, same refusal to
 install from an ephemeral box whose path will not exist next week, same
