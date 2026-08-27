@@ -682,7 +682,6 @@ def insert_picker_option(text: str, name: str) -> str:
     for picker_id in (
         "project",
         "daemonProject",
-        "worktreeProject",
         # Lists MORE than the registry -- the reference checkouts too -- so a new
         # project still has to be added to it, and this is the only place that can.
         "mergeCheckout",
@@ -826,7 +825,6 @@ def remove_picker_option(text: str, name: str) -> str:
     for picker_id in (
         "project",
         "daemonProject",
-        "worktreeProject",
         "mergeCheckout",
         "adoptProjects",
     ):
