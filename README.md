@@ -893,9 +893,9 @@ was inverted underneath it and its expectation became the opposite of shipped po
 `enforce-capped-bash.decide` about the exact command the smoke prompts for and fails if
 the two ever disagree again, at no cost, in every PR gate.
 
-Both are reachable from one workspace task, **Test: Harness Hook Tests — paid, live
-CLI**, backed by `scripts/hook-tests-live.py`; it picks a suite, prints what it is about
-to spend before launching anything, and writes failures to
+Both are reachable from **Test: Run Suite**, as the two menu rows marked `PAID`, backed
+by `scripts/hook-tests-live.py`; it prints what it is about to spend before launching
+anything, and writes failures to
 `logs/hook-test-live-failures.log`. It exists because the raw `pytest` invocations above
 have two ways to cost nothing and prove nothing while exiting 0 — the CLI is not on
 `PATH`, so the suite skips, or the `-m` selector is dropped, so `addopts`' `-m "not

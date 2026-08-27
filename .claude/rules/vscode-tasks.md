@@ -98,9 +98,13 @@ way a remembered step does: three tasks merged, the checkout was synced, and the
 were still not in anyone's window, because nothing on the machine was going to render
 them until someone typed the command.
 
-All three are one click as well — the *Workspace:* tasks, which are deliberately not
-dispatches: there is one workspace file, so there is no checkout to pick, and they carry
-their own `notify-wrap`/`log-wrap` because `plan_command` never sees them.
+The two that write are one click as well — the *Workspace:* tasks, which are
+deliberately not dispatches: there is one workspace file, so there is no checkout to
+pick, and they carry their own `notify-wrap`/`log-wrap` because `plan_command` never
+sees them. `--check-workspace` is CLI-only and no longer has a task, because publishing
+refuses an unadopted live edit and names every difference while refusing — so the
+read-only run answered a question the click you were about to make answers anyway, and
+the session-start line asks it every window besides.
 
 **Never hand-edit the live file to make a change.** It has no branch dimension: one
 copy serves every window on the machine, so an in-flight edit is globally live before
@@ -245,8 +249,8 @@ after the PR merges; a box never renders.
 - **An action scoped to exactly one checkout writes the name, not a picker.** A
   `${input:...}` with a single option asks a question that has no second answer, and the
   extension still shows it. Spell the checkout in the task's `--project` argument
-  instead — `test-hooks-live` does. The usual picker/scope gate skips a literal, so
-  `test_the_live_smoke_task_names_the_only_checkout_that_can_run_it` asserts the same
+  instead — `reclaim` does. The usual picker/scope gate skips a literal, so
+  `test_a_literal_checkout_dispatch_agrees_with_its_actions_scope` asserts the same
   agreement against `Action.projects` directly; a literal that outgrows its scope fails
   there rather than in a terminal.
 - **A scope picker is only allowed if `register()` maintains it.** There used to be two

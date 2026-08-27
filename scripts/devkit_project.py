@@ -157,9 +157,17 @@ ACTIONS: dict[str, Action] = {
         autofix_slug="codex-context-sync",
         autofix_labels=(sweep.AUTOFIX_LABEL, sweep.AUTOMERGE_LABEL),
     ),
-    "sync-devkit": Action("scripts/sync-devkit.py", "Harness: Check Drift"),
+    # `sync-devkit` and `sync-branch` were here. Both lost their task and neither has
+    # another caller, so keeping them would have left `ACTIONS` naming two scripts
+    # nothing dispatches -- which `test_every_action_is_reachable_from_a_task` is there
+    # to refuse. "Harness: Check Drift vs devkit" ran `sync-devkit.py` in the STATIC
+    # checkout, on its home branch: `--check` is what the `devkit-drift` pre-commit hook
+    # and the PR gate already run, and `--pull` wrote an upgrade into a checkout with no
+    # branch and no PR under it, which is `upgrade-project.py`'s whole job and the reason
+    # it works in a box. The script stays and keeps every mode; only the click is gone.
+    # "Git: Sync Branch onto Origin Default (Keep Changes)" went with `git-sync-keep.py`
+    # itself -- VS Code's Source Control view rebases a checkout onto its trunk already.
     # --- implemented once, here ---
-    "sync-branch": Action("scripts/git-sync-keep.py", "Git: Sync Branch", owner=DEVKIT),
     # Stack lifecycle. DEVKIT-owned with a per-project override rather than
     # PROJECT-owned, which is the same shape `docker-prune` already uses: the compose
     # topologies genuinely differ (carameli waits on healthchecks, ibkr_trader scopes
@@ -341,9 +349,19 @@ ACTIONS: dict[str, Action] = {
 # Playwright row is the ordinary way to use this, and a pair that vanishes silently is
 # indistinguishable from a suite that ran and passed.
 #
-# `test-hooks-live` is deliberately absent. It launches a paid CLI session, and a menu
-# row is one keystroke away from every free row above it; a cost nobody consented to is
-# the one difference a picker must not carry.
+# `test-hooks-live` is here as two rows, one per CLI, and it did not use to be. It was a
+# task of its own with a `claude`/`codex`/`both` single-pick, kept out of this table
+# because it launches a paid CLI session and a menu row is one keystroke away from every
+# free row above it. Ticking both rows is what `both` was, which is why there is no third
+# row -- `plan_test_runs` orders by this table, so the pair runs claude then codex.
+#
+# The cost did not stop being real, and the menu cannot ask a second time. What the fold
+# buys is one task instead of two adjacent ones asking the same question; what it costs
+# is that the workspace REMEMBERS a ticked row, so a paid row survives to the next click
+# unless it is unticked. That is stated on the rows themselves -- their labels lead with
+# PAID -- and `hook-tests-live.py` still prints what it is about to spend before it
+# launches anything. Neither is a confirmation, and there is nowhere in a checkbox
+# quick-pick to put one.
 @dataclass(frozen=True)
 class SuiteKind:
     """One row of the test menu: the action it dispatches, and the argument shaping it.
@@ -368,6 +386,11 @@ TEST_KINDS: dict[str, SuiteKind] = {
     "e2e-headed": SuiteKind("e2e", ("--headed",)),
     "e2e-cross": SuiteKind("e2e", ("--cross-browser",)),
     "local-e2e": SuiteKind("local-e2e"),
+    # Last, so the distance from `suite` is as large as the table can make it. The
+    # argument is the suite name `hook-tests-live.py` already takes, so nothing new is
+    # reachable here that its CLI did not already offer.
+    "hooks-live-claude": SuiteKind("test-hooks-live", ("claude",)),
+    "hooks-live-codex": SuiteKind("test-hooks-live", ("codex",)),
 }
 
 # The verb that spends that table. Not an `ACTIONS` key, because an action is one script
