@@ -285,17 +285,54 @@ def find_stale_memory(root: Path, now: float, days: int = STALE_MEMORY_DAYS) -> 
     return out
 
 
+def workspace_of(root: Path) -> Path:
+    """The multi-root workspace a checkout sits in.
+
+    An ephemeral box lives at `<workspace>/.worktrees/<box>`, so its parent is the box
+    store and not the workspace. Reading the parent literally makes every real checkout
+    look like a slug nothing produces — including the box's own project, whose memory
+    directory is the largest on the machine.
+    """
+    parent = root.parent
+    return parent.parent if parent.name == ".worktrees" else parent
+
+
+def live_slugs(root: Path) -> set[str]:
+    """Every slug a directory on this machine can still produce.
+
+    The checkout, **the workspace directory above it**, every checkout beside it, and
+    every live box. The workspace is what a pruning pass found missing: a multi-root
+    workspace is a working directory an agent opens sessions in — it has its own
+    `CLAUDE.md` governing exactly that — so its memories are as recallable as any
+    project's, and reporting them as orphaned invites deleting them.
+    """
+    workspace = workspace_of(root)
+    candidates = [root, workspace, *_children(workspace), *_children(workspace / ".worktrees")]
+    return {slug_for(path) for path in candidates if path.is_dir()}
+
+
+def _children(path: Path) -> list[Path]:
+    return sorted(path.iterdir()) if path.is_dir() else []
+
+
 def find_orphan_memory(projects: Path, live: set[str]) -> list[Finding]:
     """Memory directories whose slug no working directory produces any more.
 
     A renamed, moved or mistyped project path strands its memories: nothing recalls
     them, nothing expires them, and they are invisible because the directory name is
     the only evidence of which cwd made it.
+
+    Matched **case-insensitively**, because Windows hands back the drive letter in
+    whichever case the launching shell used: `c--Users-...` and `C--Users-...` are the
+    same checkout, both directories exist under `~/.claude/projects`, and a
+    case-sensitive comparison reported 50 live memories across three directories as
+    orphaned — a finding whose stated remedy is to delete them.
     """
+    recallable = {slug.casefold() for slug in live}
     out: list[Finding] = []
     for entry in sorted(projects.iterdir()) if projects.is_dir() else []:
         memory = entry / "memory"
-        if not memory.is_dir() or entry.name in live:
+        if not memory.is_dir() or entry.name.casefold() in recallable:
             continue
         held = [item for item in memory.glob("*.md") if item.name != "MEMORY.md"]
         if held:
@@ -424,12 +461,7 @@ def main(argv: list[str] | None = None) -> int:
     docs, findings, note = collect(root, args.devkit.resolve())
 
     if args.orphans:
-        live = {slug_for(root)}
-        for sibling in root.parent.iterdir() if root.parent.is_dir() else []:
-            if sibling.is_dir():
-                live.add(slug_for(sibling))
-                live.add(slug_for(sibling).lower())
-        findings.extend(find_orphan_memory(memory_root(), live))
+        findings.extend(find_orphan_memory(memory_root(), live_slugs(root)))
 
     report = render(docs, findings, note)
 

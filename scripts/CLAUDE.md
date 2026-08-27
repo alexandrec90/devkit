@@ -5,6 +5,34 @@ carries the repo-wide decisions; `.claude/rules/engineering.md` carries the scri
 conventions every project shares (stdlib-only hooks, importable functions, failure
 artifacts under `logs/`).
 
+## The two channels
+
+devkit ships the same discipline through two mechanisms, and which one a thing belongs to
+is a real decision, not a preference:
+
+| | Vendored tier | Pre-commit channel |
+| --- | --- | --- |
+| Delivered by | `sync-devkit.py --pull` copies files in | pre-commit clones devkit at a pinned `rev` |
+| Lives in | `scripts/hooks/`, listed in `MANIFEST` | `scripts/precommit/`, listed in `.pre-commit-hooks.yaml` |
+| Versioned by | `DEVKIT_VERSION` + a CI drift job | the `rev` in the consumer's config |
+| Use it when | the code must run with no network and no install (agent hooks) | the check runs at commit time and a pinned version is better than a copy |
+
+Rules specific to the pre-commit channel:
+
+- **`language: script`, stdlib only, executable bit set.** There is nothing to install
+  from a virtual project, so pre-commit execs the file directly. A missing `chmod +x` or a
+  broken shebang fails only on a consumer's machine, after the rev is tagged — a test
+  guards both.
+- **The hooks run with the *consumer's* repo as the cwd**, while the scripts themselves
+  live in pre-commit's clone. Never resolve a devkit file relative to the cwd; go through
+  `Path(__file__)`. Never assume the consumer's layout — read it from `.devkit.toml`.
+- **devkit wires its own hooks as `repo: local`, not by rev.** Pinning a rev here would
+  check a released tag's hooks against the working tree trying to change them, so a hook
+  fix could never be validated by the hook it fixes.
+- **A new hook needs an id in both files** — `.pre-commit-hooks.yaml` (published) and
+  `.pre-commit-config.yaml` (run here). A test asserts the sets match, with `devkit-drift`
+  as the one documented exception (in devkit it would compare against itself).
+
 ## Vendoring rules
 
 - `MANIFEST` in `scripts/sync-devkit.py` is the shared set. Every entry ships with its
