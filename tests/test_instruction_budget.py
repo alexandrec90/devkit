@@ -294,6 +294,16 @@ def test_a_slug_differing_only_in_case_is_not_orphaned(tmp_path: Path):
     assert findings == [], "the drive letter's case does not make a second checkout"
 
 
+def test_workspace_of_looks_through_the_box_store(tmp_path: Path):
+    """`.worktrees/` holds copies of checkouts, so it is never the workspace itself."""
+    workspace = tmp_path / "vs_code"
+    checkout = workspace / "devkit"
+    box = workspace / ".worktrees" / "devkit--topic-0827"
+
+    assert budget.workspace_of(checkout) == workspace
+    assert budget.workspace_of(box) == workspace, "a box's parent is the store, not the workspace"
+
+
 def test_live_slugs_covers_the_workspace_directory_itself(tmp_path: Path):
     """The parent is a working directory too, not merely the thing checkouts sit in.
 
