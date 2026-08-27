@@ -712,6 +712,20 @@ def _chdir_operand(tokens: list[str]) -> str | None:
     return target.replace("\\", "/").rstrip("/") or None
 
 
+def _rebased(target: str, base: str) -> str:
+    """`target` resolved against a `cd` the same command line already made.
+
+    An absolute target ignores the move, a relative one hangs off it, and an *empty*
+    target is the move: a statement that names no directory of its own runs wherever
+    the `cd` before it went, which is the whole case this exists for.
+    """
+    if not target:
+        return base
+    if _is_rooted(target) or not base:
+        return target
+    return f"{base}/{target}"
+
+
 def shell_write_targets(command: str) -> list[str]:
     """Every path this command line names as something it is about to write.
 
@@ -953,18 +967,31 @@ def _switch_ref(operands: list[str]) -> str:
 def switch_targets(command: str) -> list[tuple[str, str]]:
     """`(directory, ref)` for every `git checkout`/`git switch` on this command line.
 
-    `directory` is git's `-C` when the call gave one and `""` otherwise, meaning the tool
-    call's own cwd. Same crude statement splitter and the same closed-list discipline as
-    the shell tier above: a spelling this does not recognise yields nothing and is
-    allowed, because the cost of the two mistakes is not symmetric here either.
+    `directory` is where the move lands: git's `-C` when the call gave one, rebased onto
+    whatever `cd` the same command line already did, and `""` only when neither says --
+    which still means the tool call's own cwd. Same crude statement splitter and the same
+    closed-list discipline as the shell tier above: a spelling this does not recognise
+    yields nothing and is allowed, because the cost of the two mistakes is not symmetric
+    here either.
+
+    Following the `cd` is not a refinement, it is the difference between judging the tree
+    the move lands in and judging a tree the command never touched. `shell_write_targets`
+    has tracked it since that tier was written; this one did not, so
+    `cd <workspace>/.ui-previews/carameli/master && git switch -c agent/x` was judged
+    against the *session's* cwd and refused as parking the carameli checkout -- blocking
+    the one move that rescues work out of a preview copy `--clean` is about to delete.
     """
     found: list[tuple[str, str]] = []
+    base = ""
     # Heredoc bodies dropped here for the same reason as in `shell_write_targets`: a
     # `git checkout agent/x` quoted inside a script is text, and this tier's verdict --
     # a refusal with no box and nothing to re-issue -- is the most expensive one to
     # earn by accident.
     for statement in split_statements(strip_heredocs(command)):
         tokens = shell_tokens(statement)
+        moved = _chdir_operand(tokens)
+        if moved is not None:
+            base = moved if _is_rooted(moved) or not base else f"{base}/{moved}"
         while tokens and (_verb(tokens[0]) in SHELL_PREFIXES or ENV_ASSIGN.match(tokens[0])):
             tokens = tokens[1:]
         if not tokens or _verb(tokens[0]) != "git":
@@ -985,7 +1012,7 @@ def switch_targets(command: str) -> list[tuple[str, str]]:
             continue
         ref = _switch_ref(operands)
         if ref:
-            found.append((directory, ref))
+            found.append((_rebased(directory, base), ref))
     return found
 
 
