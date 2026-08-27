@@ -64,6 +64,10 @@ POLICY_TARGET = Path.home() / ".devkit" / "git-hooks"
 ROOT_SETTINGS = Path(".claude") / "settings.json"
 GUARD_SCRIPT = "worktree-guard.py"
 _GB = 1024**3
+# Free space at each session start, so "where did 20 GB go" is a subtraction rather
+# than archaeology. Under the permanent checkout's `logs/` for `events_line`'s reason.
+HEADROOM_LOG = Path("logs") / "headroom.log"
+HEADROOM_HISTORY = 400
 
 # `install-git-policy.py` is hyphenated and so cannot be imported by name. Going
 # through the shared loader keeps the file list and the comparison in one place --
@@ -456,6 +460,80 @@ def _commit_status() -> tuple[int, int, int]:
     return (status.ullTotalPhys, status.ullTotalPageFile, status.ullAvailPageFile)
 
 
+def record_headroom(
+    free: int,
+    source: Path = SOURCE_ROOT,
+    now: float = 0.0,
+    keep: int = HEADROOM_HISTORY,
+) -> tuple[int, float] | None:
+    """Appends this session's free space; returns the previous `(free, age_seconds)`.
+
+    Both disk investigations this line exists for were archaeology, and the second
+    one could not be finished: on 2026-08-27 the machine had gone from 42 GB free to
+    20 GB with every directory that could be measured unchanged, and the only figures
+    from the day before were the handful a previous session happened to print into a
+    chat log. **File mtimes cannot close that gap** -- a 13 GB VHDX rewritten in place
+    carries the same recent mtime as 13 GB of new bytes, so an mtime sum answers
+    "what was touched" while the question is "what grew". Without a recorded
+    baseline, the honest answer is that it cannot be reconstructed, and an hour of
+    directory sums arrives at that answer the expensive way.
+
+    One number per session start makes it a subtraction instead. Failure is silence:
+    this runs inside a status line that must never fail a session start, so a
+    baseline that cannot be written costs a sentence rather than a session.
+    """
+    stamp = now or _time.time()
+    path = source / HEADROOM_LOG
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    previous: tuple[int, float] | None = None
+    for line in reversed(lines):
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        try:
+            when, was = float(fields[0]), int(fields[1])
+        except ValueError:
+            continue
+        previous = (was, max(stamp - when, 0.0))
+        break
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        kept = [*lines[-(keep - 1) :], f"{stamp:.0f} {free}"]
+        path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    return previous
+
+
+def _headroom_fix(commit_pressure: bool) -> str:
+    """The remedy, which is the *opposite* of itself in the two cases this line has.
+
+    A single hard-coded fix string is what made this line actively wrong on
+    2026-08-27. It said *a reboot returns the pagefile's share* while the pagefile
+    sat at its boot size, so the advice fired on a machine that had nothing to
+    reclaim by rebooting -- the user rebooted on the strength of it and got zero
+    bytes back, which is worse than an unhelpful line: it spent the one remedy that
+    costs a whole working state.
+
+    The two cases want opposite actions. Commit pressure is *transient* and lives in
+    processes, so closing them is the fix and a reboot is the blunt version of it.
+    Tight disk with the pagefile at boot size is **durable** -- it is files, and no
+    reboot or process kill returns a byte of it.
+    """
+    if commit_pressure:
+        return (
+            "close idle dev servers and browsers -- a reboot returns the pagefile's "
+            "share and none of the cause"
+        )
+    return (
+        "this is files, not commit pressure -- a reboot returns none of it; look for "
+        "superseded tool versions and stale OS staging directories"
+    )
+
+
 def headroom_line(
     volume: Path = REPO_ROOT,
     usage=None,
@@ -463,6 +541,7 @@ def headroom_line(
     free_floor: float = 25.0,
     growth_slack: float = 1.25,
     commit_ceiling: float = 0.85,
+    history=None,
 ) -> str:
     """Reports disk the machine is losing to *commit pressure* rather than to files.
 
@@ -484,30 +563,39 @@ def headroom_line(
     free space alone sends you hunting through folders for something that is not
     there. Silent unless the disk is genuinely tight, the pagefile has grown past its
     boot size, or commit is close enough to the limit that it is about to.
+
+    **The pagefile is one of two cases, and this line asserted it was the only one.**
+    On 2026-08-27 the disk was tight with the pagefile at its boot size -- the space
+    had gone into ordinary files -- and the line still advised a reboot, which
+    returned nothing. `_headroom_fix` picks the remedy from what actually fired, and
+    `record_headroom` supplies the *trend*, because "20 GB free" is the number that
+    prompts the hunt while "down 21 GB since yesterday" is the one that ends it.
     """
     try:
         free = (usage or shutil.disk_usage)(volume).free
     except OSError:
         return ""
     phys, limit, avail = (memory or _commit_status)()
+    trend = (history or record_headroom)(free)
     pagefile = max(limit - phys, 0)
+    grown = bool(phys and pagefile > phys * growth_slack)
+    straining = bool(limit and (limit - avail) / limit >= commit_ceiling)
     parts = []
     if free < free_floor * _GB:
-        parts.append(f"{free / _GB:.0f} GB free")
-    if phys and pagefile > phys * growth_slack:
+        tight = f"{free / _GB:.0f} GB free"
+        if trend and trend[0] - free >= _GB:
+            tight += f", down {(trend[0] - free) / _GB:.0f} GB in {_age(trend[1])}"
+        parts.append(tight)
+    if grown:
         parts.append(
             f"pagefile is {pagefile / _GB:.0f} GB, "
             f"{(pagefile - phys) / _GB:.0f} GB past its boot size"
         )
-    if limit and (limit - avail) / limit >= commit_ceiling:
+    if straining:
         parts.append(f"commit at {(limit - avail) / limit:.0%} of {limit / _GB:.0f} GB and growing")
     if not parts:
         return ""
-    return (
-        f"headroom: {' -- '.join(parts)} "
-        f"(fix: close idle dev servers and browsers -- a reboot returns the pagefile's "
-        f"share and none of the cause)"
-    )
+    return f"headroom: {' -- '.join(parts)} (fix: {_headroom_fix(grown or straining)})"
 
 
 def _age(seconds: float) -> str:

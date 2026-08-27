@@ -885,21 +885,35 @@ def _mem(phys_gb, pagefile_gb, used_fraction=0.5):
     return lambda: (int(phys_gb * _GB), limit, int(limit * (1 - used_fraction)))
 
 
+def _prior(free_gb=None, age_seconds=0.0):
+    """A `history` stub: what the last session recorded, or `None` for no baseline.
+
+    Injected by every test here so the suite never writes the real
+    `logs/headroom.log` -- and so the trend is a fixture rather than a leftover
+    from whichever test ran first.
+    """
+    if free_gb is None:
+        return lambda _free: None
+    return lambda _free: (int(free_gb * _GB), age_seconds)
+
+
 def test_a_roomy_machine_at_its_boot_pagefile_says_nothing():
     """The default state of every other workstation -- and most of this one's days."""
-    line = ws.headroom_line(usage=_disk(300), memory=_mem(16, 16))
+    line = ws.headroom_line(usage=_disk(300), memory=_mem(16, 16), history=_prior())
     assert line == ""
 
 
 def test_a_grown_pagefile_is_reported_even_while_the_disk_looks_fine():
     """The whole point: 20 GB can be gone with 90 GB still free and no folder to blame."""
-    line = ws.headroom_line(usage=_disk(90), memory=_mem(16, 38))
+    line = ws.headroom_line(usage=_disk(90), memory=_mem(16, 38), history=_prior())
     assert "pagefile is 38 GB, 22 GB past its boot size" in line
     assert "90 GB free" not in line
 
 
 def test_a_tight_disk_is_reported_with_the_pagefile_that_took_it():
-    line = ws.headroom_line(usage=_disk(20), memory=_mem(16, 38, used_fraction=0.91))
+    line = ws.headroom_line(
+        usage=_disk(20), memory=_mem(16, 38, used_fraction=0.91), history=_prior()
+    )
     assert "20 GB free" in line
     assert "22 GB past its boot size" in line
     assert "commit at 91% of 54 GB and growing" in line
@@ -907,26 +921,106 @@ def test_a_tight_disk_is_reported_with_the_pagefile_that_took_it():
 
 def test_commit_near_the_limit_is_reported_before_the_pagefile_grows():
     """The pagefile grows *because* commit approached the limit, so this is the warning."""
-    line = ws.headroom_line(usage=_disk(300), memory=_mem(16, 16, used_fraction=0.93))
+    line = ws.headroom_line(
+        usage=_disk(300), memory=_mem(16, 16, used_fraction=0.93), history=_prior()
+    )
     assert "commit at 93%" in line
     assert "past its boot size" not in line
 
 
 def test_a_reboot_is_named_as_the_symptom_fix_not_the_cause():
     """A line that only says "reboot" trains you to reboot daily and change nothing."""
-    line = ws.headroom_line(usage=_disk(20), memory=_mem(16, 40))
+    line = ws.headroom_line(usage=_disk(20), memory=_mem(16, 40), history=_prior())
     assert "close idle dev servers and browsers" in line
     assert "none of the cause" in line
 
 
+def test_a_tight_disk_at_its_boot_pagefile_is_not_told_to_reboot():
+    """The 2026-08-27 regression: the advice fired where it could not possibly work.
+
+    Disk tight, pagefile at boot size, commit mid-range -- so the space is in files.
+    The line still said *a reboot returns the pagefile's share*, the reboot happened,
+    and it returned nothing. Reverting `_headroom_fix` fails here.
+    """
+    line = ws.headroom_line(usage=_disk(20), memory=_mem(16, 16), history=_prior())
+    assert "20 GB free" in line
+    assert "a reboot returns none of it" in line
+    assert "close idle dev servers" not in line
+    assert "past its boot size" not in line
+
+
+def test_the_drop_since_the_last_session_is_named():
+    """ "20 GB free" starts the hunt; "down 22 GB since yesterday" is what ends it."""
+    line = ws.headroom_line(usage=_disk(20), memory=_mem(16, 16), history=_prior(42, 23 * 3600))
+    assert "down 22 GB in " in line
+
+
+def test_a_drop_under_a_gigabyte_is_not_worth_a_clause():
+    """Ordinary churn between two sessions is noise, and noise retires the line."""
+    line = ws.headroom_line(usage=_disk(20), memory=_mem(16, 16), history=_prior(20.4))
+    assert "20 GB free" in line
+    assert "down" not in line
+
+
+def test_a_first_session_has_no_baseline_and_still_reports_the_number():
+    """The log starts empty on every fresh machine; that is not a reason to go quiet."""
+    line = ws.headroom_line(usage=_disk(20), memory=_mem(16, 16), history=_prior())
+    assert "20 GB free" in line
+    assert "down" not in line
+
+
+def test_a_healthy_session_still_records_its_baseline():
+    """Recording happens *before* the silence check, or the baseline only ever exists
+    on machines that were already in trouble -- which is exactly too late."""
+    seen = []
+    line = ws.headroom_line(
+        usage=_disk(300),
+        memory=_mem(16, 16),
+        history=lambda free: seen.append(free) or None,
+    )
+    assert line == ""
+    assert seen == [int(300 * _GB)]
+
+
 def test_a_machine_that_cannot_be_measured_is_silence():
     """Off Windows there is no commit story, and an unreadable volume is not a failure."""
-    assert ws.headroom_line(usage=_disk(300), memory=lambda: (0, 0, 0)) == ""
+    assert ws.headroom_line(usage=_disk(300), memory=lambda: (0, 0, 0), history=_prior()) == ""
 
     def explode(_path):
         raise OSError("no such volume")
 
-    assert ws.headroom_line(usage=explode, memory=_mem(16, 40)) == ""
+    assert ws.headroom_line(usage=explode, memory=_mem(16, 40), history=_prior()) == ""
+
+
+def test_record_headroom_returns_the_previous_session_and_appends_this_one(tmp_path):
+    assert ws.record_headroom(30 * _GB, source=tmp_path, now=1000.0) is None
+    log = tmp_path / ws.HEADROOM_LOG
+    assert log.read_text(encoding="utf-8").split() == ["1000", str(30 * _GB)]
+
+    assert ws.record_headroom(20 * _GB, source=tmp_path, now=4600.0) == (30 * _GB, 3600.0)
+    assert len(log.read_text(encoding="utf-8").strip().splitlines()) == 2
+
+
+def test_record_headroom_skips_unparseable_lines_rather_than_failing(tmp_path):
+    """The log is plain text on a workstation; something will eventually truncate it."""
+    log = tmp_path / ws.HEADROOM_LOG
+    log.parent.mkdir(parents=True)
+    log.write_text(f"garbage\n\n1000 {5 * _GB}\nnot-a-number 12\n", encoding="utf-8")
+    assert ws.record_headroom(_GB, source=tmp_path, now=2000.0) == (5 * _GB, 1000.0)
+
+
+def test_record_headroom_caps_its_history(tmp_path):
+    """Unbounded would be fine for years and then be the file nobody can open."""
+    for i in range(6):
+        ws.record_headroom(i, source=tmp_path, now=100.0 + i, keep=3)
+    lines = (tmp_path / ws.HEADROOM_LOG).read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 3
+
+
+def test_record_headroom_is_silent_when_it_cannot_write(tmp_path):
+    """A status line that must never fail a session start cannot raise over a log."""
+    (tmp_path / "logs").write_text("not a directory", encoding="utf-8")
+    assert ws.record_headroom(_GB, source=tmp_path, now=1.0) is None
 
 
 def test_the_headroom_line_reaches_the_rendered_message():
