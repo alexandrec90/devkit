@@ -988,3 +988,34 @@ def test_notify_wrap_propagates_the_wrapped_exit_code(monkeypatch, code):
         ["notify-wrap.py", "T", "--", sys.executable, "-c", f"raise SystemExit({code})"],
     )
     assert notify_wrap.main() == code
+
+
+def test_notify_wrap_runs_nothing_when_a_task_prompt_was_dismissed(monkeypatch, capsys):
+    """Every wrapped picker task's cancel lands here, so the check is worth one test.
+
+    Both halves matter and only one is obvious: nothing runs, *and* nothing is toasted.
+    A cancel is the user's own decision — notifying them of it would make dismissing a
+    picker louder than answering it. `subprocess.run` and `notify` are stubbed to raise
+    rather than to record, because a call to either is the failure itself.
+    """
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a cancelled task must neither run nor toast")
+
+    notify_wrap = load_script("scripts/notify-wrap.py")
+    monkeypatch.setattr(notify_wrap, "notify", refuse)
+    monkeypatch.setattr(notify_wrap.subprocess, "run", refuse)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "notify-wrap.py",
+            "T",
+            "--",
+            "python",
+            "scripts/plug-projects.py",
+            "${input:plugSelection}",
+        ],
+    )
+    assert notify_wrap.main() == 0
+    assert "cancelled" in capsys.readouterr().out

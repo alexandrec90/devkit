@@ -34,6 +34,15 @@ def main() -> int:
     if not title or not cmd:
         return 2
 
+    # A dismissed quick-pick is not an answer. VS Code aborts a task itself only for its
+    # own `promptString`/`pickString` inputs; a `command` input -- every multi-select
+    # picker -- returns nothing, no substitution is recorded, and the task launches with
+    # the literal `${input:<id>}` still in the argument list. Run nothing, and toast
+    # nothing: a cancel is the user's decision, not an outcome to notify them about.
+    if any("${input:" in arg for arg in cmd):
+        print("notify-wrap: cancelled -- nothing ran (a task prompt was dismissed)")
+        return 0
+
     start = time.monotonic()
     try:
         # cmd comes from tasks.json (trusted), not user input.

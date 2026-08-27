@@ -20,6 +20,9 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import task_input
+
 REGISTRY_NAME = "ports.toml"
 
 # Env-var name published for each service, e.g. db -> DB_HOST_PORT. Compose files
@@ -217,6 +220,13 @@ def load(root: Path) -> Registry:
 def main(argv: list[str] | None = None) -> int:
     """Print the registry, or env blocks for comma-delimited checkout selections."""
     args = list(sys.argv[1:] if argv is None else argv)
+    # *Ports: Show Checkout Allocations* passes the `project` quick-pick straight in, and
+    # a dismissed one arrives as the literal `${input:project}` -- which would otherwise
+    # be read as a checkout name and reported as unknown. See `task_input`.
+    dismissed = task_input.cancelled_inputs(args)
+    if dismissed:
+        print(task_input.cancel_report("devkit_ports", dismissed))
+        return 0
     root = Path(__file__).resolve().parent.parent
     try:
         registry = load(root)

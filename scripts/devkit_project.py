@@ -48,6 +48,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
 import sweep
+import task_input
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # The workspace file is the project registry: it lists the checkouts and, since the
@@ -1316,6 +1317,15 @@ def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+
+    # Before argparse, because a dismissed quick-pick is not a usage error and must not
+    # be reported as one. Every task in `workspace.jsonc` that offers a multi-select
+    # picker routes through here, so this is the one place that turns Escape into a
+    # no-op for all of them -- see `task_input` for why VS Code cannot do it itself.
+    dismissed = task_input.cancelled_inputs(sys.argv[1:] if argv is None else argv)
+    if dismissed:
+        print(task_input.cancel_report("devkit_project", dismissed))
+        return 0
 
     parser = argparse.ArgumentParser(
         description="Run a generic project action in a chosen checkout.",

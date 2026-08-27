@@ -40,6 +40,7 @@ import devkit_render  # noqa: E402
 import git_policy  # noqa: E402
 import harness_config  # noqa: E402
 import sweep  # noqa: E402
+import task_input  # noqa: E402
 import task_slug  # noqa: E402
 import worktree  # noqa: E402
 
@@ -98,6 +99,7 @@ __all__ = [
     "needs_live_workspace",
     "needs_the_static_checkout",
     "sweep",
+    "task_input",
     "task_slug",
     "vendor_manifest",
     "worktree",

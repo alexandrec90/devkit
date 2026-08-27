@@ -1861,6 +1861,78 @@ def test_every_input_referenced_is_defined(canonical):
     assert defined <= referenced, f"unused inputs: {defined - referenced}"
 
 
+# The scripts that recognise an unresolved `${input:…}` and exit 0 having run nothing.
+# Spelled out rather than derived, because the failure this guards against is a *new*
+# task wired to a script that has no such check — deriving the list from the tasks would
+# make every new task exempt by construction.
+CANCEL_AWARE_RECEIVERS = {
+    "devkit_project.py",
+    "devkit_ports.py",
+    "resume-sessions.py",
+    "plug-projects.py",
+    "upgrade-project.py",
+}
+
+
+def _receiving_script(args: list[str]) -> str:
+    """The script a task's arguments are actually handed to.
+
+    Wrappers nest left to right with a bare `--` before the command they run, so the
+    innermost one is what follows the last separator; a dispatched task has no separator
+    and is its own receiver. The guard has to live in that script: `log-wrap.py` passes
+    its tail through untouched, so a check in the outer layer would prove nothing about
+    what the inner one does with the literal.
+    """
+    tail = args
+    if "--" in args:
+        tail = args[len(args) - args[::-1].index("--") :]
+    return next((arg.split("/")[-1] for arg in tail if arg.endswith(".py")), "")
+
+
+def test_every_task_with_a_command_picker_can_be_cancelled(canonical):
+    """A dismissed `command` input must reach a script that treats it as a cancel.
+
+    VS Code aborts a task run itself when one of *its own* inputs (`promptString`,
+    `pickString`) is escaped. It cannot for a `command` input — the extension returns
+    nothing, no substitution is recorded, and the task launches with the literal
+    `${input:<id>}` still in its argument list. Every multi-select picker here is a
+    command input, so "cancel means nothing runs" is a property of the receiving script
+    and of nothing else; before this, escaping the project picker ran the dispatcher,
+    which reported `unknown project '${input:project}'` as a task *failure*, complete
+    with a red icon and a toast, for a run the user had just called off.
+    """
+    command_inputs = {spec["id"] for spec in canonical["inputs"] if spec.get("type") == "command"}
+    assert command_inputs, "no command-typed inputs — the picker convention has changed"
+
+    offenders = {}
+    for task in canonical["tasks"]:
+        args = [str(arg) for arg in task.get("args", [])]
+        if not any(f"${{input:{name}}}" in arg for name in command_inputs for arg in args):
+            continue
+        receiver = _receiving_script(args)
+        if receiver not in CANCEL_AWARE_RECEIVERS:
+            offenders[task["label"]] = receiver
+    assert not offenders, (
+        f"tasks whose dismissed picker reaches a script that would run anyway: {offenders}"
+    )
+
+
+def test_a_dismissed_picker_dispatches_nothing(monkeypatch, capsys):
+    """The dispatcher's half of the contract above, exercised rather than inferred.
+
+    Asserted through `main` because the guard's placement is the point: it sits ahead of
+    `argparse`, which would otherwise turn the literal into a usage error on the
+    arguments that carry a `type=` or a `choices=`.
+    """
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a cancelled task must not spawn anything")
+
+    monkeypatch.setattr(devkit_project.subprocess, "run", refuse)
+    assert devkit_project.main(["--project", "${input:project}", "test"]) == 0
+    assert "cancelled" in capsys.readouterr().out
+
+
 # A release tag as this file could come to carry one: `v1.2.3` in a label, a detail or a
 # task argument. Comments are already gone by the time `canonical` is parsed, so a
 # version written as *reasoning* is out of scope and stays allowed -- what this catches

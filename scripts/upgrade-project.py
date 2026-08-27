@@ -53,7 +53,9 @@ does not stop the others, and the exit code reports the worst outcome.
 checkbox quick-pick and passes the ticked names in as the positional -- so choosing four
 of five is a gesture rather than a comma-delimited string somebody has to spell from
 memory, in a terminal, correctly. `--all` remains what the unattended callers use, and
-escaping the checklist means *never mind*: see `picked_nothing`.
+escaping the checklist means *never mind*: `main` recognises the unresolved literal ahead
+of `argparse` (see `task_input`), and `picked_nothing` is the same reading for a caller
+that hands the positional in itself.
 
 Safe to run unattended, which is the point: `scripts/install-upgrade-schedule.py`
 registers exactly that.
@@ -83,6 +85,7 @@ from typing import NoReturn
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sweep
 import task_branch as tb
+import task_input
 import worktree
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -158,6 +161,12 @@ def picked_nothing(value: str | None) -> bool:
     gesture that means *never mind*, and written to `logs/upgrade.log` where the next
     reader finds it as a failure. `plug-projects.picked_nothing` reads an escaped pick
     the same way and for the same reason.
+
+    The task itself no longer arrives here: `main` recognises the literal in the raw argv
+    ahead of `argparse`, because the checklist is not the only input the task passes and
+    a dismissed `${input:sweepApply}` reached argparse as a stray positional -- a usage
+    error, exit 2, for the same gesture. This stays for callers that build the positional
+    themselves; `release-pipeline.py` is the one that does.
     """
     return "${input:" in value if value else False
 
@@ -1008,6 +1017,22 @@ class _ReportingParser(argparse.ArgumentParser):
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Before argparse, and before `_ReportingParser` can write a failure artifact: a
+    # dismissed quick-pick is not a usage error, and `${input:adoptProjects}` reaching
+    # the positional would be reported as one -- red icon, toast, `logs/upgrade.log` --
+    # for a run the user called off. *Devkit: Upgrade Projects* is wrapped by
+    # `notify-wrap.py`, which recognises the literal too, but the guard belongs here as
+    # well: this script is also the innermost command, and a wrapper's check protects
+    # nothing when the script is invoked directly. See `task_input`.
+    dismissed = task_input.cancelled_inputs(sys.argv[1:] if argv is None else argv)
+    if dismissed:
+        print(task_input.cancel_report("upgrade-project", dismissed))
+        # Emptied for the same reason the "nothing was picked" branch below empties it:
+        # a cancel that leaves the previous run's artifact in place is indistinguishable
+        # from a run that broke.
+        write_artifact(REPO_ROOT, "")
+        return 0
+
     parser = _ReportingParser(description=__doc__.splitlines()[0])
     # Optional, and paired with --all for the same reason --dry-run is paired with
     # --yes: the VS Code picker has to emit one real token on the "every project"

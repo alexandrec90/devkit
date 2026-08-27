@@ -68,6 +68,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_clis
+import task_input
 
 # The update stage, taken as an argument so a test of the launch path cannot spawn a real
 # updater by forgetting to stub one. `agent_clis.run_pass` is its only production value.
@@ -400,6 +401,14 @@ def main(argv: list[str] | None = None, agent_pass: AgentPass | None = None) -> 
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+
+    # Before argparse: `--agent` has a `type=` that would reject the literal
+    # `${input:resumeAgents}` a dismissed checkbox list leaves behind, turning a cancel
+    # into a usage error. This task carries no wrapper, so the guard has to be here.
+    dismissed = task_input.cancelled_inputs(sys.argv[1:] if argv is None else argv)
+    if dismissed:
+        print(task_input.cancel_report("resume-sessions", dismissed))
+        return 0
 
     parser = argparse.ArgumentParser(
         description="Reopen the most recently active Claude and/or Codex sessions."
