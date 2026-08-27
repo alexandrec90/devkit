@@ -167,6 +167,11 @@ READY_TIMEOUT = 90.0
 # state, gitignored, worth nothing to a fresh clone.
 SERVER_REGISTRY = REPO_ROOT / "logs" / "preview-ui-servers.json"
 
+# The narrowest the closing block's rule is drawn. It grows to the widest row rather than
+# truncating one: the rule is there to frame the URLs a reviewer is about to click, and a
+# frame narrower than its contents reads as damage.
+SUMMARY_RULE_WIDTH = 66
+
 # Win32 constants for the teardown tier. Spelled out rather than imported because
 # `ctypes.wintypes` carries types, not values, and a devkit script has no third-party
 # dependency to borrow them from.
@@ -185,6 +190,9 @@ class HostPlan:
     `steps` are `(cwd, git argv)` pairs that make `serve_dir` exist and point at the
     ref -- empty when the row is served from a live box, which is taken as it stands.
     A set `refusal` means nothing else in the plan is meaningful.
+
+    `pr` and `title` are carried for the closing summary alone: they say what the row
+    IS, which is the one thing a column of `agent/<slug>-0826` refs cannot.
     """
 
     project: str
@@ -196,6 +204,8 @@ class HostPlan:
     steps: tuple[tuple[str, tuple[str, ...]], ...] = ()
     note: str = ""
     refusal: str = ""
+    pr: int = 0
+    title: str = ""
 
 
 def echo(line: str = "") -> None:
@@ -398,6 +408,8 @@ def plan_host(candidate, root: Path, taken: set[int], listening, proxy: str) -> 
         proxy=proxy,
         steps=steps,
         note=note,
+        pr=candidate.pr,
+        title=candidate.title,
     )
 
 
@@ -858,6 +870,49 @@ def clean(root: Path, run=subprocess.run) -> int:
     return 1 if failures else 0
 
 
+def review_columns(plan: HostPlan) -> tuple[str, str]:
+    """`("PR #12", '"what it is for"')` for one row -- each half empty when unknown.
+
+    Both come off the `Candidate` the pick resolved to, so this adds no source and no
+    call: the scan already knew them when it drew the menu, and the plan now carries
+    them through. `title` is the PR's when there is one and the branch tip's commit
+    subject otherwise -- `preview_task.collect` folds both into one field, which is what
+    lets a bare branch still say something a human wrote.
+
+    Two strings rather than one joined note, because they are two COLUMNS: a row with no
+    PR pads that column instead of sliding its title left under the numbers, so the
+    titles -- the part actually read downwards -- all start in the same place.
+    """
+    return (f"PR #{plan.pr}" if plan.pr else "", f'"{plan.title}"' if plan.title else "")
+
+
+def summary_lines(reachable) -> list[str]:
+    """The closing block's rows -- URL, project, ref and what the ref is -- in columns.
+
+    Columns, because the block is read by comparing rows: six previews of one project
+    differ only in a slug, and ragged two-space joins put that difference in a different
+    place on every line. `render_menu` sizes its columns the same way for the same
+    reason, and a reviewer now sees one shape twice -- the menu they picked from, and
+    the block they click out of.
+
+    Empty in, empty out: every server can time out, and a rule drawn around nothing was
+    the old behaviour of this block.
+    """
+    rows = [(url, plan.project, plan.ref, *review_columns(plan)) for plan, url in reachable]
+    if not rows:
+        return []
+    # A column nothing has anything to say in is dropped rather than padded to nothing:
+    # a menu of bare branches has no PR number anywhere, and an empty column between the
+    # refs and the titles would be a gap in every line aligning two things that are not
+    # there.
+    columns = [column for column in zip(*rows, strict=True) if any(column)]
+    widths = [max(len(cell) for cell in column) for column in columns]
+    return [
+        ("  " + "  ".join(c.ljust(w) for c, w in zip(row, widths, strict=True))).rstrip()
+        for row in zip(*columns, strict=True)
+    ]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="preview-ui-host.py",
@@ -1027,10 +1082,11 @@ def main(argv: list[str] | None = None) -> int:
     if not servers:
         return 1 if failures else 0
 
-    rule = "=" * 66
+    lines = summary_lines(reachable)
+    rule = "=" * max([SUMMARY_RULE_WIDTH, *(len(line) for line in lines)])
     echo(f"\n{rule}")
-    for plan, url in reachable:
-        echo(f"  {url}  {plan.project}  {plan.ref}")
+    for line in lines:
+        echo(line)
     echo(rule)
     echo("Serving. Ctrl+C here, or closing this terminal, stops every server; so does")
     echo("`Preview: Stop Host UI Servers`, from anywhere. The copies under")
