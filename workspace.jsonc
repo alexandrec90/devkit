@@ -121,7 +121,7 @@
 		"tasks": [
 			// --- generic: pick a project ---------------------------------------
 			{
-				// Five tasks became this one. "Test: Run Suite" and its scope dropdown,
+				// Six tasks became this one. "Test: Run Suite" and its scope dropdown,
 				// "Test: Harness Hook Tests — free", and carameli's "Run Carameli Target",
 				// "Run Browser E2E" and "Run Local Integration E2E" all asked the same two
 				// questions — which checkouts, and which tests — and answered the second
@@ -130,11 +130,16 @@
 				// menu, and a kind a checkout cannot run is skipped BY NAME rather than
 				// dropped, because one menu is offered for every checkout.
 				//
-				// The paid live-CLI smoke below stays a task of its own: a menu row is one
-				// keystroke from every free row above it, and a cost nobody consented to is
-				// the difference a picker must not carry.
+				// The sixth is the paid live-CLI smoke, which used to be a task of its own
+				// so that a cost could not be reached by a keystroke from a free row. It is
+				// two rows here now, one per CLI, and ticking both is what `both` was. The
+				// trade that bought is worth stating where it is read: `testKinds` REMEMBERS
+				// the ticked set per workspace, so a paid row ticked once is ticked on the
+				// next click too, and this task can spend money without asking again. The
+				// rows say PAID in their label, the runner prints what it is about to spend
+				// before it launches anything, and neither of those is a confirmation.
 				"label": "Test: Run Suite",
-				"detail": "Tick one or more checkouts, then tick the kinds of test to run in them. Every pair runs sequentially and writes its own artifact under that checkout's logs/ — read the artifact, not the terminal. A kind only Carameli implements (its free targets, Playwright, the local integration suite) is skipped by name for the checkouts that cannot run it, so ticking widely is safe.",
+				"detail": "Tick one or more checkouts, then tick the kinds of test to run in them. Every pair runs sequentially and writes its own artifact under that checkout's logs/ — read the artifact, not the terminal. A kind only Carameli implements (its free targets, Playwright, the local integration suite) is skipped by name for the checkouts that cannot run it, so ticking widely is safe. The two rows marked PAID launch real authenticated agent CLI sessions and are devkit-only; the ticked set is REMEMBERED, so untick them again.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -151,37 +156,6 @@
 				"icon": {
 					"id": "beaker",
 					"color": "terminal.ansiGreen"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Test: Harness Hook Tests — paid, live CLI",
-				"detail": "PAID — launches a real authenticated agent CLI against a throwaway project and proves the hooks change what it actually does. devkit only: these smokes live in tests/, which is never vendored. 'Claude only' is the cheapest run and is evidence about Claude ONLY — it says nothing about Codex, and the run now names the suite it skipped so a green line cannot be read as a clean bill of health for both. Each suite's model and budget are set in its own test file. Failures go to devkit/logs/hook-test-live-failures.log.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					// Written out rather than a picker: the action's scope is one checkout, so a
-					// picker here would be a list of length one asking a question with no second
-					// answer. `test_the_live_smoke_task_names_the_only_checkout_that_can_run_it`
-					// pins this literal against `Action.projects` so the two cannot drift.
-					"devkit",
-					"test-hooks-live",
-					"${input:liveHookSuite}"
-				],
-				"group": "test",
-				// Same `zap` family as the free hook tests, in red: the colour is the only
-				// warning a one-click paid task gets before it is clicked.
-				"icon": {
-					"id": "zap",
-					"color": "terminal.ansiRed"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -245,69 +219,20 @@
 				},
 				"problemMatcher": []
 			},
-			{
-				"label": "Harness: Check Drift vs devkit",
-				"detail": "Byte-compares each selected checkout's vendored scripts/hooks/ against devkit, sequentially. Needs DEVKIT_DIR set. Defaults to the read-only check; --pull and --push both rewrite files.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:project}",
-					"sync-devkit",
-					"${input:harnessMode}"
-				],
-				"icon": {
-					"id": "diff",
-					"color": "terminal.ansiCyan"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
 			// --- the workspace file itself ------------------------------------
 			// This file has no branch: one copy serves every VS Code window on the
 			// machine, so an edit is globally live before anyone reviews it. devkit's
 			// `workspace.jsonc` is the copy with a branch and a reviewer, and these
-			// three are the only sanctioned way to move content between them. They are
+			// two are the only sanctioned way to move content between them. They are
 			// NOT dispatches -- there is one workspace file, so there is nothing to
 			// pick a checkout for, and the wrapping is written out here.
-			{
-				"label": "Workspace: Check Drift vs devkit's Copy",
-				"detail": "Read-only. Compares the live .code-workspace against devkit's canonical workspace.jsonc — folders, extensions, tasks, inputs, settings — and names every difference. The full list the session-start line only counts.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/notify-wrap.py",
-					"Workspace: Check Drift vs devkit's Copy",
-					"--",
-					"python",
-					"scripts/log-wrap.py",
-					"Workspace: Check Drift vs devkit's Copy",
-					"--",
-					"python",
-					"scripts/devkit_project.py",
-					"--check-workspace"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "multiple-windows",
-					"color": "terminal.ansiBlue"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
+			//
+			// There were three. "Workspace: Check Drift vs devkit's Copy" ran
+			// `--check-workspace`, which is the read-only half of the publish below --
+			// and the publish REFUSES an unadopted live edit and names every difference
+			// while refusing, so the check answered a question the click you were going
+			// to make answers anyway. The session-start line asks it every window as
+			// well. Nothing routed through it that publishing does not.
 			{
 				"label": "Workspace: Publish devkit's Copy",
 				"detail": "Renders devkit's workspace.jsonc over the live .code-workspace — the file every VS Code window on this machine reads. REFUSES rather than clobbering a live edit devkit never wrote; adopt that first. Publishes whatever branch the devkit checkout is on, so check it out before clicking.",
@@ -447,29 +372,6 @@
 				"problemMatcher": []
 			},
 			{
-				"label": "Git: Sync Branch onto Origin Default (Keep Changes)",
-				"detail": "For each selected checkout, sequentially: detect origin's default branch, then fetch → stash if dirty → rebase → pop. Keeps unstaged/untracked changes.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:project}",
-					"sync-branch"
-				],
-				"icon": {
-					"id": "git-merge",
-					"color": "terminal.ansiGreen"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"close": false,
-					"clear": true
-				},
-				"problemMatcher": []
-			},
-			{
 				// The one task that reaches a REFERENCE checkout, and the reason it is
 				// not a devkit_project.py dispatch: that dispatcher resolves through
 				// `known_projects`, which drops NOT_PROJECTS because every action it
@@ -477,8 +379,14 @@
 				// so this script resolves against the raw registry and its picker lists
 				// VanillaLand alongside the projects.
 				//
-				// The sibling above REBASES, which is right for a task branch and wrong
-				// for long-lived work whose history is already published. This merges.
+				// It MERGES, which is what long-lived work wants: the history is already
+				// published, so it must not be rewritten. There used to be a sibling above
+				// it, "Git: Sync Branch onto Origin Default (Keep Changes)", which rebased
+				// the current branch and stashed around it -- the task-branch case. It is
+				// gone because VS Code's own Source Control view already does exactly that,
+				// per checkout, without a picker. This one stays for what that view does
+				// not give: a conflict left in progress with every unmerged file named in
+				// a log file, which is what makes the outcome handable to an agent.
 				"label": "Git: Merge Origin Default into Current Branch",
 				"detail": "Fetch, then MERGE origin's default branch — auto-detected, so `develop` in VanillaLand — into whatever branch the chosen checkout is on. Commits locally and NEVER pushes. On conflict the merge is LEFT IN PROGRESS and every unmerged file is named in devkit's logs/git-merge-origin-default-into-current-branch.log; hand that file to a coding agent.",
 				"type": "process",
@@ -1197,33 +1105,7 @@
 				"problemMatcher": []
 			},
 			{
-				"label": "Agents: Open Tabs (External Terminal)",
-				"detail": "Choose Claude or Codex, then open a new Windows Terminal window with one tab per worktree. Machine-scoped, so it takes no project. The Carameli tabs also mount ../VanillaLand as writable.",
-				"type": "process",
-				"command": "pwsh.exe",
-				"args": [
-					"-NoProfile",
-					"-ExecutionPolicy",
-					"Bypass",
-					"-File",
-					"${workspaceFolder:devkit}/scripts/launch-agent-tabs.ps1",
-					"-Agent",
-					"${input:agentCli}"
-				],
-				"icon": {
-					"id": "rocket",
-					"color": "terminal.ansiMagenta"
-				},
-				"presentation": {
-					"reveal": "silent",
-					"panel": "new",
-					"clear": true,
-					"close": true
-				},
-				"problemMatcher": []
-			},
-			{
-				// These agent recovery tasks take NO checkout, and deliberately so. Every
+				// This agent recovery task takes NO checkout, and deliberately so. Every
 				// picker in this file lists the static checkouts; a session that ran in an
 				// ephemeral box is unreachable from all of them, because boxes are absent
 				// from `folders` by design. What you want back is the last few sessions
@@ -1246,35 +1128,6 @@
 				"icon": {
 					"id": "history",
 					"color": "terminal.ansiBrightMagenta"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				// Claude and Codex session IDs differ. This selects only Claude transcripts
-				// whose final assistant turn is the account/session limit error, passes those
-				// transcripts through Codex's native Claude importer, then resumes the returned
-				// Codex thread IDs. Codex's importer owns deduplication and import history.
-				"label": "Agents: Import Limited Claude Sessions",
-				"detail": "Choose how many recent Claude sessions that ended at a usage limit to import through Codex's native Claude importer and resume by their Codex thread IDs, one new Windows Terminal tab each, OLDEST TAB FIRST. Claude subagents and sessions whose directory has been reaped are skipped. Already imported transcripts resolve to their existing native Codex threads.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/import-claude-sessions.py",
-					"--count",
-					"${input:resumeSessionCount}"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "arrow-swap",
-					"color": "terminal.ansiBrightCyan"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1381,6 +1234,11 @@
 				// row. So every row states its scope, and devkit_project.py prints the
 				// pairs it skipped and why.
 				//
+				// The two PAID rows at the foot are the one place remembering costs money
+				// rather than a keystroke. They are last, and their labels lead with the
+				// word, because a checkbox list has nowhere else to put a warning: there is
+				// no per-row confirmation, and `minCount` cannot express "not that one".
+				//
 				// `value` is what travels (the extension joins the checked VALUES with
 				// `separator`); the remembered set is stored by LABEL, so editing a label
 				// costs the next reader one re-tick and nothing else. `picked` seeds the
@@ -1470,6 +1328,21 @@
 									"label": "Local integration E2E — carameli ↔ VanillaLand",
 									"value": "local-e2e",
 									"description": "carameli only · boots local IIS Express + vs-sql via VS_REPO_DIR; needs a filled .env.local-e2e"
+								},
+								{
+									// The two paid rows, last in the list so that the distance
+									// from `suite` is as large as the menu can make it. They
+									// were one task with a single-pick of claude/codex/both;
+									// ticking both of these IS `both`, which is why there is no
+									// third row. Untick them: the set is remembered.
+									"label": "PAID — live Claude CLI hook smoke",
+									"value": "hooks-live-claude",
+									"description": "devkit only · SPENDS MONEY · one real authenticated Claude session"
+								},
+								{
+									"label": "PAID — live Codex CLI hook smoke",
+									"value": "hooks-live-codex",
+									"description": "devkit only · SPENDS MONEY · two real authenticated Codex sessions"
 								}
 							]
 						}
@@ -1500,30 +1373,6 @@
 					}
 				],
 				"default": ""
-			},
-			{
-				// The one picker in this file where an accidental Enter spends money, so the
-				// default is the smallest run that still proves something rather than the most
-				// thorough one. Single-pick for the same reason: "both" is a deliberate choice,
-				// not two checkboxes that are easy to leave ticked from last time.
-				"id": "liveHookSuite",
-				"type": "pickString",
-				"description": "Which live CLI smoke? Every option launches a paid session.",
-				"options": [
-					{
-						"label": "Claude only — cheapest, one session",
-						"value": "claude"
-					},
-					{
-						"label": "Codex only — two sessions",
-						"value": "codex"
-					},
-					{
-						"label": "Both — every live smoke",
-						"value": "both"
-					}
-				],
-				"default": "claude"
 			},
 			{
 				// The checkout picker for the project-SCOPED tasks. Deliberately not the
@@ -1732,32 +1581,6 @@
 				"default": "2026-07-01"
 			},
 			{
-				// Every branch supplies one real token — `--check` rather than "" for
-				// the default — for the reason spelled out on `newProjectRemote` below.
-				"id": "harnessMode",
-				"type": "pickString",
-				"description": "Drift-check, adopt upstream, or push a change authored here",
-				"options": [
-					{
-						"label": "Check for drift (safe, read-only)",
-						"value": "--check"
-					},
-					{
-						"label": "Pull — adopt devkit's version, overwriting local",
-						"value": "--pull"
-					},
-					{
-						"label": "Push — send this repo's version up to devkit",
-						"value": "--push"
-					},
-					{
-						"label": "List the manifest + vendored version",
-						"value": "--list"
-					}
-				],
-				"default": "--check"
-			},
-			{
 				"id": "newProjectName",
 				"type": "promptString",
 				"description": "New project name — becomes the directory, the Python package, and COMPOSE_PROJECT_NAME",
@@ -1906,16 +1729,6 @@
 					}
 				],
 				"default": "patch"
-			},
-			{
-				"id": "agentCli",
-				"type": "pickString",
-				"description": "Coding agent CLI to open in every worktree tab",
-				"options": [
-					"claude",
-					"codex"
-				],
-				"default": "claude"
 			},
 			{
 				// Selecting both agents means one global recency slice, not `count` from

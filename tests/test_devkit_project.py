@@ -219,9 +219,9 @@ def test_devkit_owned_action_uses_an_absolute_path(checkouts, tmp_path):
     """It runs with cwd set to the checkout, so a relative path would miss."""
     devkit_root = tmp_path / "dk"
     (devkit_root / "scripts").mkdir(parents=True)
-    (devkit_root / "scripts" / "git-sync-keep.py").write_text("")
-    command = plan_command(ACTIONS["sync-branch"], checkouts / "beta", [], devkit_root)
-    assert inner(command) == ["python", str(devkit_root / "scripts" / "git-sync-keep.py")]
+    (devkit_root / "scripts" / "hook-tests.py").write_text("")
+    command = plan_command(ACTIONS["test-hooks"], checkouts / "beta", [], devkit_root)
+    assert inner(command) == ["python", str(devkit_root / "scripts" / "hook-tests.py")]
 
 
 def test_devkit_owned_action_works_in_a_non_conforming_checkout(checkouts, tmp_path):
@@ -236,7 +236,7 @@ def test_devkit_owned_action_works_in_a_non_conforming_checkout(checkouts, tmp_p
 
 def test_a_broken_devkit_checkout_is_distinguished_from_a_project_gap(checkouts, tmp_path):
     with pytest.raises(ProjectError, match="devkit is missing"):
-        plan_command(ACTIONS["sync-branch"], checkouts / "alpha", [], tmp_path / "empty")
+        plan_command(ACTIONS["test-hooks"], checkouts / "alpha", [], tmp_path / "empty")
 
 
 def test_docker_up_forces_a_rebuild(checkouts, tmp_path):
@@ -457,10 +457,10 @@ def test_stopping_the_host_previews_asks_nothing(canonical):
 
 # --- the test menu ----------------------------------------------------------
 #
-# One task replaced five: `Test: Run Suite`, `Test: Run Carameli Target`, both browser
-# E2E tasks and the free hook-test run. `TEST_KINDS` is the table it spends -- a row is
-# an (action, argument) pair, so eleven rows reach only actions `ACTIONS` already
-# defines, scopes and wraps for logging.
+# One task replaced six: `Test: Run Suite`, `Test: Run Carameli Target`, both browser
+# E2E tasks, the free hook-test run, and the paid live-CLI smoke. `TEST_KINDS` is the
+# table it spends -- a row is an (action, argument) pair, so every row reaches only
+# actions `ACTIONS` already defines, scopes and wraps for logging.
 
 TEST_KINDS = devkit_project.TEST_KINDS
 TESTS_VERB = devkit_project.TESTS_VERB
@@ -1400,9 +1400,7 @@ def test_both_lint_scopes_reach_the_one_action(checkouts, picked, expected):
 # opened, and there is no run text for anyone to read afterwards. Named here rather than
 # passed over, so a task that stops writing one has to say why in this list.
 UNLOGGED_TASKS = {
-    "Agents: Open Tabs (External Terminal)": "spawns terminal tabs; the window is the output",
-    "Agents: Resume Recent Sessions": "same — reopens sessions in tabs, then exits",
-    "Agents: Import Limited Claude Sessions": "same — opens imported sessions in tabs",
+    "Agents: Resume Recent Sessions": "reopens sessions in tabs, then exits",
     "IBKR: Open Gateway VNC Viewer": "launches a GUI viewer; nothing to parse when it closes",
     "Workspace: Plug / Unplug Projects": (
         "the script writes logs/plug-projects.log itself, naming the registry it ended "
@@ -1434,15 +1432,24 @@ def test_every_workspace_scoped_task_writes_a_failure_artifact(canonical):
 
 
 def test_every_workspace_file_command_is_reachable_from_a_task(canonical):
-    """The three directions between the live file and `workspace.jsonc` are one click.
+    """Both directions that WRITE between the live file and `workspace.jsonc` are one
+    click.
 
     A flag nobody can click is how the old arrangement stayed broken: `--check-tasks`
     existed for years, was correct, and was never wired to anything -- so the only
     thing that ever ran it was a test that CI skips. Reachability is the difference
     between a gate and a documented intention.
+
+    `--check-workspace` is the third direction and is deliberately not in this list.
+    It lost its task because the comparison it makes is the one `--render-workspace`
+    makes anyway: a publish REFUSES an unadopted live edit and names every difference
+    while refusing, and `workspace_sync_line` runs the same comparison at every session
+    start whether anyone clicks anything or not. So the flag is a convenience spelling
+    of a check that has two unclicked callers -- which is the opposite of `--check-tasks`,
+    and the reason the ratchet above does not apply to it.
     """
     spelled = {arg for task in canonical["tasks"] for arg in map(str, task.get("args", ()))}
-    for flag in ("--check-workspace", "--render-workspace", "--adopt-workspace"):
+    for flag in ("--render-workspace", "--adopt-workspace"):
         assert flag in spelled, f"{flag} is reachable only by typing it"
 
 
@@ -1533,9 +1540,7 @@ TASK_CONTRACT = {
 # exists: a toast reports that something you were not watching has ended, and these
 # either end instantly or hand you a window that is itself the notification.
 UNTOASTED_TASKS = {
-    "Agents: Open Tabs (External Terminal)": "the tabs it opens are the notification",
-    "Agents: Resume Recent Sessions": "same — reopens sessions in tabs, then exits",
-    "Agents: Import Limited Claude Sessions": "same — opens imported sessions in tabs",
+    "Agents: Resume Recent Sessions": "the tabs it reopens are the notification",
     "Workspace: List Tasks as a Table": "same — the table is the output, in front of you",
 }
 
@@ -1544,12 +1549,6 @@ UNTOASTED_TASKS = {
 CONTRACT_EXCEPTIONS = {
     ("Agent: Sync Codex Context", "presentation.reveal"): (
         "silent: a context sync that prints nothing worth stealing focus for"
-    ),
-    ("Agents: Open Tabs (External Terminal)", "presentation.reveal"): (
-        "silent: the tabs it opens are the output; its own terminal holds one line"
-    ),
-    ("Agents: Open Tabs (External Terminal)", "presentation.close"): (
-        "closes: same — nothing is left in this terminal to review"
     ),
 }
 
@@ -1652,12 +1651,17 @@ def test_a_scoped_task_offers_exactly_the_checkouts_its_action_allows(canonical)
     assert checked, "no scoped task found — the wiring this test guards is gone"
 
 
-def test_the_live_smoke_task_names_the_only_checkout_that_can_run_it(canonical):
+def test_a_literal_checkout_dispatch_agrees_with_its_actions_scope(canonical):
     """The test above skips a task whose `--project` is a literal rather than a picker,
-    which is exactly what "Test: Harness Hook Tests — paid, live CLI" is: its action is
-    defined for one checkout, and a picker of length one asks a question with no second
-    answer. That trade is only safe while the literal and the scope agree — so this is
-    the same assertion, made against the constant instead of against an option list.
+    which is what a task does when its action is defined for one checkout: a picker of
+    length one asks a question with no second answer. That trade is only safe while the
+    literal and the scope agree — so this is the same assertion, made against the
+    constant instead of against an option list.
+
+    "Test: Harness Hook Tests — paid, live CLI" used to be the case this was written
+    for, and it was named in the test's own name; it is two rows on the test menu now,
+    and "Machine: Reclaim Resources" is what still spells a checkout out. That the
+    rename was the only work the fold cost here is the paragraph below being true.
 
     Written for the general case rather than for one label: a second single-scope task
     spelled the same way is covered the day it is added, which is when it would
