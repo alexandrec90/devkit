@@ -43,8 +43,10 @@ What one run does, per picked row:
      re-pointed at it on every later run, so the copy is paid for once per ref.
   2. **Install once, stamped.** `npm ci` runs only when `node_modules/.ci-stamp` is
      older than `package-lock.json` -- the same stamp the compose frontend service
-     uses, so the first run of a copy costs about a minute and every later one skips
-     straight to Vite, which starts in seconds.
+     uses, so the first run of a copy costs minutes rather than seconds -- long
+     enough that the message it prints has to say so, or the wait reads as a hang and
+     gets interrupted, which is how a copy ends up with a `node_modules` and no
+     stamp -- and every later one skips straight to Vite, which starts in seconds.
   3. **Serve and say where.** `npm run dev` on a free port scanned upward from
      `PORT_START` -- deliberately above the registry slots, which belong to the
      Docker tier -- with `--strictPort` so the URL printed is the URL served.
@@ -426,7 +428,9 @@ def apply_host(plan: HostPlan, npm: str, run=subprocess.run, spawn=subprocess.Po
         echo(f"  failed: {frontend} does not exist on {plan.ref}")
         return None
     if npm_stale(frontend):
-        echo("  installing frontend dependencies (first run for this copy -- about a minute) ...")
+        echo(
+            "  installing frontend dependencies (first run for this copy -- minutes, not seconds) ..."
+        )
         result = run([npm, "ci", "--no-audit", "--no-fund"], cwd=str(frontend))
         if result.returncode != 0:
             echo(f"  failed: npm ci exited {result.returncode}")
