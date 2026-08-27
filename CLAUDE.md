@@ -13,9 +13,10 @@ decisions, and the failures that produced them.
 | File | What it governs |
 | --- | --- |
 | [`.claude/rules/engineering.md`](.claude/rules/engineering.md) | baseline policy: testing, scripts, lint, capped Bash, the vendored harness |
+| [`.claude/engineering-evidence.md`](.claude/engineering-evidence.md) | the measurements and incidents behind that policy — loaded only when a pointer sends you |
 | [`.claude/rules/authoring.md`](.claude/rules/authoring.md) | writing rules, skills and instruction files |
 | [`.claude/rules/vscode-tasks.md`](.claude/rules/vscode-tasks.md) | the workspace task block and its dispatcher |
-| [`scripts/CLAUDE.md`](scripts/CLAUDE.md) | vendoring, ephemeral boxes, scheduled jobs, loading a module by path |
+| [`scripts/CLAUDE.md`](scripts/CLAUDE.md) | the two delivery channels, vendoring, ephemeral boxes, scheduled jobs, loading a module by path |
 | [`scripts/hooks/CLAUDE.md`](scripts/hooks/CLAUDE.md) | the Codex translation tier: ported wiring, the response contract, the adapter |
 | [`.github/CLAUDE.md`](.github/CLAUDE.md) | the CI surface every project has |
 | [`tests/CLAUDE.md`](tests/CLAUDE.md) | the two test trees, and which one a test belongs in |
@@ -88,34 +89,6 @@ devkit-only. Which one a test belongs in, and the two gates that assert a test e
 at all, are in [`tests/CLAUDE.md`](tests/CLAUDE.md) — a subtree file, so it loads when
 you are writing a test rather than on every call of every session.
 
-## The two channels
-
-devkit ships the same discipline through two mechanisms, and which one a thing belongs to
-is a real decision, not a preference:
-
-| | Vendored tier | Pre-commit channel |
-| --- | --- | --- |
-| Delivered by | `sync-devkit.py --pull` copies files in | pre-commit clones devkit at a pinned `rev` |
-| Lives in | `scripts/hooks/`, listed in `MANIFEST` | `scripts/precommit/`, listed in `.pre-commit-hooks.yaml` |
-| Versioned by | `DEVKIT_VERSION` + a CI drift job | the `rev` in the consumer's config |
-| Use it when | the code must run with no network and no install (agent hooks) | the check runs at commit time and a pinned version is better than a copy |
-
-Rules specific to the pre-commit channel:
-
-- **`language: script`, stdlib only, executable bit set.** There is nothing to install
-  from a virtual project, so pre-commit execs the file directly. A missing `chmod +x` or a
-  broken shebang fails only on a consumer's machine, after the rev is tagged — a test
-  guards both.
-- **The hooks run with the *consumer's* repo as the cwd**, while the scripts themselves
-  live in pre-commit's clone. Never resolve a devkit file relative to the cwd; go through
-  `Path(__file__)`. Never assume the consumer's layout — read it from `.devkit.toml`.
-- **devkit wires its own hooks as `repo: local`, not by rev.** Pinning a rev here would
-  check a released tag's hooks against the working tree trying to change them, so a hook
-  fix could never be validated by the hook it fixes.
-- **A new hook needs an id in both files** — `.pre-commit-hooks.yaml` (published) and
-  `.pre-commit-config.yaml` (run here). A test asserts the sets match, with `devkit-drift`
-  as the one documented exception (in devkit it would compare against itself).
-
 ## Guardrails
 
 The instruction-file feedback loop lives in `.claude/rules/engineering.md` — report a
@@ -129,18 +102,17 @@ alters vendored behaviour, say so in the commit message: adopters find out by ru
 
 A missing tag is the mirror-image failure and is easier to miss: `new-project.py`
 resolves `latest_devkit_tag() or FALLBACK_DEVKIT_REF`, so **an untagged feature does
-not exist as far as a generated project is concerned**, however green `main` is. That
+not exist as far as a generated project is concerned**, however green `main` is — which
 is how a rendered `.pre-commit-config.yaml` came to request hook ids its pinned tag
-could not serve, aborting the new owner's first commit. The release checklist —
-including why the fallback test is deliberately red for one commit — is
-[`RELEASING.md`](RELEASING.md).
+could not serve. The release checklist, including why the fallback test is deliberately
+red for one commit, is [`RELEASING.md`](RELEASING.md).
 
 ### The internal names are `devkit`
 
 `.devkit.toml`, `$DEVKIT_DIR`, `DEVKIT_VERSION`, `scripts/sync-devkit.py`, and the
-published hook ids `devkit-manifest` / `devkit-hooks-stdlib-only` / `devkit-drift`. The
-rename from the `agent-harness` spelling had to be one atomic change across devkit and
-every consumer, because `sync-devkit.py` is **itself in the `MANIFEST`** — renaming it
-changes the very path list the drift check compares by, and a half-applied rename fails
-`--check` in whichever repo lands second. Treat these names as fixed; if you find the
-old spelling anywhere, it is a miss from that migration, not a deliberate holdout.
+published hook ids `devkit-manifest` / `devkit-hooks-stdlib-only` / `devkit-drift`.
+Treat them as fixed: the rename from the `agent-harness` spelling had to be one atomic
+change across devkit and every consumer, because `sync-devkit.py` is **itself in the
+`MANIFEST`** — it is the very path list the drift check compares by, so a half-applied
+rename fails `--check` in whichever repo lands second. The old spelling anywhere is a
+miss from that migration, not a deliberate holdout.

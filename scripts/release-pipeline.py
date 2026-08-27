@@ -106,7 +106,7 @@ RELEASE_WORKFLOW = "release.yml"
 
 # The second tier a release delivers, and the one `MANIFEST` does not cover.
 #
-# devkit ships through two channels (see `CLAUDE.md`, "The two channels"). The vendored
+# devkit ships through two channels (see `scripts/CLAUDE.md`, "The two channels"). The vendored
 # tier is copied in by `sync-devkit.py --pull` and is exactly `MANIFEST`. The pre-commit
 # tier is *not*: a consumer pins devkit by `rev` in its `.pre-commit-config.yaml` and
 # pre-commit clones this repo at that rev, so these files reach a consumer only when a

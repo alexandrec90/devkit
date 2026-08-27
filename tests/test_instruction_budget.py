@@ -38,7 +38,7 @@ budget = load_script("scripts/instruction-budget.py")
 # stopped the nightly release, which is the backstop working: GitHub Free cannot require
 # a PR to be current before merging (see `scripts/git_policy.py`), so nothing else here
 # would have caught it.
-HOT_CEILING = 7700
+HOT_CEILING = 6300
 
 
 # --- the estimate -------------------------------------------------------------
@@ -276,6 +276,56 @@ def test_find_orphan_memory_names_slugs_no_checkout_produces(tmp_path: Path):
     findings = budget.find_orphan_memory(tmp_path, live={"live-slug"})
     subjects = {finding.subject for finding in findings}
     assert subjects == {"dead-slug"}, "a live slug is recallable; an empty one costs nothing"
+
+
+def test_a_slug_differing_only_in_case_is_not_orphaned(tmp_path: Path):
+    """Regression: Windows hands back the drive letter in whichever case the shell used.
+
+    `c--Users-...-carameli` and `C--Users-...-carameli` are one checkout, and only the
+    lowercase directory had ever been written. A case-sensitive comparison reported it
+    as a slug "no live checkout produces", with `delete` as the stated remedy -- 37 live
+    memories, plus 13 more under another project.
+    """
+    memory = tmp_path / "c--Users-a-vs-code-carameli" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "held.md").write_text("x", encoding="utf-8")
+
+    findings = budget.find_orphan_memory(tmp_path, live={"C--Users-a-vs-code-carameli"})
+    assert findings == [], "the drive letter's case does not make a second checkout"
+
+
+def test_live_slugs_covers_the_workspace_directory_itself(tmp_path: Path):
+    """The parent is a working directory too, not merely the thing checkouts sit in.
+
+    A multi-root workspace has its own `CLAUDE.md` governing sessions opened at that
+    level, so its memories are recallable. Building the live set from the checkout and
+    its *siblings* alone left the workspace slug out and reported it as orphaned.
+    """
+    workspace = tmp_path / "vs_code"
+    (workspace / "devkit").mkdir(parents=True)
+    (workspace / "carameli").mkdir()
+
+    slugs = budget.live_slugs(workspace / "devkit")
+
+    assert budget.slug_for(workspace) in slugs, "sessions run at the workspace root"
+    assert budget.slug_for(workspace / "devkit") in slugs
+    assert budget.slug_for(workspace / "carameli") in slugs
+
+
+def test_live_slugs_from_a_box_still_sees_the_real_checkouts(tmp_path: Path):
+    """Regression: run from an ephemeral box, the parent is `.worktrees`, not the
+    workspace — so every real checkout, devkit's own included, read as orphaned. The
+    finding's remedy is `delete`, and devkit's memory directory is the biggest here."""
+    workspace = tmp_path / "vs_code"
+    (workspace / "devkit").mkdir(parents=True)
+    box = workspace / ".worktrees" / "devkit--topic-0827"
+    box.mkdir(parents=True)
+
+    slugs = budget.live_slugs(box)
+
+    assert budget.slug_for(workspace / "devkit") in slugs, "the box is a copy of a checkout"
+    assert budget.slug_for(workspace) in slugs
+    assert budget.slug_for(box) in slugs, "a live box is a working directory of its own"
 
 
 # --- rendering and the entry point --------------------------------------------
