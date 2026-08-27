@@ -202,13 +202,14 @@ after the PR merges; a box never renders.
   string reaches argparse as a stray positional and is rejected, which is why
   `scripts/new-project.py` carries the redundant-looking `--dry-run` and `--remote`
   flags alongside their negations. The exception is a picker feeding
-  `scripts/devkit_project.py`, which strips empties before exec — `testScope`,
-  `lintScope` and `e2eMode` rely on that, and say so.
+  `scripts/devkit_project.py`, which strips empties before exec — a scope option spelled
+  as the empty string relies on that, and says so where it is defined. `lintScope` is
+  the one that does today.
 - **A scope that fits in a picker is a picker, not a second task.** Two tasks whose
   labels differ only in how much they cover sit adjacent in the quick-pick, cost an icon
   and a `detail` apiece, and — where they are dispatches — a second `ACTIONS` entry for
   one flag. *Lint: Everything* and *Lint: Changed Files* were that, beside a *Test: Run
-  Suite* that had asked the same question as a dropdown since it was written. They are
+  Suite* that had asked the same question as a picker since it was written. They are
   one task and `lintScope` now, and `lint-changed` left `ACTIONS` with them. What earns
   a task of its own instead is a difference the picker cannot carry back: a cost nobody
   consented to (`test-hooks-live` is a separate action so the free one's flag cannot
