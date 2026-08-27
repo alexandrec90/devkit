@@ -192,46 +192,26 @@
 				"problemMatcher": []
 			},
 			{
-				"label": "Lint: Everything",
-				"detail": "Full-repo lint for each selected checkout, run sequentially via scripts/lint-all.py. Findings go to that checkout's logs/lint-errors.log.",
+				// One task, two scopes. It was two tasks — "Lint: Everything" and
+				// "Lint: Changed Files" — sitting adjacent in the picker under near-identical
+				// labels, which is the shape "Test: Run Suite" has never had: there the scope
+				// is asked as a picker, and the second question is asked only once the first
+				// has been answered. `lintScope` is that dropdown, and `lint-changed` is gone
+				// from the dispatcher with it.
+				"label": "Lint: Run",
+				"detail": "Lint each selected checkout, sequentially, via its scripts/lint-all.py — the whole repo, or only the working-tree diff (vs HEAD, plus untracked), as the scope dropdown asks. Rewrites the tree before it reports (ruff --fix, ruff format) and ships what it wrote. Findings go to that checkout's logs/lint-errors.log.",
 				"type": "process",
 				"command": "python",
 				"args": [
 					"${workspaceFolder:devkit}/scripts/devkit_project.py",
 					"--project",
 					"${input:project}",
-					"lint"
+					"lint",
+					"${input:lintScope}"
 				],
 				"group": "build",
 				"icon": {
 					"id": "checklist",
-					"color": "terminal.ansiYellow"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Lint: Changed Files",
-				"detail": "Lint only the working-tree diff (vs HEAD, plus untracked) in each selected checkout. Runs sequentially; same artifact as 'Lint: Everything'.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"${workspaceFolder:devkit}/scripts/devkit_project.py",
-					"--project",
-					"${input:project}",
-					"lint-changed"
-				],
-				"group": "build",
-				// `checklist`/yellow is "Lint: Everything"; the narrower scope gets the
-				// narrower icon, so the two are told apart in the quick-pick without
-				// reading to the end of two near-identical labels.
-				"icon": {
-					"id": "list-selection",
 					"color": "terminal.ansiYellow"
 				},
 				"presentation": {
@@ -1096,7 +1076,7 @@
 				// the gate's own test artifact and refuses to merge on any other red,
 				// which is what makes "merge a failing PR" safe to put behind a click.
 				"label": "Devkit: Cut Release",
-				"detail": "DRY RUN by default — prints the plan and stops. Applied, this bumps FALLBACK_DEVKIT_REF, opens the prepare PR, WAITS for the PR gate, merges it if the only failure is the expected one, dispatches the tag workflow, then opens an adoption PR in EVERY consumer. Minutes, mostly waiting on CI.",
+				"detail": "DRY RUN by default — prints the plan and stops. Applied, this bumps FALLBACK_DEVKIT_REF, opens the prepare PR, WAITS for the PR gate, merges it if the only failure is the expected one, dispatches the tag workflow, then opens an adoption PR in each consumer you tick. Minutes, mostly waiting on CI.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -1105,6 +1085,9 @@
 					"devkit",
 					"release",
 					"${input:releaseLevel}",
+					// One token, not a flag and a value: `plan_command` drops empty
+					// arguments, and a flag whose value went with them is left dangling.
+					"--projects=${input:adoptProjects}",
 					"${input:sweepApply}"
 				],
 				"icon": {
@@ -1120,8 +1103,13 @@
 				"problemMatcher": []
 			},
 			{
+				// The consumers are ticked, not typed. `--all` is still what the 03:00
+				// pass and the release pipeline pass, and it is what ticking every box
+				// amounts to -- but a click that could only ever mean "all five" made the
+				// one thing a human is at the dropdown for, adopting somewhere and not
+				// everywhere, a terminal command instead.
 				"label": "Devkit: Upgrade Projects",
-				"detail": "DRY RUN by default. Adopt the current devkit release in every consumer that is behind, one PR per repo — the catch-up click for a night the 03:00 pass did not run. A consumer already current costs a fetch; one whose adoption PR is already open is left alone.",
+				"detail": "DRY RUN by default. Adopt the current devkit release in each consumer you tick, one PR per repo — the catch-up click for a night the 03:00 pass did not run. A consumer already current costs a fetch; one whose adoption PR is already open is left alone.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -1134,7 +1122,7 @@
 					"--",
 					"python",
 					"scripts/upgrade-project.py",
-					"--all",
+					"${input:adoptProjects}",
 					"${input:sweepApply}"
 				],
 				"options": {
@@ -1297,34 +1285,6 @@
 				"problemMatcher": []
 			},
 			{
-				"label": "Ports: Show Checkout Allocations",
-				"detail": "Print the *_HOST_PORT block for each selected checkout. Use it to rebuild .env files after worktree changes rather than picking free-looking numbers.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/log-wrap.py",
-					"Ports: Show Checkout Allocations",
-					"--",
-					"python",
-					"scripts/devkit_ports.py",
-					"${input:project}"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "plug",
-					"color": "terminal.ansiBlue"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
 				"label": "Agents: Open Tabs (External Terminal)",
 				"detail": "Choose Claude or Codex, then open a new Windows Terminal window with one tab per worktree. Machine-scoped, so it takes no project. The Carameli tabs also mount ../VanillaLand as writable.",
 				"type": "process",
@@ -1435,6 +1395,43 @@
 								"carameli",
 								"ibkr_trader",
 								"devkit",
+								"data-lake",
+								"sports_betting"
+							]
+						}
+					]
+				}
+			},
+			{
+				// MAINTAINED BY new-project.py, like `project`: `insert_picker_option`
+				// names both, so a registered project reaches this list without anyone
+				// remembering, and a retired one leaves it.
+				//
+				// It lists the registry MINUS devkit, and that exclusion is a correctness
+				// requirement rather than tidiness. devkit is the checkout a release is
+				// pulled *from*, and `upgrade-project.py` treats a checkout that was named
+				// and cannot be a target as an operator error -- so one stray tick would
+				// exit 2 for the whole run, where `--all` skips devkit silently.
+				//
+				// Ticks are remembered rather than cleared: it is the same set of
+				// consumers most nights, and both clicks that ask this share one key, so
+				// the catch-up run offers whatever the release chose.
+				"id": "adoptProjects",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which consumers should adopt this devkit release?",
+					"key": "adoptProjects",
+					"multiPick": true,
+					"multiPickStorage": "workspace",
+					"separator": ",",
+					"optionGroups": [
+						{
+							"label": "Select one or more consumers",
+							"minCount": 1,
+							"options": [
+								"carameli",
+								"ibkr_trader",
 								"data-lake",
 								"sports_betting"
 							]
@@ -1594,6 +1591,31 @@
 						}
 					]
 				}
+			},
+			{
+				// `testScope`'s counterpart, and the same two branches for the same
+				// reason: every project's lint-all.py accepts `--changed`, and the
+				// empty value is dropped by devkit_project.py before exec rather than
+				// reaching argparse as a stray positional.
+				//
+				// The default is the WIDE scope, unlike a "changed only" default would
+				// be, because lint rewrites what it reads: a run scoped to the diff
+				// leaves the rest of the tree unformatted, and the click that most
+				// often precedes a commit should be the one that cannot miss a file.
+				"id": "lintScope",
+				"type": "pickString",
+				"description": "How much of the checkout to lint",
+				"options": [
+					{
+						"label": "Everything (default)",
+						"value": ""
+					},
+					{
+						"label": "Changed only — the working-tree diff",
+						"value": "--changed"
+					}
+				],
+				"default": ""
 			},
 			{
 				// The one picker in this file where an accidental Enter spends money, so the
