@@ -79,7 +79,7 @@ import string
 import subprocess
 import sys
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -2978,6 +2978,73 @@ def build_targets(
     return tuple(targets)
 
 
+def box_image_tags(config: Mapping[str, object] | None, project_name: str) -> tuple[str, ...]:
+    """The images a box *built for itself*, which `reap` has to delete by name.
+
+    `compose down -v` removes containers, the network and the volumes, and does not
+    touch images -- `docker` has no per-project image verb, because an image is not
+    owned by the project that built it. So every reaped box left its build behind, and
+    nothing downstream collected them: `docker system prune -af` is the only thing that
+    would, and the scheduled prune is `--idle-only`, which skips whenever the engine is
+    down (`docker-maint.prune_verdict`). Measured on this workstation 2026-08-26, after
+    the leak had been running for a week: 17 orphan images from 9 destroyed boxes,
+    7.4 GB, against a machine reporting 22 GB free at session start.
+
+    **The gate is that the tag carries the box's own project name**, and it is the whole
+    safety argument rather than a tidiness rule. A project is free to pin a fixed
+    `image:` on a built service, and that tag is then shared by every box on the machine
+    -- deleting it would force a rebuild in each of them, which is the same leak
+    inverted and far more annoying. A tag containing `COMPOSE_PROJECT_NAME` cannot be
+    shared, because that name is unique to one box by construction. Nothing is guessed
+    about *how* a project spells its tags: compose resolves them and this reads the
+    answer, which is what keeps a vendored file free of one repo's naming.
+
+    Services with no `build` are skipped for the same reason from the other end: their
+    image came from a registry, is shared with every other stack on the machine, and was
+    never this box's to delete.
+    """
+    raw = (config or {}).get("services")
+    tags: list[str] = []
+    for _name, svc in (raw if isinstance(raw, dict) else {}).items():
+        if not isinstance(svc, dict) or "build" not in svc:
+            continue
+        tag = svc.get("image")
+        if not isinstance(tag, str) or project_name not in tag:
+            continue
+        if tag not in tags:
+            tags.append(tag)
+    return tuple(tags)
+
+
+def remove_images(tags: Sequence[str]) -> tuple[bool, str]:
+    """`docker image rm` the named tags. `(ok, message)`; never fatal.
+
+    A reap that cleaned everything else must not report failure because an image was
+    already gone or the daemon went away mid-teardown -- the box is destroyed either
+    way, and the caller's exit code is about the *stack*, per `apply_reap`. So the
+    message says what happened and the boolean only gates the wording.
+    """
+    if not tags:
+        return True, ""
+    try:
+        completed = subprocess.run(
+            ["docker", "image", "rm", *tags],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+            creationflags=sweep.NO_WINDOW,
+        )
+    except FileNotFoundError:
+        return False, "docker is not on PATH — the box's images were left behind"
+    except subprocess.TimeoutExpired:
+        return False, "docker image rm timed out after 120s — images may survive"
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        return False, f"could not remove {len(tags)} box image(s): {detail}"
+    return True, f"removed {len(tags)} image(s) built by the box: {', '.join(tags)}"
+
+
 def compose_config(
     path: Path, project_name: str, timeout: float = 120.0
 ) -> Mapping[str, object] | None:
@@ -3953,11 +4020,24 @@ def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
     leak a container set and a volume set per task — which is the thing that makes the
     WSL2 VHDX the next bottleneck. So the box goes, and the exit code says the stack
     needs a look.
+
+    **The images the box built are read before the teardown and deleted after it**, and
+    both halves of that order are load-bearing. `compose config` is what resolves the
+    tags (`box_image_tags`), and it can only be asked while the box's compose file is
+    still on disk — which the `git worktree remove` below ends. The delete has to come
+    after `down`, because an image with a container on it is in use. Between those two
+    points is the only window where both are true.
+
+    A failed image removal does not fail the reap either, for the reason the stack
+    teardown gives: the box is destroyed and the slot is reclaimed regardless, and a
+    leaked image costs disk rather than work. It does count toward `stack_ok`, because
+    "the stack needs a look" is exactly what it means.
     """
     root = workspace.parent
     notes: list[str] = []
     stack_ok = True
     if plan.stack_down:
+        images = box_image_tags(compose_config(Path(plan.path), plan.box), plan.box)
         stack_ok, message = compose_down(Path(plan.path), plan.box)
         notes.append(f"{'' if stack_ok else '[warn] '}{message}")
         if not stack_ok:
@@ -3965,6 +4045,10 @@ def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
                 f"the box was still removed, but its containers and volumes may survive "
                 f"as project {plan.box} — check `docker compose ls` and prune by hand"
             )
+        if stack_ok and images:
+            images_ok, image_note = remove_images(images)
+            notes.append(f"{'' if images_ok else '[warn] '}{image_note}")
+            stack_ok = stack_ok and images_ok
 
     source = root / plan.project
     ran, failed, error = run_steps(source, plan.steps)

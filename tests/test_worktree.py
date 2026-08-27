@@ -4507,6 +4507,149 @@ def test_an_unreadable_config_plans_no_targets_rather_than_guessing():
     assert worktree.build_targets({"services": None}) == ()
 
 
+def test_the_images_a_box_built_for_itself_are_named_for_removal():
+    """`compose down -v` leaves images behind, so `reap` has to delete them by name.
+
+    Both built tags, deduplicated: `app` and `worker` share one, and removing it twice
+    would make the second `docker image rm` fail on an image that is already gone.
+    """
+    assert worktree.box_image_tags(_SHARED_TAG_CONFIG, "c--preview-x") == (
+        "carameli-app-c--preview-x",
+        "carameli-db-backup-c--preview-x",
+    )
+
+
+def test_a_built_tag_that_is_not_the_box_s_own_is_never_removed():
+    """The safety property, and the reason the gate is the project name rather than the
+    presence of a `build:`. A project is free to pin a fixed tag on a built service, and
+    every box on the machine then shares it -- deleting that on one reap forces a
+    rebuild in all the others, which is this leak inverted and worse."""
+    config = {
+        "services": {
+            "app": {"build": {"context": "."}, "image": "carameli-app:latest"},
+            "mine": {"build": {"context": "."}, "image": "carameli-app-c--preview-x"},
+        }
+    }
+    assert worktree.box_image_tags(config, "c--preview-x") == ("carameli-app-c--preview-x",)
+
+
+def test_a_stock_image_is_never_removed_by_a_reap():
+    """`db` came from a registry and is shared with every other stack on the machine.
+    `postgres:18` deleted on a reap is a 650 MB re-pull for the next box."""
+    assert "postgres:16" not in worktree.box_image_tags(_SHARED_TAG_CONFIG, "c--preview-x")
+
+
+def test_an_unreadable_config_removes_no_images_rather_than_guessing():
+    """Same collapse-to-`None` contract `build_targets` relies on, pointed at the
+    destructive half: a box docker cannot describe loses no images at all."""
+    assert worktree.box_image_tags(None, "c--preview-x") == ()
+    assert worktree.box_image_tags({}, "c--preview-x") == ()
+    assert worktree.box_image_tags({"services": None}, "c--preview-x") == ()
+
+
+def test_removing_no_images_asks_docker_nothing(monkeypatch):
+    """A box that built nothing must not spawn a `docker image rm` with no arguments --
+    which is a usage error, and would report a failed teardown on a clean reap."""
+    monkeypatch.setattr(
+        worktree.subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("docker was called with no images to remove"),
+    )
+    assert worktree.remove_images(()) == (True, "")
+
+
+def test_a_failed_image_removal_is_reported_but_is_not_fatal(monkeypatch):
+    """Disk, not work. The box is destroyed and its slot reclaimed either way, so the
+    message has to say what survived rather than aborting a reap that has already
+    removed the tree."""
+    monkeypatch.setattr(
+        worktree.subprocess, "run", lambda *a, **k: _completed(1, stderr="image is in use")
+    )
+    ok, message = worktree.remove_images(("carameli-app-c--x",))
+    assert not ok
+    assert "image is in use" in message
+
+
+def test_a_missing_docker_leaves_the_images_rather_than_raising(monkeypatch):
+    """`reap` runs when the daemon is down -- that is the case `compose_down` already
+    tolerates, and an unhandled `FileNotFoundError` here would abort the reap after the
+    stack teardown had already reported the same condition politely."""
+
+    def boom(*a, **k):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(worktree.subprocess, "run", boom)
+    ok, message = worktree.remove_images(("carameli-app-c--x",))
+    assert not ok
+    assert "docker is not on PATH" in message
+
+
+def test_the_reap_reads_the_image_tags_before_it_tears_the_stack_down(tmp_path, monkeypatch):
+    """The ordering is the fix. `compose config` can only be asked while the box's
+    compose file is on disk, and an image cannot be deleted while a container holds it
+    -- so the read must precede `down` and the delete must follow it. Getting this
+    backwards leaves the images behind exactly as before, silently.
+    """
+    workspace = tmp_path / "ws.jsonc"
+    workspace.write_text("{}", encoding="utf-8")
+    (tmp_path / "demo").mkdir()
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        worktree,
+        "compose_config",
+        lambda path, name, **k: (
+            calls.append("config")
+            or {"services": {"app": {"build": {}, "image": f"demo-app-{name}"}}}
+        ),
+    )
+    monkeypatch.setattr(
+        worktree, "compose_down", lambda *a: (calls.append("down"), (True, "torn down"))[1]
+    )
+    monkeypatch.setattr(
+        worktree,
+        "remove_images",
+        lambda tags: (calls.append(f"rm:{','.join(tags)}"), (True, "removed 1"))[1],
+    )
+    monkeypatch.setattr(worktree, "run_steps", lambda *a: ([], "", ""))
+    monkeypatch.setattr(worktree, "record_reap", lambda *a: None)
+
+    ok, notes = worktree.apply_reap(
+        reaped_plan(box="demo--x-0806", project="demo", stack_down=True), workspace
+    )
+    assert ok
+    assert calls == ["config", "down", "rm:demo-app-demo--x-0806"]
+    assert any("removed 1" in note for note in notes)
+
+
+def test_a_failed_teardown_removes_no_images(tmp_path, monkeypatch):
+    """An image whose container is still up cannot be deleted, and trying adds a second
+    confusing failure to a reap that has already said the stack needs a look."""
+    workspace = tmp_path / "ws.jsonc"
+    workspace.write_text("{}", encoding="utf-8")
+    (tmp_path / "demo").mkdir()
+
+    monkeypatch.setattr(
+        worktree,
+        "compose_config",
+        lambda path, name, **k: {"services": {"app": {"build": {}, "image": f"a-{name}"}}},
+    )
+    monkeypatch.setattr(worktree, "compose_down", lambda *a: (False, "docker is not on PATH"))
+    monkeypatch.setattr(
+        worktree,
+        "remove_images",
+        lambda tags: pytest.fail("images were removed after a failed teardown"),
+    )
+    monkeypatch.setattr(worktree, "run_steps", lambda *a: ([], "", ""))
+    monkeypatch.setattr(worktree, "record_reap", lambda *a: None)
+
+    ok, _ = worktree.apply_reap(
+        reaped_plan(box="demo--x-0806", project="demo", stack_down=True), workspace
+    )
+    # The box still went: a daemon that happened to be down must never pin a checkout.
+    assert not ok
+
+
 def test_compose_config_reads_the_resolved_stack_and_swallows_every_failure(monkeypatch):
     """A build-planning aid, so it must never be the thing that fails a box.
 
