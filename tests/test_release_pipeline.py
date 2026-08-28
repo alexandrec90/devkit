@@ -147,6 +147,87 @@ def test_a_fully_green_gate_proceeds():
     assert verdict == rp.VERDICT_PROCEED
 
 
+# --- waiting for the gate to settle -------------------------------------------
+
+
+def watcher(monkeypatch, watch_results, rollups):
+    """Drive `wait_for_checks` over scripted `gh` outcomes; returns the calls made."""
+    calls: list[list[str]] = []
+    results = iter(watch_results)
+    payloads = iter(rollups)
+
+    def run(cmd, cwd=None, capture=True):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, next(results))
+
+    monkeypatch.setattr(rp, "_run", run)
+    monkeypatch.setattr(rp, "pr_rollup", lambda _devkit, _number: next(payloads))
+    monkeypatch.setattr(rp.time, "sleep", lambda _seconds: None)
+    return calls
+
+
+def test_a_rollup_that_is_still_running_does_not_end_the_wait(tmp_path, monkeypatch):
+    """The failure this encodes stranded the v0.11.8 release. `--watch` lost the enqueue
+    race and exited 1 with "no checks reported"; by the time the retry read the rollup
+    the gate had appeared, so a non-empty rollup ended the wait while both jobs were
+    still running -- and `gate_verdict` turned that PENDING gate into a STOP."""
+    calls = watcher(
+        monkeypatch,
+        watch_results=[1, 1],
+        rollups=[
+            [check("A", conclusion="", status="IN_PROGRESS")],
+            [check(rp.GATE_TEST_JOB, conclusion="FAILURE")],
+        ],
+    )
+
+    rp.wait_for_checks(tmp_path, 256)
+
+    assert len(calls) == 2
+    assert all(call == ["gh", "pr", "checks", "256", "--watch"] for call in calls)
+
+
+def test_a_settled_rollup_ends_the_wait(tmp_path, monkeypatch):
+    """The other half: `--watch` exits 1 for a red gate too, and once nothing is running
+    that red *is* the answer. Re-watching it would cost another blocking call and change
+    no verdict."""
+    calls = watcher(
+        monkeypatch,
+        watch_results=[1],
+        rollups=[[check(rp.GATE_TEST_JOB, conclusion="FAILURE")]],
+    )
+
+    rp.wait_for_checks(tmp_path, 256)
+
+    assert len(calls) == 1
+
+
+def test_an_empty_rollup_keeps_waiting(tmp_path, monkeypatch):
+    """ "No checks reported" with nothing in the rollup is the race itself -- the case
+    the retry loop was written for, which the settled check must not regress."""
+    calls = watcher(
+        monkeypatch,
+        watch_results=[1, 0],
+        rollups=[[]],
+    )
+
+    rp.wait_for_checks(tmp_path, 256)
+
+    assert len(calls) == 2
+
+
+def test_the_retry_is_bounded_by_the_deadline(tmp_path, monkeypatch):
+    """Waiting on a settled rollup is now the only way out of the loop, so the deadline
+    is the thing standing between a gate that never settles and a pipeline that never
+    returns. It reports WAIT and stops, which a human can act on."""
+    clock = iter([0.0, rp.CHECKS_APPEAR_TIMEOUT + 1.0])
+    monkeypatch.setattr(rp.time, "monotonic", lambda: next(clock))
+    calls = watcher(monkeypatch, watch_results=[1], rollups=[])
+
+    rp.wait_for_checks(tmp_path, 256)
+
+    assert len(calls) == 1
+
+
 # --- reading the failures out of the artifact ---------------------------------
 
 

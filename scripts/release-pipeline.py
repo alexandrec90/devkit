@@ -598,10 +598,20 @@ def wait_for_checks(devkit: Path, number: int) -> None:
         # queued yet). Only the second is worth retrying, and only briefly.
         if result.returncode == 0 or time.monotonic() > deadline:
             return
-        rollup = pr_rollup(devkit, number)
-        if rollup:
+        # A non-empty rollup is not proof the wait is over: the losing side of the
+        # enqueue race sees the checks appear *as* it gives up, so the rollup that
+        # ends the retry is the one that is still running. Returning on it hands
+        # `gate_verdict` a PENDING gate, which is a WAIT, which stops the release --
+        # that is what stranded #256. Only a settled rollup ends the wait.
+        if pr_rollup_settled(devkit, number):
             return
         time.sleep(CHECKS_APPEAR_INTERVAL)
+
+
+def pr_rollup_settled(devkit: Path, number: int) -> bool:
+    """True when `number` reports checks and none of them is still running."""
+    rollup = pr_rollup(devkit, number)
+    return bool(rollup) and gate_state(rollup).state != "PENDING"
 
 
 def pr_rollup(devkit: Path, number: int) -> list[dict]:
