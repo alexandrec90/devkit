@@ -99,7 +99,6 @@ scripts/preview-task.py::stack_projects
 scripts/preview-task.py::write_menu
 scripts/reclaim.py::banner
 scripts/reclaim.py::devkit_dir
-scripts/reclaim.py::run_reconcile
 scripts/reclaim.py::running_container_names
 scripts/reclaim.py::tempdir
 scripts/reclaim.py::top_memory_holders
