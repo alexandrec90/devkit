@@ -144,12 +144,22 @@ DOCKER_DESKTOP_EXE = Path(r"C:\Program Files\Docker\Docker\Docker Desktop.exe")
 POLL_TIMEOUT = 90
 POLL_INTERVAL = 5
 
-# A cold start straight after a compaction is not a plain start: the engine re-mounts a
-# freshly rewritten VHDX and then brings back every `restart: unless-stopped` container
-# on the machine. Measured at over 90s on 2026-08-20, which is how a prune that had just
-# reclaimed 16 GB came to print `PRUNE DONE, BUT ENGINE DID NOT COME BACK` and exit 1 --
-# a scheduled job reporting failure for work it had completed.
-COMPACT_POLL_TIMEOUT = 300
+# A **cold** start is not a plain start: the engine re-mounts the VHDX and then brings
+# back every `restart: unless-stopped` container on the machine. Measured at over 90s on
+# 2026-08-20, which is how a prune that had just reclaimed 16 GB came to print
+# `PRUNE DONE, BUT ENGINE DID NOT COME BACK` and exit 1 -- a scheduled job reporting
+# failure for work it had completed.
+#
+# What that first diagnosis got too narrow was *which* starts are cold. It was written
+# for the compaction path and named after it, but the property that makes a start cold is
+# `wsl --shutdown` -- and `stop_docker` runs one on every stop. So `restart-engine` and
+# `fix`, which are built on that same stop, were polling the warm budget for a cold
+# start. On 2026-08-28 `restart-engine` printed `ENGINE STILL NOT RESPONDING` and exited
+# 1 on an engine that answered `docker version` about 45s later with no further
+# intervention. That verdict is not cosmetic: it advises a factory reset or a reboot, and
+# it is what a machine-reclaim run leaves behind whenever its stop step is followed by an
+# engine restart.
+COLD_POLL_TIMEOUT = 300
 
 
 def banner(text: str) -> str:
@@ -330,10 +340,16 @@ def generic_down(extra: list[str] | None = None) -> int:
 
 
 def generic_restart_engine() -> int:
+    """Stop the engine and start it again, polling the **cold** budget.
+
+    `stop_docker` runs `wsl --shutdown`, so what comes back is a cold start and
+    `COLD_POLL_TIMEOUT` is the budget that describes it -- see the note there for the
+    verdict this used to print on an engine that was merely still coming up.
+    """
     print(banner("Docker Engine Restart (generic)"))
     stop_docker()
     start_docker()
-    if poll_engine():
+    if poll_engine(timeout=COLD_POLL_TIMEOUT):
         print(banner("DOCKER ENGINE READY"))
         return 0
     print(banner("ENGINE STILL NOT RESPONDING"))
@@ -342,13 +358,18 @@ def generic_restart_engine() -> int:
 
 
 def generic_fix() -> int:
-    """More aggressive than restart: two stop/start rounds with a longer poll."""
+    """More aggressive than restart: two stop/start rounds, and the same cold budget.
+
+    `POLL_TIMEOUT * 2` was this mode's own way of saying "a restart needs longer", chosen
+    before `COLD_POLL_TIMEOUT` existed. It is the same cold start and it gets the same
+    number, so the two modes cannot disagree about how long one takes.
+    """
     print(banner("Docker Desktop Fix (generic, aggressive)"))
     stop_docker()
     time.sleep(5)
     stop_docker()  # second pass catches processes respawned by the first
     start_docker()
-    if poll_engine(timeout=POLL_TIMEOUT * 2):
+    if poll_engine(timeout=COLD_POLL_TIMEOUT):
         print(banner("DOCKER ENGINE READY"))
         return 0
     print(banner("DOCKER STILL WEDGED"))
@@ -517,7 +538,7 @@ def generic_prune(idle_only: bool = False) -> int:
         print("  [skip] No Docker WSL VHDX found at the expected paths.")
 
     start_docker()
-    if poll_engine(timeout=COMPACT_POLL_TIMEOUT):
+    if poll_engine(timeout=COLD_POLL_TIMEOUT):
         print(banner("PRUNE COMPLETE -- ENGINE READY"))
         return 0
     print(banner("PRUNE DONE, BUT ENGINE DID NOT COME BACK"))

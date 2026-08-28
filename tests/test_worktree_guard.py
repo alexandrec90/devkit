@@ -477,6 +477,22 @@ def test_the_deny_message_names_the_way_out():
     assert "provision b --yes" in message
 
 
+def test_the_deny_message_says_how_to_report_the_block_as_wrong():
+    """The block is where the reporting channel has to be named, because it is the only
+    place both runtimes reach.
+
+    The instruction to file a harness defect lives in `.claude/rules/engineering.md`,
+    and Codex reads straight past `.claude/rules/`: no `CLAUDE.md` names the reporter,
+    `sync-codex-context.py` mirrors only `.claude/skills/`, and the adapter discards
+    SessionStart output. The ledger measured the consequence -- 1176 rows on
+    2026-08-28, of which Codex had written seven guard-blocks and *zero* reports. An
+    agent that cannot see the channel routes around the gate instead, which is exactly
+    what the guardrail asks it not to do.
+    """
+    message = guard.deny_message("carameli", "a.py", "/ws/.worktrees/b", "b", [])
+    assert "report-harness-defect.py" in message
+
+
 def test_the_deny_message_does_not_tell_the_agent_to_reap():
     """It used to, and that now contradicts both `reconcile` and the /ship skill's
     "do not clean up after yourself".
@@ -1816,6 +1832,74 @@ def test_an_unterminated_heredoc_swallows_the_rest_like_a_shell_does():
 
 def test_redirect_targets_reads_a_descriptor_duplication_as_no_file():
     assert guard.redirect_targets("python x.py 2>&1") == []
+
+
+@pytest.mark.parametrize(
+    "tokens, expected",
+    [
+        # A duplication names no file, so it consumes nothing after it.
+        (["cp", "a", "b", "2>&1"], ["cp", "a", "b"]),
+        (["cp", "a", "b", "1>&2"], ["cp", "a", "b"]),
+        (["cp", "a", "b", ">&2"], ["cp", "a", "b"]),
+        # Detached: the operator alone, whose target is the *next* token.
+        (["cp", "a", "b", ">", "log"], ["cp", "a", "b"]),
+        (["cp", "a", "b", "2>", "err.txt"], ["cp", "a", "b"]),
+        (["cat", "<", "in.txt"], ["cat"]),
+        # Attached: the target rides in the same token.
+        (["cp", "a", "b", ">log"], ["cp", "a", "b"]),
+        (["cp", "a", "b", "2>>out.txt"], ["cp", "a", "b"]),
+        # Nothing to strip leaves the list alone, including a `>` inside a word.
+        (["cp", "a", "b"], ["cp", "a", "b"]),
+        (["echo", "a->b"], ["echo", "a->b"]),
+    ],
+)
+def test_strip_redirections_drops_the_operator_and_its_target_together(tokens, expected):
+    """`strip_redirections` is what keeps a redirection out of the operand list.
+
+    Named directly rather than only through `shell_write_targets`, because the three
+    token shapes it separates -- duplication, detached, attached -- are the whole of its
+    job, and a caller-level test only ever exercises the two that a `cp` happens to hit.
+    """
+    assert guard.strip_redirections(tokens) == expected
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        # The reported false positive: `2>&1` arrived as an ordinary operand, and `cp`
+        # takes its last one, so the block named a path nobody wrote.
+        ("cp devkit/a.ts devkit/b.ts 2>&1 | tail -c 200", ["devkit/b.ts"]),
+        ("cp devkit/a.ts devkit/b.ts 1>&2", ["devkit/b.ts"]),
+        # The quieter half: with any trailing redirection the real destination of a
+        # `SHELL_WRITE_LAST` verb was never measured at all.
+        ("cp devkit/a.ts devkit/b.ts > log", ["log", "devkit/b.ts"]),
+        ("cp devkit/a.ts devkit/b.ts >log", ["log", "devkit/b.ts"]),
+        ("mv devkit/a.ts devkit/b.ts >> log", ["log", "devkit/b.ts"]),
+        ("cp devkit/a.ts devkit/b.ts 2> err.txt", ["err.txt", "devkit/b.ts"]),
+        # An input redirection is not a write, and its operand is not a target.
+        ("cat < in.txt > devkit/out.txt", ["devkit/out.txt"]),
+        # A write-all verb keeps its own operands and gains no phantom one.
+        ("tee devkit/out.txt 2>&1", ["devkit/out.txt"]),
+    ],
+)
+def test_a_redirection_is_never_read_as_an_operand(command, expected):
+    """`redirect_targets` walked the text and read what a statement redirects to; nothing
+    took those words back out of the token list, so the operand loop saw them too.
+
+    Both directions were wrong. `2>&1` became a relative path that resolved into the
+    checkout and blocked with "an edit to 2>&1 would land on it" -- unre-issuable, and
+    the reported defect. And because `cp`/`mv` are judged on `operands[-1]`, a trailing
+    redirection displaced the real destination, so the write this tier exists to catch
+    went unmeasured. It failed closed only because both spellings happen to be relative.
+    """
+    assert guard.shell_write_targets(command) == expected
+
+
+def test_a_redirection_does_not_displace_the_ref_of_a_branch_move():
+    """`switch_targets` runs the same operand loop, so it had the same hole: a trailing
+    `2>&1` was a candidate ref. Stripping in one helper is what keeps the two tiers
+    agreeing about what an operand is."""
+    assert guard.switch_targets("git switch -c agent/x 2>&1") == [("", "agent/x")]
 
 
 def test_an_interpreter_script_is_the_documented_gap():

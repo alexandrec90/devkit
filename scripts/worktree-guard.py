@@ -635,6 +635,57 @@ def redirect_targets(statement: str) -> list[str]:
     return found
 
 
+# The three shapes a redirection arrives in, as whole tokens.
+#
+# `DUPLICATES` names no file -- `2>&1`, `1>&2`, `>&2` duplicate a descriptor -- so it
+# consumes nothing after it. `DETACHED` is the operator alone (`>`, `>>`, `2>`, `&>`,
+# `<`), whose target is the *next* token. `ATTACHED` carries its target in the same
+# token (`>log`, `2>>out.txt`). Input redirections are included because `< in.txt` is
+# not a write either, and its operand is no more a write target than a `>`'s is.
+REDIRECTION_DUPLICATES = re.compile(r"^[0-9&]*>&[0-9-]+$")
+REDIRECTION_DETACHED = re.compile(r"^[0-9&]*(?:>>?|<)$")
+REDIRECTION_ATTACHED = re.compile(r"^[0-9&]*(?:>>?|<)[^>&<]")
+
+
+def strip_redirections(tokens: list[str]) -> list[str]:
+    """`tokens` with every redirection -- operator and target word -- removed.
+
+    `redirect_targets` already reads what a statement redirects *to*, walking the raw
+    text so quoting is respected. What nothing did was take those words back out of the
+    token list, and the operand loops in `shell_write_targets` and `switch_targets` run
+    over that list -- so a redirection arrived as an ordinary operand.
+
+    Both halves of that were wrong, and the quieter half is the dangerous one:
+
+    - **The bogus operand blocks.** `cp a b 2>&1 | tail -c 200` yielded `2>&1` as a
+      target, which is relative, so it resolved into the checkout and was refused with
+      "an edit to 2>&1 would land on it" -- a path no one wrote and no one can re-issue
+      against. That is what was reported.
+    - **The real destination stops being checked.** `cp`/`mv` are `SHELL_WRITE_LAST`:
+      the guard takes `operands[-1]`. With any trailing redirection the last operand is
+      the redirection, so `cp secret frontend/x.ts > log` measured `log` and never
+      looked at `frontend/x.ts`. It failed closed only by luck -- both spellings are
+      relative, so both resolved inside the checkout and blocked anyway -- and luck is
+      not the property this tier is supposed to have.
+
+    Stripping here rather than filtering at each use keeps the two tiers agreeing about
+    what an operand is, which is the disagreement that produced this.
+    """
+    kept: list[str] = []
+    drop_next = False
+    for token in tokens:
+        if drop_next:
+            drop_next = False
+            continue
+        if REDIRECTION_DUPLICATES.match(token) or REDIRECTION_ATTACHED.match(token):
+            continue
+        if REDIRECTION_DETACHED.match(token):
+            drop_next = True
+            continue
+        kept.append(token)
+    return kept
+
+
 def _powershell_named_value(tokens: list[str], names: frozenset[str]) -> str:
     """The value after the first matching PowerShell path option, or ""."""
     for index, token in enumerate(tokens[:-1]):
@@ -775,7 +826,7 @@ def shell_write_targets(command: str) -> list[str]:
     for statement in split_statements(strip_heredocs(command)):
         for target in redirect_targets(statement):
             add(target)
-        tokens = shell_tokens(statement)
+        tokens = strip_redirections(shell_tokens(statement))
         moved = _chdir_operand(tokens)
         if moved is not None:
             base = moved if _is_rooted(moved) or not base else f"{base}/{moved}"
@@ -988,7 +1039,7 @@ def switch_targets(command: str) -> list[tuple[str, str]]:
     # a refusal with no box and nothing to re-issue -- is the most expensive one to
     # earn by accident.
     for statement in split_statements(strip_heredocs(command)):
-        tokens = shell_tokens(statement)
+        tokens = strip_redirections(shell_tokens(statement))
         moved = _chdir_operand(tokens)
         if moved is not None:
             base = moved if _is_rooted(moved) or not base else f"{base}/{moved}"
@@ -1513,6 +1564,8 @@ def deny_message(
     ]
     if notes:
         lines += ["", *[f"note: {note}" for note in notes]]
+    if harness_events is not None:
+        lines += ["", harness_events.REPORT_HINT]
     return "\n".join(lines)
 
 
