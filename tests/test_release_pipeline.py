@@ -215,6 +215,24 @@ def test_an_empty_rollup_keeps_waiting(tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
+def test_only_a_rollup_with_nothing_running_counts_as_settled(tmp_path, monkeypatch):
+    """`pr_rollup_settled` is the predicate the retry turns on, so the three answers it
+    has to keep apart are worth pinning directly: nothing reported yet, reported but
+    still running, and reported and done -- of which only the last ends the wait."""
+    monkeypatch.setattr(rp, "pr_rollup", lambda _devkit, _number: [])
+    assert rp.pr_rollup_settled(tmp_path, 256) is False
+
+    monkeypatch.setattr(
+        rp, "pr_rollup", lambda _devkit, _number: [check("A", conclusion="", status="QUEUED")]
+    )
+    assert rp.pr_rollup_settled(tmp_path, 256) is False
+
+    monkeypatch.setattr(
+        rp, "pr_rollup", lambda _devkit, _number: [check(rp.GATE_TEST_JOB, conclusion="FAILURE")]
+    )
+    assert rp.pr_rollup_settled(tmp_path, 256) is True
+
+
 def test_the_retry_is_bounded_by_the_deadline(tmp_path, monkeypatch):
     """Waiting on a settled rollup is now the only way out of the loop, so the deadline
     is the thing standing between a gate that never settles and a pipeline that never
