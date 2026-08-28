@@ -1835,6 +1835,35 @@ def test_redirect_targets_reads_a_descriptor_duplication_as_no_file():
 
 
 @pytest.mark.parametrize(
+    "tokens, expected",
+    [
+        # A duplication names no file, so it consumes nothing after it.
+        (["cp", "a", "b", "2>&1"], ["cp", "a", "b"]),
+        (["cp", "a", "b", "1>&2"], ["cp", "a", "b"]),
+        (["cp", "a", "b", ">&2"], ["cp", "a", "b"]),
+        # Detached: the operator alone, whose target is the *next* token.
+        (["cp", "a", "b", ">", "log"], ["cp", "a", "b"]),
+        (["cp", "a", "b", "2>", "err.txt"], ["cp", "a", "b"]),
+        (["cat", "<", "in.txt"], ["cat"]),
+        # Attached: the target rides in the same token.
+        (["cp", "a", "b", ">log"], ["cp", "a", "b"]),
+        (["cp", "a", "b", "2>>out.txt"], ["cp", "a", "b"]),
+        # Nothing to strip leaves the list alone, including a `>` inside a word.
+        (["cp", "a", "b"], ["cp", "a", "b"]),
+        (["echo", "a->b"], ["echo", "a->b"]),
+    ],
+)
+def test_strip_redirections_drops_the_operator_and_its_target_together(tokens, expected):
+    """`strip_redirections` is what keeps a redirection out of the operand list.
+
+    Named directly rather than only through `shell_write_targets`, because the three
+    token shapes it separates -- duplication, detached, attached -- are the whole of its
+    job, and a caller-level test only ever exercises the two that a `cp` happens to hit.
+    """
+    assert guard.strip_redirections(tokens) == expected
+
+
+@pytest.mark.parametrize(
     "command, expected",
     [
         # The reported false positive: `2>&1` arrived as an ordinary operand, and `cp`

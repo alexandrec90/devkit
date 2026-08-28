@@ -12,8 +12,6 @@ scripts/docker-maint.py::banner
 scripts/docker-maint.py::docker_info_ok
 scripts/docker-maint.py::find_delegate
 scripts/docker-maint.py::generic_down
-scripts/docker-maint.py::generic_fix
-scripts/docker-maint.py::generic_restart_engine
 scripts/docker-maint.py::generic_up
 scripts/docker-maint.py::poll_engine
 scripts/docker-maint.py::stop_docker
