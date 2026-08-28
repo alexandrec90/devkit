@@ -187,6 +187,22 @@ Each of these has already been violated by something:
   is someone noticing. And the arm returns before `reapable`, so it re-asks
   `holds_uncommitted` itself — that gate being inert for the honest caller is precisely
   how the husk case below leaked.
+- **The work can land under a PR that was never this box's, and every escape above is
+  keyed on a PR.** `MERGE_CAN_BE_STALE_ABOUT` asks *did this box's PR merge*, so a box
+  whose commits were carried in by some other branch's squash has no PR to consult and
+  no verdict that moves: carameli's `pr229-merge` sat at `needs-branch` for 28 hours on
+  a machine already at 16/16 slots, with `--force` — which discards uncommitted work —
+  once again the only exit. Commit identity cannot see it, because a squash rewrites the
+  shas that `--cherry-pick` and `merge-base --is-ancestor` compare by. The evidence that
+  survives the rewrite is the **tree**: `head_tree_landed` asks whether the box's
+  `HEAD^{tree}` appears among the last `TREE_SCAN_DEPTH` commits of
+  `refs/remotes/origin/<default>`, which is a content-level *this is already on the
+  default branch* and needs no branch, no PR and no network. `reapable` takes it as
+  `work_is_landed`, scoped by `TREE_CAN_SETTLE` to the two verdicts a rewrite can strand
+  and refused outright while the box is dirty — a landed tree says where the *committed*
+  work is and, exactly as with the merge escape, nothing about the edits on top of it.
+  Every unknown reads as *not landed*: no default branch, a failed `git`, a tree older
+  than the scan window.
 - **A box can also stop being a checkout, and that was the third spelling of the same
   leak.** When a `git worktree remove` deletes most of the tree and then dies —
   MAX_PATH, a locked file — what is left is a *husk*: a directory with no `.git`, which

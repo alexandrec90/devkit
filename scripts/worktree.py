@@ -79,7 +79,7 @@ import string
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -187,6 +187,34 @@ SWEEPABLE: frozenset[str] = SAFE_TO_REAP - AWAITS_A_MERGE
 # are uncommitted work, `blocked` is a state nothing here should be guessing at.
 MERGE_CAN_BE_STALE_ABOUT: frozenset[str] = frozenset({sweep.NEEDS_REBRANCH})
 
+# The verdicts a **landed tree** can settle, for the boxes the merge above cannot reach.
+# A squash merge is invisible to commit identity, and the PR is what tells a squashed
+# branch from an abandoned one -- but only while there is a PR to read. There is not,
+# whenever the work left the box under some *other* branch's PR: merge the default branch
+# into a helper branch cut by hand (`pr229-merge`), let the real PR squash-merge, and the
+# box is `needs-branch` -- "commits on a branch it cannot be shipped from" -- with every
+# line of them already on the default branch under a sha nothing here can match. No PR
+# names that branch, so `MERGE_CAN_BE_STALE_ABOUT` never fires and the box is a permanent
+# HOLD: the leak that arm exists to end, arriving through the verdict beside it. It cost
+# a port slot for 28h on a machine holding 16 of 16, and `--force` -- the flag that also
+# discards uncommitted work -- was again the only way out.
+#
+# `head_tree_landed` is the evidence, and it is stronger than a merged PR rather than a
+# weaker substitute for one: an identical tree is not a claim that the work landed, it is
+# the work, byte for byte, already reachable from `origin/<default>`. So this set may hold
+# `needs-branch`, which `MERGE_CAN_BE_STALE_ABOUT` must not -- that verdict's usual
+# meaning is unshipped commits, and a merge says nothing about them while a tree does.
+# `holds_uncommitted` still gates it in `reapable`: a tree answers for what is committed
+# and for nothing sitting on top of it.
+TREE_CAN_SETTLE: frozenset[str] = frozenset({sweep.NEEDS_BRANCH, sweep.NEEDS_REBRANCH})
+
+# How far back along `origin/<default>` `head_tree_landed` looks for the box's tree. The
+# match, when there is one, is near the tip by construction -- the box merged the default
+# branch and then its work landed on it -- so this is a bound on the cost of *not* finding
+# one, and a deep enough one that a box parked for weeks is still recognised. Unfound is
+# reported as not landed, which is the pre-existing refusal.
+TREE_SCAN_DEPTH = 200
+
 
 # A preview box is not a task box, and the distinction is worth a field because every
 # destructive decision in this file turns on it. A task box is where work is *made*, so
@@ -217,6 +245,7 @@ def reapable(
     pr_merged: bool = False,
     pr_closed: bool = False,
     holds_uncommitted: bool = True,
+    work_is_landed: bool = False,
 ) -> bool:
     """May this box be destroyed? The one predicate `reap` and `reconcile` both ask.
 
@@ -302,6 +331,16 @@ def reapable(
     one that takes the `True` default -- which is exactly how this leaked. The gate
     exists to protect work a commit could still rescue; a husk has no such state for it
     to be wrong about.
+
+    `work_is_landed` is the fourth spelling of the same leak, and the first one no PR can
+    answer: the work left the box under a *different* branch's PR, so there is no PR
+    naming this branch for the merge arm to read. `TREE_CAN_SETTLE` carries what that
+    costs and what the evidence is. Two properties keep it narrow. It is **evidence, not
+    policy** -- `head_tree_landed` is the only thing that sets it, and it either found the
+    box's exact tree on `origin/<default>` or it did not, so an offline machine, an
+    unreadable ref and a short scan all report `False` and leave every refusal exactly
+    where it was. And it stays behind `holds_uncommitted`, because a tree is an answer
+    about the commit under the edits and never about the edits.
     """
     if verdict == sweep.SKIPPED:
         return True
@@ -309,6 +348,8 @@ def reapable(
         return pr_merged or pr_closed or not holds_uncommitted
     if verdict in SAFE_TO_REAP:
         return not holds_uncommitted
+    if work_is_landed and not holds_uncommitted and verdict in TREE_CAN_SETTLE:
+        return True
     return pr_merged and not holds_uncommitted and verdict in MERGE_CAN_BE_STALE_ABOUT
 
 
@@ -1688,6 +1729,7 @@ def reap_decision(
     holds_uncommitted: bool = True,
     awaiting_pr: bool = False,
     unclaimed: bool = False,
+    work_is_landed: bool = False,
 ) -> tuple[bool, str]:
     """`(allowed, note)` — may this box be destroyed, and what to say about it.
 
@@ -1701,7 +1743,8 @@ def reap_decision(
     box it was made in does not. Uncommitted junk should not need a human; commits
     should never be destroyed by a cleanup command.
 
-    The merged-PR case is `reapable`'s, not `--force`'s. Forcing past a verdict that is
+    The merged-PR case is `reapable`'s, not `--force`'s, and so is the landed-tree case
+    beside it (`work_is_landed`) — the same reasoning one verdict over. Forcing past a verdict that is
     merely *stale about a squash* spends the one flag that also discards uncommitted
     work, on the most ordinary ending a box has — which teaches the reflex on the exact
     boxes where the refusal is the point.
@@ -1770,7 +1813,11 @@ def reap_decision(
             f"comments get answered. Wait for it, or pass --force."
         )
     if reapable(
-        verdict, pr_merged=pr_merged, pr_closed=pr_closed, holds_uncommitted=holds_uncommitted
+        verdict,
+        pr_merged=pr_merged,
+        pr_closed=pr_closed,
+        holds_uncommitted=holds_uncommitted,
+        work_is_landed=work_is_landed,
     ):
         return True, ""
     if force:
@@ -1831,6 +1878,7 @@ def reap_plan(
     awaiting_pr: bool = False,
     unclaimed: bool = False,
     copy_intact: bool | None = None,
+    work_is_landed: bool = False,
 ) -> ReapPlan:
     """Everything `reap` will run, in the only order that is safe.
 
@@ -1880,6 +1928,7 @@ def reap_plan(
         holds_uncommitted=bool(state.dirty),
         awaiting_pr=awaiting_pr,
         unclaimed=unclaimed,
+        work_is_landed=work_is_landed,
     )
     if not allowed:
         return ReapPlan(box=box.name, path=path, project=box.project, refusal=note)
@@ -2097,6 +2146,7 @@ def reconcile_action(
     holds_uncommitted: bool = True,
     newborn_grace_days: float = NEWBORN_GRACE_DAYS,
     unclaimed_age_days: float = DEFAULT_UNCLAIMED_AGE_DAYS,
+    work_is_landed: bool = False,
 ) -> tuple[str, str]:
     """`(action, why)` for one box. Pure; every IO decision above it collapses to these.
 
@@ -2157,6 +2207,7 @@ def reconcile_action(
         pr_merged=pr.merged,
         pr_closed=pr.is_closed,
         holds_uncommitted=holds_uncommitted,
+        work_is_landed=work_is_landed,
     ):
         if verdict == PREVIEW_VERDICT:
             # Same hold, different remedy, and the report cannot tell them apart on its
@@ -2239,6 +2290,18 @@ def reconcile_action(
             f"checkout is reclaimed at {unclaimed_age_days:g}d ({age_days:.1f}d now)"
         )
 
+    if work_is_landed:
+        # `reapable` has already agreed, so this arm only stops the fall-through below
+        # from reporting the reason wrongly. "The box was never used" is what a box with
+        # no PR and no commits gets, and this one is its opposite: it was used, its work
+        # landed under some other branch's PR, and the squash is why no verdict here can
+        # see that. Saying so is the difference between a reader trusting this pass and
+        # a reader going to look for the commits it just destroyed the checkout of.
+        return REAP, (
+            f"{verdict}, but its tree is already on the default branch -- the work "
+            f"landed under another branch's PR, so the box holds nothing unshipped"
+        )
+
     if age_days < newborn_grace_days:
         return WAIT, (
             f"{verdict} and no PR, but the box is {age_days * 24 * 60:.0f}m old -- too "
@@ -2256,6 +2319,7 @@ def reconcile_plan(
     pressure: bool = False,
     max_age_days: float = DEFAULT_MAX_AGE_DAYS,
     unclaimed_age_days: float = DEFAULT_UNCLAIMED_AGE_DAYS,
+    landed: Container[str] = (),
     now: _dt.datetime | None = None,
 ) -> list[Reconciliation]:
     """`reconcile_action` over every box, in name order. Pure -- the whole pass, testable.
@@ -2268,6 +2332,12 @@ def reconcile_plan(
     `reconcile_action` needs both to answer `reapable`, and the verdict is a summary that
     cannot be decompiled back into one: `needs-rebranch` is reported for a dirty box and
     for a clean squash-merged one alike, and those two want opposite decisions.
+
+    `landed` is the box names `head_tree_landed` answered yes for, passed as a set beside
+    the rows rather than folded into them. Every row is a tuple this function's callers
+    and its tests build by hand, and widening it would rewrite each of those for a fact
+    that is true of almost no box -- while `landed=()`, the default, is exactly the
+    behaviour every existing caller already has.
     """
     return [
         Reconciliation(
@@ -2290,6 +2360,7 @@ def reconcile_plan(
                 max_age_days=max_age_days,
                 unclaimed_age_days=unclaimed_age_days,
                 holds_uncommitted=bool(dirty),
+                work_is_landed=box.name in landed,
             )
         ]
     ]
@@ -3892,6 +3963,15 @@ def plan_reap(
             if box.kind == PREVIEW_KIND and box.branch and box.tracks and state.is_git
             else None
         ),
+        # Gated on the verdict and on cleanliness before the two git calls are made,
+        # because they are the only ones this pass adds and a `needs-pr` or `ready` box
+        # -- the ordinary endings -- must not pay for a question whose answer
+        # `reapable` would then ignore.
+        work_is_landed=(
+            verdict in TREE_CAN_SETTLE
+            and not state.dirty
+            and head_tree_landed(sweep.git_for(path), state.default_branch)
+        ),
     )
 
 
@@ -4050,6 +4130,44 @@ def branch_is_merged(git: sweep.Git, branch: str, default_branch: str) -> bool:
             f"refs/remotes/origin/{default_branch}",
         )
         return result.returncode == 0
+    return False
+
+
+def head_tree_landed(git: sweep.Git, default_branch: str, depth: int = TREE_SCAN_DEPTH) -> bool:
+    """Whether the box's HEAD tree already appears on `origin/<default_branch>`.
+
+    The question `branch_is_merged` asks about *commits*, asked about **content** instead,
+    for the boxes where commit identity has been destroyed and no PR names the branch to
+    say so (`TREE_CAN_SETTLE`). A tree object is the whole checked-out state hashed, so a
+    hit is not evidence that the work landed -- it is the work, already reachable from the
+    default branch, byte for byte. There is nothing left for a reap to lose.
+
+    Local refs only and no network, like `branch_is_merged`, and for the same reason: the
+    callers are a cleanup decision and a scheduled pass, neither of which should turn on
+    whether a fetch succeeded. That does mean the answer is only as fresh as the last
+    fetch -- which can only ever *withhold* a reap, since an unfetched default branch has
+    strictly fewer commits to match.
+
+    False on any failure, on an empty `default_branch`, and on a tree that is simply not
+    in the scanned window. Every one of those is "the landing cannot be demonstrated",
+    and the safe reading of that is the refusal the caller already had.
+    """
+    if not default_branch:
+        return False
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        head = git("rev-parse", "HEAD^{tree}")
+        tree = head.stdout.strip() if head.returncode == 0 else ""
+        if not tree:
+            return False
+        history = git(
+            "log",
+            f"--max-count={depth}",
+            "--format=%T",
+            f"refs/remotes/origin/{default_branch}",
+        )
+        if history.returncode != 0:
+            return False
+        return tree in history.stdout.split()
     return False
 
 
@@ -4215,8 +4333,21 @@ def survey(workspace: Path, fetch: bool = False, sizes: bool = False) -> list[di
             # `plan_reap` sets `awaiting_pr`: this row feeds `reap --all` and the session
             # banner, neither of which has a PR in hand, so a pushed box under review must
             # not be advertised as free to destroy.
+            # `work_is_landed` is asked here for the same reason `AWAITS_A_MERGE` is
+            # subtracted: this column is what a reader picks their next command from, and
+            # a box `reap` will destroy without a flag must not be printed as one holding
+            # work. Gated exactly as `plan_reap` and `reconcile` gate it, so all three
+            # answer alike.
             "reapable": (
-                reapable(verdict, holds_uncommitted=bool(state.dirty))
+                reapable(
+                    verdict,
+                    holds_uncommitted=bool(state.dirty),
+                    work_is_landed=(
+                        verdict in TREE_CAN_SETTLE
+                        and not state.dirty
+                        and head_tree_landed(sweep.git_for(path), state.default_branch)
+                    ),
+                )
                 and verdict not in AWAITS_A_MERGE
             ),
             "kind": box.kind,
@@ -4383,8 +4514,16 @@ def reconcile(
     pressure = under_pressure(free, min_free_gb)
 
     rows: list[tuple[Box, str, str, PullRequest, int]] = []
+    landed: set[str] = set()
     for name, box in sorted(boxes.items()):
         state, verdict, reason = inspect_box(box, root, fetch=fetch)
+        # Asked only for the two verdicts it can settle, and only of a clean box, so a
+        # pass over sixteen boxes adds two git calls for the rare one rather than
+        # thirty-two for the ordinary ones. Same gate as `plan_reap`'s, so `reap` and
+        # this pass cannot describe one box differently.
+        if verdict in TREE_CAN_SETTLE and not state.dirty:
+            if head_tree_landed(sweep.git_for(box_path(root, name)), state.default_branch):
+                landed.add(name)
         # A preview's PR is the one for the branch it is SHOWING. Looking it up by
         # `box.branch` would ask GitHub about the throwaway `preview/...` ref, get
         # nothing back, and leave the preview standing after the work it shows merged.
@@ -4405,6 +4544,7 @@ def reconcile(
         pressure=pressure,
         max_age_days=max_age_days,
         unclaimed_age_days=unclaimed_age_days,
+        landed=landed,
     ):
         notes: list[str] = []
         action = decision.action
