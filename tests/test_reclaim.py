@@ -643,6 +643,33 @@ def _with_stacks(monkeypatch, tmp_path, names=("api", "db")):
     return restarted
 
 
+def test_restore_puts_back_what_was_stopped(monkeypatch):
+    """`restore` is the one decision the happy path and the `finally` share. It is tested
+    directly as well as through `main` because a second copy of the `--leave-stopped`
+    test is exactly how the two paths would come to disagree."""
+    seen = []
+    monkeypatch.setattr(reclaim, "restart_stacks", lambda n, apply: seen.append((list(n), apply)))
+    assert reclaim.restore(["a"], apply=True, leave_stopped=False) is None
+    assert seen == [(["a"], True)]
+
+
+def test_restore_declines_when_the_caller_wants_the_cpu(monkeypatch, capsys):
+    monkeypatch.setattr(reclaim, "restart_stacks", lambda n, apply: pytest_fail())
+    assert reclaim.restore(["a"], apply=True, leave_stopped=True) is None
+    assert "they stay down" in capsys.readouterr().out
+
+
+def test_restore_with_nothing_stopped_says_so(monkeypatch, capsys):
+    monkeypatch.setattr(reclaim, "restart_stacks", lambda n, apply: pytest_fail())
+    assert reclaim.restore([], apply=True, leave_stopped=False) is None
+    assert "nothing to put back" in capsys.readouterr().out
+
+
+def test_restore_hands_back_the_failure_line(monkeypatch):
+    monkeypatch.setattr(reclaim, "restart_stacks", lambda n, apply: "docker start: nope")
+    assert reclaim.restore(["a"], apply=True, leave_stopped=False) == "docker start: nope"
+
+
 def test_a_run_puts_back_every_container_it_stopped(monkeypatch, tmp_path, capsys):
     """The whole point: this is the one-click answer to a slow machine, not a decision to
     end the working day. It left every stack down until 2026-08-27."""
