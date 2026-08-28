@@ -13,7 +13,8 @@ which is why a third scope exists rather than a fourth mode on one of the other 
      reloaders inside them stat those trees continuously across the 9p bridge, which the
      backend services on the Windows side. Measured 550 ioctls/s moving 21 KB/s: ~39
      bytes an op, i.e. pure metadata churn. **Restarting Docker cannot fix this** -- the
-     spin returns with the stack. Only stopping the stack does.
+     spin returns with the stack. Only stopping the stack does. The stop is a *window*
+     rather than a verdict, though: see "What it puts back" below.
   2. **Disk.** 13.6 GB of temp and cache trees that nothing in the harness had ever
      cleared, two of them still growing: `%TEMP%\\DiagOutputDir` held 3.13 GB of Remote
      Desktop auto-trace ETLs (100 MB apiece, a new one every few minutes) and
@@ -49,7 +50,27 @@ on the volume. A delete under a `$`-prefixed system path is refused by Windows a
 this workspace's shell guard, and a script that cannot do the thing should say so with
 the size and the remedy rather than stay quiet: `protected_staging`.
 
-Usage:  python reclaim.py [--yes] [--keep-stacks] [--min-age-days N]
+What it puts back
+-----------------
+
+**Every container it stopped goes back up before the run ends, including when the run
+dies.** The first version left them down on the grounds that the stop *is* the CPU fix
+(1), which is true and was still the wrong default: this script is the one-click answer
+to "the machine is slow", not a decision to end the working day, and a run that failed
+part-way through left a machine whose stacks were down, whose engine might be down with
+them, and whose only record said the task had passed. Restoring is therefore in a
+`finally` -- an exception, a `TimeoutExpired` from a wedged engine, or a Ctrl-C all still
+put the stacks back. `--leave-stopped` keeps the old behaviour for a caller that really
+does want the CPU back for the rest of the day, and `--keep-stacks` still means never
+touch them at all.
+
+Nothing here reports success on somebody else's failure, either. `run_reconcile` used to
+discard the child's exit code, so a reconcile that failed printed its error to the
+terminal while this script exited 0 -- and `log-wrap.py` empties the artifact on a pass,
+so the one durable record of the run was a zero-byte file saying it had gone fine. Every
+step that can fail now names itself in `failures`, and a non-empty list is the exit code.
+
+Usage:  python reclaim.py [--yes] [--keep-stacks] [--leave-stopped] [--min-age-days N]
 
 Dry-run by default, like `worktree.py`: this deletes files and stops containers, so the
 default has to be the harmless one. The task passes `--yes`.
@@ -544,27 +565,86 @@ def running_container_names() -> list[str]:
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
-def stop_stacks(names: list[str], apply: bool) -> None:
+def docker(args: list[str], timeout: int) -> tuple[bool, str]:
+    """Run one docker verb. Returns (ok, the line to print when it is not).
+
+    Never raises, and that is the fix rather than the tidiness: `docker stop` ran under
+    `capture_output=True` with its exit code discarded, so a refusal was invisible, while
+    a wedged engine raised `TimeoutExpired` out of `main` -- killing the run after the
+    containers were down and before anything could put them back. Both spellings of "the
+    engine did not co-operate" are a printed line now, and the run continues to its
+    restore.
+    """
+    try:
+        proc = subprocess.run(
+            ["docker", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            creationflags=NO_WINDOW,
+        )
+    except FileNotFoundError:
+        return False, "docker is not on PATH"
+    except subprocess.TimeoutExpired:
+        return False, f"`docker {args[0]}` did not return within {timeout}s"
+    except OSError as exc:
+        return False, str(exc)
+    if proc.returncode == 0:
+        return True, ""
+    said = (proc.stderr or proc.stdout or "").strip().splitlines()
+    return False, said[0] if said else f"`docker {args[0]}` exited {proc.returncode}"
+
+
+def stop_stacks(names: list[str], apply: bool) -> tuple[list[str], str | None]:
     """Stop every running container -- `stop`, never `down`.
 
     `down` would remove the containers and, with them, anything not on a named volume.
-    `stop` is also the verb that *survives*: a container carrying `restart:
-    unless-stopped` stays down across a reboot once stopped by hand, which is the whole
-    point -- otherwise the backend spin returns with the next boot.
+    `stop` is also the verb `restart_stacks` can undo: the containers still exist, so
+    putting them back is `docker start` and costs seconds rather than a rebuild.
+
+    Returns the names to restore plus a failure line, and returns the names **even when
+    the stop failed**: `docker stop a b c` is not atomic, so a call that reports an error
+    has usually stopped some prefix of its arguments, and the list of what to put back is
+    the list of what was up. `docker start` on a container that never went down is a
+    no-op, which is what makes the pessimistic list the safe one.
     """
     if not names:
         print("  no containers running -- nothing to stop")
-        return
+        return [], None
     print(f"  stopping {len(names)} container(s): {', '.join(names)}")
     print("    (`docker stop`, never `down` -- see stop_stacks)")
     if not apply:
-        return
-    subprocess.run(
-        ["docker", "stop", *names],
-        capture_output=True,
-        timeout=300,
-        creationflags=NO_WINDOW,
-    )
+        return list(names), None
+    ok, detail = docker(["stop", *names], timeout=300)
+    if not ok:
+        print(f"    [warn] {detail}")
+        return list(names), f"docker stop: {detail}"
+    return list(names), None
+
+
+def restart_stacks(names: list[str], apply: bool) -> str | None:
+    """Put back exactly what `stop_stacks` took down. Returns a failure line, or None.
+
+    Idempotent by construction -- `docker start` on a running container exits 0 -- which
+    is what lets this be called from a `finally` without first working out how far the
+    run got.
+
+    An engine that has gone away since the stop is the one failure worth spelling out:
+    `docker start` cannot bring the stacks back through a dead daemon, and the remedy is
+    a different script, so the line names it rather than leaving the reader with a raw
+    `npipe` error.
+    """
+    if not names:
+        return None
+    print(f"  restarting {len(names)} container(s): {', '.join(names)}")
+    if not apply:
+        return None
+    ok, detail = docker(["start", *names], timeout=300)
+    if ok:
+        return None
+    print(f"    [warn] {detail}")
+    print("    the engine may be down: `python scripts/docker-maint.py restart-engine`")
+    return f"docker start: {detail}"
 
 
 def sweep(targets: list[SweepTarget], temp: Path, min_age_days: float, apply: bool) -> int:
@@ -677,18 +757,39 @@ def banner(text: str) -> str:
     return f"\n{'=' * 60}\n  {text}\n{'=' * 60}\n"
 
 
-def run_reconcile(devkit: Path, apply: bool) -> None:
+def run_reconcile(devkit: Path, apply: bool) -> str | None:
+    """Hand the box tier the disk the sweep just freed. Returns a failure line, or None.
+
+    The exit code used to be discarded. Reconcile is the only child here whose streams
+    are inherited, so it is also the only one that can print an error the terminal
+    shows -- and with the code dropped, this script exited 0 over it and `log-wrap.py`
+    emptied the artifact on the way out. The one durable record of a run that had visibly
+    failed was a zero-byte file meaning "passed".
+    """
     script = devkit / "scripts" / "worktree.py"
     if not script.is_file():
         print(f"  [skip] {script} not found")
-        return
+        return None
     cmd = [sys.executable, str(script), "reconcile"] + (["--yes"] if apply else ["--dry-run"])
     # The child writes straight to the inherited handle, so anything still sitting in this
     # process's buffer would land after it -- which put the whole reconcile listing above
     # this script's own banner the first time it ran.
     sys.stdout.flush()
-    subprocess.run(cmd, timeout=1800)
+    try:
+        proc = subprocess.run(cmd, timeout=1800)
+    except subprocess.TimeoutExpired:
+        sys.stdout.flush()
+        print("  [warn] reconcile did not finish within 30 minutes")
+        return "reconcile timed out"
+    except OSError as exc:
+        sys.stdout.flush()
+        print(f"  [warn] reconcile could not be started: {exc}")
+        return f"reconcile could not be started: {exc}"
     sys.stdout.flush()
+    if proc.returncode != 0:
+        print(f"  [warn] reconcile exited {proc.returncode} -- its output is above")
+        return f"reconcile exited {proc.returncode}"
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -698,6 +799,11 @@ def main(argv: list[str] | None = None) -> int:
         "--keep-stacks",
         action="store_true",
         help="leave running containers alone (skips the largest CPU win)",
+    )
+    parser.add_argument(
+        "--leave-stopped",
+        action="store_true",
+        help="do not restart the containers this stopped (keeps the CPU back all day)",
     )
     parser.add_argument("--min-age-days", type=float, default=DEFAULT_MIN_AGE_DAYS)
     args = parser.parse_args(argv)
@@ -710,53 +816,98 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  free disk   {before.free_gb:.1f} GB")
     print(f"  commit      {before.committed_gb:.1f} / {before.limit_gb:.1f} GB")
 
-    print("\n-- 1. containers (the CPU half) --")
-    if args.keep_stacks:
-        print("  --keep-stacks: leaving them up; the bind-mount spin stays with them")
-    else:
-        stop_stacks(running_container_names(), apply)
+    # Every step that can fail appends one line here, and a non-empty list is the exit
+    # code. Nothing below aborts the run: a docker verb that failed must not cost the
+    # disk sweep, and neither may cost the restore.
+    failures: list[str] = []
+    stopped: list[str] = []
+    restored = False
+    try:
+        print("\n-- 1. containers (the CPU half) --")
+        if args.keep_stacks:
+            print("  --keep-stacks: leaving them up; the bind-mount spin stays with them")
+        else:
+            stopped, failed = stop_stacks(running_container_names(), apply)
+            if failed:
+                failures.append(failed)
 
-    print("\n-- 2. temp and cache trees (the disk half) --")
-    profile = home()
-    freed = sweep(
-        [*sweep_targets(temp, username()), *cache_targets(profile)],
-        temp,
-        args.min_age_days,
-        apply,
-    )
-    print(f"  {'total':<24} {freed / GB:6.2f} GB")
+        print("\n-- 2. temp and cache trees (the disk half) --")
+        profile = home()
+        freed = sweep(
+            [*sweep_targets(temp, username()), *cache_targets(profile)],
+            temp,
+            args.min_age_days,
+            apply,
+        )
+        print(f"  {'total':<24} {freed / GB:6.2f} GB")
 
-    print("\n-- 3. superseded tool versions (the half no reboot returns) --")
-    versions = sweep_versions(superseded_trees(profile, args.min_age_days), apply)
-    print(f"  {'total':<30} {versions / GB:6.2f} GB")
-    freed += versions
+        print("\n-- 3. superseded tool versions (the half no reboot returns) --")
+        versions = sweep_versions(superseded_trees(profile, args.min_age_days), apply)
+        print(f"  {'total':<30} {versions / GB:6.2f} GB")
+        freed += versions
 
-    print("\n-- 4. boxes --")
-    after_sweep = snapshot()
-    safe, why = reconcile_is_safe(after_sweep.free_gb)
-    print(f"  {why}")
-    if safe:
-        run_reconcile(devkit_dir(), apply)
-    else:
-        print("  skipping reconcile: it would reap boxes whose PR is still open")
+        print("\n-- 4. boxes --")
+        after_sweep = snapshot()
+        safe, why = reconcile_is_safe(after_sweep.free_gb)
+        print(f"  {why}")
+        if safe:
+            failed = run_reconcile(devkit_dir(), apply)
+            if failed:
+                failures.append(failed)
+        else:
+            print("  skipping reconcile: it would reap boxes whose PR is still open")
 
-    after = snapshot()
-    print(banner("Done" if apply else "Done -- DRY RUN"))
-    if apply:
-        print(f"  free disk   {before.free_gb:.1f} -> {after.free_gb:.1f} GB")
-    else:
-        # Never print a before -> after delta here. Nothing was deleted, so any movement
-        # is some other process on the machine, and rendering it as an arrow off this
-        # script's own banner reads as a result it produced.
-        print(f"  free disk   {after.free_gb:.1f} GB, unchanged")
-        print(f"  would free  {freed / GB:.2f} GB of caches and superseded versions")
-    for line in memory_verdict(after):
-        print(line)
-    for line in staging_verdict():
-        print(line)
-    if not apply:
-        print("\n  Nothing was changed. Re-run with --yes to apply.")
-    return 0
+        print("\n-- 5. putting the containers back --")
+        failed = restore(stopped, apply, args.leave_stopped)
+        restored = True
+        if failed:
+            failures.append(failed)
+
+        after = snapshot()
+        print(banner("Done" if apply else "Done -- DRY RUN"))
+        if apply:
+            print(f"  free disk   {before.free_gb:.1f} -> {after.free_gb:.1f} GB")
+        else:
+            # Never print a before -> after delta here. Nothing was deleted, so any
+            # movement is some other process on the machine, and rendering it as an arrow
+            # off this script's own banner reads as a result it produced.
+            print(f"  free disk   {after.free_gb:.1f} GB, unchanged")
+            print(f"  would free  {freed / GB:.2f} GB of caches and superseded versions")
+        for line in memory_verdict(after):
+            print(line)
+        for line in staging_verdict():
+            print(line)
+        if not apply:
+            print("\n  Nothing was changed. Re-run with --yes to apply.")
+    finally:
+        # The whole point of the `finally`: a Ctrl-C, a crash, or anything raised out of
+        # the four steps above must still leave the machine the way this found it. The
+        # normal path has already restored, and `restart_stacks` is idempotent anyway, so
+        # the flag is about not printing a second, confusing section.
+        if not restored and stopped and not args.leave_stopped:
+            print("\n-- interrupted: putting the containers back --")
+            restore(stopped, apply, args.leave_stopped)
+
+    for line in failures:
+        print(f"  [failed] {line}")
+    return 1 if failures else 0
+
+
+def restore(stopped: list[str], apply: bool, leave_stopped: bool) -> str | None:
+    """Put the stacks back unless the caller asked for the CPU instead.
+
+    Split out so the `finally` and the normal path share one decision: `--leave-stopped`
+    has to suppress the restore in both, and a second copy of that test is how one of
+    them would come to disagree.
+    """
+    if leave_stopped:
+        if stopped:
+            print("  --leave-stopped: they stay down, and the CPU stays back")
+        return None
+    if not stopped:
+        print("  nothing was stopped -- nothing to put back")
+        return None
+    return restart_stacks(stopped, apply)
 
 
 def tempdir() -> str:

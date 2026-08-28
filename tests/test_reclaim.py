@@ -14,6 +14,16 @@ them at all. Both were real failures before they were rules:
 The `docker stop`-not-`down` choice is pinned for the same reason it is pinned in
 `test_docker_maint.py`: this runs from a one-click task, and `down` discards anything not
 on a named volume.
+
+Two more properties joined that list on 2026-08-27, after a run that stopped every
+container, printed an error from its reconcile child and left the machine with its stacks
+down and a zero-byte "passed" artifact:
+
+  - **what it stopped, it restarts** -- including out of a `finally`, so a crash or a
+    Ctrl-C mid-run still leaves the machine as it was found. `--leave-stopped` is the
+    only way past it;
+  - **a failing step is the exit code.** `run_reconcile` discarded the child's, which is
+    what let `log-wrap.py` empty the artifact over a visibly failed run.
 """
 
 from __future__ import annotations
@@ -364,19 +374,92 @@ def _mkdir(path: Path) -> Path:
 # --- containers ----------------------------------------------------------------
 
 
-def test_stop_stacks_uses_stop_and_never_down(monkeypatch):
+class _Proc:
+    """The bit of `CompletedProcess` `docker()` reads."""
+
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _docker_spy(monkeypatch, result=None, raises=None):
+    """Record every docker argv, answering with `result` or raising `raises`."""
     calls = []
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        if raises is not None:
+            raise raises
+        return result if result is not None else _Proc()
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    return calls
+
+
+def test_stop_stacks_uses_stop_and_never_down(monkeypatch):
+    calls = _docker_spy(monkeypatch)
     reclaim.stop_stacks(["a", "b"], apply=True)
     assert calls == [["docker", "stop", "a", "b"]]
     assert not any("down" in c for c in calls[0])
 
 
 def test_stop_stacks_without_yes_runs_nothing(monkeypatch):
-    calls = []
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+    calls = _docker_spy(monkeypatch)
     reclaim.stop_stacks(["a"], apply=False)
     assert calls == []
+
+
+def test_stop_stacks_hands_back_what_has_to_be_restarted(monkeypatch):
+    _docker_spy(monkeypatch)
+    stopped, failed = reclaim.stop_stacks(["a", "b"], apply=True)
+    assert stopped == ["a", "b"]
+    assert failed is None
+
+
+def test_a_failed_stop_still_names_everything_that_was_up(monkeypatch, capsys):
+    """`docker stop a b c` is not atomic: an error usually means some prefix went down,
+    so the pessimistic list is the safe one -- `docker start` on a container that never
+    stopped is a no-op, while forgetting one leaves it down for good."""
+    _docker_spy(monkeypatch, result=_Proc(1, stderr="Error response from daemon: nope\n"))
+    stopped, failed = reclaim.stop_stacks(["a", "b"], apply=True)
+    assert stopped == ["a", "b"]
+    assert failed == "docker stop: Error response from daemon: nope"
+    assert "[warn]" in capsys.readouterr().out
+
+
+def test_a_wedged_engine_is_a_line_not_a_traceback(monkeypatch):
+    """The failure that left the machine with its stacks down: `TimeoutExpired` came out
+    of `docker stop` and killed the run before anything could put them back."""
+    _docker_spy(monkeypatch, raises=subprocess.TimeoutExpired(cmd="docker", timeout=300))
+    ok, detail = reclaim.docker(["stop", "a"], timeout=300)
+    assert ok is False
+    assert "did not return within 300s" in detail
+
+
+def test_docker_that_is_not_installed_is_also_a_line(monkeypatch):
+    _docker_spy(monkeypatch, raises=FileNotFoundError())
+    ok, detail = reclaim.docker(["start", "a"], timeout=30)
+    assert (ok, detail) == (False, "docker is not on PATH")
+
+
+def test_restart_stacks_starts_exactly_what_was_stopped(monkeypatch):
+    calls = _docker_spy(monkeypatch)
+    assert reclaim.restart_stacks(["a", "b"], apply=True) is None
+    assert calls == [["docker", "start", "a", "b"]]
+
+
+def test_restart_stacks_without_yes_runs_nothing(monkeypatch):
+    calls = _docker_spy(monkeypatch)
+    reclaim.restart_stacks(["a"], apply=False)
+    assert calls == []
+
+
+def test_an_engine_that_went_away_names_the_script_that_can_fix_it(monkeypatch, capsys):
+    _docker_spy(monkeypatch, result=_Proc(1, stderr="failed to connect to the docker API\n"))
+    failed = reclaim.restart_stacks(["a"], apply=True)
+    assert failed == "docker start: failed to connect to the docker API"
+    assert "restart-engine" in capsys.readouterr().out
 
 
 def test_stop_stacks_with_nothing_up_is_quiet(monkeypatch, capsys):
@@ -543,6 +626,130 @@ def test_the_run_reaches_the_profile_only_through_the_home_seam(monkeypatch, tmp
     monkeypatch.setattr(reclaim, "home", lambda: asked.append(1) or tmp_path)
     reclaim.main([])
     assert asked, "main must resolve the profile through home()"
+
+
+# --- leaving the machine as it was found ---------------------------------------
+
+
+def _with_stacks(monkeypatch, tmp_path, names=("api", "db")):
+    """An isolated run whose machine has `names` up, recording every restart."""
+    _isolate(monkeypatch, tmp_path, free_gb=24.0)
+    monkeypatch.setattr(reclaim, "running_container_names", lambda: list(names))
+    monkeypatch.setattr(reclaim, "stop_stacks", lambda n, apply: (list(n), None))
+    restarted = []
+    monkeypatch.setattr(
+        reclaim, "restart_stacks", lambda n, apply: restarted.append(list(n)) or None
+    )
+    return restarted
+
+
+def test_a_run_puts_back_every_container_it_stopped(monkeypatch, tmp_path, capsys):
+    """The whole point: this is the one-click answer to a slow machine, not a decision to
+    end the working day. It left every stack down until 2026-08-27."""
+    restarted = _with_stacks(monkeypatch, tmp_path)
+    assert reclaim.main(["--yes"]) == 0
+    assert restarted == [["api", "db"]]
+    assert "putting the containers back" in capsys.readouterr().out
+
+
+def test_a_crash_mid_run_still_puts_them_back(monkeypatch, tmp_path, capsys):
+    """Reversion check for the `finally`. Restoring only on the happy path is the same
+    bug in a smaller window: the run that reported an error is exactly the run that left
+    the stacks down, because it never reached the end."""
+    restarted = _with_stacks(monkeypatch, tmp_path)
+    monkeypatch.setattr(reclaim, "run_reconcile", lambda *a, **kw: 1 / 0)
+    try:
+        reclaim.main(["--yes"])
+    except ZeroDivisionError:
+        pass
+    assert restarted == [["api", "db"]]
+    assert "interrupted" in capsys.readouterr().out
+
+
+def test_a_ctrl_c_mid_run_still_puts_them_back(monkeypatch, tmp_path):
+    """`KeyboardInterrupt` is not an `Exception`, so an `except Exception` here would
+    pass every test above and still strand the machine on the one interruption a user
+    actually performs."""
+    restarted = _with_stacks(monkeypatch, tmp_path)
+
+    def interrupt(*a, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(reclaim, "run_reconcile", interrupt)
+    try:
+        reclaim.main(["--yes"])
+    except KeyboardInterrupt:
+        pass
+    assert restarted == [["api", "db"]]
+
+
+def test_leave_stopped_keeps_the_cpu_back(monkeypatch, tmp_path, capsys):
+    restarted = _with_stacks(monkeypatch, tmp_path)
+    assert reclaim.main(["--yes", "--leave-stopped"]) == 0
+    assert restarted == []
+    assert "they stay down" in capsys.readouterr().out
+
+
+def test_keep_stacks_has_nothing_to_put_back(monkeypatch, tmp_path):
+    """It never stopped anything, so the restore must not start something the user had
+    deliberately left down."""
+    restarted = _with_stacks(monkeypatch, tmp_path)
+    assert reclaim.main(["--yes", "--keep-stacks"]) == 0
+    assert restarted == []
+
+
+# --- a failing step is the exit code -------------------------------------------
+
+
+def test_a_failed_reconcile_is_reported_rather_than_swallowed(monkeypatch, tmp_path, capsys):
+    """`log-wrap.py` empties the artifact on a pass, so exiting 0 over a child that
+    printed an error left a zero-byte file as the only record of the run."""
+    _isolate(monkeypatch, tmp_path, free_gb=24.0)
+    monkeypatch.setattr(reclaim, "run_reconcile", lambda *a, **kw: "reconcile exited 1")
+    assert reclaim.main(["--yes"]) == 1
+    assert "[failed] reconcile exited 1" in capsys.readouterr().out
+
+
+def test_a_failed_stop_is_reported_too(monkeypatch, tmp_path, capsys):
+    _isolate(monkeypatch, tmp_path, free_gb=24.0)
+    monkeypatch.setattr(reclaim, "running_container_names", lambda: ["api"])
+    monkeypatch.setattr(reclaim, "stop_stacks", lambda n, apply: (list(n), "docker stop: nope"))
+    monkeypatch.setattr(reclaim, "restart_stacks", lambda n, apply: None)
+    assert reclaim.main(["--yes"]) == 1
+    assert "[failed] docker stop: nope" in capsys.readouterr().out
+
+
+def test_run_reconcile_reports_a_nonzero_child(monkeypatch, tmp_path):
+    script = tmp_path / "scripts" / "worktree.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _Proc(returncode=3))
+    assert reclaim.run_reconcile(tmp_path, apply=True) == "reconcile exited 3"
+
+
+def test_run_reconcile_is_quiet_about_a_clean_child(monkeypatch, tmp_path):
+    script = tmp_path / "scripts" / "worktree.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _Proc(returncode=0))
+    assert reclaim.run_reconcile(tmp_path, apply=True) is None
+
+
+def test_a_reconcile_that_never_returns_does_not_kill_the_run(monkeypatch, tmp_path):
+    script = tmp_path / "scripts" / "worktree.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("")
+    monkeypatch.setattr(
+        subprocess, "run", _raiser(subprocess.TimeoutExpired(cmd="worktree", timeout=1800))
+    )
+    assert reclaim.run_reconcile(tmp_path, apply=True) == "reconcile timed out"
+
+
+def _raiser(exc):
+    def raise_it(*a, **kw):
+        raise exc
+
+    return raise_it
 
 
 def test_a_full_disk_skips_reconcile_rather_than_reaping_open_prs(monkeypatch, tmp_path, capsys):
