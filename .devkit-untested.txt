@@ -112,7 +112,6 @@ scripts/release-pipeline.py::open_release_pr
 scripts/release-pipeline.py::parse_version
 scripts/release-pipeline.py::pr_rollup
 scripts/release-pipeline.py::prepare
-scripts/release-pipeline.py::wait_for_checks
 scripts/release.py::existing_tags
 scripts/release.py::main_fallback
 scripts/report-workflow-failure.py::api_workflow_states
