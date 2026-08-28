@@ -618,11 +618,41 @@ def test_free_gb_reports_minus_one_when_the_volume_cannot_be_read(monkeypatch):
     assert docker_maint.free_gb() == -1.0
 
 
-def test_the_engine_gets_longer_to_come_back_after_a_compaction():
-    """A cold start that re-mounts a rewritten VHDX and restarts every
-    `unless-stopped` container took over 90s, so the default poll reported a
-    successful prune as a failure."""
-    assert docker_maint.COMPACT_POLL_TIMEOUT > docker_maint.POLL_TIMEOUT
+def test_the_engine_gets_longer_to_come_back_after_a_cold_start():
+    """A cold start that re-mounts the VHDX and restarts every `unless-stopped`
+    container took over 90s, so the default poll reported a successful prune as a
+    failure."""
+    assert docker_maint.COLD_POLL_TIMEOUT > docker_maint.POLL_TIMEOUT
+
+
+@pytest.mark.parametrize("mode", ["restart-engine", "fix"])
+def test_a_stop_and_start_polls_the_cold_budget_not_the_warm_one(monkeypatch, mode):
+    """Every mode built on `stop_docker` runs `wsl --shutdown`, so every one of them is
+    waiting on a cold start -- but only the compaction path said so.
+
+    `restart-engine` polled the 90s default and `fix` polled its own `POLL_TIMEOUT * 2`,
+    both chosen before the cold budget existed. On 2026-08-28 that printed `ENGINE STILL
+    NOT RESPONDING` and exited 1 on an engine that answered ~45s later unaided -- a
+    verdict that advises a factory reset or a reboot, and the state a machine-reclaim run
+    leaves behind when its stop step is followed by an engine restart.
+    """
+    seen: list[int] = []
+    monkeypatch.setattr(docker_maint, "stop_docker", lambda: None)
+    monkeypatch.setattr(docker_maint, "start_docker", lambda: None)
+    monkeypatch.setattr(docker_maint.time, "sleep", lambda _seconds: None)
+
+    def record(timeout: int = docker_maint.POLL_TIMEOUT) -> bool:
+        seen.append(timeout)
+        return True
+
+    monkeypatch.setattr(docker_maint, "poll_engine", record)
+    runner = (
+        docker_maint.generic_restart_engine
+        if mode == "restart-engine"
+        else docker_maint.generic_fix
+    )
+    assert runner() == 0
+    assert seen == [docker_maint.COLD_POLL_TIMEOUT]
 
 
 # --- restarting what the stop actually killed ---------------------------------
