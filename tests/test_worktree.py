@@ -969,6 +969,62 @@ def test_a_ready_box_never_escapes_through_the_merge_path():
     assert sweep.READY not in worktree.MERGE_CAN_BE_STALE_ABOUT
 
 
+# --- reap: the box whose work landed under another branch's PR ---------------
+# The same leak one verdict over, and the one no PR can answer. Merge the default branch
+# into a helper branch cut by hand, let the real PR squash-merge, and the box is
+# `needs-branch` with every line of its work already on the default branch -- while the
+# only PR that could say so names a branch this box was never on.
+
+
+def test_a_landed_tree_frees_a_box_no_pr_can_speak_for():
+    """Regression, from a box that held a port slot for 28h on a machine holding 16 of
+    16. Its tree was byte-identical to the commit that merged PR #229; the refusal it got
+    was "the work is still only in this box", and `--force` was the only way out."""
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_BRANCH,
+        "3 commit(s) committed straight to pr229-merge (not a agent/ task branch), unpushed",
+        force=False,
+        holds_uncommitted=False,
+        work_is_landed=True,
+    )
+    assert allowed
+    assert note == ""
+
+
+def test_without_that_evidence_the_same_box_is_refused_exactly_as_before():
+    """The escape is the evidence, never the verdict: `needs-branch` ordinarily means
+    unshipped commits, and that is still the commonest thing it means."""
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_BRANCH,
+        "3 commit(s) committed straight to pr229-merge (not a agent/ task branch), unpushed",
+        force=False,
+        holds_uncommitted=False,
+    )
+    assert not allowed
+    assert "/ship" in note
+
+
+def test_a_landed_tree_does_not_license_destroying_uncommitted_work():
+    """The safety property again, against the new signal: a tree answers for the commit
+    under the edits and for nothing sitting on top of it."""
+    assert not worktree.reapable(sweep.NEEDS_BRANCH, holds_uncommitted=True, work_is_landed=True)
+
+
+@pytest.mark.parametrize("verdict", [sweep.READY, sweep.NEEDS_PULL, sweep.BLOCKED])
+def test_a_landed_tree_settles_only_the_verdicts_it_is_scoped_to(verdict):
+    """`blocked` is a state nothing here should be guessing at, and the other two are
+    reached with content that a tree scan by definition cannot have matched."""
+    assert not worktree.reapable(verdict, holds_uncommitted=False, work_is_landed=True)
+    assert verdict not in worktree.TREE_CAN_SETTLE
+
+
+def test_the_merge_and_the_tree_escapes_stay_separate_predicates():
+    """Neither one is the other's default. A merged PR still frees only `needs-rebranch`,
+    and the tree still has to be found before it frees anything at all."""
+    assert not worktree.reapable(sweep.NEEDS_BRANCH, pr_merged=True, holds_uncommitted=False)
+    assert not worktree.reapable(sweep.NEEDS_REBRANCH, holds_uncommitted=False)
+
+
 def test_not_knowing_whether_a_box_is_dirty_holds_it():
     """Both flags default to the cautious answer, so a caller that forgets to pass them
     keeps a box it might have destroyed rather than the reverse."""
@@ -3311,6 +3367,32 @@ def test_reconcile_plan_reads_dirtiness_from_the_row_not_from_the_verdict():
     ]
 
 
+def test_reconcile_reaps_a_box_whose_tree_landed_under_another_prs_pr():
+    """The scheduled pass has to reach the same verdict `reap` does, or the box is freed
+    only by whoever runs the command by hand -- which is what "permanent HOLD" meant."""
+    name = "demo--fix-merge-prs-0826"
+    rows = [(box(name), sweep.NEEDS_BRANCH, "3 commit(s)", worktree.PullRequest(), 0)]
+    [decision] = worktree.reconcile_plan(rows, landed={"demo--fix-merge-prs-0826"})
+    assert decision.action == worktree.REAP
+    assert "tree is already on the default branch" in decision.reason
+
+
+def test_reconcile_holds_that_same_box_when_the_tree_was_not_found():
+    """`landed` defaults to empty, so every caller that does not ask keeps the behaviour
+    it had: HOLD, reported at every pass, freed only by a person."""
+    name = "demo--fix-merge-prs-0826"
+    rows = [(box(name), sweep.NEEDS_BRANCH, "3 commit(s)", worktree.PullRequest(), 0)]
+    assert worktree.reconcile_plan(rows)[0].action == worktree.HOLD
+
+
+def test_a_landed_box_is_not_reported_as_never_used():
+    """The fall-through arm below this one says "the box was never used", which is the
+    opposite of true here and sends a reader looking for commits that landed days ago."""
+    rows = [(box("demo--x-0826"), sweep.NEEDS_BRANCH, "3 commit(s)", worktree.PullRequest(), 0)]
+    [decision] = worktree.reconcile_plan(rows, landed={"demo--x-0826"})
+    assert "never used" not in decision.reason
+
+
 def test_reconcile_reaps_a_merged_box_end_to_end(workspace, monkeypatch):
     """The loop that replaces remembering to sweep: PR merged in, box gone out."""
     root = _reconcilable(
@@ -5304,6 +5386,57 @@ def test_origin_has_branch_falls_back_to_disk_when_the_network_is_gone():
     git = _git_stub(**{"rev-parse": _completed()})
     assert worktree.origin_has_branch(git, "agent/x-0806") is True
     assert worktree.origin_has_branch(git, "agent/x-0806", network=False) is True
+
+
+def _tree_git(head: str = "t0", history: tuple[str, ...] = ("t0",), seen: list | None = None):
+    """A `sweep.Git` answering `rev-parse` with one tree and `log` with a column of them."""
+
+    def git(*argv):
+        if seen is not None:
+            seen.append(argv)
+        if argv[0] == "rev-parse":
+            return _completed(stdout=f"{head}\n") if head else _completed(returncode=1)
+        if argv[0] == "log":
+            return _completed(stdout="".join(f"{tree}\n" for tree in history))
+        return _completed(returncode=1)
+
+    return git
+
+
+def test_head_tree_landed_finds_the_boxs_tree_on_the_default_branch():
+    """The whole predicate: content, not commit identity. A squash rewrites the sha and
+    cannot rewrite the tree it produced."""
+    assert worktree.head_tree_landed(_tree_git(head="t2", history=("t3", "t2", "t1")), "master")
+
+
+def test_head_tree_landed_is_false_when_the_tree_is_nowhere_on_the_branch():
+    assert not worktree.head_tree_landed(_tree_git(head="tX", history=("t3", "t2")), "master")
+
+
+def test_head_tree_landed_asks_nothing_without_a_default_branch():
+    """A box whose `default_branch` could not be read is not a box whose work landed --
+    and spending two subprocesses to say so would put them on the husk path."""
+    seen: list = []
+    assert not worktree.head_tree_landed(_tree_git(seen=seen), "")
+    assert seen == []
+
+
+def test_head_tree_landed_reads_a_failed_git_as_not_landed():
+    """Fails closed, like `branch_is_merged`: an unreadable ref leaves the refusal the
+    caller already had, where the opposite would destroy a checkout on a broken read."""
+    assert not worktree.head_tree_landed(_git_stub(), "master")
+    assert not worktree.head_tree_landed(_tree_git(head=""), "master")
+
+
+def test_head_tree_landed_bounds_its_scan_and_reads_local_refs_only():
+    """The cost is bounded by `TREE_SCAN_DEPTH`, and the ref is the remote-tracking copy
+    -- this runs inside a cleanup decision and a scheduled pass, neither of which should
+    turn on whether a fetch succeeded."""
+    seen: list = []
+    worktree.head_tree_landed(_tree_git(seen=seen), "master", depth=7)
+    log = next(argv for argv in seen if argv[0] == "log")
+    assert "--max-count=7" in log
+    assert log[-1] == "refs/remotes/origin/master"
 
 
 def _ledger_at(tmp_path, **plan_fields):
