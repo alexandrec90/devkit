@@ -14,7 +14,7 @@ dependencies = []
 # extra: extras belong to a *distribution*, and devkit is not one (see [tool.uv] below).
 # `uv sync --all-groups` — what `.claude/hooks/session-start.sh` runs — installs this.
 dev = [
-  "ruff>=0.16.3",
+  "ruff>=0.16.4",
   "mypy>=2.3.1",
   "pytest>=8.3",
   # devkit publishes pre-commit hooks (.pre-commit-hooks.yaml) and runs them on itself
