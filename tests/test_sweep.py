@@ -219,6 +219,37 @@ def test_a_quoted_path_matches_the_diff_that_named_it_plainly():
     assert sweep.real_changes(' M "with space.py"\n', ["with space.py"]) == ("with space.py",)
 
 
+def test_inspect_counts_the_phantom_it_filtered_out(tmp_path):
+    """Dropping the phantom from `dirty` is right and is not the whole answer: `git
+    worktree remove` runs its own check with status semantics, so the box this reads as
+    clean is one git refuses to remove. `worktree.phantom_only_dirt` is the only reader,
+    and without a count there is nothing for it to read."""
+    state = inspect_with(
+        tmp_path,
+        {
+            **INSPECT_REPLIES,
+            ("status", "--porcelain"): " M .secrets.baseline\n",
+            ("diff", "--name-only", "HEAD"): "",
+        },
+    )
+    assert state.dirty == 0
+    assert state.phantom_dirty == 1
+
+
+def test_inspect_counts_no_phantom_when_the_diff_backs_the_status(tmp_path):
+    """The ordinary case, and the one the count must not fire on: a real edit."""
+    state = inspect_with(
+        tmp_path,
+        {
+            **INSPECT_REPLIES,
+            ("status", "--porcelain"): " M app.py\n",
+            ("diff", "--name-only", "HEAD"): "app.py",
+        },
+    )
+    assert state.dirty == 1
+    assert state.phantom_dirty == 0
+
+
 def test_real_changes_keeps_the_order_git_reported():
     porcelain = " M b.py\n?? c.txt\n M a.py\n"
     assert sweep.real_changes(porcelain, ["a.py", "b.py"]) == ("b.py", "c.txt", "a.py")
