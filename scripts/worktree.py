@@ -1864,6 +1864,32 @@ def branch_delete_flag(state: sweep.State, pr_merged: bool) -> str:
     return "-d"
 
 
+def phantom_only_dirt(state: sweep.State) -> bool:
+    """Whether `git worktree remove` will refuse a box every decision here calls clean.
+
+    The two commands answer the same question with different semantics. `git worktree
+    remove` re-asks it with **status** semantics; `sweep.real_changes` answered it with
+    **diff** semantics. So a box whose only change is a tracked file rewritten
+    byte-differently but equivalently -- detect-secrets regenerating `.secrets.baseline`
+    is the one that happens daily -- is clean to `reapable`, to `reconcile_action` and to
+    every refusal in `reap_decision`, and dirty to git.
+
+    Such a box reaped in halves: the stack came down, the volumes went, and then the
+    removal failed with `contains modified or untracked files`. The step is not
+    retryable and the state is not self-correcting, so `reconcile` exited 1 on every
+    scheduled pass thereafter and `reclaim.py` reported that as its own failure. Two
+    carameli boxes did it for a day, every fifteen minutes, after `real_changes` fixed
+    the *previous* half of this divergence -- boxes held forever on the same phantom.
+
+    `--force` here discards exactly nothing, and that is what makes it narrow rather than
+    a hammer: `real_changes` keeps every untracked path and every path git can show a
+    diff for, so all that is left is content git has already called identical to HEAD.
+    `state.dirty` must still be zero -- the same gate `reapable` passed to get here -- so
+    one real edit alongside the phantom puts the box back under the ordinary refusal.
+    """
+    return not state.dirty and state.phantom_dirty > 0
+
+
 def reap_plan(
     box: Box,
     workspace_root: Path,
@@ -1917,6 +1943,10 @@ def reap_plan(
     that finally cleared the husk would exit 1 and leak the port slot it was run to
     reclaim. The branch is named in the warning instead; it is a ref in the source
     checkout and outlives the box either way.
+
+    **`--force` can appear on the removal step of a reap nobody forced**, and only for a
+    box `git worktree remove` refuses while every decision above calls it clean. What
+    that discards -- nothing -- and what it cost to find out is `phantom_only_dirt`.
     """
     path = str(box_path(workspace_root, box.name))
     allowed, note = reap_decision(
@@ -1949,7 +1979,7 @@ def reap_plan(
             if part
         )
     remove: tuple[str, ...] = ("worktree", "remove", path)
-    if force or (box.kind == PREVIEW_KIND and bool(state.dirty)):
+    if force or (box.kind == PREVIEW_KIND and bool(state.dirty)) or phantom_only_dirt(state):
         remove = (*remove, "--force")
     steps: list[tuple[str, ...]] = [remove]
     warning = note

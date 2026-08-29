@@ -1227,6 +1227,25 @@ def test_reap_never_forces_the_worktree_removal_by_default():
     assert "--force" not in reap().steps[0]
 
 
+def test_a_reap_forces_past_dirt_only_git_can_see():
+    """Lived on two carameli boxes whose PRs had merged: `real_changes` correctly reads a
+    regenerated `.secrets.baseline` as no work at all, so every decision reaped the box --
+    and then `git worktree remove` re-asked with status semantics and refused. The stack
+    and the volumes were already gone, so each scheduled `reconcile` exited 1 over a box
+    it had half-destroyed, and `reclaim.py` reported that as its own failure every run."""
+    plan = reap(sweep.NEEDS_PR, state=state(dirty=0, phantom_dirty=1, unpushed=0, ahead=2))
+    assert not plan.refusal
+    assert "--force" in plan.steps[0]
+
+
+def test_a_real_edit_beside_the_phantom_is_not_forced():
+    """The narrowness `phantom_only_dirt` rests on. `--force` is safe there only because
+    what it discards is content git has already called identical to HEAD; one real
+    uncommitted file alongside it and the ordinary refusal is the right answer again."""
+    assert not worktree.phantom_only_dirt(state(dirty=1, phantom_dirty=1))
+    assert not worktree.phantom_only_dirt(state(dirty=0, phantom_dirty=0))
+
+
 def test_force_reap_discards_the_worktree_but_not_the_commits():
     """The asymmetry the whole `--force` design rests on: `worktree remove --force`
     throws away uncommitted edits, and nothing in the plan can lose a commit."""

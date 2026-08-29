@@ -252,6 +252,13 @@ class State:
     # The changed paths behind `dirty`, for the generated PR body. Empty is a
     # legitimate value for a hand-built State: the body degrades to the count.
     dirty_files: tuple[str, ...] = ()
+    # How many porcelain paths `real_changes` dropped -- tracked files git reports as
+    # ` M` and shows no diff for. Zero for every honest checkout, and never a reason to
+    # hold anything: it is `dirty` that answers "is there work here". It is carried
+    # because `git worktree remove` runs its own check with *status* semantics, so a
+    # box this file calls clean is one git refuses to remove. See
+    # `worktree.reap_plan`, which is the only reader.
+    phantom_dirty: int = 0
     behind: int = 0
     ahead: int = 0
     upstream: str = ""
@@ -1381,6 +1388,7 @@ def inspect(
         branch=branch,
         dirty=len(dirty_files),
         dirty_files=dirty_files,
+        phantom_dirty=len(parse_porcelain(porcelain)) - len(dirty_files),
         behind=behind,
         ahead=ahead,
         upstream=upstream,
