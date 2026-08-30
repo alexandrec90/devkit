@@ -102,8 +102,8 @@ it is in that code, and the file it was in is against a 500-line cap.
   `main()` test on purpose: `redirect_decision` takes the project list as an argument,
   so only the shell can be wrong about it.
 - **Among paths it does own, exactly two cases**: the edit is already inside a box
-  **this session holds the lease on**, or the checkout is on a managed task branch
-  **that carries commits of its own** — the "fix PR #42" case, where something
+  **this session holds the lease on**, or the checkout is on a branch that is not its
+  home one **and carries commits of its own** — the "fix PR #42" case, where something
   deliberately checked that branch out and a fresh box would put the fix somewhere the
   PR never sees. Anything else that would land on a home branch gets a box, because
   landing there with no task branch under it is the agent manufacturing the exact
@@ -129,6 +129,19 @@ it is in that code, and the file it was in is against a 500-line cap.
   and it is deliberately local (`git rev-list` against an already-fetched
   `origin/<default>`, not a PR lookup) because this runs on every edit and a network
   round trip in a PreToolUse hook is a hang. It **fails closed**: any error declines.
+- **Nor is "does the branch have a devkit prefix".** That was the *other* half of the
+  same mistake, and it survived the fix above until 2026-08-29: carameli parked on
+  `add-call-status-icons` with PR #252 open blocked an edit and got a box off
+  `origin/master` that could not hold the code under repair, so the agent's `Edit`
+  failed with "the box's copy of the file does not contain the text this edit
+  replaces". A human's branch protects a PR exactly as an `agent/...` one does.
+  `protectable` is the predicate: a managed prefix qualifies, and so does simply not
+  being the branch `origin/HEAD` names. `default_branch_of` supplies the second half
+  and **fails open to `""`** — the opposite of `branch_has_own_commits`, because the
+  two unknowns have opposite costs. Not knowing whether a branch carries work must not
+  start diverting edits; not knowing which branch is *home* must not start allowing
+  them onto one, which is why a checkout sitting on `master` with local commits still
+  gets a box.
 
 ## The slug is keyed by session, not by worktree
 
@@ -137,3 +150,22 @@ rather than by worktree. That is the only key the two events share: the prompt a
 UserPromptSubmit, the box is cut on PreToolUse, and the two run in different processes
 with different working directories. Without it every guard-cut box was named
 `ws-<8 hex of session id>` and no PR title said what it did.
+
+### Which is why a branch name can publish a word the task was to delete
+
+The slug is the prompt, and a prompt states the task — so "make sure references to
+&lt;licensed product&gt; are removed" from a **public** repo became
+`agent/make-sure-references-<brandname>-0824`, a branch about to push the exact token it
+was asked to delete. Nothing downstream catches that: by the time the branch has a name,
+the name is what `git push` publishes.
+
+`task_slug.record` strips denied terms from every slug it writes, from two sources it
+unions — `DEVKIT_SLUG_DENY` (comma-separated, one session) and one term per line in
+`<boxes root>/slug-deny.txt`, which is machine-local state under the boxes directory.
+**Not a file in the repo it protects**: a committed denylist publishes the same word it
+is hiding. A slug redacted to nothing is not recorded, which lands the guard on the
+`ws-<session>` fallback — ugly and safe.
+
+It is a list somebody has to fill in, and that is the honest limit of it: no harness can
+know that a word is a licensed brand. What it does buy is that filling it in once covers
+every later session on this machine.
