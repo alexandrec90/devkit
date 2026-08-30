@@ -8,6 +8,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from live_cost import ENV_VARS, resolve
 from support import REPO_ROOT
 
 pytestmark = [
@@ -15,14 +16,13 @@ pytestmark = [
     pytest.mark.paid,
 ]
 
-LIVE_MODEL = os.environ.get("CLAUDE_LIVE_HOOK_MODEL", "haiku")
-LIVE_EFFORT = os.environ.get("CLAUDE_LIVE_HOOK_EFFORT", "low")
-# A ceiling, not a spend: the run costs what it costs and this only stops a runaway. It
-# has to clear *one* turn's floor, which is dominated by the one-off cache write of the
-# CLI's own system prompt and tool schemas -- ~53k tokens, and nothing this test
-# controls. At 0.10 it did not: a measured run died at `error_max_budget_usd` on turn 1
-# having spent 0.109325, so the ceiling failed the suite before a hook was ever reached.
-LIVE_BUDGET_USD = os.environ.get("CLAUDE_LIVE_HOOK_BUDGET_USD", "0.35")
+# Resolved from `tests/live_cost.py`, never spelled here: the runner prints these before
+# it spends and exports them into this process's environment, so a literal in this file
+# would be a second number that the preflight could disagree with.
+LIVE = resolve("claude")
+LIVE_MODEL = LIVE.model
+LIVE_EFFORT = LIVE.effort
+LIVE_BUDGET_USD = LIVE.budget_usd
 
 # The child command the prompt asks for, hoisted to a constant because a *free* test
 # feeds this exact string to `enforce-capped-bash.decide` -- see
@@ -178,9 +178,10 @@ def test_claude_runs_an_unlisted_command_bare_without_a_denial_retry(tmp_path):
             f"the run hit its ${LIVE_BUDGET_USD} ceiling after "
             f"{response.get('num_turns')} turn(s), having spent "
             f"${response.get('total_cost_usd')}, so no hook was exercised. The ceiling is "
-            "a cost guard and not an assertion: raise LIVE_BUDGET_USD (or set "
-            "CLAUDE_LIVE_HOOK_BUDGET_USD) above one turn's floor, which is dominated by "
-            "the one-off cache write of the CLI's own system prompt.\n\n" + diagnostic
+            "a cost guard and not an assertion: raise the default in tests/live_cost.py "
+            f"(or set {ENV_VARS['claude']['budget_usd']}) above one turn's floor, which "
+            "is dominated by the one-off cache write of the CLI's own system prompt.\n\n"
+            + diagnostic
         )
     assert result.returncode == 0, diagnostic
     assert response["result"] == "CLAUDE_CAPPED_SHELL_OK", diagnostic

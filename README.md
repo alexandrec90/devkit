@@ -886,7 +886,15 @@ the rule's "do not wrap commands it did not name" paragraph exists to prevent. I
 also paid and opt-in:
 `python -m pytest tests/test_claude_hooks_live.py -m "claude_live and paid" -s`.
 `CLAUDE_LIVE_HOOK_MODEL`, `CLAUDE_LIVE_HOOK_EFFORT`, and
-`CLAUDE_LIVE_HOOK_BUDGET_USD` override its low-cost defaults.
+`CLAUDE_LIVE_HOOK_BUDGET_USD` override its defaults.
+
+Those defaults, and the Codex suite's, live in `tests/live_cost.py` — one table, pinning
+each CLI to its cheapest model and lowest effort. It is a module rather than three
+`os.environ.get` calls per suite so that two things become possible:
+`tests/test_live_cost.py` can assert the defaults are still the cheapest tier (raising
+one has to be an edit to a reviewed allow-list, not a word changed in passing), and the
+runner below can print the price before it spends. A test also fails if either suite goes
+back to spelling a model name itself.
 
 Because it is paid it is deselected by default, so nothing turned red when the Bash gate
 was inverted underneath it and its expectation became the opposite of shipped policy.
@@ -901,8 +909,13 @@ anything, and writes failures to
 have two ways to cost nothing and prove nothing while exiting 0 — the CLI is not on
 `PATH`, so the suite skips, or the `-m` selector is dropped, so `addopts`' `-m "not
 paid"` deselects everything. The runner reads the count of tests that actually ran and
-fails when it is zero. The task is scoped to devkit alone: these suites live in `tests/`,
-which is never vendored, so no consuming project has the file.
+fails when it is zero. It also **exports** the resolved cost into the environment pytest
+inherits, which is what makes the preflight a promise rather than a guess: with the
+model named on the command line and in the environment, no settings file, profile or
+stray shell export can put a pricier one in front of the CLI. `--model` and `--effort`
+override for one run; `--model` is refused for `both`, because one name cannot be valid
+for two CLIs. The task is scoped to devkit alone: these suites live in `tests/`, which
+is never vendored, so no consuming project has the file.
 
 For a local diagnostic, run `codex doctor --summary` first; it checks installation,
 configuration, authentication, and connectivity, but not whether a hook changed
