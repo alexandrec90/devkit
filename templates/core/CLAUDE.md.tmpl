@@ -71,24 +71,6 @@ Write the artifact on failure too, not just success, and overwrite per run.
 - **`docker compose exec` must use `-T`** — without it a pseudo-TTY is allocated and
   the subprocess handle can outlive the command, leaving the caller hung.
 
-{{#worktree}}
-## Parallel worktrees
-
-`../{{ worktree }}` is a second checkout (`git worktree`) on its own branch, with its
-own Docker stack. The `.git` object store, Docker image layers, and the package cache
-are shared, so the second stack is cheap.
-
-- **`COMPOSE_PROJECT_NAME` must equal the directory name** — it namespaces
-  containers, network, and volumes.
-- **Every `*_HOST_PORT` is offset by the checkout's slot** (this one is slot
-  {{ slot }}, `{{ worktree }}` is slot {{ worktree_slot }}). Slots are assigned in
-  devkit's `ports.toml`, not picked by hand; `docker compose up` failing with "port
-  is already allocated" means two checkouts share a slot.
-- `docker compose down -v` is project-scoped and safe to reset one stack, but
-  daemon-wide commands like `docker system prune` hit both — don't run them while
-  the other stack is up.
-{{/worktree}}
-
 ## Testing
 
 **`.claude/rules/engineering.md`** is the authority: tests ship in the same commit,

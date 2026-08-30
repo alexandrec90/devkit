@@ -623,9 +623,8 @@ Projects then `--pull`. Only `--push` from the one project actively authoring a 
 ## Creating a new project
 
 `scripts/new-project.py` renders a whole project from `templates/` — the harness
-seam, a Docker stack on registry-allocated ports, a parallel worktree, VS Code
-tasks, and a PR gate whose drift check actually gates — instead of copying whichever
-existing repo was nearest.
+seam, a Docker stack on registry-allocated ports, VS Code tasks, and a PR gate whose
+drift check actually gates — instead of copying whichever existing repo was nearest.
 
 ```bash
 # Dry run is the DEFAULT: prints every file and command, writes nothing.

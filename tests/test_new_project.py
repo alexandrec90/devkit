@@ -65,7 +65,6 @@ def make_args(**overrides):
         "db_url_scheme": "postgresql+psycopg",
         "src_layout": False,
         "preset": None,
-        "worktree": True,
         "remote": True,
         "register": True,
         "dry_run": True,
@@ -194,18 +193,33 @@ def test_explicit_flags_add_to_a_preset_rather_than_replacing_it(tmp_path):
     assert the_plan.context["redis"] is True  # from the explicit flag
 
 
-def test_worktree_env_only_offsets_services_the_project_uses():
+def test_the_generator_reserves_one_slot_and_cuts_no_sibling_checkout():
+    """The retired `<name>-b` convention, asserted gone rather than remembered.
+
+    Generating a project used to also `git worktree add` a `<name>-b` sibling, reserve
+    a *second* port slot for it, and register both in the workspace file. Ephemeral
+    boxes replaced that tier (workspace `CLAUDE.md`), and every non-interactive caller
+    was already passing `--no-worktree` — only the VS Code task, which cannot pass a
+    flag the picker does not offer, still got one. Port slots are the scarce resource
+    the second reservation spent: this machine has run at 16/16.
+    """
     args = make_args(postgres=True, docker=True, app_service=True)
     the_plan = new_project.plan(args, registry())
-    # No redis feature -> no REDIS_HOST_PORT to get wrong later.
-    assert "REDIS_HOST_PORT" not in the_plan.worktree_env
-    assert "DB_HOST_PORT" in the_plan.worktree_env
-    assert the_plan.worktree_env["COMPOSE_PROJECT_NAME"] == "demo_project-b"
+
+    assert not hasattr(the_plan, "worktree")
+    assert "worktree_slot" not in the_plan.context
+    assert not any(str(v).endswith("-b") for v in the_plan.context.values())
 
 
-def test_worktree_gets_a_different_slot_than_the_primary():
-    the_plan = new_project.plan(make_args(postgres=True), registry())
-    assert the_plan.context["slot"] != the_plan.context["worktree_slot"]
+def test_the_cli_has_no_worktree_flag_left_to_pass():
+    """`--no-worktree` is gone, not merely defaulted off.
+
+    A flag kept as a no-op reads to the next caller as a live choice, and the two
+    in-repo callers that passed it (the PR gate's matrix, RELEASING.md's acceptance
+    test) were updated in the same change. argparse exits 2 on an unknown flag.
+    """
+    with pytest.raises(SystemExit):
+        new_project.main(["demo_project", "--no-worktree", "--dry-run"])
 
 
 def test_generating_into_a_non_empty_directory_is_refused(tmp_path):
@@ -490,10 +504,11 @@ def test_generated_projects_ship_no_tasks_at_all(tmp_path, features):
     and ibkr_trader grew their `scripts/db-revision.py` entrypoints.
 
     The reason to keep this file empty rather than merely tidy is that a task defined in
-    a repo is rendered once per WORKTREE, and every project gets a parallel `-b` checkout
-    — so one entry here becomes two indistinguishable quick-pick rows the moment the
-    worktree exists. A generated project that needs a one-click migration joins
-    `DB_PROJECTS` and the `dbCheckout` picker instead.
+    a repo is rendered once per WORKTREE, and the workspace holds an ephemeral box per
+    agent task in flight — so one entry here becomes N indistinguishable quick-pick rows,
+    one of them the checkout and the rest boxes nobody meant to aim a task at. A
+    generated project that needs a one-click migration joins `DB_PROJECTS` and the
+    `dbCheckout` picker instead.
     """
     root = generate(tmp_path, features)
     text = (root / ".vscode" / "tasks.json").read_text(encoding="utf-8")
@@ -602,7 +617,7 @@ def test_registration_is_still_the_default(tmp_path, monkeypatch):
 
     new_project.register_in_workspace(the_plan, dry_run=False)
 
-    assert calls == [[the_plan.name, the_plan.worktree]]
+    assert calls == [[the_plan.name]]
 
 
 def test_the_no_register_flag_is_reachable_from_the_cli(tmp_path, capsys, monkeypatch):
@@ -612,10 +627,10 @@ def test_the_no_register_flag_is_reachable_from_the_cli(tmp_path, capsys, monkey
     )
     argv = ["probe_tag", "--preset", "bare", "--parent", str(tmp_path), "--devkit-ref", "v0.1.0"]
 
-    assert new_project.main([*argv, "--no-remote", "--no-worktree", "--no-register"]) == 0
+    assert new_project.main([*argv, "--no-remote", "--no-register"]) == 0
     assert "--no-register" in capsys.readouterr().out
 
-    assert new_project.main([*argv, "--no-remote", "--no-worktree"]) == 0
+    assert new_project.main([*argv, "--no-remote"]) == 0
     assert "--no-register" not in capsys.readouterr().out
 
 

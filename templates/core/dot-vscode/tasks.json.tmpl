@@ -9,13 +9,14 @@
   // None of them belong here.
   //
   // A TASK IN THIS FILE IS DUPLICATED PER WORKTREE, and that is the whole argument.
-  // Every project gets a parallel `-b` checkout, and both are folders in one multi-root
-  // workspace — so a task defined here is rendered TWICE in the quick-pick, under one
-  // label, with nothing to say which checkout it would run in. The two copies then
+  // The workspace holds a checkout plus an ephemeral box per agent task in flight — so
+  // a task defined here is rendered once per live worktree in the quick-pick, under one
+  // label, with nothing to say which checkout it would run in. The copies then
   // disagree the moment the worktrees sit on different branches. That is not a
-  // hypothetical: carameli's two copies had drifted to eight tasks versus two, and
-  // ibkr_trader's to five versus eleven, with the same label ("Stop: Docker Stack")
-  // running different commands in each.
+  // hypothetical: back when every project also carried a static `-b` sibling,
+  // carameli's two copies had drifted to eight tasks versus two, and ibkr_trader's to
+  // five versus eleven, with the same label ("Stop: Docker Stack") running different
+  // commands in each.
   //
   // A PROJECT-SPECIFIC TASK IS STILL HOISTED. It does not have to become generic to go
   // up: `devkit_project.py`'s `Action.projects` scopes an action to one repo's worktree
@@ -37,7 +38,7 @@
   // `project` picker. Until then, `alembic revision --autogenerate -m "..."` is the
   // documented interface, which is what it was before this task ever existed. Do NOT
   // "fix" that by putting the task back here — it would be duplicated per worktree the
-  // moment the project gets its `-b` checkout, which is the whole problem.
+  // moment an agent box is cut against the project, which is the whole problem.
   //
   // What this project owes the arrangement instead is the CLI CONTRACT: keep
   // `scripts/run-tests.py`, `scripts/lint-all.py`, `scripts/docker-up.py`,

@@ -187,7 +187,7 @@ jobs:
             echo "::group::$preset"
             rm -rf /tmp/gen && mkdir -p /tmp/gen
             python scripts/new-project.py "$name" \
-              --preset "$preset" --parent /tmp/gen --no-remote --no-worktree --yes
+              --preset "$preset" --parent /tmp/gen --no-remote --yes
             cd "/tmp/gen/$name"
             python -m pytest scripts/hooks/tests/ -q
             # The wrappers tasks.json and the generated PR gate actually invoke.
