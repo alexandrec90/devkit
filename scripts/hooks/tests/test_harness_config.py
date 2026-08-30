@@ -377,6 +377,81 @@ def test_ui_env_of_the_wrong_shape_falls_back_to_the_default():
         assert cfg.from_dict({"worktree": {"ui_env": junk}}).worktree.ui_env == {}
 
 
+# --- [structure] ------------------------------------------------------------------
+#
+# The structural ratchet's manifest table. Every field is optional and every default
+# is "the script decides", so a project that never writes the table still gets the
+# gate at the script's limits.
+
+
+def test_structure_defaults_leave_everything_to_the_script():
+    st = cfg.Config().structure
+    assert st == cfg.StructureConfig()
+    assert st.limits == {}
+    assert st.layers == ()
+    assert st.restrict == ()
+
+
+def test_structure_table_is_mapped_including_from_which_python_cannot_name():
+    st = cfg.from_dict(
+        {
+            "structure": {
+                "paths": ["app/", "lib/"],
+                "exclude": ["app/generated/"],
+                "entrypoints": ["app/plugins/"],
+                "disabled": ["orphan"],
+                "limits": {"file_lines": 400, "complexity": 10},
+                "layers": [{"name": "ui", "from": ["app/ui"], "forbid": ["app/db", "sqlalchemy"]}],
+                "restrict": [
+                    {
+                        "name": "storage",
+                        "pattern": "localStorage",
+                        "only_in": ["web/storage"],
+                        "paths": ["web"],
+                    }
+                ],
+            }
+        }
+    ).structure
+    assert st.paths == ("app/", "lib/")
+    assert st.exclude == ("app/generated/",)
+    assert st.entrypoints == ("app/plugins/",)
+    assert st.disabled == ("orphan",)
+    assert st.limits == {"file_lines": 400, "complexity": 10}
+    assert st.layers == (
+        cfg.LayerRule(name="ui", sources=("app/ui",), forbid=("app/db", "sqlalchemy")),
+    )
+    assert st.restrict == (
+        cfg.RestrictRule(
+            name="storage", pattern="localStorage", only_in=("web/storage",), paths=("web",)
+        ),
+    )
+
+
+def test_structure_limits_drop_what_is_not_a_whole_number():
+    limits = cfg.from_dict(
+        {"structure": {"limits": {"file_lines": 400, "complexity": "10", "imports": True}}}
+    )
+    assert limits.structure.limits == {"file_lines": 400}
+
+
+def test_structure_rules_of_the_wrong_shape_are_skipped_not_fatal():
+    st = cfg.from_dict(
+        {
+            "structure": {
+                "layers": ["ui", {"name": "ok", "from": ["a"], "forbid": ["b"]}],
+                "restrict": "x",
+            }
+        }
+    ).structure
+    assert [r.name for r in st.layers] == ["ok"]
+    assert st.restrict == ()
+
+
+def test_a_structure_table_of_the_wrong_shape_is_ignored():
+    assert cfg.from_dict({"structure": ["nope"]}).structure == cfg.StructureConfig()
+
+
 # --- harness provenance -------------------------------------------------------
 #
 # What a hook stamps on the messages it sends an agent. The failure this exists to

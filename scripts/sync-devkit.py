@@ -138,6 +138,15 @@ MANIFEST: tuple[str, ...] = (
     # is what keeps adoption from turning a consumer's PR gate red.
     "scripts/hooks/untested_symbols.py",
     "scripts/hooks/tests/test_untested_symbols.py",
+    # The structural ratchet: size, complexity, fan-out, cycles, boundaries and
+    # suppression counts, held to `.devkit-structure.txt` on the same terms as the
+    # untested-symbol list above -- the file may only shrink, `--pull` seeds it, and
+    # the vendored test is what runs it in a consumer's gate. Two modules because the
+    # language scanners are testable against a snippet and the judging half is not.
+    "scripts/hooks/structure_scan.py",
+    "scripts/hooks/tests/test_structure_scan.py",
+    "scripts/hooks/structure_check.py",
+    "scripts/hooks/tests/test_structure_check.py",
     "scripts/hooks/stop.py",
     "scripts/hooks/tests/test_stop.py",
     # Auto-fix-on-edit PostToolUse hook (repo-relative ruff path fix).
@@ -1032,6 +1041,49 @@ def seed_untested_baseline(root: Path) -> int | None:
     return len(read_untested_baseline(root))
 
 
+# The structural ratchet's twin of the file above, on the same terms: never vendored,
+# shared name so a pull can tell adoption from a repeat.
+STRUCTURE_BASELINE_FILE = ".devkit-structure.txt"
+
+
+def seed_structure_baseline(root: Path) -> int | None:
+    """Record this project's existing structural debt on adoption. `None` if not.
+
+    Same argument as `seed_untested_baseline`: until the baseline exists every
+    oversized function and every `# noqa` reads as new debt, so the pull that delivers
+    the gate would redden the gate. The scanner refuses to overwrite, so calling this
+    on every pull is safe, and it runs out of process for the same reason.
+    """
+    script = root / "scripts/hooks/structure_check.py"
+    if not script.is_file() or (root / STRUCTURE_BASELINE_FILE).exists():
+        return None
+    try:
+        result = subprocess.run(
+            [console_python(), str(script), "--seed"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            creationflags=NO_WINDOW,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return len(read_structure_baseline(root))
+
+
+def read_structure_baseline(root: Path) -> list[str]:
+    """The recorded findings, so a pull can report how much debt it just wrote down."""
+    path = root / STRUCTURE_BASELINE_FILE
+    if not path.is_file():
+        return []
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
 def read_untested_baseline(root: Path) -> list[str]:
     """The recorded gaps, so a pull can report how much debt it just wrote down."""
     path = root / UNTESTED_BASELINE_FILE
@@ -1259,6 +1311,7 @@ def main(argv: list[str] | None = None) -> int:
         codex_regenerated = regenerate_codex_hooks(REPO_ROOT) if args.pull else False
         # After the copy, because it runs the scanner this pull just delivered.
         seeded = seed_untested_baseline(REPO_ROOT) if args.pull else None
+        seeded_structure = seed_structure_baseline(REPO_ROOT) if args.pull else None
         blocks_written, blocks_failed = sync_blocks(from_root, to_root, BLOCK_MANIFEST)
         verb = "pulled" if args.pull else "pushed"
         print(
@@ -1287,6 +1340,11 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"  (adopted the untested-symbol ratchet) {UNTESTED_BASELINE_FILE}: "
                 f"{seeded} symbol(s) with no test naming them"
+            )
+        if seeded_structure is not None:
+            print(
+                f"  (adopted the structure ratchet) {STRUCTURE_BASELINE_FILE}: "
+                f"{seeded_structure} finding(s) grandfathered"
             )
         if args.pull:
             # The SHA, always: DEVKIT_VERSION records the upstream *commit*, and

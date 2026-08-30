@@ -113,6 +113,8 @@ def _toml_schema() -> dict[str, frozenset[str]]:
         "bash": fields(cfg.BashConfig),
         "docker": fields(cfg.DockerConfig),
         "worktree": fields(cfg.WorktreeConfig),
+        "test_contract": fields(cfg.TestContractConfig),
+        "structure": fields(cfg.StructureConfig),
     }
 
 

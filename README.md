@@ -49,6 +49,7 @@ the same hook set the generator emits, against devkit's own scripts.
 | Auto-lint on edit | `scripts/hooks/lint-fix.py` |
 | Pre-stop verification | `scripts/hooks/stop.py` → `scripts/lint-all.py`, `scripts/run-tests.py`, both test trees |
 | Tests must exist | `tests/test_test_contract.py` (a `test_<stem>.py` per script) and `scripts/hooks/untested_symbols.py` (every public callable named by a test, ratcheted against `.devkit-untested.txt`) |
+| Shape must not degrade | `scripts/hooks/structure_check.py` (size, complexity, fan-out, cycles, orphans, suppressions, dependencies and declared boundaries, ratcheted against `.devkit-structure.txt`; `--tighten` after a fix, `[structure]` in `.devkit.toml` to tune) |
 | Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log`, `logs/stop-verify.log` |
 | Scheduled-failure reporting | `.github/workflows/scheduled-failure-issue.yml` → `scripts/report-workflow-failure.py` opens one assigned issue when `Nightly` fails, and closes it when it passes |
 | VS Code tasks | the multi-root workspace file — devkit owns no `.vscode/tasks.json`, which is the rule it prescribes |

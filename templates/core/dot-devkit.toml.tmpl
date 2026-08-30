@@ -49,6 +49,59 @@ head_bytes = 2000
 #sources = ["{{ app_dir }}", "scripts/", "lib/"]
 #exclude = ["{{ app_dir }}generated/"]
 
+# The structural ratchet (`scripts/hooks/structure_check.py`): file, function, class
+# and component size, complexity, nesting, parameter and import counts, import cycles,
+# orphan modules, suppression and skipped-test counts, declared dependencies, and the
+# import and call-site boundaries declared below. Findings are recorded in
+# `.devkit-structure.txt`, which is committed and may only shrink; the limits below
+# are the script's `DEFAULT_LIMITS` and are shown so a project can see what it holds
+# to. Every key is optional; an unknown limit or rule name is a configuration error.
+#[structure]
+#paths = ["{{ app_dir }}", "scripts/"]       # defaults to the app tree, scripts/ and the frontend src
+#exclude = ["{{ app_dir }}migrations/"]      # generated code the project does not answer for
+#entrypoints = ["{{ app_dir }}plugins/"]     # loaded by name, so the orphan rule must not see them
+#disabled = []                               # e.g. ["orphan"] for a library whose modules are its API
+#
+#[structure.limits]
+#file_lines = 500
+#function_lines = 80
+#function_params = 6
+#complexity = 15
+#nesting_depth = 4
+#class_lines = 300
+#class_methods = 20
+#imports = 20
+#definitions = 20
+#component_lines = 250
+#react_state = 8
+#react_effects = 5
+#
+# Import boundaries: files under `from` may not import anything `forbid` names, as a
+# module prefix (`sqlalchemy`) or a path prefix of the resolved file (`{{ app_dir }}db/`).
+#[[structure.layers]]
+#name = "routes-do-not-touch-the-db"
+#from = ["{{ app_dir }}api/"]
+#forbid = ["{{ app_dir }}db/", "sqlalchemy"]
+#
+# Call-site boundaries: `pattern` (a regex) may appear only under `only_in`; `paths`
+# narrows which files are checked at all.
+#[[structure.restrict]]
+#name = "browser-storage-through-the-wrapper"
+#pattern = "\\b(localStorage|sessionStorage)\\b"
+#only_in = ["frontend/src/lib/storage"]
+#
+#[[structure.restrict]]
+#name = "http-through-the-api-client"
+#pattern = "\\bfetch\\("
+#paths = ["frontend/src/"]
+#only_in = ["frontend/src/api/"]
+#
+#[[structure.restrict]]
+#name = "sql-in-the-repository-layer"
+#pattern = "\\.execute\\("
+#paths = ["{{ app_dir }}"]
+#only_in = ["{{ app_dir }}repositories/"]
+
 {{#postgres}}
 # Tier 2b: host pytest against the DB over its published compose port.
 #
