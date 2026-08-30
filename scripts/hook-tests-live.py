@@ -116,7 +116,7 @@ def load_cost_module(root: Path) -> ModuleType:
     """
     path = root / COST_MODULE
     spec = importlib.util.spec_from_file_location("devkit_live_cost", path)
-    if spec is None or spec.loader is None:  # pragma: no cover - unreachable for a real file
+    if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
     # Registered *before* executing, not as a cache. `live_cost` uses `@dataclass` under
@@ -322,39 +322,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def refusal(suites: list[Suite], root: Path, model: str | None) -> str | None:
+    """The reason this run must not start, or None — `main` prints it and exits 2.
+
+    Loud, not a clean skip, the same rule `hook-tests.py` follows. The live suites are
+    devkit-only by design (`tests/` is never vendored), so a checkout without them is a
+    mis-scoped action to report rather than a pass to hand back; a CLI that is not on
+    PATH would make pytest skip, and a skipped paid smoke is a green run that proved
+    nothing.
+    """
+    if model and len(suites) > 1:
+        return (
+            "hook-tests-live: --model needs a single suite — 'haiku' is not a codex model "
+            "and 'gpt-5.6-luna' is not a Claude one. Run each suite in turn to override both."
+        )
+    absent = missing_suites(suites, root)
+    if absent:
+        return (
+            f"hook-tests-live: {root.name} has no {', '.join(absent)} — the live smokes "
+            f"live in devkit's own tests/, which is not vendored. Nothing to run here."
+        )
+    unavailable = missing_binaries(suites)
+    if unavailable:
+        return (
+            f"hook-tests-live: {', '.join(unavailable)} not on PATH. The suite would skip, "
+            f"and a skipped paid smoke is a green run that proved nothing."
+        )
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = (args.root or Path.cwd()).resolve()
     suites = resolve_suites(args.suite)
 
-    if args.model and len(suites) > 1:
-        print(
-            "hook-tests-live: --model needs a single suite — 'haiku' is not a codex model "
-            "and 'gpt-5.6-luna' is not a Claude one. Run each suite in turn to override both.",
-            file=sys.stderr,
-        )
-        return 2
-
-    absent = missing_suites(suites, root)
-    if absent:
-        # Loud, not a clean skip — the same rule `hook-tests.py` follows. These tests are
-        # devkit-only by design (`tests/` is never vendored), so a checkout without them
-        # is a mis-scoped action to report, never a pass to hand back.
-        print(
-            f"hook-tests-live: {root.name} has no {', '.join(absent)} — the live smokes "
-            f"live in devkit's own tests/, which is not vendored. Nothing to run here.",
-            file=sys.stderr,
-        )
-        return 2
-
-    unavailable = missing_binaries(suites)
-    if unavailable:
-        # pytest would skip these, and a skip reads as a pass in the task list.
-        print(
-            f"hook-tests-live: {', '.join(unavailable)} not on PATH. The suite would skip, "
-            f"and a skipped paid smoke is a green run that proved nothing.",
-            file=sys.stderr,
-        )
+    reason = refusal(suites, root, args.model)
+    if reason:
+        print(reason, file=sys.stderr)
         return 2
 
     cost_module = load_cost_module(root)

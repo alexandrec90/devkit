@@ -123,6 +123,21 @@ def test_a_checkout_without_the_live_tests_is_named(tmp_path):
     assert absent == [suite.path for suite in live.resolve_suites("both")] + [live.COST_MODULE]
 
 
+def test_required_paths_is_the_suites_plus_the_cost_table():
+    """`missing_suites` is a filter over this list; the cost table's seat in it is what
+    lets the preflight refuse a checkout that has the suites but not the price."""
+    both = live.resolve_suites("both")
+    assert live.required_paths(both) == [suite.path for suite in both] + [live.COST_MODULE]
+
+
+def test_load_cost_module_loads_the_real_table_by_path(tmp_path):
+    """Registered in `sys.modules` before exec, which is what lets the table's frozen
+    `@dataclass` resolve its own annotations — a loader that skips that step works on
+    plain modules and dies on this one."""
+    module = live.load_cost_module(fake_checkout(tmp_path))
+    assert module.resolve("claude", {}) == module.DEFAULTS["claude"]
+
+
 def test_the_cost_table_is_required_even_when_the_suites_are_present(tmp_path):
     """Without it the runner cannot say what it is about to spend, and a paid task that
     cannot state its price is exactly the thing this script exists to prevent."""
@@ -451,6 +466,21 @@ def test_a_model_override_is_refused_for_both_suites(tmp_path, never_spends, cap
     assert live.main(["both", "--model", "haiku", "--root", str(tmp_path)]) == 2
     assert "single suite" in capsys.readouterr().err
     assert never_spends == []
+
+
+def test_build_parser_defaults_to_the_cheapest_run():
+    """The defaults are the bare task invocation: cheapest suite, costs from the table,
+    the checkout the task runs in."""
+    args = live.build_parser().parse_args([])
+    assert (args.suite, args.model, args.effort, args.root) == ("claude", None, None, None)
+
+
+def test_refusal_names_the_model_flag_before_touching_the_checkout():
+    """The cross-namespace `--model` is refused first, so the message stays about the
+    flag even when the checkout would also have been refused."""
+    reason = live.refusal(live.resolve_suites("both"), Path("/nowhere"), model="haiku")
+    assert reason is not None
+    assert "--model" in reason
 
 
 def test_the_child_environment_keeps_the_rest_of_the_caller_s(tmp_path):
