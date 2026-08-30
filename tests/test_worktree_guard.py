@@ -292,6 +292,23 @@ def on_default(name: str):
     return lambda checkout: name
 
 
+def test_default_branch_of_is_empty_when_git_will_not_say(tmp_path):
+    """ "" is "cannot tell", which lands `protectable` on the name-only answer. A
+    directory that is not a repo is the honest version of every way git can fail here."""
+    guard._DEFAULT_BRANCH_CACHE.clear()
+    assert guard.default_branch_of(tmp_path) == ""
+    assert tmp_path in guard._DEFAULT_BRANCH_CACHE
+
+
+def test_default_branch_of_answers_from_the_memo_after_the_first_probe(tmp_path):
+    """One hook invocation cannot see a repo change, so the second probe is waste --
+    and `main` asks once per candidate path in a shell command naming several."""
+    guard._DEFAULT_BRANCH_CACHE.clear()
+    guard.default_branch_of(tmp_path)
+    guard._DEFAULT_BRANCH_CACHE[tmp_path] = "trunk"
+    assert guard.default_branch_of(tmp_path) == "trunk"
+
+
 def test_a_branch_that_is_not_the_home_one_is_protectable_whatever_it_is_called():
     assert guard.protectable("add-call-status-icons", "master") is True
     assert guard.protectable("agent/x-0829", "master") is True

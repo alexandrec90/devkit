@@ -129,6 +129,14 @@ def _deny_file(tmp_path, text: str):
     return path
 
 
+def test_redact_drops_the_word_carrying_the_term_and_nothing_else():
+    """The whole rule, without the filesystem: a slug is hyphen-separated words, and a
+    term takes the word it appears in rather than the slug it appears in."""
+    assert task_slug.redact("make-sure-references-cloudli", ["cloudli"]) == "make-sure-references"
+    assert task_slug.redact("make-sure-references-cloudli", []) == "make-sure-references-cloudli"
+    assert task_slug.redact("cloudli", ["cloudli"]) == ""
+
+
 def test_a_denied_term_never_reaches_a_recorded_slug(tmp_path):
     """The exact report: the branch that would have been pushed, minus the token."""
     _deny_file(tmp_path, "cloudli\n")
