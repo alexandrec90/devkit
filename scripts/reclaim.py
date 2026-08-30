@@ -39,6 +39,22 @@ A fourth was added on 2026-08-27, when this script would have found nothing:
      whose targets grow with *elapsed weeks* rather than with a session's work, which is
      why nothing had ever noticed them.
 
+A fifth, on 2026-08-29, was the one that answered "the machine crawls after I spin up a
+handful of agents, even from a fresh boot" -- and every section above would have found
+it healthy:
+
+  5. **The search indexer.** `SearchIndexer.exe` had read 48 GB and written 16 GB in the
+     first 80 minutes after boot, holding a whole core the whole time, with a backlog of
+     1.57 million queued notifications and the file under its cursor a `.pyc` inside a
+     box's `.venv`. `C:\\Users\\` is in Windows Search's default crawl scope, and each
+     static project had been excluded by hand one at a time -- but never the workspace
+     root, so `<workspace>\\.worktrees\\` was in scope, and every box an agent cut sent
+     the ~100k files of its `.venv` and `node_modules` through the indexer on provision
+     and again on reap. That is why *agents* were the trigger and a reboot was no cure:
+     the backlog survives the reboot and the indexer resumes it. `search_index` reports
+     the backlog and the scope verdict, and under `--yes` excludes the workspace root
+     with children overridden, so no future box or project needs a rule of its own.
+
 The disk half feeds the memory half, which is why it is worth clearing even when disk is
 not the complaint: under commit pressure Windows grows the pagefile, and the pagefile
 lives on the same volume. It went 34.5 -> 37.5 GB in one session here, taking ~3 GB of
@@ -87,6 +103,7 @@ from __future__ import annotations
 import argparse
 import csv
 import ctypes
+import os
 import re
 import shutil
 import subprocess
@@ -118,6 +135,96 @@ PROTECTED_STAGING = ("$GetCurrent", "$WINDOWS.~BT", "$WINDOWS.~WS", "Windows.old
 
 # `<product>-<revision>` -- how playwright, and only playwright, names a browser build.
 _REVISIONED = re.compile(r"^(?P<product>.+?)-(?P<revision>\d+)$")
+
+# Where the box tier lives under the workspace. Duplicated from `sweep.BOXES_DIR_NAME`
+# for the reason `worktree.py` states at its own copy: this script runs before any venv
+# exists and must not import a sibling to learn one directory name. A test asserts the
+# two agree.
+BOXES_DIR_NAME = ".worktrees"
+
+# Windows Search's crawl-scope API (`ISearchCrawlScopeManager`) is a raw-IUnknown COM
+# interface: `ctypes` cannot call it and PowerShell's late binder cannot either, since
+# it dispatches through IDispatch, which this object does not implement. Declaring the
+# vtable to `Add-Type` is the one route that needs nothing installed. Every `_`-prefixed
+# member is a slot placeholder -- only the position matters, and the order is
+# `searchapi.h`'s. `Api.Run` does the whole job inside C# because PowerShell binds
+# methods on the RCW's runtime class, not on the interface a cast names, and finds none.
+_SEARCH_SCOPE_CSHARP = r"""
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+namespace WS {
+  [ComImport, Guid("AB310581-AC80-11D1-8DF3-00C04FB6EF55"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface ISearchCrawlScopeManager {
+    void _AddDefaultScopeRule(); void _AddRoot(); void _RemoveRoot(); void _EnumerateRoots();
+    void _AddHierarchicalScope();
+    void AddUserScopeRule([MarshalAs(UnmanagedType.LPWStr)] string url, int include, int overrideChildren, uint follow);
+    void _RemoveScopeRule(); void _EnumerateScopeRules(); void _HasParentScopeRule(); void _HasChildScopeRule();
+    void IncludedInCrawlScope([MarshalAs(UnmanagedType.LPWStr)] string url, out int included);
+    void _IncludedInCrawlScopeEx(); void _RevertToDefaultScopes();
+    void SaveAll();
+  }
+  [ComImport, Guid("AB310581-AC80-11D1-8DF3-00C04FB6EF50"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface ISearchCatalogManager {
+    void _get_Name(); void _GetParameter(); void _SetParameter(); void _GetCatalogStatus();
+    void _Reset(); void _Reindex(); void _ReindexMatchingURLs(); void _ReindexSearchRoot();
+    void _put_ConnectTimeout(); void _get_ConnectTimeout(); void _put_DataTimeout(); void _get_DataTimeout();
+    void _NumberOfItems();
+    void NumberOfItemsToIndex(out int incremental, out int notification, out int highPriority);
+    void URLBeingIndexed([MarshalAs(UnmanagedType.LPWStr)] out string url);
+    void _GetURLIndexingState(); void _GetPersistentItemsChangedSink(); void _RegisterViewForNotification();
+    void _GetItemsChangedNotify(); void _UnregisterViewForNotification(); void _SetExtensionClusion();
+    void _EnumerateExcludedExtensions(); void _GetQueryHelper(); void _put_DiacriticSensitivity();
+    void _get_DiacriticSensitivity();
+    void GetCrawlScopeManager(out ISearchCrawlScopeManager csm);
+  }
+  [ComImport, Guid("AB310581-AC80-11D1-8DF3-00C04FB6EF69"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface ISearchManager {
+    void _GetIndexerVersionStr(); void _GetIndexerVersion(); void _GetParameter(); void _SetParameter();
+    void _get_ProxyName(); void _get_BypassList(); void _SetProxy();
+    void GetCatalog([MarshalAs(UnmanagedType.LPWStr)] string name, out ISearchCatalogManager catalog);
+  }
+  [ComImport, Guid("7D096C5F-AC08-4F1F-BEB7-5C22C517CE39")]
+  public class CSearchManager {}
+  public static class Api {
+    public static string Run(string root, bool exclude) {
+      var sb = new StringBuilder();
+      var mgr = (ISearchManager)(object)new CSearchManager();
+      ISearchCatalogManager cat; mgr.GetCatalog("SystemIndex", out cat);
+      int inc, notif, hi; cat.NumberOfItemsToIndex(out inc, out notif, out hi);
+      string url; cat.URLBeingIndexed(out url);
+      sb.AppendLine("backlog: " + (inc + notif + hi));
+      sb.AppendLine("indexing: " + url);
+      ISearchCrawlScopeManager csm; cat.GetCrawlScopeManager(out csm);
+      int before; csm.IncludedInCrawlScope("file:///" + root, out before);
+      sb.AppendLine("in-scope: " + before);
+      if (exclude && before != 0) {
+        csm.AddUserScopeRule("file:///" + root, 0, 1, 0);
+        csm.SaveAll();
+        int after; csm.IncludedInCrawlScope("file:///" + root, out after);
+        sb.AppendLine("excluded: " + (after == 0 ? 1 : 0));
+      }
+      return sb.ToString();
+    }
+  }
+}
+"""
+
+# Filled by `str.replace`, never `str.format`: the C# is full of braces.
+_SEARCH_SCOPE_PS = """\
+$src = @"
+__CSHARP__
+"@
+Add-Type -TypeDefinition $src
+[WS.Api]::Run('__ROOT__', $__EXCLUDE__)
+"""
+
+# `[ \t]*`, not `\s*`: an idle indexer prints `indexing:` with nothing after it, and
+# `\s*` would eat that newline and hand back the next line as the URL.
+_BACKLOG = re.compile(r"^backlog:[ \t]*(\d+)", re.M)
+_INDEXING = re.compile(r"^indexing:[ \t]*(.*)$", re.M)
+_IN_SCOPE = re.compile(r"^in-scope:[ \t]*([01])", re.M)
+_EXCLUDED = re.compile(r"^excluded:[ \t]*([01])", re.M)
 
 
 @dataclass(frozen=True)
@@ -152,6 +259,130 @@ class Snapshot:
     avail_gb: float
     committed_gb: float
     limit_gb: float
+
+
+@dataclass(frozen=True)
+class IndexReport:
+    """What Windows Search said about itself and about the workspace root."""
+
+    backlog: int  # items queued for indexing, all three queues summed
+    indexing: str  # the URL under the indexer's cursor when asked
+    in_scope: bool  # whether the workspace root was in the crawl scope when asked
+    excluded: bool  # whether this run added the exclusion and saw it take
+
+
+def workspace_root(devkit: Path) -> Path:
+    """The workspace a devkit checkout belongs to: one level up, or two from a box.
+
+    A box sits at `<workspace>/.worktrees/<box>`, and this script runs from one whenever
+    the reclaim task is dispatched from a session that edits devkit -- so `parent` alone
+    would hand the indexer `.worktrees/` as the workspace and leave the projects beside
+    it in scope.
+    """
+    parent = devkit.parent
+    if parent.name == BOXES_DIR_NAME:
+        return parent.parent
+    return parent
+
+
+def search_scope_script(root: Path, exclude: bool) -> str:
+    """The PowerShell that asks the indexer about `root`, and excludes it when told to.
+
+    Pure, so the interpolation can be asserted: the path lands inside a single-quoted
+    PowerShell literal, and the flag is a PowerShell boolean. The trailing backslash is
+    what makes the rule a *directory* rule to the crawl-scope manager; without it the
+    URL names a file that does not exist and the rule is stored and never matches.
+    """
+    root_url = str(root).replace("/", "\\").rstrip("\\") + "\\"
+    return (
+        _SEARCH_SCOPE_PS.replace("__CSHARP__", _SEARCH_SCOPE_CSHARP)
+        .replace("__ROOT__", root_url.replace("'", "''"))
+        .replace("__EXCLUDE__", "true" if exclude else "false")
+    )
+
+
+def parse_index_report(text: str) -> IndexReport | None:
+    """The report out of the script's stdout; None when the lines are not there.
+
+    Split out so the parsing is testable against captured output rather than against
+    the indexer, and so a script that compiled but printed a .NET exception reads as
+    "could not be asked" rather than as a report with zeros in it.
+    """
+    backlog = _BACKLOG.search(text)
+    in_scope = _IN_SCOPE.search(text)
+    if not backlog or not in_scope:
+        return None
+    indexing = _INDEXING.search(text)
+    excluded = _EXCLUDED.search(text)
+    return IndexReport(
+        backlog=int(backlog[1]),
+        indexing=indexing[1].strip() if indexing else "",
+        in_scope=in_scope[1] == "1",
+        excluded=bool(excluded and excluded[1] == "1"),
+    )
+
+
+def index_verdict(report: IndexReport | None, root: Path, apply: bool) -> list[str]:
+    """The lines for the search-indexer section, in the contract `memory_verdict` set.
+
+    The in-scope case is the finding this section exists for, so its dry-run line says
+    what the cost is and what `--yes` does about it rather than only that the root is
+    included; an exclusion that was attempted and did not take is its own line, because
+    a silent no-op here is the whole failure mode of the hand-maintained rule list.
+    """
+    if report is None:
+        return ["  windows search could not be asked -- indexer off, or not Windows"]
+    lines = [f"  backlog {report.backlog:,} item(s) queued"]
+    if report.indexing:
+        lines.append(f"  indexing now: {report.indexing}")
+    if not report.in_scope:
+        lines.append(f"  {root} is outside the crawl scope -- healthy")
+    elif report.excluded:
+        lines.append(f"  {root} was IN the crawl scope -- excluded now, children overridden")
+    elif apply:
+        lines.append(f"  {root} is IN the crawl scope, and the exclusion did not take")
+    else:
+        lines.append(f"  {root} is IN the crawl scope -- every box's .venv and node_modules")
+        lines.append("  is indexed on provision and re-walked on reap; --yes excludes the root")
+    return lines
+
+
+def run_search_scope(root: Path, apply: bool) -> IndexReport | None:
+    """Ask Windows Search through a throwaway `.ps1`. None when it cannot be asked.
+
+    `-File` rather than `-Command -`: the script is a here-string wrapping sixty lines
+    of C#, and Windows PowerShell's stdin reader executes what it has read as soon as a
+    statement parses, which a here-string that has not closed yet does not survive.
+    `powershell` rather than `pwsh` because only the former is on every Windows install.
+    """
+    path = Path(tempdir()) / f"reclaim-search-scope-{os.getpid()}.ps1"
+    try:
+        path.write_text(search_scope_script(root, apply), encoding="utf-8")
+        proc = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            creationflags=NO_WINDOW,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    if proc.returncode != 0:
+        return None
+    return parse_index_report(proc.stdout)
 
 
 def sweep_targets(temp: Path, user: str) -> list[SweepTarget]:
@@ -199,7 +430,55 @@ def cache_targets(home: Path) -> list[SweepTarget]:
             code / "CachedExtensionVSIXs",
             "the installer for every extension update, kept after it has been applied",
         ),
+        SweepTarget(
+            "npm cache",
+            home / "AppData" / "Local" / "npm-cache",
+            "content-addressed tarballs npm re-fetches on demand; grows with every provision",
+            # Age-gated because a box's `npm ci` may be mid-flight in another session,
+            # and cacache writes the tarball before it writes the index entry naming it.
+            min_age_days=DEFAULT_MIN_AGE_DAYS,
+        ),
     ]
+
+
+def uv_cache(home: Path) -> Path:
+    return home / "AppData" / "Local" / "uv" / "cache"
+
+
+def clear_uv_cache(path: Path, apply: bool) -> int:
+    """`uv cache clean`, with the freed figure read off the volume rather than the tree.
+
+    Not a `cache_targets` entry, for two reasons that are both hard links. uv links every
+    unpacked wheel from its cache into the venvs that use it, so the tree's size is not
+    what deleting it returns: a file with a second link in a live `.venv` costs nothing
+    to remove and frees nothing, and `sweep`'s re-measure would still report it freed.
+    And a concurrent `uv sync` in some box holds the cache lock that uv's own verb waits
+    on, where a file-by-file unlink would race it. The volume's free-space delta is the
+    only honest figure, floored at zero because everything else on the machine is
+    writing meanwhile.
+    """
+    size = dir_size(path)
+    if size == 0:
+        print(f"  {'uv cache':<24} nothing to clear")
+        return 0
+    print(
+        f"  {'uv cache':<24} {size / GB:6.2f} GB  -- hard-linked into venvs; freed is read off the volume"
+    )
+    if not apply:
+        return size
+    before = free_bytes(path.parent)
+    ok, detail = run_tool(["uv", "cache", "clean"], timeout=600)
+    if not ok:
+        print(f"    [warn] {detail}")
+        return 0
+    return max(0, free_bytes(path.parent) - before)
+
+
+def free_bytes(path: Path) -> int:
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return 0
 
 
 def _subdirs(root: Path) -> list[Path]:
@@ -575,24 +854,30 @@ def docker(args: list[str], timeout: int) -> tuple[bool, str]:
     engine did not co-operate" are a printed line now, and the run continues to its
     restore.
     """
+    return run_tool(["docker", *args], timeout)
+
+
+def run_tool(cmd: list[str], timeout: int) -> tuple[bool, str]:
+    """Run one external tool, never raising; the `docker` contract for any command."""
+    name = " ".join(cmd[:2])
     try:
         proc = subprocess.run(
-            ["docker", *args],
+            cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
             creationflags=NO_WINDOW,
         )
     except FileNotFoundError:
-        return False, "docker is not on PATH"
+        return False, f"{cmd[0]} is not on PATH"
     except subprocess.TimeoutExpired:
-        return False, f"`docker {args[0]}` did not return within {timeout}s"
+        return False, f"`{name}` did not return within {timeout}s"
     except OSError as exc:
         return False, str(exc)
     if proc.returncode == 0:
         return True, ""
     said = (proc.stderr or proc.stdout or "").strip().splitlines()
-    return False, said[0] if said else f"`docker {args[0]}` exited {proc.returncode}"
+    return False, said[0] if said else f"`{name}` exited {proc.returncode}"
 
 
 def stop_stacks(names: list[str], apply: bool) -> tuple[list[str], str | None]:
@@ -823,6 +1108,14 @@ def main(argv: list[str] | None = None) -> int:
     stopped: list[str] = []
     restored = False
     try:
+        print("\n-- 0. search indexer (the CPU half nothing else reports) --")
+        root = workspace_root(devkit_dir())
+        report = run_search_scope(root, apply)
+        for line in index_verdict(report, root, apply):
+            print(line)
+        if report and report.in_scope and apply and not report.excluded:
+            failures.append("search index: the workspace exclusion did not take")
+
         print("\n-- 1. containers (the CPU half) --")
         if args.keep_stacks:
             print("  --keep-stacks: leaving them up; the bind-mount spin stays with them")
@@ -839,6 +1132,7 @@ def main(argv: list[str] | None = None) -> int:
             args.min_age_days,
             apply,
         )
+        freed += clear_uv_cache(uv_cache(profile), apply)
         print(f"  {'total':<24} {freed / GB:6.2f} GB")
 
         print("\n-- 3. superseded tool versions (the half no reboot returns) --")
