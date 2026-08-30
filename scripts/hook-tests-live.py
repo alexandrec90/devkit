@@ -9,7 +9,7 @@ agent CLI** against a throwaway project and proves the hooks change what the age
 actually does. Only devkit has those tests -- they live in `tests/`, which is never
 vendored -- so the action is scoped to this repo alone.
 
-Two things this exists to stop, both of which a bare `pytest -m paid` does silently:
+Three things this exists to stop, all of which a bare `pytest -m paid` does silently:
 
 - **A skip reported as a pass.** Both suites call `pytest.skip` when their CLI is not on
   `PATH`, which is right for a test and wrong for a one-click task: the terminal goes
@@ -18,12 +18,17 @@ Two things this exists to stop, both of which a bare `pytest -m paid` does silen
   Every run here therefore reports how many tests actually executed, and a run that
   executed none is a failure.
 - **Spending without being told.** A `detail` string in the task list is read once. The
-  preflight prints the suites, the test count and where each one's cost knobs are
-  defined, before anything is launched.
+  preflight prints the model, effort and budget of every suite it is about to launch,
+  before it launches anything.
+- **Spending on the wrong model.** `tests/live_cost.py` owns the cheapest tier for each
+  CLI, and this script does not merely read it -- it **exports** the resolved values into
+  the environment pytest inherits. That closes the gap between what the preflight said
+  and what the CLI does: with the model named explicitly on the command line and in the
+  environment, no workstation settings file, profile default or shell export can
+  substitute a pricier one.
 
-The cost defaults themselves are NOT restated here. They live in the test modules
-(`LIVE_MODEL`, `LIVE_EFFORT`, `LIVE_BUDGET_USD`) with environment overrides, and a copy
-in this file is a second number to keep in step with no test to catch it drifting.
+The values themselves are still not spelled in this file. `--model` and `--effort` override
+them for one run; everything else comes from `tests/live_cost.py`, which is the only copy.
 The Codex suite writes its model and reasoning settings only into the throwaway
 `CODEX_HOME` it launches; this runner never writes the operator's user configuration.
 
@@ -31,22 +36,31 @@ The Codex suite writes its model and reasoning settings only into the throwaway
 target repo is `Path.cwd()`.
 
 Usage:
-    python scripts/hook-tests-live.py            # the Claude suite, the cheapest run
+    python scripts/hook-tests-live.py                      # the Claude suite, the cheapest run
     python scripts/hook-tests-live.py codex
     python scripts/hook-tests-live.py both
+    python scripts/hook-tests-live.py claude --model sonnet --effort medium
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import importlib.util
+import os
 import re
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 
 ARTIFACT = Path("logs") / "hook-test-live-failures.log"
+
+# The single source of truth for what a live run costs. Loaded by path rather than
+# imported, because this script runs with an arbitrary checkout as its root.
+COST_MODULE = "tests/live_cost.py"
 
 # Same cap and reasoning as `hook-tests.py`: past this it is one traceback repeated,
 # not more findings. Larger there because `-s` lets the CLI's own output through.
@@ -55,13 +69,12 @@ MAX_LINES = 400
 
 @dataclass(frozen=True)
 class Suite:
-    """One live suite: its tests, the binary it needs, and where its cost is set."""
+    """One live suite: its tests, the binary it needs, and the marker that selects it."""
 
     key: str
     path: str  # relative to the checkout, so the cwd contract holds
     binary: str  # what must be on PATH for it to do anything
     marker: str  # the pytest marker selecting it, paired with `paid`
-    knobs: str  # the environment variables that override its cost defaults
 
 
 SUITES: dict[str, Suite] = {
@@ -70,14 +83,12 @@ SUITES: dict[str, Suite] = {
         path="tests/test_claude_hooks_live.py",
         binary="claude",
         marker="claude_live",
-        knobs="CLAUDE_LIVE_HOOK_MODEL, CLAUDE_LIVE_HOOK_EFFORT, CLAUDE_LIVE_HOOK_BUDGET_USD",
     ),
     "codex": Suite(
         key="codex",
         path="tests/test_codex_hooks_live.py",
         binary="codex",
         marker="codex_live",
-        knobs="CODEX_LIVE_HOOK_MODEL, CODEX_LIVE_HOOK_REASONING_EFFORT",
     ),
 }
 
@@ -95,9 +106,38 @@ def resolve_suites(choice: str) -> list[Suite]:
     return [SUITES[choice]]
 
 
+def load_cost_module(root: Path) -> ModuleType:
+    """Load `tests/live_cost.py` from the checkout under test.
+
+    By path, not by import: the runner's own `sys.path` belongs to whichever checkout
+    invoked it, and `--root` exists so the tests can aim it somewhere else. Loading the
+    module that ships beside the suites is the only way the printed cost is guaranteed to
+    be the cost those suites will resolve.
+    """
+    path = root / COST_MODULE
+    spec = importlib.util.spec_from_file_location("devkit_live_cost", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    # Registered *before* executing, not as a cache. `live_cost` uses `@dataclass` under
+    # `from __future__ import annotations`, so the decorator resolves its own field
+    # annotations by looking the defining module up in `sys.modules` by name — and an
+    # unregistered module makes that lookup return None and the import die inside
+    # `dataclasses`. A loader that skips this works on plain modules and fails on the
+    # first dataclass, which is why it is a line of code and not a habit.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def required_paths(suites: list[Suite]) -> list[str]:
+    """Every file this run needs from the checkout, suites plus the cost table."""
+    return [suite.path for suite in suites] + [COST_MODULE]
+
+
 def missing_suites(suites: list[Suite], root: Path) -> list[str]:
-    """Suites whose test file is absent — i.e. this checkout is not devkit."""
-    return [suite.path for suite in suites if not (root / suite.path).is_file()]
+    """Required files that are absent — i.e. this checkout is not devkit."""
+    return [path for path in required_paths(suites) if not (root / path).is_file()]
 
 
 def missing_binaries(suites: list[Suite], which=None) -> list[str]:
@@ -116,6 +156,41 @@ def selector(suites: list[Suite]) -> str:
     so omitting it turns the whole run into a silent no-op."""
     markers = " or ".join(suite.marker for suite in suites)
     return f"({markers}) and paid"
+
+
+def resolve_costs(suites: list[Suite], cost_module: ModuleType, model=None, effort=None) -> dict:
+    """What each suite will spend, after the environment and then this run's overrides.
+
+    `--model` is refused for more than one suite by the caller, because the CLIs do not
+    share a model namespace and one name cannot be right for both. `--effort` is safe to
+    apply across suites: both accept the same low/medium/high vocabulary.
+    """
+    costs = {}
+    for suite in suites:
+        cost = cost_module.resolve(suite.key)
+        overrides = {}
+        if model:
+            overrides["model"] = model
+        if effort:
+            overrides["effort"] = effort
+        if overrides:
+            cost = dataclasses.replace(cost, **overrides)
+        costs[suite.key] = cost
+    return costs
+
+
+def child_env(costs: dict, cost_module: ModuleType, base=None) -> dict[str, str]:
+    """The environment pytest is launched with: the caller's, plus the resolved cost.
+
+    Exporting rather than trusting the defaults is the point. It means the numbers in the
+    preflight are the numbers the CLI is invoked with even when a shell export, a profile
+    or a settings file says otherwise, and it makes `--model` work without every suite
+    needing to grow a flag.
+    """
+    env = dict(os.environ if base is None else base)
+    for key, cost in costs.items():
+        env.update(cost_module.as_env(key, cost))
+    return env
 
 
 # Every outcome word pytest puts in its summary line, so the line is *recognised* even
@@ -184,12 +259,15 @@ def pass_line(suites: list[Suite], executed: int) -> str:
     )
 
 
-def preflight_report(suites: list[Suite]) -> str:
-    """What is about to be launched and what sets its cost. Printed before spending."""
+def preflight_report(suites: list[Suite], costs: dict, cost_module: ModuleType) -> str:
+    """What is about to be launched and what it costs. Printed before anything spends."""
     lines = ["hook-tests-live: PAID — this launches real, authenticated CLI sessions."]
     for suite in suites:
-        lines.append(f"  {suite.key:6} {suite.path}")
-        lines.append(f"         cost defaults live in that file; override with {suite.knobs}")
+        cost = costs[suite.key]
+        knobs = ", ".join(cost_module.ENV_VARS[suite.key].values())
+        lines.append(f"  {suite.key:6} {cost.summary()}")
+        lines.append(f"         {suite.path}")
+        lines.append(f"         exported to the run; override with --model/--effort or {knobs}")
     return "\n".join(lines)
 
 
@@ -206,7 +284,15 @@ def write_artifact(root: Path, body: str, suites: list[Suite]) -> None:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, as its own function so a caller can check flags against the real parser.
+
+    A task that offers `--reasoning=medium` where the script spells it `--effort` fails
+    only when someone picks that option — in a paid run, after the session that got as
+    far as argparse has already been charged for. Anything that surfaces these flags
+    should compare against this parser, not restate it: a restated copy keeps passing
+    through exactly the rename it exists to catch.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "suite",
@@ -216,38 +302,69 @@ def main(argv: list[str] | None = None) -> int:
         help="which live suite to run (default: claude, the cheapest)",
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        help="override the model for this run; only valid for a single suite, since the "
+        "two CLIs do not share a model namespace",
+    )
+    parser.add_argument(
+        "--effort",
+        default=None,
+        choices=["low", "medium", "high"],
+        help="override the reasoning effort for this run (default: the lowest each CLI takes)",
+    )
+    parser.add_argument(
         "--root",
         type=Path,
         default=None,
         help="checkout to test (default: the cwd, which is how the task invokes it)",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def refusal(suites: list[Suite], root: Path, model: str | None) -> str | None:
+    """The reason this run must not start, or None — `main` prints it and exits 2.
+
+    Loud, not a clean skip, the same rule `hook-tests.py` follows. The live suites are
+    devkit-only by design (`tests/` is never vendored), so a checkout without them is a
+    mis-scoped action to report rather than a pass to hand back; a CLI that is not on
+    PATH would make pytest skip, and a skipped paid smoke is a green run that proved
+    nothing.
+    """
+    if model and len(suites) > 1:
+        return (
+            "hook-tests-live: --model needs a single suite — 'haiku' is not a codex model "
+            "and 'gpt-5.6-luna' is not a Claude one. Run each suite in turn to override both."
+        )
+    absent = missing_suites(suites, root)
+    if absent:
+        return (
+            f"hook-tests-live: {root.name} has no {', '.join(absent)} — the live smokes "
+            f"live in devkit's own tests/, which is not vendored. Nothing to run here."
+        )
+    unavailable = missing_binaries(suites)
+    if unavailable:
+        return (
+            f"hook-tests-live: {', '.join(unavailable)} not on PATH. The suite would skip, "
+            f"and a skipped paid smoke is a green run that proved nothing."
+        )
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     root = (args.root or Path.cwd()).resolve()
     suites = resolve_suites(args.suite)
 
-    absent = missing_suites(suites, root)
-    if absent:
-        # Loud, not a clean skip — the same rule `hook-tests.py` follows. These tests are
-        # devkit-only by design (`tests/` is never vendored), so a checkout without them
-        # is a mis-scoped action to report, never a pass to hand back.
-        print(
-            f"hook-tests-live: {root.name} has no {', '.join(absent)} — the live smokes "
-            f"live in devkit's own tests/, which is not vendored. Nothing to run here.",
-            file=sys.stderr,
-        )
+    reason = refusal(suites, root, args.model)
+    if reason:
+        print(reason, file=sys.stderr)
         return 2
 
-    unavailable = missing_binaries(suites)
-    if unavailable:
-        # pytest would skip these, and a skip reads as a pass in the task list.
-        print(
-            f"hook-tests-live: {', '.join(unavailable)} not on PATH. The suite would skip, "
-            f"and a skipped paid smoke is a green run that proved nothing.",
-            file=sys.stderr,
-        )
-        return 2
+    cost_module = load_cost_module(root)
+    costs = resolve_costs(suites, cost_module, model=args.model, effort=args.effort)
+    print(preflight_report(suites, costs, cost_module))
 
-    print(preflight_report(suites))
     cmd = [
         sys.executable,
         "-m",
@@ -261,7 +378,13 @@ def main(argv: list[str] | None = None) -> int:
         "--tb=short",
     ]
     print(f"hook-tests-live: {' '.join(cmd[2:])}")
-    result = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+    result = subprocess.run(
+        cmd,
+        cwd=root,
+        capture_output=True,
+        text=True,
+        env=child_env(costs, cost_module),
+    )
     output = result.stdout + result.stderr
 
     executed = ran_count(output)

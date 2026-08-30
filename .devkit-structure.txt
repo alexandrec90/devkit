@@ -118,7 +118,6 @@ file_lines::scripts/worktree-guard.py = 2354
 file_lines::scripts/worktree.py = 6183
 function_lines::scripts/devkit_project.py::main = 250
 function_lines::scripts/docker-maint.py::generic_prune = 84
-function_lines::scripts/hook-tests-live.py::main = 83
 function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
 function_lines::scripts/install-reconcile-task.py::main = 114
 function_lines::scripts/install-vanillaland-merge.py::main = 98

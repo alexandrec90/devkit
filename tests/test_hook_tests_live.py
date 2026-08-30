@@ -6,15 +6,30 @@ money to check a test runner would be the exact failure the runner exists to mak
 visible.
 """
 
+import shutil
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
+import live_cost as cost
 import pytest
-from support import load_script
+from support import REPO_ROOT, load_script
 
 live = load_script("scripts/hook-tests-live.py")
 codex_live = load_script("tests/test_codex_hooks_live.py")
+
+
+def fake_checkout(tmp_path):
+    """Stage the minimum a run needs: empty suite files and the *real* cost table.
+
+    Real rather than a stub, because `load_cost_module` execs it — a stub would let this
+    file keep passing while the module the suites actually import was broken.
+    """
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    for suite in live.SUITES.values():
+        (tmp_path / suite.path).write_text("", encoding="utf-8")
+    shutil.copyfile(REPO_ROOT / live.COST_MODULE, tmp_path / live.COST_MODULE)
+    return tmp_path
 
 
 # --- suite selection ---------------------------------------------------------
@@ -105,12 +120,35 @@ def test_an_unreadable_run_is_none_rather_than_zero():
 
 def test_a_checkout_without_the_live_tests_is_named(tmp_path):
     absent = live.missing_suites(live.resolve_suites("both"), tmp_path)
-    assert absent == [suite.path for suite in live.resolve_suites("both")]
+    assert absent == [suite.path for suite in live.resolve_suites("both")] + [live.COST_MODULE]
+
+
+def test_required_paths_is_the_suites_plus_the_cost_table():
+    """`missing_suites` is a filter over this list; the cost table's seat in it is what
+    lets the preflight refuse a checkout that has the suites but not the price."""
+    both = live.resolve_suites("both")
+    assert live.required_paths(both) == [suite.path for suite in both] + [live.COST_MODULE]
+
+
+def test_load_cost_module_loads_the_real_table_by_path(tmp_path):
+    """Registered in `sys.modules` before exec, which is what lets the table's frozen
+    `@dataclass` resolve its own annotations — a loader that skips that step works on
+    plain modules and dies on this one."""
+    module = live.load_cost_module(fake_checkout(tmp_path))
+    assert module.resolve("claude", {}) == module.DEFAULTS["claude"]
+
+
+def test_the_cost_table_is_required_even_when_the_suites_are_present(tmp_path):
+    """Without it the runner cannot say what it is about to spend, and a paid task that
+    cannot state its price is exactly the thing this script exists to prevent."""
+    (tmp_path / "tests").mkdir()
+    for suite in live.SUITES.values():
+        (tmp_path / suite.path).write_text("", encoding="utf-8")
+
+    assert live.missing_suites(live.resolve_suites("both"), tmp_path) == [live.COST_MODULE]
 
 
 def test_a_checkout_with_the_live_tests_reports_nothing_missing():
-    from support import REPO_ROOT
-
     assert live.missing_suites(live.resolve_suites("both"), REPO_ROOT) == []
 
 
@@ -124,14 +162,33 @@ def test_an_installed_cli_is_not_reported_missing():
     assert live.missing_binaries(suites, which=lambda name: f"/usr/bin/{name}") == []
 
 
-def test_the_preflight_says_it_is_paid_and_where_the_cost_is_set():
-    """Never restates a model name or a dollar figure — those live in the test files,
-    and a second copy here is a number with no test to catch it drifting."""
-    report = live.preflight_report(live.resolve_suites("claude"))
+def test_the_preflight_states_the_price_before_anything_is_launched():
+    """It prints the model, effort and budget rather than merely naming the env vars.
+
+    The earlier version deliberately printed no numbers, on the grounds that a copy in
+    this file could drift from the test modules. Reading them from `live_cost` removes
+    that risk and leaves only the benefit: a paid task should say what it costs on the
+    line above the spending, not in a `detail` string read once months ago.
+    """
+    suites = live.resolve_suites("claude")
+    costs = live.resolve_costs(suites, cost, model=None, effort=None)
+    report = live.preflight_report(suites, costs, cost)
+
     assert "PAID" in report
     assert "tests/test_claude_hooks_live.py" in report
     assert "CLAUDE_LIVE_HOOK_BUDGET_USD" in report
-    assert "haiku" not in report
+    assert cost.DEFAULTS["claude"].model in report
+    assert f"budget=${cost.DEFAULTS['claude'].budget_usd}" in report
+
+
+def test_the_preflight_reports_the_override_rather_than_the_default():
+    suites = live.resolve_suites("claude")
+    costs = live.resolve_costs(suites, cost, model="sonnet", effort="high")
+    report = live.preflight_report(suites, costs, cost)
+
+    assert "model=sonnet" in report
+    assert "effort=high" in report
+    assert cost.DEFAULTS["claude"].model not in report
 
 
 # --- Codex configuration isolation ------------------------------------------
@@ -228,9 +285,7 @@ def never_spends(monkeypatch):
 
 
 def test_a_passing_run_clears_the_artifact(tmp_path, never_spends, capsys):
-    (tmp_path / "tests").mkdir()
-    for suite in live.SUITES.values():
-        (tmp_path / suite.path).write_text("", encoding="utf-8")
+    fake_checkout(tmp_path)
     (tmp_path / live.ARTIFACT).parent.mkdir(parents=True)
     (tmp_path / live.ARTIFACT).write_text("stale failure", encoding="utf-8")
 
@@ -243,9 +298,7 @@ def test_a_green_run_that_launched_nothing_fails(tmp_path, never_spends, monkeyp
     """The headline case. pytest exits 0 on an all-skipped run, and a task that trusts
     the exit code reports a paid smoke as passing without having spent a cent — or
     proved anything."""
-    (tmp_path / "tests").mkdir()
-    for suite in live.SUITES.values():
-        (tmp_path / suite.path).write_text("", encoding="utf-8")
+    fake_checkout(tmp_path)
     monkeypatch.setattr(
         live.subprocess, "run", lambda cmd, **kw: _Result(0, "=== 2 skipped in 0.40s ===")
     )
@@ -256,9 +309,7 @@ def test_a_green_run_that_launched_nothing_fails(tmp_path, never_spends, monkeyp
 
 
 def test_a_missing_cli_is_refused_before_anything_is_launched(tmp_path, monkeypatch, capsys):
-    (tmp_path / "tests").mkdir()
-    for suite in live.SUITES.values():
-        (tmp_path / suite.path).write_text("", encoding="utf-8")
+    fake_checkout(tmp_path)
     monkeypatch.setattr(live.shutil, "which", lambda _name: None)
     monkeypatch.setattr(
         live.subprocess, "run", lambda *a, **k: pytest.fail("launched a CLI anyway")
@@ -277,18 +328,14 @@ def test_a_checkout_without_the_tests_is_refused_loudly(tmp_path, never_spends, 
 
 
 def test_the_default_suite_is_the_cheapest_one(tmp_path, never_spends):
-    (tmp_path / "tests").mkdir()
-    for suite in live.SUITES.values():
-        (tmp_path / suite.path).write_text("", encoding="utf-8")
+    fake_checkout(tmp_path)
 
     live.main(["--root", str(tmp_path)])
     assert "tests/test_codex_hooks_live.py" not in never_spends[0]
 
 
 def test_a_failing_run_writes_the_artifact(tmp_path, monkeypatch, capsys):
-    (tmp_path / "tests").mkdir()
-    for suite in live.SUITES.values():
-        (tmp_path / suite.path).write_text("", encoding="utf-8")
+    fake_checkout(tmp_path)
     monkeypatch.setattr(live.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
         live.subprocess,
@@ -302,9 +349,7 @@ def test_a_failing_run_writes_the_artifact(tmp_path, monkeypatch, capsys):
 
 
 def test_the_runner_never_calls_pytest_without_the_paid_selector(tmp_path, never_spends):
-    (tmp_path / "tests").mkdir()
-    for suite in live.SUITES.values():
-        (tmp_path / suite.path).write_text("", encoding="utf-8")
+    fake_checkout(tmp_path)
 
     live.main(["both", "--root", str(tmp_path)])
     command = never_spends[0]
@@ -346,9 +391,7 @@ def test_unexercised_is_the_complement_in_order():
 
 def test_a_passing_run_prints_the_gap_rather_than_a_bare_pass(tmp_path, monkeypatch, capsys):
     """The reversion check: revert `pass_line` and this is the assertion that fails."""
-    (tmp_path / "tests").mkdir()
-    for suite in live.SUITES.values():
-        (tmp_path / suite.path).write_text("", encoding="utf-8")
+    fake_checkout(tmp_path)
     monkeypatch.setattr(live.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
         live.subprocess,
@@ -363,9 +406,90 @@ def test_a_passing_run_prints_the_gap_rather_than_a_bare_pass(tmp_path, monkeypa
 def test_subprocess_is_the_only_way_this_script_spends(tmp_path):
     """A guard on the guard: the fixture above only protects `subprocess.run`, so a
     future edit reaching for `os.system` or `subprocess.call` would slip past it."""
-    from support import REPO_ROOT
-
     source = (REPO_ROOT / "scripts/hook-tests-live.py").read_text(encoding="utf-8")
     for spelling in ("os.system", "subprocess.call", "subprocess.Popen", "check_output"):
         assert spelling not in source, spelling
     assert source.count("subprocess.run") == 1
+
+
+# --- the cost the run is launched with ---------------------------------------
+
+
+def test_the_runner_exports_the_resolved_cost_into_the_child_environment(tmp_path, monkeypatch):
+    """The preflight is a promise, not a guess.
+
+    A settings file, a shell profile or a stray export could otherwise put a different
+    model in front of the CLI than the one printed a line earlier. Exporting the resolved
+    values closes that gap — the suite re-reads them and can only land where they point.
+    """
+    fake_checkout(tmp_path)
+    captured = {}
+
+    def _capture(cmd, **kwargs):
+        captured.update(kwargs.get("env") or {})
+        return _Result(0, "=== 1 passed in 40.00s ===")
+
+    monkeypatch.setattr(live.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(live.subprocess, "run", _capture)
+    live.main(["claude", "--root", str(tmp_path)])
+
+    names = cost.ENV_VARS["claude"]
+    assert captured[names["model"]] == cost.DEFAULTS["claude"].model
+    assert captured[names["effort"]] == cost.LOWEST_EFFORT
+    assert captured[names["budget_usd"]] == cost.DEFAULTS["claude"].budget_usd
+
+
+def test_an_inherited_model_from_the_environment_does_not_survive_an_override(monkeypatch):
+    """`--model` beats an exported variable, which in turn beats the default. Without the
+    last step a workstation that exports a pricier model would silently win."""
+    monkeypatch.setenv(cost.ENV_VARS["claude"]["model"], "opus")
+    suites = live.resolve_suites("claude")
+
+    assert live.resolve_costs(suites, cost)["claude"].model == "opus"
+    assert live.resolve_costs(suites, cost, model="haiku")["claude"].model == "haiku"
+
+
+def test_the_effort_override_applies_to_every_selected_suite():
+    costs = live.resolve_costs(live.resolve_suites("both"), cost, effort="medium")
+    assert {key: value.effort for key, value in costs.items()} == {
+        "claude": "medium",
+        "codex": "medium",
+    }
+
+
+def test_a_model_override_is_refused_for_both_suites(tmp_path, never_spends, capsys):
+    """`haiku` is not a codex model and `gpt-5.6-luna` is not a Claude one, so a single
+    `--model` across both can only be wrong for one of them. Refused rather than
+    half-applied, and refused before anything is launched."""
+    fake_checkout(tmp_path)
+
+    assert live.main(["both", "--model", "haiku", "--root", str(tmp_path)]) == 2
+    assert "single suite" in capsys.readouterr().err
+    assert never_spends == []
+
+
+def test_build_parser_defaults_to_the_cheapest_run():
+    """The defaults are the bare task invocation: cheapest suite, costs from the table,
+    the checkout the task runs in."""
+    args = live.build_parser().parse_args([])
+    assert (args.suite, args.model, args.effort, args.root) == ("claude", None, None, None)
+
+
+def test_refusal_names_the_model_flag_before_touching_the_checkout():
+    """The cross-namespace `--model` is refused first, so the message stays about the
+    flag even when the checkout would also have been refused."""
+    reason = live.refusal(live.resolve_suites("both"), Path("/nowhere"), model="haiku")
+    assert reason is not None
+    assert "--model" in reason
+
+
+def test_the_child_environment_keeps_the_rest_of_the_caller_s(tmp_path):
+    """Only the cost variables are set. Clobbering the environment would take PATH and
+    the CLI's own credentials with it."""
+    base = {"PATH": "/usr/bin", "ANTHROPIC_API_KEY": "sentinel"}  # pragma: allowlist secret
+    costs = live.resolve_costs(live.resolve_suites("claude"), cost)
+    env = live.child_env(costs, cost, base=base)
+
+    assert env["PATH"] == "/usr/bin"
+    assert env["ANTHROPIC_API_KEY"] == "sentinel"  # pragma: allowlist secret
+    assert env[cost.ENV_VARS["claude"]["model"]] == cost.DEFAULTS["claude"].model

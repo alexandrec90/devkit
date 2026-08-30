@@ -8,6 +8,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from live_cost import resolve
 from support import REPO_ROOT, load_script
 
 hook = load_script("scripts/sync-codex-hooks.py")
@@ -17,8 +18,10 @@ pytestmark = [
     pytest.mark.paid,
 ]
 
-LIVE_MODEL = os.environ.get("CODEX_LIVE_HOOK_MODEL", "gpt-5.6-luna")
-LIVE_REASONING_EFFORT = os.environ.get("CODEX_LIVE_HOOK_REASONING_EFFORT", "low")
+# See the note in the Claude suite: `tests/live_cost.py` owns both of these values.
+LIVE = resolve("codex")
+LIVE_MODEL = LIVE.model
+LIVE_REASONING_EFFORT = LIVE.effort
 
 
 def _codex_or_skip() -> str:
