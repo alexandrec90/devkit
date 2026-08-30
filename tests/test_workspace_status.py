@@ -337,6 +337,28 @@ def test_the_two_box_states_are_reported_separately():
     assert "1 reapable (b--y-0806)" in line
 
 
+def test_a_stranded_box_is_named_first_and_not_as_holding_work():
+    """Thirteen of the fourteen boxes the banner called "holding work" on 2026-08-30 had
+    been there for days with no session behind them. That list reads as "ship these" to
+    a user who does not ship by hand; stranded is its own count with its own fix."""
+    line = ws.boxes_line(
+        [
+            {**row("a--old-0820", reapable=False), "stranded": True},
+            row("b--busy-0830", reapable=False),
+        ]
+    )
+    assert line.index("1 stranded (a--old-0820)") < line.index("1 holding work (b--busy-0830)")
+    assert "a--old-0820" not in line.split("holding work")[1]
+    assert "(fix: /triage-boxes)" in line
+
+
+def test_both_fixes_are_offered_when_both_apply():
+    line = ws.boxes_line(
+        [{**row("a--old-0820", reapable=False), "stranded": True}, row("b--y-0806", reapable=True)]
+    )
+    assert "(fix: /triage-boxes; python devkit/scripts/worktree.py reap --all --yes)" in line
+
+
 def test_a_box_survey_that_blows_up_costs_the_line_not_the_session(tmp_path, monkeypatch):
     """The survey spawns git per box; one box in a state git dislikes must not take the
     status line -- let alone the session start -- down with it."""

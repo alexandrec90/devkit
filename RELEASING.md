@@ -183,7 +183,7 @@ git ls-tree -r --name-only vX.Y.Z | grep -E 'pre-commit-hooks|precommit/'
 
 # End to end: a fresh project's commit gate must actually run.
 python scripts/new-project.py probe_tag --preset bare --parent /tmp/gen \
-  --no-remote --no-worktree --no-register --yes
+  --no-remote --no-register --yes
 cd /tmp/gen/probe_tag && pre-commit run --all-files
 ```
 

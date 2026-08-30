@@ -80,8 +80,6 @@ scripts/merge-dependabot-prs.py::merge_pr
 scripts/merge-dependabot-prs.py::open_prs
 scripts/merge-dependabot-prs.py::prs_for_branch
 scripts/merge-dependabot-prs.py::verdict
-scripts/new-project.py::Plan
-scripts/new-project.py::add_worktree
 scripts/new-project.py::build_context
 scripts/new-project.py::create_remote
 scripts/new-project.py::lock_dependencies
@@ -131,7 +129,6 @@ scripts/resume-sessions.py::resume_args
 scripts/schedule_health.py::virtualenv_interpreter
 scripts/ship.py::backoff_delays
 scripts/ship.py::current_branch
-scripts/sweep.py::Applied
 scripts/sweep.py::anchor_path
 scripts/sweep.py::common_dir
 scripts/sweep.py::gh_for
