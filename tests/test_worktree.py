@@ -961,10 +961,13 @@ def test_an_unmerged_box_stays_refused_however_clean_it_is():
 
 
 def test_a_ready_box_never_escapes_through_the_merge_path():
-    """`ready` means uncommitted work by definition, so a zero count beside it is two
-    fields disagreeing rather than a clean box. Keyed on the count alone this returned
-    True, and `test_reconcile_never_reaps_a_box_holding_work` failed -- the merge escape
-    is scoped to the verdict a squash can actually be stale about."""
+    """`ready` means work no PR by this branch's name has merged -- uncommitted files,
+    or commits never pushed -- so a merged PR says nothing about it: a zero dirt count
+    beside a merge is either two fields disagreeing or commits made after the merge.
+    Keyed on the count alone this returned True, and
+    `test_reconcile_never_reaps_a_box_holding_work` failed -- the merge escape is scoped
+    to the verdict a squash can actually be stale about. The tree escape is the one a
+    clean `ready` box may take (`test_a_landed_tree_frees_a_clean_ready_box`)."""
     assert not worktree.reapable(sweep.READY, pr_merged=True, holds_uncommitted=False)
     assert sweep.READY not in worktree.MERGE_CAN_BE_STALE_ABOUT
 
@@ -1010,12 +1013,51 @@ def test_a_landed_tree_does_not_license_destroying_uncommitted_work():
     assert not worktree.reapable(sweep.NEEDS_BRANCH, holds_uncommitted=True, work_is_landed=True)
 
 
-@pytest.mark.parametrize("verdict", [sweep.READY, sweep.NEEDS_PULL, sweep.BLOCKED])
-def test_a_landed_tree_settles_only_the_verdicts_it_is_scoped_to(verdict):
-    """`blocked` is a state nothing here should be guessing at, and the other two are
-    reached with content that a tree scan by definition cannot have matched."""
-    assert not worktree.reapable(verdict, holds_uncommitted=False, work_is_landed=True)
-    assert verdict not in worktree.TREE_CAN_SETTLE
+def test_a_landed_tree_settles_only_the_verdicts_it_is_scoped_to():
+    """`blocked` is a state nothing here should be guessing at."""
+    assert not worktree.reapable(sweep.BLOCKED, holds_uncommitted=False, work_is_landed=True)
+    assert sweep.BLOCKED not in worktree.TREE_CAN_SETTLE
+
+
+def test_a_landed_tree_frees_a_clean_ready_box():
+    """Regression. carameli's `fix-merge-pr-252` held five commits on a task branch
+    that was never pushed -- `ready`, "5 commit(s), never pushed" -- with its tree
+    identical to the master commit it had merged, because the three commits that were
+    its own had shipped under the branch of the PR it was fixing. Two days as a HOLD
+    holding nothing, and `--force` the only exit. A clean `ready` box is commits and
+    nothing else, so the tree is the whole of what it holds."""
+    assert sweep.READY in worktree.TREE_CAN_SETTLE
+    assert worktree.reapable(sweep.READY, holds_uncommitted=False, work_is_landed=True)
+    allowed, note = worktree.reap_decision(
+        sweep.READY, "5 commit(s), never pushed", force=False,
+        holds_uncommitted=False, work_is_landed=True,
+    )  # fmt: skip
+    assert allowed and note == ""
+
+
+def test_a_landed_tree_never_frees_a_dirty_ready_box():
+    """The other shape of `ready` -- uncommitted files on a task branch -- is exactly
+    the one the whole tier exists to hold, and the tree says nothing about it. Every
+    caller refuses to even ask the tree of a dirty box (`work_landed`); this is the
+    predicate refusing on its own, for a caller that asked anyway."""
+    assert not worktree.reapable(sweep.READY, holds_uncommitted=True, work_is_landed=True)
+    assert not worktree.reapable(sweep.READY, work_is_landed=True)
+
+
+def test_needs_pull_is_a_clean_box_that_has_merely_aged():
+    """Regression. devkit's `fix-merge-prs-0826` sat on a helper branch with nothing
+    dirty and nothing ahead, 28 commits behind main after its work shipped under another
+    PR -- `needs-pull`, in no reapable set, a permanent HOLD holding nothing for three
+    days. `classify` reaches the verdict only with `dirty == 0` and `ahead == 0`, so the
+    box holds exactly what a `clean` one holds, on a branch origin already has."""
+    assert sweep.NEEDS_PULL in worktree.SAFE_TO_REAP
+    assert sweep.NEEDS_PULL in worktree.SWEEPABLE
+    assert worktree.reapable(sweep.NEEDS_PULL, holds_uncommitted=False)
+    assert not worktree.reapable(sweep.NEEDS_PULL, holds_uncommitted=True)
+    allowed, note = worktree.reap_decision(
+        sweep.NEEDS_PULL, "28 commit(s) behind origin/main", force=False, holds_uncommitted=False
+    )
+    assert allowed and note == ""
 
 
 def test_the_merge_and_the_tree_escapes_stay_separate_predicates():
@@ -5456,6 +5498,102 @@ def test_head_tree_landed_bounds_its_scan_and_reads_local_refs_only():
     log = next(argv for argv in seen if argv[0] == "log")
     assert "--max-count=7" in log
     assert log[-1] == "refs/remotes/origin/master"
+
+
+# --- the merged PR's own head: the box the tree scan cannot reach -----------------
+# A branch that was behind the default branch when its PR squash-merged produces a
+# squash commit whose tree no commit of the box's ever had, so `head_tree_landed` is
+# false of a box whose every commit the PR carried. carameli's `add-cursor-and-call-images`
+# and `more-comic-assets` were that: hand-named branches (`needs-branch`, so no merge
+# arm), PRs #267 and #268 merged, master moved on in one of their files since, reported
+# as "3 commit(s) committed straight to ..., unpushed" for a day.
+
+
+def _head_git(sha: str = "abc123"):
+    return _git_stub(**{"rev-parse": _completed(stdout=f"{sha}\n")})
+
+
+def test_a_merged_prs_head_is_evidence_the_commits_landed():
+    pr = worktree.parse_pr_view(pr_json(state="MERGED", headRefOid="ABC123"))
+    assert worktree.head_is_merged_pr_head(_head_git("abc123"), pr)
+
+
+@pytest.mark.parametrize("state", ["OPEN", "CLOSED"])
+def test_only_a_merged_pr_head_counts(state):
+    """An open PR's head is a promise and a closed one's is a refusal; neither is a
+    landing, whatever the sha says."""
+    pr = worktree.parse_pr_view(pr_json(state=state, headRefOid="abc123"))
+    assert not worktree.head_is_merged_pr_head(_head_git("abc123"), pr)
+
+
+def test_a_head_past_the_merged_one_is_work_the_pr_never_saw():
+    pr = worktree.parse_pr_view(pr_json(state="MERGED", headRefOid="abc123"))
+    assert not worktree.head_is_merged_pr_head(_head_git("def456"), pr)
+
+
+def test_an_unknown_head_reads_as_not_landed_and_asks_git_nothing():
+    """`headRefOid` missing from the payload, no PR at all, or a git that fails: every
+    one is "cannot say", and the refusal the caller had stands."""
+    seen: list = []
+
+    def git(*argv):
+        seen.append(argv)
+        return _completed(returncode=1)
+
+    assert not worktree.head_is_merged_pr_head(git, worktree.parse_pr_view(pr_json(state="MERGED")))
+    assert not worktree.head_is_merged_pr_head(git, worktree.PullRequest())
+    assert seen == []
+    pr = worktree.parse_pr_view(pr_json(state="MERGED", headRefOid="abc123"))
+    assert not worktree.head_is_merged_pr_head(git, pr)
+
+
+def test_pr_view_asks_for_the_head_sha():
+    assert "headRefOid" in worktree.PR_VIEW_FIELDS.split(",")
+    assert worktree.parse_pr_view(pr_json(headRefOid="ABC")).head == "abc"
+    assert worktree.parse_pr_view(pr_json()).head == ""
+
+
+# --- `work_landed`: the one gate every caller shares ----------------------------
+
+
+def _state(dirty: int = 0, default_branch: str = "main") -> sweep.State:
+    return sweep.State(name="box", dirty=dirty, default_branch=default_branch)
+
+
+def test_work_landed_asks_nothing_of_a_verdict_outside_its_scope_or_a_dirty_box():
+    """The two gates in front of every git call: `needs-pr` and `ready`-with-edits are
+    the ordinary endings, and neither may pay for a question `reapable` would ignore."""
+    seen: list = []
+
+    def git(*argv):
+        seen.append(argv)
+        return _completed(stdout="t0\n")
+
+    merged = worktree.parse_pr_view(pr_json(state="MERGED", headRefOid="t0"))
+    assert not worktree.work_landed(git, _state(), sweep.NEEDS_PR, merged)
+    assert not worktree.work_landed(git, _state(dirty=2), sweep.NEEDS_BRANCH, merged)
+    assert not worktree.work_landed(git, _state(dirty=2), sweep.READY, merged)
+    assert seen == []
+
+
+def test_work_landed_takes_the_tree_or_the_merged_head():
+    tree_hit = _tree_git(head="t2", history=("t3", "t2"))
+    assert worktree.work_landed(tree_hit, _state(), sweep.NEEDS_BRANCH)
+    assert worktree.work_landed(tree_hit, _state(), sweep.READY)
+
+    def git(*argv):
+        # Tree nowhere on the branch; HEAD is the merged PR's head.
+        if argv[0] == "rev-parse" and argv[1] == "HEAD":
+            return _completed(stdout="abc123\n")
+        if argv[0] == "rev-parse":
+            return _completed(stdout="tX\n")
+        return _completed(stdout="t3\nt2\n")
+
+    merged = worktree.parse_pr_view(pr_json(state="MERGED", headRefOid="abc123"))
+    assert worktree.work_landed(git, _state(), sweep.NEEDS_BRANCH, merged)
+    assert not worktree.work_landed(git, _state(), sweep.NEEDS_BRANCH)  # no PR in hand
+    open_pr = worktree.parse_pr_view(pr_json(state="OPEN", headRefOid="abc123"))
+    assert not worktree.work_landed(git, _state(), sweep.NEEDS_BRANCH, open_pr)
 
 
 def _ledger_at(tmp_path, **plan_fields):
