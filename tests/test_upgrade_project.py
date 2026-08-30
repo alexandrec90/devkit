@@ -741,6 +741,33 @@ def test_a_checkout_that_never_vendored_is_skipped_not_refused():
     ]
 
 
+def test_a_project_on_hold_is_skipped_by_the_sweep_not_refused():
+    """The nightly `--all` cut boxes for two paused projects and left each holding a
+    vendored bump nobody was going to ship. A skip, like the unadopted case: passing
+    over it must not colour the exit code of a run that upgraded everything else."""
+    assert up.select_all([up.Candidate("ibkr_trader", on_hold=True)]) == [
+        ("ibkr_trader", up.SKIP_ON_HOLD)
+    ]
+    assert "name it explicitly" in up.SKIP_ON_HOLD
+
+
+def test_candidates_for_marks_the_hold_list_and_only_the_hold_list(tmp_path, monkeypatch):
+    for name in ("carameli", "ibkr_trader"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "DEVKIT_VERSION").write_text("abc", encoding="utf-8")
+    monkeypatch.setattr(up.sweep, "common_dir", lambda git, path: str(path / ".git"))
+
+    swept = up.candidates_for(
+        tmp_path, ["carameli", "ibkr_trader"], tmp_path / "devkit", on_hold={"ibkr_trader"}
+    )
+    assert [candidate.on_hold for candidate in swept] == [False, True]
+    assert up.select_all(swept) == [("carameli", ""), ("ibkr_trader", up.SKIP_ON_HOLD)]
+
+    # Named explicitly, `main` passes no hold list: the skip is for the unattended pass.
+    named = up.candidates_for(tmp_path, ["ibkr_trader"], tmp_path / "devkit")
+    assert up.select_all(named) == [("ibkr_trader", "")]
+
+
 def test_worktree_siblings_are_upgraded_once_and_the_first_listed_wins():
     """Both would cut `claude/devkit-upgrade-<mmdd>` in one ref store, so the second
     would fail on a branch that already exists -- and land a duplicate PR if it did not."""
@@ -902,6 +929,36 @@ def test_a_run_where_every_project_is_current_touches_nothing(tmp_path, capsys, 
     ws = workspace(tmp_path, "carameli", "ibkr_trader")
     assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
     assert capsys.readouterr().out.count("already on devkit v0.5.3") == 2
+
+
+def test_the_unattended_sweep_passes_over_a_project_on_hold(tmp_path, capsys, monkeypatch):
+    """`--all` reads `devkit.onHold` off the workspace file and upgrades everything else;
+    naming the paused project on the command line still upgrades it."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    monkeypatch.setattr(up, "source_at_tag", _no_worktree)
+    upgraded: list[str] = []
+
+    def record(*args, **kwargs):
+        upgraded.append(args[0] if args else kwargs.get("name", "?"))
+        return done()(*args, **kwargs)
+
+    monkeypatch.setattr(up, "upgrade_one", record)
+    for name in ("carameli", "ibkr_trader"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli", "ibkr_trader")
+    text = json.loads(ws.read_text(encoding="utf-8"))
+    text["settings"] = {sweep.ON_HOLD_SETTING: ["ibkr_trader"]}
+    ws.write_text(json.dumps(text), encoding="utf-8")
+
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert up.SKIP_ON_HOLD in out
+    assert "ibkr_trader" not in upgraded and "carameli" in upgraded
+
+    assert up.main(["ibkr_trader", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    assert "ibkr_trader" in upgraded
 
 
 def test_a_project_on_an_older_release_is_still_upgraded(tmp_path, capsys, monkeypatch):

@@ -5670,3 +5670,575 @@ def test_respawn_prefers_the_reaped_branch_and_otherwise_cuts_a_new_box(monkeypa
     monkeypatch.setattr(worktree, "resumable_branch", boom)
     worktree.plan_respawn("devkit", workspace, slug="topic", session="mine")
     assert calls[-1][0] == "new"
+
+
+# --- stranded: a HOLD nobody is going to finish -----------------------------
+
+
+def test_stranded_is_a_hold_with_no_pr_past_a_day():
+    """The user's definition, verbatim: over a day old, no PR."""
+    assert worktree.stranded(worktree.HOLD, pr_open=False, age_days=1.5)
+    assert not worktree.stranded(worktree.HOLD, pr_open=False, age_days=0.5)
+    assert not worktree.stranded(worktree.HOLD, pr_open=True, age_days=9.0)
+
+
+def test_only_a_hold_can_be_stranded():
+    """A WAIT has a PR and so a person; a REAP or MERGE is already leaving."""
+    for action in (worktree.WAIT, worktree.REAP, worktree.MERGE):
+        assert not worktree.stranded(action, pr_open=False, age_days=30.0, on_hold=True)
+
+
+def test_a_box_for_a_project_on_hold_is_stranded_at_any_age():
+    assert worktree.stranded(worktree.HOLD, pr_open=False, age_days=0.0, on_hold=True)
+    assert not worktree.stranded(worktree.HOLD, pr_open=True, age_days=0.0, on_hold=True)
+
+
+def test_on_hold_projects_reads_the_workspace_file_or_answers_nothing(tmp_path):
+    path = tmp_path / "ws.code-workspace"
+    assert worktree.on_hold_projects(path) == frozenset()
+    path.write_text(
+        json.dumps({"folders": [], "settings": {sweep.ON_HOLD_SETTING: ["ibkr_trader"]}}),
+        encoding="utf-8",
+    )
+    assert worktree.on_hold_projects(path) == frozenset({"ibkr_trader"})
+
+
+def test_reconcile_flags_a_stranded_hold_and_still_holds_it(workspace, monkeypatch):
+    """Stranded is a heading, not an action: the box is held exactly as before."""
+    root = _reconcilable(workspace, monkeypatch, "demo--old-0806", sweep.READY, "2 uncommitted", "")
+    worktree.write_leases(
+        root,
+        {"demo--old-0806": box("demo--old-0806", project="demo", created="2026-08-01T00:00:00Z")},
+    )
+    monkeypatch.setattr(
+        worktree, "run_steps", lambda *a, **k: pytest.fail("reconcile touched a held box")
+    )
+
+    code, report = worktree.reconcile(workspace, apply=True)
+
+    row = report["boxes"][0]
+    assert code == 0
+    assert row["action"] == worktree.HOLD
+    assert row["stranded"] is True
+    assert row["age_days"] > 1
+    assert "demo--old-0806" in worktree.read_leases(root)
+
+
+def test_reconcile_does_not_strand_a_fresh_hold_or_one_with_an_open_pr(workspace, monkeypatch):
+    _reconcilable(workspace, monkeypatch, "demo--busy-0806", sweep.READY, "2 uncommitted", "OPEN")
+    _, report = worktree.reconcile(workspace, apply=False)
+    assert report["boxes"][0]["action"] == worktree.HOLD
+    assert report["boxes"][0]["stranded"] is False
+
+
+def test_reconcile_strands_a_hold_for_a_project_on_hold_at_once(workspace, monkeypatch):
+    _reconcilable(workspace, monkeypatch, "demo--fresh-0806", sweep.READY, "2 uncommitted", "")
+    workspace.write_text(
+        json.dumps({"folders": [{"path": "demo"}], "settings": {sweep.ON_HOLD_SETTING: ["demo"]}}),
+        encoding="utf-8",
+    )
+    _, report = worktree.reconcile(workspace, apply=False)
+    assert report["boxes"][0]["stranded"] is True
+
+
+def test_outcome_heading_files_only_a_stranded_hold_apart():
+    assert (
+        worktree.outcome_heading({"action": worktree.HOLD, "stranded": True}) == worktree.STRANDED
+    )
+    assert worktree.outcome_heading({"action": worktree.HOLD, "stranded": False}) == worktree.HOLD
+    assert worktree.outcome_heading({"action": worktree.REAP}) == worktree.REAP
+
+
+def test_reconcile_outcome_carries_the_age_and_the_stranded_flag():
+    decision = types.SimpleNamespace(box="demo--old-0806", reason="2 uncommitted", verdict="ready")
+    held = box("demo--old-0806", project="demo", created="2026-08-01T00:00:00Z")
+    row = worktree.reconcile_outcome(
+        decision, worktree.HOLD, worktree.PullRequest(), ["note"], held, frozenset()
+    )
+    assert row["box"] == "demo--old-0806" and row["notes"] == ["note"]
+    assert row["age_days"] > 1 and row["stranded"] is True
+    fresh = worktree.reconcile_outcome(
+        decision, worktree.HOLD, worktree.PullRequest(), [], None, frozenset({"demo"})
+    )
+    assert fresh["age_days"] == 0.0 and fresh["stranded"] is False  # no lease, no project
+
+
+def test_render_reconcile_files_a_stranded_hold_under_its_own_heading():
+    """Ahead of the ordinary holds, and with the remedy that is not the user."""
+    rendered = worktree.render_reconcile(
+        _reconcile_report(
+            boxes=[
+                {
+                    "action": worktree.HOLD,
+                    "box": "demo--busy-0806",
+                    "reason": "1 uncommitted",
+                    "stranded": False,
+                },
+                {
+                    "action": worktree.HOLD,
+                    "box": "demo--old-0806",
+                    "reason": "2 uncommitted",
+                    "stranded": True,
+                },
+            ]
+        )
+    )
+    stranded_at = rendered.index("stranded --")
+    holding_at = rendered.index("holding work --")
+    assert stranded_at < holding_at
+    assert "/triage-boxes" in rendered[stranded_at:holding_at]
+    assert stranded_at < rendered.index("demo--old-0806") < holding_at
+    assert holding_at < rendered.index("demo--busy-0806")
+
+
+def _survey_row(name: str, **extra) -> dict:
+    row = {
+        "box": name,
+        "branch": "agent/x-0806",
+        "slot": 1,
+        "age_days": 3.0,
+        "verdict": sweep.READY,
+        "reason": "2 uncommitted",
+        "reapable": False,
+        "stranded": False,
+    }
+    return {**row, **extra}
+
+
+def test_render_survey_lists_stranded_boxes_apart_from_the_held_ones():
+    rows = [_survey_row("demo--old-0806", stranded=True), _survey_row("demo--busy-0806")]
+    assert worktree.survey_sections([_survey_row("x", reapable=True)]) == []
+    assert worktree.survey_sections(rows)[0] == ""
+    rendered = worktree.render_survey(rows)
+    assert "1 box(es) stranded" in rendered
+    assert "/triage-boxes" in rendered
+    assert "1 box(es) not reapable yet" in rendered
+    stranded_section, _, held_section = rendered.partition("not reapable yet")
+    stranded_section = stranded_section[stranded_section.index("box(es) stranded") :]
+    assert "demo--old-0806" in stranded_section and "demo--busy-0806" not in stranded_section
+    assert "demo--busy-0806" in held_section and "demo--old-0806" not in held_section
+
+
+def test_survey_rows_carry_the_stranded_flag(workspace, monkeypatch):
+    root = workspace.parent
+    old = box("demo--old-0806", project="demo", created="2026-08-01T00:00:00Z")
+    (root / worktree.BOXES_DIR_NAME / old.name).mkdir(parents=True)
+    worktree.write_leases(root, {old.name: old})
+    monkeypatch.setattr(worktree, "inspect_box", lambda *a, **k: (state(dirty=2), sweep.READY, "2"))
+    monkeypatch.setattr(worktree, "load_registry", lambda root: registry())
+
+    rows = worktree.survey(workspace)
+
+    assert rows[0]["reapable"] is False
+    assert rows[0]["stranded"] is True
+
+
+# --- reap: a branch that is already gone -------------------------------------
+
+
+def test_branch_already_gone_matches_only_a_missing_branch_delete():
+    assert worktree.branch_already_gone(
+        "git branch -D agent/x", "error: branch 'agent/x' not found."
+    )
+    assert not worktree.branch_already_gone("git branch -d agent/x", "not fully merged")
+    assert not worktree.branch_already_gone("git worktree remove p", "not found")
+
+
+def test_steps_after_returns_what_follows_the_failed_step():
+    steps = (("a",), ("branch", "-D", "x"), ("c",))
+    assert worktree.steps_after(steps, "git branch -D x") == (("c",),)
+    assert worktree.steps_after(steps, "git nothing") == ()
+
+
+def test_apply_reap_carries_on_when_the_branch_is_already_gone(tmp_path, monkeypatch):
+    """Regression. The scheduled pass failed a whole reap on `git branch -D` reporting
+    "branch not found" -- a step whose goal was already met -- and then held the box."""
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    worktree.write_leases(workspace.parent, {"demo--x-0806": box("demo--x-0806", project="demo")})
+    worktree.box_path(workspace.parent, "demo--x-0806").mkdir()
+    seen: list[tuple[str, ...]] = []
+
+    def fake_run_steps(cwd, steps, timeout=300.0):
+        ran = []
+        for step in steps:
+            rendered = "git " + " ".join(step)
+            if step[:2] == ("branch", "-D"):
+                return ran, rendered, "error: branch 'agent/x' not found."
+            seen.append(step)
+            ran.append(rendered)
+        return ran, "", ""
+
+    monkeypatch.setattr(worktree, "run_steps", fake_run_steps)
+    plan = reaped_plan(
+        box="demo--x-0806",
+        project="demo",
+        steps=(("worktree", "prune"), ("branch", "-D", "agent/x"), ("fetch", "--prune")),
+    )
+
+    ok, notes = worktree.apply_reap(plan, workspace)
+
+    assert ok
+    assert ("fetch", "--prune") in seen
+    assert any("already deleted" in note for note in notes)
+    assert "demo--x-0806" not in worktree.read_leases(workspace.parent)
+
+
+# --- rescue: the rebranch verb ----------------------------------------------
+
+
+def _rescue_state(**kwargs) -> sweep.State:
+    defaults = {
+        "name": "devkit--fix-0828",
+        "branch": "agent/fix-0820",
+        "default_branch": "main",
+        "local_branches": ("agent/fix-0820", "main"),
+        "dirty": 2,
+        "dirty_files": ("a.py", "tests/test_a.py"),
+    }
+    return state(**{**defaults, **kwargs})
+
+
+def _rescue_box(**kwargs) -> worktree.Box:
+    return box("devkit--fix-0828", project="devkit", branch="agent/fix-0820", **kwargs)
+
+
+def test_box_topic_strips_the_project_and_the_date_stamp():
+    assert worktree.box_topic("devkit--fix-pr-256-0828") == "fix-pr-256"
+    assert worktree.box_topic("carameli--sms-bubble-chains-0824-2") == "sms-bubble-chains"
+    assert worktree.box_topic("hotfix") == "hotfix"
+
+
+def test_commits_landed_ignores_the_dirty_gate():
+    """`work_landed` answers a dirty box with a flat no; rescue needs the fact under it."""
+    tree_hit = _tree_git(head="t2", history=("t3", "t2"))
+    assert worktree.commits_landed(tree_hit, _state(dirty=2))
+    assert not worktree.work_landed(tree_hit, _state(dirty=2), sweep.READY)
+
+
+def test_rescue_plan_cuts_a_fresh_branch_and_replays_the_commits_onto_the_default():
+    plan = worktree.rescue_plan(
+        _rescue_box(), _rescue_state(), sweep.NEEDS_REBRANCH, "retired", today=TODAY
+    )
+    assert plan.acts and not plan.refusal
+    assert plan.old_branch == "agent/fix-0820"
+    assert plan.branch == "agent/fix-0806"
+    assert plan.steps == (
+        ("checkout", "-b", "agent/fix-0806"),
+        ("rebase", "--autostash", "origin/main"),
+    )
+    assert plan.rollback == (
+        ("rebase", "--abort"),
+        ("checkout", "agent/fix-0820"),
+        ("branch", "-D", "agent/fix-0806"),
+    )
+    assert plan.path == ""  # `rescue` fills it in; the plan itself does not know the root
+
+
+def test_rescue_plan_moves_landed_work_wholesale():
+    """Commits already on the default branch are not replayed: `--onto` with HEAD as
+    the upstream carries only the autostashed dirt across."""
+    plan = worktree.rescue_plan(
+        _rescue_box(),
+        _rescue_state(),
+        sweep.NEEDS_REBRANCH,
+        "retired",
+        landed=True,
+        today=TODAY,
+    )
+    assert plan.landed
+    assert plan.steps[1] == ("rebase", "--autostash", "--onto", "origin/main", "HEAD")
+
+
+def test_rescue_plan_names_the_branch_after_the_box_when_the_branch_has_no_topic():
+    plan = worktree.rescue_plan(
+        box("devkit--fix-pr-256-0828", project="devkit", branch="hotfix"),
+        _rescue_state(branch="hotfix", local_branches=("hotfix", "main")),
+        sweep.NEEDS_BRANCH,
+        "not a task branch",
+        today=TODAY,
+    )
+    assert plan.branch == "agent/fix-pr-256-0806"
+
+
+def test_rescue_plan_steps_around_a_branch_that_already_exists():
+    plan = worktree.rescue_plan(
+        _rescue_box(),
+        _rescue_state(local_branches=("agent/fix-0820", "agent/fix-0806", "main")),
+        sweep.NEEDS_REBRANCH,
+        "retired",
+        today=TODAY,
+    )
+    assert plan.branch == "agent/fix-0806-2"
+
+
+def test_rescue_plan_passes_a_ready_box_through_with_nothing_to_move():
+    plan = worktree.rescue_plan(_rescue_box(), _rescue_state(), sweep.READY, "2 uncommitted")
+    assert not plan.refusal
+    assert not plan.acts
+    assert plan.branch == "agent/fix-0820"
+
+
+def test_rescue_plan_refuses_what_has_another_verb():
+    for verdict, remedy in ((sweep.NEEDS_PR, "/ship"), (sweep.SPENT, "reap")):
+        refusal = worktree.rescue_refusal(_rescue_box(), _rescue_state(dirty=0), verdict, "because")
+        assert remedy in refusal and "because" in refusal
+        plan = worktree.rescue_plan(_rescue_box(), _rescue_state(dirty=0), verdict, "because")
+        assert plan.refusal == refusal
+        assert not plan.acts
+    assert worktree.rescue_refusal(_rescue_box(), _rescue_state(), sweep.READY, "2") == ""
+    no_base = _rescue_state(default_branch="")
+    assert "no default branch" in worktree.rescue_refusal(_rescue_box(), no_base, sweep.READY, "2")
+
+
+def test_rescue_plan_refuses_a_preview_and_a_husk():
+    preview = worktree.rescue_plan(
+        _rescue_box(kind=worktree.PREVIEW_KIND, tracks="agent/other"),
+        _rescue_state(),
+        sweep.READY,
+        "2 uncommitted",
+    )
+    assert "preview" in preview.refusal
+    husk = worktree.rescue_plan(
+        _rescue_box(), _rescue_state(is_git=False), sweep.NEEDS_REBRANCH, "husk"
+    )
+    assert "husk" in husk.refusal
+
+
+def _rescue_workspace(tmp_path) -> tuple[Path, worktree.Box]:
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    (workspace.parent / "demo").mkdir()
+    workspace.write_text(json.dumps({"folders": [{"path": "demo"}]}), encoding="utf-8")
+    old = box("demo--x-0806", project="demo", branch="agent/x-0801")
+    worktree.write_leases(workspace.parent, {old.name: old})
+    worktree.box_path(workspace.parent, old.name).mkdir(parents=True)
+    return workspace, old
+
+
+def _rescue_plan_for(workspace, old: worktree.Box) -> worktree.RescuePlan:
+    return worktree.RescuePlan(
+        box=old.name,
+        path=str(worktree.box_path(workspace.parent, old.name)),
+        project=old.project,
+        old_branch=old.branch,
+        branch="agent/x-0806",
+        steps=(("checkout", "-b", "agent/x-0806"), ("rebase", "--autostash", "origin/main")),
+        rollback=(
+            ("rebase", "--abort"),
+            ("checkout", old.branch),
+            ("branch", "-D", "agent/x-0806"),
+        ),
+    )
+
+
+def test_apply_rescue_runs_in_the_box_and_rewrites_the_lease(tmp_path, monkeypatch):
+    """The lease rewrite is the half a hand-made `checkout -b` skips, and the reason the
+    workspace CLAUDE.md forbids it: `reconcile` looks the PR up by the lease's branch."""
+    workspace, old = _rescue_workspace(tmp_path)
+    where: list[Path] = []
+
+    def fake_run_steps(cwd, steps, timeout=300.0):
+        where.append(cwd)
+        return [f"git {' '.join(step)}" for step in steps], "", ""
+
+    monkeypatch.setattr(worktree, "run_steps", fake_run_steps)
+
+    ok, notes = worktree.apply_rescue(_rescue_plan_for(workspace, old), workspace)
+
+    assert ok
+    assert where == [worktree.box_path(workspace.parent, old.name)]
+    assert worktree.read_leases(workspace.parent)[old.name].branch == "agent/x-0806"
+    assert any("lease now records agent/x-0806" in note for note in notes)
+
+
+def test_apply_rescue_rolls_back_a_failed_rebase_and_keeps_the_lease(tmp_path, monkeypatch):
+    workspace, old = _rescue_workspace(tmp_path)
+    seen: list[tuple[str, ...]] = []
+
+    def fake_run_steps(cwd, steps, timeout=300.0):
+        ran = []
+        for step in steps:
+            seen.append(step)
+            if step[0] == "rebase" and step[1] != "--abort":
+                return ran, "git " + " ".join(step), "CONFLICT (content): a.py"
+            ran.append("git " + " ".join(step))
+        return ran, "", ""
+
+    monkeypatch.setattr(worktree, "run_steps", fake_run_steps)
+
+    ok, notes = worktree.apply_rescue(_rescue_plan_for(workspace, old), workspace)
+
+    assert not ok
+    assert ("rebase", "--abort") in seen
+    assert ("checkout", "agent/x-0801") in seen
+    assert ("branch", "-D", "agent/x-0806") in seen
+    assert worktree.read_leases(workspace.parent)[old.name].branch == "agent/x-0801"
+    assert any("FAILED at `git rebase" in note for note in notes)
+    assert any("back on agent/x-0801" in note for note in notes)
+
+
+def test_rescue_commit_message_is_mechanical_unless_given_one():
+    plan = worktree.RescuePlan(box="demo--x-0806", branch="agent/x-0806")
+    assert worktree.rescue_commit_message(plan) == "rescue(x): ship work left in demo--x-0806"
+    assert worktree.rescue_commit_message(plan, "  feat: real subject ") == "feat: real subject"
+
+
+def test_rescue_pr_body_says_nothing_reviewed_it_and_lists_the_paths():
+    plan = worktree.RescuePlan(
+        box="demo--x-0806",
+        old_branch="agent/x-0801",
+        branch="agent/x-0806",
+        verdict="needs-rebranch",
+    )
+    body = worktree.rescue_pr_body(plan, _rescue_state(dirty_files=("a.py",)))
+    assert "Nothing has reviewed this" in body
+    assert "`agent/x-0801`" in body and "`agent/x-0806`" in body
+    assert "- `a.py`" in body
+
+
+def test_rescue_ship_plan_commits_pushes_and_opens_a_pr():
+    plan = worktree.RescuePlan(
+        box="demo--x-0806",
+        old_branch="agent/x-0801",
+        branch="agent/x-0806",
+        verdict="needs-rebranch",
+    )
+    after = _rescue_state(branch="agent/x-0806", dirty=1, dirty_files=("a.py",), unpushed=-1)
+
+    shipping = worktree.rescue_ship_plan(plan, after)
+
+    assert shipping.steps == (
+        ("add", "-A"),
+        ("commit", "-m", "rescue(x): ship work left in demo--x-0806"),
+        ("push", "-u", "origin", "agent/x-0806"),
+    )
+    assert shipping.pr_head == "agent/x-0806"
+    assert shipping.pr_base == "main"
+    assert shipping.pr_title == "rescue(x): ship work left in demo--x-0806"
+
+
+def test_rescue_ship_plan_pushes_a_clean_but_unpushed_branch_and_refuses_a_shipped_one():
+    plan = worktree.RescuePlan(box="demo--x-0806", branch="agent/x-0806")
+    pushed_only = worktree.rescue_ship_plan(
+        plan, _rescue_state(branch="agent/x-0806", dirty=0, dirty_files=(), ahead=2, unpushed=2)
+    )
+    assert pushed_only.steps == (("push", "-u", "origin", "agent/x-0806"),)
+    # Pushed but still ahead of the default: the PR is the part that is missing.
+    pr_only = worktree.rescue_ship_plan(
+        plan, _rescue_state(branch="agent/x-0806", dirty=0, dirty_files=(), ahead=2, unpushed=0)
+    )
+    assert not pr_only.refusal and pr_only.pr_head == "agent/x-0806"
+    landed = worktree.rescue_ship_plan(
+        plan, _rescue_state(branch="agent/x-0806", dirty=0, dirty_files=(), ahead=0, unpushed=0)
+    )
+    assert "nothing to ship" in landed.refusal
+    off_policy = worktree.rescue_ship_plan(plan, _rescue_state(branch="hotfix"))
+    assert "not a" in off_policy.refusal
+
+
+def test_rescue_end_to_end_moves_the_work_and_ships_it_through_the_sweep(tmp_path, monkeypatch):
+    workspace, old = _rescue_workspace(tmp_path)
+    before = _rescue_state(
+        name=old.name, branch="agent/x-0801", local_branches=("agent/x-0801", "main")
+    )
+    monkeypatch.setattr(
+        worktree, "inspect_box", lambda *a, **k: (before, sweep.NEEDS_REBRANCH, "retired")
+    )
+    monkeypatch.setattr(worktree, "commits_landed", lambda *a, **k: True)
+    monkeypatch.setattr(
+        worktree,
+        "run_steps",
+        lambda cwd, steps, timeout=300.0: ([f"git {' '.join(s)}" for s in steps], "", ""),
+    )
+    reinspected: list[str] = []
+
+    def fake_inspect(name, path, fetch=True, **kw):
+        reinspected.append(name)
+        return sweep.State(
+            **{**before.__dict__, "branch": "agent/x-0806", "local_branches": ("agent/x-0806",)}
+        )
+
+    monkeypatch.setattr(sweep, "inspect", fake_inspect)
+    shipped: list[sweep.Plan] = []
+
+    def fake_apply_plan(name, path, plan, git=None, gh=None):
+        shipped.append(plan)
+        return sweep.Applied(
+            name, plan, ran=["git push"], pr_url="https://x/pull/7", pr_created=True
+        )
+
+    monkeypatch.setattr(sweep, "apply_plan", fake_apply_plan)
+
+    ok, plan, notes = worktree.rescue(
+        workspace, old.name, apply=True, ship=True, message="feat: the real subject", fetch=False
+    )
+
+    assert ok
+    assert plan.steps[1] == ("rebase", "--autostash", "--onto", "origin/main", "HEAD")
+    assert reinspected == [old.name]
+    assert shipped[0].pr_head == "agent/x-0806"
+    assert shipped[0].pr_title == "feat: the real subject"
+    assert worktree.read_leases(workspace.parent)[old.name].branch == plan.branch
+    assert "opened: https://x/pull/7" in notes
+
+
+def test_rescue_dry_run_plans_and_touches_nothing(tmp_path, monkeypatch):
+    workspace, old = _rescue_workspace(tmp_path)
+    monkeypatch.setattr(
+        worktree,
+        "inspect_box",
+        lambda *a, **k: (_rescue_state(branch="agent/x-0801"), sweep.NEEDS_REBRANCH, "retired"),
+    )
+    monkeypatch.setattr(worktree, "commits_landed", lambda *a, **k: False)
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: pytest.fail("dry run ran git"))
+
+    ok, plan, notes = worktree.rescue(workspace, old.name, apply=False, fetch=False)
+
+    assert ok and plan.acts and notes == []
+    assert worktree.read_leases(workspace.parent)[old.name].branch == "agent/x-0801"
+    with pytest.raises(worktree.WorktreeError, match="no live box"):
+        worktree.rescue(workspace, "demo--missing-0806", fetch=False)
+
+
+def test_render_rescue_shows_the_move_and_the_dry_run_notice():
+    plan = worktree.RescuePlan(
+        box="demo--x-0806",
+        old_branch="agent/x-0801",
+        branch="agent/x-0806",
+        steps=(("checkout", "-b", "agent/x-0806"),),
+        landed=True,
+    )
+    text = worktree.render_rescue(plan, applied=False, notes=[])
+    assert "Would rescue demo--x-0806: agent/x-0801 -> agent/x-0806" in text
+    assert "already landed" in text
+    assert "Dry run" in text
+    refused = worktree.render_rescue(
+        worktree.RescuePlan(box="p", refusal="a preview"), applied=True, notes=[]
+    )
+    assert refused.startswith("p: refused -- a preview")
+    untouched = worktree.render_rescue(
+        worktree.RescuePlan(box="r", branch="agent/r-0806", verdict=sweep.READY),
+        applied=True,
+        notes=["opened: https://x/pull/9"],
+    )
+    assert "nothing to move" in untouched and "opened: https://x/pull/9" in untouched
+
+
+def test_rescue_is_a_subcommand(tmp_path, monkeypatch, capsys):
+    workspace, old = _rescue_workspace(tmp_path)
+    monkeypatch.setattr(
+        worktree,
+        "inspect_box",
+        lambda *a, **k: (_rescue_state(branch="agent/x-0801"), sweep.NEEDS_REBRANCH, "retired"),
+    )
+    monkeypatch.setattr(worktree, "commits_landed", lambda *a, **k: False)
+
+    code = worktree.main(
+        ["rescue", old.name, "--workspace", str(workspace), "--no-fetch", "--json"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["applied"] is False
+    assert payload["plan"]["old_branch"] == "agent/x-0801"

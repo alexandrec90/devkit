@@ -280,6 +280,16 @@ def retired_hooks_line(root: Path, names: list[str], source: Path = SOURCE_ROOT)
     )
 
 
+# The four box states `boxes_line` reports, in the order they are printed, each with the
+# fix it wants from whoever reads the banner -- "" for the two that want nothing.
+BOX_STATES: tuple[tuple[str, str], ...] = (
+    ("stranded", "/triage-boxes"),
+    ("holding work", ""),
+    ("awaiting a PR merge", ""),
+    ("reapable", "python devkit/scripts/worktree.py reap --all --yes"),
+)
+
+
 def boxes_line(rows: list[dict]) -> str:
     """The ephemeral-box half; "" when there are none.
 
@@ -300,30 +310,36 @@ def boxes_line(rows: list[dict]) -> str:
     apart again.
 
     The fix suffix is therefore printed only when something is actually reapable.
+
+    A fourth state, **stranded**, is a holding box the tier has given up waiting on: older
+    than `worktree.STRANDED_AGE_DAYS` with no PR, or cut for a project on hold. It used to
+    be filed under "holding work", and thirteen of the fourteen boxes that heading named
+    on 2026-08-30 had been there for days with no session behind them -- a list that
+    reads as "ship these" to a user who does not ship by hand. Stranded is named first,
+    separately, and its fix is `/triage-boxes`, which ships or deletes each one.
     """
     if not rows:
         return ""
-    reapable = [row["box"] for row in rows if row["reapable"]]
-    awaiting = [
-        row["box"]
-        for row in rows
-        if not row["reapable"] and row["verdict"] in worktree.AWAITS_A_MERGE
+    groups: dict[str, list[str]] = {}
+    for row in rows:
+        if row["reapable"]:
+            key = "reapable"
+        elif row["verdict"] in worktree.AWAITS_A_MERGE:
+            key = "awaiting a PR merge"
+        elif row.get("stranded"):
+            key = "stranded"
+        else:
+            key = "holding work"
+        groups.setdefault(key, []).append(row["box"])
+    parts = [
+        f"{len(groups[key])} {key} ({', '.join(sorted(groups[key]))})"
+        for key, _ in BOX_STATES
+        if key in groups
     ]
-    holding = [
-        row["box"]
-        for row in rows
-        if not row["reapable"] and row["verdict"] not in worktree.AWAITS_A_MERGE
-    ]
-    parts = []
-    if holding:
-        parts.append(f"{len(holding)} holding work ({', '.join(sorted(holding))})")
-    if awaiting:
-        parts.append(f"{len(awaiting)} awaiting a PR merge ({', '.join(sorted(awaiting))})")
-    if reapable:
-        parts.append(f"{len(reapable)} reapable ({', '.join(sorted(reapable))})")
+    fixes = [fix for key, fix in BOX_STATES if fix and key in groups]
     line = f"{len(rows)} ephemeral box(es): {'; '.join(parts)}"
-    if reapable:
-        line += " (fix: python devkit/scripts/worktree.py reap --all --yes)"
+    if fixes:
+        line += f" (fix: {'; '.join(fixes)})"
     return line
 
 

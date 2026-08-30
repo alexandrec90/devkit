@@ -130,7 +130,6 @@ scripts/resume-sessions.py::resume_args
 scripts/schedule_health.py::virtualenv_interpreter
 scripts/ship.py::backoff_delays
 scripts/ship.py::current_branch
-scripts/sweep.py::Applied
 scripts/sweep.py::anchor_path
 scripts/sweep.py::common_dir
 scripts/sweep.py::gh_for
