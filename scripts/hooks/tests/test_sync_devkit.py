@@ -1402,6 +1402,63 @@ def test_the_baseline_is_not_vendored(tmp_path):
     assert sh.UNTESTED_BASELINE_FILE not in sh.MANIFEST
 
 
+# --- seeding the structure ratchet ---------------------------------------------------
+#
+# Same shape as the untested-symbol seeding above, for the same reason: the pull that
+# delivers the gate must not be the pull that reddens it.
+
+STRUCTURE_CHECKER = "scripts/hooks/structure_check.py"
+STRUCTURE_SCANNER = "scripts/hooks/structure_scan.py"
+
+
+def _structure_project(root: Path, source: str = "x = 1  # noqa\n") -> Path:
+    for rel in (STRUCTURE_CHECKER, STRUCTURE_SCANNER, CONFIG_MODULE):
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text((sh.REPO_ROOT / rel).read_text(encoding="utf-8"), encoding="utf-8")
+    # `paths` narrowed to the project's own tree, so the vendored hooks copied in
+    # above are not measured as the consumer's debt.
+    _seed(root, ".devkit.toml", '[paths]\napp = "src/"\n\n[structure]\npaths = ["src"]\n')
+    _seed(root, "src/main.py", source)
+    return root
+
+
+def test_structure_seeding_records_the_debt_the_project_already_has(tmp_path):
+    root = _structure_project(tmp_path)
+    assert sh.seed_structure_baseline(root) == 1
+    assert "suppressions::src/main.py = 1" in sh.read_structure_baseline(root)
+
+
+def test_structure_seeding_is_skipped_when_the_project_has_already_adopted(tmp_path):
+    root = _structure_project(tmp_path)
+    _seed(root, sh.STRUCTURE_BASELINE_FILE, "")
+    assert sh.seed_structure_baseline(root) is None
+    assert sh.read_structure_baseline(root) == []
+
+
+def test_structure_seeding_is_skipped_when_the_checker_was_not_vendored(tmp_path):
+    _seed(tmp_path, ".devkit.toml", "")
+    assert sh.seed_structure_baseline(tmp_path) is None
+    assert not (tmp_path / sh.STRUCTURE_BASELINE_FILE).exists()
+
+
+def test_a_checker_that_fails_leaves_no_structure_baseline(tmp_path):
+    root = _structure_project(tmp_path)
+    _seed(root, STRUCTURE_CHECKER, "raise SystemExit(3)\n")
+    assert sh.seed_structure_baseline(root) is None
+
+
+def test_the_structure_baseline_reader_drops_comments_and_blank_lines(tmp_path):
+    _seed(tmp_path, sh.STRUCTURE_BASELINE_FILE, "# header\n\nfile_lines::src/a.py = 900\n")
+    assert sh.read_structure_baseline(tmp_path) == ["file_lines::src/a.py = 900"]
+
+
+def test_the_structure_baseline_is_not_vendored():
+    assert sh.STRUCTURE_BASELINE_FILE not in sh.MANIFEST
+    assert STRUCTURE_CHECKER in sh.MANIFEST
+    assert STRUCTURE_SCANNER in sh.MANIFEST
+
+
 def test_pull_adopts_the_ratchet_and_says_so(tmp_path, monkeypatch, capsys):
     """End to end, because the ordering is the part that can go wrong: seeding runs the
     scanner the same pull just copied in, so it has to happen after the copy."""

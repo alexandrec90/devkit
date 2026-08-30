@@ -156,6 +156,54 @@ class TestContractConfig:
 
 
 @dataclass(frozen=True)
+class LayerRule:
+    """One import boundary: files under `sources` may not import anything `forbid`
+    names. `forbid` entries are module prefixes as written in the import (`app.db`,
+    `axios`) or repo-relative path prefixes of the resolved file (`app/db/`)."""
+
+    name: str = ""
+    sources: tuple[str, ...] = ()
+    forbid: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RestrictRule:
+    """One call-site boundary: `pattern` (a regex over the file's text) may appear
+    only in files under `only_in`. `paths` narrows which files are checked at all;
+    empty means every scanned file. The shape behind "browser storage only through
+    the wrapper", "no `fetch` outside the API client", "no SQL outside the
+    repository layer"."""
+
+    name: str = ""
+    pattern: str = ""
+    only_in: tuple[str, ...] = ()
+    paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class StructureConfig:
+    """What `scripts/hooks/structure_check.py` scans, and the limits it holds to.
+
+    `paths` defaults to the app directory, the frontend source tree when one is
+    enabled, and `scripts/`; the test directory is always scanned for the counters
+    (suppressions, skipped tests) but never measured for size. `exclude` and
+    `entrypoints` are repo-relative path prefixes: the first drops a subtree from the
+    scan (generated code, migrations), the second exempts one from the orphan rule
+    (files loaded by name rather than by import). `disabled` names rules a project
+    opts out of. `limits` overrides any default in the script's `DEFAULT_LIMITS`; an
+    unknown key is a configuration error the script reports rather than ignores.
+    """
+
+    paths: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+    entrypoints: tuple[str, ...] = ()
+    disabled: tuple[str, ...] = ()
+    limits: dict[str, int] = field(default_factory=dict)
+    layers: tuple[LayerRule, ...] = ()
+    restrict: tuple[RestrictRule, ...] = ()
+
+
+@dataclass(frozen=True)
 class WorktreeConfig:
     """Extra `.env` assignments an ephemeral box must make for itself.
 
@@ -210,6 +258,7 @@ class Config:
     docker: DockerConfig = field(default_factory=DockerConfig)
     worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
     test_contract: TestContractConfig = field(default_factory=TestContractConfig)
+    structure: StructureConfig = field(default_factory=StructureConfig)
 
     def env(self, suffix: str) -> str:
         """The prefixed control-env name, e.g. env("SKIP_STOP_VERIFY")."""
@@ -302,6 +351,69 @@ def _test_contract_from(raw: dict[str, Any], default: TestContractConfig) -> Tes
     )
 
 
+def _int_map(value: Any) -> dict[str, int]:
+    """`{name: int}` from a TOML table, dropping entries that are not whole numbers.
+
+    A dropped limit falls back to the script's default rather than to "no limit",
+    and `bool` is excluded for the reason `_int_or` gives.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(k): int(v) for k, v in value.items() if isinstance(v, int) and not isinstance(v, bool)
+    }
+
+
+def _layer_rules(value: Any) -> tuple[LayerRule, ...]:
+    if not isinstance(value, list):
+        return ()
+    rules = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        rules.append(
+            LayerRule(
+                name=str(raw.get("name", "")),
+                # `from` in TOML, because that is how the rule reads; a Python
+                # field cannot carry that name.
+                sources=_as_str_tuple(raw.get("from"), ()),
+                forbid=_as_str_tuple(raw.get("forbid"), ()),
+            )
+        )
+    return tuple(rules)
+
+
+def _restrict_rules(value: Any) -> tuple[RestrictRule, ...]:
+    if not isinstance(value, list):
+        return ()
+    rules = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        rules.append(
+            RestrictRule(
+                name=str(raw.get("name", "")),
+                pattern=str(raw.get("pattern", "")),
+                only_in=_as_str_tuple(raw.get("only_in"), ()),
+                paths=_as_str_tuple(raw.get("paths"), ()),
+            )
+        )
+    return tuple(rules)
+
+
+def _structure_from(raw: dict[str, Any], default: StructureConfig) -> StructureConfig:
+    return replace(
+        default,
+        paths=_as_str_tuple(raw.get("paths"), default.paths),
+        exclude=_as_str_tuple(raw.get("exclude"), default.exclude),
+        entrypoints=_as_str_tuple(raw.get("entrypoints"), default.entrypoints),
+        disabled=_as_str_tuple(raw.get("disabled"), default.disabled),
+        limits=_int_map(raw.get("limits")) or dict(default.limits),
+        layers=_layer_rules(raw.get("layers")) or default.layers,
+        restrict=_restrict_rules(raw.get("restrict")) or default.restrict,
+    )
+
+
 def _env_map(value: Any, fallback: dict[str, str]) -> dict[str, str]:
     # Both halves coerced to str: TOML gives an int for `PORT = 5176`, and a
     # non-string value reaching the `.env` writer would be a template that never
@@ -332,6 +444,7 @@ def from_dict(data: dict[str, Any]) -> Config:
     docker_raw = data.get("docker", {}) if isinstance(data.get("docker"), dict) else {}
     wt_raw = data.get("worktree", {}) if isinstance(data.get("worktree"), dict) else {}
     tc_raw = data.get("test_contract", {}) if isinstance(data.get("test_contract"), dict) else {}
+    st_raw = data.get("structure", {}) if isinstance(data.get("structure"), dict) else {}
     return Config(
         env_prefix=str(project.get("env_prefix", default.env_prefix)),
         app_dir=str(paths.get("app", default.app_dir)),
@@ -344,6 +457,7 @@ def from_dict(data: dict[str, Any]) -> Config:
         docker=_docker_from(docker_raw, default.docker),
         worktree=_worktree_from(wt_raw, default.worktree),
         test_contract=_test_contract_from(tc_raw, default.test_contract),
+        structure=_structure_from(st_raw, default.structure),
     )
 
 
