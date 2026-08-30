@@ -126,6 +126,30 @@ def test_the_real_workspace_file_still_lists_checkouts():
     assert parse_workspace(text), "sweep reads no checkouts from the real workspace file"
 
 
+def test_on_hold_reads_the_setting_beside_vscodes_own():
+    text = """{
+        // the checkouts this sweep manages
+        "folders": [{ "path": "carameli" }, { "path": "ibkr_trader" }],
+        "settings": {
+            "powershell.cwd": "carameli",
+            "devkit.onHold": ["ibkr_trader", "data-lake"],
+        }
+    }"""
+    assert sweep.on_hold(text) == frozenset({"ibkr_trader", "data-lake"})
+    assert sweep.ON_HOLD_SETTING == "devkit.onHold"
+
+
+def test_on_hold_is_empty_for_every_workspace_that_predates_it():
+    """An absent or misshapen setting is "nothing on hold", never an error: the pass
+    that reads it runs unattended and must not stop over a config it does not need."""
+    assert sweep.on_hold(WORKSPACE) == frozenset()
+    assert sweep.on_hold("{not json") == frozenset()
+    assert sweep.on_hold("[]") == frozenset()
+    assert sweep.on_hold(json.dumps({"settings": {"devkit.onHold": "ibkr_trader"}})) == frozenset()
+    assert sweep.on_hold(json.dumps({"settings": []})) == frozenset()
+    assert sweep.on_hold(json.dumps({"settings": {"devkit.onHold": ["", 3, "x"]}})) == {"x"}
+
+
 def test_only_restricts_the_sweep_to_the_named_checkouts():
     names = ["carameli", "carameli-b", "devkit"]
     assert sweep.select(names, ["devkit"]) == (["devkit"], [])

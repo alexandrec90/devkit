@@ -129,6 +129,20 @@ cleanup.
 
 Each of these has already been violated by something:
 
+- **A `HOLD` with nobody in the box is not "holding work", it is stranded.** `reconcile`
+  cannot tell an autosave from a feature, so it holds both -- correctly -- and for months
+  reported both as *ship it*, to a user who ships nothing by hand and had scheduled the
+  pass so they never would. Thirteen boxes accrued, the oldest ten days old, two of them
+  cut by the nightly upgrade for projects on hold. `stranded` is the predicate (a `HOLD`
+  older than `STRANDED_AGE_DAYS` with no PR, or any `HOLD` for a project in
+  `workspace.jsonc`'s `devkit.onHold` list); `reconcile`, `list` and the session banner
+  all file such a box under its own heading whose remedy is the `/triage-boxes` skill,
+  and `rescue <box> --ship` is the verb that skill ships with -- a fresh `agent/` branch,
+  a rebase onto `origin/<default>` with the dirt autostashed across, the lease rewritten
+  to the new branch, then commit, push and PR through `sweep.apply_plan`. The lease
+  rewrite is why the workspace `CLAUDE.md` forbids `git checkout -b` in a box by hand.
+  The hold list is also what `upgrade-project.py --all` passes over, so the two boxes
+  above cannot recur; naming a paused project explicitly still upgrades it.
 - **`HOLD` is tested before anything that destroys.** `reconcile` is the unattended pass
   meant for a schedule — merged PR → reap, green PR under `--merge` → squash and reap —
   and under disk pressure it also reaps boxes whose PR is merely *open*, since every

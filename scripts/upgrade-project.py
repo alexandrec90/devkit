@@ -77,7 +77,7 @@ import json
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -121,6 +121,12 @@ UPGRADE_PATHS: tuple[str, ...] = (
 # things that are not consumers, and one of them is devkit itself.
 SKIP_SOURCE = "is the devkit checkout this run pulls from"
 SKIP_UNADOPTED = "has no DEVKIT_VERSION -- it has never vendored devkit"
+# `workspace.jsonc`'s `devkit.onHold` list (`sweep.on_hold`). A paused project is not
+# upgraded by the nightly `--all`: the box it would cut has no session to ship it and
+# no reviewer to merge it, so it sits holding a vendored bump until something calls it
+# stranded. Naming the project explicitly still upgrades it -- the skip is for the
+# unattended pass, not a lock.
+SKIP_ON_HOLD = "is on hold (workspace.jsonc `devkit.onHold`) -- name it explicitly to upgrade it"
 
 # How a reader is told to cut the release this run needed and could not have. Named
 # here rather than spelled into each message because there are three of them, and a
@@ -185,6 +191,7 @@ class Candidate:
     adopts: bool = True
     is_source: bool = False
     common_dir: str = ""
+    on_hold: bool = False
 
 
 def select_all(candidates: list[Candidate]) -> list[tuple[str, str]]:
@@ -208,6 +215,9 @@ def select_all(candidates: list[Candidate]) -> list[tuple[str, str]]:
         if not candidate.adopts:
             decided.append((candidate.name, SKIP_UNADOPTED))
             continue
+        if candidate.on_hold:
+            decided.append((candidate.name, SKIP_ON_HOLD))
+            continue
         # No key means git would not say; treat the checkout as its own store
         # rather than merging every unknown into one bucket.
         key = candidate.common_dir or f"?{candidate.name}"
@@ -225,13 +235,16 @@ def select_all(candidates: list[Candidate]) -> list[tuple[str, str]]:
     return decided
 
 
-def candidates_for(root: Path, names: list[str], devkit: Path) -> list[Candidate]:
+def candidates_for(
+    root: Path, names: list[str], devkit: Path, on_hold: Iterable[str] = ()
+) -> list[Candidate]:
     """Inspect each checkout just enough to feed `select_all`.
 
     Ordered cheapest first, and the order matters: the ref-store lookup shells out
-    to git, so it never runs for devkit itself or for a directory that was never a
-    consumer.
+    to git, so it never runs for devkit itself, for a directory that was never a
+    consumer, or for a project on hold.
     """
+    paused = frozenset(on_hold)
     built: list[Candidate] = []
     for name in names:
         path = root / name
@@ -239,6 +252,8 @@ def candidates_for(root: Path, names: list[str], devkit: Path) -> list[Candidate
             built.append(Candidate(name, is_source=True))
         elif not (path / "DEVKIT_VERSION").is_file():
             built.append(Candidate(name, adopts=False))
+        elif name in paused:
+            built.append(Candidate(name, on_hold=True))
         else:
             built.append(Candidate(name, common_dir=sweep.common_dir(sweep.git_for(path), path)))
     return built
@@ -1133,8 +1148,8 @@ def main(argv: list[str] | None = None) -> int:
         preflight.append(Outcome(RELEASE_SCOPED, 1, warning))
 
     scope = names if args.every else requested
-    selected = select_all(candidates_for(root, scope, args.devkit))
-
+    paused = sweep.on_hold(args.workspace.read_text(encoding="utf-8")) - set(requested)
+    selected = select_all(candidates_for(root, scope, args.devkit, on_hold=paused))
     todo: list[str] = []
     for name, skip in selected:
         if skip:

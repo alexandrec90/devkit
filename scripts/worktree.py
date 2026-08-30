@@ -395,6 +395,9 @@ MANAGED_END = "# --- end devkit worktree block ---"
 # What `reconcile` decides to do with one box. Four, because they are the four
 # different things that can be true of a task, and each wants a different actor:
 REAP = "reap"  # the work has left the box -- destroy it, reclaim the disk
+# Not a fifth action: a HOLD the report files separately, per `stranded`. Named here so
+# `render_reconcile`'s heading key cannot collide with an action.
+STRANDED = "stranded"
 MERGE = "merge"  # its PR is green and mergeable -- merge, then reap next pass
 HOLD = "hold"  # work exists ONLY here -- never destroyed, always reported
 WAIT = "wait"  # its PR is open and not mergeable yet -- someone else's move
@@ -446,6 +449,49 @@ DEFAULT_UNCLAIMED_AGE_DAYS = 7.0
 # Only the "never used" branch consults it. Every case above that one is evidence the box
 # *was* used, and a merged or closed PR is not less true for being recent.
 NEWBORN_GRACE_DAYS = 1.0 / 24.0
+
+# How old a HOLD box with no PR is before the tier calls it **stranded**. A box exists to
+# be shipped and destroyed; one that has held work for a day with nothing on GitHub is
+# a box whose session ended without shipping, and every pass after that is the same
+# HOLD line asking a person to do what the tier was set up so they would not. The
+# 2026-08-30 audit found thirteen of them, the oldest ten days old, under a heading
+# that said "ship it" to nobody. Stranded is not a reap: `reconcile` still holds the box,
+# but it says *stranded* rather than *holding*, and the remedy it names is
+# `/triage-boxes` -- an agent reading each one and shipping (`rescue --ship`) or reaping
+# it -- rather than the user. A project on hold (`sweep.on_hold`) is stranded at any
+# age, since nothing is meant to be in flight there at all.
+STRANDED_AGE_DAYS = 1.0
+
+
+def stranded(
+    action: str,
+    *,
+    pr_open: bool,
+    age_days: float,
+    on_hold: bool = False,
+    stranded_age_days: float = STRANDED_AGE_DAYS,
+) -> bool:
+    """Whether a `HOLD` is one the tier has stopped expecting a session to finish.
+
+    Only a `HOLD` can be stranded: a `WAIT` has a PR and so a person, a `REAP` is
+    leaving. Within that, an open PR means the box is still somebody's -- a session
+    editing after it pushed -- so the age rule applies to boxes with **no** PR, and a
+    box for a project on hold is stranded at any age because nothing should have cut
+    it. Pure, so `reconcile`, `survey` and the session banner cannot disagree about
+    which boxes `/triage-boxes` is for.
+    """
+    if action != HOLD or pr_open:
+        return False
+    return on_hold or age_days > stranded_age_days
+
+
+def on_hold_projects(workspace: Path) -> frozenset[str]:
+    """`sweep.on_hold` over the workspace file, or nothing when it cannot be read."""
+    try:
+        return sweep.on_hold(workspace.read_text(encoding="utf-8"))
+    except OSError:
+        return frozenset()
+
 
 # `gh pr view` fields. `statusCheckRollup` is per-head-commit, so a stale green from
 # before the last push cannot be read as current.
@@ -4255,6 +4301,23 @@ def head_is_merged_pr_head(git: sweep.Git, pr: PullRequest) -> bool:
     return False
 
 
+def commits_landed(git: sweep.Git, state: sweep.State, pr: PullRequest | None = None) -> bool:
+    """Whether every commit the box's HEAD carries is already on the default branch.
+
+    The two landing proofs (`head_tree_landed`, `head_is_merged_pr_head`) asked together
+    and **without the dirty gate**, which is the half `work_landed` adds. Split out for
+    `rescue`, which asks a different question of the same facts: not "may this box be
+    destroyed" but "does the uncommitted work sit on commits that already landed" --
+    when it does, the fresh branch is cut from `origin/<default>` and the dirt carried
+    over, and when it does not the commits are replayed on top. A dirty box answers
+    `work_landed` with a flat no, and that no is the right answer to the reap question
+    and no answer at all to this one.
+    """
+    if head_tree_landed(git, state.default_branch):
+        return True
+    return pr is not None and head_is_merged_pr_head(git, pr)
+
+
 def work_landed(
     git: sweep.Git,
     state: sweep.State,
@@ -4274,9 +4337,337 @@ def work_landed(
     """
     if verdict not in TREE_CAN_SETTLE or state.dirty:
         return False
-    if head_tree_landed(git, state.default_branch):
-        return True
-    return pr is not None and head_is_merged_pr_head(git, pr)
+    return commits_landed(git, state, pr)
+
+
+# --- rescue: the rebranch verb --------------------------------------------------
+
+# The verdicts `rescue` will move work out from under. `needs-branch` and
+# `needs-rebranch` are the two `sweep.BRANCHABLE` states -- a branch the policy will not
+# let a commit land on -- and `ready` is included so `rescue --ship` is one command for a
+# stranded box whatever shape it is in: a box already on a live task branch has nothing
+# to rebranch and goes straight to the ship half.
+RESCUABLE: frozenset[str] = frozenset({sweep.NEEDS_BRANCH, sweep.NEEDS_REBRANCH, sweep.READY})
+
+# The `-<mmdd>` (and `-N`) stamp `tb.branch_name` appends, as it survives in a box name.
+# Stripped before the box's own name is used as a topic, so a rescue of
+# `devkit--fix-pr-256-0828` cuts `agent/fix-pr-256-0830`, not `agent/fix-pr-256-0828-0830`.
+BOX_STAMP_RE = re.compile(r"-\d{4}(?:-\d+)?$")
+
+
+@dataclass(frozen=True)
+class RescuePlan:
+    """What `rescue` would do to one box: the fresh branch, and how to get onto it.
+
+    `steps` run **in the box**, not in the source checkout -- every other plan here
+    binds its git to the project checkout, because a reap acts on the box from outside
+    it; a rescue is the one verb whose subject is the box's own working tree, dirt
+    included. `rollback` is what `apply_rescue` runs, best-effort and in order, when a
+    step fails, so a rebase that stops on a conflict leaves the box exactly as it was
+    found rather than half-moved with a `.git/rebase-merge` in it.
+
+    `landed` is `commits_landed`'s answer, carried so the report can say which of the
+    two rebase shapes was chosen and why.
+    """
+
+    box: str
+    path: str = ""
+    project: str = ""
+    old_branch: str = ""
+    branch: str = ""
+    steps: tuple[tuple[str, ...], ...] = ()
+    rollback: tuple[tuple[str, ...], ...] = ()
+    refusal: str = ""
+    verdict: str = ""
+    reason: str = ""
+    dirty: int = 0
+    landed: bool = False
+
+    @property
+    def acts(self) -> bool:
+        return bool(self.steps)
+
+
+def box_topic(name: str) -> str:
+    """The slug a box was named for: `devkit--fix-pr-256-0828` -> `fix-pr-256`."""
+    _, sep, rest = name.partition(NAME_SEP)
+    return BOX_STAMP_RE.sub("", rest if sep else name) or name
+
+
+def rescue_refusal(box: Box, state: sweep.State, verdict: str, reason: str) -> str:
+    """Why `rescue` cannot help this box, or "" when it can. Each refusal names the verb
+    that can: a merged or empty box wants `reap`, a pushed one wants `/ship`, and a
+    preview cannot be shipped at all."""
+    if box.kind == PREVIEW_KIND:
+        return (
+            f"{box.name} is a preview -- a read-only copy of {box.tracks or state.branch}. "
+            f"Edits in a preview ship nowhere; copy anything worth keeping out, then "
+            f"`reap {box.name} --force --yes`"
+        )
+    if not state.is_git:
+        return f"{reason} -- a husk holds nothing to rescue; `reap` it"
+    if verdict not in RESCUABLE:
+        remedy = "`/ship` finishes it" if verdict == sweep.NEEDS_PR else "`reap` it"
+        return (
+            f"{verdict} -- {reason}; rescue moves work off a branch it cannot be "
+            f"shipped from, and this box is not on one ({remedy})"
+        )
+    if not state.branch or not state.default_branch:
+        return f"{reason} -- no branch or no default branch to cut from"
+    return ""
+
+
+def rescue_plan(
+    box: Box,
+    state: sweep.State,
+    verdict: str,
+    reason: str,
+    *,
+    landed: bool = False,
+    today: _dt.date | None = None,
+) -> RescuePlan:
+    """The rebranch `spawn_plan` names as missing: move a box's work onto a branch it can ship from.
+
+    A box that outlives its PR is left on a **retired** branch (`needs-rebranch`: the
+    squash merge deleted the remote and the policy refuses every commit to that name),
+    or was cut onto a hand-named one the policy never accepted (`needs-branch`). Either
+    way the work in it -- uncommitted edits, commits never pushed -- has no branch to be
+    shipped from, and that is what stranded every box the 2026-08-30 audit found.
+    `sweep.branch_plan` is the static tier's version and cannot be reused here: it cuts
+    from HEAD, which for a retired branch is the pre-squash history, so a PR opened from
+    it carries every already-merged commit as a diff against the default branch.
+
+    So the fresh branch is cut and then **rebased**:
+
+    - work whose commits already landed (`landed`) is moved wholesale onto
+      `origin/<default>` -- `--onto` with `HEAD` as the upstream replays nothing and
+      carries the autostashed dirt across;
+    - work with commits of its own is rebased onto `origin/<default>`, and git's merge
+      backend drops each commit that the squash already made empty, keeping the ones it
+      did not.
+
+    `--autostash` is what makes a dirty box safe to move: the dirt is stashed before the
+    rebase and re-applied after it, and `rebase --abort` restores it if the replay stops
+    on a conflict. Nothing is committed and nothing is pushed here; `--ship` does that,
+    through `sweep.apply_plan`, after this has succeeded and been re-inspected.
+
+    `ready` is allowed through with no steps: the box is already on a live task branch,
+    so there is nothing to move, and the plan exists only so `--ship` has one to follow.
+    Everything else `rescue_refusal` turns away. The plan carries no `path`; the caller
+    that knows the workspace root fills it in.
+    """
+    plan = RescuePlan(
+        box=box.name,
+        project=box.project,
+        old_branch=state.branch,
+        branch=state.branch,
+        verdict=verdict,
+        reason=reason,
+        dirty=state.dirty,
+        landed=landed,
+    )
+    refusal = rescue_refusal(box, state, verdict, reason)
+    if refusal:
+        return replace(plan, refusal=refusal)
+    if verdict == sweep.READY:
+        # Already on a live task branch: nothing to move. `--ship` takes it from here.
+        return plan
+
+    topic = sweep.branch_topic(state.branch) or box_topic(box.name)
+    taken = set(state.local_branches) | {state.branch}
+    name = tb.branch_name(tb.slugify(topic), taken, today)
+    base = f"origin/{state.default_branch}"
+    rebase = (
+        ("rebase", "--autostash", "--onto", base, "HEAD")
+        if landed
+        else ("rebase", "--autostash", base)
+    )
+    return replace(
+        plan,
+        branch=name,
+        steps=(("checkout", "-b", name), rebase),
+        rollback=(("rebase", "--abort"), ("checkout", state.branch), ("branch", "-D", name)),
+    )
+
+
+def apply_rescue(plan: RescuePlan, workspace: Path) -> tuple[bool, list[str]]:
+    """Run the rescue in the box; on success, record the new branch in the lease.
+
+    The lease rewrite is the half a hand-made `git checkout -b` skips, and it is why
+    the workspace `CLAUDE.md` forbids renaming a box's branch by hand: `worktree.py`
+    keys its registry on the branch, `reconcile` looks the PR up by that name, and a
+    box whose lease names a branch that no longer exists is one `reconcile` can reap as
+    "never used" with the work still in it. Same lock as `claim_box` and `apply_reap`.
+
+    A failed step is rolled back before it is reported. Every rollback step is
+    best-effort -- `rebase --abort` fails harmlessly when no rebase is in progress,
+    and `branch -D` when the checkout never happened -- because the point is to leave
+    the tree where it was, not to add a second failure on top of the first.
+    """
+    root = workspace.parent
+    cwd = Path(plan.path)
+    ran, failed, error = run_steps(cwd, plan.steps)
+    notes = list(ran)
+    if failed:
+        notes.append(f"FAILED at `{failed}`: {error}")
+        for step in plan.rollback:
+            _, undo_failed, _ = run_steps(cwd, (step,))
+            if not undo_failed:
+                notes.append(f"rolled back: git {' '.join(step)}")
+        notes.append(f"the box is back on {plan.old_branch}; resolve the conflict by hand")
+        return False, notes
+    with lease_lock(root):
+        boxes = live_boxes(root)
+        box = boxes.get(plan.box)
+        if box is not None:
+            boxes[plan.box] = replace(box, branch=plan.branch)
+            write_leases(root, boxes)
+    notes.append(f"lease now records {plan.branch} (was {plan.old_branch})")
+    return True, notes
+
+
+def rescue_commit_message(plan: RescuePlan, message: str = "") -> str:
+    """The subject for a rescued commit: `message` verbatim, or an honest default.
+
+    Mechanical for the reason `sweep.commit_message` is: nothing here has read the
+    diff, so the subject says what the commit *is* -- work the tier found stranded in a
+    box and moved onto a branch it could ship from -- and the PR body says the same.
+    """
+    if message.strip():
+        return message.strip()
+    topic = sweep.branch_topic(plan.branch) or box_topic(plan.box)
+    return f"rescue({topic}): ship work left in {plan.box}"
+
+
+def rescue_pr_body(plan: RescuePlan, state: sweep.State, limit: int = 40) -> str:
+    """The body for a rescued PR: where the work was, and what moved."""
+    lines = [
+        f"Opened by `worktree.py rescue --ship` on box `{plan.box}`. The box sat on "
+        f"`{plan.old_branch}` ({plan.verdict}: {plan.reason}), which could not be shipped "
+        f"from, so its work was moved onto `{plan.branch}` on top of "
+        f"`origin/{state.default_branch}`.",
+        "",
+        "**Nothing has reviewed this.** No diff was read, so the title describes the "
+        "rescue rather than the change. Retitle, split, or close it once you have looked.",
+    ]
+    if state.dirty_files:
+        shown = state.dirty_files[:limit]
+        lines += ["", f"Changed paths ({state.dirty}):", ""]
+        lines += [f"- `{path}`" for path in shown]
+        if len(state.dirty_files) > len(shown):
+            lines.append(f"- …and {len(state.dirty_files) - len(shown)} more")
+    return "\n".join(lines)
+
+
+def rescue_ship_plan(plan: RescuePlan, state: sweep.State, message: str = "") -> sweep.Plan:
+    """The `--ship` half: commit what the rescued box holds, push it, open the PR.
+
+    Built after `apply_rescue` and from a **re-inspected** state, so the branch it
+    pushes is the one the rebase left the box on and the dirt count is what survived
+    the autostash. Refuses the same things `sweep.ship_plan` refuses, in its words: the
+    box must be on a live task branch with something to ship. Hooks are not bypassed --
+    the project's pre-commit gate runs on the commit, which is why the box has to be
+    provisioned first.
+    """
+    if not sweep.is_task_branch(state.branch):
+        return sweep.Plan(refusal=f"{state.branch} is not a {tb.BRANCH_PREFIX} task branch")
+    if not state.dirty and not state.ahead and state.unpushed == 0:
+        return sweep.Plan(refusal="nothing to ship -- the rescued branch is clean and pushed")
+    subject = rescue_commit_message(replace(plan, branch=state.branch), message)
+    steps: list[tuple[str, ...]] = []
+    if state.dirty:
+        steps.append(("add", "-A"))
+        steps.append(("commit", "-m", subject))
+    steps.append(("push", "-u", "origin", state.branch))
+    return sweep.Plan(
+        steps=tuple(steps),
+        pr_title=subject,
+        pr_body=rescue_pr_body(replace(plan, branch=state.branch), state),
+        pr_head=state.branch,
+        pr_base=state.default_branch,
+    )
+
+
+def rescue(
+    workspace: Path,
+    name: str,
+    *,
+    apply: bool = False,
+    ship: bool = False,
+    message: str = "",
+    fetch: bool = True,
+) -> tuple[bool, RescuePlan, list[str]]:
+    """`rescue <box> [--ship]` end to end. `(ok, plan, notes)`.
+
+    Inspects, plans, applies, and -- with `ship` -- re-inspects and ships, each half
+    reporting into `notes`. A dry run stops after the plan, so the fresh branch name and
+    the rebase shape are printed before anything moves.
+    """
+    root = workspace.parent
+    boxes = live_boxes(root)
+    box = boxes.get(name)
+    if box is None:
+        known = ", ".join(sorted(boxes)) or "(none)"
+        raise WorktreeError(f"no live box called {name!r}; live boxes: {known}")
+    path = box_path(root, name)
+    state, verdict, reason = inspect_box(box, root, fetch=fetch)
+    pr = (
+        pr_for(sweep.gh_for(path), box.branch or state.branch)
+        if fetch and (box.branch or state.branch) and state.host == "github"
+        else PullRequest()
+    )
+    landed = state.is_git and commits_landed(sweep.git_for(path), state, pr)
+    plan = replace(rescue_plan(box, state, verdict, reason, landed=landed), path=str(path))
+    if plan.refusal:
+        return False, plan, []
+    notes: list[str] = []
+    if not apply:
+        return True, plan, notes
+    if plan.acts:
+        ok, notes = apply_rescue(plan, workspace)
+        if not ok:
+            return False, plan, notes
+    if not ship:
+        return True, plan, notes
+    return _ship_rescued(box.name, path, plan, message, notes), plan, notes
+
+
+def _ship_rescued(name: str, path: Path, plan: RescuePlan, message: str, notes: list[str]) -> bool:
+    """The `--ship` half of `rescue`: re-inspect the moved box and ship it through the sweep."""
+    after = sweep.inspect(name, path, fetch=False)
+    shipping = rescue_ship_plan(plan, after, message)
+    if shipping.refusal:
+        notes.append(f"ship refused: {shipping.refusal}")
+        return False
+    applied = sweep.apply_plan(name, path, shipping)
+    notes.extend(applied.ran)
+    if applied.failed:
+        notes.append(f"FAILED at `{applied.failed}`: {applied.error}")
+        return False
+    if applied.pr_url:
+        notes.append(f"{'opened' if applied.pr_created else 'PR'}: {applied.pr_url}")
+    return True
+
+
+def render_rescue(plan: RescuePlan, applied: bool, notes: list[str]) -> str:
+    if plan.refusal:
+        return f"{plan.box}: refused -- {plan.refusal}"
+    if not plan.acts:
+        lines = [f"{plan.box} is already on {plan.branch} ({plan.verdict}) -- nothing to move"]
+    else:
+        verb = "Rescued" if applied else "Would rescue"
+        how = (
+            "its commits already landed, so the dirt moves onto the default branch"
+            if plan.landed
+            else "its commits are replayed onto the default branch"
+        )
+        lines = [f"{verb} {plan.box}: {plan.old_branch} -> {plan.branch} ({how})"]
+        for n, step in enumerate(plan.steps, 1):
+            lines.append(f"    {n}. git -C {plan.box} {' '.join(step)}")
+    lines.extend(f"  {note}" for note in notes)
+    if not applied:
+        lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")
+    return "\n".join(lines)
 
 
 def resumable_branch(
@@ -4317,6 +4708,36 @@ def resumable_branch(
         if origin_has_branch(git, branch, network=False):
             return branch
     return ""
+
+
+def branch_already_gone(failed: str, error: str) -> bool:
+    """Whether a failed reap step was a branch delete of a branch that no longer exists."""
+    return failed.startswith("git branch -") and "not found" in error.lower()
+
+
+def steps_after(steps: tuple[tuple[str, ...], ...], failed: str) -> tuple[tuple[str, ...], ...]:
+    """The steps that follow the one `run_steps` reported as `failed`."""
+    for index, step in enumerate(steps):
+        if "git " + " ".join(step) == failed:
+            return steps[index + 1 :]
+    return ()
+
+
+def _carry_past_deleted_branch(
+    source: Path, plan: ReapPlan, failed: str, error: str, notes: list[str]
+) -> tuple[str, str]:
+    """Run the reap steps after a `git branch -D` that found no branch; `(failed, error)`.
+
+    A branch delete that finds no branch has nothing left to do, not something left
+    undone. The scheduled pass failed a whole reap on `git branch -D <name>` --
+    "branch not found" -- after something else had already deleted the branch, and
+    then held the box, its slot and its volumes over a step whose goal was met.
+    """
+    while failed and branch_already_gone(failed, error):
+        notes.append(f"`{failed}`: the branch was already deleted; carried on")
+        more, failed, error = run_steps(source, steps_after(plan.steps, failed))
+        notes.extend(more)
+    return failed, error
 
 
 def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
@@ -4383,10 +4804,10 @@ def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
         remaining = tuple(step for step in plan.steps if step[:2] != ("worktree", "remove"))
         ran, failed, error = run_steps(source, remaining)
         notes.extend(ran)
+    failed, error = _carry_past_deleted_branch(source, plan, failed, error, notes)
     if failed:
         notes.append(f"FAILED at `{failed}`: {error}")
         return False, notes
-
     # After the tree is gone and before the lease entry is: this is the last moment the
     # box is still described by anything, and the first moment it is certainly destroyed.
     # `REPO_ROOT` passed rather than defaulted: a default is bound once at import, and
@@ -4416,10 +4837,20 @@ def survey(workspace: Path, fetch: bool = False, sizes: bool = False) -> list[di
     """
     root = workspace.parent
     registry = load_registry(root)
+    paused = on_hold_projects(workspace)
     rows: list[dict] = []
     for name, box in sorted(live_boxes(root).items()):
         state, verdict, reason = inspect_box(box, root, fetch=fetch)
         path = box_path(root, name)
+        is_reapable = (
+            reapable(
+                verdict,
+                holds_uncommitted=bool(state.dirty),
+                work_is_landed=work_landed(sweep.git_for(path), state, verdict),
+            )
+            and verdict not in AWAITS_A_MERGE
+        )
+        holding = not is_reapable and verdict not in AWAITS_A_MERGE
         row = {
             "box": name,
             "project": box.project,
@@ -4447,13 +4878,17 @@ def survey(workspace: Path, fetch: bool = False, sizes: bool = False) -> list[di
             # work. Gated exactly as `plan_reap` and `reconcile` gate it, so all three
             # answer alike -- from the tree alone, since this row has no PR in hand, which
             # is the same asymmetry `pr_merged` already has here.
-            "reapable": (
-                reapable(
-                    verdict,
-                    holds_uncommitted=bool(state.dirty),
-                    work_is_landed=work_landed(sweep.git_for(path), state, verdict),
-                )
-                and verdict not in AWAITS_A_MERGE
+            "reapable": is_reapable,
+            # The same predicate `reconcile` applies, from the tree alone: this row has
+            # no PR in hand, so a box still being edited after its PR opened reads as
+            # stranded here once it is a day old, where `reconcile` -- which asks
+            # GitHub -- would not. The banner over-reports in that one case and the
+            # reconcile log is the authority; the asymmetry is `pr_merged`'s again.
+            "stranded": stranded(
+                HOLD if holding else WAIT,
+                pr_open=False,
+                age_days=box_age_days(box.created),
+                on_hold=box.project in paused,
             ),
             "kind": box.kind,
             "tracks": box.tracks,
@@ -4615,6 +5050,7 @@ def reconcile(
     """
     root = workspace.parent
     boxes = live_boxes(root)
+    paused = on_hold_projects(workspace)
     free = free_gb(boxes_root(root) if boxes_root(root).is_dir() else root)
     pressure = under_pressure(free, min_free_gb)
 
@@ -4688,17 +5124,7 @@ def reconcile(
                         worst = 1
 
         outcomes.append(
-            {
-                "box": decision.box,
-                "action": action,
-                "reason": decision.reason,
-                "verdict": decision.verdict,
-                "pr": pr.number or None,
-                "pr_url": pr.url,
-                "pr_state": pr.state,
-                "checks": pr.checks,
-                "notes": notes,
-            }
+            reconcile_outcome(decision, action, pr, notes, boxes.get(decision.box), paused)
         )
 
     # Last, and after the reaps: a reap deletes its box's branch in the source
@@ -4843,6 +5269,65 @@ def slot_summary(rows: list[dict], registry: devkit_ports.Registry | None) -> st
     )
 
 
+def reconcile_outcome(
+    decision: Reconciliation,
+    action: str,
+    pr: PullRequest,
+    notes: list[str],
+    held_box: Box | None,
+    paused: frozenset[str],
+) -> dict:
+    """One row of the reconcile report, for the box `decision` is about.
+
+    `stranded` is a HOLD the tier has stopped expecting anyone to finish. Not an
+    action: the box is still held, exactly as before. What changes is the report,
+    which files it under a heading whose remedy is `/triage-boxes` rather than under
+    "ship it", addressed to a person who does not.
+    """
+    age = box_age_days(held_box.created) if held_box else 0.0
+    return {
+        "box": decision.box,
+        "action": action,
+        "reason": decision.reason,
+        "verdict": decision.verdict,
+        "pr": pr.number or None,
+        "pr_url": pr.url,
+        "pr_state": pr.state,
+        "checks": pr.checks,
+        "age_days": round(age, 2),
+        "stranded": stranded(
+            action,
+            pr_open=pr.is_open,
+            age_days=age,
+            on_hold=bool(held_box and held_box.project in paused),
+        ),
+        "notes": notes,
+    }
+
+
+def survey_sections(rows: list[dict]) -> list[str]:
+    """The two lists under the survey table: stranded boxes, then boxes still held.
+
+    Stranded comes first and apart, with `/triage-boxes` as its remedy: a "not reapable
+    yet" list reads as "ship these" to whoever is in the box, and a stranded box has
+    nobody in it.
+    """
+    lost = [row for row in rows if not row["reapable"] and row.get("stranded")]
+    held = [row for row in rows if not row["reapable"] and not row.get("stranded")]
+    stranded_heading = (
+        f"stranded -- older than {STRANDED_AGE_DAYS:g}d with no PR, or for a project on "
+        f"hold; /triage-boxes ships or deletes each"
+    )
+    lines: list[str] = []
+    for group, heading in ((lost, stranded_heading), (held, "not reapable yet")):
+        if not group:
+            continue
+        lines.append("")
+        lines.append(f"{len(group)} box(es) {heading}:")
+        lines.extend(f"  {row['box']} [{row['verdict']}] -- {row['reason']}" for row in group)
+    return lines
+
+
 def render_survey(rows: list[dict], registry: devkit_ports.Registry | None = None) -> str:
     if not rows:
         return "No ephemeral boxes. `worktree.py new <project>` cuts one."
@@ -4870,12 +5355,7 @@ def render_survey(rows: list[dict], registry: devkit_ports.Registry | None = Non
             best = primary_url(row.get("urls", ()))
             where = f" -> {best}" if best else ""
             lines.append(f"  {row['box']} shows {row.get('tracks') or row['branch']}{where}")
-    held = [row for row in rows if not row["reapable"]]
-    if held:
-        lines.append("")
-        lines.append(f"{len(held)} box(es) not reapable yet:")
-        for row in held:
-            lines.append(f"  {row['box']} [{row['verdict']}] -- {row['reason']}")
+    lines.extend(survey_sections(rows))
     summary = slot_summary(rows, registry)
     if summary:
         lines.append("")
@@ -4915,6 +5395,17 @@ def write_reconcile_log(rendered: str, code: int, root: Path = REPO_ROOT) -> Pat
     return path
 
 
+def outcome_heading(row: dict) -> str:
+    """Which heading of the reconcile report a row is filed under.
+
+    Stranded holds get a heading of their own, ahead of the ordinary ones: a HOLD says
+    "ship it" to whoever is in the box, and a stranded box has nobody in it.
+    """
+    if row["action"] == HOLD and row.get("stranded"):
+        return STRANDED
+    return row["action"]
+
+
 def render_reconcile(report: dict) -> str:
     """The reconcile report: what changed, what is waiting, and what needs you.
 
@@ -4931,7 +5422,7 @@ def render_reconcile(report: dict) -> str:
 
     by_action: dict[str, list[dict]] = {}
     for row in outcomes:
-        by_action.setdefault(row["action"], []).append(row)
+        by_action.setdefault(outcome_heading(row), []).append(row)
 
     verb = "Reconciled" if applied else "Would reconcile"
     lines = [f"{verb} {len(outcomes)} box(es)."]
@@ -4944,6 +5435,11 @@ def render_reconcile(report: dict) -> str:
         lines.append("  auto-merge: off -- merging a green PR is yours to do")
 
     headings = (
+        (
+            STRANDED,
+            f"stranded -- held for over {STRANDED_AGE_DAYS:g}d with no PR, or for a project "
+            f"on hold; /triage-boxes ships or deletes each",
+        ),
         (HOLD, "holding work -- only place it exists, ship it"),
         (MERGE, "merge"),
         (REAP, "reaped" if applied else "would reap"),
@@ -5163,6 +5659,74 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_rescue_parser(sub: argparse._SubParsersAction) -> None:
+    rescuer = sub.add_parser(
+        "rescue",
+        help="move a stranded box's work onto a fresh task branch, and --ship it",
+    )
+    rescuer.add_argument("box")
+    rescuer.add_argument(
+        "--ship",
+        action="store_true",
+        help="after the move, commit the box's work, push the branch and open its PR",
+    )
+    rescuer.add_argument(
+        "--message",
+        default="",
+        help="commit subject and PR title for --ship (default: a mechanical rescue(...) line)",
+    )
+    add_common_args(rescuer)
+
+
+def _run_rescue(args: argparse.Namespace) -> int:
+    ok, rescued, notes = rescue(
+        args.workspace,
+        args.box,
+        apply=not args.dry_run,
+        ship=args.ship,
+        message=args.message,
+        fetch=args.fetch,
+    )
+    if args.json:
+        payload = {
+            "plan": asdict(rescued),
+            "applied": not args.dry_run,
+            "ok": ok,
+            "notes": notes,
+        }
+        print(json.dumps(payload, indent=2))
+    else:
+        print(render_rescue(rescued, applied=not args.dry_run, notes=notes))
+    return 0 if ok else 1
+
+
+def _run_provision(args: argparse.Namespace) -> int:
+    root = args.workspace.parent
+    boxes = live_boxes(root)
+    box = boxes.get(args.box)
+    if box is None:
+        known = ", ".join(sorted(boxes)) or "(none)"
+        raise WorktreeError(f"no live box called {args.box!r}; live boxes: {known}")
+    path = box_path(root, box.name)
+    steps = plan_provision(path)
+    notes: list[str] = []
+    ok = True
+    if steps and not args.dry_run:
+        ok, notes = run_provision(path, steps)
+    if args.json:
+        payload = {
+            "box": box.name,
+            "steps": [asdict(step) for step in steps],
+            "applied": not args.dry_run,
+            "ok": ok,
+            "notes": notes,
+        }
+        print(json.dumps(payload, indent=2))
+    else:
+        print(render_provision(box.name, steps, applied=not args.dry_run, notes=notes))
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -5364,6 +5928,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     add_common_args(takeover)
 
+    _add_rescue_parser(sub)
+
     reap = sub.add_parser("reap", help="destroy a box once its work has shipped")
     # Optional so `--all` can stand alone, and checked below rather than through
     # `nargs="?"` alone: argparse cannot express "exactly one of a positional and a flag",
@@ -5540,35 +6106,10 @@ def main(argv: list[str] | None = None) -> int:
                     print("\nDry run -- nothing was changed. Re-run with --yes to apply.")
             return 0
 
+        if args.mode == "rescue":
+            return _run_rescue(args)
         if args.mode == "provision":
-            root = args.workspace.parent
-            boxes = live_boxes(root)
-            box = boxes.get(args.box)
-            if box is None:
-                known = ", ".join(sorted(boxes)) or "(none)"
-                raise WorktreeError(f"no live box called {args.box!r}; live boxes: {known}")
-            path = box_path(root, box.name)
-            steps = plan_provision(path)
-            notes = []
-            ok = True
-            if steps and not args.dry_run:
-                ok, notes = run_provision(path, steps)
-            if args.json:
-                print(
-                    json.dumps(
-                        {
-                            "box": box.name,
-                            "steps": [asdict(step) for step in steps],
-                            "applied": not args.dry_run,
-                            "ok": ok,
-                            "notes": notes,
-                        },
-                        indent=2,
-                    )
-                )
-            else:
-                print(render_provision(box.name, steps, applied=not args.dry_run, notes=notes))
-            return 0 if ok else 1
+            return _run_provision(args)
 
         for problem in reap_argument_faults(args.box, args.every, args.force):
             print(f"worktree: {problem}", file=sys.stderr)

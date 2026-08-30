@@ -363,6 +363,41 @@ class Plan:
 # --- pure helpers -----------------------------------------------------------
 
 
+# The workspace-file setting that names the projects nothing should be in flight for.
+# A list of checkout names under `"settings"`, beside VS Code's own -- the workspace file
+# is already the registry every tool reads the checkouts from, so it is where "which of
+# them are paused" belongs rather than a second file. Read by `on_hold`.
+ON_HOLD_SETTING = "devkit.onHold"
+
+
+def on_hold(text: str) -> frozenset[str]:
+    """Checkout names the workspace file marks as paused, via `ON_HOLD_SETTING`.
+
+    A project on hold gets no scheduled work: `upgrade-project.py --all` passes over it,
+    and a box that exists for it at all is reported stranded by `worktree.py` at any
+    age, since nothing is meant to be in flight there. The 2026-08-30 audit found the
+    nightly upgrade sweep had cut boxes for two paused projects and left them holding
+    a vendored-tier bump nobody was going to ship.
+
+    Same parsing and the same silence on malformed input as `parse_workspace`, for the
+    same reason -- and an absent or misshapen setting is simply "nothing on hold",
+    because that is the state of every workspace that predates it.
+    """
+    try:
+        payload = devkit_jsonc.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return frozenset()
+    if not isinstance(payload, dict):
+        return frozenset()
+    settings = payload.get("settings")
+    if not isinstance(settings, dict):
+        return frozenset()
+    names = settings.get(ON_HOLD_SETTING)
+    if not isinstance(names, list):
+        return frozenset()
+    return frozenset(name for name in names if isinstance(name, str) and name)
+
+
 def parse_workspace(text: str, exclude: frozenset[str] = DEFAULT_EXCLUDE) -> list[str]:
     """Folder names from a `.code-workspace` file, minus `exclude`, in file order.
 
