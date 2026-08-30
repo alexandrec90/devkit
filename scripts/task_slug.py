@@ -29,9 +29,12 @@ Pure helpers are unit-tested in `tests/test_task_slug.py`.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -39,6 +42,23 @@ import task_branch as tb
 import worktree
 
 SLUGS_DIR_NAME = "slugs"
+
+# Terms that must never reach a branch name, one per line, `#` for a comment.
+#
+# The slug is cut from the *prompt*, and the prompt states the task — so a task whose
+# whole point is a word turns that word into a branch name and then pushes it. That has
+# happened: "make sure references to <licensed product> are removed" from a **public**
+# repo got `agent/make-sure-references-<brandname>-0824`, which is the guard about to
+# push the exact token it was asked to delete. Nothing downstream can catch it; by the
+# time the branch has a name it is already what `git push` will publish.
+#
+# Kept beside the leases rather than in any project, and that placement is the point: a
+# denylist committed to the repo it protects publishes the same word it is hiding. This
+# file is machine-local state under the boxes directory, which no repo tracks.
+DENY_FILE_NAME = "slug-deny.txt"
+
+# The same list for a session that would rather not write a file: comma-separated.
+DENY_ENV = "DEVKIT_SLUG_DENY"
 
 # Session ids are UUIDs, but this value reaches the filesystem as a name, so it is
 # constrained here rather than trusted. Anything outside the class is dropped, and an
@@ -68,6 +88,41 @@ def slugs_dir(workspace_root: Path) -> Path:
     return worktree.boxes_root(workspace_root) / SLUGS_DIR_NAME
 
 
+def deny_terms(workspace_root: Path, env: Mapping[str, str] | None = None) -> list[str]:
+    """The lowercased terms `redact` must strip, from the file and the environment.
+
+    Both sources, unioned, because they answer different questions: the file is the
+    machine's standing list and survives a reboot, the variable is one session saying
+    "not this word, not today" without editing anything. Neither is required, and an
+    unreadable file is an empty list — this is called on the path that names a box, and
+    a missing denylist must degrade to today's behaviour rather than cost the turn.
+    """
+    terms: list[str] = []
+    source = os.environ if env is None else env
+    with contextlib.suppress(OSError):
+        raw = (worktree.boxes_root(workspace_root) / DENY_FILE_NAME).read_text(encoding="utf-8")
+        terms += raw.splitlines()
+    terms += (source.get(DENY_ENV) or "").split(",")
+    seen = {term.strip().lower() for term in terms if term.strip() and not term.startswith("#")}
+    return sorted(seen)
+
+
+def redact(slug: str, terms: list[str]) -> str:
+    """`slug` with every hyphen-separated word containing a denied term dropped.
+
+    Substring rather than whole-word: slugification glues punctuation away, so a brand
+    reaches the slug as `cloudlis` or `cloudli2` as readily as on its own, and a match
+    that only fires on the bare token publishes the near-miss.
+
+    Returns "" when nothing survives, which `record` treats as "do not name this
+    session" — the guard then falls back to `ws-<session>`, ugly and safe.
+    """
+    if not terms:
+        return slug
+    kept = [word for word in slug.split("-") if word and not any(term in word for term in terms)]
+    return "-".join(kept)
+
+
 def record(workspace_root: Path, session: str, slug: str) -> Path | None:
     """Write `slug` as this session's task name. Returns the path, or None if not written.
 
@@ -75,8 +130,14 @@ def record(workspace_root: Path, session: str, slug: str) -> Path | None:
     matters less than it did for the branch hook — the box is cut once and keeps the
     name it was cut with — but a session whose first prompt is "hi" and whose second is
     the real task should still get the real task's name if the box has not been cut yet.
+
+    Redaction happens **here**, not in the caller, so that every writer of a session
+    slug gets it and none of them has to remember to — see `DENY_FILE_NAME`. A slug
+    redacted down to nothing is not recorded at all, which is the same "" the fallback
+    already handles.
     """
     key = safe_session(session)
+    slug = redact(slug, deny_terms(workspace_root))
     if not key or not slug:
         return None
     path = slugs_dir(workspace_root) / key

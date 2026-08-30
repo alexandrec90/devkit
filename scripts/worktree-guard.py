@@ -1198,7 +1198,36 @@ def owning_project(target: Path, root: Path, projects: list[str]) -> str:
     return best
 
 
-def needs_box(branch: str, protects_open_work: bool = True) -> bool:
+def protectable(branch: str, default_branch: str = "") -> bool:
+    """Whether an edit may be *allowed* to land on `branch`, before asking whether the
+    branch carries work worth protecting.
+
+    Two ways to qualify, and the second one was missing for a year. A managed prefix
+    (`agent/`, `claude/`, `codex/`) says devkit cut the branch; **not being the
+    default branch** says a human did. Both mean the same thing to this hook — the
+    checkout is parked somewhere deliberate, and a box cut from `origin/<default>`
+    would put the edit where that branch never sees it.
+
+    Name-only was the whole test until 2026-08-29, and the case it missed is the
+    commonest human one: carameli parked on `add-call-status-icons` with PR #252 open
+    blocked an edit and got a box off `origin/master` that could not contain the code
+    under repair, so the agent's `Edit` failed with "the box's copy of the file does
+    not contain the text this edit replaces". A branch's *name* has never been the
+    reason to protect it.
+
+    `default_branch` empty reads as "git would not say", not as "this is not the
+    default branch" — a positively-named default is required, for the same reason the
+    cross-checkout arm of `redirect_decision` requires a positively-named branch.
+    Silence is not consent when the cost of being wrong is an edit on a home branch.
+    """
+    if not branch:
+        return False
+    if worktree.sweep.is_task_branch(branch):
+        return True
+    return bool(default_branch) and branch != default_branch
+
+
+def needs_box(branch: str, protects_open_work: bool = True, default_branch: str = "") -> bool:
     """True when an edit landing on `branch` would land somewhere nothing owns.
 
     The rule that replaces `branch-on-write.py`. That hook answered the same question
@@ -1209,11 +1238,11 @@ def needs_box(branch: str, protects_open_work: bool = True) -> bool:
 
     Two cases decline, and both are cases where someone has already made the decision:
 
-    - **on a managed task branch that carries commits of its own**
-      (`protects_open_work`). Something deliberately put the checkout there, and the
-      commonest reason is the one `branch-on-write.py` was rewritten for: "fix PR #42,
-      it has conflicts" means checking that PR's branch out and editing it. Routing to
-      a fresh box would put the fix somewhere the PR never sees.
+    - **on a branch that is not the home one and carries commits of its own**
+      (`protectable` and `protects_open_work`). Something deliberately put the checkout
+      there, and the commonest reason is the one `branch-on-write.py` was rewritten
+      for: "fix PR #42, it has conflicts" means checking that PR's branch out and
+      editing it. Routing to a fresh box would put the fix somewhere the PR never sees.
     - **a branch git would not name.** Detached HEAD, or a git call that failed. The
       two are indistinguishable from here, and guessing would block edits on a machine
       where git is simply unavailable — so this declines and `sweep.py`, which is still
@@ -1229,11 +1258,16 @@ def needs_box(branch: str, protects_open_work: bool = True) -> bool:
 
     So the question is not "is this a task branch" but "is there work here a box would
     strand". `protects_open_work` answers it, and the caller resolves it lazily —
-    `branch_has_own_commits` costs a `git rev-list` and only a task branch can reach it.
+    `branch_has_own_commits` costs a `git rev-list` and only a `protectable` branch
+    can reach it.
+
+    `default_branch` is what widens "managed task branch" to "any branch that is not
+    the home one" — see `protectable`. Omitted, it reads as "git would not say", which
+    is the pre-2026-08-29 answer: name-only.
     """
     if not branch:
         return False
-    if not worktree.sweep.is_task_branch(branch):
+    if not protectable(branch, default_branch):
         return True
     return not protects_open_work
 
@@ -1322,6 +1356,44 @@ def current_branch(checkout: Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def default_branch_of(checkout: Path) -> str:
+    """`checkout`'s home branch as `origin/HEAD` names it; "" when git will not say.
+
+    Local only — `symbolic-ref` on an already-fetched ref, then two `rev-parse` probes
+    at worst — for the reason `branch_has_own_commits` gives: this runs in a PreToolUse
+    hook, where a network round trip is latency the agent experiences as a hang.
+
+    **Fails open to ""**, the opposite of `branch_has_own_commits`, because the two
+    failures mean opposite things. Not knowing whether a branch carries work must not
+    start diverting edits; not knowing which branch is *home* must not start allowing
+    them onto one. "" lands `protectable` on the name-only answer it gave before this
+    existed, which is the conservative half.
+
+    Memoised per process, which is one hook invocation — so no answer can go stale, and
+    a shell command naming six paths in one checkout pays for `origin/HEAD` once rather
+    than six times. `main` clears `observed` per candidate and re-probes the branch each
+    time; this is the cheaper half of that loop precisely because it does not.
+    """
+    cached = _DEFAULT_BRANCH_CACHE.get(checkout)
+    if cached is not None:
+        return cached
+    _DEFAULT_BRANCH_CACHE[checkout] = resolved = _read_default_branch(checkout)
+    return resolved
+
+
+_DEFAULT_BRANCH_CACHE: dict[Path, str] = {}
+
+
+def _read_default_branch(checkout: Path) -> str:
+    """`default_branch_of` without the memo. Split so the cache is one flat lookup."""
+    try:
+        return worktree.sweep.tb.detect_default_branch(
+            lambda *args: _git(checkout, *args), fallback=""
+        )
+    except (OSError, worktree.subprocess.SubprocessError, ValueError):
+        return ""
+
+
 def branch_has_own_commits(checkout: Path) -> bool:
     """True when `checkout`'s HEAD carries commits `origin/<default>` does not.
 
@@ -1366,6 +1438,7 @@ def redirect_decision(
     branch_of: Callable[[Path], str] | None = None,
     commits_of_own: Callable[[Path], bool] | None = None,
     ignored: Callable[[Path, Path], bool] | None = None,
+    default_of: Callable[[Path], str] | None = None,
 ) -> tuple[str, str] | None:
     """`(project, path relative to that checkout)` when this edit needs its own box.
 
@@ -1375,12 +1448,12 @@ def redirect_decision(
       point of having sent it there. Whether it is in the *right* box is not this
       function's question — `main` asks `foreign_box` before calling here, so by the
       time this allow fires the ownership check has already passed;
-    - a checkout on a managed task branch **that carries commits of its own** —
-      see `needs_box`. **Whether or not the session is inside it**: the reason to
-      decline is that something deliberately put that branch there and a box would
-      bypass it, and where the editor happens to sit says nothing about that. A task
-      branch with no commits of its own is not covered: it is either freshly cut or
-      already merged, so there is no PR for a box to bypass;
+    - a checkout on a branch that is not its home one **and carries commits of its
+      own** — see `protectable` and `needs_box`. **Whether or not the session is
+      inside it**: the reason to decline is that something deliberately put that
+      branch there and a box would bypass it, and where the editor happens to sit says
+      nothing about that. A branch with no commits of its own is not covered: it is
+      either freshly cut or already merged, so there is no PR for a box to bypass;
     - anything outside a registered checkout, including the workspace file itself and
       any scratch directory beside the projects;
     - anything under a `.git` directory — see `_is_git_internal`. It is git's own state
@@ -1422,12 +1495,16 @@ def redirect_decision(
         return None
     lookup = branch_of or current_branch
     has_commits = commits_of_own or branch_has_own_commits
+    home_of = default_of or default_branch_of
     branch = lookup(checkout)
-    # Resolved lazily and at most once: only a task branch can be protected, and the
-    # probe is a subprocess in a hook that runs on every edit.
-    protects = worktree.sweep.is_task_branch(branch) and has_commits(checkout)
+    # Both probes are subprocesses in a hook that runs on every edit, so both are
+    # resolved lazily and at most once. A managed name settles `protectable` on its
+    # own, so the ordinary agent case pays nothing; a home-branch checkout pays one
+    # local `symbolic-ref` and never reaches the `rev-list`.
+    default = "" if not branch or worktree.sweep.is_task_branch(branch) else home_of(checkout)
+    protects = protectable(branch, default) and has_commits(checkout)
     if _within(here, checkout):
-        if not needs_box(branch, protects):
+        if not needs_box(branch, protects, default):
             return None
     elif protects:
         # The "fix PR #42" case, reached from *outside* the checkout -- which is how a
@@ -1439,8 +1516,9 @@ def redirect_decision(
         #
         # Asymmetric with the branch above on purpose. Inside, a branch git will not
         # name declines (git may simply be unavailable, and `sweep.py` still catches a
-        # detached HEAD). From outside, silence is not consent: only a name git
-        # positively reports as a task branch is allowed through.
+        # detached HEAD). From outside, silence is not consent — and `protectable`
+        # keeps that property after the widening, because it needs *two* names git
+        # gave positively: the branch, and the home branch it differs from.
         return None
     try:
         relative = resolved.relative_to(root / project)

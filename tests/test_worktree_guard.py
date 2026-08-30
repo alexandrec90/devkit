@@ -278,6 +278,122 @@ def test_needs_box_routes_a_task_branch_with_nothing_on_it():
     assert guard.needs_box("", protects_open_work=False) is False
 
 
+# --- a human's branch is a branch too ---------------------------------------
+#
+# Reported 2026-08-24: carameli parked on `add-call-status-icons` with PR #252 open
+# blocked an edit and got a box off `origin/master`, which could not contain the code
+# under repair -- the agent's `Edit` failed with "the box's copy of the file does not
+# contain the text this edit replaces". The branch was protecting an open PR; only its
+# *name* said otherwise.
+
+
+def on_default(name: str):
+    """A `default_of` stub: `origin/HEAD` names `name`, whatever is asked."""
+    return lambda checkout: name
+
+
+def test_a_branch_that_is_not_the_home_one_is_protectable_whatever_it_is_called():
+    assert guard.protectable("add-call-status-icons", "master") is True
+    assert guard.protectable("agent/x-0829", "master") is True
+    # The home branch never is, however much work is sitting on it.
+    assert guard.protectable("master", "master") is False
+    # Nor is anything, when git would not name the home branch: "" is "cannot tell",
+    # and a guess in this direction lands an agent edit on a home branch.
+    assert guard.protectable("add-call-status-icons", "") is False
+    assert guard.protectable("", "master") is False
+
+
+def test_needs_box_declines_a_human_named_branch_with_an_open_pr():
+    assert guard.needs_box("add-call-status-icons", True, "master") is False
+    # Still routed when the branch has nothing on it, exactly as a managed one is.
+    assert guard.needs_box("add-call-status-icons", False, "master") is True
+    # And the home branch is routed however it is spelled.
+    assert guard.needs_box("master", True, "master") is True
+
+
+def test_an_edit_inside_a_checkout_on_a_human_named_pr_branch_is_left_alone(root):
+    """The report, from inside the checkout. A box cut from `origin/<default>` cannot
+    hold the fix, and the agent finds that out only when its `Edit` misses."""
+    assert (
+        guard.redirect_decision(
+            str(root / "carameli" / "app" / "main.py"),
+            str(root / "carameli"),
+            root,
+            PROJECTS,
+            branch_of=on_branch("add-call-status-icons"),
+            commits_of_own=has_commits(True),
+            default_of=on_default("master"),
+        )
+        is None
+    )
+
+
+def test_the_same_edit_from_the_workspace_root_is_left_alone_too(root):
+    """The stricter arm. It stays strict -- two positively-given names, not one."""
+    assert (
+        guard.redirect_decision(
+            str(root / "carameli" / "app" / "main.py"),
+            str(root / "devkit"),
+            root,
+            PROJECTS,
+            branch_of=on_branch("add-call-status-icons"),
+            commits_of_own=has_commits(True),
+            default_of=on_default("master"),
+        )
+        is None
+    )
+
+
+def test_a_checkout_ahead_of_its_own_home_branch_still_gets_a_box(root):
+    """The widening's one dangerous neighbour: local commits on `master` make
+    `branch_has_own_commits` true, and a rule that only asked that question would hand
+    an agent edit to the home branch -- the single outcome this hook exists to stop."""
+    decision = guard.redirect_decision(
+        str(root / "carameli" / "app" / "main.py"),
+        str(root / "carameli"),
+        root,
+        PROJECTS,
+        branch_of=on_branch("master"),
+        commits_of_own=has_commits(True),
+        default_of=on_default("master"),
+    )
+    assert decision == ("carameli", str(Path("app/main.py")))
+
+
+def test_an_unknowable_home_branch_routes_rather_than_guessing(root):
+    """`default_of` silent is "cannot tell", and the conservative answer is the box --
+    the pre-2026-08-29 behaviour for any branch git did not name as managed."""
+    decision = guard.redirect_decision(
+        str(root / "carameli" / "app" / "main.py"),
+        str(root / "carameli"),
+        root,
+        PROJECTS,
+        branch_of=on_branch("add-call-status-icons"),
+        commits_of_own=has_commits(True),
+        default_of=on_default(""),
+    )
+    assert decision == ("carameli", str(Path("app/main.py")))
+
+
+def test_a_managed_task_branch_never_pays_for_the_home_branch_probe(root):
+    """`agent/...` settles `protectable` on the name, so the extra local git call is
+    not added to the case this hook takes on almost every edit."""
+    asked: list[Path] = []
+    assert (
+        guard.redirect_decision(
+            str(root / "carameli" / "app" / "main.py"),
+            str(root / "carameli"),
+            root,
+            PROJECTS,
+            branch_of=on_branch("agent/voicemail-0829"),
+            commits_of_own=has_commits(True),
+            default_of=lambda checkout: asked.append(checkout) or "master",
+        )
+        is None
+    )
+    assert asked == []
+
+
 def test_an_edit_on_a_spent_task_branch_gets_a_box(root):
     """The regression. Being a `claude/...` branch used to be the whole test, so the
     first session to leave one checked out disabled this hook for every session after
