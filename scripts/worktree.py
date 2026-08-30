@@ -153,7 +153,17 @@ DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 #   needs-pr      pushed, nothing unpushed — the remote has every commit
 #   clean         nothing to do (a box that never got used)
 # Everything else — `ready` above all — means work is still only here.
-SAFE_TO_REAP: frozenset[str] = frozenset({sweep.SPENT, sweep.NEEDS_PR, sweep.CLEAN})
+SAFE_TO_REAP: frozenset[str] = frozenset(
+    {sweep.SPENT, sweep.NEEDS_PR, sweep.CLEAN, sweep.NEEDS_PULL}
+)
+
+# `needs-pull` is `clean` a day later. `sweep.classify` reaches it only on a home branch
+# with nothing dirty and nothing ahead -- "just behind" -- so the box holds no commit
+# and no edit of its own, and its home branch is on origin in full. The one difference
+# from `clean` is that origin has moved since, which is true of every box that has
+# existed for an afternoon. Left out, a box that had merged the default branch into a
+# helper branch and shipped under another PR (`pr228-merge`) came out `needs-pull`, in no
+# set at all, and sat as a permanent HOLD holding nothing for three days.
 
 # `needs-pr` is in SAFE_TO_REAP because nothing is *at stake* -- the remote has every
 # commit -- which is the question `reconcile_action` needs answered before it applies its
@@ -184,7 +194,9 @@ SWEEPABLE: frozenset[str] = SAFE_TO_REAP - AWAITS_A_MERGE
 # that can no longer be committed to", which is what a squash merge leaves behind and is
 # also what an abandoned branch leaves behind -- the PR tells them apart. Every other
 # refusing verdict means something a merge does not answer: `ready` and `needs-branch`
-# are uncommitted work, `blocked` is a state nothing here should be guessing at.
+# are work on a branch no PR by this box's name has merged -- uncommitted edits, or
+# commits that were never pushed -- and `blocked` is a state nothing here should be
+# guessing at.
 MERGE_CAN_BE_STALE_ABOUT: frozenset[str] = frozenset({sweep.NEEDS_REBRANCH})
 
 # The verdicts a **landed tree** can settle, for the boxes the merge above cannot reach.
@@ -206,7 +218,25 @@ MERGE_CAN_BE_STALE_ABOUT: frozenset[str] = frozenset({sweep.NEEDS_REBRANCH})
 # meaning is unshipped commits, and a merge says nothing about them while a tree does.
 # `holds_uncommitted` still gates it in `reapable`: a tree answers for what is committed
 # and for nothing sitting on top of it.
-TREE_CAN_SETTLE: frozenset[str] = frozenset({sweep.NEEDS_BRANCH, sweep.NEEDS_REBRANCH})
+#
+# `ready` is in it for the same reason and by the same gate. The verdict has two shapes
+# in `sweep.classify` -- uncommitted files on a task branch, or "N commit(s), never
+# pushed" on a clean one -- and only the second can ever reach here, because every
+# caller asks the tree only of a box with `state.dirty == 0`. A clean `ready` box is
+# commits and nothing else, so a tree that is already on the default branch is the
+# whole of what it holds. carameli's `fix-merge-pr-252` was that box: five commits, three
+# of them on master under the branch that actually shipped them, its tree identical to
+# the master commit it had merged, reported for two days as "5 commit(s), never pushed".
+# The merge arm still never frees `ready` (`MERGE_CAN_BE_STALE_ABOUT`): a merged PR by
+# this branch's name says nothing about commits made after it, while the tree is the
+# commits.
+#
+# The second piece of evidence a caller may put behind `work_is_landed` is the merged
+# PR's own head: `head_is_merged_pr_head` says the commit GitHub squashed *is* this
+# HEAD, which settles the same verdicts the tree does and reaches the box the tree
+# cannot -- one whose branch was behind the default branch when it merged, so the squash
+# produced a tree no commit of the box's ever had. Same set, same dirt gate.
+TREE_CAN_SETTLE: frozenset[str] = frozenset({sweep.NEEDS_BRANCH, sweep.NEEDS_REBRANCH, sweep.READY})
 
 # How far back along `origin/<default>` `head_tree_landed` looks for the box's tree. The
 # match, when there is one, is near the tip by construction -- the box merged the default
@@ -336,11 +366,13 @@ def reapable(
     answer: the work left the box under a *different* branch's PR, so there is no PR
     naming this branch for the merge arm to read. `TREE_CAN_SETTLE` carries what that
     costs and what the evidence is. Two properties keep it narrow. It is **evidence, not
-    policy** -- `head_tree_landed` is the only thing that sets it, and it either found the
-    box's exact tree on `origin/<default>` or it did not, so an offline machine, an
-    unreadable ref and a short scan all report `False` and leave every refusal exactly
-    where it was. And it stays behind `holds_uncommitted`, because a tree is an answer
-    about the commit under the edits and never about the edits.
+    policy** -- `work_landed` is the only thing that sets it, from two observations
+    that each either hold or do not: the box's exact tree on `origin/<default>`
+    (`head_tree_landed`), or the box's HEAD being the very commit a merged PR squashed
+    (`head_is_merged_pr_head`). An offline machine, an unreadable ref, a short scan and
+    a PR gh could not describe all report `False` and leave every refusal exactly where
+    it was. And it stays behind `holds_uncommitted`, because both are answers about the
+    commit under the edits and never about the edits.
     """
     if verdict == sweep.SKIPPED:
         return True
@@ -417,7 +449,7 @@ NEWBORN_GRACE_DAYS = 1.0 / 24.0
 
 # `gh pr view` fields. `statusCheckRollup` is per-head-commit, so a stale green from
 # before the last push cannot be read as current.
-PR_VIEW_FIELDS = "number,url,state,labels,statusCheckRollup"
+PR_VIEW_FIELDS = "number,url,state,labels,statusCheckRollup,headRefOid"
 
 # How gh says "this branch has no PR", lowercased. Compared as a substring of stderr
 # because gh spells the failure in prose and exits 1 for it exactly as it does for an
@@ -609,6 +641,9 @@ class PullRequest:
     checks: str = CHECKS_NONE
     labels: tuple[str, ...] = ()
     absent: bool = False  # gh was asked and answered: this branch has no PR
+    # The sha at the PR's head -- for a merged PR, the exact commit that was squashed.
+    # "" when unknown, which `head_is_merged_pr_head` reads as "cannot say".
+    head: str = ""
 
     @property
     def exists(self) -> bool:
@@ -2119,6 +2154,7 @@ def parse_pr_view(stdout: str) -> PullRequest:
         state=str(payload.get("state") or "").upper(),
         checks=rollup_conclusion(payload.get("statusCheckRollup")),
         labels=names,
+        head=str(payload.get("headRefOid") or "").strip().lower(),
     )
 
 
@@ -3993,15 +4029,7 @@ def plan_reap(
             if box.kind == PREVIEW_KIND and box.branch and box.tracks and state.is_git
             else None
         ),
-        # Gated on the verdict and on cleanliness before the two git calls are made,
-        # because they are the only ones this pass adds and a `needs-pr` or `ready` box
-        # -- the ordinary endings -- must not pay for a question whose answer
-        # `reapable` would then ignore.
-        work_is_landed=(
-            verdict in TREE_CAN_SETTLE
-            and not state.dirty
-            and head_tree_landed(sweep.git_for(path), state.default_branch)
-        ),
+        work_is_landed=work_landed(sweep.git_for(path), state, verdict, found),
     )
 
 
@@ -4201,6 +4229,56 @@ def head_tree_landed(git: sweep.Git, default_branch: str, depth: int = TREE_SCAN
     return False
 
 
+def head_is_merged_pr_head(git: sweep.Git, pr: PullRequest) -> bool:
+    """Whether the box's HEAD is the exact commit a merged PR squashed.
+
+    The tree scan's blind spot, closed from the other side. A branch that was *behind*
+    the default branch when its PR squash-merged produces a squash commit whose tree no
+    commit of the box's ever had -- the squash carries the default branch's newer files
+    too -- so `head_tree_landed` cannot match it, and a box on a hand-named branch
+    (`needs-branch`) has no merge arm to fall back on. GitHub, though, records which
+    commit it merged: `headRefOid` on a merged PR. When that is this HEAD, every commit
+    the box has is one the PR carried, by identity rather than by content.
+
+    Only a **merged** PR counts, and only an exact match: an open PR's head is a promise,
+    a closed one's is a refusal, and a HEAD one commit past the merged head is work the
+    PR never saw. Unknown -- no PR, no `headRefOid`, a `git` that cannot answer -- is
+    `False`, the refusal the caller already had.
+    """
+    if not (pr.merged and pr.head):
+        return False
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        head = git("rev-parse", "HEAD")
+        if head.returncode != 0:
+            return False
+        return head.stdout.strip().lower() == pr.head
+    return False
+
+
+def work_landed(
+    git: sweep.Git,
+    state: sweep.State,
+    verdict: str,
+    pr: PullRequest | None = None,
+) -> bool:
+    """The `work_is_landed` every caller hands `reapable`, computed one way.
+
+    `plan_reap`, `reconcile` and `survey` used to spell the gate out separately, which
+    is how a verdict could be settled by one and held by another. Gated on the verdict
+    and on cleanliness before any git call is made, because these are the only calls a
+    pass adds and a `needs-pr` or dirty box -- the ordinary endings -- must not pay for
+    a question whose answer `reapable` would then ignore.
+
+    `pr` is optional because `survey` has none in hand; it then answers from the tree
+    alone, which can only withhold a reap, never grant one the others would refuse.
+    """
+    if verdict not in TREE_CAN_SETTLE or state.dirty:
+        return False
+    if head_tree_landed(git, state.default_branch):
+        return True
+    return pr is not None and head_is_merged_pr_head(git, pr)
+
+
 def resumable_branch(
     workspace_root: Path,
     project: str,
@@ -4367,16 +4445,13 @@ def survey(workspace: Path, fetch: bool = False, sizes: bool = False) -> list[di
             # subtracted: this column is what a reader picks their next command from, and
             # a box `reap` will destroy without a flag must not be printed as one holding
             # work. Gated exactly as `plan_reap` and `reconcile` gate it, so all three
-            # answer alike.
+            # answer alike -- from the tree alone, since this row has no PR in hand, which
+            # is the same asymmetry `pr_merged` already has here.
             "reapable": (
                 reapable(
                     verdict,
                     holds_uncommitted=bool(state.dirty),
-                    work_is_landed=(
-                        verdict in TREE_CAN_SETTLE
-                        and not state.dirty
-                        and head_tree_landed(sweep.git_for(path), state.default_branch)
-                    ),
+                    work_is_landed=work_landed(sweep.git_for(path), state, verdict),
                 )
                 and verdict not in AWAITS_A_MERGE
             ),
@@ -4547,13 +4622,6 @@ def reconcile(
     landed: set[str] = set()
     for name, box in sorted(boxes.items()):
         state, verdict, reason = inspect_box(box, root, fetch=fetch)
-        # Asked only for the two verdicts it can settle, and only of a clean box, so a
-        # pass over sixteen boxes adds two git calls for the rare one rather than
-        # thirty-two for the ordinary ones. Same gate as `plan_reap`'s, so `reap` and
-        # this pass cannot describe one box differently.
-        if verdict in TREE_CAN_SETTLE and not state.dirty:
-            if head_tree_landed(sweep.git_for(box_path(root, name)), state.default_branch):
-                landed.add(name)
         # A preview's PR is the one for the branch it is SHOWING. Looking it up by
         # `box.branch` would ask GitHub about the throwaway `preview/...` ref, get
         # nothing back, and leave the preview standing after the work it shows merged.
@@ -4563,6 +4631,12 @@ def reconcile(
             if fetch and subject and state.host == "github"
             else PullRequest()
         )
+        # Asked only for the verdicts it can settle, and only of a clean box, so a pass
+        # over sixteen boxes adds two git calls for the rare one rather than thirty-two
+        # for the ordinary ones. Same gate as `plan_reap`'s, so `reap` and this pass
+        # cannot describe one box differently.
+        if work_landed(sweep.git_for(box_path(root, name)), state, verdict, pr):
+            landed.add(name)
         rows.append((box, verdict, reason, pr, state.dirty))
 
     outcomes: list[dict] = []

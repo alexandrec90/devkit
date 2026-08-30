@@ -198,11 +198,20 @@ Each of these has already been violated by something:
   `HEAD^{tree}` appears among the last `TREE_SCAN_DEPTH` commits of
   `refs/remotes/origin/<default>`, which is a content-level *this is already on the
   default branch* and needs no branch, no PR and no network. `reapable` takes it as
-  `work_is_landed`, scoped by `TREE_CAN_SETTLE` to the two verdicts a rewrite can strand
+  `work_is_landed`, scoped by `TREE_CAN_SETTLE` to the verdicts a rewrite can strand
   and refused outright while the box is dirty — a landed tree says where the *committed*
   work is and, exactly as with the merge escape, nothing about the edits on top of it.
   Every unknown reads as *not landed*: no default branch, a failed `git`, a tree older
-  than the scan window.
+  than the scan window. The tree has one blind spot of its own — a branch that was
+  *behind* the default branch when it squash-merged produced a tree no commit of the
+  box's ever had — and `head_is_merged_pr_head` closes it from GitHub's side: the merged
+  PR's `headRefOid` being this HEAD is the commit itself, not its content. `work_landed`
+  is the one place both are asked, so `plan_reap`, `reconcile` and `survey` cannot
+  answer differently about one box. A clean `ready` box — "N commit(s), never pushed" —
+  is in the scope for the same reason: commits are all it holds, and a tree already on
+  the default branch is the whole of them. And `needs-pull` is in `SAFE_TO_REAP`
+  outright: `classify` reaches it only with nothing dirty and nothing ahead, so it is
+  `clean` on a box that has merely outlived a few pushes to origin.
 - **A box can also stop being a checkout, and that was the third spelling of the same
   leak.** When a `git worktree remove` deletes most of the tree and then dies —
   MAX_PATH, a locked file — what is left is a *husk*: a directory with no `.git`, which

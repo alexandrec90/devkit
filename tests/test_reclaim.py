@@ -560,6 +560,9 @@ def _isolate(monkeypatch, tmp_path, free_gb):
     monkeypatch.setattr(reclaim, "running_container_names", lambda: [])
     monkeypatch.setattr(reclaim, "top_memory_holders", lambda *a, **kw: [])
     monkeypatch.setattr(reclaim, "run_reconcile", lambda *a, **kw: None)
+    # Stubbed for the same reason as `home`: the root it asks about is the *real*
+    # workspace, so a `main(["--yes"])` test would write a rule into Windows Search.
+    monkeypatch.setattr(reclaim, "run_search_scope", lambda *a, **kw: None)
     monkeypatch.setattr(
         reclaim, "snapshot", lambda *a, **kw: reclaim.Snapshot(free_gb, 8.0, 10.0, 32.0)
     )
@@ -786,3 +789,275 @@ def test_a_full_disk_skips_reconcile_rather_than_reaping_open_prs(monkeypatch, t
     monkeypatch.setattr(reclaim, "run_reconcile", lambda *a, **kw: pytest_fail())
     reclaim.main(["--yes"])
     assert "skipping reconcile" in capsys.readouterr().out
+
+
+# --- the search indexer --------------------------------------------------------
+
+
+def test_boxes_dir_name_agrees_with_sweep():
+    """`workspace_root` recognises a box by the directory it sits in; sweep owns that
+    name. A silent rename there would make every box-launched run ask the indexer about
+    `.worktrees/` instead of the workspace."""
+    sweep = load_script("scripts/sweep.py")
+    assert reclaim.BOXES_DIR_NAME == sweep.BOXES_DIR_NAME
+
+
+def test_workspace_root_is_the_parent_of_a_checkout(tmp_path):
+    assert reclaim.workspace_root(tmp_path / "vs_code" / "devkit") == tmp_path / "vs_code"
+
+
+def test_workspace_root_climbs_out_of_a_box(tmp_path):
+    box = tmp_path / "vs_code" / reclaim.BOXES_DIR_NAME / "devkit--something-0829"
+    assert reclaim.workspace_root(box) == tmp_path / "vs_code"
+
+
+def test_the_scope_script_names_the_root_as_a_directory_url():
+    script = reclaim.search_scope_script(Path(r"C:\Users\u\Desktop\vs_code"), exclude=False)
+    assert r"Run('C:\Users\u\Desktop\vs_code\', $false)" in script
+    assert "namespace WS" in script
+    assert "__CSHARP__" not in script and "__ROOT__" not in script
+
+
+def test_the_scope_script_carries_the_exclude_flag_and_escapes_quotes():
+    script = reclaim.search_scope_script(Path("C:\\it's\\here\\"), exclude=True)
+    assert "Run('C:\\it''s\\here\\', $true)" in script
+
+
+_REPORT = """\
+backlog: 1565851
+indexing: file:C:/Users/u/Desktop/vs_code/.worktrees/x/.venv/Lib/site-packages/a.pyc
+in-scope: 1
+excluded: 1
+"""
+
+
+def test_parse_index_report_reads_every_line():
+    report = reclaim.parse_index_report(_REPORT)
+    assert report == reclaim.IndexReport(
+        backlog=1565851,
+        indexing="file:C:/Users/u/Desktop/vs_code/.worktrees/x/.venv/Lib/site-packages/a.pyc",
+        in_scope=True,
+        excluded=True,
+    )
+
+
+def test_parse_index_report_without_the_exclusion_line_is_not_excluded():
+    """Also the idle-indexer shape: an empty `indexing:` must not swallow the line
+    after it as the URL, which `\\s*` did on the first cut."""
+    report = reclaim.parse_index_report("backlog: 0\nindexing:\nin-scope: 0\n")
+    assert report == reclaim.IndexReport(0, "", False, False)
+
+
+def test_a_dotnet_exception_is_no_report_at_all():
+    """A script that compiled and then threw prints the exception, not the lines; that
+    has to read as "could not be asked", never as a healthy zero backlog."""
+    assert reclaim.parse_index_report("Exception calling Run: Class not registered") is None
+    assert reclaim.parse_index_report("") is None
+
+
+def test_the_verdict_when_the_indexer_cannot_be_asked():
+    lines = reclaim.index_verdict(None, Path("W"), apply=False)
+    assert lines == ["  windows search could not be asked -- indexer off, or not Windows"]
+
+
+def test_the_verdict_for_a_root_already_out_of_scope():
+    report = reclaim.IndexReport(12, "file:x", in_scope=False, excluded=False)
+    lines = reclaim.index_verdict(report, Path("W"), apply=False)
+    assert lines[0] == "  backlog 12 item(s) queued"
+    assert lines[1] == "  indexing now: file:x"
+    assert "outside the crawl scope -- healthy" in lines[2]
+
+
+def test_the_dry_run_verdict_says_what_it_costs_and_what_yes_does():
+    report = reclaim.IndexReport(1_565_851, "", in_scope=True, excluded=False)
+    lines = reclaim.index_verdict(report, Path("W"), apply=False)
+    assert "backlog 1,565,851" in lines[0]
+    assert "IN the crawl scope" in lines[1]
+    assert ".venv and node_modules" in lines[1]
+    assert "--yes excludes the root" in lines[2]
+
+
+def test_the_applied_verdict_reports_the_exclusion_that_took():
+    report = reclaim.IndexReport(1, "", in_scope=True, excluded=True)
+    lines = reclaim.index_verdict(report, Path("W"), apply=True)
+    assert "excluded now, children overridden" in lines[1]
+
+
+def test_the_applied_verdict_admits_an_exclusion_that_did_not_take():
+    report = reclaim.IndexReport(1, "", in_scope=True, excluded=False)
+    lines = reclaim.index_verdict(report, Path("W"), apply=True)
+    assert "did not take" in lines[1]
+
+
+def test_run_search_scope_writes_a_ps1_and_hands_its_stdout_to_the_parser(monkeypatch, tmp_path):
+    monkeypatch.setattr(reclaim, "tempdir", lambda: str(tmp_path))
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        seen["script"] = Path(cmd[-1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout=_REPORT, stderr="")
+
+    monkeypatch.setattr(reclaim.subprocess, "run", fake_run)
+    report = reclaim.run_search_scope(Path("C:\\w"), apply=True)
+    assert report is not None and report.backlog == 1565851
+    assert seen["cmd"][0] == "powershell" and "-File" in seen["cmd"]
+    assert "-NonInteractive" in seen["cmd"]
+    assert "Run('C:\\w\\', $true)" in seen["script"]
+    assert not list(tmp_path.iterdir()), "the throwaway .ps1 must not outlive the call"
+
+
+def test_run_search_scope_without_powershell_is_none_not_a_traceback(monkeypatch, tmp_path):
+    monkeypatch.setattr(reclaim, "tempdir", lambda: str(tmp_path))
+
+    def missing(*a, **kw):
+        raise FileNotFoundError("powershell")
+
+    monkeypatch.setattr(reclaim.subprocess, "run", missing)
+    assert reclaim.run_search_scope(Path("C:\\w"), apply=False) is None
+    assert not list(tmp_path.iterdir())
+
+
+def test_run_search_scope_treats_a_failing_script_as_unasked(monkeypatch, tmp_path):
+    monkeypatch.setattr(reclaim, "tempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        reclaim.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd, 1, stdout="backlog: 0\nin-scope: 0", stderr="boom"
+        ),
+    )
+    assert reclaim.run_search_scope(Path("C:\\w"), apply=False) is None
+
+
+def test_the_run_asks_the_indexer_about_the_workspace_and_prints_the_verdict(
+    monkeypatch, tmp_path, capsys
+):
+    """Reversion check for the whole section: `main` has to ask, about the workspace this
+    devkit belongs to, with `apply` matching `--yes` -- and print what it heard."""
+    _isolate(monkeypatch, tmp_path, free_gb=24.0)
+    asked = []
+    monkeypatch.setattr(reclaim, "devkit_dir", lambda: tmp_path / "ws" / "devkit")
+    monkeypatch.setattr(
+        reclaim,
+        "run_search_scope",
+        lambda root, apply: (
+            asked.append((root, apply)) or reclaim.IndexReport(7, "", in_scope=True, excluded=False)
+        ),
+    )
+    assert reclaim.main([]) == 0
+    assert asked == [(tmp_path / "ws", False)]
+    out = capsys.readouterr().out
+    assert "search indexer" in out
+    assert "backlog 7" in out
+    assert "IN the crawl scope" in out
+
+
+def test_an_exclusion_that_did_not_take_fails_the_run(monkeypatch, tmp_path, capsys):
+    _isolate(monkeypatch, tmp_path, free_gb=24.0)
+    monkeypatch.setattr(
+        reclaim,
+        "run_search_scope",
+        lambda root, apply: reclaim.IndexReport(7, "", in_scope=True, excluded=False),
+    )
+    assert reclaim.main(["--yes"]) == 1
+    assert "exclusion did not take" in capsys.readouterr().out
+
+
+# --- the package caches --------------------------------------------------------
+
+
+def test_the_npm_cache_is_a_target_and_is_age_gated(tmp_path):
+    """A box's `npm ci` may be mid-flight in another session, and cacache writes the
+    tarball before the index entry that names it -- so today's files stay."""
+    npm = [t for t in reclaim.cache_targets(tmp_path) if t.label == "npm cache"]
+    assert len(npm) == 1
+    assert npm[0].path == tmp_path / "AppData" / "Local" / "npm-cache"
+    assert npm[0].min_age_days == reclaim.DEFAULT_MIN_AGE_DAYS
+    assert npm[0].why
+
+
+def test_uv_cache_sits_under_the_profile(tmp_path):
+    assert reclaim.uv_cache(tmp_path) == tmp_path / "AppData" / "Local" / "uv" / "cache"
+
+
+def test_an_empty_uv_cache_runs_nothing(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(reclaim, "run_tool", lambda *a, **kw: pytest_fail())
+    assert reclaim.clear_uv_cache(tmp_path / "uv" / "cache", apply=True) == 0
+    assert "nothing to clear" in capsys.readouterr().out
+
+
+def test_a_dry_run_reports_the_uv_cache_and_runs_nothing(monkeypatch, tmp_path, capsys):
+    cache = tmp_path / "cache"
+    _mkdir(cache)
+    (cache / "wheel").write_bytes(b"x" * 2048)
+    monkeypatch.setattr(reclaim, "run_tool", lambda *a, **kw: pytest_fail())
+    assert reclaim.clear_uv_cache(cache, apply=False) == 2048
+    assert "hard-linked into venvs" in capsys.readouterr().out
+    assert (cache / "wheel").exists()
+
+
+def test_an_applied_uv_clean_uses_uvs_own_verb_and_the_volume_delta(monkeypatch, tmp_path):
+    """The tree's size is not the figure: a hard-linked wheel frees nothing. Assert the
+    freed number is the free-space delta, and that the deleter is `uv cache clean`."""
+    cache = tmp_path / "cache"
+    _mkdir(cache)
+    (cache / "wheel").write_bytes(b"x" * 2048)
+    ran = []
+    free = iter([1_000, 1_512])
+    monkeypatch.setattr(reclaim, "run_tool", lambda cmd, timeout: ran.append(cmd) or (True, ""))
+    monkeypatch.setattr(reclaim, "free_bytes", lambda p: next(free))
+    assert reclaim.clear_uv_cache(cache, apply=True) == 512
+    assert ran == [["uv", "cache", "clean"]]
+
+
+def test_a_volume_that_got_fuller_meanwhile_reads_as_zero_freed(monkeypatch, tmp_path):
+    cache = tmp_path / "cache"
+    _mkdir(cache)
+    (cache / "wheel").write_bytes(b"x")
+    free = iter([2_000, 1_000])
+    monkeypatch.setattr(reclaim, "run_tool", lambda cmd, timeout: (True, ""))
+    monkeypatch.setattr(reclaim, "free_bytes", lambda p: next(free))
+    assert reclaim.clear_uv_cache(cache, apply=True) == 0
+
+
+def test_uv_that_is_not_installed_is_a_warning_not_a_crash(monkeypatch, tmp_path, capsys):
+    cache = tmp_path / "cache"
+    _mkdir(cache)
+    (cache / "wheel").write_bytes(b"x")
+    monkeypatch.setattr(reclaim, "run_tool", lambda cmd, timeout: (False, "uv is not on PATH"))
+    assert reclaim.clear_uv_cache(cache, apply=True) == 0
+    assert "[warn] uv is not on PATH" in capsys.readouterr().out
+
+
+def test_free_bytes_of_an_unreadable_path_is_zero(tmp_path):
+    assert reclaim.free_bytes(tmp_path / "nowhere") == 0
+    assert reclaim.free_bytes(tmp_path) > 0
+
+
+def test_run_tool_reports_a_missing_tool_by_name(monkeypatch):
+    def missing(*a, **kw):
+        raise FileNotFoundError("nope")
+
+    monkeypatch.setattr(reclaim.subprocess, "run", missing)
+    assert reclaim.run_tool(["nope", "x"], timeout=1) == (False, "nope is not on PATH")
+
+
+def test_run_tool_hands_back_the_first_line_a_failing_tool_said(monkeypatch):
+    monkeypatch.setattr(
+        reclaim.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, stdout="", stderr="bad\nworse"),
+    )
+    assert reclaim.run_tool(["t", "v"], timeout=1) == (False, "bad")
+
+
+def test_the_run_reports_the_uv_cache_under_the_temp_section(monkeypatch, tmp_path, capsys):
+    _isolate(monkeypatch, tmp_path, free_gb=24.0)
+    cache = reclaim.uv_cache(tmp_path)
+    _mkdir(cache)
+    (cache / "wheel").write_bytes(b"x" * 4096)
+    monkeypatch.setattr(reclaim, "run_tool", lambda *a, **kw: pytest_fail())
+    assert reclaim.main([]) == 0
+    assert "uv cache" in capsys.readouterr().out
+    assert (cache / "wheel").exists()
