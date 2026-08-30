@@ -81,7 +81,6 @@ scripts/merge-dependabot-prs.py::open_prs
 scripts/merge-dependabot-prs.py::prs_for_branch
 scripts/merge-dependabot-prs.py::verdict
 scripts/new-project.py::Plan
-scripts/new-project.py::add_worktree
 scripts/new-project.py::build_context
 scripts/new-project.py::create_remote
 scripts/new-project.py::lock_dependencies
