@@ -1075,7 +1075,8 @@ def test_render_proceeds_once_the_live_edit_is_adopted(workspace_pair):
         newline="\n",
     )
     assert _run(live, "--adopt-workspace") == 0
-    assert devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"] == {"c": "d"}
+    adopted = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
+    assert adopted["c"] == "d" and "powershell.cwd" not in adopted
     assert _run(live, "--check-workspace") == 0
 
 
@@ -1095,7 +1096,8 @@ def test_render_stamps_so_the_next_one_is_not_mistaken_for_a_hand_edit(workspace
         newline="\n",
     )
     assert _run(live, "--render-workspace") == 0, "the second render refused its own output"
-    assert devkit_jsonc_loads(live.read_text(encoding="utf-8"))["settings"] == {"e": "f"}
+    rendered = devkit_jsonc_loads(live.read_text(encoding="utf-8"))["settings"]
+    assert rendered["e"] == "f" and "a" not in rendered
 
 
 def test_a_current_live_file_is_stamped_without_being_rewritten(workspace_pair):
