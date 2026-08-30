@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Create a new project wired to devkit, Docker, a worktree, and a GitHub repo.
+"""Create a new project wired to devkit, Docker, and a GitHub repo.
 
 Everything the existing projects were assembled by hand — the harness seam, the
-port allocation, the `.env` worktree block, the VS Code tasks, the PR gate with a
+port allocation, the VS Code tasks, the PR gate with a
 drift check that actually gates — is rendered from `templates/` instead of copied
 from whichever repo was nearest. What differs per project lives in flags; what does
 not is identical by construction.
@@ -23,10 +23,9 @@ Steps, in order:
   2. render `templates/` into the new directory
   3. `git init` + initial commit
   4. vendor the harness (`sync-devkit.py --pull`) and stamp `DEVKIT_VERSION`
-  5. add the parallel worktree with its own offset `.env`
-  6. register the project in the shared `alex-projects.code-workspace`
+  5. register the project in the shared `alex-projects.code-workspace`
      (the one step that writes OUTSIDE the new directory; `--no-register` skips it)
-  7. create the private GitHub repo and push          <- outward-facing
+  6. create the private GitHub repo and push          <- outward-facing
 """
 
 from __future__ import annotations
@@ -217,8 +216,6 @@ class Plan:
     root: Path
     context: dict[str, object]
     files: list[tuple[Path, Path, bool]] = field(default_factory=list)
-    worktree: str | None = None
-    worktree_env: dict[str, str] = field(default_factory=dict)
     remote: bool = True
     register: bool = True
 
@@ -320,8 +317,6 @@ def build_context(
             f'"{s}"' for s in (["db"] + (["redis"] if features["redis"] else []))
         ),
         "has_volumes": features["postgres"] or features["frontend"],
-        "worktree": f"{args.name}-b" if args.worktree else "",
-        "worktree_slot": "",
         **features,
     }
     # Ports the feature set actually uses, plus otel which is always exported.
@@ -358,15 +353,6 @@ def plan(args: argparse.Namespace, registry: devkit_ports.Registry) -> Plan:
     ports = registry.ports_for_slot(slot)
     context = build_context(args, slot, ports, registry.shared)
 
-    worktree_env: dict[str, str] = {}
-    if args.worktree:
-        worktree = f"{args.name}-b"
-        # `taken` keeps a brand-new project and its brand-new worktree from both
-        # being handed the same "next free" slot in a single run.
-        worktree_slot = _slot_for(registry, worktree, taken={slot})
-        context["worktree_slot"] = worktree_slot
-        worktree_env = _env_block(registry, worktree, worktree_slot, context)
-
     features = {f: bool(context[f]) for f in FEATURES}
     files = [
         (source, root / relative, source.name.endswith(TEMPLATE_SUFFIX))
@@ -378,48 +364,23 @@ def plan(args: argparse.Namespace, registry: devkit_ports.Registry) -> Plan:
         root=root,
         context=context,
         files=files,
-        worktree=f"{args.name}-b" if args.worktree else None,
-        worktree_env=worktree_env,
         remote=args.remote,
         register=args.register,
     )
 
 
-def _slot_for(registry: devkit_ports.Registry, checkout: str, taken: set[int] | None = None) -> int:
+def _slot_for(registry: devkit_ports.Registry, checkout: str) -> int:
     """A registered slot, or the next free one when the checkout is new.
 
-    `taken` covers slots already handed out within this run but not yet written to
-    `ports.toml` — without it a new project and its new worktree would both be
-    offered the same free slot and collide on first `docker compose up`.
+    One slot per generated project, and exactly one. This used to hand out a second
+    for the project's `<name>-b` sibling checkout; that convention is retired (see
+    the workspace `CLAUDE.md`), and an ephemeral box leases its own slot from
+    `worktree.py` rather than reserving one here at generation time.
     """
     try:
         return registry.slot_of(checkout)
     except devkit_ports.RegistryError:
-        pass
-    reserved = taken or set()
-    candidate = registry.next_free_slot()
-    while candidate in reserved:
-        candidate += 1
-        if candidate >= registry.max_slots:
-            raise devkit_ports.RegistryError(
-                f"no free slot below max_slots={registry.max_slots} after reserving "
-                f"{sorted(reserved)}; raise it in {devkit_ports.REGISTRY_NAME}."
-            ) from None
-    return candidate
-
-
-def _env_block(
-    registry: devkit_ports.Registry, checkout: str, slot: int, context: dict[str, object]
-) -> dict[str, str]:
-    """The `*_HOST_PORT` overrides one worktree needs, restricted to its services."""
-    services = [
-        service
-        for feature, service in SERVICE_BY_FEATURE.items()
-        if context.get(feature) and service in registry.services
-    ]
-    block = registry.env_for_slot(slot, services)
-    block["COMPOSE_PROJECT_NAME"] = checkout
-    return block
+        return registry.next_free_slot()
 
 
 def render_tree(plan: Plan, dry_run: bool) -> None:
@@ -600,29 +561,8 @@ def git_init(plan: Plan, dry_run: bool) -> None:
     )
 
 
-def add_worktree(plan: Plan, dry_run: bool) -> None:
-    """The parallel checkout, with its own offset ports written into its `.env`."""
-    if not plan.worktree:
-        return
-    target = plan.root.parent / plan.worktree
-    run(["git", "worktree", "add", "-b", plan.worktree, str(target)], plan.root, dry_run)
-
-    lines = [
-        "# Worktree overrides. Copied from the primary checkout's .env, with the",
-        "# ports replaced by this checkout's slot allocation (devkit ports.toml).",
-        "# COMPOSE_PROJECT_NAME must stay equal to this directory's name.",
-        *(f"{k}={v}" for k, v in sorted(plan.worktree_env.items())),
-    ]
-    if dry_run:
-        print(f"  write   ../{plan.worktree}/.env")
-        for line in lines[3:]:
-            print(f"            {line}")
-        return
-    (target / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
-
-
 def register_in_workspace(plan: Plan, dry_run: bool) -> None:
-    """Add the project (and its worktree) to `alex-projects.code-workspace`.
+    """Add the project to `alex-projects.code-workspace`.
 
     This used to write a *new* `<name>.code-workspace` per project, to keep the task
     quick-pick free of every other repo's tasks. Two things made that wrong. The task
@@ -650,7 +590,7 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
         print("  skip    workspace registration (--no-register)")
         return
     path = devkit_project.DEFAULT_WORKSPACE
-    names = [plan.name] + ([plan.worktree] if plan.worktree else [])
+    names = [plan.name]
     if dry_run:
         print(f"  update  ../{path.name} (folders + project picker: {', '.join(names)})")
         return
@@ -767,10 +707,8 @@ def register_slot_hint(plan: Plan) -> None:
     its own PR gate, and a tool that silently commits to its own source of truth is
     how two projects end up claiming one slot from two different sessions.
     """
-    print("\nNext: register the slot(s) in devkit's ports.toml [slots] table:")
+    print("\nNext: register the slot in devkit's ports.toml [slots] table:")
     print(f"  {plan.name} = {plan.context['slot']}")
-    if plan.worktree:
-        print(f"  {plan.worktree} = {plan.context['worktree_slot']}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -819,7 +757,6 @@ def main(argv: list[str] | None = None) -> int:
             help=help_text,
         )
 
-    parser.add_argument("--no-worktree", dest="worktree", action="store_false", default=True)
     # Same reason as --dry-run below: a VS Code picker must supply one real token.
     remote = parser.add_mutually_exclusive_group()
     remote.add_argument(
@@ -892,8 +829,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  project   {the_plan.name}  ->  {the_plan.root}")
         print(f"  slot      {the_plan.context['slot']}")
         print(f"  features  {', '.join(f for f in FEATURES if the_plan.context[f]) or '(none)'}")
-        if the_plan.worktree:
-            print(f"  worktree  {the_plan.worktree} (slot {the_plan.context['worktree_slot']})")
         print(f"  remote    {'yes' if the_plan.remote else 'no'}")
         print(f"  devkit    {the_plan.context['devkit_ref']} (pinned by the generated PR gate)")
         print()
@@ -907,7 +842,6 @@ def main(argv: list[str] | None = None) -> int:
         vendor_harness(the_plan, args.dry_run)
         lock_dependencies(the_plan, args.dry_run)
         git_init(the_plan, args.dry_run)
-        add_worktree(the_plan, args.dry_run)
         register_in_workspace(the_plan, args.dry_run)
         create_remote(the_plan, args.dry_run)
     except (GeneratorError, devkit_ports.RegistryError) as exc:

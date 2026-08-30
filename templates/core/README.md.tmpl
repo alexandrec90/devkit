@@ -50,25 +50,6 @@ Regenerate the `.env` block for any checkout with
 `python <devkit>/scripts/devkit_ports.py <checkout-name>`.
 {{/docker}}
 
-{{#worktree}}
-## Parallel worktrees
-
-A second checkout runs its own stack side by side:
-
-```bash
-git worktree add ../{{ worktree }} {{ worktree }}
-cd ../{{ worktree }}
-cp ../{{ name }}/.env .env    # then replace the ports block — slot {{ worktree_slot }}
-python <devkit>/scripts/devkit_ports.py {{ worktree }}
-{{#docker}}
-docker compose up -d
-{{/docker}}
-```
-
-`COMPOSE_PROJECT_NAME` must equal the directory name in each. See `CLAUDE.md`,
-"Parallel worktrees", for the rules that keep the two stacks independent.
-{{/worktree}}
-
 ## Layout
 
 ```text
