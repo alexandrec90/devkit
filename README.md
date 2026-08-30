@@ -300,6 +300,7 @@ python scripts/worktree.py list                                 # what exists, a
 python scripts/worktree.py reap --all --yes                     # everything already shipped
 python scripts/worktree.py claim <box> --session <id> --yes     # hand a box to another session
 python scripts/worktree.py resume carameli --pr 163 --yes       # a box back on a branch it lost
+python scripts/worktree.py rescue <box> --ship --yes            # stranded work onto a fresh branch, PR opened
 ```
 
 `new` branches off `origin/<default>`, leases a port slot from `ports.toml` (released on

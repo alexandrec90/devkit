@@ -11,10 +11,24 @@ route around it, and `scripts/hooks/report-harness-defect.py` gives that report 
 home. Nothing consumed the reports. This skill is the other end: it is why filing one is
 worth an agent's turn.
 
-Devkit-only, deliberately. Every defect on this ledger is a defect in **devkit** — the
-guard, the gates, the hooks — whatever project the session that hit it was scoped to. A
-consumer repo has nothing to fix; it has a vendored copy to `--pull` once the fix ships
-here. That is also why this skill is not in `sync-devkit.py`'s `MANIFEST`.
+Devkit-only, deliberately. A defect in the harness is a defect in **devkit** — the guard,
+the gates, the hooks — whatever project the session that hit it was scoped to, and a
+consumer repo has nothing to fix but a vendored copy to `--pull` once the fix ships here.
+That is why this skill is not in `sync-devkit.py`'s `MANIFEST`.
+
+**What does not follow is that everything on the ledger is devkit's**, and this paragraph
+used to say it did. A project owns some of the scripts an agent runs — `run-tests.py`,
+`lint-all.py`, the harness a task dispatches — and where those have diverged from
+`templates/core/`, a report about one is a report about that project. The 2026-08-26
+sweep found four in a row: an empty failure artifact on an env skip, `lint-all` linting
+zero files where git is absent and calling it success, `markdownlint --fix` over `**/*.md`
+while gating on the changed set. None of the three exists in devkit's templates.
+
+The check is one grep, and it is worth it before you start fixing: if the file the report
+names has a `templates/core/` counterpart, compare them; if devkit has no such file at
+all, the report belongs to the project that filed it. Leave it open, say so in your
+report, and name the session that could take it — a fix written here would land in a file
+devkit does not ship.
 
 > Every command below is issued bare. None is on the Bash blocklist, and a wrapper here
 > buys no second bound.
@@ -30,15 +44,24 @@ failure-artifact rule. Both are grouped by `(event, project, detail)`, most recu
 first, because a backlog read flat stops being read: 24 of this machine's first 39 open
 items were **one** spawn race recorded 24 times.
 
-Two event names reach it, and they want different treatment:
+Three event names reach it, and they want different treatment:
 
 | Event | What it is | Where the diagnosis starts |
 | --- | --- | --- |
 | `agent-report` | an agent's *judgment* — a false-positive block, an instruction that dead-ended | the `command=` field: re-run it against today's code |
 | `guard-spawn-failed` | an edit was blocked and no box could be cut for it | the `detail=` field: it carries the exception |
+| `codex-translation-gap` | a hook's answer did not survive Codex's schema — a member refused or stripped | the `detail=` field: it names the members |
 
 Everything else on the ledger — `guard-route`, `guard-block`, `capped-bash-block`,
 `lint-fix-block` — is forensics, not a backlog. `check-logs` §7 covers reading those.
+
+A `codex-translation-gap` group wants one question the other two do not: **is the project
+name real?** `harness_events.record(root=None)` resolves `$DEVKIT_DIR`, so a test that
+drove a hook end to end used to append to this machine's ledger under whatever
+`project_name` made of its `tmp_path` — and 18 of them, filed against
+`test_a_lost_decision_is_refuse0`, read as a recurring failure nobody could reproduce
+because the only thing reproducing them was the suite. A vendored `conftest` fixture now
+isolates that, so a name like this on the open list means an *older* copy is doing it.
 
 `project=` is normalised on read, so rows written from a box (`devkit--some-task-0824`)
 group with the project they were cut from. Do not filter on the raw field.
