@@ -12,7 +12,7 @@ import io
 import json
 import sys
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from conftest import load_module
@@ -201,8 +201,13 @@ def test_rounds_helpers_no_op_without_a_git_path(monkeypatch):
 def test_path_predicates():
     assert hook._is_py("app/x.py") and hook._is_py("app/y.pyi")
     assert not hook._is_py("README.md")
-    assert hook._is_frontend("frontend/src/App.tsx")
-    assert not hook._is_frontend("frontend/vite.config.ts")
+    # Built from `CFG.frontend.src`, per this module's docstring: the literals these
+    # two lines used to carry were carameli's layout, and any project that keeps its
+    # frontend anywhere else -- roguelike is its own npm root, `src/` -- failed a test
+    # about a predicate that was behaving correctly. The negative case is what it
+    # always was, a file in the npm project but outside the gated source tree.
+    assert hook._is_frontend(f"{CFG.frontend.src}App.tsx")
+    assert not hook._is_frontend(str(PurePosixPath(CFG.frontend.src).parent / "vite.config.ts"))
     assert hook._is_reqs("requirements.txt")
     assert hook._is_reqs("requirements-dev.in")
     assert not hook._is_reqs("app/requirements_notes.md")
@@ -587,7 +592,9 @@ def test_the_frontend_tier_skips_a_tree_that_was_never_provisioned(tmp_path, mon
     """
     monkeypatch.setattr(hook.shutil, "which", lambda _name: "npm")
     frontend = tmp_path / hook.CFG.frontend.dir
-    frontend.mkdir(parents=True)
+    # `exist_ok` because `dir` is legitimately "." in a repo that *is* its frontend, and
+    # `tmp_path / "."` is `tmp_path`, which pytest has already created.
+    frontend.mkdir(parents=True, exist_ok=True)
 
     assert hook._command_for(hook.CHECK_FRONTEND, tmp_path) is None
 
@@ -595,6 +602,34 @@ def test_the_frontend_tier_skips_a_tree_that_was_never_provisioned(tmp_path, mon
     spec = hook._command_for(hook.CHECK_FRONTEND, tmp_path)
     assert spec is not None
     assert spec[1] == frontend
+
+
+def test_the_frontend_tier_holds_for_a_repo_that_is_its_own_npm_root(tmp_path, monkeypatch):
+    """A layout devkit does not have, asserted explicitly rather than by luck.
+
+    Every other test here reads `hook.CFG`, which in devkit is the defaults -- so a
+    literal that matches the defaults passes the whole vendored suite while failing in
+    the consumer it was vendored to. That is not hypothetical: two tests in this file
+    carried `frontend/src/...` literals and were found by roguelike, which keeps its
+    `package.json`, `vite.config.ts` and `src/` at the repository root, because the
+    repository *is* the frontend. `dir = "."` is the case with no subdirectory at all,
+    which is why it is the one pinned here.
+
+    Constructing the layout rather than reading the project's is what makes this a
+    guarantee: it holds in every consumer, including the ones shaped like the defaults.
+    """
+    layout = replace(hook.CFG.frontend, enabled=True, dir=".", src="src/", skin="src/")
+    monkeypatch.setattr(hook, "CFG", replace(hook.CFG, frontend=layout))
+    monkeypatch.setattr(hook.shutil, "which", lambda _name: "npm")
+
+    assert hook._is_frontend("src/game/field.ts")
+    assert not hook._is_frontend("vite.config.ts")  # beside the source tree, not in it
+
+    (tmp_path / "node_modules").mkdir()
+    spec = hook._command_for(hook.CHECK_FRONTEND, tmp_path)
+    assert spec is not None
+    # `base / "."` is `base`: the npm project is the repository root itself.
+    assert spec[1] == tmp_path
 
 
 @pytest.fixture

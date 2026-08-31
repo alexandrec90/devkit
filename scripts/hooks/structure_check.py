@@ -699,7 +699,7 @@ def declared_dependencies(root: Path, cfg: harness_config.Config) -> dict[str, s
     for rel in dict.fromkeys(("package.json", f"{cfg.frontend.dir.strip('/')}/package.json")):
         path = root / rel
         if path.is_file() and (names := _package_json_dependencies(path)):
-            out[rel] = names
+            out[str(PurePosixPath(rel))] = names  # `dir = "."` spells one file two ways
     return out
 
 
