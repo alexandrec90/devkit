@@ -101,7 +101,23 @@ it is in that code, and the file it was in is against a 500-line cap.
   `test_an_edit_into_a_reference_checkout_is_allowed` is the ratchet, and it is a
   `main()` test on purpose: `redirect_decision` takes the project list as an argument,
   so only the shell can be wrong about it.
-- **Among paths it does own, exactly two cases**: the edit is already inside a box
+- **A path a box would protect nothing about**, decided per *path* rather than per
+  checkout by `guard_probes.path_is_exempt`, which unions two probes. **Git-ignored**
+  (`check-ignore`, consulting the index, so a tracked file matching an ignore rule is
+  still routed): a `.env` cannot land on any branch, so a box protects no branch from it
+  and the value ends up in a worktree that is destroyed without ever shipping. **Already
+  dirty** (`status --porcelain --untracked-files=no`): the `needs-branch` verdict a block
+  exists to prevent is already true of that path, the edit cannot make it truer, and a box
+  cut from `origin/<default>` cannot make it false — it does not contain the change. That
+  second half is the 2026-08-31 carameli session, which was asked to fix a
+  `layoutConfig.ts` the user had just written from the comic-book skin's in-browser editor
+  and staged on `master`: all ten of its edits were routed, every one of them failing with
+  `the box's copy of the file does not contain the text this edit replaces`, which is not
+  bad luck but the shape of the case — a dirty file's `old_string` is missing from
+  `origin/<default>` *by construction*, so the re-aim can never fire. Tracked only, since
+  the agent's own `Write` creates untracked files and routing those is a hole to close
+  rather than an exemption to widen. Both probes **fail closed**.
+- **Among paths it does own, two checkout-level cases**: the edit is already inside a box
   **this session holds the lease on**, or the checkout is on a branch that is not its
   home one **and carries commits of its own** — the "fix PR #42" case, where something
   deliberately checked that branch out and a fresh box would put the fix somewhere the

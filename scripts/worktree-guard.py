@@ -114,6 +114,10 @@ from _loader import load_by_path
 
 import devkit_project
 
+# The git probes this file's decisions rest on, lifted into their own leaf module — see
+# its docstring for the structural reason, which is that this one is at its ceiling.
+import guard_probes
+
 # Also resolved by the sys.path insert above. Read for the slug the UserPromptSubmit
 # hook recorded for this session — see `session_slug`.
 import task_slug
@@ -1272,26 +1276,6 @@ def needs_box(branch: str, protects_open_work: bool = True, default_branch: str 
     return not protects_open_work
 
 
-def _git(checkout: Path, *args: str):
-    """Run git in `checkout`, capturing stdout. Never raises; never opens a window."""
-    return worktree.subprocess.run(
-        ["git", "-C", str(checkout), *args],
-        capture_output=True,
-        text=True,
-        # UTF-8 with replacement, never the platform codec. `text=True` alone decodes
-        # through cp1252 here, and a byte it cannot map -- in a branch name, a path, a
-        # commit subject -- raises inside subprocess's reader thread, where this
-        # function's `check=False` cannot see it. That would crash the guard on a
-        # PreToolUse call, which is every edit in the workspace. The full account is the
-        # codec note under `VERIFY_IMPORT` in scripts/hooks/stop.py.
-        encoding="utf-8",
-        errors="replace",
-        timeout=10,
-        check=False,
-        creationflags=worktree.sweep.NO_WINDOW,
-    )
-
-
 def _is_git_internal(resolved: Path) -> bool:
     """True when this path is inside a `.git` directory -- git's own state, not content.
 
@@ -1314,34 +1298,6 @@ def _is_git_internal(resolved: Path) -> bool:
     return ".git" in resolved.parts[:-1]
 
 
-def path_is_ignored(checkout: Path, target: Path) -> bool:
-    """True when `target` is git-ignored inside `checkout`.
-
-    The premise of every block this hook issues is that the edit "would land on the home
-    branch" — and for an ignored path that premise is simply false. `.env`, `.local/`,
-    `logs/` and the rest of a checkout's untracked local state cannot land on any branch,
-    so routing them to a box does not protect a branch from anything. It costs the turn
-    and delivers nothing: the box gets its *own* seeded `.env`, so re-issuing the edit
-    there writes the value into a worktree that is destroyed without ever shipping it,
-    and the file the agent was actually asked to configure stays unchanged.
-
-    `git check-ignore` is the right oracle rather than a hard-coded list of names,
-    because what is ignored is per-project and already written down in `.gitignore`.
-    It consults the index by default (no `--no-index`), so a *tracked* file that also
-    matches an ignore rule reports as not-ignored and still gets a box — tracked is
-    tracked, and that is the case the hook exists for.
-
-    **Fails closed**: any error means "not ignored", i.e. route it. A hook that cannot
-    read the repo must not start letting edits through on the strength of a failed
-    subprocess.
-    """
-    try:
-        result = _git(checkout, "check-ignore", "--quiet", "--", str(target))
-    except (OSError, worktree.subprocess.SubprocessError):
-        return False
-    return result.returncode == 0
-
-
 def current_branch(checkout: Path) -> str:
     """The branch `checkout` has checked out; "" when git will not say.
 
@@ -1350,7 +1306,7 @@ def current_branch(checkout: Path) -> str:
     the box path and returns at the `.worktrees/` test above without reaching this.
     """
     try:
-        result = _git(checkout, "branch", "--show-current")
+        result = guard_probes.git(checkout, "branch", "--show-current")
     except (OSError, worktree.subprocess.SubprocessError):
         return ""
     return result.stdout.strip() if result.returncode == 0 else ""
@@ -1388,7 +1344,7 @@ def _read_default_branch(checkout: Path) -> str:
     """`default_branch_of` without the memo. Split so the cache is one flat lookup."""
     try:
         return worktree.sweep.tb.detect_default_branch(
-            lambda *args: _git(checkout, *args), fallback=""
+            lambda *args: guard_probes.git(checkout, *args), fallback=""
         )
     except (OSError, worktree.subprocess.SubprocessError, ValueError):
         return ""
@@ -1417,9 +1373,9 @@ def branch_has_own_commits(checkout: Path) -> bool:
     """
     try:
         default = worktree.sweep.tb.detect_default_branch(
-            lambda *args: _git(checkout, *args), fallback="main"
+            lambda *args: guard_probes.git(checkout, *args), fallback="main"
         )
-        probe = _git(checkout, "rev-list", "--count", f"origin/{default}..HEAD")
+        probe = guard_probes.git(checkout, "rev-list", "--count", f"origin/{default}..HEAD")
     except (OSError, worktree.subprocess.SubprocessError, ValueError):
         return True
     if probe.returncode != 0:
@@ -1437,7 +1393,7 @@ def redirect_decision(
     projects: list[str],
     branch_of: Callable[[Path], str] | None = None,
     commits_of_own: Callable[[Path], bool] | None = None,
-    ignored: Callable[[Path, Path], bool] | None = None,
+    exempt: Callable[[Path, Path], bool] | None = None,
     default_of: Callable[[Path], str] | None = None,
 ) -> tuple[str, str] | None:
     """`(project, path relative to that checkout)` when this edit needs its own box.
@@ -1458,9 +1414,9 @@ def redirect_decision(
       any scratch directory beside the projects;
     - anything under a `.git` directory — see `_is_git_internal`. It is git's own state
       rather than content, so no branch is at stake and the box has nowhere to put it;
-    - a **git-ignored** path inside a checkout — see `path_is_ignored`. It cannot land
-      on the home branch, so there is no branch for a box to protect, and the box would
-      swallow the edit whole.
+    - a path a box would protect nothing about, per *path* rather than per checkout:
+      git-ignored, or already dirty. `guard_probes.path_is_exempt` owns both halves and
+      the reasoning.
 
     A session inside a checkout parked on a **home** branch is no longer among them.
     That was the case `branch-on-write.py` owned, and with that hook retired an edit
@@ -1488,10 +1444,9 @@ def redirect_decision(
     if not project:
         return None
     checkout = root / project
-    # Asked before the branch is read, and it is the cheaper order: an ignored path is
-    # allowed on one subprocess and never consults the branch, while for everything else
-    # this is one `check-ignore` added to a path that was already going to spawn a box.
-    if (ignored or path_is_ignored)(checkout, resolved):
+    # Asked before the branch is read, and that is the cheaper order: an exempt path
+    # never consults the branch, and every other path was going to spawn a box anyway.
+    if (exempt or guard_probes.path_is_exempt)(checkout, resolved):
         return None
     lookup = branch_of or current_branch
     has_commits = commits_of_own or branch_has_own_commits
