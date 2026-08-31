@@ -4389,35 +4389,16 @@ def rescue_plan(
     landed: bool = False,
     today: _dt.date | None = None,
 ) -> RescuePlan:
-    """The rebranch `spawn_plan` names as missing: move a box's work onto a branch it can ship from.
+    """Move a stranded box's work onto a branch it can ship from.
 
-    A box that outlives its PR is left on a **retired** branch (`needs-rebranch`: the
-    squash merge deleted the remote and the policy refuses every commit to that name),
-    or was cut onto a hand-named one the policy never accepted (`needs-branch`). Either
-    way the work in it -- uncommitted edits, commits never pushed -- has no branch to be
-    shipped from, and that is what stranded every box the 2026-08-30 audit found.
-    `sweep.branch_plan` is the static tier's version and cannot be reused here: it cuts
-    from HEAD, which for a retired branch is the pre-squash history, so a PR opened from
-    it carries every already-merged commit as a diff against the default branch.
+    A retired or hand-named branch cannot accept the next commit. The fresh branch must
+    be rebased, not merely cut from HEAD, because HEAD may carry pre-squash history that
+    already landed. With `landed`, `--onto origin/<default> HEAD` replays no commits and
+    carries only autostashed dirt; otherwise git drops commits the squash made empty and
+    keeps the rest.
 
-    So the fresh branch is cut and then **rebased**:
-
-    - work whose commits already landed (`landed`) is moved wholesale onto
-      `origin/<default>` -- `--onto` with `HEAD` as the upstream replays nothing and
-      carries the autostashed dirt across;
-    - work with commits of its own is rebased onto `origin/<default>`, and git's merge
-      backend drops each commit that the squash already made empty, keeping the ones it
-      did not.
-
-    `--autostash` is what makes a dirty box safe to move: the dirt is stashed before the
-    rebase and re-applied after it, and `rebase --abort` restores it if the replay stops
-    on a conflict. Nothing is committed and nothing is pushed here; `--ship` does that,
-    through `sweep.apply_plan`, after this has succeeded and been re-inspected.
-
-    `ready` is allowed through with no steps: the box is already on a live task branch,
-    so there is nothing to move, and the plan exists only so `--ship` has one to follow.
-    Everything else `rescue_refusal` turns away. The plan carries no `path`; the caller
-    that knows the workspace root fills it in.
+    This stage commits and pushes nothing. `--ship` does so only after re-inspection.
+    A `ready` box needs no move, but still returns a plan for that shipping half.
     """
     plan = RescuePlan(
         box=box.name,
@@ -4456,16 +4437,10 @@ def rescue_plan(
 def apply_rescue(plan: RescuePlan, workspace: Path) -> tuple[bool, list[str]]:
     """Run the rescue in the box; on success, record the new branch in the lease.
 
-    The lease rewrite is the half a hand-made `git checkout -b` skips, and it is why
-    the workspace `CLAUDE.md` forbids renaming a box's branch by hand: `worktree.py`
-    keys its registry on the branch, `reconcile` looks the PR up by that name, and a
-    box whose lease names a branch that no longer exists is one `reconcile` can reap as
-    "never used" with the work still in it. Same lock as `claim_box` and `apply_reap`.
-
-    A failed step is rolled back before it is reported. Every rollback step is
-    best-effort -- `rebase --abort` fails harmlessly when no rebase is in progress,
-    and `branch -D` when the checkout never happened -- because the point is to leave
-    the tree where it was, not to add a second failure on top of the first.
+    The lease must follow the checked-out branch: `reconcile` keys lifecycle decisions
+    on it. An ordinary failed step rolls back best-effort. An autostash conflict is the
+    exception: rebase reports success after leaving markers, so the new branch and lease
+    stay aligned while shipping stops for manual resolution.
     """
     root = workspace.parent
     cwd = Path(plan.path)
@@ -4478,6 +4453,22 @@ def apply_rescue(plan: RescuePlan, workspace: Path) -> tuple[bool, list[str]]:
             if not undo_failed:
                 notes.append(f"rolled back: git {' '.join(step)}")
         notes.append(f"the box is back on {plan.old_branch}; resolve the conflict by hand")
+        return False, notes
+    _, marker_check, marker_error = run_steps(cwd, (("diff", "--check"),))
+    marker_lines = [
+        line for line in marker_error.splitlines() if "leftover conflict marker" in line.lower()
+    ]
+    if marker_check and marker_lines:
+        markers = "\n".join(marker_lines)
+        notes.append(f"FAILED at `git diff --check`: {markers}")
+        with lease_lock(root):
+            boxes = live_boxes(root)
+            box = boxes.get(plan.box)
+            if box is not None:
+                boxes[plan.box] = replace(box, branch=plan.branch)
+                write_leases(root, boxes)
+        notes.append(f"lease now records {plan.branch} (was {plan.old_branch})")
+        notes.append("autostash left conflict markers; rescue stopped before shipping")
         return False, notes
     with lease_lock(root):
         boxes = live_boxes(root)
