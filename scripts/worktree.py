@@ -74,7 +74,6 @@ import json
 import os
 import re
 import shutil
-import stat
 import string
 import subprocess
 import sys
@@ -85,6 +84,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+# The host half of a teardown -- deleting the directory, and evicting whatever on this
+# machine is still running out of it. Its own module because nothing in it knows what a
+# `ReapPlan` is, and because this one is already past every structural limit.
+import box_teardown
 import devkit_ports
 import devkit_project
 import git_policy
@@ -4079,46 +4082,6 @@ def plan_reap(
     )
 
 
-def remove_tree_longpath(path: Path) -> str:
-    """Delete `path` recursively, surviving Windows MAX_PATH. Empty string on success.
-
-    A provisioned box carries a `.venv` whose nesting routinely exceeds MAX_PATH, and
-    `git worktree remove` deletes with plain Win32 calls -- so a reap of a perfectly
-    clean box died with `Filename too long`, leaving a half-deleted husk that
-    classifies as `skipped` and reads as "holding work" forever. The `\\\\?\\` prefix
-    turns the limit off; the `onexc` hook clears the read-only bit that Windows also
-    uses to refuse deletion of some packaging artifacts.
-    """
-    target = str(path)
-    if os.name == "nt" and not target.startswith("\\\\?\\"):
-        target = "\\\\?\\" + os.path.abspath(target)
-
-    def _clear_and_retry(func, failed_path, _exc):
-        os.chmod(failed_path, stat.S_IWRITE)
-        func(failed_path)
-
-    try:
-        shutil.rmtree(target, onexc=_clear_and_retry)
-    except OSError as exc:
-        return str(exc)
-    return ""
-
-
-def _worktree_remove_fallback_applies(plan: ReapPlan, error: str) -> bool:
-    """Whether a failed `git worktree remove` may be finished with a direct delete.
-
-    Deliberately narrow: a dirty-tree refusal ("contains modified or untracked
-    files") must stay a refusal, because the fallback destroys what git just
-    declined to. It applies when the error is a filesystem-level deletion failure,
-    or when the box is already a husk -- a directory whose `.git` link is gone
-    because a previous removal died partway -- which no `git worktree remove` can
-    ever succeed on again.
-    """
-    if "Filename too long" in error or "Directory not empty" in error:
-        return True
-    return not (Path(plan.path) / ".git").exists()
-
-
 REAP_LEDGER = "logs/worktree-reaped.log"
 
 
@@ -4740,6 +4703,37 @@ def _carry_past_deleted_branch(
     return failed, error
 
 
+def _remove_box_by_hand(
+    plan: ReapPlan, source: Path, failed: str, error: str, notes: list[str]
+) -> tuple[str, str]:
+    """Finish a `git worktree remove` that failed, by deleting the tree ourselves.
+
+    Only reached when `box_teardown.fallback_applies` says the failure was the
+    filesystem refusing rather than git refusing — the caller owns that judgement, and
+    a dirty-tree refusal must never arrive here.
+
+    Returns the `(failed, error)` pair the caller carries on with: unchanged but for the
+    direct delete's own complaint when even that could not remove the box, and otherwise
+    the verdict of the plan's remaining steps, since the removal it stopped at is now
+    done. Extracted so `apply_reap` keeps one arm here instead of five.
+    """
+    first_line = error.splitlines()[0] if error else "no detail"
+    fallback_error, evicted = box_teardown.force_remove_box(Path(plan.path))
+    notes.extend(evicted)
+    if fallback_error:
+        return failed, f"{error} (direct delete also failed: {fallback_error})"
+    _, prune_failed, prune_error = run_steps(source, (("worktree", "prune"),))
+    if prune_failed:
+        return prune_failed, prune_error
+    notes.append(
+        f"`{failed}` failed ({first_line}); deleted the tree directly and pruned the record"
+    )
+    remaining = tuple(step for step in plan.steps if step[:2] != ("worktree", "remove"))
+    ran, failed, error = run_steps(source, remaining)
+    notes.extend(ran)
+    return failed, error
+
+
 def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
     """Destroy the box. `(ok, notes)`. The lease is released only once it is gone.
 
@@ -4785,25 +4779,9 @@ def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
     if (
         failed
         and failed.startswith("git worktree remove")
-        and _worktree_remove_fallback_applies(plan, error)
+        and box_teardown.fallback_applies(Path(plan.path), error)
     ):
-        first_line = error.splitlines()[0] if error else "no detail"
-        fallback_error = remove_tree_longpath(Path(plan.path))
-        if fallback_error:
-            notes.append(
-                f"FAILED at `{failed}`: {error} (direct delete also failed: {fallback_error})"
-            )
-            return False, notes
-        _, prune_failed, prune_error = run_steps(source, (("worktree", "prune"),))
-        if prune_failed:
-            notes.append(f"FAILED at `{prune_failed}`: {prune_error}")
-            return False, notes
-        notes.append(
-            f"`{failed}` failed ({first_line}); deleted the tree directly and pruned the record"
-        )
-        remaining = tuple(step for step in plan.steps if step[:2] != ("worktree", "remove"))
-        ran, failed, error = run_steps(source, remaining)
-        notes.extend(ran)
+        failed, error = _remove_box_by_hand(plan, source, failed, error, notes)
     failed, error = _carry_past_deleted_branch(source, plan, failed, error, notes)
     if failed:
         notes.append(f"FAILED at `{failed}`: {error}")

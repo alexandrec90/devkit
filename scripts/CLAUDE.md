@@ -246,6 +246,19 @@ Each of these has already been violated by something:
   minutes ago by the box and are namespaced to its own `COMPOSE_PROJECT_NAME`, and
   leaking a set per task is how the WSL2 VHDX becomes the next bottleneck. `-p <box>` is
   passed explicitly so the scope cannot widen to the source project.
+- **The teardown has a host half, and for a year it had only the container half.**
+  `compose_down` ends what the box ran in Docker; nothing ended what it ran on the
+  machine. An agent that types `npm run dev` in a box leaves a vite server whose native
+  `.node` binding stays mapped, and Windows refuses to delete a mapped image — so
+  `git worktree remove` deleted what it could, died on that one file having already
+  removed `.git`, and left a **husk that no later pass can ever clear**: the husk clause
+  is what admits the direct-delete fallback, and the fallback meets the same lock. Two of
+  them turned every scheduled `reconcile`, and the machine-reclaim task that runs it,
+  permanently red. `box_teardown.py` is the missing half, and what its eviction matches
+  on is the safety property: a process whose **executable or a loaded module** lives
+  under the box, never one whose command line merely names it — an agent's own shell
+  sitting in a box names it too, and killing the session that asked for the reap is
+  worse than the husk it would clear.
 - **A box is never registered in the workspace file.** Registering one would put it in
   `sweep.py`'s scope, and then both tools would own its lifecycle. The cost is that
   nothing else can see boxes, which is why `workspace-status.py` reports them at session

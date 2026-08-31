@@ -15,13 +15,14 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 import subprocess
 import sys
 import types
 from pathlib import Path
 
 import pytest
-from support import devkit_ports, sweep, worktree
+from support import box_teardown, devkit_ports, sweep, worktree
 
 TODAY = _dt.date(2026, 8, 6)
 
@@ -1525,6 +1526,65 @@ def test_a_dirty_tree_refusal_is_not_finished_by_the_fallback(tmp_path, monkeypa
     assert ok is False
     assert (box_dir / "uncommitted.py").exists(), "the fallback destroyed a dirty tree"
     assert any("FAILED at" in note for note in notes)
+
+
+# --- a box a live process is still running out of -----------------------------
+
+
+def test_a_reap_blocked_by_a_live_process_evicts_it_and_finishes(tmp_path, monkeypatch):
+    """The husk factory, closed at both ends.
+
+    An agent that ran `npm run dev` in a box leaves a vite server whose native binding
+    stays mapped; Windows refuses the delete with `Access is denied`, and
+    `git worktree remove` dies partway having already removed `.git`. That husk is
+    unreapable forever -- no later `git worktree remove` can succeed on it and the
+    fallback meets the same lock -- which is what turned every scheduled `reconcile`,
+    and the machine-reclaim task that runs it, permanently red on 2026-08-30.
+    """
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    box_dir = tmp_path / "ws" / ".worktrees" / "demo--x-0806"
+    (box_dir / "nested").mkdir(parents=True)
+    # A live `.git`, so the access-denied clause is what licenses the fallback here and
+    # not the husk clause -- the first reap of such a box is the one worth saving.
+    (box_dir / ".git").write_text("gitdir: elsewhere", encoding="utf-8")
+    (box_dir / "nested" / "binding.node").write_text("native", encoding="utf-8")
+
+    released = {"now": False}
+    real_unlink = os.unlink
+
+    def stubborn(path, *args, **kwargs):
+        if str(path).endswith("binding.node") and not released["now"]:
+            raise PermissionError(13, "Access is denied")
+        return real_unlink(path, *args, **kwargs)
+
+    def fake_evict(path, run=subprocess.run):
+        released["now"] = True
+        return ["node (4242)"]
+
+    def fake_run_steps(cwd, steps, timeout=300.0):
+        if steps and steps[0][:2] == ("worktree", "remove"):
+            rendered = "git " + " ".join(steps[0])
+            return [], rendered, f"error: failed to delete '{box_dir}': Access is denied"
+        return ["git " + " ".join(step) for step in steps], "", ""
+
+    monkeypatch.setattr(os, "unlink", stubborn)
+    monkeypatch.setattr(box_teardown, "evict_box_holders", fake_evict)
+    monkeypatch.setattr(box_teardown, "HOLDER_RELEASE_SECONDS", 0.0)
+    monkeypatch.setattr(worktree, "run_steps", fake_run_steps)
+    monkeypatch.setattr(worktree, "read_leases", lambda root: {})
+    monkeypatch.setattr(worktree, "write_leases", lambda root, boxes: None)
+
+    plan = worktree.ReapPlan(
+        box="demo--x-0806",
+        path=str(box_dir),
+        project="demo",
+        steps=(("worktree", "remove", str(box_dir)),),
+    )
+    ok, notes = worktree.apply_reap(plan, workspace)
+    assert ok is True, notes
+    assert not box_dir.exists(), "the box survived the eviction that was meant to free it"
+    assert any("killed 1 process(es)" in note for note in notes)
 
 
 # --- the CLI ----------------------------------------------------------------
