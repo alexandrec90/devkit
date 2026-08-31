@@ -349,6 +349,26 @@ def test_declared_dependencies_read_every_manifest_a_project_carries(tmp_path):
     }
 
 
+def test_a_frontend_at_the_repository_root_is_one_manifest_not_two(tmp_path):
+    """`dir = "."` must produce the same key the root manifest already has.
+
+    These strings are baseline keys, so a second spelling of one file is the worst
+    shape a ratchet finding can take: every dependency in it is reported as new, and
+    every line already recorded under the other spelling goes stale in the same run --
+    a project that has added nothing is told to justify its entire dependency list.
+    roguelike is the shape that reaches it: a Phaser game whose `package.json`,
+    `vite.config.ts` and `src/` are the repository root, so it declares `dir = "."`
+    rather than a subdirectory that does not exist.
+    """
+    write(tmp_path, "package.json", '{"dependencies": {"phaser": "4"}}')
+    cfg = dataclasses.replace(config(), frontend=hc.FrontendConfig(enabled=True, dir="."))
+
+    assert sc.declared_dependencies(tmp_path, cfg) == {"package.json": {"phaser"}}
+    assert [f.key for f in sc.dependency_findings(tmp_path, cfg)] == [
+        "dependency::package.json::phaser"
+    ]
+
+
 def test_declared_dependencies_survive_a_manifest_that_does_not_parse(tmp_path):
     write(tmp_path, "pyproject.toml", "[project\n")
     write(tmp_path, "package.json", "{")
