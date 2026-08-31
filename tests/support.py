@@ -51,6 +51,11 @@ import task_input
 import task_slug
 import worktree
 
+# Reached through `worktree` rather than imported again, and not only to spare this file
+# an eleventh suppression: the box teardown is monkeypatched from both test modules, so
+# it has to be the same module object the code under test holds.
+box_teardown = worktree.box_teardown
+
 # The live multi-root registry: a workstation file that sits *beside* the checkout, so
 # it exists on the desktop this harness drives and never in a CI clone. The handful of
 # tests that assert against the real file (rather than a fixture) carry the marker
@@ -94,6 +99,7 @@ __all__ = [
     "LIVE_WORKSPACE",
     "REPO_ROOT",
     "TEMPLATES",
+    "box_teardown",
     "devkit_jsonc",
     "devkit_ports",
     "devkit_project",

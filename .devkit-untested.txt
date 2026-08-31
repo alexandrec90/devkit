@@ -177,7 +177,6 @@ scripts/worktree.py::plan_env_templates
 scripts/worktree.py::plan_resume
 scripts/worktree.py::pr_head_branch
 scripts/worktree.py::recovered_slot
-scripts/worktree.py::remove_tree_longpath
 scripts/worktree.py::render_preview
 scripts/worktree.py::render_reap
 scripts/worktree.py::run_steps
