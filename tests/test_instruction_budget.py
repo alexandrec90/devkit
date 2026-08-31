@@ -135,6 +135,11 @@ def test_the_vendored_set_is_read_not_guessed():
     assert "CLAUDE.md" not in paths, "a project's own root file is never vendored"
 
 
+def test_the_background_pipeline_warning_names_the_masked_task_status():
+    rule = (REPO_ROOT / ".claude/rules/engineering.md").read_text(encoding="utf-8")
+    assert "background task's completion status" in rule
+
+
 def test_manifest_paths_is_empty_when_sync_devkit_is_missing(tmp_path: Path):
     assert budget.manifest_paths(tmp_path) == frozenset()
 

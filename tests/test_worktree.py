@@ -6107,7 +6107,7 @@ def test_apply_rescue_runs_in_the_box_and_rewrites_the_lease(tmp_path, monkeypat
     ok, notes = worktree.apply_rescue(_rescue_plan_for(workspace, old), workspace)
 
     assert ok
-    assert where == [worktree.box_path(workspace.parent, old.name)]
+    assert where == [worktree.box_path(workspace.parent, old.name)] * 2
     assert worktree.read_leases(workspace.parent)[old.name].branch == "agent/x-0806"
     assert any("lease now records agent/x-0806" in note for note in notes)
 
@@ -6136,6 +6136,32 @@ def test_apply_rescue_rolls_back_a_failed_rebase_and_keeps_the_lease(tmp_path, m
     assert worktree.read_leases(workspace.parent)[old.name].branch == "agent/x-0801"
     assert any("FAILED at `git rebase" in note for note in notes)
     assert any("back on agent/x-0801" in note for note in notes)
+
+
+def test_apply_rescue_stops_after_a_successful_rebase_that_left_conflict_markers(
+    tmp_path, monkeypatch
+):
+    """`git rebase --autostash` exits zero when reapplying the stash conflicts.
+
+    Shipping after that committed conflict markers in files whose linters do not reject
+    them. The rescue must keep the new branch and its lease aligned, but stop before its
+    shipping half can stage anything.
+    """
+    workspace, old = _rescue_workspace(tmp_path)
+
+    def fake_run_steps(cwd, steps, timeout=300.0):
+        if steps == (("diff", "--check"),):
+            return [], "git diff --check", "ui.tsx:7: leftover conflict marker"
+        return [f"git {' '.join(step)}" for step in steps], "", ""
+
+    monkeypatch.setattr(worktree, "run_steps", fake_run_steps)
+
+    ok, notes = worktree.apply_rescue(_rescue_plan_for(workspace, old), workspace)
+
+    assert not ok
+    assert worktree.read_leases(workspace.parent)[old.name].branch == "agent/x-0806"
+    assert any("leftover conflict marker" in note for note in notes)
+    assert any("stopped before shipping" in note for note in notes)
 
 
 def test_rescue_commit_message_is_mechanical_unless_given_one():
