@@ -246,12 +246,14 @@ UNATTENDED: dict[str, str] = {
     # not scheduled, but the same failure: an agent hook's parent is whatever launched
     # the agent, and an editor's extension host has no console either.
     "scripts/worktree-guard.py": "PreToolUse hook, parent may itself be console-less",
+    "scripts/guard_probes.py": "the git the guard asks about a path, on every edit",
 }
 
 # A module in `UNATTENDED` that spawns nothing passes vacuously, so each one has to say
 # which module does the spawning for it.
 DELEGATES_ITS_SPAWNS: dict[str, str] = {
     "scripts/git-merge-default.py": "scripts/git_policy.py",
+    "scripts/worktree-guard.py": "scripts/guard_probes.py",
 }
 
 SPAWN_ATTRS = frozenset({"run", "Popen", "call", "check_call", "check_output"})

@@ -33,16 +33,23 @@ for _path in (REPO_ROOT / "scripts", REPO_ROOT / "scripts" / "hooks"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-import devkit_jsonc  # noqa: E402
-import devkit_ports  # noqa: E402
-import devkit_project  # noqa: E402
-import devkit_render  # noqa: E402
-import git_policy  # noqa: E402
-import harness_config  # noqa: E402
-import sweep  # noqa: E402
-import task_input  # noqa: E402
-import task_slug  # noqa: E402
-import worktree  # noqa: E402
+# Every import below the bootstrap is E402 by construction — that is the whole design of
+# this file, stated once here rather than restated on each line. A per-line `# noqa: E402`
+# said nothing a reader could act on and grew by one whenever a module was added; the
+# claim is a property of the file, so it is written as one. Scoped to E402 alone, so any
+# other finding in here still fails.
+# ruff: noqa: E402
+import devkit_jsonc
+import devkit_ports
+import devkit_project
+import devkit_render
+import git_policy
+import guard_probes
+import harness_config
+import sweep
+import task_input
+import task_slug
+import worktree
 
 # The live multi-root registry: a workstation file that sits *beside* the checkout, so
 # it exists on the desktop this harness drives and never in a CI clone. The handful of
@@ -93,6 +100,7 @@ __all__ = [
     "devkit_render",
     "gh_steps_without_repo_context",
     "git_policy",
+    "guard_probes",
     "harness_config",
     "in_an_ephemeral_box",
     "load_script",

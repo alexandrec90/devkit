@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -504,62 +503,31 @@ def test_no_path_means_no_decision(root):
     assert guard.redirect_decision("", str(root), root, PROJECTS) is None
 
 
-# --- git-ignored paths ------------------------------------------------------
+# --- paths a box would protect nothing about --------------------------------
+
+# What makes a path exempt -- git-ignored, or already carrying the human's uncommitted
+# work -- is `guard_probes.path_is_exempt`, and `tests/test_guard_probes.py` asks a real
+# repo about it. Here the question is only what the decision does with the answer.
 
 
-def make_repo(path: Path, gitignore: str) -> Path:
-    """A real repo on disk: `check-ignore` is the oracle under test, so stubbing git
-    here would test nothing but the stub."""
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "--quiet", str(path)], check=True, capture_output=True)
-    (path / ".gitignore").write_text(gitignore, encoding="utf-8")
-    return path
-
-
-def test_path_is_ignored_reads_the_projects_own_gitignore(tmp_path):
-    """What is ignored is per-project and already written down, which is why this asks
-    git rather than carrying a hard-coded list of names."""
-    repo = make_repo(tmp_path / "carameli", ".env\n.env.*\nlogs/\n")
-    assert guard.path_is_ignored(repo, repo / ".env") is True
-    assert guard.path_is_ignored(repo, repo / ".env.local") is True
-    assert guard.path_is_ignored(repo, repo / "logs" / "runtime.log") is True
-
-
-def test_path_is_ignored_is_false_for_an_ordinary_source_file(tmp_path):
-    repo = make_repo(tmp_path / "carameli", "*.md\n")
-    assert guard.path_is_ignored(repo, repo / "app" / "main.py") is False
-
-
-def test_a_tracked_file_matching_an_ignore_rule_is_not_ignored(tmp_path):
-    """`check-ignore` consults the index (no `--no-index`) on purpose: tracked is
-    tracked, and an edit to a tracked file lands on the home branch however its name
-    reads -- which is the case the hook exists for."""
-    repo = make_repo(tmp_path / "carameli", "*.md\n")
-    (repo / "README.md").write_text("x", encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(repo), "add", "-f", "README.md"], check=True, capture_output=True
-    )
-    assert guard.path_is_ignored(repo, repo / "README.md") is False
-
-
-def test_path_is_ignored_fails_closed_when_git_will_not_answer(tmp_path):
-    """A directory that is not a repo stands in for every way the probe can fail. A hook
-    that cannot read the repo must not start letting edits through on the strength of a
-    failed subprocess -- it routes them, as it always did."""
-    assert guard.path_is_ignored(tmp_path, tmp_path / ".env") is False
-
-
-def is_ignored(value: bool):
-    """An `ignored` stub: the path is git-ignored inside its checkout, or is not."""
+def is_exempt(value: bool):
+    """An `exempt` stub: a box would protect nothing about this path, or would."""
     return lambda checkout, target: value
 
 
-def test_an_edit_to_a_gitignored_path_is_left_alone(root):
-    """The premise of every block -- "this would land on the home branch" -- is false for
-    an ignored path, so a box protects nothing. Worse, the box has its own seeded `.env`,
-    so re-issuing the edit there writes the value into a worktree that is destroyed
-    without ever shipping it, and the file that was meant to be configured is unchanged.
-    """
+def test_an_edit_to_an_exempt_path_is_left_alone(root):
+    """Two paths reach this: a `.env`, where the premise of every block -- "this would
+    land on the home branch" -- is simply false, and a file the human already left dirty,
+    where it is already true and a box cannot undo it.
+
+    The second is what a carameli session cost on 2026-08-31. The user had saved
+    `layoutConfig.ts` from the comic-book skin's in-browser editor and staged it on
+    `master`; the review they asked for was routed, and all ten of its edits were blocked
+    with `the box's copy of the file does not contain the text this edit replaces` --
+    which is not bad luck but the shape of the case, since the box holds
+    `origin/<default>`'s copy and a dirty file's `old_string` is missing from it by
+    construction. It ended with the file unfixed on `master` and a second, divergent copy
+    of it in a box holding work with no PR."""
     assert (
         guard.redirect_decision(
             str(root / "carameli" / ".env"),
@@ -567,24 +535,45 @@ def test_an_edit_to_a_gitignored_path_is_left_alone(root):
             root,
             PROJECTS,
             branch_of=on_branch("master"),
-            ignored=is_ignored(True),
+            exempt=is_exempt(True),
         )
         is None
     )
 
 
-def test_a_tracked_path_in_the_same_checkout_still_gets_a_box(root):
-    """The exemption is per-path, not per-checkout: being ignored is the whole reason it
-    is allowed, and the file beside it is unaffected."""
+def test_a_path_beside_an_exempt_one_still_gets_a_box(root):
+    """The exemption is per-path, not per-checkout: one ignored file, or one the human
+    left dirty, does not license the agent to write anywhere else in the tree."""
     decision = guard.redirect_decision(
         str(root / "carameli" / "app" / "main.py"),
         str(root),
         root,
         PROJECTS,
         branch_of=on_branch("master"),
-        ignored=is_ignored(False),
+        exempt=is_exempt(False),
     )
     assert decision == ("carameli", str(Path("app/main.py")))
+
+
+def test_the_default_exempt_probe_is_the_one_that_asks_git(root):
+    """The wiring, not the answer: `redirect_decision` with no stub must consult
+    `guard_probes.path_is_exempt`, or the dirty-file exemption exists only in tests."""
+    seen: list[tuple[Path, Path]] = []
+    monkeypatched = guard.guard_probes.path_is_exempt
+    try:
+        guard.guard_probes.path_is_exempt = lambda checkout, target: bool(
+            seen.append((checkout, target))
+        )
+        guard.redirect_decision(
+            str(root / "carameli" / "app" / "main.py"),
+            str(root),
+            root,
+            PROJECTS,
+            branch_of=on_branch("master"),
+        )
+    finally:
+        guard.guard_probes.path_is_exempt = monkeypatched
+    assert seen == [(root / "carameli", root / "carameli" / "app" / "main.py")]
 
 
 # --- what the agent reads ---------------------------------------------------
@@ -2851,26 +2840,6 @@ def test_an_editor_call_is_never_read_for_a_branch_move(root, monkeypatch):
     )
     # Routed as an ordinary edit -- re-aimed into the box, not refused as a park.
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
-
-
-def test_the_guards_git_helper_decodes_utf8_rather_than_the_platform_codec():
-    """`text=True` alone decodes git's output through cp1252 on this machine, and a byte
-    it cannot map -- in a branch name, a path, a commit subject -- raises inside
-    subprocess's reader thread, past this helper's `check=False`. That crash would land
-    in a PreToolUse hook, which is every edit in the workspace.
-
-    Asserted on the source because the failure is in the arguments, not in the return:
-    a stub git emitting a bad byte would prove nothing about the real call's keywords.
-    The vendored half of this ratchet is
-    `test_every_capture_in_a_vendored_hook_declares_its_codec`; the guard is
-    devkit-only, so it needs its own.
-    """
-    source = (REPO_ROOT / "scripts" / "worktree-guard.py").read_text(encoding="utf-8")
-    call = source[source.index("def _git(") :]
-    call = call[: call.index("\n\n\n")]
-    assert 'encoding="utf-8"' in call and 'errors="replace"' in call, (
-        "worktree-guard._git must name its codec: encoding='utf-8', errors='replace'"
-    )
 
 
 @pytest.mark.parametrize(
