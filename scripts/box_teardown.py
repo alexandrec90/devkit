@@ -149,6 +149,51 @@ def evict_box_holders(path: Path, run=subprocess.run) -> list[str]:
     return killed
 
 
+def _make_deletable(target: str) -> None:
+    """Clear whatever permission bit the filesystem is refusing the delete on.
+
+    **Add the bits, never assign them.** `chmod(S_IWRITE)` is the Windows idiom and says
+    exactly the right thing there -- clear the read-only attribute -- but on POSIX the
+    same constant is `0o200`, so it also takes away read and execute. A directory this
+    hook had touched then became untraversable, and every entry beneath it failed for a
+    reason that had nothing to do with the one that got us here.
+    """
+    try:
+        mode = os.stat(target, follow_symlinks=False).st_mode
+    except OSError:
+        mode = 0
+    wanted = stat.S_IWUSR | stat.S_IRUSR
+    if stat.S_ISDIR(mode):
+        wanted |= stat.S_IXUSR
+    try:
+        os.chmod(target, mode | wanted)
+    except OSError:
+        # A permission we cannot even change is the retry's problem to report, not ours.
+        pass
+
+
+def _retry_delete(failed_path: str) -> str:
+    """Delete one entry `rmtree` could not, by path. Empty string on success.
+
+    Deliberately **not** the callable `rmtree` hands the hook. On POSIX `rmtree` walks
+    with directory file descriptors, so that callable is `os.open`/`os.unlink`/`os.rmdir`
+    already spoken for by a `dir_fd` and a bare name -- calling it with a full path is a
+    `TypeError` (`open() missing required argument 'flags'`), which is not an `OSError`,
+    so it escaped the hook's `except` and aborted the very walk the hook exists to keep
+    going. Windows takes the path-based branch and never showed it; CI did, on the first
+    run.
+    """
+    _make_deletable(failed_path)
+    try:
+        if os.path.isdir(failed_path) and not os.path.islink(failed_path):
+            os.rmdir(failed_path)
+        else:
+            os.unlink(failed_path)
+    except OSError as exc:
+        return f"{failed_path}: {exc.strerror or exc}"
+    return ""
+
+
 def remove_tree_longpath(path: Path) -> str:
     """Delete `path` recursively, surviving Windows MAX_PATH. Empty string on success.
 
@@ -156,8 +201,9 @@ def remove_tree_longpath(path: Path) -> str:
     `git worktree remove` deletes with plain Win32 calls -- so a reap of a perfectly
     clean box died with `Filename too long`, leaving a half-deleted husk that
     classifies as `skipped` and reads as "holding work" forever. The `\\\\?\\` prefix
-    turns the limit off; the `onexc` hook clears the read-only bit that Windows also
-    uses to refuse deletion of some packaging artifacts.
+    turns the limit off; the `onexc` hook clears whatever the filesystem is refusing on
+    -- the read-only bit Windows uses for some packaging artifacts -- and retries the
+    delete **by path**.
 
     **The hook records a failure it cannot fix rather than raising it.** Re-raising
     aborts `rmtree` at the first unfixable entry, so one file a live process had mapped
@@ -172,12 +218,10 @@ def remove_tree_longpath(path: Path) -> str:
         target = "\\\\?\\" + os.path.abspath(target)
     failures: list[str] = []
 
-    def _clear_and_retry(func, failed_path, _exc):
-        try:
-            os.chmod(failed_path, stat.S_IWRITE)
-            func(failed_path)
-        except OSError as retry_exc:
-            failures.append(f"{failed_path}: {retry_exc.strerror or retry_exc}")
+    def _clear_and_retry(_func, failed_path, _exc):
+        failure = _retry_delete(failed_path)
+        if failure:
+            failures.append(failure)
 
     try:
         shutil.rmtree(target, onexc=_clear_and_retry)

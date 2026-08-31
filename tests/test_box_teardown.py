@@ -10,6 +10,7 @@ can afford to have go wrong.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -87,6 +88,56 @@ def test_a_locked_file_no_longer_costs_the_rest_of_the_tree(tmp_path, monkeypatc
     error = box_teardown.remove_tree_longpath(box_dir)
     assert "binding.node" in error.splitlines()[0]
     assert not (box_dir / "ordinary.txt").exists(), "one locked file stopped the whole walk"
+
+
+def test_a_dir_fd_flavoured_callback_is_recorded_rather_than_replayed(tmp_path, monkeypatch):
+    """The hook must delete by path, not replay the callable `rmtree` handed it.
+
+    On POSIX `rmtree` walks with directory file descriptors, so that callable is
+    `os.open`/`os.unlink`/`os.rmdir` still owed a `dir_fd` and a bare name. Replaying it
+    with a full path raised `TypeError: open() missing required argument 'flags'` —
+    not an `OSError`, so it went straight past the hook's `except` and aborted the very
+    walk the hook exists to keep going. Windows takes `rmtree`'s path-based branch and
+    never sees it; the first CI run did, on three tests at once.
+
+    Simulated rather than skipped on Windows: the contract that broke is what `rmtree`
+    passes `onexc`, and the fake passes exactly that.
+    """
+    box_dir = tmp_path / "demo--x-0806"
+    (box_dir / "nested").mkdir(parents=True)
+    (box_dir / "nested" / "binding.node").write_text("native", encoding="utf-8")
+
+    def fd_walking_rmtree(target, onexc=None, **_kwargs):
+        onexc(os.open, str(Path(target) / "nested"), PermissionError(13, "Access is denied"))
+
+    monkeypatch.setattr(shutil, "rmtree", fd_walking_rmtree)
+    error = box_teardown.remove_tree_longpath(box_dir)
+    assert "nested" in error
+
+
+def test_the_hook_leaves_the_directories_it_touched_traversable(tmp_path, monkeypatch):
+    """Clearing the read-only bit must not cost read and execute.
+
+    `chmod(S_IWRITE)` is the Windows spelling of "stop refusing this delete", but the
+    constant is `0o200`, and on POSIX assigning it takes a directory's read and execute
+    bits away. Every entry under a directory the hook had touched then failed for a
+    reason with nothing to do with the lock that got us here — including the assertions
+    of the test above it, which could no longer stat what they were checking was gone.
+    """
+    box_dir = tmp_path / "demo--x-0806"
+    (box_dir / "nested").mkdir(parents=True)
+    (box_dir / "nested" / "binding.node").write_text("native", encoding="utf-8")
+
+    real_unlink = os.unlink
+
+    def stubborn(path, *args, **kwargs):
+        if str(path).endswith("binding.node"):
+            raise PermissionError(13, "Access is denied")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", stubborn)
+    box_teardown.remove_tree_longpath(box_dir)
+    assert os.listdir(box_dir / "nested") == ["binding.node"]
 
 
 def test_force_remove_asks_for_an_eviction_only_after_a_delete_has_failed(tmp_path):
