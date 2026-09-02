@@ -23,6 +23,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import project_python
+except ImportError:
+    # Optional for the same reason as in `lint-all.py`: this script is copied into
+    # generated projects, and failing to import is not a reason to refuse to run tests.
+    project_python = None  # type: ignore[assignment]
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT = REPO_ROOT / "logs" / "test-failures.log"
 
@@ -121,4 +129,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Re-exec under the project's own virtualenv when this interpreter cannot import
+    # pytest. Invoked as `python scripts/run-tests.py` from an agent's shell, `python` is
+    # whatever is on PATH -- which on a workstation is the bare install, not the `.venv`
+    # holding the dev tools -- and the whole run died on "No module named pytest" with an
+    # artifact carrying only that line. `project_python` explains why an interpreter is
+    # resolved rather than a PATH: an agent's shell is never an activated one.
+    #
+    # In the `__main__` guard rather than inside `main()` so that a test calling `main()`
+    # directly stays in-process and testable.
+    code = project_python.re_exec(REPO_ROOT, "pytest", sys.argv) if project_python else None
+    sys.exit(main() if code is None else code)

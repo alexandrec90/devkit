@@ -33,15 +33,23 @@ repos:
         name: ruff (fix)
         # The same fixers `lint-fix.py` applies on every agent edit, so a human commit
         # and an agent commit converge on the same formatting rather than fighting.
-        entry: ruff check --fix --force-exclude
-        language: system
+        #
+        # Spawned through `run_ruff.py` rather than as a bare `ruff`: the entry resolved
+        # against PATH, and an agent's shell is never an activated one, so `git commit`
+        # from one failed with "Executable `ruff` not found" and refused the commit. The
+        # helper resolves the project's own interpreter instead. Deliberately NOT a
+        # pinned `ruff-pre-commit` rev -- that would be a second ruff, free to drift from
+        # the one `lint-fix.py` runs, and the pairing above is the whole point.
+        entry: scripts/precommit/run_ruff.py check --fix --force-exclude
+        language: script
         types_or: [python, pyi]
         require_serial: true
 
       - id: ruff-format
         name: ruff format
-        entry: ruff format --force-exclude
-        language: system
+        # Through the same helper, for the same reason as `ruff-check` above.
+        entry: scripts/precommit/run_ruff.py format --force-exclude
+        language: script
         types_or: [python, pyi]
         require_serial: true
 

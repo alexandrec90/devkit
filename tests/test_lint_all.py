@@ -63,6 +63,12 @@ def build_repo(root: Path, workflow: str = MINIMAL_WORKFLOW, env_example: bool =
     (root / "tests").mkdir()
     (root / ".github" / "workflows").mkdir(parents=True)
     shutil.copy2(REPO_ROOT / "scripts" / "lint-all.py", root / "scripts" / "lint-all.py")
+    # Copied too, so the fixture exercises the path a real project takes rather than the
+    # ImportError fallback. `test_the_runner_still_starts_without_its_interpreter_helper`
+    # is what covers the other branch, deliberately and on its own.
+    shutil.copy2(
+        REPO_ROOT / "scripts" / "project_python.py", root / "scripts" / "project_python.py"
+    )
     (root / ".github" / "workflows" / "ci.yml").write_text(workflow, encoding="utf-8")
     (root / "ruff.toml").write_text('[lint]\nselect = ["E4", "E7", "E9", "F"]\n', encoding="utf-8")
     (root / "tests" / "test_ok.py").write_text(
@@ -89,6 +95,25 @@ def run_lint(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+def test_the_runner_still_starts_without_its_interpreter_helper(tmp_path):
+    """`project_python.py` is an optimisation, not a dependency.
+
+    This script is copied into generated projects, and one that arrives without its
+    helper must still lint. A hard import turns "the interpreter could not be upgraded"
+    into "the linter will not start", which is worse than the behaviour it improves on —
+    and it is a `ModuleNotFoundError` before `main()`, so nothing writes an artifact and
+    the agent gets a traceback where a lint report should be.
+    """
+    root = build_repo(tmp_path / "repo")
+    (root / "scripts" / "project_python.py").unlink()
+    result = run_lint(root)
+    # The claim is that it RUNS, not that it passes: mypy legitimately objects to the
+    # import it can no longer resolve, and asserting exit 0 here would be asserting
+    # something this test does not care about.
+    assert "ModuleNotFoundError" not in result.stderr, result.stderr
+    assert "ruff: ok" in result.stdout, result.stdout + result.stderr
 
 
 # --------------------------------------------------------------------------
