@@ -142,10 +142,18 @@ it is in that code, and the file it was in is against a 500-line cap.
   was that the first session to leave one checked out turned the guard off for every
   session afterwards — the checkout became shared, unguarded space until someone parked
   it back on a home branch. Two sessions landed in one checkout that way, one of them
-  on a branch whose PR had already merged. `branch_has_own_commits` is the distinction,
-  and it is deliberately local (`git rev-list` against an already-fetched
-  `origin/<default>`, not a PR lookup) because this runs on every edit and a network
-  round trip in a PreToolUse hook is a hang. It **fails closed**: any error declines.
+  on a branch whose PR had already merged. `guard_probes.branch_protects_open_work` is
+  the distinction, and it has two producers. `branch_has_own_commits` is deliberately
+  local (`git rev-list` against an already-fetched `origin/<default>`, not a PR lookup)
+  because this runs on every edit and a network round trip in a PreToolUse hook is a
+  hang; it **fails closed**, so any error declines. `branch_is_a_sweep_park` is the
+  second, and it exists because this hook and `sweep.py --branch` disagreed: `--branch`
+  cuts an `agent/...` branch **in place**, from HEAD, precisely so a dirty tree comes
+  along untouched — and the branch then has no commits, so the next edit was routed into
+  a box cut from `origin/<default>`, which is the one place that work is not. It reads
+  the anchor marker `--branch` writes *and* requires the tree to be dirty: once the work
+  is committed the first producer answers, and a clean checkout on a spent task branch is
+  the shared-unguarded-space case above, which must still be routed.
 - **Nor is "does the branch have a devkit prefix".** That was the *other* half of the
   same mistake, and it survived the fix above until 2026-08-29: carameli parked on
   `add-call-status-icons` with PR #252 open blocked an edit and got a box off
@@ -154,8 +162,8 @@ it is in that code, and the file it was in is against a 500-line cap.
   replaces". A human's branch protects a PR exactly as an `agent/...` one does.
   `protectable` is the predicate: a managed prefix qualifies, and so does simply not
   being the branch `origin/HEAD` names. `default_branch_of` supplies the second half
-  and **fails open to `""`** — the opposite of `branch_has_own_commits`, because the
-  two unknowns have opposite costs. Not knowing whether a branch carries work must not
+  and **fails open to `""`** — the opposite of `guard_probes.branch_has_own_commits`,
+  because the two unknowns have opposite costs. Not knowing whether a branch carries work must not
   start diverting edits; not knowing which branch is *home* must not start allowing
   them onto one, which is why a checkout sitting on `master` with local commits still
   gets a box.
