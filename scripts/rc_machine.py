@@ -255,10 +255,16 @@ def user_idle_seconds() -> float | None:
     info = LastInput()
     info.cbSize = ctypes.sizeof(LastInput)
     try:
-        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+        # `sys.modules["ctypes"]` rather than the imported name: mypy resolves `windll`
+        # against the platform it is running on, so the bare attribute fails
+        # `[attr-defined]` on the Linux CI runner and the ignore that silences it there
+        # is an unused ignore here, under `warn_unused_ignores`. `scripts/reclaim.py`
+        # writes out why a `getattr` does not survive ruff's B009 autofix.
+        windll = sys.modules["ctypes"].windll
+        if not windll.user32.GetLastInputInfo(ctypes.byref(info)):
             return None
-        ticks = ctypes.windll.kernel32.GetTickCount64()
-    except (AttributeError, OSError):
+        ticks = windll.kernel32.GetTickCount64()
+    except (AttributeError, OSError, KeyError):
         return None
     # Both are milliseconds since boot. `GetTickCount64` rather than `GetTickCount` so
     # the arithmetic does not wrap after 49 days of uptime -- on a desktop left on all

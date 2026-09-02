@@ -77,13 +77,23 @@ POLL_MS = 120_000
 # larger icon cleanly while it cannot invent detail for a smaller one.
 ICON_SIZE = 16
 
-# Annotated `Any` rather than left to inference. `ctypes.windll.<x>` is untyped, so the
+# The Windows-only half of `ctypes`, reached through `sys.modules` rather than through
+# the imported name. mypy resolves an attribute against the platform it is *running* on,
+# so a bare `ctypes.windll` fails `[attr-defined]` on the Linux CI runner while the
+# `# type: ignore` that silences it there is an unused ignore on this Windows desktop --
+# and `warn_unused_ignores` is on, so neither spelling is green in both places. Indexing
+# `sys.modules` types as `ModuleType`, whose attributes are `Any`; a `getattr` with a
+# literal name would read better and not survive, because ruff's B009 autofix rewrites it
+# back to the attribute. `scripts/reclaim.py` carries the long form of this note.
+_win = sys.modules["ctypes"]
+
+# Annotated `Any` rather than left to inference. `windll.<x>` is untyped, so the
 # inferred type is `WinDLL | None` and every one of the twenty-odd calls below becomes a
 # union-attr error -- twenty suppressions for one fact the `os.name` guard already states
 # and `main` already enforces by refusing to run off Windows.
-user32: Any = ctypes.windll.user32 if os.name == "nt" else None
-shell32: Any = ctypes.windll.shell32 if os.name == "nt" else None
-kernel32: Any = ctypes.windll.kernel32 if os.name == "nt" else None
+user32: Any = _win.windll.user32 if os.name == "nt" else None
+shell32: Any = _win.windll.shell32 if os.name == "nt" else None
+kernel32: Any = _win.windll.kernel32 if os.name == "nt" else None
 
 # The Win32 surface this module uses, as data.
 #
@@ -213,7 +223,7 @@ class NOTIFYICONDATA(ctypes.Structure):
     )
 
 
-WNDPROC = ctypes.WINFUNCTYPE(
+WNDPROC = _win.WINFUNCTYPE(
     ctypes.c_longlong, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
 )
 
