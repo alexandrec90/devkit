@@ -314,6 +314,37 @@ def test_no_skill_wraps_a_command_the_gate_does_not_block():
     assert not offenders, "wrapped commands the gate does not block: " + "; ".join(offenders)
 
 
+def test_the_repo_carries_no_agents_md():
+    """Codex reads this repo's `CLAUDE.md` files; a repo-level `AGENTS.md` is a fork.
+
+    `project_doc_fallback_filenames = ["CLAUDE.md"]` at user scope is what points Codex
+    at the real instruction tier, and `~/.codex/AGENTS.md` carries the one generic bridge
+    for the rules Codex cannot discover. README says the rest outright: copying rule
+    bodies into an `AGENTS.md` creates a second instruction tree that can drift.
+
+    This is a regression test with a specific incident behind it. On 2026-09-02 an
+    `AGENTS.md` appeared in this checkout, untracked, produced by running the root
+    `CLAUDE.md` through `CLAUDE.md`->`AGENTS.md` and a case-insensitive `claude`->`Codex`
+    -- which is why it opened "the portable agent-coding harness for Codex / Codex" and
+    pointed at nine paths (`.Codex/rules/engineering.md`, `scripts/AGENTS.md`, ...) that
+    have never existed. Nothing generated it and nothing would have regenerated it.
+
+    `test_documented_paths_exist` caught that one only by accident, through those dead
+    paths. A *correct* find-and-replace would have produced a file with every path
+    resolving and no gate with anything to say -- an authoritative second tree, silently.
+    So the invariant worth asserting is the file's absence, not its contents.
+    """
+    found = sorted(
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in REPO_ROOT.rglob("AGENTS.md")
+        if not any(part in _UNSEARCHED for part in path.relative_to(REPO_ROOT).parts)
+    )
+    assert not found, (
+        "a second instruction tree: " + ", ".join(found) + "\nCodex reads CLAUDE.md here "
+        "(project_doc_fallback_filenames). Delete it rather than maintaining a mirror."
+    )
+
+
 def test_documented_paths_exist():
     """A path a document names is a claim the repo has to keep."""
     missing: list[str] = []
