@@ -123,7 +123,6 @@ ARTIFACTS: dict[str, str] = {
     "devkit-upgrade-projects": "logs/upgrade.log",
     "devkit-docker-prune": "logs/scheduled-docker-prune.log",
     "devkit-docker-stop-idle": "logs/scheduled-docker-stop-idle.log",
-    "devkit-vanillaland-merge": "logs/scheduled-vanillaland-merge-develop.log",
     "devkit-global-tools": "logs/global-tools.log",
 }
 

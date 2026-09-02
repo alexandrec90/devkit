@@ -4,9 +4,8 @@ paths:
   - workspace.jsonc
   - scripts/devkit_project.py
   - scripts/git-merge-default.py
-  - scripts/vanillaland-e2e.py
   - tests/test_devkit_project.py
-  - tests/test_vanillaland_e2e.py
+  - tests/test_git_merge_default.py
   - tests/test_self_hosting.py
 ---
 
@@ -60,15 +59,14 @@ without turning that exclusion into an exception. Each resolves against the **ra
 registry instead, and neither moves the dispatcher's contract:
 
 - `scripts/git-merge-default.py` merges a trunk in and needs git alone. Its picker,
-  `mergeCheckout`, is the one listing *more* than the registry —
-  `insert_picker_option` maintains it, and a test pins the equality both ways.
+  `mergeCheckout`, lists the RAW registry — every checkout, reference ones included —
+  where the dispatcher's `project` picker lists `known_projects`. The two coincide
+  while `NOT_PROJECTS` is empty and must not be collapsed into one because of it:
+  `insert_picker_option` maintains both, and a test pins each to its own source.
   (`adoptProjects` is the mirror image, listing one *less*; see the `--all` bullet
   below.)
-- `scripts/vanillaland-e2e.py` runs the start script VanillaLand itself ships and needs
-  PowerShell alone. It carries **no** picker: one checkout owns that stack, so the name
-  is a constant and `--checkout` stays a flag only so the tests can aim it elsewhere.
 
-Both docstrings carry the rest.
+Its docstring carries the rest.
 
 ## Changing a task: edit devkit's copy, on a branch, then render
 

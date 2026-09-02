@@ -21,7 +21,20 @@ guard = load_script("scripts/worktree-guard.py")
 # Read from the registry module rather than through `guard`: the coupling under test is
 # that the hook *uses* this, and reaching for it via the hook would make a revert that
 # drops the import an ImportError at collection instead of a failing assertion.
+#
+# The set is EMPTY today. The two tests below used to parametrize over it, which now
+# collects nothing -- a check that disappears rather than one that passes. They name a
+# reference checkout and put it in the set instead, so the wiring stays covered for the
+# day one is registered again.
 NOT_PROJECTS = devkit_project.NOT_PROJECTS
+REFERENCE = "reference-checkout"
+
+
+@pytest.fixture
+def reference(monkeypatch):
+    monkeypatch.setattr(devkit_project, "NOT_PROJECTS", frozenset({REFERENCE}))
+    return REFERENCE
+
 
 PROJECTS = ["carameli", "carameli-b", "ibkr_trader", "apt-finder", "apt-finder-b", "devkit"]
 
@@ -779,18 +792,17 @@ def test_an_in_checkout_edit_on_a_task_branch_is_allowed(root, monkeypatch):
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
 
 
-@pytest.mark.parametrize("reference", sorted(NOT_PROJECTS))
 def test_an_edit_into_a_reference_checkout_is_allowed(root, monkeypatch, reference):
     """A checkout in `folders` but not in the registry gets no box, whatever branch it
     is parked on.
 
     The wiring is the assertion: `main` builds its project list with `known_projects`,
     which subtracts `NOT_PROJECTS`, rather than with `sweep.parse_workspace` directly.
-    Read raw, the registry would put `VanillaLand` behind a block and cut it an
-    ephemeral box on a `claude/...` branch -- for a reference checkout that ships
-    nothing, has no harness, and whose Azure DevOps remote has no PR for that branch to
-    become. `redirect_decision` cannot express this: it takes the project list as an
-    argument, so only the shell can be wrong about it.
+    Read raw, the registry would put a reference checkout behind a block and cut it an
+    ephemeral box on an `agent/...` branch -- for a checkout that ships nothing, has no
+    harness, and may well have a remote with no PR for that branch to become.
+    `redirect_decision` cannot express this: it takes the project list as an argument,
+    so only the shell can be wrong about it.
     """
     (root / reference).mkdir()
     workspace = _workspace(root, extra=[reference])
@@ -803,7 +815,6 @@ def test_an_edit_into_a_reference_checkout_is_allowed(root, monkeypatch, referen
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
 
 
-@pytest.mark.parametrize("reference", sorted(NOT_PROJECTS))
 def test_a_project_scoped_session_may_still_edit_a_reference_checkout(root, monkeypatch, reference):
     """The exemption is a property of the *target*, not of where the session is rooted.
 

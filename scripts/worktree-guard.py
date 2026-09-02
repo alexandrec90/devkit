@@ -1109,8 +1109,8 @@ def switch_decision(
 
     Three cases allow, and each is somebody else's decision already made:
 
-    - a directory under no registered checkout at all -- a scratch clone, `VanillaLand`,
-      anything outside the workspace. Same silence every other tier keeps there;
+    - a directory under no registered checkout at all -- a scratch clone, a reference
+      checkout, anything outside. Same silence every other tier keeps there;
     - a box already standing on this branch, which is what `worktree.py resume` leaves
       behind and what re-attaching after a detached HEAD does;
     - a path under `.worktrees/` that is in no live box -- a husk, a stray directory.

@@ -127,10 +127,8 @@ def source_checkout(repo_root: Path) -> Path:
 
 DEFAULT_WORKSPACE = default_workspace(REPO_ROOT)
 
-# Checkouts in the workspace that this sweep does not manage. VanillaLand is the
-# legacy Azure DevOps monolith: different host, different PR API, `develop` base,
-# and it is a reference checkout rather than something we ship from.
-DEFAULT_EXCLUDE: frozenset[str] = frozenset({"VanillaLand"})
+# Checkouts this sweep does not manage. Empty since 2026-09-02, kept as a mechanism.
+DEFAULT_EXCLUDE: frozenset[str] = frozenset()
 
 Git = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -398,7 +396,7 @@ def on_hold(text: str) -> frozenset[str]:
     return frozenset(name for name in names if isinstance(name, str) and name)
 
 
-def parse_workspace(text: str, exclude: frozenset[str] = DEFAULT_EXCLUDE) -> list[str]:
+def parse_workspace(text: str, exclude: frozenset[str] | None = None) -> list[str]:
     """Folder names from a `.code-workspace` file, minus `exclude`, in file order.
 
     Parsed through `devkit_jsonc`, not `json`: the workspace file is hand-edited,
@@ -410,6 +408,8 @@ def parse_workspace(text: str, exclude: frozenset[str] = DEFAULT_EXCLUDE) -> lis
     raising: a broken workspace file should make the sweep report nothing, not
     crash a root-level task.
     """
+    # Resolved here: a default argument would bind the empty set at import time.
+    exclude = DEFAULT_EXCLUDE if exclude is None else exclude
     try:
         payload = devkit_jsonc.loads(text)
     except (json.JSONDecodeError, TypeError):
@@ -1788,7 +1788,7 @@ def main(argv: list[str] | None = None) -> int:
         "--exclude",
         action="append",
         default=None,
-        help="checkout name to skip; repeatable (default: VanillaLand)",
+        help="checkout name to skip; repeatable (default: skip nothing)",
     )
     # Paired for the same reason as --dry-run/--yes: the VS Code picker has to emit
     # a real token on the "every checkout" branch too, and an empty string would

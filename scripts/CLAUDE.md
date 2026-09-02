@@ -318,7 +318,7 @@ match. Every caller uses that answer to strip a prefix off a topic, so a first-m
 ## A scheduled task is registered from XML, never from `schtasks` flags
 
 Every unattended job — `install-reconcile-task.py`, `install-upgrade-schedule.py`,
-`install-release-schedule.py`, `install-docker-prune.py`, `install-vanillaland-merge.py`,
+`install-release-schedule.py`, `install-docker-prune.py`, `install-docker-stop-idle.py`,
 `install-global-tools.py` —
 goes through
 `scripts/devkit_schtasks.py`, which builds a
@@ -346,8 +346,8 @@ Two things a change here has to keep:
   day.
 - **The interpreter is part of "which checkout", not part of the environment.**
   `--devkit` exists so an agent in a box can register a job against the static checkout,
-  and `install-vanillaland-merge.py` moved every *script* path across while leaving
-  `sys.executable` — the box's own `.venv` — as the interpreter. `reconcile` deletes that
+  and an installer once moved every *script* path across while leaving `sys.executable`
+  — the box's own `.venv` — as the interpreter. `reconcile` deletes that
   when the PR merges, so the escape hatch registered the exact failure it was the escape
   from, silently and only after the box was reaped. `interpreter(root)` is the fix; when
   the named checkout has no virtualenv, `sys._base_executable` is the only interpreter in

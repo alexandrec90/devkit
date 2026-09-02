@@ -31,11 +31,9 @@
 	// there is no longer a task to run by hand instead. `new-project.py`
 	// registers new projects here rather than writing a workspace file of its own.
 	//
-	// VanillaLand is the legacy Azure DevOps monolith Carameli replaces: a reference
-	// checkout, not something we ship from. It is excluded by `sweep.DEFAULT_EXCLUDE`
-	// and `devkit_project.NOT_PROJECTS`, and it is a SINGLE SHARED CHECKOUT — both the
-	// primary and -b agents edit the same files, so hand ownership over explicitly
-	// (launch-agent-tabs.ps1 -VanillaLandOwners) rather than assuming it.
+	// A *reference* checkout — one registered here to be read but never shipped from —
+	// goes in `sweep.DEFAULT_EXCLUDE` and `devkit_project.NOT_PROJECTS` as well. Both
+	// sets are empty today: every folder below is a real project.
 	"folders": [
 		{
 			"path": "carameli"
@@ -54,10 +52,6 @@
 		},
 		{
 			"path": "roguelike"
-		},
-		{
-			"name": "VanillaLand (reference)",
-			"path": "VanillaLand"
 		}
 	],
 	"extensions": {
@@ -375,12 +369,12 @@
 				"problemMatcher": []
 			},
 			{
-				// The one task that reaches a REFERENCE checkout, and the reason it is
-				// not a devkit_project.py dispatch: that dispatcher resolves through
+				// The one task that can reach a checkout with no harness, and the reason
+				// it is not a devkit_project.py dispatch: that dispatcher resolves through
 				// `known_projects`, which drops NOT_PROJECTS because every action it
 				// runs needs a harness. Merging a trunk in needs git and nothing else,
-				// so this script resolves against the raw registry and its picker lists
-				// VanillaLand alongside the projects.
+				// so this script resolves against the raw registry — which is why its
+				// picker can still list a reference checkout once one is registered.
 				//
 				// It MERGES, which is what long-lived work wants: the history is already
 				// published, so it must not be rewritten. There used to be a sibling above
@@ -391,7 +385,7 @@
 				// not give: a conflict left in progress with every unmerged file named in
 				// a log file, which is what makes the outcome handable to an agent.
 				"label": "Git: Merge Origin Default into Current Branch",
-				"detail": "Fetch, then MERGE origin's default branch — auto-detected, so `develop` in VanillaLand — into whatever branch the chosen checkout is on. Commits locally and NEVER pushes. On conflict the merge is LEFT IN PROGRESS and every unmerged file is named in devkit's logs/git-merge-origin-default-into-current-branch.log; hand that file to a coding agent.",
+				"detail": "Fetch, then MERGE origin's default branch — auto-detected per checkout, so a repo whose trunk is `develop` merges `develop` — into whatever branch the chosen checkout is on. Commits locally and NEVER pushes. On conflict the merge is LEFT IN PROGRESS and every unmerged file is named in devkit's logs/git-merge-origin-default-into-current-branch.log; hand that file to a coding agent.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -721,44 +715,6 @@
 				"icon": {
 					"id": "radio-tower",
 					"color": "terminal.ansiBrightMagenta"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			// --- scoped: the reference checkout ----------------------------------
-			// The second task to reach VanillaLand, and the second one that cannot be a
-			// `devkit_project.py` dispatch: that dispatcher resolves through
-			// `known_projects`, which drops NOT_PROJECTS because every action it runs
-			// needs a harness. Running a start script the checkout itself ships needs
-			// PowerShell and nothing else, so `scripts/vanillaland-e2e.py` resolves
-			// against the raw registry the way `git-merge-default.py` does.
-			{
-				"label": "Start: VanillaLand IIS Express",
-				"detail": "Run VanillaLand's own .local/carameli-e2e/start.ps1: the persisted vs-sql container, the local SOAP stand-ins, and both 64-bit IIS Express sites (VoipApi :8085, classic web UI :8022), waiting for each to answer — up to ~3 min on a cold start while .NET JITs. Idempotent: a port already listening is left alone. Needs a machine seeded per that checkout's .local/carameli-e2e/README.md. Stops nothing.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/notify-wrap.py",
-					"Start: VanillaLand IIS Express",
-					"--",
-					"python",
-					"scripts/log-wrap.py",
-					"Start: VanillaLand IIS Express",
-					"--",
-					"python",
-					"scripts/vanillaland-e2e.py"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "server-process",
-					"color": "terminal.ansiMagenta"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1331,11 +1287,6 @@
 									"description": "carameli only · Chromium, Firefox, WebKit; NEEDS the stack and Vite up"
 								},
 								{
-									"label": "Local integration E2E — carameli ↔ VanillaLand",
-									"value": "local-e2e",
-									"description": "carameli only · boots local IIS Express + vs-sql via VS_REPO_DIR; needs a filled .env.local-e2e"
-								},
-								{
 									// The two paid rows, last in the list so that the distance
 									// from `suite` is as large as the menu can make it. They
 									// were one task with a single-pick of claude/codex/both;
@@ -1765,16 +1716,16 @@
 				"default": "4"
 			},
 			{
-				// MAINTAINED BY new-project.py, like `project` — and it is the only
-				// picker that lists MORE than the registry, because the reference
-				// checkout can take this action and no other. Single-pick: a merge
+				// MAINTAINED BY new-project.py, like `project` — but from the RAW
+				// registry rather than `known_projects`, because a reference checkout
+				// can take this action and no other. The two lists coincide only while
+				// `NOT_PROJECTS` is empty, which is the case today. Single-pick: a merge
 				// conflict is resolved per repo, so batching them would just queue up
 				// two half-finished merges.
 				"id": "mergeCheckout",
 				"type": "pickString",
 				"description": "Which checkout should take origin's default branch?",
 				"options": [
-					"VanillaLand",
 					"carameli",
 					"ibkr_trader",
 					"devkit",
@@ -1782,13 +1733,14 @@
 					"sports_betting",
 					"roguelike"
 				],
-				"default": "VanillaLand"
+				"default": "carameli"
 			},
 			{
 				// Every branch supplies one real token — `auto` rather than "" — for the
 				// reason spelled out on `newProjectRemote`. `auto` reads the branch off
-				// refs/remotes/origin/HEAD, which is already `develop` in VanillaLand;
-				// the named ones are for merging from somewhere other than the trunk.
+				// refs/remotes/origin/HEAD, so a repo whose trunk is `develop` needs no
+				// entry here; the named ones are for merging from somewhere other than
+				// the trunk.
 				"id": "mergeBase",
 				"type": "pickString",
 				"description": "Which branch to merge FROM",

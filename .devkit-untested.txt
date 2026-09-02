@@ -64,8 +64,6 @@ scripts/install-global-tools.py::runner_script
 scripts/install-global-tools.py::uninstall_argv
 scripts/install-reconcile-task.py::query_argv
 scripts/install-reconcile-task.py::worktree_script
-scripts/install-vanillaland-merge.py::query_argv
-scripts/install-vanillaland-merge.py::uninstall_argv
 scripts/lint-all.py::changed_python_files
 scripts/lint-all.py::explicit_paths
 scripts/lint-all.py::python_targets
@@ -148,7 +146,6 @@ scripts/upgrade-project.py::run_pull
 scripts/upgrade-project.py::run_scoped
 scripts/upgrade-project.py::source_at_tag
 scripts/upgrade-project.py::verify_pull
-scripts/vanillaland-e2e.py::run_attached
 scripts/workspace-status.py::behind_line
 scripts/workspace-status.py::schedule_lines
 scripts/workspace-status.py::stranded_line

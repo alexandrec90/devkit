@@ -3919,13 +3919,18 @@ def test_sync_checkouts_asks_sweep_for_the_sync_mode_and_applies_it(workspace, m
 
 
 def test_the_reference_checkout_is_never_swept(tmp_path, monkeypatch):
-    """VanillaLand is an Azure DevOps reference checkout on a `develop` base, and
-    nothing in this workspace ships from it. Reading the exclusion off
-    `sweep.parse_workspace` rather than re-listing it here is what keeps the scheduled
-    pass and the hand-run sweep agreeing about which checkouts exist."""
+    """A reference checkout is registered to be read, not shipped from. Reading the
+    exclusion off `sweep.parse_workspace` rather than re-listing it here is what keeps
+    the scheduled pass and the hand-run sweep agreeing about which checkouts exist.
+
+    `DEFAULT_EXCLUDE` is empty today, so the name is put in it here; without that the
+    test would pass whatever `sync_checkouts` did with the exclusion.
+    """
+    monkeypatch.setattr(sweep, "DEFAULT_EXCLUDE", frozenset({"reference-checkout"}))
     registry = tmp_path / "registry.code-workspace"
     registry.write_text(
-        json.dumps({"folders": [{"path": "carameli"}, {"path": "VanillaLand"}]}), encoding="utf-8"
+        json.dumps({"folders": [{"path": "carameli"}, {"path": "reference-checkout"}]}),
+        encoding="utf-8",
     )
     swept: list[list[str]] = []
     monkeypatch.setattr(

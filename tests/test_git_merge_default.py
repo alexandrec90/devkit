@@ -12,6 +12,8 @@ state the next step needs.
 `NOT_PROJECTS`, and every other workspace tool subtracts something similar, because the
 actions they dispatch need a harness. This one needs git and nothing else, so it
 resolves against the raw registry -- and that is the seam the task was written for.
+`NOT_PROJECTS` is empty today, so the seam is covered by putting a name in it rather
+than by naming a live checkout.
 """
 
 import json
@@ -32,7 +34,7 @@ resolve_base = merge_default.resolve_base
 target_repo = merge_default.target_repo
 MergeError = merge_default.MergeError
 
-REPO = Path("C:/checkouts/VanillaLand")
+REPO = Path("C:/checkouts/reference-checkout")
 
 # The fixture registries below are deliberately NOT named `alex-projects.code-workspace`:
 # `test_self_hosting.py` treats that literal in an unmarked test as a read of the live
@@ -92,29 +94,37 @@ def run(fake, base=merge_default.AUTO, remote="origin"):
 # --- the registry seam ------------------------------------------------------
 
 WORKSPACE = json.dumps(
-    {"folders": [{"path": "carameli"}, {"path": "devkit"}, {"path": "VanillaLand"}]}
+    {"folders": [{"path": "carameli"}, {"path": "devkit"}, {"path": "reference-checkout"}]}
 )
 
 
-def test_the_reference_checkout_is_reachable_from_here():
+def test_the_reference_checkout_is_reachable_from_here(monkeypatch):
     """The point of the whole script. Every other workspace tool drops this checkout
     because its actions need a harness; a merge needs git, so dropping it here would
-    remove the one the task was written for."""
-    assert "VanillaLand" in every_checkout(WORKSPACE)
-    assert "VanillaLand" not in devkit_project.known_projects(WORKSPACE)
+    remove the one the task was written for.
+
+    `NOT_PROJECTS` is empty today, so the two lists coincide on the live registry and
+    the seam would pass vacuously. Putting a name in it is what still asserts the
+    difference — and the difference is the reason this script is not a dispatch.
+    """
+    monkeypatch.setattr(devkit_project, "NOT_PROJECTS", frozenset({"reference-checkout"}))
+    assert "reference-checkout" in every_checkout(WORKSPACE)
+    assert "reference-checkout" not in devkit_project.known_projects(WORKSPACE)
 
 
 def test_a_named_checkout_resolves_to_its_directory(tmp_path):
     workspace = tmp_path / "registry.code-workspace"
     workspace.write_text(WORKSPACE, encoding="utf-8")
-    (tmp_path / "VanillaLand").mkdir()
-    assert target_repo("VanillaLand", workspace) == tmp_path / "VanillaLand"
+    (tmp_path / "reference-checkout").mkdir()
+    assert target_repo("reference-checkout", workspace) == tmp_path / "reference-checkout"
 
 
 def test_an_unknown_checkout_names_the_real_ones(tmp_path):
     workspace = tmp_path / "registry.code-workspace"
     workspace.write_text(WORKSPACE, encoding="utf-8")
-    with pytest.raises(devkit_project.ProjectError, match=r"unknown checkout 'nope'.*VanillaLand"):
+    with pytest.raises(
+        devkit_project.ProjectError, match=r"unknown checkout 'nope'.*reference-checkout"
+    ):
         target_repo("nope", workspace)
 
 
@@ -125,14 +135,14 @@ def test_no_checkout_means_the_current_directory(tmp_path, monkeypatch):
 
 def test_a_missing_registry_is_reported_rather_than_traced(tmp_path):
     with pytest.raises(MergeError, match="cannot read the workspace registry"):
-        target_repo("VanillaLand", tmp_path / "missing.code-workspace")
+        target_repo("reference-checkout", tmp_path / "missing.code-workspace")
 
 
 # --- choosing the base ------------------------------------------------------
 
 
 def test_the_base_is_read_off_the_remote_by_default():
-    """VanillaLand's trunk is `develop`; nothing here knows that, and it must not."""
+    """The fixture repo's trunk is `develop`; nothing here knows that, and it must not."""
     assert resolve_base(FakeGit(), "origin", merge_default.AUTO) == "develop"
 
 
@@ -504,16 +514,18 @@ def test_the_remediation_block_says_where_the_work_went_only_when_it_went_somewh
 def test_main_runs_against_the_checkout_it_was_given(tmp_path):
     workspace = tmp_path / "registry.code-workspace"
     workspace.write_text(WORKSPACE, encoding="utf-8")
-    (tmp_path / "VanillaLand").mkdir()
+    (tmp_path / "reference-checkout").mkdir()
     seen = {}
 
     def factory(repo):
         seen["repo"] = repo
         return FakeGit()
 
-    code = main(["--checkout", "VanillaLand", "--workspace", str(workspace)], run_factory=factory)
+    code = main(
+        ["--checkout", "reference-checkout", "--workspace", str(workspace)], run_factory=factory
+    )
     assert code == 0
-    assert seen["repo"] == tmp_path / "VanillaLand"
+    assert seen["repo"] == tmp_path / "reference-checkout"
 
 
 def test_main_reports_a_bad_checkout_without_touching_git(tmp_path, capsys):
