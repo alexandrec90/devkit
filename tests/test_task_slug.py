@@ -102,6 +102,21 @@ def test_main_records_the_prompts_topic_for_the_session(tmp_path, monkeypatch):
     assert "please" not in recorded
 
 
+def test_main_does_not_replace_the_task_with_a_task_notification(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    task_slug.record(tmp_path, "sess-9", "serialize-auth-skin-load")
+    payload = json.dumps(
+        {
+            "session_id": "sess-9",
+            "prompt": "<task-notification>Background command completed successfully</task-notification>",
+        }
+    )
+    monkeypatch.setattr("sys.stdin", _stdin(payload))
+
+    assert task_slug.main(["--workspace", str(workspace)]) == 0
+    assert task_slug.read(tmp_path, "sess-9") == "serialize-auth-skin-load"
+
+
 def test_main_is_silent_without_a_workspace_file(tmp_path, monkeypatch):
     """A CI runner, a fresh clone, anyone else's machine: there is no box tier."""
     monkeypatch.setattr("sys.stdin", _stdin(json.dumps({"session_id": "s", "prompt": "x"})))
