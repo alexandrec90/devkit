@@ -192,6 +192,56 @@ def test_uv_pin_is_honoured_when_a_dev_lock_provides_one(tmp_path):
     assert "uv==0.4.18" in output, output
 
 
+def test_the_pinned_interpreter_reaches_both_the_venv_and_the_install(tmp_path):
+    """`python -m venv` can only ever copy the interpreter running it, so a project
+    pinned to 3.12 got a venv on whatever the sandbox default is and was reported as
+    provisioned -- the mismatch surfacing later as a resolution or type-check failure
+    that reads as broken code. `worktree.venv_step` fixed this for boxes; this file,
+    which is vendored into every project, never got the matching change. The pin has to
+    reach the install too: `requires-python` in a lock is a floor, not a pin."""
+    project, log, env_file = _make_project(
+        tmp_path,
+        {
+            "uv.lock": "",
+            "pyproject.toml": PYPROJECT,
+            ".devkit.toml": '[python]\nversion = "3.12"\n',
+        },
+    )
+    rc, output, written = _run(project, log, env_file)
+    assert rc == 0, output
+    assert "uv venv --python 3.12 .venv" in output, output
+    assert "sync --all-extras --all-groups --python 3.12" in output, output
+    assert PATH_EXPORT in written
+
+
+def test_an_unpinned_project_keeps_the_plain_venv_and_the_plain_sync(tmp_path):
+    """The pin is an override, not a requirement: a project that declares none must not
+    start paying for an interpreter fetch it never asked for."""
+    project, log, env_file = _make_project(tmp_path, {"uv.lock": "", "pyproject.toml": PYPROJECT})
+    rc, output, _ = _run(project, log, env_file)
+    assert rc == 0, output
+    assert "uv venv" not in output, output
+    assert "--python" not in output.split("sync --all-extras --all-groups")[-1].splitlines()[0]
+
+
+def test_a_venv_already_on_the_pinned_version_is_not_rebuilt(tmp_path):
+    """The rebuild is the expensive branch and it is idempotent-by-check, not by luck:
+    every session start would otherwise throw away a correct venv and re-fetch it."""
+    project, log, env_file = _make_project(
+        tmp_path,
+        {
+            "uv.lock": "",
+            "pyproject.toml": PYPROJECT,
+            ".devkit.toml": '[python]\nversion = "3.12"\n',
+        },
+    )
+    (project / ".venv" / "pyvenv.cfg").write_text("version = 3.12.7\n", encoding="utf-8")
+    rc, output, _ = _run(project, log, env_file)
+    assert rc == 0, output
+    assert "uv venv" not in output, output
+    assert "sync --all-extras --all-groups --python 3.12" in output, output
+
+
 def test_missing_uv_pin_falls_back_to_unpinned_uv(tmp_path):
     """The `:?`-to-`:+` fix: no pin must mean plain `uv`, not a dead shell."""
     project, log, env_file = _make_project(tmp_path, {"pyproject.toml": PYPROJECT})

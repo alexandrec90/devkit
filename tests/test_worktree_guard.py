@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -452,6 +453,46 @@ def test_an_edit_from_outside_onto_a_spent_task_branch_gets_a_box(root):
     assert decision == ("carameli", str(Path("app/main.py")))
 
 
+def test_a_branch_sweep_parked_uncommitted_work_on_protects_it(tmp_path):
+    """The two tools disagreed. `sweep.py --branch` cuts an `agent/...` branch in place,
+    from HEAD, precisely so a dirty tree comes along untouched -- and the branch then has
+    no commits, so the very next edit was routed into a box cut from `origin/<default>`,
+    which is the one place that work is not. The sanctioned "park stranded work on a
+    branch, then commit it" flow could not reach its own second step.
+
+    Driven against a real repository rather than a stubbed git: the probe reads a marker
+    git itself resolves the path of, and `rev-parse --git-path` is the half a stub would
+    have to fake to get right."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    marker = guard.worktree.sweep.ANCHOR_MARKER_NAME
+    assert guard.guard_probes.branch_is_a_sweep_park(tmp_path, marker) is False
+
+    (tmp_path / ".git" / marker).write_text("main\n", encoding="utf-8")
+    assert guard.guard_probes.branch_is_a_sweep_park(tmp_path, marker) is False, (
+        "an anchor alone protects nothing -- a clean checkout on a spent task branch is "
+        "the shared-unguarded-space case, and it must still be routed"
+    )
+
+    (tmp_path / "app.py").write_text("changed\n", encoding="utf-8")
+    assert guard.guard_probes.branch_is_a_sweep_park(tmp_path, marker) is True
+
+
+def test_branch_has_own_commits_fails_closed_on_its_own(tmp_path):
+    """The first producer, asserted where it now lives. It **fails closed** -- every
+    error is True, meaning "decline, leave the edit alone" -- which is the opposite of
+    the park probe beside it, and the reason a broken repo declines before that one is
+    ever reached."""
+    detect = guard.worktree.sweep.tb.detect_default_branch
+    assert guard.guard_probes.branch_has_own_commits(tmp_path, lambda git: "main") is True
+    assert guard.guard_probes.branch_has_own_commits(tmp_path, detect) is True
+
+
+def test_the_park_probe_declines_when_git_will_not_answer(tmp_path):
+    """The widening term fails to False, unlike every other probe in that module: a
+    probe that cannot read the repo must not be what turns the guard off."""
+    assert guard.guard_probes.branch_is_a_sweep_park(tmp_path, "agent-anchor") is False
+
+
 def test_an_edit_from_outside_onto_a_task_branch_holding_work_is_left_alone(root):
     """`upgrade-project.py` leaves a checkout parked on `claude/devkit-upgrade-<mmdd>`
     holding the adoption its commit gate rejected. A box would put a fix somewhere that
@@ -473,7 +514,7 @@ def test_branch_has_own_commits_fails_closed_when_git_will_not_answer(tmp_path):
     """A directory that is not a repo stands in for every way the probe can fail. The
     hook must not start diverting edits into boxes on the strength of a failed
     subprocess: declining is what it did for every task branch before this existed."""
-    assert guard.branch_has_own_commits(tmp_path) is True
+    assert guard.branch_protects_open_work(tmp_path) is True
 
 
 def test_an_edit_already_inside_a_box_is_left_alone(root):
@@ -867,7 +908,7 @@ def test_the_message_names_the_branch_the_decision_was_made_on(root, monkeypatch
     """
     workspace = _workspace(root)
     monkeypatch.setattr(guard, "current_branch", on_branch("claude/dual-vendor-status-audit-0813"))
-    monkeypatch.setattr(guard, "branch_has_own_commits", has_commits(False))
+    monkeypatch.setattr(guard, "branch_protects_open_work", has_commits(False))
     monkeypatch.setattr(guard.worktree, "plan_new", lambda *a, **k: _plan(root))
     monkeypatch.setattr(guard.worktree, "apply_new", lambda *a, **k: (True, []))
     monkeypatch.setattr(

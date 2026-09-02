@@ -115,3 +115,89 @@ def path_is_exempt(checkout: Path, target: Path) -> bool:
     worktree, so one more local git call is not the expensive part of that turn.
     """
     return path_is_ignored(checkout, target) or path_is_modified(checkout, target)
+
+
+def branch_has_own_commits(checkout: Path, detect_default) -> bool:
+    """True when `checkout`'s HEAD carries commits `origin/<default>` does not.
+
+    One of the two producers of `needs_box`'s `protects_open_work`: a task branch with
+    commits of its own has somewhere for an edit to belong -- an open PR, or one about
+    to exist. A task branch with none is either freshly cut or already merged, and in
+    both cases a box strands nothing.
+
+    Local only, deliberately. The honest question is "has this branch got an open PR",
+    and asking GitHub would answer it exactly -- but this runs in a PreToolUse hook on
+    every edit that reaches a static checkout, where a network round trip is latency the
+    agent experiences as a hang. `git rev-list` against the *already fetched*
+    `origin/<default>` costs milliseconds and agrees with the PR in every case that
+    matters; the disagreement is a branch pushed and merged since the last fetch, which
+    the next fetch resolves.
+
+    `detect_default` is injected rather than imported so this module keeps its one
+    property: nothing here loads anything. The guard passes `task_branch`'s resolver.
+
+    **Fails closed** -- every error returns True, meaning "decline, leave the edit
+    alone". A hook that cannot read the repo must not start diverting edits into boxes
+    on the strength of a failed subprocess.
+    """
+    try:
+        default = detect_default(lambda *args: git(checkout, *args))
+        probe = git(checkout, "rev-list", "--count", f"origin/{default}..HEAD")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return True
+    if probe.returncode != 0:
+        return True
+    try:
+        return int(probe.stdout.strip()) > 0
+    except ValueError:
+        return True
+
+
+def branch_is_a_sweep_park(checkout: Path, marker: str) -> bool:
+    """True when `sweep.py --branch` parked this checkout's uncommitted work here.
+
+    The other producer of `protects_open_work`, and the two tools disagreed without it.
+    `--branch` cuts an `agent/...` branch **in place**, from HEAD, precisely so a dirty
+    tree comes along untouched -- and the branch then has no commits, so the very next
+    edit was routed into a box cut from `origin/<default>`, which is the one place that
+    work is not. The sanctioned "park stranded work on a branch, then commit it" flow
+    could not reach its own second step.
+
+    Two terms, and both are needed. `marker` is the anchor file `--branch` writes and
+    nothing else does, so it names this exact flow rather than any task branch (the
+    guard passes `sweep.ANCHOR_MARKER_NAME`, so there is no second copy of the name).
+    Dirtiness is what makes a box strand something: once the work is committed,
+    `branch_has_own_commits` answers on its own, and a *clean* checkout left on a spent
+    task branch is the shared-unguarded-space case `needs_box` was rewritten to close --
+    so it must still be routed.
+
+    Fails to False, unlike every other probe here: this is the widening term, and a
+    probe that cannot read the repo must not be the thing that turns the guard off.
+    `branch_has_own_commits` is asked first and fails closed, so a broken repo declines
+    before this is ever reached.
+    """
+    try:
+        anchor = git(checkout, "rev-parse", "--git-path", marker)
+        if anchor.returncode != 0:
+            return False
+        path = Path(anchor.stdout.strip())
+        recorded = path if path.is_absolute() else checkout / path
+        if not recorded.is_file() or not recorded.read_text(encoding="utf-8").strip():
+            return False
+        dirty = git(checkout, "status", "--porcelain")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    return dirty.returncode == 0 and bool(dirty.stdout.strip())
+
+
+def branch_protects_open_work(checkout: Path, detect_default, marker: str) -> bool:
+    """`needs_box`'s `protects_open_work`, resolved: either producer is enough.
+
+    One name rather than a second probe injected into `redirect_decision`, which takes
+    more arguments than anything should already. Asked in cost order -- a `rev-list`
+    against an already-fetched ref, then a marker read and a `status` only if that came
+    back empty.
+    """
+    return branch_has_own_commits(checkout, detect_default) or branch_is_a_sweep_park(
+        checkout, marker
+    )
