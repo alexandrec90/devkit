@@ -17,7 +17,7 @@ decisions, and the failures that produced them.
 | [`.claude/rules/authoring.md`](.claude/rules/authoring.md) | writing rules, skills and instruction files |
 | [`.claude/rules/vscode-tasks.md`](.claude/rules/vscode-tasks.md) | the workspace task block and its dispatcher |
 | [`scripts/CLAUDE.md`](scripts/CLAUDE.md) | the two delivery channels, vendoring, ephemeral boxes, scheduled jobs, loading a module by path |
-| [`scripts/hooks/CLAUDE.md`](scripts/hooks/CLAUDE.md) | the Codex translation tier: ported wiring, the response contract, the adapter |
+| [`scripts/hooks/CLAUDE.md`](scripts/hooks/CLAUDE.md) | editing a hook here; the Codex translation tier: ported wiring, the response contract, the adapter |
 | [`.github/CLAUDE.md`](.github/CLAUDE.md) | the CI surface every project has |
 | [`tests/CLAUDE.md`](tests/CLAUDE.md) | the two test trees, and which one a test belongs in |
 
@@ -49,9 +49,8 @@ already happened here. Assume it is happening now.
    its current value.
 3. **`tests/test_doc_claims.py` gates the checkable half** — every cited path exists,
    and instruction prose pins no version — across every `CLAUDE.md`, rule and skill in
-   the repo. It cannot tell you a rationale went stale; it does stop the *silent* rot,
-   which is the kind that accumulates. Its docstring owns the rest, including where a
-   deliberate absence goes and what each one has to keep proving.
+   the repo. It cannot tell you a rationale went stale; it does stop the *silent* rot.
+   Its docstring owns the rest.
 
 ## Nothing but the standard library, by contract
 
@@ -71,16 +70,10 @@ Everything devkit ships to other projects is wired up **here**, on itself: the h
 `.claude/settings.json`, the lint and test wrappers they call, the pre-commit gate, the
 failure artifacts under `logs/`, and a PR gate titled `PR Gate` like every consumer's.
 
-This is not decoration. A hook that only runs downstream is a hook nobody tests: devkit
-shipped a `lint-fix.py` that formats on every edit and then needed a dedicated commit
-(`4fbda17`) to clean up the format drift that had accumulated in the one repo where the
-hook was not wired.
-
-**When you change a hook script, you are changing the thing that is running you.** A
-syntax error in `stop.py` breaks the current session's Stop; a bad `lint-fix.py` blocks
-every subsequent edit. Both fail loudly and immediately, which is the point — but run
-`python scripts/run-tests.py` and the vendored tree's suite
-(`python -m pytest scripts/hooks/tests/ -q`) before assuming a change is good.
+This is not decoration — a hook that only runs downstream is a hook nobody tests. What
+that costs when it lapses, and what it means for a session editing a hook (you are
+changing the thing that is running you), is in
+[`scripts/hooks/CLAUDE.md`](scripts/hooks/CLAUDE.md).
 
 ## The two test trees
 
@@ -100,12 +93,10 @@ Generated PR gates pin a devkit **tag**, never `@main`, for this reason. When a 
 alters vendored behaviour, say so in the commit message: adopters find out by running
 `sync-devkit.py --pull`, and the message is the only changelog they get.
 
-A missing tag is the mirror-image failure and is easier to miss: `new-project.py`
-resolves `latest_devkit_tag() or FALLBACK_DEVKIT_REF`, so **an untagged feature does
-not exist as far as a generated project is concerned**, however green `main` is — which
-is how a rendered `.pre-commit-config.yaml` came to request hook ids its pinned tag
-could not serve. The release checklist, including why the fallback test is deliberately
-red for one commit, is [`RELEASING.md`](RELEASING.md).
+A missing tag is the mirror-image failure and is easier to miss: **an untagged feature
+does not exist as far as a generated project is concerned**, however green `main` is.
+Which refs a consumer pins, what a late tag broke, and the release checklist are in
+[`RELEASING.md`](RELEASING.md).
 
 ### The internal names are `devkit`
 
