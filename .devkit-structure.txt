@@ -121,7 +121,7 @@ file_lines::scripts/upgrade-project.py = 1231
 file_lines::scripts/workspace-status.py = 982
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2282
-file_lines::scripts/worktree.py = 6152
+file_lines::scripts/worktree.py = 6208
 function_lines::scripts/devkit_project.py::main = 250
 function_lines::scripts/docker-maint.py::generic_prune = 84
 function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
@@ -271,4 +271,7 @@ swallowed_errors::scripts/worktree.py = 3
 #   file_lines::scripts/plug-projects.py -> 973
 #   file_lines::scripts/sync-devkit.py -> 1463
 #   file_lines::scripts/workspace-status.py -> 982
+#   file_lines::scripts/worktree.py -> 6208
+
+# 2026-09-02  recorded: worktree.py, re-derived after merging #282: artifact_root and provision_target are the fixes for the forged reconcile log and the un-provisionable static checkout, and the import that would reach an extracted module is itself over the imports limit
 #   file_lines::scripts/worktree.py -> 6208
