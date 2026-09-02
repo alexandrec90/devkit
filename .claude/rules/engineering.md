@@ -9,10 +9,9 @@ everywhere, so there is no glob that should exempt a file from them.
 
 **This file is vendored from devkit and is byte-identical in every project.** It is in
 `sync-devkit.py`'s `MANIFEST`, so a local edit is reported as drift by the PR gate
-rather than quietly becoming this project's private opinion. That is the point: these
-paragraphs previously lived inline in each repo's `CLAUDE.md`, were copied forward by
-hand, and drifted — devkit's own template had already lost a clause carameli still
-had. To change the policy, change it here and let projects `--pull`.
+rather than quietly becoming this project's private opinion. That is the point: this
+policy used to live inline in each repo, was copied forward by hand, and drifted. To
+change it, change it here and let projects `--pull`.
 
 A project's `CLAUDE.md` should **point at this file, not restate it.** A restatement is
 a fork: it looks authoritative, it is not gated, and the two copies disagree the first
@@ -57,20 +56,17 @@ command you wrote. That list is closed -- `ls`, `cat`, `find`, `tree`, `du`, `en
 **Everything else runs uncapped, and wrapping it is a mistake.** A `grep`, a `python -c`,
 a test run, a `curl`, a heredoc: issue them bare. A session that routes every call through
 the wrapper by reflex pays visible indirection for no second bound, and that has happened
-here at scale -- 42% of one month's Bash calls carried a wrapper they did not need.
+here at scale.
 
-Any of three spellings takes a named command off the list:
-
-| Form | Trade |
-| --- | --- |
-| `<cmd> \| head -c N`, `\| tail -c N`, `\| wc -l`, `\| grep -c <pat>` | **masks the exit code, including a background task's completion status** |
-| `<cmd> > <file>` | strongest bound; output never enters context |
-| `python3 scripts/hooks/invoke-capped.py --command "<cmd>"` | keeps head and tail; preserves the exit code |
-
-The wrapper runs the command through the platform shell -- **`cmd.exe` on Windows** -- so
-heredocs, single-quoted paths and escaped alternation do not survive it. Pipe into
-`head`/`tail` for those, and prefer it for test and lint runs, where the summary at the
-end is the part worth keeping.
+Any of three spellings takes a named command off the list: a pipe into `head -c N`,
+`tail -c N`, `wc -l` or `grep -c <pat>`, which **masks the exit code, including a
+background task's completion status**; `<cmd> > <file>`, the strongest bound, whose
+output never enters context; or `python3 scripts/hooks/invoke-capped.py --command
+"<cmd>"`, which keeps a head *and* a tail window and preserves the exit code. The
+wrapper runs through the platform shell -- **`cmd.exe` on Windows** -- so heredocs,
+single-quoted paths and escaped alternation do not survive it; pipe into `head`/`tail`
+for those, and prefer the wrapper for test and lint runs, where the summary at the end
+is the part worth keeping.
 
 For `ls`, `cat` and `find` the better answer is usually not a cap at all: the Glob, Read
 and Grep tools cost no subprocess, no cap, and page rather than dump.
@@ -88,17 +84,10 @@ context. Issue commands there directly -- including the nine.
 **If this gate blocks something that is not one of the nine, that is a defect in it:**
 report it with the exact command, per the feedback-loop guardrail at the foot of this
 file. Never rewrite a correct command to satisfy it. Why the gate is a blocklist rather
-than a proof obligation -- it used to be the other way round, and 46% of every block it
-issued was its own false positive -- is in
+than a proof obligation, and what preemptive wrapping has cost, are in
 [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
 ## Waiting on a CI gate: one blocking call, not a poll loop
-
-When you are asked to wait for a PR gate, the expensive part is not the `gh` command --
-it is that **every poll is a full API round trip that re-sends the whole conversation**,
-landing at the *end* of a session where the context is largest. What that measured is in
-[`.claude/engineering-evidence.md`](../engineering-evidence.md), along with the two PRs
-that produced the diagnosis below.
 
 **Spell the wait as a single call that blocks**, backgrounded so the harness re-invokes
 you when it exits instead of holding a turn open:
@@ -112,19 +101,17 @@ the completion notification. Backgrounding is the half that is easy to drop: a g
 routinely outruns the Bash tool's ten-minute ceiling, and a foreground `--watch` that
 times out has become a poll loop again with the timeout as its interval.
 
-Two things this does **not** condemn, because neither is waste:
-
-- **Diagnosing a failure.** `gh run view --log-failed` and the greps after it are the
-  work itself, not waiting. Where the volume warrants it, send them to a file and read
-  from there.
-- **Asking once.** A single `gh pr checks` is one call and often the right answer. The
-  waste begins at the *second* identical poll and compounds from there.
+Two things this does **not** condemn: **diagnosing a failure** (`gh run view
+--log-failed` and the greps after it are the work itself, not waiting -- send them to a
+file where the volume warrants it), and **asking once** (a single `gh pr checks` is
+often the right answer; the waste begins at the *second* identical poll). What polling
+costs when it does, and the two PRs behind the paragraph below, are in
+[`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
 **"No checks reported" has two causes and they need opposite responses**: a gate that
 has not started *yet*, and one that will **never** start because a `CONFLICTING` PR has
 no merge ref for GitHub to build a run against. Ask the one question that separates
-them, once, after a push -- one call against an unbounded wait plus the polls that
-follow when the wait is abandoned:
+them, once, after a push:
 
 ```bash
 gh pr view <N> --json mergeStateStatus,statusCheckRollup
@@ -136,9 +123,8 @@ commit. `BLOCKED`/`UNSTABLE`/`CLEAN` mean the run exists and `--watch` is the ri
 answer in the seconds after a push and says nothing either way — `--watch` covers it.
 
 When you get the message anyway, tell the two apart by **how long the call took, not by
-what it said**: a `--watch` that returns in about a second never waited for anything, so
-treat it as the race and re-issue the same watch once. A `CONFLICTING` PR gives the same
-message and does not get better on a retry.
+what it said**: a `--watch` back in about a second never waited for anything, so re-issue
+it once; a `CONFLICTING` PR gives the same message and does not improve on a retry.
 
 When the gate will outlast anything useful you could do meanwhile, the cheapest correct
 move is to stop: report that the branch is pushed and the gate is running, and let the
@@ -173,30 +159,27 @@ the artifact on failure too, not only on success, and overwrite it per run.
 
 Lint exists to catch **correctness and security** problems — the ones a human reviewer
 reads past. Style and formatting are not judgement calls worth an agent's turn: a
-formatter settles them, in place, with no discussion.
+formatter settles them, in place, with no discussion — `ruff format` runs on every edit
+via the `lint-fix.py` PostToolUse hook and again in CI, so line length, quote style and
+import order never reach a review.
 
-- **On:** correctness (undefined names, unreachable code, shadowed builtins, mutable
-  default arguments), security (injection sinks, unsafe deserialisation, hard-coded
-  secrets), and resource-handling (unclosed files, bare `except`).
-- **Off:** anything a formatter can decide. `ruff format` runs on every edit via the
-  `lint-fix.py` PostToolUse hook and again in CI, so line length, quote style and
-  import order never reach a review.
-
-The split has a practical consequence worth stating: a lint rule that fires on
-something a formatter would fix is misconfigured, not useful. Turn it off rather than
-teaching everyone to ignore it.
+So: **on** for correctness, security and resource-handling; **off** for anything a
+formatter can decide. Which selectors that puts on each side is in
+[`.claude/engineering-evidence.md`](../engineering-evidence.md). The split has a
+practical consequence worth stating: a lint rule that fires on something a formatter
+would fix is misconfigured, not useful. Turn it off rather than teaching everyone to
+ignore it.
 
 ### Rule families are how cosmetic rules get in
 
 **Adding a family prefix to `select` enables every member, including the cosmetic
-ones.** `"E"` is not one rule; it is nineteen, and `E501` (line-too-long) is one of
-them — nobody here ever decided to cap line length. So when adding a family, **read its
-members and ignore the cosmetic ones in the same change**; a rule already exempted in
-two or three directories is not a rule anyone wants, which is the signal to turn it off
-globally rather than exempt it a fourth time.
+ones**, so when adding a family, **read its members and ignore the cosmetic ones in the
+same change**. A rule already exempted in two or three directories is not a rule anyone
+wants: turn it off globally rather than exempt it a fourth time.
 
-Which selectors are currently off by this policy, why a selector never spans linters,
-and the generated-project test that stops them drifting back are in
+Which selectors are currently off by this policy, the `E501` incident behind the rule,
+why a selector never spans linters, and the generated-project test that stops them
+drifting back are in
 [`.claude/engineering-evidence.md`](../engineering-evidence.md) — read it before editing
 any `select` or `ignore` list.
 
@@ -249,11 +232,10 @@ everything with no submodule and no install step.
   `--push` sends a change authored here back up. `DEVKIT_VERSION` records which
   upstream commit the vendored copy corresponds to.
 - **`$DEVKIT_DIR` unset means there is nothing to compare against, and the stamp
-  decides what that is worth.** Before adoption every mode no-ops clean (exit 0); once
-  `DEVKIT_VERSION` exists the same silence would report a comparison that never ran, so
-  it **fails** instead. On a machine with no devkit clone at all, the drift check that
-  still works is `pre-commit run devkit-drift --all-files` — same comparison, against
-  the rev pinned in `.pre-commit-config.yaml`.
+  decides what that is worth** — clean before adoption, a failure once `DEVKIT_VERSION`
+  exists. On a machine with no devkit clone at all, the drift check that still works is
+  `pre-commit run devkit-drift --all-files` — same comparison, against the rev pinned in
+  `.pre-commit-config.yaml`.
 - A vendored script may depend on a file the project owns (`lint-all.py`,
   `run-tests.py`), and a missing one is a silent skip by design. Both that and the
   stamp rule above are explained in
@@ -280,18 +262,9 @@ session reads it without being handed your chat. It complements the flag in your
 rather than replacing it — the user still has to see it — and on a machine with no
 `$DEVKIT_DIR` it says so and exits 0.
 
-### Reporting a *harness* defect: name the copy's age
-
-The hook scripts are a **vendored copy**, and every consuming project is routinely weeks
-of fixes behind devkit — so a block or a crash you hit here may already be fixed
-upstream, and a report of one costs a human a relay and a false-positive triage. Spend
-one command before reporting one, and put its answer in the report:
-
-```bash
-python scripts/sync-devkit.py --check     # clean = this copy matches upstream
-```
-
-A report that names `DEVKIT_VERSION` and what `--check` said can be triaged; one that
-does not cannot. Blocks from the capped-Bash gate carry this footer themselves, so the
-version is usually already in front of you. An old copy is still worth reporting once
-you know that is what it is — this is **not** a reason to route around the hook.
+When the defect is in the **vendored harness** rather than in prose, run
+`python scripts/sync-devkit.py --check` first and put its answer, with `DEVKIT_VERSION`,
+in the report: this copy is routinely weeks of fixes behind devkit, and why that decides
+whether a report can be triaged at all is in
+[`.claude/engineering-evidence.md`](../engineering-evidence.md). An old copy is still
+worth reporting once you know that is what it is — never a reason to route around a hook.

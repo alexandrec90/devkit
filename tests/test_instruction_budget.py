@@ -38,7 +38,7 @@ budget = load_script("scripts/instruction-budget.py")
 # stopped the nightly release, which is the backstop working: GitHub Free cannot require
 # a PR to be current before merging (see `scripts/git_policy.py`), so nothing else here
 # would have caught it.
-HOT_CEILING = 6300
+HOT_CEILING = 5800
 
 
 # --- the estimate -------------------------------------------------------------

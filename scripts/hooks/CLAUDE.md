@@ -5,10 +5,24 @@ ceiling. It is a `CLAUDE.md` rather than a rule on purpose: **Codex reads every
 `CLAUDE.md` and reads straight past `.claude/rules/`**, and a Codex session working on
 this tier is the one that can least afford to miss it.
 
-Everything here is about one seam — Claude-shaped hook wiring being made to run under
+Most of it is about one seam — Claude-shaped hook wiring being made to run under
 Codex. The scripts are `sync-codex-hooks.py`, `sync-codex-context.py`,
 `codex-hook-adapter.py`, `codex-session-start.py`, and devkit-only
-`extract-codex-schema.py`.
+`extract-codex-schema.py`. The section below applies to every hook in this tree,
+whichever runtime it is being made to run under.
+
+## Changing a hook changes the thing that is running you
+
+devkit wires the hooks it ships on itself, and that is not decoration: a hook that only
+runs downstream is a hook nobody tests. devkit shipped a `lint-fix.py` that formats on
+every edit and then needed a dedicated commit (`4fbda17`) to clean up the format drift
+that had accumulated in the one repo where the hook was not wired.
+
+The consequence for a session editing one here is immediate. A syntax error in
+`stop.py` breaks the current session's Stop; a bad `lint-fix.py` blocks every subsequent
+edit. Both fail loudly, which is the point — but run `python scripts/run-tests.py` and
+this tree's own suite (`python -m pytest scripts/hooks/tests/ -q`) before assuming a
+change is good.
 
 ## Vendoring a generator does not vendor its output
 

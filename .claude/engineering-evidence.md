@@ -14,6 +14,14 @@ prose that should be paid for only when someone goes looking for it. Same argume
 This file is vendored (it is in `sync-devkit.py`'s `MANIFEST`), because the pointers
 that reach it are vendored too. A local edit here is drift.
 
+## Which side of the split each rule family falls on
+
+The policy is correctness and security on, anything a formatter can decide off. In
+practice that means **on** for undefined names, unreachable code, shadowed builtins and
+mutable default arguments; for injection sinks, unsafe deserialisation and hard-coded
+secrets; and for unclosed files and bare `except`. **Off** for line length, quote style
+and import order, which `ruff format` settles before a review ever sees them.
+
 ## Rule families are how cosmetic rules get in
 
 **Adding a family prefix to `select` enables every member, including the cosmetic
@@ -118,6 +126,22 @@ silence would report a comparison that never ran, so it **fails** instead.
 `$DEVKIT_DIR` is a property of the machine and `DEVKIT_VERSION` is committed, which is
 what makes the distinction reliable: a second workstation, a fresh clone or a CI job
 missing its `env:` block is where the gate would otherwise go quiet.
+
+## Reporting a *harness* defect: name the copy's age
+
+The hook scripts are a **vendored copy**, and every consuming project is routinely weeks
+of fixes behind devkit — so a block or a crash you hit there may already be fixed
+upstream, and a report of one costs a human a relay and a false-positive triage. Spend
+one command before reporting one, and put its answer in the report:
+
+```bash
+python scripts/sync-devkit.py --check     # clean = this copy matches upstream
+```
+
+A report that names `DEVKIT_VERSION` and what `--check` said can be triaged; one that
+does not cannot. Blocks from the capped-Bash gate carry this footer themselves, so the
+version is usually already in front of you. An old copy is still worth reporting once
+you know that is what it is — this is **not** a reason to route around the hook.
 
 ## Why a vendored file may depend on one the project owns
 
