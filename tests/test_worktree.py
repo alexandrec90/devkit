@@ -1192,12 +1192,13 @@ def test_destroying_a_box_writes_the_ledger(tmp_path, monkeypatch):
     monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
     monkeypatch.setattr(worktree, "read_leases", lambda root: {})
     monkeypatch.setattr(worktree, "write_leases", lambda root, boxes: None)
-    monkeypatch.setattr(worktree, "REPO_ROOT", tmp_path)
 
     ok, notes = worktree.apply_reap(reaped_plan(box="demo--x-0806", project="demo"), workspace)
 
     assert ok is True
-    written = (tmp_path / worktree.REAP_LEDGER).read_text(encoding="utf-8")
+    # With the workspace being reaped, not with whichever devkit is running: this used to
+    # default to `REPO_ROOT` and wrote fixture rows into the real machine's ledger.
+    written = (workspace.parent / worktree.REAP_LEDGER).read_text(encoding="utf-8")
     assert "box=demo--x-0806" in written
     assert any(worktree.REAP_LEDGER.split("/")[-1] in note for note in notes)
 
@@ -2921,6 +2922,35 @@ def test_provisioning_an_unknown_box_is_an_error_not_a_no_op(workspace):
     assert worktree.main(["provision", "demo--ghost-0806", "--workspace", str(workspace)]) == 2
 
 
+def test_provision_resolves_a_static_checkout_as_well_as_a_box(workspace):
+    """Nothing in the workspace provisioned a static checkout: `new` provisions the box
+    it just cut, and `session-start.sh` returns early on a local machine precisely
+    because a checkout is provisioned once by hand. A freshly cloned project therefore
+    had no verb at all -- `plan_provision` already took a plain path, and only the
+    resolver insisted on a lease."""
+    root = workspace.parent
+    (root / "demo" / ".git").mkdir(parents=True)
+    assert worktree.provision_target(root, "demo") == ("demo", root / "demo")
+
+
+def test_a_box_wins_the_name_over_a_checkout_that_shares_it(workspace):
+    """The verb was written for boxes and stays that way; the checkout is the fallback."""
+    root = workspace.parent
+    (root / worktree.BOXES_DIR_NAME / "demo").mkdir(parents=True)
+    (root / "demo" / ".git").mkdir(parents=True)
+    worktree.write_leases(root, {"demo": box("demo", project="demo")})
+    assert worktree.provision_target(root, "demo")[1] == worktree.box_path(root, "demo")
+
+
+def test_a_directory_with_no_repository_in_it_is_refused(workspace):
+    """A mistyped box name would otherwise read as "some empty folder", and the install
+    ladder would run its whole length in a tree with nothing to install."""
+    root = workspace.parent
+    (root / "not-a-repo").mkdir(parents=True)
+    with pytest.raises(worktree.WorktreeError, match="no live box or checkout"):
+        worktree.provision_target(root, "not-a-repo")
+
+
 # --- reconcile: reading GitHub ----------------------------------------------
 
 
@@ -4040,6 +4070,34 @@ def test_an_unwritable_log_never_fails_the_pass(tmp_path, monkeypatch):
         worktree.Path, "mkdir", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only"))
     )
     assert worktree.write_reconcile_log("x", 0, root=tmp_path) is None
+
+
+def test_artifact_root_keeps_this_repo_only_for_the_workspace_it_is_inside(tmp_path):
+    """`REPO_ROOT` is bound at import to whichever devkit is executing, so every CLI path
+    wrote its `logs/` here regardless of the workspace it was pointed at. Right for the
+    scheduled job, whose workspace is this one; wrong for everything else."""
+    assert worktree.artifact_root(worktree.REPO_ROOT.parent) == worktree.REPO_ROOT
+    assert worktree.artifact_root(tmp_path) == tmp_path
+
+
+def test_the_reconcile_cli_writes_the_log_of_the_workspace_it_acted_on(tmp_path):
+    """The regression, and it is not cosmetic: `workspace-status.scheduler_line` reads
+    this file's timestamp as its evidence that the job is alive, *because* `schtasks`
+    reports a disabled task as healthy. A `pytest tests/ -q` run overwrote the real one
+    with `No ephemeral boxes and no checkouts to sync` while a box was live -- making a
+    dead scheduler look alive, which is the exact failure that line exists to catch.
+
+    Asserted by where the file lands rather than by the real one staying byte-identical:
+    the scheduled pass rewrites that one every fifteen minutes, so a comparison would
+    fail whichever test happened to be running when it fired."""
+    workspace = tmp_path / "ws" / "probe.code-workspace"
+    workspace.parent.mkdir()
+    workspace.write_text('{"folders": []}', encoding="utf-8")
+
+    assert worktree.main(["reconcile", "--no-fetch", "--workspace", str(workspace)]) == 0
+
+    written = workspace.parent / worktree.RECONCILE_LOG
+    assert written.is_file() and "exit=0" in written.read_text(encoding="utf-8")
 
 
 # --- the scheduled pass opens no windows ------------------------------------
@@ -5689,6 +5747,18 @@ def test_a_merged_branch_is_not_resumable(tmp_path, monkeypatch):
         worktree.resumable_branch(tmp_path, "devkit", "mine", ledger_root=tmp_path)
         == "agent/topic-0820"
     )
+
+
+def test_the_ledger_defaults_to_the_workspace_being_asked_about(tmp_path, monkeypatch):
+    """The reader half of `record_reap`, resolved the same way. Left defaulting to
+    `REPO_ROOT` it answered a question about one workspace out of another's ledger --
+    the same import-time binding that had the writer forging this repo's copy."""
+    _ledger_at(tmp_path)
+    monkeypatch.setattr(worktree.tb, "detect_default_branch", lambda git, fallback="": "main")
+    open_still = _git_stub(**{"merge-base": _completed(returncode=1), "rev-parse": _completed()})
+    monkeypatch.setattr(worktree.sweep, "git_for", lambda _d: open_still)
+
+    assert worktree.resumable_branch(tmp_path, "devkit", "mine") == "agent/topic-0820"
 
 
 def test_another_sessions_reaped_box_is_never_offered(tmp_path, monkeypatch):

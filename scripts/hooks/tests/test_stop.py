@@ -667,6 +667,39 @@ def test_verify_returns_two_on_failure(monkeypatch, sandboxed_verify):
     assert hook.verify("{}", {}) == 2
 
 
+def _read_only(tmp_path: Path) -> str:
+    """A stop payload whose transcript shows no file-writing tool use."""
+    path = tmp_path / "transcript.jsonl"
+    record = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read"}]}}
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8", newline="\n")
+    return json.dumps({"session_id": "s1", "transcript_path": str(path)})
+
+
+def test_verify_reports_rather_than_blocks_when_the_session_wrote_nothing(
+    monkeypatch, sandboxed_verify, tmp_path
+):
+    """A static checkout is not one session's. Two sessions sharing one had the gate
+    demand that the read-only one fix a partial rename the other was mid-way through
+    committing -- four times, with the skip variable the only escape."""
+    monkeypatch.setattr(hook, "run_host_tests", lambda *a, **k: [])
+    monkeypatch.setattr(
+        hook, "run_checks", lambda names, root=None, deadline=None: [("lint", None, "not mine")]
+    )
+
+    assert hook.verify(_read_only(tmp_path), {}) == 0
+    assert sandboxed_verify["value"] == 0, "a foreign failure must not spend this session's budget"
+
+
+def test_verify_still_blocks_when_the_transcript_cannot_say(monkeypatch, sandboxed_verify):
+    """The probe's own cases are in `test_stop_session.py`; this asserts the *wiring*
+    still blocks when it answers no."""
+    monkeypatch.setattr(hook, "run_host_tests", lambda *a, **k: [])
+    monkeypatch.setattr(
+        hook, "run_checks", lambda names, root=None, deadline=None: [("lint", None, "x")]
+    )
+    assert hook.verify("{}", {}) == 2
+
+
 def test_verify_returns_two_when_db_tests_fail(monkeypatch, sandboxed_verify):
     monkeypatch.setattr(hook, "run_checks", lambda names, root=None, deadline=None: [])
     monkeypatch.setattr(hook, "run_host_tests", lambda *a, **k: [("tests", None, "F app/x")])

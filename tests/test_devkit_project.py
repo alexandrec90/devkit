@@ -1166,6 +1166,48 @@ def test_publish_workspace_refuses_a_live_file_it_did_not_stamp(workspace_pair):
     assert devkit_project.publish_workspace(live, force=True)[0] == devkit_project.RENDER_PUBLISHED
 
 
+def test_publish_workspace_creates_a_live_file_that_does_not_exist_yet(workspace_pair):
+    """The fresh-workstation bootstrap. The refusal protects a hand edit, and a file that
+    is not there has none -- but `publish_workspace` read it unconditionally, so the
+    canonical->live direction could only ever overwrite, never create. The reported
+    workaround was copying `workspace.jsonc` to the live path by hand, which is this
+    function without the stamp."""
+    canonical, live = workspace_pair
+    live.unlink()
+    devkit_project.stamp_path(live).unlink(missing_ok=True)
+
+    outcome, problems = devkit_project.publish_workspace(live)
+
+    assert outcome == devkit_project.RENDER_PUBLISHED
+    assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
+    assert any("did not exist" in problem for problem in problems)
+    # Stamped, so the very next render is not refused as a hand edit nobody made.
+    assert devkit_project.publish_workspace(live) == (devkit_project.RENDER_CURRENT, [])
+
+
+def test_render_workspace_bootstraps_a_missing_live_file_instead_of_exiting_2(workspace_pair):
+    """`main` loaded the registry before dispatching, so the one action that does not
+    need it exited 2 with `cannot read the workspace registry` -- on the exact machine
+    that has no registry yet."""
+    _canonical, live = workspace_pair
+    live.unlink()
+    devkit_project.stamp_path(live).unlink(missing_ok=True)
+
+    assert _run(live, "--render-workspace") == 0
+    assert live.is_file()
+
+
+def test_a_missing_live_file_is_still_an_error_for_every_other_action(workspace_pair):
+    """The tolerance is scoped to the action that creates the file. `--check-workspace`
+    and the dispatcher have nothing to answer without a registry, and saying so is the
+    honest report."""
+    _canonical, live = workspace_pair
+    live.unlink()
+
+    assert _run(live, "--check-workspace") == 2
+    assert _run(live, "--list") == 2
+
+
 def test_a_written_stamp_reads_back_and_a_missing_one_is_not_an_error(tmp_path):
     """`write_stamp`/`read_stamp` are what make a render refusable, so the round trip is
     pinned directly rather than only through `--render-workspace`. A live file devkit

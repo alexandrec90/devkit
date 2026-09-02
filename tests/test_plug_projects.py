@@ -262,6 +262,10 @@ def test_an_error_does_not_end_the_loop():
     "candidate, expected",
     [
         (Candidate("alpha", plugged=True, on_disk=True, on_github=True), "untick to retire it"),
+        (
+            Candidate("zeta", plugged=True, on_disk=False, on_github=True),
+            "leaving it ticked clones acme/zeta",
+        ),
         (Candidate("gamma", plugged=False, on_disk=False, on_github=True), "clones acme/gamma"),
         (Candidate("delta", plugged=False, on_disk=True, on_github=False), "CREATES the private"),
         (
@@ -447,6 +451,55 @@ def test_a_folder_that_is_not_a_git_repo_is_initialised_first():
     candidates = inventory(REGISTRY, ["alpha", "beta", "gamma"], [])
     (step,) = plan(candidates, {"alpha", "beta", "gamma"})
     assert step.init_git and step.create_repo
+
+
+def test_a_registered_project_missing_from_disk_is_planned_as_a_clone():
+    """The fresh-workstation case, and the one row where the tick and the registry
+    already agree -- so both halves of `plan` skipped it and no verb offered the clone.
+    Four registered projects were missing from disk, none was offered, and the answer was
+    a hand-written `gh repo clone` loop."""
+    candidates = inventory(REGISTRY, [], ["alpha", "beta"])
+    steps = plan(candidates, {"alpha", "beta"})
+
+    assert [(s.action, s.name, s.clone) for s in steps] == [
+        (plug_projects.CLONE, "alpha", True),
+        (plug_projects.CLONE, "beta", True),
+    ]
+    assert "clone from GitHub" in describe(steps[0])
+
+
+def test_the_clone_step_leaves_the_registry_alone():
+    """It is already registered. Re-registering would be a no-op edit to the file every
+    window on the machine reads, and `apply_registry` is the one place that says so."""
+    candidates = inventory(REGISTRY, [], ["alpha", "beta"])
+    assert apply_registry(REGISTRY, plan(candidates, {"alpha", "beta"})) == REGISTRY
+
+
+def test_a_registered_project_with_no_repo_to_clone_from_is_left_alone():
+    """Nothing to clone from, so the step would only fail. A registry entry naming a
+    repo that is gone is an unplug's problem, not a clone's."""
+    assert plan(inventory(REGISTRY, [], []), {"alpha", "beta"}) == []
+    assert not plug_projects.needs_clone(
+        Candidate("a", plugged=True, on_disk=False, on_github=False)
+    )
+
+
+def test_needs_clone_is_only_true_for_a_registered_row_absent_from_disk():
+    """The predicate the three surfaces share -- the plan, the listing and the quick-pick
+    detail -- so it is asserted once here rather than three times through them."""
+    assert plug_projects.needs_clone(Candidate("a", plugged=True, on_disk=False, on_github=True))
+    assert not plug_projects.needs_clone(Candidate("a", plugged=True, on_disk=True, on_github=True))
+    assert not plug_projects.needs_clone(
+        Candidate("a", plugged=False, on_disk=False, on_github=True)
+    )
+
+
+def test_the_listing_says_which_registered_rows_are_not_on_disk():
+    """The row has to carry it: nothing else distinguishes a registered project that is
+    present from one that only exists in the registry, and both draw as ticked."""
+    lines = render(inventory(REGISTRY, ["alpha"], ["alpha", "beta"]), {"alpha", "beta"})
+    assert "registered, not on disk: will clone" in lines[1]
+    assert "will clone" not in lines[0]
 
 
 def test_unticking_plans_an_unplug_and_nothing_on_disk():
