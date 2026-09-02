@@ -34,17 +34,6 @@ found"; and any session reached through Codex's hook adapter, which has no
 `updatedInput` contract and would read the allow as permission to write the *original*
 path. The block message is the same one as before, with the reason added as a note.
 
-**Two copies of this hook run on every tool call**, because it is registered in the
-user's `settings.json` and in the project's, and Claude Code fires both. They race to
-cut the same box, and the loser's `git worktree add` dies on the branch the winner has
-just created. Both responses then reach the agent as one object: an error saying the
-spawn failed and nothing was written, beside an `additionalContext` saying the edit was
-applied in the box. Whichever half it believes, the other is a lie — and believing the
-context is the expensive one, because the agent goes on to build on a change that was
-never made. So the spawn is held under `worktree.spawn_lock`, and a spawn that fails
-anyway looks for the box the winner registered before it blocks; `after_failed_spawn`
-is that recovery.
-
 Either way, by the time the agent reads the message the worktree exists, is on a fresh
 task branch off `origin/<default>`, and has its own `COMPOSE_PROJECT_NAME` and port
 lease. It does *not* have a toolchain — installing one is minutes and a hook may not
@@ -96,7 +85,7 @@ import os
 import re
 import shlex
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -360,6 +349,7 @@ SHELL_WRITE_ALL = frozenset(
         "shred",
     }
 )
+SHELL_REMOVE = frozenset({"rm", "unlink", "remove-item"})
 
 # PowerShell is this workspace's other shell and has its own tool. Its cmdlets take
 # common parameters after the path (`-ErrorAction SilentlyContinue`) and content after
@@ -781,7 +771,7 @@ def _rebased(target: str, base: str) -> str:
     return f"{base}/{target}"
 
 
-def shell_write_targets(command: str) -> list[str]:
+def shell_write_targets(command: str, removals_only: bool = False) -> list[str]:
     """Every path this command line names as something it is about to write.
 
     Order-preserving and deduplicated, so a block names the first target the command
@@ -789,12 +779,8 @@ def shell_write_targets(command: str) -> list[str]:
     PowerShell cmdlets select their path/destination parameters so `-Value x` and common
     parameter values do not become checkout-relative filenames.
 
-    The one operand dropped is an **unexpanded variable**: `tee "$OUT"`, `echo x > %TMP%`.
-    "Resolves to no checkout" is the reason the rest are kept, and for these it is simply
-    untrue — the shell has not substituted yet, so what arrives is a *relative* word, and
-    a relative word resolves against the cwd, which in a guarded session is the checkout.
-    Expanding it is out of the question at this tier, and reading `$S` as a filename named
-    `$S` blocks a command that writes to a scratch directory.
+    Unexpanded variables are dropped: expanding them is out of scope, while treating
+    `$S` as a relative filename blocks commands that write to scratch directories.
 
     **A `cd` earlier in the same command line moves what a relative operand is relative
     to**, and not honouring that was the guard's most-reported false positive. The caller
@@ -812,33 +798,32 @@ def shell_write_targets(command: str) -> list[str]:
     the conservative direction, because a base this cannot follow means a *relative*
     name, and a relative name still resolves into the checkout.
     """
-    found: list[str] = []
+    found: dict[str, None] = {}
     base = ""
 
     def add(value: str) -> None:
         value = _unquote(value.strip())
-        if value.startswith(("$", "%", "`")) or POWERSHELL_NON_FILESYSTEM_PROVIDER.match(value):
+        if any(
+            (value.startswith(("$", "%", "`")), POWERSHELL_NON_FILESYSTEM_PROVIDER.match(value))
+        ):
             return
-        if not value or _is_rooted(value):
-            if value and value not in found:
-                found.append(value)
+        if not value:
             return
-        rebased = f"{base}/{value}" if base else value
-        if rebased not in found:
-            found.append(rebased)
+        rebased = value if _is_rooted(value) or not base else f"{base}/{value}"
+        found.setdefault(rebased, None)
 
     for statement in split_statements(strip_heredocs(command)):
-        for target in redirect_targets(statement):
+        for target in () if removals_only else redirect_targets(statement):
             add(target)
         tokens = strip_redirections(shell_tokens(statement))
         moved = _chdir_operand(tokens)
         if moved is not None:
             base = moved if _is_rooted(moved) or not base else f"{base}/{moved}"
-        while tokens and (_verb(tokens[0]) in SHELL_PREFIXES or ENV_ASSIGN.match(tokens[0])):
+        while tokens and any((_verb(tokens[0]) in SHELL_PREFIXES, ENV_ASSIGN.match(tokens[0]))):
             tokens = tokens[1:]
-        if not tokens:
+        verb = _verb(next(iter(tokens), ""))
+        if all((removals_only, verb not in SHELL_REMOVE)):
             continue
-        verb = _verb(tokens[0])
         operands = [token for token in tokens[1:] if not token.startswith("-")]
         if verb == "sed":
             # Only `-i`/`--in-place` writes. Every other `sed` reads, and `sed -n '1,5p'`
@@ -863,7 +848,7 @@ def shell_write_targets(command: str) -> list[str]:
             destination = _powershell_named_value(tokens[1:], POWERSHELL_DESTINATION_OPTIONS)
             positionals = _powershell_positionals(tokens[1:])
             add(destination or (positionals[-1] if positionals else ""))
-    return found
+    return list(found)
 
 
 # --- The patch tier --------------------------------------------------------------------
@@ -1772,20 +1757,29 @@ def failure_message(
     )
 
 
-def resolve_target(target: str, cwd: str) -> Path | None:
+def resolve_target(
+    target: str, cwd: str, removals: Collection[str] = (), boxes_root: Path | None = None
+) -> Path | None:
     """The edit's absolute target, or None when it cannot be resolved.
 
-    Same resolution `redirect_decision` performs; split out so `main` can ask "is this
-    under the box tier" before that function's checkout logic, which returns None for
-    every box path and so cannot carry the ownership question.
+    A removed link directly under the box tier keeps its leaf unresolved: deleting that
+    link does not touch the checkout it points at. Descendants and every other write do
+    resolve through it, so a link cannot bypass checkout protection.
     """
     if not target:
         return None
     try:
         base = Path(cwd) if cwd else Path.cwd()
-        return (
-            (base / target).resolve() if not Path(target).is_absolute() else Path(target).resolve()
-        )
+        path = base / target if not Path(target).is_absolute() else Path(target)
+        leaf = path.parent.resolve() / path.name
+        if (
+            target in removals
+            and boxes_root is not None
+            and _within(leaf, boxes_root.resolve())
+            and (leaf.is_symlink() or leaf.is_junction())
+        ):
+            return leaf
+        return path.resolve()
     except (OSError, ValueError, RuntimeError):
         return None
 
@@ -2194,8 +2188,9 @@ def main(argv: list[str] | None = None) -> int:
     # hook on *every* Bash call rather than on the handful that edit files. A command that
     # writes nothing and moves no branch has to cost a payload parse and nothing else --
     # both of these are string work over the argv, with no subprocess and no file read.
-    targets = guarded_targets(payload)
-    switches = switch_targets(str(tool_input(payload).get("command") or "")) if shell else []
+    command = str(tool_input(payload).get("command") or "")
+    targets, removals = guarded_targets(payload), shell_write_targets(command, removals_only=True)
+    switches = switch_targets(command) if shell else []
     if not targets and not switches:
         return EXIT_ALLOW
 
@@ -2239,7 +2234,6 @@ def main(argv: list[str] | None = None) -> int:
     # to name -- and reading it a second time would be a second subprocess per blocked
     # edit and, worse, could report a different branch than the one that was judged.
     # `redirect_decision` calls its lookup at most once, so recording it is enough.
-    # Defined outside the loop so it closes over nothing that changes under it.
     observed: list[str] = []
 
     def observe(checkout: Path) -> str:
@@ -2254,7 +2248,7 @@ def main(argv: list[str] | None = None) -> int:
         # so the ownership question has to be asked before it swallows the path. The
         # lease read happens only for edits actually aimed at the box tier — the common
         # checkout edit never pays it here.
-        target = resolve_target(candidate, cwd)
+        target = resolve_target(candidate, cwd, removals, worktree.boxes_root(root))
         if target is not None and _within(target, worktree.boxes_root(root).resolve()):
             boxes = worktree.live_boxes(root)
             conflict = foreign_box(target, root, boxes, session)

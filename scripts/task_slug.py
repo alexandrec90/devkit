@@ -65,6 +65,10 @@ DENY_ENV = "DEVKIT_SLUG_DENY"
 # empty result is simply not recorded — never a traversal, never a write outside the
 # slugs directory.
 _SAFE_SESSION_RE = re.compile(r"[^A-Za-z0-9_-]+")
+_INTERNAL_PROMPT_RE = re.compile(
+    r"^\s*<(?:task-notification|system-reminder|command-[a-z-]+|local-command-[a-z]+)(?:\s|>)",
+    re.I,
+)
 
 
 def safe_session(session: str, max_len: int = 64) -> str:
@@ -219,7 +223,10 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(payload, dict):
         return 0
     session = str(payload.get("session_id") or payload.get("sessionId") or "")
-    slug = tb.slug_from_prompt(tb.parse_prompt(raw))
+    prompt = tb.parse_prompt(raw)
+    if _INTERNAL_PROMPT_RE.match(prompt):
+        return 0
+    slug = tb.slug_from_prompt(prompt)
     if record(workspace.parent, session, slug):
         prune(workspace.parent)
     return 0

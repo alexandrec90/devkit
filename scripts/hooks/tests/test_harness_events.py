@@ -164,7 +164,8 @@ class TestLedgerPath:
 
 
 class TestRecord:
-    def test_appends_one_line_per_call(self, tmp_path):
+    def test_appends_one_line_per_call(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(events.ADAPTER_ENV, raising=False)
         path = events.record("guard-block", (("project", "p"),), root=tmp_path)
         events.record("guard-block", (("project", "q"),), root=tmp_path)
         assert path == tmp_path / "logs" / "harness-events.log"
