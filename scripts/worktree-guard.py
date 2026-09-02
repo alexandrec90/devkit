@@ -10,10 +10,8 @@ agent would be manufacturing the exact backlog the sweep exists to clear.
 solved the branch and kept the problem: the checkout still outlived the task. It is
 retired, and this hook covers both session shapes in its place.
 
-Refusing the edit would fix that and cost the turn. So this hook does the other
-thing: it **spawns the box the edit should have been made in** and hands the path
-back. One box per (session, project), so a session that touches three repos gets
-three boxes and a session that makes forty edits in one repo gets one.
+Instead, this hook **spawns the box the edit should have been made in** and hands the
+path back. One box serves each (session, project), however many edits it receives.
 
 **The edit is re-aimed, not refused.** Claude Code honours `updatedInput` from a
 PreToolUse hook, so the guard rewrites the tool's path argument to the same file
@@ -26,11 +24,10 @@ permissionBehavior === undefined`), so this hook sets none and the call goes on 
 permission-checked at its new path like any other.
 
 It still blocks wherever a rewrite cannot honestly express the outcome, and
-`redirect_blocker` is the single predicate: a spawn that failed **with no box left
-behind by anyone else**, so there is nothing to aim at; a tool whose arguments it does
-not know how to rewrite; an `old_string` the
-box's copy does not contain, which would turn a clear block into an opaque "string not
-found"; and any session reached through Codex's hook adapter, which has no
+`redirect_blocker` is the single predicate: a failed spawn with no box left behind; a
+tool whose arguments it cannot rewrite; an `old_string` the box's copy does not
+contain, which would turn a clear block into an opaque "string not found"; and any
+session reached through Codex's hook adapter, which has no
 `updatedInput` contract and would read the allow as permission to write the *original*
 path. The block message is the same one as before, with the reason added as a note.
 
@@ -40,15 +37,12 @@ lease. It does *not* have a toolchain — installing one is minutes and a hook m
 take minutes — so the message carries the provision command along with the rest of the
 route out.
 
-**A shell command is judged too**, on the paths its own command line names as writes —
-see the shell tier below `old_strings`. Editor calls were the whole scope until Claude
-Code's bypass-permissions mode began telling sessions, in text indistinguishable from
-their operator's, to prefer `sed`/heredocs over Edit and Write; that made the blind side
-a route. A shell command is never re-aimed, because the rewrite replaces a path argument
-and a command line has none, so this tier always blocks toward the box.
+**A shell command is judged too**, on the paths its command line names as writes; see
+the shell tier below `old_strings`. Bypass-permissions mode made the old editor-only
+scope a blind route by recommending `sed` and heredocs. A command is never re-aimed,
+because the rewrite replaces a path argument and a command line has none.
 
-**And the program that command hands to an interpreter is judged as well**, by
-`guard_interpreter.py` — whose docstring owns that tier's reasoning.
+**Interpreter programs are judged as well**; `guard_interpreter.py` owns that tier.
 
 **A `git checkout`/`git switch` onto a task branch is blocked outright** — see the branch
 tier below the shell one. It is the only judgement here that ends in neither a rewrite nor
@@ -71,14 +65,12 @@ every tier here working exactly as designed.
   - any machine with no multi-root workspace file, which is every CI runner and every
     fresh clone.
 
-Wired in devkit's own `.claude/settings.json` as well as the workspace root's. In a
-devkit session it is one `Path.resolve()` and out — but it fires for real the moment a
-devkit session edits a sibling checkout, which is the same class of mistake and the
-reason devkit runs the hooks it ships.
+Wired in devkit's own `.claude/settings.json` as well as the workspace root's. It is one
+`Path.resolve()` and out until a devkit session edits a sibling checkout, which is the
+same class of mistake and the reason devkit runs the hooks it ships.
 
-Pure helpers (`edited_path`, `owning_project`, `redirect_decision`, `deny_message`)
-are unit-tested in `tests/test_worktree_guard.py`; `main` is the thin shell that
-spawns and reports.
+Pure helpers are unit-tested in `tests/test_worktree_guard.py`; `main` is the thin shell
+that spawns and reports.
 """
 
 from __future__ import annotations

@@ -19,15 +19,13 @@ submodule. This script keeps that copy honest:
     seed a fresh shared repo from the project that currently owns the code).
   - `--list`: print the manifest and resolved source, then exit.
 
-The shared-repo path resolves from `--src` or `$DEVKIT_DIR`. `.devkit.toml`
-itself is **never** synced -- it is the per-project config the shared code reads.
+The source resolves from `--src` or `$DEVKIT_DIR`; `.devkit.toml` stays project-owned.
 
-`MANIFEST` is the reviewed, portable subset (config loader + the scripts audited so
-far); extend it as more scripts are decoupled. Pure helpers (`resolve_src`,
-`classify`) are unit-tested in `scripts/hooks/tests/test_sync_devkit.py`.
+`MANIFEST` is the reviewed, portable subset; extend it as more scripts are decoupled.
+Pure helpers are unit-tested in `scripts/hooks/tests/test_sync_devkit.py`.
 
-`BLOCK_MANIFEST` is the second tier: a *region* of a per-project file, delimited by
-`<!-- devkit:begin <id> -->` / `<!-- devkit:end <id> -->`, gated byte-for-byte while
+`BLOCK_MANIFEST` gates a *region* delimited by `<!-- devkit:begin <id> -->` /
+`<!-- devkit:end <id> -->` byte-for-byte while
 the rest of the file stays the project's own. It exists for `CLAUDE.md`, which can
 never join `MANIFEST` -- see the tier's own comment block below for why the policy has
 to be inline rather than behind a pointer. Every mode handles both tiers; a block that
