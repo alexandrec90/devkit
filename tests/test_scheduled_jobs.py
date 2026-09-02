@@ -179,6 +179,26 @@ def test_the_stop_idle_pass_writes_the_file_its_installer_advertises():
     assert "--always" in installer.stop_idle_arguments(r"C:\py\pythonw.exe", root=Path(r"C:\ws"))
 
 
+def test_the_rc_server_pass_writes_the_file_its_installer_advertises():
+    """This one writes its own artifact rather than being wrapped, for the same reason
+    `global-tools.py` does: the content that matters is a line per served project, which
+    only the runner can render."""
+    installer = load_script("scripts/install-rc-schedule.py")
+    runner = load_script("scripts/rc-servers.py")
+    assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
+
+
+def test_the_scheduled_rc_pass_never_loses_the_mode_that_makes_it_do_anything():
+    """`maintain` is the difference between a job and a no-op.
+
+    `rc-servers.py`'s default mode is `status`, which is read-only by design, so an argv
+    that lost the word would register a task that fires every fifteen minutes forever
+    and repairs nothing -- while `schtasks` reported `Last Result: 0` throughout.
+    """
+    installer = load_script("scripts/install-rc-schedule.py")
+    assert "maintain" in installer.schedule_for(root=REPO_ROOT).command
+
+
 def test_the_global_tools_pass_writes_the_file_its_installer_advertises():
     """This one writes its own artifact rather than being wrapped: the content that
     matters is not the captured stdout of an npm command but the rollback line for
@@ -228,6 +248,7 @@ UNATTENDED: dict[str, str] = {
     # through `notify-wrap.py`, whose parent is an extension host with no console either.
     "scripts/git-merge-default.py": "the VS Code merge task, from a console-less parent",
     "scripts/global-tools.py": "devkit-global-tools runs it nightly",
+    "scripts/rc-servers.py": "devkit-rc-servers runs it every 15 minutes",
     "scripts/log-wrap.py": "the wrapper three of those jobs are launched through",
     # reached from an entry point
     "scripts/sweep.py": "the git and gh IO for reconcile and upgrade",

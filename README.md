@@ -510,11 +510,51 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-docker-stop-idle` | `scripts/install-docker-stop-idle.py` | daily 03:30 | `logs/scheduled-docker-stop-idle.log` |
 | `devkit-docker-prune` | `scripts/install-docker-prune.py` | daily 04:00 | `logs/scheduled-docker-prune.log` |
 | `devkit-global-tools` | `scripts/install-global-tools.py` | daily 04:30 | `logs/global-tools.log` |
+| `devkit-rc-servers` | `scripts/install-rc-schedule.py` | every 15 min | `logs/rc-servers.log` |
 
 `scripts/schedule_health.py` answers the question no artifact can — *did it run at all*
 — and names the file above when one exits non-zero, so the session-start line is a
 pointer rather than a bare exit code. `tests/test_scheduled_jobs.py` holds the contract:
 a job registered by hand, or one that leaves nothing behind, fails the suite.
+
+#### Remote Control servers, and why keeping them up is a job
+
+`claude remote-control` puts a session running on this machine in front of the phone at
+`claude.ai/code`. One server per project covers every conversation in that project — it
+serves sessions on demand from the device — so what needs managing is the project, not
+the session.
+
+Two facts make that a scheduled job rather than a terminal you leave open. A server that
+loses the network for ten minutes **exits**, and nothing restarts it. And a server that
+never exits means a process called `claude` is always running, which is exactly what
+`scripts/agent_clis.py` refuses to update over — so an always-on server silently
+disables the nightly CLI update it depends on.
+
+`scripts/rc-servers.py` owns both halves. Every fire restarts what died; once a day,
+when every served project has been quiet long enough, it stops the servers, updates the
+CLI in the gap, and starts them again. Restarting inside four hours brings each session
+back, so the cycle costs the conversations nothing.
+
+Nothing is served until you opt a project in, because a standing server costs real
+memory. The setting lives in the workspace file beside `devkit.onHold`:
+
+```jsonc
+"devkit.remoteControl": ["devkit", "carameli"]
+```
+
+or, with the knobs:
+
+```jsonc
+"devkit.remoteControl": {
+  "projects": ["devkit"],
+  "permissionMode": "acceptEdits",  // a standing grant — opt in deliberately
+  "idleMinutes": 20,
+  "updateAt": "04:45"
+}
+```
+
+`python scripts/rc-servers.py status` reports what is up and what is active without
+touching anything; `up`, `cycle` and `down` are the manual verbs.
 
 The global-tools pass is the machine-wide counterpart to the project upgrade. Four of
 this workspace's MCP servers — chrome-devtools, postgres, redis, azure-devops — are
