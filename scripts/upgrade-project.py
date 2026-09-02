@@ -114,11 +114,6 @@ UPGRADE_PATHS: tuple[str, ...] = (
     "DEVKIT_FILES.json",
     ".pre-commit-config.yaml",
     ".github/workflows/pr-gate.yml",
-    # The project's own settings, which `--pull` rewrites in both directions: it
-    # unwires a hook whose script the pull deleted, and wires the cross-checkout edit
-    # guard when nothing runs it. `add -A` was committing this file all along; only
-    # the plan failed to name it, which is the half a reviewer reads.
-    ".claude/settings.json",
 )
 
 

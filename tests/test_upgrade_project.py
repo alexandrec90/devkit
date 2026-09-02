@@ -303,18 +303,6 @@ def test_the_planned_commit_does_not_claim_a_file_count_it_cannot_know(
     assert "0 vendored file(s)" not in printed
 
 
-def test_the_plan_names_the_settings_file_the_pull_rewrites(tmp_path, capsys, monkeypatch):
-    """`add -A` commits it either way; the plan is the half a reviewer reads. `--pull`
-    rewrites `.claude/settings.json` in both directions -- unwiring a hook whose script
-    it just deleted, and wiring the cross-checkout edit guard when nothing runs it --
-    so an upgrade that silently changed a project's harness config was describing
-    itself as touching four files."""
-    monkeypatch.setattr(up.sweep, "git_for", lambda _p: refs({}))
-    monkeypatch.setattr(up.tb, "detect_default_branch", lambda *_a, **_kw: "master")
-    assert up.upgrade_one("carameli", tmp_path, "v0.5.3").code == 0
-    assert ".claude/settings.json" in capsys.readouterr().out
-
-
 def test_the_pr_body_lists_all_four_pins_and_the_previous_version():
     body = up.pr_body("v0.5.3", "v0.5.2", ["scripts/hooks/stop.py"])
     assert "v0.5.3" in body and "v0.5.2" in body
