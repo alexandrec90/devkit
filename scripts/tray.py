@@ -80,8 +80,11 @@ ICON_SIZE = 16
 # The Windows-only half of `ctypes`, reached through `sys.modules` rather than through
 # the imported name. mypy resolves an attribute against the platform it is *running* on,
 # so a bare `ctypes.windll` fails `[attr-defined]` on the Linux CI runner while the
-# `# type: ignore` that silences it there is an unused ignore on this Windows desktop --
-# and `warn_unused_ignores` is on, so neither spelling is green in both places. Indexing
+# `type: ignore` that silences it there is an unused ignore on this Windows desktop --
+# and `warn_unused_ignores` is on, so neither spelling is green in both places. (Written
+# without the leading hash on purpose: `structure_scan` counts that token in a comment as
+# a suppression, so spelling it in full costs this file a `suppressions::` entry.)
+# Indexing
 # `sys.modules` types as `ModuleType`, whose attributes are `Any`; a `getattr` with a
 # literal name would read better and not survive, because ruff's B009 autofix rewrites it
 # back to the attribute. `scripts/reclaim.py` carries the long form of this note.
