@@ -241,6 +241,12 @@ SLOTLESS: dict[str, str] = {
         "an installable library, not an application: it owns no engine and no "
         "migrations, its suite runs on in-memory SQLite, and it ships no compose file"
     ),
+    "roguelike": (
+        "a browser game with no compose file, so there is no Docker tier and nothing "
+        "for a slot to offset: its .devkit.toml declares [db] enabled = false, and the "
+        "Vite dev server its [frontend] tier runs is a host process choosing its own "
+        "port, not a container publishing one"
+    ),
 }
 
 
