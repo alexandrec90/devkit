@@ -240,6 +240,36 @@ def _reexec(module: str) -> int | None:
     return project_python.re_exec(REPO_ROOT, module, sys.argv)
 
 
+def markdown_sections(markdown: list[str]) -> str:
+    """The markdownlint and remark passes over `markdown`, as artifact sections.
+
+    Its own function so `main` does not carry four branches for two optional node tools.
+    Both are looked up through `node_tool` rather than run blind: they are real
+    executables rather than `-m` modules, so an absent one raises FileNotFoundError
+    inside `run_tool` instead of being reported as a finding nobody can fix.
+    """
+    if not markdown:
+        return ""
+    sections = ""
+    if markdownlint := node_tool("markdownlint-cli2"):
+        sections += run_tool(
+            "markdownlint",
+            [markdownlint, *markdown],
+            f"{markdownlint} --fix {' '.join(markdown)}",
+        )
+    else:
+        print("  markdownlint: not installed — skipped")
+    if remark := node_tool("remark"):
+        sections += run_tool(
+            "remark",
+            [remark, "--frail", "--ignore-path", ".remarkignore", *markdown],
+            f"{remark} --output {' '.join(markdown)}",
+        )
+    else:
+        print("  remark: not installed — skipped")
+    return sections
+
+
 def not_clean_reason() -> str:
     """The line to print when a REQUIRED linter could not run, else "".
 
@@ -343,23 +373,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     if envs:
         sections += run_tool("dotenv-linter", [*DOTENV_CMD, *envs], " ".join([*DOTENV_CMD, *envs]))
-    if markdown:
-        if markdownlint := node_tool("markdownlint-cli2"):
-            sections += run_tool(
-                "markdownlint",
-                [markdownlint, *markdown],
-                f"{markdownlint} --fix {' '.join(markdown)}",
-            )
-        else:
-            print("  markdownlint: not installed — skipped")
-        if remark := node_tool("remark"):
-            sections += run_tool(
-                "remark",
-                [remark, "--frail", "--ignore-path", ".remarkignore", *markdown],
-                f"{remark} --output {' '.join(markdown)}",
-            )
-        else:
-            print("  remark: not installed — skipped")
+    sections += markdown_sections(markdown)
 
     _write_artifact(sections)
 

@@ -91,3 +91,15 @@ def test_the_hook_runs_against_this_repo_for_real():
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "not found" not in (result.stdout + result.stderr).lower()
+
+
+def test_an_interpreter_without_ruff_falls_back_to_path(tmp_path, monkeypatch):
+    """The regression a box found. An ephemeral worktree has no `.venv` until it is
+    provisioned, so the helper correctly answers "the current interpreter" — and that
+    interpreter is the bare workstation Python. Committing from a box then failed with
+    `No module named ruff`: the hook that used to work, broken by the fix meant to make
+    it more reliable."""
+    import project_python
+
+    monkeypatch.setattr(project_python, "has_module", lambda *_a, **_k: False)
+    assert run_ruff.ruff_command(["check"], root=tmp_path) == ["ruff", "check"]

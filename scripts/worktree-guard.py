@@ -47,11 +47,8 @@ their operator's, to prefer `sed`/heredocs over Edit and Write; that made the bl
 a route. A shell command is never re-aimed, because the rewrite replaces a path argument
 and a command line has none, so this tier always blocks toward the box.
 
-**And the program that command hands to an interpreter is judged as well** — see
-`guard_interpreter.py`, which owns that tier. Covering `sed -i` and `>` but not a
-heredoc'd `Path(...).write_text(...)` left the gap exactly where the operator instruction
-above sends the most traffic, so a session following it wrote to a home branch every time
-with this hook wired, running and silent.
+**And the program that command hands to an interpreter is judged as well**, by
+`guard_interpreter.py` — whose docstring owns that tier's reasoning.
 
 **A `git checkout`/`git switch` onto a task branch is blocked outright** — see the branch
 tier below the shell one. It is the only judgement here that ends in neither a rewrite nor
@@ -113,9 +110,7 @@ import devkit_project
 # its docstring for the structural reason, which is that this one is at its ceiling.
 import guard_probes
 
-# The interpreter tier, in its own module for that same reason and because it asks a
-# different question: everything here is how a shell splits a line, that is what a script
-# does with a path.
+# The interpreter tier, in its own module for the same structural reason.
 import guard_interpreter
 
 # Also resolved by the sys.path insert above. Read for the slug the UserPromptSubmit
@@ -918,9 +913,7 @@ def guarded_targets(payload: dict) -> list[str]:
     """
     if _tool_name(payload) in SHELL_TOOLS:
         command = str(tool_input(payload).get("command") or "")
-        # Composed here, not inside `shell_write_targets`: the two answer different
-        # questions and only one is about shell grammar. Command-line targets come first,
-        # so a block names the unambiguous one when a call has both.
+        # Command-line targets first, so a block names the unambiguous one.
         return [*shell_write_targets(command), *guard_interpreter.write_targets(command)]
     if _tool_name(payload) in PATCH_TOOLS:
         # Falls through to the path key when the envelope names nothing, rather than

@@ -152,7 +152,6 @@ MANIFEST: tuple[str, ...] = (
     # Auto-fix-on-edit PostToolUse hook (repo-relative ruff path fix).
     "scripts/hooks/lint-fix.py",
     "scripts/hooks/tests/test_lint_fix.py",
-    # Reaches devkit's guard from a project that cannot hold it (see its docstring).
     "scripts/hooks/worktree-guard-launch.py",
     "scripts/hooks/tests/test_worktree_guard_launch.py",
     # Bash output cap: the PreToolUse gate and the wrapper it demands. They ship
