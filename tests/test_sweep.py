@@ -66,7 +66,7 @@ WORKSPACE = json.dumps(
             {"path": "carameli-b"},
             {"path": "ibkr_trader"},
             {"path": "devkit"},
-            {"path": "VanillaLand"},
+            {"path": "reference-checkout"},
         ]
     }
 )
@@ -78,15 +78,20 @@ def test_workspace_folders_are_read_in_file_order():
         "carameli-b",
         "ibkr_trader",
         "devkit",
-        "VanillaLand",
+        "reference-checkout",
     ]
 
 
 def test_excluded_checkouts_are_dropped():
-    # The default exclusion: VanillaLand is Azure DevOps with a `develop` base and
-    # is a reference checkout, not one we ship from.
-    assert "VanillaLand" not in parse_workspace(WORKSPACE)
-    assert len(parse_workspace(WORKSPACE)) == 4
+    """`DEFAULT_EXCLUDE` is empty today, so the default drops nothing and this would
+    pass vacuously read against it. The exclusion is passed in explicitly instead --
+    which is the mechanism, and the thing that has to still work when a reference
+    checkout is registered again."""
+    excluded = frozenset({"reference-checkout"})
+    assert "reference-checkout" not in parse_workspace(WORKSPACE, excluded)
+    assert len(parse_workspace(WORKSPACE, excluded)) == 4
+    # And the default: nothing is excluded unless a caller says so.
+    assert len(parse_workspace(WORKSPACE)) == 5
 
 
 def test_nested_paths_reduce_to_the_checkout_name():

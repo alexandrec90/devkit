@@ -95,9 +95,10 @@ it is in that code, and the file it was in is against a 500-line cap.
   the box tier entirely. It builds its project list with `devkit_project.known_projects`,
   so a folder in `NOT_PROJECTS` is registered in the workspace — visible, readable — and
   yet owns no path the guard will route: an edit there is allowed silently, on whatever
-  branch it is parked on. Reading the registry raw instead would cut `VanillaLand` a box
-  on an `agent/...` branch, for a checkout that ships nothing and whose Azure DevOps
-  remote has no PR for that branch to become.
+  branch it is parked on. Reading the registry raw instead would cut such a checkout a
+  box on an `agent/...` branch — for a folder that ships nothing, and whose remote may
+  not even be a host with pull requests for that branch to become. `NOT_PROJECTS` is
+  empty today; the behaviour is what makes registering one safe again.
   `test_an_edit_into_a_reference_checkout_is_allowed` is the ratchet, and it is a
   `main()` test on purpose: `redirect_decision` takes the project list as an argument,
   so only the shell can be wrong about it.

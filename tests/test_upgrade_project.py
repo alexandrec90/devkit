@@ -817,9 +817,9 @@ def test_candidates_read_the_source_and_the_stamp_off_disk(tmp_path):
     adopter = tmp_path / "carameli"
     adopter.mkdir()
     (adopter / "DEVKIT_VERSION").write_text("v0.5.2\n", encoding="utf-8")
-    (tmp_path / "VanillaLand").mkdir()
+    (tmp_path / "reference-checkout").mkdir()
 
-    built = up.candidates_for(tmp_path, ["devkit", "carameli", "VanillaLand"], devkit)
+    built = up.candidates_for(tmp_path, ["devkit", "carameli", "reference-checkout"], devkit)
     assert [c.is_source for c in built] == [True, False, False]
     assert [c.adopts for c in built] == [True, True, False]
 

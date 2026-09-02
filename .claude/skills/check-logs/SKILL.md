@@ -45,7 +45,8 @@ If `LastRunTime` predates `LastWriteTime`, **the result describes a command that
 longer exists**. Say so and stop; there is no failure to fix. Confirm what changed with
 `git log` on the installer -- `scripts/install-docker-prune.py`,
 `scripts/install-reconcile-task.py`, `scripts/install-upgrade-schedule.py`,
-`scripts/install-release-schedule.py`, `scripts/install-vanillaland-merge.py`.
+`scripts/install-release-schedule.py`, `scripts/install-docker-stop-idle.py`,
+`scripts/install-global-tools.py`.
 
 ## 3. Read the registered command against its installer
 
@@ -83,7 +84,7 @@ session-start line names the absence rather than pointing at the path.
 
 Never fire a scheduled job to clear a stale status. `scripts/docker-maint.py` runs
 `wsl --shutdown` and prunes every unused image; the reconcile pass destroys boxes; the
-VanillaLand merge stashes a working tree somebody may be editing right now. Each is
+stop-idle pass stops every container an opted-in stack is serving from. Each is
 correct in the small hours and wrong as a diagnostic.
 
 To prove the wrapper writes what it claims, run the *registered* command with a scratch

@@ -58,9 +58,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # the naive `REPO_ROOT.parent` made it exit 2 there, naming `.worktrees/<file>`.
 DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 
-# Checkouts that are not projects in this sense. VanillaLand is the legacy reference
-# monolith — it ships no harness and nothing here applies to it.
-NOT_PROJECTS: frozenset[str] = frozenset({"VanillaLand"})
+# Checkouts registered so they can be read but shipping no harness, so nothing in ACTIONS
+# applies. Empty since 2026-09-02 and kept as a mechanism: `known_projects` subtracts it
+# from the raw registry, so re-introducing one is a name here rather than a refactor.
+NOT_PROJECTS: frozenset[str] = frozenset()
 
 
 class ProjectError(ValueError):
@@ -292,13 +293,12 @@ ACTIONS: dict[str, Action] = {
     # phantom gaps.
     "test-target": Action("scripts/run-tests.py", "Test: Run Carameli Target", projects=CARAMELI),
     "e2e": Action("scripts/run-e2e.py", "Test: Run Browser E2E", projects=CARAMELI),
-    # The carameli <-> VanillaLand local integration suite, both directions. carameli
-    # owns the orchestrator: it boots the VanillaLand-side harness (VS_REPO_DIR in its
-    # `.env.local-e2e`), runs tests/local_e2e, then the .NET outbound driver. VanillaLand
-    # cannot own an action — it is in NOT_PROJECTS — so carameli fronts for the pair.
-    "local-e2e": Action(
-        "scripts/local-e2e.py", "Test: Run Local Integration E2E", projects=CARAMELI
-    ),
+    # A `local-e2e` action stood here until 2026-09-02. It drove carameli's integration
+    # suite against the reference checkout that was retired from this workspace on that
+    # date, and the other half of the pair is what made it runnable: the orchestrator
+    # boots a counterpart stack named by `VS_REPO_DIR`, so with no such checkout on the
+    # machine it can only fail at the first step. carameli still ships the script; what
+    # is gone is the menu row and the dispatch that implied the machine could serve it.
     "ngrok": Action("scripts/start-ngrok.py", "Start: ngrok + Sync URLs", projects=CARAMELI),
     # Takes no argument on purpose. The script encodes every master in
     # `frontend/assets-src/comic-book/` that has no export yet and skips the rest, so
@@ -386,7 +386,6 @@ TEST_KINDS: dict[str, SuiteKind] = {
     "e2e": SuiteKind("e2e"),
     "e2e-headed": SuiteKind("e2e", ("--headed",)),
     "e2e-cross": SuiteKind("e2e", ("--cross-browser",)),
-    "local-e2e": SuiteKind("local-e2e"),
     # Last, so the distance from `suite` is as large as the table can make it. The
     # argument is the suite name `hook-tests-live.py` already takes, so nothing new is
     # reachable here that its CLI did not already offer.
@@ -465,9 +464,9 @@ def resolve_project(name: str, projects: list[str], root: Path, noun: str = "pro
 
     `noun` is what the failure calls the thing that was not found. It exists because
     `git-merge-default.py` resolves against the RAW registry -- reference checkouts
-    included, since merging a trunk needs git and no harness — and telling someone
-    `unknown project 'VanillaLand'` about a folder this file deliberately excludes from
-    the word "project" would send them to fix the wrong list.
+    included, since merging a trunk needs git and no harness — and calling such a folder
+    an unknown *project*, when `NOT_PROJECTS` is exactly what excludes it from that word,
+    would send the reader to fix the wrong list.
     """
     if not name:
         raise ProjectError(f"no {noun} given; expected one of: {', '.join(projects)}")
@@ -772,8 +771,8 @@ def _indent_of(text: str, offset: int) -> str:
 def insert_folder(text: str, name: str) -> str:
     """Add `{"path": name}` to `folders`, before any reference (non-project) checkout.
 
-    Inserting before the references rather than appending keeps VanillaLand last,
-    which is how the list reads in the folder tree and in a sweep report.
+    Inserting before the references rather than appending keeps a reference checkout
+    last, which is how the list reads in the folder tree and in a sweep report.
     """
     scan = devkit_jsonc.blank_comments(text)
     key = scan.find('"folders"')
@@ -905,7 +904,7 @@ def remove_folder(text: str, name: str) -> str:
     Matched on `path`, whitespace-insensitively, because VS Code rewrites this file
     itself whenever a workspace setting is changed through its UI and its spacing is
     not ours to predict. `name` is deliberately not consulted: a folder may carry a
-    display label (`VanillaLand (reference)`) and the path is what every reader keys on.
+    display label distinct from its path, and the path is what every reader keys on.
     """
     scan = devkit_jsonc.blank_comments(text)
     key = scan.find('"folders"')

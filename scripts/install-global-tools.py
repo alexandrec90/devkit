@@ -28,9 +28,9 @@ would be that job again, with a worse blast radius: it changes the versions ever
 session's tooling runs on.
 
 None of this ships into consuming projects. Installers are not in `sync-devkit.py`'s
-`MANIFEST` -- they configure *this* machine, which is also why `devkit-docker-prune`,
-`devkit-docker-stop-idle` and `devkit-vanillaland-merge` live here without being
-anything a generated project inherits.
+`MANIFEST` -- they configure *this* machine, which is also why `devkit-docker-prune`
+and `devkit-docker-stop-idle` live here without being anything a generated project
+inherits.
 
 04:30 rather than a shared slot: 03:00 is the devkit upgrade, 03:30 the Docker stop-idle
 pass and 04:00 the prune. Landing last means a night that updated npm's global tree is
@@ -114,10 +114,10 @@ def runner_script(root: Path = REPO_ROOT) -> Path:
 def interpreter(root: Path = REPO_ROOT) -> str:
     """The interpreter the scheduled task should run, belonging to `root`.
 
-    A copy of `install-vanillaland-merge.interpreter`, and for the reason its docstring
-    gives: `--devkit` exists so an agent in a box can register the job against the static
-    checkout, and using `sys.executable` there registers the *box's* `.venv` -- which
-    `reconcile` deletes the moment the PR merges, silently, days later.
+    Every installer here resolves it the same way, for the same reason: `--devkit`
+    exists so an agent in a box can register the job against the static checkout, and
+    using `sys.executable` there registers the *box's* `.venv` -- which `reconcile`
+    deletes the moment the PR merges, silently, days later.
 
     `global-tools.py` imports nothing but the standard library, so any Python 3 would
     run it. The trap is about the path outliving the box, not about what is installed.

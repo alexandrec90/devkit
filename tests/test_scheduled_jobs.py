@@ -188,17 +188,6 @@ def test_the_global_tools_pass_writes_the_file_its_installer_advertises():
     assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
 
 
-def test_the_vanillaland_merge_writes_the_file_its_installer_advertises():
-    """Same shape as the prune: `git-merge-default.py` has several callers -- a VS Code
-    task among them -- and writes no artifact of its own, so the claim here is about the
-    label the wrapper is given. The label differs from the clicked task's on purpose, so
-    a click cannot overwrite the unattended run's only record."""
-    installer = load_script("scripts/install-vanillaland-merge.py")
-    log_wrap = load_script("scripts/log-wrap.py")
-    assert installer.ARTIFACT == f"logs/{log_wrap.slug(installer.LABEL)}.log"
-    assert "--always" in installer.merge_arguments(r"C:\py\pythonw.exe", root=Path(r"C:\ws"))
-
-
 # --- an unattended job puts no window on the desktop ----------------------------
 #
 # `pythonw.exe` is what keeps the job itself from opening a console. What it does not do
@@ -234,11 +223,14 @@ UNATTENDED: dict[str, str] = {
     "scripts/release-pipeline.py": "devkit-release runs it nightly, behind --if-needed",
     "scripts/upgrade-project.py": "devkit-upgrade-projects runs it nightly",
     "scripts/docker-maint.py": "devkit-docker-prune and devkit-docker-stop-idle run it nightly",
-    "scripts/git-merge-default.py": "devkit-vanillaland-merge runs it nightly",
+    # No scheduler reaches this one today -- the nightly job that did was retired with
+    # the reference checkout it merged. It stays listed because the VS Code task runs it
+    # through `notify-wrap.py`, whose parent is an extension host with no console either.
+    "scripts/git-merge-default.py": "the VS Code merge task, from a console-less parent",
     "scripts/global-tools.py": "devkit-global-tools runs it nightly",
     "scripts/log-wrap.py": "the wrapper three of those jobs are launched through",
     # reached from an entry point
-    "scripts/sweep.py": "the git and gh IO for reconcile, upgrade and the merge",
+    "scripts/sweep.py": "the git and gh IO for reconcile and upgrade",
     "scripts/sync-devkit.py": "upgrade-project.py spawns it per project, once per pass",
     "scripts/release.py": "release-pipeline.py imports it for the version and bump helpers",
     "scripts/git_policy.py": "the single spawn point git-merge-default.py runs git through",

@@ -34,7 +34,16 @@ plan_command = devkit_project.plan_command
 project_selection = devkit_project.project_selection
 resolve_project = devkit_project.resolve_project
 
-WORKSPACE = json.dumps({"folders": [{"path": "alpha"}, {"path": "beta"}, {"path": "VanillaLand"}]})
+WORKSPACE = json.dumps({"folders": [{"path": "alpha"}, {"path": "beta"}]})
+
+# The same registry plus a *reference* checkout — one registered to be read but never
+# shipped from. `NOT_PROJECTS` is empty today, so every test below that exercises the
+# exclusion has to put a name in it; that is the only way the mechanism gets covered at
+# all, and the alternative is deleting the checks that guard it.
+REFERENCE = "reference-checkout"
+REFERENCE_WORKSPACE = json.dumps(
+    {"folders": [{"path": "alpha"}, {"path": "beta"}, {"path": REFERENCE}]}
+)
 
 
 @pytest.fixture
@@ -55,9 +64,10 @@ def test_projects_come_from_the_workspace_registry():
     assert known_projects(WORKSPACE) == ["alpha", "beta"]
 
 
-def test_the_reference_checkout_is_not_a_project():
-    # VanillaLand ships no harness; nothing in ACTIONS applies to it.
-    assert "VanillaLand" not in known_projects(WORKSPACE)
+def test_the_reference_checkout_is_not_a_project(monkeypatch):
+    # A NOT_PROJECTS entry ships no harness; nothing in ACTIONS applies to it.
+    monkeypatch.setattr(devkit_project, "NOT_PROJECTS", frozenset({REFERENCE}))
+    assert known_projects(REFERENCE_WORKSPACE) == ["alpha", "beta"]
 
 
 # --- resolution -------------------------------------------------------------
@@ -359,10 +369,6 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # Never hoisted — born scoped, and scoped by content rather than by capability:
         # the script encodes the comic-book skin's art, which only carameli has.
         "encode-art",
-        # Never hoisted — born scoped. The integration suite spans carameli and the
-        # VanillaLand checkout, and VanillaLand is in NOT_PROJECTS, so carameli fronts
-        # for the pair and no other checkout can run it.
-        "local-e2e",
         # Also born scoped, and the only entry whose scope is devkit itself: the
         # live-CLI smokes are in `tests/`, the one tree `sync-devkit.py` never vendors,
         # so no consumer has the file. Every other action here is scoped by capability;
@@ -682,8 +688,8 @@ COMMENTED = """{
 \t\t\t"path": "carameli"
 \t\t},
 \t\t{
-\t\t\t"name": "VanillaLand (reference)",
-\t\t\t"path": "VanillaLand"
+\t\t\t"name": "reference-checkout (reference)",
+\t\t\t"path": "reference-checkout"
 \t\t}
 \t],
 \t"tasks": {
@@ -735,21 +741,30 @@ def test_picker_registration_updates_the_multi_test_picker_too():
 
 def test_registration_preserves_comments():
     """A json.dumps round-trip would delete these; the folder list would lose the only
-    place it explains what VanillaLand is and why sweep depends on it."""
+    place it explains what a reference checkout is and why sweep depends on the list."""
     updated = register(COMMENTED, ["newproj"])
     assert "sweep.py reads this as the project registry" in updated
     assert "MAINTAINED BY new-project.py" in updated
 
 
-def test_reference_checkouts_stay_last():
+def test_reference_checkouts_stay_last(monkeypatch):
+    """`NOT_PROJECTS` is empty, so `insert_folder` appends and the rule never fires on
+    the live registry. It is still the rule the moment a reference checkout comes back,
+    which is exactly when nobody will re-derive it — so cover it with one in the set."""
+    monkeypatch.setattr(devkit_project, "NOT_PROJECTS", frozenset({REFERENCE}))
     updated = register(COMMENTED, ["newproj"])
     paths = [f["path"] for f in devkit_jsonc_loads(updated)["folders"]]
-    assert paths == ["carameli", "newproj", "VanillaLand"]
+    assert paths == ["carameli", "newproj", REFERENCE]
 
 
 def test_registering_a_project_and_its_worktree():
     updated = register(COMMENTED, ["newproj", "newproj-b"])
-    assert devkit_project.known_projects(updated) == ["carameli", "newproj", "newproj-b"]
+    assert devkit_project.known_projects(updated) == [
+        "carameli",
+        REFERENCE,
+        "newproj",
+        "newproj-b",
+    ]
 
 
 def test_registration_is_idempotent():
@@ -795,8 +810,11 @@ def test_registering_against_the_real_workspace_file():
         "adoptProjects",
     ):
         assert _input_options(inputs[picker_id])[-2:] == ["probe", "probe-b"]
-    # VanillaLand is a reference checkout and must not drift into the middle.
-    assert [f["path"] for f in devkit_jsonc_loads(updated)["folders"]][-1] == "VanillaLand"
+    # No reference checkout is registered today, so the new pair simply lands last.
+    assert [f["path"] for f in devkit_jsonc_loads(updated)["folders"]][-2:] == [
+        "probe",
+        "probe-b",
+    ]
 
 
 # --- retirement, the inverse ------------------------------------------------
@@ -936,8 +954,10 @@ def test_retiring_against_the_real_workspace_file():
         assert victim not in options
         default = inputs[picker_id].get("default")
         assert default is None or default in options
-    # VanillaLand is not a project, so no checkbox can retire it out of the registry.
-    assert [f["path"] for f in devkit_jsonc_loads(updated)["folders"]][-1] == "VanillaLand"
+    # Only the picked project leaves; every other folder survives the edit.
+    assert (
+        len(devkit_jsonc_loads(updated)["folders"]) == len(devkit_jsonc_loads(text)["folders"]) - 1
+    )
 
 
 @needs_live_workspace
@@ -1779,7 +1799,7 @@ def test_the_test_kinds_input_is_a_checkbox_list_the_dispatcher_can_split(canoni
     ]
 
 
-# The one task that reaches a checkout `NOT_PROJECTS` excludes. Named once, because two
+# The one task that can reach a checkout `NOT_PROJECTS` excludes. Named once, because two
 # tests below assert about it and a renamed label must break them rather than quietly
 # exempt itself.
 MERGE_TASK = "Git: Merge Origin Default into Current Branch"
@@ -1792,7 +1812,9 @@ def test_the_merge_picker_reaches_the_reference_checkouts_too(canonical):
     exclusion. This one offers the registry PLUS `NOT_PROJECTS`: merging origin's
     default branch in is pure
     git — no `.devkit.toml`, no virtualenv, no vendored tier — so it is the one action a
-    reference checkout can take, and the checkout it was written for is one.
+    reference checkout can take. The set is empty today, which makes the two sides equal
+    rather than making the rule wrong; the equality below is what keeps them agreeing
+    when a reference checkout is registered again.
 
     Asserted as an equality in both directions so the picker cannot drift either way: a
     newly generated project has to reach it (`register()` maintains it alongside

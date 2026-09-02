@@ -510,7 +510,6 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-docker-stop-idle` | `scripts/install-docker-stop-idle.py` | daily 03:30 | `logs/scheduled-docker-stop-idle.log` |
 | `devkit-docker-prune` | `scripts/install-docker-prune.py` | daily 04:00 | `logs/scheduled-docker-prune.log` |
 | `devkit-global-tools` | `scripts/install-global-tools.py` | daily 04:30 | `logs/global-tools.log` |
-| `devkit-vanillaland-merge` | `scripts/install-vanillaland-merge.py` | daily 05:00 | `logs/scheduled-vanillaland-merge-develop.log` |
 
 `scripts/schedule_health.py` answers the question no artifact can — *did it run at all*
 — and names the file above when one exits non-zero, so the session-start line is a
@@ -571,12 +570,23 @@ the safety property: a collector-style stack doing scheduled work with no client
 connected looks exactly like an idle one, so it is safe by default rather than by
 being remembered.
 
-The VanillaLand merge is the odd one out and the only job that touches a working tree a
-human is going to open: it runs `git-merge-default.py` against the reference checkout, so
-`develop` arrives daily instead of as one unreviewable merge weeks later. It commits
-locally and never pushes. A conflict is left **in progress** with every unmerged file
-named in the log, and uncommitted work it had to set aside stays in a named stash — the
-installer's docstring is the place that explains why, and the log repeats the recovery.
+A seventh job stood in that table until 2026-09-02: a nightly `git-merge-default.py`
+against a reference checkout, so its trunk arrived daily instead of as one unreviewable
+merge weeks later. It was the only scheduled job that touched a working tree a human was
+going to open, and it went when the checkout did. `git-merge-default.py` itself stays —
+it is the "Git: Merge Origin Default into Current Branch" task, which is where that
+merge is now asked for by hand rather than nightly.
+
+**Every job in the table above is registered on one laptop, and that is the standing
+weakness of this tier.** `Get-ScheduledTaskInfo` on 2026-09-02 reported `devkit-release`,
+`devkit-upgrade-projects`, `devkit-docker-stop-idle`, `devkit-docker-prune` and
+`devkit-global-tools` all with the *same* `LastRunTime` — 09:03:04, the moment the
+machine came up — rather than the 02:00 through 04:30 their triggers name. That is the
+catch-up firing five jobs in a herd because the lid was closed at each nominal hour. It
+is why `<StartWhenAvailable>` is in `task_xml` at all, and it is not a substitute for a
+host that is awake: a job whose work is pure GitHub API traffic (`devkit-release`,
+`devkit-upgrade-projects`) has no reason to be pinned to a laptop, while the ones that
+manage this machine's boxes, containers and global npm tree have no reason to leave it.
 
 ## Reading the workspace task block
 

@@ -58,7 +58,15 @@ scripted_env = plug_projects.scripted_env
 unplug_hazards = plug_projects.unplug_hazards
 write_artifact = plug_projects.write_artifact
 
-REGISTRY = '{"folders": [{"path": "alpha"}, {"path": "beta"}, {"path": "VanillaLand"}]}'
+REGISTRY = '{"folders": [{"path": "alpha"}, {"path": "beta"}]}'
+
+# The same registry plus a reference checkout. Only the exclusion test below uses it,
+# and only with `NOT_PROJECTS` monkeypatched: the set is empty today, so a registry that
+# carried this name unconditionally would just add a candidate everywhere else.
+REFERENCE = "reference-checkout"
+REFERENCE_REGISTRY = (
+    '{"folders": [{"path": "alpha"}, {"path": "beta"}, {"path": "reference-checkout"}]}'
+)
 
 
 def done(stdout: str = "", code: int = 0, stderr: str = "") -> subprocess.CompletedProcess:
@@ -129,12 +137,17 @@ def test_a_project_in_only_one_source_is_still_offered():
     assert not found["onlydisk"].plugged and not found["onlyrepo"].plugged
 
 
-def test_the_reference_checkout_is_never_a_candidate():
+def test_the_reference_checkout_is_never_a_candidate(monkeypatch):
     """It is in `folders` on purpose and every consumer of the registry excludes it by
     name; a checkbox that could retire it would break the one task that resolves
-    against the raw registry."""
-    names = [c.name for c in inventory(REGISTRY, ["VanillaLand"], ["VanillaLand"])]
-    assert "VanillaLand" not in names
+    against the raw registry.
+
+    `NOT_PROJECTS` is empty today, so the name has to be put in it for the exclusion to
+    be exercised at all.
+    """
+    monkeypatch.setattr(devkit_project, "NOT_PROJECTS", frozenset({REFERENCE}))
+    names = [c.name for c in inventory(REFERENCE_REGISTRY, [REFERENCE], [REFERENCE])]
+    assert REFERENCE not in names
 
 
 def test_unregistered_candidates_are_alphabetical_after_the_registered_ones():
