@@ -10,10 +10,12 @@ import pytest
 from conftest import load_module
 
 sh = load_module("scripts/sync-devkit.py")
-# The settings tier the pull drives, which `sync-devkit.py` re-exports as an attribute.
-# Its own contract is covered in `test_project_settings.py`; what is checked from here
-# is the pull and the check reaching it with this module's retired list.
-ps = sh.project_settings
+# The settings tier the pull drives. Loaded here rather than off `sh`, because
+# `sync-devkit.py` imports it on use and deliberately holds no reference: a project's
+# first pull runs that script before this file exists. Its own contract is covered in
+# `test_project_settings.py`; what is checked from here is the pull and the check
+# reaching it with this module's retired list.
+ps = load_module("scripts/project_settings.py")
 
 
 def test_resolve_src_prefers_arg_then_env():
@@ -1498,8 +1500,33 @@ def test_a_second_pull_does_not_say_it_again(tmp_path, monkeypatch, capsys):
 # the shim shipped in the MANIFEST and no command anywhere ran it.
 
 
+def test_the_two_modules_name_the_same_settings_file():
+    """The one constant that is spelled twice, and why. `sync-devkit.py` must import the
+    settings tier lazily -- a project's first pull runs it before that file exists -- so
+    it cannot read the path from there at module scope. Two copies with no gate is how a
+    rename lands in one of them; this is the gate."""
+    assert sh.SETTINGS_FILE == ps.SETTINGS_FILE
+
+
+def test_the_bootstrap_pull_runs_without_the_settings_tier(tmp_path, monkeypatch, capsys):
+    """A generated project runs the copy of `sync-devkit.py` the generator placed there,
+    at a moment when nothing else in the MANIFEST exists. An import at module scope made
+    that pull a traceback -- the one pull that cannot be retried differently."""
+    src, dst = tmp_path / "shared", tmp_path / "proj"
+    _seed(src, "scripts/x.py", "v1")
+    monkeypatch.setattr(sh, "REPO_ROOT", dst)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "git_head", lambda p: "abc1234")
+    monkeypatch.setitem(sys.modules, "project_settings", None)
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
+    assert sh.settings_pass(dst) == []
+    assert sh.retired_hook_paths() == ()
+    assert sh.local_faults(dst) == ([], "")
+    assert "Traceback" not in capsys.readouterr().err
+
+
 def _unguarded_project(root: Path) -> Path:
-    _seed(root, sh.project_settings.GUARD_HOOK, "# the shim\n")
+    _seed(root, ps.GUARD_HOOK, "# the shim\n")
     _seed(root, sh.SETTINGS_FILE, "{}")
     return root
 
@@ -1515,7 +1542,7 @@ def test_pull_wires_the_guard_and_says_so(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sh, "git_head", lambda p: "abc1234")
     assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
     assert "cross-checkout edit guard" in capsys.readouterr().out
-    assert sh.project_settings.guard_unwired(dst) is False
+    assert ps.guard_unwired(dst) is False
 
 
 def test_check_fails_on_an_unwired_guard_without_calling_it_drift(tmp_path, monkeypatch, capsys):

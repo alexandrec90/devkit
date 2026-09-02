@@ -45,10 +45,14 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-# The insert names *this* copy's directory, so a consumer's `workspace-status.py`
+# For `project_settings.py`, which the three functions below import **on use** rather
+# than here. A project's very first pull runs the copy of this script the generator
+# placed there, at a moment when nothing else in the MANIFEST exists yet -- so an import
+# at module scope is a crash in exactly the bootstrap the pull exists for, and that is
+# not a hypothesis: it is what `test_a_generated_project_satisfies_the_vendored_ci_contract`
+# caught. The insert names *this* copy's directory, so a consumer's `workspace-status.py`
 # loading this file by path cannot reach a sibling checkout's tier.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import project_settings
 
 REPO_ROOT = (Path(__file__).parent / "..").resolve()
 SRC_ENV = "DEVKIT_DIR"
@@ -829,9 +833,11 @@ def retired_present(root: Path) -> list[str]:
 # exactly why `--pull` has to touch it: the pull deletes a retired hook script and wires
 # a newly delivered one, and both of those are edits to a file no MANIFEST covers. That
 # tier lives in `project_settings.py` — a different contract from copying, and this
-# module was past every structural limit it holds other files to. Re-exported because
-# `workspace-status.py` reads the path from this module rather than copying it.
-SETTINGS_FILE = project_settings.SETTINGS_FILE
+# module was past every structural limit it holds other files to. Spelled out here
+# rather than read from there because this module must load before that file exists
+# (see the sys.path comment at the top); `test_the_two_modules_name_the_same_settings
+# _file` is what stops the two copies drifting.
+SETTINGS_FILE = ".claude/settings.json"
 
 
 def retired_hook_paths(retired: tuple[str, ...] | None = None) -> tuple[str, ...]:
@@ -842,7 +848,15 @@ def retired_hook_paths(retired: tuple[str, ...] | None = None) -> tuple[str, ...
     the loaded module to prove the names are read from here rather than copied. A
     default captured at def time silently ignores that, and the test would have been
     asserting nothing.
+
+    Empty when the tier is not on disk yet, which is the bootstrap pull and nothing
+    else: a copy that has vendored the MANIFEST and lost this file is drift, and
+    `--check` reports it as drift rather than through this.
     """
+    try:
+        import project_settings
+    except ModuleNotFoundError:
+        return ()
     return project_settings.retired_hook_paths(RETIRED_PATHS if retired is None else retired)
 
 
@@ -853,7 +867,30 @@ def settings_pass(root: Path, retired: tuple[str, ...] | None = None) -> list[st
     edit guard when nothing runs it. `project_settings.settings_pass` owns both, and
     the notes it returns are already worded for the report below.
     """
+    try:
+        import project_settings
+    except ModuleNotFoundError:
+        return []
     return project_settings.settings_pass(root, retired_hook_paths(retired))
+
+
+def local_faults(root: Path) -> tuple[list[tuple[str, str]], str]:
+    """`(faults, summary)` for what `--check` finds outside the MANIFEST.
+
+    Neither the settings file nor the generated Codex mirror is ever compared against
+    upstream, so neither is drift -- but an unwired edit guard is the one harness fault
+    with no symptom at all, and a check that stayed quiet about it is how five
+    checkouts spent a release routing agent edits onto their home branches.
+
+    Returns the summary already worded, so `main` neither grows a branch per fault nor
+    words it there; both are what pushed that function past its limits.
+    """
+    try:
+        import project_settings
+    except ModuleNotFoundError:
+        return [], ""
+    faults = project_settings.check_notes(root, CODEX_HOOKS_FILE, codex_hooks_stale(root))
+    return faults, project_settings.check_summary(faults)
 
 
 CODEX_HOOKS_FILE = ".codex/hooks.json"
@@ -1318,7 +1355,7 @@ def main(argv: list[str] | None = None) -> int:
     receipt_retired = receipt_retired_present(REPO_ROOT, MANIFEST)
     # Faults in this project's own files: not drift, since `--check` never compares
     # them, but red for the same reason -- an unwired edit guard has no other symptom.
-    local = project_settings.check_notes(REPO_ROOT, CODEX_HOOKS_FILE, codex_hooks_stale(REPO_ROOT))
+    local, local_summary = local_faults(REPO_ROOT)
     if not (
         drifted or missing or retired or receipt_retired or block_drifted or block_unusable or local
     ):
@@ -1368,8 +1405,7 @@ def main(argv: list[str] | None = None) -> int:
         # someone to adopt upstream when nothing upstream differs is the kind of advice
         # that gets a red gate reclassified as noise.
         print(
-            f"sync-harness: every vendored file is in sync; "
-            f"{project_settings.check_summary(local)}.",
+            f"sync-harness: every vendored file is in sync; {local_summary}.",
             file=sys.stderr,
         )
     return 1
