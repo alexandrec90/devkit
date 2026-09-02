@@ -267,10 +267,34 @@ def test_a_repeated_header_row_is_not_read_as_a_job():
         ("8/14/2026 3:00:00 AM", dt.datetime(2026, 8, 14, 3, 0)),
         ("8/14/2026 15:00:00", dt.datetime(2026, 8, 14, 15, 0)),
         ("2026-08-14 03:00:00", dt.datetime(2026, 8, 14, 3, 0)),
+        ("2026-08-14 3:00:00 AM", dt.datetime(2026, 8, 14, 3, 0)),
+        ("2026-08-14 3:00:00 PM", dt.datetime(2026, 8, 14, 15, 0)),
     ],
 )
 def test_the_timestamp_formats_schtasks_emits(raw, expected):
     assert health.parse_time(raw) == expected
+
+
+def test_an_iso_date_beside_a_twelve_hour_clock_is_a_real_run():
+    """The false alarm this fixes, and the worst kind: silence inverted into noise.
+
+    `schtasks` formats its stamps from the machine's *short date* and *long time*
+    settings independently, so a machine set to an ISO short date and a 12-hour clock
+    emits `2026-09-02 9:02:42 AM` -- a spelling no format here covered. Both stamps then
+    parsed as None, and a job with no last run and no next run takes the `never run`
+    branch: four healthy jobs, every one of them green in the scheduler, reported at
+    every session start as never having run.
+
+    A check whose failure mode is crying wolf is worse than no check, because this one
+    exists to be believed when it says a job stopped.
+    """
+    assert health.parse_time("2026-09-02 9:02:42 AM") == dt.datetime(2026, 9, 2, 9, 2, 42)
+    healthy = job(
+        name="devkit-docker-prune",
+        last_run=health.parse_time("2026-09-02 9:02:42 AM"),
+        next_run=health.parse_time("2026-09-03 4:00:00 AM"),
+    )
+    assert health.problems([healthy], now=dt.datetime(2026, 9, 2, 13, 0)) == []
 
 
 @pytest.mark.parametrize("raw", ["N/A", "", "   ", "never", "30/30/2026 99:99:99"])
