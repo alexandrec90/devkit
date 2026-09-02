@@ -280,6 +280,47 @@ def retired_hooks_line(root: Path, names: list[str], source: Path = SOURCE_ROOT)
     )
 
 
+def unguarded_line(root: Path, names: list[str], source: Path = SOURCE_ROOT) -> str:
+    """Checkouts that vendor devkit and run no edit guard; "" when all of them do.
+
+    The mirror of `retired_hooks_line`: that one reports a hook wired to a script that
+    is gone, this one no hook at all. The second is the quieter of the two by far -- a
+    missing script errors on every prompt, while an unwired guard is simply silence,
+    and the only trace it leaves is the stranded branch a sweep reports days later.
+
+    The condition is **adopted devkit, no guard** -- deliberately wider than
+    `sync-devkit.guard_unwired`, which additionally requires the shim to be on disk
+    because `--check` already reports a missing vendored file as drift. From out here
+    there is no such second report, and the shape this was written for is precisely a
+    project whose vendored copy predates the shim: it has neither the file nor the
+    hook, and the same `--pull` fixes both. Requiring the file would have made this
+    line silent for all five checkouts on the machine that needed it.
+
+    Reads the paths and the predicate from `sync-devkit.py` rather than repeating
+    them, for the reason the whole file exists: a second copy is a second thing to go
+    stale.
+    """
+    if load_by_path is None:
+        return ""
+    try:
+        sync = load_by_path("_sync_devkit", source / "scripts" / "sync-devkit.py")
+        offenders = [
+            name
+            for name in names
+            if (root / name / sync.VERSION_FILE).is_file()
+            and sync.settings_guard(root / name) is False
+        ]
+    except Exception:
+        return ""
+    if not offenders:
+        return ""
+    return (
+        f"edit guard not wired: {', '.join(offenders)} -- an agent edit there lands on "
+        f"the home branch with no task branch under it "
+        f"(fix: python scripts/sync-devkit.py --pull, from that checkout)"
+    )
+
+
 # The four box states `boxes_line` reports, in the order they are printed, each with the
 # fix it wants from whoever reads the banner -- "" for the two that want nothing.
 BOX_STATES: tuple[tuple[str, str], ...] = (
@@ -623,11 +664,16 @@ def _age(seconds: float) -> str:
 def guard_line(root: Path, settings: Path = ROOT_SETTINGS) -> str:
     """Reports a workspace root that does not run the cross-checkout edit guard.
 
-    `worktree-guard.py` is wired in every repo that vendors devkit's settings, which is
-    the case it matters least in — a session inside a checkout is already the case the
-    guard stays silent for. The session it exists for is the one opened at the workspace
-    *root*, and that root is not inside any repository, so its `.claude/settings.json` is
-    a workstation file no test in this repo can hold in place.
+    The root is one of the two session shapes, and `unguarded_line` below is the other.
+    This one exists because the root is not inside any repository, so its
+    `.claude/settings.json` is a workstation file no test in this repo can hold in
+    place.
+
+    It used to say the checkouts were covered — "wired in every repo that vendors
+    devkit's settings" — and they were not: settings files are never vendored, so no
+    consuming project had the guard at all. That sentence is why the gap went a release
+    unreported, and it is the reason the checkout half is now checked rather than
+    asserted.
 
     Absent-is-silent everywhere else in this file, and it is the wrong default here: an
     unwired guard has no symptom at all. The edits land on home branches, and the sweep
@@ -802,6 +848,7 @@ def render(
     adoption: str = "",
     boxes: str = "",
     guard: str = "",
+    unguarded: str = "",
     retired: str = "",
     scheduler: str = "",
     schedule: list[str] | None = None,
@@ -828,6 +875,7 @@ def render(
         boxes,
         previews,
         guard,
+        unguarded,
         retired,
         events,
         workspace_sync,
@@ -926,6 +974,7 @@ def main(argv: list[str] | None = None) -> int:
             adoption_line(root, names),
             boxes_line(box_survey(workspace)),
             guard_line(root),
+            unguarded_line(root, names),
             retired_hooks_line(root, names),
             scheduler,
             schedule,

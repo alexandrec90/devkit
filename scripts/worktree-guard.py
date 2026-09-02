@@ -69,6 +69,12 @@ Wired in devkit's own `.claude/settings.json` as well as the workspace root's. I
 `Path.resolve()` and out until a devkit session edits a sibling checkout, which is the
 same class of mistake and the reason devkit runs the hooks it ships.
 
+**A consuming project reaches it through `scripts/hooks/worktree-guard-launch.py`**,
+which is vendored where this file is not. Both halves of that are delivered now:
+`sync-devkit.py`'s MANIFEST copies the shim, and its `--pull` back-fills the hook entry
+into the project's own `.claude/settings.json`, because a settings file is never
+vendored and for one release every consumer therefore held the shim and ran nothing.
+
 Pure helpers are unit-tested in `tests/test_worktree_guard.py`; `main` is the thin shell
 that spawns and reports.
 """

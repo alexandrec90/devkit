@@ -431,6 +431,29 @@ def test_generated_harness_manifest_is_readable_by_harness_config(tmp_path, feat
         assert config.frontend.test_cmd == ("run", "test:run")
 
 
+def test_a_generated_project_wires_the_guard_the_way_a_pull_would(tmp_path):
+    """Two paths deliver the same hook -- `templates/` for a project generated after
+    the shim existed, `sync-devkit.py --pull` for every project generated before one --
+    and they must agree on which tools it sees. When they drift, which of your calls
+    reach the guard depends on the month the repo was created, and nothing says so.
+    """
+    sync = load_script("scripts/sync-devkit.py")
+    # The bare preset: the guard is core wiring, so it must not depend on a feature.
+    root = generate(tmp_path, {})
+    settings = json.loads((root / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    groups = [
+        group
+        for group in settings["hooks"][sync.GUARD_EVENT]
+        if any(sync.GUARD_HOOK in entry["command"] for entry in group["hooks"])
+    ]
+    assert len(groups) == 1, "the template wires the guard exactly once"
+    assert groups[0]["matcher"] == sync.GUARD_MATCHER
+    assert sync.GUARD_COMMAND in [entry["command"] for entry in groups[0]["hooks"]]
+    # And the back-fill agrees it is already wired, so a pull into a freshly generated
+    # project does not append a second copy.
+    assert sync.wire_guard(settings)[1] is False
+
+
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
 def test_generated_json_parses(tmp_path, features):
     root = generate(tmp_path, features)

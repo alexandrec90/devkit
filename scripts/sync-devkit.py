@@ -929,6 +929,140 @@ def prune_settings(root: Path, retired: tuple[str, ...] = RETIRED_PATHS) -> list
     return dropped
 
 
+# The mirror image of the prune, and the reason it is here rather than in the MANIFEST.
+# `scripts/hooks/worktree-guard-launch.py` IS vendored, so a pull delivers the file --
+# but a hook file is inert until `.claude/settings.json` names it, and that file is the
+# project's own. `templates/` wires it for projects generated after the shim existed;
+# every project generated before one got the file and nothing that runs it, and no
+# command anywhere closed that gap.
+#
+# It was not a hypothetical. On the machine this was written on, all five vendoring
+# projects had the guard unwired: a session opened in one of them cut a task branch
+# inside the static checkout, edited it, switched back to the home branch -- carrying
+# the uncommitted work onto it -- and the branch tier that blocks exactly that never
+# ran. The pull is the only moment devkit has a project's settings file in its hands,
+# so the pull is where the wiring gets back-filled.
+GUARD_HOOK = "scripts/hooks/worktree-guard-launch.py"
+GUARD_EVENT = "PreToolUse"
+# Kept in step with `templates/core/dot-claude/settings.json.tmpl` by a test: a project
+# generated today and one back-filled by `--pull` must guard the same tools, or which
+# calls reach the guard depends on when the project happened to be created.
+GUARD_MATCHER = "^(Edit|Write|MultiEdit|NotebookEdit|apply_patch|create_file|Bash|PowerShell)$"
+GUARD_COMMAND = 'python3 "${CLAUDE_PROJECT_DIR:-.}/' + GUARD_HOOK + '"'
+# Either spelling counts as already guarded: the vendored shim, or devkit's own
+# settings naming the guard directly -- devkit holds the guard, so it needs no shim to
+# reach it, and back-filling one there would run it twice.
+GUARD_SCRIPT_NAMES = frozenset({GUARD_HOOK, "scripts/worktree-guard.py"})
+
+
+def guard_wired(payload: object) -> bool:
+    """Whether this settings tree runs the guard shim, under any event or matcher.
+
+    Deliberately wider than what `wire_guard` writes. A project that wired the shim by
+    hand -- a different matcher, an extra event, devkit's own settings naming
+    `scripts/worktree-guard.py` directly -- has a guard, and a back-fill that only
+    recognised its own spelling would append a second copy on every pull.
+    """
+    if not isinstance(payload, dict):
+        return False
+    hooks = payload.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    for groups in hooks.values():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            entries = group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                command = entry.get("command", "") if isinstance(entry, dict) else ""
+                if not isinstance(command, str):
+                    continue
+                # Slash-normalised for the same reason `prune_hook_commands` does it:
+                # a settings file written on Windows can spell the same hook with
+                # backslashes, and the manifest paths are always POSIX.
+                probe = command.replace("\\", "/")
+                if any(name in probe for name in GUARD_SCRIPT_NAMES):
+                    return True
+    return False
+
+
+def wire_guard(payload: object) -> tuple[object, bool]:
+    """`(settings, added)` -- the guard's hook group appended when none is present.
+
+    Appended rather than merged into an existing `PreToolUse` group: the groups carry
+    their own matchers, and folding this command into one written for a different
+    matcher would change which tools *that* hook sees.
+    """
+    if not isinstance(payload, dict) or guard_wired(payload):
+        return payload, False
+    hooks = payload.get("hooks")
+    hooks = dict(hooks) if isinstance(hooks, dict) else {}
+    groups = hooks.get(GUARD_EVENT)
+    groups = list(groups) if isinstance(groups, list) else []
+    groups.append(
+        {
+            "matcher": GUARD_MATCHER,
+            "hooks": [{"type": "command", "command": GUARD_COMMAND}],
+        }
+    )
+    return {**payload, "hooks": {**hooks, GUARD_EVENT: groups}}, True
+
+
+def wire_settings(root: Path) -> bool:
+    """Back-fill the guard hook into this project's settings file; True when it wrote.
+
+    Best-effort exactly as `prune_settings` is, and refuses for one extra reason: it
+    will not name a script this project does not have on disk. Wiring a command that
+    points at a missing file is the precise failure the prune exists to undo, and a
+    pull that skipped the shim (`(absent)` in its own report) is the case where that
+    would happen.
+    """
+    if not (root / GUARD_HOOK).is_file():
+        return False
+    path = root / SETTINGS_FILE
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    wired, added = wire_guard(payload)
+    if not added:
+        return False
+    try:
+        path.write_text(json.dumps(wired, indent=2) + "\n", encoding="utf-8", newline="\n")
+    except OSError:
+        return False
+    return True
+
+
+def settings_guard(root: Path) -> bool | None:
+    """Whether this project's settings run an edit guard; None when they cannot be read.
+
+    Three-valued on purpose, and the third value is the point: a project with no
+    settings file, or one that will not parse, is *not* an unguarded project -- it is a
+    project this cannot speak about, and reporting it as unguarded is how a status line
+    starts crying wolf. `workspace-status.py` asks this about checkouts it must never
+    write to, so the read and the rewrite are separate calls.
+    """
+    try:
+        payload = json.loads((root / SETTINGS_FILE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return guard_wired(payload)
+
+
+def guard_unwired(root: Path) -> bool:
+    """Whether `--check` should report this project as holding the shim and running it.
+
+    Narrower than `settings_guard` alone by one condition: the shim has to be on disk.
+    A project that has not vendored it yet is unguarded too, but `--check` already
+    reports that file as MISSING drift, and one fault reported twice reads as two
+    faults.
+    """
+    return (root / GUARD_HOOK).is_file() and settings_guard(root) is False
+
+
 CODEX_HOOKS_FILE = ".codex/hooks.json"
 CODEX_GENERATOR = "scripts/sync-codex-hooks.py"
 
@@ -1305,6 +1439,10 @@ def main(argv: list[str] | None = None) -> int:
         # After the deletions, never before: pruning a hook whose script survived the
         # pull would disable a live hook.
         unwired = prune_settings(REPO_ROOT) if args.pull else []
+        # After the copy above, never before: this names a script the pull just
+        # delivered, and wiring a command that points at a missing file is the exact
+        # state `prune_settings` exists to undo.
+        wired_guard = wire_settings(REPO_ROOT) if args.pull else False
         # After the settings prune, never before: the Codex file is generated *from*
         # those settings, so regenerating first would bake back in whatever the prune
         # is about to remove.
@@ -1329,6 +1467,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  (now yours -- un-vendored, devkit no longer updates it) {rel}")
         for name in unwired:
             print(f"  (unwired retired hook) {SETTINGS_FILE}: {name}")
+        if wired_guard:
+            # Named loudly, because it is a behaviour change the pull made to a file
+            # the project owns: from here on an agent edit aimed at a checkout's home
+            # branch is routed into a box instead of landing on it.
+            print(f"  (wired the cross-checkout edit guard) {SETTINGS_FILE}: {GUARD_HOOK}")
         if codex_regenerated:
             # Named, because it is the one file the pull rewrote that was never copied
             # from the source: it is generated here, from this project's own settings.
@@ -1390,6 +1533,7 @@ def main(argv: list[str] | None = None) -> int:
     retired = retired_present(REPO_ROOT)
     receipt_retired = receipt_retired_present(REPO_ROOT, MANIFEST)
     codex_stale = codex_hooks_stale(REPO_ROOT)
+    unguarded = guard_unwired(REPO_ROOT)
     if not (
         drifted
         or missing
@@ -1398,6 +1542,7 @@ def main(argv: list[str] | None = None) -> int:
         or block_drifted
         or block_unusable
         or codex_stale
+        or unguarded
     ):
         blocks = f" and {len(block_ok)} block(s)" if BLOCK_MANIFEST else ""
         print(f"sync-harness: all {len(MANIFEST)} vendored files{blocks} in sync with {src}.")
@@ -1438,6 +1583,18 @@ def main(argv: list[str] | None = None) -> int:
             f"Run `python scripts/sync-codex-context.py`",
             file=sys.stderr,
         )
+    if unguarded:
+        # Not DRIFT: the file that would differ is this project's own settings, which
+        # devkit never vendors and this check never compares. It is reported at the
+        # same volume anyway because an unwired guard is the one harness fault with no
+        # symptom at all -- the edits land on the home branch and nothing is red until
+        # a sweep reports the branch days later as though a human had left it there.
+        print(
+            f"UNWIRED {SETTINGS_FILE} -- vendors {GUARD_HOOK} but no hook runs it, so "
+            f"an agent edit lands on this checkout's home branch with no task branch "
+            f"under it. Run `python scripts/sync-devkit.py --pull`",
+            file=sys.stderr,
+        )
     if drifted or missing or retired or receipt_retired or block_drifted or block_unusable:
         print(
             "sync-harness: vendored harness drifted from the shared repo. "
@@ -1446,12 +1603,21 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     else:
-        # A `--pull` would resolve this one too, but only incidentally, and telling
+        # A `--pull` would resolve these too, but only incidentally, and telling
         # someone to adopt upstream when nothing upstream differs is the kind of advice
-        # that gets a red gate reclassified as noise.
+        # that gets a red gate reclassified as noise. Both faults are named because
+        # either can hold this branch alone, and a summary that mentions the Codex
+        # hooks when the guard is what is unwired sends the reader to the wrong file.
+        faults = [
+            label
+            for label, present in (
+                ("the generated Codex hooks are stale", codex_stale),
+                ("no hook runs the cross-checkout edit guard", unguarded),
+            )
+            if present
+        ]
         print(
-            "sync-harness: every vendored file is in sync; only the generated Codex "
-            "hooks are stale.",
+            f"sync-harness: every vendored file is in sync; {' and '.join(faults)}.",
             file=sys.stderr,
         )
     return 1
