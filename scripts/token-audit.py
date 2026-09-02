@@ -146,15 +146,43 @@ def estimate_tokens(content):
     return len(content) // 4
 
 
-def tool_payload_units(records, ttl="5m"):
-    """Lifetime cost of each tool's results: one write plus every later re-read.
+def register_tool_uses(message, tool_of):
+    """Record which tool each ``tool_use`` id belongs to, for later attribution."""
+    for block in message.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            tool_of[block.get("id")] = block.get("name")
 
-    A result entering context at call *i* of *n* is written once and then read
-    back on each of the remaining ``n - i`` calls, which is why position in the
-    session matters as much as payload size.
+
+def iter_results(message, tool_of):
+    """Yield ``(tool, tokens)`` for every attributable tool result in a message.
+
+    A result whose ``tool_use_id`` is not in ``tool_of`` belongs to a call made
+    before the transcript starts -- a resumed session -- and is skipped rather
+    than bucketed under an unknown tool.
     """
+    for block in message.get("content") or []:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        tool = tool_of.get(block.get("tool_use_id"))
+        if tool is None:
+            continue
+        yield tool, estimate_tokens(block.get("content"))
+
+
+def result_units(tokens, entered_at, total_calls, ttl="5m"):
+    """Cost of one tool result over its life: one write plus every later read.
+
+    A result entering context at call ``entered_at`` of ``total_calls`` is
+    written once and then re-read on each of the remaining calls, which is why
+    position in the session matters as much as payload size.
+    """
+    remaining = max(0, total_calls - entered_at)
+    return tokens * WRITE_MULTIPLIER[ttl] + tokens * PRICE_CACHE_READ * remaining
+
+
+def tool_payload_units(records, ttl="5m"):
+    """Aggregate :func:`result_units` per tool across a transcript."""
     records = list(records)
-    write = WRITE_MULTIPLIER[ttl]
     total_calls = sum(1 for _ in api_calls(records))
 
     units = Counter()
@@ -170,20 +198,13 @@ def tool_payload_units(records, ttl="5m"):
             if message.get("usage") and key not in seen:
                 seen.add(key)
                 index += 1
-            for block in message.get("content") or []:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    tool_of[block.get("id")] = block.get("name")
-        elif record.get("type") == "user":
-            for block in message.get("content") or []:
-                if not isinstance(block, dict) or block.get("type") != "tool_result":
-                    continue
-                tool = tool_of.get(block.get("tool_use_id"))
-                if tool is None:
-                    continue
-                tokens = estimate_tokens(block.get("content"))
-                remaining = max(0, total_calls - index)
-                units[tool] += tokens * write + tokens * PRICE_CACHE_READ * remaining
-                counts[tool] += 1
+            register_tool_uses(message, tool_of)
+            continue
+        if record.get("type") != "user":
+            continue
+        for tool, tokens in iter_results(message, tool_of):
+            units[tool] += result_units(tokens, index, total_calls, ttl)
+            counts[tool] += 1
 
     return units, counts
 

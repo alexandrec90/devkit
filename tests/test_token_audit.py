@@ -107,6 +107,31 @@ def test_user_records_are_never_calls():
 
 
 # --------------------------------------------------------------------------
+# request_key -- which API response a record belongs to
+# --------------------------------------------------------------------------
+
+
+def test_request_key_prefers_request_id():
+    record = assistant("req1", "msg1", [], usage(read=1))
+    assert audit.request_key(record) == "req1"
+
+
+def test_request_key_falls_back_to_message_id():
+    record = {"type": "assistant", "message": {"id": "msg1", "content": []}}
+    assert audit.request_key(record) == "msg1"
+
+
+def test_request_key_is_none_when_neither_is_present():
+    """Records with no identity must not all collapse onto one key."""
+    assert audit.request_key({"type": "assistant"}) is None
+
+
+def test_request_key_groups_the_split_records_of_one_response():
+    records = batched_turn("req1", "msg1", [("t1", "Read"), ("t2", "Grep")], usage(read=1))
+    assert {audit.request_key(r) for r in records} == {"req1"}
+
+
+# --------------------------------------------------------------------------
 # token_totals / cost_units
 # --------------------------------------------------------------------------
 
@@ -190,6 +215,48 @@ def _session_with_result_at(position, total_calls, payload):
         else:
             records.append(assistant(f"req{i}", f"msg{i}", [], usage(read=10)))
     return records
+
+
+def test_register_tool_uses_maps_ids_to_tools():
+    tool_of = {}
+    audit.register_tool_uses({"content": [tool_use("t1", "Read"), tool_use("t2", "Grep")]}, tool_of)
+    assert tool_of == {"t1": "Read", "t2": "Grep"}
+
+
+def test_register_tool_uses_ignores_non_tool_blocks():
+    tool_of = {}
+    audit.register_tool_uses({"content": [{"type": "text", "text": "hi"}, "not-a-dict"]}, tool_of)
+    assert tool_of == {}
+
+
+def test_iter_results_yields_tool_and_token_count():
+    message = {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x" * 400}]}
+    assert list(audit.iter_results(message, {"t1": "Read"})) == [("Read", 100)]
+
+
+def test_iter_results_skips_unattributable_results():
+    """A resumed session references tool_use ids from before the transcript."""
+    message = {"content": [{"type": "tool_result", "tool_use_id": "gone", "content": "x"}]}
+    assert list(audit.iter_results(message, {})) == []
+
+
+def test_iter_results_ignores_non_result_blocks():
+    assert list(audit.iter_results({"content": [{"type": "text", "text": "hi"}]}, {})) == []
+
+
+def test_result_units_is_one_write_plus_remaining_reads():
+    assert audit.result_units(1000, entered_at=1, total_calls=3) == pytest.approx(
+        1000 * 1.25 + 1000 * 0.1 * 2
+    )
+
+
+def test_result_units_never_charges_negative_reads():
+    """A result recorded after the last counted call must not go negative."""
+    assert audit.result_units(1000, entered_at=9, total_calls=3) == pytest.approx(1000 * 1.25)
+
+
+def test_result_units_honours_the_ttl():
+    assert audit.result_units(100, 1, 1, "1h") > audit.result_units(100, 1, 1, "5m")
 
 
 def test_early_result_costs_more_than_late_result():
