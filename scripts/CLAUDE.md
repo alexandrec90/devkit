@@ -487,14 +487,12 @@ apart aims every fix at whichever tier was guessed. Pre-field rows read `unknown
 is honest; back-filling them as `claude` would be a guess.
 
 **`host=` names the machine, and is deliberately *not* in the signature** — the opposite
-call from `agent=`, since one hook does behave differently under two runtimes and does not
-under two machines. One defect hit on both is **one** defect a single `--resolve-like`
-retires; the two rows have different content-addressed ids and nothing else would connect
-them. The write side shards on that name (`harness-events-<host>.log`, `$DEVKIT_HOST` over
-the hostname); `load` unions every `harness-events*.log` beside it, legacy file included,
-and `render` names the machines a group was seen on. **The shard is what makes pooling
-work** — no machine writes to another's, resolutions included. devkit ships no transport:
-a synced folder or private repo, never its public remote (rows carry verbatim commands).
+call from `agent=`, since one hook behaves differently under two runtimes and not under
+two machines. One defect hit on both is **one** defect a single `--resolve-like` retires;
+the two rows have different content-addressed ids and nothing else connects them. The
+write side shards on that name (`harness-events-<host>.log`, `$DEVKIT_HOST` over the
+hostname); `load` unions every `harness-events*.log` beside it, so no machine writes to
+another's — what makes a pooled `logs/` conflict-free. No transport ships with it.
 
 The skill that works the backlog is `triage-harness`, and it is devkit-only on purpose —
 every defect on this ledger is a defect in devkit, whatever project the session that hit
