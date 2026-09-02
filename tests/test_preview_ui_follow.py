@@ -96,6 +96,55 @@ def test_an_entry_missing_its_project_or_ref_is_ignored(tmp_path):
     assert follow.copies(tmp_path, [{"pid": 3, "port": 5300}]) == []
 
 
+def test_every_git_call_addresses_the_copy_rather_than_the_process_cwd():
+    """`-C <copy>` is the whole reason this can run from anywhere: a follower started in
+    the workspace root would otherwise fetch and check out the workspace's own repo."""
+    fake = FakeGit()
+    follow.git(Path("x"), ("status",), fake)
+    assert fake.calls[-1][:3] == ["git", "-C", "x"]
+
+
+def test_first_line_prefers_stderr_and_keeps_only_its_first_line():
+    result = types.SimpleNamespace(stdout="ignored", stderr="fatal: it did not work\nsecond")
+    assert follow.first_line(result) == "fatal: it did not work"
+
+
+def test_first_line_falls_back_to_stdout_and_then_to_a_placeholder():
+    """A git that fails silently still has to produce a report line that reads."""
+    assert follow.first_line(types.SimpleNamespace(stdout="said\nmore", stderr="")) == "said"
+    assert follow.first_line(types.SimpleNamespace(stdout="", stderr="")) == "no output"
+
+
+def test_head_of_reads_the_served_commit_and_is_empty_when_git_will_not_say(tmp_path):
+    copy = make_copy(tmp_path)
+    assert follow.head_of(copy, FakeGit()) == HEAD
+    assert follow.head_of(copy, FakeGit(fail="rev-parse")) == ""
+
+
+def test_tip_of_fetches_first_and_reads_the_ref_that_fetch_just_brought_down(tmp_path):
+    """`FETCH_HEAD`, not `origin/<ref>`: the latter can be another run's leftover."""
+    fake = FakeGit()
+    assert follow.tip_of(make_copy(tmp_path), fake) == (TIP, "")
+    assert [call[3] for call in fake.calls] == ["fetch", "rev-parse"]
+    assert fake.calls[-1][-1] == "FETCH_HEAD"
+
+
+def test_tip_of_says_which_half_of_the_fetch_and_read_failed(tmp_path):
+    copy = make_copy(tmp_path)
+    assert follow.tip_of(copy, FakeGit(fail="fetch"))[1].startswith("could not fetch origin main")
+    assert follow.tip_of(copy, FakeGit(fail="rev-parse"))[1].startswith(
+        "fetched origin main but could not read it"
+    )
+
+
+def test_is_dirty_treats_a_git_that_will_not_answer_as_dirty(tmp_path):
+    """The refusal has to fail safe: an unreadable status is not a licence to checkout."""
+    copy = make_copy(tmp_path)
+    assert follow.is_dirty(copy, FakeGit()) is False
+    assert follow.is_dirty(copy, FakeGit(dirty=" M frontend/src/App.tsx")) is True
+    assert follow.is_dirty(copy, FakeGit(fail="status")) is True
+
+
 def test_a_branch_that_moved_is_checked_out_and_reported(tmp_path):
     git = FakeGit()
     line = follow.advance(make_copy(tmp_path), git)
@@ -193,6 +242,22 @@ def test_the_loop_re_reads_the_registry_so_a_preview_opened_later_is_picked_up(
     except KeyboardInterrupt:
         pass
     assert git.ran("checkout")
+
+
+def test_the_parser_defaults_the_interval_to_the_follow_period():
+    """The default is the constant rather than a repeated literal: the comment on
+    `FOLLOW_SECONDS` is where the twenty seconds is argued for, and a second copy here
+    would be the thing that disagrees with it."""
+    args = follow.build_parser().parse_args([])
+    assert args.interval == follow.FOLLOW_SECONDS
+    assert args.workspace is None
+    assert args.once is False
+
+
+def test_the_parser_accepts_a_single_pass_and_a_faster_interval():
+    args = follow.build_parser().parse_args(["--once", "--interval", "5"])
+    assert args.once is True
+    assert args.interval == 5.0
 
 
 def test_main_refuses_a_workspace_that_is_not_there(tmp_path, capsys):
