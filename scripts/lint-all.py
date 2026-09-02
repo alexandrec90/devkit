@@ -40,6 +40,22 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Linters that come from `pyproject.toml`'s dev group, so a missing one is a broken
+# environment rather than an absent optional tool.
+#
+# **This distinction is the whole of the fix.** `run_tool` degrades a missing tool to a
+# terminal note and returns "" — the same value it returns when a tool PASSED — so a run
+# where every linter was skipped produced no sections and printed `lint-all: clean`. That
+# is a false negative on every rule at once, and it is indistinguishable at a glance from
+# the real thing. The node tools are genuinely optional (nothing here declares them), so
+# they keep the old behaviour; these two do not.
+REQUIRED_TOOLS = ("ruff", "mypy")
+
+# Names passed to `run_tool` that were skipped for want of the tool. Module-level because
+# `run_tool` is called from eight places and threading an accumulator through all of them
+# would obscure the one line that matters; `main` clears it on entry.
+_SKIPPED: list[str] = []
 ARTIFACT = REPO_ROOT / "logs" / "lint-errors.log"
 
 # What mypy type-checks. Unlike a generated project's copy, this includes
@@ -191,11 +207,13 @@ def run_tool(name: str, cmd: list[str], fix_hint: str) -> str:
     to a terminal note instead.
     """
     if _missing_module(cmd):
+        _SKIPPED.append(name)
         print(f"  {name}: not installed — skipped")
         return ""
     try:
         result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     except FileNotFoundError:
+        _SKIPPED.append(name)
         print(f"  {name}: not installed — skipped")
         return ""
     if result.returncode == 0:
@@ -206,7 +224,72 @@ def run_tool(name: str, cmd: list[str], fix_hint: str) -> str:
     return f"# {name}\n# fix: {fix_hint}\n{body}\n\n"
 
 
+def _reexec(module: str) -> int | None:
+    """Re-run this process under the project's virtualenv, or None to carry on here.
+
+    The import is local, and optional, on purpose. This script is copied into generated
+    projects and, in the suite, into a bare temp repo holding nothing but itself; a
+    module-level import would turn "the interpreter could not be upgraded" into "this
+    will not start at all", which is worse than the behaviour it improves on.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import project_python
+    except ImportError:
+        return None
+    return project_python.re_exec(REPO_ROOT, module, sys.argv)
+
+
+def markdown_sections(markdown: list[str]) -> str:
+    """The markdownlint and remark passes over `markdown`, as artifact sections.
+
+    Its own function so `main` does not carry four branches for two optional node tools.
+    Both are looked up through `node_tool` rather than run blind: they are real
+    executables rather than `-m` modules, so an absent one raises FileNotFoundError
+    inside `run_tool` instead of being reported as a finding nobody can fix.
+    """
+    if not markdown:
+        return ""
+    sections = ""
+    if markdownlint := node_tool("markdownlint-cli2"):
+        sections += run_tool(
+            "markdownlint",
+            [markdownlint, *markdown],
+            f"{markdownlint} --fix {' '.join(markdown)}",
+        )
+    else:
+        print("  markdownlint: not installed — skipped")
+    if remark := node_tool("remark"):
+        sections += run_tool(
+            "remark",
+            [remark, "--frail", "--ignore-path", ".remarkignore", *markdown],
+            f"{remark} --output {' '.join(markdown)}",
+        )
+    else:
+        print("  remark: not installed — skipped")
+    return sections
+
+
+def not_clean_reason() -> str:
+    """The line to print when a REQUIRED linter could not run, else "".
+
+    Asked before the `clean` line, because a required linter that could not run is not a
+    finding to write into the artifact — it is a statement that the run cannot be
+    believed, and the honest exit code for that is non-zero. Printing `clean` there is
+    exactly the failure this guard exists to stop.
+    """
+    absent = [name for name in _SKIPPED if name in REQUIRED_TOOLS]
+    if not absent:
+        return ""
+    return (
+        f"\nlint-all: NOT CLEAN — {', '.join(absent)} could not be run, so nothing was "
+        f"checked for the rules they own. They are declared in pyproject.toml: install "
+        f"them (`uv sync --all-extras --all-groups`) or run under the project's .venv."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
+    _SKIPPED.clear()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--changed", action="store_true", help="lint only the working-tree diff")
     parser.add_argument(
@@ -290,25 +373,14 @@ def main(argv: list[str] | None = None) -> int:
         )
     if envs:
         sections += run_tool("dotenv-linter", [*DOTENV_CMD, *envs], " ".join([*DOTENV_CMD, *envs]))
-    if markdown:
-        if markdownlint := node_tool("markdownlint-cli2"):
-            sections += run_tool(
-                "markdownlint",
-                [markdownlint, *markdown],
-                f"{markdownlint} --fix {' '.join(markdown)}",
-            )
-        else:
-            print("  markdownlint: not installed — skipped")
-        if remark := node_tool("remark"):
-            sections += run_tool(
-                "remark",
-                [remark, "--frail", "--ignore-path", ".remarkignore", *markdown],
-                f"{remark} --output {' '.join(markdown)}",
-            )
-        else:
-            print("  remark: not installed — skipped")
+    sections += markdown_sections(markdown)
 
     _write_artifact(sections)
+
+    if unusable := not_clean_reason():
+        print(unusable)
+        return 1
+
     if sections:
         print(f"\nlint-all: FAILED — details in {ARTIFACT.relative_to(REPO_ROOT)}")
         return 1
@@ -323,4 +395,10 @@ def _write_artifact(sections: str) -> None:
 
 
 if __name__ == "__main__":
+    # Same reasoning as `run-tests.py`: an agent's shell is never an activated one, so
+    # resolve the interpreter that holds the tools rather than hoping for a PATH. Without
+    # it, this script's most common invocation skipped every linter and printed `clean`.
+    _code = _reexec("ruff")
+    if _code is not None:
+        sys.exit(_code)
     sys.exit(main())

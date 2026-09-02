@@ -63,6 +63,12 @@ def build_repo(root: Path, workflow: str = MINIMAL_WORKFLOW, env_example: bool =
     (root / "tests").mkdir()
     (root / ".github" / "workflows").mkdir(parents=True)
     shutil.copy2(REPO_ROOT / "scripts" / "lint-all.py", root / "scripts" / "lint-all.py")
+    # Copied too, so the fixture exercises the path a real project takes rather than the
+    # ImportError fallback. `test_the_runner_still_starts_without_its_interpreter_helper`
+    # is what covers the other branch, deliberately and on its own.
+    shutil.copy2(
+        REPO_ROOT / "scripts" / "project_python.py", root / "scripts" / "project_python.py"
+    )
     (root / ".github" / "workflows" / "ci.yml").write_text(workflow, encoding="utf-8")
     (root / "ruff.toml").write_text('[lint]\nselect = ["E4", "E7", "E9", "F"]\n', encoding="utf-8")
     (root / "tests" / "test_ok.py").write_text(
@@ -89,6 +95,25 @@ def run_lint(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+def test_the_runner_still_starts_without_its_interpreter_helper(tmp_path):
+    """`project_python.py` is an optimisation, not a dependency.
+
+    This script is copied into generated projects, and one that arrives without its
+    helper must still lint. A hard import turns "the interpreter could not be upgraded"
+    into "the linter will not start", which is worse than the behaviour it improves on —
+    and it is a `ModuleNotFoundError` before `main()`, so nothing writes an artifact and
+    the agent gets a traceback where a lint report should be.
+    """
+    root = build_repo(tmp_path / "repo")
+    (root / "scripts" / "project_python.py").unlink()
+    result = run_lint(root)
+    # The claim is that it RUNS, not that it passes: mypy legitimately objects to the
+    # import it can no longer resolve, and asserting exit 0 here would be asserting
+    # something this test does not care about.
+    assert "ModuleNotFoundError" not in result.stderr, result.stderr
+    assert "ruff: ok" in result.stdout, result.stdout + result.stderr
 
 
 # --------------------------------------------------------------------------
@@ -261,3 +286,40 @@ def test_a_missing_linter_is_a_note_and_never_an_artifact_entry(tmp_path):
     """
     absent = ["definitely-not-a-real-linter-9d2f", "--check"]
     assert lint_all.run_tool("actionlint", absent, "hint") == ""
+
+
+# --------------------------------------------------------------------------
+# A required linter that could not run is NOT a clean run
+# --------------------------------------------------------------------------
+
+
+def test_no_skipped_required_tool_means_no_complaint():
+    lint_all._SKIPPED.clear()
+    assert lint_all.not_clean_reason() == ""
+
+
+def test_a_skipped_optional_tool_is_still_clean():
+    """The node linters are genuinely optional — nothing in pyproject.toml declares
+    them — so a machine without them has not failed to check anything it promised."""
+    lint_all._SKIPPED.clear()
+    lint_all._SKIPPED.append("markdownlint")
+    assert lint_all.not_clean_reason() == ""
+
+
+def test_a_skipped_required_tool_names_itself_and_the_way_out():
+    """The bug this whole seam exists for: `run_tool` returns "" both for "passed" and
+    for "skipped", so a run where every linter was absent produced no sections and
+    printed the word `clean` — a false negative on every rule at once."""
+    lint_all._SKIPPED.clear()
+    lint_all._SKIPPED.extend(["ruff", "mypy"])
+    reason = lint_all.not_clean_reason()
+    assert "NOT CLEAN" in reason
+    assert "ruff, mypy" in reason
+    assert "pyproject.toml" in reason
+    lint_all._SKIPPED.clear()
+
+
+def test_markdown_sections_is_empty_when_there_is_no_markdown():
+    """Extracted from `main` so it does not carry four branches for two optional node
+    tools. The empty case is the one `main` used to guard with an `if`."""
+    assert lint_all.markdown_sections([]) == ""

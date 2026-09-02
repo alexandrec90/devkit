@@ -237,11 +237,25 @@ def parse_time(raw: str) -> _dt.datetime | None:
     Several formats reach this depending on locale, so it tries the common ones and
     gives up quietly rather than raising: a status line that can crash a session start
     is a status line that gets deleted.
+
+    **The date and the clock vary independently**, which is the trap: `schtasks` builds
+    a stamp from the machine's short-date setting and its long-time setting, and neither
+    constrains the other. So an ISO short date beside a 12-hour clock --
+    `2026-09-02 9:02:42 AM` -- is an ordinary machine, and it was not covered here. Every
+    stamp on it parsed as None, and a job with neither a last run nor a next run is
+    indistinguishable from one that has never run: four healthy jobs were reported as
+    never having run at every session start, which is this module's own failure mode
+    turned inside out. Cover the product of the two, not the spellings seen so far.
     """
     text = raw.strip()
     if not text or text.startswith(NEVER):
         return None
-    for fmt in ("%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+    for fmt in (
+        "%m/%d/%Y %I:%M:%S %p",
+        "%m/%d/%Y %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %I:%M:%S %p",
+    ):
         try:
             parsed = _dt.datetime.strptime(text, fmt)
         except ValueError:

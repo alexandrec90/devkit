@@ -84,6 +84,22 @@ def cap_failure_blocks(text: str, limit: int = MAX_LINES_PER_FAILURE) -> str:
     return "\n".join(out)
 
 
+def _reexec(module: str) -> int | None:
+    """Re-run this process under the project's virtualenv, or None to carry on here.
+
+    The import is local, and optional, on purpose. This script is copied into generated
+    projects and, in the suite, into a bare temp repo holding nothing but itself; a
+    module-level import would turn "the interpreter could not be upgraded" into "this
+    will not start at all", which is worse than the behaviour it improves on.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import project_python
+    except ImportError:
+        return None
+    return project_python.re_exec(REPO_ROOT, module, sys.argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--changed", action="store_true", help="run pytest's last-failed subset")
@@ -121,4 +137,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Re-exec under the project's own virtualenv when this interpreter cannot import
+    # pytest. Invoked as `python scripts/run-tests.py` from an agent's shell, `python` is
+    # whatever is on PATH -- which on a workstation is the bare install, not the `.venv`
+    # holding the dev tools -- and the whole run died on "No module named pytest" with an
+    # artifact carrying only that line. `project_python` explains why an interpreter is
+    # resolved rather than a PATH: an agent's shell is never an activated one.
+    #
+    # In the `__main__` guard rather than inside `main()` so that a test calling `main()`
+    # directly stays in-process and testable.
+    code = _reexec("pytest")
+    sys.exit(main() if code is None else code)
