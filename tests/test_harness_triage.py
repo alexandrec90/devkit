@@ -10,6 +10,7 @@ from __future__ import annotations
 from support import load_script
 
 triage = load_script("scripts/harness_triage.py")
+harness_events = triage.harness_events
 
 STAMP = "2026-08-24T12:00:00+00:00"
 # Two stamps for the tests that need one defect recorded *twice*: an id is content-
@@ -26,8 +27,17 @@ def _line(event: str, project: str = "carameli", stamp: str = STAMP, **fields: s
 
 
 def _ledger(root, *lines: str):
+    """The legacy, unsharded ledger -- every row written before a machine had a name."""
     (root / "logs").mkdir(parents=True, exist_ok=True)
     (root / "logs" / "harness-events.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return root
+
+
+def _shard(root, host: str, *lines: str):
+    """One machine's shard. Two of these beside each other is a pooled `logs/`."""
+    (root / "logs").mkdir(parents=True, exist_ok=True)
+    path = root / "logs" / f"harness-events-{host}.log"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return root
 
 
@@ -245,10 +255,11 @@ def test_the_ledger_is_the_machine_wide_one_not_the_cwd(tmp_path, monkeypatch):
     """`ledger_file` resolves `$DEVKIT_DIR` first, for the reason every writer does: run
     from a box, the local `logs/` is a directory nothing has ever appended to, so a tool
     reading it would report an empty backlog rather than the machine's."""
+    monkeypatch.setenv("DEVKIT_HOST", "laptop")
     monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
-    assert triage.ledger_file() == tmp_path / "logs" / "harness-events.log"
+    assert triage.ledger_file() == tmp_path / "logs" / "harness-events-laptop.log"
     monkeypatch.delenv("DEVKIT_DIR", raising=False)
-    assert triage.ledger_file().name == "harness-events.log"
+    assert triage.ledger_file().name == "harness-events-laptop.log"
 
 
 def test_an_absent_ledger_reads_as_empty_rather_than_raising(tmp_path, monkeypatch):
@@ -267,12 +278,141 @@ def test_resolving_appends_an_event_the_next_read_honours(tmp_path):
     assert written[0].fields["pr"] == "202"
 
 
-def test_the_ledger_is_only_ever_appended_to(tmp_path):
+def test_the_ledger_is_only_ever_appended_to(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEVKIT_HOST", "laptop")
     report = _line("agent-report", message="one")
-    _ledger(tmp_path, report)
+    _shard(tmp_path, "laptop", report)
     triage.resolve([triage.item_id(report)], "done", root=tmp_path)
-    text = (tmp_path / "logs" / "harness-events.log").read_text(encoding="utf-8")
+    text = (tmp_path / "logs" / "harness-events-laptop.log").read_text(encoding="utf-8")
     assert text.startswith(report)
+    assert triage.RESOLVED_EVENT in text
+
+
+# --- pooling two machines' shards ---------------------------------------------
+#
+# One ledger per machine was correct while there was one machine. Every test below is a
+# regression test for the same defect in the two-machine case: a backlog that is only
+# ever half-read, and -- because a resolution is itself an event -- a group retired on
+# one machine that stays open on the other forever.
+
+
+def test_ledger_files_lists_every_shard_load_will_read(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEVKIT_HOST", "laptop")
+    monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+    _shard(tmp_path, "desktop", _line("agent-report", message="x"))
+    assert [p.name for p in triage.ledger_files()] == [
+        "harness-events-desktop.log",
+        "harness-events-laptop.log",
+    ]
+
+
+def test_ledger_files_falls_back_to_the_repo_when_there_is_no_seam(tmp_path, monkeypatch):
+    """`ledger_file`'s fallback, kept in step: a checkout with no `$DEVKIT_DIR` reads its
+    own `logs/` rather than reporting that it has no backlog."""
+    monkeypatch.delenv("DEVKIT_DIR", raising=False)
+    monkeypatch.setattr(triage.harness_events, "REPO_ROOT", tmp_path / "someproject")
+    assert triage.ledger_files() == [triage.REPO_ROOT / harness_events.LEDGER]
+
+
+def test_load_unions_every_machines_shard(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEVKIT_HOST", "laptop")
+    monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+    _shard(tmp_path, "laptop", _line("agent-report", message="from the laptop"))
+    _shard(tmp_path, "desktop", _line("agent-report", message="from the desktop"))
+    assert {i.detail for i in triage.load()} == {"from the laptop", "from the desktop"}
+
+
+def test_the_legacy_unsharded_file_is_still_part_of_the_backlog(tmp_path, monkeypatch):
+    """Most of the ledger's history predates the split, and it is append-only."""
+    monkeypatch.setenv("DEVKIT_HOST", "laptop")
+    monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+    _ledger(tmp_path, _line("agent-report", message="written before the split"))
+    assert [i.detail for i in triage.load()] == ["written before the split"]
+
+
+def test_items_are_ordered_by_stamp_not_by_which_shard_they_came_from(tmp_path, monkeypatch):
+    """Concatenating shards gives file order, which is chronological within one and
+    meaningless across two -- and `open_items` reverses it to mean 'newest first'."""
+    monkeypatch.setenv("DEVKIT_HOST", "laptop")
+    monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+    _shard(tmp_path, "desktop", _line("agent-report", stamp=_STAMPS[1], message="second"))
+    _shard(tmp_path, "laptop", _line("agent-report", stamp=_STAMPS[0], message="first"))
+    assert [i.detail for i in triage.load()] == ["first", "second"]
+    assert [i.detail for i in triage.open_items(triage.load())] == ["second", "first"]
+
+
+def test_one_defect_hit_on_two_machines_is_one_group(tmp_path, monkeypatch):
+    """The host is deliberately not in the signature: this is one defect, not two."""
+    monkeypatch.setenv("DEVKIT_HOST", "laptop")
+    monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+    _shard(tmp_path, "laptop", _line("agent-report", stamp=_STAMPS[0], host="laptop", message="x"))
+    _shard(
+        tmp_path, "desktop", _line("agent-report", stamp=_STAMPS[1], host="desktop", message="x")
+    )
+    assert len(triage.groups(triage.open_items(triage.load()))) == 1
+
+
+def test_resolve_like_retires_the_other_machines_copy_too(tmp_path, monkeypatch):
+    """The property the whole change exists for. Ids are content-addressed per line, so
+    the two machines' rows for one defect have *different* ids and nothing else would
+    connect them -- a fix triaged on one machine used to leave the other's row open
+    forever, and the next pass there re-verified work that had already shipped."""
+    monkeypatch.setenv("DEVKIT_HOST", "laptop")
+    monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+    mine = _line("agent-report", stamp=_STAMPS[0], host="laptop", message="the same block")
+    theirs = _line("agent-report", stamp=_STAMPS[1], host="desktop", message="the same block")
+    _shard(tmp_path, "laptop", mine)
+    _shard(tmp_path, "desktop", theirs)
+    assert triage.item_id(mine) != triage.item_id(theirs)
+
+    ids = triage.expand_like([triage.item_id(mine)], triage.load())
+    triage.resolve(sorted(set(ids)), "fixed in #300", pr="300", root=tmp_path)
+    assert triage.open_items(triage.load()) == []
+
+
+def test_a_resolution_is_written_only_to_this_machines_shard(tmp_path, monkeypatch):
+    """No machine ever writes to another's file -- that is what keeps a pooled directory
+    conflict-free for any transport that syncs it."""
+    monkeypatch.setenv("DEVKIT_HOST", "laptop")
+    monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+    theirs = _line("agent-report", host="desktop", message="x")
+    _shard(tmp_path, "desktop", theirs)
+    before = (tmp_path / "logs" / "harness-events-desktop.log").read_text(encoding="utf-8")
+    triage.resolve([triage.item_id(theirs)], "fixed here", root=tmp_path)
+    after = (tmp_path / "logs" / "harness-events-desktop.log").read_text(encoding="utf-8")
+    assert after == before
+    mine = (tmp_path / "logs" / "harness-events-laptop.log").read_text(encoding="utf-8")
+    assert triage.RESOLVED_EVENT in mine
+
+
+def test_an_unreadable_shard_does_not_take_the_backlog_down(tmp_path, monkeypatch):
+    """A half-synced file is the ordinary state of a directory two machines write into."""
+    monkeypatch.setenv("DEVKIT_HOST", "laptop")
+    monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+    _shard(tmp_path, "laptop", _line("agent-report", message="readable"))
+    (tmp_path / "logs" / "harness-events-desktop.log").mkdir()
+    assert [i.detail for i in triage.load()] == ["readable"]
+
+
+def test_the_rendering_names_the_machines_a_group_was_seen_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEVKIT_HOST", "laptop")
+    monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+    _shard(tmp_path, "laptop", _line("agent-report", stamp=_STAMPS[0], host="laptop", message="x"))
+    _shard(
+        tmp_path, "desktop", _line("agent-report", stamp=_STAMPS[1], host="desktop", message="x")
+    )
+    assert "  host   desktop laptop" in triage.render(triage.open_items(triage.load()))
+
+
+def test_a_pre_field_row_reports_no_host_rather_than_guessing_one(tmp_path, monkeypatch):
+    """The ledger is append-only, so rows written before `host=` existed have none and
+    never will. `unknown-host` is honest; naming this machine would be a guess."""
+    monkeypatch.setenv("DEVKIT_HOST", "laptop")
+    monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+    _ledger(tmp_path, _line("agent-report", message="written before the split"))
+    rendered = triage.render(triage.open_items(triage.load()))
+    assert triage.load()[0].host == harness_events.UNKNOWN_HOST
+    assert "  host " not in rendered
 
 
 # --- rendering and the artifact -----------------------------------------------

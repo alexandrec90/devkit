@@ -1500,8 +1500,18 @@ def test_a_refused_re_aim_is_recorded_as_a_block_and_not_as_a_route(
 
 
 def _events(base: Path) -> list[str]:
-    path = base / "logs" / "harness-events.log"
-    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    """Every ledger line, across every shard.
+
+    The ledger is one file per machine (`harness-events-<host>.log`), so reading the one
+    unsharded name found nothing at all once the guard started writing to a shard -- and
+    a helper that returns `[]` for a missing file turned eleven assertions about what the
+    guard records into assertions that passed against nothing.
+    """
+    lines: list[str] = []
+    for path in sorted((base / "logs").glob("harness-events*.log")):
+        if path.is_file():
+            lines.extend(path.read_text(encoding="utf-8").splitlines())
+    return lines
 
 
 def _guarded_edit(root, monkeypatch, target=None):
