@@ -53,6 +53,9 @@
 			"path": "sports_betting"
 		},
 		{
+			"path": "roguelike"
+		},
+		{
 			"name": "VanillaLand (reference)",
 			"path": "VanillaLand"
 		}
@@ -1161,7 +1164,8 @@
 								"ibkr_trader",
 								"devkit",
 								"data-lake",
-								"sports_betting"
+								"sports_betting",
+								"roguelike"
 							]
 						}
 					]
@@ -1198,7 +1202,8 @@
 								"carameli",
 								"ibkr_trader",
 								"data-lake",
-								"sports_betting"
+								"sports_betting",
+								"roguelike"
 							]
 						}
 					]
@@ -1215,7 +1220,8 @@
 					"ibkr_trader",
 					"devkit",
 					"data-lake",
-					"sports_betting"
+					"sports_betting",
+					"roguelike"
 				],
 				"default": "carameli"
 			},
@@ -1773,7 +1779,8 @@
 					"ibkr_trader",
 					"devkit",
 					"data-lake",
-					"sports_betting"
+					"sports_betting",
+					"roguelike"
 				],
 				"default": "VanillaLand"
 			},
