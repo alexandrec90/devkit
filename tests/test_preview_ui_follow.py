@@ -55,7 +55,9 @@ class FakeGit:
         return any(call[3] == subcommand for call in self.calls)
 
 
-def make_copy(tmp_path: Path, project="roguelike", ref="main") -> follow.Copy:
+# No return annotation: `follow` is a module object loaded at runtime, so `follow.Copy`
+# is a value to mypy and not a name it can resolve in an annotation position.
+def make_copy(tmp_path: Path, project="roguelike", ref="main"):
     path = tmp_path / follow.host.UI_PREVIEWS_DIR_NAME / project / follow.host.ref_slug(ref)
     path.mkdir(parents=True, exist_ok=True)
     return follow.Copy(project=project, ref=ref, path=path)
