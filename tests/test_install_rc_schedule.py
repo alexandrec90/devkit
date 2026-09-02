@@ -10,6 +10,7 @@ installer decides: the repetition, the time limit, the working directory, and wh
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -186,6 +187,38 @@ def test_check_is_green_when_it_points_here(monkeypatch):
 
 
 # --- the three modes --------------------------------------------------------
+
+
+def test_query_argv_asks_for_the_verbose_list_the_parser_reads():
+    """`registered_command` looks for a `Task To Run:` label, which only `/V` prints."""
+    argv = installer.query_argv()
+    assert argv[:2] == ["schtasks", "/Query"]
+    assert "/V" in argv and argv[argv.index("/TN") + 1] == installer.TASK_NAME
+
+
+def test_run_command_captures_rather_than_streaming():
+    """The installer prints its own message; a `schtasks` that wrote straight to the
+    terminal would double it and lose the failure text on the error path."""
+    result = installer.run_command([sys.executable, "-c", "print('x')"])
+    assert result.stdout.strip() == "x"
+
+
+def test_windowless_python_resolves_a_gui_subsystem_interpreter():
+    """A scheduled task that put a console on the desktop every fifteen minutes would be
+    the most visible thing this job does."""
+    resolved = installer.windowless_python(sys.executable)
+    assert resolved.endswith("pythonw.exe") or resolved == sys.executable
+
+
+def test_render_plan_names_the_job_and_what_it_runs():
+    text = installer.render_plan(schedule(), windows=True)
+    assert installer.TASK_NAME in text and "maintain" in text
+    assert "scheduled task registered from XML" in text
+
+
+def test_render_plan_off_windows_hands_over_a_crontab_line():
+    text = installer.render_plan(schedule(), windows=False)
+    assert "crontab" in text and "*/15 * * * *" in text
 
 
 def test_the_bare_invocation_registers_nothing(capsys):

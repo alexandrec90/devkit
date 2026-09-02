@@ -249,6 +249,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/git-merge-default.py": "the VS Code merge task, from a console-less parent",
     "scripts/global-tools.py": "devkit-global-tools runs it nightly",
     "scripts/rc-servers.py": "devkit-rc-servers runs it every 15 minutes",
+    "scripts/rc_machine.py": "the tasklist, taskkill and server launch that pass makes",
     "scripts/log-wrap.py": "the wrapper three of those jobs are launched through",
     # reached from an entry point
     "scripts/sweep.py": "the git and gh IO for reconcile and upgrade",
@@ -267,6 +268,7 @@ UNATTENDED: dict[str, str] = {
 DELEGATES_ITS_SPAWNS: dict[str, str] = {
     "scripts/git-merge-default.py": "scripts/git_policy.py",
     "scripts/worktree-guard.py": "scripts/guard_probes.py",
+    "scripts/rc-servers.py": "scripts/rc_machine.py",
 }
 
 SPAWN_ATTRS = frozenset({"run", "Popen", "call", "check_call", "check_output"})
