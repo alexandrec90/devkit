@@ -205,8 +205,11 @@ def test_the_tools_this_repo_declares_are_reachable_from_its_own_venv(module):
     every dev tool `pyproject.toml` declares is importable from the interpreter this
     module resolves. It is the assertion that would have failed on the machine where
     `lint-all` reported clean having run nothing.
+
+    Asserted unconditionally rather than skipped when there is no `.venv`: CI installs
+    these tools into the interpreter it runs as, so `interpreter()` returns that one and
+    the claim still holds. A skip here would have made the check disappear on exactly the
+    machines where nobody is watching the terminal.
     """
     root = Path(__file__).resolve().parents[1]
-    if project_python.venv_python(root) is None:
-        pytest.skip("no .venv in this checkout — CI installs the tools globally")
     assert project_python.has_module(project_python.interpreter(root, module), module)

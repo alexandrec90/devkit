@@ -34,12 +34,28 @@ def test_the_arguments_pre_commit_appends_are_passed_through():
     assert cmd[-4:] == ["format", "--force-exclude", "a.py", "b.py"]
 
 
-def test_without_the_helper_it_falls_back_to_a_bare_ruff(monkeypatch):
+def test_without_the_helper_it_falls_back_to_a_bare_ruff(tmp_path):
     """Reproduces the OLD behaviour rather than inventing a new one: if this file is
-    ever shipped without `project_python.py`, a PATH lookup still beats refusing to
-    run."""
-    monkeypatch.setattr(run_ruff, "project_python", None)
-    assert run_ruff.ruff_command(["check"]) == ["ruff", "check"]
+    ever shipped without `project_python.py`, a PATH lookup still beats refusing to run.
+
+    A subprocess rather than an in-process call, and that is the point: the suite has
+    already imported `project_python` for other modules, so `sys.modules` holds it and a
+    local import here would succeed no matter what is on disk. Only a fresh interpreter
+    with an empty tree actually takes the branch.
+    """
+    (tmp_path / "scripts" / "precommit").mkdir(parents=True)
+    copy = tmp_path / "scripts" / "precommit" / "run_ruff.py"
+    copy.write_text(Path(run_ruff.__file__).read_text(encoding="utf-8"), encoding="utf-8")
+    probe = (
+        "import importlib.util, sys;"
+        f"spec = importlib.util.spec_from_file_location('rr', r'{copy}');"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m);"
+        "print(m.ruff_command(['check'])[0])"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, cwd=tmp_path
+    )
+    assert result.stdout.strip() == "ruff", result.stdout + result.stderr
 
 
 def test_a_ruff_that_cannot_start_exits_one_with_a_readable_line(monkeypatch, capsys):

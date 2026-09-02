@@ -2060,12 +2060,82 @@ def test_a_redirection_does_not_displace_the_ref_of_a_branch_move():
     assert guard.switch_targets("git switch -c agent/x 2>&1") == [("", "agent/x")]
 
 
-def test_an_interpreter_script_is_the_documented_gap():
-    """`python -c` computes its target at runtime and names it nowhere in the argv, so no
-    argv scan can see it. Pinned as a test rather than left implicit: a silent gap in a
-    guard reads as coverage, and whoever widens this tier should find the limit written
-    where closing it will show up as a failure."""
-    assert guard.shell_write_targets("python -c \"open('devkit/a.py','w').write('x')\"") == []
+# --- the interpreter tier ---------------------------------------------------------------
+#
+# Asserted through `guarded_targets`, which is where the tier composes and the call path
+# `main` actually takes. `shell_write_targets` is deliberately untouched by it: the two
+# answer different questions, and only one of them is about shell grammar.
+#
+# This closes what the suite used to pin as "the documented gap". The note left there
+# asked that whoever widened it find the limit written where closing it would show up as a
+# failure -- these are that.
+
+
+def bash_targets(command: str) -> list[str]:
+    return guard.guarded_targets({"tool_name": "Bash", "tool_input": {"command": command}})
+
+
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        # The spelling that actually happened, and repeatedly: bypass-permissions mode
+        # tells sessions to prefer heredocs and short scripts over Edit and Write, so the
+        # guard's blind side was the route its own operator recommended.
+        (
+            "python - <<'PY'\nimport pathlib\npathlib.Path('scripts/a.py').write_text(s)\nPY",
+            ["scripts/a.py"],
+        ),
+        ("python - <<'PY'\nopen('scripts/a.py','w').write('x')\nPY", ["scripts/a.py"]),
+        ("python -c \"open('devkit/a.py','w').write('x')\"", ["devkit/a.py"]),
+        ('python3 -c \'import pathlib; pathlib.Path("a.py").write_text("x")\'', ["a.py"]),
+        ("node -e \"fs.writeFileSync('src/a.js','x')\"", ["src/a.js"]),
+    ],
+)
+def test_an_interpreter_that_writes_is_read_as_a_write(command, expected):
+    assert bash_targets(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Reading is most of what a guarded session does through these interpreters, and
+        # the literal is identical to the writing case -- only the CALL differs. A tier
+        # gated on the path rather than the sink would block every one of these.
+        "python - <<'PY'\nprint(open('README.md').read())\nPY",
+        "python -c \"print(open('scripts/foo.py').read())\"",
+        "python -c 'import json; json.load(open(\"a.json\"))'",
+        # `-e` is not a program flag for these; reading it as one would treat a search
+        # pattern as code and a filename as its target.
+        "grep -e 'write_text(' scripts/foo.py",
+        "sed -e s/a/b/ scripts/foo.py",
+        # A sink with no path-like literal. `3.14` is `<name>.<ext>` by shape, and routing
+        # a write for a version number is the false positive that shape check prevents.
+        "python -c 'import pathlib; pathlib.Path(x).write_text(\"3.14\")'",
+    ],
+)
+def test_an_interpreter_that_only_reads_is_left_alone(command):
+    assert bash_targets(command) == []
+
+
+def test_the_command_line_tier_still_decides_first():
+    """Both tiers can fire on one call. The command-line target is the unambiguous one,
+    so a block names it first."""
+    assert bash_targets("python -c \"open('a.py','w')\" > b.txt") == ["b.txt", "a.py"]
+
+
+def test_shell_write_targets_is_untouched_by_the_interpreter_tier():
+    """It answers "what does this command LINE name", and a script's runtime target is
+    not that. Keeping the seam is what let the tier be added without moving this
+    function's structural numbers."""
+    assert guard.shell_write_targets("python - <<'PY'\nopen('a.py','w')\nPY") == []
+
+
+def test_a_heredoc_body_is_still_not_read_as_a_command_line():
+    """The two tiers must not blur. `>=` inside a script is an operator, and the older
+    fix for that -- stripping bodies before the argv scan -- has to survive this one
+    reading the same bodies as program text."""
+    command = "python - <<'PY'\nif a >= b:\n    pass\nPY"
+    assert guard.shell_write_targets(command) == []
 
 
 def test_an_unbalanced_quote_falls_back_to_whitespace_splitting():

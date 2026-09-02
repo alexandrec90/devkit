@@ -23,14 +23,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-try:
-    import project_python
-except ImportError:
-    # Optional for the same reason as in `lint-all.py`: this script is copied into
-    # generated projects, and failing to import is not a reason to refuse to run tests.
-    project_python = None  # type: ignore[assignment]
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT = REPO_ROOT / "logs" / "test-failures.log"
 
@@ -92,6 +84,22 @@ def cap_failure_blocks(text: str, limit: int = MAX_LINES_PER_FAILURE) -> str:
     return "\n".join(out)
 
 
+def _reexec(module: str) -> int | None:
+    """Re-run this process under the project's virtualenv, or None to carry on here.
+
+    The import is local, and optional, on purpose. This script is copied into generated
+    projects and, in the suite, into a bare temp repo holding nothing but itself; a
+    module-level import would turn "the interpreter could not be upgraded" into "this
+    will not start at all", which is worse than the behaviour it improves on.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import project_python
+    except ImportError:
+        return None
+    return project_python.re_exec(REPO_ROOT, module, sys.argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--changed", action="store_true", help="run pytest's last-failed subset")
@@ -138,5 +146,5 @@ if __name__ == "__main__":
     #
     # In the `__main__` guard rather than inside `main()` so that a test calling `main()`
     # directly stays in-process and testable.
-    code = project_python.re_exec(REPO_ROOT, "pytest", sys.argv) if project_python else None
+    code = _reexec("pytest")
     sys.exit(main() if code is None else code)

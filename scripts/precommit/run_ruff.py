@@ -31,21 +31,18 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
-try:
-    import project_python
-except ImportError:  # pragma: no cover - a checkout missing its own helper
-    project_python = None  # type: ignore[assignment]
-
 
 def ruff_command(args: list[str], root: Path = REPO_ROOT) -> list[str]:
     """The argv to spawn. Falls back to a bare `ruff` when the helper is absent.
 
-    The fallback reproduces exactly the old behaviour rather than inventing a new one:
-    if this file is somehow shipped without `project_python.py`, a `PATH` lookup is
-    still better than refusing to run.
+    The import is local, and its failure is not an error: if this file is ever shipped
+    without `project_python.py`, a `PATH` lookup reproduces exactly the old behaviour,
+    which is still better than a pre-commit hook that refuses to start.
     """
-    if project_python is None:
+    sys.path.insert(0, str(root / "scripts"))
+    try:
+        import project_python
+    except ImportError:
         return ["ruff", *args]
     return project_python.tool_command(root, "ruff", args)
 

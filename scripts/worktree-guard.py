@@ -47,6 +47,12 @@ their operator's, to prefer `sed`/heredocs over Edit and Write; that made the bl
 a route. A shell command is never re-aimed, because the rewrite replaces a path argument
 and a command line has none, so this tier always blocks toward the box.
 
+**And the program that command hands to an interpreter is judged as well** — see
+`guard_interpreter.py`, which owns that tier. Covering `sed -i` and `>` but not a
+heredoc'd `Path(...).write_text(...)` left the gap exactly where the operator instruction
+above sends the most traffic, so a session following it wrote to a home branch every time
+with this hook wired, running and silent.
+
 **A `git checkout`/`git switch` onto a task branch is blocked outright** — see the branch
 tier below the shell one. It is the only judgement here that ends in neither a rewrite nor
 a box, because the call was never going to write anything: parking a static checkout on
@@ -106,6 +112,11 @@ import devkit_project
 # The git probes this file's decisions rest on, lifted into their own leaf module — see
 # its docstring for the structural reason, which is that this one is at its ceiling.
 import guard_probes
+
+# The interpreter tier, in its own module for that same reason and because it asks a
+# different question: everything here is how a shell splits a line, that is what a script
+# does with a path.
+import guard_interpreter
 
 # Also resolved by the sys.path insert above. Read for the slug the UserPromptSubmit
 # hook recorded for this session — see `session_slug`.
@@ -419,9 +430,9 @@ ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Tracking quotes is lexical, not shell modelling: `shell_tokens` already pays `shlex` to
 # do exactly this for the verb half.
 
-# A heredoc body is program text, not a command line, so no scanner here should read it.
-# `<<'PY' … PY` is where `>=` and `->` come from, and closing that costs nothing this tier
-# claimed: an interpreter's runtime target is the documented gap below.
+# A heredoc body is program text, not a command line, so no scanner here should read it
+# *as one*. `<<'PY' … PY` is where `>=` and `->` come from. It is read separately, as
+# program text, by the interpreter tier below.
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 # Inside double quotes a backslash escapes only these. Everything else keeps its
@@ -906,7 +917,11 @@ def guarded_targets(payload: dict) -> list[str]:
     and both a shell command and a patch envelope can name more than one.
     """
     if _tool_name(payload) in SHELL_TOOLS:
-        return shell_write_targets(str(tool_input(payload).get("command") or ""))
+        command = str(tool_input(payload).get("command") or "")
+        # Composed here, not inside `shell_write_targets`: the two answer different
+        # questions and only one is about shell grammar. Command-line targets come first,
+        # so a block names the unambiguous one when a call has both.
+        return [*shell_write_targets(command), *guard_interpreter.write_targets(command)]
     if _tool_name(payload) in PATCH_TOOLS:
         # Falls through to the path key when the envelope names nothing, rather than
         # returning empty: `apply_patch` is a name two harnesses could spell differently,

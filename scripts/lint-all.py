@@ -39,16 +39,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-try:
-    import project_python
-except ImportError:
-    # **Optional on purpose.** This script travels: it is copied into generated projects
-    # and, in the suite, into a bare temp repo holding nothing but itself. A hard import
-    # would turn "the interpreter could not be upgraded" into "the linter will not start
-    # at all", which is strictly worse than the behaviour it improves on.
-    project_python = None  # type: ignore[assignment]
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Linters that come from `pyproject.toml`'s dev group, so a missing one is a broken
@@ -234,6 +224,40 @@ def run_tool(name: str, cmd: list[str], fix_hint: str) -> str:
     return f"# {name}\n# fix: {fix_hint}\n{body}\n\n"
 
 
+def _reexec(module: str) -> int | None:
+    """Re-run this process under the project's virtualenv, or None to carry on here.
+
+    The import is local, and optional, on purpose. This script is copied into generated
+    projects and, in the suite, into a bare temp repo holding nothing but itself; a
+    module-level import would turn "the interpreter could not be upgraded" into "this
+    will not start at all", which is worse than the behaviour it improves on.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import project_python
+    except ImportError:
+        return None
+    return project_python.re_exec(REPO_ROOT, module, sys.argv)
+
+
+def not_clean_reason() -> str:
+    """The line to print when a REQUIRED linter could not run, else "".
+
+    Asked before the `clean` line, because a required linter that could not run is not a
+    finding to write into the artifact — it is a statement that the run cannot be
+    believed, and the honest exit code for that is non-zero. Printing `clean` there is
+    exactly the failure this guard exists to stop.
+    """
+    absent = [name for name in _SKIPPED if name in REQUIRED_TOOLS]
+    if not absent:
+        return ""
+    return (
+        f"\nlint-all: NOT CLEAN — {', '.join(absent)} could not be run, so nothing was "
+        f"checked for the rules they own. They are declared in pyproject.toml: install "
+        f"them (`uv sync --all-extras --all-groups`) or run under the project's .venv."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     _SKIPPED.clear()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -339,18 +363,8 @@ def main(argv: list[str] | None = None) -> int:
 
     _write_artifact(sections)
 
-    # Asked before the `clean` line, because a required linter that could not run is not
-    # a finding to write into the artifact — it is a statement that the run cannot be
-    # believed, and the honest exit code for that is non-zero. Printing `clean` here is
-    # exactly the failure this guard exists to stop.
-    absent = [name for name in _SKIPPED if name in REQUIRED_TOOLS]
-    if absent:
-        print(
-            f"\nlint-all: NOT CLEAN — {', '.join(absent)} could not be run, so nothing was "
-            f"checked for the rules they own. They are declared in pyproject.toml: install "
-            f"them (`uv sync --all-extras --all-groups`) or run this under the project's "
-            f".venv interpreter."
-        )
+    if unusable := not_clean_reason():
+        print(unusable)
         return 1
 
     if sections:
@@ -370,7 +384,7 @@ if __name__ == "__main__":
     # Same reasoning as `run-tests.py`: an agent's shell is never an activated one, so
     # resolve the interpreter that holds the tools rather than hoping for a PATH. Without
     # it, this script's most common invocation skipped every linter and printed `clean`.
-    _code = project_python.re_exec(REPO_ROOT, "ruff", sys.argv) if project_python else None
+    _code = _reexec("ruff")
     if _code is not None:
         sys.exit(_code)
     sys.exit(main())
