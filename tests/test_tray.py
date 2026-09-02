@@ -70,36 +70,13 @@ def win32_calls() -> set[str]:
     """
     tree = ast.parse((REPO_ROOT / "scripts" / "tray.py").read_text(encoding="utf-8"))
     return {
-        node.func.attr
+        f"{node.func.value.id}.{node.func.attr}"
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id in {"user32", "shell32", "kernel32"}
     }
-
-
-def declared_names() -> str:
-    """The source of `_declare`, which is where a signature is pinned."""
-    tree = ast.parse((REPO_ROOT / "scripts" / "tray.py").read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_declare":
-            return ast.unparse(node)
-    raise AssertionError("tray.py no longer has a _declare()")
-
-
-# Calls that genuinely need no signature: they take only a `byref` pointer or a small
-# int, so `ctypes`' inference is right about every argument and the return is a BOOL or
-# is discarded. Anything touching a handle belongs in `_declare` instead -- an
-# undeclared 64-bit handle is either a silent truncation (a return) or an
-# `OverflowError` at the call (an argument), and this module has produced both.
-NEEDS_NO_SIGNATURE = {
-    "GetCursorPos",
-    "PostQuitMessage",
-    "RegisterClassExW",
-    "TranslateMessage",
-    "DispatchMessageW",
-}
 
 
 def test_every_win32_call_is_declared_or_deliberately_not():
@@ -109,31 +86,44 @@ def test_every_win32_call_is_declared_or_deliberately_not():
     handle to nothing, and an undeclared handle argument raises inside a callback where
     the error is printed and ignored. Neither reddens anything.
     """
-    # `_RESTYPES` counts as declared: `_declare` applies it by `getattr`, so those names
-    # never appear literally in its body.
-    source = declared_names()
+    declared = set(tray._RESTYPES) | set(tray._ARGTYPES)
     undeclared = sorted(
-        name
-        for name in win32_calls()
-        if name not in NEEDS_NO_SIGNATURE and name not in source and name not in tray._RESTYPES
+        call
+        for call in win32_calls()
+        if call not in declared and call.partition(".")[2] not in tray.NEEDS_NO_SIGNATURE
     )
     assert not undeclared, (
-        f"{undeclared} are called but have no signature in _declare(). If a call really "
-        f"touches no handle, add it to NEEDS_NO_SIGNATURE with the reason."
+        f"{undeclared} are called with no entry in _RESTYPES or _ARGTYPES. If a call "
+        f"really touches no handle, add it to NEEDS_NO_SIGNATURE with the reason."
     )
 
 
 def test_the_message_fallback_is_declared():
     """`DefWindowProcW` is only reached for messages the tray does not handle, so it
     fails on ordinary background traffic rather than on anything the tray does."""
-    assert "DefWindowProcW.argtypes" in declared_names()
+    assert tray._ARGTYPES["user32.DefWindowProcW"][-1] is tray.wintypes.LPARAM
 
 
 def test_no_signature_is_declared_for_a_call_that_was_removed():
-    """The other direction: a stale declaration is a claim about code that is gone."""
+    """The other direction: a stale declaration is a claim about code that is gone. One
+    (`LoadCursorW`) was already sitting in the table when this test was written."""
     calls = win32_calls()
-    for name in tray._RESTYPES:
-        assert name in calls, f"{name} is declared in _RESTYPES but nothing calls it"
+    for table in (tray._RESTYPES, tray._ARGTYPES):
+        for name in table:
+            assert name in calls, f"{name} is declared but nothing calls it"
+
+
+def test_nothing_is_exempted_that_is_never_called():
+    assert {f"user32.{name}" for name in tray.NEEDS_NO_SIGNATURE} <= win32_calls()
+
+
+def test_every_declared_name_is_qualified_by_its_dll():
+    """The tables are keyed `<dll>.<function>` and `_declare` splits on the dot. A bare
+    name would be a `KeyError` on the module, raised the first time the tray starts."""
+    for table in (tray._RESTYPES, tray._ARGTYPES):
+        for name in table:
+            module, dot, function = name.partition(".")
+            assert dot and module in {"user32", "shell32", "kernel32"} and function
 
 
 def test_the_notify_structure_matches_the_size_windows_expects():
@@ -215,3 +205,19 @@ def test_the_window_procedure_is_kept_alive_by_the_object():
     """The only Python reference to a callback Windows holds a raw pointer to. Letting
     it be collected is a crash in a message loop, with no traceback."""
     assert tray.Tray().proc is not None
+
+
+def test_make_icon_is_a_no_op_without_a_windows_dll(monkeypatch):
+    """`make_icon` returning None rather than raising is what lets `notify` fall back to
+    a tooltip-only icon instead of taking the tray down."""
+    monkeypatch.setattr(tray, "user32", None)
+    assert tray.make_icon((1, 2, 3)) is None
+
+
+def test_the_window_class_struct_declares_its_own_size():
+    """`WNDCLASSEX` is registered by `cbSize`, and a struct whose fields do not match the
+    size it declares is refused by `RegisterClassExW` with no error the caller sees."""
+    fields = dict(tray.WNDCLASSEX._fields_)
+    assert fields["cbSize"] is tray.wintypes.UINT
+    assert fields["lpfnWndProc"] is tray.WNDPROC
+    assert fields["lpszClassName"] is tray.wintypes.LPCWSTR

@@ -203,3 +203,26 @@ def test_the_colours_differ_in_brightness_as_well_as_hue():
         level: 0.299 * r + 0.587 * g + 0.114 * b for level, (r, g, b) in tray_state.COLOURS.items()
     }
     assert len({round(value / 20) for value in luma.values()}) == 3
+
+
+def test_refresh_asks_the_scheduler_and_returns_what_the_tray_draws(monkeypatch):
+    """The one function the tray calls on a timer. It exists so the message loop holds
+    no knowledge of `schedule_health` at all."""
+    monkeypatch.setattr(schedule_health, "query", lambda: jobs("devkit-a", "devkit-b"))
+    monkeypatch.setattr(
+        schedule_health,
+        "problems",
+        lambda found, now=None: ["devkit-b: disabled -- nothing runs it"],
+    )
+    found = tray_state.refresh()
+    assert [(item.name, item.state) for item in found] == [
+        ("devkit-b", tray_state.FAIL),
+        ("devkit-a", tray_state.OK),
+    ]
+
+
+def test_refresh_on_a_machine_with_no_scheduler_reports_nothing_registered(monkeypatch):
+    monkeypatch.setattr(schedule_health, "query", lambda: [])
+    monkeypatch.setattr(schedule_health, "problems", lambda found, now=None: [])
+    assert tray_state.refresh() == []
+    assert tray_state.overall(tray_state.refresh()) == tray_state.WARN

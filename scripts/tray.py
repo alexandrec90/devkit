@@ -85,106 +85,107 @@ user32: Any = ctypes.windll.user32 if os.name == "nt" else None
 shell32: Any = ctypes.windll.shell32 if os.name == "nt" else None
 kernel32: Any = ctypes.windll.kernel32 if os.name == "nt" else None
 
-# Every function here that returns a handle, with the type it really returns.
+# The Win32 surface this module uses, as data.
 #
 # **This is not tidiness.** A `ctypes` function with no declared `restype` returns
 # `c_int` -- 32 bits -- and on 64-bit Windows every one of these returns a 64-bit
 # pointer. The high half is silently discarded, so the truncated value is a handle to
 # nothing: `CreateWindowExW` appears to succeed and the icon then attaches to a window
-# that does not exist. It fails as *nothing happening*, with no error anywhere, which is
-# the worst way for a tray to fail because that is also what a healthy quiet tray does.
-_RESTYPES = {
-    "CreateIcon": wintypes.HICON,
-    "CreateWindowExW": wintypes.HWND,
-    "CreatePopupMenu": wintypes.HMENU,
-    "DefWindowProcW": ctypes.c_longlong,
+# that does not exist. `argtypes` matters for the same reason and fails more loudly: an
+# undeclared handle *argument* raises `OverflowError: int too long to convert` at the
+# call -- and for a window procedure, inside a callback where the error is printed and
+# ignored. Both were real here.
+#
+# A table rather than a wall of assignments so the set can be read, and so
+# `tests/test_tray.py` can check it against the calls this module actually makes.
+_RESTYPES: dict[str, Any] = {
+    "user32.CreateIcon": wintypes.HICON,
+    "user32.CreateWindowExW": wintypes.HWND,
+    "user32.CreatePopupMenu": wintypes.HMENU,
+    "user32.DefWindowProcW": ctypes.c_longlong,
+    "kernel32.GetModuleHandleW": wintypes.HMODULE,
+    "shell32.Shell_NotifyIconW": wintypes.BOOL,
+    # Takes and returns a UINT_PTR; the default truncates the id on the way back.
+    "user32.SetTimer": ctypes.c_size_t,
 }
+
+_ARGTYPES: dict[str, list[Any]] = {
+    "user32.CreateWindowExW": [
+        wintypes.DWORD,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.HWND,
+        wintypes.HMENU,
+        wintypes.HINSTANCE,
+        wintypes.LPVOID,
+    ],
+    "user32.CreateIcon": [
+        wintypes.HINSTANCE,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.BYTE,
+        wintypes.BYTE,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+    ],
+    "user32.AppendMenuW": [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR],
+    "user32.TrackPopupMenu": [
+        wintypes.HMENU,
+        wintypes.UINT,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.HWND,
+        wintypes.LPVOID,
+    ],
+    # Easy to forget, because it is only reached for messages this window does not
+    # handle -- so it fails on ordinary background traffic rather than on anything the
+    # tray does.
+    "user32.DefWindowProcW": [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM],
+    "user32.DestroyMenu": [wintypes.HMENU],
+    "user32.DestroyWindow": [wintypes.HWND],
+    "user32.SetForegroundWindow": [wintypes.HWND],
+    "user32.SetTimer": [wintypes.HWND, ctypes.c_size_t, wintypes.UINT, wintypes.LPVOID],
+    "shell32.Shell_NotifyIconW": [wintypes.DWORD, ctypes.c_void_p],
+    # These take `self.hwnd`, a real 64-bit handle now that `CreateWindowExW` returns
+    # one, so undeclared they are the `OverflowError` above.
+    "user32.PostMessageW": [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM],
+    "user32.GetMessageW": [wintypes.LPVOID, wintypes.HWND, wintypes.UINT, wintypes.UINT],
+    "shell32.ShellExecuteW": [
+        wintypes.HWND,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+    ],
+}
+
+# Calls that genuinely need no signature: each takes only a `byref` pointer or a small
+# int, so `ctypes`' inference is right about every argument and the return is a BOOL or
+# is discarded. Anything touching a handle belongs in the tables above instead.
+NEEDS_NO_SIGNATURE = frozenset(
+    {"GetCursorPos", "PostQuitMessage", "RegisterClassExW", "TranslateMessage", "DispatchMessageW"}
+)
+
+_DLLS = {"user32": lambda: user32, "shell32": lambda: shell32, "kernel32": lambda: kernel32}
 
 
 def _declare() -> None:
-    """Pin the signatures above. Idempotent, and a no-op off Windows.
-
-    `argtypes` matters for the same reason `restype` does and fails more loudly: with
-    none declared, `ctypes` guesses each argument's width from the Python value, so a
-    module handle large enough to need 64 bits raises `OverflowError: int too long to
-    convert` at the call. That is the better failure of the two -- the undeclared
-    *return* is the silent one -- but both come from the same omission.
-    """
+    """Apply the tables above. Idempotent, and a no-op off Windows."""
     if user32 is None:
         return
-    for name, restype in _RESTYPES.items():
-        getattr(user32, name).restype = restype
-    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
-    user32.CreateWindowExW.argtypes = [
-        wintypes.DWORD,
-        wintypes.LPCWSTR,
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        wintypes.HWND,
-        wintypes.HMENU,
-        wintypes.HINSTANCE,
-        wintypes.LPVOID,
-    ]
-    user32.CreateIcon.argtypes = [
-        wintypes.HINSTANCE,
-        ctypes.c_int,
-        ctypes.c_int,
-        wintypes.BYTE,
-        wintypes.BYTE,
-        ctypes.c_char_p,
-        ctypes.c_char_p,
-    ]
-    user32.AppendMenuW.argtypes = [
-        wintypes.HMENU,
-        wintypes.UINT,
-        ctypes.c_size_t,
-        wintypes.LPCWSTR,
-    ]
-    user32.TrackPopupMenu.argtypes = [
-        wintypes.HMENU,
-        wintypes.UINT,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        wintypes.HWND,
-        wintypes.LPVOID,
-    ]
-    # The one that is easy to forget, because it is only reached for messages this
-    # window does not handle -- so it fails on the ordinary background traffic rather
-    # than on anything the tray does, and the error arrives as "exception ignored in
-    # callback" from inside the message loop where it cannot be raised.
-    user32.DefWindowProcW.argtypes = [
-        wintypes.HWND,
-        wintypes.UINT,
-        wintypes.WPARAM,
-        wintypes.LPARAM,
-    ]
-    user32.DestroyMenu.argtypes = [wintypes.HMENU]
-    user32.DestroyWindow.argtypes = [wintypes.HWND]
-    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-    # `SetTimer` takes and returns a UINT_PTR; the default `c_int` truncates the id on
-    # the way back, which only matters if the timer is ever cancelled by handle.
-    user32.SetTimer.argtypes = [wintypes.HWND, ctypes.c_size_t, wintypes.UINT, wintypes.LPVOID]
-    user32.SetTimer.restype = ctypes.c_size_t
-    shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.c_void_p]
-    shell32.Shell_NotifyIconW.restype = wintypes.BOOL
-    # These two take `self.hwnd`, which is a real 64-bit handle now that
-    # `CreateWindowExW` returns one. Undeclared, they are the same
-    # `OverflowError: int too long to convert` this module has already produced twice.
-    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-    user32.GetMessageW.argtypes = [wintypes.LPVOID, wintypes.HWND, wintypes.UINT, wintypes.UINT]
-    shell32.ShellExecuteW.argtypes = [
-        wintypes.HWND,
-        wintypes.LPCWSTR,
-        wintypes.LPCWSTR,
-        wintypes.LPCWSTR,
-        wintypes.LPCWSTR,
-        ctypes.c_int,
-    ]
+    for qualified, restype in _RESTYPES.items():
+        module, _, name = qualified.partition(".")
+        getattr(_DLLS[module](), name).restype = restype
+    for qualified, argtypes in _ARGTYPES.items():
+        module, _, name = qualified.partition(".")
+        getattr(_DLLS[module](), name).argtypes = argtypes
 
 
 class NOTIFYICONDATA(ctypes.Structure):
