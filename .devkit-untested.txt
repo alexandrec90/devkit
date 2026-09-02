@@ -161,7 +161,6 @@ scripts/worktree-guard.py::foreign_box
 scripts/worktree-guard.py::foreign_box_reason
 scripts/worktree-guard.py::old_strings
 scripts/worktree-guard.py::redirect_message
-scripts/worktree-guard.py::resolve_target
 scripts/worktree-guard.py::route_out_lines
 scripts/worktree-guard.py::route_to_own_box
 scripts/worktree-guard.py::tool_input

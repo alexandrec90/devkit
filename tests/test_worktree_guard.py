@@ -1045,6 +1045,31 @@ def test_a_non_box_path_under_worktrees_is_left_alone(root, monkeypatch):
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
 
 
+def test_removing_a_stray_link_under_worktrees_does_not_follow_it(root, monkeypatch):
+    """Deleting the link removes no checkout content; resolving its leaf made the guard
+    judge the static checkout the link points at and cut an unrelated box instead."""
+    workspace = _workspace(root)
+    target = root / ".worktrees" / "carameli"
+    target.symlink_to(root / "carameli", target_is_directory=True)
+    descendant = str(target / "a.py")
+    assert (
+        guard.resolve_target(descendant, str(root), [descendant], root / ".worktrees")
+        == (root / "carameli" / "a.py").resolve()
+    )
+    monkeypatch.setattr(guard, "current_branch", lambda _checkout: "main")
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(
+            payload(
+                tool="PowerShell",
+                command=f"Remove-Item -Recurse -Force '{target}' -Confirm:$false",
+                cwd=str(root / "carameli"),
+            )
+        ),
+    )
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+
+
 def test_a_refusal_puts_its_reason_on_stderr_because_a_blocked_hooks_stdout_is_dropped(
     root, monkeypatch, capsys
 ):
