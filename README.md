@@ -511,6 +511,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-docker-prune` | `scripts/install-docker-prune.py` | daily 04:00 | `logs/scheduled-docker-prune.log` |
 | `devkit-global-tools` | `scripts/install-global-tools.py` | daily 04:30 | `logs/global-tools.log` |
 | `devkit-rc-servers` | `scripts/install-rc-schedule.py` | every 15 min | `logs/rc-servers.log` |
+| `devkit-tray` | `scripts/install-tray.py` | at logon, resident | `logs/tray.log` |
 
 `scripts/schedule_health.py` answers the question no artifact can — *did it run at all*
 — and names the file above when one exits non-zero, so the session-start line is a
@@ -548,13 +549,50 @@ or, with the knobs:
 "devkit.remoteControl": {
   "projects": ["devkit"],
   "permissionMode": "acceptEdits",  // a standing grant — opt in deliberately
-  "idleMinutes": 20,
-  "updateAt": "04:45"
+  "idleMinutes": 20,                // transcript silence before a restart is allowed
+  "updateAt": "04:45",              // after devkit-global-tools, deliberately
+  "capacity": 8,                    // sessions per server; the CLI's own default is 32
+  "powerSaving": false,             // see below — not a free saving
+  "awayMinutes": 15
 }
 ```
 
+On memory: a server costs 300–420 MB as a process, and then holds every session the
+phone spawns for as long as it lives — which is where the growth actually is, so
+`capacity` is the knob that matters and it is bounded well below the CLI's default of 32.
+
+`powerSaving` stops the servers while someone is using the machine and starts them again
+once the keyboard has been quiet for `awayMinutes`. It is **off by default and is a real
+trade-off, not a free saving**: restarting brings sessions back only inside about four
+hours, so a full day at the desk loses them rather than pausing them. Worth it on a
+machine tight on memory; wrong if you want to pick up this morning's phone conversation
+after lunch.
+
 `python scripts/rc-servers.py status` reports what is up and what is active without
 touching anything; `up`, `cycle` and `down` are the manual verbs.
+
+#### The tray indicator: nothing is ever totally invisible
+
+Unattended jobs are invisible by construction. They run windowless, their stdout goes
+nowhere, and the only sign one has stopped is a line at the start of the next session —
+which requires someone to start a session. `devkit-tray` is the always-on half of that:
+one notification-area icon, green when every registered job is healthy, amber when one
+is late or has never run, red when one has failed or is disabled. Right-click lists them
+all; clicking a job opens its own log.
+
+It makes no judgement of its own — `schedule_health.problems` decides what counts as a
+problem, and the tray adds only how loud each answer is. A second opinion would be worse
+than no indicator, because it would disagree with the session-start line about the same
+machine. A machine with nothing registered shows **amber, not green**: green over a set
+of zero jobs is the most misleading thing it could say.
+
+```bash
+python scripts/tray.py --once        # what it would show, as text
+python scripts/install-tray.py --yes # start it at every logon
+```
+
+Windows only, and stdlib only — Shell_NotifyIcon through `ctypes`. `tray.py --once`
+prints the same verdict anywhere, which is also how the read path is tested.
 
 The global-tools pass is the machine-wide counterpart to the project upgrade. Four of
 this workspace's MCP servers — chrome-devtools, postgres, redis, azure-devops — are

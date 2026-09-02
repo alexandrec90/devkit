@@ -217,10 +217,68 @@ def launch_argv(claude: str, name: str, config: rc_config.Config) -> list[str]:
     `<host>-<adjective>-<noun>` and the session list is unusable for the one thing it is
     for -- picking the right project on a small screen.
     """
-    argv = [claude, "remote-control", "--name", name, "--spawn", config.spawn]
+    argv = [
+        claude,
+        "remote-control",
+        "--name",
+        name,
+        "--spawn",
+        config.spawn,
+        # Bounded on purpose. A server holds every session the phone spawns for as long
+        # as it lives, so the default of 32 is an unbounded-in-practice memory budget for
+        # a process that is meant to run all week.
+        "--capacity",
+        str(config.capacity),
+    ]
     if config.permission_mode:
         argv += ["--permission-mode", config.permission_mode]
     return argv
+
+
+def user_idle_seconds() -> float | None:
+    """Seconds since the last keyboard or mouse input, or `None` when unanswerable.
+
+    `GetLastInputInfo` through `ctypes`, which is stdlib -- the harness contract forbids
+    an installed dependency here, and this is the whole of what a `psutil`-shaped one
+    would have been used for.
+
+    The value is session-wide rather than per-window, which is exactly the question
+    being asked: is a person at this desk. `None` off Windows, and on any failure.
+    """
+    if not WINDOWS:
+        return None
+    import ctypes
+
+    class LastInput(ctypes.Structure):
+        _fields_ = (("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_ulong))
+
+    info = LastInput()
+    info.cbSize = ctypes.sizeof(LastInput)
+    try:
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        ticks = ctypes.windll.kernel32.GetTickCount64()
+    except (AttributeError, OSError):
+        return None
+    # Both are milliseconds since boot. `GetTickCount64` rather than `GetTickCount` so
+    # the arithmetic does not wrap after 49 days of uptime -- on a desktop left on all
+    # the time, which is the machine this feature is for, that wrap is not hypothetical.
+    return max(0.0, (ticks - info.dwTime) / 1000.0)
+
+
+def at_the_desk(away_minutes: int) -> bool:
+    """Whether someone is using this machine right now.
+
+    `False` when the question cannot be answered, which is the safe direction here and
+    the opposite of the rule elsewhere in this module: the *action* gated on this is
+    stopping servers, and a wrong "yes" destroys sessions. Everywhere else the action is
+    a restart and the danger is interrupting one, so unknown means busy. The rule is not
+    "unknown is always X" -- it is "unknown never destroys".
+    """
+    idle = user_idle_seconds()
+    if idle is None:
+        return False
+    return idle < away_minutes * 60
 
 
 def claude_executable(which: Callable[[str], str | None] = shutil.which) -> str:

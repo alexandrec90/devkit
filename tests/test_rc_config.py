@@ -170,3 +170,52 @@ def test_a_day_that_was_missed_is_caught_up_on_the_next_tick():
 
 def test_a_malformed_update_time_never_fires_the_cycle():
     assert rc_config.due_for_update("", _dt.datetime(2026, 9, 2, 23, 0), "4pm") is False
+
+
+# --- the memory knobs -------------------------------------------------------
+
+
+def test_the_session_capacity_is_bounded_well_below_the_cli_default():
+    """A server holds every session the phone spawns for as long as it lives, so
+    `remote-control`'s default of 32 is an unbounded memory budget for a process meant
+    to run all week."""
+    assert rc_config.DEFAULT_CAPACITY < 32
+    assert rc_config.Config().capacity == rc_config.DEFAULT_CAPACITY
+
+
+def test_the_capacity_can_be_raised_from_the_workspace_file():
+    assert (
+        rc_config.parse_config(workspace_text({"projects": ["d"], "capacity": 20})).capacity == 20
+    )
+
+
+@pytest.mark.parametrize("value", [0, -1, "8", True], ids=["zero", "negative", "string", "bool"])
+def test_an_unusable_capacity_falls_back_to_the_default(value):
+    config = rc_config.parse_config(workspace_text({"projects": ["d"], "capacity": value}))
+    assert config.capacity == rc_config.DEFAULT_CAPACITY
+
+
+def test_power_saving_is_off_unless_it_was_asked_for():
+    """It is a real trade-off, not a free saving: past four hours the sessions it stops
+    are gone rather than paused."""
+    assert rc_config.Config().power_saving is False
+    assert rc_config.parse_config(workspace_text(["devkit"])).power_saving is False
+
+
+def test_power_saving_turns_on_only_for_a_real_boolean_true():
+    assert (
+        rc_config.parse_config(
+            workspace_text({"projects": ["d"], "powerSaving": True})
+        ).power_saving
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "value", ["true", "false", 1, "yes"], ids=["str-true", "str-false", "one", "yes"]
+)
+def test_a_truthy_non_boolean_never_turns_power_saving_on(value):
+    """A `"false"` that read as True is how a mode nobody asked for starts destroying
+    sessions."""
+    config = rc_config.parse_config(workspace_text({"projects": ["d"], "powerSaving": value}))
+    assert config.power_saving is False

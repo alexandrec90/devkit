@@ -256,3 +256,11 @@ def test_reading_the_plan_from_a_box_is_still_allowed(tmp_path, capsys):
     (box / "scripts" / "rc-servers.py").write_text("", encoding="utf-8")
     assert installer.main(["--devkit", str(box)]) == 0
     assert "Nothing was registered" in capsys.readouterr().out
+
+
+def test_the_document_also_fires_after_a_reboot():
+    """A reboot kills every server, and the next repetition can be a full interval away.
+    Fifteen minutes of an unreachable phone is the failure this job exists to prevent."""
+    xml = installer.task_document(schedule())
+    assert "<BootTrigger>" in xml and "<TimeTrigger>" in xml
+    assert xml.count("<Triggers>") == 1

@@ -153,7 +153,11 @@ def task_document(schedule: Schedule) -> str:
     return devkit_schtasks.task_xml(
         program,
         subprocess.list2cmdline(arguments),
-        devkit_schtasks.repeating_trigger(schedule.every),
+        # Two triggers. The repetition is the job; the boot trigger only closes the gap
+        # after a restart, where the servers are certainly down (a reboot kills them) and
+        # the next repetition could be a full interval away. Fifteen minutes of an
+        # unreachable phone is exactly the failure this job exists to prevent.
+        devkit_schtasks.repeating_trigger(schedule.every) + devkit_schtasks.boot_trigger(),
         time_limit="PT15M",
         working_dir=str(Path(schedule.script).parent.parent),
     )

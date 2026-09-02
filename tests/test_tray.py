@@ -1,0 +1,217 @@
+"""`tray.py`: the parts of a Windows message loop that can be tested without one.
+
+Most of this file is `ctypes`, and a mocked `ctypes` call asserts only that the mock was
+written. So the tests here cover the two things that are real: the pixel buffer handed
+to `CreateIcon`, and the signature declarations -- which is where this actually broke
+twice, both times as *nothing happening* rather than as an error.
+
+The message loop itself was verified by running it: `python scripts/tray.py
+--poll-seconds 3` under a timeout, which draws a real icon and exits only when killed.
+That is not something a suite can assert, so `--once` exists to give the whole read path
+a runnable, assertable form.
+"""
+
+from __future__ import annotations
+
+import ast
+
+import pytest
+from support import REPO_ROOT, load_script
+
+tray = load_script("scripts/tray.py")
+tray_state = load_script("scripts/tray_state.py")
+
+
+# --- the icon ---------------------------------------------------------------
+
+
+def test_the_pixel_buffer_is_the_size_createicon_expects():
+    """32 bits per pixel over a 16x16 square. A buffer of the wrong length is read past
+    its end by a C function that was told how big it is by the width and height."""
+    pixels = tray.icon_pixels((1, 2, 3), size=16)
+    assert len(pixels) == 16 * 16 * 4
+
+
+def test_the_pixels_are_bgra_not_rgba():
+    """Windows DIBs are little-endian BGRA. Getting this backwards swaps red and blue,
+    which for this icon means a failure shows up as the healthy colour."""
+    assert tray.icon_pixels((0xC6, 0x28, 0x28), size=1) == bytes((0x28, 0x28, 0xC6, 0xFF))
+
+
+def test_every_pixel_is_opaque():
+    """The AND mask is all zeros, so the alpha channel is what decides visibility. A
+    zero there is an icon that is present, correct, and completely transparent."""
+    pixels = tray.icon_pixels((10, 20, 30), size=4)
+    assert set(pixels[3::4]) == {0xFF}
+
+
+def test_each_state_yields_a_distinct_buffer():
+    buffers = {level: tray.icon_pixels(colour) for level, colour in tray_state.COLOURS.items()}
+    assert len(set(buffers.values())) == len(tray_state.COLOURS)
+
+
+# --- the signatures ---------------------------------------------------------
+
+
+def test_declaring_is_idempotent_and_safe_on_any_platform():
+    """It runs on every `Tray.run`, and off Windows it must return rather than explode --
+    devkit runs on POSIX and importing this module there is supported."""
+    tray._declare()
+    tray._declare()
+
+
+def win32_calls() -> set[str]:
+    """Every `user32`/`shell32`/`kernel32` function this module calls, from its source.
+
+    Read out of the AST rather than off the loaded DLLs, so this whole section runs on
+    POSIX. The Windows-only versions of these assertions were `skipif`-ed, which meant
+    the checks that mattered most did not run in CI at all -- and the bugs they are
+    about are invisible at runtime, so nothing else would have caught them either.
+    """
+    tree = ast.parse((REPO_ROOT / "scripts" / "tray.py").read_text(encoding="utf-8"))
+    return {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in {"user32", "shell32", "kernel32"}
+    }
+
+
+def declared_names() -> str:
+    """The source of `_declare`, which is where a signature is pinned."""
+    tree = ast.parse((REPO_ROOT / "scripts" / "tray.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_declare":
+            return ast.unparse(node)
+    raise AssertionError("tray.py no longer has a _declare()")
+
+
+# Calls that genuinely need no signature: they take only a `byref` pointer or a small
+# int, so `ctypes`' inference is right about every argument and the return is a BOOL or
+# is discarded. Anything touching a handle belongs in `_declare` instead -- an
+# undeclared 64-bit handle is either a silent truncation (a return) or an
+# `OverflowError` at the call (an argument), and this module has produced both.
+NEEDS_NO_SIGNATURE = {
+    "GetCursorPos",
+    "PostQuitMessage",
+    "RegisterClassExW",
+    "TranslateMessage",
+    "DispatchMessageW",
+}
+
+
+def test_every_win32_call_is_declared_or_deliberately_not():
+    """The check that would have caught all three signature bugs in this file at once.
+
+    Each was invisible: a truncated `restype` makes a call *appear* to succeed against a
+    handle to nothing, and an undeclared handle argument raises inside a callback where
+    the error is printed and ignored. Neither reddens anything.
+    """
+    # `_RESTYPES` counts as declared: `_declare` applies it by `getattr`, so those names
+    # never appear literally in its body.
+    source = declared_names()
+    undeclared = sorted(
+        name
+        for name in win32_calls()
+        if name not in NEEDS_NO_SIGNATURE and name not in source and name not in tray._RESTYPES
+    )
+    assert not undeclared, (
+        f"{undeclared} are called but have no signature in _declare(). If a call really "
+        f"touches no handle, add it to NEEDS_NO_SIGNATURE with the reason."
+    )
+
+
+def test_the_message_fallback_is_declared():
+    """`DefWindowProcW` is only reached for messages the tray does not handle, so it
+    fails on ordinary background traffic rather than on anything the tray does."""
+    assert "DefWindowProcW.argtypes" in declared_names()
+
+
+def test_no_signature_is_declared_for_a_call_that_was_removed():
+    """The other direction: a stale declaration is a claim about code that is gone."""
+    calls = win32_calls()
+    for name in tray._RESTYPES:
+        assert name in calls, f"{name} is declared in _RESTYPES but nothing calls it"
+
+
+def test_the_notify_structure_matches_the_size_windows_expects():
+    """`cbSize` selects the layout. A structure that does not match the size it declares
+    is rejected by the shell with no error the caller can see."""
+    assert tray.ctypes.sizeof(tray.NOTIFYICONDATA) > 0
+    fields = dict(tray.NOTIFYICONDATA._fields_)
+    assert fields["szTip"] == tray.wintypes.WCHAR * 128
+
+
+# --- the read path ----------------------------------------------------------
+
+
+def test_once_prints_what_the_tray_would_show(capsys, monkeypatch):
+    """`--once` is the whole read path in a form a suite can assert, and the form a
+    human uses to check the tray is telling the truth."""
+    monkeypatch.setattr(
+        tray_state,
+        "refresh",
+        lambda now=None: [
+            tray_state.JobState("devkit-a", tray_state.OK),
+            tray_state.JobState("devkit-b", tray_state.FAIL, "it broke"),
+        ],
+    )
+    assert tray.main(["--once"]) == 0
+    out = capsys.readouterr().out
+    assert "devkit-a" in out and "devkit-b" in out and "it broke" in out
+
+
+def test_once_works_on_a_machine_with_nothing_registered(capsys, monkeypatch):
+    monkeypatch.setattr(tray_state, "refresh", lambda now=None: [])
+    assert tray.main(["--once"]) == 0
+    assert "no scheduled jobs" in capsys.readouterr().out
+
+
+def test_a_posix_machine_is_told_so_and_stays_green(capsys, monkeypatch):
+    """Not a failure: a missing tray on POSIX is not a fault, and a non-zero exit would
+    redden a scheduled caller for the platform it is running on."""
+    monkeypatch.setattr(tray.os, "name", "posix")
+    assert tray.main([]) == 0
+    assert "Windows only" in capsys.readouterr().out
+
+
+def test_the_artifact_says_why_a_missing_tray_is_worth_a_file(tmp_path):
+    tray.write_artifact("# hello\n", tmp_path)
+    assert (tmp_path / tray.ARTIFACT).read_text(encoding="utf-8") == "# hello\n"
+
+
+@pytest.mark.parametrize(
+    "error", [OSError("schtasks is gone"), ValueError("unparseable"), KeyError("no colour")]
+)
+def test_a_poll_that_hits_a_known_failure_leaves_the_icon_up(monkeypatch, error):
+    """A tray that died on one bad `schtasks` answer would vanish from the notification
+    area, which reads as "nothing is wrong" -- the opposite of what happened."""
+
+    def explode(now=None):
+        raise error
+
+    monkeypatch.setattr(tray_state, "refresh", explode)
+    instance = tray.Tray()
+    instance.poll()
+    assert instance.states == []
+
+
+def test_a_poll_that_hits_something_unexpected_is_not_swallowed(monkeypatch):
+    """The other half of catching narrowly. A bare `except` here would turn any defect
+    in `tray_state` into a tray that sits there showing a machine it stopped reading --
+    which is indistinguishable from a healthy one."""
+
+    def explode(now=None):
+        raise RuntimeError("a defect, not a bad answer")
+
+    monkeypatch.setattr(tray_state, "refresh", explode)
+    with pytest.raises(RuntimeError):
+        tray.Tray().poll()
+
+
+def test_the_window_procedure_is_kept_alive_by_the_object():
+    """The only Python reference to a callback Windows holds a raw pointer to. Letting
+    it be collected is a crash in a message loop, with no traceback."""
+    assert tray.Tray().proc is not None

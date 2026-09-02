@@ -226,7 +226,8 @@ def test_no_permission_mode_is_passed_unless_one_was_configured():
 
 
 def test_the_spawn_mode_is_always_passed_explicitly():
-    assert rc.launch_argv("claude", "d", rc_config.Config())[-1] == "same-dir"
+    argv = rc.launch_argv("claude", "d", rc_config.Config())
+    assert argv[argv.index("--spawn") + 1] == "same-dir"
 
 
 def test_the_cli_is_found_off_path_where_the_native_installer_puts_it(monkeypatch, tmp_path):
@@ -298,3 +299,42 @@ def test_saving_creates_the_directory_it_needs(tmp_path):
     path = tmp_path / "logs" / "state.json"
     rc.State().save(path)
     assert path.is_file()
+
+
+# --- the memory knobs -------------------------------------------------------
+
+
+def test_the_session_capacity_is_always_passed():
+    """Left off, a server inherits `remote-control`'s default of 32 and grows all week."""
+    argv = rc.launch_argv("claude", "devkit", rc_config.Config())
+    assert argv[argv.index("--capacity") + 1] == str(rc_config.DEFAULT_CAPACITY)
+
+
+def test_a_raised_capacity_reaches_the_command():
+    argv = rc.launch_argv("claude", "d", rc_config.Config(capacity=20))
+    assert argv[argv.index("--capacity") + 1] == "20"
+
+
+def test_the_idle_probe_answers_in_seconds_or_not_at_all():
+    """Real call, no mock: the point of `GetLastInputInfo` here is that it works on this
+    machine, and a mocked ctypes call would assert only that the mock was written."""
+    idle = rc.user_idle_seconds()
+    assert idle is None or (isinstance(idle, float) and idle >= 0.0)
+
+
+def test_a_machine_that_cannot_answer_is_not_treated_as_occupied(monkeypatch):
+    """The opposite of this module's usual rule, deliberately. The action gated on this
+    is *stopping* servers, and a wrong "yes" destroys sessions; elsewhere the action is a
+    restart and unknown means busy. The invariant is "unknown never destroys"."""
+    monkeypatch.setattr(rc, "user_idle_seconds", lambda: None)
+    assert rc.at_the_desk(15) is False
+
+
+def test_recent_input_means_someone_is_here(monkeypatch):
+    monkeypatch.setattr(rc, "user_idle_seconds", lambda: 60.0)
+    assert rc.at_the_desk(15) is True
+
+
+def test_a_long_silence_means_the_desk_is_empty(monkeypatch):
+    monkeypatch.setattr(rc, "user_idle_seconds", lambda: 16 * 60.0)
+    assert rc.at_the_desk(15) is False

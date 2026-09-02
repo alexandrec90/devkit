@@ -287,6 +287,17 @@ def run_mode(mode: str, plan: Plan, report: Pass, now: _dt.datetime) -> None:
         if ran:
             plan.state.last_update = now.date().isoformat()
         return
+    # Power saving is checked only on `maintain`, never on an explicit `up`. Someone who
+    # types `up` is asking for servers, and a mode that answered "no, you are at your
+    # desk" would be refusing the one instruction it was given.
+    if (
+        mode == "maintain"
+        and plan.config.power_saving
+        and rc_machine.at_the_desk(plan.config.away_minutes)
+    ):
+        report.say("power saving -- someone is at the desk, servers stay down")
+        down(plan, report)
+        return
     ensure_up(plan, report)
 
 

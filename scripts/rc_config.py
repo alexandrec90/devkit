@@ -57,6 +57,28 @@ DEFAULT_IDLE_MINUTES = 20
 # as it does today and this reports "current".
 DEFAULT_UPDATE_AT = "04:45"
 
+# Concurrent sessions one server will serve. `remote-control`'s own default is 32, and
+# **this is where a server's memory actually goes** -- the process baseline is one cost,
+# paid once, but every session the phone spawns is held for as long as the server lives.
+# Eight is more phone conversations than a project accumulates between nightly restarts,
+# and the cost of the bound being too low is one refused session with a clear reason,
+# against an unbounded server that grows all week.
+DEFAULT_CAPACITY = 8
+
+# Whether to stop the servers while someone is sitting at the machine.
+#
+# **Off by default, and it is a real trade-off rather than a free saving.** Restarting
+# brings sessions back only inside about four hours; a working day at the desk is longer
+# than that, so the conversations are gone rather than paused. What it buys is the whole
+# per-server footprint back during the hours you are using the desktop for something
+# else. Worth it for a machine that is tight on memory, wrong for one where you want to
+# pick up this morning's phone conversation after lunch.
+DEFAULT_POWER_SAVING = False
+
+# Minutes of no keyboard or mouse input before the desk counts as empty. Fifteen is
+# longer than reading a diff and shorter than a meeting.
+DEFAULT_AWAY_MINUTES = 15
+
 
 @dataclass(frozen=True)
 class Config:
@@ -67,6 +89,9 @@ class Config:
     permission_mode: str = DEFAULT_PERMISSION_MODE
     update_at: str = DEFAULT_UPDATE_AT
     idle_minutes: int = DEFAULT_IDLE_MINUTES
+    capacity: int = DEFAULT_CAPACITY
+    power_saving: bool = DEFAULT_POWER_SAVING
+    away_minutes: int = DEFAULT_AWAY_MINUTES
 
 
 def _text(value: object, fallback: str) -> str:
@@ -125,6 +150,12 @@ def parse_config(text: str) -> Config:
         permission_mode=_text(raw.get("permissionMode"), DEFAULT_PERMISSION_MODE),
         update_at=_text(raw.get("updateAt"), DEFAULT_UPDATE_AT),
         idle_minutes=_positive_int(raw.get("idleMinutes"), DEFAULT_IDLE_MINUTES),
+        capacity=_positive_int(raw.get("capacity"), DEFAULT_CAPACITY),
+        # The one setting where a bare `bool` is the right type, so unlike the ints this
+        # accepts nothing else: a truthy string ("false", say) meaning True is how a
+        # power-saving mode nobody asked for starts destroying sessions.
+        power_saving=raw.get("powerSaving") is True,
+        away_minutes=_positive_int(raw.get("awayMinutes"), DEFAULT_AWAY_MINUTES),
     )
 
 

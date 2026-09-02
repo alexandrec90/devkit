@@ -359,3 +359,51 @@ def test_a_status_run_never_rewrites_the_state_file(monkeypatch, tmp_path):
         ["status", "--workspace", str(workspace(tmp_path, ["devkit"])), "--devkit", str(tmp_path)]
     )
     assert not (tmp_path / rc.STATE).exists()
+
+
+# --- power saving ------------------------------------------------------------
+
+
+def test_power_saving_stops_the_servers_while_someone_is_at_the_desk(monkeypatch, tmp_path):
+    monkeypatch.setattr(rc_machine, "at_the_desk", lambda minutes: True)
+    stopped = []
+    monkeypatch.setattr(rc_machine, "stop_server", lambda pid: stopped.append(pid) or "")
+    plan = plan_for(
+        tmp_path, servers={"devkit": 42}, config=rc_config.Config(("devkit",), power_saving=True)
+    )
+    plan.state.last_update = _dt.date.today().isoformat()
+    report = rc.Pass()
+    rc.run_mode("maintain", plan, report, _dt.datetime.now())
+    assert stopped == [42]
+    assert "power saving" in report.lines[0]
+
+
+def test_power_saving_starts_them_again_once_the_desk_is_empty(monkeypatch, no_launch, tmp_path):
+    monkeypatch.setattr(rc_machine, "at_the_desk", lambda minutes: False)
+    monkeypatch.setattr(rc_machine, "pid_is_server", lambda pid: False)
+    plan = plan_for(tmp_path, config=rc_config.Config(("devkit",), power_saving=True))
+    plan.state.last_update = _dt.date.today().isoformat()
+    rc.run_mode("maintain", plan, rc.Pass(), _dt.datetime.now())
+    assert no_launch == ["devkit"]
+
+
+def test_power_saving_never_overrides_an_explicit_up(monkeypatch, no_launch, tmp_path):
+    """Someone who types `up` is asking for servers. A mode that answered "no, you are at
+    your desk" would be refusing the one instruction it was given."""
+    monkeypatch.setattr(rc_machine, "at_the_desk", lambda minutes: True)
+    monkeypatch.setattr(rc_machine, "pid_is_server", lambda pid: False)
+    plan = plan_for(tmp_path, config=rc_config.Config(("devkit",), power_saving=True))
+    rc.run_mode("up", plan, rc.Pass(), _dt.datetime.now())
+    assert no_launch == ["devkit"]
+
+
+def test_the_desk_is_never_consulted_when_power_saving_is_off(monkeypatch, no_launch, tmp_path):
+    def explode(minutes):
+        raise AssertionError("power saving is off; the desk is none of its business")
+
+    monkeypatch.setattr(rc_machine, "at_the_desk", explode)
+    monkeypatch.setattr(rc_machine, "pid_is_server", lambda pid: False)
+    plan = plan_for(tmp_path)
+    plan.state.last_update = _dt.date.today().isoformat()
+    rc.run_mode("maintain", plan, rc.Pass(), _dt.datetime.now())
+    assert no_launch == ["devkit"]
