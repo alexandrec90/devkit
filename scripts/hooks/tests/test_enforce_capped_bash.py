@@ -457,10 +457,17 @@ def test_the_powershell_message_names_native_caps_only():
 
 
 def ledger_lines(base):
-    path = base / "logs" / "harness-events.log"
-    if not path.exists():
-        return []
-    return path.read_text(encoding="utf-8").splitlines()
+    """Every ledger line, across every shard -- the ledger is one file per machine.
+
+    Reading the single unsharded name found nothing once the writers moved to a shard,
+    and the `return []` below turned every assertion built on this into one that passes
+    against an empty list.
+    """
+    lines = []
+    for path in sorted((base / "logs").glob("harness-events*.log")):
+        if path.is_file():
+            lines.extend(path.read_text(encoding="utf-8").splitlines())
+    return lines
 
 
 def test_record_block_writes_session_and_command(tmp_path, monkeypatch):

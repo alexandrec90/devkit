@@ -16,9 +16,11 @@ So a resolution is itself an event -- `triage-resolved`, carrying `ref=<item id>
 "open" means an event with no resolution naming it. Three properties follow, and a
 change here has to keep all three:
 
-- **The ledger stays append-only and single-file.** A separate state file was the
-  alternative and it is the one `events_line`'s own docstring already rejected: a second
-  file that can go stale, for a list this short.
+- **The ledger stays append-only, and carries no state file.** A separate file recording
+  what is resolved was the alternative, and it is the one `events_line`'s own docstring
+  already rejected: a second file that can go stale, for a list this short. (It is no
+  longer a *single* file -- there is one shard per machine, unioned on read -- but that
+  is a partition of the same append-only log, not state kept beside it.)
 - **An id is content-addressed** (`item_id`), not a line number, so appending never
   renumbers anything and a resolution recorded months ago still names its event.
 - **Nothing here can mark an item resolved on its own.** Ageing out was the silent
@@ -90,6 +92,17 @@ class Item:
         recorded it.
         """
         return self.fields.get("agent", "").strip(" -") or harness_events.UNKNOWN_AGENT
+
+    @property
+    def host(self) -> str:
+        """Which machine's harness wrote this row.
+
+        Deliberately absent from `signature`: see `harness_events.HOST_ENV`. One defect
+        hit on two machines is one defect, and a single `--resolve-like` has to retire
+        both copies. Which machines saw it is evidence -- "only reproduces on the
+        laptop" is a real diagnosis -- and `render` shows it for that reason.
+        """
+        return self.fields.get("host", "").strip(" -") or harness_events.UNKNOWN_HOST
 
     @property
     def detail(self) -> str:
@@ -202,6 +215,9 @@ def render(items: list[Item]) -> str:
         seen = f" (x{len(bucket)}, since {bucket[-1].stamp})" if len(bucket) > 1 else ""
         lines.append(f"=== {event}  [{agent}]  {project}  [{head.id}]{seen} ===")
         lines.append(f"  when   {head.stamp}")
+        seen_on = sorted({i.host for i in bucket} - {harness_events.UNKNOWN_HOST})
+        if seen_on:
+            lines.append(f"  host   {' '.join(seen_on)}")
         lines.append(f"  detail {head.detail}")
         if head.fields.get("version", "").strip(" -"):
             lines.append(f"  version {head.fields['version']}")
@@ -215,21 +231,52 @@ def render(items: list[Item]) -> str:
 
 
 def ledger_file(root: Path | None = None) -> Path:
-    """The one ledger both halves of this tool read and write.
+    """The shard this tool *writes* to -- this machine's own.
 
     `$DEVKIT_DIR` first, for the reason `workspace-status.events_line` documents: every
     writer resolves the ledger to the permanent checkout, so from a box the local
     `logs/` is a directory nothing has ever written to.
+
+    A resolution is an event like any other, so it lands here rather than in the shard
+    holding the row it retires. That is what keeps the pooled directory conflict-free:
+    no machine ever writes to another's file. `expand_like` is what makes it correct --
+    see `load`.
     """
     return harness_events.ledger_path(root) or (REPO_ROOT / harness_events.LEDGER)
 
 
+def ledger_files(root: Path | None = None) -> list[Path]:
+    """Every shard this tool *reads*: this machine's, and any other machine's beside it."""
+    return harness_events.ledger_paths(root) or [REPO_ROOT / harness_events.LEDGER]
+
+
 def load(root: Path | None = None) -> list[Item]:
-    """Every event on this machine's ledger; empty when there is none."""
-    try:
-        return read_items(ledger_file(root).read_text(encoding="utf-8"))
-    except OSError:
-        return []
+    """Every event on every shard in reach, oldest first; empty when there is none.
+
+    Reading the union is what makes a pooled ledger work as one backlog rather than as
+    two that happen to share a directory. Two consequences are load-bearing:
+
+    - **A group spans machines.** `signature` excludes the host, so one defect hit on
+      both is one group, and the `--resolve-like` that retires it expands over *both*
+      machines' open rows -- ids are content-addressed per line, so the two copies have
+      different ids and nothing else would have connected them.
+    - **Order is by stamp, not by file.** Concatenating shards gives file order, which is
+      chronological within a shard and meaningless across them; `open_items` reverses
+      this for "newest first" and would otherwise interleave two machines' history
+      arbitrarily. Stamps are ISO-8601 in UTC, so lexicographic *is* chronological.
+
+    A shard that cannot be read is skipped rather than fatal: a half-synced file is the
+    ordinary state of a directory two machines write into, and one unreadable shard must
+    not take the whole backlog down with it.
+    """
+    items: list[Item] = []
+    for path in ledger_files(root):
+        try:
+            items.extend(read_items(path.read_text(encoding="utf-8")))
+        except OSError:
+            continue
+    items.sort(key=lambda item: item.stamp)
+    return items
 
 
 def resolve(ids: list[str], note: str, pr: str = "", root: Path | None = None) -> list[str]:
