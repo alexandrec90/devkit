@@ -146,7 +146,9 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/structure_check.py",
     "scripts/hooks/tests/test_structure_check.py",
     "scripts/hooks/stop.py",
+    "scripts/hooks/stop_session.py",
     "scripts/hooks/tests/test_stop.py",
+    "scripts/hooks/tests/test_stop_session.py",
     # Auto-fix-on-edit PostToolUse hook (repo-relative ruff path fix).
     "scripts/hooks/lint-fix.py",
     "scripts/hooks/tests/test_lint_fix.py",
