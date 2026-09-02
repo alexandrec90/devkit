@@ -1246,9 +1246,9 @@ def needs_box(branch: str, protects_open_work: bool = True, default_branch: str 
     protects no PR because there is nothing left on it to protect.
 
     So the question is not "is this a task branch" but "is there work here a box would
-    strand". `protects_open_work` answers it, and the caller resolves it lazily —
-    `branch_has_own_commits` costs a `git rev-list` and only a `protectable` branch
-    can reach it.
+    strand". `protects_open_work` answers it — see `guard_probes` for its two producers
+    — and the caller resolves it lazily, because it costs a `git rev-list` and only a
+    `protectable` branch can reach it.
 
     `default_branch` is what widens "managed task branch" to "any branch that is not
     the home one" — see `protectable`. Omitted, it reads as "git would not say", which
@@ -1335,40 +1335,19 @@ def _read_default_branch(checkout: Path) -> str:
         return ""
 
 
-def branch_has_own_commits(checkout: Path) -> bool:
-    """True when `checkout`'s HEAD carries commits `origin/<default>` does not.
+def branch_protects_open_work(checkout: Path) -> bool:
+    """`needs_box`'s `protects_open_work`, with this repo's two dependencies bound.
 
-    The signal behind `needs_box`'s `protects_open_work`: a task branch with commits of
-    its own has somewhere for an edit to belong — an open PR, or one about to exist. A
-    task branch with none is either freshly cut or already merged, and in both cases a
-    box strands nothing.
-
-    Local only, deliberately. The honest question is "has this branch got an open PR",
-    and asking GitHub would answer it exactly — but this runs in a PreToolUse hook on
-    every edit that reaches a static checkout, where a network round trip is latency the
-    agent experiences as a hang. `git rev-list` against the *already fetched*
-    `origin/<default>` costs milliseconds and agrees with the PR in every case that
-    matters; the disagreement is a branch pushed and merged since the last fetch, which
-    the next fetch resolves.
-
-    **Fails closed** — every error returns True, meaning "decline, leave the edit
-    alone". A hook that cannot read the repo must not start diverting edits into boxes
-    on the strength of a failed subprocess, and declining is what this hook did for
-    every task branch before the distinction existed.
+    The probes themselves live in `guard_probes`, which loads nothing — so the resolver
+    and the anchor's name are passed in from here rather than imported there. Both
+    producers and why each exists are in that module; `branch_is_a_sweep_park` is the
+    second one, and it is what stopped `sweep.py --branch` and this hook disagreeing.
     """
-    try:
-        default = worktree.sweep.tb.detect_default_branch(
-            lambda *args: guard_probes.git(checkout, *args), fallback="main"
-        )
-        probe = guard_probes.git(checkout, "rev-list", "--count", f"origin/{default}..HEAD")
-    except (OSError, worktree.subprocess.SubprocessError, ValueError):
-        return True
-    if probe.returncode != 0:
-        return True
-    try:
-        return int(probe.stdout.strip()) > 0
-    except ValueError:
-        return True
+    return guard_probes.branch_protects_open_work(
+        checkout,
+        lambda git: worktree.sweep.tb.detect_default_branch(git, fallback="main"),
+        worktree.sweep.ANCHOR_MARKER_NAME,
+    )
 
 
 def redirect_decision(
@@ -1434,7 +1413,7 @@ def redirect_decision(
     if (exempt or guard_probes.path_is_exempt)(checkout, resolved):
         return None
     lookup = branch_of or current_branch
-    has_commits = commits_of_own or branch_has_own_commits
+    has_commits = commits_of_own or branch_protects_open_work
     home_of = default_of or default_branch_of
     branch = lookup(checkout)
     # Both probes are subprocesses in a hook that runs on every edit, so both are

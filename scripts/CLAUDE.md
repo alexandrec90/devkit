@@ -278,6 +278,8 @@ Each of these has already been violated by something:
   container does not match, reported as provisioned. `[python] version` in `.devkit.toml` is the seam,
   and `uv venv --python` fetches the version when the machine lacks it, which
   `python -m venv` cannot: it only ever copies the interpreter already running it.
+  `session-start.sh` reads the same seam now; what it still cannot read is the *detected*
+  pin, because `detect_python_version` is not vendored.
 
 ### The guard's own decisions: [`worktree-guard.md`](worktree-guard.md)
 
