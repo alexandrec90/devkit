@@ -36,7 +36,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
@@ -159,7 +159,10 @@ def task_document(schedule: Schedule) -> str:
         # unreachable phone is exactly the failure this job exists to prevent.
         devkit_schtasks.repeating_trigger(schedule.every) + devkit_schtasks.boot_trigger(),
         time_limit="PT15M",
-        working_dir=str(Path(schedule.script).parent.parent),
+        # `PureWindowsPath`, not `Path`: the document is Windows by construction, so it
+        # has to be split on backslashes whatever host builds it -- see the same line in
+        # `install-tray.py`.
+        working_dir=str(PureWindowsPath(schedule.script).parent.parent),
     )
 
 

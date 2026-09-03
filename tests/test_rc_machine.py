@@ -118,28 +118,36 @@ def test_a_matching_row_yields_the_normalised_image_name():
     assert rc.parse_pid_image('"claude.exe","4960","Console","1","420,000 K"') == "claude"
 
 
+# `windows=True` on every probe below is not decoration. The parameter defaults to this
+# host, so on the Linux CI runner `pid_is_server` short-circuits to "still serving"
+# before it runs anything -- and each of these tests would then pass or fail for a reason
+# that has nothing to do with what it names. Only the two tests *about* the platform
+# seam, at the foot of this block, leave it alone.
 def test_a_pid_recycled_by_another_process_is_not_a_server():
     """Pids are reused. Without the name check this job would report a server that is
     not there and `taskkill` a stranger on the next cycle."""
-    assert (
-        rc.pid_is_server(4960, run=lambda argv: completed('"chrome.exe","4960","Console"')) is False
-    )
+
+    def chrome(argv):
+        return completed('"chrome.exe","4960","Console"')
+
+    assert rc.pid_is_server(4960, run=chrome, windows=True) is False
 
 
 def test_a_live_claude_is_a_server():
-    assert (
-        rc.pid_is_server(4960, run=lambda argv: completed('"claude.exe","4960","Console"')) is True
-    )
+    def claude(argv):
+        return completed('"claude.exe","4960","Console"')
+
+    assert rc.pid_is_server(4960, run=claude, windows=True) is True
 
 
 def test_a_machine_that_cannot_be_asked_is_assumed_to_be_serving():
     """Not knowing is the one state where acting is a guess about live work."""
-    assert rc.pid_is_server(1, run=lambda argv: completed(returncode=1)) is True
+    assert rc.pid_is_server(1, run=lambda argv: completed(returncode=1), windows=True) is True
 
     def explode(argv):
         raise OSError("tasklist is missing")
 
-    assert rc.pid_is_server(1, run=explode) is True
+    assert rc.pid_is_server(1, run=explode, windows=True) is True
 
 
 def test_off_windows_the_question_is_not_asked_at_all():
@@ -177,7 +185,9 @@ def test_a_server_that_exits_politely_is_never_forced():
         calls.append(list(argv))
         return completed("INFO: no tasks" if len(calls) > 1 else "")
 
-    assert rc.stop_server(7, run=run, sleep=lambda _s: None) == ""
+    # `windows=True` for the reason stated above the probes: without it the follow-up
+    # question is never asked, every stop escalates, and this assertion inverts.
+    assert rc.stop_server(7, run=run, sleep=lambda _s: None, windows=True) == ""
     assert not any("/F" in argv for argv in calls)
 
 
@@ -188,7 +198,22 @@ def test_a_server_that_ignores_the_ask_is_forced():
         calls.append(list(argv))
         return completed('"claude.exe","7","Console"')
 
-    assert rc.stop_server(7, run=run, sleep=lambda _s: None) == ""
+    assert rc.stop_server(7, run=run, sleep=lambda _s: None, windows=True) == ""
+    assert any("/F" in argv for argv in calls)
+
+
+def test_off_windows_a_stop_escalates_because_the_probe_cannot_answer():
+    """The other side of the seam, pinned rather than left to be rediscovered: where
+    `pid_is_server` cannot ask it answers "still serving", so the polite stop is always
+    followed by the forced one. Harmless -- this job runs on Windows -- but it is why
+    the tests above have to say which platform they mean."""
+    calls = []
+
+    def run(argv):
+        calls.append(list(argv))
+        return completed("")
+
+    assert rc.stop_server(7, run=run, sleep=lambda _s: None, windows=False) == ""
     assert any("/F" in argv for argv in calls)
 
 
@@ -198,7 +223,7 @@ def test_a_stop_that_fails_reports_why():
             return completed('"claude.exe","7","Console"')
         return completed(returncode=1, stderr="Access is denied.")
 
-    assert "denied" in rc.stop_server(7, run=run, sleep=lambda _s: None)
+    assert "denied" in rc.stop_server(7, run=run, sleep=lambda _s: None, windows=True)
 
 
 def test_a_stop_that_cannot_run_at_all_reports_why():

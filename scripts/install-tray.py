@@ -28,7 +28,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
@@ -110,7 +110,11 @@ def task_document(schedule: Schedule) -> str:
         devkit_schtasks.logon_trigger(),
         # See the module docstring: an hour's limit would kill the tray every day.
         time_limit=NO_TIME_LIMIT,
-        working_dir=str(Path(schedule.script).parent.parent),
+        # `PureWindowsPath`, not `Path`: this document is Windows by construction, so the
+        # separator it has to be split on is the backslash whatever host builds it. A
+        # plain `Path` on a POSIX runner reads the whole path as one filename and yields
+        # `.` -- the tests for this line ran there and caught it.
+        working_dir=str(PureWindowsPath(schedule.script).parent.parent),
     )
 
 

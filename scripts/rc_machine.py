@@ -193,13 +193,22 @@ def stop_argv(pid: int, force: bool = False) -> list[str]:
 
 
 def stop_server(
-    pid: int, run: Runner = run_command, sleep: Callable[[float], None] = time.sleep
+    pid: int,
+    run: Runner = run_command,
+    sleep: Callable[[float], None] = time.sleep,
+    windows: bool = WINDOWS,
 ) -> str:
-    """Ask `pid` to exit, insist if it does not. "" on success, else the reason."""
+    """Ask `pid` to exit, insist if it does not. "" on success, else the reason.
+
+    `windows` is forwarded rather than left to `pid_is_server`'s own default so the
+    escalation can be exercised off Windows: without it that probe short-circuits to
+    "still serving" on a POSIX runner and every polite exit is followed by a `/F` the
+    caller never asked for -- which is a test that cannot see the behaviour it names.
+    """
     try:
         run(stop_argv(pid))
         sleep(STOP_GRACE_SECONDS)
-        if not pid_is_server(pid, run):
+        if not pid_is_server(pid, run, windows):
             return ""
         result = run(stop_argv(pid, force=True))
     except (OSError, subprocess.SubprocessError) as error:
