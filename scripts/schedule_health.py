@@ -52,7 +52,7 @@ import io
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -281,8 +281,21 @@ def parse_tasks(stdout: str, prefix: str = PREFIX) -> list[Job]:
     The header repeats between tasks in some Windows builds, so rows whose values equal
     the column names are dropped -- without that, one phantom job per task appears with
     a `Last Result` of `"Last Result"` and the whole report becomes noise.
+
+    **`schtasks` emits one row per *trigger*, not per task**, so a task with more than
+    one appears more than once. That was theoretical until `devkit-rc-servers` gained a
+    boot trigger beside its repetition, and then it was not: the tray listed the job
+    twice and `problems` would have reported any fault with it twice.
+
+    The rows are merged rather than deduplicated by taking the first, because they
+    disagree about exactly one field that matters. Every trigger reports the same last
+    run and the same result, but its own **next** run -- and `Job.interval` is
+    `next_run - last_run`, so keeping a boot trigger's row (which has no next run at all
+    until the next boot) would either lose the cadence or invent a wrong one. The
+    earliest next run is both the true answer to "when does this fire next" and the one
+    that yields the real interval.
     """
-    jobs: list[Job] = []
+    merged: dict[str, Job] = {}
     for row in csv.DictReader(io.StringIO(stdout)):
         name = (row.get("TaskName") or "").lstrip("\\")
         if not name.startswith(prefix) or name == "TaskName":
@@ -292,17 +305,21 @@ def parse_tasks(stdout: str, prefix: str = PREFIX) -> list[Job]:
             result = int(raw_result)
         except ValueError:
             continue
-        jobs.append(
-            Job(
-                name=name,
-                enabled=(row.get("Scheduled Task State") or "").strip().lower() == "enabled",
-                last_result=result,
-                last_run=parse_time(row.get("Last Run Time") or ""),
-                next_run=parse_time(row.get("Next Run Time") or ""),
-                command=(row.get("Task To Run") or "").strip(),
-            )
+        job = Job(
+            name=name,
+            enabled=(row.get("Scheduled Task State") or "").strip().lower() == "enabled",
+            last_result=result,
+            last_run=parse_time(row.get("Last Run Time") or ""),
+            next_run=parse_time(row.get("Next Run Time") or ""),
+            command=(row.get("Task To Run") or "").strip(),
         )
-    return jobs
+        seen = merged.get(name)
+        if seen is None:
+            merged[name] = job
+            continue
+        if job.next_run is not None and (seen.next_run is None or job.next_run < seen.next_run):
+            merged[name] = replace(seen, next_run=job.next_run)
+    return list(merged.values())
 
 
 def virtualenv_interpreter(job: Job) -> Path | None:
