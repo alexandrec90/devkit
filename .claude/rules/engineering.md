@@ -233,12 +233,12 @@ everything with no submodule and no install step.
   upstream commit the vendored copy corresponds to.
 - **`$DEVKIT_DIR` unset means there is nothing to compare against, and the stamp
   decides what that is worth** — clean before adoption, a failure once `DEVKIT_VERSION`
-  exists. On a machine with no devkit clone at all, the drift check that still works is
-  `pre-commit run devkit-drift --all-files` — same comparison, against the rev pinned in
-  `.pre-commit-config.yaml`.
+  exists.
+- **An operator may switch the harness off** — `DEVKIT_HOOKS_OFF`, which cannot reach
+  the tier that puts an agent edit on a task branch.
 - A vendored script may depend on a file the project owns (`lint-all.py`,
-  `run-tests.py`), and a missing one is a silent skip by design. Both that and the
-  stamp rule above are explained in
+  `run-tests.py`), and a missing one is a silent skip by design. That, the stamp rule,
+  the switch's values, and the drift check for a machine with no devkit clone are all in
   [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
 ## Guardrail: the instruction-file feedback loop

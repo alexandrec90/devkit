@@ -11,6 +11,28 @@
 # `report_missing_toolchain` carries why that line is not the same as the ladder below.
 set -uo pipefail
 
+# --- The harness kill switch ---------------------------------------------------
+# `DEVKIT_HOOKS_OFF` is parsed by `harness_config.hooks_off`, never re-implemented here:
+# a second copy of the aliases and the off-values asymmetry in shell is exactly the drift
+# the manifest CLI exists to prevent. The `-n` pre-check is not an optimisation for its
+# own sake -- with the switch unset (the normal state) it costs nothing, so leaving the
+# harness on never pays for the ability to turn it off.
+#
+# NB this also skips `wire_pre_commit` below, deliberately: switching the agent harness
+# off while a commit-time gate goes on installing itself at every session start is the
+# half-off state nobody asked for. `pre-commit install` by hand restores it.
+#
+# **A REMOTE session is never switched off.** Below the local branch this file is not a
+# check at all -- it is the only thing that installs the toolchain into a Claude Code on
+# the web sandbox, which starts empty every time. Honouring the switch there would answer
+# "stop gating my sessions" with "your cloud session has no ruff, mypy or pytest", a
+# failure that reads as a broken sandbox rather than as a setting. The switch turns off
+# things that *judge*; it may not turn off the thing that provisions.
+if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ] && [ -n "${DEVKIT_HOOKS_OFF:-}" ] &&
+  python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/harness_config.py" --hook-off session-start 2>/dev/null; then
+  exit 0
+fi
+
 # --- The pre-commit gate, wired for BOTH session kinds -------------------------
 # `.git/hooks/` is not committed, so a fresh clone has the config file and none of the
 # hooks it describes — the gate silently does not exist until someone runs

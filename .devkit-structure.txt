@@ -70,7 +70,7 @@ definitions::scripts/agent_clis.py = 21
 definitions::scripts/devkit_project.py = 44
 definitions::scripts/docker-maint.py = 30
 definitions::scripts/git_policy.py = 36
-definitions::scripts/hooks/harness_config.py = 31
+definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
 definitions::scripts/hooks/structure_check.py = 42
 definitions::scripts/hooks/structure_scan.py = 31
@@ -102,9 +102,9 @@ dependency::pyproject.toml::ruff = 1
 file_lines::scripts/devkit_project.py = 1594
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/git_policy.py = 710
-file_lines::scripts/hooks/enforce-capped-bash.py = 625
-file_lines::scripts/hooks/harness_config.py = 580
-file_lines::scripts/hooks/stop.py = 1105
+file_lines::scripts/hooks/enforce-capped-bash.py = 629
+file_lines::scripts/hooks/harness_config.py = 640
+file_lines::scripts/hooks/stop.py = 1110
 file_lines::scripts/hooks/structure_check.py = 1042
 file_lines::scripts/hooks/structure_scan.py = 669
 file_lines::scripts/new-project.py = 860
@@ -274,3 +274,9 @@ swallowed_errors::scripts/worktree.py = 3
 
 # 2026-09-02  recorded: worktree.py, re-derived after merging #282: artifact_root and provision_target are the fixes for the forged reconcile log and the un-provisionable static checkout, and the import that would reach an extracted module is itself over the imports limit
 #   file_lines::scripts/worktree.py -> 6208
+
+# 2026-09-03  recorded: DEVKIT_HOOKS_OFF: the harness kill switch. harness_config.py gains the parse (hooks_off, SWITCHABLE_HOOKS, the alias and off-value sets) because the switch is harness configuration read from the environment rather than from .devkit.toml, and a second vendored module for five lines would be a split made to satisfy a line count rather than a responsibility. stop.py and enforce-capped-bash.py gain four lines each: the one question a switched-off gate has to ask before it reads stdin. Neither file's split is a thing this change could have been asked to do first.
+#   definitions::scripts/hooks/harness_config.py -> 32
+#   file_lines::scripts/hooks/enforce-capped-bash.py -> 629
+#   file_lines::scripts/hooks/harness_config.py -> 640
+#   file_lines::scripts/hooks/stop.py -> 1110
