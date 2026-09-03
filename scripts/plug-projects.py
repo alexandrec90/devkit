@@ -80,6 +80,9 @@ SKIP_DIRS = frozenset({"logs"})
 
 PLUG = "plug"
 UNPLUG = "unplug"
+# The registry already names it; the disk does not have it. Distinct from PLUG because
+# the registry half is already true, so `apply_registry` must not re-register it.
+CLONE = "clone"
 
 
 class PlugError(RuntimeError):
@@ -215,6 +218,8 @@ def render(candidates: list[Candidate], checked: set[str]) -> list[str]:
         pending = ""
         if ticked != candidate.plugged:
             pending = "  <- will plug" if ticked else "  <- will unplug"
+        elif ticked and needs_clone(candidate):
+            pending = "  <- registered, not on disk: will clone"
         note = "" if candidate.harnessed or not candidate.on_disk else "  (no .devkit.toml)"
         mark = "x" if ticked else " "
         lines.append(
@@ -317,6 +322,8 @@ def menu_detail(candidate: Candidate, owner: str) -> str:
     what its *own* tick does, because the consequence of unticking is uniform and the
     consequence of ticking is not.
     """
+    if candidate.plugged and needs_clone(candidate):
+        return f"registered but not on disk -- leaving it ticked clones {owner}/{candidate.name}"
     if candidate.plugged:
         return "in the registry -- untick to retire it (registry only; nothing on disk is touched)"
     if not candidate.on_disk:
@@ -486,7 +493,27 @@ def plan(
                     init_git=candidate.on_disk and not candidate.is_git,
                 )
             )
+    # A registered project that is not on disk is the fresh-workstation case, and it is
+    # the one row where the tick and the registry already agree -- so both loops above
+    # skip it and no verb offered the clone. Four projects were in `folders`, none was on
+    # disk, and the answer was a hand-written `gh repo clone` loop. This keeps one verb
+    # for "make the registry true here": the registry half is already done, so the step
+    # carries only the disk half.
+    steps.extend(
+        Step(CLONE, c.name, clone=True) for c in candidates if c.name in checked and needs_clone(c)
+    )
     return steps
+
+
+def needs_clone(candidate: Candidate) -> bool:
+    """Is this registered project missing from disk, with a repo to clone it from?
+
+    Both halves matter. Without `on_github` there is nothing to clone *from*, and
+    emitting the step anyway would turn a fresh workstation's first run into a failed
+    `gh repo clone` -- a registry entry naming a repo that no longer exists is a
+    different problem, and one an unplug fixes rather than a clone.
+    """
+    return candidate.plugged and not candidate.on_disk and candidate.on_github
 
 
 def describe(step: Step) -> str:
@@ -494,6 +521,8 @@ def describe(step: Step) -> str:
     if step.action == UNPLUG:
         tail = f"  ({'; '.join(step.hazards)})" if step.hazards else ""
         return f"  unplug  {step.name}   registry only, nothing on disk is touched{tail}"
+    if step.action == CLONE:
+        return f"  clone   {step.name}   already registered, clone from GitHub"
     extra = []
     if step.clone:
         extra.append("clone from GitHub")

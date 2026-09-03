@@ -502,6 +502,31 @@ def test_the_fix_names_a_forward_slash_path_on_every_platform(tmp_path):
     assert ".claude/settings.json" in ws.guard_line(tmp_path)
 
 
+def test_a_workstation_with_uv_and_a_git_identity_says_nothing():
+    assert ws.toolchain_lines(which=lambda _n: "/usr/bin/uv", git=lambda *a: "someone") == []
+
+
+def test_a_missing_uv_is_reported_because_nothing_can_provision_without_it():
+    """`guard_line`'s reason: it has no symptom at the moment it is wrong. devkit is
+    uv-native, so `worktree.py new`, `provision` and `session-start.sh` all end in the
+    same failure wearing three different messages."""
+    (line,) = ws.toolchain_lines(which=lambda _n: None, git=lambda *a: "someone")
+    assert "uv is not on PATH" in line and "install uv" in line
+
+
+def test_an_unset_git_identity_is_reported_with_the_key_that_is_missing():
+    """It surfaces as `sweep.py --ship` dying at `git commit` with `Author identity
+    unknown` -- at the end of the one operation whose purpose is to get work off the
+    machine."""
+    lines = ws.toolchain_lines(
+        which=lambda _n: "/usr/bin/uv",
+        git=lambda *a: "" if a[-1] == "user.email" else "someone",
+    )
+    assert len(lines) == 1
+    assert "user.email" in lines[0] and "user.name" not in lines[0]
+    assert "Author identity unknown" in lines[0]
+
+
 @needs_live_workspace
 def test_this_workstations_root_actually_runs_the_guard():
     """The wiring itself lives outside every repository, so this is the only place it can

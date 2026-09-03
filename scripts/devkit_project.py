@@ -1259,7 +1259,20 @@ def publish_workspace(live: Path, *, force: bool = False) -> tuple[str, list[str
     an unstamped-but-identical live file is the normal state right after an adopt, and
     leaving it unstamped would make the NEXT render refuse for a hand edit that never
     happened. `RENDER_REFUSED` writes nothing at all.
+
+    **A live file that does not exist yet is published over, not refused.** This
+    direction is how a fresh workstation gets one at all -- nothing else writes it --
+    and the refusal exists to protect a hand edit, of which a missing file has none. It
+    read as `cannot read the workspace registry` instead, and the bootstrap ended with
+    someone copying `workspace.jsonc` to the live path by hand, which is this function
+    without the stamp.
     """
+    if not live.is_file():
+        canonical = canonical_text()
+        live.parent.mkdir(parents=True, exist_ok=True)
+        live.write_text(canonical, encoding="utf-8", newline="\n")
+        write_stamp(live, semantic_digest(canonical))
+        return RENDER_PUBLISHED, [f"{live.name} did not exist -- created from the canonical copy"]
     text = live.read_text(encoding="utf-8")
     canonical = canonical_text()
     problems = workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical))
@@ -1303,7 +1316,22 @@ def conformance(projects: list[str], root: Path) -> dict[str, list[str]]:
 # --- entrypoint -------------------------------------------------------------
 
 
-def _load_workspace(path: Path) -> str:
+def _load_workspace(path: Path, may_create: bool = False) -> str:
+    """The live registry's text; `""` when there is none and the caller will write one.
+
+    `may_create` is `--render-workspace`, the one action that does not need a file to
+    read: it *creates* one from the canonical copy, which is how a fresh workstation gets
+    a registry at all. Reading unconditionally is what made that action exit 2 with
+    `cannot read the workspace registry` on the exact machine that has none yet.
+
+    The canonical copy stands in, rather than `""`: everything downstream -- the JSONC
+    check, `known_projects`, `workspace_drift` -- then works on real text, the drift comes
+    out empty, and `publish_workspace` reports the file it created. A flag rather than a
+    branch at the call site because `main` is one step under its complexity limit, and
+    this is the function that already owns "can the registry be read".
+    """
+    if may_create and not path.is_file():
+        return canonical_text()
     try:
         return path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -1387,7 +1415,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        text = _load_workspace(args.workspace)
+        text = _load_workspace(args.workspace, may_create=bool(args.render_workspace))
     except ProjectError as exc:
         print(f"devkit_project: {exc}", file=sys.stderr)
         return 2

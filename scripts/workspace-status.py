@@ -650,6 +650,36 @@ def guard_line(root: Path, settings: Path = ROOT_SETTINGS) -> str:
     )
 
 
+def toolchain_lines(which=shutil.which, git=None) -> list[str]:
+    """The workstation prerequisites nothing else reports missing; [] when both are set.
+
+    Reported here for `guard_line`'s reason: neither has a symptom at the moment it is
+    wrong. A machine with no `uv` cannot provision anything at all -- devkit is uv-native,
+    so `worktree.py new`, `provision` and `session-start.sh` all end in the same failure
+    wearing three different messages -- and an unset git identity surfaces as `sweep.py
+    --ship` dying at `git commit` with `Author identity unknown`, at the end of the one
+    operation whose whole purpose is to get work off a machine.
+
+    Both were found by hand on a fresh workstation bootstrap, which is exactly the
+    session that has no idea which of its failures are its own doing.
+    """
+    run = git or _git
+    lines = []
+    if which("uv") is None:
+        lines.append(
+            "uv is not on PATH -- devkit is uv-native, so no box and no checkout can be "
+            "provisioned (fix: install uv, https://docs.astral.sh/uv/)"
+        )
+    unset = [key for key in ("user.name", "user.email") if not run("config", "--get", key)]
+    if unset:
+        lines.append(
+            f"git identity unset ({', '.join(unset)}) -- every commit fails with "
+            f"'Author identity unknown', `sweep.py --ship` included "
+            f"(fix: git config --global {unset[0]} ...)"
+        )
+    return lines
+
+
 def schedule_lines() -> list[str]:
     """One line per unhealthy scheduled job; [] when they are all fine.
 
@@ -934,6 +964,12 @@ def main(argv: list[str] | None = None) -> int:
             previews_line(),
             headroom=headroom_line(root),
         )
+        # Prefixed here rather than passed into `render`: these come first because a
+        # machine missing uv or a git identity cannot act on any of the lines below, so
+        # saying them second would be handing out fixes that cannot run -- and `render`
+        # already takes more arguments than anything should.
+        toolchain = "\n".join(f"[workspace] {line}" for line in toolchain_lines())
+        message = "\n".join(part for part in (toolchain, message) if part)
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)
         return 0

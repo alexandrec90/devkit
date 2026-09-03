@@ -4628,7 +4628,7 @@ def resumable_branch(
     workspace_root: Path,
     project: str,
     session: str,
-    ledger_root: Path = REPO_ROOT,
+    ledger_root: Path | None = None,
 ) -> str:
     """The branch this session should be put back onto in `project`, or "".
 
@@ -4646,8 +4646,11 @@ def resumable_branch(
     project with no git are all "" -- the caller then cuts a fresh box, which is the
     behaviour that existed before this function did.
     """
+    # The reader half of `record_reap`, so it resolves the ledger the same way: with the
+    # workspace it is asking about, not with whichever devkit copy is running.
+    root = artifact_root(workspace_root) if ledger_root is None else ledger_root
     try:
-        ledger = (ledger_root / REAP_LEDGER).read_text(encoding="utf-8")
+        ledger = (root / REAP_LEDGER).read_text(encoding="utf-8")
     except OSError:
         return ""
     candidates = reaped_branches(project, session, ledger)
@@ -4779,9 +4782,10 @@ def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
         return False, notes
     # After the tree is gone and before the lease entry is: this is the last moment the
     # box is still described by anything, and the first moment it is certainly destroyed.
-    # `REPO_ROOT` passed rather than defaulted: a default is bound once at import, and
-    # the ledger's own test has to be able to point it somewhere other than this repo.
-    ledger = record_reap(plan, REPO_ROOT)
+    # `artifact_root` rather than `REPO_ROOT`: the record belongs to the workspace whose
+    # box this was, which is this repo for every real run and a `tmp_path` for a test --
+    # see `artifact_root` for what defaulting to the module constant forged.
+    ledger = record_reap(plan, artifact_root(root))
     if ledger is not None:
         notes.append(f"recorded in {ledger}")
 
@@ -5335,6 +5339,37 @@ def render_survey(rows: list[dict], registry: devkit_ports.Registry | None = Non
 RECONCILE_LOG = "logs/reconcile.log"
 
 
+def artifact_root(root: Path, repo_root: Path | None = None) -> Path:
+    """Where a run's `logs/` artifacts belong: with the workspace the run acted on.
+
+    `REPO_ROOT` is bound at import to whichever devkit copy is executing, so every CLI
+    path wrote its artifacts *here* regardless of which workspace it was pointed at.
+    That is right for the scheduled job, whose workspace is this one, and wrong for
+    every other caller -- and the caller it was most wrong for is the test suite. A
+    `pytest tests/ -q` run drove `main(["reconcile", ...])` and `main(["reap", ...])`
+    against a `tmp_path` workspace, overwrote this machine's real `reconcile.log` with
+    `No ephemeral boxes and no checkouts to sync` at a moment when a box had been live
+    for five minutes, and appended three fixture rows to the append-only reap ledger.
+
+    Not cosmetic, because of what reads them: `workspace-status.scheduler_line` takes
+    `reconcile.log`'s timestamp as its evidence *precisely because* `schtasks` reports a
+    disabled task as healthy. A test run therefore made a dead scheduler look alive --
+    the exact failure that line was written to catch.
+
+    So the artifacts follow the workspace. This repo keeps them whenever it is inside the
+    workspace being acted on, which is every real invocation; a workspace somewhere else
+    gets its own `logs/`, and nothing a test drives can reach this one. `repo_root` is
+    resolved at call time rather than defaulted, so patching `REPO_ROOT` still works.
+    """
+    here = REPO_ROOT if repo_root is None else repo_root
+    try:
+        if here.resolve().is_relative_to(root.resolve()):
+            return here
+    except (OSError, ValueError):
+        return here
+    return root
+
+
 def write_reconcile_log(rendered: str, code: int, root: Path = REPO_ROOT) -> Path | None:
     """Persist a reconcile pass to `logs/reconcile.log`. Returns the path, or None.
 
@@ -5669,14 +5704,35 @@ def _run_rescue(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def provision_target(root: Path, name: str) -> tuple[str, Path]:
+    """The tree `provision <name>` means: a live box, or a static checkout.
+
+    A box wins the name, because it is the common case and the one this verb was written
+    for. A checkout was not reachable at all, and nothing else in the workspace
+    provisions one: `new` provisions the box it just cut, and `session-start.sh` returns
+    early on a local machine precisely because a static checkout is provisioned once by
+    hand. So a freshly cloned project had no verb -- `plan_provision` already took a
+    plain path, and only this resolver insisted on a lease.
+
+    A directory with no repository in it is refused rather than provisioned: a mistyped
+    box name would otherwise be read as "some empty folder", and the install ladder would
+    run its whole length in a tree with nothing to install.
+    """
+    boxes = live_boxes(root)
+    box = boxes.get(name)
+    if box is not None:
+        return box.name, box_path(root, box.name)
+    candidate = Path(name)
+    path = candidate if candidate.is_absolute() else root / name
+    if (path / ".git").exists():
+        return path.name, path
+    known = ", ".join(sorted(boxes)) or "(none)"
+    raise WorktreeError(f"no live box or checkout called {name!r}; live boxes: {known}")
+
+
 def _run_provision(args: argparse.Namespace) -> int:
     root = args.workspace.parent
-    boxes = live_boxes(root)
-    box = boxes.get(args.box)
-    if box is None:
-        known = ", ".join(sorted(boxes)) or "(none)"
-        raise WorktreeError(f"no live box called {args.box!r}; live boxes: {known}")
-    path = box_path(root, box.name)
+    name, path = provision_target(root, args.box)
     steps = plan_provision(path)
     notes: list[str] = []
     ok = True
@@ -5684,7 +5740,7 @@ def _run_provision(args: argparse.Namespace) -> int:
         ok, notes = run_provision(path, steps)
     if args.json:
         payload = {
-            "box": box.name,
+            "box": name,
             "steps": [asdict(step) for step in steps],
             "applied": not args.dry_run,
             "ok": ok,
@@ -5692,7 +5748,7 @@ def _run_provision(args: argparse.Namespace) -> int:
         }
         print(json.dumps(payload, indent=2))
     else:
-        print(render_provision(box.name, steps, applied=not args.dry_run, notes=notes))
+        print(render_provision(name, steps, applied=not args.dry_run, notes=notes))
     return 0 if ok else 1
 
 
@@ -5954,7 +6010,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             rendered = json.dumps(report, indent=2) if args.json else render_reconcile(report)
             print(rendered)
-            write_reconcile_log(rendered, code)
+            write_reconcile_log(rendered, code, artifact_root(args.workspace.parent))
             return code
 
         if args.mode == "new":

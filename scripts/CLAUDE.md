@@ -467,7 +467,7 @@ the hour kept being counted for a week, and one nobody looked at vanished silent
 eight. Both failure directions at once. Open now means an event with no `triage-resolved`
 naming it, at any age — which is why `resolve()` refuses a blank `--note` and why the ids
 are content-addressed rather than positional. A separate state file was the alternative
-and is the thing an append-only single file exists to avoid.
+and is the thing an append-only log exists to avoid.
 
 **`project=` names the repo, not the directory the writer ran in.** Three of the four
 writers recorded `REPO_ROOT.name`, and from a box that is the box directory, so 28% of
@@ -485,6 +485,14 @@ Claude report of the same symptom. A hook that misbehaves under one runtime rout
 behaves under the other (`scripts/hooks/CLAUDE.md`), so a ledger that cannot tell them
 apart aims every fix at whichever tier was guessed. Pre-field rows read `unknown`, which
 is honest; back-filling them as `claude` would be a guess.
+
+**`host=` names the machine, and is deliberately *not* in the signature** — the opposite
+call from `agent=`, since one hook behaves differently under two runtimes and not under
+two machines. One defect hit on both is **one** defect a single `--resolve-like` retires;
+the two rows have different content-addressed ids and nothing else connects them. The
+write side shards on that name (`harness-events-<host>.log`, `$DEVKIT_HOST` over the
+hostname); `load` unions every `harness-events*.log` beside it, so no machine writes to
+another's — what makes a pooled `logs/` conflict-free. No transport ships with it.
 
 The skill that works the backlog is `triage-harness`, and it is devkit-only on purpose —
 every defect on this ledger is a defect in devkit, whatever project the session that hit
