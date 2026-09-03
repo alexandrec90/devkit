@@ -38,6 +38,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import harness_config
 import task_branch as tb
 import worktree
 
@@ -195,6 +197,12 @@ def prune(workspace_root: Path, keep: int = 200) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The slug exists to name the box `worktree-guard.py` cuts, so it is switched off by
+    # the same name: a recorded slug with no guard to spend it is a file written before
+    # every prompt for nothing.
+    if harness_config.hooks_off("branch-tier"):
+        return 0
+
     args = sys.argv[1:] if argv is None else argv
     workspace = Path(args[args.index("--workspace") + 1]) if "--workspace" in args else None
     workspace = (workspace or worktree.DEFAULT_WORKSPACE).resolve()

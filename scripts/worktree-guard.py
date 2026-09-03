@@ -91,6 +91,12 @@ if TYPE_CHECKING:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+# The kill switch's vocabulary, from the vendored tier. devkit wires this file directly
+# rather than through `hooks/worktree-guard-launch.py`, so the check the shim makes has
+# to be made here too or devkit is the one machine the switch cannot reach.
+import harness_config
+
 # Resolved by the sys.path insert above; `scripts/precommit/` is not a package. The
 # shared loader is used because `worktree.py` is importable by name but this file is
 # not — see that module's docstring for why the registration order matters.
@@ -2145,6 +2151,12 @@ def spawn_and_route(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # First, before stdin and before the registry read: an operator who has stood the
+    # branch tier down cuts boxes through `Agent: Spawn Branch, Worktree, Agent` instead,
+    # and this hook firing on every mutating call is most of what they are turning off.
+    if harness_config.hooks_off("branch-tier"):
+        return EXIT_ALLOW
+
     args = sys.argv[1:] if argv is None else argv
     workspace = Path(args[args.index("--workspace") + 1]) if "--workspace" in args else None
     # Resolved for the same reason `worktree.main` resolves it: the box path in the block

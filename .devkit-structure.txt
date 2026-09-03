@@ -51,7 +51,7 @@ complexity::scripts/sync-devkit.py::main = 69
 complexity::scripts/upgrade-project.py::main = 26
 complexity::scripts/upgrade-project.py::upgrade_one = 23
 complexity::scripts/workspace-status.py::previews_line = 17
-complexity::scripts/worktree-guard.py::main = 31
+complexity::scripts/worktree-guard.py::main = 32
 complexity::scripts/worktree-guard.py::redirect_decision = 20
 complexity::scripts/worktree-guard.py::redirect_targets = 21
 complexity::scripts/worktree-guard.py::shell_write_targets = 29
@@ -75,7 +75,7 @@ definitions::scripts/hooks/stop.py = 51
 definitions::scripts/hooks/structure_check.py = 42
 definitions::scripts/hooks/structure_scan.py = 31
 definitions::scripts/install-git-policy.py = 21
-definitions::scripts/instruction-budget.py = 23
+definitions::scripts/instruction-budget.py = 26
 definitions::scripts/new-project.py = 28
 definitions::scripts/plug-projects.py = 33
 definitions::scripts/preview-task.py = 54
@@ -99,14 +99,15 @@ dependency::pyproject.toml::mypy = 1
 dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::pytest = 1
 dependency::pyproject.toml::ruff = 1
-file_lines::scripts/devkit_project.py = 1594
+file_lines::scripts/devkit_project.py = 1599
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/git_policy.py = 710
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
-file_lines::scripts/hooks/harness_config.py = 640
+file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
 file_lines::scripts/hooks/structure_check.py = 1042
 file_lines::scripts/hooks/structure_scan.py = 669
+file_lines::scripts/instruction-budget.py = 517
 file_lines::scripts/new-project.py = 860
 file_lines::scripts/plug-projects.py = 973
 file_lines::scripts/preview-task.py = 1810
@@ -119,8 +120,8 @@ file_lines::scripts/sync-devkit.py = 1417
 file_lines::scripts/upgrade-project.py = 1231
 file_lines::scripts/workspace-status.py = 982
 file_lines::scripts/workspace-task-index.py = 576
-file_lines::scripts/worktree-guard.py = 2282
-file_lines::scripts/worktree.py = 6208
+file_lines::scripts/worktree-guard.py = 2294
+file_lines::scripts/worktree.py = 6230
 function_lines::scripts/devkit_project.py::main = 250
 function_lines::scripts/docker-maint.py::generic_prune = 84
 function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
@@ -142,11 +143,11 @@ function_lines::scripts/sweep.py::sync_plan = 87
 function_lines::scripts/sync-devkit.py::main = 246
 function_lines::scripts/upgrade-project.py::main = 162
 function_lines::scripts/upgrade-project.py::upgrade_one = 143
-function_lines::scripts/worktree-guard.py::main = 132
+function_lines::scripts/worktree-guard.py::main = 138
 function_lines::scripts/worktree-guard.py::redirect_decision = 94
 function_lines::scripts/worktree-guard.py::spawn_and_route = 98
 function_lines::scripts/worktree.py::apply_new = 107
-function_lines::scripts/worktree.py::main = 450
+function_lines::scripts/worktree.py::main = 456
 function_lines::scripts/worktree.py::plan_preview = 105
 function_lines::scripts/worktree.py::provision_steps = 82
 function_lines::scripts/worktree.py::reap_decision = 107
@@ -173,7 +174,7 @@ function_params::scripts/worktree-guard.py::redirect_message = 9
 function_params::scripts/worktree-guard.py::route_to_own_box = 12
 function_params::scripts/worktree-guard.py::spawn_and_route = 12
 function_params::scripts/worktree.py::managed_env = 7
-function_params::scripts/worktree.py::plan_new = 7
+function_params::scripts/worktree.py::plan_new = 8
 function_params::scripts/worktree.py::plan_preview = 10
 function_params::scripts/worktree.py::plan_resume = 7
 function_params::scripts/worktree.py::preview_spawn_plan = 12
@@ -280,3 +281,15 @@ swallowed_errors::scripts/worktree.py = 3
 #   file_lines::scripts/hooks/enforce-capped-bash.py -> 629
 #   file_lines::scripts/hooks/harness_config.py -> 640
 #   file_lines::scripts/hooks/stop.py -> 1110
+
+# 2026-09-03  recorded: Switching the harness off: the branch tier learned to consult DEVKIT_HOOKS_OFF (one early return each in worktree-guard.main and task_slug.main), worktree.py new gained a --base argument, devkit_project gained MAINTAINED_PICKERS, and instruction-budget learned to read a switched-off file. Every module here was already far past file_lines before this change, so the few lines each gained have nowhere else to go; the new modules the change did add (agent-box.py, harness_state.py, harness-switch.py) are all under every limit, and harness_state.py exists because harness-switch.py was not.
+#   complexity::scripts/worktree-guard.py::main -> 32
+#   definitions::scripts/instruction-budget.py -> 26
+#   file_lines::scripts/devkit_project.py -> 1599
+#   file_lines::scripts/hooks/harness_config.py -> 655
+#   file_lines::scripts/instruction-budget.py -> 517
+#   file_lines::scripts/worktree-guard.py -> 2294
+#   file_lines::scripts/worktree.py -> 6230
+#   function_lines::scripts/worktree-guard.py::main -> 138
+#   function_lines::scripts/worktree.py::main -> 456
+#   function_params::scripts/worktree.py::plan_new -> 8

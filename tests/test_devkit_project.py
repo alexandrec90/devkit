@@ -1937,6 +1937,7 @@ CANCEL_AWARE_RECEIVERS = {
     "resume-sessions.py",
     "plug-projects.py",
     "upgrade-project.py",
+    "harness-switch.py",
 }
 
 
@@ -2098,6 +2099,25 @@ def test_the_box_tier_keeps_one_task_and_it_is_read_only(canonical):
     `list` stays because boxes are absent from `folders` by design, so it is the only
     thing that reports them to a human at all. Re-adding one of the three means naming
     the human it is for, not just deleting this test.
+
+    **The human has since been named, and the rows came back under `Agent:`.** With
+    `harness-switch.py` able to stand the branch tier down, "an agent reaches every
+    subcommand through the CLI" stops being true of the one subcommand that matters: with
+    the guard off, nothing cuts a box unless a person asks for one. So `agent-box.py`
+    carries four rows and each answers the bullet that retired its ancestor —
+
+    - `Agent: Spawn Branch, Worktree, Agent` **does** pass a session (its own tab's), asks
+      for the topic and the base, and opens the agent in the box it cut, so the box is
+      adopted by construction rather than left cold for `reconcile` to reap;
+    - `Agent: Ship PR` is the delivery half the retired rows had no equivalent of at all,
+      and it is what makes a hand-cut box finishable without the Stop-hook tier;
+    - `Agent: Delete Branch` is `reap --force`, deliberately *stronger* than the retired
+      Reap row rather than a copy of it: abandoning work is the case that row refused.
+
+    Reconcile is still not a row, and that half of the docstring above stands unchanged —
+    the schedule owns it, and the one-click copy's missing `--merge-label` is still the
+    reason. `harness-switch.py --off --group jobs` is how it is stood down, not a task
+    that runs a second copy of it.
     """
     callers = [
         task
@@ -2107,6 +2127,23 @@ def test_the_box_tier_keeps_one_task_and_it_is_read_only(canonical):
     assert [task["label"] for task in callers] == ["Worktree: List Boxes — read-only"]
     args = [str(a) for a in callers[0]["args"]]
     assert "list" in args, "the surviving box task must be the read-only one"
+
+    # The four that came back, by the verb each runs. Spelled out so a fifth is a
+    # decision somebody makes here rather than a row that appears in the menu.
+    lifecycle = {
+        task["label"]: [str(a) for a in task["args"]][-1 * len(task["args"]) :]
+        for task in canonical["tasks"]
+        if any("agent-box.py" in str(a) for a in task.get("args", []))
+    }
+    assert set(lifecycle) == {
+        "Agent: Spawn Branch, Worktree, Agent",
+        "Agent: Run Agent on Worktree",
+        "Agent: Ship PR",
+        "Agent: Delete Branch",
+    }
+    verbs = {args[args.index("scripts/agent-box.py") + 1] for args in lifecycle.values()}
+    assert verbs == {"spawn", "attach", "ship", "delete"}
+    assert "reconcile" not in verbs, "the schedule owns reconcile; a second copy is not a row"
 
     retired = {"worktreeProject", "worktreeSlug", "reconcileMerge"}
     defined = {spec["id"] for spec in canonical["inputs"]}

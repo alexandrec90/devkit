@@ -19,6 +19,7 @@ makes the dependency explicit and immune to reordering.
 """
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -26,6 +27,19 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = REPO_ROOT / "templates"
+
+# The harness kill switch, cleared for this whole process. `scripts/hooks/tests/` does the
+# same thing in its `conftest.py` and for the same reason: the variable lives in a
+# `settings.json` `env` block, so it is present in the environment of every agent session
+# on a machine where someone has switched the harness off, and absent in CI. Inherited, it
+# does not fail this suite -- it hollows it out. `worktree-guard.py` and `task_slug.py`
+# consult it now, so forty end-to-end guard tests would drive a `main()` that returned
+# before reading stdin and would pass by agreeing that nothing happened.
+#
+# Done here, at import, rather than in an autouse fixture, because an autouse fixture needs
+# a `conftest.py` and this directory cannot have one -- see above. A test that wants the
+# variable set still wins: `monkeypatch.setenv` runs long after this line.
+os.environ.pop("DEVKIT_HOOKS_OFF", None)
 
 # `scripts/` for the importable devkit modules; `scripts/hooks/` so a test can load
 # the vendored harness_config that generated manifests must satisfy.
@@ -46,6 +60,7 @@ import devkit_render
 import git_policy
 import guard_probes
 import harness_config
+import harness_state
 import sweep
 import task_input
 import task_slug
@@ -108,6 +123,7 @@ __all__ = [
     "git_policy",
     "guard_probes",
     "harness_config",
+    "harness_state",
     "in_an_ephemeral_box",
     "load_script",
     "needs_live_workspace",

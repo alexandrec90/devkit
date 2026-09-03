@@ -182,7 +182,20 @@ after the PR merges; a box never renders.
   Three of the four box tasks went for exactly that;
   `test_the_box_tier_keeps_one_task_and_it_is_read_only` holds the line and carries the
   case per task, and `test_the_sweep_has_no_workspace_task` is the same judgement about
-  `sweep.py`.
+  `sweep.py`. **The test that holds this line is also the record of where it moved.**
+  Once `harness-switch.py` could stand the branch tier down, the box tier's clicker
+  stopped being hypothetical — with the guard off, nothing cuts a box unless a person
+  asks — and the four `Agent:` rows came back through `agent-box.py`, each answering the
+  bullet that retired its ancestor. That test's docstring carries the answers; reconcile
+  is still not a row.
+- **A task may ask a question, and the prompt has to be a whole flushed line.**
+  `log-wrap.py` pipes the child's stdout and reads it a line at a time, so a bare
+  `input("> ")` — a prompt with no newline — sits in the pipe buffer and the operator
+  watches an empty terminal hang. Print the question with `flush=True` and read with a
+  bare `input()`. stdin is inherited through both wrappers, so an interactive task is
+  *not* a reason to drop the artifact or the toast: `agent-box.choose` is the worked
+  example, and it is why the three `Agent:` rows that pick a box are wrapped like
+  everything else.
 - Label convention: `"Domain: Title Case Action"`, and **every task carries a `detail`**
   — that is the second line in the quick-pick, and the only place a one-click action can
   state its cost or blast radius.

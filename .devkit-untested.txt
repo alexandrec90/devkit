@@ -167,7 +167,6 @@ scripts/worktree.py::branch_is_merged
 scripts/worktree.py::compose_down
 scripts/worktree.py::has_stack
 scripts/worktree.py::inspect_box
-scripts/worktree.py::is_tracked
 scripts/worktree.py::lease_file
 scripts/worktree.py::plan_env_templates
 scripts/worktree.py::plan_resume
