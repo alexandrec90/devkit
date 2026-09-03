@@ -226,7 +226,14 @@ class NOTIFYICONDATA(ctypes.Structure):
     )
 
 
-WNDPROC = _win.WINFUNCTYPE(
+# `WINFUNCTYPE` is absent off Windows at *runtime*, not only from the stubs, and this
+# runs at import -- so a bare reference makes the whole module unimportable on the Linux
+# CI runner and `tests/test_tray.py` fails to collect there. The tests in that file are
+# the two things about this module that are real and portable (the pixel buffer and
+# these signature declarations), so the module has to import everywhere for them to run.
+# `CFUNCTYPE` builds the identical signature and differs only in calling convention,
+# which decides nothing on a platform where nothing calls this.
+WNDPROC = getattr(_win, "WINFUNCTYPE", _win.CFUNCTYPE)(
     ctypes.c_longlong, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
 )
 
