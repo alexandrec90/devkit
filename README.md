@@ -435,6 +435,25 @@ The dropdown lists only checkouts declaring `[frontend] dir` in `.devkit.toml`
 the *stack* is what you need — an API, a worker, a database — that is the terminal menu
 above, or `worktree.py preview` under it.
 
+#### A preview is a snapshot, so something has to move it
+
+Each pick is served from a copy detached at the ref the run resolved, and nothing moves
+it afterwards. A preview of `main` left open across three merges keeps serving the commit
+it opened on — and no amount of reloading fixes a server whose files are old, which is a
+failure that looks exactly like the change never landed. `preview-ui-follow.py` closes
+it: started once and left running, it fetches each served copy's ref every 20 seconds and
+re-detaches the copy when the branch moves, which Vite answers with a reload.
+
+```bash
+python scripts/preview-ui-follow.py            # follow every open preview until Ctrl+C
+python scripts/preview-ui-follow.py --once     # bring them all current and exit
+```
+
+It reads the same registry `--stop` does, so it can be started before any preview and
+picks up every one opened later. A copy carrying local edits — `?edit=1`'s layout editor
+saves into the serving copy — is reported once and never moved, and a box-served preview
+is never touched at all: the unpushed work in it is the thing the preview exists to show.
+
 ### The scheduled pass
 
 Both tiers need something to run afterwards, and "afterwards" is exactly when nobody
