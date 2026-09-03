@@ -86,7 +86,13 @@ def _make_project(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path, Pa
 
 
 def _run(
-    project: Path, log: Path, env_file: Path, *, inherit_path: bool = True, remote: bool = True
+    project: Path,
+    log: Path,
+    env_file: Path,
+    *,
+    inherit_path: bool = True,
+    remote: bool = True,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
     """Drive the script with the stub bin dir first on PATH.
 
@@ -121,6 +127,7 @@ def _run(
         GIT_CONFIG_GLOBAL=str(project.parent / "gitconfig"),
         PATH=path,
     )
+    env.update(extra_env or {})
     proc = subprocess.run(
         [BASH, str(SCRIPT)], cwd=project, env=env, capture_output=True, text=True, timeout=120
     )
@@ -155,6 +162,51 @@ def test_each_dependency_model_installs_and_still_exports_path(tmp_path, files, 
     # The regression assertion. Before the fix this file was empty for every model
     # except `requirements-locks`, because the shell had already exited.
     assert PATH_EXPORT in written, f"provisioning died before the PATH export\n{output}"
+
+
+# The local branch's last act is `report_missing_toolchain`, which asks the manifest
+# about the frontend tier. Its call is therefore the marker for "the script ran"; the
+# `[session-start]` banner is not, because a project with no pre-commit config, a `.venv`
+# already present and no frontend correctly prints nothing at all.
+LOCAL_BRANCH_RAN = "frontend.enabled"
+
+
+@pytest.mark.parametrize("value", ["1", "all", "stop,session-start", "SESSION-START"])
+def test_the_kill_switch_stands_a_local_session_start_down(tmp_path, value):
+    """`DEVKIT_HOOKS_OFF` is the one-line way to quieten the harness, and this script is
+    part of what it quietens: on a local session it prints a banner, wires the
+    commit-time gate and rebases the branch onto the default, none of which an operator
+    who has switched the harness off is asking for."""
+    project, log, env_file = _make_project(tmp_path, {"pyproject.toml": PYPROJECT})
+    rc, output, _written = _run(
+        project, log, env_file, remote=False, extra_env={"DEVKIT_HOOKS_OFF": value}
+    )
+    assert rc == 0, output
+    assert LOCAL_BRANCH_RAN not in output, output
+
+
+@pytest.mark.parametrize("value", ["stop", "0", ""])
+def test_a_switch_that_does_not_name_this_script_leaves_it_running(tmp_path, value):
+    """Selective is how the harness comes back, one hook at a time -- and `0` must never
+    read as "off", per the asymmetry `hooks_off` documents."""
+    project, log, env_file = _make_project(tmp_path, {"pyproject.toml": PYPROJECT})
+    rc, output, _written = _run(
+        project, log, env_file, remote=False, extra_env={"DEVKIT_HOOKS_OFF": value}
+    )
+    assert rc == 0, output
+    assert LOCAL_BRANCH_RAN in output, output
+
+
+def test_the_kill_switch_never_strips_provisioning_from_a_remote_sandbox(tmp_path):
+    """Below the local branch this script is not a check at all -- it is the only thing
+    that installs a toolchain into a Claude Code on the web sandbox, which starts empty
+    every time. Honouring the switch there would answer "stop gating my sessions" with a
+    cloud session that has no ruff, mypy or pytest, and that reads as a broken sandbox
+    rather than as a setting someone chose."""
+    project, log, env_file = _make_project(tmp_path, {"pyproject.toml": PYPROJECT})
+    rc, output, written = _run(project, log, env_file, extra_env={"DEVKIT_HOOKS_OFF": "1"})
+    assert rc == 0, output
+    assert PATH_EXPORT in written, output
 
 
 def test_project_with_no_dependency_file_warns_and_continues(tmp_path):

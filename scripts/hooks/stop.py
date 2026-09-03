@@ -1075,6 +1075,11 @@ def verify(raw_stdin: str, env: Mapping[str, str]) -> int:
 
 
 def main() -> int:
+    # Before stdin, before git, before the frontend typecheck: an operator who has
+    # switched this gate off is not waiting on any of it. See `harness_config.hooks_off`.
+    if harness_config.hooks_off("stop"):
+        return 0
+
     raw_stdin = _read_stdin()
 
     root = verify_root(raw_stdin, REPO_ROOT)

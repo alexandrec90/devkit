@@ -69,9 +69,28 @@ Run each step in order. Stop on failure; never open a PR for an unverified branc
    `gh pr create` with the detected base branch, current branch, commit subject (or
    the argument, when it reads as a title), and a concise body covering the change and
    verification — written to a file and passed with `--body-file`.
-5. Report the PR number and URL.
+5. Report the PR number and URL, and **stop**.
 
-Do not enable auto-merge, wait on CI, or start an autofix loop unless the user asks.
+## Shipping ends at the push — the gate is somebody else's turn
+
+**Never wait for the PR to go green, and never poll it.** Watching a gate is the most
+expensive thing a session can do with its remaining context: it happens at the tail of a
+long conversation, where every turn re-sends the whole transcript, and it produces
+nothing a later session could not read in a single call. A gate also routinely outruns
+the Bash tool's ceiling, so even the "one blocking call" spelling
+`.claude/rules/engineering.md` prescribes for a deliberate wait decays into a poll loop
+with the timeout as its interval.
+
+So: no `gh pr checks --watch`, no repeated `gh pr view`, no autofix loop, and no "let me
+just confirm it passed". Report that the branch is pushed and the gate is running. If it
+fails, the run is on the PR and a fresh session fixes it at the session floor rather than
+at the tail of this one.
+
+Two things this does not forbid: **diagnosing a failure you were asked to fix** is the
+work itself rather than waiting, and a single `gh pr view` to confirm the PR exists is
+part of step 4. The waste begins at the second identical poll.
+
+Do not enable auto-merge or start an autofix loop unless the user asks.
 
 ## Do not clean up after yourself
 

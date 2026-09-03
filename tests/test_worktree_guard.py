@@ -3153,3 +3153,22 @@ def test_read_stdin_survives_a_byte_it_cannot_decode():
         assert guard.read_stdin() == ""
     finally:
         _sys.stdin = saved
+
+
+@pytest.mark.parametrize("relpath", ["scripts/worktree-guard.py", "scripts/task_slug.py"])
+def test_the_branch_tier_never_consults_the_harness_kill_switch(relpath):
+    """`DEVKIT_HOOKS_OFF` (`harness_config.hooks_off`) exists so an operator can quieten
+    the harness -- the Stop gate, the formatter, the Bash cap -- from one line in a
+    `settings.json`. These two are not part of what it quietens, and the distinction is
+    the whole safety property: this hook is what routes an agent edit into a box on a
+    task branch, and `task_slug.py` is what names it. Switching them off does not make a
+    session quieter; it lands agent work on a checkout's home branch with no branch under
+    it -- the failure the workspace tier exists to prevent, surfacing days later as a
+    `needs-branch` verdict nobody can attribute to a session.
+
+    Asserted on the source rather than on behaviour because the risk is a *future* edit
+    adding the check here by symmetry with the four hooks that do carry it.
+    """
+    source = (REPO_ROOT / relpath).read_text(encoding="utf-8")
+    assert "hooks_off" not in source
+    assert "DEVKIT_HOOKS_OFF" not in source

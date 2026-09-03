@@ -241,6 +241,43 @@ everything with no submodule and no install step.
   stamp rule above are explained in
   [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
+### Switching the harness off: `DEVKIT_HOOKS_OFF`
+
+The harness is a cost as well as a guarantee, and the cost is not always worth paying —
+the Stop gate reproduces the PR gate locally and blocks the session on what it finds, so
+a red tree turns every stop into another round of fixing. **An operator is allowed to
+turn that off**, and the switch exists so they do it once rather than by deleting hook
+entries out of each project's `.claude/settings.json` — N files to strip and N to
+reconstruct from memory, which is not a switch anyone flips twice.
+
+Put it in the `env` block of whichever `settings.json` should carry it (`~/.claude` for
+every project on the machine, the project's own for one repo):
+
+| Value | Effect |
+| --- | --- |
+| unset, or `0`/`false`/`no`/`off` | every hook runs — the default, and the only thing a value that reads as "off" to a human may mean |
+| `1`, `all`, `*` | every switchable hook stands down |
+| `stop`, `lint-fix`, `capped-bash`, `session-start`, `failure-retro` | that hook only; comma- or semicolon-separated for several |
+
+`harness_config.hooks_off` owns the parse and `SWITCHABLE_HOOKS` owns the vocabulary;
+shell callers ask through `harness_config.py --hook-off <name>`, never by re-reading the
+variable, so the aliases have one owner.
+
+**What it deliberately cannot reach is the branch tier.** The workspace hook that routes
+an agent edit into an ephemeral box, and the one that names its branch, never consult it:
+switching those off does not make a session quieter, it lands agent work on a checkout's
+home branch with nothing under it. Turning the harness off is a decision about *checks*;
+it is not a decision about where the work goes, and a test fails a copy that confuses the
+two.
+
+Three consequences worth knowing before flipping it. `session-start` also wires the
+commit-time `pre-commit` gate, so switching it off leaves that gate uninstalled on a
+fresh clone — `pre-commit install` by hand restores it. A **remote** session-start is
+never switched off, because below its local branch that script is not a check at all but
+the only thing that installs a toolchain into a cloud sandbox, which starts empty every
+time. And CI is unaffected: the PR gate runs the same checks server-side, so what the
+switch removes is the *local* round, not the verdict.
+
 ## Guardrail: the instruction-file feedback loop
 
 If an instruction in a skill, a rule, or a `CLAUDE.md` sent you into a dead end or a
