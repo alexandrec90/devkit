@@ -179,6 +179,45 @@ def test_the_stop_idle_pass_writes_the_file_its_installer_advertises():
     assert "--always" in installer.stop_idle_arguments(r"C:\py\pythonw.exe", root=Path(r"C:\ws"))
 
 
+def test_the_rc_server_pass_writes_the_file_its_installer_advertises():
+    """This one writes its own artifact rather than being wrapped, for the same reason
+    `global-tools.py` does: the content that matters is a line per served project, which
+    only the runner can render."""
+    installer = load_script("scripts/install-rc-schedule.py")
+    runner = load_script("scripts/rc-servers.py")
+    assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
+
+
+def test_the_scheduled_rc_pass_never_loses_the_mode_that_makes_it_do_anything():
+    """`maintain` is the difference between a job and a no-op.
+
+    `rc-servers.py`'s default mode is `status`, which is read-only by design, so an argv
+    that lost the word would register a task that fires every fifteen minutes forever
+    and repairs nothing -- while `schtasks` reported `Last Result: 0` throughout.
+    """
+    installer = load_script("scripts/install-rc-schedule.py")
+    assert "maintain" in installer.schedule_for(root=REPO_ROOT).command
+
+
+def test_the_tray_writes_the_file_its_installer_advertises():
+    """The tray's artifact is unusual: it is written only when the tray cannot start.
+    That is the one failure with no other signal, because a tray that is not running
+    looks exactly like a tray reporting nothing wrong."""
+    installer = load_script("scripts/install-tray.py")
+    runner = load_script("scripts/tray.py")
+    assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
+
+
+def test_the_tray_is_never_given_an_execution_time_limit():
+    """Every other job here is a pass that should finish in minutes. This one is
+    resident, and the inherited one-hour limit would have Task Scheduler killing it an
+    hour after logon, every day -- surfacing as an icon that "sometimes isn't there"."""
+    installer = load_script("scripts/install-tray.py")
+    xml = installer.task_document(installer.schedule_for(root=REPO_ROOT))
+    assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml
+    assert "<LogonTrigger>" in xml
+
+
 def test_the_global_tools_pass_writes_the_file_its_installer_advertises():
     """This one writes its own artifact rather than being wrapped: the content that
     matters is not the captured stdout of an npm command but the rollback line for
@@ -228,6 +267,11 @@ UNATTENDED: dict[str, str] = {
     # through `notify-wrap.py`, whose parent is an extension host with no console either.
     "scripts/git-merge-default.py": "the VS Code merge task, from a console-less parent",
     "scripts/global-tools.py": "devkit-global-tools runs it nightly",
+    "scripts/rc-servers.py": "devkit-rc-servers runs it every 15 minutes",
+    "scripts/rc_machine.py": "the tasklist, taskkill and server launch that pass makes",
+    "scripts/tray.py": "devkit-tray runs it from logon until logoff",
+    "scripts/tray_state.py": "the tray asks it what to draw, on every poll",
+    "scripts/schedule_health.py": "the schtasks the tray spawns every poll, and session start",
     "scripts/log-wrap.py": "the wrapper three of those jobs are launched through",
     # reached from an entry point
     "scripts/sweep.py": "the git and gh IO for reconcile and upgrade",
@@ -246,6 +290,9 @@ UNATTENDED: dict[str, str] = {
 DELEGATES_ITS_SPAWNS: dict[str, str] = {
     "scripts/git-merge-default.py": "scripts/git_policy.py",
     "scripts/worktree-guard.py": "scripts/guard_probes.py",
+    "scripts/rc-servers.py": "scripts/rc_machine.py",
+    "scripts/tray.py": "scripts/schedule_health.py",
+    "scripts/tray_state.py": "scripts/schedule_health.py",
 }
 
 SPAWN_ATTRS = frozenset({"run", "Popen", "call", "check_call", "check_output"})

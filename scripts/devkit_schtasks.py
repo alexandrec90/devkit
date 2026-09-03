@@ -153,6 +153,50 @@ def daily_trigger(at: str, start_date: str = "2020-01-01") -> str:
     )
 
 
+def boot_trigger(delay: str = "PT1M") -> str:
+    """A trigger that fires once, shortly after the machine starts.
+
+    A repeating `TimeTrigger` already survives a reboot -- Task Scheduler restores the
+    repetition, and `StartWhenAvailable` catches up a fire the machine slept through --
+    so this is not what makes a job come back. What it fixes is the *gap*: after a
+    restart the next repetition can be a full interval away, and for a job whose subject
+    is "a process that should be running", fifteen minutes of not running is the whole
+    failure it exists to prevent.
+
+    The delay is not decoration. At the instant a boot trigger would otherwise fire,
+    the network stack is often not up, mapped drives are not mounted, and a job that
+    probes either gets a wrong answer rather than a late one.
+
+    Combine with another trigger by concatenating: `<Triggers>` holds an unordered
+    choice, so `repeating_trigger(15) + boot_trigger()` is one valid document.
+    """
+    return (
+        "    <BootTrigger>\n"
+        f"      <Delay>{escape(delay)}</Delay>\n"
+        "      <Enabled>true</Enabled>\n"
+        "    </BootTrigger>\n"
+    )
+
+
+def logon_trigger(delay: str = "PT30S") -> str:
+    """A trigger that fires when the user logs on.
+
+    For the jobs whose subject is a *desktop* rather than the machine -- anything that
+    puts a window or a tray icon in front of someone. A `BootTrigger` runs before there
+    is a session to draw into; this one runs when there is.
+
+    No `<UserId>`, for `task_xml`'s reason: naming a principal means naming a user id,
+    and every spelling of that is a way to fail on someone else's machine. Without one
+    the trigger belongs to whoever registered the task.
+    """
+    return (
+        "    <LogonTrigger>\n"
+        f"      <Delay>{escape(delay)}</Delay>\n"
+        "      <Enabled>true</Enabled>\n"
+        "    </LogonTrigger>\n"
+    )
+
+
 def task_xml(
     command: str,
     arguments: str,

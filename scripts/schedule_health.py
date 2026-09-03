@@ -67,6 +67,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # added tomorrow is checked without touching this file.
 PREFIX = "devkit-"
 
+# This module's one spawn has to be console-less, and for a reason that only arrived
+# with a second caller. Session start runs it from a terminal, where a flashed console
+# is invisible among the output; `tray.py` runs it from a task registered under
+# `pythonw.exe`, on a timer, forever -- and Windows gives a brand new console window to
+# every console child of a console-less parent. Without this the tray would open a black
+# window every poll, which is the exact regression `tests/test_scheduled_jobs.py`
+# documents twice. Zero off Windows, where the flag does not exist.
+NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # `schtasks` writes this when a task has never run. It is not a date to reason about.
 NEVER = "N/A"
 
@@ -124,6 +133,8 @@ ARTIFACTS: dict[str, str] = {
     "devkit-docker-prune": "logs/scheduled-docker-prune.log",
     "devkit-docker-stop-idle": "logs/scheduled-docker-stop-idle.log",
     "devkit-global-tools": "logs/global-tools.log",
+    "devkit-rc-servers": "logs/rc-servers.log",
+    "devkit-tray": "logs/tray.log",
 }
 
 
@@ -395,6 +406,7 @@ def query(prefix: str = PREFIX) -> list[Job]:
             text=True,
             timeout=30,
             check=False,
+            creationflags=NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return []

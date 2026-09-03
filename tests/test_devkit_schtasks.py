@@ -270,3 +270,29 @@ def test_there_is_no_window_question_to_answer_off_windows(tmp_path):
     python = tmp_path / "python"
     python.write_text("", encoding="utf-8")
     assert schtasks.windowless(str(python)) == str(python)
+
+
+def test_a_boot_trigger_waits_before_it_fires():
+    """At the instant a boot trigger would otherwise fire the network stack is often not
+    up, and a job that probes it gets a wrong answer rather than a late one."""
+    trigger = schtasks.boot_trigger()
+    assert "<BootTrigger>" in trigger
+    assert "<Delay>PT1M</Delay>" in trigger
+
+
+def test_a_logon_trigger_names_no_principal():
+    """Naming a user id is a way to fail on a renamed account or an unresolved domain;
+    without one the trigger belongs to whoever registered the task."""
+    trigger = schtasks.logon_trigger()
+    assert "<LogonTrigger>" in trigger
+    assert "<UserId>" not in trigger
+
+
+def test_two_triggers_concatenate_into_one_valid_document():
+    """`<Triggers>` holds an unordered choice, which is what lets a job have both a
+    repetition and a boot trigger without a second task."""
+    body = schtasks.task_xml(
+        "py.exe", "--x", schtasks.repeating_trigger(15) + schtasks.boot_trigger()
+    )
+    assert body.count("<Triggers>") == 1
+    assert "<TimeTrigger>" in body and "<BootTrigger>" in body
