@@ -5382,6 +5382,20 @@ def write_reconcile_log(rendered: str, code: int, root: Path = REPO_ROOT) -> Pat
     failure-artifact rule in `.claude/rules/engineering.md`: a log that only appears on
     failure is one you cannot distinguish from a job that never ran.
 
+    **A pass that did nothing writes nothing**, which is why the CLI calls this only on an
+    applying run -- `--yes`, which the scheduled job passes and `--dry-run`, the CLI
+    default, does not. The file is not a transcript of who ran `reconcile`; it is the
+    evidence `workspace-status.scheduler_line` reads to decide the scheduled job is still
+    alive, and `schedule_health` reads to explain a bare exit code. A dry run forges both
+    halves: it refreshes the mtime, so a task that stopped days ago looks like it passed
+    minutes ago, and it stamps its own `exit=0` over the `exit=1` of the pass that
+    actually failed. That is not hypothetical -- the `/triage-boxes` skill opens with
+    `reconcile --dry-run --json` against the real workspace, so the one session sent to
+    investigate stranded boxes destroyed the record of the scheduled pass that stranded
+    them, every time. `artifact_root` already fixed the same failure from the other
+    direction, when `pytest tests/ -q` wrote over the real log; a dry run is that bug
+    with the right workspace and the wrong verb.
+
     Best-effort — a reconcile pass that did its work must not report failure because a
     log file could not be written.
     """
@@ -6010,7 +6024,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             rendered = json.dumps(report, indent=2) if args.json else render_reconcile(report)
             print(rendered)
-            write_reconcile_log(rendered, code, artifact_root(args.workspace.parent))
+            if not args.dry_run:
+                write_reconcile_log(rendered, code, artifact_root(args.workspace.parent))
             return code
 
         if args.mode == "new":
