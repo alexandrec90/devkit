@@ -75,12 +75,6 @@ that costs when it lapses, and what it means for a session editing a hook (you a
 changing the thing that is running you), is in
 [`scripts/hooks/CLAUDE.md`](scripts/hooks/CLAUDE.md).
 
-Running them here also means devkit is where they can be switched **off**:
-`DEVKIT_HOOKS_OFF` stands the Stop gate, the formatter, the Bash cap, the SessionStart
-script and the failure retro down from one line in a `settings.json` `env` block. The
-values and the two hooks it deliberately cannot reach are in
-[`.claude/rules/engineering.md`](.claude/rules/engineering.md); do not restate them here.
-
 ## The two test trees
 
 `scripts/hooks/tests/` is vendored and must stay project-agnostic; `tests/` is
