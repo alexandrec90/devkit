@@ -5370,7 +5370,9 @@ def artifact_root(root: Path, repo_root: Path | None = None) -> Path:
     return root
 
 
-def write_reconcile_log(rendered: str, code: int, root: Path = REPO_ROOT) -> Path | None:
+def write_reconcile_log(
+    rendered: str, code: int, root: Path = REPO_ROOT, dry_run: bool = False
+) -> Path | None:
     """Persist a reconcile pass to `logs/reconcile.log`. Returns the path, or None.
 
     The scheduled run is **windowless** (`pythonw.exe`, so no console flashes up every
@@ -5382,9 +5384,11 @@ def write_reconcile_log(rendered: str, code: int, root: Path = REPO_ROOT) -> Pat
     failure-artifact rule in `.claude/rules/engineering.md`: a log that only appears on
     failure is one you cannot distinguish from a job that never ran.
 
-    **A pass that did nothing writes nothing**, which is why the CLI calls this only on an
-    applying run -- `--yes`, which the scheduled job passes and `--dry-run`, the CLI
-    default, does not. The file is not a transcript of who ran `reconcile`; it is the
+    **A pass that did nothing writes nothing**, which is what `dry_run` refuses -- the
+    CLI's own flag, defaulting to `--dry-run` while the scheduled job passes `--yes`. The
+    refusal lives here rather than at the call site because the reason does, and because
+    the caller is `main`, whose every extra branch is one the structural ratchet counts.
+    The file is not a transcript of who ran `reconcile`; it is the
     evidence `workspace-status.scheduler_line` reads to decide the scheduled job is still
     alive, and `schedule_health` reads to explain a bare exit code. A dry run forges both
     halves: it refreshes the mtime, so a task that stopped days ago looks like it passed
@@ -5399,6 +5403,8 @@ def write_reconcile_log(rendered: str, code: int, root: Path = REPO_ROOT) -> Pat
     Best-effort — a reconcile pass that did its work must not report failure because a
     log file could not be written.
     """
+    if dry_run:
+        return None
     path = root / RECONCILE_LOG
     stamp = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
     try:
@@ -6024,8 +6030,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             rendered = json.dumps(report, indent=2) if args.json else render_reconcile(report)
             print(rendered)
-            if not args.dry_run:
-                write_reconcile_log(rendered, code, artifact_root(args.workspace.parent))
+            write_reconcile_log(rendered, code, artifact_root(args.workspace.parent), args.dry_run)
             return code
 
         if args.mode == "new":
