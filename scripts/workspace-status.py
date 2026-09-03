@@ -623,11 +623,11 @@ def _age(seconds: float) -> str:
 def guard_line(root: Path, settings: Path = ROOT_SETTINGS) -> str:
     """Reports a workspace root that does not run the cross-checkout edit guard.
 
-    `worktree-guard.py` is wired in every repo that vendors devkit's settings, which is
-    the case it matters least in — a session inside a checkout is already the case the
-    guard stays silent for. The session it exists for is the one opened at the workspace
-    *root*, and that root is not inside any repository, so its `.claude/settings.json` is
-    a workstation file no test in this repo can hold in place.
+    This once said the guard was "wired in every repo that vendors devkit's settings".
+    It was not — settings are never vendored, so no consumer ran it until
+    `project_settings.py` began back-filling the hook on `--pull` — and that sentence is
+    why the gap went a release unreported. The root is the case only a line like this
+    can cover: it is not inside any repository, so no test here can hold its wiring.
 
     Absent-is-silent everywhere else in this file, and it is the wrong default here: an
     unwired guard has no symptom at all. The edits land on home branches, and the sweep
