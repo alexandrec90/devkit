@@ -1226,11 +1226,12 @@ def test_adopt_refuses_to_delete_canonical_content_the_live_file_lacks(workspace
     canonical, live = workspace_pair
     _add_a_folder(canonical)
     before = canonical.read_text(encoding="utf-8")
+    text = live.read_text(encoding="utf-8")
 
-    assert _run(live, "--adopt-workspace") == 1
+    assert devkit_project.adopt_workspace(live, text) == 1
     assert canonical.read_text(encoding="utf-8") == before, "the canonical copy lost content"
 
-    assert _run(live, "--adopt-workspace", "--force") == 0
+    assert devkit_project.adopt_workspace(live, text, force=True) == 0
     assert canonical.read_text(encoding="utf-8") == live.read_text(encoding="utf-8")
 
 
@@ -1252,13 +1253,26 @@ def test_the_refusals_stop_naming_an_adopt_that_would_delete_something(workspace
     _add_a_folder(canonical)
     _hand_edit(live)
 
-    assert _run(live, "--render-workspace") == 1
-    assert _run(live, "--check-workspace") == 1
+    assert devkit_project.render_workspace(live) == 1
+    assert devkit_project.check_workspace(live, live.read_text(encoding="utf-8")) == 1
 
     err = capsys.readouterr()
     both = err.out + err.err
     assert "--adopt-workspace" not in both
     assert both.count("by hand") == 2
+
+
+def test_keep_hint_offers_the_adopt_only_when_devkit_has_nothing_to_lose():
+    """One spelling for both refusals: two that disagreed about which command is safe
+    would be the same defect twice, and it is the unsafe half that deletes a branch."""
+    live_authored = ["settings differs"]
+    assert "--adopt-workspace" in devkit_project.keep_hint(live_authored, "  -> keep them: ")
+    ahead = [*live_authored, "missing from the workspace: Agent: Ship PR"]
+    hint = devkit_project.keep_hint(ahead, "  -> keep them: ")
+    assert "--adopt-workspace" not in hint and "by hand" in hint
+
+
+def test_publish_workspace_creates_a_live_file_that_does_not_exist_yet(workspace_pair):
     """The fresh-workstation bootstrap. The refusal protects a hand edit, and a file that
     is not there has none -- but `publish_workspace` read it unconditionally, so the
     canonical->live direction could only ever overwrite, never create. The reported

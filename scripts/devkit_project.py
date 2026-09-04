@@ -1329,6 +1329,107 @@ def publish_workspace(live: Path, *, force: bool = False) -> tuple[str, list[str
     return RENDER_PUBLISHED, problems
 
 
+def keep_hint(problems: list[str], label: str) -> str:
+    """The "keep the live edits" line the two refusals print, under `label`.
+
+    `--adopt-workspace` takes the *whole* live file, so it is the remedy only while the
+    canonical copy has nothing of its own to lose. Naming it otherwise points at a
+    command that now refuses -- and used to delete the very tasks the list above says
+    the live file is missing. Written once because two refusals that disagree about
+    which command is safe is the same defect twice.
+    """
+    if not canonical_only(problems):
+        return f"{label}{RENDER_HINT} --adopt-workspace"
+    return (
+        f"{label}merge them into workspace.jsonc by hand, on a task branch"
+        " -- an adopt would delete what the live file is missing above"
+    )
+
+
+def adopt_workspace(live: Path, text: str, *, force: bool = False) -> int:
+    """Record the live file as the canonical copy. The `--adopt-workspace` verb.
+
+    An adopt is a whole-file overwrite in the direction the module's own preamble calls
+    the old failure -- harmless only while the canonical copy is behind the live one or
+    level with it. When it is AHEAD, the overwrite deletes committed work with nothing
+    to show it went: the tasks of PR #292 were one click from exactly that, because the
+    publish refusal named `--adopt-workspace` as the remedy for a live edit that had to
+    be merged by hand instead.
+    """
+    losses = canonical_only(
+        workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical_text()))
+        if CANONICAL_WORKSPACE.is_file()
+        else []
+    )
+    if losses and not force:
+        print(
+            f"devkit_project: {CANONICAL_WORKSPACE.name} carries content"
+            f" {live.name} does not -- adopting would delete it:",
+            file=sys.stderr,
+        )
+        for loss in losses:
+            print(f"  {loss}", file=sys.stderr)
+        print(
+            "  -> merge the live edit into workspace.jsonc by hand instead, on a"
+            " task branch\n"
+            f"  -> discard them: {RENDER_HINT} --adopt-workspace --force",
+            file=sys.stderr,
+        )
+        return 1
+    # Written directly rather than printed for redirection: the file carries en-dashes
+    # and arrows, and a redirected stdout on Windows is cp1252.
+    CANONICAL_WORKSPACE.write_text(text, encoding="utf-8", newline="\n")
+    write_stamp(live, semantic_digest(text))
+    print(f"adopted {live.name} into {CANONICAL_WORKSPACE.name}")
+    print("commit it on a task branch -- that is what gives the edit a reviewer")
+    return 0
+
+
+def check_workspace(live: Path, text: str) -> int:
+    """Report drift without touching either file. The `--check-workspace` verb.
+
+    Takes the registry text `main` already read rather than re-reading it: two reads of
+    a file every VS Code window writes could disagree, and the exit code would then not
+    be about the text the caller validated.
+    """
+    problems = workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical_text()))
+    if not problems:
+        print(f"{live.name}: matches {CANONICAL_WORKSPACE.name}")
+        return 0
+    print(f"{live.name} has drifted from {CANONICAL_WORKSPACE.name}:")
+    for problem in problems:
+        print(f"  {problem}")
+    print(keep_hint(problems, "  -> keep the live edits:  "))
+    print(f"  -> publish the canonical: {RENDER_HINT} --render-workspace")
+    return 1
+
+
+def render_workspace(live: Path, *, force: bool = False) -> int:
+    """Publish the canonical copy over the live file. The `--render-workspace` verb."""
+    rendered, problems = publish_workspace(live, force=force)
+    if rendered == RENDER_CURRENT:
+        print(f"{live.name}: already current")
+        return 0
+    if rendered == RENDER_REFUSED:
+        print(
+            f"devkit_project: {live.name} carries edits devkit did not"
+            " write -- refusing to overwrite them:",
+            file=sys.stderr,
+        )
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
+        print(
+            f"{keep_hint(problems, '  -> keep them:    ')}\n"
+            f"  -> discard them: {RENDER_HINT} --render-workspace --force",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"rendered {CANONICAL_WORKSPACE.name} -> {live.name}")
+    for problem in problems:
+        print(f"  {problem}")
+    return 0
+
+
 def expected_actions(project: str) -> set[str]:
     """The PROJECT-owned actions `project` is on the hook for.
 
@@ -1483,96 +1584,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.adopt_workspace:
-        # An adopt is a whole-file overwrite in the direction the module's own preamble
-        # calls the old failure -- harmless only while the canonical copy is behind the
-        # live one or level with it. When it is AHEAD, the overwrite deletes committed
-        # work with nothing to show it went: the tasks of PR #292 were one click from
-        # exactly that, because the publish refusal above named `--adopt-workspace` as
-        # the remedy for a live edit that had to be merged by hand instead.
-        losses = canonical_only(
-            workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical_text()))
-            if CANONICAL_WORKSPACE.is_file()
-            else []
-        )
-        if losses and not args.force:
-            print(
-                f"devkit_project: {CANONICAL_WORKSPACE.name} carries content"
-                f" {args.workspace.name} does not -- adopting would delete it:",
-                file=sys.stderr,
-            )
-            for loss in losses:
-                print(f"  {loss}", file=sys.stderr)
-            print(
-                "  -> merge the live edit into workspace.jsonc by hand instead, on a"
-                " task branch\n"
-                f"  -> discard them: {RENDER_HINT} --adopt-workspace --force",
-                file=sys.stderr,
-            )
-            return 1
-        # Written directly rather than printed for redirection: the file carries
-        # en-dashes and arrows, and a redirected stdout on Windows is cp1252.
-        CANONICAL_WORKSPACE.write_text(text, encoding="utf-8", newline="\n")
-        write_stamp(args.workspace, semantic_digest(text))
-        print(f"adopted {args.workspace.name} into {CANONICAL_WORKSPACE.name}")
-        print("commit it on a task branch -- that is what gives the edit a reviewer")
-        return 0
+        return adopt_workspace(args.workspace, text, force=args.force)
 
     if args.render_workspace or args.check_workspace:
         if not CANONICAL_WORKSPACE.is_file():
             print(f"devkit_project: no canonical copy at {CANONICAL_WORKSPACE}", file=sys.stderr)
             return 2
-        problems = workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical_text()))
-
         if args.check_workspace:
-            if not problems:
-                print(f"{args.workspace.name}: matches {CANONICAL_WORKSPACE.name}")
-                return 0
-            print(f"{args.workspace.name} has drifted from {CANONICAL_WORKSPACE.name}:")
-            for problem in problems:
-                print(f"  {problem}")
-            if not canonical_only(problems):
-                print(f"  -> keep the live edits:  {RENDER_HINT} --adopt-workspace")
-            else:
-                print(
-                    "  -> keep the live edits:  merge them into workspace.jsonc by hand"
-                    " -- an adopt would delete what the live file is missing above"
-                )
-            print(f"  -> publish the canonical: {RENDER_HINT} --render-workspace")
-            return 1
-
-        rendered, problems = publish_workspace(args.workspace, force=args.force)
-        if rendered == RENDER_CURRENT:
-            print(f"{args.workspace.name}: already current")
-            return 0
-
-        if rendered == RENDER_REFUSED:
-            print(
-                f"devkit_project: {args.workspace.name} carries edits devkit did not"
-                " write -- refusing to overwrite them:",
-                file=sys.stderr,
-            )
-            for problem in problems:
-                print(f"  {problem}", file=sys.stderr)
-            # `--adopt-workspace` takes the whole live file, so it is only the remedy
-            # while the canonical copy has nothing of its own to lose. Naming it anyway
-            # would point at a command that now refuses -- and used to delete the tasks
-            # the same list says the live file is missing.
-            keep = (
-                f"  -> keep them:    {RENDER_HINT} --adopt-workspace"
-                if not canonical_only(problems)
-                else "  -> keep them:    merge them into workspace.jsonc by hand, on a"
-                " task branch -- an adopt would delete what the live file is missing above"
-            )
-            print(
-                f"{keep}\n  -> discard them: {RENDER_HINT} --render-workspace --force",
-                file=sys.stderr,
-            )
-            return 1
-
-        print(f"rendered {CANONICAL_WORKSPACE.name} -> {args.workspace.name}")
-        for problem in problems:
-            print(f"  {problem}")
-        return 0
+            return check_workspace(args.workspace, text)
+        return render_workspace(args.workspace, force=args.force)
 
     if args.check:
         for name, actions in conformance(projects, root).items():
