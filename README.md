@@ -609,6 +609,7 @@ or, with the knobs:
 ```jsonc
 "devkit.remoteControl": {
   "projects": ["devkit"],
+  "spawn": "same-dir",              // or "worktree" — see below
   "permissionMode": "acceptEdits",  // a standing grant — opt in deliberately
   "idleMinutes": 20,                // transcript silence before a restart is allowed
   "updateAt": "04:45",              // after devkit-global-tools, deliberately
@@ -617,6 +618,23 @@ or, with the knobs:
   "awayMinutes": 15
 }
 ```
+
+`permissionMode` is the one knob a phone cannot work around. A session spawned from the
+mobile app opens in `auto` and the UI offers no way to switch, so `bypassPermissions`
+here is the only route to one — and it is a standing grant on an unattended machine,
+which is why it is opt-in.
+
+`spawn` chooses where an on-demand session lands. **`worktree` mode is not the box tier
+`worktree.py` owns.** Claude Code cuts its own worktrees under
+`<repo>/.claude/worktrees/<name>`, inside the checkout, and the two managers do not know
+about each other: a box cut from the phone gets no `provision`, no port lease, no
+`COMPOSE_PROJECT_NAME` and no `reconcile` reap, and `sweep`, `reconcile` and
+`workspace-status` cannot see it to report it stranded. Removing one is
+`git -C <repo> worktree remove .claude/worktrees/<name>` by hand. It still beats
+`same-dir` when the phone is the only client you have — parallel sessions stop editing
+one tree — but the cleanup is yours. The generated `.gitignore` covers
+`.claude/worktrees/`; a project generated before that line existed needs it added, or
+the nested worktree leaves the checkout dirty and `sweep` stops syncing it.
 
 On memory: a server costs 300–420 MB as a process, and then holds every session the
 phone spawns for as long as it lives — which is where the growth actually is, so
