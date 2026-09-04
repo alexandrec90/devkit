@@ -5818,6 +5818,59 @@ def test_no_ledger_is_no_way_back_rather_than_a_crash(tmp_path):
     assert worktree.resumable_branch(tmp_path, "devkit", "mine", ledger_root=tmp_path) == ""
 
 
+@pytest.fixture
+def new_without_git(monkeypatch, tmp_path):
+    """`plan_new` with everything but the base-branch decision stubbed out.
+
+    Returns the kwargs `spawn_plan` was handed, which is where the decision lands.
+    """
+    captured: dict = {}
+    monkeypatch.setattr(worktree, "known_projects", lambda _w: ["devkit"])
+    monkeypatch.setattr(worktree.devkit_project, "resolve_project", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(worktree.sweep, "git_for", lambda _d: _git_stub())
+    monkeypatch.setattr(worktree.sweep, "_out", lambda _r: "")
+    monkeypatch.setattr(worktree.tb, "detect_default_branch", lambda *a, **k: "main")
+    monkeypatch.setattr(worktree, "live_boxes", lambda _r: {})
+    monkeypatch.setattr(worktree, "has_stack", lambda _s: False)
+    monkeypatch.setattr(worktree, "plan_provision", lambda *a, **k: ())
+    monkeypatch.setattr(worktree, "plan_env_templates", lambda _s: {})
+    monkeypatch.setattr(worktree, "retired_branch_probe", lambda _s: None)
+    # Returns the kwargs, not a plan: `spawn()` above calls the very function being
+    # replaced here, so building a real one inside the stub recurses until the stack ends.
+    monkeypatch.setattr(worktree, "spawn_plan", lambda **kwargs: captured.update(kwargs))
+    return captured
+
+
+def test_new_cuts_from_the_projects_default_branch_when_no_base_is_named(
+    new_without_git, monkeypatch
+):
+    """The default stays the default for `spawn_plan`'s reason: a box starts empty, so
+    anywhere but the tip of the default branch is a stale base for no benefit."""
+    monkeypatch.setattr(worktree, "origin_has_branch", lambda *a, **k: True)
+    worktree.plan_new("devkit", Path("/ws/x.code-workspace"), slug="topic")
+    assert new_without_git["default_branch"] == "main"
+
+
+def test_new_cuts_from_a_named_base_instead(new_without_git, monkeypatch):
+    """The one thing the hook tier never needs and a human sometimes does: stacking a
+    second branch on a first whose PR is still open."""
+    monkeypatch.setattr(worktree, "origin_has_branch", lambda *a, **k: True)
+    worktree.plan_new("devkit", Path("/ws/x.code-workspace"), slug="topic", base="agent/first")
+    assert new_without_git["default_branch"] == "agent/first"
+
+
+def test_a_base_origin_does_not_carry_is_refused_before_the_box_is_named(
+    new_without_git, monkeypatch
+):
+    """Checked here rather than left to git, whose failure is `git worktree add` refusing
+    an unknown revision -- after the fetch, with the box name already chosen, naming
+    neither the argument nor the branch it looked for."""
+    monkeypatch.setattr(worktree, "origin_has_branch", lambda *a, **k: False)
+    with pytest.raises(worktree.WorktreeError, match="origin/nope does not exist"):
+        worktree.plan_new("devkit", Path("/ws/x.code-workspace"), slug="topic", base="nope")
+    assert new_without_git == {}
+
+
 def test_respawn_prefers_the_reaped_branch_and_otherwise_cuts_a_new_box(monkeypatch):
     """What the guard calls. The fallback is the important half: a resume is a
     convenience, and a guard that raised over one would block the edit outright."""

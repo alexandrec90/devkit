@@ -506,3 +506,57 @@ def test_a_failing_job_on_a_stub_reports_the_failure_first(tmp_path):
     lines = health.problems([job(last_result=2, command=f"{stub} script.py")], NOW)
     assert len(lines) == 1
     assert "exit 2" in lines[0]
+
+
+# --- one task, several triggers ----------------------------------------------
+#
+# `schtasks` emits a row per *trigger*, not per task. It was theoretical until
+# `devkit-rc-servers` gained a boot trigger beside its repetition, and then the tray
+# listed the job twice -- which is what found it.
+
+TWO_TRIGGER_CSV = (
+    '"HostName","TaskName","Next Run Time","Status","Last Run Time","Last Result",'
+    '"Scheduled Task State"\n'
+    '"HOST","\\devkit-rc-servers","9/2/2026 8:45:00 PM","Ready",'
+    '"9/2/2026 8:30:00 PM","0","Enabled"\n'
+    '"HOST","\\devkit-rc-servers","N/A","Ready","9/2/2026 8:30:00 PM","0","Enabled"\n'
+)
+
+
+def test_a_task_with_two_triggers_is_one_job():
+    jobs = health.parse_tasks(TWO_TRIGGER_CSV)
+    assert [item.name for item in jobs] == ["devkit-rc-servers"]
+
+
+def test_the_earliest_next_run_survives_the_merge():
+    """The boot trigger's row has no next run until the next boot. Keeping it would lose
+    the cadence, because `Job.interval` is `next_run - last_run`."""
+    job = health.parse_tasks(TWO_TRIGGER_CSV)[0]
+    assert job.next_run == dt.datetime(2026, 9, 2, 20, 45)
+    assert job.interval == dt.timedelta(minutes=15)
+
+
+def test_the_merge_does_not_depend_on_which_trigger_schtasks_lists_first():
+    """`schtasks` gives no ordering guarantee across triggers, so a fix that kept the
+    first row would work only while the repetition happened to come first."""
+    lines = TWO_TRIGGER_CSV.strip().splitlines()
+    reversed_csv = "\n".join([lines[0], lines[2], lines[1]]) + "\n"
+    job = health.parse_tasks(reversed_csv)[0]
+    assert job.next_run == dt.datetime(2026, 9, 2, 20, 45)
+    assert job.interval == dt.timedelta(minutes=15)
+
+
+def test_a_problem_with_a_multi_trigger_job_is_reported_once():
+    """The consequence that reached a user: the tray drew the same job twice, and
+    `problems` would have said the same thing about it twice."""
+    failing = TWO_TRIGGER_CSV.replace('"0","Enabled"', '"1","Enabled"')
+    found = health.problems(health.parse_tasks(failing), dt.datetime(2026, 9, 2, 20, 40))
+    assert len(found) == 1
+    assert found[0].startswith("devkit-rc-servers: last run failed")
+
+
+def test_every_trigger_reporting_no_next_run_still_leaves_one_job():
+    never = TWO_TRIGGER_CSV.replace('"9/2/2026 8:45:00 PM"', '"N/A"')
+    jobs = health.parse_tasks(never)
+    assert len(jobs) == 1
+    assert jobs[0].next_run is None

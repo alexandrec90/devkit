@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -3153,3 +3154,38 @@ def test_read_stdin_survives_a_byte_it_cannot_decode():
         assert guard.read_stdin() == ""
     finally:
         _sys.stdin = saved
+
+
+@pytest.mark.parametrize("relpath", ["scripts/worktree-guard.py", "scripts/task_slug.py"])
+def test_the_branch_tier_consults_the_harness_kill_switch(relpath):
+    """`DEVKIT_HOOKS_OFF=branch-tier` reaches both halves of the tier, under one name.
+
+    This inverts an earlier assertion. These two were exempt from the switch because
+    turning them off does not quieten a session -- it lands agent work on a checkout's
+    home branch with no branch under it, a `needs-branch` verdict nobody can attribute
+    days later. That held only while the hooks were the sole way to cut the branch;
+    `Agent: Spawn Branch, Worktree, Agent` and `Agent: Ship PR` now do it on a click, so
+    the operator who stands the tier down keeps the guarantee by hand. The safety
+    property has moved, it has not been deleted.
+
+    Asserted on the source as well as on behaviour: the risk the earlier test guarded
+    against runs the other way now -- a future edit *removing* the check by symmetry with
+    a tier that used to be exempt.
+    """
+    source = (REPO_ROOT / relpath).read_text(encoding="utf-8")
+    assert 'hooks_off("branch-tier")' in source
+
+
+def _switch_explodes(*_args, **_kwargs):
+    raise AssertionError("the branch tier did work after being switched off")
+
+
+@pytest.mark.parametrize("module", ["worktree-guard", "task_slug"])
+def test_a_stood_down_branch_tier_returns_before_it_reads_stdin(monkeypatch, module):
+    """The reversion check: with the switch on, neither half may read the payload, touch
+    the registry, or cut anything. Both are on the hot path of every prompt or mutating
+    call, so an early return is the whole of what "off" can mean here."""
+    hook = load_script(f"scripts/{module}.py")
+    monkeypatch.setenv("DEVKIT_HOOKS_OFF", "branch-tier")
+    monkeypatch.setattr(sys, "stdin", None)
+    assert hook.main([]) == 0

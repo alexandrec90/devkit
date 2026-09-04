@@ -119,9 +119,11 @@ checkouts synced. Two readings that are easy to get backwards:
 
 ## 7. What the harness did to agents: the events ledger
 
-`logs/harness-events.log` in the devkit checkout is the reap ledger's pattern applied
-to the rest of the harness: one line per event, ISO stamp then tab-separated
-`key=value`, append-only. Every guard decision names the box and branch it routed to,
+`logs/harness-events-<host>.log` in the devkit checkout — one shard per machine, plus the
+legacy unsharded `harness-events.log` — is the reap ledger's pattern applied to the rest
+of the harness: one line per event, ISO stamp then tab-separated `key=value`,
+append-only. Grep them together (`logs/harness-events*.log`); `harness_triage.py` already
+reads the union. Every guard decision names the box and branch it routed to,
 under one of two event names that are worth keeping apart: `guard-route` is the ordinary
 case, where the edit was re-aimed at the box and the agent paid nothing, while
 `guard-block` is a call the guard could not re-aim and refused instead -- a failed tool

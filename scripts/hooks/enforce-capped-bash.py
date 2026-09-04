@@ -604,6 +604,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--shell", choices=("bash", "powershell"), default="bash")
     args = parser.parse_args(argv)
+    # Asked before stdin is read: a gate that has been switched off blocks nothing, so
+    # there is nothing for it to decide. See `harness_config.hooks_off`.
+    if harness_config.hooks_off("capped-bash"):
+        return 0
     # UTF-8, never the platform codec -- see `worktree-guard.read_stdin`. A command
     # carrying an em dash decoded through cp1252 reaches `decide` mangled, and the
     # mangling is then what `record_block` puts on the ledger.

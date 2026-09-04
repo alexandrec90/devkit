@@ -75,6 +75,10 @@ that costs when it lapses, and what it means for a session editing a hook (you a
 changing the thing that is running you), is in
 [`scripts/hooks/CLAUDE.md`](scripts/hooks/CLAUDE.md).
 
+**All of it can be switched off, and here some of it is** — a hook that does nothing may
+be `harness-switch.py`, not a bug. That tier is in
+[`scripts/CLAUDE.md`](scripts/CLAUDE.md).
+
 ## The two test trees
 
 `scripts/hooks/tests/` is vendored and must stay project-agnostic; `tests/` is

@@ -66,6 +66,15 @@ isolates that, so a name like this on the open list means an *older* copy is doi
 `project=` is normalised on read, so rows written from a box (`devkit--some-task-0824`)
 group with the project they were cut from. Do not filter on the raw field.
 
+**A group can span machines**, and the `host` line names the ones it was seen on. The
+backlog is the union of every `harness-events-<host>.log` in the checkout's `logs/`, so on
+a machine whose ledger is pooled you are triaging both. Two consequences: a group seen on
+one host only is a lead worth following — a path, a shell, a scheduler that differs — and a
+`--resolve-like` retires **every** machine's copy in one note, which is the point. A
+machine whose `logs/` is not pooled still shows only its own, and a defect filed on the
+other one is invisible here; that is a transport that was never set up, not an empty
+backlog.
+
 ## 2. Verify each group before believing it
 
 **A report is evidence that an agent was blocked, not that the block was wrong**, and
@@ -114,8 +123,10 @@ literal ids when a group needs splitting.
 
 - The note is **required**. `--note` refuses to be blank, exactly as `.devkit-untested.txt`
   refuses to be seeded over.
-- A resolution is itself a ledger event, so the ledger stays append-only and single-file:
-  nothing is edited, nothing can go stale against a second state file.
+- A resolution is itself a ledger event, so the ledger stays append-only: nothing is
+  edited, nothing can go stale against a second state file. It is written to **this**
+  machine's shard even when it retires a row another machine filed — no machine writes to
+  another's file, which is what keeps a pooled `logs/` conflict-free.
 - Ids are content-addressed, not line numbers — a resolution written today still names
   its event after a thousand appends.
 

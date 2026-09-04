@@ -795,6 +795,28 @@ def insert_folder(text: str, name: str) -> str:
     return text[:end] + entry + text[end:]
 
 
+# Every picker whose options are a project list this module keeps current. One tuple
+# rather than one per direction: the pair below are inverses, and a name added to only
+# the insert side is a picker that grows a project and can never lose it again.
+MAINTAINED_PICKERS = (
+    "project",
+    "daemonProject",
+    # Lists MORE than the registry -- the reference checkouts too -- so a new
+    # project still has to be added to it, and this is the only place that can.
+    "mergeCheckout",
+    # And this one lists LESS: every consumer that adopts a devkit release, which
+    # is the registry minus devkit itself. Inserting into it is still right --
+    # `register` never names devkit, since devkit is already registered -- and the
+    # alternative, a hand-kept list of consumers, is exactly the drift that
+    # retired `sweepScope` and `upgradeScope`.
+    "adoptProjects",
+    # The single-pick the four `Agent:` tasks share. One checkout per click by nature:
+    # a box is cut in one repo, and spawning the same topic across six of them is not a
+    # thing anybody wants by accident.
+    "agentProject",
+)
+
+
 def insert_picker_option(text: str, name: str) -> str:
     """Add `name` to the maintained single- and multi-project picker options.
 
@@ -803,19 +825,7 @@ def insert_picker_option(text: str, name: str) -> str:
     answer against `folders`, so a missed update costs a picker entry, not correctness.
     """
     updated = text
-    for picker_id in (
-        "project",
-        "daemonProject",
-        # Lists MORE than the registry -- the reference checkouts too -- so a new
-        # project still has to be added to it, and this is the only place that can.
-        "mergeCheckout",
-        # And this one lists LESS: every consumer that adopts a devkit release, which
-        # is the registry minus devkit itself. Inserting into it is still right --
-        # `register` never names devkit, since devkit is already registered -- and the
-        # alternative, a hand-kept list of consumers, is exactly the drift that
-        # retired `sweepScope` and `upgradeScope`.
-        "adoptProjects",
-    ):
+    for picker_id in MAINTAINED_PICKERS:
         scan = devkit_jsonc.blank_comments(updated)
         marker = scan.find(f'"id": "{picker_id}"')
         if marker < 0:
@@ -946,12 +956,7 @@ def remove_picker_option(text: str, name: str) -> str:
     is an error.
     """
     updated = text
-    for picker_id in (
-        "project",
-        "daemonProject",
-        "mergeCheckout",
-        "adoptProjects",
-    ):
+    for picker_id in MAINTAINED_PICKERS:
         scan = devkit_jsonc.blank_comments(updated)
         marker = scan.find(f'"id": "{picker_id}"')
         if marker < 0:

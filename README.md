@@ -295,6 +295,7 @@ when the work leaves it:
 
 ```bash
 python scripts/worktree.py new carameli --slug voicemail --yes  # cut, lease, install
+python scripts/worktree.py new carameli --slug voicemail --base release/2.1 --yes  # ... off something else
 python scripts/worktree.py new carameli --slug bump --auto --yes  # ... for a scheduled job
 python scripts/worktree.py list                                 # what exists, and its verdict
 python scripts/worktree.py reap --all --yes                     # everything already shipped
@@ -359,6 +360,42 @@ branch. The same hook holds the boundary between boxes: each one is leased to th
 session it was cut for, an edit aimed into another session's box is blocked toward the
 editor's own, and `claim` is the deliberate handover for when the user moves a task
 between sessions.
+
+### Switching the harness off, and driving the same tier by hand
+
+The harness is three costs wearing one name, and `scripts/harness-switch.py` is the one
+verb that stands all three down and puts them back:
+
+```bash
+python scripts/harness-switch.py                       # what is off right now
+python scripts/harness-switch.py --off                 # hooks, instructions and jobs
+python scripts/harness-switch.py --off --group hooks   # one group at a time
+python scripts/harness-switch.py --on --group instructions
+```
+
+| Group | What it stands down | How |
+| --- | --- | --- |
+| `hooks` | every hook, the branch tier included | `DEVKIT_HOOKS_OFF=1` in the user settings and the user environment |
+| `instructions` | every `CLAUDE.md` and `.claude/rules/*.md`, at every tier | moved to `logs/harness-switch/`, tracked ones marked `skip-worktree` |
+| `jobs` | `devkit-worktree-reconcile`, `devkit-upgrade-projects`, `devkit-release` | `schtasks /Change /DISABLE` |
+
+Nothing is deleted: files are held and restored byte for byte, jobs are disabled rather
+than unregistered, and `--on` is the inverse of `--off`. Skills are never touched — they
+cost nothing until a session invokes one by name.
+
+With the branch tier off, `scripts/agent-box.py` is what cuts, runs, ships and destroys a
+box on purpose. It is one verb per workspace task, and the tasks are the intended way in:
+
+```bash
+python scripts/agent-box.py spawn --project carameli --slug voicemail --agent claude
+python scripts/agent-box.py attach --project carameli --agent codex   # pick from a menu
+python scripts/agent-box.py ship --project carameli                   # commit, push, PR
+python scripts/agent-box.py delete --project carameli                 # box and local branch
+```
+
+`ship` runs the deterministic fixers, commits with `--no-verify` and pushes with the
+branch policy skipped — on purpose. A pre-commit refusal leaves the work uncommitted in a
+box `reconcile` may reap, while the same rules run in `PR Gate` on a branch that exists.
 
 ### Running someone else's branch before it merges
 
@@ -531,6 +568,11 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-global-tools` | `scripts/install-global-tools.py` | daily 04:30 | `logs/global-tools.log` |
 | `devkit-rc-servers` | `scripts/install-rc-schedule.py` | every 15 min | `logs/rc-servers.log` |
 | `devkit-tray` | `scripts/install-tray.py` | at logon, resident | `logs/tray.log` |
+
+The first three are the branch-delivery half, and are the ones
+`scripts/harness-switch.py --off --group jobs` disables: they exist to move agent
+branches along. The rest are machine maintenance and are left running, because stopping
+the vacuum cleaner is not part of stopping cooking.
 
 `scripts/schedule_health.py` answers the question no artifact can — *did it run at all*
 — and names the file above when one exits non-zero, so the session-start line is a
