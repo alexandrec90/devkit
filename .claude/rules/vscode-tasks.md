@@ -85,9 +85,23 @@ where a conflict has two visible sides.
 **The other direction still exists, for the edits that are not yours to route.** VS Code
 rewrites the file itself when a workspace setting is changed through its UI.
 `--adopt-workspace` records the live file back into `workspace.jsonc` for committing on a
-branch, and `--render-workspace` *refuses* rather than overwriting an unadopted edit — it
-renders only when the live file is byte-for-meaning what devkit last wrote, recorded in
-`.devkit-workspace-render.json` beside it. `--force` overrides that, and it discards.
+branch, and `--render-workspace` *refuses* rather than overwriting an unadopted edit — the
+live file's meaning is stamped in `.devkit-workspace-render.json` beside it, and a stamp
+that no longer matches arms the refusal. `--force` overrides that, and it discards.
+
+**Only differences that could be someone's edit arm it.** A stale stamp says the live file
+moved, not what moved, so `live_only` reads the drift and a canonical copy that is merely
+*ahead* — tasks, inputs or folders the live file is missing — publishes anyway: those are
+the entries a publish exists to deliver, and git holds every one of them. The three
+"differs" lines count as live-authored regardless, because they name a key both copies
+carry and say nothing about who moved it last.
+
+**And an adopt refuses in that same state, rather than deleting what it finds.**
+`--adopt-workspace` overwrites `workspace.jsonc` with the whole live file, so against a
+canonical copy that is ahead it deletes merged work — the state of the machine between any
+task's merge and its publish. It names what would go and stops; `--force` is the discarding
+half. **The merge that state needs is by hand:** copy the live edit into `workspace.jsonc`
+on a task branch, ship it, and publish after it merges.
 
 `test_the_live_workspace_matches_the_canonical_copy` holds the pairing and is
 `@needs_live_workspace`: skipped in CI, so drift is caught locally or not at all.
@@ -95,11 +109,16 @@ renders only when the live file is byte-for-meaning what devkit last wrote, reco
 **Red there is not evidence of drift.** The live file is rendered from a *merged* canonical
 copy, so from a box on an open task branch the test reports your own unlanded edit every
 time — an added task as `missing from the workspace`, a changed one as `definition
-differs`. With several boxes open that is the normal state. What the live file should match
-is `workspace.jsonc` **as it stands on `origin/main`**. **And the remedy the failure names
-is the wrong direction here:** `--adopt-workspace` takes the live file — still main's
-render — over your canonical copy, so running it in a box to get green deletes the edit the
-branch exists for. Render only after the PR merges; a box never renders.
+differs`. Another branch's edit reads the same way once its PR lands and this box has not
+merged main yet. With several boxes open that is the normal state, not a defect. What the
+live file should match is `workspace.jsonc` **as it stands on `origin/main`** — `git show`
+that revision, and the difference against your own copy is what your branch adds.
+
+**And the adopt direction is the wrong one here.** `--adopt-workspace` takes the *live*
+file — still main's render — over your canonical copy, so running it in a box to get green
+deletes the edit the branch exists for. It refuses on exactly that now, and the failure no
+longer offers it, but the reason is worth carrying: render only after the PR merges; a box
+never renders.
 
 ## Conventions for the tasks themselves
 
