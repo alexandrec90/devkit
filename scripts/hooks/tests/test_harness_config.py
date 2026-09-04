@@ -691,6 +691,17 @@ def test_the_bash_cap_returns_before_it_reads_anything(monkeypatch):
     assert capped.main([]) == 0
 
 
+def test_the_branch_tier_shim_returns_before_it_resolves_devkit(monkeypatch):
+    """`branch-tier` is the one switch name whose hook is a *shim*: it forwards the
+    payload to a guard that lives in devkit. Standing it down has to happen before that
+    subprocess, or an operator who switched the tier off still pays a Python start on
+    every mutating call in every consuming project."""
+    shim = load_module("scripts/hooks/worktree-guard-launch.py")
+    monkeypatch.setenv(cfg.HOOKS_OFF_ENV, "branch-tier")
+    monkeypatch.setattr(shim, "devkit_root", _explodes)
+    assert shim.main([]) == 0
+
+
 def test_every_switchable_hook_is_a_hook_that_actually_consults_the_switch():
     """`SWITCHABLE_HOOKS` is the documented vocabulary, so a name in it that no hook
     reads is a value an operator can set and watch do nothing. The two call sites that
@@ -702,6 +713,7 @@ def test_every_switchable_hook_is_a_hook_that_actually_consults_the_switch():
             REPO_ROOT / "scripts/hooks/stop.py",
             REPO_ROOT / "scripts/hooks/lint-fix.py",
             REPO_ROOT / "scripts/hooks/enforce-capped-bash.py",
+            REPO_ROOT / "scripts/hooks/worktree-guard-launch.py",
             REPO_ROOT / ".claude/hooks/session-start.sh",
             REPO_ROOT / ".claude/settings.json",
         )

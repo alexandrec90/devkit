@@ -36,8 +36,22 @@ read — worth doing once the false-positive rate here is known, and not before.
 import functools
 import re
 import subprocess
+from pathlib import Path
 
-from support import REPO_ROOT
+from support import REPO_ROOT, harness_state
+
+
+def _text(path: Path) -> str:
+    """A documented file's content, whether or not the instructions switch has moved it.
+
+    Every read in this module goes through here. `harness-switch.py --off --group
+    instructions` moves `CLAUDE.md` and `.claude/rules/*.md` out of the checkout so a
+    session stops loading them -- but an instruction file that has moved is still an
+    instruction file, and a gate that silently stopped checking one would be worse than a
+    gate that failed. Live file first, stash second, "" if it is genuinely neither.
+    """
+    return harness_state.instruction_text(path)
+
 
 # --- what counts as a documented file -----------------------------------------
 #
@@ -208,11 +222,22 @@ def _claude_md_files() -> list:
     project's, not devkit's.
     """
     skipped = _UNSEARCHED | {"templates"}
-    return sorted(
+    found = {
         path
         for path in REPO_ROOT.rglob("CLAUDE.md")
         if not any(part in skipped for part in path.relative_to(REPO_ROOT).parts)
-    )
+    }
+    # Switched-off files by their LIVE path, so everything downstream -- the citation
+    # check, the `relative_to` in every message -- keeps talking about the repo. The
+    # listing has to include them, not just the reads: a glob finds nothing once the
+    # group is off, and `test_every_claude_md_is_checked_not_only_the_root_one` would
+    # then pass by checking nothing.
+    found |= {
+        REPO_ROOT / relpath
+        for relpath, _held in harness_state.instruction_sources(REPO_ROOT)
+        if Path(relpath).name == "CLAUDE.md"
+    }
+    return sorted(found)
 
 
 def _sibling_references() -> list:
@@ -237,13 +262,24 @@ def _documented_files() -> list:
     roots = [REPO_ROOT / "README.md", REPO_ROOT / "RELEASING.md"]
     roots += _claude_md_files()
     roots += _sibling_references()
-    roots += sorted((REPO_ROOT / ".claude" / "rules").glob("*.md"))
+    roots += _rule_files()
     roots += sorted((REPO_ROOT / ".claude" / "skills").glob("*/*.md"))
     seen: dict = {}
     for path in roots:
-        if path.is_file():
+        if harness_state.instruction_exists(path):
             seen.setdefault(path.resolve(), path)
     return list(seen.values())
+
+
+def _rule_files() -> list:
+    """`.claude/rules/*.md` by live path, switched off or not. See `_claude_md_files`."""
+    found = set((REPO_ROOT / ".claude" / "rules").glob("*.md"))
+    found |= {
+        REPO_ROOT / relpath
+        for relpath, _held in harness_state.instruction_sources(REPO_ROOT)
+        if relpath.startswith(".claude/rules/")
+    }
+    return sorted(found)
 
 
 def _instruction_files() -> list:
@@ -345,12 +381,40 @@ def test_the_repo_carries_no_agents_md():
     )
 
 
+def test_the_gate_still_sees_a_file_the_instructions_switch_has_moved(monkeypatch, tmp_path):
+    """The reversion check for `_text` and the two listing helpers.
+
+    `harness-switch.py --off --group instructions` moves this repo's own `CLAUDE.md` and
+    rules out of the checkout. Without the switch-aware listing every assertion in this
+    module would still pass -- over an empty set, which is the one failure mode a gate
+    cannot report about itself.
+    """
+    held = tmp_path / "held.md"
+    held.write_text("stashed body naming `scripts/worktree.py`\n", encoding="utf-8")
+    monkeypatch.setattr(
+        harness_state,
+        "instruction_sources",
+        lambda _root, _ledger=None: [("nested/CLAUDE.md", held), (".claude/rules/x.md", held)],
+    )
+    monkeypatch.setattr(
+        harness_state, "instruction_text", lambda path: _stashed_or_live(path, held)
+    )
+
+    assert REPO_ROOT / "nested" / "CLAUDE.md" in _claude_md_files()
+    assert REPO_ROOT / ".claude" / "rules" / "x.md" in _rule_files()
+    assert "worktree.py" in _text(REPO_ROOT / "nested" / "CLAUDE.md")
+
+
+def _stashed_or_live(path: Path, held: Path) -> str:
+    return path.read_text(encoding="utf-8") if path.is_file() else held.read_text(encoding="utf-8")
+
+
 def test_documented_paths_exist():
     """A path a document names is a claim the repo has to keep."""
     missing: list[str] = []
     for path in _documented_files():
         rel = path.relative_to(REPO_ROOT).as_posix()
-        for cited in cited_paths(path.read_text(encoding="utf-8")):
+        for cited in cited_paths(_text(path)):
             if cited in ALLOWED_MISSING or _exists(cited):
                 continue
             missing.append(f"{rel}: {cited}")
@@ -372,7 +436,7 @@ def test_instruction_prose_pins_no_versions():
     pinned: list[str] = []
     for path in _instruction_files():
         rel = path.relative_to(REPO_ROOT).as_posix()
-        for pin in version_pins(path.read_text(encoding="utf-8")):
+        for pin in version_pins(_text(path)):
             if pin not in ALLOWED_VERSION_PINS:
                 pinned.append(f"{rel}: {pin!r}")
     assert not pinned, (
@@ -403,11 +467,7 @@ def test_exemptions_are_still_needed():
     assert not resurrected, (
         f"ALLOWED_MISSING names paths this repo now tracks: {resurrected}. Drop the entries."
     )
-    everything_cited = {
-        cited
-        for path in _documented_files()
-        for cited in cited_paths(path.read_text(encoding="utf-8"))
-    }
+    everything_cited = {cited for path in _documented_files() for cited in cited_paths(_text(path))}
     uncited = sorted(set(ALLOWED_MISSING) - everything_cited)
     assert not uncited, (
         f"ALLOWED_MISSING exempts paths no document names: {uncited}. Drop the entries."
@@ -415,9 +475,7 @@ def test_exemptions_are_still_needed():
     unused = sorted(
         pin
         for pin in ALLOWED_VERSION_PINS
-        if not any(
-            pin in version_pins(path.read_text(encoding="utf-8")) for path in _instruction_files()
-        )
+        if not any(pin in version_pins(_text(path)) for path in _instruction_files())
     )
     assert not unused, f"ALLOWED_VERSION_PINS names pins no longer written: {unused}."
 
@@ -494,13 +552,10 @@ def test_the_root_file_names_every_other_instruction_file():
     absence is visible from inside the file that should have named it, which is the
     same shape as every other miss this module catches.
     """
-    root = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    root = _text(REPO_ROOT / "CLAUDE.md")
     cited = set(cited_paths(root))
     expected = {path.relative_to(REPO_ROOT).as_posix() for path in _claude_md_files()}
-    expected |= {
-        path.relative_to(REPO_ROOT).as_posix()
-        for path in (REPO_ROOT / ".claude" / "rules").glob("*.md")
-    }
+    expected |= {path.relative_to(REPO_ROOT).as_posix() for path in _rule_files()}
     missing = sorted(expected - cited - {"CLAUDE.md"})
     assert not missing, (
         f"CLAUDE.md's map does not name: {missing}. Add a row, or the file is reachable "

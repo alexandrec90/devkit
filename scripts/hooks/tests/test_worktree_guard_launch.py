@@ -56,6 +56,25 @@ def make_project(root: Path) -> Path:
 # --- finding devkit ---------------------------------------------------------
 
 
+def test_the_branch_tier_switch_is_read_and_defaults_to_running(monkeypatch):
+    """`DEVKIT_HOOKS_OFF=branch-tier` is the one exit-0 path here that is a decision
+    rather than a fallback, and the default has to be "the guard runs" for a variable
+    nobody has ever heard of."""
+    assert launch.branch_tier_off() is False
+    monkeypatch.setenv("DEVKIT_HOOKS_OFF", "branch-tier")
+    assert launch.branch_tier_off() is True
+    monkeypatch.setenv("DEVKIT_HOOKS_OFF", "stop")
+    assert launch.branch_tier_off() is False
+
+
+def test_the_switch_reads_as_running_when_the_sibling_is_not_vendored(monkeypatch):
+    """A consumer whose pull went sideways must not have every tool call routed through
+    an ImportError -- and "cannot decide" has to mean "let the guard run", not "skip it"."""
+    monkeypatch.setitem(sys.modules, "harness_config", None)
+    monkeypatch.setenv("DEVKIT_HOOKS_OFF", "branch-tier")
+    assert launch.branch_tier_off() is False
+
+
 def test_the_environment_variable_is_consulted_first(tmp_path):
     """`$DEVKIT_DIR` is the name `sync-devkit.py` and `report-harness-defect.py` already
     use, so a machine configured for those is configured for this."""

@@ -10,6 +10,36 @@ that resolves a box for a session. It lives beside `CLAUDE.md` rather than insid
 for the reason `windowless-jobs.md` does: this is mechanism a session needs only when
 it is in that code, and the file it was in is against a 500-line cap.
 
+## It can be switched off, and that is new
+
+`DEVKIT_HOOKS_OFF=branch-tier` stands this hook and `task_slug.py` down before either
+reads its payload. Both were deliberately exempt from the kill switch until
+`harness-switch.py` and the four `Agent:` workspace tasks existed, on the reasoning that
+switching them off does not quieten a session — it lands agent work on a checkout's home
+branch with nothing under it. That argument held only while this hook was the *only*
+thing that could cut the branch.
+
+So the guarantee moved rather than went: `agent-box.py spawn` cuts the box and
+`agent-box.py ship` delivers it, both on a click. What that means for a change here is
+that **the block message is no longer the only way an operator learns a box exists**, and
+the two paths have to keep agreeing about what a box is. `tests/test_worktree_guard.py`
+pins both halves — that the switch is consulted, and that consulting it returns before
+anything is read.
+
+Two coupling points between `agent-box.py` and this tier are easy to break silently:
+
+- **`spawn` reads `worktree.py new --json`**, so that payload's `path` and `box.branch`
+  are an interface. Rendering them differently breaks the click and nothing else.
+- **`ship` bypasses the pre-commit gate deliberately.** The gate's refusal leaves the work
+  uncommitted in a box `reconcile` may reap; the same rules run in `PR Gate`, on a branch
+  that exists. That is a decision about *where the work is when the checks run*, not a
+  check anybody is skipping — and it is why `ship` runs the deterministic fixers first.
+
+A third belongs to whoever changes `worktree.py new`: `--base` exists for the one thing
+this hook never needs and a human sometimes does — stacking a branch on one whose PR is
+still open. The hook tier passes it never, and `spawn_plan`'s reasoning for cutting from
+`origin/<default>` is unchanged by it.
+
 ## What it judges
 
 - **The guard re-aims the call rather than refusing it, and the refusal is the

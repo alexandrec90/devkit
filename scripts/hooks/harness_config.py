@@ -583,20 +583,35 @@ def lookup(cfg: Config, dotted: str) -> str:
 # each hook so the spelling, the "all" aliases and the off-values asymmetry have one
 # owner.
 #
-# **Two hooks deliberately never ask it**, and that is the whole safety property:
-# `worktree-guard.py`, which routes an agent edit into a box on a task branch, and
-# `task_slug.py`, which names it. Switching those off does not quieten a session — it
-# lands agent work on a checkout's home branch with no branch under it, which is the
-# failure the workspace tier exists to prevent, and it surfaces days later as a
-# `needs-branch` verdict nobody can attribute. `test_harness_config.py` fails a copy of
-# either that learns to consult this.
+# **The branch tier is switchable too, and that is a deliberate reversal.**
+# `worktree-guard.py` — which routes an agent edit into a box on a task branch — and
+# `task_slug.py`, which names it, were exempt from this switch on the reasoning that
+# turning them off does not quieten a session, it lands agent work on a checkout's home
+# branch with nothing under it. That argument held only while the hooks were the *only*
+# thing that could cut the branch. They no longer are: devkit's workspace carries a task
+# per verb — cut the box, open an agent in it, ship it, destroy it — so an operator who
+# stands the tier down is choosing to drive it by hand rather than losing it. That tier is
+# devkit's, not every project's, which is why this comment describes the *reversal* rather
+# than naming a script a consumer does not have.
+#
+# The two share one name, `branch-tier`, rather than one each. They are halves of a
+# single mechanism — the slug exists to name the box the guard cuts — and the vendored
+# tier can only see one of them anyway: consumers run `worktree-guard-launch.py` and
+# have no copy of `task_slug.py` at all.
 HOOKS_OFF_ENV = "DEVKIT_HOOKS_OFF"
 
 # Every hook the switch reaches, spelled as it is written in the env var. Listing them
 # is what makes `DEVKIT_HOOKS_OFF=stop` a typo-checkable value rather than a guess, and
 # what lets the harness be re-enabled one hook at a time — the order it will actually
 # come back in, since the Stop gate is the expensive one and `lint-fix` is nearly free.
-SWITCHABLE_HOOKS = ("session-start", "capped-bash", "lint-fix", "stop", "failure-retro")
+SWITCHABLE_HOOKS = (
+    "session-start",
+    "capped-bash",
+    "lint-fix",
+    "stop",
+    "failure-retro",
+    "branch-tier",
+)
 
 # Anything meaning "every hook in `SWITCHABLE_HOOKS`". A bare `=1` is what an operator
 # reaches for first, so it has to mean the obvious thing.

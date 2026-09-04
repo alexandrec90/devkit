@@ -35,6 +35,10 @@ Resolution order, first hit wins:
 3. a sibling `devkit/` beside this checkout, which is the workspace layout and therefore
    the case that needs no configuration at all.
 
+`DEVKIT_HOOKS_OFF=branch-tier` stands this down before it resolves anything, and that is
+the one exit-0 path here that is a *decision* rather than a fallback. See the kill-switch
+section of `harness_config.py` for why the branch tier is switchable at all.
+
 Stdlib only, and no import of anything under `scripts/` -- this runs before a virtualenv
 exists, in a repo devkit does not control.
 
@@ -47,6 +51,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # The guard's path inside a devkit checkout. A shim that pointed at a name devkit does
 # not have would resolve a directory and then exit 0 forever, which looks exactly like a
@@ -104,7 +110,31 @@ def configured_dir(root: Path) -> str:
     return ""
 
 
+def branch_tier_off() -> bool:
+    """Whether `DEVKIT_HOOKS_OFF` names the branch tier.
+
+    The import is local rather than module-level for `lint-fix.py`'s reason -- a consumer
+    whose pull went sideways must not have every tool call routed through an ImportError,
+    and this shim's whole contract is that it allows when it cannot decide. Written as a
+    function rather than a module-level `try` with a `None` fallback because that shape
+    costs two suppressions (`pragma: no cover` and `type: ignore`) in a vendored file
+    where `structure_check.py` counts every one of them, and this needs neither.
+    """
+    try:
+        import harness_config
+    except ImportError:
+        return False
+    return bool(harness_config.hooks_off("branch-tier"))
+
+
 def main(argv: list[str] | None = None) -> int:
+    # Before the stdin read and before devkit is resolved, so a stood-down tier costs a
+    # dict lookup rather than a subprocess. `branch-tier` covers this shim and, in
+    # devkit, the guard and the slug hook behind it: an operator who has switched the
+    # tier off is cutting branches through the workspace tasks instead.
+    if branch_tier_off():
+        return EXIT_ALLOW
+
     # UTF-8 in both directions, explicitly. `text=True` and a bare `sys.stdin` decode
     # through `locale.getencoding()` -- cp1252 on a Windows workstation -- and this shim
     # carries the guard's payload in and its `updatedInput` back out. A mangled byte on

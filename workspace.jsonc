@@ -1095,6 +1095,206 @@
 					"close": false
 				},
 				"problemMatcher": []
+			},
+			// The four `Agent:` tasks are the manual spelling of what the branch tier used
+			// to do without being asked. `worktree-guard.py` routed an agent edit into a
+			// fresh box and the operator chose nothing; `harness-switch.py` can now stand
+			// that tier down, and a tier that can be switched off needs a hand spelling or
+			// switching it off loses the guarantee rather than moving it.
+			//
+			// All five are wrapped in `notify-wrap.py` / `log-wrap.py` like every other
+			// direct task, and three of them ASK something on stdin -- which box to ship,
+			// delete or open. Those two facts coexist because of one detail in
+			// `agent-box.choose`: the prompt is a whole flushed LINE. `log-wrap.py` pipes
+			// stdout and reads it a line at a time, so a bare `input("> ")` prompt would sit
+			// in the buffer and the operator would watch an empty terminal hang; stdin is
+			// inherited through both wrappers either way.
+			{
+				"label": "Agent: Spawn Branch, Worktree, Agent",
+				"detail": "Cut a task branch off the base you choose, give it an ephemeral worktree with its own port lease and COMPOSE_PROJECT_NAME, provision its toolchain, and open Claude or Codex in a tab scoped to it. The tab attaches to the Windows Terminal window you are already looking at, and creates one only if there is none. Leave the topic blank to name the branch after the project; leave the base blank for the project's own default branch. Choosing 'none' as the agent cuts and provisions the box and opens nothing.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Agent: Spawn Branch, Worktree, Agent",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Agent: Spawn Branch, Worktree, Agent",
+					"--",
+					"python",
+					"scripts/agent-box.py",
+					"spawn",
+					"--project",
+					"${input:agentProject}",
+					"--slug",
+					"${input:agentSlug}",
+					"--base",
+					"${input:agentBase}",
+					"--agent",
+					"${input:agentCli}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "rocket",
+					"color": "terminal.ansiGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Agent: Run Agent on Worktree",
+				"detail": "The last step of `Agent: Spawn Branch, Worktree, Agent`, on a box that already exists: open Claude or Codex in a tab scoped to it. Same script and same function, so the two can never disagree about which window the agent opens in. Leave the branch blank to pick from this project's live boxes in the terminal.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Agent: Run Agent on Worktree",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Agent: Run Agent on Worktree",
+					"--",
+					"python",
+					"scripts/agent-box.py",
+					"attach",
+					"--project",
+					"${input:agentProject}",
+					"--branch",
+					"${input:agentBranch}",
+					"--agent",
+					"${input:agentCliOnly}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "terminal",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Agent: Ship PR",
+				"detail": "Run the deterministic fixers over a box, commit everything in it, push the branch and open its pull request. Leave the branch blank to pick from this project's live boxes; a box whose PR has already MERGED is never offered, and one whose PR is still open is, because another commit is how you answer review. The pre-commit gate is bypassed on purpose: its refusal would leave the work uncommitted in a box that reconcile may reap, and the same rules run in the PR gate on a branch that exists.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Agent: Ship PR",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Agent: Ship PR",
+					"--",
+					"python",
+					"scripts/agent-box.py",
+					"ship",
+					"--project",
+					"${input:agentProject}",
+					"--branch",
+					"${input:agentBranch}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "git-pull-request",
+					"color": "terminal.ansiBlue"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Agent: Delete Branch",
+				"detail": "Destroy a box and its local branch, whatever state it is in — this is the verb for abandoning work, so the reap is forced and a dirty tree does not stop it. The branch on origin, and therefore any PR, is left alone and said so. Leave the branch blank to pick from this project's live boxes.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Agent: Delete Branch",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Agent: Delete Branch",
+					"--",
+					"python",
+					"scripts/agent-box.py",
+					"delete",
+					"--project",
+					"${input:agentProject}",
+					"--branch",
+					"${input:agentBranch}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "circle-slash",
+					"color": "terminal.ansiRed"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				// The switch itself. Without a click it is three commands nobody would
+				// remember, which is the state the harness was in before `DEVKIT_HOOKS_OFF`
+				// existed and the reason nobody ever switched anything off.
+				"label": "Harness: Switch Agent Automation",
+				"detail": "Stand the coding-agent harness down, or put it back, in three groups: `hooks` (every hook, the branch tier included), `instructions` (every CLAUDE.md and .claude/rules/*.md, moved aside and restorable byte for byte — skills are never touched) and `jobs` (the scheduled tasks that deliver agent branches: reconcile, upgrade-projects, release). Report changes nothing. Nothing is deleted: files are held under devkit/logs/harness-switch and jobs are disabled rather than unregistered.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"scripts/notify-wrap.py",
+					"Harness: Switch Agent Automation",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
+					"Harness: Switch Agent Automation",
+					"--",
+					"python",
+					"scripts/harness-switch.py",
+					"${input:harnessVerb}",
+					"--group",
+					"${input:harnessGroups}"
+				],
+				"options": {
+					"cwd": "${workspaceFolder:devkit}"
+				},
+				"icon": {
+					"id": "circuit-board",
+					"color": "terminal.ansiYellow"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
 			}
 		],
 		"inputs": [
@@ -1936,6 +2136,115 @@
 						"fileName": "${workspaceFolder:devkit}/logs/plug-menu.json",
 						"fileFormat": "load"
 					}
+				}
+			},
+			{
+				// MAINTAINED BY new-project.py — `devkit_project.MAINTAINED_PICKERS` names
+				// it. Single-pick by nature: a box is cut in one repo, and spawning the same
+				// topic across six of them is not a thing anybody wants by accident.
+				"id": "agentProject",
+				"type": "pickString",
+				"description": "Which checkout is this box for?",
+				"options": [
+					"carameli",
+					"ibkr_trader",
+					"devkit",
+					"data-lake",
+					"sports_betting",
+					"roguelike"
+				],
+				"default": "devkit"
+			},
+			{
+				// A prompt rather than a picker, and blank rather than "main", because the
+				// projects here do not agree on a name: some are on `main` and some on
+				// `master`, and a picker offering both would be offering one wrong answer per
+				// project. Blank means "ask git", which is right in every repo.
+				"id": "agentBase",
+				"type": "promptString",
+				"description": "Base branch — blank for this project's own default (main/master)",
+				"default": ""
+			},
+			{
+				"id": "agentSlug",
+				"type": "promptString",
+				"description": "What is this branch about? A few words; blank names it after the project",
+				"default": ""
+			},
+			{
+				// Deliberately NOT a picker over live boxes. VS Code cannot build an input's
+				// options at runtime (microsoft/vscode#81370) and this list changes with every
+				// spawn, so the only honest static list is no list: blank hands the choice to
+				// the script, which knows which boxes exist and — for Ship — which have
+				// already merged. The numbered menu it prints is why the four `Agent:` tasks
+				// go unwrapped.
+				"id": "agentBranch",
+				"type": "promptString",
+				"description": "Branch or box name — blank to choose from this project's live boxes",
+				"default": ""
+			},
+			{
+				"id": "agentCli",
+				"type": "pickString",
+				"description": "Which agent should open in the new box?",
+				"options": [
+					{ "label": "Claude Code", "value": "claude" },
+					{ "label": "Codex", "value": "codex" },
+					{ "label": "None — cut and provision the box only", "value": "none" }
+				],
+				"default": "claude"
+			},
+			{
+				// The same choice minus `none`: a task whose whole job is opening an agent
+				// has no meaning for "open no agent".
+				"id": "agentCliOnly",
+				"type": "pickString",
+				"description": "Which agent should open in this box?",
+				"options": [
+					{ "label": "Claude Code", "value": "claude" },
+					{ "label": "Codex", "value": "codex" }
+				],
+				"default": "claude"
+			},
+			{
+				// Three literal flags rather than two flags and their absence, so the picker
+				// has three rows that read the same way. `harness-switch.py` accepts
+				// `--status` for exactly this reason.
+				"id": "harnessVerb",
+				"type": "pickString",
+				"description": "Report, stand down, or restore?",
+				"options": [
+					{ "label": "Report — change nothing", "value": "--status" },
+					{ "label": "OFF — stand the selected groups down", "value": "--off" },
+					{ "label": "ON — put the selected groups back", "value": "--on" }
+				],
+				"default": "--status"
+			},
+			{
+				// Checkboxes because the groups come back one at a time: hooks first (the
+				// cheap half), instructions last (the one that moves files). `all` is offered
+				// as a group of its own so the common case is one tick rather than three.
+				"id": "harnessGroups",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which groups?",
+					"key": "harnessGroups",
+					"multiPick": true,
+					"multiPickStorage": "workspace",
+					"separator": ",",
+					"optionGroups": [
+						{
+							"label": "Select one or more groups",
+							"minCount": 1,
+							"options": [
+								"all",
+								"hooks",
+								"instructions",
+								"jobs"
+							]
+						}
+					]
 				}
 			}
 		]

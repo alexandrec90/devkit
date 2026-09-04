@@ -29,6 +29,13 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The instructions switch's record, so a stood-down tier is reported at its real weight
+# rather than at zero. This tool exists to answer "what is a session paying for these
+# files"; with the files moved aside the honest answer is what they *would* cost, and a
+# report saying nothing is loaded would read as the pruning having already been done.
+import harness_state
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # What loading a file actually costs the session that loads it.
@@ -184,6 +191,38 @@ def memory_root(home: Path | None = None) -> Path:
     return (home or Path.home()) / ".claude" / "projects"
 
 
+def _memory_files(root: Path) -> list[Path]:
+    """Every `CLAUDE.md` under `root` that a session could load, by its LIVE path.
+
+    Live files and ones the instructions switch has moved aside, unioned: a report saying
+    nothing is loaded while that group is off would read as the pruning having already
+    been done, and `_read` finds each body wherever it currently is.
+
+    Deliberately skips `.worktrees/` and dependency trees: an ephemeral box holds a copy
+    of the same files, and counting those reports a workspace as carrying ten times the
+    instruction load it does.
+    """
+    skip = {".worktrees", "node_modules", ".venv", ".git", "__pycache__", "templates"}
+    found = set(root.rglob("CLAUDE.md")) | _switched_off(root)
+    return sorted(
+        path
+        for path in found
+        if path.name == "CLAUDE.md" and not skip & set(path.relative_to(root).parts)
+    )
+
+
+def _rule_files(root: Path) -> list[Path]:
+    """`.claude/rules/*.md`, live or switched off. See `_memory_files`."""
+    rules = root / ".claude" / "rules"
+    live = set(rules.glob("*.md")) if rules.is_dir() else set()
+    return sorted(live | {path for path in _switched_off(root) if path.parent == rules})
+
+
+def _switched_off(root: Path) -> set[Path]:
+    """The instruction files the switch is holding, by the path they came from."""
+    return {root / relpath for relpath, _held in harness_state.instruction_sources(root)}
+
+
 def discover(root: Path, vendored: frozenset[str]) -> list[Doc]:
     """Every instruction file under `root`, classified by tier.
 
@@ -191,12 +230,9 @@ def discover(root: Path, vendored: frozenset[str]) -> list[Doc]:
     copy of the same files, and counting those reports a workspace as carrying ten
     times the instruction load it does.
     """
-    skip = {".worktrees", "node_modules", ".venv", ".git", "__pycache__", "templates"}
     docs: list[Doc] = []
 
-    for path in sorted(root.rglob("CLAUDE.md")):
-        if skip & set(path.relative_to(root).parts):
-            continue
+    for path in _memory_files(root):
         text = _read(path)
         at_root = path.parent == root
         docs.append(
@@ -212,8 +248,7 @@ def discover(root: Path, vendored: frozenset[str]) -> list[Doc]:
             )
         )
 
-    rules = root / ".claude" / "rules"
-    for path in sorted(rules.glob("*.md")) if rules.is_dir() else []:
+    for path in _rule_files(root):
         text = _read(path)
         scoped = rule_is_scoped(text)
         docs.append(
@@ -246,7 +281,7 @@ def discover(root: Path, vendored: frozenset[str]) -> list[Doc]:
 
 def _read(path: Path) -> str:
     try:
-        return path.read_text(encoding="utf-8")
+        return harness_state.instruction_text(path)
     except OSError:
         return ""
 

@@ -3521,18 +3521,34 @@ def plan_new(
     fetch: bool = True,
     quiet: bool = False,
     branch_prefix: str = tb.BRANCH_PREFIX,
+    base: str = "",
 ) -> SpawnPlan:
-    """Resolve everything `new` needs from disk, then hand off to the pure planner."""
+    """Resolve everything `new` needs from disk, then hand off to the pure planner.
+
+    `base` names a branch to cut from other than the project's default. Blank -- the only
+    value the hook tier ever passes -- keeps the old behaviour, and that stays the default
+    for the reason `spawn_plan` documents: a box starts empty, so anywhere but the tip of
+    the default branch is a stale base for no benefit. It is an argument at all because a
+    human spawning a box by hand sometimes has a reason the tier cannot have: stacking a
+    second branch on a first whose PR is still open.
+
+    Checked against `origin` rather than passed through, because the failure otherwise is
+    `git worktree add` refusing an unknown revision -- after the fetch, with the box name
+    already chosen, in a message that names neither the argument nor the branch it looked
+    for.
+    """
     root = workspace.parent
     projects = known_projects(workspace)
     source = devkit_project.resolve_project(project, projects, root)
 
     git = sweep.git_for(source)
-    default_branch = tb.detect_default_branch(git, fallback="")
+    default_branch = base or tb.detect_default_branch(git, fallback="")
     if not default_branch:
         raise WorktreeError(
             f"cannot resolve origin/HEAD in {project} — there is no base branch to cut from"
         )
+    if base and not origin_has_branch(git, base, network=fetch):
+        raise WorktreeError(f"origin/{base} does not exist in {project} — nothing to cut from")
     existing = set(
         sweep._out(git("for-each-ref", "--format=%(refname:short)", "refs/heads/")).splitlines()
     )
@@ -5759,6 +5775,11 @@ def main(argv: list[str] | None = None) -> int:
     new = sub.add_parser("new", help="cut a fresh box for a project")
     new.add_argument("project")
     new.add_argument("--slug", default="", help="topic for the branch name (default: the project)")
+    new.add_argument(
+        "--base",
+        default="",
+        help="cut from origin/<this> instead of the project's default branch",
+    )
     new.add_argument("--session", default="", help="tag the lease with an agent session id")
     new.add_argument(
         "--auto",
@@ -6021,6 +6042,7 @@ def main(argv: list[str] | None = None) -> int:
                 session=args.session,
                 fetch=args.fetch,
                 branch_prefix=tb.AUTOMATION_PREFIX if args.auto else tb.BRANCH_PREFIX,
+                base=args.base,
             )
             notes: list[str] = []
             ok = True

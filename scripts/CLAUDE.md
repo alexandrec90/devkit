@@ -281,13 +281,13 @@ Each of these has already been violated by something:
   `session-start.sh` reads the same seam now; what it still cannot read is the *detected*
   pin, because `detect_python_version` is not vendored.
 
-### The guard's own decisions: [`worktree-guard.md`](worktree-guard.md)
+### The guard's own decisions, and the switch: [`worktree-guard.md`](worktree-guard.md)
 
 What `worktree-guard.py` judges (editor calls it re-aims, shell write verbs and Codex
-`apply_patch` envelopes it blocks, branch moves it refuses), what it declines and why
-each of those cases exists, and why the slug is keyed by session rather than by
-worktree. Read it before touching that hook, the tools its matcher lists, or anything
-that resolves a box for a session.
+`apply_patch` envelopes it blocks, branch moves it refuses), what it declines and why, why
+the slug is keyed by session, and — since `harness-switch.py` can stand the whole tier
+down — what `agent-box.py` couples to when it cuts and ships a box by hand instead. Read
+it before touching that hook, its matcher's tools, or anything that resolves a box.
 
 It sits beside this file for the reason [`windowless-jobs.md`](windowless-jobs.md)
 does — mechanism a session needs only when it is in that code, in a file with a
