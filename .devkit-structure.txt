@@ -121,7 +121,7 @@ file_lines::scripts/upgrade-project.py = 1231
 file_lines::scripts/workspace-status.py = 982
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2294
-file_lines::scripts/worktree.py = 6230
+file_lines::scripts/worktree.py = 6250
 function_lines::scripts/devkit_project.py::main = 250
 function_lines::scripts/docker-maint.py::generic_prune = 84
 function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
@@ -293,3 +293,6 @@ swallowed_errors::scripts/worktree.py = 3
 #   function_lines::scripts/worktree-guard.py::main -> 138
 #   function_lines::scripts/worktree.py::main -> 456
 #   function_params::scripts/worktree.py::plan_new -> 8
+
+# 2026-09-03  recorded: worktree.py gains twenty lines, all but four of them the docstring saying why a dry run must not write logs/reconcile.log -- the artifact workspace-status reads as proof the scheduled job is alive. The fix itself is a `dry_run` parameter and one early return; splitting a 6200-line module is not a rider a one-line bug fix can carry. The value is re-derived after merging main, which raised the same key to 6230 for the kill switch.
+#   file_lines::scripts/worktree.py -> 6250
