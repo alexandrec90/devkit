@@ -18,7 +18,7 @@ complexity::scripts/agent_clis.py::run_pass = 18
 complexity::scripts/devkit_jsonc.py::blank_comments = 18
 complexity::scripts/devkit_ports.py::main = 16
 complexity::scripts/devkit_ports.py::validate = 17
-complexity::scripts/devkit_project.py::main = 45
+complexity::scripts/devkit_project.py::main = 39
 complexity::scripts/devkit_render.py::render = 18
 complexity::scripts/global-tools.py::main = 19
 complexity::scripts/hooks/enforce-capped-bash.py::split_top_level = 29
@@ -67,7 +67,7 @@ complexity::scripts/worktree.py::render_preview = 18
 complexity::scripts/worktree.py::render_reconcile = 22
 complexity::scripts/worktree.py::render_survey = 21
 definitions::scripts/agent_clis.py = 21
-definitions::scripts/devkit_project.py = 44
+definitions::scripts/devkit_project.py = 50
 definitions::scripts/docker-maint.py = 30
 definitions::scripts/git_policy.py = 36
 definitions::scripts/hooks/harness_config.py = 32
@@ -99,7 +99,7 @@ dependency::pyproject.toml::mypy = 1
 dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::pytest = 1
 dependency::pyproject.toml::ruff = 1
-file_lines::scripts/devkit_project.py = 1599
+file_lines::scripts/devkit_project.py = 1701
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/git_policy.py = 710
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
@@ -122,7 +122,7 @@ file_lines::scripts/workspace-status.py = 982
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2294
 file_lines::scripts/worktree.py = 6250
-function_lines::scripts/devkit_project.py::main = 250
+function_lines::scripts/devkit_project.py::main = 213
 function_lines::scripts/docker-maint.py::generic_prune = 84
 function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
 function_lines::scripts/install-reconcile-task.py::main = 114
@@ -296,3 +296,7 @@ swallowed_errors::scripts/worktree.py = 3
 
 # 2026-09-03  recorded: worktree.py gains twenty lines, all but four of them the docstring saying why a dry run must not write logs/reconcile.log -- the artifact workspace-status reads as proof the scheduled job is alive. The fix itself is a `dry_run` parameter and one early return; splitting a 6200-line module is not a rider a one-line bug fix can carry. The value is re-derived after merging main, which raised the same key to 6230 for the kill switch.
 #   file_lines::scripts/worktree.py -> 6250
+
+# 2026-09-04  recorded: Teaching the workspace publish tier the difference between a live edit and a canonical copy that is merely ahead: three shared prefixes, live_only/canonical_only, keep_hint, and the adopt guard the refusals now point at. The verbs left main as adopt_workspace/check_workspace/render_workspace, which is why main SHRINKS above -- 250 to 213 lines, complexity 45 to 39 -- and why these two lines grow instead. devkit_project.py is 3x file_lines and 2x definitions and has been since before this gate; the workspace tier is a real seam and moving it to its own module is its own change, not one a publish bug fix can carry.
+#   definitions::scripts/devkit_project.py -> 50
+#   file_lines::scripts/devkit_project.py -> 1701

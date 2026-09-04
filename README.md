@@ -598,7 +598,9 @@ CLI in the gap, and starts them again. Restarting inside four hours brings each 
 back, so the cycle costs the conversations nothing.
 
 Nothing is served until you opt a project in, because a standing server costs real
-memory. The setting lives in the workspace file beside `devkit.onHold`:
+memory. The setting lives beside `devkit.onHold` in devkit's `workspace.jsonc` --
+canonical-then-publish like every other workspace edit, because a hand edit of the live
+file has to be merged back by hand before anything can publish again:
 
 ```jsonc
 "devkit.remoteControl": ["devkit", "carameli"]
