@@ -2255,6 +2255,23 @@
 		// Projects nothing should be in flight for. `upgrade-project.py --all` passes over
 		// them and `worktree.py` reports any box cut for one as stranded at any age
 		// (`sweep.on_hold`). Naming a project explicitly on the command line still works.
-		"devkit.onHold": ["ibkr_trader", "data-lake", "sports_betting"]
+		"devkit.onHold": ["ibkr_trader", "data-lake", "sports_betting"],
+
+		// Projects that get a standing `claude remote-control` server, so a session on
+		// this machine is reachable from the phone. `devkit-rc-servers` restarts any that
+		// exits and, once a day, updates the Claude CLI in the gap between stopping them
+		// and starting them again -- see README, "Remote Control servers".
+		//
+		// The three on hold above are deliberately absent: `rc_config.selected` refuses
+		// them anyway, since a paused project is one nothing should be in flight for and
+		// a phone-reachable server is an invitation to start something.
+		//
+		// No `permissionMode` here, so each server inherits its project's own settings
+		// and prompts forward to the phone. Add `"permissionMode": "acceptEdits"` to stop
+		// the prompting -- it is a standing grant on an unattended machine, so it is a
+		// deliberate choice rather than a default.
+		"devkit.remoteControl": {
+			"projects": ["devkit", "carameli", "roguelike"]
+		}
 	}
 }

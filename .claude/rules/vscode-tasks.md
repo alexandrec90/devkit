@@ -116,9 +116,24 @@ conflict in git, where a conflict has two visible sides.
 Code rewrites the file itself when a workspace setting is changed through its UI, and a
 hand edit in the editor is legitimate. `--adopt-workspace` records the live file back
 into `workspace.jsonc` for committing on a branch, and `--render-workspace` *refuses*
-rather than overwriting an unadopted edit — it renders only when the live file is
-byte-for-meaning what devkit last wrote, recorded in `.devkit-workspace-render.json`
-beside it. `--force` overrides that, and it discards.
+rather than overwriting an unadopted edit — the live file's meaning is stamped in
+`.devkit-workspace-render.json` beside it, and a stamp that no longer matches arms the
+refusal. `--force` overrides that, and it discards.
+
+**Only differences that could be someone's edit arm it.** A stale stamp says the live
+file moved, not what moved, so `live_only` reads the drift and a canonical copy that is
+merely *ahead* — tasks, inputs or folders the live file is missing — publishes anyway.
+Nothing is at risk there: those are the entries a publish exists to deliver, and git
+holds every one of them. The three "differs" lines count as live-authored regardless,
+because they name a key both copies carry and say nothing about who moved it last.
+
+**And an adopt refuses in that same state, rather than deleting what it finds.**
+`--adopt-workspace` overwrites `workspace.jsonc` with the whole live file, so against a
+canonical copy that is ahead it deletes merged work — which is the state of this machine
+between any task's merge and its publish. It names what would go and stops; `--force` is
+there and it is the discarding half. **The merge that state actually needs is by hand:**
+copy the live edit into `workspace.jsonc` on a task branch, ship it, and publish after
+it merges. Both refusals stop naming an adopt they would have to walk back.
 
 The pairing is held by `test_the_live_workspace_matches_the_canonical_copy`, which is
 `@needs_live_workspace`: skipped in CI, so drift is caught locally or not at all. That
@@ -136,10 +151,11 @@ state, not a defect. What the live file should match is `workspace.jsonc` **as i
 on `origin/main`** — `git show` that revision of it, and the difference against your own
 copy is what your branch adds.
 
-**And the remedy the failure names is the wrong direction here.** `--adopt-workspace`
-takes the *live* file — which is still main's render — over your canonical copy, so
-running it in a box to get green deletes the edit the branch exists for. Render only
-after the PR merges; a box never renders.
+**And the adopt direction is the wrong one here.** `--adopt-workspace` takes the *live*
+file — which is still main's render — over your canonical copy, so running it in a box
+to get green deletes the edit the branch exists for. It refuses on exactly that now, and
+the failure no longer offers it, but the reason is worth carrying: render only after the
+PR merges; a box never renders.
 
 ## Conventions for the tasks themselves
 

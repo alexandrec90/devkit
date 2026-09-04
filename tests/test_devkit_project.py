@@ -1151,12 +1151,25 @@ def test_publish_workspace_reports_which_of_the_three_things_it_did(workspace_pa
     assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
 
 
+def _hand_edit(live):
+    """A live-only difference: a setting devkit's copy has never heard of.
+
+    What a hand edit and a VS Code settings change both look like, and the only shape
+    the refusal is about -- see `test_publish_workspace_publishes_when_the_canonical
+    _copy_is_merely_ahead` for the shape it is not.
+    """
+    payload = devkit_jsonc_loads(live.read_text(encoding="utf-8"))
+    payload["settings"] = {**payload.get("settings", {}), "invented.setting": True}
+    live.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
+
+
 def test_publish_workspace_refuses_a_live_file_it_did_not_stamp(workspace_pair):
     """The refusal belongs here and not in each caller -- the hook publishes unattended,
     so a caller that forgot the check would discard a hand edit with nobody watching."""
     canonical, live = workspace_pair
     devkit_project.stamp_path(live).unlink(missing_ok=True)
     _add_a_folder(canonical)
+    _hand_edit(live)
     before = live.read_text(encoding="utf-8")
 
     outcome, problems = devkit_project.publish_workspace(live)
@@ -1166,7 +1179,86 @@ def test_publish_workspace_refuses_a_live_file_it_did_not_stamp(workspace_pair):
     assert devkit_project.publish_workspace(live, force=True)[0] == devkit_project.RENDER_PUBLISHED
 
 
-def test_publish_workspace_creates_a_live_file_that_does_not_exist_yet(workspace_pair):
+def test_publish_workspace_publishes_when_the_canonical_copy_is_merely_ahead(workspace_pair):
+    """A stale stamp says the live file moved; it does not say anyone added anything.
+
+    The live copy of the machine's workspace file sat five tasks and eight inputs behind
+    `main` for a week: a setting had been hand-edited into it and merged into
+    `workspace.jsonc` by hand -- the only merge there is -- so the *drift* named nothing
+    live-authored, while the stamp, which cannot tell the two apart, refused every
+    publish and offered `--force`, the one verb that discards, for a state with nothing
+    at risk. Publishing what git already holds is not a discard.
+    """
+    canonical, live = workspace_pair
+    devkit_project.stamp_path(live).unlink(missing_ok=True)
+    _add_a_folder(canonical)
+
+    outcome, problems = devkit_project.publish_workspace(live)
+
+    assert outcome == devkit_project.RENDER_PUBLISHED
+    assert devkit_project.live_only(problems) == [], problems
+    assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
+
+
+def test_a_differing_definition_is_treated_as_the_live_file_s_until_proven_otherwise():
+    """The three "differs" lines name a key both copies carry and say nothing about who
+    moved it last, so they arm the refusal. The asymmetry is deliberate: republishing a
+    task git holds costs a reload, and discarding an edit nothing holds is unrecoverable.
+    """
+    assert devkit_project.live_only(["definition differs: Lint: Run"])
+    assert devkit_project.live_only(["input definition differs: project"])
+    assert devkit_project.live_only(["settings differs"])
+    assert devkit_project.live_only(["folders: same checkouts, different entries"])
+    assert not devkit_project.live_only(
+        [
+            "missing from the workspace: Agent: Ship PR",
+            "missing input: agentSlug",
+            "folder missing from the workspace: devkit",
+        ]
+    )
+
+
+def test_adopt_refuses_to_delete_canonical_content_the_live_file_lacks(workspace_pair):
+    """An adopt is a whole-file overwrite, so it is only safe while devkit's copy has
+    nothing of its own. Against a canonical copy that is ahead -- the state of every
+    machine between a task's merge and its publish -- it deletes committed work with
+    nothing to show it went, and the publish refusal used to name it as the remedy."""
+    canonical, live = workspace_pair
+    _add_a_folder(canonical)
+    before = canonical.read_text(encoding="utf-8")
+
+    assert _run(live, "--adopt-workspace") == 1
+    assert canonical.read_text(encoding="utf-8") == before, "the canonical copy lost content"
+
+    assert _run(live, "--adopt-workspace", "--force") == 0
+    assert canonical.read_text(encoding="utf-8") == live.read_text(encoding="utf-8")
+
+
+def test_adopt_still_records_a_live_edit_when_devkit_has_nothing_to_lose(workspace_pair):
+    """The ordinary direction, unchanged: a VS Code settings change is recorded without
+    a flag. The guard above must gate the deleting case only."""
+    canonical, live = workspace_pair
+    _hand_edit(live)
+
+    assert _run(live, "--adopt-workspace") == 0
+    adopted = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
+    assert adopted["invented.setting"] is True
+
+
+def test_the_refusals_stop_naming_an_adopt_that_would_delete_something(workspace_pair, capsys):
+    """Both refusals used to route a reader into the command that eats their branch."""
+    canonical, live = workspace_pair
+    devkit_project.stamp_path(live).unlink(missing_ok=True)
+    _add_a_folder(canonical)
+    _hand_edit(live)
+
+    assert _run(live, "--render-workspace") == 1
+    assert _run(live, "--check-workspace") == 1
+
+    err = capsys.readouterr()
+    both = err.out + err.err
+    assert "--adopt-workspace" not in both
+    assert both.count("by hand") == 2
     """The fresh-workstation bootstrap. The refusal protects a hand edit, and a file that
     is not there has none -- but `publish_workspace` read it unconditionally, so the
     canonical->live direction could only ever overwrite, never create. The reported
@@ -2197,9 +2289,16 @@ def test_the_live_workspace_matches_the_canonical_copy():
     problems = devkit_project.workspace_drift(
         devkit_jsonc_loads(text), devkit_jsonc_loads(devkit_project.canonical_text())
     )
+    keep = (
+        "or --adopt-workspace to keep the live edits"
+        if not devkit_project.canonical_only(problems)
+        # An adopt would delete what the live file is missing, so it is not on offer here;
+        # `main`'s two refusals make the same distinction, for the same reason.
+        else "merging any live edit into workspace.jsonc by hand first"
+    )
     assert not problems, (
-        "run `python scripts/devkit_project.py --render-workspace` (or --adopt-workspace "
-        "to keep the live edits): " + "; ".join(problems)
+        f"run `python scripts/devkit_project.py --render-workspace` ({keep}): "
+        + "; ".join(problems)
     )
 
 
