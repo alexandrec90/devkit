@@ -4089,15 +4089,52 @@ def test_the_reconcile_cli_writes_the_log_of_the_workspace_it_acted_on(tmp_path)
 
     Asserted by where the file lands rather than by the real one staying byte-identical:
     the scheduled pass rewrites that one every fifteen minutes, so a comparison would
-    fail whichever test happened to be running when it fired."""
+    fail whichever test happened to be running when it fired.
+
+    `--yes` is load-bearing rather than incidental: only an applying pass accounts for
+    itself in the log, per the test below. The workspace is empty, so applying is the
+    same no-op the dry run was, and this stays a test about *where* the file lands."""
     workspace = tmp_path / "ws" / "probe.code-workspace"
     workspace.parent.mkdir()
     workspace.write_text('{"folders": []}', encoding="utf-8")
 
-    assert worktree.main(["reconcile", "--no-fetch", "--workspace", str(workspace)]) == 0
+    assert worktree.main(["reconcile", "--yes", "--no-fetch", "--workspace", str(workspace)]) == 0
 
     written = workspace.parent / worktree.RECONCILE_LOG
     assert written.is_file() and "exit=0" in written.read_text(encoding="utf-8")
+
+
+def test_a_dry_run_writes_no_log_and_says_so_by_returning_none(tmp_path):
+    """The refusal is in the function rather than at the call site: its caller is `main`,
+    whose branch count the structural ratchet holds at a baseline, and the reason the
+    refusal exists is in this docstring and nowhere near the CLI."""
+    assert (
+        worktree.write_reconcile_log("would reap demo--x-0806", 0, tmp_path, dry_run=True) is None
+    )
+    assert not (tmp_path / worktree.RECONCILE_LOG).exists()
+
+
+def test_a_dry_run_leaves_the_scheduled_passs_log_untouched(tmp_path):
+    """The same regression as above, reached with the right workspace and the wrong verb.
+
+    `/triage-boxes` opens with `reconcile --dry-run --json` against the real workspace, so
+    the one session sent to investigate stranded boxes overwrote the only record of the
+    scheduled pass -- stamping `exit=0` over an `exit=1` and refreshing the mtime that
+    `workspace-status.scheduler_line` reads as proof the job is alive. A dry run destroys
+    nothing and reconciles nothing, so it has nothing to account for."""
+    workspace = tmp_path / "ws" / "probe.code-workspace"
+    workspace.parent.mkdir()
+    workspace.write_text('{"folders": []}', encoding="utf-8")
+    log = workspace.parent / worktree.RECONCILE_LOG
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("# devkit worktree reconcile\n# 2026-09-03T00:30:00+00:00  exit=1\n", "utf-8")
+    before = log.read_text(encoding="utf-8")
+
+    assert (
+        worktree.main(["reconcile", "--dry-run", "--no-fetch", "--workspace", str(workspace)]) == 0
+    )
+
+    assert log.read_text(encoding="utf-8") == before
 
 
 # --- the scheduled pass opens no windows ------------------------------------
