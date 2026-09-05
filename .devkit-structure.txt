@@ -105,7 +105,7 @@ file_lines::scripts/agent-box.py = 538
 file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/fix-prs.py = 660
-file_lines::scripts/git_policy.py = 742
+file_lines::scripts/git_policy.py = 756
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
@@ -337,3 +337,6 @@ swallowed_errors::scripts/worktree.py = 2
 
 # 2026-09-05  recorded: vendored_paths had to match ast.AnnAssign as well as ast.Assign: the real MANIFEST declaration is annotated, so the vendored-file skip returned nothing in every consumer that ever ran it. The fix plus the note recording why it was invisible costs 8 lines in a module already past file_lines. Splitting this module is still its own change.
 #   file_lines::scripts/hooks/structure_check.py -> 1050
+
+# 2026-09-05  recorded: git_policy.py gains NO_PRE_COMMIT: the refusal named no remedy, and two agents reported it in one week -- one of them reaching for a PATH workaround, which is the reach for --no-verify this is meant to stop. The lines are the remedy itself plus the note that this file is COPIED to ~/.devkit/git-hooks, so the fix for the underlying lookup can be committed here and still be missing where it fires. Recorded rather than split for the reason the 2026-09-05 entry gives: splitting this module moves a file every workspace-aware script imports AND that runs with no checkout in reach, which wants its own PR.
+#   file_lines::scripts/git_policy.py -> 756

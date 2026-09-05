@@ -54,7 +54,6 @@ scripts/install-docker-prune.py::uninstall_argv
 scripts/install-docker-stop-idle.py::query_argv
 scripts/install-docker-stop-idle.py::uninstall_argv
 scripts/install-git-policy.py::digest
-scripts/install-git-policy.py::run_command
 scripts/install-global-tools.py::Schedule
 scripts/install-global-tools.py::install
 scripts/install-global-tools.py::query_argv
