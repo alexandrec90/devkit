@@ -7,8 +7,9 @@ which requires someone to start a session. This is the always-on half of that. O
 in the notification area, coloured and marked by the worst thing the scheduler is
 reporting, with the whole set behind a right-click.
 
-`schedule_health` decides what counts as a problem and `tray_state` decides how loud
-each one is; this file is the `ctypes` that draws the result and nothing else.
+`schedule_health` decides what counts as a problem, `tray_state` decides how loud each
+one is, and `tray_icon` turns that into pixels; this file is the `ctypes` that puts them
+in the notification area and nothing else.
 
 **Stdlib only, like everything under `scripts/`.** There is no tray library in the
 standard library, but there is `ctypes`, and Shell_NotifyIcon is four calls. A
@@ -25,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import math
 import os
 import sys
 from ctypes import wintypes
@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tray_icon
 import tray_state
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -73,36 +74,6 @@ FIRST_JOB = 200
 # runs every fifteen, so anything tighter is asking a question whose answer cannot have
 # changed, and each ask spawns a `schtasks`.
 POLL_MS = 120_000
-
-# 16x16 is what the notification area asks for at 100% scale, and Windows downsamples a
-# larger icon cleanly while it cannot invent detail for a smaller one.
-ICON_SIZE = 16
-
-# Samples per pixel per axis, so 64 colour samples decide each pixel and its alpha lands
-# on one of 65 levels. The dot and its glyph are round, the icon is 16 pixels across, and
-# a hard-edged circle that small is a staircase; this is the whole of the antialiasing.
-# The cost is sixteen thousand distance checks per icon, paid three times per session --
-# `icon_for` caches, because an `HICON` per poll is the leak this used to be written to
-# avoid.
-SUPERSAMPLE = 8
-
-# The dot, in the icon's own 16-unit coordinate space: radius, and the multipliers the
-# fill is scaled by at the top and bottom row. The gradient is slight on purpose -- it
-# is there to stop a flat disc reading as a sticker, not to be seen as a gradient.
-DOT_RADIUS = 7.4
-TOP_SHADE, BOTTOM_SHADE = 1.24, 0.80
-
-# The glyph knocked out of the dot, per level, as round-capped strokes in the same
-# 16-unit space (x right, y down; a zero-length stroke is a dot). This is redundancy
-# with the colour rather than decoration: it is the half of the signal that survives a
-# colour-blind reader, and it is why the tray can be read without learning which of two
-# similar-brightness colours means which.
-GLYPH_WIDTH = 2.2
-GLYPHS: dict[str, tuple[tuple[float, float, float, float], ...]] = {
-    tray_state.OK: ((4.7, 8.2, 6.9, 10.5), (6.9, 10.5, 11.4, 5.6)),
-    tray_state.WARN: ((8.0, 4.2, 8.0, 9.0), (8.0, 11.4, 8.0, 11.4)),
-    tray_state.FAIL: ((5.2, 5.2, 10.8, 10.8), (10.8, 5.2, 5.2, 10.8)),
-}
 
 # The Windows-only half of `ctypes`, reached through `sys.modules` rather than through
 # the imported name. mypy resolves an attribute against the platform it is *running* on,
@@ -282,96 +253,9 @@ class WNDCLASSEX(ctypes.Structure):
     )
 
 
-def _stroke_distance(x: float, y: float, stroke: tuple[float, float, float, float]) -> float:
-    """Distance from a point to a line segment, which is what gives the glyph round caps
-    and joins for free: every point within half a stroke width of the segment is ink."""
-    ax, ay, bx, by = stroke
-    run, rise = bx - ax, by - ay
-    span = run * run + rise * rise
-    along = 0.0 if span == 0 else max(0.0, min(1.0, ((x - ax) * run + (y - ay) * rise) / span))
-    return math.hypot(x - (ax + along * run), y - (ay + along * rise))
-
-
-def _pack(red: float, green: float, blue: float, coverage: float) -> bytes:
-    """One pixel as the BGRA `CreateIcon` takes: little-endian channel order, `coverage`
-    as the alpha, and the colour left **un**-premultiplied.
-
-    Which of the two conventions applies is the kind of thing that is asserted both ways
-    across the internet, so it was measured here rather than assumed: hand `CreateIcon`
-    a pixel of full-strength green at alpha 0x80, `DrawIconEx` it onto white, and the
-    result is full-strength green blended half-and-half -- Windows applied the alpha to
-    the colour itself. Premultiplying first would apply it twice, which is invisible in
-    the opaque middle of the dot and a ring of muddy pixels around its edge.
-    """
-    return bytes(
-        (
-            round(max(0.0, min(1.0, blue)) * 255.0),
-            round(max(0.0, min(1.0, green)) * 255.0),
-            round(max(0.0, min(1.0, red)) * 255.0),
-            round(max(0.0, min(1.0, coverage)) * 255.0),
-        )
-    )
-
-
-def icon_pixels(
-    colour: tuple[int, int, int],
-    size: int = ICON_SIZE,
-    glyph: tuple[tuple[float, float, float, float], ...] = (),
-) -> bytes:
-    """An antialiased dot of `colour` carrying `glyph`, as the BGRA rows `CreateIcon`
-    takes.
-
-    A dot rather than the square this drew first: the notification area sits a few
-    pixels from Windows' own round icons, and a full-bleed rectangle of colour reads as
-    a rendering fault next to them rather than as a status. Everything outside the
-    circle is transparent -- the alpha channel is load-bearing here, not decoration, and
-    `make_icon`'s all-zero AND mask is what lets it be.
-
-    Rows run top-down, which is the order `CreateIcon` reads device-dependent bitmap
-    bits in. It did not matter while this was a solid fill and it decides which way up
-    the check mark points now.
-    """
-    red, green, blue = (channel / 255.0 for channel in colour)
-    scale = size / ICON_SIZE
-    centre = size / 2.0
-    radius = DOT_RADIUS * scale
-    reach = GLYPH_WIDTH * scale / 2.0
-    offsets = [(index + 0.5) / SUPERSAMPLE for index in range(SUPERSAMPLE)]
-    samples = SUPERSAMPLE * SUPERSAMPLE
-
-    rows = []
-    for row in range(size):
-        for col in range(size):
-            covered = 0
-            sums = [0.0, 0.0, 0.0]
-            for dy in offsets:
-                y = row + dy
-                shade = TOP_SHADE + (BOTTOM_SHADE - TOP_SHADE) * (y / size)
-                for dx in offsets:
-                    x = col + dx
-                    if math.hypot(x - centre, y - centre) > radius:
-                        continue
-                    covered += 1
-                    if any(_stroke_distance(x, y, stroke) <= reach for stroke in glyph):
-                        sums[0] += 1.0
-                        sums[1] += 1.0
-                        sums[2] += 1.0
-                    else:
-                        sums[0] += red * shade
-                        sums[1] += green * shade
-                        sums[2] += blue * shade
-            if covered == 0:
-                rows.append(b"\x00\x00\x00\x00")
-                continue
-            rows.append(
-                _pack(sums[0] / covered, sums[1] / covered, sums[2] / covered, covered / samples)
-            )
-    return b"".join(rows)
-
-
 def make_icon(
     colour: tuple[int, int, int],
-    size: int = ICON_SIZE,
+    size: int = tray_icon.ICON_SIZE,
     glyph: tuple[tuple[float, float, float, float], ...] = (),
 ) -> Any:
     """An `HICON` of one colour, or None when it could not be made.
@@ -383,7 +267,7 @@ def make_icon(
     if user32 is None:
         return None
     mask = b"\x00" * (size * size // 8)
-    pixels = icon_pixels(colour, size, glyph)
+    pixels = tray_icon.icon_pixels(colour, size, glyph)
     handle = user32.CreateIcon(None, size, size, 1, 32, mask, pixels)
     return handle or None
 
@@ -411,7 +295,7 @@ class Tray:
         """One `HICON` per colour, made once. Icons are a limited resource, and a tray
         that made a new one every poll would leak three an hour, forever."""
         if level not in self.icons:
-            handle = make_icon(tray_state.COLOURS[level], glyph=GLYPHS.get(level, ()))
+            handle = make_icon(tray_state.COLOURS[level], glyph=tray_icon.GLYPHS.get(level, ()))
             if handle is None:
                 return None
             self.icons[level] = handle
