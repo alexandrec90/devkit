@@ -175,7 +175,9 @@ def test_the_jobs_group_names_only_the_branch_delivery_jobs():
     }
 
 
-def test_a_job_that_is_not_registered_is_reported_not_recorded(monkeypatch):
+def test_a_job_that_is_not_registered_is_reported_as_such(monkeypatch):
+    """`changed` is what `schtasks` actually did, and must not claim a task it could not
+    find. What gets *recorded* is a separate question -- see the intent tests below."""
     monkeypatch.setattr(switch, "WINDOWS", True)
 
     def runner(argv, **_kwargs):
@@ -224,15 +226,40 @@ def test_a_group_nobody_selected_does_nothing(tmp_path, monkeypatch):
     assert switch.apply([], True, tmp_path / "w.code-workspace") == ["nothing selected"]
 
 
-def test_switching_off_the_jobs_group_records_only_what_actually_changed(tmp_path, monkeypatch):
+def test_switching_off_the_jobs_group_records_the_whole_group(tmp_path, monkeypatch):
+    """It used to record only the tasks `schtasks` could reach, and that was the bug.
+
+    A job missing at switch time is a job whose installer may run tomorrow, so the
+    outcome is the wrong thing to persist -- intent is a property of the group and
+    outlives which tasks happen to exist. Lived: this machine had one of the three
+    registered, so `--off jobs` recorded one name and `--status` went on reporting the
+    tier as off while `install-release-schedule.py` would have produced a task that
+    cuts and pushes releases, enabled, authorised by nobody.
+    """
     monkeypatch.setattr(switch, "WINDOWS", True)
 
     def runner(argv, **_kwargs):
         code = 0 if "devkit-release" in argv else 1
         return subprocess.CompletedProcess(argv, code, "", "")
 
+    lines = switch.apply(["jobs"], True, tmp_path / "w.code-workspace", runner=runner)
+    assert set(harness_state.Ledger.load().jobs) == set(switch.BRANCH_DELIVERY_JOBS)
+    # The record is the group; the report still says what actually happened to each.
+    assert any("not registered here, skipped" in line for line in lines)
+
+
+def test_a_job_absent_at_switch_time_is_still_stood_down_for_its_installer(tmp_path, monkeypatch):
+    """The whole point of recording intent: `harness_state.stood_down` is what an
+    installer consults, so a task that did not exist when the tier went down still
+    lands disabled when someone installs it later."""
+    monkeypatch.setattr(switch, "WINDOWS", True)
+
+    def runner(argv, **_kwargs):
+        code = 1 if "devkit-release" in argv else 0
+        return subprocess.CompletedProcess(argv, code, "", "")
+
     switch.apply(["jobs"], True, tmp_path / "w.code-workspace", runner=runner)
-    assert harness_state.Ledger.load().jobs == ("devkit-release",)
+    assert "devkit-release" in harness_state.stood_down()
 
 
 def test_switching_the_jobs_group_back_on_empties_the_record(tmp_path, monkeypatch):

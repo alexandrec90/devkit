@@ -397,6 +397,29 @@ python scripts/agent-box.py delete --project carameli                 # box and 
 branch policy skipped — on purpose. A pre-commit refusal leaves the work uncommitted in a
 box `reconcile` may reap, while the same rules run in `PR Gate` on a branch that exists.
 
+### Sending an agent at a PR that is already red
+
+`reconcile` merges what is green and labelled, so a PR whose base moved under it or whose
+gate failed is the state every scheduled pass steps over. `scripts/fix-prs.py` is the way
+back in: it puts a box on the PR's own head branch — upstream set, so a bare push lands on
+the PR — and opens an agent there already knowing the PR number, what is wrong with it and
+that the job ends with the PR merged once the gate is green.
+
+```bash
+python scripts/fix-prs.py --list                              # what is red, per checkout
+python scripts/fix-prs.py --picks carameli:313 --agent claude # a tab you can watch
+python scripts/fix-prs.py --picks "devkit:88 roguelike:16" --agent claude-bg
+python scripts/fix-prs.py --refresh                           # rewrite the dropdown's options
+```
+
+`claude-bg` is `claude --bg`: it returns a session id and `claude agents`, `claude logs
+<id>` and `claude attach <id>` read it back. There is no `codex-bg` — `codex exec` is
+non-interactive but streams into the terminal that started it and leaves nothing to
+reattach to. The *Agent: Fix a Broken PR* task is the same thing with two dropdowns, and
+its list is rebuilt by `worktree.py reconcile` every quarter of an hour; a pick is re-read
+live before anything is spawned, so a PR that went green since the scan is reported and
+skipped.
+
 ### Running someone else's branch before it merges
 
 `preview` is the reviewer's half of the same tier. Testing an agent's change used to mean
@@ -627,16 +650,22 @@ here is the only route to one — and it is a standing grant on an unattended ma
 which is why it is opt-in.
 
 `spawn` chooses where an on-demand session lands. **`worktree` mode is not the box tier
-`worktree.py` owns.** Claude Code cuts its own worktrees under
-`<repo>/.claude/worktrees/<name>`, inside the checkout, and the two managers do not know
-about each other: a box cut from the phone gets no `provision`, no port lease, no
-`COMPOSE_PROJECT_NAME` and no `reconcile` reap, and `sweep`, `reconcile` and
-`workspace-status` cannot see it to report it stranded. Removing one is
-`git -C <repo> worktree remove .claude/worktrees/<name>` by hand. It still beats
-`same-dir` when the phone is the only client you have — parallel sessions stop editing
-one tree — but the cleanup is yours. The generated `.gitignore` covers
-`.claude/worktrees/`; a project generated before that line existed needs it added, or
-the nested worktree leaves the checkout dirty and `sweep` stops syncing it.
+`worktree.py` owns** — Claude Code cuts its own worktrees under
+`<repo>/.claude/worktrees/<name>`, inside the checkout — but it is not an unmanaged tier
+either. Claude Code offers keep-or-remove when a worktree session exits, naming what
+would be lost, and its retention sweep (`cleanupPeriodDays`, 30 days unless you set it)
+removes a stale one only when it is clean, fully pushed, unlocked and carries Claude
+Code's own creation marker. So they do not accumulate, and one holding real work is never
+swept.
+
+The single thing the tier does not get is the **stack** half: no port lease and no
+`COMPOSE_PROJECT_NAME`, so two concurrent sessions that each bring a compose stack up
+collide on both. That makes `worktree` the right mode for sessions that edit code and
+ship — which is what a phone is for — and `worktree.py new` still the right one when a
+session needs services. The generated `.gitignore` covers `.claude/worktrees/`; a project
+generated before that line existed needs it added, or the nested checkout shows up
+untracked in every `git status` and reads as `holds_uncommitted` to anything that
+inspects dirtiness.
 
 On memory: a server costs 300–420 MB as a process, and then holds every session the
 phone spawns for as long as it lives — which is where the growth actually is, so

@@ -22,8 +22,8 @@ ledger records where it came from, so restoring is a move back rather than a
 reconstruction. A **tracked** file additionally gets `git update-index --skip-worktree`.
 
 That second half is not tidiness. Without it the file reads as deleted: `git status`
-shows it, and — much worse — `git add -A` stages it, so the first `Agent: Ship PR` run in
-a box with the group off would carry "delete CLAUDE.md" into a pull request. With it, git
+shows it, and — much worse — `git add -A` stages it, so the first `/ship` run in a box
+with the group off would carry "delete CLAUDE.md" into a pull request. With it, git
 reports the tree clean and the deletion cannot be committed by accident.
 
 Nothing here decides *whether* to switch anything. `harness-switch.py` owns that, and
@@ -73,6 +73,14 @@ SKIP_DIRS = frozenset(
         ".git",
         ".venv",
         ".worktrees",
+        # `.claude/worktrees/<name>`, where `claude --worktree` and a Remote Control
+        # server started with `--spawn worktree` cut theirs. `.worktrees` above is the
+        # box tier, which sits *beside* every checkout and so was never reachable from
+        # here; these land inside it. Without this the switch treats a nested worktree's
+        # own `CLAUDE.md` files as this root's and moves them aside -- files it does not
+        # own, in a checkout it was not asked about, restored to the wrong root if that
+        # worktree is removed before the switch goes back on.
+        "worktrees",
         "__pycache__",
         ".pytest_cache",
         "node_modules",
@@ -126,9 +134,17 @@ class Ledger:
             for entry in raw.get("instructions", [])
             if isinstance(entry, dict)
         ]
+        # `jobs` has to be re-checked rather than trusted to be iterable. The claim
+        # above is that this never raises, and `tuple(... for name in raw["jobs"])`
+        # breaks it for any ledger whose `jobs` is a scalar -- a hand-edited file, or a
+        # half-written one. A reader that raises here takes out an installer and the
+        # session-start report together, which is a bad trade for a one-line guard.
+        jobs = raw.get("jobs", [])
+        if not isinstance(jobs, (list, tuple)):
+            jobs = []
         return cls(
             hooks=bool(raw.get("hooks")),
-            jobs=tuple(str(name) for name in raw.get("jobs", [])),
+            jobs=tuple(str(name) for name in jobs),
             instructions=[f for f in files if f.root and f.relpath and f.stash],
         )
 
@@ -144,6 +160,30 @@ class Ledger:
             ],
         }
         target.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+
+def stood_down(path: Path | None = None) -> frozenset[str]:
+    """The scheduled jobs `harness-switch.py --off jobs` was told to stand down.
+
+    The ledger is the only place that intent exists. From the scheduler's side a job an
+    operator switched off is byte-for-byte a job that broke -- `Scheduled Task State`
+    reads `Disabled` either way -- so everything that reports on, or installs, a
+    scheduled job needs this to tell the two apart. `schedule_health.stood_down`
+    delegates here rather than reading the file a second way.
+
+    **It names the whole group, not the tasks that happened to be registered when the
+    switch ran**, which is what makes it usable by an installer. `--off jobs` on a
+    machine missing two of the three used to record only the one it could disable, so
+    installing either of the others afterwards produced an enabled, unrecorded job while
+    `--status` still said the tier was off.
+
+    Never raises, because `Ledger.load` does not: an absent or corrupt ledger reads as
+    "nothing is deliberate", the direction that leaves a genuinely broken job reported
+    and a new task enabled. That guarantee is asserted there rather than defended with a
+    blanket `except` here, which would have hidden the one input `load` really did still
+    raise on instead of fixing it.
+    """
+    return frozenset(Ledger.load(path).jobs)
 
 
 def root_key(root: Path) -> str:

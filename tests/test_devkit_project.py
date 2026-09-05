@@ -399,6 +399,12 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # "stop them" is a machine-wide verb with no checkout to ask about. Per-checkout
         # it would stop the same servers N times.
         "preview-ui-stop",
+        # Born scoped, and the same kind as `preview-ui-host` above: one scan across
+        # every checkout in the registry, so the checkout is a column in the menu rather
+        # than a scope for the task. Run per selected checkout it would draw the same
+        # cross-checkout dropdown two or three times over. The dispatch pins
+        # `--project devkit` and asks which PR instead.
+        "fix-prs",
         # Born scoped, and the third of the no-project-dimension kind -- but for a
         # sharper reason than `reclaim`'s: repeating a release is not merely a no-op on
         # runs 2..N, it is a failure. The second run would find the tag it just pushed
@@ -1211,8 +1217,8 @@ def test_a_differing_definition_is_treated_as_the_live_file_s_until_proven_other
     assert devkit_project.live_only(["folders: same checkouts, different entries"])
     assert not devkit_project.live_only(
         [
-            "missing from the workspace: Agent: Ship PR",
-            "missing input: agentSlug",
+            "missing from the workspace: Test: Run Suite",
+            "missing input: lintScope",
             "folder missing from the workspace: devkit",
         ]
     )
@@ -1267,7 +1273,7 @@ def test_keep_hint_offers_the_adopt_only_when_devkit_has_nothing_to_lose():
     would be the same defect twice, and it is the unsafe half that deletes a branch."""
     live_authored = ["settings differs"]
     assert "--adopt-workspace" in devkit_project.keep_hint(live_authored, "  -> keep them: ")
-    ahead = [*live_authored, "missing from the workspace: Agent: Ship PR"]
+    ahead = [*live_authored, "missing from the workspace: Test: Run Suite"]
     hint = devkit_project.keep_hint(ahead, "  -> keep them: ")
     assert "--adopt-workspace" not in hint and "by hand" in hint
 
@@ -2206,24 +2212,35 @@ def test_the_box_tier_keeps_one_task_and_it_is_read_only(canonical):
     thing that reports them to a human at all. Re-adding one of the three means naming
     the human it is for, not just deleting this test.
 
-    **The human has since been named, and the rows came back under `Agent:`.** With
-    `harness-switch.py` able to stand the branch tier down, "an agent reaches every
-    subcommand through the CLI" stops being true of the one subcommand that matters: with
-    the guard off, nothing cuts a box unless a person asks for one. So `agent-box.py`
-    carries four rows and each answers the bullet that retired its ancestor —
+    The four `Agent:` lifecycle rows came back once and have gone again, and the reason
+    they went is not the reason they arrived. They were added because `harness-switch.py`
+    can stand the branch tier down, and with the guard off nothing cuts a box unless a
+    person asks — so a hand spelling was needed. **Claude Code then grew its own**:
+    `claude --worktree <topic>` cuts and enters a worktree at `.claude/worktrees/<topic>`,
+    offers keep-or-remove on exit, and sweeps a stale one that is clean and pushed. That
+    is `spawn`, `attach` and `delete` in a built-in nobody here maintains, and `/ship` is
+    the delivery half — `ship.is_shippable` accepts the `worktree-<topic>` branch it cuts
+    for exactly this reason. A row that duplicates a built-in is the same clutter as a row
+    that duplicates a scheduled pass.
 
-    - `Agent: Spawn Branch, Worktree, Agent` **does** pass a session (its own tab's), asks
-      for the topic and the base, and opens the agent in the box it cut, so the box is
-      adopted by construction rather than left cold for `reconcile` to reap;
-    - `Agent: Ship PR` is the delivery half the retired rows had no equivalent of at all,
-      and it is what makes a hand-cut box finishable without the Stop-hook tier;
-    - `Agent: Delete Branch` is `reap --force`, deliberately *stronger* than the retired
-      Reap row rather than a copy of it: abandoning work is the case that row refused.
+    **The box tier still has a clicked entry point, and that is not a contradiction.**
+    `Agent: Fix a Broken PR` cuts one box per ticked PR, and every part of what it does is
+    a thing `claude --worktree` has no shape for: the box sits on the *PR's own head
+    branch* with upstream set so a bare push lands on the PR, and the session opens
+    already knowing which PR, what is failing on it now, and that the job ends merged.
+    That is a job spec, not an isolation primitive. This test reads task **args**, so it
+    passes because that row dispatches through `devkit_project.py`; `fix-prs.py` still
+    reaches `agent_command` internally, which is the point of the seam.
 
-    Reconcile is still not a row, and that half of the docstring above stands unchanged —
-    the schedule owns it, and the one-click copy's missing `--merge-label` is still the
-    reason. `harness-switch.py --off --group jobs` is how it is stood down, not a task
-    that runs a second copy of it.
+    `agent-box.py` and `harness-switch.py` therefore stay, and keep their CLI verbs — the
+    other thing the built-in cannot give a box is a port lease and a
+    `COMPOSE_PROJECT_NAME`, so `agent-box.py spawn` remains the answer for a session that
+    runs a compose stack. Typed, by the one person who would want it, which is the bar
+    this test has always applied.
+
+    Reconcile is still not a row, and that half stands unchanged: the schedule owns it,
+    the one-click copy's missing `--merge-label` is still the reason, and
+    `harness-switch.py --off --group jobs` is how it is stood down.
     """
     callers = [
         task
@@ -2234,24 +2251,36 @@ def test_the_box_tier_keeps_one_task_and_it_is_read_only(canonical):
     args = [str(a) for a in callers[0]["args"]]
     assert "list" in args, "the surviving box task must be the read-only one"
 
-    # The four that came back, by the verb each runs. Spelled out so a fifth is a
-    # decision somebody makes here rather than a row that appears in the menu.
-    lifecycle = {
-        task["label"]: [str(a) for a in task["args"]][-1 * len(task["args"]) :]
+    # `agent-box.py` and `harness-switch.py` are CLI-only: neither gets a row back
+    # without naming the human it is for, which is what the docstring above does.
+    clickable = [
+        task["label"]
         for task in canonical["tasks"]
-        if any("agent-box.py" in str(a) for a in task.get("args", []))
-    }
-    assert set(lifecycle) == {
-        "Agent: Spawn Branch, Worktree, Agent",
-        "Agent: Run Agent on Worktree",
-        "Agent: Ship PR",
-        "Agent: Delete Branch",
-    }
-    verbs = {args[args.index("scripts/agent-box.py") + 1] for args in lifecycle.values()}
-    assert verbs == {"spawn", "attach", "ship", "delete"}
-    assert "reconcile" not in verbs, "the schedule owns reconcile; a second copy is not a row"
+        if any(
+            script in str(a)
+            for a in task.get("args", [])
+            for script in ("agent-box.py", "harness-switch.py")
+        )
+    ]
+    assert not clickable, (
+        f"{clickable} duplicates a Claude Code built-in (`claude --worktree` plus "
+        "`/ship`); a row that duplicates one is the same clutter as a row that "
+        "duplicates a scheduled pass"
+    )
 
-    retired = {"worktreeProject", "worktreeSlug", "reconcileMerge"}
+    retired = {
+        "worktreeProject",
+        "worktreeSlug",
+        "reconcileMerge",
+        "agentProject",
+        "agentBase",
+        "agentSlug",
+        "agentBranch",
+        "agentCli",
+        "agentCliOnly",
+        "harnessVerb",
+        "harnessGroups",
+    }
     defined = {spec["id"] for spec in canonical["inputs"]}
     assert not (retired & defined), (
         f"{sorted(retired & defined)} feeds a task that no longer exists -- a picker "

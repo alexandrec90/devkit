@@ -94,9 +94,10 @@ def test_an_unusable_idle_window_falls_back_to_the_default(value):
 
 def test_the_default_spawn_mode_does_not_cut_worktrees():
     """Claude Code's worktrees land under `<repo>/.claude/worktrees/`, not the
-    `<workspace>/.worktrees/` tier `worktree.py` owns, so one cut from the phone gets no
-    provisioning, no port lease and no `reconcile` reap -- and nothing can report it
-    stranded. A machine may still opt in; it may not do so by accident."""
+    `<workspace>/.worktrees/` tier `worktree.py` owns. Claude Code reaps its own, so the
+    gap is not lifecycle -- it is the stack half: no port lease and no
+    `COMPOSE_PROJECT_NAME`, which two sessions running compose at once would collide on.
+    A machine may opt in; it may not do so by accident."""
     assert rc_config.Config().spawn == "same-dir"
 
 
@@ -107,10 +108,10 @@ def test_the_default_spawn_mode_does_not_cut_worktrees():
 )
 def test_every_repo_this_job_can_serve_ignores_claude_code_s_own_worktrees(path):
     """`"spawn": "worktree"` has Claude Code cut worktrees *inside* the checkout, at
-    `.claude/worktrees/<name>`. Un-ignored, the first session started from the phone
-    leaves the static checkout permanently dirty -- which is `holds_uncommitted` to
-    `sweep.classify`, so the nightly `reconcile` names the checkout and steps over it
-    instead of bringing it home, for as long as the worktree exists.
+    `.claude/worktrees/<name>`. Un-ignored, a nested checkout shows up untracked in every
+    `git status`, `git add -A` stages the whole of it, and anything reading dirtiness
+    (`sweep.classify`, the session-start banner) calls the checkout `holds_uncommitted`
+    for as long as the worktree exists.
 
     Both copies, because `templates/` is a one-shot render: devkit's own file is what
     protects this repo, and the template is what protects the next generated one.

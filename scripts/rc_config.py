@@ -34,14 +34,23 @@ RC_SETTING = "devkit.remoteControl"
 # reasonable thing for a machine to ask for: a phone has no VS Code tasks, so spawning
 # in place is the only isolation a mobile session gets otherwise.
 #
-# What the opt-in costs, and why it is not the default: Claude Code cuts its worktrees
-# under `<repo>/.claude/worktrees/<name>`, *inside* the checkout, while `worktree.py`
-# owns a separate tier at `<workspace>/.worktrees/`. The two do not know about each
-# other, so a box cut by the phone gets no `provision`, no port lease, no
-# `COMPOSE_PROJECT_NAME`, and no `reconcile` reap -- and `sweep`, `reconcile` and
-# `workspace-status` cannot see it to report it stranded. Removing one is a hand job.
-# The consuming project must also gitignore `.claude/worktrees/`, or the nested worktree
-# leaves the static checkout dirty and `sweep.classify` stops syncing it.
+# What the opt-in actually costs -- narrower than it looks, so do not over-read it.
+# Claude Code cuts its worktrees under `<repo>/.claude/worktrees/<name>`, *inside* the
+# checkout, and manages their whole lifecycle itself: it offers keep-or-remove on exit,
+# and its retention sweep removes a stale one that is clean, fully pushed, unlocked and
+# carries its own creation marker. So these do not accumulate the way an unmanaged
+# directory would, and the tier needs nothing from `worktree.py`.
+#
+# What it does not get is the **stack** half: no port lease and no
+# `COMPOSE_PROJECT_NAME`, so two concurrent sessions that each bring a compose stack up
+# will collide on both. That is the whole of it -- irrelevant to a session that only
+# edits code and ships, decisive for one that runs the stack, which is why the default
+# stays `same-dir` and a project that needs isolation-with-services uses
+# `worktree.py new` instead.
+#
+# The consuming project must also gitignore `.claude/worktrees/`, or the nested checkout
+# is untracked in every `git status` and reads as `holds_uncommitted` to anything that
+# inspects dirtiness.
 DEFAULT_SPAWN = "same-dir"
 
 # Empty means "pass no `--permission-mode`", so a server inherits whatever the project's

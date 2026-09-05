@@ -88,6 +88,36 @@ def test_the_settings_block_is_in_schema_order():
     assert positions == sorted(positions)
 
 
+def test_a_task_is_enabled_by_default():
+    assert "<Enabled>true</Enabled>" in settings_block(document())
+
+
+def test_a_task_can_be_registered_already_disabled():
+    """For an installer run while `harness-switch.py` has the jobs tier stood down. A
+    document flag rather than a `/Change /DISABLE` afterwards, because the gap between
+    the two commands is one a 15-minute job can fire in."""
+    assert "<Enabled>false</Enabled>" in settings_block(document(enabled=False))
+
+
+def test_disabling_the_task_does_not_disable_its_trigger():
+    """`<Enabled>` is a legal child of both, and the trigger's copy comes first. A
+    document whose trigger was switched off instead would register, look right, and
+    never fire again once the task was re-enabled."""
+    body = document(enabled=False)
+    assert "<Enabled>true</Enabled>" in body[: body.index("<Settings>")]
+
+
+def test_a_disabled_task_is_still_in_schema_order():
+    """The value moves; the position must not. A reordering is rejected at registration
+    on the installing machine, where no test here can reach it."""
+    body = settings_block(document(enabled=False))
+    found = [name for name in SETTINGS_ORDER if f"<{name}>" in body]
+    assert found == list(SETTINGS_ORDER)
+    assert [body.index(f"<{name}>") for name in found] == sorted(
+        body.index(f"<{name}>") for name in found
+    )
+
+
 def test_a_job_runs_where_it_was_told_to():
     """A scheduled task's cwd is `system32`, so a job that resolves `logs/` from the cwd
     -- which every runner following the failure-artifact rule does -- writes its report

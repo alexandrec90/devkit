@@ -20,6 +20,24 @@ def test_namespaced_task_branches_are_shippable_regardless_of_agent():
         assert not ok
 
 
+def test_the_branch_claude_s_own_worktree_flag_cuts_is_shippable():
+    """`claude --worktree fix-thing` cuts `worktree-fix-thing`, and a name containing a
+    slash has it replaced (`claude/x` -> `worktree-claude+x`), so the built-in flag can
+    never produce the `<namespace>/<topic>` spelling. That is hard-coded in the CLI with
+    no setting behind it, so refusing the branch would make `/ship` work from a devkit box
+    and not from Claude Code's own worktree -- a rule about provenance, not about whether
+    the branch is disposable."""
+    for branch in ("worktree-fix-thing", "worktree-claude+fix-thing"):
+        assert ship.is_shippable(branch, "main") == (True, "")
+
+
+def test_the_bare_worktree_prefix_is_not_a_topic():
+    """`worktree-` alone names no task. Accepting it would turn the prefix test into a
+    substring check that any branch merely starting with it passes."""
+    ok, _ = ship.is_shippable("worktree-", "main")
+    assert not ok
+
+
 def test_default_branch_uses_shared_detection(monkeypatch):
     monkeypatch.setattr(ship.tb, "detect_default_branch", lambda git, fallback: "trunk")
     assert ship.default_branch() == "trunk"

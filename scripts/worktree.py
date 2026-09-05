@@ -5125,6 +5125,7 @@ def reconcile(
 
     menu = refresh_preview_menu(workspace, apply=apply, fetch=fetch)
     plug_menu = refresh_plug_menu(apply=apply)
+    broken_menu = refresh_broken_pr_menu(workspace, apply=apply)
 
     report = {
         "applied": apply,
@@ -5136,8 +5137,37 @@ def reconcile(
         "checkouts": synced,
         "preview_menu": menu,
         "plug_menu": plug_menu,
+        "broken_pr_menu": broken_menu,
     }
     return worst, report
+
+
+def menu_rider(script: str, rebuild) -> str:
+    """Let one sibling script rebuild its own dropdown as a rider on this pass.
+
+    The three `refresh_*_menu` functions below differ only in which script they load and
+    what they ask it for; this is the half they share, and it is the half that has to be
+    right. It is also the half worth having in one place: three copies of a broad
+    handler are three chances for one of them to stop being total.
+
+    Loaded by path and INSIDE this function on purpose. Each of those scripts imports
+    this module, so importing one at the top of it is a cycle; and each is hyphenated, so
+    none could be a plain `import` either way. `worktree.py` is the lower layer and these
+    calls are the one place the arrow points back, which is why it is kept narrow and
+    total -- never raising, and never affecting `worst`. A menu that could not be rebuilt
+    is a stale dropdown; a reconcile that failed on one is a machine that stops reaping
+    boxes because a *convenience* broke.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+        from _loader import load_by_path
+
+        here = Path(__file__).resolve().parent
+        module = load_by_path(script.replace("-", "_").removesuffix(".py"), here / script)
+        written = rebuild(module)
+    except Exception:
+        return ""
+    return str(written) if written else ""
 
 
 def refresh_preview_menu(workspace: Path, *, apply: bool, fetch: bool = True) -> str:
@@ -5152,27 +5182,28 @@ def refresh_preview_menu(workspace: Path, *, apply: bool, fetch: bool = True) ->
     just finished reaping exactly the boxes whose rows should go: it knows more about
     what belongs in that menu than any other scheduled thing on the machine.
 
-    Loaded by path and INSIDE the function on purpose. `preview-task.py` imports this
-    module, so importing it at the top of this one is a cycle; and it is hyphenated, so
-    it cannot be a plain `import` either way. `worktree.py` is the lower layer of the two
-    and this call is the one place the arrow points back, which is a good reason to keep
-    it narrow and total -- never raising, and never affecting `worst`. A menu that could
-    not be rebuilt is a stale dropdown; a reconcile that failed on one is a machine that
-    stops reaping boxes because a *convenience* broke.
+    `menu_rider` owns the loading and the containment for all three of these.
     """
     if not apply:
         return ""
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
-        from _loader import load_by_path
+    return menu_rider("preview-task.py", lambda mod: mod.refresh_menu(workspace, fetch=fetch))
 
-        preview_task = load_by_path(
-            "preview_task", Path(__file__).resolve().parent / "preview-task.py"
-        )
-        written = preview_task.refresh_menu(workspace, fetch=fetch)
-    except Exception:
+
+def refresh_broken_pr_menu(workspace: Path, *, apply: bool) -> str:
+    """Rebuild the broken-PR dropdown's options. The path written, or "" for anything else.
+
+    The third rider on this pass, here for the first one's reason and with the sharpest
+    version of it: the rows this writes are the PRs this pass has just decided NOT to
+    touch. `reconcile` merges only what is green and labelled, so every red PR it steps
+    over is one of these -- it has the answer in hand at the one moment per quarter hour
+    when the answer is current, and no other scheduled thing on this machine does.
+
+    No `fetch` argument, unlike `refresh_preview_menu`: every source here is `gh`, which
+    reads GitHub rather than a local ref, so there is nothing a fetch would make fresher.
+    """
+    if not apply:
         return ""
-    return str(written) if written else ""
+    return menu_rider("fix-prs.py", lambda mod: mod.refresh_menu(workspace))
 
 
 def refresh_plug_menu(*, apply: bool) -> str:
@@ -5184,26 +5215,14 @@ def refresh_plug_menu(*, apply: bool) -> str:
     it claims to show -- and unticking a row is how a project leaves the registry.
 
     Takes no workspace: `plug-projects.py` resolves the live workspace file and its own
-    `logs/` from module constants, so the checkout this module was loaded from is
-    already the one whose menu gets written. Loaded by path and inside the function for
-    the reason above it -- the name is hyphenated, and this is a convenience whose
-    failure must never reach `worst`. `refresh_menu` is itself total and returns None
+    `logs/` from module constants, so the checkout `menu_rider` loaded it from is
+    already the one whose menu gets written. `refresh_menu` is itself total and returns None
     rather than writing when `gh` could not be reached, so an outage leaves the previous
     menu in place instead of one offering to create repositories that already exist.
     """
     if not apply:
         return ""
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
-        from _loader import load_by_path
-
-        plug_projects = load_by_path(
-            "plug_projects", Path(__file__).resolve().parent / "plug-projects.py"
-        )
-        written = plug_projects.refresh_menu()
-    except Exception:
-        return ""
-    return str(written) if written else ""
+    return menu_rider("plug-projects.py", lambda mod: mod.refresh_menu())
 
 
 # --- reporting --------------------------------------------------------------
@@ -5507,6 +5526,12 @@ def render_reconcile(report: dict) -> str:
             f"  plug menu: refreshed ({plug_menu})"
             if plug_menu
             else "  plug menu: [warn] not refreshed -- the Plug / Unplug checklist is stale"
+        )
+        broken_menu = report.get("broken_pr_menu")
+        lines.append(
+            f"  broken-PR menu: refreshed ({broken_menu})"
+            if broken_menu
+            else "  broken-PR menu: [warn] not refreshed -- the Fix a Broken PR list is stale"
         )
     if not applied:
         lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")

@@ -87,13 +87,23 @@ def severity(line: str) -> str:
     return FAIL if any(marker in lowered for marker in FAIL_MARKERS) else WARN
 
 
-def states(jobs: list, lines: list[str]) -> list[JobState]:
+def states(
+    jobs: list, lines: list[str], deliberate: frozenset[str] = frozenset()
+) -> list[JobState]:
     """One `JobState` per registered job, worst-first then alphabetical.
 
     Every job appears, not only the unhealthy ones. The tray's job is to make the whole
     set visible -- "nothing is ever totally invisible" is the point of it -- and a menu
     that listed only failures would be indistinguishable from a menu that had lost track
     of a job entirely.
+
+    A job stood down through `harness-switch.py --off jobs` is `OK` -- it is doing what
+    someone asked of it -- but it is **not** left to read as a job that is running. That
+    would trade one wrong report for its mirror image: the menu's whole claim is that a
+    stopped job cannot hide in it, and a deliberately stopped one rendered identically to
+    a working one is exactly that hiding place. It gets the state of a healthy job and a
+    detail saying why it is quiet, so the menu answers "is anything broken" and "is
+    anything off" without conflating them.
     """
     worst: dict[str, tuple[str, str]] = {}
     for line in lines:
@@ -103,7 +113,16 @@ def states(jobs: list, lines: list[str]) -> list[JobState]:
         level = severity(line)
         if name not in worst or RANK[level] > RANK[worst[name][0]]:
             worst[name] = (level, line.partition(": ")[2])
-    found = [JobState(job.name, *worst.get(job.name, (OK, ""))) for job in jobs]
+    found = [
+        JobState(
+            job.name,
+            *worst.get(
+                job.name,
+                (OK, "off on purpose (harness-switch)" if job.name in deliberate else ""),
+            ),
+        )
+        for job in jobs
+    ]
     return sorted(found, key=lambda item: (-RANK[item.state], item.name))
 
 
@@ -146,6 +165,15 @@ def menu_label(item: JobState) -> str:
 
 
 def refresh(now=None) -> list[JobState]:
-    """Ask the scheduler and turn its answer into what the tray draws."""
+    """Ask the scheduler and turn its answer into what the tray draws.
+
+    `stood_down` is read here for the same reason `report` reads it: `problems` is pure
+    and takes intent as an argument, so every entry point owes it that argument or it
+    silently gets the strict answer. The tray is the entry point where the omission
+    would be loudest -- a job an operator deliberately switched off would sit in the
+    menu under a red icon indefinitely, which is the one thing an always-visible
+    indicator must never do if its red is to keep meaning anything.
+    """
     jobs = schedule_health.query()
-    return states(jobs, schedule_health.problems(jobs, now))
+    deliberate = schedule_health.stood_down()
+    return states(jobs, schedule_health.problems(jobs, now, deliberate), deliberate)

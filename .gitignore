@@ -16,7 +16,8 @@ logs/
 
 # Worktrees Claude Code cuts for itself under `--spawn worktree` / `--worktree`. This is
 # NOT the `<workspace>/.worktrees/` box tier — that one lives outside every checkout and
-# `worktree.py` owns it. These land *inside* the repo, so without this line a session
-# started from the phone leaves the static checkout permanently dirty and `sweep.classify`
-# stops syncing it.
+# `worktree.py` owns it. These land *inside* the repo, so without this line every
+# `git status` carries a nested checkout as untracked, `git add -A` stages the whole of
+# it, and anything reading dirtiness (`sweep.classify`, the session-start banner) calls
+# the checkout `holds_uncommitted` for as long as the worktree exists.
 .claude/worktrees/

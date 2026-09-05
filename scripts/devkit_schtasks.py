@@ -57,6 +57,10 @@ TASK_NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 # suppresses **every** later fire until the limit expires -- a fifteen-minute job that
 # hangs once would then be silently dead for three days, which is indistinguishable
 # from the failure this module exists to prevent.
+# Every task this module registers is devkit's own -- `schedule_health` finds them by
+# their name prefix, not by this. Metadata, and deliberately not a parameter.
+AUTHOR = "devkit"
+
 DEFAULT_TIME_LIMIT = "PT1H"
 
 # Midnight on a date already past. A `TimeTrigger` needs a start boundary, and a
@@ -203,8 +207,8 @@ def task_xml(
     trigger: str,
     *,
     time_limit: str = DEFAULT_TIME_LIMIT,
-    author: str = "devkit",
     working_dir: str = "",
+    enabled: bool = True,
 ) -> str:
     """The full task document: one action, one trigger, and the settings that matter.
 
@@ -229,12 +233,17 @@ def task_xml(
     responsible for remembering, and the one that forgot is what this parameter was
     added for. `<Exec>` children are an ordered sequence like `<Settings>`, so it goes
     last, after `<Arguments>`.
+
+    `<Author>` is the constant `AUTHOR`: a knob no caller turned still costs an argument
+    slot. **`enabled=False` registers a task that exists and does not fire**, for an
+    installer run while the jobs group is stood down -- a document flag, not a later
+    `/Change /DISABLE`, whose gap a 15-minute `reconcile` can fire in.
     """
     return (
         '<?xml version="1.0" encoding="UTF-16"?>\n'
         f'<Task version="1.2" xmlns="{TASK_NS}">\n'
         "  <RegistrationInfo>\n"
-        f"    <Author>{escape(author)}</Author>\n"
+        f"    <Author>{AUTHOR}</Author>\n"
         "  </RegistrationInfo>\n"
         "  <Triggers>\n"
         f"{trigger}"
@@ -251,7 +260,7 @@ def task_xml(
         "      <RestartOnIdle>false</RestartOnIdle>\n"
         "    </IdleSettings>\n"
         "    <AllowStartOnDemand>true</AllowStartOnDemand>\n"
-        "    <Enabled>true</Enabled>\n"
+        f"    <Enabled>{'true' if enabled else 'false'}</Enabled>\n"
         "    <Hidden>false</Hidden>\n"
         "    <RunOnlyIfIdle>false</RunOnlyIfIdle>\n"
         "    <WakeToRun>false</WakeToRun>\n"
