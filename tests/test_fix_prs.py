@@ -11,20 +11,19 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from support import load_script
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-sys.path.insert(0, str(ROOT / "scripts" / "precommit"))
-
-from _loader import load_by_path  # noqa: E402
-
-fix_prs = load_by_path("fix_prs", ROOT / "scripts" / "fix-prs.py")
-agent_box = load_by_path("agent_box", ROOT / "scripts" / "agent-box.py")
+# `support.load_script` rather than `_loader.load_by_path`, which is what the script
+# itself uses: `load_by_path` overwrites `sys.modules[name]`, so reaching `agent-box.py`
+# that way would hand this process a second copy of a module `tests/test_agent_box.py`
+# has already loaded -- and it is the one this suite monkeypatches. It also costs no
+# `sys.path` bootstrap here, so this file needs no file-wide `noqa` to sit under one.
+fix_prs = load_script("scripts/fix-prs.py")
+agent_box = load_script("scripts/agent-box.py")
 
 NOW = _dt.datetime(2026, 9, 4, 12, 0, tzinfo=_dt.UTC)
 
@@ -134,6 +133,23 @@ def test_a_gh_failure_loses_the_rows_and_keeps_the_menu(monkeypatch, tmp_path, c
     assert fix_prs.broken_prs(tmp_path) == []
 
 
+def test_the_pr_is_re_read_live_rather_than_trusted_to_the_menu(monkeypatch, tmp_path):
+    """The dropdown can be a quarter of an hour old, so what the agent is told about a PR
+    comes from here and not from the row that was clicked."""
+    monkeypatch.setattr(fix_prs.sweep, "gh_for", gh_returning(0, json.dumps(pr(number=9))))
+    assert fix_prs.pr_view(tmp_path, 9)["number"] == 9
+
+
+@pytest.mark.parametrize("code,out", [(1, ""), (0, "not json"), (0, "[]")])
+def test_a_pr_view_that_cannot_be_read_is_empty_rather_than_a_traceback(
+    monkeypatch, tmp_path, code, out
+):
+    """`[]` is in here because `gh` returning the wrong SHAPE must land in the same place
+    as `gh` failing: `run_one` branches on emptiness, and a list would reach `.get`."""
+    monkeypatch.setattr(fix_prs.sweep, "gh_for", gh_returning(code, out))
+    assert fix_prs.pr_view(tmp_path, 9) == {}
+
+
 # --- the dropdown's options file --------------------------------------------------
 
 
@@ -220,6 +236,37 @@ def test_the_scan_covers_the_registry_not_just_the_stack_projects(monkeypatch, t
     monkeypatch.setattr(fix_prs.devkit_project, "known_projects", lambda _text: ["a", "b"])
     monkeypatch.setattr(fix_prs, "broken_prs", lambda _dir: [])
     assert sorted(fix_prs.scan(workspace)) == ["a", "b"]
+
+
+def test_a_pick_is_one_token_the_extension_can_return():
+    """A VS Code input resolves to a single string, so both halves ride in one value."""
+    assert fix_prs.pick_value("carameli", 412) == "carameli:412"
+
+
+def test_a_row_names_the_pr_says_what_is_wrong_and_how_old_the_scan_is():
+    row = fix_prs.menu_row("carameli", pr(mergeable="CONFLICTING"), NOW)
+    assert row["value"] == "carameli:412"
+    assert row["label"] == "#412 agent/sweep-labels-0904"
+    assert row["description"] == "merge conflict -- 3h ago"
+    assert row["detail"] == "Teach the sweep about labels"
+
+
+def test_the_placeholder_row_says_picking_it_runs_nothing():
+    """It exists to keep the array non-empty, so it has to read as a non-action rather
+    than as a PR whose title nobody filled in."""
+    row = fix_prs.placeholder_row("devkit")
+    assert row["value"] == "devkit:none"
+    assert fix_prs.parse_pick(row["value"]) is None
+    assert "nothing" in row["label"] and "runs nothing" in row["detail"]
+
+
+def test_a_checkout_with_nothing_broken_says_so_rather_than_saying_zero():
+    """The first dropdown's second column is read at a glance; `0 broken` is a number to
+    parse where `nothing broken` is an answer."""
+    assert (
+        fix_prs.project_note([], "2026-09-04 12:00") == "nothing broken -- as of 2026-09-04 12:00"
+    )
+    assert fix_prs.project_note([pr()], "2026-09-04 12:00").startswith("1 broken -- ")
 
 
 # --- reading a pick ---------------------------------------------------------------
@@ -353,6 +400,57 @@ def test_the_three_modes_map_to_two_clis_and_two_ways_of_opening():
     assert "codex-bg" not in fix_prs.AGENT_MODES
 
 
+def test_the_background_launch_runs_the_resolved_exe_in_the_box(monkeypatch, tmp_path):
+    seen = {}
+
+    def runner(argv, **kwargs):
+        seen.update(argv=argv, kwargs=kwargs)
+        return subprocess.CompletedProcess(argv, 0, "session abc123", "")
+
+    # `which` resolves to an absolute path, and that resolved path is what must be
+    # spawned: the argv is handed to `subprocess.run` with no shell, so the bare name
+    # would be looked up a second time -- against the child's PATH, not this one's.
+    resolved = r"C:\bin\claude.exe"
+    monkeypatch.setattr(fix_prs.shutil, "which", lambda _cli: resolved)
+    code = fix_prs.launch_background("claude", tmp_path, "fix #412", False, runner)
+    assert code == fix_prs.EXIT_OK
+    assert seen["argv"] == [resolved, "--bg", "fix #412"]
+    assert seen["kwargs"]["cwd"] == str(tmp_path)
+    assert fix_prs.agent_box.harness_switch.HOOKS_OFF_ENV not in seen["kwargs"]["env"]
+
+
+def test_the_background_launch_carries_the_hooks_switch_as_an_env_var(monkeypatch, tmp_path):
+    """There is no shell in this mode, so the `$env:` prefix the tab uses has nowhere to
+    go -- the switch has to reach the child through its environment or not at all."""
+    seen = {}
+
+    def runner(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(fix_prs.shutil, "which", lambda _cli: "claude")
+    fix_prs.launch_background("claude", tmp_path, "p", True, runner)
+    switch = fix_prs.agent_box.harness_switch
+    assert seen["env"][switch.HOOKS_OFF_ENV] == switch.HOOKS_OFF_VALUE
+
+
+def test_a_cli_that_is_not_on_path_is_reported_rather_than_spawned(monkeypatch, tmp_path, capsys):
+    def explode(*_a, **_k):
+        raise AssertionError("nothing should be spawned")
+
+    monkeypatch.setattr(fix_prs.shutil, "which", lambda _cli: None)
+    assert fix_prs.launch_background("claude", tmp_path, "p", False, explode) == fix_prs.EXIT_FAILED
+    assert "not on PATH" in capsys.readouterr().out
+
+
+def test_a_background_session_that_failed_to_start_is_a_failure(monkeypatch, tmp_path):
+    def runner(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "no credit")
+
+    monkeypatch.setattr(fix_prs.shutil, "which", lambda _cli: "claude")
+    assert fix_prs.launch_background("claude", tmp_path, "p", False, runner) == fix_prs.EXIT_FAILED
+
+
 # --- one PR, end to end -----------------------------------------------------------
 
 
@@ -481,3 +579,24 @@ def test_an_unknown_checkout_is_a_usage_error_not_a_traceback(workspace, capsys)
     code = fix_prs.main(["--picks", "nosuch:1", "--workspace", str(workspace)])
     assert code == fix_prs.EXIT_USAGE
     assert "unknown checkout" in capsys.readouterr().err
+
+
+def test_the_terminal_listing_draws_the_same_rows_as_the_dropdown():
+    """`--list` is what a machine with no VS Code has, so it must not be a second answer
+    to the question the menu answers."""
+    found = {"devkit": [pr(mergeable="CONFLICTING")], "carameli": []}
+    text = fix_prs.render_scan(found)
+    assert "devkit: 1 broken" in text
+    assert "  #412 agent/sweep-labels-0904 -- merge conflict" in text
+    assert "carameli: nothing broken" in text
+
+
+def test_the_parser_defaults_to_a_watchable_tab_and_offers_only_the_known_modes():
+    """The default is the tab because a session that pushes to a real branch and can merge
+    a real PR is one worth being able to interrupt; `choices` is `AGENT_MODES` so a row in
+    the picker and a mode here can never drift apart."""
+    parser = fix_prs.build_parser()
+    args = parser.parse_args([])
+    assert (args.agent, args.picks, args.refresh, args.list) == ("claude", "", False, False)
+    action = next(a for a in parser._actions if a.dest == "agent")
+    assert sorted(action.choices) == sorted(fix_prs.AGENT_MODES)

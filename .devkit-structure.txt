@@ -64,11 +64,13 @@ complexity::scripts/worktree.py::reap_plan = 26
 complexity::scripts/worktree.py::reconcile = 20
 complexity::scripts/worktree.py::reconcile_action = 22
 complexity::scripts/worktree.py::render_preview = 18
-complexity::scripts/worktree.py::render_reconcile = 22
+complexity::scripts/worktree.py::render_reconcile = 23
 complexity::scripts/worktree.py::render_survey = 21
+definitions::scripts/agent-box.py = 21
 definitions::scripts/agent_clis.py = 21
 definitions::scripts/devkit_project.py = 50
 definitions::scripts/docker-maint.py = 30
+definitions::scripts/fix-prs.py = 28
 definitions::scripts/git_policy.py = 36
 definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
@@ -90,7 +92,7 @@ definitions::scripts/upgrade-project.py = 39
 definitions::scripts/workspace-status.py = 30
 definitions::scripts/workspace-task-index.py = 29
 definitions::scripts/worktree-guard.py = 60
-definitions::scripts/worktree.py = 159
+definitions::scripts/worktree.py = 161
 dependency::package.json::markdownlint-cli2 = 1
 dependency::package.json::remark-cli = 1
 dependency::package.json::remark-frontmatter = 1
@@ -99,8 +101,10 @@ dependency::pyproject.toml::mypy = 1
 dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::pytest = 1
 dependency::pyproject.toml::ruff = 1
-file_lines::scripts/devkit_project.py = 1701
+file_lines::scripts/agent-box.py = 532
+file_lines::scripts/devkit_project.py = 1710
 file_lines::scripts/docker-maint.py = 790
+file_lines::scripts/fix-prs.py = 649
 file_lines::scripts/git_policy.py = 710
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
@@ -120,8 +124,8 @@ file_lines::scripts/sync-devkit.py = 1417
 file_lines::scripts/upgrade-project.py = 1231
 file_lines::scripts/workspace-status.py = 997
 file_lines::scripts/workspace-task-index.py = 576
-file_lines::scripts/worktree-guard.py = 2294
-file_lines::scripts/worktree.py = 6250
+file_lines::scripts/worktree-guard.py = 2295
+file_lines::scripts/worktree.py = 6275
 function_lines::scripts/devkit_project.py::main = 213
 function_lines::scripts/docker-maint.py::generic_prune = 84
 function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
@@ -143,7 +147,7 @@ function_lines::scripts/sweep.py::sync_plan = 87
 function_lines::scripts/sync-devkit.py::main = 246
 function_lines::scripts/upgrade-project.py::main = 162
 function_lines::scripts/upgrade-project.py::upgrade_one = 143
-function_lines::scripts/worktree-guard.py::main = 138
+function_lines::scripts/worktree-guard.py::main = 139
 function_lines::scripts/worktree-guard.py::redirect_decision = 94
 function_lines::scripts/worktree-guard.py::spawn_and_route = 98
 function_lines::scripts/worktree.py::apply_new = 107
@@ -153,7 +157,7 @@ function_lines::scripts/worktree.py::provision_steps = 82
 function_lines::scripts/worktree.py::reap_decision = 107
 function_lines::scripts/worktree.py::reap_plan = 162
 function_lines::scripts/worktree.py::reapable = 114
-function_lines::scripts/worktree.py::reconcile = 148
+function_lines::scripts/worktree.py::reconcile = 150
 function_lines::scripts/worktree.py::reconcile_action = 176
 function_lines::scripts/worktree.py::resume_plan = 86
 function_params::scripts/devkit_project.py::autofix_ship_plan = 9
@@ -186,7 +190,7 @@ function_params::scripts/worktree.py::reconcile_plan = 8
 function_params::scripts/worktree.py::resume_plan = 11
 function_params::scripts/worktree.py::spawn_plan = 14
 imports::scripts/preview-ui-host.py = 23
-imports::scripts/worktree.py = 25
+imports::scripts/worktree.py = 24
 nesting_depth::scripts/devkit_jsonc.py::blank_comments = 5
 nesting_depth::scripts/devkit_jsonc.py::drop_trailing_commas = 5
 nesting_depth::scripts/devkit_project.py::_array_span = 6
@@ -255,7 +259,7 @@ swallowed_errors::scripts/task_slug.py = 1
 swallowed_errors::scripts/upgrade-project.py = 1
 swallowed_errors::scripts/workspace-status.py = 8
 swallowed_errors::scripts/worktree-guard.py = 3
-swallowed_errors::scripts/worktree.py = 3
+swallowed_errors::scripts/worktree.py = 2
 
 # --- recorded growth ------------------------------------------------
 
@@ -303,3 +307,16 @@ swallowed_errors::scripts/worktree.py = 3
 
 # 2026-09-04  recorded: `scheduler_fallback` learned that a reconcile pass stood down on purpose is not a stopped one. It is the second of two reporters watching that job -- `schedule_health` reads the scheduler, this reads the mtime of logs/reconcile.log -- so silencing only the first moved the false alarm here instead of removing it. The growth is a third parameter, two guard lines and the docstring saying why the intent is passed in rather than looked up. workspace-status.py has been 2x file_lines since before this gate; splitting the schedule tier out of it is its own change, not a rider on a false-alarm fix.
 #   file_lines::scripts/workspace-status.py -> 997
+
+# 2026-09-05  recorded: The broken-PR tier. Two kinds of growth here, and the second is the one to read: worktree.py, worktree-guard.py and devkit_project.py are all far past file_lines already, so a rider, a comment and a task row have nowhere to land -- that is what recording is for. But scripts/fix-prs.py CROSSES both limits on its first commit (649 lines, 28 definitions) and scripts/agent-box.py is pushed over by ps_quote and two parameters (532, 21). Neither is debt this gate inherited; both are a split this change owes. The seam in fix-prs.py is the one its own section headers already draw: the scan-and-menu half that worktree.reconcile rides on (broken_reason .. refresh_menu) against the launch half (parse_pick .. main). Recorded rather than split because the split moves the module worktree.menu_rider loads by name and the file the dropdown reads, which is a change that wants its own PR and its own reversion check, not a rider on the one that introduced the tier.
+#   complexity::scripts/worktree.py::render_reconcile -> 23
+#   definitions::scripts/agent-box.py -> 21
+#   definitions::scripts/fix-prs.py -> 28
+#   definitions::scripts/worktree.py -> 161
+#   file_lines::scripts/agent-box.py -> 532
+#   file_lines::scripts/devkit_project.py -> 1710
+#   file_lines::scripts/fix-prs.py -> 649
+#   file_lines::scripts/worktree-guard.py -> 2295
+#   file_lines::scripts/worktree.py -> 6275
+#   function_lines::scripts/worktree-guard.py::main -> 139
+#   function_lines::scripts/worktree.py::reconcile -> 150

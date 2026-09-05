@@ -3707,6 +3707,41 @@ def _with_loader(monkeypatch, module, asked: list | None = None):
     monkeypatch.setitem(sys.modules, "_loader", types.SimpleNamespace(load_by_path=load_by_path))
 
 
+# --- the one loader the three riders share -----------------------------------
+
+
+def test_the_rider_loads_the_named_script_under_its_underscored_name(monkeypatch):
+    """The three menu riders differ only in which sibling they load and what they ask it
+    for, so the loading and the containment live here once. Each is hyphenated, so the
+    module name it is registered under has to be derived rather than passed."""
+    asked: list = []
+    _with_loader(monkeypatch, _fake_script(refresh_menu=lambda: "written"), asked)
+
+    assert worktree.menu_rider("plug-projects.py", lambda mod: mod.refresh_menu()) == "written"
+    name, path = asked[0]
+    assert name == "plug_projects"
+    assert path.name == "plug-projects.py"
+    assert path.is_file(), "the rider is loading a file that no longer exists"
+
+
+def test_the_rider_swallows_whatever_the_sibling_raises(monkeypatch):
+    """One handler rather than three, and this is what it is for: `gh` is a network call,
+    so a scan that raised must not stop the pass that destroys merged boxes. Asserted
+    here so the containment cannot rot in a copy."""
+
+    def explode(_mod):
+        raise RuntimeError("gh is not on PATH today")
+
+    _with_loader(monkeypatch, _fake_script())
+    assert worktree.menu_rider("fix-prs.py", explode) == ""
+
+
+def test_a_rider_that_wrote_nothing_is_an_empty_string(monkeypatch):
+    """None would render as the word "None" in the reconcile log, which reads like a path."""
+    _with_loader(monkeypatch, _fake_script())
+    assert worktree.menu_rider("fix-prs.py", lambda _mod: None) == ""
+
+
 def test_reconcile_refreshes_the_dropdown_at_the_end_of_the_pass(workspace, monkeypatch):
     """The whole point of the rider: the menu is rebuilt by a scheduled pass rather than
     by whoever last clicked a preview task. Revert this and the dropdown is a cache of

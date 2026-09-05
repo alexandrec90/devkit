@@ -330,13 +330,16 @@ def refresh_menu(workspace: Path, path: Path | None = None) -> Path | None:
 
     Total, like `write_menu` and for the stronger reason: `worktree.reconcile` calls this
     at the end of every pass, and a menu that could not be built must never fail a
-    reconcile that reaped boxes correctly. `broken_prs` is already the forgiving kind, so
-    the `Exception` here is for the shapes that are not source failures at all -- an
-    unreadable workspace file, a registry that has been replaced by a directory.
+    reconcile that reaped boxes correctly. `broken_prs` and `write_menu` are already the
+    forgiving kind, so what is left here is the workspace file itself: `OSError` for one
+    that cannot be read, and `ValueError` for one that cannot be parsed as a registry --
+    `json.JSONDecodeError` and `devkit_project.ProjectError` are both that. Named rather
+    than caught as `Exception`, so a bug in the shapes above still surfaces as a
+    traceback instead of an empty dropdown nobody can account for.
     """
     try:
         return write_menu(menu_payload(scan(workspace)), path)
-    except Exception:
+    except (OSError, ValueError):
         return None
 
 
