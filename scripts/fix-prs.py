@@ -25,14 +25,14 @@ background session: `codex exec` is non-interactive but streams to the terminal 
 started in and hands back nothing to attach to. Offering a row per agent per mode would
 have made that difference silent; three rows makes it visible in the dropdown.
 
-**The menu is a scan, not live state.** `rioj7.command-variable` can read a file and
-cannot run a command, so the dropdown's options are whatever the last `--refresh` wrote
--- and the writer that matters is not a task run but `worktree.reconcile`, which calls
-`refresh_menu` on its fifteen-minute pass exactly as it does for `preview-task.py`. The
-rows therefore track GitHub without anyone asking, and every row carries the scan's
-timestamp so a stale one says so. What a *click* then acts on is read fresh from `gh pr
-view`: the menu is up to a quarter hour old, and the prompt an agent is handed must
-describe the PR as it is now.
+**The menu is live, and that is a change of writer rather than of shape.** It used to be
+a JSON file rebuilt every fifteen minutes by `worktree.reconcile`, because
+`rioj7.command-variable` reads a file and cannot run a command -- so the rows were stale
+by construction, and stale in the one direction that costs: a PR closed since the scan
+still drew a row, and clicking it sent `resume` at a head branch GitHub had deleted.
+`--rows` is that scan with no file under it, run by `shellCommand.execute` at the moment
+the picker opens. `run_one` still re-reads the PR it was handed, because a scan of six
+checkouts is seconds of quick-pick and a person then reads the list.
 
 Every function that decides something is pure and tested in `tests/test_fix_prs.py`;
 the ones that spawn take a runner.
@@ -41,6 +41,7 @@ the ones that spawn take a runner.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures as futures
 import datetime as _dt
 import json
 import os
@@ -68,11 +69,6 @@ WORKTREE = REPO_ROOT / "scripts" / "worktree.py"
 
 agent_box = load_by_path("agent_box", REPO_ROOT / "scripts" / "agent-box.py")
 
-# The file the dropdown reads. Under `logs/` for `preview-task.MENU_CACHE`'s reason: it
-# is machine state with the lifetime of a reconcile pass, gitignored, and worth nothing
-# to a fresh clone.
-MENU_CACHE = REPO_ROOT / "logs" / "broken-prs.json"
-
 # `<project>:<number>`, one token because a VS Code input resolves to one string. A
 # checkout name cannot contain a colon (it is a directory name and a
 # `COMPOSE_PROJECT_NAME`), so the first one always separates the halves.
@@ -82,12 +78,22 @@ PICK_SEP = ":"
 # and chosen on the same terms: neither half can contain one.
 PICK_LIST_SEP = " "
 
-# The row a healthy checkout still draws. The extension builds its list by evaluating
-# one expression per field against rising indices until one *throws*, so a checkout with
-# an empty `rows` array would end the list at the first project that had nothing wrong
-# -- hiding every checkout after it. A placeholder row keeps the array non-empty, and
-# `main` recognises the sentinel and reports rather than spawning anything.
+# The row a scan that found nothing draws. `shellCommand.execute` has `defaultOptions`
+# for this, and the row is written here instead so the *reason* the list is empty is one
+# of this module's outputs and testable with the rest: an empty quick-pick says nothing
+# about whether the scan ran. `main` recognises the sentinel and spawns nothing.
 NOTHING = "none"
+
+# What separates the four fields of a row. `shellCommand.execute` splits each line into
+# `value|label|description|detail` and returns the value alone; the other three are the
+# two lines the quick-pick draws. A PR title is the one field a person wrote, so `cell`
+# takes the separator back out rather than trusting GitHub not to carry one.
+FIELD_SEP = "|"
+
+# How many checkouts `scan` asks about at once. Well above the registry's size, so the
+# pool is bounded by the number of checkouts in practice; the ceiling is here so a
+# workspace that grows to thirty repos does not open thirty `gh` processes at once.
+SCAN_WORKERS = 8
 
 # How many open PRs to ask about per checkout. Well past what any of these repos carries
 # at once; the cap is here so a runaway bot cannot turn one dropdown into a thousand.
@@ -210,7 +216,7 @@ def broken_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
     return [entry for entry in entries if isinstance(entry, dict) and broken_reason(entry)]
 
 
-# --- the dropdown's options file --------------------------------------------------
+# --- the rows the picker draws ----------------------------------------------------
 
 
 def age(stamp: str, now: _dt.datetime | None = None) -> str:
@@ -239,114 +245,70 @@ def pick_value(project: str, number: object) -> str:
     return f"{project}{PICK_SEP}{number}"
 
 
-def menu_row(project: str, pr: dict, now: _dt.datetime | None = None) -> dict[str, str]:
-    """One dropdown entry. Every field a string -- see `menu_payload` for why."""
-    return {
-        "value": pick_value(project, pr.get("number", "")),
-        "label": f"#{pr.get('number', '?')} {pr.get('headRefName', '')}".strip(),
-        "description": f"{broken_reason(pr)} -- {age(str(pr.get('updatedAt', '')), now)}",
-        "detail": str(pr.get("title", "")),
-    }
+def cell(text: object) -> str:
+    """One field of a row: a single line, with no `FIELD_SEP` left in it."""
+    return " ".join(str(text).replace(FIELD_SEP, "/").split())
 
 
-def placeholder_row(project: str) -> dict[str, str]:
-    """The row a checkout with nothing broken still draws. See `NOTHING`."""
-    return {
-        "value": pick_value(project, NOTHING),
-        "label": "nothing broken",
-        "description": "every open PR here is either green or a draft",
-        "detail": "picking this runs nothing",
-    }
+def menu_row(project: str, pr: dict, now: _dt.datetime | None = None) -> str:
+    """One quick-pick line for a broken PR.
 
-
-def project_note(rows: list[dict], as_of: str) -> str:
-    """The first dropdown's second column: what picking this checkout will offer."""
-    if not rows:
-        return f"nothing broken -- as of {as_of}"
-    return f"{len(rows)} broken -- as of {as_of}"
-
-
-def menu_payload(
-    found: dict[str, list[dict]], now: _dt.datetime | None = None
-) -> dict[str, object]:
-    """The options file: the checkouts, and each one's rows keyed by name.
-
-    The shape is `preview-task.menu_payload`'s, and load-bearing for its reasons: the
-    extension appends options until an expression *throws*, `undefined` does not throw,
-    and a bare list index merely returns it. So the rows are an array under a key per
-    checkout -- `rows[project][i].value` raises past the end -- and every row carries all
-    four fields as strings.
-
-    Checkouts with something broken sort first, and within that by count. A dropdown
-    whose top entry is the one with four red PRs is the dropdown answering the question
-    it was opened to answer; alphabetical order puts `carameli` first every time
-    regardless of whether anything is wrong there.
+    The checkout is in the description rather than the label because the list is flat --
+    `shellCommand.execute` resolves one input per command, and a "which checkout, then
+    which of its PRs" pair would be two, which VS Code gives no sight of each other. One
+    scan across every checkout was always the question this task asked; the two-stage
+    picker was how a *file* keyed its rows, not what a reader wanted.
     """
-    stamp = now or _dt.datetime.now(_dt.UTC)
-    as_of = stamp.astimezone().strftime("%Y-%m-%d %H:%M")
-    entries, rows = [], {}
-    for project in sorted(found, key=lambda name: (-len(found[name]), name)):
-        listed = sorted(found[project], key=lambda pr: str(pr.get("updatedAt", "")), reverse=True)
-        rows[project] = [menu_row(project, pr, stamp) for pr in listed] or [
-            placeholder_row(project)
-        ]
-        entries.append(
-            {"name": project, "label": project, "description": project_note(listed, as_of)}
+    number = pr.get("number", "?")
+    return FIELD_SEP.join(
+        (
+            cell(pick_value(project, pr.get("number", ""))),
+            cell(f"#{number} {pr.get('headRefName', '')}"),
+            cell(f"{project} -- {broken_reason(pr)} -- {age(str(pr.get('updatedAt', '')), now)}"),
+            cell(pr.get("title", "")),
         )
-    return {"generated": stamp.isoformat(), "asOf": as_of, "projects": entries, "rows": rows}
+    )
 
 
-def write_menu(payload: dict, path: Path | None = None) -> Path | None:
-    """Save the options, atomically. The path on success, None on any failure.
+def placeholder_row() -> str:
+    """The row a scan that found nothing draws. See `NOTHING`."""
+    return FIELD_SEP.join(
+        (
+            NOTHING,
+            "nothing broken",
+            "every open PR on this machine is green, or a draft",
+            "picking this runs nothing",
+        )
+    )
 
-    Never raises, for `preview-task.write_menu`'s reason: this runs as a rider on
-    somebody else's pass, and the cost of a swallowed error is one stale dropdown that
-    the next pass rewrites within the quarter hour.
 
-    The destination defaults at CALL time so a test can point `MENU_CACHE` somewhere
-    disposable and the caller in `main` follows it there.
+def rows(found: dict[str, list[dict]], now: _dt.datetime | None = None) -> list[str]:
+    """Every broken PR on the machine as a quick-pick line, most recently touched first.
+
+    Newest first rather than grouped by checkout: the reader is choosing which red PR to
+    send a session at, and "which repo" is a field on the row rather than the question.
     """
-    path = path or MENU_CACHE
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        scratch = path.with_suffix(".json.tmp")
-        scratch.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        scratch.replace(path)
-    except OSError:
-        return None
-    return path
+    listed = [(project, pr) for project, prs in found.items() for pr in prs]
+    listed.sort(key=lambda pair: str(pair[1].get("updatedAt", "")), reverse=True)
+    return [menu_row(project, pr, now) for project, pr in listed] or [placeholder_row()]
 
 
 def scan(workspace: Path, projects: list[str] | None = None) -> dict[str, list[dict]]:
     """Every checkout in the registry, and the broken PRs it has.
 
-    Every registered checkout is listed even when it contributes no row, because the
-    reader's question is "where is something red", and a checkout that silently drops out
-    of the list when it is healthy is indistinguishable from one the scan could not
-    reach.
+    Concurrent because a person is watching: this now runs when the picker opens rather
+    than on a scheduled pass, and six serial `gh pr list` calls are five seconds of empty
+    quick-pick. The calls share nothing and `broken_prs` is total, so a pool of them
+    cannot fail differently from the loop it replaced -- only sooner.
     """
     text = workspace.read_text(encoding="utf-8")
     names = devkit_project.known_projects(text) if projects is None else projects
     root = workspace.parent
-    return {name: broken_prs(root / name) for name in names}
-
-
-def refresh_menu(workspace: Path, path: Path | None = None) -> Path | None:
-    """Rebuild the options file. The path on success, None on any failure.
-
-    Total, like `write_menu` and for the stronger reason: `worktree.reconcile` calls this
-    at the end of every pass, and a menu that could not be built must never fail a
-    reconcile that reaped boxes correctly. `broken_prs` and `write_menu` are already the
-    forgiving kind, so what is left here is the workspace file itself: `OSError` for one
-    that cannot be read, and `ValueError` for one that cannot be parsed as a registry --
-    `json.JSONDecodeError` and `devkit_project.ProjectError` are both that. Named rather
-    than caught as `Exception`, so a bug in the shapes above still surfaces as a
-    traceback instead of an empty dropdown nobody can account for.
-    """
-    try:
-        return write_menu(menu_payload(scan(workspace)), path)
-    except (OSError, ValueError):
-        return None
+    if not names:
+        return {}
+    with futures.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(names))) as pool:
+        found = pool.map(lambda name: broken_prs(root / name), names)
+        return dict(zip(names, found, strict=True))
 
 
 # --- reading a pick ---------------------------------------------------------------
@@ -372,6 +334,11 @@ def parse_pick(token: str) -> Pick | None:
     the menu file and this parser disagree, and running the rest of a batch while
     silently dropping one is how a user ends up believing a PR was looked at.
     """
+    # Ahead of the split, and a bare word rather than the `<project>:none` this used to
+    # be: the pick reaches the script as `--picks <value>`, and argparse reads any value
+    # starting with `-` as an option, so a sentinel needs no leading punctuation either.
+    if str(token) == NOTHING:
+        return None
     project, _, tail = str(token).partition(PICK_SEP)
     if not project or not tail:
         raise FixError(f"cannot read the pick {token!r}; expected <project>{PICK_SEP}<number>")
@@ -611,7 +578,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(AGENT_MODES),
         help="which CLI opens, and whether it opens in a tab or in the background",
     )
-    parser.add_argument("--refresh", action="store_true", help="rewrite the menu file and stop")
+    parser.add_argument(
+        "--rows",
+        action="store_true",
+        help="print the picker's rows (`value|label|description|detail`) and stop",
+    )
     parser.add_argument("--list", action="store_true", help="print the broken PRs and stop")
     parser.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
     return parser
@@ -634,10 +605,12 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
 
     try:
-        if args.refresh:
-            written = refresh_menu(workspace)
-            print(f"fix-prs: wrote {written}" if written else "fix-prs: the menu was not written")
-            return EXIT_OK if written else EXIT_FAILED
+        if args.rows:
+            # The picker's stdout, so nothing else may be written to it: a status line
+            # here is an extra option in the quick-pick.
+            for row in rows(scan(workspace)):
+                print(row)
+            return EXIT_OK
         if args.list:
             print(render_scan(scan(workspace)))
             return EXIT_OK
