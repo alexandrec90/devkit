@@ -158,6 +158,22 @@ def fields(row: str) -> list[str]:
     return row.split(fix_prs.FIELD_SEP)
 
 
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("plain", "plain"),
+        ("a|b", "a/b"),
+        ("one" + chr(10) + "two", "one two"),
+        ("  padded  ", "padded"),
+        (412, "412"),
+    ],
+)
+def test_a_cell_is_one_line_with_no_separator_left_in_it(text, expected):
+    """The whole of a row's containment: `menu_row` builds four of these and joins them,
+    so anything that could add a field or a line has to stop here."""
+    assert fix_prs.cell(text) == expected
+
+
 def test_a_row_is_the_four_fields_the_extension_splits_on():
     """`shellCommand.execute` returns the FIRST field and draws the other three, so a row
     that runs the fields together sends an agent at a label."""
