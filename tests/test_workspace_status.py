@@ -502,15 +502,25 @@ def test_the_fix_names_a_forward_slash_path_on_every_platform(tmp_path):
     assert ".claude/settings.json" in ws.guard_line(tmp_path)
 
 
+def toolchain(**over):
+    """A fully-provisioned workstation, minus whatever the caller overrides.
+
+    The extension reporter is injected rather than left to its default because the
+    default reads the machine running the tests -- which would make every assertion here
+    depend on what its VS Code happens to have installed."""
+    args = {"which": lambda _n: "/usr/bin/uv", "git": lambda *a: "someone", "extensions": list}
+    return ws.toolchain_lines(**{**args, **over})
+
+
 def test_a_workstation_with_uv_and_a_git_identity_says_nothing():
-    assert ws.toolchain_lines(which=lambda _n: "/usr/bin/uv", git=lambda *a: "someone") == []
+    assert toolchain() == []
 
 
 def test_a_missing_uv_is_reported_because_nothing_can_provision_without_it():
     """`guard_line`'s reason: it has no symptom at the moment it is wrong. devkit is
     uv-native, so `worktree.py new`, `provision` and `session-start.sh` all end in the
     same failure wearing three different messages."""
-    (line,) = ws.toolchain_lines(which=lambda _n: None, git=lambda *a: "someone")
+    (line,) = toolchain(which=lambda _n: None)
     assert "uv is not on PATH" in line and "install uv" in line
 
 
@@ -518,13 +528,26 @@ def test_an_unset_git_identity_is_reported_with_the_key_that_is_missing():
     """It surfaces as `sweep.py --ship` dying at `git commit` with `Author identity
     unknown` -- at the end of the one operation whose purpose is to get work off the
     machine."""
-    lines = ws.toolchain_lines(
-        which=lambda _n: "/usr/bin/uv",
-        git=lambda *a: "" if a[-1] == "user.email" else "someone",
-    )
+    lines = toolchain(git=lambda *a: "" if a[-1] == "user.email" else "someone")
     assert len(lines) == 1
     assert "user.email" in lines[0] and "user.name" not in lines[0]
     assert "Author identity unknown" in lines[0]
+
+
+def test_a_missing_vs_code_extension_joins_the_other_prerequisites():
+    """Same category and same reason -- no symptom until the moment it is needed -- so it
+    is reported in the same place rather than in a check somebody runs. The knowledge of
+    how VS Code records an install lives in `vscode_extensions.py`; this is the wiring,
+    which is otherwise the kind of line whose absence looks exactly like good news."""
+    assert toolchain(extensions=lambda: ["no such extension"]) == ["no such extension"]
+
+
+def test_the_extension_reporter_defaults_to_the_real_one():
+    """An injected default that nothing wires up in production is a test passing alone."""
+    assert ws.vscode_extensions.report_lines is not None
+    assert ws.toolchain_lines(which=lambda _n: "/usr/bin/uv", git=lambda *a: "someone") == (
+        ws.vscode_extensions.report_lines()
+    )
 
 
 @needs_live_workspace
