@@ -47,7 +47,7 @@ complexity::scripts/sweep.py::main = 18
 complexity::scripts/sweep.py::render = 18
 complexity::scripts/sweep.py::run_mode = 20
 complexity::scripts/sweep.py::sync_plan = 18
-complexity::scripts/sync-devkit.py::main = 69
+complexity::scripts/sync-devkit.py::main = 70
 complexity::scripts/upgrade-project.py::main = 26
 complexity::scripts/upgrade-project.py::upgrade_one = 23
 complexity::scripts/workspace-status.py::previews_line = 17
@@ -120,7 +120,7 @@ file_lines::scripts/reclaim.py = 1232
 file_lines::scripts/release-pipeline.py = 960
 file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/sweep.py = 1990
-file_lines::scripts/sync-devkit.py = 1417
+file_lines::scripts/sync-devkit.py = 1422
 file_lines::scripts/upgrade-project.py = 1231
 file_lines::scripts/workspace-status.py = 997
 file_lines::scripts/workspace-task-index.py = 576
@@ -144,7 +144,7 @@ function_lines::scripts/sweep.py::classify = 84
 function_lines::scripts/sweep.py::inspect = 133
 function_lines::scripts/sweep.py::main = 171
 function_lines::scripts/sweep.py::sync_plan = 87
-function_lines::scripts/sync-devkit.py::main = 246
+function_lines::scripts/sync-devkit.py::main = 251
 function_lines::scripts/upgrade-project.py::main = 162
 function_lines::scripts/upgrade-project.py::upgrade_one = 143
 function_lines::scripts/worktree-guard.py::main = 139
@@ -340,3 +340,8 @@ swallowed_errors::scripts/worktree.py = 2
 
 # 2026-09-05  recorded: git_policy.py gains NO_PRE_COMMIT: the refusal named no remedy, and two agents reported it in one week -- one of them reaching for a PATH workaround, which is the reach for --no-verify this is meant to stop. The lines are the remedy itself plus the note that this file is COPIED to ~/.devkit/git-hooks, so the fix for the underlying lookup can be committed here and still be missing where it fires. Recorded rather than split for the reason the 2026-09-05 entry gives: splitting this module moves a file every workspace-aware script imports AND that runs with no checkout in reach, which wants its own PR.
 #   file_lines::scripts/git_policy.py -> 756
+
+# 2026-09-05  recorded: sync-devkit.py: the DEVKIT_VERSION write moves above the baseline seeding, because structure_check.vendored_paths keys off that file - a baseline seeded before the stamp exists grandfathers devkit's own vendored modules into a consumer's numbers, and the moment the stamp lands those 49 keys all read as stale. A freshly generated project's structural gate was red on arrival. +5 lines in a module already ~3x file_lines; splitting it is its own change, and it is itself in the MANIFEST.
+#   complexity::scripts/sync-devkit.py::main -> 70
+#   file_lines::scripts/sync-devkit.py -> 1422
+#   function_lines::scripts/sync-devkit.py::main -> 251
