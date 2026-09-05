@@ -31,8 +31,9 @@ agent sessions structurally do not have.
 inside a pre-commit hook and a PostToolUse lint pass, neither of which may take the
 minutes an install costs, and both of which run in repos this module does not own.
 
-Stdlib only -- `scripts/hooks/` imports it, and those run before any venv exists.
-Tested in `tests/test_project_python.py`.
+Stdlib only -- `scripts/precommit/run_ruff.py` imports it from inside a pre-commit
+hook, which runs before any venv is guaranteed to exist. Tested in
+`tests/test_project_python.py`.
 """
 
 from __future__ import annotations
@@ -62,6 +63,45 @@ VENV_DIR = ".venv"
 REEXEC_GUARD = "DEVKIT_PROJECT_PYTHON_REEXEC"
 
 
+def _venv_in(root: Path) -> Path | None:
+    """The interpreter inside `root`'s own `.venv`, looking nowhere else."""
+    for parts in VENV_SUBPATHS:
+        candidate = root / VENV_DIR / Path(*parts)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def main_checkout(root: Path) -> Path | None:
+    """The checkout a linked worktree was cut from, or None when `root` is not one.
+
+    A worktree's `.git` is a *file* holding one line -- `gitdir: <main>/.git/worktrees/
+    <name>` -- so the hop back is three `parent`s off that path and needs no `git` on
+    `PATH` and no subprocess. Both matter: this module is imported by a pre-commit hook,
+    which is the context least able to afford either.
+
+    The two middle segments are checked rather than assumed, because a **submodule**
+    writes the same kind of pointer at `<main>/.git/modules/<name>`, and walking up three
+    from that lands somewhere that is not a checkout at all. A shape that is not the
+    worktree one answers None and the caller carries on as if there were no venv.
+    """
+    marker = root / ".git"
+    if not marker.is_file():
+        return None
+    try:
+        first = marker.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, UnicodeDecodeError, IndexError):
+        return None
+    if not first.startswith("gitdir:"):
+        return None
+    gitdir = Path(first[len("gitdir:") :].strip())
+    if not gitdir.is_absolute():
+        gitdir = (root / gitdir).resolve()
+    if gitdir.parent.name != "worktrees" or gitdir.parent.parent.name != ".git":
+        return None
+    return gitdir.parent.parent.parent
+
+
 def venv_python(root: Path) -> Path | None:
     """The interpreter inside `root`'s virtualenv, or None when there is not one.
 
@@ -69,12 +109,36 @@ def venv_python(root: Path) -> Path | None:
     installs tools globally, and a consumer project that never adopted a venv are all
     ordinary, and every caller here has a correct behaviour for "no venv" that is not
     "crash".
+
+    **A worktree with no venv of its own falls back to the checkout it was cut from.**
+    `worktree.py` provisions a box its own `.venv` and that one wins whenever it exists;
+    this is for the box that did not get one, where the alternative is not "use a
+    different venv" but "find no tools at all". That is not hypothetical -- it is how
+    this fallback came to be written, in a box where `ruff`, `mypy` and `pytest` were one
+    directory up and all four surfaces in this module's own docstring failed at once.
+    A linked worktree is the same project at the same pin, so its parent's venv is the
+    closest thing to the right answer that exists on the machine; `re_exec` says out loud
+    when it uses one, because "the same project" is a claim about a checkout, not a
+    guarantee about what somebody installed into it.
     """
-    for parts in VENV_SUBPATHS:
-        candidate = root / VENV_DIR / Path(*parts)
-        if candidate.is_file():
-            return candidate
-    return None
+    own = _venv_in(root)
+    if own is not None:
+        return own
+    main = main_checkout(root)
+    return _venv_in(main) if main is not None else None
+
+
+def borrowed_from(root: Path) -> Path | None:
+    """The other checkout whose `.venv` `venv_python` would reach for, or None.
+
+    None covers both of the cases where nothing is being borrowed: `root` has its own
+    venv, and there is no venv anywhere. Callers use it to explain a choice, so it
+    answers about provenance only and never about whether a tool is importable.
+    """
+    if _venv_in(root) is not None:
+        return None
+    main = main_checkout(root)
+    return main if main is not None and _venv_in(main) is not None else None
 
 
 def has_module(executable: str | Path, module: str) -> bool:
@@ -148,6 +212,17 @@ def re_exec(
     if Path(chosen) == Path(sys.executable):
         return None
     environment[REEXEC_GUARD] = "1"
+    lender = borrowed_from(root)
+    if lender is not None:
+        # Said out loud rather than done quietly. Borrowing is the right default -- the
+        # alternative here is no tools at all -- but it is still a different directory's
+        # install than the one the caller named, and a version surprise traced back to a
+        # line nobody printed costs more than the line does.
+        print(
+            f"project_python: no {VENV_DIR} in {root}; using the one in {lender} "
+            f"(give the box its own with `worktree.py provision <box>`)",
+            file=sys.stderr,
+        )
     try:
         return subprocess.run([chosen, *argv], env=environment, check=False).returncode
     except (OSError, subprocess.SubprocessError):
