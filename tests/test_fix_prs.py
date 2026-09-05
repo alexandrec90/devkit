@@ -37,6 +37,7 @@ def pr(**fields) -> dict:
         "baseRefName": "main",
         "updatedAt": "2026-09-04T09:00:00Z",
         "url": "https://github.com/x/y/pull/412",
+        "state": "OPEN",
         "isDraft": False,
         "mergeable": "MERGEABLE",
         "statusCheckRollup": [{"conclusion": "SUCCESS"}],
@@ -485,6 +486,50 @@ def test_a_pr_that_went_green_since_the_scan_is_reported_not_given_a_box(
     assert code == 0
     assert not opened
     assert "nothing to do" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("state", ["CLOSED", "MERGED"])
+def test_a_pr_that_left_the_open_set_since_the_scan_gets_no_box(
+    monkeypatch, tmp_path, capsys, state
+):
+    """The failure this was written for: a red PR was closed between the reconcile pass
+    that wrote the menu and the click, GitHub deleted its head branch on the way out, and
+    `resume` refused a branch `origin` no longer has -- an exit 1 and a message about
+    worktrees for what is a stale row. A closed PR is still `red` to `broken_reason`,
+    which only ever sees open ones from the scan, so the state is checked before it."""
+    view = pr(state=state, statusCheckRollup=[{"conclusion": "FAILURE"}])
+    code, opened = run_one_with(monkeypatch, tmp_path, view)
+    assert code == 0
+    assert not opened
+    assert "nothing to do" in capsys.readouterr().out
+
+
+def test_a_pr_view_without_a_state_is_treated_as_open(monkeypatch, tmp_path):
+    """`state` missing is `gh` answering a shape this asked for and did not get; the
+    scan already filtered to open PRs, so the safe reading is to carry on rather than
+    to swallow every pick on the day the field is renamed."""
+    view = pr(statusCheckRollup=[{"conclusion": "FAILURE"}])
+    view.pop("state")
+    code, opened = run_one_with(monkeypatch, tmp_path, view)
+    assert code == 0
+    assert opened
+
+
+def test_a_pr_turned_draft_since_the_scan_gets_no_box(monkeypatch, tmp_path, capsys):
+    """`isDraft` is in the view fields for the same reason as `state`: `broken_reason`
+    already excludes drafts, and could not while the field it reads was never asked for."""
+    view = pr(isDraft=True, statusCheckRollup=[{"conclusion": "FAILURE"}])
+    code, opened = run_one_with(monkeypatch, tmp_path, view)
+    assert code == 0
+    assert not opened
+    assert "nothing to do" in capsys.readouterr().out
+
+
+def test_the_view_asks_for_every_field_the_launch_path_reads():
+    """A field `run_one` branches on and `PR_VIEW_FIELDS` omits is always absent, which
+    is indistinguishable from the harmless value -- how the closed-PR bug survived."""
+    asked = set(fix_prs.PR_VIEW_FIELDS.split(","))
+    assert {"state", "isDraft", "mergeable", "statusCheckRollup", "headRefName"} <= asked
 
 
 def test_a_broken_pr_opens_a_tab_titled_for_the_pr(monkeypatch, tmp_path):

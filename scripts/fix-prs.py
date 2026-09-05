@@ -98,8 +98,17 @@ PR_LIMIT = 50
 PR_LIST_FIELDS = "number,title,headRefName,updatedAt,url,isDraft,mergeable,statusCheckRollup"
 
 # ...and the same question asked of one PR at launch time, plus the base branch, which is
-# what the agent has to merge in when the answer is a conflict.
-PR_VIEW_FIELDS = "number,title,headRefName,baseRefName,url,mergeable,statusCheckRollup"
+# what the agent has to merge in when the answer is a conflict, and `state`, which the
+# list half gets for free from `--state open` and this half has to ask for.
+PR_VIEW_FIELDS = (
+    "number,title,headRefName,baseRefName,url,state,isDraft,mergeable,statusCheckRollup"
+)
+
+# The one `state` a PR can be in and still be worth a box. GitHub's other two are `CLOSED`
+# and `MERGED`, and both delete the head branch on the way out, so a resume aimed at one
+# fails several steps later with `origin has no branch ... -- nothing to resume`: a
+# message about worktrees for what is really a stale menu row.
+OPEN = "OPEN"
 
 # How GitHub says the branch no longer merges cleanly. `UNKNOWN` is its answer while the
 # mergeability job is still running, and is deliberately NOT treated as a conflict: a PR
@@ -520,9 +529,13 @@ def run_one(
 ) -> int:
     """One PR, end to end: read it, get a box on its branch, open the agent in it.
 
-    Returns non-zero for anything that stopped this PR getting an agent. A PR that has
-    since gone green is `EXIT_OK` and no box: the menu was stale, the work is done, and
-    reporting that as a failure would put a red icon on good news.
+    Returns non-zero for anything that stopped this PR getting an agent. The three ways
+    the menu can be stale -- the PR went green, someone closed it, someone merged it --
+    are all `EXIT_OK` and no box: the work is done or abandoned, and reporting that as a
+    failure would put a red icon on good news. `state` is the half that is easy to leave
+    out, because the scan asks `gh` for open PRs only and a *view* answers for any of
+    them; without it a closed PR reads as broken, and the run dies in `resume` on the
+    head branch GitHub deleted when it closed.
     """
     root = workspace.parent
     project_dir = root / pick.project
@@ -533,6 +546,10 @@ def run_one(
     if not pr:
         print(f"{pick.project} #{pick.number}: gh could not read this PR -- skipped")
         return EXIT_FAILED
+    state = str(pr.get("state") or OPEN).upper()
+    if state != OPEN:
+        print(f"{pick.project} #{pick.number}: {state.lower()} since the scan -- nothing to do")
+        return EXIT_OK
     reason = broken_reason(pr)
     if not reason:
         print(f"{pick.project} #{pick.number}: nothing wrong with it now -- nothing to do")
