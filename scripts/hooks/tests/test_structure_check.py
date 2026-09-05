@@ -109,6 +109,38 @@ def test_vendored_paths_are_read_off_the_manifest_literal(tmp_path):
     assert sc.vendored_paths(tmp_path) == {"a.py", "b/c.py"}
 
 
+def test_vendored_paths_are_read_off_an_annotated_manifest(tmp_path):
+    """The shape `sync-devkit.py` actually uses -- `ast.AnnAssign`, not `ast.Assign`."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(
+        tmp_path,
+        "scripts/sync-devkit.py",
+        'MANIFEST: tuple[str, ...] = (\n    "a.py",\n    "b/c.py",\n)\n',
+    )
+    assert sc.vendored_paths(tmp_path) == {"a.py", "b/c.py"}
+
+
+def test_vendored_paths_survive_a_bare_manifest_declaration(tmp_path):
+    """`MANIFEST: tuple[str, ...]` with no value is an `AnnAssign` whose `value` is None."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(tmp_path, "scripts/sync-devkit.py", "MANIFEST: tuple[str, ...]\n")
+    assert sc.vendored_paths(tmp_path) == frozenset()
+
+
+def test_vendored_paths_read_this_repos_real_sync_script(tmp_path):
+    """The regression: every fixture above is synthetic, and the real file parsed to none.
+
+    A consumer is `DEVKIT_VERSION` plus devkit's own `sync-devkit.py`, so build exactly
+    that and assert the manifest comes back non-empty and naming a file devkit vendors.
+    """
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    real = (REPO_ROOT / "scripts" / "sync-devkit.py").read_text(encoding="utf-8")
+    write(tmp_path, "scripts/sync-devkit.py", real)
+    paths = sc.vendored_paths(tmp_path)
+    assert paths, "the real MANIFEST must be readable, or the vendored skip is inert"
+    assert ".claude/rules/engineering.md" in paths
+
+
 def test_vendored_paths_survive_a_script_that_does_not_parse(tmp_path):
     write(tmp_path, "DEVKIT_VERSION", "abc\n")
     write(tmp_path, "scripts/sync-devkit.py", "def (:\n")

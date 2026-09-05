@@ -27,6 +27,13 @@ def _box(root: Path, name: str) -> Path:
     return path
 
 
+def _claude_worktree(root: Path, name: str) -> Path:
+    """A worktree where `claude --worktree` cuts one: inside the checkout, unregistered."""
+    path = root / hook.CLAUDE_WORKTREES_DIR / name
+    (path / ".git").mkdir(parents=True)
+    return path
+
+
 def _payload(tmp_path: Path, *records) -> str:
     """A stop payload naming a transcript holding `records`, one JSON object per line."""
     path = tmp_path / "transcript.jsonl"
@@ -64,6 +71,69 @@ def test_absence_falls_through_to_the_checkout(tmp_path):
     assert hook.session_box("abcdef0123", root) is None
     assert hook.verify_root("{}", root) == root
     assert hook.verify_root("not json", root) == root
+
+
+def test_payload_cwd_reads_the_directory_the_session_is_standing_in(tmp_path):
+    """`cwd` rather than `os.getcwd()`: the hook runs wherever Claude Code starts it."""
+    assert hook.payload_cwd(json.dumps({"cwd": str(tmp_path)})) == tmp_path
+    assert hook.payload_cwd(json.dumps({"cwd": "  "})) is None
+    assert hook.payload_cwd(json.dumps({"cwd": 7})) is None
+    assert hook.payload_cwd("{}") is None
+    assert hook.payload_cwd("not json") is None
+
+
+def test_a_claude_worktree_is_verified_instead_of_the_checkout_it_lives_in(tmp_path):
+    """The report: a session in `.claude/worktrees/devkit-320` had its gate run against
+    the primary checkout, and was blocked on that checkout's unrelated uncommitted work
+    and its broken venv -- failures the session could not have caused and must not fix."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    tree = _claude_worktree(root, "devkit-320")
+    raw = json.dumps({"session_id": "s1", "cwd": str(tree)})
+
+    assert hook.claude_worktree(tree, root) == tree
+    assert hook.verify_root(raw, root) == tree
+
+
+def test_a_cwd_deeper_inside_a_claude_worktree_still_finds_its_root(tmp_path):
+    """The session's cwd is wherever it wandered to, not the worktree's top."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    tree = _claude_worktree(root, "topic")
+    deep = tree / "scripts" / "hooks"
+    deep.mkdir(parents=True)
+    assert hook.verify_root(json.dumps({"cwd": str(deep)}), root) == tree
+
+
+def test_a_cwd_in_the_checkout_itself_changes_nothing(tmp_path):
+    """The ordinary session, and every consumer: no worktree, so no change of tree."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "scripts").mkdir()
+    assert hook.claude_worktree(root, root) is None
+    assert hook.verify_root(json.dumps({"cwd": str(root / "scripts")}), root) == root
+    assert hook.verify_root(json.dumps({"cwd": "   "}), root) == root
+
+
+def test_a_husk_claude_worktree_falls_back_to_the_checkout(tmp_path):
+    """No `.git` means git has stopped tracking it -- the same guard `session_box` makes."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    husk = root / hook.CLAUDE_WORKTREES_DIR / "dead"
+    husk.mkdir(parents=True)
+    assert hook.claude_worktree(husk, root) is None
+    assert hook.verify_root(json.dumps({"cwd": str(husk)}), root) == root
+
+
+def test_the_lease_file_outranks_the_cwd(tmp_path):
+    """A box names the session; a cwd only observes where it is standing."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    box = _box(root, "proj--task-0101")
+    _leases(root, {"proj--task-0101": {"project": "proj", "session": "abcdef0123", "kind": "task"}})
+    tree = _claude_worktree(root, "topic")
+    raw = json.dumps({"session_id": "abcdef0123", "cwd": str(tree)})
+    assert hook.verify_root(raw, root) == box
 
 
 def test_a_preview_box_is_never_this_sessions_work(tmp_path):

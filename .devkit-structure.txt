@@ -109,7 +109,7 @@ file_lines::scripts/git_policy.py = 742
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
-file_lines::scripts/hooks/structure_check.py = 1042
+file_lines::scripts/hooks/structure_check.py = 1050
 file_lines::scripts/hooks/structure_scan.py = 669
 file_lines::scripts/instruction-budget.py = 517
 file_lines::scripts/new-project.py = 860
@@ -334,3 +334,6 @@ swallowed_errors::scripts/worktree.py = 2
 
 # 2026-09-05  recorded: fix-prs.py must ask gh for the PR state before it cuts a box; the module is 149 lines past file_lines already and splitting it is its own change
 #   file_lines::scripts/fix-prs.py -> 660
+
+# 2026-09-05  recorded: vendored_paths had to match ast.AnnAssign as well as ast.Assign: the real MANIFEST declaration is annotated, so the vendored-file skip returned nothing in every consumer that ever ran it. The fix plus the note recording why it was invisible costs 8 lines in a module already past file_lines. Splitting this module is still its own change.
+#   file_lines::scripts/hooks/structure_check.py -> 1050
