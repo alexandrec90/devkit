@@ -886,8 +886,15 @@ def test_the_import_exemptions_are_not_stale():
 
 
 def branch_delivery_installers() -> list[tuple[str, object]]:
+    """The subset of `JOBS` whose task `harness-switch.py --off jobs` stands down.
+
+    `getattr` rather than `mod.TASK_NAME` for `scheduled_installers`' reason: these are
+    modules loaded by path, so they are `object` to a type checker and every attribute
+    on one has to be reached the same way.
+    """
     switch = load_script("scripts/harness-switch.py")
-    return [(name, mod) for name, mod in JOBS if mod.TASK_NAME in switch.BRANCH_DELIVERY_JOBS]
+    delivery = set(switch.BRANCH_DELIVERY_JOBS)
+    return [(name, mod) for name, mod in JOBS if getattr(mod, "TASK_NAME", "") in delivery]
 
 
 def test_every_branch_delivery_job_has_an_installer_here():
