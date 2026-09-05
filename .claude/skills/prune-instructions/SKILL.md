@@ -1,6 +1,7 @@
 ---
 name: prune-instructions
 description: Cut the recurring token cost of the instruction tier — every CLAUDE.md, rule, skill and stored memory — by moving what a session rarely needs out of the always-loaded tier and deleting what has gone inert. Measurement-first; never edits a vendored file.
+disable-model-invocation: true
 ---
 
 # Prune the instruction tier

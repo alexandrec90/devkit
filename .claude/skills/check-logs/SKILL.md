@@ -1,6 +1,7 @@
 ---
 name: check-logs
 description: Audit this machine's background and automated processes -- the scheduled jobs, the artifacts they leave, and the boxes reconcile manages -- and tell a stale record apart from a live failure.
+disable-model-invocation: true
 ---
 
 # Check the automated processes

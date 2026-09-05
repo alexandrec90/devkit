@@ -299,8 +299,6 @@ def _instruction_files() -> list:
 ALLOWED_MISSING = {
     ".vscode/tasks.json": "the file devkit does NOT own -- its absence is the rule, and "
     "test_devkit_ships_no_project_level_tasks enforces it",
-    "scripts/backtest-task.py": "ibkr_trader's, cited as the worked example of the CLI "
-    "seam a hoisted task needs",
     "check-lock-markers.py": "a project-owned Stop tier devkit has no lockfiles for; "
     "its absence is an explicit skip, documented in test_repo_contract.py",
     "test_codex_hooks_contract.py": "carameli's, cited as the coupling the vendored "

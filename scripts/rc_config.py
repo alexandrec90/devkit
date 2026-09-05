@@ -30,16 +30,26 @@ import sweep
 RC_SETTING = "devkit.remoteControl"
 
 # `same-dir` is `remote-control`'s own default and is kept as this job's default
-# deliberately. `worktree` mode would have Claude Code cutting git worktrees on a
-# machine where `worktree.py reconcile` already manages a worktree tier under
-# `.worktrees/` and reaps what it finds stranded; two unattended worktree managers that
-# do not know about each other is how work gets stranded, and nothing here would notice.
+# deliberately -- but it is a default, not a prohibition, and `"spawn": "worktree"` is a
+# reasonable thing for a machine to ask for: a phone has no VS Code tasks, so spawning
+# in place is the only isolation a mobile session gets otherwise.
+#
+# What the opt-in costs, and why it is not the default: Claude Code cuts its worktrees
+# under `<repo>/.claude/worktrees/<name>`, *inside* the checkout, while `worktree.py`
+# owns a separate tier at `<workspace>/.worktrees/`. The two do not know about each
+# other, so a box cut by the phone gets no `provision`, no port lease, no
+# `COMPOSE_PROJECT_NAME`, and no `reconcile` reap -- and `sweep`, `reconcile` and
+# `workspace-status` cannot see it to report it stranded. Removing one is a hand job.
+# The consuming project must also gitignore `.claude/worktrees/`, or the nested worktree
+# leaves the static checkout dirty and `sweep.classify` stops syncing it.
 DEFAULT_SPAWN = "same-dir"
 
 # Empty means "pass no `--permission-mode`", so a server inherits whatever the project's
-# own settings say. Not defaulted to `acceptEdits` even though that is the mode that
-# makes a phone usable: it is a standing grant on an unattended machine, and the opt-in
-# belongs to the person whose machine it is rather than to this file's default.
+# own settings say. Not defaulted even though a phone is the one client that cannot
+# escalate for itself -- a session spawned from the mobile app opens in `auto` and the UI
+# offers no switch, so `bypassPermissions` set here is the only route to one. That is a
+# standing grant on an unattended machine reachable from the internet, which is exactly
+# why the opt-in belongs to the person whose machine it is rather than to this default.
 DEFAULT_PERMISSION_MODE = ""
 
 # Minutes of transcript silence before a project's server may be restarted. Twenty is

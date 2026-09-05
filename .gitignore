@@ -13,3 +13,10 @@ __pycache__/
 # Failure artifacts written by scripts/lint-all.py and scripts/run-tests.py. Generated
 # per run and read by whoever is fixing the failure — never committed.
 logs/
+
+# Worktrees Claude Code cuts for itself under `--spawn worktree` / `--worktree`. This is
+# NOT the `<workspace>/.worktrees/` box tier — that one lives outside every checkout and
+# `worktree.py` owns it. These land *inside* the repo, so without this line a session
+# started from the phone leaves the static checkout permanently dirty and `sweep.classify`
+# stops syncing it.
+.claude/worktrees/

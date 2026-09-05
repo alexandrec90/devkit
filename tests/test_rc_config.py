@@ -12,7 +12,7 @@ import datetime as _dt
 import json
 
 import pytest
-from support import load_script
+from support import REPO_ROOT, TEMPLATES, load_script
 
 rc_config = load_script("scripts/rc_config.py")
 
@@ -93,14 +93,36 @@ def test_an_unusable_idle_window_falls_back_to_the_default(value):
 
 
 def test_the_default_spawn_mode_does_not_cut_worktrees():
-    """`worktree.py reconcile` already manages a worktree tier and reaps what it finds
-    stranded. A second unattended worktree manager is how work disappears."""
+    """Claude Code's worktrees land under `<repo>/.claude/worktrees/`, not the
+    `<workspace>/.worktrees/` tier `worktree.py` owns, so one cut from the phone gets no
+    provisioning, no port lease and no `reconcile` reap -- and nothing can report it
+    stranded. A machine may still opt in; it may not do so by accident."""
     assert rc_config.Config().spawn == "same-dir"
 
 
+@pytest.mark.parametrize(
+    "path",
+    [REPO_ROOT / ".gitignore", TEMPLATES / "core" / "dot-gitignore.tmpl"],
+    ids=["devkit", "generated"],
+)
+def test_every_repo_this_job_can_serve_ignores_claude_code_s_own_worktrees(path):
+    """`"spawn": "worktree"` has Claude Code cut worktrees *inside* the checkout, at
+    `.claude/worktrees/<name>`. Un-ignored, the first session started from the phone
+    leaves the static checkout permanently dirty -- which is `holds_uncommitted` to
+    `sweep.classify`, so the nightly `reconcile` names the checkout and steps over it
+    instead of bringing it home, for as long as the worktree exists.
+
+    Both copies, because `templates/` is a one-shot render: devkit's own file is what
+    protects this repo, and the template is what protects the next generated one.
+    """
+    ignored = {line.strip().rstrip("/") for line in path.read_text(encoding="utf-8").splitlines()}
+    assert ".claude/worktrees" in ignored
+
+
 def test_no_permission_mode_is_granted_by_default():
-    """The mode that makes a phone usable is also a standing grant on an unattended
-    machine. Opting in belongs to the person whose machine it is."""
+    """A phone opens spawned sessions in `auto` with no way to switch, so
+    `bypassPermissions` here is the only route to one -- and a standing grant on an
+    unattended machine. Opting in belongs to the person whose machine it is."""
     assert rc_config.Config().permission_mode == ""
 
 
