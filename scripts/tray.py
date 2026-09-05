@@ -3,12 +3,13 @@
 
 Unattended jobs are invisible by construction: they run windowless, their stdout goes
 nowhere, and the only sign one has stopped is a line at the start of the next session --
-which requires someone to start a session. This is the always-on half of that. One icon,
-coloured by the worst thing the scheduler is reporting, with the whole set behind a
-right-click.
+which requires someone to start a session. This is the always-on half of that. One dot
+in the notification area, coloured and marked by the worst thing the scheduler is
+reporting, with the whole set behind a right-click.
 
-`schedule_health` decides what counts as a problem and `tray_state` decides how loud
-each one is; this file is the `ctypes` that draws the result and nothing else.
+`schedule_health` decides what counts as a problem, `tray_state` decides how loud each
+one is, and `tray_icon` turns that into pixels; this file is the `ctypes` that puts them
+in the notification area and nothing else.
 
 **Stdlib only, like everything under `scripts/`.** There is no tray library in the
 standard library, but there is `ctypes`, and Shell_NotifyIcon is four calls. A
@@ -32,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tray_icon
 import tray_state
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -72,10 +74,6 @@ FIRST_JOB = 200
 # runs every fifteen, so anything tighter is asking a question whose answer cannot have
 # changed, and each ask spawns a `schtasks`.
 POLL_MS = 120_000
-
-# 16x16 is what the notification area asks for at 100% scale, and Windows downsamples a
-# larger icon cleanly while it cannot invent detail for a smaller one.
-ICON_SIZE = 16
 
 # The Windows-only half of `ctypes`, reached through `sys.modules` rather than through
 # the imported name. mypy resolves an attribute against the platform it is *running* on,
@@ -255,31 +253,21 @@ class WNDCLASSEX(ctypes.Structure):
     )
 
 
-def icon_pixels(colour: tuple[int, int, int], size: int = ICON_SIZE) -> bytes:
-    """A solid square of `colour`, as the BGRA rows `CreateIcon` takes.
-
-    A square rather than a glyph, and that is a decision rather than laziness: at 16
-    pixels a shape carries no information a colour does not, and the notification area
-    is the one place where a reader is identifying something from across a desk. The
-    colours differ in brightness as well as hue -- see `tray_state.COLOURS`.
-
-    Bottom-up row order is DIB convention, and irrelevant to a solid fill; it is stated
-    because it stops being irrelevant the moment someone draws a shape here.
-    """
-    red, green, blue = colour
-    return bytes((blue, green, red, 0xFF)) * (size * size)
-
-
-def make_icon(colour: tuple[int, int, int], size: int = ICON_SIZE):
+def make_icon(
+    colour: tuple[int, int, int],
+    size: int = tray_icon.ICON_SIZE,
+    glyph: tuple[tuple[float, float, float, float], ...] = (),
+) -> Any:
     """An `HICON` of one colour, or None when it could not be made.
 
-    The AND mask is all zeros, meaning "every pixel opaque". With a 32-bit XOR bitmap
-    Windows uses the alpha channel, and the mask only has to not subtract from it.
+    The AND mask is all zeros, meaning "take every pixel from the colour bitmap". With a
+    32-bit XOR bitmap Windows uses the alpha channel, so that is what shapes the dot;
+    the mask only has to not subtract from it.
     """
     if user32 is None:
         return None
     mask = b"\x00" * (size * size // 8)
-    pixels = icon_pixels(colour, size)
+    pixels = tray_icon.icon_pixels(colour, size, glyph)
     handle = user32.CreateIcon(None, size, size, 1, 32, mask, pixels)
     return handle or None
 
@@ -307,7 +295,7 @@ class Tray:
         """One `HICON` per colour, made once. Icons are a limited resource, and a tray
         that made a new one every poll would leak three an hour, forever."""
         if level not in self.icons:
-            handle = make_icon(tray_state.COLOURS[level])
+            handle = make_icon(tray_state.COLOURS[level], glyph=tray_icon.GLYPHS.get(level, ()))
             if handle is None:
                 return None
             self.icons[level] = handle
