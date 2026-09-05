@@ -872,3 +872,59 @@ def test_the_import_exemptions_are_not_stale():
         assert spawn_sites((REPO_ROOT / rel).read_text(encoding="utf-8")), (
             f"{rel} is exempt as main()-only, but no longer spawns anything at all"
         )
+
+
+# --- the jobs tier's standing instruction ---------------------------------------
+#
+# `harness-switch.py --off jobs` stands the branch-delivery tier down and records the
+# whole group, so the record outlives the question of which tasks existed at the time.
+# That is only worth anything if the installers read it: the failure it exists to stop
+# is an operator standing the tier down, installing one of its jobs later, and getting
+# back a task that opens PRs or cuts releases while `--status` still says the tier is
+# off. Asserted from the installers rather than from a list here, so a fourth
+# branch-delivery job fails this file rather than shipping the gap.
+
+
+def branch_delivery_installers() -> list[tuple[str, object]]:
+    switch = load_script("scripts/harness-switch.py")
+    return [(name, mod) for name, mod in JOBS if mod.TASK_NAME in switch.BRANCH_DELIVERY_JOBS]
+
+
+def test_every_branch_delivery_job_has_an_installer_here():
+    """The switch names three tasks; a name with no installer is a task nobody can
+    stand back up, and one this contract would silently skip."""
+    switch = load_script("scripts/harness-switch.py")
+    covered = {module.TASK_NAME for _name, module in branch_delivery_installers()}
+    assert covered == set(switch.BRANCH_DELIVERY_JOBS)
+
+
+def test_every_branch_delivery_installer_consults_the_switch():
+    """It must ask `harness_state.stood_down()` and pass the answer to `task_xml` as
+    `enabled=`. Checked as source rather than by registering a task, because the thing
+    that goes wrong is a new installer never asking the question at all."""
+    for name, _module in branch_delivery_installers():
+        source = (REPO_ROOT / "scripts" / name).read_text(encoding="utf-8")
+        assert "harness_state.stood_down()" in source, name
+        assert "enabled=" in source, name
+
+
+def test_a_stood_down_job_is_registered_disabled(monkeypatch):
+    """End to end through the real document builder: with the tier down, the task the
+    installer would register carries `<Enabled>false</Enabled>`."""
+    harness_state = load_script("scripts/harness_state.py")
+    installer = load_script("scripts/install-reconcile-task.py")
+    monkeypatch.setattr(
+        harness_state, "stood_down", lambda *_a, **_k: frozenset({installer.TASK_NAME})
+    )
+    monkeypatch.setattr(installer, "harness_state", harness_state)
+    body = installer.task_document(r"C:\py\pythonw.exe", "worktree.py reconcile", 15)
+    assert "<Enabled>false</Enabled>" in body[body.index("<Settings>") :]
+
+
+def test_an_ordinary_install_is_enabled(monkeypatch):
+    harness_state = load_script("scripts/harness_state.py")
+    installer = load_script("scripts/install-reconcile-task.py")
+    monkeypatch.setattr(harness_state, "stood_down", lambda *_a, **_k: frozenset())
+    monkeypatch.setattr(installer, "harness_state", harness_state)
+    body = installer.task_document(r"C:\py\pythonw.exe", "worktree.py reconcile", 15)
+    assert "<Enabled>true</Enabled>" in body[body.index("<Settings>") :]

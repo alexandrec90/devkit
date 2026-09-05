@@ -3671,6 +3671,21 @@ def plug_rider(monkeypatch):
     return real
 
 
+@pytest.fixture(autouse=True)
+def broken_pr_rider(monkeypatch):
+    """And the same containment for the third, which is the most expensive of them.
+
+    `refresh_broken_pr_menu` loads `fix-prs.py`, which runs a `gh pr list` per registered
+    checkout and writes the real `logs/broken-prs.json` -- the file the *Agent: Fix a
+    Broken PR* dropdown reads. A reaping test that rewrote it would leave that menu
+    describing whichever fixture registry the test happened to build, and a run with no
+    network would spend six `gh` timeouts on its way to a verdict about boxes.
+    """
+    real = worktree.refresh_broken_pr_menu
+    monkeypatch.setattr(worktree, "refresh_broken_pr_menu", lambda ws, *, apply: "")
+    return real
+
+
 def _fake_script(**namespace) -> types.SimpleNamespace:
     """Stand in for a rider's script, injected through the `_loader` the rider imports.
 
@@ -3798,6 +3813,89 @@ def test_a_dry_run_rebuilds_no_checklist(workspace, plug_rider):
     assert plug_rider(apply=False) == ""
 
 
+def test_reconcile_refreshes_the_broken_pr_menu_at_the_end_of_the_pass(workspace, monkeypatch):
+    """The third rider, and the one with the sharpest claim on this pass: the rows it
+    writes are the PRs this pass has just decided NOT to touch. `reconcile` merges only
+    what is green and labelled, so every red PR it steps over is one of these."""
+    seen: list = []
+    monkeypatch.setattr(
+        worktree,
+        "refresh_broken_pr_menu",
+        lambda ws, *, apply: (seen.append((ws, apply)), "C:/logs/broken-prs.json")[1],
+    )
+
+    _, report = worktree.reconcile(workspace, apply=True, fetch=False)
+
+    assert seen == [(workspace, True)]
+    assert report["broken_pr_menu"] == "C:/logs/broken-prs.json"
+
+
+def test_a_dry_run_rebuilds_no_broken_pr_menu(workspace, broken_pr_rider):
+    """Same promise as its two siblings': `--dry-run` writes nothing on disk."""
+    assert broken_pr_rider(workspace, apply=False) == ""
+
+
+def test_the_broken_pr_rider_reports_the_path_it_wrote(workspace, monkeypatch, broken_pr_rider):
+    asked: list = []
+    _with_loader(
+        monkeypatch,
+        _fake_script(refresh_menu=lambda ws: Path("C:/logs/broken-prs.json")),
+        asked,
+    )
+
+    written = broken_pr_rider(workspace, apply=True)
+
+    assert written == str(Path("C:/logs/broken-prs.json"))
+    assert asked and asked[0][0] == "fix_prs"
+    assert asked[0][1].name == "fix-prs.py"
+    assert asked[0][1].is_file(), "the rider is loading a file that no longer exists"
+
+
+def test_the_broken_pr_rider_takes_no_fetch(workspace, monkeypatch, broken_pr_rider):
+    """Unlike the preview rider: every source in `fix-prs.py` is `gh`, which reads GitHub
+    rather than a local ref, so there is nothing a fetch would make fresher. A rider that
+    grew a `fetch` argument would be claiming a `--no-fetch` pass can skip work it never
+    does."""
+    seen: list = []
+    _with_loader(
+        monkeypatch, _fake_script(refresh_menu=lambda ws: (seen.append(ws), Path("m.json"))[1])
+    )
+
+    broken_pr_rider(workspace, apply=True)
+
+    assert seen == [workspace]
+
+
+def test_a_broken_pr_menu_that_could_not_be_written_is_an_empty_string(
+    workspace, monkeypatch, broken_pr_rider
+):
+    """None would render as the word "None" in the reconcile log, which reads like a path."""
+    _with_loader(monkeypatch, _fake_script(refresh_menu=lambda ws: None))
+    assert broken_pr_rider(workspace, apply=True) == ""
+
+
+def test_a_raising_broken_pr_rider_never_reddens_the_pass(workspace, monkeypatch, broken_pr_rider):
+    """The reversion check for the containment, in the form this rider is most likely to
+    need it: `gh` is a network call, and a scan that raised must not stop the pass that
+    destroys merged boxes."""
+
+    def explode(ws):
+        raise RuntimeError("gh is not on PATH today")
+
+    _with_loader(monkeypatch, _fake_script(refresh_menu=explode))
+    assert broken_pr_rider(workspace, apply=True) == ""
+
+
+def test_a_missing_fix_prs_is_survived_too(workspace, monkeypatch, broken_pr_rider):
+    """The loader itself failing -- what a renamed or deleted `fix-prs.py` looks like."""
+
+    def missing(name, path):
+        raise ImportError(f"cannot load {name} from {path}")
+
+    monkeypatch.setitem(sys.modules, "_loader", types.SimpleNamespace(load_by_path=missing))
+    assert broken_pr_rider(workspace, apply=True) == ""
+
+
 def test_the_checklist_rider_reports_the_path_it_wrote(monkeypatch, plug_rider):
     """It takes no workspace: `plug-projects.py` resolves the live file and its own
     `logs/` from module constants, so the checkout the rider was loaded from is already
@@ -3870,6 +3968,19 @@ def test_a_stale_checklist_is_warned_about_too():
     rendered = worktree.render_reconcile(_reconcile_report(plug_menu=""))
     assert "plug menu: [warn] not refreshed" in rendered
     assert "checklist is stale" in rendered
+
+
+def test_the_pass_says_where_the_broken_pr_list_landed():
+    rendered = worktree.render_reconcile(_reconcile_report(broken_pr_menu="C:/logs/broken.json"))
+    assert "broken-PR menu: refreshed (C:/logs/broken.json)" in rendered
+
+
+def test_a_stale_broken_pr_list_is_warned_about_too():
+    """Same reasoning again, and the failure it hides is the quietest of the three: a
+    list that could not be rebuilt looks exactly like a machine with nothing broken."""
+    rendered = worktree.render_reconcile(_reconcile_report(broken_pr_menu=""))
+    assert "broken-PR menu: [warn] not refreshed" in rendered
+    assert "Fix a Broken PR list is stale" in rendered
 
 
 def test_a_dry_run_claims_nothing_about_the_menu():

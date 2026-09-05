@@ -212,7 +212,7 @@ def test_refresh_asks_the_scheduler_and_returns_what_the_tray_draws(monkeypatch)
     monkeypatch.setattr(
         schedule_health,
         "problems",
-        lambda found, now=None: ["devkit-b: disabled -- nothing runs it"],
+        lambda found, now=None, deliberate=frozenset(): ["devkit-b: disabled -- nothing runs it"],
     )
     found = tray_state.refresh()
     assert [(item.name, item.state) for item in found] == [
@@ -223,6 +223,49 @@ def test_refresh_asks_the_scheduler_and_returns_what_the_tray_draws(monkeypatch)
 
 def test_refresh_on_a_machine_with_no_scheduler_reports_nothing_registered(monkeypatch):
     monkeypatch.setattr(schedule_health, "query", lambda: [])
-    monkeypatch.setattr(schedule_health, "problems", lambda found, now=None: [])
+    monkeypatch.setattr(
+        schedule_health, "problems", lambda found, now=None, deliberate=frozenset(): []
+    )
     assert tray_state.refresh() == []
     assert tray_state.overall(tray_state.refresh()) == tray_state.WARN
+
+
+def test_a_stood_down_job_is_healthy_but_says_it_is_off():
+    """Not a fault, and not disguised as a running job either -- the menu's one claim is
+    that a stopped job cannot hide in it."""
+    found = tray_state.states(jobs("devkit-a"), [], frozenset({"devkit-a"}))
+    assert found[0].state == tray_state.OK
+    assert "on purpose" in found[0].detail
+    assert tray_state.overall(found) == tray_state.OK
+
+
+def test_an_ordinary_healthy_job_gets_no_detail():
+    found = tray_state.states(jobs("devkit-a"), [], frozenset())
+    assert (found[0].state, found[0].detail) == (tray_state.OK, "")
+
+
+def test_a_real_failure_outranks_the_stood_down_label():
+    """Intent never overwrites a problem line: a job in the ledger that is somehow also
+    failing is reported as failing."""
+    found = tray_state.states(
+        jobs("devkit-a"), ["devkit-a: last run failed (exit 1)"], frozenset({"devkit-a"})
+    )
+    assert found[0].state == tray_state.FAIL
+    assert "last run failed" in found[0].detail
+
+
+def test_refresh_tells_problems_what_was_stood_down_on_purpose(monkeypatch):
+    """An always-visible red icon is the worst place to report a state someone chose:
+    it cannot be dismissed, so it goes on saying "broken" about a working machine until
+    the operator stops reading the icon. `problems` only knows the difference if its
+    caller passes the ledger, and `refresh` is a caller it would be easy to forget."""
+    seen = {}
+    monkeypatch.setattr(schedule_health, "query", lambda: jobs("devkit-a"))
+    monkeypatch.setattr(schedule_health, "stood_down", lambda: frozenset({"devkit-a"}))
+    monkeypatch.setattr(
+        schedule_health,
+        "problems",
+        lambda found, now=None, deliberate=frozenset(): seen.update(passed=deliberate) or [],
+    )
+    tray_state.refresh()
+    assert seen["passed"] == frozenset({"devkit-a"})

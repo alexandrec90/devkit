@@ -118,7 +118,7 @@ file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/sweep.py = 1953
 file_lines::scripts/sync-devkit.py = 1417
 file_lines::scripts/upgrade-project.py = 1231
-file_lines::scripts/workspace-status.py = 982
+file_lines::scripts/workspace-status.py = 997
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2294
 file_lines::scripts/worktree.py = 6250
@@ -300,3 +300,6 @@ swallowed_errors::scripts/worktree.py = 3
 # 2026-09-04  recorded: Teaching the workspace publish tier the difference between a live edit and a canonical copy that is merely ahead: three shared prefixes, live_only/canonical_only, keep_hint, and the adopt guard the refusals now point at. The verbs left main as adopt_workspace/check_workspace/render_workspace, which is why main SHRINKS above -- 250 to 213 lines, complexity 45 to 39 -- and why these two lines grow instead. devkit_project.py is 3x file_lines and 2x definitions and has been since before this gate; the workspace tier is a real seam and moving it to its own module is its own change, not one a publish bug fix can carry.
 #   definitions::scripts/devkit_project.py -> 50
 #   file_lines::scripts/devkit_project.py -> 1701
+
+# 2026-09-04  recorded: `scheduler_fallback` learned that a reconcile pass stood down on purpose is not a stopped one. It is the second of two reporters watching that job -- `schedule_health` reads the scheduler, this reads the mtime of logs/reconcile.log -- so silencing only the first moved the false alarm here instead of removing it. The growth is a third parameter, two guard lines and the docstring saying why the intent is passed in rather than looked up. workspace-status.py has been 2x file_lines since before this gate; splitting the schedule tier out of it is its own change, not a rider on a false-alarm fix.
+#   file_lines::scripts/workspace-status.py -> 997

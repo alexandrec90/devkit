@@ -55,6 +55,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
+import harness_state
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -239,6 +240,11 @@ def task_document(schedule: Schedule) -> str:
         devkit_schtasks.daily_trigger(schedule.at),
         working_dir=str(schedule.root),
         time_limit="PT3H",
+        # Lands disabled when the jobs tier is stood down. `harness-switch.py --off
+        # jobs` records the whole group, not just the tasks that existed when it
+        # ran, so an installer executed afterwards must not hand the operator back
+        # a running job they had switched off.
+        enabled=TASK_NAME not in harness_state.stood_down(),
     )
 
 

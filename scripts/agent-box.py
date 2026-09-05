@@ -5,18 +5,24 @@
 checkout's home branch was routed into a fresh box, and the operator never chose anything.
 That is switchable now (`harness-switch.py`), and a tier that can be switched off needs a
 manual spelling or switching it off loses the guarantee rather than moving it. This is the
-manual spelling, one verb per workspace task:
+manual spelling, one verb per lifecycle step:
 
-| verb | task | what it does |
-| --- | --- | --- |
-| `spawn` | Agent: Spawn Branch, Worktree, Agent | cut the branch and box, provision, open the agent |
-| `attach` | Agent: Run Agent on Worktree | the last step of `spawn`, on a box that exists |
-| `ship` | Agent: Ship PR | commit, push and open the PR for a box |
-| `delete` | Agent: Delete Branch | destroy the box and its local branch |
+| verb | what it does |
+| --- | --- |
+| `spawn` | cut the branch and box, provision, open the agent |
+| `attach` | the last step of `spawn`, on a box that exists |
+| `ship` | commit, push and open the PR for a box |
+| `delete` | destroy the box and its local branch |
 
-**`spawn` and `attach` share `open_agent`, and that is the point of having both.** The
-fourth task the operator asked for is literally the tail of the first; two copies of the
-terminal-launching logic would be two answers to "which window does the agent open in".
+**CLI-only, and workspace tasks until 2026-09-04**: `claude --worktree` plus `/ship`
+covers all four for an ordinary task, so the rows duplicated a built-in. What the
+built-in cannot give a box is a port lease and a `COMPOSE_PROJECT_NAME`, which is what
+`spawn` is still for. `test_the_box_tier_keeps_one_task_and_it_is_read_only` owns the
+reasoning.
+
+**`spawn` and `attach` share `open_agent`, and that is the point of having both.**
+`attach` is literally the tail of `spawn`; two copies of the terminal-launching logic
+would be two answers to "which window does the agent open in".
 
 `scripts/worktree-guard.md` carries the two decisions a change here has to preserve --
 why `ship` bypasses the pre-commit gate, and why `worktree.py new --json` is an interface
@@ -86,19 +92,37 @@ class Candidate:
 # --- pure argv builders -------------------------------------------------------------
 
 
-def agent_command(agent: str, hooks_off: bool) -> str:
+def agent_command(agent: str, hooks_off: bool, prompt: str = "") -> str:
     """The one command line the terminal tab runs.
 
     A string rather than an argv because `wt` hands everything after `-Command` to
     PowerShell as a single line anyway, and the environment assignment has to be part of
     it: `wt` has no way to set a variable for the child it spawns.
+
+    `prompt` is the session's opening instruction, and it is optional because the two
+    callers want opposite things. `spawn` and `attach` hand over a box with no topic --
+    the person who asked for it is about to type one. `fix-prs.py` already knows the
+    whole job (which PR, what is wrong with it, where it has to end up), and a session
+    that starts by rediscovering that is the cost that task exists to remove. Assembled
+    HERE rather than there so one place still owns what a tab's command line looks like.
     """
     prefix = (
         f"$env:{harness_switch.HOOKS_OFF_ENV}='{harness_switch.HOOKS_OFF_VALUE}'; "
         if hooks_off
         else ""
     )
-    return f"{prefix}{agent}"
+    return f"{prefix}{agent} {ps_quote(prompt)}" if prompt else f"{prefix}{agent}"
+
+
+def ps_quote(text: str) -> str:
+    """`text` as a PowerShell single-quoted literal.
+
+    Single quotes rather than double: PowerShell expands `$` and backticks inside a
+    double-quoted string, so a prompt naming `$env:` -- or a branch with a backtick in
+    it -- would be rewritten on its way to the agent. Doubling is how a single quote is
+    escaped inside one.
+    """
+    return "'" + str(text).replace("'", "''") + "'"
 
 
 def wt_argv(title: str, cwd: Path, command: str) -> list[str]:
@@ -291,17 +315,30 @@ def choose(candidates: list[Candidate], branch: str, noun: str, reader=input) ->
 # --- the verbs ----------------------------------------------------------------------
 
 
-def open_agent(agent: str, box: Path, branch: str, runner=subprocess.run) -> int:
-    """Open one agent tab in `box`. Shared by `spawn` and `attach`."""
+def open_agent(
+    agent: str,
+    box: Path,
+    branch: str,
+    runner=subprocess.run,
+    prompt: str = "",
+    title: str = "",
+) -> int:
+    """Open one agent tab in `box`. Shared by `spawn`, `attach` and `fix-prs.py`.
+
+    `title` overrides the tab's name, which the branch answers for a box cut to do one
+    thing. `fix-prs.py` passes the PR instead: several of its tabs can be open at once,
+    on branches whose names all begin `agent/`, and a strip of tabs that agree for their
+    first eleven characters names nothing.
+    """
     if agent == "none":
         print(f"no agent requested; the box is at {box}")
         return EXIT_OK
     terminal = shutil.which("wt.exe") or shutil.which("wt")
-    command = agent_command(agent, harness_switch.hooks_are_off())
+    command = agent_command(agent, harness_switch.hooks_are_off(), prompt)
     if not terminal:
         print(f"Windows Terminal not found; run this yourself:\n  cd {box}\n  {command}")
         return EXIT_OK
-    argv = wt_argv(branch, box, command)
+    argv = wt_argv(title or branch, box, command)
     print(f"opening {agent} in {box}")
     done = runner([terminal, *argv], check=False)
     return EXIT_OK if done.returncode == 0 else EXIT_FAILED
@@ -396,7 +433,7 @@ def ship(project: str, workspace: Path, branch: str, runner=subprocess.run, read
     source = devkit_project.resolve_project(project, worktree.known_projects(workspace), root)
     default = worktree.tb.detect_default_branch(worktree.sweep.git_for(source), fallback="main")
     title = commit_message(candidate.branch, 0).splitlines()[0]
-    body = f"Shipped from the box `{candidate.name}` by `Agent: Ship PR`."
+    body = f"Shipped from the box `{candidate.name}` by `agent-box.py ship`."
     if runner(pr_argv(title, body, default), cwd=str(box), check=False).returncode:
         print("agent-box: `gh pr create` failed; the branch is pushed", file=sys.stderr)
         return EXIT_FAILED

@@ -27,17 +27,34 @@ EXIT_LINT_FAILED = 5
 EXIT_PUSH_FAILED = 6
 
 
-def is_shippable(branch: str, default: str) -> tuple[bool, str]:
-    """Return whether branch is an isolated, namespaced task branch suitable for a PR.
+# What `claude --worktree <name>` names the branch it cuts: the literal string
+# `worktree-` followed by the name, with any `/` replaced by `+`. It is hard-coded in the
+# CLI -- there is no setting for it -- so a session that isolates itself with the built-in
+# flag can never present the `<namespace>/<topic>` spelling below, however it is invoked.
+# Refusing it would mean `/ship` worked from a devkit box and not from Claude Code's own
+# worktree, which is a rule about provenance rather than about the property being checked.
+CLI_WORKTREE_PREFIX = "worktree-"
 
-    The namespace identifies a short-lived task branch without coupling shipping to
-    whichever agent created it (for example ``agent/``, ``claude/`` or ``codex/``).
-    Unnamespaced branches remain reserved for default and long-lived home branches.
+
+def is_shippable(branch: str, default: str) -> tuple[bool, str]:
+    """Return whether branch is an isolated task branch suitable for a PR.
+
+    Two accepted spellings, and the test is the same one in both cases -- *is this branch
+    disposable* -- rather than who cut it:
+
+    - ``<namespace>/<topic>``, which identifies a short-lived task branch without
+      coupling shipping to whichever agent created it (``agent/``, ``claude/``,
+      ``codex/``).
+    - ``worktree-<topic>``, which is what ``claude --worktree`` cuts.
+
+    Anything else remains reserved for default and long-lived home branches.
     """
     if not branch:
         return False, "HEAD is detached; check out a task branch before shipping."
     if branch == default:
         return False, f"'{default}' is the default branch; ship from a namespaced task branch."
+    if branch.startswith(CLI_WORKTREE_PREFIX) and branch != CLI_WORKTREE_PREFIX:
+        return True, ""
     namespace, separator, topic = branch.partition("/")
     if not separator or not namespace or not topic:
         return False, (

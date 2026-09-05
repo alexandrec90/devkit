@@ -261,6 +261,19 @@ ACTIONS: dict[str, Action] = {
         ("--stop",),
         projects=DEVKIT_ONLY,
     ),
+    # Sending an agent at a PR that is already red -- a merge conflict, a failed gate, or
+    # both. Nothing else on this machine does it: `worktree.py reconcile` merges only what
+    # is green and carries the merge label, so a broken PR is exactly the state its
+    # fifteen-minute pass steps over forever, and the row is the human's way of saying
+    # "yes, go and deal with that one".
+    #
+    # DEVKIT_ONLY and a literal `--project devkit`, for `preview-ui-host`'s reason rather
+    # than its own -- and it looks even more like a per-project action than that one does.
+    # The menu is one scan across every checkout in the registry, and there is one box
+    # registry and one port registry on this machine. Run once per selected checkout it
+    # would draw the same cross-checkout dropdown two or three times over. The project
+    # dimension lives INSIDE the menu, as the first of the two nested pickers.
+    "fix-prs": Action("scripts/fix-prs.py", "Agent: Fix a Broken PR", projects=DEVKIT_ONLY),
     # Cutting a devkit release. DEVKIT_ONLY because a release is devkit's own act and
     # has no project dimension at all -- run per selected checkout it would try to tag
     # this repo two or three times, and the second attempt would refuse a tag that now
@@ -810,10 +823,6 @@ MAINTAINED_PICKERS = (
     # alternative, a hand-kept list of consumers, is exactly the drift that
     # retired `sweepScope` and `upgradeScope`.
     "adoptProjects",
-    # The single-pick the four `Agent:` tasks share. One checkout per click by nature:
-    # a box is cut in one repo, and spawning the same topic across six of them is not a
-    # thing anybody wants by accident.
-    "agentProject",
 )
 
 

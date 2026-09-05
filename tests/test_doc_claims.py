@@ -92,6 +92,15 @@ _UNSEARCHED = frozenset(
         ".pytest_cache",
         ".hypothesis",
         ".agents",
+        # `.claude/worktrees/<name>`, where `claude --worktree` and a Remote Control
+        # server started with `--spawn worktree` cut theirs. Unlike the `.worktrees/`
+        # box tier -- which lives beside every checkout and so was never in reach --
+        # these land *inside* the repo, so every scanner here walks into a whole second
+        # copy of it: each nested `CLAUDE.md` reads as an instruction file the root map
+        # fails to name, and each nested path answers `_exists` for a file this repo
+        # does not own. Gitignoring the directory does not help a walker that reads the
+        # filesystem rather than `git ls-files`.
+        "worktrees",
     }
 )
 

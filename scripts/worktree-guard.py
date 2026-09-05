@@ -2152,8 +2152,9 @@ def spawn_and_route(
 
 def main(argv: list[str] | None = None) -> int:
     # First, before stdin and before the registry read: an operator who has stood the
-    # branch tier down cuts boxes through `Agent: Spawn Branch, Worktree, Agent` instead,
-    # and this hook firing on every mutating call is most of what they are turning off.
+    # branch tier down cuts boxes with `claude --worktree` (or `agent-box.py spawn`,
+    # when the box needs a port lease) instead, and this hook firing on every mutating
+    # call is most of what they are turning off.
     if harness_config.hooks_off("branch-tier"):
         return EXIT_ALLOW
 

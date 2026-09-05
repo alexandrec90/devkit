@@ -560,3 +560,68 @@ def test_every_trigger_reporting_no_next_run_still_leaves_one_job():
     jobs = health.parse_tasks(never)
     assert len(jobs) == 1
     assert jobs[0].next_run is None
+
+
+# --- deliberate is not broken ---------------------------------------------------
+#
+# `Disabled` is the one scheduler state with two opposite meanings. The incident in this
+# module's header is one of them; an operator running `harness-switch.py --off jobs` is
+# the other, and the scheduler records them identically. Reporting the deliberate one as
+# a fault is how the real one becomes a line people skim past.
+
+
+def test_a_deliberately_stood_down_job_is_silent():
+    off = job(name="devkit-worktree-reconcile", enabled=False, next_run=None)
+    deliberate = frozenset({"devkit-worktree-reconcile"})
+    assert health.problems([off], NOW, deliberate) == []
+
+
+def test_a_hand_disabled_job_is_still_reported():
+    """The whole of the 471-missed-runs incident. Only a name in the ledger is intent;
+    a job disabled by hand is in none, and must stay a fault."""
+    off = job(name="devkit-worktree-reconcile", enabled=False, next_run=None)
+    assert health.problems([off], NOW, frozenset({"devkit-release"})) != []
+
+
+def test_standing_one_job_down_does_not_quieten_its_neighbours():
+    off = job(name="devkit-worktree-reconcile", enabled=False, next_run=None)
+    broken = job(name="devkit-release", last_result=1)
+    lines = health.problems([off, broken], NOW, frozenset({"devkit-worktree-reconcile"}))
+    assert len(lines) == 1
+    assert lines[0].startswith("devkit-release:")
+
+
+def test_a_stood_down_job_that_is_running_again_is_judged_normally():
+    """The ledger goes stale the moment someone re-enables a task by hand. Intent only
+    ever suppresses the `disabled` line, so a job that is actually running is checked
+    like any other -- here, still reporting its failed run."""
+    back = job(name="devkit-worktree-reconcile", enabled=True, last_result=1)
+    lines = health.problems([back], NOW, frozenset({"devkit-worktree-reconcile"}))
+    assert len(lines) == 1
+    assert "last run failed" in lines[0]
+
+
+def test_problems_defaults_to_treating_nothing_as_deliberate():
+    """The safe direction: a caller that has not read the ledger must not lose a fault."""
+    assert health.problems([job(enabled=False)], NOW) != []
+
+
+def test_stood_down_reads_the_switch_ledger(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(
+        '{"hooks": false, "jobs": ["devkit-worktree-reconcile"], "instructions": []}',
+        encoding="utf-8",
+    )
+    assert health.stood_down(ledger) == frozenset({"devkit-worktree-reconcile"})
+
+
+def test_stood_down_is_empty_when_no_ledger_exists(tmp_path):
+    """A fresh clone, CI, anyone else's machine. Empty is the direction that keeps a
+    genuinely disabled job reported."""
+    assert health.stood_down(tmp_path / "nope.json") == frozenset()
+
+
+def test_a_corrupt_ledger_reads_as_nothing_deliberate(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text("{not json", encoding="utf-8")
+    assert health.stood_down(ledger) == frozenset()

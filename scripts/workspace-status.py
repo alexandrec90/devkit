@@ -698,9 +698,24 @@ def schedule_lines() -> list[str]:
         return []
 
 
-def scheduler_fallback(scheduler: str, schedule: list[str]) -> str:
-    """Keep the log warning unless schtasks already explains reconcile's failure."""
-    if any("devkit-worktree-reconcile:" in line for line in schedule):
+RECONCILE_TASK = "devkit-worktree-reconcile"
+
+
+def scheduler_fallback(
+    scheduler: str, schedule: list[str], deliberate: frozenset[str] = frozenset()
+) -> str:
+    """Keep the log warning unless reconcile's silence is already explained.
+
+    A `schedule:` line about the task explains it. **So does a pass stood down on
+    purpose, and that half cannot be left to `schedule_health`:** this watches the same
+    job through a different window, so `logs/reconcile.log` goes stale whenever the task
+    is off, deliberate or not, and suppressing only the scheduler's half moves the false
+    alarm here rather than removing it. `deliberate` is passed in, never looked up, so
+    the answer cannot depend on the machine the caller runs on; `main` reads the ledger.
+    """
+    if RECONCILE_TASK in deliberate:
+        return ""
+    if any(f"{RECONCILE_TASK}:" in line for line in schedule):
         return ""
     return scheduler
 
@@ -947,7 +962,7 @@ def main(argv: list[str] | None = None) -> int:
         latest = latest_devkit_tag(root / "devkit")
         behind = projects_behind(root, names, latest) if latest else {}
         schedule = schedule_lines()
-        scheduler = scheduler_fallback(scheduler_line(), schedule)
+        scheduler = scheduler_fallback(scheduler_line(), schedule, schedule_health.stood_down())
         message = render(
             results,
             behind,

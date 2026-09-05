@@ -17,11 +17,16 @@ only place all but one of these failure modes are visible at all:
 
 | what went wrong | where it shows |
 | --- | --- |
-| someone disabled it | `Scheduled Task State` |
+| someone disabled it | `Scheduled Task State`, minus what `stood_down` says was meant |
 | it ran and failed | `Last Result` |
 | it has silently stopped firing | `Last Run Time` against its own cadence |
 | it runs, and opens a window every time | `Task To Run` -- see `virtualenv_interpreter` |
 | it ran, and declined to do anything | the job's own artifact, not here |
+
+`Disabled` is the one state the scheduler cannot interpret on its own, because an
+operator standing the tier down with `harness-switch.py --off jobs` leaves the task in
+exactly the state the incident above did. `stood_down` reads the intent off that switch's
+ledger; everything not written there is still the fault it was.
 
 The last row is the one this deliberately does not cover: "ran fine, did nothing" is a
 statement about the work, and the job that did it owns that log. This answers the prior
@@ -57,6 +62,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
+import harness_state
 
 # `ARTIFACTS` holds repo-relative paths, and the caller is `workspace-status.py`, whose
 # cwd is the workspace rather than this checkout. Resolving against this file keeps the
@@ -353,7 +359,35 @@ def virtualenv_interpreter(job: Job) -> Path | None:
     return devkit_schtasks.venv_home(executable)
 
 
-def problems(jobs: list[Job], now: _dt.datetime | None = None) -> list[str]:
+def stood_down(path: Path | None = None) -> frozenset[str]:
+    """The jobs an operator switched off **on purpose**, per `harness-switch.py`.
+
+    `--off jobs` disables the branch-delivery tasks with `schtasks /Change /DISABLE` and
+    records the group in `harness_state`'s ledger. From the scheduler's side that is
+    byte-for-byte the accident this module exists to catch -- `Scheduled Task State` says
+    `Disabled` either way -- so the scheduler alone cannot tell the two apart, and
+    reporting both as faults is what makes the real one skippable.
+
+    **The ledger is the only place the intent is written down**, which is what makes it
+    the right thing to consult rather than a suppression list of this module's own: it is
+    already the record `--status` prints and `--on` restores from, so a job stops being
+    reported exactly when someone stood it down and starts again the moment they put it
+    back. A hand-disabled job is in no ledger and is still a fault -- which is the whole
+    of the 471-missed-runs incident in the header, and stays reported.
+
+    An alias, kept because this module's readers ask the scheduler's question and should
+    not have to know which module owns the switch. `harness_state` owns the ledger, so it
+    owns what the ledger means; reading the file a second way here is how the two answers
+    would eventually disagree.
+    """
+    return harness_state.stood_down(path)
+
+
+def problems(
+    jobs: list[Job],
+    now: _dt.datetime | None = None,
+    deliberate: frozenset[str] = frozenset(),
+) -> list[str]:
     """One line per job that needs attention; [] when they are all healthy.
 
     Ordered so the most actionable comes first, and **at most one line per job** -- a
@@ -368,6 +402,12 @@ def problems(jobs: list[Job], now: _dt.datetime | None = None) -> list[str]:
     found: list[str] = []
     for job in sorted(jobs, key=lambda item: item.name):
         if not job.enabled:
+            if job.name in deliberate:
+                # Stood down through `harness-switch.py --off jobs`, which wrote the
+                # name to the ledger `deliberate` came from. A state someone chose is
+                # not a fault, and `--status` is where it is reported; saying it again
+                # here as a problem is what trains a reader to skim this whole block.
+                continue
             found.append(f"{job.name}: disabled -- nothing is running it")
             continue
         if job.last_run is None:
@@ -433,5 +473,9 @@ def query(prefix: str = PREFIX) -> list[Job]:
 
 
 def report(prefix: str = PREFIX, now: _dt.datetime | None = None) -> list[str]:
-    """The lines a caller should print. Empty means every scheduled job is healthy."""
-    return problems(query(prefix), now)
+    """The lines a caller should print. Empty means every scheduled job is healthy.
+
+    "Healthy" includes a job deliberately stood down: `problems` is pure and takes the
+    intent as an argument, and this is the one place that reads it off the machine.
+    """
+    return problems(query(prefix), now, stood_down())

@@ -5125,6 +5125,7 @@ def reconcile(
 
     menu = refresh_preview_menu(workspace, apply=apply, fetch=fetch)
     plug_menu = refresh_plug_menu(apply=apply)
+    broken_menu = refresh_broken_pr_menu(workspace, apply=apply)
 
     report = {
         "applied": apply,
@@ -5136,6 +5137,7 @@ def reconcile(
         "checkouts": synced,
         "preview_menu": menu,
         "plug_menu": plug_menu,
+        "broken_pr_menu": broken_menu,
     }
     return worst, report
 
@@ -5170,6 +5172,37 @@ def refresh_preview_menu(workspace: Path, *, apply: bool, fetch: bool = True) ->
             "preview_task", Path(__file__).resolve().parent / "preview-task.py"
         )
         written = preview_task.refresh_menu(workspace, fetch=fetch)
+    except Exception:
+        return ""
+    return str(written) if written else ""
+
+
+def refresh_broken_pr_menu(workspace: Path, *, apply: bool) -> str:
+    """Rebuild the broken-PR dropdown's options. The path written, or "" for anything else.
+
+    The third rider on this pass, here for the first one's reason and with the sharpest
+    version of it: the rows this writes are the PRs this pass has just decided NOT to
+    touch. `reconcile` merges only what is green and labelled, so every red PR it steps
+    over is one of these -- it has the answer in hand at the one moment per quarter hour
+    when the answer is current, and no other scheduled thing on this machine does.
+
+    Loaded by path and inside the function, like its two siblings: `fix-prs.py` imports
+    this module, so a top-level import would be a cycle, and it is hyphenated either way.
+    Total, and never affecting `worst` -- a dropdown that could not be rebuilt is a stale
+    menu, and a reconcile that failed on one is a machine that stops reaping boxes
+    because a convenience broke.
+
+    No `fetch` argument, unlike `refresh_preview_menu`: every source here is `gh`, which
+    reads GitHub rather than a local ref, so there is nothing a fetch would make fresher.
+    """
+    if not apply:
+        return ""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+        from _loader import load_by_path
+
+        fix_prs = load_by_path("fix_prs", Path(__file__).resolve().parent / "fix-prs.py")
+        written = fix_prs.refresh_menu(workspace)
     except Exception:
         return ""
     return str(written) if written else ""
@@ -5507,6 +5540,12 @@ def render_reconcile(report: dict) -> str:
             f"  plug menu: refreshed ({plug_menu})"
             if plug_menu
             else "  plug menu: [warn] not refreshed -- the Plug / Unplug checklist is stale"
+        )
+        broken_menu = report.get("broken_pr_menu")
+        lines.append(
+            f"  broken-PR menu: refreshed ({broken_menu})"
+            if broken_menu
+            else "  broken-PR menu: [warn] not refreshed -- the Fix a Broken PR list is stale"
         )
     if not applied:
         lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")

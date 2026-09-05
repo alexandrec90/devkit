@@ -3164,8 +3164,8 @@ def test_the_branch_tier_consults_the_harness_kill_switch(relpath):
     turning them off does not quieten a session -- it lands agent work on a checkout's
     home branch with no branch under it, a `needs-branch` verdict nobody can attribute
     days later. That held only while the hooks were the sole way to cut the branch;
-    `Agent: Spawn Branch, Worktree, Agent` and `Agent: Ship PR` now do it on a click, so
-    the operator who stands the tier down keeps the guarantee by hand. The safety
+    `claude --worktree` and `/ship` now do it without the tier at all, so the operator who
+    stands it down keeps the guarantee by hand. The safety
     property has moved, it has not been deleted.
 
     Asserted on the source as well as on behaviour: the risk the earlier test guarded

@@ -1032,3 +1032,40 @@ def test_every_vendored_hook_decodes_its_payload_as_utf8():
         "reconfigure the stream first, per the codec note under VERIFY_IMPORT in "
         "scripts/hooks/stop.py"
     )
+
+
+# --- the repo ignores the worktrees Claude Code cuts for itself ---------------
+# Ungated: `claude --worktree` needs no harness wiring, so a repo that has not adopted
+# the hooks can still acquire one of these.
+
+
+def test_claude_code_s_own_worktrees_are_ignored():
+    """`claude --worktree <name>` (and a Remote Control server started with
+    `--spawn worktree`) cuts a git worktree at `.claude/worktrees/<name>` -- *inside*
+    this checkout, not beside it. A linked worktree is not ignored by git on its
+    parent's behalf, so without an ignore rule the whole nested checkout is untracked:
+    it shows up in every `git status`, `git add -A` stages all of it, and anything that
+    decides by dirtiness (a pre-push gate, `sweep.classify`, a session-start banner)
+    reads this repo as holding uncommitted work for as long as the worktree lives.
+
+    The rule is asserted rather than vendored because a `.gitignore` cannot be: every
+    project's differs, so it is rendered from a template once and never pulled again.
+    A test is what survives that.
+    """
+    gitignore = REPO_ROOT / ".gitignore"
+    assert gitignore.is_file(), (
+        "no .gitignore, so a `claude --worktree` session would leave this checkout "
+        "permanently dirty -- add one containing `.claude/worktrees/`"
+    )
+    patterns = {
+        line.strip().rstrip("/")
+        for line in gitignore.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    # `.claude/` would also cover it, but it buries the harness's own committed files
+    # (settings.json, rules/, skills/), so it is not an acceptable way to pass this.
+    assert ".claude/worktrees" in patterns, (
+        "add `.claude/worktrees/` to .gitignore -- `claude --worktree` and "
+        "`remote-control --spawn worktree` both cut a nested checkout there, and an "
+        "un-ignored one makes this repo read as dirty to everything that looks"
+    )

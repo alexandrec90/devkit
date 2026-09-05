@@ -221,11 +221,23 @@ def switch_instructions(
 
 
 def status_lines(ledger: Ledger, workspace: Path) -> list[str]:
-    """What is off right now, group by group, read from the world and not from intent."""
+    """What is off right now, group by group.
+
+    `hooks` and `instructions` are read from the world -- the settings file and the files
+    actually on disk -- because for those the world is the whole truth.
+
+    **`jobs` is the exception, and says so.** What the scheduler holds is the *outcome* of
+    the last switch, not the standing instruction: a task registered after `--off jobs`
+    ran was never disabled by it, so a status line built from `schtasks` would report the
+    tier as partly on and hide the fact that anything installed next is meant to land
+    down. The ledger names the whole group, so the line is labelled `stood down` rather
+    than `disabled` -- it is what was asked for, which is exactly why an installer can
+    honour it.
+    """
     held = len(ledger.instructions)
     roots = sorted({Path(f.root).name for f in ledger.instructions})
     instructions = f"  ({held} files held from: {', '.join(roots)})" if held else ""
-    jobs = f"  ({', '.join(ledger.jobs)})" if ledger.jobs else ""
+    jobs = f"  (stood down: {', '.join(ledger.jobs)})" if ledger.jobs else ""
     live = sum(len(harness_state.instruction_files(root)) for root in default_roots(workspace))
     return [
         f"hooks:        {'OFF' if hooks_are_off() else 'on'}  ({CLAUDE_USER_SETTINGS})",
@@ -248,9 +260,17 @@ def apply(groups: Iterable[str], off: bool, workspace: Path, runner=subprocess.r
         elif group == "instructions":
             lines += switch_instructions(off, ledger, workspace, runner)
         else:
-            job_lines, changed = switch_jobs(off, runner=runner)
+            job_lines, _changed = switch_jobs(off, runner=runner)
             lines += job_lines
-            ledger.jobs = tuple(changed) if off else ()
+            # The ledger records the **group**, not the subset `schtasks` could reach.
+            # `changed` is what actually happened and is what the lines above report; it
+            # is the wrong thing to persist, because a job absent at switch time is a job
+            # whose installer may run tomorrow. Recording only the reachable ones left
+            # `--status` saying the tier was off while a later `install-release-schedule
+            # .py` produced an enabled task nobody had authorised -- the tier standing
+            # down and one of its jobs starting up out of the same state. Intent is a
+            # property of the group and outlives which tasks exist.
+            ledger.jobs = tuple(BRANCH_DELIVERY_JOBS) if off else ()
     ledger.save()
     return lines or ["nothing selected"]
 

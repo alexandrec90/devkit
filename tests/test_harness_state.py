@@ -79,6 +79,23 @@ def test_templates_are_not_part_of_the_tier(repo):
     assert "templates/core/CLAUDE.md" not in found
 
 
+def test_claude_code_s_own_worktrees_are_not_part_of_the_tier(repo):
+    """`claude --worktree <name>` cuts a whole second checkout at
+    `.claude/worktrees/<name>`, *inside* this one -- unlike the `.worktrees/` box tier,
+    which sits beside it and was never reachable from here.
+
+    Its `CLAUDE.md` files belong to that worktree's own root. Sweeping them in makes
+    `--off --group instructions` move files this root does not own, recorded in the
+    ledger against the wrong root; and since a worktree can be removed while the group is
+    off, the restore then has nowhere to put them back.
+    """
+    nested = repo / ".claude" / "worktrees" / "some-topic" / "scripts"
+    nested.mkdir(parents=True)
+    (nested / "CLAUDE.md").write_text("nested worktree memory", encoding="utf-8")
+    found = {path.relative_to(repo).as_posix() for path in state.instruction_files(repo)}
+    assert not any(name.startswith(".claude/worktrees/") for name in found)
+
+
 def test_a_root_that_is_not_a_directory_yields_nothing(tmp_path):
     assert state.instruction_files(tmp_path / "absent") == []
 
@@ -302,3 +319,34 @@ def test_git_missing_entirely_tracks_nothing(tmp_path):
         raise OSError("no git")
 
     assert state.is_tracked(tmp_path, "CLAUDE.md", explode) is False
+
+
+# --- the ledger as an installer reads it ----------------------------------------
+
+
+def test_stood_down_names_the_recorded_jobs(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text('{"jobs": ["devkit-release", "devkit-tray"]}', encoding="utf-8")
+    assert state.stood_down(ledger) == frozenset({"devkit-release", "devkit-tray"})
+
+
+def test_stood_down_is_empty_without_a_ledger(tmp_path):
+    """A fresh clone, CI, or a machine that never stood anything down. Empty is the safe
+    direction: a genuinely disabled job stays reported and a new task installs enabled."""
+    assert state.stood_down(tmp_path / "absent.json") == frozenset()
+
+
+def test_a_ledger_whose_jobs_is_not_a_list_does_not_raise(tmp_path):
+    """`load` promises it never raises, and a scalar `jobs` was the input that broke the
+    promise -- `tuple(... for name in 5)`. It matters because the readers are an
+    installer and the session-start report, so an exception here takes out both."""
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text('{"hooks": false, "jobs": 5}', encoding="utf-8")
+    assert state.Ledger.load(ledger).jobs == ()
+    assert state.stood_down(ledger) == frozenset()
+
+
+def test_a_corrupt_ledger_reads_as_nothing_stood_down(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text("{not json at all", encoding="utf-8")
+    assert state.stood_down(ledger) == frozenset()

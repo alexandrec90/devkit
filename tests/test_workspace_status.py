@@ -598,6 +598,22 @@ def test_an_upgrade_failure_does_not_hide_a_stale_reconcile_log():
     assert ws.scheduler_fallback(fallback, schedule) == fallback
 
 
+def test_a_deliberately_stood_down_pass_silences_the_log_fallback():
+    """The half that is easy to miss. `harness-switch.py --off jobs` stops the task, so
+    `logs/reconcile.log` goes stale exactly as it would if the task had broken -- and
+    with `schedule_health` correctly quiet about a state someone chose, this line is
+    what would report it instead. Suppressing one and not the other moves the false
+    alarm rather than removing it."""
+    fallback = "unattended pass last ran 5d 0h ago"
+    deliberate = frozenset({"devkit-worktree-reconcile"})
+    assert ws.scheduler_fallback(fallback, [], deliberate) == ""
+
+
+def test_standing_another_job_down_leaves_the_reconcile_fallback_alone():
+    fallback = "unattended pass last ran 5d 0h ago"
+    assert ws.scheduler_fallback(fallback, [], frozenset({"devkit-release"})) == fallback
+
+
 # --- the architectural check ------------------------------------------------
 
 
