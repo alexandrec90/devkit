@@ -44,6 +44,7 @@ import harness_triage as _triage
 import schedule_health
 import sweep
 import task_branch
+import vscode_extensions
 import worktree
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -650,17 +651,19 @@ def guard_line(root: Path, settings: Path = ROOT_SETTINGS) -> str:
     )
 
 
-def toolchain_lines(which=shutil.which, git=None) -> list[str]:
-    """The workstation prerequisites nothing else reports missing; [] when both are set.
+def toolchain_lines(which=shutil.which, git=None, extensions=None) -> list[str]:
+    """The workstation prerequisites nothing else reports missing; [] when they are set.
 
-    Reported here for `guard_line`'s reason: neither has a symptom at the moment it is
+    Reported here for `guard_line`'s reason: none has a symptom at the moment it is
     wrong. A machine with no `uv` cannot provision anything at all -- devkit is uv-native,
     so `worktree.py new`, `provision` and `session-start.sh` all end in the same failure
     wearing three different messages -- and an unset git identity surfaces as `sweep.py
     --ship` dying at `git commit` with `Author identity unknown`, at the end of the one
-    operation whose whole purpose is to get work off a machine.
+    operation whose whole purpose is to get work off a machine. The third, a workspace
+    task's VS Code extension, is `vscode_extensions.py`; injected rather than called so
+    this function's own tests do not depend on what the machine running them installed.
 
-    Both were found by hand on a fresh workstation bootstrap, which is exactly the
+    All three were found by hand on a fresh workstation bootstrap, which is exactly the
     session that has no idea which of its failures are its own doing.
     """
     run = git or _git
@@ -677,7 +680,7 @@ def toolchain_lines(which=shutil.which, git=None) -> list[str]:
             f"'Author identity unknown', `sweep.py --ship` included "
             f"(fix: git config --global {unset[0]} ...)"
         )
-    return lines
+    return lines + (extensions or vscode_extensions.report_lines)()
 
 
 def schedule_lines() -> list[str]:
@@ -980,9 +983,9 @@ def main(argv: list[str] | None = None) -> int:
             headroom=headroom_line(root),
         )
         # Prefixed here rather than passed into `render`: these come first because a
-        # machine missing uv or a git identity cannot act on any of the lines below, so
-        # saying them second would be handing out fixes that cannot run -- and `render`
-        # already takes more arguments than anything should.
+        # machine missing uv, a git identity or a task's extension cannot act on the
+        # lines below, so saying them second would hand out fixes that cannot run --
+        # and `render` already takes more arguments than anything should.
         toolchain = "\n".join(f"[workspace] {line}" for line in toolchain_lines())
         message = "\n".join(part for part in (toolchain, message) if part)
     except Exception as exc:

@@ -122,7 +122,7 @@ file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/sweep.py = 1953
 file_lines::scripts/sync-devkit.py = 1417
 file_lines::scripts/upgrade-project.py = 1231
-file_lines::scripts/workspace-status.py = 997
+file_lines::scripts/workspace-status.py = 1000
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2295
 file_lines::scripts/worktree.py = 6275
@@ -320,3 +320,6 @@ swallowed_errors::scripts/worktree.py = 2
 #   file_lines::scripts/worktree.py -> 6275
 #   function_lines::scripts/worktree-guard.py::main -> 139
 #   function_lines::scripts/worktree.py::reconcile -> 150
+
+# 2026-09-05  recorded: workspace-status.py gains one import line and two docstring lines naming a third workstation prerequisite: the VS Code extension every checkout picker runs through, which a machine can be missing with no symptom until a task is clicked and fails naming a command rather than a package. The check itself is a NEW module, scripts/vscode_extensions.py, on schedule_health.py's precedent -- inlining it here would have cost +1 definitions, +1 swallowed_errors and +49 file_lines in a module that is already twice its limit and whose split three earlier records have deferred. This is the one-line adapter that split leaves behind.
+#   file_lines::scripts/workspace-status.py -> 1000
