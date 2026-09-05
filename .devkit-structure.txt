@@ -104,7 +104,7 @@ dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 538
 file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
-file_lines::scripts/fix-prs.py = 649
+file_lines::scripts/fix-prs.py = 660
 file_lines::scripts/git_policy.py = 742
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
@@ -331,3 +331,6 @@ swallowed_errors::scripts/worktree.py = 2
 #   file_lines::scripts/sweep.py -> 1990
 #   file_lines::scripts/worktree.py -> 6297
 #   function_lines::scripts/worktree.py::reconcile -> 152
+
+# 2026-09-05  recorded: fix-prs.py must ask gh for the PR state before it cuts a box; the module is 149 lines past file_lines already and splitting it is its own change
+#   file_lines::scripts/fix-prs.py -> 660
