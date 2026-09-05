@@ -1275,6 +1275,13 @@ def main(argv: list[str] | None = None) -> int:
         # those settings, so regenerating first would bake back in whatever the prune
         # is about to remove.
         codex_regenerated = regenerate_codex_hooks(REPO_ROOT) if args.pull else False
+        # Before the seeds: `structure_check.vendored_paths` keys off this file, so a
+        # baseline seeded while the stamp is absent grandfathers every vendored module
+        # into the consumer's numbers -- and once the stamp lands the gate stops scanning
+        # them, so all 49 keys read as stale and a generated project is red on arrival.
+        if args.pull:
+            stamp = f"{git_head(src) or 'unknown'}\n"
+            (REPO_ROOT / VERSION_FILE).write_text(stamp, encoding="utf-8", newline="\n")
         # After the copy, because it runs the scanner this pull just delivered.
         seeded = seed_untested_baseline(REPO_ROOT) if args.pull else None
         seeded_structure = seed_structure_baseline(REPO_ROOT) if args.pull else None
@@ -1313,12 +1320,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"{seeded_structure} finding(s) grandfathered"
             )
         if args.pull:
-            # The SHA, always: DEVKIT_VERSION records the upstream *commit*, and
+            # The stamp itself is written above, before the baselines are seeded. It
+            # is the SHA, always: DEVKIT_VERSION records the upstream *commit*, and
             # the vendored `test_harness_version_records_a_commit` asserts exactly
             # that. The tag goes in the receipt instead, where `stale_pin` reads it.
-            (REPO_ROOT / VERSION_FILE).write_text(
-                f"{git_head(src) or 'unknown'}\n", encoding="utf-8", newline="\n"
-            )
             # No tag recorded for an untagged or dirty pull: there is no release
             # those files correspond to, and `stale_pin` reporting "cannot tell"
             # beats it asserting something untrue.
