@@ -323,7 +323,13 @@ def open_agent(
     prompt: str = "",
     title: str = "",
 ) -> int:
-    """Open one agent tab in `box`. Shared by `spawn`, `attach` and `fix-prs.py`.
+    """Open one agent tab in `box`. Shared by `spawn`, `attach`, `fix-prs.py` and
+    `agent-worktree.py`.
+
+    The last of those is a different tier -- a plain `.claude/worktrees/` worktree with
+    no lease and no port -- and shares this anyway, because "which window does the agent
+    open in" has to have one answer on a machine. It is also why nothing here says `box`
+    to the operator: every caller hands this a worktree, and only some of them are boxes.
 
     `title` overrides the tab's name, which the branch answers for a box cut to do one
     thing. `fix-prs.py` passes the PR instead: several of its tabs can be open at once,
@@ -331,7 +337,7 @@ def open_agent(
     first eleven characters names nothing.
     """
     if agent == "none":
-        print(f"no agent requested; the box is at {box}")
+        print(f"no agent requested; the worktree is at {box}")
         return EXIT_OK
     terminal = shutil.which("wt.exe") or shutil.which("wt")
     command = agent_command(agent, harness_switch.hooks_are_off(), prompt)

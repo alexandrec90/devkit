@@ -84,6 +84,14 @@ WORKSPACE_FILE_NAME = "alex-projects.code-workspace"
 BOXES_DIR_NAME = ".worktrees"
 NAME_SEP = "--"
 
+# The OTHER worktree directory on this machine, and it is a different tier: this one sits
+# INSIDE a checkout, holds no lease and no port, and is where `claude --worktree` and a
+# remote Claude session put a worktree. `scripts/agent-worktree.py` is the local verb for
+# it. Named here beside the box tier's directory because the two questions below have to
+# answer for both -- a worktree here is two levels under its checkout rather than one
+# level beside it, so the naive parent walk lands somewhere nobody ever wrote.
+CLI_WORKTREES_DIR = (".claude", "worktrees")
+
 
 def default_workspace(repo_root: Path, name: str = WORKSPACE_FILE_NAME) -> Path:
     """The workspace registry for a checkout at `repo_root`, box or not.
@@ -100,9 +108,35 @@ def default_workspace(repo_root: Path, name: str = WORKSPACE_FILE_NAME) -> Path:
     while `workspace-status.py` degraded to silence, which is the same failure with no
     symptom at all. `worktree.py` was alone in resolving both, so this is its logic
     moved down to where everything else can reach it.
+
+    A `.claude/worktrees/` worktree is the same failure one directory deeper, and it
+    arrived by a different route: nothing here cuts those, so the first ones on the
+    machine were made by `claude --worktree` and by remote sessions, and every script
+    below resolved its workspace to `<checkout>/.claude/worktrees/<file>`. That is the
+    directory an agent handed one of these is *running in*, so the naive answer is wrong
+    exactly where it is most often asked.
     """
+    inside = cli_worktree_checkout(repo_root)
+    if inside is not None:
+        return inside.parent / name
     parent = repo_root.parent
     return (parent.parent if parent.name == BOXES_DIR_NAME else parent) / name
+
+
+def cli_worktree_checkout(repo_root: Path) -> Path | None:
+    """The checkout a `.claude/worktrees/` worktree belongs to; None when it is not one.
+
+    Matched on the two directory names above `repo_root` rather than on the branch or on
+    anything git reports, so it is pure and answers for a path that no longer exists --
+    which is what a script resolving its own workspace file needs, and what the box tier's
+    two functions already do for their own directory.
+    """
+    parents = repo_root.parents
+    if len(parents) < 3:
+        return None
+    if (parents[0].name, parents[1].name) != (CLI_WORKTREES_DIR[1], CLI_WORKTREES_DIR[0]):
+        return None
+    return parents[2]
 
 
 def source_checkout(repo_root: Path) -> Path:
@@ -119,6 +153,9 @@ def source_checkout(repo_root: Path) -> Path:
     The project name is read off the box name rather than assumed, so this holds for a
     box cut from any project, not just devkit's.
     """
+    inside = cli_worktree_checkout(repo_root)
+    if inside is not None:
+        return inside
     parent = repo_root.parent
     if parent.name != BOXES_DIR_NAME:
         return repo_root

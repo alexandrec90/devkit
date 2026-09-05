@@ -540,10 +540,42 @@ def _repo_root(runner: Runner) -> Path | None:
     return Path(raw).resolve() if raw else None
 
 
-def _pre_commit_command(root: Path) -> list[str] | None:
-    candidates = (
-        root / ".venv" / "Scripts" / "pre-commit.exe",
-        root / ".venv" / "bin" / "pre-commit",
+def _venv_roots(root: Path, runner: Runner) -> tuple[Path, ...]:
+    """`root`, then the checkout it is a worktree of when that is a different directory.
+
+    A worktree checks out **tracked files only**, and `.venv` is gitignored in every
+    project here — so a worktree nobody provisioned has no virtualenv of its own, and
+    looking in one place made "commit from a worktree" impossible: the framework was
+    reported as not installed and the commit was refused, in a repo whose checkout has
+    `pre-commit` sitting in `.venv` two directories up.
+
+    Read off `--git-common-dir` rather than off a path convention, because the two
+    worktree tiers on this machine sit at different depths — `<workspace>/.worktrees/`
+    for a provisioned box and `<checkout>/.claude/worktrees/` for the plain kind
+    `claude --worktree` and `scripts/agent-worktree.py` cut — and git already knows the
+    answer for both, and for whatever the third tier turns out to be. A box has its own
+    `.venv`, so this changes nothing for one; the ordering keeps it that way.
+
+    Through the injected `runner` rather than a bare `subprocess.run`, for the reason
+    `NO_WINDOW` is declared at the top of this module: this file is in the reachable set
+    of the unattended jobs, and a spawn without `creationflags` opens a console window
+    under `pythonw.exe`. `tests/test_scheduled_jobs.py` is the gate, and it caught this
+    one on its first commit.
+    """
+    main = _stdout(
+        _git(runner, "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir")
+    )
+    if not main:
+        return (root,)
+    checkout = Path(main).parent
+    return (root,) if checkout == root else (root, checkout)
+
+
+def _pre_commit_command(root: Path, runner: Runner) -> list[str] | None:
+    candidates = tuple(
+        base / ".venv" / tail
+        for base in _venv_roots(root, runner)
+        for tail in (Path("Scripts") / "pre-commit.exe", Path("bin") / "pre-commit")
     )
     for candidate in candidates:
         if candidate.is_file():
@@ -559,7 +591,7 @@ def _pre_commit_command(root: Path) -> list[str] | None:
 def _run_pre_commit_framework(root: Path, runner: Runner) -> int:
     if not (root / ".pre-commit-config.yaml").is_file():
         return 0
-    command = _pre_commit_command(root)
+    command = _pre_commit_command(root, runner)
     if command is None:
         print(
             "[devkit branch policy] project has .pre-commit-config.yaml but pre-commit "

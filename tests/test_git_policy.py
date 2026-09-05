@@ -1,6 +1,7 @@
 """Tests for Devkit's global commit/push branch policy."""
 
 import json
+import pathlib
 import subprocess
 import sys
 
@@ -380,7 +381,9 @@ def test_policy_runs_pre_commit_framework_then_project_hook(tmp_path, monkeypatc
     project_hook.parent.mkdir()
     project_hook.write_text("# project hook\n", encoding="utf-8")
 
-    monkeypatch.setattr(git_policy, "_pre_commit_command", lambda _root: ["pre-commit-test"])
+    monkeypatch.setattr(
+        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
     monkeypatch.setattr(
         git_policy, "_project_hook_command", lambda _path, _args: ["project-hook-test"]
     )
@@ -389,6 +392,64 @@ def test_policy_runs_pre_commit_framework_then_project_hook(tmp_path, monkeypatc
     assert runner.calls.index(("pre-commit-test", "run", "--hook-stage", "pre-commit")) < (
         runner.calls.index(("project-hook-test",))
     )
+
+
+def _common_dir(main_git: pathlib.Path | None):
+    """A runner answering `rev-parse --git-common-dir`, or failing like a non-repository."""
+
+    def runner(argv, *, input_text=None, cwd=None):
+        if main_git is None:
+            return completed(argv, returncode=1)
+        return completed(argv, stdout=f"{main_git}\n")
+
+    return runner
+
+
+def test_a_worktree_finds_the_venv_of_the_checkout_it_belongs_to(tmp_path):
+    """A worktree checks out tracked files only and `.venv` is gitignored, so a worktree
+    nobody provisioned has none of its own.
+
+    Regression: this made committing from a `.claude/worktrees/` worktree impossible.
+    Every commit was refused with "project has .pre-commit-config.yaml but pre-commit is
+    not installed", in a repo whose checkout had `pre-commit` in `.venv` two directories
+    up -- and refusing is the correct half of that behaviour, so the failure looked like
+    policy rather than like a lookup that stopped one directory short.
+    """
+    checkout = tmp_path / "devkit"
+    tool = checkout / ".venv" / "Scripts" / "pre-commit.exe"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("", encoding="utf-8")
+    worktree = checkout / ".claude" / "worktrees" / "topic"
+    worktree.mkdir(parents=True)
+    assert git_policy._pre_commit_command(worktree, _common_dir(checkout / ".git")) == [str(tool)]
+
+
+def test_a_worktree_with_its_own_venv_keeps_using_it(tmp_path):
+    """The ordering, asserted rather than assumed: a provisioned box has a virtualenv of
+    its own with the project's own pinned tools in it, and reaching past that to the
+    source checkout's would run a different `pre-commit` than the box installed."""
+    checkout = tmp_path / "devkit"
+    outer = checkout / ".venv" / "Scripts" / "pre-commit.exe"
+    outer.parent.mkdir(parents=True)
+    outer.write_text("", encoding="utf-8")
+    box = tmp_path / ".worktrees" / "devkit--topic-0905"
+    inner = box / ".venv" / "Scripts" / "pre-commit.exe"
+    inner.parent.mkdir(parents=True)
+    inner.write_text("", encoding="utf-8")
+    assert git_policy._pre_commit_command(box, _common_dir(checkout / ".git")) == [str(inner)]
+
+
+def test_a_directory_git_cannot_answer_for_falls_back_to_itself(tmp_path):
+    """`_pre_commit_command` is called with the repo root, so this should not happen --
+    and it runs inside a commit hook, where a raise is a commit refused with a traceback
+    instead of a reason."""
+    assert git_policy._venv_roots(tmp_path, _common_dir(None)) == (tmp_path,)
+
+
+def test_a_plain_checkout_looks_in_exactly_one_place(tmp_path):
+    """`--git-common-dir` in a non-worktree names that checkout's own `.git`, so the
+    fallback must collapse rather than listing the same directory twice."""
+    assert git_policy._venv_roots(tmp_path, _common_dir(tmp_path / ".git")) == (tmp_path,)
 
 
 def test_skip_env_var_reads_only_explicit_off_values_as_off():
@@ -425,7 +486,9 @@ def test_skip_env_var_bypasses_branch_checks_but_still_runs_downstream_hooks(tmp
         ["pre-commit-test"]
     )
     (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
-    monkeypatch.setattr(git_policy, "_pre_commit_command", lambda _root: ["pre-commit-test"])
+    monkeypatch.setattr(
+        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
 
     runner = FakeRunner(responses)
     code = git_policy.run_hook("pre-commit", [], runner=runner, env={git_policy.SKIP_ENV_VAR: "1"})

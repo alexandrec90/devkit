@@ -86,11 +86,21 @@ needs_live_workspace = pytest.mark.skipif(
 
 
 def in_an_ephemeral_box(root: Path) -> bool:
-    """True when `root` is one of the workspace's disposable boxes, not a static checkout.
+    """True when `root` is a disposable worktree of either tier, not a static checkout.
 
-    Keyed off `worktree.BOXES_DIR_NAME` rather than the literal, so the two cannot drift.
+    Keyed off `worktree.BOXES_DIR_NAME` and `sweep.cli_worktree_checkout` rather than the
+    literals, so none of the three can drift.
+
+    Both tiers, because what the marker below actually asks is "is this checkout the one
+    the live workspace file is rendered from", and a `.claude/worktrees/` worktree is no
+    more that than a box is. It read as one until a branch edited `workspace.jsonc` from
+    inside one and the drift check reported its own un-merged edit as drift -- which is
+    the failure the marker exists to prevent, arriving through the tier that did not
+    exist when it was written.
     """
-    return root.parent.name == worktree.BOXES_DIR_NAME
+    return root.parent.name == worktree.BOXES_DIR_NAME or (
+        sweep.cli_worktree_checkout(root) is not None
+    )
 
 
 # The narrower marker, for every assertion that reads the live file expecting *this*

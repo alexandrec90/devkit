@@ -1129,6 +1129,93 @@
 				},
 				"problemMatcher": []
 			},
+			// The `.claude/worktrees/` pair, and they are NOT the box tier coming back.
+			// `Worktree: List Boxes` above reports `<workspace>/.worktrees/` — port leases,
+			// COMPOSE_PROJECT_NAMEs, a reaper. These two act on plain git worktrees INSIDE a
+			// checkout, which is where `claude --worktree` puts one and where a remote Claude
+			// session spawns. No lease, no provisioning, nothing to collide with a static
+			// checkout's ports.
+			//
+			// They exist because the built-in is a CLAUDE CODE flag. There is no `codex -w`,
+			// so a Codex session that wants isolation has to be handed a worktree by
+			// something — and putting it anywhere else would leave the machine with two
+			// conventions and two menus each blind to half the worktrees on it.
+			// `test_the_box_tier_keeps_one_task_and_it_is_read_only` carries the argument in
+			// full, including why `agent-box.py` stays CLI-only.
+			//
+			// Machine scope, not project scope, and a literal `--project devkit`: the menu is
+			// one scan across every checkout, so the checkout is the first of two nested
+			// pickers rather than a scope for the task. See ACTIONS["worktree-new"].
+			//
+			// Every picker-fed argument is spelled `--flag=${input:...}` rather than as two
+			// tokens. `plan_command` drops empty arguments before exec, so a blank `--slug`
+			// and `""` pair would reach argparse as a lone `--slug` that swallows the next
+			// flag; `--slug=` survives the filter and parses as the empty string the picker
+			// meant.
+			{
+				"label": "Agent: New Worktree",
+				"detail": "Asks which checkout, then which branch to cut from — its default branch first, then origin's most recently committed branches — then what the branch is about and which agent to open. Cuts agent/<slug>-<mmdd> off origin/<base> with no upstream, puts a worktree for it under the checkout's .claude/worktrees/, and opens Claude or Codex in a Windows Terminal tab scoped to it, attaching to the window you are already looking at. This is the plain-worktree tier: no port lease, no COMPOSE_PROJECT_NAME and no toolchain provisioning, so a session that needs a compose stack wants 'agent-box.py spawn' instead. Leave the topic blank to name the branch after the checkout. THIS SPENDS A PAID AGENT SESSION. The branch list tracks origin on its own — the scheduled reconcile pass rebuilds it every quarter hour, and this task rewrites it as it finishes.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"devkit",
+					"worktree-new",
+					"--pick=${input:worktreeBase}",
+					"--slug=${input:worktreeTopic}",
+					"--agent=${input:worktreeAgent}"
+				],
+				"icon": {
+					"id": "rocket",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"focus": true,
+					"clear": true,
+					"close": false
+				},
+				// Several at once is ordinary: two worktrees in different checkouts are
+				// unrelated pieces of work, and the second must not offer to terminate the
+				// first. Nothing here is leased, so the only bound is the machine's.
+				"runOptions": {
+					"instanceLimit": 4
+				},
+				"problemMatcher": []
+			},
+			{
+				// The safety picker is a second dropdown rather than the absence of one,
+				// because a multi-select is the worst possible surface for losing work: the
+				// rows already say what each worktree holds, and discarding it has to be a
+				// separate answer to a separate question rather than a consequence of
+				// ticking a box. The default refuses, names what would have been lost, and
+				// says which row to pick instead.
+				"label": "Agent: Delete Worktrees",
+				"detail": "Asks which checkout, then which of its .claude/worktrees/ worktrees to destroy — tick as many as you want — and whether to discard work. Each row says what that worktree holds: uncommitted paths, unpushed commits, or 'clean and pushed'. The default REFUSES anything that would lose work and names it; 'Force' discards it. A worktree's local branch is deleted only when git will take it with 'branch -d', so a branch whose commits exist nowhere else is kept and said so, and origin's copy — and therefore any PR — is never touched. The list covers worktrees this machine made any way at all, including the ones 'claude --worktree' and a remote Claude session cut; it is rebuilt by the scheduled reconcile pass every quarter hour and again as this task finishes.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"devkit",
+					"worktree-remove",
+					"--picks=${input:worktreeRow}",
+					"--force=${input:worktreeForce}"
+				],
+				"icon": {
+					"id": "trash",
+					"color": "terminal.ansiBrightRed"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"clear": true,
+					"close": false
+				},
+				"problemMatcher": []
+			},
 			{
 				// This agent recovery task takes NO checkout, and deliberately so. Every
 				// picker in this file lists the static checkouts; a session that ran in an
@@ -1992,6 +2079,161 @@
 						}
 					}
 				}
+			},
+			{
+				// `previewRow`'s shape again, pointed at a third file, and every paragraph on
+				// that input applies here unchanged: the nesting (the branch list depends on
+				// the checkout, and two sibling inputs could not see each other), the single
+				// pick in `value` with `${remember:...}` in the other three fields, the
+				// one-token `<checkout>:<branch>` value, and the absence of `checkEscapedUI`.
+				// Read them there.
+				//
+				// SINGLE-pick, unlike its two siblings, so no `separator` and no
+				// `clearStorage`: one worktree is cut off one base, and a checkbox list of
+				// bases would be asking for several branches at once under one topic.
+				//
+				// The writer is `agent-worktree.py --refresh`, and `worktree.py reconcile`
+				// calls it on the same pass that rebuilds the other two menus. This one has a
+				// second writer the others do not — `new` and `remove` rewrite it as they
+				// finish — because the worktree you just cut is the one you are most likely
+				// to want in the delete list, and a quarter of an hour is a long time to be
+				// unable to undo a click.
+				//
+				// Every checkout is listed even when it has no worktrees, and one with none
+				// draws a single sentinel row. That is not decoration: the extension appends
+				// options until an expression THROWS, so an empty array would end the list at
+				// the first such checkout and hide every one after it. `agent-worktree.py`
+				// recognises the sentinel and runs nothing.
+				"id": "worktreeBase",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which branch should the new one be cut from?",
+					"key": "worktreeBase",
+					"fileName": "${workspaceFolder:devkit}/logs/agent-worktrees.json",
+					"fileFormat": "json",
+					"jsonOption": {
+						"value": "content.bases['${pickStringRemember:worktreeSource}'][__itemIdx__].value",
+						"label": "content.bases['${remember:worktreeSource}'][__itemIdx__].label",
+						"description": "content.bases['${remember:worktreeSource}'][__itemIdx__].description",
+						"detail": "content.bases['${remember:worktreeSource}'][__itemIdx__].detail"
+					},
+					"pickStringRemember": {
+						"worktreeSource": {
+							"description": "Which checkout is this worktree for?",
+							"key": "worktreeSource",
+							"fileName": "${workspaceFolder:devkit}/logs/agent-worktrees.json",
+							"fileFormat": "json",
+							"jsonOption": {
+								"value": "content.projects[__itemIdx__].name",
+								"label": "content.projects[__itemIdx__].label",
+								"description": "content.projects[__itemIdx__].branches"
+							}
+						}
+					}
+				}
+			},
+			{
+				// A prompt rather than a picker, because nothing can know the answer in
+				// advance. Blank is a real answer — the branch takes the checkout's name —
+				// and reaches the script as `--slug=`, which is why every argument on these
+				// two tasks is spelled with an `=`; see the comment on the task itself.
+				"id": "worktreeTopic",
+				"type": "promptString",
+				"description": "What is this branch about? A few words; blank names it after the checkout",
+				"default": ""
+			},
+			{
+				// Two rows, and deliberately not three. `fixAgent` offers `claude-bg` because
+				// a batch of red PRs is work nobody is watching; a worktree cut to be typed
+				// into is the opposite, and a background session in one would be a tab that
+				// never opened. `none` exists on the CLI for cutting a worktree with nothing
+				// in it, and is not a row: that is `git worktree add`, which needs no menu.
+				//
+				// A `pickString` rather than a command picker, for `fixAgent`'s reason: one
+				// answer, a fixed list, and VS Code's own input aborts the task when it is
+				// escaped. Every branch carries a real token.
+				"id": "worktreeAgent",
+				"type": "pickString",
+				"description": "Which agent should open in the new worktree?",
+				"options": [
+					{
+						"label": "Claude — a terminal tab you can watch and steer",
+						"value": "claude"
+					},
+					{
+						"label": "Codex — the reason this task exists; there is no `codex -w`",
+						"value": "codex"
+					}
+				],
+				"default": "claude"
+			},
+			{
+				// `worktreeBase`'s twin, pointed at the same file's other list and drawn with
+				// checkboxes: finishing with three experiments at once is the ordinary way
+				// this task gets used. `separator` is a SPACE for `previewRow`'s reason — a
+				// comma is legal in a git ref and a directory name, and a space is not, so it
+				// cannot fall inside the half that varies.
+				//
+				// `clearStorage` for `previewRow`'s reason too, and a sharper one: these
+				// options are worktrees that existed at the last scan, so remembering the
+				// ticked set would pre-tick rows for worktrees a previous run has already
+				// destroyed.
+				//
+				// A separate `pickStringRemember` key from `worktreeBase`'s, so that picking
+				// a checkout to cut in does not pre-answer which checkout to delete from.
+				"id": "worktreeRow",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which worktrees should be destroyed? Tick as many as you want.",
+					"key": "worktreeRow",
+					"multiPick": true,
+					"clearStorage": true,
+					"separator": " ",
+					"fileName": "${workspaceFolder:devkit}/logs/agent-worktrees.json",
+					"fileFormat": "json",
+					"jsonOption": {
+						"value": "content.rows['${pickStringRemember:worktreeOwner}'][__itemIdx__].value",
+						"label": "content.rows['${remember:worktreeOwner}'][__itemIdx__].label",
+						"description": "content.rows['${remember:worktreeOwner}'][__itemIdx__].description",
+						"detail": "content.rows['${remember:worktreeOwner}'][__itemIdx__].detail"
+					},
+					"pickStringRemember": {
+						"worktreeOwner": {
+							"description": "Which checkout are the worktrees in?",
+							"key": "worktreeOwner",
+							"fileName": "${workspaceFolder:devkit}/logs/agent-worktrees.json",
+							"fileFormat": "json",
+							"jsonOption": {
+								"value": "content.projects[__itemIdx__].name",
+								"label": "content.projects[__itemIdx__].label",
+								"description": "content.projects[__itemIdx__].worktrees"
+							}
+						}
+					}
+				}
+			},
+			{
+				// Two literal values rather than a flag and its absence, so both rows read
+				// the same way and neither reaches argparse empty. The safe one is the
+				// default and is what makes the checkbox list above safe to use quickly: a
+				// pick that would lose work is refused by name, not acted on.
+				"id": "worktreeForce",
+				"type": "pickString",
+				"description": "What about worktrees holding work that exists nowhere else?",
+				"options": [
+					{
+						"label": "Keep them — refuse anything with uncommitted or unpushed work",
+						"value": "keep"
+					},
+					{
+						"label": "Force — DISCARD uncommitted and unpushed work in every ticked worktree",
+						"value": "force",
+						"description": "there is no undo; the rows say which ones this would cost you"
+					}
+				],
+				"default": "keep"
 			},
 			{
 				// Three rows rather than two plus a "run it in the background" toggle, because

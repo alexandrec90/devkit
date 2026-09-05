@@ -405,6 +405,12 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # cross-checkout dropdown two or three times over. The dispatch pins
         # `--project devkit` and asks which PR instead.
         "fix-prs",
+        # Born scoped, and the same kind again: one scan across every checkout, so the
+        # checkout is the first of the nested pickers rather than a scope for the task.
+        # The pair exists because `claude --worktree` has no Codex counterpart -- see
+        # `test_the_box_tier_keeps_one_task_and_it_is_read_only`.
+        "worktree-new",
+        "worktree-remove",
         # Born scoped, and the third of the no-project-dimension kind -- but for a
         # sharper reason than `reclaim`'s: repeating a release is not merely a no-op on
         # runs 2..N, it is a failure. The second run would find the tag it just pushed
@@ -2223,6 +2229,23 @@ def test_the_box_tier_keeps_one_task_and_it_is_read_only(canonical):
     for exactly this reason. A row that duplicates a built-in is the same clutter as a row
     that duplicates a scheduled pass.
 
+    **Two of them are back, and the built-in is exactly why the argument does not cover
+    them.** `--worktree` is a *Claude Code* flag; there is no `codex -w`, so a Codex
+    session that wants isolation has to be handed a worktree by something, and the
+    something has to put it where the built-in does or the machine ends up with two
+    conventions and two menus that each see half the worktrees. `Agent: New Worktree` and
+    `Agent: Delete Worktrees` are that something, they run `agent-worktree.py`, and they
+    live in `.claude/worktrees/` on purpose — it is also where a remote Claude session
+    spawns, which is the other half of what the delete row can see and a built-in bounded
+    to one session cannot. The human they are for is the one who typed this request:
+    somebody driving Codex from the quick-pick.
+
+    They are not the box tier either, and the same seam says so. No port lease, no
+    `COMPOSE_PROJECT_NAME`, no toolchain provisioning and no reaper — `agent-box.py spawn`
+    is still the answer for a session that runs a compose stack, and stays CLI-only. What
+    the two share is `agent_box.open_agent`, because two copies of "which window does the
+    agent open in" is the duplication that seam exists to prevent.
+
     **The box tier still has a clicked entry point, and that is not a contradiction.**
     `Agent: Fix a Broken PR` cuts one box per ticked PR, and every part of what it does is
     a thing `claude --worktree` has no shape for: the box sits on the *PR's own head
@@ -2242,10 +2265,13 @@ def test_the_box_tier_keeps_one_task_and_it_is_read_only(canonical):
     the one-click copy's missing `--merge-label` is still the reason, and
     `harness-switch.py --off --group jobs` is how it is stood down.
     """
+    # Matched on the file NAME, not on a substring of the path: `agent-worktree.py`
+    # ends in the same eleven characters and is a different tier entirely, so a
+    # substring test would report the `.claude/worktrees/` rows as box-tier rows.
     callers = [
         task
         for task in canonical["tasks"]
-        if any("worktree.py" in str(a) for a in task.get("args", []))
+        if any(Path(str(a)).name == "worktree.py" for a in task.get("args", []))
     ]
     assert [task["label"] for task in callers] == ["Worktree: List Boxes — read-only"]
     args = [str(a) for a in callers[0]["args"]]
@@ -2306,11 +2332,20 @@ def test_some_task_still_routes_through_the_dispatcher(canonical):
 def test_a_box_is_told_apart_from_a_checkout_by_the_directory_above_it():
     """What `needs_the_static_checkout` turns on. Both halves matter: a false positive
     turns this drift check off on the machine it is the only gate for, and a false
-    negative is the Stop-gate dead end it exists to end."""
+    negative is the Stop-gate dead end it exists to end.
+
+    Both disposable tiers count, and the second is here because it caught the dead end
+    again: a branch editing `workspace.jsonc` from a `.claude/worktrees/` worktree had
+    the drift check report its own un-merged edit, with `--adopt-workspace` — the one
+    move that deletes that edit — offered as the fix.
+    """
     boxes = Path("C:/ws") / worktree.BOXES_DIR_NAME
     assert in_an_ephemeral_box(boxes / "devkit--some-task-0824")
+    assert in_an_ephemeral_box(Path("C:/ws/devkit/.claude/worktrees/snoopy-sauteeing-gray"))
     assert not in_an_ephemeral_box(Path("C:/ws/devkit"))
     assert not in_an_ephemeral_box(boxes)  # the boxes directory is not itself a box
+    # ...nor is the directory the second tier's worktrees sit in.
+    assert not in_an_ephemeral_box(Path("C:/ws/devkit/.claude/worktrees"))
 
 
 @needs_live_workspace
