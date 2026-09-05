@@ -397,6 +397,35 @@ python scripts/agent-box.py delete --project carameli                 # box and 
 branch policy skipped — on purpose. A pre-commit refusal leaves the work uncommitted in a
 box `reconcile` may reap, while the same rules run in `PR Gate` on a branch that exists.
 
+### A plain worktree, in the directory Claude Code uses
+
+`claude --worktree <topic>` cuts `.claude/worktrees/<topic>`, enters it and offers
+keep-or-remove on the way out. There is no `codex -w`, so a Codex session that wants
+isolation has to be handed a worktree by something — and `scripts/agent-worktree.py` is
+that something, cutting in the same directory the built-in does so the machine has one
+convention rather than two. It is also where a remote Claude session spawns, which is why
+the delete verb can see worktrees nothing here made:
+
+```bash
+python scripts/agent-worktree.py new --pick devkit:main --slug voicemail --agent codex
+python scripts/agent-worktree.py list                          # every checkout's worktrees
+python scripts/agent-worktree.py remove --picks "devkit:voicemail-0905"
+python scripts/agent-worktree.py remove --picks "devkit:spike-0905" --force keep
+python scripts/agent-worktree.py refresh                       # rewrite the dropdowns' options
+```
+
+**Not the box tier.** No port lease, no `COMPOSE_PROJECT_NAME`, no toolchain provisioning
+and no reaper — `agent-box.py spawn` above is still the verb for a session that runs a
+compose stack. The branch is `agent/<slug>-<mmdd>` cut `--no-track` off `origin/<base>`,
+so `/ship` and the branch policy read it exactly as they read a box's.
+
+`remove` refuses anything holding uncommitted paths or unpushed commits and names it;
+`--force force` discards. The local branch is deleted only with `git branch -d`, so a
+branch whose commits exist nowhere else is kept and said so, and origin's copy is never
+touched. *Agent: New Worktree* and *Agent: Delete Worktrees* are the same two verbs with
+dropdowns, and their lists are rebuilt by `worktree.py reconcile` every quarter of an hour
+and again as either task finishes.
+
 ### Sending an agent at a PR that is already red
 
 `reconcile` merges what is green and labelled, so a PR whose base moved under it or whose

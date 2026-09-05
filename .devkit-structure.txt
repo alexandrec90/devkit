@@ -71,7 +71,7 @@ definitions::scripts/agent_clis.py = 21
 definitions::scripts/devkit_project.py = 50
 definitions::scripts/docker-maint.py = 30
 definitions::scripts/fix-prs.py = 28
-definitions::scripts/git_policy.py = 36
+definitions::scripts/git_policy.py = 37
 definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
 definitions::scripts/hooks/structure_check.py = 42
@@ -86,13 +86,13 @@ definitions::scripts/reclaim.py = 48
 definitions::scripts/release-pipeline.py = 35
 definitions::scripts/report-workflow-failure.py = 27
 definitions::scripts/resume-sessions.py = 21
-definitions::scripts/sweep.py = 55
+definitions::scripts/sweep.py = 56
 definitions::scripts/sync-devkit.py = 44
 definitions::scripts/upgrade-project.py = 39
 definitions::scripts/workspace-status.py = 30
 definitions::scripts/workspace-task-index.py = 29
 definitions::scripts/worktree-guard.py = 60
-definitions::scripts/worktree.py = 161
+definitions::scripts/worktree.py = 162
 dependency::package.json::markdownlint-cli2 = 1
 dependency::package.json::remark-cli = 1
 dependency::package.json::remark-frontmatter = 1
@@ -101,11 +101,11 @@ dependency::pyproject.toml::mypy = 1
 dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::pytest = 1
 dependency::pyproject.toml::ruff = 1
-file_lines::scripts/agent-box.py = 532
-file_lines::scripts/devkit_project.py = 1710
+file_lines::scripts/agent-box.py = 538
+file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/fix-prs.py = 649
-file_lines::scripts/git_policy.py = 710
+file_lines::scripts/git_policy.py = 742
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
@@ -119,13 +119,13 @@ file_lines::scripts/preview-ui-host.py = 1110
 file_lines::scripts/reclaim.py = 1232
 file_lines::scripts/release-pipeline.py = 960
 file_lines::scripts/report-workflow-failure.py = 614
-file_lines::scripts/sweep.py = 1953
+file_lines::scripts/sweep.py = 1990
 file_lines::scripts/sync-devkit.py = 1417
 file_lines::scripts/upgrade-project.py = 1231
 file_lines::scripts/workspace-status.py = 997
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2295
-file_lines::scripts/worktree.py = 6275
+file_lines::scripts/worktree.py = 6297
 function_lines::scripts/devkit_project.py::main = 213
 function_lines::scripts/docker-maint.py::generic_prune = 84
 function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
@@ -157,7 +157,7 @@ function_lines::scripts/worktree.py::provision_steps = 82
 function_lines::scripts/worktree.py::reap_decision = 107
 function_lines::scripts/worktree.py::reap_plan = 162
 function_lines::scripts/worktree.py::reapable = 114
-function_lines::scripts/worktree.py::reconcile = 150
+function_lines::scripts/worktree.py::reconcile = 152
 function_lines::scripts/worktree.py::reconcile_action = 176
 function_lines::scripts/worktree.py::resume_plan = 86
 function_params::scripts/devkit_project.py::autofix_ship_plan = 9
@@ -320,3 +320,14 @@ swallowed_errors::scripts/worktree.py = 2
 #   file_lines::scripts/worktree.py -> 6275
 #   function_lines::scripts/worktree-guard.py::main -> 139
 #   function_lines::scripts/worktree.py::reconcile -> 150
+
+# 2026-09-05  recorded: The .claude/worktrees tier. The two new modules — scripts/agent_worktrees.py and scripts/agent-worktree.py — were split from each other on their own decision/effect seam and pass every limit; what grew is five modules already far past theirs, and each gained the only kind of line it could. devkit_project.py gains two ACTIONS entries and their reasoning, and ACTIONS is the one place a dispatched task can be declared. worktree.py gains refresh_worktree_menu, the fourth menu rider, which its own menu_rider docstring says is where a rider belongs, plus the two lines in reconcile that call it and report it. sweep.py gains cli_worktree_checkout and git_policy.py gains _venv_roots — the two halves of one defect, which is that both files knew about the box tier's worktree directory and not about this one, so from inside a .claude/worktrees worktree the first resolved the workspace registry to a path nobody wrote and the second refused every commit as 'pre-commit is not installed'. agent-box.py gains six docstring lines on open_agent naming its fourth caller and why that caller's worktrees are not boxes; the alternative was leaving a docstring that lists three of four, which is the stale-instruction failure the root CLAUDE.md is about. Recorded rather than split because each split moves a module every workspace-aware script imports — git_policy.py is additionally COPIED to ~/.devkit/git-hooks and runs with no checkout in reach — which wants its own PR and its own reversion check.
+#   definitions::scripts/git_policy.py -> 37
+#   definitions::scripts/sweep.py -> 56
+#   definitions::scripts/worktree.py -> 162
+#   file_lines::scripts/agent-box.py -> 538
+#   file_lines::scripts/devkit_project.py -> 1725
+#   file_lines::scripts/git_policy.py -> 742
+#   file_lines::scripts/sweep.py -> 1990
+#   file_lines::scripts/worktree.py -> 6297
+#   function_lines::scripts/worktree.py::reconcile -> 152
