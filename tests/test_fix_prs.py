@@ -151,50 +151,83 @@ def test_a_pr_view_that_cannot_be_read_is_empty_rather_than_a_traceback(
     assert fix_prs.pr_view(tmp_path, 9) == {}
 
 
-# --- the dropdown's options file --------------------------------------------------
+# --- the rows the picker draws ----------------------------------------------------
 
 
-def test_every_row_carries_every_field_as_a_string():
-    """The extension appends options until an expression THROWS, and `undefined` does
-    not throw -- a row missing one field draws ten thousand blank entries."""
-    payload = fix_prs.menu_payload({"carameli": [pr(mergeable="CONFLICTING")]}, NOW)
-    for rows in payload["rows"].values():
-        for row in rows:
-            assert set(row) == {"value", "label", "description", "detail"}
-            assert all(isinstance(value, str) for value in row.values())
+def fields(row: str) -> list[str]:
+    return row.split(fix_prs.FIELD_SEP)
 
 
-def test_a_healthy_checkout_still_draws_one_row():
-    """An empty `rows` array would end the extension's list at the first healthy
-    checkout, hiding every checkout after it."""
-    payload = fix_prs.menu_payload({"devkit": [], "carameli": []}, NOW)
-    assert [row["value"] for row in payload["rows"]["devkit"]] == ["devkit:none"]
-    assert payload["rows"]["carameli"][0]["label"] == "nothing broken"
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("plain", "plain"),
+        ("a|b", "a/b"),
+        ("one" + chr(10) + "two", "one two"),
+        ("  padded  ", "padded"),
+        (412, "412"),
+    ],
+)
+def test_a_cell_is_one_line_with_no_separator_left_in_it(text, expected):
+    """The whole of a row's containment: `menu_row` builds four of these and joins them,
+    so anything that could add a field or a line has to stop here."""
+    assert fix_prs.cell(text) == expected
 
 
-def test_every_registered_checkout_is_listed_even_with_nothing_wrong():
-    payload = fix_prs.menu_payload({"devkit": [], "carameli": [pr()]}, NOW)
-    assert {entry["name"] for entry in payload["projects"]} == {"devkit", "carameli"}
+def test_a_row_is_the_four_fields_the_extension_splits_on():
+    """`shellCommand.execute` returns the FIRST field and draws the other three, so a row
+    that runs the fields together sends an agent at a label."""
+    row = fix_prs.menu_row("carameli", pr(mergeable="CONFLICTING"), NOW)
+    assert fields(row) == [
+        "carameli:412",
+        "#412 agent/sweep-labels-0904",
+        "carameli -- merge conflict -- 3h ago",
+        "Teach the sweep about labels",
+    ]
 
 
-def test_the_checkout_with_the_most_broken_prs_comes_first():
-    """The dropdown's top entry should answer the question it was opened to answer."""
-    found = {"aaa": [], "zzz": [pr(number=1)], "mmm": [pr(number=2), pr(number=3)]}
-    payload = fix_prs.menu_payload(found, NOW)
-    assert [entry["name"] for entry in payload["projects"]] == ["mmm", "zzz", "aaa"]
+def test_a_pr_title_carrying_the_separator_cannot_add_a_field():
+    """The title is the one field a person wrote, and a `|` in it would shift the row's
+    detail into a fifth field the extension does not read."""
+    row = fix_prs.menu_row("devkit", pr(title="fix: a|b", mergeable="CONFLICTING"), NOW)
+    assert len(fields(row)) == 4
+    assert fields(row)[3] == "fix: a/b"
 
 
-def test_a_checkouts_note_counts_only_what_is_broken():
-    payload = fix_prs.menu_payload({"devkit": [pr(), pr()]}, NOW)
-    note = payload["projects"][0]["description"]
-    assert note.startswith("2 broken -- as of ")
+def test_a_row_is_one_line_whatever_the_title_did():
+    """Each line of stdout is one option, so a newline in a title would draw two rows,
+    the second of them unpickable."""
+    broke = pr(title="one" + chr(10) + "two", mergeable="CONFLICTING")
+    row = fix_prs.menu_row("devkit", broke, NOW)
+    assert chr(10) not in row
+    assert fields(row)[3] == "one two"
 
 
-def test_rows_are_newest_first():
+def test_the_checkout_is_on_every_row_because_the_list_is_flat():
+    """One input, one command: there is no `which checkout` stage to carry it."""
+    row = fix_prs.menu_row("roguelike", pr(mergeable="CONFLICTING"), NOW)
+    assert fields(row)[2].startswith("roguelike -- ")
+
+
+def test_rows_are_newest_first_across_every_checkout():
     older = pr(number=1, updatedAt="2026-09-01T09:00:00Z")
     newer = pr(number=2, updatedAt="2026-09-04T09:00:00Z")
-    payload = fix_prs.menu_payload({"devkit": [older, newer]}, NOW)
-    assert [row["value"] for row in payload["rows"]["devkit"]] == ["devkit:2", "devkit:1"]
+    drawn = fix_prs.rows({"devkit": [older], "carameli": [newer]}, NOW)
+    assert [fields(row)[0] for row in drawn] == ["carameli:2", "devkit:1"]
+
+
+def test_a_machine_with_nothing_broken_draws_the_sentinel_rather_than_no_rows():
+    """An empty quick-pick says nothing about whether the scan ran."""
+    drawn = fix_prs.rows({"devkit": [], "carameli": []}, NOW)
+    assert len(drawn) == 1
+    assert fix_prs.parse_pick(fields(drawn[0])[0]) is None
+    assert "nothing broken" in drawn[0]
+
+
+def test_the_sentinel_row_says_picking_it_runs_nothing():
+    """It has to read as a non-action rather than as a PR whose title nobody filled in."""
+    row = fix_prs.placeholder_row()
+    assert fields(row)[3] == "picking this runs nothing"
 
 
 @pytest.mark.parametrize(
@@ -211,26 +244,6 @@ def test_age_is_coarse_and_never_raises(stamp, expected):
     assert fix_prs.age(stamp, NOW) == expected
 
 
-def test_the_menu_is_written_atomically_and_reads_back(tmp_path):
-    path = tmp_path / "nested" / "broken-prs.json"
-    assert fix_prs.write_menu(fix_prs.menu_payload({"devkit": [pr()]}, NOW), path) == path
-    assert json.loads(path.read_text(encoding="utf-8"))["rows"]["devkit"]
-
-
-def test_writing_the_menu_never_raises(tmp_path):
-    """A rider on somebody else's pass: the cost of a swallowed error is one stale
-    dropdown, and the next pass rewrites it within the quarter hour."""
-    blocked = tmp_path / "file"
-    blocked.write_text("not a directory", encoding="utf-8")
-    assert fix_prs.write_menu({}, blocked / "menu.json") is None
-
-
-def test_refresh_menu_is_total_against_an_unreadable_workspace(tmp_path):
-    """`worktree.reconcile` calls this; a menu that could not be built must never fail a
-    pass that reaped boxes correctly."""
-    assert fix_prs.refresh_menu(tmp_path / "nope.code-workspace", tmp_path / "out.json") is None
-
-
 def test_the_scan_covers_the_registry_not_just_the_stack_projects(monkeypatch, tmp_path):
     workspace = tmp_path / "alex.code-workspace"
     workspace.write_text("{}", encoding="utf-8")
@@ -239,35 +252,34 @@ def test_the_scan_covers_the_registry_not_just_the_stack_projects(monkeypatch, t
     assert sorted(fix_prs.scan(workspace)) == ["a", "b"]
 
 
+def test_the_scan_asks_every_checkout_at_once_and_keeps_the_answers_paired(monkeypatch, tmp_path):
+    """A person is waiting on this now, so the calls run concurrently -- and a pool hands
+    results back in completion order, which would pair the wrong PRs with the wrong
+    checkout if the mapping were built from that."""
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(fix_prs.devkit_project, "known_projects", lambda _text: ["slow", "fast"])
+    monkeypatch.setattr(
+        fix_prs,
+        "broken_prs",
+        lambda project_dir: [pr(number=1 if project_dir.name == "slow" else 2)],
+    )
+    found = fix_prs.scan(workspace)
+    assert found["slow"][0]["number"] == 1
+    assert found["fast"][0]["number"] == 2
+
+
+def test_an_empty_registry_scans_to_nothing_rather_than_an_empty_pool(tmp_path):
+    """`ThreadPoolExecutor` refuses `max_workers=0`, so a workspace with no checkouts has
+    to be answered before the pool is built."""
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    assert fix_prs.scan(workspace, projects=[]) == {}
+
+
 def test_a_pick_is_one_token_the_extension_can_return():
     """A VS Code input resolves to a single string, so both halves ride in one value."""
     assert fix_prs.pick_value("carameli", 412) == "carameli:412"
-
-
-def test_a_row_names_the_pr_says_what_is_wrong_and_how_old_the_scan_is():
-    row = fix_prs.menu_row("carameli", pr(mergeable="CONFLICTING"), NOW)
-    assert row["value"] == "carameli:412"
-    assert row["label"] == "#412 agent/sweep-labels-0904"
-    assert row["description"] == "merge conflict -- 3h ago"
-    assert row["detail"] == "Teach the sweep about labels"
-
-
-def test_the_placeholder_row_says_picking_it_runs_nothing():
-    """It exists to keep the array non-empty, so it has to read as a non-action rather
-    than as a PR whose title nobody filled in."""
-    row = fix_prs.placeholder_row("devkit")
-    assert row["value"] == "devkit:none"
-    assert fix_prs.parse_pick(row["value"]) is None
-    assert "nothing" in row["label"] and "runs nothing" in row["detail"]
-
-
-def test_a_checkout_with_nothing_broken_says_so_rather_than_saying_zero():
-    """The first dropdown's second column is read at a glance; `0 broken` is a number to
-    parse where `nothing broken` is an answer."""
-    assert (
-        fix_prs.project_note([], "2026-09-04 12:00") == "nothing broken -- as of 2026-09-04 12:00"
-    )
-    assert fix_prs.project_note([pr()], "2026-09-04 12:00").startswith("1 broken -- ")
 
 
 # --- reading a pick ---------------------------------------------------------------
@@ -277,8 +289,14 @@ def test_a_pick_is_a_checkout_and_a_number():
     assert fix_prs.parse_pick("carameli:412") == fix_prs.Pick("carameli", 412)
 
 
-def test_the_placeholder_row_parses_to_nothing_rather_than_failing():
-    assert fix_prs.parse_pick("devkit:none") is None
+def test_the_sentinel_row_parses_to_nothing_rather_than_failing():
+    assert fix_prs.parse_pick("none") is None
+
+
+def test_the_sentinel_carries_no_leading_dash_argparse_would_read_as_a_flag():
+    """It reaches the script as `--picks <value>`; a value starting with `-` is an option
+    to argparse, and the task fails with a usage error on a click that meant `nothing`."""
+    assert not fix_prs.placeholder_row().startswith("-")
 
 
 @pytest.mark.parametrize("token", ["carameli", "", ":412", "carameli:head"])
@@ -593,15 +611,32 @@ def test_nothing_ticked_runs_nothing(workspace, capsys):
     assert "nothing to do" in capsys.readouterr().out
 
 
-def test_only_the_placeholder_ticked_runs_nothing(workspace, capsys):
-    assert fix_prs.main(["--picks", "devkit:none", "--workspace", str(workspace)]) == 0
+def test_only_the_sentinel_ticked_runs_nothing(workspace, capsys):
+    assert fix_prs.main(["--picks", "none", "--workspace", str(workspace)]) == 0
     assert "nothing to do" in capsys.readouterr().out
 
 
-def test_refresh_writes_the_menu_and_stops(workspace, monkeypatch, capsys):
-    monkeypatch.setattr(fix_prs, "refresh_menu", lambda _ws: Path("logs/broken-prs.json"))
-    assert fix_prs.main(["--refresh", "--workspace", str(workspace)]) == 0
-    assert "broken-prs.json" in capsys.readouterr().out
+def test_rows_prints_the_picker_lines_and_nothing_else(workspace, monkeypatch, capsys):
+    """This stdout IS the quick-pick: every line it carries becomes an option, so a
+    status line here would be a row a person could tick."""
+    monkeypatch.setattr(
+        fix_prs, "scan", lambda _ws: {"devkit": [pr(mergeable="CONFLICTING")], "carameli": []}
+    )
+    assert fix_prs.main(["--rows", "--workspace", str(workspace)]) == 0
+    printed = capsys.readouterr().out.splitlines()
+    assert printed == [
+        "devkit:412|#412 agent/sweep-labels-0904|devkit -- merge conflict -- "
+        + fix_prs.age("2026-09-04T09:00:00Z")
+        + "|Teach the sweep about labels"
+    ]
+
+
+def test_rows_draws_the_sentinel_when_the_machine_is_clean(workspace, monkeypatch, capsys):
+    monkeypatch.setattr(fix_prs, "scan", lambda _ws: {"devkit": [], "carameli": []})
+    assert fix_prs.main(["--rows", "--workspace", str(workspace)]) == 0
+    printed = capsys.readouterr().out.splitlines()
+    assert len(printed) == 1
+    assert fix_prs.parse_pick(printed[0].split(fix_prs.FIELD_SEP)[0]) is None
 
 
 def test_a_missing_workspace_file_is_a_usage_error(tmp_path, capsys):
@@ -642,6 +677,6 @@ def test_the_parser_defaults_to_a_watchable_tab_and_offers_only_the_known_modes(
     the picker and a mode here can never drift apart."""
     parser = fix_prs.build_parser()
     args = parser.parse_args([])
-    assert (args.agent, args.picks, args.refresh, args.list) == ("claude", "", False, False)
+    assert (args.agent, args.picks, args.rows, args.list) == ("claude", "", False, False)
     action = next(a for a in parser._actions if a.dest == "agent")
     assert sorted(action.choices) == sorted(fix_prs.AGENT_MODES)

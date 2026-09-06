@@ -5125,7 +5125,6 @@ def reconcile(
 
     menu = refresh_preview_menu(workspace, apply=apply, fetch=fetch)
     plug_menu = refresh_plug_menu(apply=apply)
-    broken_menu = refresh_broken_pr_menu(workspace, apply=apply)
     tree_menu = refresh_worktree_menu(workspace, apply=apply)
 
     report = {
@@ -5138,7 +5137,6 @@ def reconcile(
         "checkouts": synced,
         "preview_menu": menu,
         "plug_menu": plug_menu,
-        "broken_pr_menu": broken_menu,
         "worktree_menu": tree_menu,
     }
     return worst, report
@@ -5147,7 +5145,7 @@ def reconcile(
 def menu_rider(script: str, rebuild) -> str:
     """Let one sibling script rebuild its own dropdown as a rider on this pass.
 
-    The four `refresh_*_menu` functions below differ only in which script they load and
+    The three `refresh_*_menu` functions below differ only in which script they load and
     what they ask it for; this is the half they share, and it is the half that has to be
     right. It is also the half worth having in one place: four copies of a broad
     handler are four chances for one of them to stop being total.
@@ -5184,34 +5182,17 @@ def refresh_preview_menu(workspace: Path, *, apply: bool, fetch: bool = True) ->
     just finished reaping exactly the boxes whose rows should go: it knows more about
     what belongs in that menu than any other scheduled thing on the machine.
 
-    `menu_rider` owns the loading and the containment for all four of these.
+    `menu_rider` owns the loading and the containment for all three of these.
     """
     if not apply:
         return ""
     return menu_rider("preview-task.py", lambda mod: mod.refresh_menu(workspace, fetch=fetch))
 
 
-def refresh_broken_pr_menu(workspace: Path, *, apply: bool) -> str:
-    """Rebuild the broken-PR dropdown's options. The path written, or "" for anything else.
-
-    The third rider on this pass, here for the first one's reason and with the sharpest
-    version of it: the rows this writes are the PRs this pass has just decided NOT to
-    touch. `reconcile` merges only what is green and labelled, so every red PR it steps
-    over is one of these -- it has the answer in hand at the one moment per quarter hour
-    when the answer is current, and no other scheduled thing on this machine does.
-
-    No `fetch` argument, unlike `refresh_preview_menu`: every source here is `gh`, which
-    reads GitHub rather than a local ref, so there is nothing a fetch would make fresher.
-    """
-    if not apply:
-        return ""
-    return menu_rider("fix-prs.py", lambda mod: mod.refresh_menu(workspace))
-
-
 def refresh_worktree_menu(workspace: Path, *, apply: bool) -> str:
     """Rebuild the `.claude/worktrees/` dropdowns' options. The path written, or "".
 
-    The fourth rider, and the only one whose menu has a second writer: `agent-worktree.py`
+    The third rider, and the only one whose menu has a second writer: `agent-worktree.py`
     rewrites it as `new` and `remove` finish, because the worktree you have just cut is
     the one you are most likely to want in the delete list and a quarter of an hour is a
     long time to be unable to undo a click. That does not make this rider optional -- the
@@ -5219,9 +5200,8 @@ def refresh_worktree_menu(workspace: Path, *, apply: bool) -> str:
     spawns, are made by nothing that runs here, so a menu with only its own tasks for a
     writer would be blind to most of what it lists.
 
-    No `fetch` argument, unlike `refresh_preview_menu`, and for a different reason from
-    `refresh_broken_pr_menu`'s: this reads local worktrees and remote-tracking refs, and
-    the pass has already fetched by the time it runs.
+    No `fetch` argument, unlike `refresh_preview_menu`: this reads local worktrees and
+    remote-tracking refs, and the pass has already fetched by the time it runs.
     """
     if not apply:
         return ""
@@ -5548,12 +5528,6 @@ def render_reconcile(report: dict) -> str:
             f"  plug menu: refreshed ({plug_menu})"
             if plug_menu
             else "  plug menu: [warn] not refreshed -- the Plug / Unplug checklist is stale"
-        )
-        broken_menu = report.get("broken_pr_menu")
-        lines.append(
-            f"  broken-PR menu: refreshed ({broken_menu})"
-            if broken_menu
-            else "  broken-PR menu: [warn] not refreshed -- the Fix a Broken PR list is stale"
         )
     if not applied:
         lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")
