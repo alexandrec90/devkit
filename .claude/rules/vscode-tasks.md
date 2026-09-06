@@ -206,6 +206,16 @@ never renders.
   blank entries instead of ending the list. Ride on an existing scheduled pass rather than
   adding a daemon, and make the rider unable to fail it: any exception leaves `reconcile`'s
   own verdict untouched and prints one warning.
+- **A picker that needs an extension declares it in `extensions.recommendations`, and a
+  test holds that.** A `command` input is dead on a machine without the extension behind
+  it, and it fails naming a *command* rather than a package — so the prerequisite is
+  unguessable from the failure and has to be written where something checks it. That list
+  is the single source, and `test_every_extension_a_picker_needs_is_a_workspace_recommendation`
+  maps each input's command to its provider and turns red until the entry exists. A command
+  id whose provider is not in `PICKER_EXTENSIONS` fails rather than passing — a picker
+  nobody wrote a provider down for is the one nobody will list as a prerequisite either.
+  **A recommendation is checked, never installed**: VS Code offers it once, so a machine
+  that dismissed the toast is indistinguishable from one that is set up.
 - **A cached list is only as alive as its writer, and nothing in the dropdown says so.**
   The broken-PR menu spent two days a day stale because the scheduled pass that wrote it
   had been stood down by `harness-switch.py --off jobs` — the rows still drew, the
