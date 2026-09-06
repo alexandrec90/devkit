@@ -17,6 +17,7 @@ from support import load_script
 # reason: the latter overwrites `sys.modules[name]`, so `agent-box.py` would be loaded a
 # second time into a process whose other suites monkeypatch the first copy.
 agent_worktree = load_script("scripts/agent-worktree.py")
+picker_rows = load_script("scripts/picker_rows.py")
 aw = agent_worktree.aw
 
 
@@ -234,7 +235,6 @@ def workspace(tmp_path, monkeypatch):
             }
         ),
     )
-    monkeypatch.setattr(agent_worktree, "refresh_menu", lambda *a, **k: None)
     return file
 
 
@@ -367,26 +367,56 @@ def test_one_refusal_does_not_hide_the_removals_beside_it(workspace, monkeypatch
 # --- the menu and the entry point ----------------------------------------------------
 
 
-def test_the_menu_is_none_rather_than_a_raise_when_the_registry_cannot_be_read(tmp_path):
-    """`worktree.reconcile` calls this on every pass; a reconcile that reaped boxes
-    correctly must never fail because a dropdown could not be rebuilt."""
+def test_a_missing_registry_is_a_usage_error_rather_than_a_traceback(tmp_path, capsys):
+    """The picker runs this; a traceback would reach the quick-pick as no options at all,
+    which is indistinguishable from a machine with no worktrees."""
     missing = tmp_path / "nothing.code-workspace"
-    assert agent_worktree.refresh_menu(missing, tmp_path / "menu.json") is None
+    assert agent_worktree.main(["rows", "--workspace", str(missing)]) == agent_worktree.EXIT_USAGE
+    assert "no workspace file" in capsys.readouterr().err
 
 
-def test_a_registry_that_cannot_be_parsed_leaves_the_previous_menu_alone(tmp_path):
+def test_a_registry_that_cannot_be_parsed_still_draws_the_sentinel(tmp_path, capsys):
     """`sweep.parse_workspace` answers a file it cannot parse with an empty list rather
-    than a raise, so "no checkouts" is what a truncated workspace file looks like from
-    here. Writing the empty menu would turn one bad read into two dropdowns that offer
-    nothing until the next pass."""
-    # Deliberately not the live registry's filename: `refresh_menu` reads the path it is
-    # given and nothing else, and naming it after the real file would make this test look
-    # like one that needs `@needs_live_workspace`.
+    than a raise, so "no checkouts" is what a truncated registry looks like from here.
+    The cached menu refused to write in that state, because overwriting a good file with
+    an empty one outlived the bad read. There is no file to protect now, so the honest
+    answer is the row that says there is nothing -- and it is one click, not a quarter of
+    an hour, from being asked again."""
     broken = tmp_path / "truncated.code-workspace"
     broken.write_text("{not json", encoding="utf-8")
-    target = tmp_path / "menu.json"
-    assert agent_worktree.refresh_menu(broken, target) is None
-    assert not target.exists()
+    assert agent_worktree.main(["rows", "--workspace", str(broken)]) == 0
+    printed = capsys.readouterr().out.splitlines()
+    assert len(printed) == 1
+    assert printed[0].split(picker_rows.FIELD_SEP)[0] == picker_rows.NOTHING
+
+
+def test_the_two_picker_verbs_print_their_own_list_and_nothing_else(tmp_path, monkeypatch, capsys):
+    """One scan answers both questions, and each verb draws only its half: a base branch
+    in the delete list is a row that would refuse, and vice versa."""
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    tree = agent_worktree.aw.Tree("box", "C:/w/box", "agent/x", 0, 0)
+    monkeypatch.setattr(
+        agent_worktree,
+        "scan",
+        lambda ws: ({"devkit": [tree]}, {"devkit": [("main", "the default branch")]}),
+    )
+
+    assert agent_worktree.main(["rows", "--workspace", str(workspace)]) == 0
+    drawn = capsys.readouterr().out.splitlines()
+    assert [line.split(picker_rows.FIELD_SEP)[0] for line in drawn] == ["devkit:box"]
+
+    assert agent_worktree.main(["bases", "--workspace", str(workspace)]) == 0
+    drawn = capsys.readouterr().out.splitlines()
+    assert [line.split(picker_rows.FIELD_SEP)[0] for line in drawn] == ["devkit:main"]
+
+
+def test_cutting_and_removing_leave_no_menu_to_keep_warm(tmp_path):
+    """The reversion check for deleting the second writer: `new` and `remove` used to
+    rewrite the file as they finished, because a quarter of an hour was a long time to be
+    unable to undo a click. A live list needs no such catch-up."""
+    assert not hasattr(agent_worktree, "refresh_menu")
+    assert not hasattr(agent_worktree, "MENU_CACHE")
 
 
 def test_a_dismissed_picker_runs_nothing_and_exits_zero(capsys):

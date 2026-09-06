@@ -54,6 +54,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import devkit_project
+import picker_rows
 import sweep
 import task_input
 import worktree
@@ -77,18 +78,6 @@ PICK_SEP = ":"
 # What joins several ticked rows into that one string. A space, matching `previewRow`
 # and chosen on the same terms: neither half can contain one.
 PICK_LIST_SEP = " "
-
-# The row a scan that found nothing draws. `shellCommand.execute` has `defaultOptions`
-# for this, and the row is written here instead so the *reason* the list is empty is one
-# of this module's outputs and testable with the rest: an empty quick-pick says nothing
-# about whether the scan ran. `main` recognises the sentinel and spawns nothing.
-NOTHING = "none"
-
-# What separates the four fields of a row. `shellCommand.execute` splits each line into
-# `value|label|description|detail` and returns the value alone; the other three are the
-# two lines the quick-pick draws. A PR title is the one field a person wrote, so `cell`
-# takes the separator back out rather than trusting GitHub not to carry one.
-FIELD_SEP = "|"
 
 # How many checkouts `scan` asks about at once. Well above the registry's size, so the
 # pool is bounded by the number of checkouts in practice; the ceiling is here so a
@@ -245,11 +234,6 @@ def pick_value(project: str, number: object) -> str:
     return f"{project}{PICK_SEP}{number}"
 
 
-def cell(text: object) -> str:
-    """One field of a row: a single line, with no `FIELD_SEP` left in it."""
-    return " ".join(str(text).replace(FIELD_SEP, "/").split())
-
-
 def menu_row(project: str, pr: dict, now: _dt.datetime | None = None) -> str:
     """One quick-pick line for a broken PR.
 
@@ -260,25 +244,18 @@ def menu_row(project: str, pr: dict, now: _dt.datetime | None = None) -> str:
     picker was how a *file* keyed its rows, not what a reader wanted.
     """
     number = pr.get("number", "?")
-    return FIELD_SEP.join(
-        (
-            cell(pick_value(project, pr.get("number", ""))),
-            cell(f"#{number} {pr.get('headRefName', '')}"),
-            cell(f"{project} -- {broken_reason(pr)} -- {age(str(pr.get('updatedAt', '')), now)}"),
-            cell(pr.get("title", "")),
-        )
+    return picker_rows.row(
+        pick_value(project, pr.get("number", "")),
+        f"#{number} {pr.get('headRefName', '')}",
+        f"{project} -- {broken_reason(pr)} -- {age(str(pr.get('updatedAt', '')), now)}",
+        pr.get("title", ""),
     )
 
 
 def placeholder_row() -> str:
-    """The row a scan that found nothing draws. See `NOTHING`."""
-    return FIELD_SEP.join(
-        (
-            NOTHING,
-            "nothing broken",
-            "every open PR on this machine is green, or a draft",
-            "picking this runs nothing",
-        )
+    """The row a scan that found nothing draws. See `picker_rows.nothing_row`."""
+    return picker_rows.nothing_row(
+        "nothing broken", "every open PR on this machine is green, or a draft"
     )
 
 
@@ -334,15 +311,17 @@ def parse_pick(token: str) -> Pick | None:
     the menu file and this parser disagree, and running the rest of a batch while
     silently dropping one is how a user ends up believing a PR was looked at.
     """
-    # Ahead of the split, and a bare word rather than the `<project>:none` this used to
-    # be: the pick reaches the script as `--picks <value>`, and argparse reads any value
-    # starting with `-` as an option, so a sentinel needs no leading punctuation either.
-    if str(token) == NOTHING:
+    # Ahead of the split, because the sentinel is a bare word: `picker_rows.NOTHING`
+    # carries no `PICK_SEP` and would otherwise read as a project with no number. The
+    # `<project>:none` spelling below is what the cached menu wrote, kept because a
+    # remembered pick from before that change must still mean "nothing" rather than
+    # raise at a person who clicked the row that said so.
+    if str(token) == picker_rows.NOTHING:
         return None
     project, _, tail = str(token).partition(PICK_SEP)
     if not project or not tail:
         raise FixError(f"cannot read the pick {token!r}; expected <project>{PICK_SEP}<number>")
-    if tail == NOTHING:
+    if tail == picker_rows.NOTHING:
         return None
     if not tail.isdigit():
         raise FixError(f"{token!r} does not name a PR number")
@@ -606,10 +585,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.rows:
-            # The picker's stdout, so nothing else may be written to it: a status line
-            # here is an extra option in the quick-pick.
-            for row in rows(scan(workspace)):
-                print(row)
+            picker_rows.emit(rows(scan(workspace)))
             return EXIT_OK
         if args.list:
             print(render_scan(scan(workspace)))

@@ -98,7 +98,7 @@ project, nothing for `reconcile` to own.
 
 Usage:
     python preview-ui-host.py --picks="carameli:agent/foo carameli:agent/bar"
-    python preview-ui-host.py --refresh      # rebuild the dropdown's option file only
+    python preview-ui-host.py --rows         # the dropdown's rows, live, serving nothing
     python preview-ui-host.py --stop         # stop every host preview server
     python preview-ui-host.py --clean        # remove every .ui-previews copy
 
@@ -127,6 +127,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+import picker_rows
 import sweep
 import worktree
 from _loader import load_by_path
@@ -928,9 +929,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="space-joined <project>:<ref> tokens -- what the checkbox dropdown sends",
     )
     parser.add_argument(
-        "--refresh",
+        "--rows",
         action="store_true",
-        help="rebuild the dropdown's option file and exit, serving nothing",
+        help="print the dropdown's rows and exit, serving nothing",
     )
     parser.add_argument(
         "--clean",
@@ -986,17 +987,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.fetch:
         echo("Reading boxes, open PRs and recent branches ...")
-    # Scoped to the checkouts this script can actually serve, in both dimensions at once:
-    # the scan skips a frontend-less checkout's `git fetch` and `gh pr list` entirely, and
-    # the file it writes cannot offer a row that would land back here as a refusal.
+    # Scoped to the checkouts this script can actually serve: the scan skips a
+    # frontend-less checkout's `git fetch` and `gh pr list` entirely, and cannot offer a
+    # row that would land back here as a refusal.
     projects = preview_task.ui_projects(workspace)
     everything = preview_task.collect(workspace, fetch=args.fetch, projects=projects)
-    written = preview_task.write_menu(preview_task.menu_payload(everything, projects))
-    if args.refresh:
-        echo(
-            f"Dropdown options written to {written}" if written else "Could not write the options."
-        )
-        return 0 if written else 1
+    if args.rows:
+        # `preview-task.rows`, from this scan: both dropdowns pick from one list, and a
+        # second spelling is a second thing to keep true. Every line here is an option.
+        picker_rows.emit(preview_task.rows(everything))
+        return 0
 
     npm = shutil.which("npm")
     if npm is None:
