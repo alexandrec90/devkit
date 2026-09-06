@@ -306,6 +306,16 @@ def base_rows(bases: dict[str, list[tuple[str, str]]]) -> list[str]:
     return listed or [picker_rows.nothing_row("no branches", "origin could not be read")]
 
 
+def empty_rows(half: str) -> list[str]:
+    """The sentinel row for a half whose ticked checkouts turned out to hold nothing.
+
+    Through the two row builders rather than spelled here, because an empty quick-pick
+    cannot be told apart from a command that failed to run, and each half words that
+    differently -- "no worktrees" against "origin could not be read".
+    """
+    return tree_rows({}) if half == "trees" else base_rows({})
+
+
 def tree_project_rows(trees: dict[str, list[Tree]], token: str) -> list[str]:
     """The delete task's checkout stage: one row per checkout, and what it holds.
 

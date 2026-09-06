@@ -333,7 +333,7 @@ def test_every_row_of_either_list_carries_four_fields():
 # --- the checkout stage, and the order it has to record -----------------------
 
 
-def tree(name: str) -> aw.Tree:
+def tree(name: str):
     return aw.Tree(name, f"C:/ws/devkit/.claude/worktrees/{name}", f"agent/{name}", 0, 0)
 
 
@@ -401,3 +401,12 @@ def test_the_base_entries_match_their_row_list_too():
 def test_selecting_one_checkout_out_of_the_entries_keeps_the_scans_order():
     entries = aw.tree_entries(TREES)
     assert picker_scan.select(entries, ["devkit"]) == aw.tree_rows({"devkit": TREES["devkit"]})
+
+
+def test_empty_rows_draws_each_halfs_own_sentinel():
+    """An empty quick-pick cannot be told apart from a command that failed to run, and
+    the two halves have different reasons for being empty."""
+    assert aw.empty_rows("trees") == aw.tree_rows({})
+    assert aw.empty_rows("bases") == aw.base_rows({})
+    assert "no worktrees" in aw.empty_rows("trees")[0]
+    assert "origin could not be read" in aw.empty_rows("bases")[0]

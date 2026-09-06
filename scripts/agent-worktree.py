@@ -384,11 +384,12 @@ def draw(workspace: Path, verb: str, checkouts: str) -> list[str]:
     half = PICKER_VERBS[verb]
     if not verb.endswith("-projects"):
         return picked_rows(workspace, checkouts, half)
-    found = scan(workspace)[0 if half == "trees" else 1]
-    entries = aw.tree_entries(found) if half == "trees" else aw.base_entries(found)
-    token = picker_scan.write(SCAN_NAMES[half], entries)
-    rows = aw.tree_project_rows if half == "trees" else aw.base_project_rows
-    return rows(found, token)
+    trees, bases = scan(workspace)
+    if half == "trees":
+        return aw.tree_project_rows(
+            trees, picker_scan.write(SCAN_NAMES[half], aw.tree_entries(trees))
+        )
+    return aw.base_project_rows(bases, picker_scan.write(SCAN_NAMES[half], aw.base_entries(bases)))
 
 
 def picked_rows(workspace: Path, checkouts: str, half: str) -> list[str]:
@@ -403,16 +404,16 @@ def picked_rows(workspace: Path, checkouts: str, half: str) -> list[str]:
     An empty `checkouts` is the verb typed by hand with no first stage in front of it,
     and answers with the whole machine the way it did before there was one.
     """
-    trees = half == "trees"
-    name = SCAN_NAMES[half]
-    render = aw.tree_rows if trees else aw.base_rows
     projects, token = picker_scan.parse_projects(checkouts)
-    if not projects:
-        return render(scan(workspace)[0 if trees else 1])
-    cached = picker_scan.read(name, token)
-    if cached is not None:
-        return picker_scan.select(cached, projects) or render({})
-    return render(scan(workspace, projects)[0 if trees else 1])
+    if projects:
+        cached = picker_scan.read(SCAN_NAMES[half], token)
+        if cached is not None:
+            return picker_scan.select(cached, projects) or aw.empty_rows(half)
+    # A miss, or a verb typed by hand with no first stage in front of it. `projects`
+    # narrows the rescan in the first case and is empty in the second, which `scan`
+    # reads as "every checkout" -- the answer this verb gave before there was a stage.
+    found = scan(workspace, projects or None)
+    return aw.tree_rows(found[0]) if half == "trees" else aw.base_rows(found[1])
 
 
 def strayed_picks(picks: list[tuple[str, str]], checkouts: str) -> list[str]:

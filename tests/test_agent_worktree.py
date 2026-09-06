@@ -400,7 +400,10 @@ def test_the_two_picker_verbs_print_their_own_list_and_nothing_else(tmp_path, mo
     monkeypatch.setattr(
         agent_worktree,
         "scan",
-        lambda ws: ({"devkit": [tree]}, {"devkit": [("main", "the default branch")]}),
+        lambda ws, projects=None: (
+            {"devkit": [tree]},
+            {"devkit": [("main", "the default branch")]},
+        ),
     )
 
     assert agent_worktree.main(["rows", "--workspace", str(workspace)]) == 0
