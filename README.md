@@ -192,7 +192,7 @@ Exits 0 when current, 1 when a file was modified after install or a newer releas
 exists, and 2 where nothing is installed — a fresh clone, CI, or anyone else's
 machine, none of which should read as a failure.
 
-`workspace-status.py` runs the same comparison at session start, so this is
+`workspace-status.py` runs the same comparison on its daily pass, so this is
 normally noticed without anyone asking. It answers two separate questions, because
 they deserve different reactions: **modified** means the installed bytes no longer
 match the receipt and should never happen, while **behind** means a newer release
@@ -457,8 +457,9 @@ dropdown runs `--rows` when you open it — one `gh` call per checkout, fanned o
 list is a live scan rather than a cached one. A pick is then re-read again before anything
 is spawned, so a PR that went green, was closed or was merged in between is reported and
 skipped. It needs the `augustocdias.tasks-shell-input` extension, which is what lets a VS
-Code input run a command at all; `workspace-status.py` reports it at session start when it
-is missing.
+Code input run a command at all; the daily `devkit-workspace-status` pass reports it when
+it is missing, and toasts, because the failure it prevents names a *command* rather than a
+package and so cannot be searched for.
 
 ### Running someone else's branch before it merges
 
@@ -604,7 +605,7 @@ forever, and a box holding uncommitted work is held at any age like every other.
 The run is windowless, so its only record is `logs/reconcile.log`, overwritten per
 pass and written on success too — a log that appears only on failure cannot be told
 apart from a task that has stopped running. That log's timestamp is also what
-`workspace-status.py` reads at session start: a scheduled task that has been disabled
+`workspace-status.py` reads on its own daily pass: a scheduled task that has been disabled
 looks exactly like one that is working, so the status line says when a pass last
 finished rather than leaving you to notice the drift it causes.
 
@@ -632,6 +633,17 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-global-tools` | `scripts/install-global-tools.py` | daily 04:30 | `logs/global-tools.log` |
 | `devkit-rc-servers` | `scripts/install-rc-schedule.py` | every 15 min | `logs/rc-servers.log` |
 | `devkit-tray` | `scripts/install-tray.py` | at logon, resident | `logs/tray.log` |
+| `devkit-workspace-status` | `scripts/install-workspace-status.py` | daily 09:00 | `logs/scheduled-workspace-status.log` |
+
+The last of those is the workspace's own health report, and it is a scheduled job for a
+reason worth knowing before you move it: `workspace-status.py` was written as a
+SessionStart line, every document here called it one, and **nothing ever ran it** — so a
+missing `uv`, an unset git identity, a stranded checkout and an uninstalled picker
+extension were all reported to nobody until the extension surfaced as `command
+'shellCommand.execute' not found` at the moment a task was clicked. It is not an agent
+hook now either, and deliberately: the pass is nine seconds, which as a per-session tax is
+the kind that gets a check disabled. `--notify` toasts only when there is something to
+report, so a healthy workspace is silent.
 
 The first three are the branch-delivery half, and are the ones
 `scripts/harness-switch.py --off --group jobs` disables: they exist to move agent
@@ -639,7 +651,7 @@ branches along. The rest are machine maintenance and are left running, because s
 the vacuum cleaner is not part of stopping cooking.
 
 `scripts/schedule_health.py` answers the question no artifact can — *did it run at all*
-— and names the file above when one exits non-zero, so the session-start line is a
+— and names the file above when one exits non-zero, so the reported line is a
 pointer rather than a bare exit code. `tests/test_scheduled_jobs.py` holds the contract:
 a job registered by hand, or one that leaves nothing behind, fails the suite.
 

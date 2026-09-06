@@ -218,6 +218,46 @@ def test_the_tray_is_never_given_an_execution_time_limit():
     assert "<LogonTrigger>" in xml
 
 
+def test_the_status_pass_writes_the_file_its_installer_advertises():
+    """Same shape as the prune: `workspace-status.py` writes no artifact of its own --
+    it prints, and every other caller of it is a terminal. The wrapper is what gives the
+    scheduled caller a file, so the claim here is about the label it is given."""
+    installer = load_script("scripts/install-workspace-status.py")
+    log_wrap = load_script("scripts/log-wrap.py")
+    assert installer.ARTIFACT == f"logs/{log_wrap.slug(installer.LABEL)}.log"
+    assert "--always" in installer.status_arguments(r"C:\py\pythonw.exe", root=Path(r"C:\ws"))
+
+
+def test_the_status_pass_never_loses_the_flag_that_makes_it_reach_anyone():
+    """`--notify` is the difference between this job and the two years of silence it
+    replaces.
+
+    Without it the pass runs daily, writes a log nobody has a reason to open, and reports
+    a missing extension or a stranded checkout to exactly the audience it had when
+    nothing ran it at all -- while `schtasks` says `Last Result: 0` throughout. The flag
+    is one word in a tuple that reads like tidy-up bait, so it is asserted rather than
+    trusted.
+    """
+    installer = load_script("scripts/install-workspace-status.py")
+    assert "--notify" in installer.status_arguments(r"C:\py\pythonw.exe", root=Path(r"C:\ws"))
+
+
+def test_the_status_pass_is_scheduled_by_a_trigger_that_has_a_next_run():
+    """A logon-only task has no `Next Run Time`, and `schedule_health.problems` reads a
+    job with no last run and no next run as "registered but has never run".
+
+    So a logon trigger here would have the workspace reporter's own job reported as
+    broken, by the reporter, from registration until the next logon. A `CalendarTrigger`
+    always has a next run; `StartWhenAvailable` covers the laptop that was shut at 09:00.
+    """
+    installer = load_script("scripts/install-workspace-status.py")
+    xml = installer.task_document(r"C:\py\pythonw.exe", "args", "09:00", root=Path(r"C:\ws"))
+    assert "<CalendarTrigger>" in xml
+    assert "<StartBoundary>2020-01-01T09:00:00</StartBoundary>" in xml
+    assert "<LogonTrigger>" not in xml
+    assert "<StartWhenAvailable>true</StartWhenAvailable>" in xml
+
+
 def test_the_global_tools_pass_writes_the_file_its_installer_advertises():
     """This one writes its own artifact rather than being wrapped: the content that
     matters is not the captured stdout of an npm command but the rollback line for
@@ -271,8 +311,12 @@ UNATTENDED: dict[str, str] = {
     "scripts/rc_machine.py": "the tasklist, taskkill and server launch that pass makes",
     "scripts/tray.py": "devkit-tray runs it from logon until logoff",
     "scripts/tray_state.py": "the tray asks it what to draw, on every poll",
-    "scripts/schedule_health.py": "the schtasks the tray spawns every poll, and session start",
-    "scripts/log-wrap.py": "the wrapper three of those jobs are launched through",
+    "scripts/schedule_health.py": "the schtasks the tray spawns every poll, and the status pass",
+    "scripts/workspace-status.py": "devkit-workspace-status runs it daily, and it spawns git",
+    "scripts/log-wrap.py": "the wrapper four of those jobs are launched through",
+    # reached from `workspace-status.py --notify`, which is the one script that imports
+    # it rather than being wrapped in `notify-wrap.py`; see that flag's docstring.
+    "scripts/notify.py": "the Windows PowerShell the status pass raises its toast through",
     # reached from an entry point
     "scripts/sweep.py": "the git and gh IO for reconcile and upgrade",
     "scripts/sync-devkit.py": "upgrade-project.py spawns it per project, once per pass",

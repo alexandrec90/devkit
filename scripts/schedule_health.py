@@ -44,7 +44,9 @@ know that reconcile is every 15 minutes and the upgrade is daily. Adding a fourt
 needs no edit.
 
 Windows-only by nature (`schtasks`), and silent everywhere else -- same contract as
-`workspace-status.py`, which is what surfaces this at session start.
+`workspace-status.py`, which is what surfaces this: the tray, on every poll, and the
+daily `devkit-workspace-status` pass, which toasts when there is something to say. It
+used to say "at session start" here, and in five other files; nothing ever ran it there.
 
 Tested in `tests/test_schedule_health.py`.
 """
@@ -141,6 +143,7 @@ ARTIFACTS: dict[str, str] = {
     "devkit-global-tools": "logs/global-tools.log",
     "devkit-rc-servers": "logs/rc-servers.log",
     "devkit-tray": "logs/tray.log",
+    "devkit-workspace-status": "logs/scheduled-workspace-status.log",
 }
 
 

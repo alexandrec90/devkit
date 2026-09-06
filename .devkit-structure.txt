@@ -89,7 +89,7 @@ definitions::scripts/resume-sessions.py = 21
 definitions::scripts/sweep.py = 56
 definitions::scripts/sync-devkit.py = 44
 definitions::scripts/upgrade-project.py = 39
-definitions::scripts/workspace-status.py = 31
+definitions::scripts/workspace-status.py = 32
 definitions::scripts/workspace-task-index.py = 29
 definitions::scripts/worktree-guard.py = 60
 definitions::scripts/worktree.py = 159
@@ -122,7 +122,7 @@ file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/sweep.py = 1990
 file_lines::scripts/sync-devkit.py = 1422
 file_lines::scripts/upgrade-project.py = 1231
-file_lines::scripts/workspace-status.py = 1030
+file_lines::scripts/workspace-status.py = 1094
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2295
 file_lines::scripts/worktree.py = 6225
@@ -365,3 +365,7 @@ swallowed_errors::scripts/worktree.py = 2
 
 # 2026-09-06  recorded: fix-prs.py moves off the box tier: the two functions that asked worktree.py for a box on the PR head branch are replaced by the pair that finds or cuts a .claude/worktrees/ worktree on it, and the module docstring gains the paragraph saying which tier this writes to and why -- the claim that is now the module's whole subject, and the one a stale copy of would send the next agent at worktree.py resume. The file was already 109 lines past file_lines before this change and two earlier records deferred its split; the seam is still the one its own section headers draw, the scan-and-menu half against the launch half, and moving it moves the path the workspace task block names for the live --rows picker. That is a change with its own reversion check, not a rider on the one that changed which directory the task cuts into.
 #   file_lines::scripts/fix-prs.py -> 639
+
+# 2026-09-06  recorded: workspace-status.py gains --notify, toast_text and the docstring for both. The module was called 'the SessionStart status line' by six files and no hook ever ran it, so every prerequisite it reports -- a missing uv, an unset git identity, an uninstalled picker extension -- was reported to nobody; it is now the runner behind the daily devkit-workspace-status job, and --notify is the half that reaches a person. The growth is one flag, one pure function that turns the report into a two-field toast, and the paragraph recording who runs this and why it is deliberately not an agent hook (the pass is 9s, which as a per-session tax is what gets a check disabled). Splitting this module is what four earlier records here have deferred and is not a rider on wiring it to a caller.
+#   definitions::scripts/workspace-status.py -> 32
+#   file_lines::scripts/workspace-status.py -> 1094

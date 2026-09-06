@@ -1,9 +1,15 @@
-"""Tests for scripts/workspace-status.py (the SessionStart status line).
+"""Tests for scripts/workspace-status.py (the daily workspace status pass).
 
 The properties that matter are all about *not* being annoying: silent when
-healthy, silent when it cannot tell, and never able to fail a session start. A
+healthy, silent when it cannot tell, and never able to fail the job that runs it. A
 status line that cries wolf is removed within a week, and then the thing it was
 watching goes unwatched again.
+
+It was called "the SessionStart status line" here for as long as it existed and no
+SessionStart hook ever ran it. `devkit-workspace-status` does now -- see
+`tests/test_install_workspace_status.py` for the registration and
+`test_a_toast_is_raised_only_when_there_is_something_to_say` below for the half that
+reaches a person.
 """
 
 import json
@@ -133,13 +139,101 @@ def test_an_absent_workspace_is_silent_and_successful(tmp_path, monkeypatch, cap
 
 
 def test_a_failure_anywhere_still_exits_zero(tmp_path, monkeypatch):
-    """A status line that can fail a session start gets removed the first time it
+    """A status line that can fail the job running it gets removed the first time it
     is wrong -- and then nothing is watching again."""
     workspace = tmp_path / "w.code-workspace"
     workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
     monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
     assert ws.main([]) == 0
+
+
+# --- the toast the unattended pass reaches a person with ---------------------
+#
+# `--notify` is the whole reason the scheduled job is worth registering: a daily pass
+# that only writes `logs/scheduled-workspace-status.log` reports to the same audience
+# this file had when nothing ran it at all.
+
+
+def _workspace_reporting(monkeypatch, tmp_path, message: str) -> None:
+    """Point `main` at a workspace whose whole report is `message`.
+
+    `main` composes three parts, so all three have to be answered here or the promise in
+    that first line is false: `render`, `toolchain_lines`, and the plug checklist. The
+    last one is stubbed at `refresh_plug_menu` rather than at `plug_menu_line` because
+    that call is a *write* -- unstubbed it rebuilds the real workstation's menu from
+    whatever `gh` says, which is a side effect no test here asked for, and on a machine
+    where `gh` cannot be reached it returns "" and `plug_menu_line` adds a warning to a
+    report this fixture said was empty. That is how it reads on CI and not here.
+    """
+    workspace = tmp_path / "w.code-workspace"
+    workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
+    monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
+    monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: [])
+    monkeypatch.setattr(ws, "render", lambda *a, **k: message)
+    monkeypatch.setattr(ws, "toolchain_lines", lambda *a, **k: [])
+    monkeypatch.setattr(ws.worktree, "refresh_plug_menu", lambda **k: "logs/plug-menu.json")
+
+
+def test_a_toast_is_raised_only_when_there_is_something_to_say(monkeypatch, tmp_path):
+    """A notification on a healthy workspace is the one that teaches you to dismiss the
+    next one without reading it. Silence is the whole contract."""
+    raised = []
+    monkeypatch.setattr(ws._notify, "notify", lambda title, body: raised.append((title, body)))
+
+    _workspace_reporting(monkeypatch, tmp_path, "")
+    assert ws.main(["--notify"]) == 0
+    assert raised == []
+
+    _workspace_reporting(monkeypatch, tmp_path, "[workspace] something is wrong")
+    assert ws.main(["--notify"]) == 0
+    assert len(raised) == 1
+
+
+def test_without_the_flag_nothing_is_notified(monkeypatch, tmp_path, capsys):
+    """Every interactive caller is a terminal that already shows the report. A toast
+    there is a second copy of something you are looking at."""
+    raised = []
+    monkeypatch.setattr(ws._notify, "notify", lambda title, body: raised.append((title, body)))
+    _workspace_reporting(monkeypatch, tmp_path, "[workspace] something is wrong")
+    assert ws.main([]) == 0
+    assert "something is wrong" in capsys.readouterr().out
+    assert raised == []
+
+
+def test_a_toast_that_cannot_be_shown_costs_nothing(monkeypatch, tmp_path, capsys):
+    """The report must not depend on the toast: the printed line is the artifact, and a
+    POSIX machine, a locked session and a machine with no WinRT bridge are all normal
+    places for this job to run. `notify` reports its own failure and returns False --
+    `test_a_crashing_toast_never_reaches_the_wrapped_task` in `test_notify.py` is what
+    holds it to never raising, which is why nothing here catches."""
+    monkeypatch.setattr(ws._notify, "notify", lambda title, body: False)
+    _workspace_reporting(monkeypatch, tmp_path, "[workspace] something is wrong")
+    assert ws.main(["--notify"]) == 0
+    assert "something is wrong" in capsys.readouterr().out
+
+
+def test_the_toast_body_leads_with_the_first_finding_and_counts_the_rest():
+    """Two short strings is all a toast has, so it is a pointer: the leading finding,
+    how many followed it, and the file holding all of them."""
+    title, body = ws.toast_text("[workspace] uv is not on PATH\n[workspace] 2 boxes stranded")
+    assert title == ws.NOTIFY_TITLE
+    assert body.startswith("uv is not on PATH")
+    assert "(+1 more)" in body
+    assert "logs/scheduled-workspace-status.log" in body
+
+
+def test_a_single_finding_is_not_given_a_count():
+    """ "(+0 more)" reads as a bug in the reporter, which is the last thing a line about
+    a broken workspace needs."""
+    _, body = ws.toast_text("[workspace] uv is not on PATH")
+    assert "more)" not in body
+
+
+def test_the_toast_survives_a_report_with_no_prefix():
+    """`toast_text` is given whatever `main` assembled. Nothing guarantees the prefix --
+    an empty report is the documented healthy case, and a stripped one must not raise."""
+    assert ws.toast_text("")[1].startswith(" -- see")
 
 
 # --- the branch-policy half --------------------------------------------------

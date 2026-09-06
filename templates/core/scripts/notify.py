@@ -28,6 +28,15 @@ registered shortcut, which is an install step this file exists to avoid.
 
 Called by `scripts/notify-wrap.py` — never imported by diagnostic scripts directly.
 Notifications are a task-wrapper concern, not a script concern.
+
+**One script imports it anyway, and the exception is about the exit code.**
+`workspace-status.py --notify` runs unattended, from a Scheduled Task, where the code the
+wrapper propagates is the task's `Last Result` — so "there is something to report" cannot
+be spelled as a non-zero exit without `schedule_health.py` reporting the job as broken
+every day the workspace has anything to say, and spelling it as zero would toast "Passed"
+at a machine with nothing wrong. The wrapper decides from the exit code and toasts on
+every run; that script has the finding in hand and toasts only when there is one. Nothing
+interactive gets to use this argument: a clicked task has a human watching its terminal.
 """
 
 import os
