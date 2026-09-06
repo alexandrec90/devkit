@@ -17,6 +17,7 @@ from support import load_script
 # both suites and the script under test share one copy.
 aw = load_script("scripts/agent_worktrees.py")
 picker_rows = load_script("scripts/picker_rows.py")
+picker_scan = load_script("scripts/picker_scan.py")
 
 NOW = _dt.datetime(2026, 9, 5, 12, 0, tzinfo=_dt.UTC)
 CHECKOUT = Path("C:/ws/devkit")
@@ -327,3 +328,76 @@ def test_every_row_of_either_list_carries_four_fields():
     bases = {"devkit": [("main", "the default branch")], "carameli": []}
     for line in [*aw.tree_rows(trees), *aw.base_rows(bases)]:
         assert len(fields(line)) == 4
+
+
+# --- the checkout stage, and the order it has to record -----------------------
+
+
+def tree(name: str) -> aw.Tree:
+    return aw.Tree(name, f"C:/ws/devkit/.claude/worktrees/{name}", f"agent/{name}", 0, 0)
+
+
+TREES = {"devkit": [tree("a"), tree("b")], "carameli": [tree("c")], "roguelike": []}
+
+
+def test_the_delete_checkout_rows_count_what_each_one_holds():
+    drawn = aw.tree_project_rows(TREES, "tok")
+    assert [fields(line)[1] for line in drawn] == ["devkit", "carameli", "roguelike"]
+    assert [fields(line)[2] for line in drawn] == ["2 worktrees", "1 worktree", "no worktrees"]
+
+
+def test_a_checkout_with_no_worktrees_is_offered_and_says_so():
+    """ "Where are my worktrees" is a question about the machine, so a checkout that
+    silently drops out of the answer cannot be told apart from one the scan could not
+    reach -- which is the same argument the row list itself makes."""
+    assert fields(aw.tree_project_rows(TREES, "tok")[2])[2] == "no worktrees"
+
+
+def test_the_base_checkout_rows_are_alphabetical_and_counted():
+    bases = {"zulu": [("main", "the default branch")], "alpha": [("main", "x"), ("dev", "y")]}
+    drawn = aw.base_project_rows(bases, "tok")
+    assert [fields(line)[1] for line in drawn] == ["alpha", "zulu"]
+    assert fields(drawn[0])[2] == "2 branches to cut from"
+    assert fields(drawn[1])[2] == "1 branch to cut from"
+
+
+def test_a_checkout_whose_origin_could_not_be_read_says_that_rather_than_nothing():
+    """Every checkout contributes at least its default branch, so a count of zero here
+    means `recent_bases` could not read its origin refs at all -- worth saying in the
+    row rather than leaving as an unexplained short list one stage later."""
+    assert fields(aw.base_project_rows({"alpha": []}, "tok")[0])[2] == "origin could not be read"
+
+
+def test_a_checkout_row_carries_the_token_the_second_stage_reads():
+    for line in (
+        aw.tree_project_rows(TREES, "tok9")[0],
+        aw.base_project_rows({"a": []}, "tok9")[0],
+    ):
+        assert picker_scan.parse_projects(fields(line)[0])[1] == "tok9"
+
+
+def test_no_checkouts_at_all_draws_a_sentinel_rather_than_an_empty_menu():
+    for drawn in (aw.tree_project_rows({}, "tok"), aw.base_project_rows({}, "tok")):
+        assert len(drawn) == 1
+        assert fields(drawn[0])[0] == picker_rows.NOTHING
+
+
+def test_the_entries_carry_the_checkout_and_the_row_list_carries_the_same_order():
+    """The pair the second stage depends on: it filters what `tree_entries` recorded, so
+    a row list ordered differently from the entries would draw the right worktrees in
+    the wrong order -- which nobody would report."""
+    entries = aw.tree_entries(TREES)
+    assert [project for project, _line in entries] == ["devkit", "devkit", "carameli"]
+    assert [line for _project, line in entries] == aw.tree_rows(TREES)
+
+
+def test_the_base_entries_match_their_row_list_too():
+    bases = {"zulu": [("main", "x")], "alpha": [("main", "y")]}
+    entries = aw.base_entries(bases)
+    assert [project for project, _line in entries] == ["alpha", "zulu"]
+    assert [line for _project, line in entries] == aw.base_rows(bases)
+
+
+def test_selecting_one_checkout_out_of_the_entries_keeps_the_scans_order():
+    entries = aw.tree_entries(TREES)
+    assert picker_scan.select(entries, ["devkit"]) == aw.tree_rows({"devkit": TREES["devkit"]})

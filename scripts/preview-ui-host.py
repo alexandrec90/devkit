@@ -128,6 +128,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import picker_rows
+import picker_scan
 import sweep
 import worktree
 from _loader import load_by_path
@@ -934,6 +935,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the dropdown's rows and exit, serving nothing",
     )
     parser.add_argument(
+        "--checkouts",
+        default="",
+        metavar="'PROJECT@TOKEN,...'",
+        help="what the checkout dropdown sends -- the stage the row dropdown was narrowed by",
+    )
+    parser.add_argument(
         "--clean",
         action="store_true",
         help=f"remove every {UI_PREVIEWS_DIR_NAME} copy and exit",
@@ -981,7 +988,12 @@ def main(argv: list[str] | None = None) -> int:
             f"{entry.get('port')} with nothing left watching it -- stopped."
         )
 
-    if args.picks and preview_task.unresolved(args.picks):
+    # Either dropdown, because either can be the one that was dismissed and a cancel
+    # has to cost nothing whichever it was. VS Code leaves the literal `${input:...}` in
+    # the argv rather than aborting the task; see `preview_task.unresolved`.
+    if (args.picks and preview_task.unresolved(args.picks)) or (
+        args.checkouts and preview_task.unresolved(args.checkouts)
+    ):
         echo("Nothing picked -- the dropdown was cancelled.")
         return 0
 
@@ -995,7 +1007,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.rows:
         # `preview-task.rows`, from this scan: both dropdowns pick from one list, and a
         # second spelling is a second thing to keep true. Every line here is an option.
-        picker_rows.emit(preview_task.rows(everything))
+        # Narrowed by the checkout stage when one ran, the same way `preview-task.py
+        # --rows` is -- this path takes the scan it already has rather than reading the
+        # recorded one, which is the same rows by a shorter route.
+        ticked, _token = picker_scan.parse_projects(args.checkouts)
+        listed = [c for c in everything if c.project in ticked] if ticked else everything
+        picker_rows.emit(preview_task.rows(listed))
         return 0
 
     npm = shutil.which("npm")
@@ -1010,6 +1027,21 @@ def main(argv: list[str] | None = None) -> int:
         resolved = preview_task.resolve_picks(args.picks, everything)
     except ValueError as exc:
         echo(str(exc))
+        return 2
+
+    # The two picker stages agreeing is not something the dropdowns can guarantee, and
+    # the way they disagree is silent: `augustocdias.tasks-shell-input` resolves the row
+    # stage's `${input:previewCheckout}` from the value it recorded when THAT input last
+    # ran, so an argument order that stopped putting the checkout stage first would
+    # narrow by a previous click's checkouts and serve a branch nobody asked to see.
+    strayed = preview_task.strayed_picks(resolved, args.checkouts)
+    if strayed:
+        echo(
+            f"Ticked {'a ref' if len(strayed) == 1 else 'refs'} from {', '.join(strayed)}, "
+            "which the checkout dropdown did not return -- the two picker stages "
+            "disagree, so nothing was served. See `.claude/rules/vscode-tasks.md` on the "
+            "order the inputs have to appear in."
+        )
         return 2
     if not resolved:
         return 0

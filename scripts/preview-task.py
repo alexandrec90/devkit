@@ -151,6 +151,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_ports
 import devkit_project
 import picker_rows
+import picker_scan
 import sweep
 import task_branch as tb
 import worktree
@@ -663,6 +664,104 @@ def menu_row(candidate: Candidate, now: _dt.datetime | None = None) -> str:
         f"{candidate.project} -- {describe(candidate, now)}",
         candidate.title,
     )
+
+
+SCAN_NAME = "preview"
+
+
+def scan_entries(
+    candidates: list[Candidate], now: _dt.datetime | None = None
+) -> list[tuple[str, str]]:
+    """What stage one hands stage two: every row, tagged with its checkout, in rank.
+
+    A flat list in `collect`'s ranking rather than a mapping, because that ranking is
+    what stage two has to preserve -- trunks first, then standing boxes, then everything
+    else newest-first, across the whole machine. Ticking two checkouts gives one menu
+    ordered that way, not one checkout's rows followed by the other's.
+    """
+    return [(candidate.project, menu_row(candidate, now)) for candidate in candidates]
+
+
+def project_rows(candidates: list[Candidate], projects: list[str], token: str) -> list[str]:
+    """Stage one: one checkout per row, and what stage two would draw for it.
+
+    Every servable checkout is listed whether or not the scan found anything unusual in
+    it, and `ui_projects` rather than the scan decides which those are: a checkout is on
+    this list because `npm run dev` could serve it, which is a property of the checkout
+    and not of what happens to be open in it today. It always has at least its trunk, so
+    "nothing to preview" is not a state a row here can be in.
+    """
+    if not projects:
+        return [
+            picker_rows.nothing_row(
+                "no servable checkout",
+                "no registered checkout declares a [frontend] dir in its .devkit.toml",
+            )
+        ]
+    counts: dict[str, int] = dict.fromkeys(projects, 0)
+    under_review: dict[str, int] = dict.fromkeys(projects, 0)
+    for candidate in candidates:
+        if candidate.project in counts:
+            counts[candidate.project] += 1
+            if candidate.kind != KIND_TRUNK:
+                under_review[candidate.project] += 1
+    listed = []
+    for project in projects:
+        total, extra = counts[project], under_review[project]
+        listed.append(
+            picker_scan.project_row(
+                project,
+                token,
+                f"{total} ref{'' if total == 1 else 's'}"
+                + (f", {extra} under review" if extra else ", nothing under review"),
+                "tick as many checkouts as you want -- the next list covers all of them",
+            )
+        )
+    return listed
+
+
+def picked_rows(
+    workspace: Path,
+    checkouts: str,
+    fetch: bool = True,
+    now: _dt.datetime | None = None,
+) -> list[str]:
+    """Stage two: the rows for the ticked checkouts, from stage one's scan if it is theirs.
+
+    The token decides, and a miss is answered by scanning rather than by serving
+    anything older -- see `picker_scan`. The rescan covers only what was ticked, and a
+    scan of one checkout is the cheap end of the fan-out stage one already paid for.
+
+    An empty `checkouts` is `--rows` typed by hand with no first stage in front of it,
+    and answers with every servable checkout, the way this did before there was one.
+    """
+    projects, token = picker_scan.parse_projects(checkouts)
+    servable = ui_projects(workspace)
+    if not projects:
+        return rows(collect(workspace, fetch=fetch, projects=servable), now)
+    cached = picker_scan.read(SCAN_NAME, token)
+    if cached is not None:
+        return picker_scan.select(cached, projects) or rows([], now)
+    # Narrowed to what is servable as well as what was ticked: a checkout that reached
+    # here any other way could only draw rows `preview-ui-host.py` would refuse.
+    wanted = [project for project in projects if project in servable]
+    return rows(collect(workspace, fetch=fetch, projects=wanted), now)
+
+
+def strayed_picks(candidates: list[Candidate], checkouts: str) -> list[str]:
+    """Ticked refs whose checkout was not ticked in the first stage.
+
+    Nothing in the two stages can produce one: stage two draws only the checkouts stage
+    one returned. So a stray is evidence the chain itself misfired -- the extension
+    resolves `${input:...}` against a value it recorded when that input last ran, so an
+    input order that stopped putting the checkout stage first would quietly filter by
+    the *previous* click's checkouts. That is the one failure of this design that could
+    otherwise be silent, and serving a preview is the wrong place to be quietly wrong.
+    """
+    ticked, _ = picker_scan.parse_projects(checkouts)
+    if not ticked:
+        return []
+    return sorted({candidate.project for candidate in candidates} - set(ticked))
 
 
 def rows(candidates: list[Candidate], now: _dt.datetime | None = None) -> list[str]:
@@ -1583,6 +1682,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the dropdown's rows (`value|label|description|detail`) and exit",
     )
     parser.add_argument(
+        "--project-rows",
+        action="store_true",
+        help="print the CHECKOUT picker's rows and exit, recording the scan they came from",
+    )
+    parser.add_argument(
+        "--checkouts",
+        default="",
+        help=(
+            f"ticked checkouts, `<project>{picker_scan.SEP}<scan token>` joined by "
+            f"`{picker_scan.LIST_SEP}` -- what the checkout picker returns"
+        ),
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=MENU_LIMIT,
@@ -1642,8 +1754,16 @@ def main(argv: list[str] | None = None) -> int:
         # Untrimmed in the other -- a quick-pick has no screen to run out of, so the row
         # `--limit` drops from a terminal is exactly the row only this list can offer.
         # Nothing else may reach stdout here: every line of it is an option.
+        picker_rows.emit(picked_rows(workspace, args.checkouts, fetch=args.fetch))
+        return 0
+
+    if args.project_rows:
+        # Stage one, and the only place the whole fan-out is paid for. It records what
+        # it found so stage two can filter it instead of scanning again.
         listed = ui_projects(workspace)
-        picker_rows.emit(rows(collect(workspace, fetch=args.fetch, projects=listed)))
+        found = collect(workspace, fetch=args.fetch, projects=listed)
+        token = picker_scan.write(SCAN_NAME, scan_entries(found))
+        picker_rows.emit(project_rows(found, listed, token))
         return 0
 
     if args.fetch and not args.list:
@@ -1668,6 +1788,15 @@ def main(argv: list[str] | None = None) -> int:
             picked = resolve_picks(args.pick_ref, everything)
         except ValueError as exc:
             echo(str(exc))
+            return 2
+        strayed = strayed_picks(picked, args.checkouts)
+        if strayed:
+            echo(
+                f"Ticked {'a ref' if len(strayed) == 1 else 'refs'} from "
+                f"{', '.join(strayed)}, which the checkout picker did not return -- the "
+                "two picker stages disagree, so nothing was served. See "
+                "`.claude/rules/vscode-tasks.md` on the order the inputs have to appear in."
+            )
             return 2
 
     if picked:

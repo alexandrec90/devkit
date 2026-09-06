@@ -1948,14 +1948,24 @@ def test_project_scope_inputs_are_real_multi_picks(canonical):
         assert _picker_values(inputs[picker_id]) == _picker_values(inputs["project"])
 
 
+# What a task spells to receive a live checkout stage's answer. The flag IS the
+# contract between the two: a live stage's rows are `<checkout>@<scan token>` values
+# with no option list to read, so there is nothing else about the input that says what
+# it asks. `scripts/picker_scan.py` owns the format behind it.
+CHECKOUT_FLAG = "--checkouts="
+
+
 def _checkout_pickers(canonical: dict) -> set[str]:
     """Input ids that ask which checkout, derived rather than listed.
 
-    An input whose whole option list is checkout names is a checkout picker however it
-    is spelled, so this reads the registry instead of keeping a roster beside it — the
-    second copy this file has already retired twice (`sweepScope`, `upgradeScope`). A
-    live `shellCommand.execute` input has no options at all and so is never one of
-    these, which is exactly right: its rows are `<checkout>:<ref>` values, not checkouts.
+    Two spellings, both derived rather than rostered — a hand-kept list is the second
+    copy this file has already retired twice (`sweepScope`, `upgradeScope`).
+
+    An input whose whole OPTION list is checkout names is one, whichever extension
+    draws it, so that half reads the registry. A live `shellCommand.execute` stage has
+    no options to read, so that half reads the `--checkouts=` flag a task spells to
+    receive it: the flag is the only thing that distinguishes a checkout stage from any
+    other live picker, and it is exactly what the receiving script parses.
     """
     projects = set(known_projects(devkit_project.canonical_text()))
     found = set()
@@ -1966,20 +1976,27 @@ def _checkout_pickers(canonical: dict) -> set[str]:
             continue
         if values and values <= projects:
             found.add(spec["id"])
+    for task in canonical["tasks"]:
+        for arg in (str(a) for a in task.get("args", ())):
+            if arg.startswith(CHECKOUT_FLAG):
+                found.update(re.findall(r"\$\{input:([^}]+)\}", arg))
     return found
 
 
 def test_no_task_detail_promises_a_checkout_question_it_does_not_ask(canonical):
     """A `detail` may not say it asks which checkout unless a checkout picker feeds it.
 
-    Four tasks said it and had not asked in months. `Preview: Open a UI Branch`,
-    `Agent: Fix a Broken PR`, `Agent: New Worktree` and `Agent: Delete Worktrees` each
-    dropped their project stage when their list went live — one input runs one command,
-    so the checkout became a field on the row — and every one of them kept the "Asks
-    which checkout, then which of its ..." opening the two-stage version had. The
-    quick-pick is the one surface with no README, so its second line reading as a
-    promise the click does not keep is the whole cost, and it read as a regression to
-    the person clicking rather than as the deliberate flattening it was.
+    Four tasks said it while asking nothing, for two releases. `Preview: Open a UI
+    Branch`, `Agent: Fix a Broken PR`, `Agent: New Worktree` and `Agent: Delete
+    Worktrees` each dropped their checkout stage when their list went live — on the
+    since-corrected belief that a live picker could not have one — and every one of them
+    kept the "Asks which checkout, then which of its ..." opening the two-stage version
+    had. The quick-pick is the one surface with no README, so a second line promising a
+    question the click does not ask is the whole cost, and it was reported as a
+    regression by the person clicking it.
+
+    The stage is back, so this now passes the other way round; it stays because the
+    claim and the picker are still two separate edits, and either can move alone.
 
     One direction only. Plenty of tasks ask and phrase it some other way; what is not
     allowed is claiming the question when there is nothing to answer it.
@@ -1993,6 +2010,63 @@ def test_no_task_detail_promises_a_checkout_question_it_does_not_ask(canonical):
         assert "which checkout" not in task["detail"].lower(), (
             f"{task['label']} says it asks which checkout, but no checkout picker feeds it"
         )
+
+
+def test_a_dependent_picker_resolves_after_the_stage_it_depends_on(canonical):
+    """A task's checkout stage must appear before the input whose command reads it.
+
+    The one documented limitation of `augustocdias.tasks-shell-input`: it substitutes
+    `${input:<id>}` inside a later input's command from the value it recorded when that
+    input LAST resolved, and the resolution order is the left-to-right order the inputs
+    appear in the task's own arguments. Put the row stage first and it does not fail —
+    it filters by the checkouts of some EARLIER click, which is a wrong list drawn
+    confidently, and on `Agent: Delete Worktrees` a wrong list of things to destroy.
+
+    So the ordering is asserted here rather than left to whoever next reorders an
+    argument list for tidiness. The receiving scripts refuse a pick from a checkout the
+    first stage did not return, which is the runtime half of the same guard; this is
+    the half that fails before anybody clicks.
+    """
+    dependents = {
+        spec["id"]: re.findall(r"\$\{input:([^}]+)\}", json.dumps(spec.get("args", {})))
+        for spec in canonical["inputs"]
+    }
+    checked = 0
+    for task in canonical["tasks"]:
+        order = [
+            found
+            for arg in (str(a) for a in task.get("args", ()))
+            for found in re.findall(r"\$\{input:([^}]+)\}", arg)
+        ]
+        for position, input_id in enumerate(order):
+            for needed in dependents.get(input_id, ()):
+                assert needed in order, (
+                    f"{task['label']}: `{input_id}` reads `{needed}`, which the task never "
+                    "resolves — the extension would substitute an earlier click's value"
+                )
+                assert order.index(needed) < position, (
+                    f"{task['label']}: `{needed}` must appear before `{input_id}` in the "
+                    "arguments; the extension resolves them left to right"
+                )
+                checked += 1
+    assert checked, "no dependent picker was found; this test has stopped covering anything"
+
+
+def test_every_dependent_picker_is_a_shell_command_one(canonical):
+    """The extension's other documented limitation, and it is not the ordering.
+
+    `${input:...}` inside an input's command resolves only against inputs
+    `shellCommand.execute` itself drew — that is the only place it records an answer.
+    A `pickString` or a `pickStringRemember` in that position substitutes empty, which
+    reaches the script as an unfiltered list rather than as an error.
+    """
+    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
+    for spec in canonical["inputs"]:
+        for needed in re.findall(r"\$\{input:([^}]+)\}", json.dumps(spec.get("args", {}))):
+            assert inputs[needed]["command"] == "shellCommand.execute", (
+                f"`{spec['id']}` reads `{needed}`, which is not a shellCommand.execute "
+                "input — the extension records no answer for it and would substitute empty"
+            )
 
 
 def test_the_test_kinds_input_is_a_checkbox_list_the_dispatcher_can_split(canonical):

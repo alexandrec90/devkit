@@ -2172,3 +2172,157 @@ def test_build_parser_defaults_to_an_interactive_fetching_run():
     assert args.pick == 0 and args.pick_ref == ""
     assert args.fetch and not args.rows and not args.all and not args.down and not args.ui
     assert args.limit == preview_task.MENU_LIMIT and args.workspace is None
+
+
+# --- the checkout stage, and the scan it hands on -----------------------------
+
+picker_scan = load_script("scripts/picker_scan.py")
+
+
+@pytest.fixture(autouse=True)
+def scans_in_tmp(tmp_path, monkeypatch):
+    """Keep every scan write inside the test, out of the repo's `logs/`."""
+    monkeypatch.setattr(preview_task.picker_scan, "SCANS_DIR", tmp_path / "scans")
+
+
+def ref_of(line: str) -> str:
+    return line.split(preview_task.picker_rows.FIELD_SEP)[0]
+
+
+def field(line: str, index: int) -> str:
+    return line.split(preview_task.picker_rows.FIELD_SEP)[index]
+
+
+PREVIEW_SCAN = [
+    preview_task.Candidate(project="carameli", ref="main", kind=preview_task.KIND_TRUNK),
+    preview_task.Candidate(project="devkit", ref="main", kind=preview_task.KIND_TRUNK),
+    preview_task.Candidate(project="carameli", ref="agent/ui-0905", kind=preview_task.KIND_PR),
+]
+
+
+def test_the_checkout_rows_count_refs_and_say_how_many_are_under_review():
+    drawn = preview_task.project_rows(PREVIEW_SCAN, ["carameli", "devkit"], "tok")
+    assert [field(line, 1) for line in drawn] == ["carameli", "devkit"]
+    assert field(drawn[0], 2) == "2 refs, 1 under review"
+    assert field(drawn[1], 2) == "1 ref, nothing under review"
+
+
+def test_the_checkout_list_is_what_can_be_SERVED_not_what_the_scan_found():
+    """A checkout is on this list because `npm run dev` could serve it, which is a
+    property of the checkout rather than of what happens to be open in it today. A
+    checkout with only its trunk still gets a row, because its trunk is servable."""
+    drawn = preview_task.project_rows([], ["carameli"], "tok")
+    assert field(drawn[0], 1) == "carameli"
+    assert field(drawn[0], 2) == "0 refs, nothing under review"
+
+
+def test_no_servable_checkout_draws_a_sentinel_rather_than_an_empty_menu():
+    drawn = preview_task.project_rows(PREVIEW_SCAN, [], "tok")
+    assert len(drawn) == 1
+    assert ref_of(drawn[0]) == preview_task.picker_rows.NOTHING
+
+
+def test_a_checkout_row_carries_the_token_the_second_stage_reads():
+    row = preview_task.project_rows(PREVIEW_SCAN, ["carameli"], "tok7")[0]
+    assert picker_scan.parse_projects(ref_of(row)) == (["carameli"], "tok7")
+
+
+def test_the_second_stage_serves_the_first_stages_scan_without_rescanning(tmp_path, monkeypatch):
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    token = picker_scan.write(preview_task.SCAN_NAME, preview_task.scan_entries(PREVIEW_SCAN))
+    monkeypatch.setattr(preview_task, "ui_projects", lambda _ws: ["carameli", "devkit"])
+    monkeypatch.setattr(
+        preview_task, "collect", lambda *_a, **_k: pytest.fail("the cached scan should do")
+    )
+    drawn = preview_task.picked_rows(workspace, f"carameli@{token}")
+    assert [ref_of(line) for line in drawn] == ["carameli:main", "carameli:agent/ui-0905"]
+
+
+def test_the_second_stage_keeps_the_scans_ranking_across_ticked_checkouts(tmp_path, monkeypatch):
+    """Trunks first, then everything else -- across both checkouts, not one list after
+    the other. That is the ordering a mapping payload would have lost."""
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    token = picker_scan.write(preview_task.SCAN_NAME, preview_task.scan_entries(PREVIEW_SCAN))
+    monkeypatch.setattr(preview_task, "ui_projects", lambda _ws: ["carameli", "devkit"])
+    monkeypatch.setattr(preview_task, "collect", lambda *_a, **_k: pytest.fail("should not scan"))
+    drawn = preview_task.picked_rows(workspace, f"carameli@{token},devkit@{token}")
+    assert [ref_of(line) for line in drawn] == [
+        "carameli:main",
+        "devkit:main",
+        "carameli:agent/ui-0905",
+    ]
+
+
+def test_a_token_that_names_no_scan_rescans_only_the_ticked_checkouts(tmp_path, monkeypatch):
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    asked = []
+
+    def fake(_ws, fetch=True, projects=None):
+        asked.append(projects)
+        return [
+            preview_task.Candidate(project="carameli", ref="main", kind=preview_task.KIND_TRUNK)
+        ]
+
+    monkeypatch.setattr(preview_task, "ui_projects", lambda _ws: ["carameli", "devkit"])
+    monkeypatch.setattr(preview_task, "collect", fake)
+    drawn = preview_task.picked_rows(workspace, "carameli@stale")
+    assert asked == [["carameli"]]
+    assert [ref_of(line) for line in drawn] == ["carameli:main"]
+
+
+def test_a_rescan_still_refuses_a_checkout_that_cannot_be_served(tmp_path, monkeypatch):
+    """A checkout reaching the miss path any other way could only draw rows
+    `preview-ui-host.py` would refuse by name."""
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    asked = []
+
+    def fake(_ws, fetch=True, projects=None):
+        asked.append(projects)
+        return []
+
+    monkeypatch.setattr(preview_task, "ui_projects", lambda _ws: ["carameli"])
+    monkeypatch.setattr(preview_task, "collect", fake)
+    preview_task.picked_rows(workspace, "carameli@stale,ibkr_trader@stale")
+    assert asked == [["carameli"]]
+
+
+def test_no_checkout_stage_at_all_lists_every_servable_checkout(tmp_path, monkeypatch):
+    """`--rows` typed by hand has no first stage, and answers the way it did before
+    there was one."""
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    asked = []
+
+    def fake(_ws, fetch=True, projects=None):
+        asked.append(projects)
+        return PREVIEW_SCAN
+
+    monkeypatch.setattr(preview_task, "ui_projects", lambda _ws: ["carameli", "devkit"])
+    monkeypatch.setattr(preview_task, "collect", fake)
+    preview_task.picked_rows(workspace, "")
+    assert asked == [["carameli", "devkit"]]
+
+
+# --- the guard on the two stages disagreeing ----------------------------------
+
+
+def test_a_pick_from_a_ticked_checkout_is_not_a_stray():
+    assert preview_task.strayed_picks(PREVIEW_SCAN, "carameli@tok,devkit@tok") == []
+
+
+def test_a_pick_from_a_checkout_the_first_stage_did_not_return_is_named():
+    """Nothing in the two stages can produce this: stage two draws only the checkouts
+    stage one returned. So it is evidence the chain misfired -- the extension resolves
+    `${input:...}` from the value it recorded when that input LAST ran, so an input
+    order that stopped putting the checkout stage first would filter by the previous
+    click's checkouts."""
+    assert preview_task.strayed_picks(PREVIEW_SCAN, "carameli@tok") == ["devkit"]
+
+
+def test_no_checkout_stage_means_nothing_to_disagree_with():
+    """A hand-typed `--pick-ref` has no first stage, and must not be refused for it."""
+    assert preview_task.strayed_picks(PREVIEW_SCAN, "") == []

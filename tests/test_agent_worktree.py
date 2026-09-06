@@ -18,6 +18,7 @@ from support import load_script
 # second time into a process whose other suites monkeypatch the first copy.
 agent_worktree = load_script("scripts/agent-worktree.py")
 picker_rows = load_script("scripts/picker_rows.py")
+picker_scan = load_script("scripts/picker_scan.py")
 aw = agent_worktree.aw
 
 
@@ -452,3 +453,131 @@ def test_the_render_lists_every_checkout_including_the_empty_ones():
     assert "devkit: 1 worktree(s)" in text
     assert "carameli: no worktree(s)" in text
     assert "topic -- agent/topic-0905 -- clean and pushed" in text
+
+
+# --- the checkout stage -------------------------------------------------------
+
+
+TREE = aw.Tree("box", "C:/w/box", "agent/x", 0, 0)
+SCANNED = ({"devkit": [TREE], "carameli": []}, {"devkit": [("main", "the default branch")]})
+
+
+@pytest.fixture
+def two_stage(tmp_path, monkeypatch):
+    """A workspace, a stubbed scan, and scan writes kept out of the repo's `logs/`."""
+    monkeypatch.setattr(picker_scan, "SCANS_DIR", tmp_path / "scans")
+    monkeypatch.setattr(agent_worktree.picker_scan, "SCANS_DIR", tmp_path / "scans")
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(agent_worktree, "scan", lambda _ws, projects=None: SCANNED)
+    return workspace
+
+
+def values(printed: list[str]) -> list[str]:
+    return [line.split(picker_rows.FIELD_SEP)[0] for line in printed]
+
+
+def test_the_two_checkout_verbs_draw_a_checkout_per_row(two_stage, capsys):
+    assert agent_worktree.main(["tree-projects", "--workspace", str(two_stage)]) == 0
+    drawn = capsys.readouterr().out.splitlines()
+    assert [line.split(picker_rows.FIELD_SEP)[1] for line in drawn] == ["devkit", "carameli"]
+
+    assert agent_worktree.main(["base-projects", "--workspace", str(two_stage)]) == 0
+    drawn = capsys.readouterr().out.splitlines()
+    assert [line.split(picker_rows.FIELD_SEP)[1] for line in drawn] == ["devkit"]
+
+
+def test_each_checkout_verb_records_the_scan_its_row_verb_reads(two_stage, capsys):
+    """The handoff, end to end: the token a checkout row carries names a write that the
+    row verb can then serve without scanning again."""
+    assert agent_worktree.main(["tree-projects", "--workspace", str(two_stage)]) == 0
+    token = picker_scan.parse_projects(values(capsys.readouterr().out.splitlines())[0])[1]
+
+    assert (
+        agent_worktree.main(["rows", f"--checkouts=devkit@{token}", "--workspace", str(two_stage)])
+        == 0
+    )
+    assert values(capsys.readouterr().out.splitlines()) == ["devkit:box"]
+
+
+def test_the_two_verbs_record_under_different_names(two_stage, capsys):
+    """Two tasks, each clicked on its own, so neither can rely on a write the other
+    made. A token from the base scan must not resolve against the tree scan."""
+    assert agent_worktree.main(["base-projects", "--workspace", str(two_stage)]) == 0
+    token = picker_scan.parse_projects(values(capsys.readouterr().out.splitlines())[0])[1]
+    assert picker_scan.read(agent_worktree.SCAN_NAMES["trees"], token) is None
+    assert picker_scan.read(agent_worktree.SCAN_NAMES["bases"], token) is not None
+
+
+def test_a_token_that_names_no_scan_rescans_the_ticked_checkouts(two_stage, monkeypatch, capsys):
+    asked = []
+
+    def fake(_ws, projects=None):
+        asked.append(projects)
+        return SCANNED
+
+    monkeypatch.setattr(agent_worktree, "scan", fake)
+    assert (
+        agent_worktree.main(["rows", "--checkouts=devkit@stale", "--workspace", str(two_stage)])
+        == 0
+    )
+    assert asked == [["devkit"]]
+
+
+def test_ticking_only_empty_checkouts_draws_the_sentinel(two_stage, capsys):
+    assert agent_worktree.main(["tree-projects", "--workspace", str(two_stage)]) == 0
+    token = picker_scan.parse_projects(values(capsys.readouterr().out.splitlines())[0])[1]
+    assert (
+        agent_worktree.main(
+            ["rows", f"--checkouts=carameli@{token}", "--workspace", str(two_stage)]
+        )
+        == 0
+    )
+    assert values(capsys.readouterr().out.splitlines()) == [picker_rows.NOTHING]
+
+
+# --- the guard on the two stages disagreeing ----------------------------------
+
+
+def test_a_pick_from_a_checkout_the_first_stage_did_not_return_is_named():
+    """Nothing in the two stages can produce this, so it is evidence the chain misfired
+    -- and on THIS task a wrongly-filtered list is a list of things to destroy."""
+    assert agent_worktree.strayed_picks([("roguelike", "box")], "devkit@tok") == ["roguelike"]
+    assert agent_worktree.strayed_picks([("devkit", "box")], "devkit@tok") == []
+    assert agent_worktree.strayed_picks([("devkit", "box")], "") == []
+
+
+def test_a_stray_removal_pick_destroys_nothing(two_stage, monkeypatch, capsys):
+    monkeypatch.setattr(
+        agent_worktree, "remove", lambda *_a: pytest.fail("nothing may be destroyed")
+    )
+    code = agent_worktree.main(
+        [
+            "remove",
+            "--picks=roguelike:box",
+            "--checkouts=devkit@tok",
+            "--workspace",
+            str(two_stage),
+        ],
+        FakeRun(),
+    )
+    assert code == agent_worktree.EXIT_USAGE
+    assert "roguelike" in capsys.readouterr().err
+
+
+def test_a_stray_base_pick_cuts_nothing(two_stage, monkeypatch, capsys):
+    monkeypatch.setattr(agent_worktree, "create", lambda *_a: pytest.fail("nothing may be cut"))
+    code = agent_worktree.main(
+        [
+            "new",
+            "--pick=roguelike:main",
+            "--checkouts=devkit@tok",
+            "--slug=x",
+            "--agent=none",
+            "--workspace",
+            str(two_stage),
+        ],
+        FakeRun(),
+    )
+    assert code == agent_worktree.EXIT_USAGE
+    assert "roguelike" in capsys.readouterr().err

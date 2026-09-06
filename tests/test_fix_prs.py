@@ -182,7 +182,9 @@ def test_a_pr_title_goes_through_the_shared_containment():
 
 
 def test_the_checkout_is_on_every_row_because_the_list_is_flat():
-    """One input, one command: there is no `which checkout` stage to carry it."""
+    """Still on the row even though a checkout stage asks first, because that stage is
+    a multi-select: three ticked checkouts give one ranked menu, and a row in it that
+    did not say which repo it came from would be unreadable."""
     row = fix_prs.menu_row("roguelike", pr(mergeable="CONFLICTING"), NOW)
     assert fields(row)[2].startswith("roguelike -- ")
 
@@ -804,6 +806,148 @@ def test_rows_draws_the_sentinel_when_the_machine_is_clean(workspace, monkeypatc
     printed = capsys.readouterr().out.splitlines()
     assert len(printed) == 1
     assert fix_prs.parse_pick(printed[0].split(picker_rows.FIELD_SEP)[0]) is None
+
+
+# --- the checkout stage, and the scan it hands on -----------------------------
+
+
+@pytest.fixture(autouse=True)
+def scans_in_tmp(tmp_path, monkeypatch):
+    """Keep every scan write inside the test, out of the repo's `logs/`."""
+    monkeypatch.setattr(fix_prs.picker_scan, "SCANS_DIR", tmp_path / "scans")
+
+
+BROKEN = {"devkit": [pr(number=1, mergeable="CONFLICTING")], "carameli": [], "roguelike": []}
+
+
+def test_the_checkout_rows_count_what_each_one_holds():
+    drawn = fix_prs.project_rows(BROKEN, "tok")
+    assert [fields(row)[1] for row in drawn] == ["devkit", "carameli", "roguelike"]
+    assert fields(drawn[0])[2] == "1 broken PR"
+
+
+def test_a_checkout_with_nothing_broken_is_listed_and_says_so():
+    """The whole reason stage one costs a scan instead of reading the registry: a
+    checkout silently missing from the menu cannot be told apart from one the scan
+    could not reach, and ticking a checkout to find it empty spends a click to learn
+    what the scan already knew."""
+    drawn = fix_prs.project_rows(BROKEN, "tok")
+    assert fields(drawn[1])[2] == "nothing broken"
+
+
+def test_the_fullest_checkout_is_offered_first():
+    found = {"a": [], "b": [pr(number=1), pr(number=2)], "c": [pr(number=3)]}
+    assert [fields(row)[1] for row in fix_prs.project_rows(found, "tok")] == ["b", "c", "a"]
+
+
+def test_a_checkout_row_carries_the_token_the_second_stage_reads():
+    row = fix_prs.project_rows(BROKEN, "tok123")[0]
+    assert fix_prs.picker_scan.parse_projects(fields(row)[0]) == (["devkit"], "tok123")
+
+
+def test_no_checkouts_at_all_draws_a_sentinel_rather_than_an_empty_menu():
+    drawn = fix_prs.project_rows({}, "tok")
+    assert len(drawn) == 1
+    assert fields(drawn[0])[0] == picker_rows.NOTHING
+
+
+def test_the_second_stage_serves_the_first_stages_scan_without_rescanning(workspace, monkeypatch):
+    token = fix_prs.picker_scan.write(fix_prs.SCAN_NAME, fix_prs.scan_entries(BROKEN, NOW))
+    monkeypatch.setattr(
+        fix_prs, "scan", lambda *_a: pytest.fail("the cached scan should have been enough")
+    )
+    drawn = fix_prs.picked_rows(workspace, f"devkit@{token}", NOW)
+    assert [fields(row)[0] for row in drawn] == ["devkit:1"]
+
+
+def test_the_second_stage_keeps_the_ranking_across_several_ticked_checkouts(workspace, monkeypatch):
+    found = {
+        "devkit": [pr(number=1, updatedAt="2026-09-01T09:00:00Z")],
+        "carameli": [pr(number=2, updatedAt="2026-09-04T09:00:00Z")],
+    }
+    token = fix_prs.picker_scan.write(fix_prs.SCAN_NAME, fix_prs.scan_entries(found, NOW))
+    monkeypatch.setattr(fix_prs, "scan", lambda *_a: pytest.fail("should not rescan"))
+    drawn = fix_prs.picked_rows(workspace, f"devkit@{token},carameli@{token}", NOW)
+    assert [fields(row)[0] for row in drawn] == ["carameli:2", "devkit:1"]
+
+
+def test_a_token_that_names_no_scan_rescans_only_the_ticked_checkouts(workspace, monkeypatch):
+    """The miss path, and the reason a miss is safe: it costs a scan of what was
+    ticked, which is less than the scan stage one already did, and it cannot serve a
+    row anybody wrote earlier."""
+    asked = []
+
+    def fake(_ws, projects=None):
+        asked.append(projects)
+        return {"devkit": [pr(number=9, mergeable="CONFLICTING")]}
+
+    monkeypatch.setattr(fix_prs, "scan", fake)
+    drawn = fix_prs.picked_rows(workspace, "devkit@stale", NOW)
+    assert asked == [["devkit"]]
+    assert [fields(row)[0] for row in drawn] == ["devkit:9"]
+
+
+def test_ticked_checkouts_with_nothing_broken_draw_the_sentinel(workspace, monkeypatch):
+    token = fix_prs.picker_scan.write(fix_prs.SCAN_NAME, fix_prs.scan_entries(BROKEN, NOW))
+    monkeypatch.setattr(fix_prs, "scan", lambda *_a: pytest.fail("should not rescan"))
+    drawn = fix_prs.picked_rows(workspace, f"carameli@{token}", NOW)
+    assert len(drawn) == 1
+    assert fix_prs.parse_pick(fields(drawn[0])[0]) is None
+
+
+def test_no_checkout_stage_at_all_lists_the_whole_machine(workspace, monkeypatch):
+    """`--rows` typed by hand has no first stage, and answers the way it did before
+    there was one."""
+    monkeypatch.setattr(fix_prs, "scan", lambda _ws: BROKEN)
+    assert [fields(row)[0] for row in fix_prs.picked_rows(workspace, "", NOW)] == ["devkit:1"]
+
+
+def test_project_rows_records_the_scan_the_second_stage_will_read(workspace, monkeypatch, capsys):
+    monkeypatch.setattr(fix_prs, "scan", lambda _ws: BROKEN)
+    assert fix_prs.main(["--project-rows", "--workspace", str(workspace)]) == 0
+    printed = capsys.readouterr().out.splitlines()
+    projects, token = fix_prs.picker_scan.parse_projects(printed[0].split(picker_rows.FIELD_SEP)[0])
+    assert projects == ["devkit"]
+    assert fix_prs.picker_scan.read(fix_prs.SCAN_NAME, token) is not None
+
+
+# --- the guard on the two stages disagreeing ----------------------------------
+
+
+def test_a_pick_from_a_ticked_checkout_is_not_a_stray():
+    picks = [fix_prs.Pick("devkit", 1)]
+    assert fix_prs.strayed_picks(picks, "devkit@tok,carameli@tok") == []
+
+
+def test_a_pick_from_a_checkout_the_first_stage_did_not_return_is_named():
+    """Nothing in the two stages can produce this: stage two draws only what stage one
+    returned. So it is evidence the chain misfired -- the extension resolves
+    `${input:...}` from the value it recorded when that input LAST ran, so an input
+    order that stopped putting the checkout stage first would filter by the previous
+    click's checkouts. This is what makes that loud instead of silent."""
+    picks = [fix_prs.Pick("devkit", 1), fix_prs.Pick("roguelike", 2)]
+    assert fix_prs.strayed_picks(picks, "devkit@tok") == ["roguelike"]
+
+
+def test_no_checkout_stage_means_nothing_to_disagree_with():
+    """A hand-typed `--picks` has no first stage, and must not be refused for it."""
+    assert fix_prs.strayed_picks([fix_prs.Pick("devkit", 1)], "") == []
+
+
+def test_a_stray_pick_refuses_the_whole_run(workspace, monkeypatch, capsys):
+    monkeypatch.setattr(fix_prs, "run", lambda *_a: pytest.fail("nothing may be spawned"))
+    code = fix_prs.main(
+        [
+            "--picks",
+            "roguelike:2",
+            "--checkouts",
+            "devkit@tok",
+            "--workspace",
+            str(workspace),
+        ]
+    )
+    assert code == fix_prs.EXIT_USAGE
+    assert "roguelike" in capsys.readouterr().err
 
 
 def test_a_missing_workspace_file_is_a_usage_error(tmp_path, capsys):

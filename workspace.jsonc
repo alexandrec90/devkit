@@ -588,17 +588,28 @@
 				//
 				// Machine scope, not project scope — one box registry and one port registry on
 				// this machine, so the checkout is a dimension inside the ANSWER rather than a
-				// scope for the task. `previewProject` asked which one until 2026-09-05, when the
-				// list became live: `shellCommand.execute` resolves one input per command, so there
-				// is no outer stage left to nest under — the checkout rides in each `previewRow`
-				// row's description, and the quick-pick's own type-to-filter is what narrows to one
-				// checkout now. See ACTIONS["preview-ui-host"].
+				// scope for the task: `previewCheckout` narrows, `previewRow` answers, and both
+				// are one scan. The checkout stage was dropped on 2026-09-05 because the rule
+				// file said a live picker could not have one; it can — the extension
+				// substitutes an earlier input's answer into a later input's command — and the
+				// note on `previewCheckout` carries the mechanism. The checkout stays in each
+				// row's description anyway, because that stage takes several.
+				// See ACTIONS["preview-ui-host"].
 				//
 				// `focus` because the terminal menu is still reachable — a pick that no longer
 				// matches a row lands there — and without it that answer is typed into
 				// whatever had focus when the task was clicked.
+				// `--checkouts` is spelled FIRST and that is load-bearing, not cosmetic.
+				// `augustocdias.tasks-shell-input` resolves one input's `${input:<id>}`
+				// reference from the value it recorded when that input last ran, so the
+				// checkout stage has to resolve before the row stage does -- and the order
+				// VS Code resolves them in is the order they appear here, left to right.
+				// The extension's README says so as its one documented limitation. Get it
+				// backwards and the row list filters by the PREVIOUS click's checkouts,
+				// which is why the receiving script also refuses a pick from a checkout
+				// this stage did not return rather than trusting the ordering alone.
 				"label": "Preview: Open a UI Branch",
-				"detail": "Lists every servable checkout's refs in one menu — each checkout's default branch first, then live agent boxes, open PRs and recent agent/ branches on origin, newest first within each group, with the checkout named on every row so typing it narrows the list — and serves each ticked one's frontend from a plain host Vite dev server on its own port, opening the URL once it answers. No Docker and no backend: seconds to start, after a one-off npm install per new ref (about a minute). A ref with a live agent box is served from that box's worktree, unpushed work included; anything else gets a kept copy under .ui-previews/. API-backed views show real data when the static checkout's stack happens to be up and their offline state when it is not. The list is scanned when you open it, one checkout per thread, so it cannot be older than the click: a PR that opened shows up and one that merged drops off. The servers end when this terminal does, by three separate means — Ctrl+C, a job object the kernel enforces, and a watch on the terminal itself — and 'Preview: Stop Host UI Servers' ends any that outlived all three.",
+				"detail": "Asks which checkouts — every one that declares a frontend, each with how many refs it has and how many are under review — then which of their refs, ranked default branches first, then live agent boxes, open PRs and recent agent/ branches on origin. Tick several checkouts and you get one ranked list across them, with the checkout on every row. Serves each ticked ref's frontend from a plain host Vite dev server on its own port, opening the URL once it answers. No Docker and no backend: seconds to start, after a one-off npm install per new ref (about a minute). A ref with a live agent box is served from that box's worktree, unpushed work included; anything else gets a kept copy under .ui-previews/. API-backed views show real data when the static checkout's stack happens to be up and their offline state when it is not. Both lists come from ONE scan, run when the first picker opens, one checkout per thread — so neither can be older than the click and the second question costs no wait: a PR that opened shows up and one that merged drops off. The servers end when this terminal does, by three separate means — Ctrl+C, a job object the kernel enforces, and a watch on the terminal itself — and 'Preview: Stop Host UI Servers' ends any that outlived all three.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -606,8 +617,8 @@
 					"--project",
 					"devkit",
 					"preview-ui-host",
-					"--picks",
-					"${input:previewRow}"
+					"--checkouts=${input:previewCheckout}",
+					"--picks=${input:previewRow}"
 				],
 				"icon": {
 					"id": "preview",
@@ -660,8 +671,17 @@
 				// `focus` because a run asks nothing further but prints the box path and, in
 				// background mode, the session id — the one line the terminal has that nothing
 				// else will show you.
+				// `--checkouts` is spelled FIRST and that is load-bearing, not cosmetic.
+				// `augustocdias.tasks-shell-input` resolves one input's `${input:<id>}`
+				// reference from the value it recorded when that input last ran, so the
+				// checkout stage has to resolve before the row stage does -- and the order
+				// VS Code resolves them in is the order they appear here, left to right.
+				// The extension's README says so as its one documented limitation. Get it
+				// backwards and the row list filters by the PREVIOUS click's checkouts,
+				// which is why the receiving script also refuses a pick from a checkout
+				// this stage did not return rather than trusting the ordering alone.
 				"label": "Agent: Fix a Broken PR",
-				"detail": "Lists every checkout's broken PRs in one menu — the open ones with a merge conflict or a failing gate, drafts excluded, most recently touched first, with the checkout named on every row so typing it narrows the list — then asks which agent opens on them. Each ticked PR gets a box on that PR's own head branch, upstream set so a bare push lands on the PR, and an agent session that starts already knowing the PR number, what is wrong with it right now, and that the job ends with the PR merged once the gate is green. Boxes are cut one at a time: each costs a port slot and a cold toolchain install. THIS SPENDS A PAID AGENT SESSION PER TICKED PR, and those sessions push to a real branch and can merge a real PR. The list is scanned from GitHub when you open it, so it cannot be older than the click, and what a click acts on is re-read again at launch: a PR that went green, was closed or was merged in between is reported and skipped rather than given a box. 'claude' and 'codex' open a terminal tab you can watch and steer; 'claude (background)' returns an id instead and is read back with 'claude agents', 'claude logs <id>' and 'claude attach <id>' — nothing is watching it, so a permission prompt it cannot answer sits there until you look.",
+				"detail": "Asks which checkouts — every one, with a count of what is red in it, so 'nothing broken' is an answer rather than a repo silently missing from a list — then which of their broken PRs: the open ones with a merge conflict or a failing gate, drafts excluded, most recently touched first. Tick several checkouts and you get one ranked list across them, with the checkout on every row. Then which agent opens on them. Each ticked PR gets a box on that PR's own head branch, upstream set so a bare push lands on the PR, and an agent session that starts already knowing the PR number, what is wrong with it right now, and that the job ends with the PR merged once the gate is green. Boxes are cut one at a time: each costs a port slot and a cold toolchain install. THIS SPENDS A PAID AGENT SESSION PER TICKED PR, and those sessions push to a real branch and can merge a real PR. Both lists come from ONE GitHub scan, run when the first picker opens, so neither can be older than the click and the second question costs no wait; what a click acts on is then re-read again at launch: a PR that went green, was closed or was merged in between is reported and skipped rather than given a box. 'claude' and 'codex' open a terminal tab you can watch and steer; 'claude (background)' returns an id instead and is read back with 'claude agents', 'claude logs <id>' and 'claude attach <id>' — nothing is watching it, so a permission prompt it cannot answer sits there until you look.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -669,10 +689,9 @@
 					"--project",
 					"devkit",
 					"fix-prs",
-					"--picks",
-					"${input:brokenPrRow}",
-					"--agent",
-					"${input:fixAgent}"
+					"--checkouts=${input:fixCheckout}",
+					"--picks=${input:brokenPrRow}",
+					"--agent=${input:fixAgent}"
 				],
 				"icon": {
 					"id": "git-pull-request",
@@ -1149,19 +1168,28 @@
 			// full, including why `agent-box.py` stays CLI-only.
 			//
 			// Machine scope, not project scope, and a literal `--project devkit`: the menu is
-			// one scan across every checkout, so the checkout is a field on each row rather than
-			// a scope for the task. It was the first of two nested pickers until 2026-09-05,
-			// when both lists became live — one input runs one command, so the outer stage had
-			// nowhere left to live. See ACTIONS["worktree-new"].
+			// one scan across every checkout, so the checkout narrows the ANSWER rather than
+			// scoping the task. It is the first of two dependent pickers again — dropped on
+			// 2026-09-05 on the rule file's word that a live picker could not have one, which
+			// was wrong; see the note on `previewCheckout` for what the extension actually
+			// does. See ACTIONS["worktree-new"].
 			//
 			// Every picker-fed argument is spelled `--flag=${input:...}` rather than as two
 			// tokens. `plan_command` drops empty arguments before exec, so a blank `--slug`
 			// and `""` pair would reach argparse as a lone `--slug` that swallows the next
 			// flag; `--slug=` survives the filter and parses as the empty string the picker
 			// meant.
+			//
+			// And `--checkouts` comes FIRST on both, which is load-bearing:
+			// `augustocdias.tasks-shell-input` resolves a later input's `${input:<id>}`
+			// against the value it recorded when that input last ran, and the resolution
+			// order is the order the arguments appear in. Its README documents that as its
+			// one limitation. The receiving script refuses a pick from a checkout the first
+			// stage did not return, so getting it wrong is a refusal rather than a list
+			// quietly filtered by an earlier click.
 			{
 				"label": "Agent: New Worktree",
-				"detail": "Lists every checkout's base branches in one menu — that checkout's default branch first, then origin's most recently committed ones, alphabetical by checkout, with the checkout named on every row so typing it narrows the list — then asks what the branch is about and which agent to open. Cuts agent/<slug>-<mmdd> off origin/<base> with no upstream, puts a worktree for it under the checkout's .claude/worktrees/, and opens Claude or Codex in a Windows Terminal tab scoped to it, attaching to the window you are already looking at. This is the plain-worktree tier: no port lease, no COMPOSE_PROJECT_NAME and no toolchain provisioning, so a session that needs a compose stack wants 'agent-box.py spawn' instead. Leave the topic blank to name the branch after the checkout. THIS SPENDS A PAID AGENT SESSION. The branch list is read when the picker opens, from each checkout's origin refs, so it is as fresh as that checkout's last fetch rather than as fresh as a scheduled pass.",
+				"detail": "Asks which checkouts — each with how many branches it can offer — then which branch to cut from: that checkout's default branch first, then origin's most recently committed ones. Tick several checkouts to compare their branches in one list; the new worktree is cut from the one branch you then pick. Then what the branch is about and which agent to open. Cuts agent/<slug>-<mmdd> off origin/<base> with no upstream, puts a worktree for it under the checkout's .claude/worktrees/, and opens Claude or Codex in a Windows Terminal tab scoped to it, attaching to the window you are already looking at. This is the plain-worktree tier: no port lease, no COMPOSE_PROJECT_NAME and no toolchain provisioning, so a session that needs a compose stack wants 'agent-box.py spawn' instead. Leave the topic blank to name the branch after the checkout. THIS SPENDS A PAID AGENT SESSION. Both lists come from ONE scan, run when the first picker opens, reading each checkout's origin refs — so they are as fresh as that checkout's last fetch rather than as fresh as a scheduled pass, and the second question costs no wait.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -1169,6 +1197,7 @@
 					"--project",
 					"devkit",
 					"worktree-new",
+					"--checkouts=${input:worktreeBaseCheckout}",
 					"--pick=${input:worktreeBase}",
 					"--slug=${input:worktreeTopic}",
 					"--agent=${input:worktreeAgent}"
@@ -1200,7 +1229,7 @@
 				// ticking a box. The default refuses, names what would have been lost, and
 				// says which row to pick instead.
 				"label": "Agent: Delete Worktrees",
-				"detail": "Lists every checkout's .claude/worktrees/ worktrees in one menu, the fullest checkout first, with the checkout named on every row so typing it narrows the list — tick as many as you want to destroy — then asks whether to discard work. Each row says what that worktree holds: uncommitted paths, unpushed commits, or 'clean and pushed'. The default REFUSES anything that would lose work and names it; 'Force' discards it. A worktree's local branch is deleted only when git will take it with 'branch -d', so a branch whose commits exist nowhere else is kept and said so, and origin's copy — and therefore any PR — is never touched. The list covers worktrees this machine made any way at all, including the ones 'claude --worktree' and a remote Claude session cut; it is scanned when the picker opens rather than read from a file a scheduled pass wrote.",
+				"detail": "Asks which checkouts — each with how many worktrees it holds, which is also the answer to 'did I leave anything in that repo' — then which of their .claude/worktrees/ worktrees to destroy, tick as many as you want, then whether to discard work. Each row says what that worktree holds: uncommitted paths, unpushed commits, or 'clean and pushed'. The default REFUSES anything that would lose work and names it; 'Force' discards it. A worktree's local branch is deleted only when git will take it with 'branch -d', so a branch whose commits exist nowhere else is kept and said so, and origin's copy — and therefore any PR — is never touched. The list covers worktrees this machine made any way at all, including the ones 'claude --worktree' and a remote Claude session cut; both lists come from ONE scan run when the first picker opens, rather than from a file a scheduled pass wrote.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -1208,6 +1237,7 @@
 					"--project",
 					"devkit",
 					"worktree-remove",
+					"--checkouts=${input:worktreeCheckout}",
 					"--picks=${input:worktreeRow}",
 					"--force=${input:worktreeForce}"
 				],
@@ -1937,15 +1967,49 @@
 				// is narrowed rather than its rows, because every checkout in it costs a fetch and
 				// a `gh pr list`.
 				//
-				// Flat, where the file keyed its rows by checkout: one input runs one command, so
-				// the checkout rides in each row's description instead. Every row is servable --
-				// each checkout contributes its trunk unconditionally, so there is always
-				// something to pick.
+				// TWO inputs, not one, and this is the pair the rule file spent two releases
+				// calling impossible. `augustocdias.tasks-shell-input` records each input's
+				// answer as it resolves and substitutes `${input:<id>}` inside a later input's
+				// own command, so "which checkouts, then which of their refs" is expressible
+				// after all -- its README's own headline example is exactly this shape. Two
+				// conditions ride on the TASK rather than on either input: the inputs must
+				// appear left to right in order of dependence in the task's arguments, which
+				// is why `--checkouts` is spelled there ahead of `--picks`, and both halves
+				// must be `shellCommand.execute` ones, which they are.
+				//
+				// The failure that pairing could have is silent, so the task refuses it out
+				// loud: the lookup falls back to whatever this input last returned, in some
+				// EARLIER click, if the order ever stops holding. `preview-task.strayed_picks`
+				// catches a ticked ref whose checkout this stage did not return and serves
+				// nothing.
+				"id": "previewCheckout",
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/preview-task.py\" --project-rows",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "Which checkouts? Tick as many as you want; the next list covers all of them.",
+					"fieldSeparator": "|",
+					"multiselect": true,
+					"multiselectSeparator": ",",
+					"rememberPrevious": false
+				}
+			},
+			{
+				// Stage two, and the half that costs nothing: `--project-rows` above already
+				// scanned the machine and recorded what it found, so this filters that record
+				// by the token the ticked rows carry rather than fetching anything again. A
+				// token naming no write is a miss, and a miss rescans only the ticked
+				// checkouts -- `scripts/picker_scan.py` carries why that is the whole point.
+				//
+				// Still flat, and still multi-select: ticking three checkouts gives ONE menu
+				// in the scan's ranking rather than three lists end to end, so the checkout
+				// stays in each row's description even though it was also asked for.
 				"id": "previewRow",
 				"type": "command",
 				"command": "shellCommand.execute",
 				"args": {
-					"command": "python \"${workspaceFolder:devkit}/scripts/preview-task.py\" --rows",
+					"command": "python \"${workspaceFolder:devkit}/scripts/preview-task.py\" --rows --checkouts=\"${input:previewCheckout}\"",
 					"cwd": "${workspaceFolder:devkit}",
 					"description": "Which branch should be served? Tick as many as you want.",
 					"fieldSeparator": "|",
@@ -1976,19 +2040,44 @@
 				// one `none` row rather than an empty list, because an empty quick-pick says nothing
 				// about whether the scan ran, and `fix-prs.py` answers that value by running nothing.
 				//
-				// Flat, where the file-backed version asked for the checkout first: that stage
-				// existed because a JSON menu keys its rows by something, and one input runs one
-				// command. The checkout rides on the row instead.
+				// The checkout stage is back and is NOT the file-backed one: it runs the same
+				// live `gh` scan, records it, and hands this input a token naming that write.
+				// See `previewCheckout` for the extension mechanism that makes two dependent
+				// live pickers possible, and `scripts/picker_scan.py` for why a token rather
+				// than a timestamp -- a stale read is not made unlikely here, it is made
+				// unrepresentable.
+				//
+				// The checkout stays on each row anyway, because this stage is multi-select:
+				// two ticked checkouts give one menu ranked newest-first across both.
 				//
 				// Dismissing it is still the script's job to notice — the extension returns nothing,
 				// VS Code substitutes nothing, and the task starts with the literal
 				// `${input:brokenPrRow}` in its argv, which `scripts/task_input.py` recognises ahead
 				// of argparse.
+				"id": "fixCheckout",
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/fix-prs.py\" --project-rows",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "Which checkouts? Tick as many as you want; the next list covers all of them.",
+					"fieldSeparator": "|",
+					"multiselect": true,
+					"multiselectSeparator": ",",
+					"rememberPrevious": false
+				}
+			},
+			{
+				// Stage two. See `previewCheckout` / `previewRow` for the mechanism; what is
+				// particular here is that stage one is worth its scan even when you know which
+				// repo you want. It draws every checkout with a COUNT, so "devkit -- nothing
+				// broken" is an answer rather than a checkout mysteriously absent from a list,
+				// and that is the one thing the flat menu could not say.
 				"id": "brokenPrRow",
 				"type": "command",
 				"command": "shellCommand.execute",
 				"args": {
-					"command": "python \"${workspaceFolder:devkit}/scripts/fix-prs.py\" --rows",
+					"command": "python \"${workspaceFolder:devkit}/scripts/fix-prs.py\" --rows --checkouts=\"${input:fixCheckout}\"",
 					"cwd": "${workspaceFolder:devkit}",
 					"description": "Which broken PR should an agent be sent at? Tick as many as you want.",
 					"fieldSeparator": "|",
@@ -2006,13 +2095,33 @@
 				// can be destroyed, and a row from either in the other is an option that refuses.
 				//
 				// Single-select, so no `multiselect`: a new worktree is cut from one base. The
-				// value is `<checkout>:<branch>` for `previewRow`'s reason -- an input resolves to
-				// one string, so the checkout travels inside it.
+				// value is still `<checkout>:<branch>` even with a checkout stage in front,
+				// because that stage takes several -- an input resolves to one string, so the
+				// checkout has to travel inside this one too.
+				"id": "worktreeBaseCheckout",
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-worktree.py\" base-projects",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "Which checkouts? Tick one, or several to compare their branches.",
+					"fieldSeparator": "|",
+					"multiselect": true,
+					"multiselectSeparator": ",",
+					"rememberPrevious": false
+				}
+			},
+			{
+				// Stage two. See `previewCheckout` for the mechanism. Multi-select on the
+				// stage ABOVE and single-select here, which is not a contradiction: one new
+				// worktree is cut from one base, but which checkout to cut in is a thing a
+				// person narrows rather than decides -- ticking two and reading both lists is
+				// how you pick between them.
 				"id": "worktreeBase",
 				"type": "command",
 				"command": "shellCommand.execute",
 				"args": {
-					"command": "python \"${workspaceFolder:devkit}/scripts/agent-worktree.py\" bases",
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-worktree.py\" bases --checkouts=\"${input:worktreeBaseCheckout}\"",
 					"cwd": "${workspaceFolder:devkit}",
 					"description": "Which checkout, and what should the new branch be cut from?",
 					"fieldSeparator": "|",
@@ -2063,11 +2172,29 @@
 				// It is also why `new` and `remove` no longer rewrite anything as they finish.
 				// They did, because a quarter of an hour was a long time to be unable to undo a
 				// click; a list built by the click needs no catch-up.
+				"id": "worktreeCheckout",
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-worktree.py\" tree-projects",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "Which checkouts? Tick as many as you want; the next list covers all of them.",
+					"fieldSeparator": "|",
+					"multiselect": true,
+					"multiselectSeparator": ",",
+					"rememberPrevious": false
+				}
+			},
+			{
+				// Stage two, and the one where narrowing is worth the most: this list is what
+				// a click DESTROYS, so a shorter one is a safer one. See `previewCheckout` for
+				// the mechanism. The count in the stage above is also the answer to "did I
+				// leave anything in that repo", which used to need reading the whole list.
 				"id": "worktreeRow",
 				"type": "command",
 				"command": "shellCommand.execute",
 				"args": {
-					"command": "python \"${workspaceFolder:devkit}/scripts/agent-worktree.py\" rows",
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-worktree.py\" rows --checkouts=\"${input:worktreeCheckout}\"",
 					"cwd": "${workspaceFolder:devkit}",
 					"description": "Which worktrees should be destroyed? Tick as many as you want.",
 					"fieldSeparator": "|",
