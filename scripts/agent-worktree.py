@@ -12,8 +12,9 @@ Claude session spawns, so the delete verb can see those too.
 | --- | --- |
 | `new` | cut `agent/<slug>-<mmdd>`, a worktree for it, and open Claude or Codex there |
 | `remove` | destroy the ticked worktrees, and their local branches when nothing is lost |
-| `refresh` | rewrite the option file both dropdowns read |
-| `list` | print what a refresh would write |
+| `rows` | print the delete dropdown's rows, from a scan, and stop |
+| `bases` | print the base-branch dropdown's rows and stop |
+| `list` | print the worktrees, for a terminal |
 
 **This is not the box tier and must not become it.** `worktree.py` cuts a box at
 `<workspace>/.worktrees/`, leases it a port and a `COMPOSE_PROJECT_NAME`, provisions its
@@ -23,12 +24,14 @@ provisioning, no reaper, and nothing to collide with the ports a static checkout
 The one thing shared is how a terminal tab is opened, which is `agent_box.open_agent` --
 two copies of that would be two answers to "which window does the agent open in".
 
-The menu is a scan, not live state: `rioj7.command-variable` can read a file and cannot
-run a command, so `worktree.reconcile` rewrites it on its fifteen-minute pass exactly as
-it does for `preview-task.py` and `fix-prs.py`. `new` and `remove` also rewrite it as
-they finish, which the other two menus have no equivalent of and this one needs: the
-worktree you just cut is the one you are most likely to want in the delete list, and a
-quarter of an hour is a long time to be unable to undo a click.
+The menus are live, and there is no file under them. Both are `shellCommand.execute`
+running `rows` or `bases` at the moment the picker opens, which is a scan of
+`git worktree list --porcelain` per checkout, fanned out. What that replaced was a JSON
+file only `worktree.reconcile` wrote, so a worktree cut a minute ago was not in the
+delete list and one destroyed a minute ago still was -- and `new` and `remove` each had
+to rewrite it as they finished to make the common case bearable. Nothing rewrites
+anything now: a worktree is in the list because it exists, which is also why
+`fix-prs.py` can cut into this tier without knowing this file exists.
 
 Every decision is in `scripts/agent_worktrees.py`, pure and separately tested; what is
 here spawns git and terminals, and takes a runner so the tests do not.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send an agent at the PRs that are already red, one box per PR.
+"""Send an agent at the PRs that are already red, one worktree per PR.
 
 A PR goes red two ways and both of them wait for a person: `origin/<default>` moved
 under it (`mergeable: CONFLICTING`), or its gate failed. Neither is work anybody wants
@@ -7,15 +7,24 @@ to do by hand, and neither is work the scheduled tier will ever do -- `worktree.
 reconcile` merges only what is *green* and carries the merge label, so a red PR is
 precisely the state it steps over every quarter hour, forever.
 
-**The unit of work is one PR in one box on that PR's own head branch.** Not a new branch:
-the fix belongs on the branch under review, and `worktree.py resume <project> --branch
-<head>` is the verb that puts a box back on an existing branch with the upstream set so
-a bare push lands where the PR is looking. That is also this repo's answer to "is there
-a CLI flag that attaches an agent to a PR branch": Claude Code's `--from-pr` *resumes a
-session linked to a PR*, which needs that session to still exist on this machine, and
-boxes are reaped after `worktree.DEFAULT_MAX_AGE_DAYS`. Resuming the box is the spelling
-that works on a PR nobody has touched this week, and it is the one that comes with a
-port lease and a `COMPOSE_PROJECT_NAME`.
+**The unit of work is one PR in one worktree on that PR's own head branch.** Not a new
+branch: the fix belongs on the branch under review, so the worktree is cut on the head
+branch with `origin/<head>` as its upstream and a bare push lands where the PR is
+looking. That is also this repo's answer to "is there a CLI flag that attaches an agent
+to a PR branch": Claude Code's `--from-pr` *resumes a session linked to a PR*, which
+needs that session to still exist on this machine. Cutting the worktree is the spelling
+that works on a PR nobody has touched this week.
+
+**The worktree is a `.claude/worktrees/` one, not a box, and that is the whole of where
+this tool puts things.** Every worktree on this machine lives under a checkout's
+`.claude/worktrees/`, which is where `claude --worktree` cuts, where a remote session
+spawns, and what `agent-worktree.py` lists and removes -- so a PR fixed from here is
+visible to the same two dropdowns as everything else, and reachable by the same delete
+row. `scripts/agent_worktrees.py` owns the three decisions that takes (`holder`,
+`tree_name`, `add_steps`); what is here is the PR half. The box tier -- `worktree.py`,
+a port lease, a `COMPOSE_PROJECT_NAME`, a provisioned toolchain and a reaper -- is still
+`agent-box.py spawn`'s, for a session that runs a compose stack, and this task no longer
+cuts one.
 
 **Three agent modes, and the third one is an asymmetry rather than an omission.**
 `claude` and `codex` each open a Windows Terminal tab, the same one `agent-box.py`
@@ -53,6 +62,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+import agent_worktrees as aw
 import devkit_project
 import picker_rows
 import sweep
@@ -66,7 +76,6 @@ import worktree
 from _loader import load_by_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WORKTREE = REPO_ROOT / "scripts" / "worktree.py"
 
 agent_box = load_by_path("agent_box", REPO_ROOT / "scripts" / "agent-box.py")
 
@@ -100,7 +109,7 @@ PR_LIST_FIELDS = "number,title,headRefName,updatedAt,url,isDraft,mergeable,statu
 PR_VIEW_FIELDS = (
     "number,title,headRefName,baseRefName,url,state,isDraft,mergeable,statusCheckRollup"
 )
-OPEN = "OPEN"  # the one state worth a box; CLOSED and MERGED both delete the head branch
+OPEN = "OPEN"  # the one state worth a tree; CLOSED and MERGED both delete the head branch
 
 # How GitHub says the branch no longer merges cleanly. `UNKNOWN` is its answer while the
 # mergeability job is still running, and is deliberately NOT treated as a conflict: a PR
@@ -334,7 +343,7 @@ def pr_view(project_dir: Path, number: int) -> dict:
     The menu is up to a quarter of an hour old, which is long enough for the gate to have
     gone green or for a rebase to have cleared the conflict. What the agent is told has
     to be current, so this is read at launch time -- and it is also the check that stops
-    a box being cut for a PR that no longer needs one.
+    a worktree being cut for a PR that no longer needs one.
     """
     try:
         result = sweep.gh_for(project_dir)("pr", "view", str(number), "--json", PR_VIEW_FIELDS)
@@ -379,7 +388,7 @@ def seed_prompt(project: str, pr: dict, reason: str) -> str:
     head = pr.get("headRefName", "its head branch")
     return tab_safe(
         f"PR #{number} in {project} is stuck: {reason}. "
-        f"This box is checked out on the PR head branch {head} with its upstream set, "
+        f"This worktree is checked out on the PR head branch {head} with its upstream set, "
         f"so a bare git push lands on the PR. "
         f"Merge origin/{base} in, fix what the gate is failing on, run the targeted "
         f"tests and the linter, push, and then merge the PR once the gate is green. "
@@ -390,45 +399,60 @@ def seed_prompt(project: str, pr: dict, reason: str) -> str:
 # --- opening the session ----------------------------------------------------------
 
 
-def existing_box(boxes: dict, project: str, branch: str):
-    """The live box already on `branch`, or None. Reuse before resume.
+def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
+    """The worktree already on `branch`, or why one cannot be cut. See `aw.holder`.
 
-    `worktree.resume_plan` refuses a branch that is already checked out, and rightly --
-    two worktrees on one branch is a state git will not hold. But this task's ordinary
-    second click is on a PR whose box is still open from the first, so the refusal would
-    read as a failure when what it describes is the box being *ready*.
+    Three answers in two fields, because they need three different next moves.
+    `(path, "")` is one of this checkout's own `.claude/worktrees/` and is reused as it
+    stands: this task's ordinary second click is on a PR whose worktree is still open
+    from the first, and two worktrees on one branch is a state git will not hold, so
+    cutting again would fail on the very thing that means "ready". `(None, "")` is a
+    branch nothing holds, which is the case `cut_tree` exists for. `(None, why)` is a
+    branch held somewhere this tool does not own -- the checkout itself, a `.worktrees/`
+    box, a worktree cut by hand -- where the honest answer is the sentence naming the
+    directory, not a `git worktree add` that fails talking about the branch instead.
     """
-    return next(
-        (box for box in boxes.values() if box.project == project and box.branch == branch), None
-    )
+    listed = sweep.git_for(project_dir)("worktree", "list", "--porcelain")
+    if listed.returncode != 0:
+        return None, f"git could not list the worktrees of {project_dir}"
+    held, nested = aw.holder(project_dir, listed.stdout, branch)
+    if not held:
+        return None, ""
+    if not nested:
+        return None, (
+            f"{branch} is already checked out at {held}, which is outside "
+            f"{aw.WORKTREES_DIR} -- finish the PR from there, or remove that worktree"
+        )
+    return Path(held), ""
 
 
-def resume_box(project: str, branch: str, workspace: Path, runner=subprocess.run) -> Path | None:
-    """Put a box back on `branch` and return its path. None when it could not be cut."""
-    argv = [
-        sys.executable,
-        str(WORKTREE),
-        "resume",
-        project,
-        "--branch",
-        branch,
-        "--yes",
-        "--json",
-        "--workspace",
-        str(workspace),
-    ]
-    done = runner(argv, capture_output=True, text=True, check=False)
-    sys.stderr.write(done.stderr or "")
-    if done.returncode != 0:
+def cut_tree(project_dir: Path, branch: str, runner=subprocess.run) -> Path | None:
+    """Cut `.claude/worktrees/<name>` on the PR's own head branch. None when git refused.
+
+    The fetch first is `agent-worktree.create`'s and for its reason: a checkout that has
+    not fetched is however stale it last was, and here that decides the question below
+    it -- whether `origin/<branch>` exists at all is what tells a branch this machine has
+    never seen from a PR whose head this checkout simply has not heard about yet.
+    """
+    git = sweep.git_for(project_dir)
+    runner(["git", "-C", str(project_dir), "fetch", "--quiet", "origin"], check=False)
+    local = git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0
+    remote = git("rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}").returncode
+    if not local and remote != 0:
+        print(f"  origin has no branch {branch} in {project_dir.name}", file=sys.stderr)
         return None
-    try:
-        plan = json.loads(done.stdout or "{}")
-    except ValueError:
+    root = project_dir / aw.WORKTREES_DIR
+    taken = [entry.name for entry in root.iterdir()] if root.is_dir() else []
+    path = root / aw.tree_name(branch, taken)
+    argv = ["git", "-C", str(project_dir), *aw.add_steps(branch, str(path), local)]
+    if runner(argv, check=False).returncode != 0:
         return None
-    for note in plan.get("notes", []):
-        print(f"  {note}")
-    path = plan.get("path")
-    return Path(path) if path else None
+    # Nothing is written to make this appear in the delete dropdown, because that menu
+    # has no file behind it any more: `agent-worktree.py rows` scans
+    # `git worktree list --porcelain` when the picker opens, and `aw.nested` selects
+    # exactly the directory cut above. The worktree you just cut is in the list because
+    # it exists, not because a writer remembered to say so.
+    return path
 
 
 def background_argv(cli: str, prompt: str) -> list[str]:
@@ -443,18 +467,18 @@ def background_argv(cli: str, prompt: str) -> list[str]:
 
 
 def launch_background(
-    cli: str, box: Path, prompt: str, hooks_off: bool, runner=subprocess.run
+    cli: str, tree: Path, prompt: str, hooks_off: bool, runner=subprocess.run
 ) -> int:
     """Start a detached session and print the id that reads it back."""
     exe = shutil.which(cli)
     if not exe:
-        print(f"fix-prs: {cli} is not on PATH; run this yourself:\n  cd {box}\n  {cli} --bg ...")
+        print(f"fix-prs: {cli} is not on PATH; run this yourself:\n  cd {tree}\n  {cli} --bg ...")
         return EXIT_FAILED
     env = dict(os.environ)
     if hooks_off:
         env[agent_box.harness_switch.HOOKS_OFF_ENV] = agent_box.harness_switch.HOOKS_OFF_VALUE
     done = runner(
-        background_argv(exe, prompt), cwd=str(box), capture_output=True, text=True, env=env
+        background_argv(exe, prompt), cwd=str(tree), capture_output=True, text=True, env=env
     )
     sys.stdout.write(done.stdout or "")
     sys.stderr.write(done.stderr or "")
@@ -470,10 +494,10 @@ def run_one(
     mode: str,
     runner=subprocess.run,
 ) -> int:
-    """One PR, end to end: read it, get a box on its branch, open the agent in it.
+    """One PR, end to end: read it, get a worktree on its branch, open the agent in it.
 
     Returns non-zero for anything that stopped this PR getting an agent. A PR that went
-    green, or that left the open set entirely, is `EXIT_OK` and no box: the menu was
+    green, or that left the open set entirely, is `EXIT_OK` and no worktree: the menu was
     stale, the work is done or abandoned, and reporting that as a failure would put a
     red icon on good news.
     """
@@ -501,29 +525,35 @@ def run_one(
         return EXIT_FAILED
 
     print(f"{pick.project} #{pick.number} ({reason}) on {branch}")
-    held = existing_box(worktree.live_boxes(root), pick.project, branch)
-    box = Path(held.path) if held is not None else resume_box(pick.project, branch, workspace)
-    if box is None:
-        print(f"  no box for {branch}; nothing opened", file=sys.stderr)
+    tree, refused = existing_tree(project_dir, branch)
+    if refused:
+        print(f"  {refused}", file=sys.stderr)
         return EXIT_FAILED
-    print(f"  box {box}")
+    tree = tree or cut_tree(project_dir, branch, runner)
+    if tree is None:
+        print(f"  no worktree for {branch}; nothing opened", file=sys.stderr)
+        return EXIT_FAILED
+    print(f"  worktree {tree}")
 
     cli, how = AGENT_MODES[mode]
     prompt = seed_prompt(pick.project, pr, reason)
     if how == BACKGROUND:
-        return launch_background(cli, box, prompt, agent_box.harness_switch.hooks_are_off(), runner)
+        return launch_background(
+            cli, tree, prompt, agent_box.harness_switch.hooks_are_off(), runner
+        )
     return agent_box.open_agent(
-        cli, box, branch, runner, prompt=prompt, title=f"{pick.project} #{pick.number}"
+        cli, tree, branch, runner, prompt=prompt, title=f"{pick.project} #{pick.number}"
     )
 
 
 def run(picks: list[Pick], workspace: Path, mode: str, runner=subprocess.run) -> int:
     """Every ticked PR in turn. The worst exit code, so one failure is still reported.
 
-    In turn rather than at once, and that is the cost this task states in its `detail`:
-    each PR wants a box, and a box wants a port slot out of a fixed ceiling and a cold
-    toolchain install. Three at once is three provisioning runs competing for the same
-    disk.
+    In turn rather than at once, and the reason survived the move off the box tier
+    intact even though the expensive half of it did not: several ticked PRs are usually
+    several PRs of the *same* checkout, `git worktree add` takes that checkout's index
+    lock, and a fetch runs before each one. Three at once is three git processes
+    queueing on one lock, with the failures arriving interleaved with the tabs.
     """
     worst = EXIT_OK
     for pick in picks:

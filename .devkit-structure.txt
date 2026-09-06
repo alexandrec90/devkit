@@ -104,7 +104,7 @@ dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 538
 file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
-file_lines::scripts/fix-prs.py = 609
+file_lines::scripts/fix-prs.py = 639
 file_lines::scripts/git_policy.py = 756
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
@@ -362,3 +362,6 @@ swallowed_errors::scripts/worktree.py = 2
 #   file_lines::scripts/plug-projects.py -> 1043
 #   file_lines::scripts/workspace-status.py -> 1030
 #   function_lines::scripts/plug-projects.py::main -> 202
+
+# 2026-09-06  recorded: fix-prs.py moves off the box tier: the two functions that asked worktree.py for a box on the PR head branch are replaced by the pair that finds or cuts a .claude/worktrees/ worktree on it, and the module docstring gains the paragraph saying which tier this writes to and why -- the claim that is now the module's whole subject, and the one a stale copy of would send the next agent at worktree.py resume. The file was already 109 lines past file_lines before this change and two earlier records deferred its split; the seam is still the one its own section headers draw, the scan-and-menu half against the launch half, and moving it moves the path the workspace task block names for the live --rows picker. That is a change with its own reversion check, not a rider on the one that changed which directory the task cuts into.
+#   file_lines::scripts/fix-prs.py -> 639

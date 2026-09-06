@@ -11,7 +11,6 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -344,44 +343,185 @@ def test_the_hooks_off_prefix_survives_a_prompt(monkeypatch):
 # --- opening the session ----------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class FakeBox:
-    project: str
-    branch: str
-    path: str
+def fake_git(answers: dict[tuple[str, ...], tuple[int, str]], default=(1, "")):
+    """A `git_for`-shaped callable answering from a table keyed by argv.
+
+    Named without the module it comes from, and that is not an oversight:
+    `untested_symbols.module_pattern` reads an attribute access on a module's name --
+    anywhere in a test file, a docstring included -- as that file joining the module's
+    corpus. `gh_for` is monkeypatched all over this suite and tested in none of it, so
+    writing the prefix here would retire a real gap from the untested baseline as "now
+    covered". That is the exact false negative that function's own docstring is about.
+    """
+
+    def git(*args: str):
+        code, out = answers.get(tuple(args), default)
+        return subprocess.CompletedProcess(list(args), code, stdout=out, stderr="")
+
+    return git
 
 
-def test_a_live_box_on_that_branch_is_reused_rather_than_resumed():
-    """`resume_plan` refuses a branch already checked out -- and this task's ordinary
-    second click is on a PR whose box is still open from the first."""
-    boxes = {"b": FakeBox("carameli", "agent/x", "/boxes/b")}
-    assert fix_prs.existing_box(boxes, "carameli", "agent/x").path == "/boxes/b"
+class FakeRun:
+    """A `subprocess.run` stand-in that records argv and answers 0."""
+
+    def __init__(self):
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append([str(a) for a in argv])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def git_args(self) -> list[list[str]]:
+        """Each git call with `git -C <dir>` stripped, so assertions read as the verb."""
+        return [call[3:] for call in self.calls if call[:1] == ["git"]]
 
 
-def test_a_box_of_another_checkout_on_the_same_branch_name_is_not_reused():
-    boxes = {"b": FakeBox("devkit", "agent/x", "/boxes/b")}
-    assert fix_prs.existing_box(boxes, "carameli", "agent/x") is None
+def listing(*entries: tuple[str, str]) -> str:
+    """`git worktree list --porcelain` output for `(path, branch)` pairs."""
+    blocks = [f"worktree {path}\nHEAD 1a2b3c4d\nbranch refs/heads/{on}" for path, on in entries]
+    return "\n\n".join(blocks)
 
 
-def test_resume_asks_worktree_for_a_box_on_the_prs_own_branch(tmp_path):
-    seen = {}
+def checkout_listing(monkeypatch, tmp_path, *entries: tuple[str, str]) -> Path:
+    """A checkout whose `git worktree list --porcelain` answers with `entries`."""
+    checkout = tmp_path / "carameli"
+    checkout.mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        fix_prs.sweep,
+        "git_for",
+        lambda _path: fake_git({("worktree", "list", "--porcelain"): (0, listing(*entries))}),
+    )
+    return checkout
+
+
+def test_a_worktree_already_on_that_branch_is_reused_rather_than_cut(monkeypatch, tmp_path):
+    """This task's ordinary second click is on a PR whose worktree is still open from the
+    first, and two worktrees on one branch is a state git will not hold -- so cutting
+    again would fail on the very thing that means "ready"."""
+    held = f"{(tmp_path / 'carameli').as_posix()}/.claude/worktrees/x"
+    checkout = checkout_listing(monkeypatch, tmp_path, (held, "agent/x"))
+    assert fix_prs.existing_tree(checkout, "agent/x") == (Path(held), "")
+
+
+def test_a_branch_held_outside_the_tier_is_refused_with_the_directory_named(monkeypatch, tmp_path):
+    """A box of the other tier, the checkout itself, a worktree cut by hand: `git
+    worktree add` fails on all three talking about the *branch*, when the tree holding it
+    is what the reader has to go and deal with."""
+    checkout = checkout_listing(monkeypatch, tmp_path, ("C:/ws/.worktrees/carameli--x", "agent/x"))
+    tree, refused = fix_prs.existing_tree(checkout, "agent/x")
+    assert tree is None
+    assert "C:/ws/.worktrees/carameli--x" in refused
+    assert fix_prs.aw.WORKTREES_DIR in refused
+
+
+def test_a_branch_nothing_holds_is_neither_a_tree_nor_a_refusal(monkeypatch, tmp_path):
+    """The two empties are the case `cut_tree` exists for, and `run_one` branches on the
+    difference between them."""
+    checkout = checkout_listing(monkeypatch, tmp_path, (str(tmp_path / "carameli"), "main"))
+    assert fix_prs.existing_tree(checkout, "agent/x") == (None, "")
+
+
+def test_git_that_cannot_list_the_worktrees_is_a_refusal_not_a_free_cut(monkeypatch, tmp_path):
+    """Reading the empty answer as "nothing holds it" would send `cut_tree` at a branch
+    that may already be checked out, which is the one thing this lookup exists to stop."""
+    checkout = tmp_path / "carameli"
+    checkout.mkdir(exist_ok=True)
+    monkeypatch.setattr(fix_prs.sweep, "git_for", lambda _path: fake_git({}))
+    tree, refused = fix_prs.existing_tree(checkout, "agent/x")
+    assert tree is None
+    assert refused
+
+
+def cut_with(monkeypatch, tmp_path, *, local: bool, remote: bool = True):
+    """`cut_tree` against a checkout whose refs answer as asked. Returns `(path, run)`."""
+    checkout = tmp_path / "carameli"
+    (checkout / ".claude" / "worktrees").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        fix_prs.sweep,
+        "git_for",
+        lambda _path: fake_git(
+            {
+                ("rev-parse", "--verify", "--quiet", "refs/heads/agent/x"): (0 if local else 1, ""),
+                ("rev-parse", "--verify", "--quiet", "refs/remotes/origin/agent/x"): (
+                    0 if remote else 1,
+                    "",
+                ),
+            }
+        ),
+    )
+    run = FakeRun()
+    return fix_prs.cut_tree(checkout, "agent/x", run), run
+
+
+def test_a_worktree_is_cut_in_the_tier_tracking_the_prs_own_remote_branch(monkeypatch, tmp_path):
+    """The whole point of the task: the upstream is `origin/<head>`, so a bare push from
+    the worktree lands where the PR is looking. The fetch first is `create`'s, and here it
+    is also what makes the ref check below it mean anything."""
+    path, run = cut_with(monkeypatch, tmp_path, local=False)
+    fetch, add = run.git_args()
+    assert fetch == ["fetch", "--quiet", "origin"]
+    assert add == ["worktree", "add", "--track", "-b", "agent/x", str(path), "origin/agent/x"]
+    assert path.parts[-3:] == (".claude", "worktrees", "x")
+
+
+def test_a_branch_this_checkout_already_has_is_not_recreated_from_origin(monkeypatch, tmp_path):
+    """It may carry commits no remote has -- a box reaped while its work was open leaves
+    exactly that -- and re-cutting it from origin is the one move that discards them."""
+    path, run = cut_with(monkeypatch, tmp_path, local=True)
+    assert run.git_args()[1] == ["worktree", "add", str(path), "agent/x"]
+
+
+def test_a_head_branch_origin_no_longer_has_is_reported_before_git_cuts(
+    monkeypatch, tmp_path, capsys
+):
+    """The stale-menu case one layer below `run_one`'s state check: a fetch that found no
+    such ref means there is nothing to cut from, and the message says which branch."""
+    path, run = cut_with(monkeypatch, tmp_path, local=False, remote=False)
+    assert path is None
+    assert run.git_args() == [["fetch", "--quiet", "origin"]]
+    assert "origin has no branch" in capsys.readouterr().err
+
+
+def test_a_directory_name_the_tier_already_uses_does_not_collide(monkeypatch, tmp_path):
+    """Two PRs whose head branches end in the same segment want two worktrees, and the
+    second landing in the first one's directory is what the counter prevents."""
+    (tmp_path / "carameli" / ".claude" / "worktrees" / "x").mkdir(parents=True)
+    path, _run = cut_with(monkeypatch, tmp_path, local=False)
+    assert path.name == "x-2"
+
+
+def test_cutting_one_lands_where_the_delete_dropdown_scans(monkeypatch, tmp_path):
+    """The delete menu has no file behind it -- `agent-worktree.py rows` scans
+    `git worktree list --porcelain` when the picker opens and keeps what `aw.nested`
+    calls nested. So the only thing that puts a PR's worktree in that list is cutting it
+    under the checkout's own `.claude/worktrees/`, which is what this asserts. Cut it
+    anywhere else and it is invisible to the dropdown and to its delete row."""
+    checkout = tmp_path / "carameli"
+    path, run = cut_with(monkeypatch, tmp_path, local=False)
+    _fetch, add = run.git_args()
+    assert add[:2] == ["worktree", "add"]
+    porcelain = f"worktree {path.as_posix()}\nbranch refs/heads/agent/x\n"
+    assert fix_prs.aw.nested(checkout, porcelain) == [(path.name, path.as_posix(), "agent/x")]
+
+
+def test_a_git_refusal_yields_no_worktree_rather_than_a_path(monkeypatch, tmp_path):
+    """`run_one` turns None into an exit 1; a path to a directory git declined to create
+    would turn it into an agent opened in nothing."""
+    checkout = tmp_path / "carameli"
+    (checkout / ".claude" / "worktrees").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        fix_prs.sweep,
+        "git_for",
+        lambda _path: fake_git(
+            {("rev-parse", "--verify", "--quiet", "refs/remotes/origin/agent/x"): (0, "")}
+        ),
+    )
 
     def runner(argv, **kwargs):
-        seen["argv"] = argv
-        return subprocess.CompletedProcess(argv, 0, json.dumps({"path": "/boxes/b"}), "")
+        code = 0 if "fetch" in [str(a) for a in argv] else 128
+        return subprocess.CompletedProcess(argv, code, "", "already exists")
 
-    workspace = tmp_path / "alex.code-workspace"
-    assert fix_prs.resume_box("carameli", "agent/x", workspace, runner) == Path("/boxes/b")
-    argv = seen["argv"]
-    assert argv[2:6] == ["resume", "carameli", "--branch", "agent/x"]
-    assert "--yes" in argv and "--json" in argv
-
-
-def test_a_refused_resume_returns_no_box_rather_than_a_path(tmp_path):
-    def runner(argv, **kwargs):
-        return subprocess.CompletedProcess(argv, 2, "", "already checked out")
-
-    assert fix_prs.resume_box("c", "b", tmp_path / "w", runner) is None
+    assert fix_prs.cut_tree(checkout, "agent/x", runner) is None
 
 
 def test_the_background_argv_passes_the_prompt_as_one_argument():
@@ -459,8 +599,8 @@ def run_one_with(monkeypatch, tmp_path, view: dict, mode: str = "claude"):
     workspace.parent.mkdir(exist_ok=True)
     opened: dict = {}
     monkeypatch.setattr(fix_prs, "pr_view", lambda _dir, _n: view)
-    monkeypatch.setattr(fix_prs.worktree, "live_boxes", lambda _root: {})
-    monkeypatch.setattr(fix_prs, "resume_box", lambda *a, **k: Path("/boxes/b"))
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a, **k: (None, ""))
+    monkeypatch.setattr(fix_prs, "cut_tree", lambda *a, **k: Path("/trees/x"))
     monkeypatch.setattr(
         fix_prs.agent_box,
         "open_agent",
@@ -474,7 +614,7 @@ def run_one_with(monkeypatch, tmp_path, view: dict, mode: str = "claude"):
     return code, opened
 
 
-def test_a_pr_that_went_green_since_the_scan_is_reported_not_given_a_box(
+def test_a_pr_that_went_green_since_the_scan_is_reported_not_given_a_worktree(
     monkeypatch, tmp_path, capsys
 ):
     """The menu can be a quarter of an hour old. Reporting good news as a failure would
@@ -486,14 +626,14 @@ def test_a_pr_that_went_green_since_the_scan_is_reported_not_given_a_box(
 
 
 @pytest.mark.parametrize("state", ["CLOSED", "MERGED"])
-def test_a_pr_that_left_the_open_set_since_the_scan_gets_no_box(
+def test_a_pr_that_left_the_open_set_since_the_scan_gets_no_worktree(
     monkeypatch, tmp_path, capsys, state
 ):
-    """The failure this was written for: a red PR was closed between the reconcile pass
-    that wrote the menu and the click, GitHub deleted its head branch on the way out, and
-    `resume` refused a branch `origin` no longer has -- an exit 1 and a message about
-    worktrees for what is a stale row. A closed PR is still `red` to `broken_reason`,
-    which only ever sees open ones from the scan, so the state is checked before it."""
+    """The failure this was written for: a red PR was closed between the scan and the
+    click, GitHub deleted its head branch on the way out, and the cut refused a branch
+    `origin` no longer has -- an exit 1 and a message about worktrees for what is a stale
+    row. A closed PR is still `red` to `broken_reason`, which only ever sees open ones
+    from the scan, so the state is checked before it."""
     view = pr(state=state, statusCheckRollup=[{"conclusion": "FAILURE"}])
     code, opened = run_one_with(monkeypatch, tmp_path, view)
     assert code == 0
@@ -512,7 +652,7 @@ def test_a_pr_view_without_a_state_is_treated_as_open(monkeypatch, tmp_path):
     assert opened
 
 
-def test_a_pr_turned_draft_since_the_scan_gets_no_box(monkeypatch, tmp_path, capsys):
+def test_a_pr_turned_draft_since_the_scan_gets_no_worktree(monkeypatch, tmp_path, capsys):
     """`isDraft` is in the view fields for the same reason as `state`: `broken_reason`
     already excludes drafts, and could not while the field it reads was never asked for."""
     view = pr(isDraft=True, statusCheckRollup=[{"conclusion": "FAILURE"}])
@@ -541,6 +681,54 @@ def test_the_background_mode_does_not_open_a_tab(monkeypatch, tmp_path):
     _code, opened = run_one_with(monkeypatch, tmp_path, pr(mergeable="CONFLICTING"), "claude-bg")
     assert "bg" in opened
     assert "kwargs" not in opened
+
+
+def test_an_open_worktree_on_the_head_branch_is_used_and_nothing_is_cut(monkeypatch, tmp_path):
+    """The second click on the same PR. `cut_tree` raises rather than returning, so this
+    fails loudly if the reuse branch is ever dropped."""
+
+    def explode(*_a, **_k):
+        raise AssertionError("a worktree already on the branch must not be cut again")
+
+    (tmp_path / "carameli").mkdir(exist_ok=True)
+    workspace = tmp_path / "w" / "alex.code-workspace"
+    workspace.parent.mkdir(exist_ok=True)
+    (tmp_path / "w" / "carameli").mkdir(exist_ok=True)
+    opened: dict = {}
+    monkeypatch.setattr(fix_prs, "pr_view", lambda _dir, _n: pr(mergeable="CONFLICTING"))
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a, **k: (Path("/trees/held"), ""))
+    monkeypatch.setattr(fix_prs, "cut_tree", explode)
+    monkeypatch.setattr(
+        fix_prs.agent_box,
+        "open_agent",
+        lambda *args, **kwargs: opened.update(args=args) or 0,
+    )
+    assert fix_prs.run_one(fix_prs.Pick("carameli", 412), workspace, "claude") == 0
+    assert opened["args"][1] == Path("/trees/held")
+
+
+def test_a_branch_held_outside_the_tier_stops_the_run_and_opens_nothing(
+    monkeypatch, tmp_path, capsys
+):
+    """A refusal is not "no worktree yet": cutting anyway is what git would reject, and
+    opening an agent somewhere else is what nobody asked for."""
+
+    def explode(*_a, **_k):
+        raise AssertionError("nothing should be cut or opened")
+
+    (tmp_path / "carameli").mkdir(exist_ok=True)
+    workspace = tmp_path / "w" / "alex.code-workspace"
+    workspace.parent.mkdir(exist_ok=True)
+    (tmp_path / "w" / "carameli").mkdir(exist_ok=True)
+    monkeypatch.setattr(fix_prs, "pr_view", lambda _dir, _n: pr(mergeable="CONFLICTING"))
+    monkeypatch.setattr(
+        fix_prs, "existing_tree", lambda *a, **k: (None, "agent/x is checked out at C:/ws/devkit")
+    )
+    monkeypatch.setattr(fix_prs, "cut_tree", explode)
+    monkeypatch.setattr(fix_prs.agent_box, "open_agent", explode)
+    code = fix_prs.run_one(fix_prs.Pick("carameli", 412), workspace, "claude")
+    assert code == fix_prs.EXIT_FAILED
+    assert "checked out at C:/ws/devkit" in capsys.readouterr().err
 
 
 def test_a_pr_gh_cannot_read_is_a_failure_rather_than_a_silent_skip(monkeypatch, tmp_path):
