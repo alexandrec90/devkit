@@ -3635,135 +3635,33 @@ def test_reconcile_cli_reports_and_exits_zero_on_an_empty_workspace(workspace, c
     assert "Nothing to reconcile" in capsys.readouterr().out
 
 
-# --- the rider that keeps the Preview: dropdowns current ---------------------
+# --- the riders are gone, and reconcile writes no dropdown --------------------
 
 
-@pytest.fixture(autouse=True)
-def plug_rider(monkeypatch):
-    """Containment for the one rider left, and it is the one that needs it most.
+def test_reconcile_writes_no_dropdown_file_at_all():
+    """`menu_rider` and `refresh_plug_menu` are deleted, not merely unused.
 
-    `refresh_plug_menu` loads `plug-projects.py`, which shells out to `gh repo list` and
-    then writes the real `logs/plug-menu.json` -- the file the developer's own *ticked*
-    checklist is drawn from. A reaping test that rewrote it would leave the workspace's
-    plug/unplug boxes reflecting whatever fixture registry that test had built.
+    All four dropdowns now run a command when they open, so nothing is left for this
+    pass to keep fresh. The last one to convert was the plug/unplug checklist, whose
+    rows used to open pre-ticked from the registry -- and `shellCommand.execute` has no
+    `picked` field, so it became a toggle rather than keeping a scheduled writer alive
+    for the ticks alone.
+
+    Asserted rather than left to rot: a rider that came back would reintroduce a
+    reconcile pass writing a file that decides what an unplug retires, and the reaping
+    tests needed an autouse fixture to stop the developer's own checklist being
+    overwritten by a fixture registry.
     """
-    real = worktree.refresh_plug_menu
-    monkeypatch.setattr(worktree, "refresh_plug_menu", lambda *, apply: "")
-    return real
+    for gone in ("menu_rider", "refresh_plug_menu"):
+        assert not hasattr(worktree, gone), f"{gone} is back; the dropdowns are live now"
 
 
-def _fake_script(**namespace) -> types.SimpleNamespace:
-    """Stand in for a rider's script, injected through the `_loader` the rider imports.
-
-    Both riders load their module by path on every call, so there is no attribute on
-    `worktree` to patch. `from _loader import load_by_path` consults
-    `sys.modules` first, though, so a fake `_loader` is the seam -- and asserting on the
-    `(name, path)` it was asked for is what catches the file being renamed out from
-    under the rider.
-    """
-    return types.SimpleNamespace(**namespace)
-
-
-def _with_loader(monkeypatch, module, asked: list | None = None):
-    def load_by_path(name, path):
-        if asked is not None:
-            asked.append((name, Path(path)))
-        return module
-
-    monkeypatch.setitem(sys.modules, "_loader", types.SimpleNamespace(load_by_path=load_by_path))
-
-
-# --- the one loader the three riders share -----------------------------------
-
-
-def test_the_rider_loads_the_named_script_under_its_underscored_name(monkeypatch):
-    """The three menu riders differ only in which sibling they load and what they ask it
-    for, so the loading and the containment live here once. Each is hyphenated, so the
-    module name it is registered under has to be derived rather than passed."""
-    asked: list = []
-    _with_loader(monkeypatch, _fake_script(refresh_menu=lambda: "written"), asked)
-
-    assert worktree.menu_rider("plug-projects.py", lambda mod: mod.refresh_menu()) == "written"
-    name, path = asked[0]
-    assert name == "plug_projects"
-    assert path.name == "plug-projects.py"
-    assert path.is_file(), "the rider is loading a file that no longer exists"
-
-
-def test_the_rider_swallows_whatever_the_sibling_raises(monkeypatch):
-    """One handler rather than three, and this is what it is for: `gh` is a network call,
-    so a scan that raised must not stop the pass that destroys merged boxes. Asserted
-    here so the containment cannot rot in a copy."""
-
-    def explode(_mod):
-        raise RuntimeError("gh is not on PATH today")
-
-    _with_loader(monkeypatch, _fake_script())
-    assert worktree.menu_rider("fix-prs.py", explode) == ""
-
-
-def test_a_rider_that_wrote_nothing_is_an_empty_string(monkeypatch):
-    """None would render as the word "None" in the reconcile log, which reads like a path."""
-    _with_loader(monkeypatch, _fake_script())
-    assert worktree.menu_rider("fix-prs.py", lambda _mod: None) == ""
-
-
-def test_reconcile_refreshes_the_checklist_at_the_end_of_the_pass(workspace, monkeypatch):
-    """The plug/unplug checklist rides the same pass, for the same reason and one more:
-    its rows open *pre-ticked* from the registry, so a stale file does not merely omit a
-    project -- it shows the wrong state and invites an untick that retires the wrong one."""
-    seen: list = []
-    monkeypatch.setattr(
-        worktree,
-        "refresh_plug_menu",
-        lambda *, apply: (seen.append(apply), "C:/logs/plug-menu.json")[1],
-    )
-
+def test_the_reconcile_report_carries_no_plug_menu_key(workspace):
+    """The render read `report["plug_menu"]` to print a refreshed-or-stale line. Both
+    halves are gone, so the key must be too rather than left None for a reader to
+    format as the word "None"."""
     _, report = worktree.reconcile(workspace, apply=True, fetch=False)
-
-    assert seen == [True]
-    assert report["plug_menu"] == "C:/logs/plug-menu.json"
-
-
-def test_a_dry_run_rebuilds_no_checklist(workspace, plug_rider):
-    """Same promise as the dropdown's: `--dry-run` writes nothing on disk."""
-    assert plug_rider(apply=False) == ""
-
-
-def test_the_checklist_rider_reports_the_path_it_wrote(monkeypatch, plug_rider):
-    """It takes no workspace: `plug-projects.py` resolves the live file and its own
-    `logs/` from module constants, so the checkout the rider was loaded from is already
-    the one whose menu it rewrites."""
-    asked: list = []
-    _with_loader(
-        monkeypatch,
-        _fake_script(refresh_menu=lambda: Path("C:/logs/plug-menu.json")),
-        asked,
-    )
-
-    assert plug_rider(apply=True) == str(Path("C:/logs/plug-menu.json"))
-    assert asked and asked[0][0] == "plug_projects"
-    assert asked[0][1].name == "plug-projects.py"
-    assert asked[0][1].is_file(), "the rider is loading a file that no longer exists"
-
-
-def test_a_checklist_that_could_not_be_written_is_an_empty_string(monkeypatch, plug_rider):
-    """`refresh_menu` answers None for a failure it swallowed itself -- including the
-    deliberate one, a `gh` outage, which leaves the previous menu in place rather than
-    writing rows that offer to create repositories that already exist."""
-    _with_loader(monkeypatch, _fake_script(refresh_menu=lambda: None))
-    assert plug_rider(apply=True) == ""
-
-
-def test_a_checklist_rider_that_raises_never_reddens_the_pass(monkeypatch, plug_rider):
-    """The reversion check for the second rider's containment, which is the whole reason
-    it is allowed to ride a pass whose real job is destroying merged boxes."""
-
-    def explode():
-        raise RuntimeError("the workspace file is a directory today")
-
-    _with_loader(monkeypatch, _fake_script(refresh_menu=explode))
-    assert plug_rider(apply=True) == ""
+    assert "plug_menu" not in report
 
 
 def _reconcile_report(**extra) -> dict:
@@ -3777,23 +3675,13 @@ def _reconcile_report(**extra) -> dict:
     }
 
 
-def test_the_pass_says_where_the_checklist_landed():
-    rendered = worktree.render_reconcile(_reconcile_report(plug_menu="C:/logs/plug-menu.json"))
-    assert "plug menu: refreshed (C:/logs/plug-menu.json)" in rendered
-
-
-def test_a_stale_checklist_is_warned_about_too():
-    """Same reasoning as the dropdown's warning, against a worse failure: the checklist
-    is pre-ticked, so picking from a stale one edits a registry it is misreporting."""
-    rendered = worktree.render_reconcile(_reconcile_report(plug_menu=""))
-    assert "plug menu: [warn] not refreshed" in rendered
-    assert "checklist is stale" in rendered
-
-
-def test_a_dry_run_claims_nothing_about_the_checklist():
-    """It did not rebuild one, so the line would not be true."""
-    rendered = worktree.render_reconcile(_reconcile_report(applied=False))
-    assert "plug menu" not in rendered
+def test_the_pass_says_nothing_about_any_checklist():
+    """The refreshed/stale line is gone with the rider that produced it. Asserted in
+    both directions of `applied`, because the warning half only rendered on a real run
+    and would be the one to survive a partial revert."""
+    for applied in (True, False):
+        rendered = worktree.render_reconcile(_reconcile_report(applied=applied))
+        assert "plug menu" not in rendered
 
 
 # --- the static half of the scheduled pass ----------------------------------

@@ -20,6 +20,7 @@ makes the dependency explicit and immune to reordering.
 
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -61,7 +62,9 @@ import git_policy
 import guard_probes
 import harness_config
 import harness_state
+import ship
 import sweep
+import task_branch
 import task_input
 import task_slug
 import worktree
@@ -83,6 +86,41 @@ needs_live_workspace = pytest.mark.skipif(
     not LIVE_WORKSPACE.exists(),
     reason=f"{LIVE_WORKSPACE.name} is a workstation-local registry, not part of the checkout",
 )
+
+
+def on_a_task_branch(root: Path) -> bool:
+    """Is `root` carrying an edit that has not merged yet?
+
+    The other half of the marker below, and it was missing. That marker's *reason* has
+    always said "after a branch merges", but its predicate asked only WHERE the checkout
+    is -- so a box was skipped and the static checkout on a task branch was not, though
+    both hold exactly the same thing: a canonical `workspace.jsonc` the live file cannot
+    match yet, because rendering happens after the merge.
+
+    The failure that closes is the one `in_an_ephemeral_box` closed for boxes, arriving
+    by the other route: an agent editing the workspace file in the static checkout gets a
+    red suite at the finish line, whose first suggested fix (`--adopt-workspace`) is the
+    one move that deletes the edit it just made.
+
+    Reads the branch rather than the diff: `task_branch.MANAGED_BRANCH_PREFIXES` is the
+    same namespace `ship.py` accepts, plus the `worktree-<topic>` spelling
+    `claude --worktree` cuts. Anything else -- the default branch above all -- is a
+    checkout whose copy is supposed to match, and there the check keeps meaning something.
+    """
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(root), "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    branch = (done.stdout or "").strip()
+    return bool(branch) and (
+        branch.startswith(task_branch.MANAGED_BRANCH_PREFIXES)
+        or branch.startswith(ship.CLI_WORKTREE_PREFIX)
+    )
 
 
 def in_an_ephemeral_box(root: Path) -> bool:
@@ -116,7 +154,7 @@ def in_an_ephemeral_box(root: Path) -> bool:
 # would then point VS Code at a task shape the *static* checkout's scripts cannot serve
 # until the same branch merges. So the check stays exactly where it means something.
 needs_the_static_checkout = pytest.mark.skipif(
-    in_an_ephemeral_box(REPO_ROOT),
+    in_an_ephemeral_box(REPO_ROOT) or on_a_task_branch(REPO_ROOT),
     reason="the live workspace is rendered from the static checkout after a branch merges",
 )
 
@@ -138,6 +176,7 @@ __all__ = [
     "load_script",
     "needs_live_workspace",
     "needs_the_static_checkout",
+    "on_a_task_branch",
     "sweep",
     "task_input",
     "task_slug",

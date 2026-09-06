@@ -375,29 +375,6 @@ def boxes_line(rows: list[dict]) -> str:
     return line
 
 
-def plug_menu_line(written: str) -> str:
-    """What to say about the plug/unplug checklist this run just rebuilt. "" when it was.
-
-    Pure, taking the path `worktree.refresh_plug_menu` returned, on `boxes_line`'s shape:
-    the side effect belongs to the caller so that what is said about it can be asserted
-    without performing it.
-
-    It is the one dropdown in the workspace that still reads a cached file, because its
-    rows open **pre-ticked** from the registry and `shellCommand.execute` has no way to
-    express that. So its freshness has to come from somewhere, and this pass is where:
-    `worktree.reconcile` used to be the writer and is stood down. Silence on success --
-    a rebuild that worked is not news, and this file's whole discipline is that a line
-    means something needs doing.
-    """
-    if written:
-        return ""
-    return (
-        "[warn] the Plug / Unplug checklist was not rebuilt -- its rows and their ticks "
-        "are as old as the last run that managed it "
-        "(fix: python scripts/plug-projects.py --refresh-menu)"
-    )
-
-
 def previews_line(source: Path = SOURCE_ROOT, loader=None) -> str:
     """Host Vite preview servers still serving; "" when there are none.
 
@@ -1065,14 +1042,11 @@ def main(argv: list[str] | None = None) -> int:
         # lines below, so saying them second would hand out fixes that cannot run --
         # and `render` already takes more arguments than anything should.
         toolchain = "\n".join(f"[workspace] {line}" for line in toolchain_lines())
-        # Prefixed here for `toolchain`'s reason rather than passed into `render`, which
-        # already takes eight parameters more than its limit and says so. The rebuild is
-        # the side effect: nothing else writes that checklist since the scheduled pass
-        # was stood down, and `refresh_menu` is total -- it declines to write at all when
-        # `gh` could not be reached, leaving the previous file rather than a wrong one.
-        rebuilt = plug_menu_line(worktree.refresh_plug_menu(apply=True))
-        plug = f"[workspace] {rebuilt}" if rebuilt else ""
-        message = "\n".join(part for part in (toolchain, message, plug) if part)
+        # No plug-menu rebuild rides on this pass any more. That checklist was the last
+        # dropdown reading a cached file, and it now scans when it opens
+        # (`plug-projects.py --rows`), so there is nothing left for a scheduled writer to
+        # keep fresh -- and nothing for this pass to warn about when it could not.
+        message = "\n".join(part for part in (toolchain, message) if part)
     except Exception as exc:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)
         return 0

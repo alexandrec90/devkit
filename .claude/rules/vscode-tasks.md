@@ -66,15 +66,22 @@ python scripts/devkit_project.py --check-workspace    # do they agree?
 python scripts/devkit_project.py --render-workspace   # workspace.jsonc -> the live file
 ```
 
-**The last step runs itself.** `workspace_sync_line` in `scripts/workspace-status.py`
-publishes at session start through `publish_workspace`, the same function the CLI calls,
-adding two conditions in `publish_verdict`: devkit's checkout is on its default branch and
-its `workspace.jsonc` is committed. A task branch's copy is a proposal and an uncommitted
-one is not even that, so from a box, or mid-edit, the line reports the drift and publishes
-nothing. When it does publish it asks for a window reload — VS Code reads the file once,
-at open. That is a wire-up rather than a convenience: the remembered step had already
-failed, with three tasks merged, the checkout synced, and nothing on the machine going to
-render them until someone typed the command.
+**The last step runs itself, but only once a day.** `workspace_sync_line` in
+`scripts/workspace-status.py` publishes through `publish_workspace`, the same function the
+CLI calls, adding two conditions in `publish_verdict`: devkit's checkout is on its default
+branch and its `workspace.jsonc` is committed. A task branch's copy is a proposal and an
+uncommitted one is not even that, so from a box, or mid-edit, the line reports the drift
+and publishes nothing. When it does publish it asks for a window reload — VS Code reads
+the file once, at open.
+
+**What runs it is `devkit-workspace-status`, a scheduled job, not a session-start hook** —
+the whole pass is several seconds, which is what its own docstring says gets a hook
+disabled. So a merge does not publish: the render lands on the job's next pass, or when
+someone runs `--render-workspace`. Between those two the live file is behind, and the
+tasks a branch just changed are not the tasks a click will run. The hook the paragraph
+above once described was never wired at all, and three merged tasks sat unrendered for
+days before anyone noticed — which is why the automatic half is worth having even at a
+day's latency, and why the manual command stays documented rather than deprecated.
 
 **Never hand-edit the live file to make a change.** It has no branch dimension: one copy
 serves every window on the machine, so an in-flight edit is globally live before anyone

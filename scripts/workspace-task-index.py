@@ -218,12 +218,23 @@ def task_rows(block: dict) -> list[TaskRow]:
 # --- one input ----------------------------------------------------------------
 
 
+# The two extensions a `command` input can be, and they answer the question differently.
+# `shellCommand.execute` runs a command when the picker opens; `pickStringRemember` reads
+# options out of the file or the literal list beside it.
+SHELL_COMMAND = "shellCommand.execute"
+
+
 def input_kind(spec: dict) -> str:
     """How the picker asks: free text, one answer, or several.
 
-    A `command` input is the `command-variable` extension, whose whole reason for being
-    here is multi-select and remembering â€” so say which of those this one uses rather
-    than printing the extension's command id, which is the same string 10 times over.
+    A `command` input is one of two extensions, and they spell the same three facts with
+    different keys -- so this branches on the command id rather than reading one
+    extension's arguments off both. It used to assume `command-variable`, which made
+    every live picker read as "pick one, remembered": `multiPick` is not a key
+    `shellCommand.execute` has, so its multi-selects all fell to the singular default and
+    its `rememberPrevious: false` was reported as remembering.
+
+    Neither is printed as its command id, which would be the same string ten times over.
     """
     kind = str(spec.get("type", ""))
     if kind == "promptString":
@@ -233,6 +244,14 @@ def input_kind(spec: dict) -> str:
     if kind != "command":
         return kind or "?"
     args = spec.get("args") or {}
+    if str(spec.get("command", "")) == SHELL_COMMAND:
+        # "from a scan" rather than "from a file" is the distinction worth drawing in
+        # this table: it is why these rows cannot be stale, and the reason the four
+        # dropdowns that used to read JSON were converted.
+        parts = ["pick many" if args.get("multiselect") else "pick one", "from a scan"]
+        if args.get("rememberPrevious"):
+            parts.append("remembered")
+        return ", ".join(parts)
     parts = ["pick many" if args.get("multiPick") else "pick one", "remembered"]
     if args.get("fileName"):
         parts.append("from a file")

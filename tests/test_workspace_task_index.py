@@ -305,6 +305,39 @@ def test_input_kind_names_how_the_picker_asks(block: dict):
     assert kinds["previewRow"] == "pick many, remembered, from a file, after a first pick"
 
 
+@pytest.mark.parametrize(
+    "args, expected",
+    [
+        ({"multiselect": True}, "pick many, from a scan"),
+        ({}, "pick one, from a scan"),
+        ({"multiselect": True, "rememberPrevious": True}, "pick many, from a scan, remembered"),
+        # The spelling every live picker in the workspace file actually carries.
+        ({"multiselect": True, "rememberPrevious": False}, "pick many, from a scan"),
+    ],
+)
+def test_a_shell_command_picker_is_read_with_its_own_keys(args, expected):
+    """The regression: both extensions are `"type": "command"`, and this read every one
+    of them with `command-variable`'s keys.
+
+    `multiPick` is not a key `shellCommand.execute` has, so its multi-selects all fell to
+    the singular default -- and `rememberPrevious: false`, which every live picker sets,
+    was reported as "remembered". Five rows in the table said the opposite of the truth.
+    """
+    spec = {"id": "x", "type": "command", "command": index.SHELL_COMMAND, "args": args}
+    assert index.input_kind(spec) == expected
+
+
+def test_a_command_variable_picker_still_reads_with_its_own_keys():
+    """The other branch, unchanged -- `multiPick` and the file it loads options from."""
+    spec = {
+        "id": "x",
+        "type": "command",
+        "command": "extension.commandvariable.pickStringRemember",
+        "args": {"multiPick": True, "fileName": "menu.json"},
+    }
+    assert index.input_kind(spec) == "pick many, remembered, from a file"
+
+
 def test_input_question_reads_a_command_inputs_own_args(block: dict):
     assert index.input_question(block["inputs"][0]) == "Which checkout(s)?"
     assert index.input_question(block["inputs"][1]) == "How much of the suite"
