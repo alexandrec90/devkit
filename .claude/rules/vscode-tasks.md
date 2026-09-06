@@ -202,8 +202,8 @@ never renders.
   anything — is limited to. One picker still needs it: `plugSelection` opens **pre-ticked**
   from the registry, which `shellCommand.execute` has no way to express, and unticked
   means unplug. Three things it costs: the list is stale by construction, so it needs a
-  visible timestamp **and a writer that is not a task run** — `plug-menu.json` is rewritten
-  by `worktree.py reconcile` on its schedule; a pick that no longer matches anything must
+  visible timestamp **and a writer that is not a task run** — its cached options file is
+  rewritten by `worktree.py reconcile` on its schedule; a pick that no longer matches anything must
   still resolve to something servable; and **every row must carry every templated field, as
   a string**, because the extension appends options until an expression *throws*, and
   `undefined` does not throw — a row missing one field draws ten thousand blank entries
