@@ -572,7 +572,7 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     file's `folders` as its registry, so a freshly scaffolded project was invisible to
     every sweep and could strand work with nothing reporting it. That matters more
     now than it did then: the sweep has no workspace task left, so the only readers
-    are automatic ones -- `workspace-status.py`'s session-start line and reconcile's
+    are automatic ones -- the daily `devkit-workspace-status` pass and reconcile's
     checkout pass -- and an unregistered project is invisible to both.
 
     Registration is best-effort by design: the project itself is already written and

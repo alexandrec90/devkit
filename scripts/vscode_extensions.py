@@ -26,14 +26,19 @@ Two decisions worth keeping:
   needs the `recommendations` entry and nothing else. Canonical rather than the live
   workspace file because a fresh machine is precisely the one that has not rendered yet.
 - **The installed set comes from VS Code's own registry, not `code --list-extensions`.**
-  This runs at every session start, where a subprocess spawn is the cost that gets a hook
-  disabled -- and the CLI is not on PATH on a machine where VS Code was installed without
-  it, which would report every extension missing on exactly the workstation least able to
-  tell that is wrong.
+  A subprocess spawn is the cost that gets a reporter disabled -- and the CLI is not on
+  PATH on a machine where VS Code was installed without it, which would report every
+  extension missing on exactly the workstation least able to tell that is wrong.
+
+This shipped reporting to nobody. `workspace-status.py`'s `toolchain_lines` was called
+"the session-start line" everywhere and no hook ever ran it, so the first machine to be
+missing `augustocdias.tasks-shell-input` found out by clicking *Agent: Fix a Broken PR*
+and reading `command 'shellCommand.execute' not found` -- the exact unsearchable failure
+the paragraph above describes. The daily `devkit-workspace-status` job is the reader.
 
 Silent whenever it cannot tell. A checkout with no workspace copy, or a VS Code keeping
 its extensions under a custom `--extensions-dir`, has nothing to compare against, and a
-session start must never turn "I don't know" into a fix nobody needs.
+reporter must never turn "I don't know" into a fix nobody needs.
 
 Tested in `tests/test_vscode_extensions.py`.
 """
@@ -60,7 +65,7 @@ EXTENSIONS_JSON = Path.home() / ".vscode" / "extensions" / "extensions.json"
 # JSONDecodeError is), and a well-formed file whose shape is not the one expected --
 # `recommendations` holding a string, or a registry entry with no `identifier`
 # (AttributeError, KeyError, TypeError). Anything outside that list is a bug here and
-# should reach the caller, which is a session start that already refuses to fail on it.
+# should reach the caller, which is a status pass that already refuses to fail on it.
 UNREADABLE = (OSError, ValueError, AttributeError, KeyError, TypeError)
 
 

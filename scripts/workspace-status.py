@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One line of workspace health, for a SessionStart hook.
+"""One line of workspace health, for the scheduled pass that reports it.
 
 Answers the questions that went unasked for a whole day of parallel work and cost
 an afternoon to unpick: **is there work stranded in any checkout**, **is any
@@ -10,15 +10,31 @@ The third is the quietest of them. The global hooks are a *copy*, so a stale one
 still fires and simply enforces an older policy -- there is no failure to notice,
 which is why it needs a line here rather than a check someone remembers to run.
 
-Design constraints, all from the fact that this runs at the top of every session:
+**Who runs it, and the two years this file spent answering nobody.** Every docstring
+here, in `schedule_health.py`, in `vscode_extensions.py` and in three places in
+`README.md` called this "the session-start line", and the `Ship: Check Workspace`
+quick-pick row was *deleted* on the strength of that. Nothing ever ran it: devkit's
+`SessionStart` hook is `.claude/hooks/session-start.sh`, whose local branch wires the
+commit gate and reports a missing venv, and `git log -S` finds no commit that ever
+named this file in a settings file. So a missing `uv`, an unset git identity, a
+picker's absent VS Code extension, a stood-down `reconcile` and a leaked box were all
+reported to nobody, and the extension gap surfaced the only way it could -- as
+`command 'shellCommand.execute' not found` at the moment a task was clicked.
 
-- **Never blocks.** Always exits 0. A status line that can fail a session start is
-  a status line that gets removed the first time it is wrong.
+`install-workspace-status.py` is what runs it now: a daily `devkit-workspace-status`
+job, deliberately **not** an agent hook, because the full pass is nine seconds
+(`sweep` 3.3s, `schtasks` 3.1s, the box survey 2.1s) and a per-session tax that size is
+one somebody eventually removes. `--notify` is how an unattended pass reaches a human.
+
+Design constraints, all from the fact that nobody is watching when this runs:
+
+- **Never blocks.** Always exits 0, `--notify` included. Findings are not a job
+  failure, and an exit code is the scheduler's `Last Result` -- a status line that
+  reports itself as a broken task teaches `schedule_health` to cry wolf.
 - **No network.** `--no-fetch`, so ahead/behind may be stale -- but "3 checkouts
-  have uncommitted work" does not need a fetch to be true, and a hook that costs
-  seconds gets disabled.
+  have uncommitted work" does not need a fetch to be true.
 - **Silent when healthy.** Prints nothing when there is nothing to say, so the one
-  time it does speak is worth reading.
+  time it does speak is worth reading, and raises no toast either.
 - **Absent workspace is silence, not an error.** The registry is a workstation-local
   file; on CI, a fresh clone, or anyone else's machine there is simply nothing to
   report.
@@ -28,6 +44,7 @@ Tested in `tests/test_workspace_status.py`.
 
 from __future__ import annotations
 
+import argparse
 import ctypes
 import json
 import shutil
@@ -41,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
 import devkit_project
 import harness_triage as _triage
+import notify as _notify
 import schedule_health
 import sweep
 import task_branch
@@ -48,6 +66,19 @@ import vscode_extensions
 import worktree
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# `notify.py` says notifications are a task-wrapper concern and that a diagnostic script
+# should never import it. This is the one caller that cannot use the wrapper, and the
+# reason is the exit code: `notify-wrap.py` toasts on every run and decides pass from
+# fail by the code it propagates, which for a scheduled task **is** its `Last Result`.
+# Making findings exit non-zero would have `schedule_health` reporting this job as
+# broken every day it had something to say; keeping it 0 would toast "Passed in 9s" at a
+# machine with nothing wrong. Neither is the message. So the decision -- *is there
+# anything to say* -- is made here, where it is already computed, and only the toast is
+# borrowed. `notify.py`'s docstring carries the same exception.
+NOTIFY_TITLE = "devkit workspace"
+# Windows hands a brand new console window to every console child of a console-less
+# parent, and the scheduled pass runs under `pythonw.exe`. See `scripts/windowless-jobs.md`.
+NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # Box-aware (see `sweep.default_workspace`). This one had the quietest version of the
 # bug: a session started inside a box resolved a registry that does not exist, and this
 # hook's whole design is to stay silent when it cannot tell -- so it reported nothing,
@@ -833,6 +864,7 @@ def _git_run(*args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=False,
+        creationflags=NO_WINDOW,
     )
 
 
@@ -952,7 +984,30 @@ def box_survey(workspace: Path) -> list[dict]:
         return []
 
 
+def toast_text(message: str) -> tuple[str, str]:
+    """`(title, body)` for the report -- the first finding, and how many follow it.
+
+    A toast shows two short strings and is gone, so it is a *pointer*, never the report:
+    the whole of it is in `logs/scheduled-workspace-status.log`, which the body names
+    because a notification nobody can act on is the same as no notification. The
+    `[workspace] ` prefix is dropped -- it disambiguates a status line printed among a
+    session's other output, and there is no other output in a toast.
+    """
+    lines = [line.removeprefix("[workspace] ") for line in message.splitlines() if line.strip()]
+    head = lines[0] if lines else ""
+    rest = f" (+{len(lines) - 1} more)" if len(lines) > 1 else ""
+    return NOTIFY_TITLE, f"{head}{rest} -- see logs/scheduled-workspace-status.log"
+
+
 def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="raise a Windows toast when there is something to report (unattended callers)",
+    )
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+
     workspace = DEFAULT_WORKSPACE
     if not workspace.is_file():
         return 0
@@ -992,7 +1047,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)
         return 0
     if message:
+        # Printed first, and never conditional on the toast: the report is the artifact
+        # and must not depend on a notifier that a POSIX machine, a locked session or a
+        # broken WinRT bridge will decline.
         print(message)
+        if args.notify:
+            # No handler here on purpose. `notify` never raises -- it returns False and
+            # says why on stderr, and `test_a_crashing_toast_never_reaches_the_wrapped_
+            # task` is what holds it to that. A second broad `except` around a call with
+            # that contract buys nothing and hides the next bug in this function.
+            _notify.notify(*toast_text(message))
     return 0
 
 

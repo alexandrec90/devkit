@@ -89,7 +89,7 @@ definitions::scripts/resume-sessions.py = 21
 definitions::scripts/sweep.py = 56
 definitions::scripts/sync-devkit.py = 44
 definitions::scripts/upgrade-project.py = 39
-definitions::scripts/workspace-status.py = 30
+definitions::scripts/workspace-status.py = 31
 definitions::scripts/workspace-task-index.py = 29
 definitions::scripts/worktree-guard.py = 60
 definitions::scripts/worktree.py = 161
@@ -122,7 +122,7 @@ file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/sweep.py = 1990
 file_lines::scripts/sync-devkit.py = 1417
 file_lines::scripts/upgrade-project.py = 1231
-file_lines::scripts/workspace-status.py = 1000
+file_lines::scripts/workspace-status.py = 1064
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2295
 file_lines::scripts/worktree.py = 6271
@@ -337,3 +337,7 @@ swallowed_errors::scripts/worktree.py = 2
 
 # 2026-09-05  recorded: workspace-status.py gains one import line and two docstring lines naming a third workstation prerequisite: the VS Code extension every checkout picker runs through, which a machine can be missing with no symptom until a task is clicked and fails naming a command rather than a package. The check itself is a NEW module, scripts/vscode_extensions.py, on schedule_health.py's precedent -- inlining it here would have cost +1 definitions, +1 swallowed_errors and +49 file_lines in a module that is already twice its limit and whose split three earlier records have deferred. This is the one-line adapter that split leaves behind.
 #   file_lines::scripts/workspace-status.py -> 1000
+
+# 2026-09-06  recorded: workspace-status.py gains --notify, toast_text and the docstring for both. The module was called 'the SessionStart status line' by six files and no hook ever ran it, so every prerequisite it reports -- a missing uv, an unset git identity, an uninstalled picker extension -- was reported to nobody; it is now the runner behind the daily devkit-workspace-status job, and --notify is the half that reaches a person. The growth is one flag, one pure function that turns the report into a two-field toast, and the paragraph recording who runs this and why it is deliberately not an agent hook (the pass is 9s, which as a per-session tax is what gets a check disabled). Splitting this module is what four earlier records here have deferred and is not a rider on wiring it to a caller.
+#   definitions::scripts/workspace-status.py -> 31
+#   file_lines::scripts/workspace-status.py -> 1064

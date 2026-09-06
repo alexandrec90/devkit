@@ -87,7 +87,7 @@ nothing anywhere would have said so.
   3. **The registry and the reap.** Each run records its servers in
      `logs/preview-ui-servers.json`, the next run stops any whose owner is gone before
      it serves anything, `--stop` ends every one of them from anywhere, and
-     `workspace-status.py` names what is still up at session start. This is the net
+     `workspace-status.py` names what is still up on its daily pass. This is the net
      for the run that predates the other two, and the one that makes an accumulation
      visible rather than merely impossible.
 
@@ -162,7 +162,7 @@ OFFLINE_BODY = b'{"detail":"no backend is running for this UI preview"}'
 READY_TIMEOUT = 90.0
 
 # What this run's servers are recorded in, so a *different* process can see them: the
-# `--stop` verb, the next run's orphan reap, and the session-start line in
+# `--stop` verb, the next run's orphan reap, and the scheduled status pass in
 # `workspace-status.py`. Under `logs/` on the same terms as the menu cache -- machine
 # state, gitignored, worth nothing to a fresh clone.
 SERVER_REGISTRY = REPO_ROOT / "logs" / "preview-ui-servers.json"

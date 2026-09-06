@@ -4822,7 +4822,7 @@ def survey(workspace: Path, fetch: bool = False, sizes: bool = False) -> list[di
 
     `sizes` adds the on-disk cost per box, behind a flag because it is the expensive
     walk `free_gb` exists to avoid — see `dir_size_bytes`. Off by default so
-    `workspace-status.py` can keep calling this at every session start.
+    `workspace-status.py` can keep calling this on every scheduled pass.
     """
     root = workspace.parent
     registry = load_registry(root)
