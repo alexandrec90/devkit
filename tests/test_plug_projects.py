@@ -51,6 +51,8 @@ picked_nothing = plug_projects.picked_nothing
 read_menu = plug_projects.read_menu
 refresh_menu = plug_projects.refresh_menu
 selection_from_ticks = plug_projects.selection_from_ticks
+guarded_selection = plug_projects.guarded_selection
+read_ticks = plug_projects.read_ticks
 write_menu = plug_projects.write_menu
 plan = plug_projects.plan
 render = plug_projects.render
@@ -328,6 +330,25 @@ def test_the_menu_survives_a_round_trip_as_the_names_it_offered(tmp_path):
     assert read_menu(path) == ["alpha", "beta", "gamma"]
 
 
+def test_the_menu_also_reads_back_which_rows_it_drew_ticked(tmp_path):
+    """The tick state is what `guarded_selection` compares against the live registry, and
+    it is the half of a cached checklist that can be wrong invisibly: a short list is
+    obviously short, a wrong tick looks exactly like a right one."""
+    path = tmp_path / "plug-menu.json"
+    candidates = inventory(REGISTRY, ["alpha", "beta"], ["alpha", "beta", "gamma"])
+    write_menu(menu_payload(candidates, "acme"), path)
+    assert read_ticks(path) == {"alpha", "beta"}
+
+
+def test_missing_or_corrupt_ticks_read_as_no_menu(tmp_path):
+    """None rather than an empty set, on `read_menu`'s reasoning: "nothing was ticked" is
+    a claim that every registered project was deliberately left out."""
+    assert read_ticks(tmp_path / "nothing.json") is None
+    corrupt = tmp_path / "plug-menu.json"
+    corrupt.write_text("[{", encoding="utf-8")
+    assert read_ticks(corrupt) is None
+
+
 def test_a_missing_or_corrupt_menu_reads_as_no_menu(tmp_path):
     """None rather than [], because an empty offered-set would make every registered
     project look like a row the reader deliberately left unticked."""
@@ -416,6 +437,66 @@ def test_a_project_registered_since_the_menu_was_written_is_not_retired():
         "alpha",
         "beta",
     }
+
+
+# --- and the harder half: a row the file DID draw, with the wrong tick ---------------
+
+
+def test_a_row_registered_since_the_file_was_drawn_is_skipped_not_retired():
+    """The failure this guard exists for, and it is silent in the dialog.
+
+    `beta` was on disk but unregistered when the file was written, so it draws unticked.
+    It has been registered since. Leaving it alone -- the ordinary thing to do with a row
+    you have no opinion about -- used to retire it, reverting a registration by a click
+    that never mentioned it.
+    """
+    selection, skipped = guarded_selection(
+        ("alpha",), ["alpha", "beta"], claimed={"alpha"}, plugged={"alpha", "beta"}
+    )
+    assert selection == {"alpha", "beta"}
+    assert skipped == ["beta"]
+
+
+def test_a_row_unregistered_since_the_file_was_drawn_is_skipped_not_replugged():
+    """The mirror case: `beta` draws ticked because it was registered then, and was
+    unplugged since. Leaving it ticked would put it back."""
+    selection, skipped = guarded_selection(
+        ("alpha", "beta"), ["alpha", "beta"], claimed={"alpha", "beta"}, plugged={"alpha"}
+    )
+    assert selection == {"alpha"}
+    assert skipped == ["beta"]
+
+
+def test_a_row_the_reader_actually_toggled_is_acted_on():
+    """The skip is for rows nobody touched. A toggle is an expressed intent, and the worst
+    it can do against a moved row is ask for the state that row is already in."""
+    selection, skipped = guarded_selection(
+        ("alpha", "beta"), ["alpha", "beta"], claimed={"alpha"}, plugged={"alpha", "beta"}
+    )
+    assert selection == {"alpha", "beta"}
+    assert skipped == []
+
+
+def test_a_fresh_file_decides_every_row_it_drew():
+    """When nothing moved, this is `selection_from_ticks` exactly -- the guard must not
+    cost a correct answer on the ordinary run."""
+    for ticked, offered, plugged in (
+        (("alpha",), ["alpha", "beta"], {"alpha", "beta"}),
+        (("alpha", "gamma"), ["alpha", "gamma"], {"alpha"}),
+    ):
+        selection, skipped = guarded_selection(ticked, offered, plugged, plugged)
+        assert selection == selection_from_ticks(ticked, offered, plugged)
+        assert skipped == []
+
+
+def test_a_row_the_file_never_drew_is_still_left_alone():
+    """`selection_from_ticks`' own guarantee, which this must not lose: a project
+    registered since is absent from the file, so no tick speaks for it either way."""
+    selection, skipped = guarded_selection(
+        ("alpha",), ["alpha", "gamma"], claimed={"alpha"}, plugged={"alpha", "beta"}
+    )
+    assert selection == {"alpha", "beta"}
+    assert skipped == []
 
 
 # --- the plan ---------------------------------------------------------------

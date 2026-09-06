@@ -31,7 +31,7 @@ complexity::scripts/install-reconcile-task.py::main = 19
 complexity::scripts/instruction-budget.py::render = 16
 complexity::scripts/lint-all.py::main = 19
 complexity::scripts/new-project.py::main = 19
-complexity::scripts/plug-projects.py::main = 47
+complexity::scripts/plug-projects.py::main = 49
 complexity::scripts/precommit/check_harness_manifest.py::check = 21
 complexity::scripts/preview-task.py::main = 30
 complexity::scripts/preview-task.py::merge_candidates = 17
@@ -79,7 +79,7 @@ definitions::scripts/hooks/structure_scan.py = 31
 definitions::scripts/install-git-policy.py = 21
 definitions::scripts/instruction-budget.py = 26
 definitions::scripts/new-project.py = 28
-definitions::scripts/plug-projects.py = 33
+definitions::scripts/plug-projects.py = 35
 definitions::scripts/preview-task.py = 51
 definitions::scripts/preview-ui-host.py = 31
 definitions::scripts/reclaim.py = 48
@@ -89,7 +89,7 @@ definitions::scripts/resume-sessions.py = 21
 definitions::scripts/sweep.py = 56
 definitions::scripts/sync-devkit.py = 44
 definitions::scripts/upgrade-project.py = 39
-definitions::scripts/workspace-status.py = 30
+definitions::scripts/workspace-status.py = 31
 definitions::scripts/workspace-task-index.py = 29
 definitions::scripts/worktree-guard.py = 60
 definitions::scripts/worktree.py = 159
@@ -113,7 +113,7 @@ file_lines::scripts/hooks/structure_check.py = 1050
 file_lines::scripts/hooks/structure_scan.py = 669
 file_lines::scripts/instruction-budget.py = 517
 file_lines::scripts/new-project.py = 860
-file_lines::scripts/plug-projects.py = 973
+file_lines::scripts/plug-projects.py = 1043
 file_lines::scripts/preview-task.py = 1722
 file_lines::scripts/preview-ui-host.py = 1110
 file_lines::scripts/reclaim.py = 1232
@@ -122,7 +122,7 @@ file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/sweep.py = 1990
 file_lines::scripts/sync-devkit.py = 1422
 file_lines::scripts/upgrade-project.py = 1231
-file_lines::scripts/workspace-status.py = 1000
+file_lines::scripts/workspace-status.py = 1030
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2295
 file_lines::scripts/worktree.py = 6225
@@ -132,7 +132,7 @@ function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
 function_lines::scripts/install-reconcile-task.py::main = 114
 function_lines::scripts/lint-all.py::main = 98
 function_lines::scripts/new-project.py::main = 143
-function_lines::scripts/plug-projects.py::main = 195
+function_lines::scripts/plug-projects.py::main = 202
 function_lines::scripts/precommit/check_harness_manifest.py::check = 84
 function_lines::scripts/preview-task.py::main = 98
 function_lines::scripts/preview-task.py::wait_for_all = 88
@@ -338,7 +338,6 @@ swallowed_errors::scripts/worktree.py = 2
 # 2026-09-05  recorded: workspace-status.py gains one import line and two docstring lines naming a third workstation prerequisite: the VS Code extension every checkout picker runs through, which a machine can be missing with no symptom until a task is clicked and fails naming a command rather than a package. The check itself is a NEW module, scripts/vscode_extensions.py, on schedule_health.py's precedent -- inlining it here would have cost +1 definitions, +1 swallowed_errors and +49 file_lines in a module that is already twice its limit and whose split three earlier records have deferred. This is the one-line adapter that split leaves behind.
 #   file_lines::scripts/workspace-status.py -> 1000
 
-
 # 2026-09-05  recorded: vendored_paths had to match ast.AnnAssign as well as ast.Assign: the real MANIFEST declaration is annotated, so the vendored-file skip returned nothing in every consumer that ever ran it. The fix plus the note recording why it was invisible costs 8 lines in a module already past file_lines. Splitting this module is still its own change.
 #   file_lines::scripts/hooks/structure_check.py -> 1050
 
@@ -355,3 +354,11 @@ swallowed_errors::scripts/worktree.py = 2
 
 # 2026-09-06  recorded: preview-ui-host.py gains picker_rows, the module that owns the one-line-per-option format every live picker shares: this script is the second reader of the preview scan, and drawing its rows a second way rather than importing the format would be the duplicate that module exists to prevent. It is 610 lines past file_lines already, so its split is its own change.
 #   imports::scripts/preview-ui-host.py -> 24
+
+# 2026-09-06  recorded: the plug/unplug checklist is the one dropdown that still reads a cached file, because its rows open pre-ticked from the registry and shellCommand.execute cannot express that. Two things follow, and both land in modules already far past every limit. plug-projects.py gains read_ticks and guarded_selection, which stop a stale tick being read as an instruction: a project registered since the file was drawn used to be retired by a click that never mentioned it. workspace-status.py gains plug_menu_line and becomes the writer, because the scheduled pass that wrote that file is stood down and nothing else does. Both modules are 500+ lines past file_lines and their splits are their own change; the alternative was leaving a silent destructive edit in a task that also creates repositories.
+#   complexity::scripts/plug-projects.py::main -> 49
+#   definitions::scripts/plug-projects.py -> 35
+#   definitions::scripts/workspace-status.py -> 31
+#   file_lines::scripts/plug-projects.py -> 1043
+#   file_lines::scripts/workspace-status.py -> 1030
+#   function_lines::scripts/plug-projects.py::main -> 202
