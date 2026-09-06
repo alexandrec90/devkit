@@ -203,6 +203,16 @@ never renders.
   of its branches" pair is a `pickStringRemember` nested inside the outer input's `args`,
   read back as `${pickStringRemember:<id>}` — one token, because an input resolves to one
   string.
+- **The extension those pickers need is a workstation prerequisite, and a
+  `recommendations` entry does not install it.** `rioj7.command-variable` supplies every
+  `pickStringRemember` and `multiPick` in this file, so a machine without it runs twenty
+  tasks into `command 'extension.commandvariable.pickStringRemember' not found` — a
+  message naming a command and no package, which is why the fix is unguessable from the
+  failure. `scripts/vscode_extensions.py` reads the recommendation list out of the
+  canonical workspace file and `toolchain_lines` reports it at session start alongside a
+  missing `uv`, with the `code --install-extension` line. The list has one source, so a
+  task that grows a dependency on a new extension needs the `recommendations` entry and
+  nothing else — and note that entry is what devkit *checks*, never what installs it.
 - **An action scoped to exactly one checkout writes the name, not a picker.** A
   `${input:...}` with a single option asks a question that has no second answer, and the
   extension still shows it. Spell the checkout in the task's `--project` argument instead.
