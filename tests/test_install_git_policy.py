@@ -10,6 +10,21 @@ from support import REPO_ROOT, load_script
 installer = load_script("scripts/install-git-policy.py")
 
 
+def test_run_command_captures_both_streams_without_raising():
+    """The installer's default runner. It must not `check=True`: every caller reads the
+    return code itself -- `ensure_compatible_hooks_path` treats a non-zero
+    `--get core.hooksPath` as "unset", which is the ordinary case on a fresh machine."""
+    ok = installer.run_command([sys.executable, "-c", "print('out')"])
+    assert ok.returncode == 0
+    assert ok.stdout.strip() == "out"
+
+    bad = installer.run_command(
+        [sys.executable, "-c", "import sys; sys.stderr.write('boom'); sys.exit(3)"]
+    )
+    assert bad.returncode == 3
+    assert bad.stderr.strip() == "boom"
+
+
 class FakeRunner:
     def __init__(self, hooks_path=""):
         self.hooks_path = hooks_path

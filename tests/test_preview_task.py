@@ -32,6 +32,7 @@ import pytest
 from support import load_script, worktree
 
 preview_task = load_script("scripts/preview-task.py")
+picker_rows = load_script("scripts/picker_rows.py")
 
 NOW = _dt.datetime(2026, 8, 21, 18, 0, tzinfo=_dt.UTC)
 
@@ -777,18 +778,21 @@ def _raise_or(outcome):
     return outcome
 
 
-# --- the dropdown's option file -----------------------------------------------
+# --- the rows the dropdown draws ------------------------------------------------
 #
-# The VS Code picker cannot run a command, so the two dropdowns read a file this script
-# wrote on its last run. That buys a shape with two hard constraints and one soft one,
-# and all three are asserted here because none of them fails loudly: the extension builds
-# a list by evaluating one expression per field against rising indices until one THROWS,
-# so a malformed payload does not error -- it draws ten thousand blank rows, or silently
-# omits a checkout whose only offer is its trunk.
+# The picker runs `--rows` when it opens, so these lines ARE the quick-pick. Every
+# failure here is silent in the UI -- a shifted field draws a row whose description is
+# its detail, a split line draws a row whose value is somebody's prose -- so the shapes
+# are asserted positionally. `tests/test_picker_rows.py` owns what `cell` does to a
+# field; these assert this module hands it the right four.
 
 
-def _payload(rows, projects=("carameli",), now=NOW):
-    return preview_task.menu_payload(list(rows), list(projects), now)
+def _rows(rows, now=NOW):
+    return preview_task.rows(list(rows), now)
+
+
+def _fields(line):
+    return line.split(picker_rows.FIELD_SEP)
 
 
 def _branch(ref, *, project="carameli", updated=""):
@@ -803,95 +807,52 @@ def _trunk(ref="master", *, project="carameli", updated=""):
     )
 
 
-def test_every_row_carries_every_field_as_a_string():
-    """The blank-rows failure, and the reason it would never be reported as one.
-
-    An expression that resolves to `undefined` on a row that exists does not end the
-    extension's loop -- only one that throws does. So a row missing `detail`, which is
-    every branch with no PR title, appends blanks up to the extension's 10000 cap and
-    then draws them.
-    """
-    payload = _payload([_branch("agent/x"), _branch("agent/y", updated="2026-08-21T17:00:00Z")])
-    assert payload["rows"]["carameli"]
-    for row in payload["rows"]["carameli"]:
-        assert set(row) == {"value", "label", "description", "detail"}
-        assert all(isinstance(value, str) for value in row.values())
-    for entry in payload["projects"]:
-        assert set(entry) == {"name", "label", "description"}
-        assert all(isinstance(value, str) for value in entry.values())
-
-
 def test_a_row_is_picked_by_project_and_ref_in_one_token():
     """A VS Code input resolves to one string, so the checkout travels inside the value."""
-    payload = _payload([_branch("agent/x")])
-    assert payload["rows"]["carameli"][0]["value"] == "carameli:agent/x"
-    assert payload["rows"]["carameli"][0]["label"] == "agent/x"
+    line = _rows([_branch("agent/x")])[0]
+    assert _fields(line)[0] == "carameli:agent/x"
+    assert _fields(line)[1] == "agent/x"
+
+
+def test_the_checkout_is_on_every_row_because_the_list_is_flat():
+    """One input runs one command, so there is no `which checkout` stage to carry it."""
+    line = _rows([_branch("agent/x", project="ibkr_trader")])[0]
+    assert _fields(line)[2].startswith("ibkr_trader -- ")
+
+
+def test_a_row_with_no_pr_title_still_carries_four_fields():
+    """Every branch with no PR has an empty detail, and a row three fields long would
+    make the next row's reader take the description for one."""
+    assert len(_fields(_rows([_branch("agent/x")])[0])) == 4
 
 
 def test_no_row_is_a_control_row():
-    """Every row is servable, which is what removing `Rescan` bought.
-
-    The old last row of every checkout resolved to no candidate at all, so `resolve_pick`
-    had to be allowed to return nothing and every caller had to handle it. Now a value
-    that survives to the resolver always names something that can be brought up.
-    """
-    payload = _payload([_trunk(), _branch("agent/x")], projects=("carameli", "ibkr_trader"))
-    for project in ("carameli", "ibkr_trader"):
-        for row in payload["rows"][project]:
-            assert "__" not in row["value"]
+    """Every row is servable, which is what removing `Rescan` bought: a value that
+    survives to the resolver always names something that can be brought up."""
+    for line in _rows([_trunk(), _branch("agent/x")]):
+        assert "__" not in _fields(line)[0]
 
 
-def test_the_scans_age_is_on_the_checkout_rather_than_a_row():
-    """Removing the `Rescan` row removed the only place the timestamp was shown.
-
-    It moved up a level rather than away: the first dropdown's second column carries it,
-    so it is read once per run instead of once per checkout's worth of scrolling.
-    """
-    payload = _payload([_trunk(), _branch("agent/x")])
-    assert payload["asOf"] in payload["projects"][0]["description"]
+def test_a_scan_that_found_nothing_draws_the_sentinel_rather_than_no_rows():
+    """An empty quick-pick cannot be told apart from a command that failed to run."""
+    drawn = _rows([])
+    assert len(drawn) == 1
+    assert _fields(drawn[0])[0] == picker_rows.NOTHING
+    assert "nothing to preview" in drawn[0]
 
 
-def test_a_checkout_with_nothing_under_review_still_offers_its_trunk():
-    """Otherwise the branch pushed thirty seconds ago picks an empty list and stops.
-
-    `collect` adds a trunk row per checkout unconditionally, which is what makes an empty
-    pick list unreachable now that no control row exists to fill one.
-    """
-    payload = _payload(
-        [_trunk(), _trunk(project="ibkr_trader", ref="main")],
-        projects=("carameli", "ibkr_trader"),
-    )
-    assert sorted(entry["name"] for entry in payload["projects"]) == ["carameli", "ibkr_trader"]
-    assert [row["label"] for row in payload["rows"]["carameli"]] == ["master"]
-    assert "trunk only" in payload["projects"][0]["description"]
+def test_the_rows_keep_the_scans_ranking():
+    """`collect` already ranks trunk first and then by recency; re-sorting here would
+    give the dropdown and `--list` two different orders for the same machine."""
+    rows = [_trunk(), _branch("agent/new", updated="2026-08-21T17:00:00Z")]
+    assert [_fields(line)[1] for line in _rows(rows)] == ["master", "agent/new"]
 
 
-def test_checkouts_are_ordered_by_their_freshest_row():
-    rows = [
-        _branch("agent/old", project="ibkr_trader", updated="2026-08-20T10:00:00Z"),
-        _branch("agent/new", project="carameli", updated="2026-08-21T17:00:00Z"),
-    ]
-    payload = _payload(rows, projects=("ibkr_trader", "carameli"))
-    assert [entry["name"] for entry in payload["projects"]] == ["carameli", "ibkr_trader"]
-
-
-def test_a_checkout_note_says_how_many_are_already_standing():
-    rows = [
-        preview_task.Candidate(
-            project="carameli", ref="agent/up", kind=preview_task.KIND_STANDING, box="b"
-        ),
-        _branch("agent/x"),
-    ]
-    note = _payload(rows)["projects"][0]["description"]
-    assert "2 to look at" in note
-    assert "1 already standing" in note
-
-
-def test_a_row_the_scan_found_is_present_even_though_the_menu_would_trim_it():
-    """The cache is written from the untrimmed scan: a dropdown has no screen to fill."""
+def test_every_row_the_scan_found_is_drawn_even_past_the_terminal_limit():
+    """A quick-pick has no screen to run out of, so the row `--limit` drops from a
+    terminal menu is exactly the row only this list can offer."""
     rows = [_branch(f"agent/{n}") for n in range(preview_task.MENU_LIMIT + 5)]
-    payload = _payload(rows)
-    assert len(payload["rows"]["carameli"]) == len(rows)
+    assert len(_rows(rows)) == len(rows)
 
 
 # --- resolving what the dropdown sent back -------------------------------------
@@ -1098,13 +1059,7 @@ def stub(monkeypatch, tmp_path):
         return 0
 
     monkeypatch.setattr(preview_task, "serve_all", serve_all)
-    monkeypatch.setattr(preview_task, "MENU_CACHE", tmp_path / "logs" / "preview-menu.json")
-    return types.SimpleNamespace(
-        workspace=workspace,
-        served=served,
-        monkeypatch=monkeypatch,
-        cache=tmp_path / "logs" / "preview-menu.json",
-    )
+    return types.SimpleNamespace(workspace=workspace, served=served, monkeypatch=monkeypatch)
 
 
 def _menu(stub, rows):
@@ -1199,24 +1154,24 @@ def test_the_dropdown_offers_only_checkouts_that_declare_a_frontend(tmp_path, mo
 
 def test_collect_scans_only_the_checkouts_it_is_given(scan, monkeypatch):
     """The narrowing is a parameter, not a filter on the result: each checkout in the list
-    costs a `git fetch` and a `gh pr list`, and this runs every fifteen minutes."""
+    costs a `git fetch` and a `gh pr list`, and this runs when a person opens the
+    dropdown -- a discarded row is a second they spent watching an empty quick-pick."""
     scanned = []
     monkeypatch.setattr(preview_task, "open_prs", lambda d: scanned.append(d.name) or [])
     preview_task.collect(scan.workspace, fetch=False, projects=["ibkr_trader"])
     assert scanned == ["ibkr_trader"]
 
 
-def test_menu_payload_drops_a_row_from_an_unlisted_checkout():
-    """Belt and braces over `collect`'s narrowing, and the same reason: the file this
-    builds is read by a task that can only serve a frontend, so a row from anywhere else
-    is an option that refuses when it is picked."""
-    rows = [
-        preview_task.Candidate(project="carameli", ref="agent/x", kind=preview_task.KIND_BRANCH),
-        preview_task.Candidate(project="ibkr_trader", ref="agent/y", kind=preview_task.KIND_BRANCH),
-    ]
-    payload = preview_task.menu_payload(rows, ["carameli"])
-    assert [entry["name"] for entry in payload["projects"]] == ["carameli"]
-    assert list(payload["rows"]) == ["carameli"]
+def test_the_rows_path_scans_only_the_servable_checkouts(scan, monkeypatch, capsys):
+    """The dropdown feeds `preview-ui-host.py`, which can only serve a checkout declaring
+    `[frontend] dir`, so a row from anywhere else is an option that refuses when picked.
+    Narrowed at the scan rather than after it -- see `collect`."""
+    scanned = []
+    monkeypatch.setattr(preview_task, "open_prs", lambda d: scanned.append(d.name) or [])
+    monkeypatch.setattr(preview_task, "ui_projects", lambda ws: ["carameli"])
+    assert preview_task.main(["--workspace", str(scan.workspace), "--rows", "--no-fetch"]) == 0
+    assert scanned == ["carameli"]
+    assert capsys.readouterr().out.strip()
 
 
 def test_every_checkout_contributes_its_trunk_row(scan):
@@ -1249,22 +1204,11 @@ def test_a_richer_row_for_the_default_branch_is_not_duplicated_by_the_trunk_row(
     assert rows[0].title == "a release PR"
 
 
-def test_refresh_menu_writes_the_options_file(scan):
-    path = scan.tmp / "logs" / "menu.json"
-    assert preview_task.refresh_menu(scan.workspace, fetch=False, path=path) == path
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["rows"]["carameli"][0]["label"] == "master"
-
-
-def test_refresh_menu_swallows_a_failure_rather_than_raising(scan):
-    """It is a rider on `worktree.py reconcile`, so it must never fail a pass that reaped
-    boxes correctly. A menu that could not be built costs one stale dropdown."""
-    scan.monkeypatch.setattr(
-        preview_task,
-        "ui_projects",
-        lambda ws: _raise_or(RuntimeError("registry is a directory")),
-    )
-    assert preview_task.refresh_menu(scan.workspace, fetch=False) is None
+def test_the_rows_path_prints_the_picker_lines_and_nothing_else(scan, capsys):
+    """This stdout IS the quick-pick: a progress line here is a row a person can tick."""
+    assert preview_task.main(["--workspace", str(scan.workspace), "--rows", "--no-fetch"]) == 0
+    printed = capsys.readouterr().out.splitlines()
+    assert printed == ["carameli:master|master|carameli -- default branch|"]
 
 
 def test_a_missing_workspace_registry_is_reported_not_traced(tmp_path, capsys):
@@ -1445,29 +1389,24 @@ def test_the_prompt_offers_all_only_when_something_is_standing(stub, capsys, mon
     assert "`a` for all 1 standing preview(s)" in capsys.readouterr().out
 
 
-def test_every_run_leaves_the_dropdown_a_fresh_option_file(stub, monkeypatch):
-    """Nothing schedules this refresh: the previous preview is what keeps the list warm."""
+def test_serving_a_pick_writes_no_options_anywhere(stub, monkeypatch, tmp_path):
+    """The reversion check for deleting the cache: an ordinary run used to leave a file
+    behind, and a run that still wrote one would mean a second, staler source of rows."""
     monkeypatch.setattr(preview_task, "ui_projects", lambda w: ["carameli"])
     _menu(stub, [_branch("agent/x")])
     assert preview_task.main(["--workspace", str(stub.workspace), "--pick", "1"]) == 0
-    payload = json.loads(stub.cache.read_text(encoding="utf-8"))
-    assert payload["rows"]["carameli"][0]["value"] == "carameli:agent/x"
+    assert not list(tmp_path.rglob("*menu*.json"))
 
 
-def test_refresh_writes_the_options_and_picks_nothing(stub, capsys, monkeypatch):
+def test_rows_picks_nothing_and_serves_nothing(stub, capsys, monkeypatch):
+    """It is the picker's own read of the machine: it must not act on what it finds."""
     monkeypatch.setattr(preview_task, "ui_projects", lambda w: ["carameli"])
     _menu(stub, [_branch("agent/x")])
-    assert preview_task.main(["--workspace", str(stub.workspace), "--refresh"]) == 0
+    assert preview_task.main(["--workspace", str(stub.workspace), "--rows"]) == 0
     assert stub.served == []
-    assert stub.cache.is_file()
-    assert str(stub.cache) in capsys.readouterr().out
-
-
-def test_refresh_is_a_failure_when_the_options_cannot_be_written(stub, capsys, monkeypatch):
-    monkeypatch.setattr(preview_task, "write_menu", lambda *a, **k: None)
-    _menu(stub, [])
-    assert preview_task.main(["--workspace", str(stub.workspace), "--refresh"]) == 1
-    assert "Could not write" in capsys.readouterr().out
+    assert capsys.readouterr().out.splitlines() == [
+        "carameli:agent/x|agent/x|carameli -- branch on origin|"
+    ]
 
 
 def test_pick_ref_serves_that_row_without_asking(stub, monkeypatch):
@@ -2231,5 +2170,5 @@ def test_echo_prints_a_whole_flushed_line(capsys):
 def test_build_parser_defaults_to_an_interactive_fetching_run():
     args = preview_task.build_parser().parse_args([])
     assert args.pick == 0 and args.pick_ref == ""
-    assert args.fetch and not args.refresh and not args.all and not args.down and not args.ui
+    assert args.fetch and not args.rows and not args.all and not args.down and not args.ui
     assert args.limit == preview_task.MENU_LIMIT and args.workspace is None

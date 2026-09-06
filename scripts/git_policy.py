@@ -588,16 +588,30 @@ def _pre_commit_command(root: Path, runner: Runner) -> list[str] | None:
     return None
 
 
+# Two agents reported this message in one week, both saying it names a refusal and no
+# remedy -- so it reads as policy declining the commit rather than a tool being missing,
+# and the first guess is `--no-verify`. The stale-copy line is not padding: this file is
+# COPIED to `~/.devkit/git-hooks` and the hooks run the copy, so `_venv_roots` can be
+# fixed here and still be missing where it fires -- which is how both reports were
+# produced. Nothing about a stale copy looks wrong; only `--check` answers it.
+NO_PRE_COMMIT = (
+    "[devkit branch policy] project has .pre-commit-config.yaml but pre-commit is not installed",
+    "  looked in: .venv of this tree and of the checkout it was cut from, PATH, "
+    "and this interpreter",
+    "  install it:      uv pip install pre-commit   (or: pip install pre-commit)",
+    "  provision a box: python scripts/worktree.py provision <box>",
+    "  if it IS installed, the hooks may be running a stale copy of this policy:",
+    "                   python scripts/install-git-policy.py --check",
+)
+
+
 def _run_pre_commit_framework(root: Path, runner: Runner) -> int:
     if not (root / ".pre-commit-config.yaml").is_file():
         return 0
     command = _pre_commit_command(root, runner)
     if command is None:
-        print(
-            "[devkit branch policy] project has .pre-commit-config.yaml but pre-commit "
-            "is not installed",
-            file=sys.stderr,
-        )
+        for line in NO_PRE_COMMIT:
+            print(line, file=sys.stderr)
         return 1
     result = runner([*command, "run", "--hook-stage", "pre-commit"], cwd=root)
     if result.stdout:

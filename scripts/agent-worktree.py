@@ -12,8 +12,9 @@ Claude session spawns, so the delete verb can see those too.
 | --- | --- |
 | `new` | cut `agent/<slug>-<mmdd>`, a worktree for it, and open Claude or Codex there |
 | `remove` | destroy the ticked worktrees, and their local branches when nothing is lost |
-| `refresh` | rewrite the option file both dropdowns read |
-| `list` | print what a refresh would write |
+| `rows` | print the delete dropdown's rows, from a scan, and stop |
+| `bases` | print the base-branch dropdown's rows and stop |
+| `list` | print the worktrees, for a terminal |
 
 **This is not the box tier and must not become it.** `worktree.py` cuts a box at
 `<workspace>/.worktrees/`, leases it a port and a `COMPOSE_PROJECT_NAME`, provisions its
@@ -23,12 +24,14 @@ provisioning, no reaper, and nothing to collide with the ports a static checkout
 The one thing shared is how a terminal tab is opened, which is `agent_box.open_agent` --
 two copies of that would be two answers to "which window does the agent open in".
 
-The menu is a scan, not live state: `rioj7.command-variable` can read a file and cannot
-run a command, so `worktree.reconcile` rewrites it on its fifteen-minute pass exactly as
-it does for `preview-task.py` and `fix-prs.py`. `new` and `remove` also rewrite it as
-they finish, which the other two menus have no equivalent of and this one needs: the
-worktree you just cut is the one you are most likely to want in the delete list, and a
-quarter of an hour is a long time to be unable to undo a click.
+The menus are live, and there is no file under them. Both are `shellCommand.execute`
+running `rows` or `bases` at the moment the picker opens, which is a scan of
+`git worktree list --porcelain` per checkout, fanned out. What that replaced was a JSON
+file only `worktree.reconcile` wrote, so a worktree cut a minute ago was not in the
+delete list and one destroyed a minute ago still was -- and `new` and `remove` each had
+to rewrite it as they finished to make the common case bearable. Nothing rewrites
+anything now: a worktree is in the list because it exists, which is also why
+`fix-prs.py` can cut into this tier without knowing this file exists.
 
 Every decision is in `scripts/agent_worktrees.py`, pure and separately tested; what is
 here spawns git and terminals, and takes a runner so the tests do not.
@@ -37,6 +40,7 @@ here spawns git and terminals, and takes a runner so the tests do not.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures as futures
 import subprocess
 import sys
 from pathlib import Path
@@ -45,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_worktrees as aw
 import devkit_project
+import picker_rows
 import sweep
 import task_branch as tb
 import task_input
@@ -58,9 +63,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 agent_box = load_by_path("agent_box", REPO_ROOT / "scripts" / "agent-box.py")
 
-# The file both dropdowns read. Under `logs/` for `fix-prs.MENU_CACHE`'s reason: machine
-# state with the lifetime of a reconcile pass, gitignored, worth nothing to a fresh clone.
-MENU_CACHE = REPO_ROOT / "logs" / "agent-worktrees.json"
+# How many checkouts `scan` reads at once. A worktree scan is three `git` calls per
+# checkout and one more per worktree found, which is seconds in a row; the picker runs
+# it while somebody watches.
+SCAN_WORKERS = 8
 
 # What the `new` picker offers. `none` is CLI-only and deliberately not a row: the task's
 # whole purpose is opening an agent, and a worktree with nothing in it is `git worktree
@@ -83,13 +89,21 @@ def trees_for(project_dir: Path) -> list[aw.Tree]:
     listed = git("worktree", "list", "--porcelain")
     if listed.returncode != 0:
         return []
-    found = []
-    for name, path, branch in aw.nested(project_dir, listed.stdout or ""):
+    nested = aw.nested(project_dir, listed.stdout or "")
+    if not nested:
+        return []
+
+    def read(entry: tuple[str, str, str]) -> aw.Tree:
+        name, path, branch = entry
         inner = sweep.git_for(Path(path))
         status = inner("status", "--porcelain")
         dirty = len((status.stdout or "").strip().splitlines()) if status.returncode == 0 else 0
-        found.append(aw.Tree(name, path, branch, dirty, unpushed_count(inner, branch)))
-    return found
+        return aw.Tree(name, path, branch, dirty, unpushed_count(inner, branch))
+
+    # Fanned out for `scan`'s reason, one level in: a checkout with eight worktrees is
+    # sixteen git calls, and this runs while somebody watches a quick-pick open.
+    with futures.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(nested))) as pool:
+        return list(pool.map(read, nested))
 
 
 def unpushed_count(git, branch: str) -> int:
@@ -154,39 +168,24 @@ def scan(workspace: Path) -> tuple[dict[str, list[aw.Tree]], dict[str, list[tupl
     Every checkout is listed even when it has neither, because the reader's question is
     "where are my worktrees", and one that silently drops out when it is empty is
     indistinguishable from one the scan could not reach.
+
+    Concurrent because both dropdowns now run this when they open rather than reading a
+    file a scheduled pass wrote. The per-checkout calls share nothing and both helpers
+    answer empty rather than raising, so the pool cannot fail where the loop would not.
     """
     text = workspace.read_text(encoding="utf-8")
     root = workspace.parent
     names = [name for name in devkit_project.known_projects(text) if (root / name).is_dir()]
+    if not names:
+        return {}, {}
+    with futures.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(names))) as pool:
+        found = list(
+            pool.map(lambda name: (trees_for(root / name), recent_bases(root / name)), names)
+        )
     return (
-        {name: trees_for(root / name) for name in names},
-        {name: recent_bases(root / name) for name in names},
+        {name: trees for name, (trees, _) in zip(names, found, strict=True)},
+        {name: bases for name, (_, bases) in zip(names, found, strict=True)},
     )
-
-
-def refresh_menu(workspace: Path, path: Path | None = None) -> Path | None:
-    """Rebuild the option file. The path on success, None on any failure.
-
-    Total, like `write_menu` and for the stronger reason: `worktree.reconcile` calls this
-    at the end of every pass, and a menu that could not be built must never fail a
-    reconcile that reaped boxes correctly. `OSError` is a workspace file that cannot be
-    read and `ValueError` one that cannot be parsed as a registry -- named rather than
-    caught as `Exception`, so a bug in the shapes above still surfaces as a traceback
-    instead of an empty dropdown nobody can account for.
-
-    A scan that found NO checkouts writes nothing, for `plug-projects.refresh_menu`'s
-    reason: `sweep.parse_workspace` answers a registry it cannot parse with an empty list
-    rather than a raise, so "no projects" is what a truncated workspace file looks like
-    from here -- and overwriting a good menu with an empty one turns a transient bad read
-    into two dropdowns that offer nothing until the next pass.
-    """
-    try:
-        trees, bases = scan(workspace)
-        if not trees:
-            return None
-        return aw.write_menu(aw.menu_payload(trees, bases), path or MENU_CACHE)
-    except (OSError, ValueError):
-        return None
 
 
 def create(project: str, workspace: Path, slug: str, base: str, agent: str, runner) -> int:
@@ -230,7 +229,6 @@ def create(project: str, workspace: Path, slug: str, base: str, agent: str, runn
         print("agent-worktree: the worktree was not cut; nothing to open", file=sys.stderr)
         return EXIT_FAILED
     print(f"{branch} off origin/{ref}\n  {path}")
-    refresh_menu(workspace)
     return agent_box.open_agent(agent, path, branch, runner)
 
 
@@ -278,7 +276,6 @@ def remove(picks: list[tuple[str, str]], workspace: Path, forced: bool, runner) 
             print(f"  {project}: no worktree called {name} (the menu was stale)")
             continue
         worst = max(worst, remove_one(project, source, found, forced, runner))
-    refresh_menu(workspace)
     return worst
 
 
@@ -311,9 +308,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="`force` discards uncommitted and unpushed work; `keep` refuses to",
     )
 
-    again = sub.add_parser("refresh", help="rewrite the menu file and stop")
+    again = sub.add_parser("rows", help="print the delete dropdown's rows and stop")
+    from_refs = sub.add_parser("bases", help="print the base-branch dropdown's rows and stop")
     shown = sub.add_parser("list", help="print the worktrees and stop")
-    for one in (new, gone, again, shown):
+    for one in (new, gone, again, from_refs, shown):
         one.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
     return parser
 
@@ -335,10 +333,13 @@ def main(argv: list[str] | None = None, runner=subprocess.run) -> int:
         return EXIT_USAGE
 
     try:
-        if args.verb == "refresh":
-            written = refresh_menu(workspace)
-            print(f"agent-worktree: wrote {written}" if written else "agent-worktree: not written")
-            return EXIT_OK if written else EXIT_FAILED
+        # Both picker paths: this stdout IS the quick-pick, so nothing else may reach it.
+        if args.verb == "rows":
+            picker_rows.emit(aw.tree_rows(scan(workspace)[0]))
+            return EXIT_OK
+        if args.verb == "bases":
+            picker_rows.emit(aw.base_rows(scan(workspace)[1]))
+            return EXIT_OK
         if args.verb == "list":
             print(render(scan(workspace)[0]))
             return EXIT_OK
