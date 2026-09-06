@@ -5123,9 +5123,7 @@ def reconcile(
         code, synced = sync_checkouts(workspace, apply=apply, fetch=fetch)
         worst = max(worst, code)
 
-    menu = refresh_preview_menu(workspace, apply=apply, fetch=fetch)
     plug_menu = refresh_plug_menu(apply=apply)
-    tree_menu = refresh_worktree_menu(workspace, apply=apply)
 
     report = {
         "applied": apply,
@@ -5135,9 +5133,7 @@ def reconcile(
         "automerge": automerge,
         "boxes": outcomes,
         "checkouts": synced,
-        "preview_menu": menu,
         "plug_menu": plug_menu,
-        "worktree_menu": tree_menu,
     }
     return worst, report
 
@@ -5145,10 +5141,12 @@ def reconcile(
 def menu_rider(script: str, rebuild) -> str:
     """Let one sibling script rebuild its own dropdown as a rider on this pass.
 
-    The three `refresh_*_menu` functions below differ only in which script they load and
-    what they ask it for; this is the half they share, and it is the half that has to be
-    right. It is also the half worth having in one place: four copies of a broad
-    handler are four chances for one of them to stop being total.
+    One caller left, and it is worth keeping the seam anyway: what this contains is a
+    broad `except` around a module loaded by path, which is the part that has to be right
+    and the part that is easy to get subtly wrong when it is inlined. The other three
+    riders are gone because their dropdowns run a command when they open -- see
+    `.claude/rules/vscode-tasks.md`. This one remains while `plugSelection` still reads a
+    file, and it goes the same way when that changes.
 
     Loaded by path and INSIDE this function on purpose. Each of those scripts imports
     this module, so importing one at the top of it is a cycle; and each is hyphenated, so
@@ -5168,44 +5166,6 @@ def menu_rider(script: str, rebuild) -> str:
     except Exception:
         return ""
     return str(written) if written else ""
-
-
-def refresh_preview_menu(workspace: Path, *, apply: bool, fetch: bool = True) -> str:
-    """Rebuild the preview tasks' dropdown options. The path written, or "" for anything else.
-
-    A rider on this pass rather than a schedule of its own, and that is the whole design:
-    the options file is what the two `Preview:` dropdowns read, `rioj7.command-variable`
-    can only read a *file*, and the only writer used to be the previous click on one of
-    those tasks. So the list a person picked from was however stale their last preview
-    was -- open PRs missing for days, and boxes on branches that had long since merged
-    still offered. This pass already runs every fifteen minutes, already fetches, and has
-    just finished reaping exactly the boxes whose rows should go: it knows more about
-    what belongs in that menu than any other scheduled thing on the machine.
-
-    `menu_rider` owns the loading and the containment for all three of these.
-    """
-    if not apply:
-        return ""
-    return menu_rider("preview-task.py", lambda mod: mod.refresh_menu(workspace, fetch=fetch))
-
-
-def refresh_worktree_menu(workspace: Path, *, apply: bool) -> str:
-    """Rebuild the `.claude/worktrees/` dropdowns' options. The path written, or "".
-
-    The third rider, and the only one whose menu has a second writer: `agent-worktree.py`
-    rewrites it as `new` and `remove` finish, because the worktree you have just cut is
-    the one you are most likely to want in the delete list and a quarter of an hour is a
-    long time to be unable to undo a click. That does not make this rider optional -- the
-    worktrees Claude Code's own `--worktree` flag cuts, and the ones a remote session
-    spawns, are made by nothing that runs here, so a menu with only its own tasks for a
-    writer would be blind to most of what it lists.
-
-    No `fetch` argument, unlike `refresh_preview_menu`: this reads local worktrees and
-    remote-tracking refs, and the pass has already fetched by the time it runs.
-    """
-    if not apply:
-        return ""
-    return menu_rider("agent-worktree.py", lambda mod: mod.refresh_menu(workspace))
 
 
 def refresh_plug_menu(*, apply: bool) -> str:
@@ -5517,12 +5477,6 @@ def render_reconcile(report: dict) -> str:
             lines.extend(f"        {note}" for note in row.get("notes") or [])
     lines.extend(render_checkout_sync(checkouts, applied=bool(applied)))
     if applied:
-        menu = report.get("preview_menu")
-        lines.append(
-            f"  preview menu: refreshed ({menu})"
-            if menu
-            else "  preview menu: [warn] not refreshed -- the Preview: dropdowns are stale"
-        )
         plug_menu = report.get("plug_menu")
         lines.append(
             f"  plug menu: refreshed ({plug_menu})"

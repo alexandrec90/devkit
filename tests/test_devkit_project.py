@@ -1377,23 +1377,35 @@ def test_drift_reports_a_changed_input_definition(canonical):
     assert f"input definition differs: {first['id']}" in tasks_drift(changed, canonical)
 
 
-def test_the_preview_row_dropdown_asks_for_the_project_exactly_once(canonical):
-    """`${pickStringRemember:previewProject}` may appear in ONE `jsonOption` field only.
+def test_a_nested_picker_is_asked_for_in_one_json_option_field_only(canonical):
+    """`${pickStringRemember:...}` may appear in ONE `jsonOption` field per input.
 
     The extension substitutes each template string of `jsonOption` in turn, and every
-    occurrence of a `${pickStringRemember:...}` variable opens its own quick-pick.
-    Spelled in all four fields, the project dropdown appeared four times per run before
-    the branch list showed. `value` must resolve first — insertion order is evaluation
-    order — storing the answer under the nested pick's `key`, and the other fields read
-    it back with `${remember:previewProject}`, which never prompts.
+    occurrence of such a variable opens its own quick-pick. Spelled in all four fields,
+    the nested project dropdown appeared four times per run before the list it narrowed
+    showed. `value` must resolve first — insertion order is evaluation order — storing
+    the answer under the nested pick's `key`, and the other fields read it back with
+    `${remember:<key>}`, which never prompts.
+
+    Written over every input rather than over the one that had the bug: the inputs that
+    had it are live `shellCommand.execute` pickers now and nest nothing, so naming one
+    would leave the trap covered only while somebody remembered to re-aim this. It
+    passes vacuously today, which is the correct state for a ratchet on a shape nothing
+    currently uses.
     """
-    row = next(i for i in canonical["inputs"] if i["id"] == "previewRow")
-    template = row["args"]["jsonOption"]
-    assert next(iter(template)) == "value", "the prompting field must be evaluated first"
-    prompting = [f for f, expr in template.items() if "${pickStringRemember:" in expr]
-    assert prompting == ["value"], f"fields that would each open a project pick: {prompting}"
-    reading = [f for f, expr in template.items() if "${remember:previewProject}" in expr]
-    assert reading == ["label", "description", "detail"]
+    for spec in canonical["inputs"]:
+        template = (spec.get("args") or {}).get("jsonOption")
+        if not isinstance(template, dict):
+            continue
+        prompting = [f for f, expr in template.items() if "${pickStringRemember:" in str(expr)]
+        if not prompting:
+            continue
+        assert next(iter(template)) == "value", (
+            f"{spec['id']}: the prompting field must be evaluated first"
+        )
+        assert prompting == ["value"], (
+            f"{spec['id']}: fields that would each open their own pick: {prompting}"
+        )
 
 
 def _picker_args(spec: dict) -> list[dict]:

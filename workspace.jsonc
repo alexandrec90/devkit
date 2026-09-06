@@ -1920,113 +1920,33 @@
 				"default": "auto"
 			},
 			{
-				// The dropdown pair this task asks with. The extension cannot RUN anything to
-				// build a list, so both read the option file `preview-task.py` writes under
-				// devkit's `logs/` — which makes the list a SCAN, not live state. What keeps it
-				// current is not a task run: `worktree.py reconcile` rewrites the file on every
-				// pass, and the scheduled pass runs every fifteen minutes, so open PRs appear
-				// and merged ones leave without anyone asking. Each project's first row is its
-				// default branch, and the header row carries the scan's timestamp. On a machine
-				// where that pass has never run, `python devkit/scripts/preview-ui-host.py
-				// --refresh` writes the file and picks nothing.
+				// Live, like `brokenPrRow` and for the reason its note carries: this list used to
+				// be a JSON file that only `worktree.py reconcile` wrote, so it was stale by
+				// construction and froze silently the moment that pass was stood down.
+				// `preview-task.py --rows` scans the machine when the picker opens -- boxes, open
+				// PRs and recent branches, one checkout per thread, about two seconds for six.
 				//
-				// There is no `Rescan` row and there must not be one again: a self-service row
-				// makes staleness the reader's problem on every single open, and the thing it
-				// asked them to notice — an open PR missing from the list — is the file's
-				// writer's job. `.claude/rules/vscode-tasks.md` carries the general form.
+				// It draws FEWER checkouts than the terminal menu does, and `ui_projects` is that
+				// line: this list's reader serves a frontend with `npm run dev`, so a checkout
+				// declaring no `[frontend] dir` would be an option that can only refuse. The scan
+				// is narrowed rather than its rows, because every checkout in it costs a fetch and
+				// a `gh pr list`.
 				//
-				// `previewProject` is NESTED inside this input rather than declared beside it,
-				// because the second list depends on the first: the extension resolves a nested
-				// `pickStringRemember` first and substitutes the answer into the expressions
-				// below. Two sibling inputs would resolve in whatever order VS Code chose, and
-				// neither could read the other.
-				//
-				// The pick fires ONCE, in `value`: the extension substitutes each template
-				// string in turn, and EVERY `${pickStringRemember:...}` occurrence opens its
-				// own quick-pick — spelled in all four fields, the project dropdown appeared
-				// four times per run. `value` resolves first, the pick stores its answer under
-				// its `key`, and the other three fields read it back with
-				// `${remember:previewProject}`, which never prompts.
-				//
-				// The value is one token, `<project>:<ref>`, because a VS Code input resolves to
-				// one string. `git check-ref-format` refuses a ref containing a colon, so the
-				// first one always separates the two halves.
-				//
-				// Several rows at a time: `multiPick` draws the list with checkboxes and joins
-				// the ticked values with `separator`. A SPACE, rather than the comma the
-				// `project` picker uses, for the same reason the colon above was chosen over
-				// something merely conventional — a comma is legal in a git ref name and a
-				// space is not, so the separator cannot fall inside the half that varies.
-				// `preview-task.py` splits on it, drops any pick that would land in a box
-				// another pick has already claimed, then starts the boxes in turn and waits on
-				// all of them at once.
-				//
-				// `clearStorage`, which is the one place this deliberately differs from the
-				// `project` picker: that picker's options are the checkout registry, which does
-				// not move, so pre-ticking last time's answer is a convenience. These options
-				// are refs the previous scan happened to find, so remembering the ticked set
-				// turns "also show me this one" into "re-serve everything I have looked at
-				// since Tuesday".
-				//
-				// Omitting `multiPickStorage` does NOT buy that, which is what this comment
-				// claimed until the extension's source was read: a `multiPick` stores its
-				// ticked labels either way, and the argument only chooses global over
-				// workspace storage. The remembered set then overwrites each option's own
-				// `picked`, so the second click reopened on the previous answer with nothing
-				// in this file asking for it. `clearStorage` drops the set before the list is
-				// built, which is the behaviour the paragraph above always described.
+				// Flat, where the file keyed its rows by checkout: one input runs one command, so
+				// the checkout rides in each row's description instead. Every row is servable --
+				// each checkout contributes its trunk unconditionally, so there is always
+				// something to pick.
 				"id": "previewRow",
 				"type": "command",
-				"command": "extension.commandvariable.pickStringRemember",
+				"command": "shellCommand.execute",
 				"args": {
-					"description": "Which branch, PR or box should be brought up? Tick as many as you want.",
-					"key": "previewRow",
-					// NO `checkEscapedUI`, and its absence is the fix for a task that could be
-					// used exactly once per window. The flag is a STICKY bit: escaping stores
-					// `__escapedUI: true` in the extension's `rememberStore` (`storeEscapedUI`
-					// in extension-common.js), every later command that opts in returns
-					// `undefined` BEFORE its quick-pick opens, and that early return is the one
-					// path that never clears the bit it just read. Nothing else clears it, so one
-					// Escape retired both dropdowns for the life of the window, with no list ever
-					// appearing again.
-					//
-					// What that leaves behind is the half the extension's README denies. It says
-					// an escaped UI "will not start the task/launch" — and on this VS Code the
-					// task starts: a dismissed `project` picker on 2026-08-26 left
-					// `devkit-ports: no slot registered for '${input:project}'`, exit 1, in
-					// `logs/ports-show-checkout-allocations.log` (overwritten per run, hence the
-					// quote). That is a task running on the same `undefined` this flag returns,
-					// so opting in would buy a dropdown that stops opening and no cancel at all.
-					// The cancel is `scripts/task_input.py`, in the script that receives the
-					// literal — which is the only tier that observably gets a say.
-					"multiPick": true,
-					"clearStorage": true,
-					"separator": " ",
-					"fileName": "${workspaceFolder:devkit}/logs/preview-menu.json",
-					"fileFormat": "json",
-					"jsonOption": {
-						"value": "content.rows['${pickStringRemember:previewProject}'][__itemIdx__].value",
-						"label": "content.rows['${remember:previewProject}'][__itemIdx__].label",
-						"description": "content.rows['${remember:previewProject}'][__itemIdx__].description",
-						"detail": "content.rows['${remember:previewProject}'][__itemIdx__].detail"
-					},
-					"pickStringRemember": {
-						"previewProject": {
-							"description": "Which checkout has the branch you want to look at?",
-							"key": "previewProject",
-							// No `checkEscapedUI` here either, and for the sharper half of the
-							// reason above: this is the FIRST pick of the pair, so it is the
-							// one an Escape usually lands on, and the bit it would set is read
-							// by the outer command on the next run.
-							"fileName": "${workspaceFolder:devkit}/logs/preview-menu.json",
-							"fileFormat": "json",
-							"jsonOption": {
-								"value": "content.projects[__itemIdx__].name",
-								"label": "content.projects[__itemIdx__].label",
-								"description": "content.projects[__itemIdx__].description"
-							}
-						}
-					}
+					"command": "python \"${workspaceFolder:devkit}/scripts/preview-task.py\" --rows",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "Which branch should be served? Tick as many as you want.",
+					"fieldSeparator": "|",
+					"multiselect": true,
+					"multiselectSeparator": " ",
+					"rememberPrevious": false
 				}
 			},
 			{
@@ -2076,56 +1996,22 @@
 				}
 			},
 			{
-				// `previewRow`'s shape again, pointed at a third file, and every paragraph on
-				// that input applies here unchanged: the nesting (the branch list depends on
-				// the checkout, and two sibling inputs could not see each other), the single
-				// pick in `value` with `${remember:...}` in the other three fields, the
-				// one-token `<checkout>:<branch>` value, and the absence of `checkEscapedUI`.
-				// Read them there.
+				// One half of one scan, drawn by its own command because one input resolves one
+				// of them: `bases` lists what a new branch can be cut from and `rows` lists what
+				// can be destroyed, and a row from either in the other is an option that refuses.
 				//
-				// SINGLE-pick, unlike its two siblings, so no `separator` and no
-				// `clearStorage`: one worktree is cut off one base, and a checkbox list of
-				// bases would be asking for several branches at once under one topic.
-				//
-				// The writer is `agent-worktree.py --refresh`, and `worktree.py reconcile`
-				// calls it on the same pass that rebuilds the other two menus. This one has a
-				// second writer the others do not — `new` and `remove` rewrite it as they
-				// finish — because the worktree you just cut is the one you are most likely
-				// to want in the delete list, and a quarter of an hour is a long time to be
-				// unable to undo a click.
-				//
-				// Every checkout is listed even when it has no worktrees, and one with none
-				// draws a single sentinel row. That is not decoration: the extension appends
-				// options until an expression THROWS, so an empty array would end the list at
-				// the first such checkout and hide every one after it. `agent-worktree.py`
-				// recognises the sentinel and runs nothing.
+				// Single-select, so no `multiselect`: a new worktree is cut from one base. The
+				// value is `<checkout>:<branch>` for `previewRow`'s reason -- an input resolves to
+				// one string, so the checkout travels inside it.
 				"id": "worktreeBase",
 				"type": "command",
-				"command": "extension.commandvariable.pickStringRemember",
+				"command": "shellCommand.execute",
 				"args": {
-					"description": "Which branch should the new one be cut from?",
-					"key": "worktreeBase",
-					"fileName": "${workspaceFolder:devkit}/logs/agent-worktrees.json",
-					"fileFormat": "json",
-					"jsonOption": {
-						"value": "content.bases['${pickStringRemember:worktreeSource}'][__itemIdx__].value",
-						"label": "content.bases['${remember:worktreeSource}'][__itemIdx__].label",
-						"description": "content.bases['${remember:worktreeSource}'][__itemIdx__].description",
-						"detail": "content.bases['${remember:worktreeSource}'][__itemIdx__].detail"
-					},
-					"pickStringRemember": {
-						"worktreeSource": {
-							"description": "Which checkout is this worktree for?",
-							"key": "worktreeSource",
-							"fileName": "${workspaceFolder:devkit}/logs/agent-worktrees.json",
-							"fileFormat": "json",
-							"jsonOption": {
-								"value": "content.projects[__itemIdx__].name",
-								"label": "content.projects[__itemIdx__].label",
-								"description": "content.projects[__itemIdx__].branches"
-							}
-						}
-					}
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-worktree.py\" bases",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "Which checkout, and what should the new branch be cut from?",
+					"fieldSeparator": "|",
+					"rememberPrevious": false
 				}
 			},
 			{
@@ -2164,49 +2050,25 @@
 				"default": "claude"
 			},
 			{
-				// `worktreeBase`'s twin, pointed at the same file's other list and drawn with
-				// checkboxes: finishing with three experiments at once is the ordinary way
-				// this task gets used. `separator` is a SPACE for `previewRow`'s reason — a
-				// comma is legal in a git ref and a directory name, and a space is not, so it
-				// cannot fall inside the half that varies.
+				// The other half, and the one where staleness cost the most: each row warns with
+				// what that worktree holds (`clean and pushed`, `2 uncommitted path(s)`), which is
+				// exactly what a click is about to destroy. Read from a file, that warning was as
+				// old as the last scheduled pass.
 				//
-				// `clearStorage` for `previewRow`'s reason too, and a sharper one: these
-				// options are worktrees that existed at the last scan, so remembering the
-				// ticked set would pre-tick rows for worktrees a previous run has already
-				// destroyed.
-				//
-				// A separate `pickStringRemember` key from `worktreeBase`'s, so that picking
-				// a checkout to cut in does not pre-answer which checkout to delete from.
+				// It is also why `new` and `remove` no longer rewrite anything as they finish.
+				// They did, because a quarter of an hour was a long time to be unable to undo a
+				// click; a list built by the click needs no catch-up.
 				"id": "worktreeRow",
 				"type": "command",
-				"command": "extension.commandvariable.pickStringRemember",
+				"command": "shellCommand.execute",
 				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-worktree.py\" rows",
+					"cwd": "${workspaceFolder:devkit}",
 					"description": "Which worktrees should be destroyed? Tick as many as you want.",
-					"key": "worktreeRow",
-					"multiPick": true,
-					"clearStorage": true,
-					"separator": " ",
-					"fileName": "${workspaceFolder:devkit}/logs/agent-worktrees.json",
-					"fileFormat": "json",
-					"jsonOption": {
-						"value": "content.rows['${pickStringRemember:worktreeOwner}'][__itemIdx__].value",
-						"label": "content.rows['${remember:worktreeOwner}'][__itemIdx__].label",
-						"description": "content.rows['${remember:worktreeOwner}'][__itemIdx__].description",
-						"detail": "content.rows['${remember:worktreeOwner}'][__itemIdx__].detail"
-					},
-					"pickStringRemember": {
-						"worktreeOwner": {
-							"description": "Which checkout are the worktrees in?",
-							"key": "worktreeOwner",
-							"fileName": "${workspaceFolder:devkit}/logs/agent-worktrees.json",
-							"fileFormat": "json",
-							"jsonOption": {
-								"value": "content.projects[__itemIdx__].name",
-								"label": "content.projects[__itemIdx__].label",
-								"description": "content.projects[__itemIdx__].worktrees"
-							}
-						}
-					}
+					"fieldSeparator": "|",
+					"multiselect": true,
+					"multiselectSeparator": " ",
+					"rememberPrevious": false
 				}
 			},
 			{

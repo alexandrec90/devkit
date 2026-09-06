@@ -17,10 +17,10 @@ Every function here is pure and tested in `tests/test_agent_worktrees.py`.
 
 from __future__ import annotations
 
-import datetime as _dt
-import json
 from dataclasses import dataclass
 from pathlib import Path
+
+import picker_rows
 
 # Relative to a checkout. Spelled with a forward slash because every comparison below is
 # made on `as_posix()` output, which is what `git worktree list --porcelain` prints too.
@@ -34,11 +34,10 @@ PICK_SEP = ":"
 # `brokenPrRow`: neither half can contain one.
 PICK_LIST_SEP = " "
 
-# The row a checkout with nothing to offer still draws. The extension builds its list by
-# evaluating one expression per field against rising indices until one *throws*, so an
-# empty array would end the dropdown at the first such checkout and hide every one after
-# it. The receiving verb recognises the sentinel and runs nothing.
-NOTHING = "none"
+# The value a row carries when picking it should run nothing, re-exported from
+# `picker_rows` rather than spelled again: `parse_pick` reads it and the row builders
+# write it, and a second copy would drift the first time either moved.
+NOTHING = picker_rows.NOTHING
 
 # How many recent branches the base picker offers per checkout. The default branch is
 # always the first row and does not count against it.
@@ -149,100 +148,65 @@ def parse_pick(token: str) -> tuple[str, str] | None:
     return project, name
 
 
-def tree_row(project: str, tree: Tree) -> dict[str, str]:
-    """One row of the delete dropdown. Every field a string -- see `menu_payload`."""
-    return {
-        "value": pick_value(project, tree.name),
-        "label": tree.name,
-        "description": tree.state(),
-        "detail": f"{tree.branch or 'detached HEAD'} -- {tree.path}",
-    }
+def tree_row(project: str, tree: Tree) -> str:
+    """One row of the delete dropdown.
 
-
-def base_row(project: str, ref: str, note: str) -> dict[str, str]:
-    """One row of the base-branch dropdown. The value is the branch name, not `origin/`
-    plus it: the CLI takes a branch and resolves which ref it means, so the same string
-    works whether it was ticked here or typed."""
-    return {
-        "value": pick_value(project, ref),
-        "label": ref,
-        "description": note,
-        "detail": f"cut the new branch from origin/{ref}",
-    }
-
-
-def placeholder_row(project: str, label: str, note: str) -> dict[str, str]:
-    """The row a checkout with nothing to list still draws. See `NOTHING`."""
-    return {
-        "value": pick_value(project, NOTHING),
-        "label": label,
-        "description": note,
-        "detail": "picking this runs nothing",
-    }
-
-
-def menu_payload(
-    trees: dict[str, list[Tree]],
-    bases: dict[str, list[tuple[str, str]]],
-    now: _dt.datetime | None = None,
-) -> dict[str, object]:
-    """The options file both tasks read: the checkouts, their bases, and their worktrees.
-
-    One file for two dropdowns because one scan answers both questions and a second file
-    would be a second thing to keep current. The shape is `fix-prs.menu_payload`'s and is
-    load-bearing for its reasons: the extension appends options until an expression
-    *throws*, `undefined` does not throw, and a bare list index merely returns it -- so
-    every list is an array under a key per checkout, and every row carries all four
-    fields as strings.
-
-    Checkouts with worktrees sort first, and within that by count: the delete dropdown's
-    top entry should be the checkout that has something to delete, which alphabetical
-    order gets right only by luck.
+    The checkout rides in the description because the list is flat: one input runs one
+    command, so the "which checkout, then which of its worktrees" pair the cached menu
+    nested has nowhere to live -- and "where are my worktrees" was always a question
+    about the machine rather than about one checkout.
     """
-    stamp = now or _dt.datetime.now(_dt.UTC)
-    as_of = stamp.astimezone().strftime("%Y-%m-%d %H:%M")
-    entries: list[dict[str, str]] = []
-    rows: dict[str, list[dict[str, str]]] = {}
-    base_rows: dict[str, list[dict[str, str]]] = {}
-    for project in sorted(trees, key=lambda name: (-len(trees[name]), name)):
-        listed = trees[project]
-        rows[project] = [tree_row(project, tree) for tree in listed] or [
-            placeholder_row(project, "no worktrees", f"nothing under {WORKTREES_DIR}")
-        ]
-        base_rows[project] = [base_row(project, ref, note) for ref, note in bases.get(project, ())]
-        if not base_rows[project]:
-            base_rows[project] = [
-                placeholder_row(project, "no branches", "origin could not be read")
-            ]
-        entries.append(
-            {
-                "name": project,
-                "label": project,
-                "worktrees": f"{len(listed) or 'no'} worktree(s) -- as of {as_of}",
-                "branches": f"{len(base_rows[project])} branch(es) -- as of {as_of}",
-            }
-        )
-    return {
-        "generated": stamp.isoformat(),
-        "asOf": as_of,
-        "projects": entries,
-        "bases": base_rows,
-        "rows": rows,
-    }
+    return picker_rows.row(
+        pick_value(project, tree.name),
+        tree.name,
+        f"{project} -- {tree.state()}",
+        f"{tree.branch or 'detached HEAD'} -- {tree.path}",
+    )
 
 
-def write_menu(payload: dict, path: Path) -> Path | None:
-    """Save the options, atomically. The path on success, None on any failure.
+def base_row(project: str, ref: str, note: str) -> str:
+    """One row of the base-branch dropdown.
 
-    Never raises, for `fix-prs.write_menu`'s reason: this runs as a rider on somebody
-    else's pass, and the cost of a swallowed error is one stale dropdown that the next
-    pass rewrites within the quarter hour.
+    The value is the branch name, not `origin/` plus it: the CLI takes a branch and
+    resolves which ref it means, so the same string works whether it was ticked here or
+    typed.
     """
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        scratch = path.with_suffix(".json.tmp")
-        scratch.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        scratch.replace(path)
-    except OSError:
-        return None
-    return path
+    return picker_rows.row(
+        pick_value(project, ref),
+        ref,
+        f"{project} -- {note}",
+        f"cut the new branch from origin/{ref}",
+    )
+
+
+def tree_rows(trees: dict[str, list[Tree]]) -> list[str]:
+    """The delete dropdown's lines: every checkout's worktrees, the fullest checkout first.
+
+    Ordered by count for the cached menu's reason, read one level down: whoever opened
+    this wants to delete something, so the rows of the checkout that has several belong
+    above the one that has none. Within a checkout the scan's order stands -- it is `git
+    worktree list`'s, which is creation order.
+    """
+    listed = [
+        tree_row(project, tree)
+        for project in sorted(trees, key=lambda name: (-len(trees[name]), name))
+        for tree in trees[project]
+    ]
+    return listed or [
+        picker_rows.nothing_row("no worktrees", f"nothing under {WORKTREES_DIR} in any checkout")
+    ]
+
+
+def base_rows(bases: dict[str, list[tuple[str, str]]]) -> list[str]:
+    """The base-branch dropdown's lines: every checkout's recent branches.
+
+    Alphabetical by checkout, where `tree_rows` is by count, and the difference is the
+    question: this list is read to find a *known* branch name, so a stable position is
+    worth more than putting the busiest checkout on top.
+    """
+    listed = [
+        base_row(project, ref, note)
+        for project in sorted(bases)
+        for ref, note in bases.get(project, ())
+    ]
+    return listed or [picker_rows.nothing_row("no branches", "origin could not be read")]

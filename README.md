@@ -411,7 +411,8 @@ python scripts/agent-worktree.py new --pick devkit:main --slug voicemail --agent
 python scripts/agent-worktree.py list                          # every checkout's worktrees
 python scripts/agent-worktree.py remove --picks "devkit:voicemail-0905"
 python scripts/agent-worktree.py remove --picks "devkit:spike-0905" --force keep
-python scripts/agent-worktree.py refresh                       # rewrite the dropdowns' options
+python scripts/agent-worktree.py rows                          # the delete dropdown's rows, live
+python scripts/agent-worktree.py bases                         # the base-branch dropdown's rows
 ```
 
 **Not the box tier.** No port lease, no `COMPOSE_PROJECT_NAME`, no toolchain provisioning
@@ -423,8 +424,11 @@ so `/ship` and the branch policy read it exactly as they read a box's.
 `--force force` discards. The local branch is deleted only with `git branch -d`, so a
 branch whose commits exist nowhere else is kept and said so, and origin's copy is never
 touched. *Agent: New Worktree* and *Agent: Delete Worktrees* are the same two verbs with
-dropdowns, and their lists are rebuilt by `worktree.py reconcile` every quarter of an hour
-and again as either task finishes.
+dropdowns, and each runs its own scan when it opens — `agent-worktree.py bases` for what a
+branch can be cut from, `rows` for what can be destroyed. That matters most for the delete
+list, whose rows carry what each worktree holds (`clean and pushed`, `2 uncommitted
+path(s)`): read from a cache, that warning would be as old as the last scheduled pass, and
+it describes what the click is about to destroy.
 
 ### Sending an agent at a PR that is already red
 
@@ -494,6 +498,7 @@ python scripts/preview-task.py            # menu, then bring the pick up and ope
 python scripts/preview-task.py --list     # print the menu and exit (agents: --json)
 python scripts/preview-task.py --pick 3   # take row 3 without asking
 python scripts/preview-task.py --all      # re-serve every standing preview
+python scripts/preview-task.py --rows     # the dropdown's rows, live
 ```
 
 `--all` is the post-reboot case: Docker stops every container on a restart while the
@@ -518,7 +523,7 @@ task, and it is the only preview task there is.
 
 ```bash
 python scripts/preview-ui-host.py --picks="carameli:agent/foo carameli:agent/bar"
-python scripts/preview-ui-host.py --refresh   # rebuild the dropdown's option file
+python scripts/preview-ui-host.py --rows      # the dropdown's rows, live
 python scripts/preview-ui-host.py --stop      # stop every host preview server
 ```
 

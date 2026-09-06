@@ -43,7 +43,7 @@ Usage:
     python preview-task.py --down          # menu, then STOP the picked row's stack
     python preview-task.py --pick-ref carameli:agent/comic-book-ui-0820  # what the task sends
     python preview-task.py --pick-ref "carameli:agent/a-0824 carameli:agent/b-0824"  # several
-    python preview-task.py --refresh       # rebuild the dropdown's option file and exit
+    python preview-task.py --rows          # the dropdown's rows, live, and exit
     python preview-task.py --pick 3 --no-wait  # return when the containers start, not
                                                # when what they serve answers
 
@@ -79,22 +79,21 @@ name. Underneath, `worktree.plan_preview` looks that name up among the live boxe
 port the box already holds whether it was picked as a standing row, as a stale branch row
 drawn before the box existed, or typed by hand.
 
-The extension that draws those lists (`rioj7.command-variable`) cannot run a command to
-build them; it can only read a **file**. So `write_menu` saves one on every run of this
-script, which makes the dropdown the previous scan rather than the current one. On a
-machine that has never run either, `python preview-ui-host.py --refresh` writes the file
-and picks nothing.
+The dropdown runs `--rows` when it opens, through `shellCommand.execute`, so its list
+is this scan and not a cached copy of an earlier one. It used to be a file, because
+`rioj7.command-variable` can only read one -- and the cost was not theoretical: the
+broken-PR menu that worked the same way spent two days a day stale after the pass that
+wrote it was switched off, still drawing rows for a PR that had been closed.
 
 **The file lists fewer checkouts than this menu does**, and `ui_projects` is that line.
 Its reader serves a frontend with `npm run dev`, so a checkout that declares no
 `[frontend] dir` is an option that can only refuse; the terminal menu here brings stacks
 up and keeps offering every checkout that has one.
 
-**`--refresh` is also on a schedule**, which is what keeps that gap down to minutes
-instead of down to whenever somebody last previewed something. `worktree.py reconcile`
-calls `refresh_menu` at the end of every pass, and that already runs every fifteen
-minutes under the `devkit-worktree-reconcile` scheduled task -- so a PR opened, merged or
-retitled is in the dropdown within the quarter hour with nobody having asked for it.
+**The scan fans out across the checkouts**, because a picker is a person watching an
+empty box: each one costs a `git fetch` and a `gh pr list`, which is five seconds in a
+row and about two in a pool. Nothing schedules this any more -- the list is built by the
+click that needs it.
 
 There used to be a `Rescan` row at the end of every checkout's list for this, picking
 nothing and falling through to the terminal menu below with the scan already done. It was
@@ -132,6 +131,7 @@ its own record; `preview-ui-host.py`, which is dispatched, gets `log-wrap.py` fr
 from __future__ import annotations
 
 import argparse
+import concurrent.futures as futures
 import datetime as _dt
 import json
 import socket
@@ -148,6 +148,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_ports
 import devkit_project
+import picker_rows
 import sweep
 import task_branch as tb
 import worktree
@@ -256,10 +257,10 @@ KIND_NOTE = {
     KIND_BRANCH: "branch on origin",
 }
 
-# The file the VS Code dropdown reads its options from. Under `logs/` because it is
-# machine state with exactly the lifetime of `logs/reconcile.log` -- gitignored, owned by
-# whichever run writes it next, and worth nothing to a fresh clone.
-MENU_CACHE = REPO_ROOT / "logs" / "preview-menu.json"
+# How many checkouts `collect` scans at once. The pool is bounded by the registry in
+# practice; the ceiling stops a workspace that grows to thirty repos opening thirty
+# fetches at once.
+SCAN_WORKERS = 8
 
 # `--pick-ref <project>:<ref>`, one token because a VS Code input resolves to one string.
 # The separator is safe rather than merely conventional: `git check-ref-format` refuses a
@@ -646,93 +647,37 @@ def resolve_picks(text: str, candidates: list[Candidate]) -> list[Candidate]:
     return [resolve_pick(token, candidates) for token in split_picks(text)]
 
 
-def menu_row(candidate: Candidate, now: _dt.datetime | None = None) -> dict[str, str]:
-    """One dropdown entry, with every field a string. See `menu_payload` for why."""
-    return {
-        "value": pick_value(candidate),
-        "label": candidate.ref,
-        "description": describe(candidate, now),
-        "detail": candidate.title,
-    }
+def menu_row(candidate: Candidate, now: _dt.datetime | None = None) -> str:
+    """One quick-pick line for a previewable ref.
 
-
-def project_note(found: list[Candidate], as_of: str) -> str:
-    """The first dropdown's second column: what picking this checkout will offer.
-
-    The trunk row is not counted. It is in every checkout's list unconditionally, so
-    counting it would report `1 to look at` for a checkout with no branch, no PR and no
-    box -- a number that is true of the rows and false about the question being asked,
-    and identical for the checkout that genuinely has one thing to review.
+    The checkout is in the description because the list is flat: `shellCommand.execute`
+    resolves one input per command, so the "which checkout, then which of its refs" pair
+    the cached menu could nest has nowhere to live. It was never the question this task
+    asks anyway -- what is worth looking at is a property of the ref.
     """
-    found = [candidate for candidate in found if candidate.kind != KIND_TRUNK]
-    if not found:
-        return f"nothing under review -- trunk only, as of {as_of}"
-    standing = sum(1 for candidate in found if candidate.kind == KIND_STANDING)
-    note = f"{len(found)} to look at"
-    if standing:
-        note += f", {standing} already standing"
-    return f"{note} -- as of {as_of}"
+    return picker_rows.row(
+        pick_value(candidate),
+        candidate.ref,
+        f"{candidate.project} -- {describe(candidate, now)}",
+        candidate.title,
+    )
 
 
-def menu_payload(
-    candidates: list[Candidate],
-    projects: list[str],
-    now: _dt.datetime | None = None,
-) -> dict:
-    """The dropdown's options file: the checkouts, and each one's rows keyed by name.
+def rows(candidates: list[Candidate], now: _dt.datetime | None = None) -> list[str]:
+    """Every previewable ref as a quick-pick line, in `collect`'s ranking.
 
-    Two shapes here are load-bearing rather than stylistic, because the extension builds
-    its list by evaluating one expression **per field** against rising indices until one
-    *throws*:
-
-      - every row carries all four of `value`, `label`, `description` and `detail`, and
-        each as a string. A field that resolves to `undefined` on a row that exists does
-        not end the list -- it appends ten thousand blank entries and then draws them.
-      - the rows are an array under a key per checkout, so the expression that reads them
-        ends in a property access. `rows[project][i].value` raises past the end, which is
-        what the extension is watching for; a bare `list[i]` would merely be undefined.
-
-    `projects` is the whole list of checkouts to draw, and a candidate belonging to none of
-    them is **dropped** rather than adding a group of its own. That is the half that makes
-    the list servable: the dropdown feeds `preview-ui-host.py`, which can only serve a
-    checkout declaring `[frontend] dir`, so a row from anywhere else is an option that
-    refuses when picked. Callers pass `ui_projects`, and this is what stops a wider
-    `collect` -- the default one, over every checkout with a compose stack -- reaching the
-    file through the back door.
-
-    Every listed checkout is drawn even when it contributed no discovered row, and
-    what stops such a checkout drawing an EMPTY pick list is its trunk row -- `collect`
-    adds one per checkout unconditionally, so there is always something to pick. That
-    guarantee used to belong to the `Rescan` row, which was the only way out of an options
-    file the previous run had written; it is gone because the file is no longer only
-    written by the previous run (`reconcile` refreshes it every fifteen minutes), so the
-    row's real job was covering a staleness that has been fixed at the source.
-
-    Checkouts are ordered by their freshest row, for the same reason `sort_key` puts
-    recency above kind: the change someone has just asked to look at is the newest thing
-    on the machine. The trunk row is excluded from that comparison -- it is the same age
-    in every checkout and dating a checkout by it would rank the quiet ones by how long
-    ago somebody last landed anything.
+    Ranked rather than grouped, and the trunk rows ride along with the rest: a checkout
+    whose only row is its trunk is a checkout with nothing under review, and saying so by
+    drawing one plain row is what the cached menu's separate `project_note` was for.
     """
-    stamp = now or _dt.datetime.now(_dt.UTC)
-    as_of = stamp.astimezone().strftime("%Y-%m-%d %H:%M")
-    grouped: dict[str, list[Candidate]] = {project: [] for project in projects}
-    for candidate in candidates:
-        if candidate.project in grouped:
-            grouped[candidate.project].append(candidate)
-
-    def freshest(project: str) -> tuple[float, str]:
-        rows = [row for row in grouped[project] if row.kind != KIND_TRUNK]
-        return (-max((_epoch(row.updated) for row in rows), default=float("-inf")), project)
-
-    entries, rows = [], {}
-    for project in sorted(grouped, key=freshest):
-        found = sorted(grouped[project], key=lambda candidate: candidate.sort_key)
-        rows[project] = [menu_row(candidate, stamp) for candidate in found]
-        entries.append(
-            {"name": project, "label": project, "description": project_note(found, as_of)}
-        )
-    return {"generated": stamp.isoformat(), "asOf": as_of, "projects": entries, "rows": rows}
+    if not candidates:
+        return [
+            picker_rows.nothing_row(
+                "nothing to preview",
+                "no live box, no open PR and no recent branch in any servable checkout",
+            )
+        ]
+    return [menu_row(candidate, now) for candidate in candidates]
 
 
 def parse_choice(text: str, count: int) -> tuple[str, list[int]]:
@@ -1356,12 +1301,21 @@ def collect(
     dropdown (`ui_projects`, a strict subset). It is a parameter rather than a filter on
     the result because every checkout in the list costs a `git fetch` and a `gh pr list`:
     discarding those rows afterwards would spend the whole scan and then throw two thirds
-    of it away, on a pass that rides on `worktree.py reconcile` every fifteen minutes.
+    of it away -- and this now runs when a person opens the dropdown rather than on a
+    schedule, so that waste is seconds they spend watching an empty quick-pick.
+
+    Which is also why the checkouts are scanned concurrently. They share only `boxes`,
+    read once before the pool and never written, and every source inside `scan` already
+    answers empty rather than raising, so the pool cannot fail in a way the loop it
+    replaced would not have.
     """
     root = workspace.parent
     boxes = worktree.live_boxes(root)
-    candidates: list[Candidate] = []
-    for project in stack_projects(workspace) if projects is None else projects:
+    names = stack_projects(workspace) if projects is None else projects
+    if not names:
+        return []
+
+    def scan(project: str) -> list[Candidate]:
         project_dir = root / project
         branches = [
             entry for entry in recent_branches(project_dir, fetch=fetch) if fresh(entry[1], now=now)
@@ -1377,54 +1331,12 @@ def collect(
         trunk = trunk_row(project, project_dir)
         if not any(candidate.ref == trunk.ref for candidate in found):
             found.append(trunk)
-        candidates.extend(found)
+        return found
+
+    with futures.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(names))) as pool:
+        found = list(pool.map(scan, names))
+    candidates = [candidate for group in found for candidate in group]
     return sorted(candidates, key=lambda candidate: candidate.sort_key)
-
-
-def write_menu(payload: dict, path: Path | None = None) -> Path | None:
-    """Save the dropdown's options, atomically. The path on success, None on any failure.
-
-    Never raises, and that is the point: this runs on the way to bringing a stack up, and
-    a preview that worked is not worth failing because the *next* one's menu could not be
-    cached. The cost of a swallowed error is one stale dropdown, and the scheduled
-    `--refresh` pass (`worktree.py reconcile`) writes the file again within the quarter
-    hour regardless of what happened here.
-
-    The destination defaults at CALL time rather than in the signature, so a test can
-    point `MENU_CACHE` somewhere disposable and the caller in `main` -- which passes no
-    path -- follows it there.
-    """
-    path = path or MENU_CACHE
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        scratch = path.with_suffix(".json.tmp")
-        scratch.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        scratch.replace(path)
-    except OSError:
-        return None
-    return path
-
-
-def refresh_menu(workspace: Path, fetch: bool = True, path: Path | None = None) -> Path | None:
-    """Rebuild the dropdown's options file. The path on success, None on any failure.
-
-    The whole of `--refresh` as one call, for the scheduled caller: `worktree.reconcile`
-    runs it at the end of every pass so that the dropdown tracks open PRs on the
-    reconcile task's cadence rather than on how recently somebody previewed something.
-
-    Total, like `write_menu` and for a stronger reason: this is a rider on somebody
-    else's pass, and a menu that could not be built must never be able to fail a
-    reconcile that reaped boxes correctly. `collect` is already the forgiving kind --
-    every source in it returns empty rather than raising on an offline or unauthenticated
-    machine -- so the `Exception` here is for the shapes that are not source failures at
-    all: an unreadable registry, a workspace file that has been replaced by a directory.
-    """
-    try:
-        projects = ui_projects(workspace)
-        candidates = collect(workspace, fetch=fetch, projects=projects)
-        return write_menu(menu_payload(candidates, projects), path)
-    except Exception:
-        return None
 
 
 def read_choice(
@@ -1664,9 +1576,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="take these refs without asking, space-separated -- what the VS Code dropdown sends",
     )
     parser.add_argument(
-        "--refresh",
+        "--rows",
         action="store_true",
-        help="rebuild the dropdown's option file and exit, picking nothing",
+        help="print the dropdown's rows (`value|label|description|detail`) and exit",
     )
     parser.add_argument(
         "--limit",
@@ -1721,20 +1633,20 @@ def main(argv: list[str] | None = None) -> int:
         echo("Nothing picked -- the dropdown was cancelled.")
         return 0
 
+    if args.rows:
+        # The dropdown's own path, and narrower than the terminal menu in one dimension:
+        # `ui_projects` alone, because its reader serves a frontend with `npm run dev` and
+        # a checkout declaring no `[frontend] dir` is an option that can only refuse.
+        # Untrimmed in the other -- a quick-pick has no screen to run out of, so the row
+        # `--limit` drops from a terminal is exactly the row only this list can offer.
+        # Nothing else may reach stdout here: every line of it is an option.
+        listed = ui_projects(workspace)
+        picker_rows.emit(rows(collect(workspace, fetch=args.fetch, projects=listed)))
+        return 0
+
     if args.fetch and not args.list:
         echo("Reading boxes, open PRs and recent branches ...")
     everything = collect(workspace, fetch=args.fetch)
-    # Cached before anything can fail, and from the UNTRIMMED scan: the dropdown has no
-    # screen to run out of, so the row `--limit` drops from a terminal menu is exactly the
-    # row that only the dropdown can still offer. Narrower in the other dimension, though
-    # -- `menu_payload` keeps only the checkouts `ui_projects` names, because this menu is
-    # a terminal one and that file is read by a task that serves frontends alone.
-    written = write_menu(menu_payload(everything, ui_projects(workspace)))
-    if args.refresh:
-        echo(
-            f"Dropdown options written to {written}" if written else "Could not write the options."
-        )
-        return 0 if written else 1
 
     # Trimmed ONCE, here, so every consumer numbers the same rows. Trimming the menu and
     # not `--list` would give `--pick 12` two meanings depending on which one the caller
