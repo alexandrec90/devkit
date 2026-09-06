@@ -1,13 +1,16 @@
 """`install-tray.py`: the two settings that make a *resident* task different from a pass.
 
 `tests/test_scheduled_jobs.py` holds this to the contract every devkit job shares. What
-is left for here is what only this installer decides, and both of its decisions exist
-because every other job in the repo is a pass that finishes:
+is left for here is what only this installer decides, and every one of those decisions
+exists because every other job in the repo is a pass that finishes:
 
 - **no execution time limit** -- the inherited hour would kill the tray an hour after
   logon, every day, surfacing as an icon that "sometimes isn't there";
 - **a logon trigger, not a boot trigger** -- a boot trigger fires before there is a
-  desktop to draw into.
+  desktop to draw into;
+- **`--restart`** -- a pass picks up an edit on its next run, whereas the tray holds the
+  `tray.py` it imported at logon until the session ends, so an edited icon is invisible
+  with nothing failing to say so.
 """
 
 from __future__ import annotations
@@ -176,6 +179,99 @@ def test_the_posix_plan_offers_an_autostart_line_rather_than_pretending():
 def test_a_checkout_with_no_tray_is_refused(tmp_path, capsys):
     assert installer.main(["--devkit", str(tmp_path)]) == 2
     assert "no tray at" in capsys.readouterr().err
+
+
+# --- --restart ---------------------------------------------------------------
+#
+# The tray holds `tray.py` in memory from logon to logout, so an edited icon is invisible
+# until the process is replaced -- with nothing failing anywhere to say so.
+
+
+def test_end_argv_stops_the_named_task():
+    argv = installer.end_argv()
+    assert argv[:2] == ["schtasks", "/End"]
+    assert argv[argv.index("/TN") + 1] == installer.TASK_NAME
+
+
+def test_start_argv_runs_the_named_task():
+    argv = installer.start_argv()
+    assert argv[:2] == ["schtasks", "/Run"]
+    assert argv[argv.index("/TN") + 1] == installer.TASK_NAME
+
+
+def test_a_restart_stops_the_old_process_before_starting_one(monkeypatch):
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    calls = []
+
+    def runner(argv):
+        calls.append(list(argv))
+        return completed()
+
+    ok, _ = installer.restart(schedule(), runner=runner)
+    assert ok is True
+    assert [argv[1] for argv in calls] == ["/End", "/Run"]
+
+
+def test_a_restart_names_the_task_rather_than_this_checkouts_tray(monkeypatch):
+    """A worktree restarts the registered tray, not the one it would have installed."""
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    calls = []
+    installer.restart(schedule(), runner=lambda argv: calls.append(list(argv)) or completed())
+    for argv in calls:
+        assert argv[argv.index("/TN") + 1] == installer.TASK_NAME
+        assert not any("tray.py" in part for part in argv)
+
+
+def test_a_tray_that_was_not_running_still_starts(monkeypatch):
+    """`/End` reports non-zero with nothing to end -- the state a restart produces."""
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    ok, message = installer.restart(
+        schedule(),
+        runner=lambda argv: completed(returncode=1 if argv[1] == "/End" else 0),
+    )
+    assert ok is True and installer.TASK_NAME in message
+
+
+def test_a_restart_that_could_not_start_it_is_a_failure(monkeypatch):
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    ok, message = installer.restart(
+        schedule(),
+        runner=lambda argv: completed("ERROR: cannot find the task", returncode=1),
+    )
+    assert ok is False and "cannot find the task" in message
+
+
+def test_restarting_off_windows_says_there_is_nowhere_to_draw(monkeypatch):
+    monkeypatch.setattr(installer, "WINDOWS", False)
+    ok, message = installer.restart(schedule())
+    assert ok is False and "notification area" in message
+
+
+def test_the_cli_restarts_without_registering_anything(monkeypatch, capsys):
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    monkeypatch.setattr(
+        installer, "install", lambda *a, **k: pytest.fail("--restart must not register")
+    )
+    monkeypatch.setattr(installer, "restart", lambda *a, **k: (True, "restarted devkit-tray"))
+    assert installer.main(["--restart"]) == 0
+    assert "restarted devkit-tray" in capsys.readouterr().out
+
+
+def test_a_failed_restart_exits_nonzero_on_stderr(monkeypatch, capsys):
+    monkeypatch.setattr(installer, "restart", lambda *a, **k: (False, "ERROR: no such task"))
+    assert installer.main(["--restart"]) == 2
+    assert "no such task" in capsys.readouterr().err
+
+
+def test_a_restart_needs_no_checkout_to_point_at(monkeypatch, tmp_path):
+    """It acts on the registered task, so the --devkit guards must not reject it."""
+    monkeypatch.setattr(installer, "restart", lambda *a, **k: (True, "restarted"))
+    assert installer.main(["--restart", "--devkit", str(tmp_path)]) == 0
+
+
+def test_restart_cannot_be_combined_with_installing():
+    with pytest.raises(SystemExit):
+        installer.main(["--restart", "--yes"])
 
 
 def test_installing_from_an_ephemeral_box_is_refused(tmp_path, capsys):

@@ -16,6 +16,11 @@ to draw into. `logon_trigger` waits for a session.
 **Read-only by default**, the same three modes as its siblings: `--yes` installs,
 `--check` reports, and the bare invocation prints the plan.
 
+**`--restart` is the fourth, and only this installer has one.** A pass picks up an edit
+on its next run; the tray imported `tray.py` once at logon and holds it for the session,
+so a change to the icon is invisible -- with no error anywhere -- until the process is
+replaced. The logon trigger's own answer is "log out", which is why this flag exists.
+
 Stdlib only, and every decision is an importable function tested in
 `tests/test_install_tray.py`.
 """
@@ -132,6 +137,36 @@ def query_argv(name: str = TASK_NAME) -> list[str]:
     return ["schtasks", "/Query", "/TN", name, "/FO", "LIST", "/V"]
 
 
+def end_argv(name: str = TASK_NAME) -> list[str]:
+    return ["schtasks", "/End", "/TN", name]
+
+
+def start_argv(name: str = TASK_NAME) -> list[str]:
+    return ["schtasks", "/Run", "/TN", name]
+
+
+def restart(schedule: Schedule, runner: Runner = run_command) -> tuple[bool, str]:
+    """Stop the resident tray and start it again, so it re-imports. `(ok, message)`.
+
+    Addressed by task *name*, never by `schedule.script`: the icon on the desktop was
+    drawn by whichever checkout is registered, so restarting from a worktree has to
+    restart that one rather than a tray this checkout would have installed. It follows
+    that `--restart` needs no `--devkit` and cannot be pointed at the wrong tray.
+
+    **`/End` is allowed to fail.** It reports non-zero when nothing is running, which is
+    the very state a restart produces anyway; treating it as fatal would make the flag
+    refuse exactly when the tray has died and needs starting most. Only `/Run` failing
+    means the restart did not happen.
+    """
+    if not WINDOWS:
+        return False, "not a Windows machine -- there is no notification area to draw into"
+    runner(end_argv(schedule.name))
+    result = runner(start_argv(schedule.name))
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout or "schtasks failed").strip()
+    return True, f"restarted {schedule.name}; it is running the tray as it is on disk now"
+
+
 def registered_command(stdout: str) -> str:
     """The command line `schtasks /Query /V` reports, or "" when it reports none."""
     for line in stdout.splitlines():
@@ -202,6 +237,11 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--yes", action="store_true", help="register the task")
     mode.add_argument("--check", action="store_true", help="report what is registered")
+    mode.add_argument(
+        "--restart",
+        action="store_true",
+        help="stop and restart the running tray, so it picks up an edited tray.py",
+    )
     parser.add_argument(
         "--poll-seconds",
         type=int,
@@ -224,6 +264,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             f"--poll-seconds must be a whole number from 10 to 3600, not {args.poll_seconds!r}"
         )
+    # Before the checkout checks below, all of which ask about a tray this invocation
+    # might install. A restart acts on the registered task, so none of them apply.
+    if args.restart:
+        ok, message = restart(schedule_for(args.poll_seconds))
+        print(message, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 2
+
     root = args.devkit.expanduser().resolve()
     script = root / "scripts" / "tray.py"
     if not script.is_file():
