@@ -62,6 +62,10 @@ INLINE_CALL = re.compile(
 #   - a bare `.write(` — `sys.stdout.write(open('x').read())` writes nothing to disk and
 #     names a real path, so including it would block reads.
 # `open(..., "w")` already covers the file-handle case, which is how those paths are named.
+#
+# `json.dump` is a sink only when its stream is not the process's own stdout or stderr:
+# `json.dump(report, sys.stdout)` is how a measuring script prints its answer, and it
+# names every file it measured. A dump into `open(..., 'w')` is caught by that clause.
 WRITE_SINK = re.compile(
     r"""
       \.write_text\s*\(
@@ -73,7 +77,7 @@ WRITE_SINK = re.compile(
     | \bopen\s*\([^)]*?,\s*['"][^'"]*[wax][^'"]*['"]
     | \bos\.(?:remove|unlink|rename|replace|makedirs|mkdir)\s*\(
     | \bshutil\.(?:copy2?|copyfile|copytree|move|rmtree)\s*\(
-    | \bjson\.dump\s*\(
+    | \bjson\.dump\s*\((?![^)]*\bsys\.std(?:out|err)\b)
     | \bfs\.(?:write|append|rm|unlink|copy|rename)[A-Za-z]*\s*\(
     """,
     re.VERBOSE,
@@ -83,10 +87,40 @@ WRITE_SINK = re.compile(
 # caller drops anything that does not resolve into a registered checkout.
 CODE_STRING = re.compile(r"'([^'\n]*)'|\"([^\"\n]*)\"")
 
+# pathlib's join between two literals -- `'scripts' / 'x.py'` -- is ONE path, `scripts/x.py`.
+# Collapsed before the literals are read, or the tail is returned alone and the guard
+# resolves `x.py` against the cwd: a name with the wrong parent, and a remedy message that
+# tells the agent to re-issue against a file that does not exist.
+JOINED_LITERALS = re.compile(r"""(['"])([^'"\n]*)\1(\))?\s*/\s*(['"])([^'"\n]*)\4""")
+
+# A literal joined onto something that is NOT a literal -- `BOX / 'x.py'`,
+# `Path(__file__).parent / 'x.py'`, `root() / 'x.py'` -- is a path segment whose root this
+# tier cannot see. The command-line tier drops an unexpanded `$VAR` operand for the same
+# reason: a name whose base is unknowable resolves, as a relative name, into the checkout
+# the session is standing in, and that is the false positive rather than the catch. The
+# lookbehind keeps the match to an operator: a `/` inside a string, or a regex literal
+# `'/'` followed by another argument, is preceded by a quote and not by an identifier.
+SEGMENT_LITERAL = re.compile(r"""(?<=[\w)\]])\s*/\s*(['"])[^'"\n]*\1""")
+
 # A literal worth treating as a path: it carries a separator, or ends in an extension
 # whose first character is a LETTER. That last clause is what keeps `3.14` out — a version
 # number otherwise reads as `<name>.<ext>` and routes a write nobody asked for.
 PATHLIKE_EXTENSION = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,5}$")
+
+# A plain `cd` at the head of the command line, and only there: `cd <dir> &&`,
+# `cd <dir>;`, or `cd <dir>` on a line of its own, with one operand, quoted or bare.
+# Anything the shell would expand first (`$BOX`, `~`, `%CD%`), a switch (`cd -`, `cd /d`)
+# and a second operand are left unmatched, so the base stays where the tool call's cwd
+# put it -- the same closed list of followable spellings the command-line tier keeps.
+LEADING_CD = re.compile(
+    r"""^\s*(?:cd|pushd|chdir|set-location|sl)\s+
+        (?:"([^"$%~][^"]*)"|'([^'$%~][^']*)'|([^\s"'$%~&|;-][^\s&|;]*))
+        \s*(?:&&|;|\n|$)
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+DRIVE_LETTER = re.compile(r"^[A-Za-z]:")
 
 
 def heredoc_bodies(command: str) -> list[str]:
@@ -138,6 +172,26 @@ def _pathlike(value: str) -> bool:
     return bool(PATHLIKE_EXTENSION.search(value))
 
 
+def join_path_literals(code: str) -> str:
+    """`code` with pathlib joins resolved as far as literals allow.
+
+    Two passes, in this order. Literal-to-literal joins collapse into one literal, repeated
+    until a chain like `'a' / 'b' / 'c'` is `'a/b/c'`; a closing paren between them is the
+    `Path('a') / 'b'` idiom and is carried past the join. Then a literal still joined onto a
+    non-literal is blanked: its root is a variable or a call, which this tier cannot read,
+    and a tail returned alone would be resolved against the wrong parent -- see
+    `SEGMENT_LITERAL`. The result is only ever read by `CODE_STRING`, so what it looks like
+    as code does not matter; only which literals survive.
+    """
+    previous = None
+    while previous != code:
+        previous = code
+        code = JOINED_LITERALS.sub(
+            lambda m: f"{m.group(1)}{m.group(2)}/{m.group(5)}{m.group(1)}{m.group(3) or ''}", code
+        )
+    return SEGMENT_LITERAL.sub(lambda m: f" / {m.group(1)}{m.group(1)}", code)
+
+
 def code_write_targets(code: str) -> list[str]:
     """Paths a snippet names, when it also contains a call that writes. [] otherwise.
 
@@ -152,11 +206,33 @@ def code_write_targets(code: str) -> list[str]:
     if not code or not WRITE_SINK.search(code):
         return []
     found: list[str] = []
-    for match in CODE_STRING.finditer(code):
+    for match in CODE_STRING.finditer(join_path_literals(code)):
         value = match.group(1) if match.group(1) is not None else match.group(2)
         if _pathlike(value) and value not in found:
             found.append(value)
     return found
+
+
+def leading_cd(command: str) -> str:
+    """The directory a plain `cd` at the head of `command` moves to, or "".
+
+    Only the head, and only the plain spellings `LEADING_CD` names. A `cd` mid-line, one
+    with a variable or a switch, or one with two operands, answers "" -- and "" means the
+    guard resolves the targets against the tool call's own cwd, which is what it did for
+    every `cd` before this existed.
+    """
+    match = LEADING_CD.match(command or "")
+    if not match:
+        return ""
+    target = match.group(1) or match.group(2) or match.group(3) or ""
+    return target.strip().replace("\\", "/").rstrip("/")
+
+
+def _rebased(target: str, base: str) -> str:
+    """`target` hung off `base` unless it is rooted, on either platform's spelling."""
+    if not base or target.startswith(("/", "\\")) or DRIVE_LETTER.match(target):
+        return target
+    return f"{base}/{target}"
 
 
 def write_targets(command: str) -> list[str]:
@@ -169,15 +245,20 @@ def write_targets(command: str) -> list[str]:
     reading a body that turns out to be data costs nothing — nothing here fires without a
     sink.
 
-    **A leading `cd` is not followed**, unlike the command-line tier's operands. The paths
-    are handed back relative, and the guard resolves them against the tool call's own cwd
-    — which is exactly what that tier already does for any `cd` form it cannot follow, and
-    for the reason it gives there: a base that cannot be followed means a relative name,
-    and a relative name still resolves into the checkout. The conservative direction.
+    **A plain leading `cd` is followed**, exactly as the command-line tier follows one for
+    its operands, and for the reason that tier gives: `cd <box> && python - <<PY` was this
+    tier's most-reported false positive. The paths came back relative, the guard resolved
+    them against the tool call's cwd -- the static checkout -- and a write that stayed
+    inside the session's own box was refused as a write to the home branch, with a remedy
+    path that named a file the agent had never mentioned. Every `cd` form `leading_cd`
+    cannot follow still leaves the base alone, which keeps the conservative direction for
+    the cases that are actually ambiguous.
     """
+    base = leading_cd(command)
     found: list[str] = []
     for snippet in (*heredoc_bodies(command), *inline_snippets(command)):
         for target in code_write_targets(snippet):
-            if target not in found:
-                found.append(target)
+            rebased = _rebased(target, base)
+            if rebased not in found:
+                found.append(rebased)
     return found

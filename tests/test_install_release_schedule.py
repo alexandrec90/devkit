@@ -278,6 +278,16 @@ def test_an_installation_aimed_at_a_box_is_refused(tmp_path, capsys):
     assert "ephemeral box" in capsys.readouterr().err
 
 
+def test_an_installation_aimed_at_a_cli_worktree_is_refused_too(tmp_path, capsys):
+    """A `claude --worktree` checkout lives under `.claude/worktrees/` and is deleted when
+    its branch lands, exactly like a box. `BOXES_DIR in root.parts` did not see it."""
+    worktree = tmp_path / "devkit" / ".claude" / "worktrees" / "modular-watching-starfish"
+    (worktree / "scripts").mkdir(parents=True)
+    (worktree / "scripts" / "release-pipeline.py").write_text("", encoding="utf-8")
+    assert sched.main(["--yes", "--devkit", str(worktree)]) == 2
+    assert "temporary checkout" in capsys.readouterr().err
+
+
 def test_the_plan_may_still_be_read_from_a_box(tmp_path, capsys):
     """Refusing the read-only mode too would make it useless in the place an agent is
     most often invoked from."""

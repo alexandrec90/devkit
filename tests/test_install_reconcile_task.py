@@ -151,6 +151,22 @@ def test_installing_from_an_ephemeral_box_is_refused(monkeypatch, capsys, tmp_pa
     assert "ephemeral box" in capsys.readouterr().err
 
 
+def test_installing_from_a_cli_worktree_is_refused_too(monkeypatch, capsys, tmp_path):
+    """`claude --worktree` cuts its checkout under `.claude/worktrees/`, not `.worktrees/`,
+    and it is deleted the same way when the branch lands. The old `BOXES_DIR_NAME in
+    REPO_ROOT.parts` test waved it through, so an agent standing in one registered a pass
+    whose path died with the branch -- every fifteen minutes, in silence."""
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    worktree = tmp_path / "devkit" / ".claude" / "worktrees" / "modular-watching-starfish"
+    monkeypatch.setattr(installer, "REPO_ROOT", worktree)
+    monkeypatch.setattr(
+        installer, "_run_argv", lambda argv: pytest.fail("registered a task from a worktree")
+    )
+
+    assert installer.main(["--yes"]) == 2
+    assert "temporary checkout" in capsys.readouterr().err
+
+
 def test_reading_the_plan_from_a_box_still_works(monkeypatch, capsys, tmp_path):
     """The read-only mode is most often invoked from a box -- that is where an agent
     is, and refusing it would leave nothing to read before moving."""

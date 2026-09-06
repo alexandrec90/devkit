@@ -230,17 +230,24 @@ never renders.
   timestamp was in a description nobody reads at click time, and the click sent a session
   at a PR that had been closed since. That is the case for preferring the live shape
   wherever the command can answer in about a second.
-- **Two dependent pickers are one input, not two.** VS Code resolves sibling `${input:...}`
-  in no defined order and gives neither sight of the other, so a "which project, then which
-  of its branches" pair is a `pickStringRemember` nested inside the outer input's `args`,
-  read back as `${pickStringRemember:<id>}` — one token, because an input resolves to one
-  string. A live picker has no such nesting — one input runs one command — so the
-  dependent half becomes a **field on the row** instead: `brokenPrRow`, `previewRow` and
-  `worktreeRow` each list every checkout's rows in one flat list with the checkout in the
-  description. Where the two halves are genuinely different *lists* rather than a
-  narrowing, they are two commands over one scan: `agent-worktree.py rows` draws what can
-  be destroyed and `bases` what a branch can be cut from, and a row from either in the
-  other would refuse when picked.
+- **Two dependent pickers nest, and the nesting differs by shape.** VS Code's *native*
+  inputs resolve sibling `${input:...}` in no defined order and give neither sight of the
+  other, so a cached "which project, then which of its branches" pair is a
+  `pickStringRemember` nested inside the outer input's `args`, read back as
+  `${pickStringRemember:<id>}` — one token, because an input resolves to one string. A
+  live picker nests the other way round: `augustocdias.tasks-shell-input` resolves
+  `${input:<otherId>}` inside its own `command` string, so a second `shellCommand.execute`
+  can take the first one's answer as an argument. Its two documented conditions are that
+  the task's command lists the inputs left to right in order of dependence, and that an
+  input's command may reference only other `shellCommand.execute` inputs. This bullet used
+  to say the live shape could not nest at all; that false premise talked the broken-PR,
+  preview and worktree pickers (`brokenPrRow`, `previewRow`, `worktreeRow`) into one flat
+  list per picker with the checkout in the description, and cost them the checkout filter
+  they had. The flat list is a choice a task may make for a short list; a narrowing picker
+  is not something it has to avoid. Where the two halves are genuinely different *lists*
+  rather than a narrowing, they are two commands over one scan: `agent-worktree.py rows`
+  draws what can be destroyed and `bases` what a branch can be cut from, and a row from
+  either in the other would refuse when picked.
 - **An action scoped to exactly one checkout writes the name, not a picker.** A
   `${input:...}` with a single option asks a question that has no second answer, and the
   extension still shows it. Spell the checkout in the task's `--project` argument instead.

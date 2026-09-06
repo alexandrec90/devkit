@@ -309,17 +309,21 @@ def main(argv: list[str] | None = None) -> int:
     if not upgrade_script.is_file():
         print(f"schedule: no upgrade script at {upgrade_script}", file=sys.stderr)
         return 2
-    if args.yes and BOXES_DIR in root.parts:
+    if args.yes and sweep.source_checkout(root) != root:
         # Registering a box would look fine today and break silently on the next
         # `reconcile`. Refused rather than warned: the failure this mode's `--check`
-        # exists for is a task nobody notices has stopped running.
+        # exists for is a task nobody notices has stopped running. `source_checkout`
+        # rather than `BOXES_DIR in root.parts` because a `claude --worktree` checkout
+        # under `.claude/worktrees/` is deleted the same way and the narrower test
+        # waved it through.
         #
         # Only on `--yes`. Printing the plan from a box is how an agent reads what the
         # install would do before it has anywhere else to run, and refusing that would
         # make the read-only mode useless in the place it is most often invoked from.
         print(
-            f"schedule: {root} is an ephemeral box. Point --devkit at the static "
-            f"checkout, which outlives the boxes.",
+            f"schedule: {root} is a temporary checkout -- an ephemeral box or a claude "
+            f"--worktree worktree. Point --devkit at the static checkout, which outlives "
+            f"both.",
             file=sys.stderr,
         )
         return 2
