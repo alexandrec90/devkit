@@ -14,12 +14,15 @@ none of them visible from inside the sentence that made them:
   - the README described `.devkit.toml` as a fixture "turning on the DB and frontend
     tiers", when it describes devkit and turns both off.
 
-So this file checks the two classes of claim that can be checked mechanically:
+So this file checks the three classes of claim that can be checked mechanically:
 
   - **A cited path exists.** Every path in an inline code span or a Markdown link.
   - **Prose pins no version.** An interpreter or tool version written into a sentence
     is a claim with no owner: the toolchain moves, the sentence does not, and the next
     agent gets a confident contradiction of `pyproject.toml`.
+  - **A cited test exists.** A paragraph naming the test that pins a behaviour is the
+    reader's shortcut to the evidence, and a rename leaves the shortcut pointing at
+    nothing while the paragraph still reads as authority.
 
 Everything else about a doc — whether a rationale is still true, whether a table still
 describes the design — is beyond a test, and this file does not pretend otherwise. It
@@ -129,6 +132,15 @@ _VERSION_PIN = re.compile(
     re.VERBOSE,
 )
 
+# A test function named in prose. Six characters past the prefix, because a name short
+# enough to be ambiguous (`test_x`) is not one a document points a reader at.
+_TEST_NAME = re.compile(r"^test_[a-z0-9_]{6,}$")
+
+_TEST_DEF = re.compile(r"^\s*(?:async\s+)?def\s+(test_[A-Za-z0-9_]+)", re.M)
+
+# Both test trees: half the suite is vendored out of here and lives under `scripts/`.
+_TEST_ROOTS = ("tests", "scripts/hooks/tests")
+
 
 def strip_fences(text: str) -> str:
     """`text` with fenced code blocks removed, so only prose is examined."""
@@ -171,6 +183,49 @@ def cited_paths(text: str) -> list[str]:
 def version_pins(text: str) -> list[str]:
     """Version literals written into prose (fenced blocks excluded)."""
     return [match.group(0) for match in _VERSION_PIN.finditer(strip_fences(text))]
+
+
+def cited_test_names(text: str) -> list[str]:
+    """Test functions a document claims exist, read from code spans only.
+
+    Split on the punctuation a sentence puts around a name -- a trailing comma, a
+    parenthesised fixture, a full stop -- so a citation is found however it was
+    written rather than only when it stands alone in its span. Prose that merely
+    contains the characters is not a claim; the backticks are what make it one.
+
+    **A name carrying a suffix is a file, and belongs to `cited_paths`.** The split
+    leaves an internal dot alone for exactly that reason. Reading
+    `test_codex_hooks_contract.py` as a function would have this gate demand a test
+    that carameli owns and the README names *because* devkit does not have it -- a
+    claim `ALLOWED_MISSING` already keeps, one gate away, with its reason attached.
+    """
+    return [
+        candidate
+        for span in _CODE_SPAN.findall(strip_fences(text))
+        for token in re.split(r"[\s(),;:]+", span)
+        if _TEST_NAME.match(candidate := token.rstrip("."))
+    ]
+
+
+@functools.lru_cache(maxsize=1)
+def _defined_test_names() -> frozenset[str]:
+    """Every test function `def`ined in either tree, plus every test module's stem.
+
+    Names, not file text. The looser rule -- "the name occurs somewhere under
+    `tests/`" -- reads a *mention* as an existence proof, and the first thing it
+    excused was this file: the gate below recounts the rename that motivated it, so a
+    docstring naming the retired test would have kept that test citable forever. A dead
+    name has to be dead everywhere, or the gate launders its own history.
+
+    Stems are in because prose names a module (`test_repo_contract`) about as often as
+    a function, and `cited_paths` only sees the spelling that carries a directory.
+    """
+    found: set[str] = set()
+    for root in _TEST_ROOTS:
+        for path in sorted((REPO_ROOT / root).rglob("*.py")):
+            found.add(path.stem)
+            found.update(_TEST_DEF.findall(path.read_text(encoding="utf-8", errors="replace")))
+    return frozenset(found)
 
 
 def _exists(relpath: str) -> bool:
@@ -338,6 +393,14 @@ ALLOWED_MISSING = {
 # can rot. Empty by intent: the first entry has to argue for itself.
 ALLOWED_VERSION_PINS: dict[str, str] = {}
 
+# Names in `test_`-shape that are not tests. Same contract as the two lists above: an
+# entry is a claim, it carries its reason, and it fails once it stops being true.
+ALLOWED_TEST_NAMES = {
+    "test_a_lost_decision_is_refuse0": "not a test but a pytest `tmp_path` basename, "
+    "truncated by the fixture -- documented as such in scripts/hooks/tests/conftest.py, "
+    "which is the whole point of the paragraphs that cite it",
+}
+
 
 def test_no_skill_wraps_a_command_the_gate_does_not_block():
     """A wrapper on a command nothing blocks is pure noise, and it spreads by copying.
@@ -454,10 +517,40 @@ def test_instruction_prose_pins_no_versions():
     )
 
 
+def test_documented_test_names_exist():
+    """A test named in prose is a pointer to the evidence, and a rename breaks it.
+
+    This is the class the other two gates could not see, and it surfaced only because
+    someone asked an unrelated question. `.claude/engineering-evidence.md` told every
+    reader that the branch tier was exempt from `DEVKIT_HOOKS_OFF`, and named the test
+    that asserted the exemption. The exemption had since been inverted and that test
+    renamed to `test_the_branch_tier_consults_the_harness_kill_switch` -- so the
+    paragraph was telling agents their work would still be routed into a box with the
+    switch on, when standing the harness down now stands the tier down with it. Every
+    path in it existed and it pinned no version: both other gates were green throughout.
+
+    The retired name is deliberately not written here. See `_defined_test_names`.
+    """
+    stale: list[str] = []
+    for path in _documented_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        for name in cited_test_names(_text(path)):
+            if name in ALLOWED_TEST_NAMES or name in _defined_test_names():
+                continue
+            stale.append(f"{rel}: {name}")
+    assert not stale, (
+        "documentation cites tests that are not in the suite:\n  "
+        + "\n  ".join(sorted(set(stale)))
+        + "\nPoint at the test that carries the behaviour now -- and read the paragraph "
+        "around the citation, because a renamed test usually means the claim moved too. "
+        "A name that was never a test goes in ALLOWED_TEST_NAMES with the reason."
+    )
+
+
 def test_exemptions_are_still_needed():
     """An exemption that has become true is an exemption nobody will remove.
 
-    Both lists are documentation of a deliberate gap; a stale entry turns them into
+    Each list is documentation of a deliberate gap; a stale entry turns them into
     noise, and then into cover for a real miss. So an entry has to stay *both* absent
     and cited — the second half matters as much, because an exemption for a sentence
     nobody writes any more is drift of exactly the kind this file exists to catch, one
@@ -485,6 +578,17 @@ def test_exemptions_are_still_needed():
         if not any(pin in version_pins(_text(path)) for path in _instruction_files())
     )
     assert not unused, f"ALLOWED_VERSION_PINS names pins no longer written: {unused}."
+    defined = sorted(name for name in ALLOWED_TEST_NAMES if name in _defined_test_names())
+    assert not defined, (
+        f"ALLOWED_TEST_NAMES exempts names the suite now defines: {defined}. Drop the entries."
+    )
+    everything_named = {
+        name for path in _documented_files() for name in cited_test_names(_text(path))
+    }
+    unnamed = sorted(set(ALLOWED_TEST_NAMES) - everything_named)
+    assert not unnamed, (
+        f"ALLOWED_TEST_NAMES exempts names no document cites: {unnamed}. Drop the entries."
+    )
 
 
 def test_a_generated_file_on_disk_does_not_retire_its_exemption():
@@ -624,6 +728,40 @@ def test_version_pins_finds_prose_and_spares_fenced_samples():
 
 def test_version_pins_ignores_line_counts_and_rule_codes():
     assert version_pins("Keep files under 500 lines; E501 stays off; 12 tests failed.") == []
+
+
+def test_cited_test_names_reads_spans_however_they_are_punctuated():
+    text = (
+        "The gate is `test_documented_paths_exist`.\n"
+        "See `test_one_thing` and `test_two_things(tmp_path)`, then stop.\n"
+        "```\ntest_inside_a_fence_is_a_transcript\n```\n"
+    )
+    assert cited_test_names(text) == [
+        "test_documented_paths_exist",
+        "test_one_thing",
+        "test_two_things",
+    ]
+
+
+def test_cited_test_names_leaves_a_test_file_to_the_path_gate():
+    """`foo.py` is a claim about a file, and the two gates must not both make it."""
+    assert cited_test_names("Carameli's `test_codex_hooks_contract.py` stays there.") == []
+    assert cited_test_names("Run `python -m pytest tests/test_doc_claims.py`.") == []
+
+
+def test_cited_test_names_needs_a_span_and_a_name_worth_citing():
+    """Unbackticked prose is not a claim, and `test_x` is not a name."""
+    assert cited_test_names("test_the_thing_that_is_not_in_a_span") == []
+    assert cited_test_names("`test_x`") == []
+
+
+def test_defined_names_hold_functions_and_stems_and_nothing_else():
+    """A stem and a function both count; a name that only appears *inside* a test file
+    does not, which is the property that stops this file excusing its own history."""
+    defined = _defined_test_names()
+    assert "test_repo_contract" in defined  # a module stem
+    assert "test_documented_paths_exist" in defined  # a function
+    assert "test_a_lost_decision_is_refuse0" not in defined  # quoted, never defined
 
 
 def test_strip_fences_leaves_prose_intact():
