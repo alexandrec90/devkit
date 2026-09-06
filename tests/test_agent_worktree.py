@@ -581,3 +581,35 @@ def test_a_stray_base_pick_cuts_nothing(two_stage, monkeypatch, capsys):
     )
     assert code == agent_worktree.EXIT_USAGE
     assert "roguelike" in capsys.readouterr().err
+
+
+def test_stray_report_names_the_checkouts_and_says_nothing_happened():
+    text = agent_worktree.stray_report(["roguelike", "carameli"], "worktrees")
+    assert "worktrees from roguelike, carameli" in text
+    assert "nothing was done" in text
+    assert "vscode-tasks.md" in text
+
+
+def test_draw_sends_each_picker_verb_at_its_own_half_of_one_scan(two_stage):
+    """Four verbs, two values between them: which half of the scan, and whether this is
+    the stage that records or the stage that filters."""
+    assert [
+        line.split(picker_rows.FIELD_SEP)[1]
+        for line in agent_worktree.draw(two_stage, "tree-projects", "")
+    ] == ["devkit", "carameli"]
+    assert [
+        line.split(picker_rows.FIELD_SEP)[1]
+        for line in agent_worktree.draw(two_stage, "base-projects", "")
+    ] == ["devkit"]
+    assert [
+        line.split(picker_rows.FIELD_SEP)[0] for line in agent_worktree.draw(two_stage, "rows", "")
+    ] == ["devkit:box"]
+    assert [
+        line.split(picker_rows.FIELD_SEP)[0] for line in agent_worktree.draw(two_stage, "bases", "")
+    ] == ["devkit:main"]
+
+
+def test_every_picker_verb_the_parser_takes_is_one_draw_can_answer():
+    """The pairing that would otherwise fail at the click: a verb `main` routes into
+    `draw` and `draw` has no entry for is a KeyError on somebody's quick-pick."""
+    assert set(agent_worktree.PICKER_VERBS) == {"rows", "bases", "tree-projects", "base-projects"}

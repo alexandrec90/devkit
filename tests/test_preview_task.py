@@ -2326,3 +2326,49 @@ def test_a_pick_from_a_checkout_the_first_stage_did_not_return_is_named():
 def test_no_checkout_stage_means_nothing_to_disagree_with():
     """A hand-typed `--pick-ref` has no first stage, and must not be refused for it."""
     assert preview_task.strayed_picks(PREVIEW_SCAN, "") == []
+
+
+def test_draw_pays_for_the_fan_out_on_stage_one_and_filters_it_on_stage_two(tmp_path, monkeypatch):
+    """One function for both stages, because they differ in whether the scan is run or
+    read -- and stage one is the only place the whole fan-out is paid for."""
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(preview_task, "ui_projects", lambda _ws: ["carameli", "devkit"])
+    monkeypatch.setattr(preview_task, "collect", lambda *_a, **_k: PREVIEW_SCAN)
+
+    stage_one = preview_task.draw(workspace, stage_one=True, checkouts="")
+    assert [field(line, 1) for line in stage_one] == ["carameli", "devkit"]
+
+    token = picker_scan.parse_projects(ref_of(stage_one[0]))[1]
+    monkeypatch.setattr(preview_task, "collect", lambda *_a, **_k: pytest.fail("no rescan"))
+    stage_two = preview_task.draw(workspace, stage_one=False, checkouts=f"carameli@{token}")
+    assert [ref_of(line) for line in stage_two] == ["carameli:main", "carameli:agent/ui-0905"]
+
+
+def test_refuse_strays_raises_so_a_stray_leaves_by_the_unresolvable_pick_route():
+    """A stray pick is an unusable pick, so it takes the route an unresolvable one
+    already takes rather than growing each caller's `main` a second refusal branch."""
+    with pytest.raises(ValueError, match="devkit"):
+        preview_task.refuse_strays(PREVIEW_SCAN, "carameli@tok")
+    preview_task.refuse_strays(PREVIEW_SCAN, "carameli@tok,devkit@tok")
+    preview_task.refuse_strays(PREVIEW_SCAN, "")
+
+
+def test_stray_report_names_every_checkout_and_says_nothing_was_served():
+    one = preview_task.stray_report(["devkit"])
+    many = preview_task.stray_report(["carameli", "devkit"])
+    assert "a ref from devkit" in one
+    assert "refs from carameli, devkit" in many
+    for text in (one, many):
+        assert "nothing was served" in text
+        assert "vscode-tasks.md" in text
+
+
+def test_drawing_is_true_for_either_dropdown_stage_and_nothing_else():
+    class Args:
+        def __init__(self, rows=False, project_rows=False):
+            self.rows, self.project_rows = rows, project_rows
+
+    assert preview_task.drawing(Args(rows=True))
+    assert preview_task.drawing(Args(project_rows=True))
+    assert not preview_task.drawing(Args())

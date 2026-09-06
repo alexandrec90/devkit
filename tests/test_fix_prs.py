@@ -991,3 +991,27 @@ def test_the_parser_defaults_to_a_watchable_tab_and_offers_only_the_known_modes(
     assert (args.agent, args.picks, args.rows, args.list) == ("claude", "", False, False)
     action = next(a for a in parser._actions if a.dest == "agent")
     assert sorted(action.choices) == sorted(fix_prs.AGENT_MODES)
+
+
+def test_listed_is_the_one_ranking_both_callers_read():
+    """`rows` prints it and `scan_entries` records it for the second stage to filter,
+    so it is named once rather than sorted twice: a stage two filtering a differently
+    ranked list would draw the right PRs in the wrong order."""
+    older = pr(number=1, updatedAt="2026-09-01T09:00:00Z")
+    newer = pr(number=2, updatedAt="2026-09-04T09:00:00Z")
+    ranked = fix_prs.listed({"devkit": [older], "carameli": [newer]})
+    assert [(project, entry["number"]) for project, entry in ranked] == [
+        ("carameli", 2),
+        ("devkit", 1),
+    ]
+    assert [project for project, _line in fix_prs.scan_entries({"devkit": [older]})] == ["devkit"]
+
+
+def test_stray_report_names_every_checkout_and_says_nothing_ran():
+    one = fix_prs.stray_report(["roguelike"])
+    many = fix_prs.stray_report(["carameli", "roguelike"])
+    assert "ticked a PR from roguelike" in one
+    assert "ticked PRs from carameli, roguelike" in many
+    for text in (one, many):
+        assert "nothing was run" in text
+        assert "vscode-tasks.md" in text

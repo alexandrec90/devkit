@@ -362,6 +362,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# The four verbs that draw a quick-pick, and which half of one scan each reads.
+# `draw` dispatches on this rather than `main` carrying four branches: they differ in
+# two values and nothing else, and `main` is already the widest function in the file.
+PICKER_VERBS = {
+    "rows": "trees",
+    "bases": "bases",
+    "tree-projects": "trees",
+    "base-projects": "bases",
+}
+
+
+def draw(workspace: Path, verb: str, checkouts: str) -> list[str]:
+    """The rows for whichever picker verb was asked for.
+
+    The `-projects` pair is stage one: it runs the fan-out, records it under the half's
+    own scan name, and draws a checkout per row. The bare pair is stage two, which
+    filters that record. Both are in one function because "which half" is the only
+    thing that varies across the four, and the caller's stdout IS the quick-pick.
+    """
+    half = PICKER_VERBS[verb]
+    if not verb.endswith("-projects"):
+        return picked_rows(workspace, checkouts, half)
+    found = scan(workspace)[0 if half == "trees" else 1]
+    entries = aw.tree_entries(found) if half == "trees" else aw.base_entries(found)
+    token = picker_scan.write(SCAN_NAMES[half], entries)
+    rows = aw.tree_project_rows if half == "trees" else aw.base_project_rows
+    return rows(found, token)
+
+
 def picked_rows(workspace: Path, checkouts: str, half: str) -> list[str]:
     """Stage two for either dropdown: `half` is "trees" or "bases".
 
@@ -429,22 +458,10 @@ def main(argv: list[str] | None = None, runner=subprocess.run) -> int:
         return EXIT_USAGE
 
     try:
-        # Both picker paths: this stdout IS the quick-pick, so nothing else may reach it.
-        if args.verb == "rows":
-            picker_rows.emit(picked_rows(workspace, args.checkouts, "trees"))
-            return EXIT_OK
-        if args.verb == "bases":
-            picker_rows.emit(picked_rows(workspace, args.checkouts, "bases"))
-            return EXIT_OK
-        if args.verb == "tree-projects":
-            trees = scan(workspace)[0]
-            token = picker_scan.write(SCAN_NAMES["trees"], aw.tree_entries(trees))
-            picker_rows.emit(aw.tree_project_rows(trees, token))
-            return EXIT_OK
-        if args.verb == "base-projects":
-            bases = scan(workspace)[1]
-            token = picker_scan.write(SCAN_NAMES["bases"], aw.base_entries(bases))
-            picker_rows.emit(aw.base_project_rows(bases, token))
+        if args.verb in PICKER_VERBS:
+            # `getattr` because the two stage-ONE verbs take no `--checkouts`: they are
+            # what a checkout stage is, so there is nothing in front of them to narrow by.
+            picker_rows.emit(draw(workspace, args.verb, getattr(args, "checkouts", "")))
             return EXIT_OK
         if args.verb == "list":
             print(render(scan(workspace)[0]))

@@ -748,6 +748,59 @@ def picked_rows(
     return rows(collect(workspace, fetch=fetch, projects=wanted), now)
 
 
+def drawing(args) -> bool:
+    """True when this run is a dropdown opening rather than a person serving something.
+
+    One predicate rather than two conditions in `main`, which is the widest function
+    here: both flags mean "print rows and stop", and `draw` is what tells them apart.
+    """
+    return bool(args.rows or args.project_rows)
+
+
+def draw(workspace: Path, stage_one: bool, checkouts: str, fetch: bool = True) -> list[str]:
+    """The rows for either dropdown stage. This return value IS the quick-pick.
+
+    `stage_one` runs the whole fan-out -- the only place it is paid for -- and records
+    what it found so stage two filters that instead of scanning again. Stage two is
+    `picked_rows`, which reads the record when the token names it and rescans only the
+    ticked checkouts when it does not.
+
+    Both are narrower than the terminal menu in one dimension and wider in another.
+    Narrower: `ui_projects` alone, because this list's reader serves a frontend with
+    `npm run dev` and a checkout declaring no `[frontend] dir` is an option that can
+    only refuse. Wider: untrimmed, because a quick-pick has no screen to run out of, so
+    the row `--limit` drops from a terminal is exactly the row only this list can offer.
+    """
+    if not stage_one:
+        return picked_rows(workspace, checkouts, fetch=fetch)
+    listed = ui_projects(workspace)
+    found = collect(workspace, fetch=fetch, projects=listed)
+    return project_rows(found, listed, picker_scan.write(SCAN_NAME, scan_entries(found)))
+
+
+def refuse_strays(candidates: list[Candidate], checkouts: str) -> None:
+    """Raise `ValueError` naming any ticked ref the checkout stage did not cover.
+
+    A stray pick is an unusable pick, so it leaves by the route an unresolvable one
+    already leaves by rather than growing each caller's `main` a second refusal branch.
+    Both readers of this module do exactly that, which is also what keeps the wording in
+    one place instead of two.
+    """
+    strayed = strayed_picks(candidates, checkouts)
+    if strayed:
+        raise ValueError(stray_report(strayed))
+
+
+def stray_report(strayed: list[str]) -> str:
+    """What to say about ticked refs the checkout stage did not cover."""
+    return (
+        f"Ticked {'a ref' if len(strayed) == 1 else 'refs'} from {', '.join(strayed)}, "
+        "which the checkout picker did not return -- the two picker stages disagree, so "
+        "nothing was served. See `.claude/rules/vscode-tasks.md` on the order the inputs "
+        "have to appear in."
+    )
+
+
 def strayed_picks(candidates: list[Candidate], checkouts: str) -> list[str]:
     """Ticked refs whose checkout was not ticked in the first stage.
 
@@ -1747,23 +1800,10 @@ def main(argv: list[str] | None = None) -> int:
         echo("Nothing picked -- the dropdown was cancelled.")
         return 0
 
-    if args.rows:
-        # The dropdown's own path, and narrower than the terminal menu in one dimension:
-        # `ui_projects` alone, because its reader serves a frontend with `npm run dev` and
-        # a checkout declaring no `[frontend] dir` is an option that can only refuse.
-        # Untrimmed in the other -- a quick-pick has no screen to run out of, so the row
-        # `--limit` drops from a terminal is exactly the row only this list can offer.
-        # Nothing else may reach stdout here: every line of it is an option.
-        picker_rows.emit(picked_rows(workspace, args.checkouts, fetch=args.fetch))
-        return 0
-
-    if args.project_rows:
-        # Stage one, and the only place the whole fan-out is paid for. It records what
-        # it found so stage two can filter it instead of scanning again.
-        listed = ui_projects(workspace)
-        found = collect(workspace, fetch=args.fetch, projects=listed)
-        token = picker_scan.write(SCAN_NAME, scan_entries(found))
-        picker_rows.emit(project_rows(found, listed, token))
+    if drawing(args):
+        picker_rows.emit(
+            draw(workspace, stage_one=args.project_rows, checkouts=args.checkouts, fetch=args.fetch)
+        )
         return 0
 
     if args.fetch and not args.list:
@@ -1786,17 +1826,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.pick_ref:
         try:
             picked = resolve_picks(args.pick_ref, everything)
+            refuse_strays(picked, args.checkouts)
         except ValueError as exc:
             echo(str(exc))
-            return 2
-        strayed = strayed_picks(picked, args.checkouts)
-        if strayed:
-            echo(
-                f"Ticked {'a ref' if len(strayed) == 1 else 'refs'} from "
-                f"{', '.join(strayed)}, which the checkout picker did not return -- the "
-                "two picker stages disagree, so nothing was served. See "
-                "`.claude/rules/vscode-tasks.md` on the order the inputs have to appear in."
-            )
             return 2
 
     if picked:

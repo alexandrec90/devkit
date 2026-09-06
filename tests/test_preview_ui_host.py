@@ -1214,3 +1214,32 @@ def test_a_ref_from_a_checkout_the_first_stage_did_not_return_serves_nothing(
     )
     assert code == 2
     assert "devkit" in capsys.readouterr().out
+
+
+def test_cancelled_reads_either_dropdown_being_dismissed():
+    """Either of them, because either can be the one escaped and a cancel has to cost
+    nothing whichever it was."""
+    assert host.cancelled("${input:previewRow}", "carameli@tok")
+    assert host.cancelled("carameli:main", "${input:previewCheckout}")
+    assert not host.cancelled("carameli:main", "carameli@tok")
+    assert not host.cancelled("", "")
+
+
+def test_narrowed_filters_to_the_ticked_checkouts_and_keeps_order():
+    assert host.narrowed(BOTH, "devkit@tok") == [BOTH[1]]
+    assert host.narrowed(BOTH, "") == BOTH
+
+
+def test_report_stopped_says_what_went_and_how_many(monkeypatch, capsys):
+    monkeypatch.setattr(
+        host, "stop_recorded", lambda: [{"project": "carameli", "ref": "main", "port": 5300}]
+    )
+    assert host.report_stopped() == 0
+    printed = capsys.readouterr().out
+    assert "stopped carameli main on port 5300" in printed
+    assert "1 host preview server(s) stopped." in printed
+
+
+def test_report_reaped_names_the_ref_and_the_port_it_took_back():
+    line = host.report_reaped({"ref": "agent/ui-0905", "port": 5301})
+    assert "agent/ui-0905" in line and "5301" in line and "stopped" in line
