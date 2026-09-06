@@ -186,23 +186,53 @@ never renders.
   usage error is a red icon, a toast and a `logs/` artifact for a run the user called off.
   `test_every_task_with_a_command_picker_can_be_cancelled` checks the **innermost** command,
   since a wrapper passes its tail through.
-- **A picker whose options are not knowable in advance reads a file, and the script that
-  answers it writes that file.** `rioj7.command-variable` can read and template JSON and
-  cannot run a command, so a list of live branches or boxes has to be *cached* by the
-  previous run. Three things that costs: the list is stale by construction, so it needs a
+- **A picker whose options are not knowable in advance has two shapes, and the live one is
+  the default now.** `augustocdias.tasks-shell-input`'s `shellCommand.execute` runs a
+  command when the input resolves and draws its stdout, so the list is built at click time
+  and cannot be stale — `brokenPrRow` is the worked example, and its note carries the
+  contract: one line per row, `value|label|description|detail` split on `fieldSeparator`,
+  only the value returned, and the script strips that separator out of anything a person
+  wrote. **The cost is the wait**, because the picker is a person watching an empty box:
+  fan the calls out (`fix-prs.scan` runs one `gh` per checkout in a pool) and keep it near
+  a second.
+- **The cached shape is for a list no command can produce fast enough**, and it is what
+  `rioj7.command-variable` — which reads and templates JSON and cannot run anything — is
+  limited to. Three things it costs: the list is stale by construction, so it needs a
   visible timestamp **and a writer that is not a task run** — `previewRow`'s file is
-  rewritten by `worktree.py reconcile` on its schedule, so the menu tracks open PRs without
-  anyone asking; a pick that no longer matches anything must still resolve to something
-  servable; and **every row must carry every templated field, as a string**, because the
-  extension appends options until an expression *throws*, and `undefined` does not throw —
-  a row missing one field draws ten thousand blank entries instead of ending the list. Ride
-  on an existing scheduled pass rather than adding a daemon, and make the rider unable to
-  fail it: any exception leaves `reconcile`'s own verdict untouched and prints one warning.
+  rewritten by `worktree.py reconcile` on its schedule; a pick that no longer matches
+  anything must still resolve to something servable; and **every row must carry every
+  templated field, as a string**, because the extension appends options until an expression
+  *throws*, and `undefined` does not throw — a row missing one field draws ten thousand
+  blank entries instead of ending the list. Ride on an existing scheduled pass rather than
+  adding a daemon, and make the rider unable to fail it: any exception leaves `reconcile`'s
+  own verdict untouched and prints one warning.
+- **A picker that needs an extension declares it in `extensions.recommendations`, and two
+  things hold that.** A `command` input is dead on a machine without the extension behind
+  it, and it fails naming a *command* rather than a package: `rioj7.command-variable`
+  supplies every `pickStringRemember` and `multiPick` here, so a machine without it runs
+  twenty tasks into `command 'extension.commandvariable.pickStringRemember' not found`,
+  which is why the fix is unguessable from the failure. That list is the single source —
+  `test_every_extension_a_picker_needs_is_a_workspace_recommendation` maps each input's
+  command to its provider and turns red until the entry exists, and
+  `scripts/vscode_extensions.py` reads the same list so `toolchain_lines` reports a missing
+  one at session start beside a missing `uv`, with the `code --install-extension` line. A
+  command id whose provider is not in `PICKER_EXTENSIONS` fails rather than passing — a
+  picker nobody wrote a provider down for is the one nobody will list as a prerequisite
+  either. **A recommendation is checked, never installed**: VS Code offers it once, so a
+  machine that dismissed the toast is indistinguishable from one that is set up.
+- **A cached list is only as alive as its writer, and nothing in the dropdown says so.**
+  The broken-PR menu spent two days a day stale because the scheduled pass that wrote it
+  had been stood down by `harness-switch.py --off jobs` — the rows still drew, the
+  timestamp was in a description nobody reads at click time, and the click sent a session
+  at a PR that had been closed since. That is the case for preferring the live shape
+  wherever the command can answer in about a second.
 - **Two dependent pickers are one input, not two.** VS Code resolves sibling `${input:...}`
   in no defined order and gives neither sight of the other, so a "which project, then which
   of its branches" pair is a `pickStringRemember` nested inside the outer input's `args`,
   read back as `${pickStringRemember:<id>}` — one token, because an input resolves to one
-  string.
+  string. A live picker has no such nesting — one input runs one command — so the
+  dependent half becomes a **field on the row** instead: `brokenPrRow` lists every
+  checkout's broken PRs in one flat list and puts the checkout in the description.
 - **An action scoped to exactly one checkout writes the name, not a picker.** A
   `${input:...}` with a single option asks a question that has no second answer, and the
   extension still shows it. Spell the checkout in the task's `--project` argument instead.

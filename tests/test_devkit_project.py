@@ -2102,6 +2102,58 @@ def test_every_task_with_a_command_picker_can_be_cancelled(canonical):
     )
 
 
+# Which extension supplies each `command` input's command, and so which
+# `recommendations` entry every task using that picker depends on. Keyed by the prefix
+# that identifies the provider, because `rioj7.command-variable` contributes a family.
+PICKER_EXTENSIONS = {
+    "extension.commandvariable.": "rioj7.command-variable",
+    "shellCommand.execute": "augustocdias.tasks-shell-input",
+}
+
+
+def _providing_extension(command: str) -> str:
+    """The extension a `command` input's command comes from, or "" for none known."""
+    return next(
+        (name for prefix, name in PICKER_EXTENSIONS.items() if command.startswith(prefix)), ""
+    )
+
+
+def test_every_extension_a_picker_needs_is_a_workspace_recommendation(canonical):
+    """A `command` input is dead on a machine without the extension behind it, and the
+    failure names a command rather than a package -- so the prerequisite has to be
+    written down where something checks it.
+
+    `extensions.recommendations` in the canonical workspace is that list, and it is the
+    only one: `scripts/vscode_extensions.py` reads it to report what is missing at
+    session start, and a recommendation is what VS Code offers to install. This is the
+    half that cannot be forgotten -- adding a picker on a new extension turns red here
+    until the entry exists.
+
+    An unknown command id fails rather than passing. A picker whose provider nobody
+    wrote down is exactly the one nobody will list as a prerequisite either, and
+    treating it as "needs nothing" would make this test quietly stop covering it.
+    """
+    recommended = set(
+        devkit_jsonc_loads(devkit_project.canonical_text())["extensions"]["recommendations"]
+    )
+    needed: dict[str, list[str]] = {}
+    for spec in canonical["inputs"]:
+        if spec.get("type") != "command":
+            continue
+        provider = _providing_extension(str(spec.get("command", "")))
+        assert provider, (
+            f"input {spec['id']!r} runs {spec.get('command')!r}, which no entry of "
+            f"PICKER_EXTENSIONS claims -- name the extension that supplies it"
+        )
+        needed.setdefault(provider, []).append(spec["id"])
+
+    assert needed, "no command-typed inputs -- the picker convention has changed"
+    missing = {name: ids for name, ids in needed.items() if name not in recommended}
+    assert not missing, (
+        f"extensions these pickers need and the workspace does not recommend: {missing}"
+    )
+
+
 def test_a_dismissed_picker_dispatches_nothing(monkeypatch, capsys):
     """The dispatcher's half of the contract above, exercised rather than inferred.
 

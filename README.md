@@ -438,16 +438,19 @@ that the job ends with the PR merged once the gate is green.
 python scripts/fix-prs.py --list                              # what is red, per checkout
 python scripts/fix-prs.py --picks carameli:313 --agent claude # a tab you can watch
 python scripts/fix-prs.py --picks "devkit:88 roguelike:16" --agent claude-bg
-python scripts/fix-prs.py --refresh                           # rewrite the dropdown's options
+python scripts/fix-prs.py --rows                             # the dropdown's rows, live
 ```
 
 `claude-bg` is `claude --bg`: it returns a session id and `claude agents`, `claude logs
 <id>` and `claude attach <id>` read it back. There is no `codex-bg` — `codex exec` is
 non-interactive but streams into the terminal that started it and leaves nothing to
-reattach to. The *Agent: Fix a Broken PR* task is the same thing with two dropdowns, and
-its list is rebuilt by `worktree.py reconcile` every quarter of an hour; a pick is re-read
-live before anything is spawned, so a PR that went green since the scan is reported and
-skipped.
+reattach to. The *Agent: Fix a Broken PR* task is the same thing with a dropdown, and that
+dropdown runs `--rows` when you open it — one `gh` call per checkout, fanned out, so the
+list is a live scan rather than a cached one. A pick is then re-read again before anything
+is spawned, so a PR that went green, was closed or was merged in between is reported and
+skipped. It needs the `augustocdias.tasks-shell-input` extension, which is what lets a VS
+Code input run a command at all; `workspace-status.py` reports it at session start when it
+is missing.
 
 ### Running someone else's branch before it merges
 

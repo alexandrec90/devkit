@@ -56,7 +56,8 @@
 	],
 	"extensions": {
 		"recommendations": [
-			"rioj7.command-variable"
+			"rioj7.command-variable",
+			"augustocdias.tasks-shell-input"
 		]
 	},
 	// ---------------------------------------------------------------------------
@@ -642,8 +643,9 @@
 				// PR nobody has touched this week.
 				//
 				// Machine scope, not project scope — one scan across every checkout, so the
-				// checkout is the first of two nested pickers rather than a scope for the task.
-				// See ACTIONS["fix-prs"].
+				// checkout is a field on each row rather than a scope for the task. The picker
+				// runs that scan itself, at click time; see the note on `brokenPrRow` for what
+				// the cached menu it replaced cost. See ACTIONS["fix-prs"].
 				//
 				// The third picker is where Claude and Codex stop matching, and that is why it
 				// is spelled as three rows rather than an agent picker plus a background
@@ -656,7 +658,7 @@
 				// background mode, the session id — the one line the terminal has that nothing
 				// else will show you.
 				"label": "Agent: Fix a Broken PR",
-				"detail": "Asks which checkout, then which of its broken PRs — the open ones with a merge conflict or a failing gate, drafts excluded — then which agent opens on them. Each ticked PR gets a box on that PR's own head branch, upstream set so a bare push lands on the PR, and an agent session that starts already knowing the PR number, what is wrong with it right now, and that the job ends with the PR merged once the gate is green. Boxes are cut one at a time: each costs a port slot and a cold toolchain install. THIS SPENDS A PAID AGENT SESSION PER TICKED PR, and those sessions push to a real branch and can merge a real PR. The list tracks GitHub on its own — the scheduled reconcile pass rebuilds it every quarter hour — and what a click acts on is re-read live, so a PR that went green since the scan is reported and skipped. 'claude' and 'codex' open a terminal tab you can watch and steer; 'claude (background)' returns an id instead and is read back with 'claude agents', 'claude logs <id>' and 'claude attach <id>' — nothing is watching it, so a permission prompt it cannot answer sits there until you look.",
+				"detail": "Asks which checkout, then which of its broken PRs — the open ones with a merge conflict or a failing gate, drafts excluded — then which agent opens on them. Each ticked PR gets a box on that PR's own head branch, upstream set so a bare push lands on the PR, and an agent session that starts already knowing the PR number, what is wrong with it right now, and that the job ends with the PR merged once the gate is green. Boxes are cut one at a time: each costs a port slot and a cold toolchain install. THIS SPENDS A PAID AGENT SESSION PER TICKED PR, and those sessions push to a real branch and can merge a real PR. The list is scanned from GitHub when you open it, so it cannot be older than the click, and what a click acts on is re-read again at launch: a PR that went green, was closed or was merged in between is reported and skipped rather than given a box. 'claude' and 'codex' open a terminal tab you can watch and steer; 'claude (background)' returns an id instead and is read back with 'claude agents', 'claude logs <id>' and 'claude attach <id>' — nothing is watching it, so a permission prompt it cannot answer sits there until you look.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -2028,56 +2030,49 @@
 				}
 			},
 			{
-				// `previewRow`'s shape, pointed at a different file, and every paragraph on
-				// that input applies here unchanged: the nesting (the row list depends on the
-				// checkout, and two sibling inputs could not see each other), the single pick
-				// in `value` with `${remember:...}` in the other three fields, the one-token
-				// `<project>:<number>` value, the space separator, `clearStorage`, and the
-				// absence of `checkEscapedUI`. Read them there.
+				// The one picker in this file that runs a command instead of reading a file, and
+				// the reason is what the file cost. `rioj7.command-variable` reads and templates
+				// JSON and cannot run anything, so every other list here is whatever the last
+				// scheduled pass wrote — stale by construction, and stale in the direction that
+				// costs: a PR closed since the scan still drew a row, and clicking it sent
+				// `worktree.py resume` at a head branch GitHub had deleted when it closed. The row
+				// was a day old because the pass that wrote it had been switched off, and nothing
+				// about a dropdown says that.
 				//
-				// What differs is the writer and what staleness costs. `fix-prs.py --refresh`
-				// writes this file and `worktree.py reconcile` calls it on the same pass that
-				// rebuilds the preview menu — so the rows track GitHub without anyone asking.
-				// A row can still be up to a quarter of an hour old, and here that matters more
-				// than it does for a preview: a PR can go green in that window. So the pick is
-				// re-read live before anything is spawned, and a PR that is no longer broken is
-				// reported and skipped rather than given a box and an agent.
+				// `augustocdias.tasks-shell-input` runs `fix-prs.py --rows` at the moment the
+				// picker opens, so the list is a `gh` scan of every checkout and cannot be older
+				// than the click. The script fans that scan out across the checkouts, which is what
+				// keeps it near a second rather than the five a serial pass took — a picker is a
+				// person waiting.
 				//
-				// Every checkout is listed even when nothing there is broken, and such a
-				// checkout draws a single `nothing broken` row. That is not decoration: the
-				// extension appends options until an expression THROWS, so an empty `rows`
-				// array would end the list at the first healthy checkout and hide every one
-				// after it. `fix-prs.py` recognises the sentinel value and runs nothing.
+				// `fieldSeparator` splits each line into `value|label|description|detail`, of which
+				// only the value comes back; the script strips the separator out of a PR title
+				// rather than trusting GitHub not to carry one. A machine with nothing broken draws
+				// one `none` row rather than an empty list, because an empty quick-pick says nothing
+				// about whether the scan ran, and `fix-prs.py` answers that value by running nothing.
+				//
+				// Flat, where the file-backed version asked for the checkout first: that stage
+				// existed because a JSON menu keys its rows by something, and one input runs one
+				// command. The checkout rides on the row instead.
+				//
+				// Dismissing it is still the script's job to notice — the extension returns nothing,
+				// VS Code substitutes nothing, and the task starts with the literal
+				// `${input:brokenPrRow}` in its argv, which `scripts/task_input.py` recognises ahead
+				// of argparse.
 				"id": "brokenPrRow",
 				"type": "command",
-				"command": "extension.commandvariable.pickStringRemember",
+				"command": "shellCommand.execute",
 				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/fix-prs.py\" --rows",
+					"cwd": "${workspaceFolder:devkit}",
 					"description": "Which broken PR should an agent be sent at? Tick as many as you want.",
-					"key": "brokenPrRow",
-					"multiPick": true,
-					"clearStorage": true,
-					"separator": " ",
-					"fileName": "${workspaceFolder:devkit}/logs/broken-prs.json",
-					"fileFormat": "json",
-					"jsonOption": {
-						"value": "content.rows['${pickStringRemember:brokenPrProject}'][__itemIdx__].value",
-						"label": "content.rows['${remember:brokenPrProject}'][__itemIdx__].label",
-						"description": "content.rows['${remember:brokenPrProject}'][__itemIdx__].description",
-						"detail": "content.rows['${remember:brokenPrProject}'][__itemIdx__].detail"
-					},
-					"pickStringRemember": {
-						"brokenPrProject": {
-							"description": "Which checkout has the PR that is stuck?",
-							"key": "brokenPrProject",
-							"fileName": "${workspaceFolder:devkit}/logs/broken-prs.json",
-							"fileFormat": "json",
-							"jsonOption": {
-								"value": "content.projects[__itemIdx__].name",
-								"label": "content.projects[__itemIdx__].label",
-								"description": "content.projects[__itemIdx__].description"
-							}
-						}
-					}
+					"fieldSeparator": "|",
+					"multiselect": true,
+					"multiselectSeparator": " ",
+					// Never offer the last pick again: a PR that was broken an hour ago is the one
+					// most likely to have been fixed since, and a remembered row is the staleness
+					// this input was rewritten to remove.
+					"rememberPrevious": false
 				}
 			},
 			{
