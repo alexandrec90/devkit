@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import picker_rows
+import picker_scan
 
 # Relative to a checkout. Spelled with a forward slash because every comparison below is
 # made on `as_posix()` output, which is what `git worktree list --porcelain` prints too.
@@ -255,34 +256,118 @@ def base_row(project: str, ref: str, note: str) -> str:
     )
 
 
-def tree_rows(trees: dict[str, list[Tree]]) -> list[str]:
-    """The delete dropdown's lines: every checkout's worktrees, the fullest checkout first.
+def tree_entries(trees: dict[str, list[Tree]]) -> list[tuple[str, str]]:
+    """The delete dropdown's lines as `(checkout, row)`, the fullest checkout first.
 
     Ordered by count for the cached menu's reason, read one level down: whoever opened
     this wants to delete something, so the rows of the checkout that has several belong
     above the one that has none. Within a checkout the scan's order stands -- it is `git
     worktree list`'s, which is creation order.
+
+    Named apart from `tree_rows` because two callers need the SAME order for different
+    shapes: the dropdown prints it, and the checkout stage records it for stage two to
+    filter. A stage two filtering a differently-ordered list would draw the right
+    worktrees in the wrong order, which nobody would report.
     """
-    listed = [
-        tree_row(project, tree)
+    return [
+        (project, tree_row(project, tree))
         for project in sorted(trees, key=lambda name: (-len(trees[name]), name))
         for tree in trees[project]
     ]
+
+
+def tree_rows(trees: dict[str, list[Tree]]) -> list[str]:
+    """The delete dropdown's lines, or the sentinel when there is nothing to delete."""
+    listed = [line for _project, line in tree_entries(trees)]
     return listed or [
         picker_rows.nothing_row("no worktrees", f"nothing under {WORKTREES_DIR} in any checkout")
     ]
 
 
-def base_rows(bases: dict[str, list[tuple[str, str]]]) -> list[str]:
-    """The base-branch dropdown's lines: every checkout's recent branches.
+def base_entries(bases: dict[str, list[tuple[str, str]]]) -> list[tuple[str, str]]:
+    """The base-branch dropdown's lines as `(checkout, row)`.
 
-    Alphabetical by checkout, where `tree_rows` is by count, and the difference is the
-    question: this list is read to find a *known* branch name, so a stable position is
-    worth more than putting the busiest checkout on top.
+    Alphabetical by checkout, where `tree_entries` is by count, and the difference is
+    the question: this list is read to find a *known* branch name, so a stable position
+    is worth more than putting the busiest checkout on top. Split from `base_rows` for
+    `tree_entries`' reason -- the checkout stage records this order and stage two
+    filters it.
     """
-    listed = [
-        base_row(project, ref, note)
+    return [
+        (project, base_row(project, ref, note))
         for project in sorted(bases)
         for ref, note in bases.get(project, ())
     ]
+
+
+def base_rows(bases: dict[str, list[tuple[str, str]]]) -> list[str]:
+    """The base-branch dropdown's lines, or the sentinel when origin could not be read."""
+    listed = [line for _project, line in base_entries(bases)]
     return listed or [picker_rows.nothing_row("no branches", "origin could not be read")]
+
+
+def empty_rows(half: str) -> list[str]:
+    """The sentinel row for a half whose ticked checkouts turned out to hold nothing.
+
+    Through the two row builders rather than spelled here, because an empty quick-pick
+    cannot be told apart from a command that failed to run, and each half words that
+    differently -- "no worktrees" against "origin could not be read".
+    """
+    return tree_rows({}) if half == "trees" else base_rows({})
+
+
+def tree_project_rows(trees: dict[str, list[Tree]], token: str) -> list[str]:
+    """The delete task's checkout stage: one row per checkout, and what it holds.
+
+    A checkout with no worktrees is listed and says so, rather than dropped. The menu
+    has to be readable as an answer to "where are my worktrees", and one that silently
+    omits the empty checkouts cannot be told apart from one that could not reach them.
+    """
+    if not trees:
+        return [
+            picker_rows.nothing_row(
+                "no checkouts", "the workspace registry named nothing that could be scanned"
+            )
+        ]
+    listed = []
+    for project in sorted(trees, key=lambda name: (-len(trees[name]), name)):
+        count = len(trees[project])
+        listed.append(
+            picker_scan.project_row(
+                project,
+                token,
+                f"{count} worktree{'' if count == 1 else 's'}" if count else "no worktrees",
+                "tick as many checkouts as you want -- the next list covers all of them",
+            )
+        )
+    return listed
+
+
+def base_project_rows(bases: dict[str, list[tuple[str, str]]], token: str) -> list[str]:
+    """The new-worktree task's checkout stage: one row per checkout, and its branch count.
+
+    Every checkout contributes at least its default branch, so a count of zero here
+    means `recent_bases` could not read that checkout's origin refs at all -- which is
+    worth saying in the row rather than leaving as an unexplained short list one stage
+    later.
+    """
+    if not bases:
+        return [
+            picker_rows.nothing_row(
+                "no checkouts", "the workspace registry named nothing that could be scanned"
+            )
+        ]
+    listed = []
+    for project in sorted(bases):
+        count = len(bases.get(project, ()))
+        listed.append(
+            picker_scan.project_row(
+                project,
+                token,
+                f"{count} branch{'' if count == 1 else 'es'} to cut from"
+                if count
+                else "origin could not be read",
+                "one checkout or several -- the next list covers all of them",
+            )
+        )
+    return listed

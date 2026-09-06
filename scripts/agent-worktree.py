@@ -14,6 +14,8 @@ Claude session spawns, so the delete verb can see those too.
 | `remove` | destroy the ticked worktrees, and their local branches when nothing is lost |
 | `rows` | print the delete dropdown's rows, from a scan, and stop |
 | `bases` | print the base-branch dropdown's rows and stop |
+| `tree-projects` | print the delete task's checkout rows, recording the scan behind them |
+| `base-projects` | print the new-worktree task's checkout rows, and record its scan |
 | `list` | print the worktrees, for a terminal |
 
 **This is not the box tier and must not become it.** `worktree.py` cuts a box at
@@ -33,6 +35,14 @@ to rewrite it as they finished to make the common case bearable. Nothing rewrite
 anything now: a worktree is in the list because it exists, which is also why
 `fix-prs.py` can cut into this tier without knowing this file exists.
 
+**Each dropdown asks which checkouts first, and that costs no second scan.**
+`tree-projects` and `base-projects` are the first stage: they run the fan-out once,
+record it through `picker_scan`, and draw one row per checkout with what it holds. The
+second stage is `rows` or `bases` with `--checkouts`, which filters that record by the
+token it was handed and rescans only what was ticked when the token names no write --
+so the list a person picks from is never older than the click that opened it. See
+`scripts/picker_scan.py` for why the token is the whole design.
+
 Every decision is in `scripts/agent_worktrees.py`, pure and separately tested; what is
 here spawns git and terminals, and takes a runner so the tests do not.
 """
@@ -50,6 +60,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_worktrees as aw
 import devkit_project
 import picker_rows
+import picker_scan
 import sweep
 import task_branch as tb
 import task_input
@@ -72,6 +83,12 @@ SCAN_WORKERS = 8
 # whole purpose is opening an agent, and a worktree with nothing in it is `git worktree
 # add`, which needs no dropdown.
 AGENTS = ("claude", "codex", "none")
+
+# What `picker_scan` files each dropdown's checkout-stage write under. Two names for
+# one scan on purpose: the two dropdowns are separate tasks, each clicked on its own, so
+# each records the half it will be asked for rather than sharing a write neither click
+# can be sure the other made.
+SCAN_NAMES = {"trees": "worktree-trees", "bases": "worktree-bases"}
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -162,7 +179,9 @@ def recent_bases(project_dir: Path) -> list[tuple[str, str]]:
     return rows
 
 
-def scan(workspace: Path) -> tuple[dict[str, list[aw.Tree]], dict[str, list[tuple[str, str]]]]:
+def scan(
+    workspace: Path, projects: list[str] | None = None
+) -> tuple[dict[str, list[aw.Tree]], dict[str, list[tuple[str, str]]]]:
     """Every registered checkout's worktrees and base branches.
 
     Every checkout is listed even when it has neither, because the reader's question is
@@ -172,10 +191,20 @@ def scan(workspace: Path) -> tuple[dict[str, list[aw.Tree]], dict[str, list[tupl
     Concurrent because both dropdowns now run this when they open rather than reading a
     file a scheduled pass wrote. The per-checkout calls share nothing and both helpers
     answer empty rather than raising, so the pool cannot fail where the loop would not.
+
+    `projects` narrows it to the checkouts a caller already knows it wants -- the second
+    picker stage, when the scan its first stage recorded is not the one it was handed.
+    A parameter rather than a filter on the result, because each name in it costs a
+    `git worktree list` and a `for-each-ref`: discarding those afterwards would spend
+    the whole fan-out the narrowing exists to avoid. Names the registry does not know
+    are dropped, so a stale pick cannot reach the filesystem as a path.
     """
     text = workspace.read_text(encoding="utf-8")
     root = workspace.parent
     names = [name for name in devkit_project.known_projects(text) if (root / name).is_dir()]
+    if projects is not None:
+        wanted = set(projects)
+        names = [name for name in names if name in wanted]
     if not names:
         return {}, {}
     with futures.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(names))) as pool:
@@ -310,10 +339,107 @@ def build_parser() -> argparse.ArgumentParser:
 
     again = sub.add_parser("rows", help="print the delete dropdown's rows and stop")
     from_refs = sub.add_parser("bases", help="print the base-branch dropdown's rows and stop")
+    tree_scope = sub.add_parser(
+        "tree-projects", help="print the delete task's CHECKOUT rows and stop"
+    )
+    base_scope = sub.add_parser(
+        "base-projects", help="print the new-worktree task's CHECKOUT rows and stop"
+    )
     shown = sub.add_parser("list", help="print the worktrees and stop")
-    for one in (new, gone, again, from_refs, shown):
+    # Wherever a checkout stage can precede one: the two row verbs read it to narrow,
+    # and `new`/`remove` read it to notice the two stages disagreeing.
+    for one in (new, gone, again, from_refs):
+        one.add_argument(
+            "--checkouts",
+            default="",
+            help=(
+                f"ticked checkouts, `<project>{picker_scan.SEP}<scan token>` joined by "
+                f"`{picker_scan.LIST_SEP}` -- what the checkout picker returns"
+            ),
+        )
+    for one in (new, gone, again, from_refs, tree_scope, base_scope, shown):
         one.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
     return parser
+
+
+# The four verbs that draw a quick-pick, and which half of one scan each reads.
+# `draw` dispatches on this rather than `main` carrying four branches: they differ in
+# two values and nothing else, and `main` is already the widest function in the file.
+PICKER_VERBS = {
+    "rows": "trees",
+    "bases": "bases",
+    "tree-projects": "trees",
+    "base-projects": "bases",
+}
+
+
+def draw(workspace: Path, verb: str, checkouts: str) -> list[str]:
+    """The rows for whichever picker verb was asked for.
+
+    The `-projects` pair is stage one: it runs the fan-out, records it under the half's
+    own scan name, and draws a checkout per row. The bare pair is stage two, which
+    filters that record. Both are in one function because "which half" is the only
+    thing that varies across the four, and the caller's stdout IS the quick-pick.
+    """
+    half = PICKER_VERBS[verb]
+    if not verb.endswith("-projects"):
+        return picked_rows(workspace, checkouts, half)
+    trees, bases = scan(workspace)
+    if half == "trees":
+        return aw.tree_project_rows(
+            trees, picker_scan.write(SCAN_NAMES[half], aw.tree_entries(trees))
+        )
+    return aw.base_project_rows(bases, picker_scan.write(SCAN_NAMES[half], aw.base_entries(bases)))
+
+
+def picked_rows(workspace: Path, checkouts: str, half: str) -> list[str]:
+    """Stage two for either dropdown: `half` is "trees" or "bases".
+
+    One function for both because the two differ only in which half of the scan they
+    read and which builder renders it -- and the part worth having in one place is the
+    token check, which is the whole safety property. A token that names no write is a
+    miss, and a miss rescans the ticked checkouts rather than serving anything older;
+    see `picker_scan`.
+
+    An empty `checkouts` is the verb typed by hand with no first stage in front of it,
+    and answers with the whole machine the way it did before there was one.
+    """
+    projects, token = picker_scan.parse_projects(checkouts)
+    if projects:
+        cached = picker_scan.read(SCAN_NAMES[half], token)
+        if cached is not None:
+            return picker_scan.select(cached, projects) or aw.empty_rows(half)
+    # A miss, or a verb typed by hand with no first stage in front of it. `projects`
+    # narrows the rescan in the first case and is empty in the second, which `scan`
+    # reads as "every checkout" -- the answer this verb gave before there was a stage.
+    found = scan(workspace, projects or None)
+    return aw.tree_rows(found[0]) if half == "trees" else aw.base_rows(found[1])
+
+
+def strayed_picks(picks: list[tuple[str, str]], checkouts: str) -> list[str]:
+    """Ticked rows whose checkout the first stage did not return.
+
+    Nothing in the two stages can produce one: stage two draws only the checkouts stage
+    one returned. So a stray is evidence the chain itself misfired -- the extension
+    resolves `${input:...}` from the value it recorded when that input LAST ran, so an
+    input order that stopped putting the checkout stage first would quietly filter by
+    the previous click's checkouts. On the delete task that would mean offering
+    somebody a list of worktrees they did not ask to see, which is the wrong place in
+    this repo to be quietly wrong.
+    """
+    ticked, _ = picker_scan.parse_projects(checkouts)
+    if not ticked:
+        return []
+    return sorted({project for project, _name in picks} - set(ticked))
+
+
+def stray_report(strayed: list[str], noun: str) -> str:
+    """What to print when a pick names a checkout the first stage did not."""
+    return (
+        f"agent-worktree: ticked {noun} from {', '.join(strayed)}, which the checkout "
+        "picker did not return -- the two picker stages disagree, so nothing was done. "
+        "See `.claude/rules/vscode-tasks.md` on the order the inputs have to appear in."
+    )
 
 
 def main(argv: list[str] | None = None, runner=subprocess.run) -> int:
@@ -333,12 +459,10 @@ def main(argv: list[str] | None = None, runner=subprocess.run) -> int:
         return EXIT_USAGE
 
     try:
-        # Both picker paths: this stdout IS the quick-pick, so nothing else may reach it.
-        if args.verb == "rows":
-            picker_rows.emit(aw.tree_rows(scan(workspace)[0]))
-            return EXIT_OK
-        if args.verb == "bases":
-            picker_rows.emit(aw.base_rows(scan(workspace)[1]))
+        if args.verb in PICKER_VERBS:
+            # `getattr` because the two stage-ONE verbs take no `--checkouts`: they are
+            # what a checkout stage is, so there is nothing in front of them to narrow by.
+            picker_rows.emit(draw(workspace, args.verb, getattr(args, "checkouts", "")))
             return EXIT_OK
         if args.verb == "list":
             print(render(scan(workspace)[0]))
@@ -348,11 +472,19 @@ def main(argv: list[str] | None = None, runner=subprocess.run) -> int:
             if pick is None:
                 print("agent-worktree: no checkout picked -- nothing to do")
                 return EXIT_OK
+            strayed = strayed_picks([pick], args.checkouts)
+            if strayed:
+                print(stray_report(strayed, "a base branch"), file=sys.stderr)
+                return EXIT_USAGE
             return create(pick[0], workspace, args.slug, pick[1], args.agent, runner)
         picks = [p for p in (aw.parse_pick(t) for t in aw.split_picks(args.picks)) if p]
         if not picks:
             print("agent-worktree: nothing ticked -- nothing to do")
             return EXIT_OK
+        strayed = strayed_picks(picks, args.checkouts)
+        if strayed:
+            print(stray_report(strayed, "worktrees"), file=sys.stderr)
+            return EXIT_USAGE
         return remove(picks, workspace, args.force == "force", runner)
     except devkit_project.ProjectError as exc:
         print(f"agent-worktree: {exc}", file=sys.stderr)

@@ -24,6 +24,7 @@ import pytest
 from support import load_script
 
 host = load_script("scripts/preview-ui-host.py")
+picker_rows = load_script("scripts/picker_rows.py")
 
 Candidate = host.preview_task.Candidate
 KIND_BRANCH = host.preview_task.KIND_BRANCH
@@ -1126,3 +1127,119 @@ def test_main_names_the_pr_and_title_in_the_closing_block(
     row = '  http://127.0.0.1:5300/  demo  agent/x  PR #99  "Editor ship button"'
     rule = "=" * len(row)
     assert f"{rule}\n{row}\n{rule}" in capsys.readouterr().out
+
+
+# --- the checkout stage reaching the script that actually serves ---------------
+
+
+def _two_stage(tmp_path, monkeypatch, candidates):
+    """A workspace, a stubbed scan, and nothing that could start a server."""
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(host.preview_task, "ui_projects", lambda _ws: ["carameli", "devkit"])
+    monkeypatch.setattr(host.preview_task, "collect", lambda *_a, **_k: candidates)
+    monkeypatch.setattr(host, "reap_orphans", lambda: [])
+    return workspace
+
+
+def _candidate(project, ref):
+    return host.preview_task.Candidate(project=project, ref=ref, kind=host.preview_task.KIND_TRUNK)
+
+
+BOTH = [_candidate("carameli", "main"), _candidate("devkit", "main")]
+
+
+def test_the_serving_script_takes_the_checkout_stages_answer(tmp_path, monkeypatch, capsys):
+    """The task dispatches THIS script, not `preview-task.py`, so `--checkouts` has to
+    parse here or the whole two-stage task is a usage error on every click."""
+    workspace = _two_stage(tmp_path, monkeypatch, BOTH)
+    assert (
+        host.main(
+            ["--rows", "--no-fetch", "--checkouts=carameli@tok", "--workspace", str(workspace)]
+        )
+        == 0
+    )
+    drawn = capsys.readouterr().out.splitlines()
+    assert [line.split(picker_rows.FIELD_SEP)[0] for line in drawn] == ["carameli:main"]
+
+
+def test_no_checkout_stage_serves_every_servable_checkout(tmp_path, monkeypatch, capsys):
+    workspace = _two_stage(tmp_path, monkeypatch, BOTH)
+    assert host.main(["--rows", "--no-fetch", "--workspace", str(workspace)]) == 0
+    drawn = capsys.readouterr().out.splitlines()
+    assert [line.split(picker_rows.FIELD_SEP)[0] for line in drawn] == [
+        "carameli:main",
+        "devkit:main",
+    ]
+
+
+def test_dismissing_the_checkout_stage_costs_nothing(tmp_path, monkeypatch, capsys):
+    """Escaping either dropdown leaves VS Code's literal in the argv rather than
+    aborting the task, and a cancel has to be free whichever one was dismissed."""
+    workspace = _two_stage(tmp_path, monkeypatch, BOTH)
+    monkeypatch.setattr(
+        host.preview_task, "collect", lambda *_a, **_k: pytest.fail("a cancel must not scan")
+    )
+    code = host.main(
+        [
+            "--checkouts=${input:previewCheckout}",
+            "--picks=carameli:main",
+            "--workspace",
+            str(workspace),
+        ]
+    )
+    assert code == 0
+    assert "cancelled" in capsys.readouterr().out
+
+
+def test_a_ref_from_a_checkout_the_first_stage_did_not_return_serves_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """The runtime half of the ordering guard. Nothing in the two stages can produce
+    this, so it is evidence the chain misfired -- and serving a branch nobody asked to
+    see is the wrong way to find that out."""
+    workspace = _two_stage(tmp_path, monkeypatch, BOTH)
+    monkeypatch.setattr(host.shutil, "which", lambda _name: "npm")
+    monkeypatch.setattr(
+        host, "start_offline_stub", lambda *_a, **_k: pytest.fail("nothing may be served")
+    )
+    code = host.main(
+        [
+            "--checkouts=carameli@tok",
+            "--picks=devkit:main",
+            "--no-fetch",
+            "--workspace",
+            str(workspace),
+        ]
+    )
+    assert code == 2
+    assert "devkit" in capsys.readouterr().out
+
+
+def test_cancelled_reads_either_dropdown_being_dismissed():
+    """Either of them, because either can be the one escaped and a cancel has to cost
+    nothing whichever it was."""
+    assert host.cancelled("${input:previewRow}", "carameli@tok")
+    assert host.cancelled("carameli:main", "${input:previewCheckout}")
+    assert not host.cancelled("carameli:main", "carameli@tok")
+    assert not host.cancelled("", "")
+
+
+def test_narrowed_filters_to_the_ticked_checkouts_and_keeps_order():
+    assert host.narrowed(BOTH, "devkit@tok") == [BOTH[1]]
+    assert host.narrowed(BOTH, "") == BOTH
+
+
+def test_report_stopped_says_what_went_and_how_many(monkeypatch, capsys):
+    monkeypatch.setattr(
+        host, "stop_recorded", lambda: [{"project": "carameli", "ref": "main", "port": 5300}]
+    )
+    assert host.report_stopped() == 0
+    printed = capsys.readouterr().out
+    assert "stopped carameli main on port 5300" in printed
+    assert "1 host preview server(s) stopped." in printed
+
+
+def test_report_reaped_names_the_ref_and_the_port_it_took_back():
+    line = host.report_reaped({"ref": "agent/ui-0905", "port": 5301})
+    assert "agent/ui-0905" in line and "5301" in line and "stopped" in line
