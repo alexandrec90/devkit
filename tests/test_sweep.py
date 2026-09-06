@@ -1921,6 +1921,45 @@ def test_the_registry_is_found_from_inside_a_box(tmp_path):
     assert sweep.default_workspace(box) == tmp_path / sweep.WORKSPACE_FILE_NAME
 
 
+def test_the_registry_is_found_from_inside_a_claude_worktree(tmp_path):
+    """The same failure one directory deeper, and it arrived by a different route.
+
+    `.claude/worktrees/<name>` is where `claude --worktree` and a remote Claude session
+    put a worktree, and `scripts/agent-worktree.py` puts one there on purpose so the
+    machine has one convention rather than two. Nothing here cut the first of them, so
+    every workspace-aware script resolved its registry to
+    `<checkout>/.claude/worktrees/alex-projects.code-workspace` -- and that directory is
+    exactly the one an agent handed such a worktree is running in.
+    """
+    inside = tmp_path / "devkit" / ".claude" / "worktrees" / "snoopy-sauteeing-gray"
+    assert sweep.default_workspace(inside) == tmp_path / sweep.WORKSPACE_FILE_NAME
+
+
+def test_a_claude_worktree_resolves_to_the_checkout_it_sits_in(tmp_path):
+    """Read off the directory rather than the box name, because there is none: this tier
+    names its worktrees after the topic alone."""
+    inside = tmp_path / "devkit" / ".claude" / "worktrees" / "snoopy-sauteeing-gray"
+    assert sweep.source_checkout(inside) == tmp_path / "devkit"
+
+
+def test_the_worktrees_directory_only_counts_under_dot_claude(tmp_path):
+    """Both names have to match, or any directory called `worktrees` two levels down
+    would start rewriting where a script thinks its registry is."""
+    elsewhere = tmp_path / "devkit" / "docs" / "worktrees" / "topic"
+    assert (
+        sweep.default_workspace(elsewhere)
+        == tmp_path / "devkit" / "docs" / "worktrees" / sweep.WORKSPACE_FILE_NAME
+    )
+    assert sweep.source_checkout(elsewhere) == elsewhere
+
+
+def test_a_path_too_shallow_to_be_a_claude_worktree_is_not_one():
+    """`Path.parents` is what the check walks, and a root-adjacent path has fewer of them
+    than it reads -- an IndexError here would be a crash in the one function every
+    workspace-aware script calls at import time."""
+    assert sweep.cli_worktree_checkout(Path("/worktrees")) is None
+
+
 def test_a_static_checkout_is_its_own_source(tmp_path):
     assert sweep.source_checkout(tmp_path / "devkit") == tmp_path / "devkit"
 

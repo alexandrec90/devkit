@@ -274,6 +274,21 @@ ACTIONS: dict[str, Action] = {
     # would draw the same cross-checkout dropdown two or three times over. The project
     # dimension lives INSIDE the menu, as the first of the two nested pickers.
     "fix-prs": Action("scripts/fix-prs.py", "Agent: Fix a Broken PR", projects=DEVKIT_ONLY),
+    # The `.claude/worktrees/` pair. Claude Code's `--worktree` flag covers both halves
+    # for a Claude session and there is no `codex -w`, so a Codex session that wants
+    # isolation has to be handed a worktree by something -- and handing it one anywhere
+    # but where the built-in puts them would be two conventions on one machine.
+    #
+    # DEVKIT_ONLY and a literal `--project devkit` for `fix-prs`'s reason exactly: the
+    # menu is one scan across every checkout in the registry, so the checkout is a column
+    # in the dropdown rather than a scope for the task. Run per selected checkout, each
+    # would draw the same cross-checkout list two or three times over.
+    "worktree-new": Action(
+        "scripts/agent-worktree.py", "Agent: New Worktree", ("new",), projects=DEVKIT_ONLY
+    ),
+    "worktree-remove": Action(
+        "scripts/agent-worktree.py", "Agent: Delete Worktrees", ("remove",), projects=DEVKIT_ONLY
+    ),
     # Cutting a devkit release. DEVKIT_ONLY because a release is devkit's own act and
     # has no project dimension at all -- run per selected checkout it would try to tag
     # this repo two or three times, and the second attempt would refuse a tag that now

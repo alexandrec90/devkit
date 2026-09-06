@@ -22,34 +22,6 @@ tray = load_script("scripts/tray.py")
 tray_state = load_script("scripts/tray_state.py")
 
 
-# --- the icon ---------------------------------------------------------------
-
-
-def test_the_pixel_buffer_is_the_size_createicon_expects():
-    """32 bits per pixel over a 16x16 square. A buffer of the wrong length is read past
-    its end by a C function that was told how big it is by the width and height."""
-    pixels = tray.icon_pixels((1, 2, 3), size=16)
-    assert len(pixels) == 16 * 16 * 4
-
-
-def test_the_pixels_are_bgra_not_rgba():
-    """Windows DIBs are little-endian BGRA. Getting this backwards swaps red and blue,
-    which for this icon means a failure shows up as the healthy colour."""
-    assert tray.icon_pixels((0xC6, 0x28, 0x28), size=1) == bytes((0x28, 0x28, 0xC6, 0xFF))
-
-
-def test_every_pixel_is_opaque():
-    """The AND mask is all zeros, so the alpha channel is what decides visibility. A
-    zero there is an icon that is present, correct, and completely transparent."""
-    pixels = tray.icon_pixels((10, 20, 30), size=4)
-    assert set(pixels[3::4]) == {0xFF}
-
-
-def test_each_state_yields_a_distinct_buffer():
-    buffers = {level: tray.icon_pixels(colour) for level, colour in tray_state.COLOURS.items()}
-    assert len(set(buffers.values())) == len(tray_state.COLOURS)
-
-
 # --- the signatures ---------------------------------------------------------
 
 

@@ -5126,6 +5126,7 @@ def reconcile(
     menu = refresh_preview_menu(workspace, apply=apply, fetch=fetch)
     plug_menu = refresh_plug_menu(apply=apply)
     broken_menu = refresh_broken_pr_menu(workspace, apply=apply)
+    tree_menu = refresh_worktree_menu(workspace, apply=apply)
 
     report = {
         "applied": apply,
@@ -5138,6 +5139,7 @@ def reconcile(
         "preview_menu": menu,
         "plug_menu": plug_menu,
         "broken_pr_menu": broken_menu,
+        "worktree_menu": tree_menu,
     }
     return worst, report
 
@@ -5145,10 +5147,10 @@ def reconcile(
 def menu_rider(script: str, rebuild) -> str:
     """Let one sibling script rebuild its own dropdown as a rider on this pass.
 
-    The three `refresh_*_menu` functions below differ only in which script they load and
+    The four `refresh_*_menu` functions below differ only in which script they load and
     what they ask it for; this is the half they share, and it is the half that has to be
-    right. It is also the half worth having in one place: three copies of a broad
-    handler are three chances for one of them to stop being total.
+    right. It is also the half worth having in one place: four copies of a broad
+    handler are four chances for one of them to stop being total.
 
     Loaded by path and INSIDE this function on purpose. Each of those scripts imports
     this module, so importing one at the top of it is a cycle; and each is hyphenated, so
@@ -5182,7 +5184,7 @@ def refresh_preview_menu(workspace: Path, *, apply: bool, fetch: bool = True) ->
     just finished reaping exactly the boxes whose rows should go: it knows more about
     what belongs in that menu than any other scheduled thing on the machine.
 
-    `menu_rider` owns the loading and the containment for all three of these.
+    `menu_rider` owns the loading and the containment for all four of these.
     """
     if not apply:
         return ""
@@ -5204,6 +5206,26 @@ def refresh_broken_pr_menu(workspace: Path, *, apply: bool) -> str:
     if not apply:
         return ""
     return menu_rider("fix-prs.py", lambda mod: mod.refresh_menu(workspace))
+
+
+def refresh_worktree_menu(workspace: Path, *, apply: bool) -> str:
+    """Rebuild the `.claude/worktrees/` dropdowns' options. The path written, or "".
+
+    The fourth rider, and the only one whose menu has a second writer: `agent-worktree.py`
+    rewrites it as `new` and `remove` finish, because the worktree you have just cut is
+    the one you are most likely to want in the delete list and a quarter of an hour is a
+    long time to be unable to undo a click. That does not make this rider optional -- the
+    worktrees Claude Code's own `--worktree` flag cuts, and the ones a remote session
+    spawns, are made by nothing that runs here, so a menu with only its own tasks for a
+    writer would be blind to most of what it lists.
+
+    No `fetch` argument, unlike `refresh_preview_menu`, and for a different reason from
+    `refresh_broken_pr_menu`'s: this reads local worktrees and remote-tracking refs, and
+    the pass has already fetched by the time it runs.
+    """
+    if not apply:
+        return ""
+    return menu_rider("agent-worktree.py", lambda mod: mod.refresh_menu(workspace))
 
 
 def refresh_plug_menu(*, apply: bool) -> str:

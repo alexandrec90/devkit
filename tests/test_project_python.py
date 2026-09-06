@@ -48,6 +48,21 @@ def only(*havers):
     return lambda exe, _module=None: str(exe) in wanted
 
 
+def make_worktree(main: Path, name: str = "box") -> Path:
+    """A linked worktree of `main`, laid out the way `git worktree add` leaves one.
+
+    Only the two things the hop reads are real: the `.git` *file* holding the `gitdir:`
+    pointer, and the `<main>/.git/worktrees/<name>` directory it points at. Building an
+    actual repository would spend a `git` subprocess per test to assert something about
+    string handling.
+    """
+    (main / ".git" / "worktrees" / name).mkdir(parents=True, exist_ok=True)
+    box = main.parent / f"{name}-box"
+    box.mkdir(parents=True, exist_ok=True)
+    (box / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / name}\n", encoding="utf-8")
+    return box
+
+
 # --- finding it -------------------------------------------------------------
 
 
@@ -67,6 +82,105 @@ def test_a_venv_directory_with_no_interpreter_is_not_a_venv(tmp_path):
     it as a venv would send every caller at a path that cannot be spawned."""
     (tmp_path / ".venv").mkdir()
     assert project_python.venv_python(tmp_path) is None
+
+
+# --- finding it from inside a worktree ---------------------------------------
+
+
+def test_a_worktree_finds_the_checkout_it_was_cut_from(tmp_path):
+    """The hop itself: three parents off the `gitdir:` pointer. Everything below depends
+    on it, and it is pure string handling, so it is worth pinning on its own."""
+    main = tmp_path / "main"
+    main.mkdir()
+    box = make_worktree(main)
+    assert project_python.main_checkout(box) == main
+
+
+def test_an_ordinary_checkout_is_not_a_worktree(tmp_path):
+    """`.git` is a directory here, not a pointer file, which is the common case and has
+    to answer None rather than walking three parents up out of the repo."""
+    (tmp_path / ".git").mkdir()
+    assert project_python.main_checkout(tmp_path) is None
+
+
+def test_a_submodule_pointer_is_not_mistaken_for_a_worktree(tmp_path):
+    """A submodule writes the same kind of `gitdir:` file, at `.git/modules/<name>`.
+    Walking up three from that lands outside the checkout entirely, so the shape of the
+    two middle segments is checked and not assumed."""
+    (tmp_path / ".git").write_text(
+        f"gitdir: {tmp_path / '.git' / 'modules' / 'sub'}\n", encoding="utf-8"
+    )
+    assert project_python.main_checkout(tmp_path) is None
+
+
+@pytest.mark.parametrize("content", ["", "not a pointer\n", "gitdir:\n"])
+def test_a_git_file_that_is_not_a_usable_pointer_answers_none(tmp_path, content):
+    """Unreadable, empty, or pointing nowhere all lead to the same fallback, and none of
+    them may raise: this runs inside a pre-commit hook."""
+    (tmp_path / ".git").write_text(content, encoding="utf-8")
+    assert project_python.main_checkout(tmp_path) is None
+
+
+def test_a_worktree_without_a_venv_falls_back_to_the_main_checkout(tmp_path):
+    """The defect this was written for. The box had no `.venv`, the tools were one
+    directory up, and every surface reported them missing instead."""
+    main = tmp_path / "main"
+    main.mkdir()
+    made = make_venv(main)
+    box = make_worktree(main)
+    assert project_python.venv_python(box) == made
+    assert project_python.borrowed_from(box) == main
+
+
+def test_a_worktree_with_its_own_venv_keeps_it(tmp_path):
+    """`worktree.py` provisions a box its own venv, and that one wins. Borrowing is the
+    fallback for a box that did not get one, never a preference."""
+    main = tmp_path / "main"
+    main.mkdir()
+    make_venv(main)
+    box = make_worktree(main)
+    own = make_venv(box)
+    assert project_python.venv_python(box) == own
+    assert project_python.borrowed_from(box) is None
+
+
+def test_nothing_is_borrowed_when_neither_checkout_has_a_venv(tmp_path):
+    """No venv anywhere stays the first-class None it always was, and reports no lender
+    to explain -- the message `re_exec` prints must not appear on a fresh clone."""
+    main = tmp_path / "main"
+    main.mkdir()
+    box = make_worktree(main)
+    assert project_python.venv_python(box) is None
+    assert project_python.borrowed_from(box) is None
+
+
+def test_re_exec_says_out_loud_which_checkout_it_borrowed_from(tmp_path, monkeypatch, capsys):
+    """Borrowing is right but it is not obvious, and a version surprise traced back to a
+    line nobody printed costs more than the line does."""
+    main = tmp_path / "main"
+    main.mkdir()
+    made = make_venv(main)
+    box = make_worktree(main)
+    monkeypatch.setattr(project_python, "has_module", only(made))
+    monkeypatch.setattr(
+        project_python.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0)
+    )
+    project_python.re_exec(box, "ruff", ["x.py"], env={})
+    message = capsys.readouterr().err
+    assert str(main) in message
+    assert "provision" in message
+
+
+def test_re_exec_is_silent_when_the_venv_is_the_projects_own(tmp_path, monkeypatch, capsys):
+    """The ordinary path prints nothing. A notice on every run is one everybody learns to
+    read past, which would waste the one case it exists for."""
+    made = make_venv(tmp_path)
+    monkeypatch.setattr(project_python, "has_module", only(made))
+    monkeypatch.setattr(
+        project_python.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0)
+    )
+    project_python.re_exec(tmp_path, "ruff", ["x.py"], env={})
+    assert capsys.readouterr().err == ""
 
 
 # --- asking whether it has the tool -----------------------------------------

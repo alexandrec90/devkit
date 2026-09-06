@@ -3686,6 +3686,21 @@ def broken_pr_rider(monkeypatch):
     return real
 
 
+@pytest.fixture(autouse=True)
+def worktree_menu_rider(monkeypatch):
+    """And the same containment for the fourth.
+
+    `refresh_worktree_menu` loads `agent-worktree.py`, which runs `git worktree list`,
+    `git status` and `git for-each-ref` per registered checkout and writes the real
+    `logs/agent-worktrees.json` -- the file the two `.claude/worktrees/` dropdowns read.
+    A reaping test that rewrote it would leave the delete menu offering worktrees from
+    whichever fixture registry the test happened to build.
+    """
+    real = worktree.refresh_worktree_menu
+    monkeypatch.setattr(worktree, "refresh_worktree_menu", lambda ws, *, apply: "")
+    return real
+
+
 def _fake_script(**namespace) -> types.SimpleNamespace:
     """Stand in for a rider's script, injected through the `_loader` the rider imports.
 
@@ -3929,6 +3944,58 @@ def test_a_missing_fix_prs_is_survived_too(workspace, monkeypatch, broken_pr_rid
 
     monkeypatch.setitem(sys.modules, "_loader", types.SimpleNamespace(load_by_path=missing))
     assert broken_pr_rider(workspace, apply=True) == ""
+
+
+def test_the_worktree_rider_reports_the_path_it_wrote(workspace, monkeypatch, worktree_menu_rider):
+    """The fourth rider, loaded by the same name the reconcile pass calls it by."""
+    asked: list = []
+    _with_loader(
+        monkeypatch,
+        _fake_script(refresh_menu=lambda ws: Path("C:/logs/agent-worktrees.json")),
+        asked,
+    )
+
+    written = worktree_menu_rider(workspace, apply=True)
+
+    assert written == str(Path("C:/logs/agent-worktrees.json"))
+    assert asked and asked[0][0] == "agent_worktree"
+    assert asked[0][1].name == "agent-worktree.py"
+    assert asked[0][1].is_file(), "the rider is loading a file that no longer exists"
+
+
+def test_a_dry_run_rebuilds_no_worktree_menu(workspace, worktree_menu_rider):
+    """Same promise as its three siblings': `--dry-run` writes nothing on disk."""
+    assert worktree_menu_rider(workspace, apply=False) == ""
+
+
+def test_a_raising_worktree_rider_never_reddens_the_pass(
+    workspace, monkeypatch, worktree_menu_rider
+):
+    """The reversion check for the containment. This rider walks every checkout's
+    worktrees, so a repository mid-rebase is enough to raise inside it, and that must not
+    stop the pass that destroys merged boxes."""
+
+    def explode(ws):
+        raise RuntimeError("a worktree's git directory is missing")
+
+    _with_loader(monkeypatch, _fake_script(refresh_menu=explode))
+    assert worktree_menu_rider(workspace, apply=True) == ""
+
+
+def test_the_reconcile_report_carries_the_worktree_menu_path(workspace, monkeypatch):
+    """The pass reports what each rider wrote, so a menu that stopped being rebuilt is
+    visible in the log rather than only in a stale dropdown."""
+    seen: list = []
+    monkeypatch.setattr(
+        worktree,
+        "refresh_worktree_menu",
+        lambda ws, *, apply: (seen.append((ws, apply)), "C:/logs/agent-worktrees.json")[1],
+    )
+
+    _, report = worktree.reconcile(workspace, apply=True, fetch=False)
+
+    assert seen == [(workspace, True)]
+    assert report["worktree_menu"] == "C:/logs/agent-worktrees.json"
 
 
 def test_the_checklist_rider_reports_the_path_it_wrote(monkeypatch, plug_rider):
