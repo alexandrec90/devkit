@@ -410,6 +410,26 @@ def read_menu(path: Path | None = None) -> list[str] | None:
         return None
 
 
+def read_ticks(path: Path | None = None) -> set[str] | None:
+    """Which rows the file drew **already ticked**. None when there is no readable menu.
+
+    The registry as it stood when the file was written, which is the half of a cached
+    checklist that can be wrong in a way the reader cannot see: the rows are a list and
+    a wrong list is short, but a tick is a *claim about live state* that the dialog
+    presents as current. `guarded_selection` is what compares it against the state now.
+    """
+    try:
+        groups = json.loads((path or MENU_CACHE).read_text(encoding="utf-8"))
+        return {
+            option["value"]
+            for group in groups
+            for option in group["options"]
+            if option.get("picked")
+        }
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def refresh_menu(path: Path | None = None, owner: str = DEFAULT_OWNER) -> Path | None:
     """Rebuild the quick-pick's options file. The path on success, None on anything else.
 
@@ -456,8 +476,51 @@ def selection_from_ticks(
     a previous pass, so a project registered since is absent from the list and therefore
     absent from the answer — reading the answer as the whole intended registry would
     retire it, silently, on a click that never mentioned it.
+
+    That covers a row the file never drew. `guarded_selection` covers the harder half: a
+    row it drew with the wrong tick.
     """
     return (plugged | set(ticked)) - (set(offered) - set(ticked))
+
+
+def guarded_selection(
+    ticked: tuple[str, ...], offered: list[str], claimed: set[str], plugged: set[str]
+) -> tuple[set[str], list[str]]:
+    """`selection_from_ticks`, refusing to act on a row whose premise has changed.
+
+    The checklist opens **pre-ticked** from the registry as it stood when the file was
+    written, and the registry is read live when the answer is applied. Those two can
+    disagree, and the disagreement is invisible in the dialog: the row simply shows the
+    old state as though it were current.
+
+    The failure that guards against is silent and destructive. A project that was on disk
+    but unregistered when the file was written, and has been registered since, draws
+    **unticked**. Leave it alone — the ordinary thing to do with a row you have no
+    opinion about — and it lands in `offered - ticked` and is retired, reverting a
+    registration by a click that never mentioned it. The mirror case re-plugs something
+    unregistered since.
+
+    So a row is skipped when its live state disagrees with what the file claimed **and
+    the answer matches what the file claimed** — that is a person who did not touch it,
+    and their intent was "leave this as it is", not "make it what this file said an hour
+    ago". A row the person *toggled* is acted on: they expressed something, and the worst
+    case is a no-op, because they were asking for the state it is already in.
+
+    Returns the selection and the names skipped, so the caller can say which rows the
+    click did not decide. Not an error — the other ticks are still true, which is
+    `main`'s reason for reporting a name that has stopped being a candidate rather than
+    failing the run.
+    """
+    ticks, drawn, was = set(ticked), set(offered), set(claimed)
+    selection = set(plugged) | (ticks - drawn)
+    skipped = []
+    for name in drawn:
+        intent, before, now = name in ticks, name in was, name in plugged
+        if before != now and intent == before:
+            skipped.append(name)
+            continue
+        selection.add(name) if intent else selection.discard(name)
+    return selection, sorted(skipped)
 
 
 # --- deciding what to do ----------------------------------------------------------
@@ -863,6 +926,7 @@ def main(argv: list[str] | None = None) -> int:
             write_artifact([problem])
             return 2
         offered = from_file
+        claimed = read_ticks() or set()
         picked = parse_ticks(args.ticked)
         # A menu row is only as fresh as the pass that wrote it, and the world moved on
         # after that: a name that has since stopped being a candidate is dropped with a
@@ -898,7 +962,13 @@ def main(argv: list[str] | None = None) -> int:
 
     checked = {c.name for c in candidates if c.plugged}
     if args.ticked is not None:
-        checked = selection_from_ticks(ticks, offered, checked)
+        checked, moved = guarded_selection(ticks, offered, claimed, checked)
+        if moved:
+            print(
+                "  NOTE    changed since the checklist was built, so the click did not "
+                f"decide them: {', '.join(moved)}"
+            )
+            print("          re-run the task to see them as they are now.")
     elif args.plug or args.unplug:
         checked = (checked | set(args.plug)) - set(args.unplug)
     else:

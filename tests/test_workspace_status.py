@@ -542,6 +542,47 @@ def test_the_preview_line_reaches_the_rendered_message():
     assert "2 host UI preview server(s)" in line
 
 
+# --- the plug/unplug checklist, which this pass is now the writer of ----------------
+
+
+def test_a_rebuilt_checklist_says_nothing():
+    """This file's discipline is that a line means something needs doing, and a rebuild
+    that worked is not news."""
+    assert ws.plug_menu_line("C:/logs/plug-menu.json") == ""
+
+
+def test_a_checklist_that_could_not_be_rebuilt_warns_and_names_the_fix():
+    """It is the one dropdown still reading a cached file, and its rows open PRE-TICKED
+    from the registry -- so a file nothing rewrote is a checklist whose ticks claim a
+    live state they no longer have. Nothing else writes it since the scheduled pass was
+    stood down, which makes silence here the only symptom."""
+    line = ws.plug_menu_line("")
+    assert "not rebuilt" in line
+    assert "--refresh-menu" in line
+
+
+def test_the_checklist_line_is_prefixed_outside_render(monkeypatch, capsys, tmp_path):
+    """It rides beside `toolchain`, prefixed in `main`, because `render` is already eight
+    parameters past its limit and says so in its own comment. The rebuild is the side
+    effect of that call, which is why the stub records having been asked."""
+    asked: list = []
+    monkeypatch.setattr(
+        ws.worktree, "refresh_plug_menu", lambda *, apply: asked.append(apply) or ""
+    )
+    workspace = tmp_path / "w.code-workspace"
+    workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
+    monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
+    monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: [])
+    monkeypatch.setattr(ws, "toolchain_lines", lambda **k: [])
+
+    assert ws.main([]) == 0
+
+    assert asked == [True], "the checklist was not rebuilt by this pass"
+    assert (
+        "[workspace] [warn] the Plug / Unplug checklist was not rebuilt" in capsys.readouterr().out
+    )
+
+
 # --- the guard that is wired outside every repo -------------------------------
 
 

@@ -394,6 +394,28 @@ def test_policy_runs_pre_commit_framework_then_project_hook(tmp_path, monkeypatc
     )
 
 
+def test_a_missing_framework_names_every_remedy_not_just_the_refusal(tmp_path, monkeypatch, capsys):
+    """Two agents reported this message in one week; both said it names no remedy, so it
+    reads as policy declining the commit rather than as a tool being missing."""
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    monkeypatch.setattr(git_policy, "_pre_commit_command", lambda _root, _runner: None)
+
+    assert git_policy._run_pre_commit_framework(tmp_path, FakeRunner()) == 1
+    err = capsys.readouterr().err
+    assert "is not installed" in err
+    assert "pip install pre-commit" in err
+    assert "worktree.py provision" in err
+    # The copy at ~/.devkit/git-hooks is what the hooks run, so the fix for this can be
+    # committed here and still be missing where it fires. Nothing else answers that.
+    assert "install-git-policy.py --check" in err
+
+
+def test_a_project_with_no_pre_commit_config_says_nothing_at_all(tmp_path, capsys):
+    """The framework tier is opt-in: no config file, no message and no refusal."""
+    assert git_policy._run_pre_commit_framework(tmp_path, FakeRunner()) == 0
+    assert capsys.readouterr().err == ""
+
+
 def _common_dir(main_git: pathlib.Path | None):
     """A runner answering `rev-parse --git-common-dir`, or failing like a non-repository."""
 

@@ -186,26 +186,30 @@ never renders.
   usage error is a red icon, a toast and a `logs/` artifact for a run the user called off.
   `test_every_task_with_a_command_picker_can_be_cancelled` checks the **innermost** command,
   since a wrapper passes its tail through.
-- **A picker whose options are not knowable in advance has two shapes, and the live one is
-  the default now.** `augustocdias.tasks-shell-input`'s `shellCommand.execute` runs a
-  command when the input resolves and draws its stdout, so the list is built at click time
-  and cannot be stale — `brokenPrRow` is the worked example, and its note carries the
-  contract: one line per row, `value|label|description|detail` split on `fieldSeparator`,
-  only the value returned, and the script strips that separator out of anything a person
-  wrote. **The cost is the wait**, because the picker is a person watching an empty box:
-  fan the calls out (`fix-prs.scan` runs one `gh` per checkout in a pool) and keep it near
-  a second.
-- **The cached shape is for a list no command can produce fast enough**, and it is what
-  `rioj7.command-variable` — which reads and templates JSON and cannot run anything — is
-  limited to. Three things it costs: the list is stale by construction, so it needs a
-  visible timestamp **and a writer that is not a task run** — `previewRow`'s file is
-  rewritten by `worktree.py reconcile` on its schedule; a pick that no longer matches
-  anything must still resolve to something servable; and **every row must carry every
-  templated field, as a string**, because the extension appends options until an expression
-  *throws*, and `undefined` does not throw — a row missing one field draws ten thousand
-  blank entries instead of ending the list. Ride on an existing scheduled pass rather than
-  adding a daemon, and make the rider unable to fail it: any exception leaves `reconcile`'s
-  own verdict untouched and prints one warning.
+- **A picker whose options are not knowable in advance runs a command.**
+  `augustocdias.tasks-shell-input`'s `shellCommand.execute` runs one when the input
+  resolves and draws its stdout, so the list is built by the click and cannot be stale.
+  `scripts/picker_rows.py` owns the format — one line per option,
+  `value|label|description|detail` split on `fieldSeparator`, only the value returned, and
+  every field through `cell`, because a separator in a PR title silently makes a fifth
+  field and a newline silently makes a second, unpickable row. **The cost is the wait**,
+  since the picker is a person watching an empty box: fan the calls out (`fix-prs.scan`
+  and `preview-task.collect` run one checkout per thread) and keep it to a second or two.
+  A scan that finds nothing draws `picker_rows.nothing_row` rather than no rows — an
+  empty quick-pick cannot be told apart from a command that failed to run.
+- **The cached shape is what is left when the live one cannot express the list**, and it
+  is what `rioj7.command-variable` — which reads and templates JSON and cannot run
+  anything — is limited to. One picker still needs it: `plugSelection` opens **pre-ticked**
+  from the registry, which `shellCommand.execute` has no way to express, and unticked
+  means unplug. Three things it costs: the list is stale by construction, so it needs a
+  visible timestamp **and a writer that is not a task run** — its cached options file is
+  rewritten by `worktree.py reconcile` on its schedule; a pick that no longer matches anything must
+  still resolve to something servable; and **every row must carry every templated field, as
+  a string**, because the extension appends options until an expression *throws*, and
+  `undefined` does not throw — a row missing one field draws ten thousand blank entries
+  instead of ending the list. Ride on an existing scheduled pass rather than adding a
+  daemon, and make the rider unable to fail it: any exception leaves `reconcile`'s own
+  verdict untouched and prints one warning.
 - **A picker that needs an extension declares it in `extensions.recommendations`, and two
   things hold that.** A `command` input is dead on a machine without the extension behind
   it, and it fails naming a *command* rather than a package: `rioj7.command-variable`
@@ -231,8 +235,12 @@ never renders.
   of its branches" pair is a `pickStringRemember` nested inside the outer input's `args`,
   read back as `${pickStringRemember:<id>}` — one token, because an input resolves to one
   string. A live picker has no such nesting — one input runs one command — so the
-  dependent half becomes a **field on the row** instead: `brokenPrRow` lists every
-  checkout's broken PRs in one flat list and puts the checkout in the description.
+  dependent half becomes a **field on the row** instead: `brokenPrRow`, `previewRow` and
+  `worktreeRow` each list every checkout's rows in one flat list with the checkout in the
+  description. Where the two halves are genuinely different *lists* rather than a
+  narrowing, they are two commands over one scan: `agent-worktree.py rows` draws what can
+  be destroyed and `bases` what a branch can be cut from, and a row from either in the
+  other would refuse when picked.
 - **An action scoped to exactly one checkout writes the name, not a picker.** A
   `${input:...}` with a single option asks a question that has no second answer, and the
   extension still shows it. Spell the checkout in the task's `--project` argument instead.

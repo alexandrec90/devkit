@@ -859,7 +859,7 @@ def test_clean_reports_a_copy_git_refuses_to_remove(tmp_path, capsys):
 def test_build_parser_defaults():
     args = host.build_parser().parse_args([])
     assert args.picks == "" and args.fetch and args.open
-    assert not args.refresh and not args.clean and args.workspace is None
+    assert not args.rows and not args.clean and args.workspace is None
     assert not args.stop
 
 
@@ -893,9 +893,7 @@ def quiet_scan(monkeypatch):
     """Stub the collaborators `main` borrows from preview-task; return the mutable list."""
     everything: list = []
     monkeypatch.setattr(host.preview_task, "collect", lambda ws, fetch, projects: everything)
-    monkeypatch.setattr(host.preview_task, "menu_payload", lambda cands, projects: {})
     monkeypatch.setattr(host.preview_task, "ui_projects", lambda ws: [])
-    monkeypatch.setattr(host.preview_task, "write_menu", lambda payload: Path("menu.json"))
     monkeypatch.setattr(host.shutil, "which", lambda name: "npm")
     # No listening socket in a `main` test: the real one binds a port for the run.
     monkeypatch.setattr(host, "start_offline_stub", lambda: ("http://127.0.0.1:57231", None))
@@ -925,39 +923,30 @@ def test_main_refuses_to_serve_without_npm(workspace, quiet_scan, monkeypatch, c
     assert "npm is not on PATH" in capsys.readouterr().out
 
 
-def test_main_refresh_rewrites_the_menu_and_serves_nothing(workspace, quiet_scan, capsys):
-    assert host.main(["--workspace", str(workspace), "--refresh", "--no-fetch"]) == 0
-    assert "Dropdown options written" in capsys.readouterr().out
+def test_main_rows_prints_the_picker_lines_and_serves_nothing(workspace, quiet_scan, capsys):
+    """The same rows `preview-task.py --rows` draws, from the same scan: both dropdowns
+    pick from one list, and a second spelling of it would be a second thing to keep true.
+    An empty machine still draws the sentinel rather than nothing."""
+    assert host.main(["--workspace", str(workspace), "--rows", "--no-fetch"]) == 0
+    printed = capsys.readouterr().out.splitlines()
+    assert len(printed) == 1
+    assert printed[0].startswith(host.picker_rows.NOTHING + host.picker_rows.FIELD_SEP)
 
 
-def test_main_scans_and_draws_only_the_checkouts_it_can_serve(workspace, quiet_scan, monkeypatch):
-    """The dropdown must not offer a checkout this script would refuse to serve.
-
-    Both halves of that in one test because they are one decision: `collect` is asked for
-    the frontend-declaring checkouts alone -- so a backend-only checkout costs no `git
-    fetch` and no `gh pr list` on a pass that runs every fifteen minutes -- and the
-    payload is grouped by the same list, so nothing wider can reach the file.
-    """
+def test_main_scans_only_the_checkouts_it_can_serve(workspace, quiet_scan, monkeypatch):
+    """The dropdown must not offer a checkout this script would refuse to serve, and the
+    narrowing is on the scan rather than on its rows: a backend-only checkout costs a
+    `git fetch` and a `gh pr list`, and this runs while somebody waits for the picker."""
     seen: dict[str, list[str]] = {}
 
     def fake_collect(ws, fetch, projects):
         seen["scanned"] = projects
         return []
 
-    def fake_payload(candidates, projects):
-        seen["drawn"] = projects
-        return {}
-
     monkeypatch.setattr(host.preview_task, "ui_projects", lambda ws: ["carameli"])
     monkeypatch.setattr(host.preview_task, "collect", fake_collect)
-    monkeypatch.setattr(host.preview_task, "menu_payload", fake_payload)
-    assert host.main(["--workspace", str(workspace), "--refresh", "--no-fetch"]) == 0
-    assert seen == {"scanned": ["carameli"], "drawn": ["carameli"]}
-
-
-def test_main_refresh_fails_when_the_menu_cannot_be_written(workspace, quiet_scan, monkeypatch):
-    monkeypatch.setattr(host.preview_task, "write_menu", lambda payload: None)
-    assert host.main(["--workspace", str(workspace), "--refresh", "--no-fetch"]) == 1
+    assert host.main(["--workspace", str(workspace), "--rows", "--no-fetch"]) == 0
+    assert seen == {"scanned": ["carameli"]}
 
 
 def test_main_with_no_picks_serves_nothing(workspace, quiet_scan, capsys):

@@ -31,12 +31,12 @@ complexity::scripts/install-reconcile-task.py::main = 19
 complexity::scripts/instruction-budget.py::render = 16
 complexity::scripts/lint-all.py::main = 19
 complexity::scripts/new-project.py::main = 19
-complexity::scripts/plug-projects.py::main = 47
+complexity::scripts/plug-projects.py::main = 49
 complexity::scripts/precommit/check_harness_manifest.py::check = 21
-complexity::scripts/preview-task.py::main = 32
+complexity::scripts/preview-task.py::main = 30
 complexity::scripts/preview-task.py::merge_candidates = 17
 complexity::scripts/preview-task.py::wait_for_all = 27
-complexity::scripts/preview-ui-host.py::main = 35
+complexity::scripts/preview-ui-host.py::main = 33
 complexity::scripts/reclaim.py::main = 22
 complexity::scripts/reclaim.py::sweep = 16
 complexity::scripts/release-pipeline.py::run_pipeline = 20
@@ -47,7 +47,7 @@ complexity::scripts/sweep.py::main = 18
 complexity::scripts/sweep.py::render = 18
 complexity::scripts/sweep.py::run_mode = 20
 complexity::scripts/sweep.py::sync_plan = 18
-complexity::scripts/sync-devkit.py::main = 69
+complexity::scripts/sync-devkit.py::main = 70
 complexity::scripts/upgrade-project.py::main = 26
 complexity::scripts/upgrade-project.py::upgrade_one = 23
 complexity::scripts/workspace-status.py::previews_line = 17
@@ -64,13 +64,13 @@ complexity::scripts/worktree.py::reap_plan = 26
 complexity::scripts/worktree.py::reconcile = 20
 complexity::scripts/worktree.py::reconcile_action = 22
 complexity::scripts/worktree.py::render_preview = 18
-complexity::scripts/worktree.py::render_reconcile = 22
+complexity::scripts/worktree.py::render_reconcile = 21
 complexity::scripts/worktree.py::render_survey = 21
 definitions::scripts/agent-box.py = 21
 definitions::scripts/agent_clis.py = 21
 definitions::scripts/devkit_project.py = 50
 definitions::scripts/docker-maint.py = 30
-definitions::scripts/fix-prs.py = 26
+definitions::scripts/fix-prs.py = 25
 definitions::scripts/git_policy.py = 37
 definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
@@ -79,8 +79,8 @@ definitions::scripts/hooks/structure_scan.py = 31
 definitions::scripts/install-git-policy.py = 21
 definitions::scripts/instruction-budget.py = 26
 definitions::scripts/new-project.py = 28
-definitions::scripts/plug-projects.py = 33
-definitions::scripts/preview-task.py = 54
+definitions::scripts/plug-projects.py = 35
+definitions::scripts/preview-task.py = 51
 definitions::scripts/preview-ui-host.py = 31
 definitions::scripts/reclaim.py = 48
 definitions::scripts/release-pipeline.py = 35
@@ -89,10 +89,10 @@ definitions::scripts/resume-sessions.py = 21
 definitions::scripts/sweep.py = 56
 definitions::scripts/sync-devkit.py = 44
 definitions::scripts/upgrade-project.py = 39
-definitions::scripts/workspace-status.py = 31
+definitions::scripts/workspace-status.py = 32
 definitions::scripts/workspace-task-index.py = 29
 definitions::scripts/worktree-guard.py = 60
-definitions::scripts/worktree.py = 161
+definitions::scripts/worktree.py = 159
 dependency::package.json::markdownlint-cli2 = 1
 dependency::package.json::remark-cli = 1
 dependency::package.json::remark-frontmatter = 1
@@ -104,39 +104,39 @@ dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 538
 file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
-file_lines::scripts/fix-prs.py = 633
-file_lines::scripts/git_policy.py = 742
+file_lines::scripts/fix-prs.py = 609
+file_lines::scripts/git_policy.py = 756
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
-file_lines::scripts/hooks/structure_check.py = 1042
+file_lines::scripts/hooks/structure_check.py = 1050
 file_lines::scripts/hooks/structure_scan.py = 669
 file_lines::scripts/instruction-budget.py = 517
 file_lines::scripts/new-project.py = 860
-file_lines::scripts/plug-projects.py = 973
-file_lines::scripts/preview-task.py = 1810
+file_lines::scripts/plug-projects.py = 1043
+file_lines::scripts/preview-task.py = 1722
 file_lines::scripts/preview-ui-host.py = 1110
 file_lines::scripts/reclaim.py = 1232
 file_lines::scripts/release-pipeline.py = 960
 file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/sweep.py = 1990
-file_lines::scripts/sync-devkit.py = 1417
+file_lines::scripts/sync-devkit.py = 1422
 file_lines::scripts/upgrade-project.py = 1231
-file_lines::scripts/workspace-status.py = 1064
+file_lines::scripts/workspace-status.py = 1094
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2295
-file_lines::scripts/worktree.py = 6271
+file_lines::scripts/worktree.py = 6225
 function_lines::scripts/devkit_project.py::main = 213
 function_lines::scripts/docker-maint.py::generic_prune = 84
 function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
 function_lines::scripts/install-reconcile-task.py::main = 114
 function_lines::scripts/lint-all.py::main = 98
 function_lines::scripts/new-project.py::main = 143
-function_lines::scripts/plug-projects.py::main = 195
+function_lines::scripts/plug-projects.py::main = 202
 function_lines::scripts/precommit/check_harness_manifest.py::check = 84
 function_lines::scripts/preview-task.py::main = 98
 function_lines::scripts/preview-task.py::wait_for_all = 88
-function_lines::scripts/preview-ui-host.py::main = 146
+function_lines::scripts/preview-ui-host.py::main = 145
 function_lines::scripts/reclaim.py::main = 108
 function_lines::scripts/release-pipeline.py::run_pipeline = 127
 function_lines::scripts/resume-sessions.py::main = 97
@@ -144,7 +144,7 @@ function_lines::scripts/sweep.py::classify = 84
 function_lines::scripts/sweep.py::inspect = 133
 function_lines::scripts/sweep.py::main = 171
 function_lines::scripts/sweep.py::sync_plan = 87
-function_lines::scripts/sync-devkit.py::main = 246
+function_lines::scripts/sync-devkit.py::main = 251
 function_lines::scripts/upgrade-project.py::main = 162
 function_lines::scripts/upgrade-project.py::upgrade_one = 143
 function_lines::scripts/worktree-guard.py::main = 139
@@ -157,7 +157,7 @@ function_lines::scripts/worktree.py::provision_steps = 82
 function_lines::scripts/worktree.py::reap_decision = 107
 function_lines::scripts/worktree.py::reap_plan = 162
 function_lines::scripts/worktree.py::reapable = 114
-function_lines::scripts/worktree.py::reconcile = 150
+function_lines::scripts/worktree.py::reconcile = 146
 function_lines::scripts/worktree.py::reconcile_action = 176
 function_lines::scripts/worktree.py::resume_plan = 86
 function_params::scripts/devkit_project.py::autofix_ship_plan = 9
@@ -189,7 +189,8 @@ function_params::scripts/worktree.py::reconcile_action = 12
 function_params::scripts/worktree.py::reconcile_plan = 8
 function_params::scripts/worktree.py::resume_plan = 11
 function_params::scripts/worktree.py::spawn_plan = 14
-imports::scripts/preview-ui-host.py = 23
+imports::scripts/preview-task.py = 21
+imports::scripts/preview-ui-host.py = 24
 imports::scripts/worktree.py = 24
 nesting_depth::scripts/devkit_jsonc.py::blank_comments = 5
 nesting_depth::scripts/devkit_jsonc.py::drop_trailing_commas = 5
@@ -253,7 +254,6 @@ suppressions::tests/test_worktree_guard.py = 1
 swallowed_errors::scripts/hooks/harness_events.py = 2
 swallowed_errors::scripts/notify.py = 1
 swallowed_errors::scripts/plug-projects.py = 1
-swallowed_errors::scripts/preview-task.py = 1
 swallowed_errors::scripts/release-pipeline.py = 1
 swallowed_errors::scripts/task_slug.py = 1
 swallowed_errors::scripts/upgrade-project.py = 1
@@ -338,6 +338,31 @@ swallowed_errors::scripts/worktree.py = 2
 # 2026-09-05  recorded: workspace-status.py gains one import line and two docstring lines naming a third workstation prerequisite: the VS Code extension every checkout picker runs through, which a machine can be missing with no symptom until a task is clicked and fails naming a command rather than a package. The check itself is a NEW module, scripts/vscode_extensions.py, on schedule_health.py's precedent -- inlining it here would have cost +1 definitions, +1 swallowed_errors and +49 file_lines in a module that is already twice its limit and whose split three earlier records have deferred. This is the one-line adapter that split leaves behind.
 #   file_lines::scripts/workspace-status.py -> 1000
 
-# 2026-09-06  recorded: workspace-status.py gains --notify, toast_text and the docstring for both. The module was called 'the SessionStart status line' by six files and no hook ever ran it, so every prerequisite it reports -- a missing uv, an unset git identity, an uninstalled picker extension -- was reported to nobody; it is now the runner behind the daily devkit-workspace-status job, and --notify is the half that reaches a person. The growth is one flag, one pure function that turns the report into a two-field toast, and the paragraph recording who runs this and why it is deliberately not an agent hook (the pass is 9s, which as a per-session tax is what gets a check disabled). Splitting this module is what four earlier records here have deferred and is not a rider on wiring it to a caller.
+# 2026-09-05  recorded: vendored_paths had to match ast.AnnAssign as well as ast.Assign: the real MANIFEST declaration is annotated, so the vendored-file skip returned nothing in every consumer that ever ran it. The fix plus the note recording why it was invisible costs 8 lines in a module already past file_lines. Splitting this module is still its own change.
+#   file_lines::scripts/hooks/structure_check.py -> 1050
+
+# 2026-09-05  recorded: git_policy.py gains NO_PRE_COMMIT: the refusal named no remedy, and two agents reported it in one week -- one of them reaching for a PATH workaround, which is the reach for --no-verify this is meant to stop. The lines are the remedy itself plus the note that this file is COPIED to ~/.devkit/git-hooks, so the fix for the underlying lookup can be committed here and still be missing where it fires. Recorded rather than split for the reason the 2026-09-05 entry gives: splitting this module moves a file every workspace-aware script imports AND that runs with no checkout in reach, which wants its own PR.
+#   file_lines::scripts/git_policy.py -> 756
+
+# 2026-09-05  recorded: sync-devkit.py: the DEVKIT_VERSION write moves above the baseline seeding, because structure_check.vendored_paths keys off that file - a baseline seeded before the stamp exists grandfathers devkit's own vendored modules into a consumer's numbers, and the moment the stamp lands those 49 keys all read as stale. A freshly generated project's structural gate was red on arrival. +5 lines in a module already ~3x file_lines; splitting it is its own change, and it is itself in the MANIFEST.
+#   complexity::scripts/sync-devkit.py::main -> 70
+#   file_lines::scripts/sync-devkit.py -> 1422
+#   function_lines::scripts/sync-devkit.py::main -> 251
+
+# 2026-09-06  recorded: preview-task.py gains two imports it cannot avoid: concurrent.futures, because its scan now runs when a person opens the dropdown rather than on a schedule and six serial checkouts is five seconds of empty quick-pick; and picker_rows, the module that owns the one-line-per-option format all four live pickers share, whose alternative was a fourth copy of the field containment. The module is 1222 lines past file_lines and 31 definitions past its limit, so its split is its own change and nothing that belongs in it has anywhere else to go.
+#   imports::scripts/preview-task.py -> 21
+
+# 2026-09-06  recorded: preview-ui-host.py gains picker_rows, the module that owns the one-line-per-option format every live picker shares: this script is the second reader of the preview scan, and drawing its rows a second way rather than importing the format would be the duplicate that module exists to prevent. It is 610 lines past file_lines already, so its split is its own change.
+#   imports::scripts/preview-ui-host.py -> 24
+
+# 2026-09-06  recorded: the plug/unplug checklist is the one dropdown that still reads a cached file, because its rows open pre-ticked from the registry and shellCommand.execute cannot express that. Two things follow, and both land in modules already far past every limit. plug-projects.py gains read_ticks and guarded_selection, which stop a stale tick being read as an instruction: a project registered since the file was drawn used to be retired by a click that never mentioned it. workspace-status.py gains plug_menu_line and becomes the writer, because the scheduled pass that wrote that file is stood down and nothing else does. Both modules are 500+ lines past file_lines and their splits are their own change; the alternative was leaving a silent destructive edit in a task that also creates repositories.
+#   complexity::scripts/plug-projects.py::main -> 49
+#   definitions::scripts/plug-projects.py -> 35
 #   definitions::scripts/workspace-status.py -> 31
-#   file_lines::scripts/workspace-status.py -> 1064
+#   file_lines::scripts/plug-projects.py -> 1043
+#   file_lines::scripts/workspace-status.py -> 1030
+#   function_lines::scripts/plug-projects.py::main -> 202
+
+# 2026-09-06  recorded: workspace-status.py gains --notify, toast_text and the docstring for both. The module was called 'the SessionStart status line' by six files and no hook ever ran it, so every prerequisite it reports -- a missing uv, an unset git identity, an uninstalled picker extension -- was reported to nobody; it is now the runner behind the daily devkit-workspace-status job, and --notify is the half that reaches a person. The growth is one flag, one pure function that turns the report into a two-field toast, and the paragraph recording who runs this and why it is deliberately not an agent hook (the pass is 9s, which as a per-session tax is what gets a check disabled). Splitting this module is what four earlier records here have deferred and is not a rider on wiring it to a caller.
+#   definitions::scripts/workspace-status.py -> 32
+#   file_lines::scripts/workspace-status.py -> 1094

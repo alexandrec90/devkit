@@ -54,7 +54,6 @@ scripts/install-docker-prune.py::uninstall_argv
 scripts/install-docker-stop-idle.py::query_argv
 scripts/install-docker-stop-idle.py::uninstall_argv
 scripts/install-git-policy.py::digest
-scripts/install-git-policy.py::run_command
 scripts/install-global-tools.py::Schedule
 scripts/install-global-tools.py::install
 scripts/install-global-tools.py::query_argv
@@ -87,10 +86,8 @@ scripts/precommit/check_harness_drift.py::is_same_repo
 scripts/precommit/check_stdlib_only.py::imported_roots
 scripts/preview-task.py::describe
 scripts/preview-task.py::menu_row
-scripts/preview-task.py::project_note
 scripts/preview-task.py::read_choice
 scripts/preview-task.py::stack_projects
-scripts/preview-task.py::write_menu
 scripts/reclaim.py::banner
 scripts/reclaim.py::devkit_dir
 scripts/reclaim.py::running_container_names

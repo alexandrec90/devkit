@@ -23,6 +23,7 @@ from support import load_script
 # has already loaded -- and it is the one this suite monkeypatches. It also costs no
 # `sys.path` bootstrap here, so this file needs no file-wide `noqa` to sit under one.
 fix_prs = load_script("scripts/fix-prs.py")
+picker_rows = load_script("scripts/picker_rows.py")
 agent_box = load_script("scripts/agent-box.py")
 
 NOW = _dt.datetime(2026, 9, 4, 12, 0, tzinfo=_dt.UTC)
@@ -155,23 +156,7 @@ def test_a_pr_view_that_cannot_be_read_is_empty_rather_than_a_traceback(
 
 
 def fields(row: str) -> list[str]:
-    return row.split(fix_prs.FIELD_SEP)
-
-
-@pytest.mark.parametrize(
-    "text,expected",
-    [
-        ("plain", "plain"),
-        ("a|b", "a/b"),
-        ("one" + chr(10) + "two", "one two"),
-        ("  padded  ", "padded"),
-        (412, "412"),
-    ],
-)
-def test_a_cell_is_one_line_with_no_separator_left_in_it(text, expected):
-    """The whole of a row's containment: `menu_row` builds four of these and joins them,
-    so anything that could add a field or a line has to stop here."""
-    assert fix_prs.cell(text) == expected
+    return row.split(picker_rows.FIELD_SEP)
 
 
 def test_a_row_is_the_four_fields_the_extension_splits_on():
@@ -186,21 +171,15 @@ def test_a_row_is_the_four_fields_the_extension_splits_on():
     ]
 
 
-def test_a_pr_title_carrying_the_separator_cannot_add_a_field():
-    """The title is the one field a person wrote, and a `|` in it would shift the row's
-    detail into a fifth field the extension does not read."""
-    row = fix_prs.menu_row("devkit", pr(title="fix: a|b", mergeable="CONFLICTING"), NOW)
-    assert len(fields(row)) == 4
-    assert fields(row)[3] == "fix: a/b"
-
-
-def test_a_row_is_one_line_whatever_the_title_did():
-    """Each line of stdout is one option, so a newline in a title would draw two rows,
-    the second of them unpickable."""
-    broke = pr(title="one" + chr(10) + "two", mergeable="CONFLICTING")
+def test_a_pr_title_goes_through_the_shared_containment():
+    """A PR title is the one field here a person wrote. `tests/test_picker_rows.py` owns
+    what `cell` does to a separator and a newline; this asserts the title is not the
+    field that skipped it."""
+    broke = pr(title="fix: a|b" + chr(10) + "and more", mergeable="CONFLICTING")
     row = fix_prs.menu_row("devkit", broke, NOW)
+    assert len(fields(row)) == 4
     assert chr(10) not in row
-    assert fields(row)[3] == "one two"
+    assert fields(row)[3] == "fix: a/b and more"
 
 
 def test_the_checkout_is_on_every_row_because_the_list_is_flat():
@@ -636,7 +615,7 @@ def test_rows_draws_the_sentinel_when_the_machine_is_clean(workspace, monkeypatc
     assert fix_prs.main(["--rows", "--workspace", str(workspace)]) == 0
     printed = capsys.readouterr().out.splitlines()
     assert len(printed) == 1
-    assert fix_prs.parse_pick(printed[0].split(fix_prs.FIELD_SEP)[0]) is None
+    assert fix_prs.parse_pick(printed[0].split(picker_rows.FIELD_SEP)[0]) is None
 
 
 def test_a_missing_workspace_file_is_a_usage_error(tmp_path, capsys):
