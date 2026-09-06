@@ -1948,6 +1948,53 @@ def test_project_scope_inputs_are_real_multi_picks(canonical):
         assert _picker_values(inputs[picker_id]) == _picker_values(inputs["project"])
 
 
+def _checkout_pickers(canonical: dict) -> set[str]:
+    """Input ids that ask which checkout, derived rather than listed.
+
+    An input whose whole option list is checkout names is a checkout picker however it
+    is spelled, so this reads the registry instead of keeping a roster beside it — the
+    second copy this file has already retired twice (`sweepScope`, `upgradeScope`). A
+    live `shellCommand.execute` input has no options at all and so is never one of
+    these, which is exactly right: its rows are `<checkout>:<ref>` values, not checkouts.
+    """
+    projects = set(known_projects(devkit_project.canonical_text()))
+    found = set()
+    for spec in canonical["inputs"]:
+        try:
+            values = _picker_values(spec)
+        except (KeyError, IndexError, TypeError):
+            continue
+        if values and values <= projects:
+            found.add(spec["id"])
+    return found
+
+
+def test_no_task_detail_promises_a_checkout_question_it_does_not_ask(canonical):
+    """A `detail` may not say it asks which checkout unless a checkout picker feeds it.
+
+    Four tasks said it and had not asked in months. `Preview: Open a UI Branch`,
+    `Agent: Fix a Broken PR`, `Agent: New Worktree` and `Agent: Delete Worktrees` each
+    dropped their project stage when their list went live — one input runs one command,
+    so the checkout became a field on the row — and every one of them kept the "Asks
+    which checkout, then which of its ..." opening the two-stage version had. The
+    quick-pick is the one surface with no README, so its second line reading as a
+    promise the click does not keep is the whole cost, and it read as a regression to
+    the person clicking rather than as the deliberate flattening it was.
+
+    One direction only. Plenty of tasks ask and phrase it some other way; what is not
+    allowed is claiming the question when there is nothing to answer it.
+    """
+    pickers = _checkout_pickers(canonical)
+    assert pickers, "no checkout picker was derived; the heuristic has stopped matching"
+    for task in canonical["tasks"]:
+        args = " ".join(str(a) for a in task.get("args", ()))
+        if any(f"${{input:{picker}}}" in args for picker in pickers):
+            continue
+        assert "which checkout" not in task["detail"].lower(), (
+            f"{task['label']} says it asks which checkout, but no checkout picker feeds it"
+        )
+
+
 def test_the_test_kinds_input_is_a_checkbox_list_the_dispatcher_can_split(canonical):
     """Both of the test task's questions are checkboxes, and the second is this one.
 

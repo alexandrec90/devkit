@@ -47,14 +47,15 @@ Usage:
     python preview-task.py --pick 3 --no-wait  # return when the containers start, not
                                                # when what they serve answers
 
-**No VS Code task runs this any more, and the menu it writes is why it still matters.**
+**No VS Code task dispatches this any more, and the rows it draws are why it still
+matters.**
 Until 2026-08-25 the clickable `Preview: Open a UI Branch` dispatched this script, so a
 click on "show me that branch" cut a box, built images and brought a whole compose stack
 up -- minutes of Docker to look at a button. That label now belongs to
 `preview-ui-host.py`, which runs `npm run dev` on the frontend and nothing else; this
 stays as the terminal verb for the times the *stack* is the thing under review, and as
-the writer of the option file both of them read. `worktree.py preview` is the layer under
-both.
+the `--rows` the clickable task's dropdown is drawn from. `worktree.py preview` is the
+layer under both.
 
 The pick still arrives as `--pick-ref <project>:<ref>` whoever sends it, and the colon is
 a safe separator rather than a hopeful one: `git check-ref-format` refuses a ref that
@@ -85,7 +86,8 @@ is this scan and not a cached copy of an earlier one. It used to be a file, beca
 broken-PR menu that worked the same way spent two days a day stale after the pass that
 wrote it was switched off, still drawing rows for a PR that had been closed.
 
-**The file lists fewer checkouts than this menu does**, and `ui_projects` is that line.
+**The dropdown lists fewer checkouts than this menu does**, and `ui_projects` is that
+line.
 Its reader serves a frontend with `npm run dev`, so a checkout that declares no
 `[frontend] dir` is an option that can only refuse; the terminal menu here brings stacks
 up and keeps offering every checkout that has one.
