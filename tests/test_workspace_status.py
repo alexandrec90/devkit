@@ -156,13 +156,23 @@ def test_a_failure_anywhere_still_exits_zero(tmp_path, monkeypatch):
 
 
 def _workspace_reporting(monkeypatch, tmp_path, message: str) -> None:
-    """Point `main` at a workspace whose whole report is `message`."""
+    """Point `main` at a workspace whose whole report is `message`.
+
+    `main` composes three parts, so all three have to be answered here or the promise in
+    that first line is false: `render`, `toolchain_lines`, and the plug checklist. The
+    last one is stubbed at `refresh_plug_menu` rather than at `plug_menu_line` because
+    that call is a *write* -- unstubbed it rebuilds the real workstation's menu from
+    whatever `gh` says, which is a side effect no test here asked for, and on a machine
+    where `gh` cannot be reached it returns "" and `plug_menu_line` adds a warning to a
+    report this fixture said was empty. That is how it reads on CI and not here.
+    """
     workspace = tmp_path / "w.code-workspace"
     workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
     monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: [])
     monkeypatch.setattr(ws, "render", lambda *a, **k: message)
     monkeypatch.setattr(ws, "toolchain_lines", lambda *a, **k: [])
+    monkeypatch.setattr(ws.worktree, "refresh_plug_menu", lambda **k: "logs/plug-menu.json")
 
 
 def test_a_toast_is_raised_only_when_there_is_something_to_say(monkeypatch, tmp_path):
