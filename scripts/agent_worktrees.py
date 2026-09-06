@@ -12,6 +12,12 @@ checkout, gitignored, with no lease and no reaper. The location is not a prefere
 it is where remote Claude sessions spawn, so anything that only understands one of the
 two directories is blind to half the worktrees on the machine.
 
+**`fix-prs.py` reads from here too, and is not a fourth menu.** It cuts a worktree in
+this tier for the PR it was sent at, which is `holder`, `tree_name` and `add_steps` --
+where a worktree for a branch goes, and what git is asked to do when the branch already
+exists. A private copy of those three in that module would be a second answer to a
+question the machine may only have one answer to.
+
 Every function here is pure and tested in `tests/test_agent_worktrees.py`.
 """
 
@@ -19,6 +25,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -91,15 +99,23 @@ def parse_worktree_list(porcelain: str) -> list[tuple[str, str]]:
     return found
 
 
+def worktrees_root(project_dir: Path) -> str:
+    """`<checkout>/.claude/worktrees/`, in the spelling every comparison here uses.
+
+    Lowercased posix with a trailing slash, rather than `Path.resolve()`, so the callers
+    stay pure: git prints forward slashes on Windows too, and the case fold is what makes
+    `C:/Users` and `c:/users` the same directory there.
+    """
+    return (project_dir / WORKTREES_DIR).as_posix().lower().rstrip("/") + "/"
+
+
 def nested(project_dir: Path, porcelain: str) -> list[tuple[str, str, str]]:
     """`(name, path, branch)` for the worktrees under this checkout's `.claude/worktrees/`.
 
-    Compared as lowercased posix strings rather than with `Path.resolve()`, so this stays
-    pure: git prints forward slashes on Windows too, and the case fold is what makes
-    `C:/Users` and `c:/users` the same directory there. Only the immediate children
-    count -- a worktree cut inside another one is that one's business, not this menu's.
+    Only the immediate children count -- a worktree cut inside another one is that one's
+    business, not this menu's.
     """
-    root = (project_dir / WORKTREES_DIR).as_posix().lower().rstrip("/") + "/"
+    root = worktrees_root(project_dir)
     rows = []
     for path, branch in parse_worktree_list(porcelain):
         tail = Path(path).as_posix()
@@ -109,6 +125,66 @@ def nested(project_dir: Path, porcelain: str) -> list[tuple[str, str, str]]:
         if name and "/" not in name:
             rows.append((name, path, branch))
     return sorted(rows)
+
+
+def holder(project_dir: Path, porcelain: str, branch: str) -> tuple[str, bool]:
+    """`(path, nested)` for the worktree already on `branch`; `("", False)` when none is.
+
+    Git will not check one branch out in two worktrees, so "what holds it" has at most
+    one answer and this is the whole of it. The bool separates the two ways a branch can
+    be taken, because they need opposite responses: one of this checkout's own
+    `.claude/worktrees/` is the worktree the caller was about to cut and should be reused
+    instead, while anywhere else -- the checkout itself, a `.worktrees/` box, something
+    cut by hand -- belongs to somebody, and `git worktree add` would refuse it with a
+    message about a branch rather than about the tree that is the actual obstacle.
+    """
+    root = worktrees_root(project_dir)
+    for path, on in parse_worktree_list(porcelain):
+        if on and on == branch:
+            return path, Path(path).as_posix().lower().startswith(root)
+    return "", False
+
+
+def tree_name(branch: str, taken: Iterable[str]) -> str:
+    """The directory under `.claude/worktrees/` a worktree for `branch` is cut at.
+
+    The branch's last segment, which is `create`'s spelling (`agent/voicemail-0905` ->
+    `voicemail-0905`) generalised to a name nobody here chose: a PR head branch is
+    written by whoever opened the PR, and may carry no slash at all, several, or
+    characters a directory name cannot hold. So anything outside `[A-Za-z0-9._-]`
+    becomes a hyphen, and a name already on disk takes a counter -- two PRs whose heads
+    end in the same segment want two worktrees, and the second one silently landing in
+    the first one's directory is the failure this exists to prevent.
+
+    The name is a label, never an identity: what `holder` matches on is the branch, so a
+    worktree cut by `create` or by `claude --worktree` under some other name is still
+    found and reused.
+    """
+    segment = str(branch).rsplit("/", 1)[-1]
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", segment).strip("-.") or "worktree"
+    used = {str(name).lower() for name in taken}
+    if cleaned.lower() not in used:
+        return cleaned
+    counter = 2
+    while f"{cleaned}-{counter}".lower() in used:
+        counter += 1
+    return f"{cleaned}-{counter}"
+
+
+def add_steps(branch: str, path: str, local: bool) -> tuple[str, ...]:
+    """The `git worktree add` argv for a worktree on a branch that already exists.
+
+    `worktree.resume_plan`'s pair, copied deliberately and for its reasons. A branch this
+    checkout already has is checked out as it stands: it may carry commits no remote has,
+    which is exactly what a box reaped while its work was open leaves behind, and
+    re-creating it from `origin` is the one move that discards them. Only a branch never
+    seen here is cut from `origin/<branch>` -- with `--track`, where `create` is emphatic
+    about `--no-track`, and read the other way round for the same reason: the upstream is
+    the branch's own remote, which is precisely where a bare push should land.
+    """
+    if local:
+        return ("worktree", "add", path, branch)
+    return ("worktree", "add", "--track", "-b", branch, path, f"origin/{branch}")
 
 
 def removal_decision(tree: Tree, forced: bool) -> tuple[str, str]:

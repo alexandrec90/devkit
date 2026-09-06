@@ -56,6 +56,14 @@ def test_the_parser_survives_empty_and_junk_input():
     assert aw.parse_worktree_list("bare\nHEAD 1a2b\n") == []
 
 
+def test_the_worktrees_root_is_a_lowercased_posix_prefix():
+    """What every path comparison in this module is made against. A trailing slash so
+    `.claude/worktrees-old/` cannot prefix-match `.claude/worktrees/`, and the case fold
+    because the filesystem this runs on has one."""
+    assert aw.worktrees_root(CHECKOUT) == "c:/ws/devkit/.claude/worktrees/"
+    assert aw.worktrees_root(Path("C:/ws/DevKit/")) == "c:/ws/devkit/.claude/worktrees/"
+
+
 def test_only_the_immediate_children_of_the_worktrees_directory_count():
     """The checkout itself, a box beside it and a nested worktree are all excluded.
 
@@ -82,6 +90,111 @@ def test_the_path_comparison_ignores_case_and_slash_direction():
     """
     text = porcelain(("c:/WS/DevKit/.claude/worktrees/Topic", "agent/topic-0905"))
     assert [name for name, _, _ in aw.nested(CHECKOUT, text)] == ["Topic"]
+
+
+# --- finding, naming and cutting one on a branch that already exists -----------------
+
+
+def test_a_worktree_of_this_checkouts_own_tier_is_reported_as_reusable():
+    """`fix-prs`'s ordinary second click on a PR: the worktree from the first is still
+    there, and cutting again would fail on the very thing that means "ready"."""
+    text = porcelain(
+        ("C:/ws/devkit", "main"),
+        ("C:/ws/devkit/.claude/worktrees/pr-256", "agent/fix-pr-256"),
+    )
+    assert aw.holder(CHECKOUT, text, "agent/fix-pr-256") == (
+        "C:/ws/devkit/.claude/worktrees/pr-256",
+        True,
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "C:/ws/devkit",  # the checkout itself, sitting on the PR branch
+        "C:/ws/.worktrees/devkit--fix-pr-256-0905",  # a box of the other tier
+        "C:/ws/scratch/by-hand",  # somebody's own worktree, anywhere at all
+    ],
+)
+def test_a_branch_held_outside_the_tier_is_reported_as_held_not_as_reusable(path):
+    """The bool is the whole point: adopting one of these would put an agent in a tree
+    it does not own, and cutting anyway fails talking about the branch rather than about
+    the directory that is the actual obstacle."""
+    text = porcelain(("C:/ws/devkit", "main"), (path, "agent/fix-pr-256"))
+    assert aw.holder(CHECKOUT, text, "agent/fix-pr-256") == (path, False)
+
+
+def test_a_branch_nothing_holds_is_the_empty_answer():
+    text = porcelain(("C:/ws/devkit", "main"))
+    assert aw.holder(CHECKOUT, text, "agent/fix-pr-256") == ("", False)
+
+
+def test_a_detached_worktree_never_matches_a_branch():
+    """`parse_worktree_list` keeps detached entries so they stay deletable, and an empty
+    branch must not compare equal to a caller that asked for one."""
+    text = porcelain(("C:/ws/devkit/.claude/worktrees/loose", ""))
+    assert aw.holder(CHECKOUT, text, "") == ("", False)
+
+
+def test_the_holder_comparison_ignores_case_like_the_listing_does():
+    text = porcelain(("c:/WS/DevKit/.claude/worktrees/Topic", "agent/topic-0905"))
+    assert aw.holder(CHECKOUT, text, "agent/topic-0905")[1] is True
+
+
+@pytest.mark.parametrize(
+    ("branch", "expected"),
+    [
+        ("agent/voicemail-0905", "voicemail-0905"),  # `create`'s own spelling
+        ("pr304", "pr304"),  # a head branch with no prefix at all
+        ("dependabot/npm_and_yarn/ws-8.18.0", "ws-8.18.0"),  # several segments
+        ("feature/it works!", "it-works"),  # characters a directory cannot hold
+        ("///", "worktree"),  # nothing survives sanitising
+    ],
+)
+def test_the_directory_name_is_the_branchs_last_segment_made_safe(branch, expected):
+    """A PR head branch is written by whoever opened the PR, so this cannot assume the
+    `agent/<slug>-<mmdd>` shape the `new` verb mints."""
+    assert aw.tree_name(branch, []) == expected
+
+
+def test_a_name_already_on_disk_takes_a_counter():
+    """Two PRs whose heads end in the same segment want two worktrees; the second one
+    landing in the first one's directory is what this prevents."""
+    assert aw.tree_name("alice/fix", ["fix"]) == "fix-2"
+    assert aw.tree_name("alice/fix", ["fix", "fix-2", "FIX-3"]) == "fix-4"
+
+
+def test_the_counter_compares_names_case_insensitively():
+    """The filesystem this runs on does, so a name that differs only in case is the
+    same directory and `git worktree add` would refuse it."""
+    assert aw.tree_name("agent/Topic", ["topic"]) == "Topic-2"
+
+
+def test_a_branch_this_checkout_already_has_is_checked_out_as_it_stands():
+    """`worktree.resume_plan`'s reason: the local branch may carry commits no remote has
+    -- a box reaped while its work was open leaves exactly that -- and re-creating it
+    from origin is the one move that discards them."""
+    assert aw.add_steps("agent/x", "C:/p/.claude/worktrees/x", True) == (
+        "worktree",
+        "add",
+        "C:/p/.claude/worktrees/x",
+        "agent/x",
+    )
+
+
+def test_a_branch_only_origin_has_is_cut_tracking_its_own_remote():
+    """`--track`, where `create` is emphatic about `--no-track`, and for the same reason
+    read the other way round: the upstream is the branch's own remote, so a bare push
+    from the worktree lands where the PR is looking."""
+    assert aw.add_steps("agent/x", "C:/p/.claude/worktrees/x", False) == (
+        "worktree",
+        "add",
+        "--track",
+        "-b",
+        "agent/x",
+        "C:/p/.claude/worktrees/x",
+        "origin/agent/x",
+    )
 
 
 @pytest.mark.parametrize(

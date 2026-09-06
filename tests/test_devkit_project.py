@@ -2294,18 +2294,22 @@ def test_the_box_tier_keeps_one_task_and_it_is_read_only(canonical):
 
     They are not the box tier either, and the same seam says so. No port lease, no
     `COMPOSE_PROJECT_NAME`, no toolchain provisioning and no reaper — `agent-box.py spawn`
-    is still the answer for a session that runs a compose stack, and stays CLI-only. What
-    the two share is `agent_box.open_agent`, because two copies of "which window does the
-    agent open in" is the duplication that seam exists to prevent.
+    is still the answer for a session that runs a compose stack, and stays CLI-only, so
+    the box tier now has no clicked entry point at all. What every one of these shares is
+    `agent_box.open_agent`, because two copies of "which window does the agent open in"
+    is the duplication that seam exists to prevent.
 
-    **The box tier still has a clicked entry point, and that is not a contradiction.**
-    `Agent: Fix a Broken PR` cuts one box per ticked PR, and every part of what it does is
-    a thing `claude --worktree` has no shape for: the box sits on the *PR's own head
-    branch* with upstream set so a bare push lands on the PR, and the session opens
-    already knowing which PR, what is failing on it now, and that the job ends merged.
-    That is a job spec, not an isolation primitive. This test reads task **args**, so it
-    passes because that row dispatches through `devkit_project.py`; `fix-prs.py` still
-    reaches `agent_command` internally, which is the point of the seam.
+    **`Agent: Fix a Broken PR` is a third row in that tier, and that is not a
+    contradiction either.** Every part of what it does is a thing `claude --worktree` has
+    no shape for: the worktree sits on the *PR's own head branch* with upstream set so a
+    bare push lands on the PR, and the session opens already knowing which PR, what is
+    failing on it now, and that the job ends merged. That is a job spec, not an isolation
+    primitive. It cuts into `.claude/worktrees/` like the other two, so the delete row
+    can see what it left behind -- it used to cut a box, which meant the one task most
+    likely to leave a worktree behind was the one whose worktrees no dropdown listed.
+    This test reads task **args**, so it passes because that row dispatches through
+    `devkit_project.py`; `fix-prs.py` still reaches `agent_command` internally, which is
+    the point of the seam.
 
     `agent-box.py` and `harness-switch.py` therefore stay, and keep their CLI verbs — the
     other thing the built-in cannot give a box is a port lease and a

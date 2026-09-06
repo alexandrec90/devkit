@@ -430,9 +430,13 @@ and again as either task finishes.
 
 `reconcile` merges what is green and labelled, so a PR whose base moved under it or whose
 gate failed is the state every scheduled pass steps over. `scripts/fix-prs.py` is the way
-back in: it puts a box on the PR's own head branch — upstream set, so a bare push lands on
-the PR — and opens an agent there already knowing the PR number, what is wrong with it and
-that the job ends with the PR merged once the gate is green.
+back in: it puts a `.claude/worktrees/` worktree on the PR's own head branch — upstream
+set, so a bare push lands on the PR — and opens an agent there already knowing the PR
+number, what is wrong with it and that the job ends with the PR merged once the gate is
+green. Same tier as the two rows above, so *Agent: Delete Worktrees* lists what it left
+behind, and a second click on the same PR reuses the worktree the first one cut. A head
+branch already checked out somewhere else — the checkout itself, a `.worktrees/` box —
+is reported with that directory named rather than cut over.
 
 ```bash
 python scripts/fix-prs.py --list                              # what is red, per checkout
