@@ -120,7 +120,7 @@ file_lines::scripts/reclaim.py = 1232
 file_lines::scripts/release-pipeline.py = 960
 file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/sweep.py = 1990
-file_lines::scripts/sync-devkit.py = 1422
+file_lines::scripts/sync-devkit.py = 1427
 file_lines::scripts/upgrade-project.py = 1231
 file_lines::scripts/workspace-status.py = 1068
 file_lines::scripts/workspace-task-index.py = 576
@@ -378,3 +378,6 @@ swallowed_errors::scripts/worktree.py = 1
 #   file_lines::scripts/preview-ui-host.py -> 1155
 #   imports::scripts/preview-task.py -> 22
 #   imports::scripts/preview-ui-host.py -> 25
+
+# 2026-09-07  recorded: sync-devkit.py gains two MANIFEST entries and the comment above them: scripts/hooks/toolchain.py, the one ladder session-start.sh and ship.py --preflight now share for what a fresh worktree lacks, so a session in one is told before its commit-time gate refuses the commit. A manifest entry can only live in the manifest, and splitting a 1400-line vendoring tool is not a rider two lines can carry.
+#   file_lines::scripts/sync-devkit.py -> 1427

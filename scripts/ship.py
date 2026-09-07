@@ -15,7 +15,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import task_branch as tb
+import toolchain
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LINT_ALL = REPO_ROOT / "scripts" / "lint-all.py"
@@ -66,6 +68,28 @@ def is_shippable(branch: str, default: str) -> tuple[bool, str]:
 
 def tree_clean(porcelain: str) -> bool:
     return not porcelain.strip()
+
+
+def toolchain_report(root: Path = REPO_ROOT) -> list[str]:
+    """What the checkout lacks before its gates can run, one line each. Empty when provisioned.
+
+    Printed by `--preflight`, the first step of `/ship`, because the alternative is where
+    this was found: at step 2's `git commit`, when the pre-commit gate resolved a
+    `language: system` entry against a `PATH` with no venv on it and refused the commit.
+    A linked worktree checks out tracked files only, so a session in a fresh one has no
+    `.venv` and no `node_modules` until something installs them, and the agent that hit
+    it installed the one missing tool by hand -- which got one commit through and left
+    the lint gate at step 3 to fail the same way. Named here, the fix is one command run
+    before anything is committed. The ladder is `scripts/hooks/toolchain.py`, shared with
+    the SessionStart report so the two cannot name different commands.
+    """
+    lines = [gap.line for gap in toolchain.missing_toolchain(root)]
+    if lines:
+        lines.append(
+            "provision before committing: the commit-time pre-commit gate and the lint gate "
+            "both run from the toolchain above, and neither installs it."
+        )
+    return lines
 
 
 def backoff_delays() -> list[int]:
@@ -211,6 +235,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if argv == ["--preflight"]:
         print(f"ship: branch={branch} base={base}")
+        # Reported, not enforced: a checkout whose tools live outside `.venv` can still
+        # ship, and the gates that need the toolchain fail on their own if it is absent.
+        for line in toolchain_report():
+            print(f"ship: {line}", file=sys.stderr)
         return EXIT_OK
 
     if not tree_clean(_porcelain()):

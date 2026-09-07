@@ -209,6 +209,11 @@ MANIFEST: tuple[str, ...] = (
     # deletes these files, so it also has to drop the settings entries pointing at them.
     ".claude/hooks/session-start.sh",
     "scripts/hooks/tests/test_session_start.py",
+    # What a fresh worktree lacks and the command that installs it: the one ladder
+    # `session-start.sh` reports from and `ship.py --preflight` prints, so a session in a
+    # worktree with no `.venv` is told before its commit-time gate refuses the commit.
+    "scripts/hooks/toolchain.py",
+    "scripts/hooks/tests/test_toolchain.py",
     # The vendoring tool itself, so a project can drift-check / pull / push.
     "scripts/sync-devkit.py",
     "scripts/hooks/tests/test_sync_devkit.py",
