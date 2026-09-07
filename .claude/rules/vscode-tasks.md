@@ -195,6 +195,7 @@ never renders.
   field and a newline silently makes a second, unpickable row. **The cost is the wait**,
   since the picker is a person watching an empty box: fan the calls out (`fix-prs.scan`
   and `preview-task.collect` run one checkout per thread) and keep it to a second or two.
+  A **second, dependent** stage costs no second wait: it filters what the first recorded.
   A scan that finds nothing draws `picker_rows.nothing_row` rather than no rows — an
   empty quick-pick cannot be told apart from a command that failed to run.
 - **The cached shape is what is left when the live one cannot express the list**, and it
@@ -230,24 +231,35 @@ never renders.
   timestamp was in a description nobody reads at click time, and the click sent a session
   at a PR that had been closed since. That is the case for preferring the live shape
   wherever the command can answer in about a second.
-- **Two dependent pickers nest, and the nesting differs by shape.** VS Code's *native*
-  inputs resolve sibling `${input:...}` in no defined order and give neither sight of the
-  other, so a cached "which project, then which of its branches" pair is a
+- **Two dependent pickers are two inputs, and which extension draws them decides how.**
+  VS Code's own resolver gives sibling `${input:...}` no sight of each other, so with
+  *native* inputs a "which project, then which of its branches" pair has to be a
   `pickStringRemember` nested inside the outer input's `args`, read back as
-  `${pickStringRemember:<id>}` — one token, because an input resolves to one string. A
-  live picker nests the other way round: `augustocdias.tasks-shell-input` resolves
-  `${input:<otherId>}` inside its own `command` string, so a second `shellCommand.execute`
-  can take the first one's answer as an argument. Its two documented conditions are that
-  the task's command lists the inputs left to right in order of dependence, and that an
-  input's command may reference only other `shellCommand.execute` inputs. This bullet used
-  to say the live shape could not nest at all; that false premise talked the broken-PR,
-  preview and worktree pickers (`brokenPrRow`, `previewRow`, `worktreeRow`) into one flat
-  list per picker with the checkout in the description, and cost them the checkout filter
-  they had. The flat list is a choice a task may make for a short list; a narrowing picker
-  is not something it has to avoid. Where the two halves are genuinely different *lists*
-  rather than a narrowing, they are two commands over one scan: `agent-worktree.py rows`
-  draws what can be destroyed and `bases` what a branch can be cut from, and a row from
-  either in the other would refuse when picked.
+  `${pickStringRemember:<id>}` — one token, because an input resolves to one string.
+  **`shellCommand.execute` inputs are the exception, and it is a documented feature rather
+  than a trick.** That extension records each input's answer as it resolves and
+  substitutes `${input:<id>}` inside a *later* input's own command, so two live stages
+  chain: its README's headline example is `rootDir`, then `childDir` whose command reads
+  `${input:rootDir}`. Two conditions ride on the **task** rather than on either input, and
+  `tests/test_devkit_project.py` asserts both:
+  - the inputs appear **left to right in order of dependence** in the task's arguments,
+    because that is the order VS Code resolves them in;
+  - every input in the chain is a `shellCommand.execute` one — the only place that
+    extension records an answer, so anything else substitutes empty.
+
+  **This rule said the opposite for two releases**, and four tasks lost their checkout
+  stage on its word before the user reported that the pickers no longer narrowed. The
+  failure such a chain can have is *silent*: a lookup with nothing recorded this run falls
+  back to what that input returned in an earlier click, so a wrong order draws a
+  confidently wrong list rather than an error — on `Agent: Delete Worktrees`, a wrong list
+  of things to destroy. So each receiving script also refuses a pick from a checkout the
+  first stage did not return (`strayed_picks`, in all three), and
+  [`scripts/picker_scan.py`](../../scripts/picker_scan.py) owns the scan handed between
+  the stages: one fan-out, a token naming that exact write, and a miss that rescans the
+  ticked checkouts rather than serving anything older. Where the two halves are genuinely
+  different *lists* rather than a narrowing, they stay two commands over one scan:
+  `agent-worktree.py rows` draws what can be destroyed and `bases` what a branch can be
+  cut from, and a row from either in the other would refuse when picked.
 - **An action scoped to exactly one checkout writes the name, not a picker.** A
   `${input:...}` with a single option asks a question that has no second answer, and the
   extension still shows it. Spell the checkout in the task's `--project` argument instead.

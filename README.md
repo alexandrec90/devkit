@@ -750,9 +750,16 @@ machine. A machine with nothing registered shows **amber, not green**: green ove
 of zero jobs is the most misleading thing it could say.
 
 ```bash
-python scripts/tray.py --once        # what it would show, as text
-python scripts/install-tray.py --yes # start it at every logon
+python scripts/tray.py --once            # what it would show, as text
+python scripts/install-tray.py --yes     # start it at every logon
+python scripts/install-tray.py --restart # adopt an edited tray.py without logging out
 ```
+
+`--restart` exists because the tray is resident rather than a pass: it imported `tray.py`
+at logon and holds it until the session ends, so a change to the icon shows up nowhere —
+no error, no stale-looking log — until the process is replaced. It acts on the registered
+task by name, so it restarts whichever checkout is installed even when run from a
+worktree.
 
 Windows only, and stdlib only — Shell_NotifyIcon through `ctypes`. `tray.py --once`
 prints the same verdict anywhere, which is also how the read path is tested.
