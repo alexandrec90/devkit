@@ -126,22 +126,22 @@ def ps_quote(text: str) -> str:
 
 
 def wt_argv(title: str, cwd: Path, command: str) -> list[str]:
-    """The `wt.exe` arguments for one agent tab in one box."""
+    """Build one tab, escaping semicolons that wt otherwise treats as tab separators."""
     return [
         "-w",
         WT_WINDOW,
         "new-tab",
         "--title",
-        title,
+        title.replace(";", "\\;"),
         "-d",
-        str(cwd),
+        str(cwd).replace(";", "\\;"),
         # -NoExit for `resume-sessions.py`'s reason: an agent that dies on startup still
         # leaves its error on screen instead of closing the tab it printed it in.
         "pwsh.exe",
         "-NoLogo",
         "-NoExit",
         "-Command",
-        command,
+        command.replace(";", "\\;"),
     ]
 
 

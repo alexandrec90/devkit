@@ -71,6 +71,33 @@ def test_the_agent_tab_attaches_to_the_window_the_operator_is_looking_at():
     assert argv[argv.index("-d") + 1] == str(Path("C:/boxes/x"))
 
 
+def test_the_kill_switchs_semicolon_does_not_open_a_second_tab():
+    """The regression this file exists for: `wt` re-parses its own command line, so the
+    `;` `agent_command` writes between the assignment and the agent used to end the tab's
+    command there and start a second sub-command out of the rest -- two tabs per PR, the
+    second one answering "The system cannot find the file specified" because it tried to
+    launch `claude '<prompt>'` as an executable."""
+    command = box.agent_command("claude", True, "fix it")
+    argv = box.wt_argv("agent/thing-0903", Path("C:/boxes/x"), command)
+    embedded = argv[argv.index("-Command") + 1]
+    assert ";" in command
+    assert embedded == command.replace(";", "\\;")
+    assert ";" not in embedded.replace("\\;", "")
+
+
+def test_a_command_with_no_semicolon_reaches_the_tab_untouched():
+    """The ordinary case -- `spawn` with the harness running -- must not grow a backslash."""
+    assert box.wt_argv("b", Path("C:/boxes/x"), "claude")[-1] == "claude"
+
+
+def test_a_semicolon_in_the_title_or_the_directory_is_escaped_too():
+    """Both are legal in a Windows path and in a git branch name, and both are strings
+    this module is handed rather than writes."""
+    argv = box.wt_argv("agent/odd;name", Path("C:/box;es/x"), "claude")
+    assert argv[argv.index("--title") + 1] == "agent/odd\\;name"
+    assert ";" not in argv[argv.index("-d") + 1].replace("\\;", "")
+
+
 def test_the_kill_switch_is_exported_into_the_tab_when_it_is_on():
     """Claude reads `env` out of the user settings file. Codex reads no settings file of
     ours, so without this a Codex session in a box would run hooks the operator had

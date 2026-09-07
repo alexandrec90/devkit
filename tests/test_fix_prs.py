@@ -308,17 +308,16 @@ def test_the_prompt_names_the_pr_the_fault_and_the_finish_line():
     assert "green" in text
 
 
-def test_the_prompt_is_one_line_with_no_semicolon_in_it():
-    """`wt.exe` parses its own command line: an unescaped `;` starts a second sub-command
-    and a newline ends the command outright, so a prompt carrying either opens a tab
-    running half a sentence."""
+def test_the_prompt_is_one_line():
+    """A newline ends `wt`'s command outright and has no escape, so the prompt is
+    flattened. A `;` needs no flattening -- `agent_box.wt_argv` escapes it on the way
+    into the tab, which it must do anyway for the kill switch's own semicolon."""
     text = fix_prs.seed_prompt("x", pr(title="a; b"), "1 check failing; and more")
-    assert ";" not in text
     assert "\n" not in text
 
 
-def test_tab_safe_collapses_whitespace_and_replaces_semicolons():
-    assert fix_prs.tab_safe(" a;\n b  c ") == "a, b c"
+def test_tab_safe_collapses_whitespace_and_leaves_semicolons_to_the_escaper():
+    assert fix_prs.tab_safe(" a;\n b  c ") == "a; b c"
 
 
 def test_a_prompt_reaches_powershell_as_a_single_quoted_literal():
