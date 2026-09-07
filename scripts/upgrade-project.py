@@ -83,6 +83,7 @@ from pathlib import Path
 from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import policy_runtime
 import sweep
 import task_branch as tb
 import task_input
@@ -1129,6 +1130,10 @@ def main(argv: list[str] | None = None) -> int:
     # The whole tag set, for the projects that are *ahead* of this checkout rather than
     # behind it. Read once here; `upgrade_one` cannot, since it only has the box.
     tags = release_tags(args.devkit)
+    # The global git policy runtime is pinned to a release too, and goes stale on the
+    # same event this run reacts to. Unattended passes only, and from the tag -- the
+    # two guards are `policy_runtime`'s, with the reasons.
+    preflight += policy_runtime.refresh(args.devkit, tag, args.dry_run, args.every, Outcome)
 
     # Said once for the run, before any box is cut: the answer is the same for every
     # project, and a reader who came here for a specific vendored fix needs to know the

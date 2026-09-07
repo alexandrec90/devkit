@@ -1,13 +1,22 @@
-# Local commit-time gate. Install once per clone with `pre-commit install`;
+# Local git gate, in two stages. Install once per clone with `pre-commit install` — the
+# `default_install_hook_types` line makes that one command wire both stages — and
 # `.claude/hooks/session-start.sh` does it automatically, so agent sessions get it too.
 #
-# This is the fast, deterministic subset of the PR gate — the checks worth paying for on
-# every commit. Anything slow or infra-dependent (mypy, the test suites, the DB tier)
-# stays in `scripts/lint-all.py`, the Stop hook, and CI.
+# The commit stage is the fast, deterministic subset of the PR gate: fixers and
+# sub-second checks, so a commit is never held up by a judgement. The pre-push stage is
+# the PR gate itself — `scripts/lint-all.py`, `scripts/run-tests.py` and the hook tests,
+# via devkit's `devkit-push-gate` hook — run at the moment CI would run it, so a failure
+# is read from `logs/` a minute after the push attempt instead of from a workflow
+# artifact ten minutes after it. `SKIP=devkit-push-gate git push` skips it on purpose.
 #
 # Every `rev` is pinned and moved deliberately by `pre-commit autoupdate`. That includes
 # devkit's own hooks: a floating branch there would let one upstream commit change the
 # gate in every repo at once, which is the same reason the PR gate pins a tag.
+default_install_hook_types: [pre-commit, pre-push]
+# Without this, a hook that names no stage runs at every installed one — so the fixers
+# would rewrite the whole tree on every push. Only `devkit-push-gate` is a push hook.
+default_stages: [pre-commit]
+
 repos:
   # --- devkit's published hooks ------------------------------------------------
   # The alternative to `sync-devkit.py --check`, which resolves its source from
@@ -28,6 +37,8 @@ repos:
       - id: devkit-hooks-stdlib-only
       # Byte-compares scripts/hooks/ and friends against the devkit rev pinned above.
       - id: devkit-drift
+      # The pre-push stage: the PR gate's own commands, before the push leaves.
+      - id: devkit-push-gate
 
   # --- formatting and lint ----------------------------------------------------
   # The same fixers the `lint-fix.py` PostToolUse hook applies after every agent edit, so
@@ -39,15 +50,30 @@ repos:
         args: [--fix]
       - id: ruff-format
 
+  # The workflow linter. Here rather than in `scripts/lint-all.py`, which degrades a
+  # missing binary to a note: pre-commit builds the tool itself from the pinned rev, so
+  # a workstation that never ran the CI installer still checks its workflows.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
   # --- hygiene ----------------------------------------------------------------
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
-      # Not cosmetic for a repo with a vendored harness: a trailing space in a vendored
-      # file becomes drift the first time an editor strips it, and `sync-devkit.py
-      # --check` then fails a build over a byte nobody meant to change.
+      # Fixers, not readability rules — and not cosmetic for a repo with a vendored
+      # harness: a trailing space in a vendored file becomes drift the first time an
+      # editor strips it, and `sync-devkit.py --check` then fails a build over a byte
+      # nobody meant to change.
+      #
+      # `stages: [pre-commit]` on three of them: their upstream manifest names every
+      # stage, which overrides `default_stages` above, and a fixer over the whole tree
+      # at push time rewrites files during a push.
       - id: trailing-whitespace
+        stages: [pre-commit]
       - id: end-of-file-fixer
+        stages: [pre-commit]
       - id: mixed-line-ending
         args: [--fix=lf] # matches .gitattributes' `eol=lf`
       - id: check-merge-conflict
@@ -57,6 +83,7 @@ repos:
         # .claude/settings.json is strict JSON; .vscode/tasks.json is JSONC and would fail.
         files: ^\.claude/settings\.json$
       - id: check-added-large-files
+        stages: [pre-commit]
 
   # --- secrets ----------------------------------------------------------------
   # This is the hook `scripts/hooks/stop.py` defers to when it passes `--no-secrets`:

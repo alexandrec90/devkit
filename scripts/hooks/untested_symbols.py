@@ -173,7 +173,12 @@ def public_symbols(source: str) -> list[str]:
 
 
 def reference_pattern(symbol: str) -> re.Pattern[str]:
-    """Matches a real reference to `symbol`: an attribute, a call, or an import."""
+    """Matches a real reference to `symbol`: an attribute, a call, or an import.
+
+    The definition of a reference. `referenced_names` is the same three shapes read the
+    other way round -- every name a text references, in one pass -- and the scan uses
+    that; `test_referenced_names_agrees_with_reference_pattern` holds the two together.
+    """
     name = re.escape(symbol)
     return re.compile(
         rf"\.{name}\b"  # module.symbol
@@ -181,6 +186,33 @@ def reference_pattern(symbol: str) -> re.Pattern[str]:
         rf"|^\s*from\s+.*\bimport\b.*\b{name}\b",  # from mod import symbol
         re.MULTILINE,
     )
+
+
+# The three shapes of `reference_pattern`, each capturing the name it would have been
+# asked about. `\w+` is greedy, so the captured word is the maximal identifier -- which
+# is exactly what the `\b` on the symbol side of `reference_pattern` demands.
+_ATTRIBUTE_RE = re.compile(r"\.(\w+)")
+_CALL_RE = re.compile(r"(?<![\w.])(\w+)\s*\(")
+_FROM_IMPORT_RE = re.compile(r"^\s*from\s+.*?\bimport\b(.*)", re.MULTILINE)
+_WORD_RE = re.compile(r"\w+")
+
+
+def referenced_names(text: str) -> frozenset[str]:
+    """Every symbol `reference_pattern` would find in `text`.
+
+    Computed once per test file rather than once per (symbol, corpus) pair. The scan
+    used to run `reference_pattern(symbol).search(corpus)` for every public symbol in
+    the repo -- fifteen hundred regex passes over corpora that, for a module every test
+    imports, are most of the test tree -- and took 25s per verdict on a 2.5 MB corpus,
+    which the live gate then paid four times over. Reading each file once for the
+    names it references and taking a set union per module answers the same question
+    in well under a second.
+    """
+    names: set[str] = set(_ATTRIBUTE_RE.findall(text))
+    names.update(_CALL_RE.findall(text))
+    for rest_of_line in _FROM_IMPORT_RE.findall(text):
+        names.update(_WORD_RE.findall(rest_of_line))
+    return frozenset(names)
 
 
 def module_pattern(module: Path) -> re.Pattern[str]:
@@ -217,8 +249,8 @@ def module_pattern(module: Path) -> re.Pattern[str]:
     )
 
 
-def corpus_for(module: Path, texts: dict[Path, str]) -> str:
-    """The text of every test file that mentions `module`, concatenated.
+def corpus_files(module: Path, texts: dict[Path, str]) -> list[Path]:
+    """The test files that mention `module`, in the order `texts` lists them.
 
     The substring test in front of the regex is a **necessary condition of every
     alternative** {@link module_pattern} accepts -- each one contains either the file
@@ -238,9 +270,16 @@ def corpus_for(module: Path, texts: dict[Path, str]) -> str:
     mentions = module_pattern(module)
     name = module.name
     snake = module.stem.replace("-", "_")
-    return "\n".join(
-        text for text in texts.values() if (name in text or snake in text) and mentions.search(text)
-    )
+    return [
+        rel
+        for rel, text in texts.items()
+        if (name in text or snake in text) and mentions.search(text)
+    ]
+
+
+def corpus_for(module: Path, texts: dict[Path, str]) -> str:
+    """The text of every test file that mentions `module`, concatenated."""
+    return "\n".join(texts[rel] for rel in corpus_files(module, texts))
 
 
 def entry(module: Path, symbol: str) -> str:
@@ -262,6 +301,7 @@ def gaps(root: Path, cfg: harness_config.Config, texts: dict[Path, str] | None =
     """
     if texts is None:
         texts = read_tests(root, cfg)
+    referenced = {rel: referenced_names(text) for rel, text in texts.items()}
     found: list[str] = []
     for module in source_files(root, cfg):
         try:
@@ -270,12 +310,10 @@ def gaps(root: Path, cfg: harness_config.Config, texts: dict[Path, str] | None =
             # Not this gate's job to report: the linter and the interpreter both say so
             # louder. Skipping keeps a broken file from masking every other module.
             continue
-        corpus = corpus_for(module, texts)
-        found.extend(
-            entry(module, symbol)
-            for symbol in symbols
-            if not reference_pattern(symbol).search(corpus)
-        )
+        names: set[str] = set()
+        for rel in corpus_files(module, texts):
+            names |= referenced[rel]
+        found.extend(entry(module, symbol) for symbol in symbols if symbol not in names)
     return sorted(found)
 
 

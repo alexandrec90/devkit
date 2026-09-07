@@ -743,16 +743,20 @@ def test_a_linter_that_is_not_installed_is_skipped_not_reported(tmp_path):
     assert not lint_all._missing_module(["ruff", "check", "."])
 
 
-def test_generated_lint_runner_covers_the_workflows_and_env_file_it_ships(tmp_path):
+def test_generated_lint_runner_covers_the_env_file_and_pre_commit_covers_the_workflows(
+    tmp_path,
+):
     """Every generated project gets two workflows and a `.env.example` — and, until
-    now, no linter that ever looked at them, while `session-start.sh` dutifully
-    installed actionlint and dotenv-linter on every single session.
+    the passes existed, no linter that ever looked at them.
 
-    Asserted through the rendered runner's own selectors so this stays true of the
-    project's copy, not just devkit's.
+    The `.env` pass is the runner's, asserted through the rendered runner's own
+    selector so this stays true of the project's copy. The workflows are actionlint's,
+    from the project's `.pre-commit-config.yaml`: pre-commit builds the binary from a
+    pinned rev, where the runner could only note that the CI installer had not run.
     """
     import importlib.util
 
+    yaml = pytest.importorskip("yaml")
     root = generate(tmp_path, {"docker": True})
     spec = importlib.util.spec_from_file_location(
         "probe_lint_all", root / "scripts" / "lint-all.py"
@@ -760,15 +764,21 @@ def test_generated_lint_runner_covers_the_workflows_and_env_file_it_ships(tmp_pa
     generated = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(generated)
 
-    workflows = generated.workflow_files()
-    assert ".github/workflows/pr-gate.yml" in workflows
-    assert ".github/workflows/dependabot-automerge.yml" in workflows
     assert generated.env_files() == [".env.example"]
+    assert not hasattr(generated, "workflow_files"), "the workflow pass is pre-commit's now"
     # The gate must install what the runner calls, or the pass reports "not
     # installed — skipped" on every run and the check is inert.
     gate = (root / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
-    assert "download-actionlint" in gate
     assert "dotenv-linter" in gate
+    assert "download-actionlint" not in gate, "actionlint is pre-commit's; one copy"
+
+    config = yaml.safe_load((root / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+    hooks = {h["id"] for repo in config["repos"] for h in repo["hooks"]}
+    assert "actionlint" in hooks
+    assert "devkit-push-gate" in hooks, "the pre-push stage is missing from the project"
+    assert config["default_install_hook_types"] == ["pre-commit", "pre-push"], (
+        "`pre-commit install` must wire both stages, or the push gate never runs"
+    )
 
 
 def test_lint_all_does_not_rewrite_the_vendored_harness(tmp_path):

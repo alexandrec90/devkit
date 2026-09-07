@@ -99,6 +99,7 @@ repos:
       - id: devkit-manifest
       - id: devkit-hooks-stdlib-only
       - id: devkit-drift
+      - id: devkit-push-gate
 ```
 
 `scripts/new-project.py` renders this into every new project already, pinned to the same
@@ -109,6 +110,11 @@ devkit ref as the PR gate.
 | `devkit-manifest` | A `.devkit.toml` the harness would silently ignore: unparseable TOML, a path prefix missing its trailing slash, a declared directory that does not exist in the repo, a `[db]`/`[frontend]` block switched on and left half-filled. |
 | `devkit-hooks-stdlib-only` | A third-party import in `scripts/hooks/`. Those scripts run *before* the virtualenv exists, so this cannot be caught by a test suite — which runs inside it. |
 | `devkit-drift` | A vendored file that differs from the pinned devkit rev. |
+| `devkit-push-gate` | Whatever the PR gate would have caught, before the push: `scripts/lint-all.py`, `scripts/run-tests.py`, then the hook tests, in CI's order, stopping at the first failure. Runs at the **pre-push** stage, so a commit stays seconds and a failure is read from `logs/` instead of a workflow artifact. `SKIP=devkit-push-gate git push` bypasses it on purpose. |
+
+The commit stage is only fixers and sub-second checks. Everything a PR gate fails on and
+a commit hook did not run — mypy, the suites — is the push stage, which `pre-commit
+install` wires alongside the commit one (`default_install_hook_types`).
 
 **Why `devkit-drift` exists next to `sync-devkit.py --check`.** The sync tool needs a
 **local devkit clone** for `$DEVKIT_DIR` to point at. Where there is none it can only
@@ -204,6 +210,13 @@ nobody reads. It is also deliberately *not* a test: a test asserting
 "installed == source" could only be made green by installing work-in-progress code
 globally, which is precisely the mistake described above.
 
+**The runtime is reinstalled for you when a release moves it.** The nightly
+`upgrade-project.py --all --yes` pass, registered by `scripts/install-upgrade-schedule.py`,
+runs `install-git-policy.py --check` and reinstalls from the release it is adopting
+only when the installed copy has drifted or fallen behind — never when nothing is
+installed on the machine, and never from a working tree. `scripts/policy_runtime.py`
+carries both guards. A failed reinstall lands in `logs/upgrade.log`.
+
 The global `pre-commit` hook:
 
 - rejects detached-HEAD commits and commits on `main`, `master`, or the detected
@@ -217,7 +230,9 @@ The global `pre-push` hook inspects the destination refs rather than just the cu
 branch, so `git push origin HEAD:main` is blocked too. It rejects protected
 destinations and any branch name with an already-merged PR, while still allowing
 remote branch deletion. Non-GitHub remotes skip only the PR lookup; protected branch
-destinations remain blocked.
+destinations remain blocked. When the push publishes a branch, it then runs the
+repository's `.pre-commit-config.yaml` at the `pre-push` stage — the push gate above —
+and an optional `.githooks/pre-push`; a deletion or a tag-only push skips the stage.
 
 It also refuses a push that creates or moves a **release tag** — a `vX.Y.Z` ref, the one
 thing consumers pin — because only a release workflow runs the suite against the commit

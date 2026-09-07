@@ -29,8 +29,10 @@ that has no test, write the test in the same commit even if the logic didn't cha
 - **Reversion check:** before calling a change complete, identify which test would
   fail if the changed behavior were reverted. If none would, it is not covered yet.
 - **Coverage floors are ratchets:** never lower it merely to make a change pass.
-- **Run targeted tests** — the module you touched — plus the linter. Leave full-suite runs
-  to CI; a fresh-venv full run surfaces version skew unrelated to your change.
+- **Run targeted tests** — the module you touched — plus the linter, while you work. The
+  whole gate runs once, at push time: the `devkit-push-gate` pre-commit hook runs
+  `lint-all.py`, `run-tests.py` and the hook tests before a push leaves, so a failure is
+  read from `logs/` here rather than from a CI artifact.
 - **Fix failures in the code, not in the assertion.** Relaxing an assertion to get green
   deletes the only evidence that something is wrong.
 - A skipped or `xfail` test carries a linked issue or a one-line reason in the marker.
@@ -133,9 +135,10 @@ same OS.
 ## Lint policy
 
 Lint catches **correctness and security** problems — the ones a human reviewer reads past.
-Style is not a judgement call worth an agent's turn: `ruff format` runs on every edit via
-the `lint-fix.py` PostToolUse hook and again in CI, so line length, quote style and import
-order never reach a review. **On** for correctness, security and resource-handling; **off**
+Style is not a judgement call worth an agent's turn: `ruff format` runs at commit time from
+`.pre-commit-config.yaml`, on every agent edit where the `lint-fix.py` PostToolUse hook is
+enabled, and again in CI, so line length, quote style and import order never reach a
+review. **On** for correctness, security and resource-handling; **off**
 for anything a formatter can decide. A rule that fires on something a formatter would fix
 is misconfigured — turn it off rather than teaching everyone to ignore it.
 

@@ -10,7 +10,8 @@ remotely:
 * pushes that create or move a release tag, which only a release workflow may do.
 
 After the policy passes, the dispatcher runs the repository's pre-commit framework
-configuration (for ``pre-commit``) and an optional ``.githooks/<hook>``. Everything
+configuration -- the commit stage for ``pre-commit``, the pre-push stage for a
+``pre-push`` that publishes a branch -- and an optional ``.githooks/<hook>``. Everything
 is stdlib-only because the hook runs before a project environment is guaranteed.
 """
 
@@ -605,15 +606,27 @@ NO_PRE_COMMIT = (
 )
 
 
-def _run_pre_commit_framework(root: Path, runner: Runner) -> int:
+def _run_pre_commit_framework(
+    root: Path, runner: Runner, stage: str = "pre-commit", raw_updates: str = ""
+) -> int:
     if not (root / ".pre-commit-config.yaml").is_file():
+        return 0
+    # The push stage runs for a push that publishes a branch, and not for a deletion or
+    # a tag-only push: the stage is the PR gate (minutes of tests), and nothing a
+    # deletion could break is in it. `pre-commit install` would wire the same stage
+    # itself; this dispatcher owns `core.hooksPath`, so it has to run it in its place.
+    if stage == "pre-push" and all(u.deletion for u in parse_push_updates(raw_updates)):
         return 0
     command = _pre_commit_command(root, runner)
     if command is None:
         for line in NO_PRE_COMMIT:
             print(line, file=sys.stderr)
         return 1
-    result = runner([*command, "run", "--hook-stage", "pre-commit"], cwd=root)
+    # `--all-files` for the push stage: its hooks are `always_run` gates over the whole
+    # tree, and without it pre-commit scopes to the *staged* diff -- stashing unstaged
+    # work for the duration -- to run hooks that ignore the file list anyway.
+    args = ["run", "--hook-stage", stage] + (["--all-files"] if stage == "pre-push" else [])
+    result = runner([*command, *args], cwd=root)
     if result.stdout:
         print(result.stdout, end="")
     if result.stderr:
@@ -733,10 +746,9 @@ def run_hook(
     if root is None:
         print("[devkit branch policy] cannot locate repository root", file=sys.stderr)
         return 1
-    if hook_name == "pre-commit":
-        framework_result = _run_pre_commit_framework(root, runner)
-        if framework_result:
-            return framework_result
+    framework_result = _run_pre_commit_framework(root, runner, hook_name, input_text)
+    if framework_result:
+        return framework_result
     return _run_project_hook(hook_name, args, input_text, root, runner)
 
 

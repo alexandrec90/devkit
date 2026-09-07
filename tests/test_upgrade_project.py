@@ -63,6 +63,15 @@ def no_open_adoption_pr(monkeypatch):
     monkeypatch.setattr(up.sweep, "gh_for", lambda _p: gh_listing([]))
 
 
+@pytest.fixture(autouse=True)
+def no_policy_reinstall(monkeypatch):
+    """No test reaches the real `install-git-policy.py`, whose `--yes` writes to this
+    machine's `~/.devkit` and global git config. The rider's own decisions are pinned in
+    `tests/test_policy_runtime.py`; here it answers "nothing to record" unless a test
+    installs its own."""
+    monkeypatch.setattr(up.policy_runtime, "refresh", lambda *_a, **_kw: [])
+
+
 def done(code: int = 0):
     """A stand-in `upgrade_one` result, for the tests that fake the per-project work."""
     return lambda *_a, **_kw: up.Outcome("stub", code)
@@ -929,6 +938,49 @@ def test_a_run_where_every_project_is_current_touches_nothing(tmp_path, capsys, 
     ws = workspace(tmp_path, "carameli", "ibkr_trader")
     assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
     assert capsys.readouterr().out.count("already on devkit v0.5.3") == 2
+
+
+def test_the_unattended_pass_refreshes_the_policy_runtime_from_the_run_s_tag(tmp_path, monkeypatch):
+    """The rider is asked once per run, with the tag every consumer adopts, the mode,
+    and whether this is the `--all` pass -- so the runtime and the consumers can only
+    ever move to the same release, and a named-project run never touches the machine."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    stamps_on_main(monkeypatch)
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli")
+    asked: list[tuple] = []
+
+    def refresh(devkit, tag, dry_run, every, outcome):
+        asked.append((devkit, tag, dry_run, every, outcome))
+        return []
+
+    monkeypatch.setattr(up.policy_runtime, "refresh", refresh)
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    assert asked == [(tmp_path, "v0.5.3", False, True, up.Outcome)]
+
+
+def test_a_failed_policy_reinstall_reaches_the_artifact_and_the_exit_code(tmp_path, monkeypatch):
+    """Under `pythonw` the artifact and the exit code are the only record. The projects
+    are still processed: a stale hook runtime is no reason to leave consumers behind."""
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    stamps_on_main(monkeypatch)
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli")
+    monkeypatch.setattr(
+        up.policy_runtime,
+        "refresh",
+        lambda *_a, **_kw: [up.Outcome(up.policy_runtime.POLICY_SCOPED, 2, "upgrade: refused")],
+    )
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 2
+    artifact = (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8")
+    assert "(policy)" in artifact
+    assert "upgrade: refused" in artifact
+    # A run-level outcome is not a checkout; the retry line must not offer it.
+    assert "upgrade-project.py (policy)" not in artifact
 
 
 def test_the_unattended_sweep_passes_over_a_project_on_hold(tmp_path, capsys, monkeypatch):

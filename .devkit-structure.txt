@@ -29,7 +29,7 @@ complexity::scripts/hooks/structure_scan.py::mask_literals = 18
 complexity::scripts/hooks/structure_scan.py::scan_js = 19
 complexity::scripts/install-reconcile-task.py::main = 19
 complexity::scripts/instruction-budget.py::render = 16
-complexity::scripts/lint-all.py::main = 19
+complexity::scripts/lint-all.py::main = 16
 complexity::scripts/new-project.py::main = 19
 complexity::scripts/plug-projects.py::main = 46
 complexity::scripts/precommit/check_harness_manifest.py::check = 21
@@ -93,10 +93,6 @@ definitions::scripts/workspace-status.py = 31
 definitions::scripts/workspace-task-index.py = 29
 definitions::scripts/worktree-guard.py = 60
 definitions::scripts/worktree.py = 157
-dependency::package.json::markdownlint-cli2 = 1
-dependency::package.json::remark-cli = 1
-dependency::package.json::remark-frontmatter = 1
-dependency::package.json::remark-preset-lint-recommended = 1
 dependency::pyproject.toml::mypy = 1
 dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::pytest = 1
@@ -105,7 +101,7 @@ file_lines::scripts/agent-box.py = 538
 file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/fix-prs.py = 768
-file_lines::scripts/git_policy.py = 756
+file_lines::scripts/git_policy.py = 768
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
@@ -121,7 +117,7 @@ file_lines::scripts/release-pipeline.py = 960
 file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/sweep.py = 1990
 file_lines::scripts/sync-devkit.py = 1427
-file_lines::scripts/upgrade-project.py = 1231
+file_lines::scripts/upgrade-project.py = 1236
 file_lines::scripts/workspace-status.py = 1068
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2295
@@ -130,7 +126,7 @@ function_lines::scripts/devkit_project.py::main = 213
 function_lines::scripts/docker-maint.py::generic_prune = 84
 function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
 function_lines::scripts/install-reconcile-task.py::main = 114
-function_lines::scripts/lint-all.py::main = 98
+function_lines::scripts/lint-all.py::main = 89
 function_lines::scripts/new-project.py::main = 143
 function_lines::scripts/plug-projects.py::main = 185
 function_lines::scripts/precommit/check_harness_manifest.py::check = 84
@@ -145,7 +141,7 @@ function_lines::scripts/sweep.py::inspect = 133
 function_lines::scripts/sweep.py::main = 171
 function_lines::scripts/sweep.py::sync_plan = 87
 function_lines::scripts/sync-devkit.py::main = 251
-function_lines::scripts/upgrade-project.py::main = 162
+function_lines::scripts/upgrade-project.py::main = 166
 function_lines::scripts/upgrade-project.py::upgrade_one = 143
 function_lines::scripts/worktree-guard.py::main = 139
 function_lines::scripts/worktree-guard.py::redirect_decision = 94
@@ -221,7 +217,7 @@ skipped_tests::scripts/hooks/tests/test_untested_symbols.py = 1
 skipped_tests::tests/support.py = 2
 skipped_tests::tests/test_claude_hooks_live.py = 2
 skipped_tests::tests/test_codex_hooks_live.py = 1
-skipped_tests::tests/test_lint_all.py = 4
+skipped_tests::tests/test_lint_all.py = 2
 skipped_tests::tests/test_new_project.py = 3
 skipped_tests::tests/test_preview_ui_host.py = 2
 skipped_tests::tests/test_scheduled_jobs.py = 1
@@ -381,3 +377,10 @@ swallowed_errors::scripts/worktree.py = 1
 
 # 2026-09-07  recorded: sync-devkit.py gains two MANIFEST entries and the comment above them: scripts/hooks/toolchain.py, the one ladder session-start.sh and ship.py --preflight now share for what a fresh worktree lacks, so a session in one is told before its commit-time gate refuses the commit. A manifest entry can only live in the manifest, and splitting a 1400-line vendoring tool is not a rider two lines can carry.
 #   file_lines::scripts/sync-devkit.py -> 1427
+
+# 2026-09-07  recorded: git_policy.py grows by the pre-push stage of the framework it dispatches: the dispatcher owns core.hooksPath, so the PR gate at push time runs only if this module runs it. Splitting the module is its own change.
+#   file_lines::scripts/git_policy.py -> 768
+
+# 2026-09-07  recorded: upgrade-project.py grows by the one-line branch-policy reinstall rider in main; the rider's logic is its own module (policy_runtime.py) and splitting main is its own change.
+#   file_lines::scripts/upgrade-project.py -> 1236
+#   function_lines::scripts/upgrade-project.py::main -> 166

@@ -20,7 +20,7 @@ would have. One ruff, no `PATH` dependency.
 Exits with ruff's own code, and with 1 plus a readable line when ruff genuinely is not
 installed anywhere — the one case where the old message was telling the truth.
 
-Stdlib only. Tested in `tests/test_run_ruff_hook.py`.
+Stdlib only. Tested in `tests/test_run_ruff.py`.
 """
 
 from __future__ import annotations

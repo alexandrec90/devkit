@@ -394,6 +394,79 @@ def test_policy_runs_pre_commit_framework_then_project_hook(tmp_path, monkeypatc
     )
 
 
+def _push_responses(tmp_path):
+    responses = git_responses()
+    responses.update(merged_response("claude/fresh", []))
+    responses[("git", "rev-parse", "--git-path", "devkit-branch-policy.json")] = completed(
+        ["git"], returncode=1
+    )
+    responses[("git", "rev-parse", "--show-toplevel")] = completed(["git"], stdout=f"{tmp_path}\n")
+    responses[("git", "config", "--get", "devkit.branchPolicy.projectHooksPath")] = completed(
+        ["git"], returncode=1
+    )
+    responses[("pre-commit-test", "run", "--hook-stage", "pre-push", "--all-files")] = completed(
+        ["pre-commit-test"]
+    )
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    return responses
+
+
+PUSH_STAGE = ("pre-commit-test", "run", "--hook-stage", "pre-push", "--all-files")
+
+
+def test_a_push_that_publishes_a_branch_runs_the_pre_push_stage(tmp_path, monkeypatch):
+    """The dispatcher owns `core.hooksPath`, so `pre-commit install` never wires the
+    framework's own pre-push hook here; the PR gate at push time exists only if this
+    runs it. `--all-files`, because the stage's hooks are `always_run` gates over the
+    tree and the staged-diff default would stash unstaged work to run them."""
+    monkeypatch.setattr(
+        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
+    runner = FakeRunner(_push_responses(tmp_path))
+    raw = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n"
+    assert git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=runner) == 0
+    assert PUSH_STAGE in runner.calls
+
+
+def test_the_pre_push_stage_failing_refuses_the_push(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
+    responses = _push_responses(tmp_path)
+    responses[PUSH_STAGE] = completed(["pre-commit-test"], stdout="tests failed\n", returncode=1)
+    runner = FakeRunner(responses)
+    raw = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n"
+    assert git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=runner) == 1
+
+
+def test_a_deletion_or_tag_only_push_skips_the_pre_push_stage(tmp_path, monkeypatch):
+    """The stage is minutes of tests, and nothing a deletion could break is in it."""
+    monkeypatch.setattr(
+        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
+    for raw in (
+        f"(delete) {'0' * 40} refs/heads/claude/old {'1' * 40}\n",
+        tag_push("nightly-2026-09-07"),
+    ):
+        runner = FakeRunner(_push_responses(tmp_path))
+        assert git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=runner) == 0
+        assert PUSH_STAGE not in runner.calls
+
+
+def test_the_commit_stage_argv_is_unchanged_by_the_push_stage(tmp_path, monkeypatch):
+    """The commit stage keeps pre-commit's staged-diff default: the fixers there act
+    on the files being committed, and `--all-files` would rewrite the whole tree."""
+    monkeypatch.setattr(
+        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    runner = FakeRunner(
+        {("pre-commit-test", "run", "--hook-stage", "pre-commit"): completed(["pre-commit-test"])}
+    )
+    assert git_policy._run_pre_commit_framework(tmp_path, runner) == 0
+    assert runner.calls == [("pre-commit-test", "run", "--hook-stage", "pre-commit")]
+
+
 def test_a_missing_framework_names_every_remedy_not_just_the_refusal(tmp_path, monkeypatch, capsys):
     """Two agents reported this message in one week; both said it names no remedy, so it
     reads as policy declining the commit rather than as a tool being missing."""

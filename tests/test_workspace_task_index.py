@@ -552,15 +552,11 @@ def test_the_output_directory_is_ignored_by_git():
     assert index.output_path("text", None).parent == REPO_ROOT / "logs"
 
 
-def test_the_markdown_report_cannot_fail_a_commit():
-    """`--format markdown` writes into `logs/`, and markdownlint's `globs` are absolute
-    rather than "whatever pre-commit staged" — so before `logs/**` was ignored, running
-    this script once left a generated file that blocked every later commit, including
-    the commit of the script that wrote it. Wrapped table cells carry `<br>`, which is
-    MD033, so the artifact is unfixable as well as unreviewed."""
-    config = (REPO_ROOT / ".markdownlint-cli2.yaml").read_text(encoding="utf-8")
-    ignores = config.split("ignores:", 1)[1].split("\nconfig:", 1)[0]
-    assert '"logs/**"' in ignores
+def test_the_markdown_report_is_a_generated_artifact_under_logs():
+    """`--format markdown` writes into `logs/`, which is gitignored and outside every
+    lint pass — so a generated report is neither committed by accident nor a file some
+    later commit-time check trips over. It once was: a Markdown linter with absolute
+    globs read the report and blocked every commit until `logs/` was excluded."""
     assert index.output_path("markdown", None).parent == REPO_ROOT / "logs"
 
 

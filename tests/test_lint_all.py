@@ -1,10 +1,14 @@
-"""Tests for the workflow and `.env` passes in devkit's lint runner.
+"""Tests for the scoping and the `.env` pass in devkit's lint runner.
 
-`.claude/hooks/session-start.sh` has always installed actionlint and dotenv-linter
-into every session, and until these passes existed nothing ever ran them — a tool
-downloaded on every startup, in every project, and never invoked. The checks below
-exist to keep that from silently becoming true again, and to pin down the scoping
-rule that makes `--changed` usable for non-Python files.
+`lint-all.py` is one of the three commands the pre-push gate and the PR gate run, so
+what it lints -- and what it silently does not -- decides whether a green push means
+anything. The checks below pin the scoping rule that makes `--changed` usable for
+non-Python files, and that a missing optional tool is a note while a missing required one
+is not a clean run.
+
+The workflow files are deliberately not this runner's: actionlint runs from
+`.pre-commit-config.yaml`, where pre-commit builds the binary from a pinned rev, because
+here it was a note on every machine that had not run the CI installer.
 
 The runner is exercised as a subprocess against a throwaway repo rather than by
 calling `main()`: `REPO_ROOT` is resolved from `__file__` at import time, so the only
@@ -23,33 +27,8 @@ from support import REPO_ROOT, load_script
 
 lint_all = load_script("scripts/lint-all.py")
 
-MINIMAL_WORKFLOW = """\
-name: CI
-on:
-  push:
-    branches: [main]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo hello
-"""
 
-# `runs-on` is required; omitting it is a schema error actionlint reports and a YAML
-# parser happily accepts — so this is broken in exactly the way only actionlint sees.
-BROKEN_WORKFLOW = """\
-name: CI
-on:
-  push:
-    branches: [main]
-jobs:
-  build:
-    steps:
-      - run: echo hello
-"""
-
-
-def build_repo(root: Path, workflow: str = MINIMAL_WORKFLOW, env_example: bool = False) -> Path:
+def build_repo(root: Path, env_example: bool = False) -> Path:
     """A minimal repo with devkit's lint runner in it, committed and lint-CLEAN.
 
     Clean matters: these tests assert on the exit code, and a fixture where ruff or
@@ -61,7 +40,6 @@ def build_repo(root: Path, workflow: str = MINIMAL_WORKFLOW, env_example: bool =
     (root / "scripts").mkdir(parents=True)
     (root / "logs").mkdir()
     (root / "tests").mkdir()
-    (root / ".github" / "workflows").mkdir(parents=True)
     shutil.copy2(REPO_ROOT / "scripts" / "lint-all.py", root / "scripts" / "lint-all.py")
     # Copied too, so the fixture exercises the path a real project takes rather than the
     # ImportError fallback. `test_the_runner_still_starts_without_its_interpreter_helper`
@@ -69,7 +47,6 @@ def build_repo(root: Path, workflow: str = MINIMAL_WORKFLOW, env_example: bool =
     shutil.copy2(
         REPO_ROOT / "scripts" / "project_python.py", root / "scripts" / "project_python.py"
     )
-    (root / ".github" / "workflows" / "ci.yml").write_text(workflow, encoding="utf-8")
     (root / "ruff.toml").write_text('[lint]\nselect = ["E4", "E7", "E9", "F"]\n', encoding="utf-8")
     (root / "tests" / "test_ok.py").write_text(
         "def test_ok() -> None:\n    assert True\n", encoding="utf-8"
@@ -121,49 +98,24 @@ def test_the_runner_still_starts_without_its_interpreter_helper(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_workflow_files_finds_devkits_own_workflows():
-    found = lint_all.workflow_files()
-    assert "\n".join(found), "devkit has workflows but the selector returned none"
-    assert all(f.startswith(".github/workflows/") for f in found), found
+def test_python_targets_keeps_lintable_python_and_drops_template_content():
+    """`templates/` is content, not source: its `.py` files are linted by the config that
+    ships beside them into a generated project, not by devkit's."""
+    paths = ["scripts/lint-all.py", "README.md", "templates/core/scripts/notify.py"]
+    assert lint_all.python_targets(paths) == ["scripts/lint-all.py"]
 
 
-def test_workflow_files_narrows_to_the_changed_list():
-    every = lint_all.workflow_files()
-    assert lint_all.workflow_files([every[0]]) == [every[0]]
-    # A changed path that is not a workflow must not drag one in.
-    assert lint_all.workflow_files(["README.md"]) == []
+def test_explicit_paths_drops_what_no_longer_exists_and_normalises_separators():
+    """A deleted path is nothing to lint, and ruff/mypy treat a missing argument as a
+    usage error that fails the whole run."""
+    assert lint_all.explicit_paths(["scripts\\lint-all.py", "gone/away.py"]) == [
+        "scripts/lint-all.py"
+    ]
 
 
-def test_markdown_files_include_authored_instructions_but_not_generated_skills():
-    found = lint_all.markdown_files()
-    assert ".claude/rules/authoring.md" in found
-    assert "README.md" in found
-    assert not any(path.startswith(".agents/") for path in found)
-
-
-def test_markdown_files_narrows_to_the_changed_list():
-    assert lint_all.markdown_files(["README.md", "ok.py"]) == ["README.md"]
-
-
-def test_markdown_linters_reject_real_findings(tmp_path):
-    markdownlint = lint_all.node_tool("markdownlint-cli2")
-    remark = lint_all.node_tool("remark")
-    if markdownlint is None or remark is None:
-        pytest.skip("npm install has not provisioned the Markdown linters")
-
-    broken_structure = tmp_path / "structure.md"
-    broken_structure.write_text("# First\n\n# Second\n", encoding="utf-8")
-    section = lint_all.run_tool("markdownlint", [markdownlint, str(broken_structure)], "fix")
-    assert "# markdownlint" in section and "MD025" in section
-
-    broken_reference = tmp_path / "reference.md"
-    broken_reference.write_text("# Reference\n\nSee [missing][target].\n", encoding="utf-8")
-    section = lint_all.run_tool(
-        "remark",
-        [remark, "--frail", "--use", "remark-preset-lint-recommended", str(broken_reference)],
-        "fix",
-    )
-    assert "# remark" in section and "no-undefined-references" in section
+def test_changed_python_files_is_the_python_subset_of_the_working_tree_diff(monkeypatch):
+    monkeypatch.setattr(lint_all, "changed_paths", lambda: ["ok.py", "README.md"])
+    assert lint_all.changed_python_files() == ["ok.py"]
 
 
 def test_env_files_is_empty_in_devkit_and_live_in_a_project_shaped_repo(tmp_path):
@@ -187,7 +139,9 @@ def test_env_files_is_empty_in_devkit_and_live_in_a_project_shaped_repo(tmp_path
 
 
 def test_a_malformed_env_file_fails_the_run_and_lands_in_the_artifact(tmp_path):
-    """The dotenv pass must have the same teeth as the actionlint one."""
+    """The whole point of a pass: a finding must fail the run AND be fixable from the
+    file. `.claude/rules/engineering.md` is explicit that an agent fixes lint from
+    `logs/lint-errors.log`, never the terminal."""
     if shutil.which("dotenv-linter") is None:
         pytest.skip("dotenv-linter not installed; the gate that installs it is CI's job")
     root = build_repo(tmp_path / "repo", env_example=True)
@@ -206,30 +160,27 @@ def test_a_malformed_env_file_fails_the_run_and_lands_in_the_artifact(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_changed_run_lints_a_workflow_edit_with_no_python_in_the_diff(tmp_path):
-    """The Stop hook runs `--changed` every turn. Before this, editing only a
-    workflow printed "no changed Python files; nothing to do" and exited 0, so an
-    agent could break CI and have its own pre-stop gate wave it through."""
-    root = build_repo(tmp_path / "repo")
-    (root / ".github" / "workflows" / "ci.yml").write_text(
-        MINIMAL_WORKFLOW.replace("echo hello", "echo goodbye"), encoding="utf-8"
-    )
+def test_changed_run_lints_an_env_edit_with_no_python_in_the_diff(tmp_path):
+    """Before the non-Python passes existed, editing only a non-Python file printed
+    "no changed Python files; nothing to do" and exited 0, so an agent could break the
+    file and have its own gate wave it through. The pass has to at least be reached:
+    "ok" with the tool installed, a skip note without it, never "nothing to do"."""
+    root = build_repo(tmp_path / "repo", env_example=True)
+    (root / ".env.example").write_text("PORT=8001\n", encoding="utf-8")
     result = run_lint(root, "--changed")
     assert "nothing to do" not in result.stdout, result.stdout
-    assert "actionlint" in result.stdout, result.stdout
+    assert "dotenv-linter" in result.stdout, result.stdout
 
 
 def test_changed_run_with_no_python_does_not_widen_to_the_whole_repo(tmp_path):
     """`scope` falls back to `["."]` when `targets` is empty.
 
-    Left ungated, a one-file workflow edit would have quietly turned a per-turn check
+    Left ungated, a one-file `.env` edit would have quietly turned a per-turn check
     into a whole-repo ruff and mypy pass — slow, and reporting findings the turn did
     not cause.
     """
-    root = build_repo(tmp_path / "repo")
-    (root / ".github" / "workflows" / "ci.yml").write_text(
-        MINIMAL_WORKFLOW.replace("echo hello", "echo goodbye"), encoding="utf-8"
-    )
+    root = build_repo(tmp_path / "repo", env_example=True)
+    (root / ".env.example").write_text("PORT=8001\n", encoding="utf-8")
     result = run_lint(root, "--changed")
     assert "ruff:" not in result.stdout, f"ruff ran on a diff with no Python:\n{result.stdout}"
     assert "mypy:" not in result.stdout, f"mypy ran on a diff with no Python:\n{result.stdout}"
@@ -251,46 +202,19 @@ def test_a_clean_changed_run_still_reports_nothing_to_do(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# The pass has teeth
+# A missing tool: a note for an optional one, not a clean run for a required one
 # --------------------------------------------------------------------------
 
 
-def test_a_broken_workflow_fails_the_run_and_lands_in_the_artifact(tmp_path):
-    """The whole point: a finding must fail the run AND be fixable from the file.
-
-    `.claude/rules/engineering.md` is explicit that an agent fixes lint from
-    `logs/lint-errors.log`, never the terminal, so a pass that failed the run without
-    writing its section would be worse than no pass at all.
-    """
-    if shutil.which("actionlint") is None:
-        pytest.skip("actionlint not installed; the gate that installs it is CI's job")
-    clean = run_lint(build_repo(tmp_path / "clean"))
-    assert clean.returncode == 0, (
-        f"the fixture is not lint-clean, so nothing below proves anything:\n{clean.stdout}"
-    )
-
-    root = build_repo(tmp_path / "repo", workflow=BROKEN_WORKFLOW)
-    result = run_lint(root)
-    assert result.returncode == 1, result.stdout
-    artifact = (root / "logs" / "lint-errors.log").read_text(encoding="utf-8")
-    assert "# actionlint" in artifact, artifact
-    assert "ci.yml" in artifact, artifact
-
-
-def test_a_missing_linter_is_a_note_and_never_an_artifact_entry(tmp_path):
+def test_a_missing_linter_is_a_note_and_never_an_artifact_entry():
     """A missing tool must not become a finding: nothing in the source tree fixes it.
 
-    This is `run_tool`'s existing contract, asserted here for the two executables —
-    the `_missing_module` probe covers only `-m` invocations, so these reach the
-    FileNotFoundError branch instead and that path had no test.
+    This is `run_tool`'s existing contract, asserted here for a bare executable — the
+    `_missing_module` probe covers only `-m` invocations, so this reaches the
+    FileNotFoundError branch instead.
     """
     absent = ["definitely-not-a-real-linter-9d2f", "--check"]
-    assert lint_all.run_tool("actionlint", absent, "hint") == ""
-
-
-# --------------------------------------------------------------------------
-# A required linter that could not run is NOT a clean run
-# --------------------------------------------------------------------------
+    assert lint_all.run_tool("dotenv-linter", absent, "hint") == ""
 
 
 def test_no_skipped_required_tool_means_no_complaint():
@@ -299,10 +223,10 @@ def test_no_skipped_required_tool_means_no_complaint():
 
 
 def test_a_skipped_optional_tool_is_still_clean():
-    """The node linters are genuinely optional — nothing in pyproject.toml declares
-    them — so a machine without them has not failed to check anything it promised."""
+    """dotenv-linter is genuinely optional — nothing in pyproject.toml declares it — so
+    a machine without it has not failed to check anything it promised."""
     lint_all._SKIPPED.clear()
-    lint_all._SKIPPED.append("markdownlint")
+    lint_all._SKIPPED.append("dotenv-linter")
     assert lint_all.not_clean_reason() == ""
 
 
@@ -319,7 +243,10 @@ def test_a_skipped_required_tool_names_itself_and_the_way_out():
     lint_all._SKIPPED.clear()
 
 
-def test_markdown_sections_is_empty_when_there_is_no_markdown():
-    """Extracted from `main` so it does not carry four branches for two optional node
-    tools. The empty case is the one `main` used to guard with an `if`."""
-    assert lint_all.markdown_sections([]) == ""
+def test_the_runner_lints_no_workflow_and_names_who_does():
+    """The workflow pass moved to pre-commit's actionlint hook. A second copy here would
+    be the same inert note it was; the runner's own source says where it went, so an
+    agent reading `lint-all.py` for the workflow linter is sent to the right file."""
+    source = (REPO_ROOT / "scripts" / "lint-all.py").read_text(encoding="utf-8")
+    assert "workflow_files" not in source
+    assert ".pre-commit-config.yaml" in source

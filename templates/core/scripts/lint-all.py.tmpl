@@ -98,21 +98,6 @@ def changed_python_files() -> list[str]:
     return python_targets(changed_paths())
 
 
-def workflow_files(limit_to: list[str] | None = None) -> list[str]:
-    """`.github/workflows/*.yml`, optionally narrowed to a changed-file list.
-
-    Explicit paths rather than a bare `actionlint`, which discovers workflows itself:
-    discovery only finds them when the cwd is the repo root, and reports success
-    having checked nothing anywhere else. Returning [] when there are none is what
-    keeps the pass from turning "no workflows" into a usage error in the artifact.
-    """
-    found = sorted(
-        p.relative_to(REPO_ROOT).as_posix()
-        for p in (REPO_ROOT / ".github" / "workflows").glob("*.yml")
-    )
-    return found if limit_to is None else [p for p in found if p in set(limit_to)]
-
-
 def env_files(limit_to: list[str] | None = None) -> list[str]:
     """Root-level `.env*` files, optionally narrowed to a changed-file list.
 
@@ -210,9 +195,8 @@ def main(argv: list[str] | None = None) -> int:
         selected = explicit_paths(args.paths) if args.paths else changed_paths()
     changed = selected if scoped else None
     targets = python_targets(selected)
-    workflows = workflow_files(changed)
     envs = env_files(changed)
-    if scoped and not (targets or workflows or envs):
+    if scoped and not (targets or envs):
         print("lint-all: no changed files this run lints; nothing to do.")
         _write_artifact("")
         return 0
@@ -222,9 +206,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"lint-all: {label}")
 
     sections = ""
-    # A narrowed run with only a workflow or `.env` edit leaves `targets` empty, and
-    # `scope` then falls back to `["."]` — which would silently widen a per-turn
-    # check into a whole-repo pass. Gate the Python passes on having Python to lint.
+    # A narrowed run with only an `.env` edit leaves `targets` empty, and `scope` then
+    # falls back to `["."]` — which would silently widen a per-turn check into a
+    # whole-repo pass. Gate the Python passes on having Python to lint.
     if targets or not scoped:
         # Auto-fix first, then report. Both ruff passes mutate the same files, so they
         # must stay sequential relative to each other, and both skip the vendored
@@ -252,16 +236,12 @@ def main(argv: list[str] | None = None) -> int:
             f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
         )
 
-    # `.claude/hooks/session-start.sh` installs both of these into every session, so
-    # a provisioned checkout has them. They are real executables rather than `-m`
-    # modules, so run_tool's FileNotFoundError branch is what degrades a missing one
-    # to a terminal note instead of an unfixable artifact entry.
-    if workflows:
-        sections += run_tool(
-            "actionlint",
-            ["actionlint", *workflows],
-            f"actionlint {' '.join(workflows)}",
-        )
+    # `.claude/hooks/session-start.sh` installs this into every session, so a
+    # provisioned checkout has it. A real executable rather than a `-m` module, so
+    # run_tool's FileNotFoundError branch is what degrades a missing one to a terminal
+    # note instead of an unfixable artifact entry. The workflow files are not linted
+    # here: actionlint runs from `.pre-commit-config.yaml`, where pre-commit builds the
+    # binary itself instead of relying on an installer having run on this machine.
     if envs:
         sections += run_tool("dotenv-linter", [*DOTENV_CMD, *envs], " ".join([*DOTENV_CMD, *envs]))
 
