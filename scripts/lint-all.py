@@ -109,8 +109,13 @@ def explicit_paths(paths: list[str]) -> list[str]:
 
     A deleted path is dropped rather than passed on: there is nothing left to lint,
     and ruff/mypy treat a missing argument as a usage error that fails the whole run.
+
+    Normalisation comes *before* the existence test, not after. A backslash is a literal
+    filename character off Windows, so testing the raw path there drops every separator
+    a Windows caller sent -- silently, into the one answer that means "lint nothing".
     """
-    return sorted({n.replace("\\", "/") for n in paths if (REPO_ROOT / n).exists()})
+    normalised = {n.replace("\\", "/") for n in paths}
+    return sorted(n for n in normalised if (REPO_ROOT / n).exists())
 
 
 def python_targets(paths: list[str]) -> list[str]:

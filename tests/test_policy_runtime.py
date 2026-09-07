@@ -109,12 +109,19 @@ def test_the_argv_runs_the_installer_in_the_named_devkit_checkout():
     assert pr.install_argv(devkit, "v2.0.0")[-2:] == ["--ref", "v2.0.0"]
 
 
-def test_the_installer_is_spawned_by_a_console_interpreter_under_pythonw(monkeypatch):
+def test_the_installer_is_spawned_by_a_console_interpreter_under_pythonw(monkeypatch, tmp_path):
     """The installer runs `git` several times, and a console-less parent hands each one
-    a visible console window. `console_python()` is the twin that does not."""
-    monkeypatch.setattr(pr.git_policy.sys, "executable", r"C:\py\pythonw.exe")
-    monkeypatch.setattr(pr.git_policy.Path, "exists", lambda _self: True)
-    assert pr.check_argv(Path("D:/devkit"))[0] == r"C:\py\python.exe"
+    a visible console window. `console_python()` is the twin that does not.
+
+    A real directory holding both spellings, rather than a literal Windows path: the
+    twin is resolved through `Path`, whose separators are the *running* platform's, so
+    a hardcoded one is a single filename off Windows and the branch under test never
+    runs there -- which is every CI machine this suite has.
+    """
+    console = tmp_path / "python.exe"
+    console.write_text("", encoding="utf-8")
+    monkeypatch.setattr(pr.git_policy.sys, "executable", str(tmp_path / "pythonw.exe"))
+    assert pr.check_argv(Path("D:/devkit"))[0] == str(console)
 
 
 def test_last_line_prefers_stderr_and_falls_back_to_the_exit_code():
