@@ -36,7 +36,7 @@ complexity::scripts/precommit/check_harness_manifest.py::check = 21
 complexity::scripts/preview-task.py::main = 30
 complexity::scripts/preview-task.py::merge_candidates = 17
 complexity::scripts/preview-task.py::wait_for_all = 27
-complexity::scripts/preview-ui-host.py::main = 33
+complexity::scripts/preview-ui-host.py::main = 31
 complexity::scripts/reclaim.py::main = 22
 complexity::scripts/reclaim.py::sweep = 16
 complexity::scripts/release-pipeline.py::run_pipeline = 20
@@ -70,7 +70,7 @@ definitions::scripts/agent-box.py = 21
 definitions::scripts/agent_clis.py = 21
 definitions::scripts/devkit_project.py = 50
 definitions::scripts/docker-maint.py = 30
-definitions::scripts/fix-prs.py = 25
+definitions::scripts/fix-prs.py = 31
 definitions::scripts/git_policy.py = 37
 definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
@@ -80,8 +80,8 @@ definitions::scripts/install-git-policy.py = 21
 definitions::scripts/instruction-budget.py = 26
 definitions::scripts/new-project.py = 28
 definitions::scripts/plug-projects.py = 30
-definitions::scripts/preview-task.py = 51
-definitions::scripts/preview-ui-host.py = 31
+definitions::scripts/preview-task.py = 59
+definitions::scripts/preview-ui-host.py = 35
 definitions::scripts/reclaim.py = 48
 definitions::scripts/release-pipeline.py = 35
 definitions::scripts/report-workflow-failure.py = 27
@@ -104,7 +104,7 @@ dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 538
 file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
-file_lines::scripts/fix-prs.py = 639
+file_lines::scripts/fix-prs.py = 769
 file_lines::scripts/git_policy.py = 756
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
@@ -114,8 +114,8 @@ file_lines::scripts/hooks/structure_scan.py = 669
 file_lines::scripts/instruction-budget.py = 517
 file_lines::scripts/new-project.py = 860
 file_lines::scripts/plug-projects.py = 922
-file_lines::scripts/preview-task.py = 1722
-file_lines::scripts/preview-ui-host.py = 1110
+file_lines::scripts/preview-task.py = 1885
+file_lines::scripts/preview-ui-host.py = 1155
 file_lines::scripts/reclaim.py = 1232
 file_lines::scripts/release-pipeline.py = 960
 file_lines::scripts/report-workflow-failure.py = 614
@@ -134,7 +134,7 @@ function_lines::scripts/lint-all.py::main = 98
 function_lines::scripts/new-project.py::main = 143
 function_lines::scripts/plug-projects.py::main = 185
 function_lines::scripts/precommit/check_harness_manifest.py::check = 84
-function_lines::scripts/preview-task.py::main = 98
+function_lines::scripts/preview-task.py::main = 94
 function_lines::scripts/preview-task.py::wait_for_all = 88
 function_lines::scripts/preview-ui-host.py::main = 145
 function_lines::scripts/reclaim.py::main = 108
@@ -189,8 +189,8 @@ function_params::scripts/worktree.py::reconcile_action = 12
 function_params::scripts/worktree.py::reconcile_plan = 8
 function_params::scripts/worktree.py::resume_plan = 11
 function_params::scripts/worktree.py::spawn_plan = 14
-imports::scripts/preview-task.py = 21
-imports::scripts/preview-ui-host.py = 24
+imports::scripts/preview-task.py = 22
+imports::scripts/preview-ui-host.py = 25
 imports::scripts/worktree.py = 23
 nesting_depth::scripts/devkit_jsonc.py::blank_comments = 5
 nesting_depth::scripts/devkit_jsonc.py::drop_trailing_commas = 5
@@ -368,3 +368,13 @@ swallowed_errors::scripts/worktree.py = 1
 # 2026-09-06  recorded: workspace-status.py gains --notify, toast_text and the docstring for both. The module was called 'the SessionStart status line' by six files and no hook ever ran it, so every prerequisite it reports -- a missing uv, an unset git identity, an uninstalled picker extension -- was reported to nobody; it is now the runner behind the daily devkit-workspace-status job, and --notify is the half that reaches a person. The growth is one flag, one pure function that turns the report into a two-field toast, and the paragraph recording who runs this and why it is deliberately not an agent hook (the pass is 9s, which as a per-session tax is what gets a check disabled). Splitting this module is what four earlier records here have deferred and is not a rider on wiring it to a caller.
 #   definitions::scripts/workspace-status.py -> 32
 #   file_lines::scripts/workspace-status.py -> 1094
+
+# 2026-09-06  recorded: The checkout stage comes back to four pickers. What is recorded is module-level only: every per-function metric this change touched was brought back to or under its baseline first, by extracting the branches the gate named -- agent-worktree.main is off the list entirely, preview-task.main went 33 to 30 complexity and 115 to 94 lines, preview-ui-host.main 40 to 31 and 170 to 145. What no extraction can fix is the shape of the three modules the stage lands in, and the reason is the one three earlier records already give: preview-task.py is 1385 lines past file_lines, preview-ui-host.py 655, fix-prs.py 269, and each has a deferred split that moves a path the workspace task block names by hand -- the dropdown's own command line. Nothing that belongs in these modules has anywhere else to go until that split is its own PR with its own reversion check. The definitions counts also move in a direction the gate itself asked for: they rose partly BECAUSE main's branches became named helpers, which is what the complexity and function_lines advice says to do, so the two rules trade against each other here and the per-function half is the one worth winning. The imports are one apiece and unavoidable -- picker_scan owns the handoff between the two stages, one fan-out and a token naming that exact write, and the alternative to importing it is a second copy of the staleness argument in each reader.
+#   definitions::scripts/fix-prs.py -> 31
+#   definitions::scripts/preview-task.py -> 59
+#   definitions::scripts/preview-ui-host.py -> 35
+#   file_lines::scripts/fix-prs.py -> 769
+#   file_lines::scripts/preview-task.py -> 1885
+#   file_lines::scripts/preview-ui-host.py -> 1155
+#   imports::scripts/preview-task.py -> 22
+#   imports::scripts/preview-ui-host.py -> 25

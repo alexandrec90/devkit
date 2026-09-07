@@ -65,6 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_worktrees as aw
 import devkit_project
 import picker_rows
+import picker_scan
 import sweep
 import task_input
 import worktree
@@ -92,6 +93,10 @@ PICK_LIST_SEP = " "
 # pool is bounded by the number of checkouts in practice; the ceiling is here so a
 # workspace that grows to thirty repos does not open thirty `gh` processes at once.
 SCAN_WORKERS = 8
+
+# What `picker_scan` files this task's stage-one write under. One name per picker, so
+# two tasks scanning at once cannot read each other's rows.
+SCAN_NAME = "fix-prs"
 
 # How many open PRs to ask about per checkout. Well past what any of these repos carries
 # at once; the cap is here so a runaway bot cannot turn one dropdown into a thousand.
@@ -261,6 +266,54 @@ def menu_row(project: str, pr: dict, now: _dt.datetime | None = None) -> str:
     )
 
 
+def picked_rows(workspace: Path, checkouts: str, now: _dt.datetime | None = None) -> list[str]:
+    """Stage two: the rows for the ticked checkouts, from stage one's scan if it is theirs.
+
+    The token decides, and a miss is answered by scanning rather than by serving
+    anything older -- see `picker_scan`. The rescan covers only what was ticked, so the
+    fallback costs less than the scan stage one already did.
+
+    An empty `checkouts` means the chain did not run at all, which is a person calling
+    `--rows` by hand: that answers with the whole machine, the way it did before there
+    was a first stage.
+    """
+    projects, token = picker_scan.parse_projects(checkouts)
+    if not projects:
+        return rows(scan(workspace), now)
+    cached = picker_scan.read(SCAN_NAME, token)
+    if cached is not None:
+        return picker_scan.select(cached, projects) or [placeholder_row()]
+    return rows(scan(workspace, projects), now)
+
+
+def strayed_picks(picks: list[Pick], checkouts: str) -> list[str]:
+    """Ticked PRs whose checkout was not ticked in the first stage.
+
+    Nothing in the two stages can produce one: stage two draws only the checkouts stage
+    one returned. So a stray is evidence the chain itself misfired -- the extension
+    resolves `${input:...}` against a value it recorded when that input last ran, so an
+    input order that stopped putting the checkout stage first would quietly filter by
+    the *previous* click's checkouts. That is the one failure mode of this design that
+    could be silent, and this is what makes it loud.
+
+    Empty `checkouts` returns nothing, because a hand-typed `--picks` has no first stage
+    to disagree with.
+    """
+    ticked, _ = picker_scan.parse_projects(checkouts)
+    if not ticked:
+        return []
+    return sorted({pick.project for pick in picks} - set(ticked))
+
+
+def stray_report(strayed: list[str]) -> str:
+    """What to print when a pick names a checkout the first stage did not."""
+    return (
+        f"ticked {'a PR' if len(strayed) == 1 else 'PRs'} from {', '.join(strayed)}, which the "
+        "checkout picker did not return -- the two picker stages disagree, so nothing was run. "
+        "See `.claude/rules/vscode-tasks.md` on the order the inputs have to appear in."
+    )
+
+
 def placeholder_row() -> str:
     """The row a scan that found nothing draws. See `picker_rows.nothing_row`."""
     return picker_rows.nothing_row(
@@ -268,15 +321,70 @@ def placeholder_row() -> str:
     )
 
 
-def rows(found: dict[str, list[dict]], now: _dt.datetime | None = None) -> list[str]:
-    """Every broken PR on the machine as a quick-pick line, most recently touched first.
+def listed(found: dict[str, list[dict]]) -> list[tuple[str, dict]]:
+    """Every broken PR as `(checkout, pr)`, most recently touched first.
 
-    Newest first rather than grouped by checkout: the reader is choosing which red PR to
-    send a session at, and "which repo" is a field on the row rather than the question.
+    One ranking, named once, because two callers depend on it being the same one:
+    `rows` prints it and `scan_entries` records it for the second stage to filter. A
+    stage two that filtered a differently-ranked list would draw the right PRs in the
+    wrong order, which is the kind of wrong nobody reports.
     """
-    listed = [(project, pr) for project, prs in found.items() for pr in prs]
-    listed.sort(key=lambda pair: str(pair[1].get("updatedAt", "")), reverse=True)
-    return [menu_row(project, pr, now) for project, pr in listed] or [placeholder_row()]
+    pairs = [(project, pr) for project, prs in found.items() for pr in prs]
+    pairs.sort(key=lambda pair: str(pair[1].get("updatedAt", "")), reverse=True)
+    return pairs
+
+
+def rows(found: dict[str, list[dict]], now: _dt.datetime | None = None) -> list[str]:
+    """Every broken PR in `found` as a quick-pick line, most recently touched first.
+
+    Newest first rather than grouped by checkout, and that survived the checkout stage
+    coming back: whoever ticked three checkouts is choosing which red PR to send a
+    session at, not re-sorting them by repo. The checkout stays on every row because
+    `found` can hold several.
+    """
+    return [menu_row(project, pr, now) for project, pr in listed(found)] or [placeholder_row()]
+
+
+def scan_entries(
+    found: dict[str, list[dict]], now: _dt.datetime | None = None
+) -> list[tuple[str, str]]:
+    """What stage one hands stage two: every row, tagged with its checkout, in rank.
+
+    The rendered rows rather than the PRs, because `menu_row` has already made every
+    decision stage two would otherwise make again -- a second stage that re-renders is
+    a second place for the format to drift. Built through `listed` so the order is the
+    one `rows` prints, which is the order `picker_scan.select` then preserves.
+    """
+    return [(project, menu_row(project, pr, now)) for project, pr in listed(found)]
+
+
+def project_rows(found: dict[str, list[dict]], token: str) -> list[str]:
+    """Stage one: one row per checkout, saying how much red is in it.
+
+    A checkout with nothing broken is listed rather than dropped, and this is the whole
+    argument for stage one costing a full scan instead of just reading the registry.
+    "devkit -- nothing broken" is an answer; a menu that silently omits devkit is
+    indistinguishable from one that could not reach it, and a reader who ticks a
+    checkout to find it empty has paid a click to learn what the scan already knew.
+    """
+    if not found:
+        return [
+            picker_rows.nothing_row(
+                "no checkouts", "the workspace registry named nothing that could be scanned"
+            )
+        ]
+    listed = []
+    for project in sorted(found, key=lambda name: (-len(found[name]), name)):
+        count = len(found[project])
+        listed.append(
+            picker_scan.project_row(
+                project,
+                token,
+                f"{count} broken PR{'' if count == 1 else 's'}" if count else "nothing broken",
+                "tick as many checkouts as you want -- the next list covers all of them",
+            )
+        )
+    return listed
 
 
 def scan(workspace: Path, projects: list[str] | None = None) -> dict[str, list[dict]]:
@@ -592,6 +700,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the picker's rows (`value|label|description|detail`) and stop",
     )
+    parser.add_argument(
+        "--project-rows",
+        action="store_true",
+        help="print the CHECKOUT picker's rows and stop, recording the scan they came from",
+    )
+    parser.add_argument(
+        "--checkouts",
+        default="",
+        help=(
+            f"ticked checkouts, `<project>{picker_scan.SEP}<scan token>` joined by "
+            f"`{picker_scan.LIST_SEP}` -- what the checkout picker returns"
+        ),
+    )
     parser.add_argument("--list", action="store_true", help="print the broken PRs and stop")
     parser.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
     return parser
@@ -614,8 +735,13 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
 
     try:
+        if args.project_rows:
+            found = scan(workspace)
+            token = picker_scan.write(SCAN_NAME, scan_entries(found))
+            picker_rows.emit(project_rows(found, token))
+            return EXIT_OK
         if args.rows:
-            picker_rows.emit(rows(scan(workspace)))
+            picker_rows.emit(picked_rows(workspace, args.checkouts))
             return EXIT_OK
         if args.list:
             print(render_scan(scan(workspace)))
@@ -629,6 +755,10 @@ def main(argv: list[str] | None = None) -> int:
         if not picks:
             print("fix-prs: only the `nothing broken` row was ticked -- nothing to do")
             return EXIT_OK
+        strayed = strayed_picks(picks, args.checkouts)
+        if strayed:
+            print(f"fix-prs: {stray_report(strayed)}", file=sys.stderr)
+            return EXIT_USAGE
         return run(picks, workspace, args.agent)
     except (FixError, worktree.WorktreeError, devkit_project.ProjectError) as exc:
         print(f"fix-prs: {exc}", file=sys.stderr)

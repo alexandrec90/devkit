@@ -1,6 +1,7 @@
 ---
 name: triage-harness
 description: Work the harness-defect backlog -- the agent reports and failed box spawns every harnessed project files on this machine's central ledger -- verifying each against current code, fixing what is still real, and recording what retired it.
+disable-model-invocation: true
 argument-hint: 'Optional: a project name, an event name, or a group id to work on first'
 ---
 
