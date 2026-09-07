@@ -28,6 +28,19 @@
 | Tests | pytest |
 | Lint | ruff |
 
+{{#frontend}}
+## Parallel worktrees and the dev server
+
+Two agent sessions run at once, each in its own worktree, each running `npm run dev`.
+`frontend/src/worktreePort.ts` derives a port offset from the checkout's own directory
+name, so the static checkout keeps the conventional port and a worktree gets its own with
+nothing configured — the only thing that works across all three ways a worktree is cut
+(`claude --worktree`, devkit's task, and Remote Control), because two of them run no
+project code at the time. Wire it into `vite.config.ts` as that file's docstring shows,
+and keep `strictPort: true`: the offset is a hash, and without it a collision slides the
+second server onto a port nobody asked for and serves the wrong branch's app.
+
+{{/frontend}}
 ## Environment Variables
 
 See `.env.example` for every variable. `.env` is gitignored and holds this
