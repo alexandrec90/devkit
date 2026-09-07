@@ -34,7 +34,15 @@ Run each step in order. Stop on failure; never open a PR for an unverified branc
 1. Run `python scripts/ship.py --preflight`. It must report a namespaced task branch
    and the repository's detected default branch. The namespace is agent-neutral, so
    `agent/...`, `claude/...` and `codex/...` are all valid, as is the `worktree-<topic>`
-   spelling `claude --worktree` cuts and cannot be asked to change.
+   spelling `claude --worktree` cuts and cannot be asked to change. **It also names
+   what this checkout is missing** — no `.venv`, no `node_modules` — with the command
+   that installs it. Run that command now, before anything is committed. A linked
+   worktree checks out tracked files only, and the commit-time pre-commit gate and
+   step 3's lint gate both run from that toolchain: a `language: system` hook resolves
+   its entry point against `PATH`, which in a fresh worktree has no venv on it, so the
+   gate refuses the commit with `Executable '...' not found`. Installing the one tool
+   it named by hand and putting it on `PATH` gets that commit through and leaves the
+   next gate to fail the same way; the named command is the whole fix.
 2. Review the change. Get the file list from `git status --short`, then read the
    changes with the Read tool rather than paging a capped `git diff` — a cap drops the
    middle of a large diff, which is the one part a truncated read hides from you. Run
