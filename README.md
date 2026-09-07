@@ -647,6 +647,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-docker-prune` | `scripts/install-docker-prune.py` | daily 04:00 | `logs/scheduled-docker-prune.log` |
 | `devkit-global-tools` | `scripts/install-global-tools.py` | daily 04:30 | `logs/global-tools.log` |
 | `devkit-rc-servers` | `scripts/install-rc-schedule.py` | every 15 min | `logs/rc-servers.log` |
+| `devkit-reap-stale` | `scripts/install-reap-schedule.py` | every 15 min | `logs/reap-stale.log` |
 | `devkit-tray` | `scripts/install-tray.py` | at logon, resident | `logs/tray.log` |
 | `devkit-workspace-status` | `scripts/install-workspace-status.py` | daily 09:00 | `logs/scheduled-workspace-status.log` |
 
@@ -749,6 +750,41 @@ after lunch.
 `python scripts/rc-servers.py status` reports what is up and what is active without
 touching anything; `up`, `cycle` and `down` are the manual verbs.
 
+#### What agents leave behind, and the job that reaps it
+
+A server holds every session the phone spawns for as long as the server lives, so a
+conversation left open at breakfast is still a 300 MB process at dinner. `rc-servers.py`
+tracks servers only by the pids it wrote down, so a server it started under an earlier
+`spawn` setting outlives the change and keeps accepting sessions beside its replacement.
+And a `vite` an agent started in the background outlives the agent, because the shell it
+ran in does. On 2026-09-07 those three together held five gigabytes of a sixteen-gigabyte
+desk while seven agents paged.
+
+`scripts/reap-stale.py` is the pass that notices, and `devkit-reap-stale` runs it at
+`rc-servers`' interval. Three findings, three tests: a spawned session whose transcript
+has not moved for `sessionIdleMinutes` (default two hours); a named server the state file
+does not own, once nothing active is under it; a dev server whose ancestry reaches no
+living editor, terminal or agent. Interactive sessions carry no `--sdk-url` and are never
+candidates; anything whose activity cannot be read is kept. `status` prints every finding
+with its verdict and touches nothing; `maintain` acts, and appends each process it stopped
+to `logs/reap-stale.history.log`, which is never rewritten. The settings sit beside
+`devkit.remoteControl`:
+
+```jsonc
+"devkit.reapStale": {"sessionIdleMinutes": 120, "devServers": true}
+```
+
+```bash
+python scripts/reap-stale.py status               # what it would stop, touching nothing
+python scripts/install-reap-schedule.py --yes     # every 15 minutes, from the static checkout
+```
+
+One limit worth knowing: a session spawned in place shares the project's transcript
+directory with every interactive session there, and the ids never appear inside a
+transcript, so such a session reads as active for as long as anyone works in that
+checkout. Worktree-spawned sessions are matched by id and have no such ambiguity, which
+is one more reason `spawn: worktree` is the setting to prefer.
+
 #### The tray indicator: nothing is ever totally invisible
 
 Unattended jobs are invisible by construction. They run windowless, their stdout goes
@@ -765,9 +801,16 @@ machine. A machine with nothing registered shows **amber, not green**: green ove
 of zero jobs is the most misleading thing it could say.
 
 ```bash
-python scripts/tray.py --once        # what it would show, as text
-python scripts/install-tray.py --yes # start it at every logon
+python scripts/tray.py --once            # what it would show, as text
+python scripts/install-tray.py --yes     # start it at every logon
+python scripts/install-tray.py --restart # adopt an edited tray.py without logging out
 ```
+
+`--restart` exists because the tray is resident rather than a pass: it imported `tray.py`
+at logon and holds it until the session ends, so a change to the icon shows up nowhere —
+no error, no stale-looking log — until the process is replaced. It acts on the registered
+task by name, so it restarts whichever checkout is installed even when run from a
+worktree.
 
 Windows only, and stdlib only — Shell_NotifyIcon through `ctypes`. `tray.py --once`
 prints the same verdict anywhere, which is also how the read path is tested.

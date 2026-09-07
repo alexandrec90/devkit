@@ -115,6 +115,11 @@ REPORT_HINT = (
 # exists, so importing that module is not available to them.
 BOX_NAME_SEP = "--"
 
+# The two directory names between a repo and a `claude --worktree` checkout, outermost
+# first. `sweep.CLI_WORKTREES_DIR` is the same pair; not imported because this module is
+# stdlib-only and loaded from consumer checkouts that do not ship `sweep.py`.
+CLI_WORKTREES_DIR = (".claude", "worktrees")
+
 
 # Which agent runtime the hook ran under. Spelled here as a literal for the reason
 # `codex-hook-adapter.py` spells it as one: that file is vendored and this one is too,
@@ -216,7 +221,17 @@ def project_name(root: Path) -> str:
     greppable as the repo the work was actually in. The guard already recorded the real
     name because it resolves a project to decide anything at all; the three writers that
     had no such reason to know were the ones that got it wrong.
+
+    A `claude --worktree` checkout is the same mistake in a second shape: it lives at
+    `<repo>/.claude/worktrees/<random-name>/`, so `root.name` is a name like
+    `glowing-sparking-swing` that no grep for the repo will ever find. Five of one
+    week's thirteen open triage groups were filed under one. Matched on the two
+    directory names above `root`, the way `sweep.cli_worktree_checkout` does, because
+    this runs in a hook and must not ask git.
     """
+    parents = root.parents
+    if len(parents) >= 3 and (parents[1].name, parents[0].name) == CLI_WORKTREES_DIR:
+        return project_name(parents[2])
     return root.name.split(BOX_NAME_SEP, 1)[0] or root.name
 
 

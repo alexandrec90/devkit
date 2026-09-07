@@ -160,6 +160,40 @@ def test_archive_rule_renders_required_frontmatter(tmp_path):
     assert '\npaths:\n  - "demo_project/archive/**/*.py"\n---\n' in text
 
 
+def test_frontend_feature_brings_the_worktree_port_helper():
+    """The `frontend` feature shipped no files at all until this one.
+
+    Two agent sessions run at once, each in its own worktree, each on the same
+    conventional dev-server port -- and nothing devkit runs at cut time can fix that for
+    the two of three worktree tiers Claude Code cuts itself. So the derivation has to
+    live in the project's own code, which means the generator has to put it there.
+    """
+    off = {f: False for f in new_project.FEATURES}
+    assert not {d for _, d in new_project.iter_template_files(off) if "worktreePort" in d.name}
+    files = {d.as_posix() for _, d in new_project.iter_template_files({**off, "frontend": True})}
+    assert "frontend/src/worktreePort.ts" in files
+
+
+def test_the_worktree_port_helper_stays_dependency_free(tmp_path):
+    """It is vendored into projects devkit knows nothing about, so its only import may be
+    a Node builtin -- a framework import would make it un-droppable into half of them."""
+    root = generate(tmp_path, {"frontend": True})
+    text = (root / "frontend" / "src" / "worktreePort.ts").read_text(encoding="utf-8")
+    imports = re.findall(r'^import .* from "([^"]+)";', text, re.MULTILINE)
+    assert imports == ["node:path"], imports
+
+
+def test_the_generated_memory_names_the_helper_only_with_a_frontend(tmp_path):
+    """A section about a dev-server port in a project with no dev server is exactly the
+    instruction-file noise `.claude/rules/authoring.md` exists to keep out."""
+    assert "worktreePort" in (generate(tmp_path / "a", {"frontend": True}) / "CLAUDE.md").read_text(
+        encoding="utf-8"
+    )
+    assert "worktreePort" not in (generate(tmp_path / "b", {}) / "CLAUDE.md").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_alembic_implies_postgres_via_the_cli(tmp_path):
     result = new_project.main(
         ["demo_project", "--with-alembic", "--parent", str(tmp_path), "--no-remote"]

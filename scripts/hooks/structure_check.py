@@ -303,9 +303,8 @@ def source_files(root: Path, cfg: harness_config.Config) -> list[str]:
     found: list[str] = []
     for directory in scan_roots(cfg):
         base = root / directory
-        if not base.is_dir():
-            continue
-        for path in sorted(base.rglob("*")):
+        # A file entry is scanned as itself: the one importer outside every scanned tree.
+        for path in sorted(base.rglob("*")) if base.is_dir() else [base]:
             if not path.is_file():
                 continue
             rel = path.relative_to(root).as_posix()

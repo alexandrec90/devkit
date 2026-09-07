@@ -66,15 +66,22 @@ python scripts/devkit_project.py --check-workspace    # do they agree?
 python scripts/devkit_project.py --render-workspace   # workspace.jsonc -> the live file
 ```
 
-**The last step runs itself.** `workspace_sync_line` in `scripts/workspace-status.py`
-publishes at session start through `publish_workspace`, the same function the CLI calls,
-adding two conditions in `publish_verdict`: devkit's checkout is on its default branch and
-its `workspace.jsonc` is committed. A task branch's copy is a proposal and an uncommitted
-one is not even that, so from a box, or mid-edit, the line reports the drift and publishes
-nothing. When it does publish it asks for a window reload — VS Code reads the file once,
-at open. That is a wire-up rather than a convenience: the remembered step had already
-failed, with three tasks merged, the checkout synced, and nothing on the machine going to
-render them until someone typed the command.
+**The last step runs itself, but only once a day.** `workspace_sync_line` in
+`scripts/workspace-status.py` publishes through `publish_workspace`, the same function the
+CLI calls, adding two conditions in `publish_verdict`: devkit's checkout is on its default
+branch and its `workspace.jsonc` is committed. A task branch's copy is a proposal and an
+uncommitted one is not even that, so from a box, or mid-edit, the line reports the drift
+and publishes nothing. When it does publish it asks for a window reload — VS Code reads
+the file once, at open.
+
+**What runs it is `devkit-workspace-status`, a scheduled job, not a session-start hook** —
+the whole pass is several seconds, which is what its own docstring says gets a hook
+disabled. So a merge does not publish: the render lands on the job's next pass, or when
+someone runs `--render-workspace`. Between those two the live file is behind, and the
+tasks a branch just changed are not the tasks a click will run. The hook the paragraph
+above once described was never wired at all, and three merged tasks sat unrendered for
+days before anyone noticed — which is why the automatic half is worth having even at a
+day's latency, and why the manual command stays documented rather than deprecated.
 
 **Never hand-edit the live file to make a change.** It has no branch dimension: one copy
 serves every window on the machine, so an in-flight edit is globally live before anyone
@@ -195,21 +202,15 @@ never renders.
   field and a newline silently makes a second, unpickable row. **The cost is the wait**,
   since the picker is a person watching an empty box: fan the calls out (`fix-prs.scan`
   and `preview-task.collect` run one checkout per thread) and keep it to a second or two.
+  A **second, dependent** stage costs no second wait: it filters what the first recorded.
   A scan that finds nothing draws `picker_rows.nothing_row` rather than no rows — an
   empty quick-pick cannot be told apart from a command that failed to run.
-- **The cached shape is what is left when the live one cannot express the list**, and it
-  is what `rioj7.command-variable` — which reads and templates JSON and cannot run
-  anything — is limited to. One picker still needs it: `plugSelection` opens **pre-ticked**
-  from the registry, which `shellCommand.execute` has no way to express, and unticked
-  means unplug. Three things it costs: the list is stale by construction, so it needs a
-  visible timestamp **and a writer that is not a task run** — its cached options file is
-  rewritten by `worktree.py reconcile` on its schedule; a pick that no longer matches anything must
-  still resolve to something servable; and **every row must carry every templated field, as
-  a string**, because the extension appends options until an expression *throws*, and
-  `undefined` does not throw — a row missing one field draws ten thousand blank entries
-  instead of ending the list. Ride on an existing scheduled pass rather than adding a
-  daemon, and make the rider unable to fail it: any exception leaves `reconcile`'s own
-  verdict untouched and prints one warning.
+- **A live multi-select must explain what a tick does.** `plugSelection` runs
+  `scripts/plug-projects.py --rows` when it opens; each selected project toggles its
+  registry membership. Its description and row details must say that, because the old
+  cached checklist used ticks to represent the entire registry. No selection changes
+  nothing; `tests/test_plug_projects.py` and `tests/test_devkit_project.py` cover that
+  contract and the task wiring.
 - **A picker that needs an extension declares it in `extensions.recommendations`, and two
   things hold that.** A `command` input is dead on a machine without the extension behind
   it, and it fails naming a *command* rather than a package: `rioj7.command-variable`
@@ -230,17 +231,35 @@ never renders.
   timestamp was in a description nobody reads at click time, and the click sent a session
   at a PR that had been closed since. That is the case for preferring the live shape
   wherever the command can answer in about a second.
-- **Two dependent pickers are one input, not two.** VS Code resolves sibling `${input:...}`
-  in no defined order and gives neither sight of the other, so a "which project, then which
-  of its branches" pair is a `pickStringRemember` nested inside the outer input's `args`,
-  read back as `${pickStringRemember:<id>}` — one token, because an input resolves to one
-  string. A live picker has no such nesting — one input runs one command — so the
-  dependent half becomes a **field on the row** instead: `brokenPrRow`, `previewRow` and
-  `worktreeRow` each list every checkout's rows in one flat list with the checkout in the
-  description. Where the two halves are genuinely different *lists* rather than a
-  narrowing, they are two commands over one scan: `agent-worktree.py rows` draws what can
-  be destroyed and `bases` what a branch can be cut from, and a row from either in the
-  other would refuse when picked.
+- **Two dependent pickers are two inputs, and which extension draws them decides how.**
+  VS Code's own resolver gives sibling `${input:...}` no sight of each other, so with
+  *native* inputs a "which project, then which of its branches" pair has to be a
+  `pickStringRemember` nested inside the outer input's `args`, read back as
+  `${pickStringRemember:<id>}` — one token, because an input resolves to one string.
+  **`shellCommand.execute` inputs are the exception, and it is a documented feature rather
+  than a trick.** That extension records each input's answer as it resolves and
+  substitutes `${input:<id>}` inside a *later* input's own command, so two live stages
+  chain: its README's headline example is `rootDir`, then `childDir` whose command reads
+  `${input:rootDir}`. Two conditions ride on the **task** rather than on either input, and
+  `tests/test_devkit_project.py` asserts both:
+  - the inputs appear **left to right in order of dependence** in the task's arguments,
+    because that is the order VS Code resolves them in;
+  - every input in the chain is a `shellCommand.execute` one — the only place that
+    extension records an answer, so anything else substitutes empty.
+
+  **This rule said the opposite for two releases**, and four tasks lost their checkout
+  stage on its word before the user reported that the pickers no longer narrowed. The
+  failure such a chain can have is *silent*: a lookup with nothing recorded this run falls
+  back to what that input returned in an earlier click, so a wrong order draws a
+  confidently wrong list rather than an error — on `Agent: Delete Worktrees`, a wrong list
+  of things to destroy. So each receiving script also refuses a pick from a checkout the
+  first stage did not return (`strayed_picks`, in all three), and
+  [`scripts/picker_scan.py`](../../scripts/picker_scan.py) owns the scan handed between
+  the stages: one fan-out, a token naming that exact write, and a miss that rescans the
+  ticked checkouts rather than serving anything older. Where the two halves are genuinely
+  different *lists* rather than a narrowing, they stay two commands over one scan:
+  `agent-worktree.py rows` draws what can be destroyed and `bases` what a branch can be
+  cut from, and a row from either in the other would refuse when picked.
 - **An action scoped to exactly one checkout writes the name, not a picker.** A
   `${input:...}` with a single option asks a question that has no second answer, and the
   extension still shows it. Spell the checkout in the task's `--project` argument instead.

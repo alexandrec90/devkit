@@ -90,6 +90,9 @@ in this order — the first answer that lands ends it:
 3. **Was the report itself wrong?** An agent that wrapped a command the blocklist never
    named, or renamed a branch to get past a check, filed a defect against a gate doing
    its job. Retire it with a note saying so — that is a real resolution, not a dismissal.
+   So is a block **no devkit hook produced**: a refusal quoting "stays inside the
+   worktree" or "cannot be shown not to be git" is Claude Code's own `claude --worktree`
+   isolation guard, and one grep of `scripts/` for the quoted words settles it.
 4. **`version=` says whether the reporter's copy was current.** A consumer at
    `DEVKIT_VERSION` weeks behind may be reporting something `main` already fixed. Check
    before triaging it as live.

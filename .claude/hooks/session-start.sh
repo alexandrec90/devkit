@@ -106,38 +106,18 @@ wire_pre_commit() {
 #     provisioners is worse off than one with none.
 #
 # So it names the state and the command, in the `(fix: ...)` shape the rest of this
-# workspace's session-start output uses. Detection, like everything else here: the
-# manifest's install_command wins, then the lockfile on disk decides.
+# workspace's session-start output uses. The detection is `scripts/hooks/toolchain.py`
+# rather than a ladder in shell: `ship.py --preflight` prints the same report at the top
+# of `/ship`, because a fresh worktree's first failure used to be its commit-time gate,
+# and two ladders would eventually name two commands. Detection, like everything else
+# here: the manifest's install_command wins, then the lockfile on disk decides.
 report_missing_toolchain() {
-  # `local` throughout: the remote branch below assigns `frontend_dir`/`frontend_enabled`
-  # for its own purposes, and a vendored file gets edited by people who will not have read
-  # both halves.
-  local fix="" install_command locks frontend_enabled frontend_dir
-  if [ ! -d .venv ]; then
-    install_command="$(python3 scripts/hooks/harness_config.py python.install_command 2>/dev/null)"
-    if [ -n "$install_command" ]; then
-      fix="$install_command"
-    elif [ -f uv.lock ]; then
-      fix="uv sync --all-extras --all-groups"
-    elif [ -f requirements-dev.txt ]; then
-      locks="-r requirements-dev.txt"
-      [ -f requirements.txt ] && locks="-r requirements.txt $locks"
-      fix="python -m venv .venv && uv pip install $locks"
-    elif [ -f pyproject.toml ]; then
-      fix="python -m venv .venv && uv pip install -e '.[dev]'"
-    fi
-    [ -n "$fix" ] &&
-      echo "[session-start] No .venv here — ruff/mypy/pytest are unavailable (fix: $fix)"
-  fi
-  # node_modules is the other half of the claim this replaced, and a frontend project
-  # missing it fails lint-all.py the same way.
-  frontend_enabled="$(python3 scripts/hooks/harness_config.py frontend.enabled 2>/dev/null)"
-  frontend_dir="$(python3 scripts/hooks/harness_config.py frontend.dir 2>/dev/null)"
-  frontend_dir="${frontend_dir:-frontend}"
-  if [ "$frontend_enabled" = "true" ] && [ -d "$frontend_dir" ] &&
-    [ ! -d "$frontend_dir/node_modules" ]; then
-    echo "[session-start] No $frontend_dir/node_modules — the frontend linters are unavailable (fix: npm install --prefix $frontend_dir)"
-  fi
+  # `local`: a vendored file gets edited by people who will not have read both halves,
+  # and the remote branch below uses names of its own.
+  local line
+  python3 scripts/hooks/toolchain.py 2>/dev/null | while IFS= read -r line; do
+    [ -n "$line" ] && echo "[session-start] $line"
+  done
 }
 
 # --- LOCAL sessions only: keep this branch current with origin/master ---------

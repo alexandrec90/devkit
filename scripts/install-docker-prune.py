@@ -204,14 +204,17 @@ def main(argv: list[str] | None = None) -> int:
         print(out or f"removed {args.name}")
         return code
 
-    if args.apply and sweep.BOXES_DIR_NAME in REPO_ROOT.parts:
+    if args.apply and sweep.source_checkout(REPO_ROOT) != REPO_ROOT:
         # The registered command carries this checkout's path verbatim, and a box is
         # destroyed by `reconcile` -- so this would install a task that works until the
         # next reconcile pass and then fails nightly, forever, in silence. Same refusal
-        # both other installers make, on `--yes` only so a dry run still reads.
+        # every other installer makes, on `--yes` only so a dry run still reads.
+        # `source_checkout` because it resolves a `.claude/worktrees/` checkout too,
+        # which `BOXES_DIR_NAME in REPO_ROOT.parts` waved through.
         print(
-            f"install-docker-prune: {REPO_ROOT} is an ephemeral box, which reconcile "
-            f"destroys. Run this from the static devkit checkout.",
+            f"install-docker-prune: {REPO_ROOT} is a temporary checkout -- an ephemeral box or "
+            f"a claude --worktree worktree -- deleted when its work lands. Run this from "
+            f"the static devkit checkout.",
             file=sys.stderr,
         )
         return 2

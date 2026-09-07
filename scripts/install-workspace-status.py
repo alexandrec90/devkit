@@ -210,13 +210,12 @@ def main(argv: list[str] | None = None) -> int:
         # one is deleted when its work lands -- so this would install a task that works
         # until then and fails daily, forever, in silence.
         #
-        # `source_checkout` rather than the `BOXES_DIR_NAME in parts` test the five older
-        # installers use, and the difference is not pedantry: that test looks for
-        # `.worktrees/` and so misses a `.claude/worktrees/` checkout entirely -- the
-        # kind `claude --worktree` cuts, which is where an agent asked to wire this up
-        # is actually standing. `source_checkout` already resolves both, which is why
-        # `default_workspace` and `workspace-status.py` go through it. The other five
-        # still carry the narrow spelling.
+        # `source_checkout` rather than a `BOXES_DIR_NAME in parts` test, and the
+        # difference is not pedantry: that test looks for `.worktrees/` and so misses a
+        # `.claude/worktrees/` checkout entirely -- the kind `claude --worktree` cuts,
+        # which is where an agent asked to wire this up is actually standing.
+        # `source_checkout` already resolves both, which is why `default_workspace`,
+        # `workspace-status.py` and every other installer go through it.
         print(
             f"install-workspace-status: {REPO_ROOT} is a temporary checkout, which is "
             f"deleted when its work lands. Run this from the static devkit checkout.",

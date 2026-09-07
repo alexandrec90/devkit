@@ -77,6 +77,16 @@ satisfy it. Why it is a blocklist rather than a proof obligation, and what preem
 wrapping has cost, are in
 [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
+**A refusal that says the command "is too complex to verify that it stays inside the
+worktree", or "cannot be shown not to be git", is not this hook and not any devkit hook.**
+It is Claude Code's own isolation guard for a `claude --worktree` session, and it judges
+the shape of the command line rather than what it writes: a heredoc, a `cd … &&`
+composition and a `$HOME` in an argument are each refused on their own, whatever the
+command does. Put the file write through the Write or Edit tool and issue the rest as
+plain single commands. Report it to Claude Code, not to this harness — one week's
+backlog carried three of these filed as guard defects, and nothing in devkit can change
+what that guard accepts.
+
 ## Waiting on a CI gate: one blocking call, not a poll loop
 
 ```bash
