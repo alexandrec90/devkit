@@ -88,7 +88,8 @@ WINDOWS = os.name == "nt"
 
 # The scheduled tasks that exist to move agent branches along, and only those. The others
 # this machine runs -- `devkit-docker-prune`, `devkit-docker-stop-idle`,
-# `devkit-global-tools`, `devkit-tray`, `devkit-rc-servers` -- are machine maintenance that
+# `devkit-global-tools`, `devkit-tray`, `devkit-rc-servers`, `devkit-reap-stale` -- are
+# machine maintenance that
 # has nothing to do with whether an agent is running, so switching them off here would be
 # turning off the vacuum cleaner because you stopped cooking.
 BRANCH_DELIVERY_JOBS = (
