@@ -470,16 +470,15 @@ def pr_view(project_dir: Path, number: int) -> dict:
 
 
 def tab_safe(text: str) -> str:
-    """One line, with no `;` in it -- the two things a `wt` command line cannot carry.
+    """One line -- what a `wt` command line cannot carry at all.
 
-    `wt.exe` parses its own command line and splits on an unescaped semicolon into a
-    second sub-command, so a prompt containing one would open a tab running half a
-    sentence and then try to run the other half as a `wt` verb. Newlines end the command
-    outright. Both are replaced rather than escaped because the prompt is prose this
-    module writes: there is no case where the exact punctuation matters more than the
-    tab opening.
+    A newline ends `wt`'s command outright, and there is no escape for one, so the
+    prompt is flattened rather than quoted. Semicolons are *not* touched here:
+    `agent_box.wt_argv` escapes them for every string that reaches a tab, which it has
+    to do anyway for the kill switch's own `;` that this function can never see, and two
+    owners for one hazard is how the prefix went unescaped in the first place.
     """
-    return " ".join(str(text).replace(";", ",").split())
+    return " ".join(str(text).split())
 
 
 def seed_prompt(project: str, pr: dict, reason: str) -> str:
