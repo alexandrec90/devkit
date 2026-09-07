@@ -199,6 +199,20 @@ def test_the_scheduled_rc_pass_never_loses_the_mode_that_makes_it_do_anything():
     assert "maintain" in installer.schedule_for(root=REPO_ROOT).command
 
 
+def test_the_reap_pass_writes_the_file_its_installer_advertises():
+    """Same shape as the rc pass: a line per finding, which only the runner can render."""
+    installer = load_script("scripts/install-reap-schedule.py")
+    runner = load_script("scripts/reap-stale.py")
+    assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
+
+
+def test_the_scheduled_reap_pass_never_loses_the_mode_that_makes_it_do_anything():
+    """`reap-stale.py`'s default mode is `status`, read-only by design, for the reason
+    `rc-servers.py`'s is: a task that lost the word would fire forever and reap nothing."""
+    installer = load_script("scripts/install-reap-schedule.py")
+    assert "maintain" in installer.schedule_for(root=REPO_ROOT).command
+
+
 def test_the_tray_writes_the_file_its_installer_advertises():
     """The tray's artifact is unusual: it is written only when the tray cannot start.
     That is the one failure with no other signal, because a tray that is not running
@@ -309,6 +323,8 @@ UNATTENDED: dict[str, str] = {
     "scripts/global-tools.py": "devkit-global-tools runs it nightly",
     "scripts/rc-servers.py": "devkit-rc-servers runs it every 15 minutes",
     "scripts/rc_machine.py": "the tasklist, taskkill and server launch that pass makes",
+    "scripts/reap-stale.py": "devkit-reap-stale runs it every 15 minutes",
+    "scripts/reap_machine.py": "the process listing, tasklist and taskkill that pass makes",
     "scripts/tray.py": "devkit-tray runs it from logon until logoff",
     "scripts/tray_state.py": "the tray asks it what to draw, on every poll",
     "scripts/schedule_health.py": "the schtasks the tray spawns every poll, and the status pass",
@@ -335,6 +351,7 @@ DELEGATES_ITS_SPAWNS: dict[str, str] = {
     "scripts/git-merge-default.py": "scripts/git_policy.py",
     "scripts/worktree-guard.py": "scripts/guard_probes.py",
     "scripts/rc-servers.py": "scripts/rc_machine.py",
+    "scripts/reap-stale.py": "scripts/reap_machine.py",
     "scripts/tray.py": "scripts/schedule_health.py",
     "scripts/tray_state.py": "scripts/schedule_health.py",
 }
