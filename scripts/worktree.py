@@ -5123,8 +5123,6 @@ def reconcile(
         code, synced = sync_checkouts(workspace, apply=apply, fetch=fetch)
         worst = max(worst, code)
 
-    plug_menu = refresh_plug_menu(apply=apply)
-
     report = {
         "applied": apply,
         "free_gb": round(free, 1),
@@ -5133,58 +5131,8 @@ def reconcile(
         "automerge": automerge,
         "boxes": outcomes,
         "checkouts": synced,
-        "plug_menu": plug_menu,
     }
     return worst, report
-
-
-def menu_rider(script: str, rebuild) -> str:
-    """Let one sibling script rebuild its own dropdown as a rider on this pass.
-
-    One caller left, and it is worth keeping the seam anyway: what this contains is a
-    broad `except` around a module loaded by path, which is the part that has to be right
-    and the part that is easy to get subtly wrong when it is inlined. The other three
-    riders are gone because their dropdowns run a command when they open -- see
-    `.claude/rules/vscode-tasks.md`. This one remains while `plugSelection` still reads a
-    file, and it goes the same way when that changes.
-
-    Loaded by path and INSIDE this function on purpose. Each of those scripts imports
-    this module, so importing one at the top of it is a cycle; and each is hyphenated, so
-    none could be a plain `import` either way. `worktree.py` is the lower layer and these
-    calls are the one place the arrow points back, which is why it is kept narrow and
-    total -- never raising, and never affecting `worst`. A menu that could not be rebuilt
-    is a stale dropdown; a reconcile that failed on one is a machine that stops reaping
-    boxes because a *convenience* broke.
-    """
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
-        from _loader import load_by_path
-
-        here = Path(__file__).resolve().parent
-        module = load_by_path(script.replace("-", "_").removesuffix(".py"), here / script)
-        written = rebuild(module)
-    except Exception:
-        return ""
-    return str(written) if written else ""
-
-
-def refresh_plug_menu(*, apply: bool) -> str:
-    """Rebuild the plug/unplug checklist's options. The path written, or "" for anything else.
-
-    The second rider on this pass, and it is here for the first one's reason with one
-    addition of its own: those rows are pre-*ticked* from the workspace registry, so a
-    stale file is not merely a short list but a checklist that disagrees with the state
-    it claims to show -- and unticking a row is how a project leaves the registry.
-
-    Takes no workspace: `plug-projects.py` resolves the live workspace file and its own
-    `logs/` from module constants, so the checkout `menu_rider` loaded it from is
-    already the one whose menu gets written. `refresh_menu` is itself total and returns None
-    rather than writing when `gh` could not be reached, so an outage leaves the previous
-    menu in place instead of one offering to create repositories that already exist.
-    """
-    if not apply:
-        return ""
-    return menu_rider("plug-projects.py", lambda mod: mod.refresh_menu())
 
 
 # --- reporting --------------------------------------------------------------
@@ -5476,13 +5424,6 @@ def render_reconcile(report: dict) -> str:
             lines.append(f"    {row['box']} -- {row['reason']}{url}")
             lines.extend(f"        {note}" for note in row.get("notes") or [])
     lines.extend(render_checkout_sync(checkouts, applied=bool(applied)))
-    if applied:
-        plug_menu = report.get("plug_menu")
-        lines.append(
-            f"  plug menu: refreshed ({plug_menu})"
-            if plug_menu
-            else "  plug menu: [warn] not refreshed -- the Plug / Unplug checklist is stale"
-        )
     if not applied:
         lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")
     return "\n".join(lines)
