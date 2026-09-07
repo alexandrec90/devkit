@@ -158,6 +158,17 @@ def test_source_files_pick_both_languages_and_skip_tooling_and_declarations(tmp_
     assert sc.source_files(tmp_path, config()) == ["src/a.py", "src/b.ts", "tests/test_a.py"]
 
 
+def test_source_files_accept_a_file_entry_in_paths(tmp_path):
+    """A module whose only importer sits outside every scanned tree -- roguelike's
+    `vite.config.ts` importing `src/worktreePort.ts` -- drew a false orphan, and naming
+    the importer in `[structure] paths` was dropped without a word by an `is_dir()` test.
+    A file entry is now scanned as itself; a name that is neither still costs nothing."""
+    write(tmp_path, "src/a.py")
+    write(tmp_path, "vite.config.ts", "import './src/worktreePort'\n")
+    files = sc.source_files(tmp_path, config(paths=("src", "vite.config.ts", "missing")))
+    assert files == ["src/a.py", "vite.config.ts"]
+
+
 def test_source_files_honour_exclude_as_a_prefix_or_a_directory_name(tmp_path):
     write(tmp_path, "src/gen/a.py")
     write(tmp_path, "src/migrations/b.py")

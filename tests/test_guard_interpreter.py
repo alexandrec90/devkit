@@ -94,6 +94,51 @@ def test_targets_are_deduplicated_in_order():
     assert gi.code_write_targets(code) == ["a.py", "b.py"]
 
 
+def test_json_dumped_to_the_processs_own_stdout_is_not_a_sink():
+    """`json.dump(report, sys.stdout)` is how a measuring script prints its answer, and
+    the literals beside it are the files it measured, not files it wrote. A block here
+    was reported as a false positive on a read-only PowerShell `python -c`."""
+    code = (
+        "sizes = {p: len(open(p).read()) for p in ['scripts/a.py']}; json.dump(sizes, sys.stdout)"
+    )
+    assert gi.code_write_targets(code) == []
+    assert gi.code_write_targets("json.dump(x, open('out.json', 'w'))") == ["out.json"]
+
+
+# --- pathlib joins ----------------------------------------------------------
+
+
+def test_two_joined_literals_are_one_path():
+    """`Path('scripts') / 'x.py'` writes `scripts/x.py`. Read literal by literal it yields
+    `x.py` -- a real filename with the wrong parent, resolved against the cwd."""
+    code = "(pathlib.Path('scripts') / 'x.py').write_text('')"
+    assert gi.code_write_targets(code) == ["scripts/x.py"]
+
+
+def test_a_chain_of_joined_literals_collapses_to_one_path():
+    assert gi.join_path_literals("'a' / 'b' / 'c.py'") == "'a/b/c.py'"
+    assert gi.join_path_literals("Path('a') / 'b' / 'c.py'") == "Path('a/b/c.py')"
+
+
+def test_a_segment_joined_onto_a_variable_is_not_a_target():
+    """The reported shape: `BOX / 'scripts' / 'schedule_health.py'` with `BOX` an absolute
+    path into the session's own box. The tail literal was returned alone, the guard
+    resolved it against the static checkout, and the remedy named `<box>/schedule_health.py`
+    -- a file that does not exist. A root this tier cannot read is not a path it can judge,
+    which is how the command-line tier already treats `$VAR/x.py`."""
+    code = "(BOX / 'scripts' / 'schedule_health.py').write_text(body)"
+    assert gi.code_write_targets(code) == []
+    code = "(pathlib.Path(__file__).parent / 'x.py').write_text('')"
+    assert gi.code_write_targets(code) == []
+
+
+def test_a_slash_inside_a_literal_is_not_a_join():
+    """`re.sub('/', '_', name)` puts a slash between two quotes with a comma in the way,
+    and a division by a literal does not happen in code anyone runs."""
+    code = "open('a.py', 'w').write(re.sub('/', '_', 'b.py'))"
+    assert gi.code_write_targets(code) == ["a.py", "b.py"]
+
+
 # --- the entry point --------------------------------------------------------
 
 
@@ -102,13 +147,51 @@ def test_write_targets_reads_both_shapes():
     assert gi.write_targets(command) == ["b.py", "a.py"]
 
 
-def test_a_leading_cd_is_not_followed():
-    """Deliberate, and documented on `write_targets`: paths come back relative and the
-    guard resolves them against the tool call's own cwd. That is exactly what the
-    command-line tier already does for any `cd` form it cannot follow, and for the same
-    reason — a relative name still resolves into the checkout, the conservative direction.
+def test_a_plain_leading_cd_rebases_the_targets():
+    """The command-line tier follows a plain `cd` for its operands because not doing so was
+    its most-reported false positive; this tier had the same report against it --
+    `cd <box> && python - <<PY` refused as a write to the static checkout -- so it follows
+    the same closed list of spellings, and no more.
     """
-    assert gi.write_targets("cd sub && python - <<'PY'\nopen('a.py','w')\nPY") == ["a.py"]
+    assert gi.write_targets("cd sub && python - <<'PY'\nopen('a.py','w')\nPY") == ["sub/a.py"]
+    command = (
+        "cd \"C:\\ws\\.worktrees\\devkit--build-0902\" && python - <<'PY'\nopen('a.py','w')\nPY"
+    )
+    assert gi.write_targets(command) == ["C:/ws/.worktrees/devkit--build-0902/a.py"]
+
+
+def test_leading_cd_reads_the_plain_spellings_only():
+    """One operand, at the head of the line, terminated by `&&`, `;` or the line's end; the
+    quotes come off and a trailing separator goes, so the base joins cleanly."""
+    assert gi.leading_cd("cd sub && python x.py") == "sub"
+    assert gi.leading_cd('Set-Location "C:\\ws\\box\\"; python x.py') == "C:/ws/box"
+    assert gi.leading_cd("pushd 'a b'\npython x.py") == "a b"
+    assert gi.leading_cd("cd $BOX && python x.py") == ""
+    assert gi.leading_cd("echo x && cd sub && python x.py") == ""
+    assert gi.leading_cd("") == ""
+
+
+def test_a_rooted_target_ignores_the_cd():
+    command = "cd sub && python - <<'PY'\nopen('/opt/a.py','w'); open('C:\\\\t\\\\b.py','w')\nPY"
+    assert gi.write_targets(command) == ["/opt/a.py", "C:\\\\t\\\\b.py"]
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "cd $BOX && ",
+        "cd ~ && ",
+        "cd - && ",
+        "cd /d C:\\x && ",
+        "cd a b && ",
+        "echo x && cd sub && ",
+    ],
+)
+def test_a_cd_this_tier_cannot_follow_leaves_the_targets_relative(prefix):
+    """A variable, a switch, two operands or a `cd` that is not at the head: the base is
+    left where the tool call's cwd put it, which is the conservative direction -- a
+    relative name still resolves into the checkout."""
+    assert gi.write_targets(prefix + "python - <<'PY'\nopen('a.py','w')\nPY") == ["a.py"]
 
 
 def test_write_targets_is_empty_for_a_command_that_only_reads():

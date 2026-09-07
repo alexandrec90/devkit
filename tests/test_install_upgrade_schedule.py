@@ -163,6 +163,18 @@ def test_registering_from_an_ephemeral_box_is_refused(tmp_path, capsys, monkeypa
     assert "ephemeral box" in capsys.readouterr().err
 
 
+def test_registering_from_a_cli_worktree_is_refused_too(tmp_path, capsys, monkeypatch):
+    """A `claude --worktree` checkout lives under `.claude/worktrees/` and is deleted when
+    its branch lands, exactly like a box. `BOXES_DIR in root.parts` did not see it."""
+    worktree = tmp_path / "devkit" / ".claude" / "worktrees" / "modular-watching-starfish"
+    (worktree / "scripts").mkdir(parents=True)
+    (worktree / "scripts" / "upgrade-project.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(sched, "install", lambda *_a, **_kw: pytest.fail("registered a worktree"))
+
+    assert sched.main(["--yes", "--devkit", str(worktree)]) == 2
+    assert "temporary checkout" in capsys.readouterr().err
+
+
 def test_a_missing_upgrade_script_stops_the_install(tmp_path, capsys):
     assert sched.main(["--yes", "--devkit", str(tmp_path)]) == 2
     assert "no upgrade script" in capsys.readouterr().err
