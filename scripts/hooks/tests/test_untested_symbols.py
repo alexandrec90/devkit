@@ -22,6 +22,8 @@ it is the defect the devkit-only ancestor of this gate shipped with and had to f
 from __future__ import annotations
 
 import dataclasses
+import re
+import time
 from pathlib import Path
 
 import pytest
@@ -114,6 +116,59 @@ def test_a_bare_substring_is_not_a_reference(text):
     assert not us.reference_pattern("alpha").search(text)
 
 
+# --- referenced_names ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("acme.alpha(1)", {"alpha"}),
+        ("assert acme.alpha == 2", {"alpha"}),
+        ("alpha(1)", {"alpha"}),
+        ("from acme import alpha", {"alpha"}),
+        ("from acme import beta, alpha", {"beta", "alpha"}),
+        # The name is on the next line, so neither reading sees it; `import (` is a
+        # call-shaped `import` to both, which is harmless because nothing defines one.
+        ("from acme import (\n    alpha,\n)", {"import"}),
+        ("alphabet = 1", set()),
+        ('"alpha"', set()),
+        ("# alpha is untested", set()),
+    ],
+)
+def test_referenced_names_reads_the_three_shapes_a_reference_takes(text, expected):
+    """One pass over a file yields exactly the names `reference_pattern` would find one
+    search at a time -- the same shapes, so the same non-references stay out."""
+    assert us.referenced_names(text) == frozenset(expected)
+
+
+def test_referenced_names_agrees_with_reference_pattern_on_the_real_corpus():
+    """`reference_pattern` is the definition and `referenced_names` the fast reading of
+    it; the scan trusts the second, so it has to answer exactly as the first would for
+    every word in every test file here. A divergence in either direction is a wrong
+    verdict: a name found only by the fast path certifies coverage that does not exist,
+    one found only by the pattern reports a gap that is covered."""
+    texts = us.read_tests(REPO_ROOT, us.CFG)
+    assert texts, "no test files to compare over"
+
+    def agree(where: str, text: str) -> None:
+        fast = us.referenced_names(text)
+        for word in set(re.findall(r"\w+", text)):
+            if word[0].isdigit():
+                continue
+            slow = bool(us.reference_pattern(word).search(text))
+            assert (word in fast) == slow, f"{where}: {word!r} fast={word in fast} pattern={slow}"
+
+    # Line by line over the whole corpus: every shape is line-local, and a per-line check
+    # over 2.5 MB is cheap where a per-file one -- each word searched over its whole file
+    # -- ran for three minutes. This file is then checked whole, because the one thing a
+    # line cannot exercise is `^` and `\\s+` reaching across a line break.
+    for rel, text in texts.items():
+        for number, line in enumerate(text.splitlines(), 1):
+            agree(f"{rel}:{number}", line)
+    mine = Path(__file__).resolve().relative_to(REPO_ROOT)
+    agree(str(mine), texts[mine])
+
+
 # --- module_pattern / corpus_for ----------------------------------------------
 
 
@@ -167,6 +222,19 @@ def test_the_corpus_admits_a_sibling_that_names_the_module():
     otherwise and be wrong."""
     texts = {Path("tests/test_caller.py"): "import acme\nacme.alpha()"}
     assert "alpha" in us.corpus_for(Path("scripts/acme.py"), texts)
+
+
+def test_corpus_files_names_the_files_the_corpus_is_made_of():
+    """`gaps` unions per-file name sets over exactly these files, so the list and the
+    concatenation `corpus_for` returns have to be built from the same selection."""
+    texts = {
+        Path("tests/test_acme.py"): "acme.alpha()",
+        Path("tests/test_other.py"): "other.beta()",
+        Path("tests/test_caller.py"): "import acme\n",
+    }
+    files = us.corpus_files(Path("scripts/acme.py"), texts)
+    assert files == [Path("tests/test_acme.py"), Path("tests/test_caller.py")]
+    assert us.corpus_for(Path("scripts/acme.py"), texts) == "acme.alpha()\nimport acme\n"
 
 
 @pytest.mark.parametrize(
@@ -471,10 +539,16 @@ adopted = pytest.mark.skipif(
 
 @adopted
 def test_every_public_symbol_is_named_by_a_test():
+    started = time.monotonic()
     uncovered, _ = us.verdict(REPO_ROOT, us.CFG)
+    elapsed = time.monotonic() - started
     assert not uncovered, (
         "write a test naming these, do not add them to the baseline: " + ", ".join(uncovered)
     )
+    # This gate runs on every push, so its cost is paid on every push. One verdict took
+    # 25s before `referenced_names`; the bound is loose enough for a slow runner and
+    # tight enough that a return to per-symbol regex scans cannot pass it.
+    assert elapsed < 10, f"the live scan took {elapsed:.1f}s; see referenced_names"
 
 
 @adopted

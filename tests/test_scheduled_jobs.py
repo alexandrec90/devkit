@@ -320,6 +320,7 @@ UNATTENDED: dict[str, str] = {
     # reached from an entry point
     "scripts/sweep.py": "the git and gh IO for reconcile and upgrade",
     "scripts/sync-devkit.py": "upgrade-project.py spawns it per project, once per pass",
+    "scripts/policy_runtime.py": "upgrade-project.py runs its policy-reinstall rider once per pass",
     "scripts/release.py": "release-pipeline.py imports it for the version and bump helpers",
     "scripts/git_policy.py": "the single spawn point git-merge-default.py runs git through",
     "scripts/agent_clis.py": "global-tools.py runs the agent-CLI stage of every nightly pass",

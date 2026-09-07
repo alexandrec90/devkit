@@ -1,14 +1,29 @@
 # devkit runs the pre-commit channel it publishes, on itself.
 #
-# Its own three hooks are wired as `repo: local` rather than by URL and `rev`. That is not
-# a shortcut — pinning a rev here would check a *released tag's* hooks against the working
+# Its own hooks are wired as `repo: local` rather than by URL and `rev`. That is not a
+# shortcut — pinning a rev here would check a *released tag's* hooks against the working
 # tree that is trying to change them, so a fix to a hook could never be validated by the
 # hook it fixes, and every hook edit would need a tag before it could be trusted. A
 # consumer has the opposite need (a pinned, known-good version), which is what
 # `.pre-commit-hooks.yaml` documents.
 #
-# Install once per clone: `pre-commit install`. `.claude/hooks/session-start.sh` does it
-# automatically when this file is present, so agent sessions get the gate too.
+# Two stages, and the split is by cost. The commit stage is the fixers and the sub-second
+# checks, so a commit is never held up by a judgement. The pre-push stage is the PR gate
+# itself — `lint-all.py`, `run-tests.py`, the hook tests — run at the moment CI would run
+# it, so a failure is read from `logs/` a minute after the push attempt instead of from a
+# workflow artifact ten minutes after it. That gap was the routine way a green commit
+# became a red PR: nothing between a commit and the runner ever ran mypy or a test.
+#
+# Install once per clone: `pre-commit install`. `default_install_hook_types` makes that
+# one command wire both stages. `.claude/hooks/session-start.sh` runs it automatically
+# when this file is present, and the global dispatcher (`scripts/git_policy.py`) runs
+# both stages itself on a machine where it is installed.
+default_install_hook_types: [pre-commit, pre-push]
+# Without this, a hook that names no stage runs at every installed one — so the fixers
+# would rewrite the whole tree under `--all-files` on every push. Only `devkit-push-gate`
+# opts into the push stage.
+default_stages: [pre-commit]
+
 repos:
   - repo: local
     hooks:
@@ -28,6 +43,18 @@ repos:
       # `devkit-drift` is deliberately absent: in devkit the comparison is against
       # itself. The hook detects that and skips, so running it here would only ever print
       # a line saying it did nothing.
+
+      - id: devkit-push-gate
+        name: the PR gate, before the push
+        # The same three commands `.github/workflows/pr-gate.yml`'s test job runs, in
+        # its order, stopping at the first failure. `SKIP=devkit-push-gate git push` is
+        # the bypass for a deliberate WIP push.
+        entry: scripts/precommit/run_push_gate.py
+        language: script
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
+        verbose: true
 
       - id: ruff-check
         name: ruff (fix)
@@ -61,11 +88,17 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
-      # Vendored files are compared byte-for-byte downstream, so whitespace is not
-      # cosmetic here: a trailing space in a MANIFEST file becomes drift in every
-      # consumer the first time an editor strips it.
+      # Fixers, not readability rules. Vendored files are compared byte-for-byte
+      # downstream, so whitespace is not cosmetic here: a trailing space in a MANIFEST
+      # file becomes drift in every consumer the first time an editor strips it.
+      #
+      # `stages: [pre-commit]` on three of them: their upstream manifest names every
+      # stage, which overrides `default_stages` above, and a fixer over `--all-files`
+      # at push time rewrites the tree during a push.
       - id: trailing-whitespace
+        stages: [pre-commit]
       - id: end-of-file-fixer
+        stages: [pre-commit]
       - id: mixed-line-ending
         args: [--fix=lf] # matches .gitattributes' `eol=lf`
       - id: check-merge-conflict
@@ -75,11 +108,20 @@ repos:
       - id: check-yaml
       - id: check-toml
       - id: check-added-large-files
+        stages: [pre-commit]
 
-  - repo: https://github.com/DavidAnson/markdownlint-cli2
-    rev: v0.23.2
+  # The workflow linter lives here, not in `lint-all.py`: the wrapper degraded a missing
+  # binary to a note, and on every workstation the binary was missing — `session-start.sh`
+  # installed it only into agent sessions, so a local `lint-all.py` reported clean on a
+  # workflow CI then failed. pre-commit builds the tool itself, from a pinned rev.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
     hooks:
-      - id: markdownlint-cli2
+      - id: actionlint
+
+  # No Markdown linter, on purpose. markdownlint and remark enforced prose style and were
+  # the only checks here that existed for a human reader; the functional half — every
+  # cited path exists, no instruction pins a version — is `tests/test_doc_claims.py`.
 
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0

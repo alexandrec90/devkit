@@ -7,8 +7,10 @@ runs it: a Task Scheduler entry on Windows, a crontab line elsewhere, invoking
     <python> scripts/upgrade-project.py --all --yes
 
 on a schedule. Each project that is behind gets a box, an adoption commit and a PR;
-each project that is current costs a fetch and a `git show`. Nothing needs a human
-until a PR wants reviewing.
+each project that is current costs a fetch and a `git show`. The same pass reinstalls
+this machine's global git policy runtime when the release moved it (`policy_runtime`),
+so that installer is one fewer thing to remember. Nothing needs a human until a PR
+wants reviewing.
 
 **Read-only by default.** `--yes` installs, `--check` reports what is registered and
 whether it still points at this checkout, and the bare invocation prints the plan.

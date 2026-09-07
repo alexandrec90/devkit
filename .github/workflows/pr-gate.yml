@@ -63,14 +63,6 @@ jobs:
           # the default here would leave the convention untested in the one repo
           # that ships it.
           python-version: "3.12"
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-      - name: Install Markdown linters
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Markdown
-        run: npm run lint:markdown
       - name: Format
         # FIRST, and before anything that can rewrite a file: `lint-all.py` auto-fixes
         # by design, so running it earlier would repair drift and then report clean,
@@ -86,21 +78,12 @@ jobs:
         run: uv run ruff format --check .
       - name: Lint
         run: uv run ruff check .
-      - name: Install actionlint
-        # Fail loudly, no `|| true`: `lint-all.py` degrades a missing linter to a
-        # terminal note by design, so a silently skipped install here would leave the
-        # workflow files unchecked while the job still reported green for them —
-        # exactly the inert gate `.claude/rules/engineering.md` forbids. Same
-        # installer `.claude/hooks/session-start.sh` uses, so CI and a session check
-        # the same way. NB the args are positional ([[VERSION] DIR]); it takes no -b.
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
-            | bash -s -- latest /usr/local/bin
       - name: Lint + typecheck via the wrapper devkit ships
-        # Runs devkit's own `scripts/lint-all.py` — the entrypoint its Stop hook and
-        # every generated PR gate invoke. Its unique contribution over the two steps
-        # above is mypy; running it here also means the wrapper itself is exercised on
-        # every push rather than only in whichever session last touched it.
+        # Runs devkit's own `scripts/lint-all.py` — the entrypoint the pre-push gate
+        # and every generated PR gate invoke. Its unique contribution over the two
+        # steps above is mypy; running it here also means the wrapper itself is
+        # exercised on every push rather than only in whichever session last touched
+        # it. The workflow files are actionlint's, in the pre-commit job below.
         run: uv run python scripts/lint-all.py
       - name: Upload lint artifact
         # The filtered artifact, not the raw job log: a raw log buries the real error
@@ -145,6 +128,10 @@ jobs:
         # broken for them at their next `autoupdate` — and nothing else in this repo would
         # execute these scripts the way pre-commit does (`language: script`, which needs
         # the executable bit and a working shebang).
+        #
+        # The commit stage only. The pre-push stage is the three commands the test job
+        # above already runs directly; running them a second time here would double
+        # the gate's cost for no second signal.
         run: uv run pre-commit run --all-files --show-diff-on-failure
 
   generated-project:

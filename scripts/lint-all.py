@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -69,7 +68,6 @@ MYPY_SCOPE = ["scripts", "tests"]
 # this filter is the same guard for mypy, which has no equivalent setting, and it keeps
 # `--changed` from spending a pass on files neither tool will report on anyway.
 EXCLUDED_PREFIXES = ("templates/",)
-MARKDOWN_EXCLUDED_PREFIXES = (".agents/", ".pytest_cache/", "templates/")
 
 # dotenv-linter v4 takes a subcommand; a bare file list is rejected as an
 # unrecognised one, which reaches the artifact as a usage error no source edit can
@@ -125,21 +123,6 @@ def changed_python_files() -> list[str]:
     return python_targets(changed_paths())
 
 
-def workflow_files(limit_to: list[str] | None = None) -> list[str]:
-    """`.github/workflows/*.yml`, optionally narrowed to a changed-file list.
-
-    Explicit paths rather than a bare `actionlint`, which discovers workflows itself:
-    discovery only finds them when the cwd is the repo root, and reports success
-    having checked nothing anywhere else. Returning [] when there are none is what
-    keeps the pass from turning "no workflows" into a usage error in the artifact.
-    """
-    found = sorted(
-        p.relative_to(REPO_ROOT).as_posix()
-        for p in (REPO_ROOT / ".github" / "workflows").glob("*.yml")
-    )
-    return found if limit_to is None else [p for p in found if p in set(limit_to)]
-
-
 def env_files(limit_to: list[str] | None = None) -> list[str]:
     """Root-level `.env*` files, optionally narrowed to a changed-file list.
 
@@ -151,28 +134,6 @@ def env_files(limit_to: list[str] | None = None) -> list[str]:
     """
     found = sorted(p.name for p in REPO_ROOT.glob(".env*") if p.is_file())
     return found if limit_to is None else [p for p in found if p in set(limit_to)]
-
-
-def markdown_files(limit_to: list[str] | None = None) -> list[str]:
-    """Authored Markdown, excluding generated skills and rendered-template content."""
-    found = sorted(
-        p.relative_to(REPO_ROOT).as_posix()
-        for p in REPO_ROOT.rglob("*.md")
-        if not any(
-            p.relative_to(REPO_ROOT).as_posix().startswith(prefix)
-            for prefix in MARKDOWN_EXCLUDED_PREFIXES
-        )
-        and "node_modules" not in p.parts
-        and ".venv" not in p.parts
-    )
-    return found if limit_to is None else [p for p in found if p in set(limit_to)]
-
-
-def node_tool(name: str) -> str | None:
-    """A project-local Node binary, with the Windows command shim when needed."""
-    suffix = ".cmd" if os.name == "nt" else ""
-    candidate = REPO_ROOT / "node_modules" / ".bin" / f"{name}{suffix}"
-    return str(candidate) if candidate.is_file() else None
 
 
 def _git(*args: str) -> list[str]:
@@ -240,36 +201,6 @@ def _reexec(module: str) -> int | None:
     return project_python.re_exec(REPO_ROOT, module, sys.argv)
 
 
-def markdown_sections(markdown: list[str]) -> str:
-    """The markdownlint and remark passes over `markdown`, as artifact sections.
-
-    Its own function so `main` does not carry four branches for two optional node tools.
-    Both are looked up through `node_tool` rather than run blind: they are real
-    executables rather than `-m` modules, so an absent one raises FileNotFoundError
-    inside `run_tool` instead of being reported as a finding nobody can fix.
-    """
-    if not markdown:
-        return ""
-    sections = ""
-    if markdownlint := node_tool("markdownlint-cli2"):
-        sections += run_tool(
-            "markdownlint",
-            [markdownlint, *markdown],
-            f"{markdownlint} --fix {' '.join(markdown)}",
-        )
-    else:
-        print("  markdownlint: not installed — skipped")
-    if remark := node_tool("remark"):
-        sections += run_tool(
-            "remark",
-            [remark, "--frail", "--ignore-path", ".remarkignore", *markdown],
-            f"{remark} --output {' '.join(markdown)}",
-        )
-    else:
-        print("  remark: not installed — skipped")
-    return sections
-
-
 def not_clean_reason() -> str:
     """The line to print when a REQUIRED linter could not run, else "".
 
@@ -318,10 +249,8 @@ def main(argv: list[str] | None = None) -> int:
         selected = explicit_paths(args.paths) if args.paths else changed_paths()
     changed = selected if scoped else None
     targets = python_targets(selected)
-    workflows = workflow_files(changed)
     envs = env_files(changed)
-    markdown = markdown_files(changed)
-    if scoped and not (targets or workflows or envs or markdown):
+    if scoped and not (targets or envs):
         print("lint-all: no changed files this run lints; nothing to do.")
         _write_artifact("")
         return 0
@@ -331,9 +260,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"lint-all: {label}")
 
     sections = ""
-    # A narrowed run with only a workflow or `.env` edit leaves `targets` empty, and
-    # `scope` then falls back to `["."]` — which would silently widen a per-turn
-    # check into a whole-repo pass. Gate the Python passes on having Python to lint.
+    # A narrowed run with only an `.env` edit leaves `targets` empty, and `scope` then
+    # falls back to `["."]` — which would silently widen a per-turn check into a
+    # whole-repo pass. Gate the Python passes on having Python to lint.
     if targets or not scoped:
         # Auto-fix first, then report. Both ruff passes mutate the same files, so they
         # must stay sequential relative to each other. No `--exclude` guard here: see the
@@ -361,19 +290,12 @@ def main(argv: list[str] | None = None) -> int:
             f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
         )
 
-    # `.claude/hooks/session-start.sh` installs both of these into every session, and
-    # until now nothing ever ran them — a tool downloaded on every startup and never
-    # invoked. They are real executables rather than `-m` modules, so run_tool's
-    # FileNotFoundError branch is what degrades a missing one to a terminal note.
-    if workflows:
-        sections += run_tool(
-            "actionlint",
-            ["actionlint", *workflows],
-            f"actionlint {' '.join(workflows)}",
-        )
+    # A real executable rather than a `-m` module, so run_tool's FileNotFoundError
+    # branch is what degrades a missing one to a terminal note. The workflow files are
+    # not linted here: actionlint runs from `.pre-commit-config.yaml`, where pre-commit
+    # builds the binary itself, instead of being a note on every machine without it.
     if envs:
         sections += run_tool("dotenv-linter", [*DOTENV_CMD, *envs], " ".join([*DOTENV_CMD, *envs]))
-    sections += markdown_sections(markdown)
 
     _write_artifact(sections)
 

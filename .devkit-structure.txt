@@ -29,7 +29,7 @@ complexity::scripts/hooks/structure_scan.py::mask_literals = 18
 complexity::scripts/hooks/structure_scan.py::scan_js = 19
 complexity::scripts/install-reconcile-task.py::main = 19
 complexity::scripts/instruction-budget.py::render = 16
-complexity::scripts/lint-all.py::main = 19
+complexity::scripts/lint-all.py::main = 16
 complexity::scripts/new-project.py::main = 19
 complexity::scripts/plug-projects.py::main = 49
 complexity::scripts/precommit/check_harness_manifest.py::check = 21
@@ -93,10 +93,6 @@ definitions::scripts/workspace-status.py = 32
 definitions::scripts/workspace-task-index.py = 29
 definitions::scripts/worktree-guard.py = 60
 definitions::scripts/worktree.py = 159
-dependency::package.json::markdownlint-cli2 = 1
-dependency::package.json::remark-cli = 1
-dependency::package.json::remark-frontmatter = 1
-dependency::package.json::remark-preset-lint-recommended = 1
 dependency::pyproject.toml::mypy = 1
 dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::pytest = 1
@@ -105,7 +101,7 @@ file_lines::scripts/agent-box.py = 538
 file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/fix-prs.py = 639
-file_lines::scripts/git_policy.py = 756
+file_lines::scripts/git_policy.py = 768
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
@@ -121,7 +117,7 @@ file_lines::scripts/release-pipeline.py = 960
 file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/sweep.py = 1990
 file_lines::scripts/sync-devkit.py = 1422
-file_lines::scripts/upgrade-project.py = 1231
+file_lines::scripts/upgrade-project.py = 1236
 file_lines::scripts/workspace-status.py = 1094
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2295
@@ -130,7 +126,7 @@ function_lines::scripts/devkit_project.py::main = 213
 function_lines::scripts/docker-maint.py::generic_prune = 84
 function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
 function_lines::scripts/install-reconcile-task.py::main = 114
-function_lines::scripts/lint-all.py::main = 98
+function_lines::scripts/lint-all.py::main = 89
 function_lines::scripts/new-project.py::main = 143
 function_lines::scripts/plug-projects.py::main = 202
 function_lines::scripts/precommit/check_harness_manifest.py::check = 84
@@ -145,7 +141,7 @@ function_lines::scripts/sweep.py::inspect = 133
 function_lines::scripts/sweep.py::main = 171
 function_lines::scripts/sweep.py::sync_plan = 87
 function_lines::scripts/sync-devkit.py::main = 251
-function_lines::scripts/upgrade-project.py::main = 162
+function_lines::scripts/upgrade-project.py::main = 166
 function_lines::scripts/upgrade-project.py::upgrade_one = 143
 function_lines::scripts/worktree-guard.py::main = 139
 function_lines::scripts/worktree-guard.py::redirect_decision = 94
@@ -221,7 +217,7 @@ skipped_tests::scripts/hooks/tests/test_untested_symbols.py = 1
 skipped_tests::tests/support.py = 2
 skipped_tests::tests/test_claude_hooks_live.py = 2
 skipped_tests::tests/test_codex_hooks_live.py = 1
-skipped_tests::tests/test_lint_all.py = 4
+skipped_tests::tests/test_lint_all.py = 2
 skipped_tests::tests/test_new_project.py = 3
 skipped_tests::tests/test_preview_ui_host.py = 2
 skipped_tests::tests/test_scheduled_jobs.py = 1
@@ -369,3 +365,10 @@ swallowed_errors::scripts/worktree.py = 2
 # 2026-09-06  recorded: workspace-status.py gains --notify, toast_text and the docstring for both. The module was called 'the SessionStart status line' by six files and no hook ever ran it, so every prerequisite it reports -- a missing uv, an unset git identity, an uninstalled picker extension -- was reported to nobody; it is now the runner behind the daily devkit-workspace-status job, and --notify is the half that reaches a person. The growth is one flag, one pure function that turns the report into a two-field toast, and the paragraph recording who runs this and why it is deliberately not an agent hook (the pass is 9s, which as a per-session tax is what gets a check disabled). Splitting this module is what four earlier records here have deferred and is not a rider on wiring it to a caller.
 #   definitions::scripts/workspace-status.py -> 32
 #   file_lines::scripts/workspace-status.py -> 1094
+
+# 2026-09-07  recorded: git_policy.py grows by the pre-push stage of the framework it dispatches: the dispatcher owns core.hooksPath, so the PR gate at push time runs only if this module runs it. Splitting the module is its own change.
+#   file_lines::scripts/git_policy.py -> 768
+
+# 2026-09-07  recorded: upgrade-project.py grows by the one-line branch-policy reinstall rider in main; the rider's logic is its own module (policy_runtime.py) and splitting main is its own change.
+#   file_lines::scripts/upgrade-project.py -> 1236
+#   function_lines::scripts/upgrade-project.py::main -> 166

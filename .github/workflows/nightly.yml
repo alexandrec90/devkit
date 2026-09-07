@@ -7,9 +7,9 @@ name: Nightly
 # without one. Two of those matter here:
 #
 #   * The runner and the network. `full-suite` is the gate's substance run again on a
-#     fresh image, with the actionlint installer and `npm ci` reaching the network
-#     they reach in every session. A failure there is not devkit's code; it is devkit
-#     being unbuildable this morning, which is worth knowing before someone starts.
+#     fresh image, with `uv sync` reaching the network it reaches in every session. A
+#     failure there is not devkit's code; it is devkit being unbuildable this morning,
+#     which is worth knowing before someone starts.
 #   * The toolchain moving underneath the lock. devkit has no runtime dependencies by
 #     contract, so the only Python that can break it is its `dev` group -- ruff, mypy,
 #     pytest -- and `uv.lock` pins those until Dependabot's weekly PR moves them.
@@ -57,24 +57,10 @@ jobs:
       - uses: ./.github/actions/setup-python-env
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-      - name: Install Markdown linters
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Markdown
-        run: npm run lint:markdown
       - name: Format
         # First, before anything that can rewrite a file — `lint-all.py` auto-fixes by
         # design, so running it earlier repairs drift and then reports clean.
         run: uv run ruff format --check .
-      - name: Install actionlint
-        # No `|| true`: a silently skipped install leaves the workflow files unchecked
-        # while the job still reports green for them.
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
-            | bash -s -- latest /usr/local/bin
       - name: Lint + typecheck via the wrapper devkit ships
         run: uv run python scripts/lint-all.py
       - name: Upload lint artifact

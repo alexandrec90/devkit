@@ -21,7 +21,10 @@ clone, so resolve devkit files through `Path(__file__)` and read layout from
 `.devkit.toml`, never from the cwd. devkit wires its own as `repo: local` rather than by
 rev, or a hook fix could never be validated by the hook it fixes. A new hook needs an id
 in both `.pre-commit-hooks.yaml` and `.pre-commit-config.yaml`; a test asserts the sets
-match, with `devkit-drift` as the one documented exception.
+match, with `devkit-drift` as the one documented exception. The channel has two stages:
+commit-time hooks stay sub-second, and `devkit-push-gate` is the PR gate's own three
+commands at the pre-push stage — a check that takes minutes belongs there, never on a
+commit.
 
 ## Vendoring rules
 

@@ -7,6 +7,7 @@
 #         - id: devkit-manifest
 #         - id: devkit-hooks-stdlib-only
 #         - id: devkit-drift
+#         - id: devkit-push-gate
 #
 # `language: script`, not `language: python`: devkit is a virtual project
 # (`[tool.uv] package = false`) with nothing to install, and these scripts are stdlib-only
@@ -51,3 +52,20 @@
   # The manifest decides what is compared, not the staged file list.
   pass_filenames: false
   always_run: true
+
+- id: devkit-push-gate
+  name: the PR gate, before the push
+  description: >-
+    Runs what the PR gate's test job runs — scripts/lint-all.py, scripts/run-tests.py,
+    then pytest over scripts/hooks/tests/ — in that order, stopping at the first failure,
+    so the failure is read from logs/ before the push instead of from a workflow
+    artifact after it. A step whose file the project lacks is skipped out loud.
+    `SKIP=devkit-push-gate git push` bypasses it for a deliberate WIP push.
+  entry: scripts/precommit/run_push_gate.py
+  language: script
+  # Push time, not commit time: the suite is minutes, and a commit must stay seconds.
+  stages: [pre-push]
+  pass_filenames: false
+  always_run: true
+  # Otherwise pre-commit shows nothing for the minutes the suite takes.
+  verbose: true

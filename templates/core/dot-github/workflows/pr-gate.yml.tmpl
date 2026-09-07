@@ -61,17 +61,14 @@ jobs:
           # Explicit at every call site: the action is copied from devkit verbatim
           # rather than rendered, so its own default cannot know this project's version.
           python-version: "{{ python_version }}"
-      - name: Install actionlint and dotenv-linter
+      - name: Install dotenv-linter
         # Fail loudly, no `|| true`: `lint-all.py` degrades a missing linter to a
-        # terminal note by design, so a silently skipped install here would leave the
-        # workflow files and `.env.example` unchecked while the job still reported
-        # green for them. The same installers `.claude/hooks/session-start.sh` uses,
-        # so the gate and a local session check the same way. NB actionlint's
-        # installer takes positional args ([[VERSION] DIR]) and no -b flag;
-        # dotenv-linter's takes -b.
+        # terminal note by design, so a silently skipped install here would leave
+        # `.env.example` unchecked while the job still reported green for it. The same
+        # installer `.claude/hooks/session-start.sh` uses, so the gate and a local
+        # session check the same way. The workflow files are actionlint's, which runs
+        # from `.pre-commit-config.yaml` in the pre-commit job above.
         run: |
-          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
-            | bash -s -- latest /usr/local/bin
           curl -sSfL https://raw.githubusercontent.com/dotenv-linter/dotenv-linter/master/install.sh \
             | sh -s -- -b /usr/local/bin
       - name: Lint

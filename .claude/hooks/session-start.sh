@@ -370,20 +370,14 @@ fi
 # without `warm`; see it for why this is not remote-only.
 wire_pre_commit warm
 
-# External lint binaries lint-all.py shells out to, installed to a PATH dir so
-# `shutil.which(...)` finds them. Best-effort: the runner skips a missing tool
-# cleanly and CI installs them regardless, but having them here keeps a local
-# `lint-all.py` run faithful to the gate. NB positional args:
-# download-actionlint.bash takes [[VERSION] DIR], NOT a -b flag.
+# The external lint binary lint-all.py shells out to, installed to a PATH dir so
+# `shutil.which(...)` finds it. Best-effort: the runner skips a missing tool cleanly
+# and CI installs it regardless, but having it here keeps a local `lint-all.py` run
+# faithful to the gate. actionlint is not installed here any more: it runs as a
+# pre-commit hook, and pre-commit builds it from the pinned rev.
 BIN_DIR=/usr/local/bin
 [ -w "$BIN_DIR" ] || BIN_DIR="$HOME/.local/bin"
 mkdir -p "$BIN_DIR"
-if ! command -v actionlint >/dev/null 2>&1; then
-  echo "[session-start] Installing actionlint -> $BIN_DIR..."
-  curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
-    | bash -s -- latest "$BIN_DIR" \
-    || echo "[session-start] WARN: actionlint install skipped"
-fi
 if ! command -v dotenv-linter >/dev/null 2>&1; then
   echo "[session-start] Installing dotenv-linter -> $BIN_DIR..."
   curl -sSfL https://raw.githubusercontent.com/dotenv-linter/dotenv-linter/master/install.sh \
@@ -391,4 +385,4 @@ if ! command -v dotenv-linter >/dev/null 2>&1; then
     || echo "[session-start] WARN: dotenv-linter install skipped"
 fi
 
-echo "[session-start] Done. Run 'python scripts/lint-all.py' before pushing a gated branch."
+echo "[session-start] Done. The pre-push hook runs the PR gate before a push leaves."
