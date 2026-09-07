@@ -13,17 +13,21 @@ And `edit_verdict` is the gate between this script and the file every window on 
 machine reads. Its three refusals are the ones that would otherwise publish an unmerged
 proposal, so they are tested without a git tree at all.
 
-A fourth since the checkboxes moved into VS Code: `selection_from_ticks` reads a pick
-made against a file some *earlier* pass wrote, so the difference between "unticked" and
-"never offered" is the only thing standing between a stale menu and a silent unplug.
+A fourth since the checkboxes moved into VS Code, and it changed shape when the list
+stopped being a cached file: `toggled_selection` reads a pick as a set of rows to
+*flip*, so what is pinned is that a row nobody ticked is left exactly as it is and that
+the same pick applied twice is a no-op. The two functions this replaced,
+`selection_from_ticks` and `guarded_selection`, existed only to tell "unticked" from
+"never offered" in an answer made against options some earlier pass had written down.
 """
 
-import datetime as dt
 import json
 import subprocess
 
 import pytest
 from support import REPO_ROOT, devkit_project, load_script, worktree
+
+picker_rows = load_script("scripts/picker_rows.py")
 
 plug_projects = load_script("scripts/plug-projects.py")
 
@@ -43,17 +47,12 @@ interactive = plug_projects.interactive
 inventory = plug_projects.inventory
 live_carries_a_hand_edit = plug_projects.live_carries_a_hand_edit
 main = plug_projects.main
-menu_detail = plug_projects.menu_detail
-menu_payload = plug_projects.menu_payload
+toggle_detail = plug_projects.toggle_detail
+rows = plug_projects.rows
 parse_command = plug_projects.parse_command
 parse_ticks = plug_projects.parse_ticks
 picked_nothing = plug_projects.picked_nothing
-read_menu = plug_projects.read_menu
-refresh_menu = plug_projects.refresh_menu
-selection_from_ticks = plug_projects.selection_from_ticks
-guarded_selection = plug_projects.guarded_selection
-read_ticks = plug_projects.read_ticks
-write_menu = plug_projects.write_menu
+toggled_selection = plug_projects.toggled_selection
 plan = plug_projects.plan
 render = plug_projects.render
 scripted_env = plug_projects.scripted_env
@@ -263,10 +262,10 @@ def test_an_error_does_not_end_the_loop():
 @pytest.mark.parametrize(
     "candidate, expected",
     [
-        (Candidate("alpha", plugged=True, on_disk=True, on_github=True), "untick to retire it"),
+        (Candidate("alpha", plugged=True, on_disk=True, on_github=True), "ticking retires it"),
         (
             Candidate("zeta", plugged=True, on_disk=False, on_github=True),
-            "leaving it ticked clones acme/zeta",
+            "leaving it alone clones acme/zeta",
         ),
         (Candidate("gamma", plugged=False, on_disk=False, on_github=True), "clones acme/gamma"),
         (Candidate("delta", plugged=False, on_disk=True, on_github=False), "CREATES the private"),
@@ -277,119 +276,57 @@ def test_an_error_does_not_end_the_loop():
     ],
 )
 def test_each_row_says_what_its_own_tick_costs(candidate, expected):
-    """The task runs `--ticked ... --yes`, so the quick-pick *is* the confirmation and
-    this line is the last thing anyone reads before a private GitHub repo is created."""
-    assert expected in menu_detail(candidate, "acme")
+    """The task runs `--picks ... --yes`, so the quick-pick *is* the confirmation and
+    this line is the last thing anyone reads before a private GitHub repo is created.
+    A tick flips the row, so the two directions cost wildly different things and the
+    sentence has to name the one THIS row is offering."""
+    assert expected in toggle_detail(candidate, "acme")
 
 
-def test_the_group_label_carries_the_timestamp():
-    """The extension can only read a *file*, so the list is stale by construction and
-    the reader has to be told how stale. A group label draws as a separator row -- the
-    one line in a quick-pick that cannot be ticked, which is why it holds this."""
-    when = dt.datetime(2026, 8, 26, 17, 15, tzinfo=dt.UTC)
-    groups = menu_payload(inventory(REGISTRY, ["alpha"], ["alpha"]), "acme", now=when)
-    assert len(groups) == 1
-    assert "as of " in groups[0]["label"] and "2026-08-26" in groups[0]["label"]
-    assert "ticked = in the workspace registry" in groups[0]["label"]
-
-
-def test_the_boxes_open_ticked_exactly_as_the_registry_stands():
-    """What makes this a checklist rather than a menu: the pick is an *edit* of the live
-    state, so an unchanged pick has to be a no-op. Revert `picked` and every click
-    becomes "retire everything that was already registered"."""
+def test_every_row_carries_the_four_fields_the_quick_pick_splits_on():
+    """`shellCommand.execute` is positional: `value|label|description|detail`, and a
+    field carrying the separator silently becomes two. `picker_rows.row` is what
+    contains that, so this asserts the shape reaches it rather than re-testing it."""
     candidates = inventory(REGISTRY, ["alpha", "beta"], ["alpha", "beta", "gamma"])
-    options = menu_payload(candidates, "acme")[0]["options"]
-    assert {o["value"]: o["picked"] for o in options} == {
-        "alpha": True,
-        "beta": True,
-        "gamma": False,
-    }
+    drawn = rows(candidates, "acme")
+    assert len(drawn) == len(candidates)
+    for line in drawn:
+        assert len(line.split(picker_rows.FIELD_SEP)) == 4
 
 
-def test_every_row_carries_every_field_the_quick_pick_draws():
+def test_the_row_value_is_the_bare_project_name():
+    """The value is the only field that comes back, and it reaches `--picks` as a name
+    `main` looks up in the live candidate set."""
     candidates = inventory(REGISTRY, ["alpha", "beta"], ["alpha", "beta", "gamma"])
-    for option in menu_payload(candidates, "acme")[0]["options"]:
-        assert set(option) == {"value", "label", "description", "detail", "picked"}
-        assert all(isinstance(option[key], str) for key in ("value", "label", "description"))
+    assert [line.split(picker_rows.FIELD_SEP)[0] for line in rows(candidates, "acme")] == [
+        "alpha",
+        "beta",
+        "gamma",
+    ]
 
 
 def test_a_folder_with_no_harness_says_so_in_the_row():
     """The same flag the terminal listing carries, in the only column a quick-pick has
     room for: plugging an unharnessed folder registers a checkout no task can run."""
     candidates = inventory('{"folders": []}', ["delta"], [])
-    (option,) = menu_payload(candidates, "acme")[0]["options"]
-    assert option["description"] == "folder only  (no .devkit.toml)"
+    (line,) = rows(candidates, "acme")
+    assert line.split(picker_rows.FIELD_SEP)[2] == "folder only (no .devkit.toml)"
 
 
-def test_the_menu_survives_a_round_trip_as_the_names_it_offered(tmp_path):
-    """`read_menu` answers the **offered** set rather than the ticked one, which is what
-    lets `--ticked` tell an untick from a row that was never drawn."""
-    path = tmp_path / "plug-menu.json"
-    candidates = inventory(REGISTRY, ["alpha", "beta"], ["alpha", "beta", "gamma"])
-    assert write_menu(menu_payload(candidates, "acme"), path) == path
-    assert read_menu(path) == ["alpha", "beta", "gamma"]
+def test_a_scan_that_found_nothing_draws_a_row_saying_so():
+    """An empty stdout is indistinguishable in the quick-pick from a command that failed
+    or a wrong path, so "nothing to do" is stated as an unpickable-in-effect row whose
+    value `main` recognises."""
+    (line,) = rows([], "acme")
+    assert line.split(picker_rows.FIELD_SEP)[0] == picker_rows.NOTHING
 
 
-def test_the_menu_also_reads_back_which_rows_it_drew_ticked(tmp_path):
-    """The tick state is what `guarded_selection` compares against the live registry, and
-    it is the half of a cached checklist that can be wrong invisibly: a short list is
-    obviously short, a wrong tick looks exactly like a right one."""
-    path = tmp_path / "plug-menu.json"
-    candidates = inventory(REGISTRY, ["alpha", "beta"], ["alpha", "beta", "gamma"])
-    write_menu(menu_payload(candidates, "acme"), path)
-    assert read_ticks(path) == {"alpha", "beta"}
-
-
-def test_missing_or_corrupt_ticks_read_as_no_menu(tmp_path):
-    """None rather than an empty set, on `read_menu`'s reasoning: "nothing was ticked" is
-    a claim that every registered project was deliberately left out."""
-    assert read_ticks(tmp_path / "nothing.json") is None
-    corrupt = tmp_path / "plug-menu.json"
-    corrupt.write_text("[{", encoding="utf-8")
-    assert read_ticks(corrupt) is None
-
-
-def test_a_missing_or_corrupt_menu_reads_as_no_menu(tmp_path):
-    """None rather than [], because an empty offered-set would make every registered
-    project look like a row the reader deliberately left unticked."""
-    assert read_menu(tmp_path / "nothing.json") is None
-    corrupt = tmp_path / "plug-menu.json"
-    corrupt.write_text("[{", encoding="utf-8")
-    assert read_menu(corrupt) is None
-    corrupt.write_text('[{"label": "x"}]', encoding="utf-8")
-    assert read_menu(corrupt) is None
-
-
-def test_a_failed_repo_listing_leaves_the_previous_menu_alone(monkeypatch, tmp_path):
-    """The one refusal worth spelling out. `gather` degrades to the folder half alone
-    when `gh` is unreachable, and a project that is on GitHub then reads as `folder
-    only` -- a row whose detail offers to *create* the repo it already has. A stale menu
-    is a wrong list; that one would be a wrong act."""
-    candidates = inventory(REGISTRY, ["alpha", "beta"], [])
-    monkeypatch.setattr(plug_projects, "gather", lambda: (candidates, ["gh could not list repos"]))
-    path = tmp_path / "plug-menu.json"
-    path.write_text("[]", encoding="utf-8")
-
-    assert refresh_menu(path) is None
-    assert path.read_text(encoding="utf-8") == "[]"
-
-
-def test_the_refresh_never_raises_whatever_the_scan_did(monkeypatch, tmp_path):
-    """`worktree.py reconcile` runs this as a rider every fifteen minutes: a menu that
-    could not be built must never redden a pass that reaped boxes correctly."""
-
-    def explode():
-        raise RuntimeError("the workspace file is a directory today")
-
-    monkeypatch.setattr(plug_projects, "gather", explode)
-    assert refresh_menu(tmp_path / "plug-menu.json") is None
-
-
-def test_a_menu_that_cannot_be_written_is_reported_rather_than_raised(tmp_path):
-    """Same containment one layer down -- `write_menu` is on the rider's path too."""
-    blocked = tmp_path / "plug-menu.json"
-    blocked.mkdir()
-    assert write_menu([], blocked) is None
+def test_the_rows_carry_no_timestamp_because_they_are_not_a_cache():
+    """The file-backed checklist had to say how stale it was, in a group label. A list
+    built when the picker opens has no such claim to make, and a leftover "as of" line
+    would be the most misleading thing on it."""
+    candidates = inventory(REGISTRY, ["alpha"], ["alpha"])
+    assert not any("as of" in line for line in rows(candidates, "acme"))
 
 
 @pytest.mark.parametrize(
@@ -417,86 +354,37 @@ def test_escaping_the_quick_pick_is_recognised_rather_than_parsed():
     assert not picked_nothing("")
 
 
-def test_unticking_an_offered_row_retires_it():
-    assert selection_from_ticks(("alpha",), ["alpha", "beta"], {"alpha", "beta"}) == {"alpha"}
+def test_ticking_a_registered_row_retires_it():
+    assert toggled_selection(("alpha",), {"alpha", "beta"}) == {"beta"}
 
 
-def test_ticking_a_row_that_was_not_registered_adds_it():
-    assert selection_from_ticks(("alpha", "gamma"), ["alpha", "gamma"], {"alpha"}) == {
-        "alpha",
-        "gamma",
-    }
+def test_ticking_an_unregistered_row_adds_it():
+    assert toggled_selection(("gamma",), {"alpha"}) == {"alpha", "gamma"}
 
 
-def test_a_project_registered_since_the_menu_was_written_is_not_retired():
-    """The regression the offered-set exists for. `beta` was registered after the last
-    refresh, so it is absent from the file and therefore absent from the answer --
-    reading the answer as the whole intended registry would unplug it on a click that
-    never mentioned it, and unregistered is invisible to every sweep and to the guard."""
-    assert selection_from_ticks(("alpha",), ["alpha", "gamma"], {"alpha", "beta"}) == {
-        "alpha",
-        "beta",
-    }
+def test_ticking_nothing_changes_nothing():
+    """The property the checklist could not have, and needed a special-cased error to
+    survive: an empty answer there asked to retire the whole registry."""
+    assert toggled_selection((), {"alpha", "beta"}) == {"alpha", "beta"}
 
 
-# --- and the harder half: a row the file DID draw, with the wrong tick ---------------
+def test_a_row_nobody_ticked_is_left_exactly_as_it_is():
+    """The regression the two staleness guards existed for, now a property of the shape.
 
-
-def test_a_row_registered_since_the_file_was_drawn_is_skipped_not_retired():
-    """The failure this guard exists for, and it is silent in the dialog.
-
-    `beta` was on disk but unregistered when the file was written, so it draws unticked.
-    It has been registered since. Leaving it alone -- the ordinary thing to do with a row
-    you have no opinion about -- used to retire it, reverting a registration by a click
-    that never mentioned it.
+    A pick says nothing whatsoever about a row it does not name, so a project registered
+    (or retired) between the scan and the click cannot be reverted by a click that never
+    mentioned it -- there is no `offered` set to subtract it from.
     """
-    selection, skipped = guarded_selection(
-        ("alpha",), ["alpha", "beta"], claimed={"alpha"}, plugged={"alpha", "beta"}
-    )
-    assert selection == {"alpha", "beta"}
-    assert skipped == ["beta"]
+    assert toggled_selection(("alpha",), {"alpha", "beta"}) == {"beta"}
+    assert toggled_selection(("gamma",), {"alpha", "beta"}) == {"alpha", "beta", "gamma"}
 
 
-def test_a_row_unregistered_since_the_file_was_drawn_is_skipped_not_replugged():
-    """The mirror case: `beta` draws ticked because it was registered then, and was
-    unplugged since. Leaving it ticked would put it back."""
-    selection, skipped = guarded_selection(
-        ("alpha", "beta"), ["alpha", "beta"], claimed={"alpha", "beta"}, plugged={"alpha"}
-    )
-    assert selection == {"alpha"}
-    assert skipped == ["beta"]
-
-
-def test_a_row_the_reader_actually_toggled_is_acted_on():
-    """The skip is for rows nobody touched. A toggle is an expressed intent, and the worst
-    it can do against a moved row is ask for the state that row is already in."""
-    selection, skipped = guarded_selection(
-        ("alpha", "beta"), ["alpha", "beta"], claimed={"alpha"}, plugged={"alpha", "beta"}
-    )
-    assert selection == {"alpha", "beta"}
-    assert skipped == []
-
-
-def test_a_fresh_file_decides_every_row_it_drew():
-    """When nothing moved, this is `selection_from_ticks` exactly -- the guard must not
-    cost a correct answer on the ordinary run."""
-    for ticked, offered, plugged in (
-        (("alpha",), ["alpha", "beta"], {"alpha", "beta"}),
-        (("alpha", "gamma"), ["alpha", "gamma"], {"alpha"}),
-    ):
-        selection, skipped = guarded_selection(ticked, offered, plugged, plugged)
-        assert selection == selection_from_ticks(ticked, offered, plugged)
-        assert skipped == []
-
-
-def test_a_row_the_file_never_drew_is_still_left_alone():
-    """`selection_from_ticks`' own guarantee, which this must not lose: a project
-    registered since is absent from the file, so no tick speaks for it either way."""
-    selection, skipped = guarded_selection(
-        ("alpha",), ["alpha", "gamma"], claimed={"alpha"}, plugged={"alpha", "beta"}
-    )
-    assert selection == {"alpha", "beta"}
-    assert skipped == []
+def test_toggling_is_its_own_inverse():
+    """What makes the answer safe to apply against a registry that moved under it: the
+    same pick, applied twice, is the state it started from."""
+    plugged = {"alpha", "beta"}
+    picks = ("alpha", "gamma")
+    assert toggled_selection(picks, toggled_selection(picks, plugged)) == plugged
 
 
 # --- the plan ---------------------------------------------------------------
@@ -862,23 +750,13 @@ def test_a_warning_from_a_missing_gh_does_not_stop_the_listing(monkeypatch, tmp_
 
 
 @pytest.fixture
-def menu_file(monkeypatch, tmp_path):
-    """Point the cached options file somewhere disposable. Both `read_menu` and
-    `write_menu` default at call time, so every caller that passes no path follows."""
-    path = tmp_path / "logs" / "plug-menu.json"
-    monkeypatch.setattr(plug_projects, "MENU_CACHE", path)
-    return path
-
-
-@pytest.fixture
-def ticking(listed, menu_file, monkeypatch):
-    """`--ticked` with the gate open and the registry edit stubbed.
+def ticking(listed, monkeypatch):
+    """`--picks` with the gate open and the registry edit stubbed.
 
     What these tests read is the selection `main` computed from the answer, which is
     the half that decides an unplug -- not the git tree it would otherwise have to
     build to get past `edit_verdict`.
     """
-    write_menu(menu_payload(listed, plug_projects.DEFAULT_OWNER), menu_file)
     monkeypatch.setattr(plug_projects, "edit_verdict", lambda **kwargs: "")
     monkeypatch.setattr(plug_projects, "live_carries_a_hand_edit", lambda path: False)
     monkeypatch.setattr(plug_projects.sweep, "git_for", lambda root: lambda *a, **k: done("main\n"))
@@ -889,102 +767,87 @@ def ticking(listed, menu_file, monkeypatch):
     return applied
 
 
-def test_refreshing_the_menu_writes_a_row_for_every_candidate(listed, menu_file, capsys):
-    assert main(["--refresh-menu"]) == 0
-    assert read_menu(menu_file) == ["alpha", "beta", "gamma"]
-    assert "3 row(s)" in capsys.readouterr().out
+def test_the_rows_are_printed_for_the_quick_pick_to_read(listed, capsys):
+    assert main(["--rows"]) == 0
+    printed = capsys.readouterr().out.splitlines()
+    assert [line.split(picker_rows.FIELD_SEP)[0] for line in printed] == ["alpha", "beta", "gamma"]
 
 
-def test_a_refresh_with_no_repo_listing_refuses_rather_than_writing(monkeypatch, menu_file, capsys):
-    """The CLI half of `refresh_menu`'s refusal, and it exits 2 rather than pretending:
-    the rider swallows the same case silently because it must, but a person who typed
-    the command is owed the reason the menu they are about to pick from is unchanged."""
-    monkeypatch.setattr(plug_projects, "ARTIFACT", menu_file.parent / "plug-projects.log")
+def test_nothing_but_rows_reaches_stdout_on_the_rows_path(monkeypatch, capsys):
+    """stdout *is* the quick-pick, so a `NOTE` line becomes an option somebody can tick.
+
+    A degraded `gh` listing is the case that would produce one, and it draws the refusal
+    as a row instead: `gather` falls back to the folder half alone, which makes every
+    repo that exists read as one to CREATE.
+    """
     candidates = inventory(REGISTRY, ["alpha", "beta"], [])
     monkeypatch.setattr(plug_projects, "gather", lambda: (candidates, ["gh could not list repos"]))
-    menu_file.parent.mkdir(parents=True, exist_ok=True)
-    menu_file.write_text("[]", encoding="utf-8")
 
-    assert main(["--refresh-menu"]) == 2
-    assert "offer to create repos that exist" in capsys.readouterr().out
-    assert menu_file.read_text(encoding="utf-8") == "[]"
+    assert main(["--rows"]) == 0
+    printed = capsys.readouterr().out.splitlines()
+    assert len(printed) == 1
+    assert printed[0].split(picker_rows.FIELD_SEP)[0] == picker_rows.NOTHING
+    assert "GitHub listing failed" in printed[0]
 
 
-def test_the_ticks_are_read_as_an_edit_of_the_registry(ticking, capsys):
-    """`beta` was offered and left unticked, so it is retired -- and nothing else is."""
-    assert main(["--ticked", "alpha", "--yes"]) == 0
-    assert ticking == [Step(plug_projects.UNPLUG, "beta")]
-    assert "unplug  beta" in capsys.readouterr().out
+def test_the_picks_are_read_as_toggles_of_the_live_registry(ticking, capsys):
+    """`alpha` is registered, so ticking it retires it -- and nothing else moves, because
+    a pick says nothing about a row it does not name."""
+    assert main(["--picks", "alpha", "--yes"]) == 0
+    assert ticking == [Step(plug_projects.UNPLUG, "alpha")]
+    assert "unplug  alpha" in capsys.readouterr().out
 
 
 def test_ticking_a_row_that_was_not_registered_plugs_it(ticking):
-    assert main(["--ticked", "alpha,beta,gamma", "--yes"]) == 0
+    assert main(["--picks", "gamma", "--yes"]) == 0
     assert ticking == [Step(plug_projects.PLUG, "gamma", clone=True)]
 
 
-def test_a_project_registered_since_the_menu_was_written_survives_a_click(
-    ticking, menu_file, listed, capsys
-):
-    """The regression, end to end. The file offers alpha and gamma; `beta` was
-    registered afterwards, so no tick could possibly mention it -- and reading the
-    answer as the whole intended registry would retire it without saying so."""
-    stale = [c for c in listed if c.name != "beta"]
-    write_menu(menu_payload(stale, plug_projects.DEFAULT_OWNER), menu_file)
+def test_a_project_registered_since_the_scan_survives_a_click(ticking, capsys):
+    """The regression the two staleness guards existed for, end to end and now free.
 
-    assert main(["--ticked", "alpha", "--yes"]) == 0
-    assert ticking == []
-    assert "nothing to change" in capsys.readouterr().out
+    The scan drew alpha, beta and gamma; the click names only gamma. Under the checklist
+    an untouched row was an assertion about the registry, so a project registered after
+    the file was written could be retired by a click that never mentioned it. A toggle
+    cannot: `beta` is not in the answer, so nothing about it is being said.
+    """
+    assert main(["--picks", "gamma", "--yes"]) == 0
+    assert ticking == [Step(plug_projects.PLUG, "gamma", clone=True)]
+    assert "unplug" not in capsys.readouterr().out
 
 
-def test_a_row_that_has_since_vanished_is_dropped_with_a_note(ticking, menu_file, listed, capsys):
-    """The other direction of the same staleness, and it is only a note: the world moved
-    on after the file was written, but the *other* ticks are still true."""
-    ghost = Candidate("ghost", plugged=False, on_disk=True, on_github=False)
-    write_menu(menu_payload([*listed, ghost], plug_projects.DEFAULT_OWNER), menu_file)
-
-    assert main(["--ticked", "alpha,beta,ghost", "--yes"]) == 0
-    assert ticking == []
+def test_a_name_that_is_no_longer_a_candidate_is_dropped_with_a_note(ticking, capsys):
+    """A row can only have come from the scan a moment ago, so this is a hand-typed
+    `--picks`. A note rather than a failure: the *other* ticks are still true."""
+    assert main(["--picks", "alpha ghost", "--yes"]) == 0
+    assert ticking == [Step(plug_projects.UNPLUG, "alpha")]
     assert "no longer on disk, on GitHub or in the registry: ghost" in capsys.readouterr().out
 
 
-def test_ticking_nothing_is_refused_rather_than_retiring_everything(ticking, capsys):
-    """A quick-pick with every box cleared resolves to the empty string, which reads as
-    a plan to unplug the whole workspace. Nobody means that, and `--unplug NAME` is
-    there for anyone who does."""
-    assert main(["--ticked", "", "--yes"]) == 1
+def test_ticking_nothing_changes_nothing_rather_than_retiring_everything(ticking, capsys):
+    """A quick-pick with every box cleared resolves to the empty string. Under the
+    checklist that read as a plan to unplug the whole workspace and needed an error of
+    its own; a tick is a toggle now, so no ticks is simply no change."""
+    assert main(["--picks", "", "--yes"]) == 0
     assert ticking == []
-    assert "retire the whole registry" in capsys.readouterr().err
+    assert "nothing was picked" in capsys.readouterr().out
 
 
-def test_a_checklist_that_was_never_built_names_the_command_that_builds_it(
-    ticking, menu_file, capsys
-):
-    """`--ticked` cannot be interpreted without the offered set, so a missing file is an
-    error rather than a guess -- guessing here means unplugging."""
-    menu_file.unlink()
-    assert main(["--ticked", "alpha", "--yes"]) == 2
-    assert "--refresh-menu" in capsys.readouterr().err
+def test_the_nothing_row_is_recognised_rather_than_looked_up(ticking, capsys):
+    """A scan with nothing to offer draws `picker_rows.NOTHING`, which is a real value
+    the quick-pick can return. Read as a name it would be a project nobody has."""
+    assert main(["--picks", picker_rows.NOTHING, "--yes"]) == 0
+    assert ticking == []
+    assert "nothing was picked" in capsys.readouterr().out
 
 
 def test_escaping_the_quick_pick_costs_a_line_even_where_the_gate_would_refuse(
-    listed, menu_file, monkeypatch, capsys
+    listed, monkeypatch, capsys
 ):
     """Escape leaves the literal `${input:...}` in the argument, and that is resolved
     before `edit_verdict` on purpose: nothing was picked, so nothing is being published
     and none of the gate's three reasons is about to be true. Move the check below the
     gate and cancelling from a box reports a branch error for a run that did nothing."""
     monkeypatch.setattr(plug_projects, "edit_verdict", lambda **kwargs: "a box may not publish")
-    assert main(["--ticked", "${input:plugSelection}", "--yes"]) == 0
+    assert main(["--picks", "${input:plugSelection}", "--yes"]) == 0
     assert "nothing was picked" in capsys.readouterr().out
-
-
-def test_the_menu_is_rebuilt_after_the_registry_moves(ticking, menu_file, listed):
-    """`reconcile` would fix it within the quarter hour, and a second click inside that
-    window is exactly when someone is most likely to look at rows still pre-ticked from
-    the state this run replaced. The menu starts here as a one-row file, so a run that
-    skipped the rebuild would leave it that way."""
-    one_row = [c for c in listed if c.name == "alpha"]
-    write_menu(menu_payload(one_row, plug_projects.DEFAULT_OWNER), menu_file)
-
-    assert main(["--ticked", "alpha,beta,gamma", "--yes"]) == 0
-    assert read_menu(menu_file) == ["alpha", "beta", "gamma"]

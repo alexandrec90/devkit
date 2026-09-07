@@ -8,9 +8,11 @@ script exists to prevent.
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
+import support
 from support import (
     LIVE_WORKSPACE,
     REPO_ROOT,
@@ -2535,6 +2537,56 @@ def test_a_box_is_told_apart_from_a_checkout_by_the_directory_above_it():
     assert not in_an_ephemeral_box(boxes)  # the boxes directory is not itself a box
     # ...nor is the directory the second tier's worktrees sit in.
     assert not in_an_ephemeral_box(Path("C:/ws/devkit/.claude/worktrees"))
+
+
+@pytest.mark.parametrize(
+    "branch, skipped",
+    [
+        ("agent/plug-picker-0906", True),
+        ("claude/some-task", True),
+        ("codex/some-task", True),
+        ("agent/auto/lint-autofix-0906", True),
+        ("worktree-composed-imagining-harp", True),
+        ("main", False),
+        ("master", False),
+        ("develop", False),
+        ("", False),
+    ],
+)
+def test_the_static_checkout_is_still_pre_merge_while_it_is_on_a_task_branch(
+    tmp_path, monkeypatch, branch, skipped
+):
+    """The other half of `needs_the_static_checkout`, and the half that was missing.
+
+    The marker's reason has always said "after a branch merges", but it asked only where
+    the checkout was -- so a box was skipped and the static checkout on a task branch was
+    not, though both hold a canonical `workspace.jsonc` the live file cannot match yet.
+    Every workspace edit made outside a box therefore ended in a red suite whose first
+    suggested fix deletes the edit.
+
+    The namespaces are `ship.py`'s, not a second list: those are exactly the branches it
+    agrees to ship, so a branch this skips is one that is going to merge.
+    """
+    monkeypatch.setattr(
+        support.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, f"{branch}\n", ""),
+    )
+    assert support.on_a_task_branch(tmp_path) is skipped
+
+
+def test_a_checkout_git_cannot_answer_for_is_not_treated_as_pre_merge(tmp_path, monkeypatch):
+    """False rather than True, so the drift check keeps running where git is unavailable.
+
+    The direction matters: skipping on an error would turn devkit's only gate on live
+    workspace drift off silently, on exactly the machine that gate exists for.
+    """
+
+    def no_git(*a, **k):
+        raise OSError("git is not on PATH")
+
+    monkeypatch.setattr(support.subprocess, "run", no_git)
+    assert support.on_a_task_branch(tmp_path) is False
 
 
 @needs_live_workspace

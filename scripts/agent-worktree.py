@@ -22,7 +22,12 @@ Claude session spawns, so the delete verb can see those too.
 `<workspace>/.worktrees/`, leases it a port and a `COMPOSE_PROJECT_NAME`, provisions its
 toolchain and reaps it on a schedule; `agent-box.py spawn` is still the verb for a
 session that runs a compose stack. What is here is a plain git worktree: no lease, no
-provisioning, no reaper, and nothing to collide with the ports a static checkout holds.
+provisioning and no reaper.
+
+**Port selection belongs to the project's dev server.** New frontend projects receive
+`templates/features/frontend/frontend/src/worktreePort.ts`; its docstring owns the wiring
+and collision handling. Existing projects need to adopt it themselves. This command
+does not configure their server or allocate a port lease.
 The one thing shared is how a terminal tab is opened, which is `agent_box.open_agent` --
 two copies of that would be two answers to "which window does the agent open in".
 

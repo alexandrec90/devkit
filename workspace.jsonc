@@ -329,11 +329,12 @@
 				"problemMatcher": []
 			},
 			{
-				// The checkboxes are VS Code's, not the terminal's: `plugSelection` draws
-				// every candidate as a `multiPick` quick-pick, pre-ticked from the registry,
-				// and this task hands the answer back with `--ticked`. The pick IS the
+				// The checkboxes are VS Code's, not the terminal's: `plugSelection` scans the
+				// three sources when it opens and this task hands the answer back with
+				// `--picks`. A tick FLIPS that project's registry state, so an empty pick is
+				// a no-op rather than a request to retire everything. The pick IS the
 				// confirmation — Escape cancels, every row's second line says what ticking
-				// it costs, and a hazardous untick still refuses — which is what `--yes`
+				// it costs, and a hazardous retirement still refuses — which is what `--yes`
 				// rests on and why no question is asked once the terminal opens.
 				//
 				// Still no `log-wrap.py`, and now for one reason rather than two: the script
@@ -341,7 +342,7 @@
 				// task and the bare CLI, whose checkbox loop log-wrap could not carry
 				// anyway (it pipes stdout by line, so an unfinished prompt never appears).
 				"label": "Workspace: Plug / Unplug Projects",
-				"detail": "Checklist of every project — in the workspace registry, on disk, and on GitHub — ticked as the registry has them. Ticking an unplugged one clones its repo, or creates the repo when only the folder exists; unticking removes it from the registry and touches NOTHING on disk. Edits devkit's workspace.jsonc and republishes the live .code-workspace, so it refuses from a task branch or a box.",
+				"detail": "Every project — in the workspace registry, on disk, and on GitHub — scanned when the picker opens. Ticking FLIPS one: an unregistered project is plugged in (cloning its repo, or creating the repo when only the folder exists), and a registered one is retired from the registry, which touches NOTHING on disk. Tick nothing and nothing changes. Edits devkit's workspace.jsonc and republishes the live .code-workspace, so it refuses from a task branch or a box.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -350,7 +351,7 @@
 					"--",
 					"python",
 					"scripts/plug-projects.py",
-					"--ticked",
+					"--picks",
 					"${input:plugSelection}",
 					"--yes"
 				],
@@ -2285,46 +2286,38 @@
 				"default": "--live"
 			},
 			{
-				// The checkbox list that used to be drawn in a terminal by the script it
-				// feeds. `scripts/plug-projects.py --refresh-menu` writes the options file;
-				// `worktree.py reconcile` rewrites it every fifteen minutes, and so does a
-				// run that changes the registry, because the rows' TICKS are the registry
-				// and a menu whose ticks predate the last edit is wrong in the one way that
-				// matters. `.claude/rules/vscode-tasks.md` carries the general form.
+				// Live, like `previewRow` and `worktreeRow`: `plug-projects.py --rows` reads the
+				// three sources when the picker opens. It used to load `logs/plug-menu.json`,
+				// which only `worktree.py reconcile` wrote -- so it was stale by construction
+				// and froze outright when that pass was stood down.
 				//
-				// `fileFormat: "load"` takes the file as the option groups verbatim, which
-				// is the difference from `previewRow` above: no `__itemIdx__` expression is
-				// evaluated per field, so a row missing one cannot draw ten thousand blank
-				// entries. Python writes the whole structure, each row's `picked` included.
+				// **A tick TOGGLES the row**, where the file-backed list opened pre-ticked and
+				// the ticks were the registry itself. That is forced rather than chosen:
+				// `shellCommand.execute` has exactly four positional fields, `value|label|
+				// description|detail`, and no `picked`. It is also the better contract -- an
+				// absolute answer only means something against the state its rows were drawn
+				// from, which is what made a stale row silently retire a project nobody
+				// mentioned, while a toggle means the same thing whenever it is applied. Each
+				// row's detail line says what ITS tick does, and the terminal loop's `toggle`
+				// verb has always worked this way.
 				//
-				// `clearStorage` is what makes `picked` mean anything. Every `multiPick`
-				// remembers its ticked LABELS in workspace state whether or not
-				// `multiPickStorage` was asked for — that argument only chooses global over
-				// workspace storage — and `pickStringRemember` overwrites each option's own
-				// `picked` with the remembered set whenever it finds one. So without this
-				// flag the second click would open on what was ticked last time rather than
-				// on what is registered now, which for this list is not a stale convenience
-				// but a wrong answer: the ticks ARE the state being edited.
-				//
-				// No `checkEscapedUI`, for the reason spelled out on `previewRow`: it is a
-				// sticky bit nothing clears, so one Escape would retire this dropdown for the
-				// life of the window without buying the cancel its README promises. Escape
-				// here leaves the literal `${input:plugSelection}` in the argument, which
-				// `notify-wrap.py` recognises as a cancel and refuses to run — and which the
-				// script reads as "nothing was picked" if it is reached any other way.
+				// Escape leaves the literal `${input:plugSelection}` in the argument, which
+				// `notify-wrap.py` recognises as a cancel and refuses to run -- and which the
+				// script reads as "nothing was picked" if it is reached any other way. No
+				// `checkEscapedUI`, for the reason spelled out on `previewRow`: it is a sticky
+				// bit nothing clears, so one Escape would retire this dropdown for the life of
+				// the window.
 				"id": "plugSelection",
 				"type": "command",
-				"command": "extension.commandvariable.pickStringRemember",
+				"command": "shellCommand.execute",
 				"args": {
-					"description": "Which projects belong in the workspace registry? Ticked = plugged in. OK applies, Esc cancels.",
-					"key": "plugSelection",
-					"multiPick": true,
-					"clearStorage": true,
-					"separator": ",",
-					"optionGroups": {
-						"fileName": "${workspaceFolder:devkit}/logs/plug-menu.json",
-						"fileFormat": "load"
-					}
+					"command": "python \"${workspaceFolder:devkit}/scripts/plug-projects.py\" --rows",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "Which projects should change? Tick to flip: registered ones retire, the rest are plugged in.",
+					"fieldSeparator": "|",
+					"multiselect": true,
+					"multiselectSeparator": " ",
+					"rememberPrevious": false
 				}
 			}
 		]

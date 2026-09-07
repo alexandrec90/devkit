@@ -1,6 +1,7 @@
 ---
 name: triage-boxes
 description: Clear every stranded ephemeral box -- a HOLD older than a day with no PR, or one cut for a project on hold -- by reading what each holds and either shipping it (`worktree.py rescue --ship`) or deleting it (`worktree.py reap --force`). Ends with zero stranded boxes, not a list for the user.
+disable-model-invocation: true
 argument-hint: 'Optional: a box name to triage first, or `--all` (the default)'
 ---
 

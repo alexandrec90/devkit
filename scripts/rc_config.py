@@ -34,19 +34,25 @@ RC_SETTING = "devkit.remoteControl"
 # reasonable thing for a machine to ask for: a phone has no VS Code tasks, so spawning
 # in place is the only isolation a mobile session gets otherwise.
 #
-# What the opt-in actually costs -- narrower than it looks, so do not over-read it.
-# Claude Code cuts its worktrees under `<repo>/.claude/worktrees/<name>`, *inside* the
-# checkout, and manages their whole lifecycle itself: it offers keep-or-remove on exit,
-# and its retention sweep removes a stale one that is clean, fully pushed, unlocked and
-# carries its own creation marker. So these do not accumulate the way an unmanaged
-# directory would, and the tier needs nothing from `worktree.py`.
+# What the opt-in actually costs. Claude Code cuts its worktrees under
+# `<repo>/.claude/worktrees/<name>`, *inside* the checkout, and manages their lifecycle
+# itself: it offers keep-or-remove on exit, and its retention sweep removes a stale one
+# that is clean, fully pushed, unlocked and carries its own creation marker.
 #
-# What it does not get is the **stack** half: no port lease and no
-# `COMPOSE_PROJECT_NAME`, so two concurrent sessions that each bring a compose stack up
-# will collide on both. That is the whole of it -- irrelevant to a session that only
-# edits code and ships, decisive for one that runs the stack, which is why the default
-# stays `same-dir` and a project that needs isolation-with-services uses
-# `worktree.py new` instead.
+# **Those conditions are narrow, and in practice these do accumulate.** This comment
+# claimed the opposite until the machine was counted: thirteen of them under one
+# checkout, six with their work long merged, four `locked` -- and a locked worktree is
+# one the retention sweep will never touch. A session that ends without answering
+# keep-or-remove leaves one behind, and nothing else is looking. `agent-worktree.py
+# remove` is the verb, from the *Agent: Delete Worktrees* task; there is no reaper for
+# this tier and it is not `worktree.py`'s job to grow one.
+#
+# The other half it does not get is the **stack**: no port lease and no
+# `COMPOSE_PROJECT_NAME`, so two concurrent sessions that each serve anything will
+# collide on both -- a compose stack, and equally a `npm run dev` on the checkout's one
+# conventional port. Irrelevant to a session that only edits code and ships, decisive for
+# one that runs the app, which is why the default stays `same-dir` and a project that
+# needs isolation-with-services uses `worktree.py new` instead.
 #
 # The consuming project must also gitignore `.claude/worktrees/`, or the nested checkout
 # is untracked in every `git status` and reads as `holds_uncommitted` to anything that

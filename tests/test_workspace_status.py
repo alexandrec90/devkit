@@ -158,13 +158,12 @@ def test_a_failure_anywhere_still_exits_zero(tmp_path, monkeypatch):
 def _workspace_reporting(monkeypatch, tmp_path, message: str) -> None:
     """Point `main` at a workspace whose whole report is `message`.
 
-    `main` composes three parts, so all three have to be answered here or the promise in
-    that first line is false: `render`, `toolchain_lines`, and the plug checklist. The
-    last one is stubbed at `refresh_plug_menu` rather than at `plug_menu_line` because
-    that call is a *write* -- unstubbed it rebuilds the real workstation's menu from
-    whatever `gh` says, which is a side effect no test here asked for, and on a machine
-    where `gh` cannot be reached it returns "" and `plug_menu_line` adds a warning to a
-    report this fixture said was empty. That is how it reads on CI and not here.
+    `main` composes two parts, so both have to be answered here or the promise in that
+    first line is false: `render` and `toolchain_lines`. There used to be a third -- this
+    pass rebuilt the plug/unplug checklist as a side effect, and it had to be stubbed at
+    the *write* rather than at the line about it, or a run would rewrite the real
+    workstation's menu from whatever `gh` said. That dropdown scans when it opens now, so
+    the pass has no side effect left to contain.
     """
     workspace = tmp_path / "w.code-workspace"
     workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
@@ -172,7 +171,6 @@ def _workspace_reporting(monkeypatch, tmp_path, message: str) -> None:
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: [])
     monkeypatch.setattr(ws, "render", lambda *a, **k: message)
     monkeypatch.setattr(ws, "toolchain_lines", lambda *a, **k: [])
-    monkeypatch.setattr(ws.worktree, "refresh_plug_menu", lambda **k: "logs/plug-menu.json")
 
 
 def test_a_toast_is_raised_only_when_there_is_something_to_say(monkeypatch, tmp_path):
@@ -552,45 +550,35 @@ def test_the_preview_line_reaches_the_rendered_message():
     assert "2 host UI preview server(s)" in line
 
 
-# --- the plug/unplug checklist, which this pass is now the writer of ----------------
+# --- the plug/unplug checklist, which this pass no longer writes --------------------
 
 
-def test_a_rebuilt_checklist_says_nothing():
-    """This file's discipline is that a line means something needs doing, and a rebuild
-    that worked is not news."""
-    assert ws.plug_menu_line("C:/logs/plug-menu.json") == ""
+def test_this_pass_writes_no_dropdown_file():
+    """It briefly was the plug checklist's writer, because that dropdown loaded a cached
+    file and `worktree.reconcile` -- the previous writer -- had been stood down. The
+    dropdown runs `plug-projects.py --rows` when it opens now, so both the rebuild and
+    the line reporting it are gone.
+
+    Asserted rather than left to rot: the side effect was the reason this module's own
+    fixtures had to stub a `gh`-shelling write, and a revert would silently start
+    rewriting the developer's real menu from a test's fixture registry.
+    """
+    assert not hasattr(ws, "plug_menu_line")
+    assert not hasattr(ws.worktree, "refresh_plug_menu")
 
 
-def test_a_checklist_that_could_not_be_rebuilt_warns_and_names_the_fix():
-    """It is the one dropdown still reading a cached file, and its rows open PRE-TICKED
-    from the registry -- so a file nothing rewrote is a checklist whose ticks claim a
-    live state they no longer have. Nothing else writes it since the scheduled pass was
-    stood down, which makes silence here the only symptom."""
-    line = ws.plug_menu_line("")
-    assert "not rebuilt" in line
-    assert "--refresh-menu" in line
-
-
-def test_the_checklist_line_is_prefixed_outside_render(monkeypatch, capsys, tmp_path):
-    """It rides beside `toolchain`, prefixed in `main`, because `render` is already eight
-    parameters past its limit and says so in its own comment. The rebuild is the side
-    effect of that call, which is why the stub records having been asked."""
-    asked: list = []
-    monkeypatch.setattr(
-        ws.worktree, "refresh_plug_menu", lambda *, apply: asked.append(apply) or ""
-    )
+def test_the_report_is_toolchain_and_render_and_nothing_else(monkeypatch, capsys, tmp_path):
+    """The composition `main` now makes. A leftover checklist warning would appear here
+    as a third line on a pass that has nothing to say."""
     workspace = tmp_path / "w.code-workspace"
     workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
     monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: [])
     monkeypatch.setattr(ws, "toolchain_lines", lambda **k: [])
+    monkeypatch.setattr(ws, "render", lambda *a, **k: "")
 
     assert ws.main([]) == 0
-
-    assert asked == [True], "the checklist was not rebuilt by this pass"
-    assert (
-        "[workspace] [warn] the Plug / Unplug checklist was not rebuilt" in capsys.readouterr().out
-    )
+    assert "checklist" not in capsys.readouterr().out
 
 
 # --- the guard that is wired outside every repo -------------------------------
