@@ -1459,6 +1459,80 @@ def test_the_structure_baseline_reader_drops_comments_and_blank_lines(tmp_path):
     assert sh.read_structure_baseline(tmp_path) == ["file_lines::src/a.py = 900"]
 
 
+# --- tightening: the seed's mirror, on every pull after the first ----------------
+# A release that shrinks a vendored module, or stops scanning vendored paths at all,
+# leaves an adopted baseline holding lines its code no longer earns, and the vendored
+# stale-line test reddens the adoption PR on files the consumer never edited. v0.11.13,
+# v0.11.14 and v0.11.15 were each re-tightened by hand in the consumers.
+
+
+def test_structure_tightening_drops_a_line_the_code_no_longer_earns(tmp_path):
+    root = _structure_project(tmp_path)
+    _seed(
+        root,
+        sh.STRUCTURE_BASELINE_FILE,
+        "suppressions::src/gone.py = 1\nsuppressions::src/main.py = 1\n",
+    )
+    assert sh.tighten_structure_baseline(root) == (1, 0)
+    assert sh.read_structure_baseline(root) == ["suppressions::src/main.py = 1"]
+
+
+def test_structure_tightening_lowers_a_value_that_shrank(tmp_path):
+    root = _structure_project(tmp_path)
+    _seed(root, sh.STRUCTURE_BASELINE_FILE, "suppressions::src/main.py = 3\n")
+    assert sh.tighten_structure_baseline(root) == (0, 1)
+    assert sh.read_structure_baseline(root) == ["suppressions::src/main.py = 1"]
+
+
+def test_structure_tightening_leaves_an_exact_baseline_alone(tmp_path):
+    root = _structure_project(tmp_path)
+    _seed(root, sh.STRUCTURE_BASELINE_FILE, "suppressions::src/main.py = 1\n")
+    assert sh.tighten_structure_baseline(root) == (0, 0)
+    assert (root / sh.STRUCTURE_BASELINE_FILE).read_text(encoding="utf-8") == (
+        "suppressions::src/main.py = 1\n"
+    )
+
+
+def test_structure_tightening_is_skipped_before_adoption(tmp_path):
+    """No baseline means the seed's turn, not the tightener's; it must not create one."""
+    root = _structure_project(tmp_path)
+    assert sh.tighten_structure_baseline(root) is None
+    assert not (root / sh.STRUCTURE_BASELINE_FILE).exists()
+
+
+def test_structure_tightening_is_skipped_when_the_checker_was_not_vendored(tmp_path):
+    _seed(tmp_path, ".devkit.toml", "")
+    _seed(tmp_path, sh.STRUCTURE_BASELINE_FILE, "suppressions::src/gone.py = 1\n")
+    assert sh.tighten_structure_baseline(tmp_path) is None
+    assert sh.read_structure_baseline(tmp_path) == ["suppressions::src/gone.py = 1"]
+
+
+def test_a_checker_that_crashes_reports_no_tightening(tmp_path):
+    root = _structure_project(tmp_path)
+    _seed(root, sh.STRUCTURE_BASELINE_FILE, "suppressions::src/gone.py = 1\n")
+    _seed(root, STRUCTURE_CHECKER, "raise SystemExit(3)\n")
+    assert sh.tighten_structure_baseline(root) is None
+
+
+def test_structure_tightening_still_drops_when_the_project_has_new_debt_of_its_own(tmp_path):
+    """`--tighten` judges after it rewrites, so a consumer whose own code got worse
+    sees exit 1 from the checker. The stale lines are still gone -- that debt is the
+    gate's to report, not a reason to leave devkit's numbers in the file."""
+    root = _structure_project(tmp_path)
+    _seed(root, sh.STRUCTURE_BASELINE_FILE, "suppressions::src/gone.py = 1\n")
+    assert sh.tighten_structure_baseline(root) == (1, 0)
+    assert sh.read_structure_baseline(root) == []
+
+
+def test_structure_baseline_values_parse_only_finding_lines(tmp_path):
+    _seed(
+        tmp_path,
+        sh.STRUCTURE_BASELINE_FILE,
+        "# header\n\nfile_lines::src/a.py = 900\nnot a finding\nsuppressions::src/b.py = x\n",
+    )
+    assert sh.structure_baseline_values(tmp_path) == {"file_lines::src/a.py": 900}
+
+
 def test_the_structure_baseline_is_not_vendored():
     assert sh.STRUCTURE_BASELINE_FILE not in sh.MANIFEST
     assert STRUCTURE_CHECKER in sh.MANIFEST
@@ -1492,6 +1566,42 @@ def test_a_second_pull_does_not_say_it_again(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
     assert "untested-symbol ratchet" not in capsys.readouterr().out
+
+
+def test_pull_tightens_an_adopted_structure_baseline_and_says_so(tmp_path, monkeypatch, capsys):
+    """End to end, because the ordering is the part that can go wrong: the tighten runs
+    the checker the same pull just copied in, after the stamp that tells it which paths
+    are vendored, and only when there was no seed to make the file exact already."""
+    src, dst = tmp_path / "shared", tmp_path / "proj"
+    _seed(src, "scripts/x.py", "v1")
+    _structure_project(dst)
+    _seed(
+        dst,
+        sh.STRUCTURE_BASELINE_FILE,
+        "suppressions::src/gone.py = 1\nsuppressions::src/main.py = 1\n",
+    )
+    monkeypatch.setattr(sh, "REPO_ROOT", dst)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "git_head", lambda p: "abc1234")
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
+    out = capsys.readouterr().out
+    assert "(tightened the structure ratchet)" in out
+    assert "dropped 1 line(s)" in out
+    assert sh.read_structure_baseline(dst) == ["suppressions::src/main.py = 1"]
+
+
+def test_a_pull_with_nothing_to_tighten_says_nothing(tmp_path, monkeypatch, capsys):
+    """An exact baseline is the ordinary case; naming a rewrite that did not happen
+    would read as the pull touching a project-owned file it left alone."""
+    src, dst = tmp_path / "shared", tmp_path / "proj"
+    _seed(src, "scripts/x.py", "v1")
+    _structure_project(dst)
+    _seed(dst, sh.STRUCTURE_BASELINE_FILE, "suppressions::src/main.py = 1\n")
+    monkeypatch.setattr(sh, "REPO_ROOT", dst)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "git_head", lambda p: "abc1234")
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
+    assert "tightened the structure ratchet" not in capsys.readouterr().out
 
 
 # --- the settings pass, from the two modes that drive it ----------------------
