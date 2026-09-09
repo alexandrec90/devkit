@@ -46,9 +46,11 @@ repos:
 
       - id: devkit-push-gate
         name: the PR gate, before the push
-        # The same three commands `.github/workflows/pr-gate.yml`'s test job runs, in
-        # its order, stopping at the first failure. `SKIP=devkit-push-gate git push` is
-        # the bypass for a deliberate WIP push.
+        # Three of the commands `.github/workflows/pr-gate.yml`'s test job runs, lint
+        # first because it auto-fixes, stopping at the first failure. Not all of them:
+        # `tests/test_gate_parity.py` holds every remaining difference to a written
+        # reason, so what this hook skips is a decision rather than an oversight.
+        # `SKIP=devkit-push-gate git push` is the bypass for a deliberate WIP push.
         entry: scripts/precommit/run_push_gate.py
         language: script
         stages: [pre-push]

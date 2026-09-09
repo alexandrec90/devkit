@@ -8,12 +8,23 @@ instead of from a workflow artifact ten minutes after it. It exists because the 
 between the two was the routine way a green commit became a red PR: nothing between a
 commit and the runner ever ran mypy or a test.
 
-Three steps, in CI's order, stopping at the first failure so each wrapper's artifact is
+Three of the commands CI runs, stopping at the first failure so each wrapper's artifact is
 the one still on disk when the push is refused:
 
   1. `scripts/lint-all.py` -- ruff, mypy, whatever else the project's copy runs
   2. `scripts/run-tests.py` -- the application suite
   3. `pytest scripts/hooks/tests/` -- the vendored harness tier
+
+Lint is first because it auto-fixes: anything that can rewrite a file has to come after
+it, or the later step reports clean on what the earlier one just repaired. The two test
+tiers' order is free, and is deliberately not CI's -- the gate stops at the first failure,
+so running the application suite second keeps `logs/test-failures.log` the artifact the
+refusal points at, while CI (which has no such stop) runs the fast vendored tier first so
+a broken harness still reports when the application suite is red.
+
+What the gate does *not* reproduce is not a judgement call left to the reader:
+`tests/test_gate_parity.py` reads `.github/workflows/pr-gate.yml` and fails on any `run:`
+step that neither matches a step here nor carries a written reason for the difference.
 
 Each step is skipped, out loud, when the project does not have the file it needs: the
 wrappers are project-owned (`.claude/rules/engineering.md`, "a missing one is a silent
