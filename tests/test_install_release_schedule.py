@@ -197,33 +197,15 @@ def test_an_invalid_time_is_rejected(at):
 # --- --check -------------------------------------------------------------------
 
 
-def test_a_task_pointing_at_another_checkout_is_drift():
+def test_a_task_pointing_at_another_checkout_is_drift(monkeypatch):
     """The failure `--check` exists for: the checkout moved, and the schedule has been
     running something else -- or nothing -- ever since."""
-    reason = sched.drifted(
-        r"C:\py\pythonw.exe C:\old\devkit\scripts\release-pipeline.py", a_schedule()
+    monkeypatch.setattr(sched, "WINDOWS", True)
+    moved = sched.task_document(a_schedule(root=Path(r"C:\old\devkit")))
+    code, message = sched.run_check(
+        a_schedule(), runner=lambda argv: subprocess.CompletedProcess(list(argv), 0, moved, "")
     )
-    assert "not this checkout" in reason
-
-
-def test_a_task_pointing_here_is_not_drift():
-    registered = f"{WINDOWS_PYTHON} {a_schedule().script} --if-needed --yes"
-    assert sched.drifted(registered, a_schedule()) == ""
-
-
-def test_nothing_registered_is_reported_as_such():
-    assert sched.drifted("", a_schedule()) == "nothing is scheduled"
-
-
-@pytest.mark.parametrize("label", ["Task To Run", "TÂCHE À EXÉCUTER"])
-def test_the_command_is_read_out_of_either_locale(label):
-    """This machine's `schtasks` answers in French often enough to matter."""
-    stdout = f"Folder: \\\n{label}: C:\\py\\pythonw.exe run.py\nStatus: Ready\n"
-    assert sched.registered_command(stdout) == r"C:\py\pythonw.exe run.py"
-
-
-def test_a_query_that_reports_nothing_yields_no_command():
-    assert sched.registered_command("Status: Ready\n") == ""
+    assert code == 1 and r"C:\old" in message
 
 
 def test_check_fails_when_the_query_fails(monkeypatch):
@@ -233,18 +215,28 @@ def test_check_fails_when_the_query_fails(monkeypatch):
         runner=lambda argv: subprocess.CompletedProcess(list(argv), 1, "", "not found"),
     )
     assert code == 1
-    assert "--yes" in message
+    assert "nothing is scheduled" in message and "--yes" in message
 
 
 def test_check_passes_when_the_registered_task_is_this_one(monkeypatch):
+    """The document `--yes` registers is the document `--check` compares against: the
+    two cannot disagree about the nesting this file's docstring is about."""
     monkeypatch.setattr(sched, "WINDOWS", True)
-    stdout = f"Task To Run: {WINDOWS_PYTHON} {a_schedule().script} --if-needed --yes\n"
+    document = sched.task_document(a_schedule())
     code, message = sched.run_check(
         a_schedule(),
-        runner=lambda argv: subprocess.CompletedProcess(list(argv), 0, stdout, ""),
+        runner=lambda argv: subprocess.CompletedProcess(list(argv), 0, document, ""),
     )
     assert code == 0
     assert sched.TASK_NAME in message
+
+
+def test_check_off_windows_has_nothing_to_query(monkeypatch):
+    monkeypatch.setattr(sched, "WINDOWS", False)
+    code, _message = sched.run_check(
+        a_schedule(), runner=lambda argv: subprocess.CompletedProcess(list(argv), 1, "", "")
+    )
+    assert code == 0
 
 
 # --- the plan, and the refusals ------------------------------------------------
@@ -349,15 +341,6 @@ def test_a_checkout_with_no_workspace_beside_it_passes_no_flag():
     assert "--workspace" in sched.release_arguments(
         WINDOWS_PYTHON, REPO_ROOT, "somewhere/alex.code-workspace"
     )
-
-
-def test_the_query_asks_for_the_verbose_list_the_parser_reads():
-    """`registered_command` reads a `Task To Run:` line, which only `/V` prints and only
-    `/FO LIST` prints one-per-line. Drop either and the query still succeeds, reports no
-    command, and `--check` calls a correctly registered task drift."""
-    argv = sched.query_argv("devkit-release")
-    assert argv[:4] == ["schtasks", "/Query", "/TN", "devkit-release"]
-    assert "/V" in argv and argv[argv.index("/FO") + 1] == "LIST"
 
 
 def test_the_runner_captures_output_and_leaves_a_failure_to_the_caller():

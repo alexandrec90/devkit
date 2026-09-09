@@ -386,6 +386,7 @@ python scripts/harness-switch.py                       # what is off right now
 python scripts/harness-switch.py --off                 # hooks, instructions and jobs
 python scripts/harness-switch.py --off --group hooks   # one group at a time
 python scripts/harness-switch.py --on --group instructions
+python scripts/harness-switch.py --off --job devkit-tray  # one scheduled job, from any group
 ```
 
 | Group | What it stands down | How |
@@ -395,8 +396,10 @@ python scripts/harness-switch.py --on --group instructions
 | `jobs` | `devkit-worktree-reconcile`, `devkit-upgrade-projects`, `devkit-release` | `schtasks /Change /DISABLE` |
 
 Nothing is deleted: files are held and restored byte for byte, jobs are disabled rather
-than unregistered, and `--on` is the inverse of `--off`. Skills are never touched — they
-cost nothing until a session invokes one by name.
+than unregistered, and `--on` is the inverse of `--off`. A job stood down by name or by
+group is recorded in the ledger, and its installer registers it *disabled* from then on,
+so the nightly `devkit-installers` pass keeps it registered without ever starting it.
+Skills are never touched — they cost nothing until a session invokes one by name.
 
 With the branch tier off, `scripts/agent-box.py` is what cuts, runs, ships and destroys a
 box on purpose. It is one verb per workspace task, and the tasks are the intended way in:
@@ -581,6 +584,7 @@ runner here that outlives a session, a reboot and a closed editor:
 ```bash
 python scripts/install-reconcile-task.py --yes      # every 15 minutes
 python scripts/install-reconcile-task.py --status   # what is installed, and whether it runs
+python scripts/install-reconcile-task.py --check    # is it the task this checkout would register
 python scripts/install-reconcile-task.py --uninstall --yes
 ```
 
@@ -649,7 +653,47 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-rc-servers` | `scripts/install-rc-schedule.py` | every 15 min | `logs/rc-servers.log` |
 | `devkit-reap-stale` | `scripts/install-reap-schedule.py` | every 15 min | `logs/reap-stale.log` |
 | `devkit-tray` | `scripts/install-tray.py` | at logon, resident | `logs/tray.log` |
+| `devkit-installers` | `scripts/install-installers-schedule.py` | daily 08:45, and at logon | `logs/installers.log` |
 | `devkit-workspace-status` | `scripts/install-workspace-status.py` | daily 09:00 | `logs/scheduled-workspace-status.log` |
+
+#### The one installer you run by hand
+
+Nobody remembers to run ten installers, and for a while nothing could even say which
+ones had been run: `schedule_health.py` reads the scheduler, so a job that was **never
+registered** was invisible to it, and two of the jobs above had been missing for weeks on
+the workstation that runs them. `scripts/installers.py` is the pass that closes that. It
+asks every `scripts/install-*.py` the one question they all answer — `--check`, exit 0
+current, 1 needs (re)installing, 2 left alone — and in `maintain` mode runs `--yes` on
+each that answered 1: a job never installed, a checkout that moved, an installer that
+gained a flag, a task disabled by nobody. `devkit-installers` runs it daily and two
+minutes after every logon, so registering *that* job is the only install a machine ever
+needs done by hand:
+
+```bash
+python scripts/install-installers-schedule.py --yes   # once per machine
+python scripts/installers.py                          # what is current, stale, or left alone
+```
+
+Two things it deliberately does not decide. A job stood down with `harness-switch.py
+--off --job <name>` is registered **disabled** by its own installer, which is what its
+`--check` then expects to find, so `--on` never needs an install and the pass never
+enables anything. And `install-git-policy.py` answers "nothing installed here" with exit
+2 and is left there: rewriting global git config on a machine that never opted in is a
+decision, not maintenance.
+
+An option an installer should keep — `--merge` on the reconcile pass — is remembered by
+nothing but the registered task, so a re-register from defaults would silently drop it.
+Put it in the workspace file's `settings` as `devkit.installers`, keyed by installer file
+name; the pass passes it to that installer's `--check` and `--yes` alike:
+
+```jsonc
+"devkit.installers": { "install-reconcile-task.py": ["--merge"] }
+```
+
+`tests/test_installer_contract.py` holds every installer to the contract the pass relies
+on — found by name, answers `--check` and `--yes`, names its group, checks through
+`devkit_schtasks.run_check`, consults the ledger, and has a row in the table above — so a
+new installer joins the pass by existing, and one that cannot be driven fails the suite.
 
 The last of those is the workspace's own health report, and it is a scheduled job for a
 reason worth knowing before you move it: `workspace-status.py` was written as a
@@ -664,7 +708,9 @@ report, so a healthy workspace is silent.
 The first three are the branch-delivery half, and are the ones
 `scripts/harness-switch.py --off --group jobs` disables: they exist to move agent
 branches along. The rest are machine maintenance and are left running, because stopping
-the vacuum cleaner is not part of stopping cooking.
+the vacuum cleaner is not part of stopping cooking. Any one of them can still be stood
+down by name — `--off --job devkit-tray` — and every installer declares which half it is
+in (`GROUP`), which is what the switch's list is held to.
 
 `scripts/schedule_health.py` answers the question no artifact can — *did it run at all*
 — and names the file above when one exits non-zero, so the reported line is a

@@ -139,38 +139,11 @@ def test_installing_off_windows_prints_the_line_rather_than_faking_it(monkeypatc
 # --- drift ------------------------------------------------------------------
 
 
-def test_a_query_that_names_this_checkout_is_healthy():
-    registered = r"C:\py\pythonw.exe C:\ws\devkit\scripts\rc-servers.py maintain"
-    assert installer.drifted(registered, schedule()) == ""
-
-
-def test_nothing_registered_is_named_as_such():
-    assert installer.drifted("", schedule()) == "nothing is scheduled"
-
-
-def test_a_task_pointing_somewhere_else_is_drift():
-    """The failure this mode exists for: a checkout that moved leaves a task running
-    something else, or nothing, while `schtasks` still reports it as present."""
-    reason = installer.drifted(
-        r"C:\py\pythonw.exe C:\old\devkit\scripts\rc-servers.py maintain", schedule()
-    )
-    assert "not this checkout" in reason
-
-
-def test_a_differing_interpreter_alone_is_not_drift():
-    """A venv rebuilt or a Python upgraded in place changes the interpreter and nothing
-    that matters. Rewriting the task over it would be noise."""
-    registered = r"C:\other\pythonw.exe C:\ws\devkit\scripts\rc-servers.py maintain"
-    assert installer.drifted(registered, schedule()) == ""
-
-
-def test_the_command_is_read_out_of_the_query_output():
-    stdout = "Folder: \\\nTaskName:     \\devkit-rc-servers\nTask To Run:  C:\\py\\pythonw.exe C:\\x.py\n"
-    assert installer.registered_command(stdout) == r"C:\py\pythonw.exe C:\x.py"
-
-
-def test_a_query_with_no_such_line_reports_nothing_registered():
-    assert installer.registered_command("TaskName: \\devkit-rc-servers\n") == ""
+def test_check_is_green_when_the_scheduler_holds_this_document(monkeypatch):
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    document = installer.task_document(schedule())
+    code, message = installer.run_check(schedule(), runner=lambda argv: completed(document))
+    assert code == 0 and installer.TASK_NAME in message
 
 
 def test_check_is_red_when_the_task_is_missing(monkeypatch):
@@ -179,21 +152,23 @@ def test_check_is_red_when_the_task_is_missing(monkeypatch):
     assert code == 1 and "nothing is scheduled" in message
 
 
-def test_check_is_green_when_it_points_here(monkeypatch):
+def test_a_task_pointing_somewhere_else_is_drift(monkeypatch):
+    """The failure this mode exists for: a checkout that moved leaves a task running
+    something else, or nothing, while `schtasks` still reports it as present."""
     monkeypatch.setattr(installer, "WINDOWS", True)
-    stdout = "Task To Run:  C:\\py\\pythonw.exe C:\\ws\\devkit\\scripts\\rc-servers.py maintain\n"
-    code, message = installer.run_check(schedule(), runner=lambda argv: completed(stdout))
-    assert code == 0 and installer.TASK_NAME in message
+    moved = installer.task_document(
+        installer.Schedule(installer.TASK_NAME, r"C:\py\pythonw.exe", r"C:\old\rc-servers.py", 15)
+    )
+    code, message = installer.run_check(schedule(), runner=lambda argv: completed(moved))
+    assert code == 1 and r"C:\old" in message
+
+
+def test_check_off_windows_has_nothing_to_query(monkeypatch):
+    monkeypatch.setattr(installer, "WINDOWS", False)
+    assert installer.run_check(schedule(), runner=lambda argv: completed(returncode=1))[0] == 0
 
 
 # --- the three modes --------------------------------------------------------
-
-
-def test_query_argv_asks_for_the_verbose_list_the_parser_reads():
-    """`registered_command` looks for a `Task To Run:` label, which only `/V` prints."""
-    argv = installer.query_argv()
-    assert argv[:2] == ["schtasks", "/Query"]
-    assert "/V" in argv and argv[argv.index("/TN") + 1] == installer.TASK_NAME
 
 
 def test_run_command_captures_rather_than_streaming():

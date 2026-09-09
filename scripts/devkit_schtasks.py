@@ -42,15 +42,25 @@ already handles.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, unescape
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
 
 TASK_NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+
+# The exit codes every installer's `--check` answers with, and the only thing
+# `installers.py` reads off one. `install-git-policy.py` spelled the contract first and
+# `policy_runtime.py` carries its own copy of these three names; a job installer gets them
+# from here so the two cannot drift apart.
+CHECK_CURRENT = 0
+CHECK_STALE = 1
+CHECK_LEFT_ALONE = 2
 
 # An hour is generous for either job and finite, which is the point. The default is
 # three days, and `MultipleInstancesPolicy=IgnoreNew` means a single wedged run
@@ -302,6 +312,134 @@ def write_task_file(xml: str, directory: Path | None = None) -> Path:
     target = Path(directory or tempfile.gettempdir()) / "devkit-task.xml"
     target.write_text(xml, encoding="utf-16")
     return target
+
+
+# --- the check every installer answers -------------------------------------------
+#
+# Six installers each carried a `registered_command` that parsed `schtasks /Query /FO
+# LIST /V` for a `Task To Run:` label (in two languages) and a `drifted` that asked one
+# question of it: does the registered line still contain this checkout's script path.
+# Four more had no check at all, only `--status`, which printed the scheduler's table and
+# exited with whatever `schtasks` did. Nothing could drive all ten the same way, so the
+# pass that keeps them current (`installers.py`) had nothing to drive.
+#
+# One implementation, and it compares documents rather than lines: `schtasks /Query /XML`
+# returns the task as it was registered, and `task_xml` is the task as the installer would
+# register it now, so the check is the three fields of that document a re-register would
+# change. Deliberately including the interpreter, which the old copies excused as noise:
+# `scripts/CLAUDE.md` says the interpreter is part of "which checkout", and the venv
+# trampoline `schedule_health.virtualenv_interpreter` reports is exactly a task whose
+# interpreter drifted. A re-register from the installer is the fix for that, so the check
+# has to see it.
+
+
+@dataclass(frozen=True)
+class Registration:
+    """The three fields of a task document a re-register can change."""
+
+    command: str
+    arguments: str
+    enabled: bool
+
+
+# Three fields out of a document that has exactly one shape -- `task_xml`'s, which is
+# also what `schtasks /Query /XML` hands back for a task registered from it. A regex over
+# that shape rather than an XML parser, for two reasons that point the same way: the
+# parser refuses the `str` the pipe delivers (a UTF-16 declaration over 8-bit bytes, with
+# CRCRLF line endings), and `xml.etree` on text a subprocess handed back is the thing
+# ruff's S314 exists to flag. The `<Enabled>` that matters is the one under `<Settings>`;
+# every trigger carries one too.
+_EXEC = re.compile(r"<Exec>(.*?)</Exec>", re.S)
+_SETTINGS = re.compile(r"<Settings>(.*?)</Settings>", re.S)
+_ENTITIES = {"&quot;": '"', "&apos;": "'"}
+
+
+def _field(block: str, tag: str) -> str | None:
+    """The text of `<tag>` inside `block`, entities decoded; None when it is absent."""
+    match = re.search(rf"<{tag}>(.*?)</{tag}>", block, re.S)
+    return None if match is None else unescape(match.group(1), _ENTITIES)
+
+
+def parse_task(text: str) -> Registration | None:
+    """`text` -- a task document, ours or the scheduler's -- as a `Registration`.
+
+    None for anything that is not a task document: the `ERROR: The system cannot find
+    the file specified.` a query for an unregistered task prints, an empty pipe, a
+    localised message. Every one of those means "nothing is registered as this", which
+    is what the caller reports for None.
+    """
+    action = _EXEC.search(text)
+    if action is None:
+        return None
+    command = _field(action.group(1), "Command")
+    if not command or not command.strip():
+        return None
+    arguments = _field(action.group(1), "Arguments") or ""
+    settings = _SETTINGS.search(text)
+    enabled = (_field(settings.group(1), "Enabled") if settings else None) or "true"
+    return Registration(command.strip(), arguments.strip(), enabled.strip().lower() == "true")
+
+
+def query_xml_argv(name: str) -> list[str]:
+    """The query `run_check` makes. `/XML` rather than `/FO LIST /V` because the
+    document is locale-neutral and separates the command from its arguments, which the
+    `Task To Run:` line joins back together with a space and truncates."""
+    return ["schtasks", "/Query", "/TN", name, "/XML"]
+
+
+def _same_path(left: str, right: str) -> bool:
+    """Windows hands back whatever case a path was registered with."""
+    return left.strip().strip('"').lower() == right.strip().strip('"').lower()
+
+
+def drift(registered: Registration | None, expected: Registration) -> list[str]:
+    """Why the registered task is not the one the installer would register now; [] when
+    it is.
+
+    Every reason is a thing `--yes` changes, so the list is exactly the set of repairs
+    a re-register makes -- which is what lets `installers.py` run one without reading
+    this. Enablement is compared because it is in the document: an installer registers a
+    stood-down job disabled and an ordinary one enabled, so a job that is disabled with
+    nobody having stood it down (the 471-missed-runs incident) is drift, and so is one
+    somebody re-enabled by hand while the ledger still says off.
+    """
+    if registered is None:
+        return ["nothing is scheduled"]
+    reasons: list[str] = []
+    if not _same_path(registered.command, expected.command):
+        reasons.append(f"runs `{registered.command}`, not `{expected.command}`")
+    if " ".join(registered.arguments.split()) != " ".join(expected.arguments.split()):
+        reasons.append(f"runs with `{registered.arguments}`, not `{expected.arguments}`")
+    if registered.enabled != expected.enabled:
+        reasons.append(
+            "is disabled, and nobody stood it down"
+            if expected.enabled
+            else "is enabled, and it was stood down"
+        )
+    return reasons
+
+
+def run_check(name: str, document: str, run: Runner) -> tuple[int, str]:
+    """`(exit code, message)` for an installer's `--check`, against the document its
+    `--yes` would register.
+
+    Taking the document rather than its pieces is the point: the check and the install
+    read the same string, so an installer cannot pass its own check with one command line
+    and register another. `CHECK_LEFT_ALONE` only for a document this module cannot read,
+    which is a bug in the caller rather than a state of the machine.
+    """
+    expected = parse_task(document)
+    if expected is None:
+        return CHECK_LEFT_ALONE, f"schedule: {name}'s own task document could not be parsed"
+    result = run(query_xml_argv(name))
+    registered = parse_task(result.stdout or "") if result.returncode == 0 else None
+    reasons = drift(registered, expected)
+    if reasons:
+        return (
+            CHECK_STALE,
+            f"schedule: {name} {'; '.join(reasons)}. Re-run with --yes to (re)register it.",
+        )
+    return CHECK_CURRENT, f"schedule: {name} is registered as this checkout would register it."
 
 
 def register(name: str, xml: str, run: Runner) -> tuple[bool, str]:

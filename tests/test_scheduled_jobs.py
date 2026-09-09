@@ -329,6 +329,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/tray_state.py": "the tray asks it what to draw, on every poll",
     "scripts/schedule_health.py": "the schtasks the tray spawns every poll, and the status pass",
     "scripts/workspace-status.py": "devkit-workspace-status runs it daily, and it spawns git",
+    "scripts/installers.py": "devkit-installers runs it daily and at logon; it spawns every installer",
     "scripts/log-wrap.py": "the wrapper four of those jobs are launched through",
     # reached from `workspace-status.py --notify`, which is the one script that imports
     # it rather than being wrapped in `notify-wrap.py`; see that flag's docstring.
@@ -967,14 +968,24 @@ def test_every_branch_delivery_job_has_an_installer_here():
     assert covered == set(switch.BRANCH_DELIVERY_JOBS)
 
 
-def test_every_branch_delivery_installer_consults_the_switch():
-    """It must ask `harness_state.stood_down()` and pass the answer to `task_xml` as
-    `enabled=`. Checked as source rather than by registering a task, because the thing
-    that goes wrong is a new installer never asking the question at all."""
-    for name, _module in branch_delivery_installers():
-        source = (REPO_ROOT / "scripts" / name).read_text(encoding="utf-8")
-        assert "harness_state.stood_down()" in source, name
-        assert "enabled=" in source, name
+def test_the_installers_pass_writes_the_file_its_installer_advertises():
+    """Same shape as the rc and reap passes: a line per installer, which only the runner
+    can render, so it writes its own artifact rather than being wrapped."""
+    installer = load_script("scripts/install-installers-schedule.py")
+    runner = load_script("scripts/installers.py")
+    assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
+
+
+def test_the_scheduled_installers_pass_never_loses_the_mode_that_makes_it_act():
+    """`installers.py`'s default mode is `status`, read-only by design, for the reason
+    `rc-servers.py`'s is: a task that lost the word would fire daily and repair nothing."""
+    installer = load_script("scripts/install-installers-schedule.py")
+    assert "maintain" in installer.schedule_for(root=REPO_ROOT).command
+
+
+# Every job installer, not only the three delivery ones, consults the ledger: that is
+# `tests/test_installer_contract.py`'s `test_every_job_installer_consults_the_ledger`,
+# since `--off --job` can stand any of them down by name.
 
 
 def test_a_stood_down_job_is_registered_disabled(monkeypatch):

@@ -15,6 +15,11 @@ answer to "what is actually off right now".
 | `instructions` | `CLAUDE.md` and `.claude/rules/*.md`, every tier | move aside, reversibly |
 | `jobs` | the scheduled jobs that deliver agent branches | `schtasks /Change /DISABLE` |
 
+`--job <name>` stands one scheduled job down (or back up) by name, from any group:
+`--off --job devkit-tray`. The ledger records every name either way, and that record is
+what the job's installer and `installers.py` honour -- a stood-down job is registered
+*disabled* rather than skipped, so `--on` never needs an install.
+
 **Skills are deliberately not a group.** They cost nothing until a session invokes one by
 name, which is the opposite of the always-loaded tier this exists to switch off, and a
 bare session that has lost `/ship` has lost the thing it needs *most* once the hooks that
@@ -64,6 +69,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_project
 import harness_state
+import schedule_health
 from harness_state import Ledger
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -248,8 +254,37 @@ def status_lines(ledger: Ledger, workspace: Path) -> list[str]:
     ]
 
 
-def apply(groups: Iterable[str], off: bool, workspace: Path, runner=subprocess.run) -> list[str]:
-    """Run the requested groups and return the whole report."""
+def switch_named_jobs(
+    off: bool, names: Sequence[str], ledger: Ledger, runner=subprocess.run
+) -> list[str]:
+    """Disable or re-enable `names`, and record the intent for every one of them.
+
+    The ledger records **every name asked for**, not the subset `schtasks` could reach.
+    What actually happened is what the returned lines report; it is the wrong thing to
+    persist, because a job absent at switch time is a job whose installer may run
+    tomorrow. Recording only the reachable ones left `--status` saying the tier was off
+    while a later `install-release-schedule.py` produced an enabled task nobody had
+    authorised -- the tier standing down and one of its jobs starting up out of the same
+    state. Intent is a property of the name and outlives which tasks exist.
+
+    A set rather than a tuple assignment, so `--on --group jobs` forgets the three
+    delivery jobs and nothing else: a maintenance job stood down by name stays down.
+    """
+    lines, _changed = switch_jobs(off, tuple(names), runner=runner)
+    recorded = set(ledger.jobs)
+    recorded = recorded | set(names) if off else recorded - set(names)
+    ledger.jobs = tuple(sorted(recorded))
+    return lines
+
+
+def apply(
+    groups: Iterable[str],
+    off: bool,
+    workspace: Path,
+    runner=subprocess.run,
+    jobs: Sequence[str] = (),
+) -> list[str]:
+    """Run the requested groups, then the jobs named one by one, and return the report."""
     ledger = Ledger.load()
     wanted = set(groups)
     lines: list[str] = []
@@ -261,17 +296,10 @@ def apply(groups: Iterable[str], off: bool, workspace: Path, runner=subprocess.r
         elif group == "instructions":
             lines += switch_instructions(off, ledger, workspace, runner)
         else:
-            job_lines, _changed = switch_jobs(off, runner=runner)
-            lines += job_lines
-            # The ledger records the **group**, not the subset `schtasks` could reach.
-            # `changed` is what actually happened and is what the lines above report; it
-            # is the wrong thing to persist, because a job absent at switch time is a job
-            # whose installer may run tomorrow. Recording only the reachable ones left
-            # `--status` saying the tier was off while a later `install-release-schedule
-            # .py` produced an enabled task nobody had authorised -- the tier standing
-            # down and one of its jobs starting up out of the same state. Intent is a
-            # property of the group and outlives which tasks exist.
-            ledger.jobs = tuple(BRANCH_DELIVERY_JOBS) if off else ()
+            lines += switch_named_jobs(off, BRANCH_DELIVERY_JOBS, ledger, runner)
+    if jobs:
+        lines.append("jobs, by name:")
+        lines += switch_named_jobs(off, jobs, ledger, runner)
     ledger.save()
     return lines or ["nothing selected"]
 
@@ -294,8 +322,21 @@ def main(argv: list[str] | None = None) -> int:
     action.add_argument("--status", action="store_true", help="report and change nothing")
     parser.add_argument(
         "--group",
-        default="all",
-        help=f"comma-separated: {', '.join(GROUPS)} (default: all of them)",
+        default=None,
+        help=(
+            f"comma-separated: {', '.join(GROUPS)} (default: all of them, unless --job "
+            f"names a job, in which case none)"
+        ),
+    )
+    parser.add_argument(
+        "--job",
+        action="append",
+        default=[],
+        metavar="TASK",
+        help=(
+            "one scheduled job by name, from any group (e.g. devkit-tray); repeatable. "
+            "Recorded in the ledger so its installer registers it disabled"
+        ),
     )
     parser.add_argument("--workspace", type=Path, default=None)
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
@@ -308,17 +349,26 @@ def main(argv: list[str] | None = None) -> int:
     # VS Code aborts a run itself only for its own input types, never for a `command` one.
     # Treated as a cancel here, which is where it has to be -- `log-wrap.py` passes its
     # tail through untouched, so a check in the wrapper would prove nothing about this.
-    if "${input:" in args.group:
+    if args.group is not None and "${input:" in args.group:
         print("harness-switch: no groups picked; nothing done")
         return EXIT_OK
 
-    groups = selected_groups(args.group)
+    # `--job` alone means that job alone; a `--group` beside it means both.
+    groups = [] if args.group is None and args.job else selected_groups(args.group or "all")
     if groups is None:
         print(f"harness-switch: unknown group(s) in '{args.group}'", file=sys.stderr)
         return EXIT_USAGE
+    unknown = [name for name in args.job if not name.startswith(schedule_health.PREFIX)]
+    if unknown:
+        print(
+            f"harness-switch: not devkit jobs: {', '.join(unknown)} (every one is named "
+            f"{schedule_health.PREFIX}<job>; see the table in README.md)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
 
     if args.off or args.on:
-        print("\n".join(apply(groups, args.off, workspace)) + "\n")
+        print("\n".join(apply(groups, args.off, workspace, jobs=tuple(args.job))) + "\n")
     print("\n".join(status_lines(Ledger.load(), workspace)))
     return EXIT_OK
 

@@ -274,6 +274,99 @@ def _ok(argv):
     return subprocess.CompletedProcess(argv, 0, "", "")
 
 
+# --- one job by name ------------------------------------------------------------------
+
+
+def test_a_job_can_be_stood_down_by_name_from_any_group(tmp_path, monkeypatch):
+    """The tray is maintenance, which no group stands down; `--job` is how one job is."""
+    monkeypatch.setattr(switch, "WINDOWS", True)
+    seen: list[list[str]] = []
+
+    def runner(argv, **_kwargs):
+        seen.append(list(argv))
+        return _ok(argv)
+
+    switch.apply([], True, tmp_path / "w.code-workspace", runner=runner, jobs=("devkit-tray",))
+    assert harness_state.Ledger.load().jobs == ("devkit-tray",)
+    assert seen == [switch.job_change_argv("devkit-tray", False)]
+
+
+def test_a_job_absent_at_switch_time_is_still_recorded_by_name(tmp_path, monkeypatch):
+    """Same intent rule as the group: the record is what its installer reads tomorrow."""
+    monkeypatch.setattr(switch, "WINDOWS", True)
+
+    def runner(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "ERROR: cannot find the file")
+
+    lines = switch.apply(
+        [], True, tmp_path / "w.code-workspace", runner=runner, jobs=("devkit-tray",)
+    )
+    assert "devkit-tray" in harness_state.stood_down()
+    assert any("not registered here, skipped" in line for line in lines)
+
+
+def test_standing_one_delivery_job_back_up_leaves_the_rest_of_the_group_down(tmp_path, monkeypatch):
+    """The case this was built for: the branch tier off, and two of its three jobs
+    wanted back."""
+    monkeypatch.setattr(switch, "WINDOWS", True)
+    workspace = tmp_path / "w.code-workspace"
+    switch.apply(["jobs"], True, workspace, runner=lambda argv, **_: _ok(argv))
+    switch.apply(
+        [],
+        False,
+        workspace,
+        runner=lambda argv, **_: _ok(argv),
+        jobs=("devkit-upgrade-projects", "devkit-release"),
+    )
+    assert harness_state.Ledger.load().jobs == ("devkit-worktree-reconcile",)
+
+
+def _run_ok(argv, **_kwargs):
+    return _ok(argv)
+
+
+def test_switch_named_jobs_records_every_name_and_reports_what_schtasks_did(monkeypatch):
+    """The two halves the function keeps apart: the ledger gets every name asked for,
+    the report gets what actually happened to each."""
+    monkeypatch.setattr(switch, "WINDOWS", True)
+    ledger = harness_state.Ledger(jobs=("devkit-tray",))
+
+    def runner(argv, **_kwargs):
+        code = 1 if "devkit-release" in argv else 0
+        return subprocess.CompletedProcess(argv, code, "", "")
+
+    lines = switch.switch_named_jobs(True, ("devkit-release", "devkit-rc-servers"), ledger, runner)
+    assert ledger.jobs == ("devkit-rc-servers", "devkit-release", "devkit-tray")
+    assert any("not registered here, skipped: devkit-release" in line for line in lines)
+    assert any("disabled: devkit-rc-servers" in line for line in lines)
+
+    switch.switch_named_jobs(False, ("devkit-tray",), ledger, runner)
+    assert ledger.jobs == ("devkit-rc-servers", "devkit-release")
+
+
+def test_the_group_going_back_on_forgets_only_its_own_jobs(tmp_path, monkeypatch):
+    monkeypatch.setattr(switch, "WINDOWS", True)
+    workspace = tmp_path / "w.code-workspace"
+    switch.apply([], True, workspace, runner=_run_ok, jobs=("devkit-tray",))
+    switch.apply(["jobs"], True, workspace, runner=_run_ok)
+    switch.apply(["jobs"], False, workspace, runner=_run_ok)
+    assert harness_state.Ledger.load().jobs == ("devkit-tray",)
+
+
+def test_switching_a_job_by_name_does_not_touch_the_other_groups(tmp_path, monkeypatch):
+    monkeypatch.setattr(switch, "WINDOWS", True)
+    monkeypatch.setattr(switch, "switch_hooks", _never)
+    monkeypatch.setattr(switch, "switch_instructions", _never)
+    lines = switch.apply(
+        [],
+        True,
+        tmp_path / "w.code-workspace",
+        runner=lambda argv, **_: _ok(argv),
+        jobs=("devkit-tray",),
+    )
+    assert lines[0] == "jobs, by name:"
+
+
 def test_standing_the_instructions_group_down_warns_about_the_drift_check(tmp_path, monkeypatch):
     """`sync-devkit.py --check` is vendored and cannot import this tier, so it reports the
     held rules as drift. Said at the time rather than discovered later."""
@@ -328,3 +421,43 @@ def test_an_explicit_status_reports_and_acts_on_nothing(workspace, monkeypatch, 
 def test_the_report_names_every_group_whether_or_not_it_is_off(workspace):
     lines = switch.status_lines(harness_state.Ledger(), workspace)
     assert [line.split(":")[0] for line in lines[:3]] == ["hooks", "instructions", "jobs"]
+
+
+def test_a_job_named_on_the_command_line_switches_that_job_alone(workspace, monkeypatch):
+    """`--job` with no `--group` must not mean `--group all` as well, or standing one job
+    down would take the hooks and every instruction file with it."""
+    seen = {}
+
+    def apply(groups, off, ws, jobs=()):
+        seen.update(groups=list(groups), off=off, jobs=tuple(jobs))
+        return ["ok"]
+
+    monkeypatch.setattr(switch, "apply", apply)
+    argv = [
+        "--off",
+        "--job",
+        "devkit-tray",
+        "--job",
+        "devkit-release",
+        "--workspace",
+        str(workspace),
+    ]
+    assert switch.main(argv) == switch.EXIT_OK
+    assert seen == {"groups": [], "off": True, "jobs": ("devkit-tray", "devkit-release")}
+
+
+def test_a_group_and_a_job_together_switch_both(workspace, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        switch, "apply", lambda groups, off, ws, jobs=(): seen.update(g=list(groups), j=jobs) or []
+    )
+    switch.main(["--on", "--group", "hooks", "--job", "devkit-tray", "--workspace", str(workspace)])
+    assert seen == {"g": ["hooks"], "j": ("devkit-tray",)}
+
+
+def test_a_job_that_is_not_a_devkit_job_is_a_usage_error(workspace, monkeypatch, capsys):
+    monkeypatch.setattr(switch, "apply", _never)
+    assert (
+        switch.main(["--off", "--job", "tray", "--workspace", str(workspace)]) == switch.EXIT_USAGE
+    )
+    assert "devkit-" in capsys.readouterr().err

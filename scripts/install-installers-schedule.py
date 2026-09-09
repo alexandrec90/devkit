@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
-"""Register `reap-stale.py maintain` as a recurring OS task.
+"""Register `installers.py maintain` as a recurring OS task.
 
-`reap-stale.py` explains what the job reaps and what it never touches. This registers
-it: a Task Scheduler entry on Windows, a crontab line elsewhere, invoking
+`installers.py` explains what the pass does: every other installer's `--check`, then
+`--yes` on each that needs it. This registers the pass, invoking
 
-    <python> scripts/reap-stale.py maintain --workspace <workspace>
+    <python> scripts/installers.py maintain
 
-every `--every` minutes. Each fire stops the Remote Control sessions nobody has used for
-`sessionIdleMinutes`, the named servers `rc-servers.py` no longer owns once nothing live
-is under them, and the dev servers whose agent has gone.
+daily, and once shortly after logon. The logon trigger is the half that matters on a
+laptop: a checkout moved or a devkit pulled during the day is caught at the next start
+rather than tomorrow morning, and a fresh machine that has run this one installer has
+every other job registered before the first coffee. Daily as well, because `schedule_health`
+derives a job's cadence from its next run and a logon-only task has none.
 
-**Frequent rather than daily**, at `devkit-rc-servers`' interval and for a related
-reason: what it reclaims is memory a working machine is short of *now*, and the cost of
-a late reap is a desk that pages for the rest of the afternoon. The pass is cheap on a
-tick that finds nothing -- one process listing and a `stat` per transcript.
+**This is the one installer a machine runs by hand**, once. Everything the others
+register is then kept current by the job this registers -- including this job itself,
+since `installers.py` discovers this file like any other `install-*.py`.
 
-**Read-only by default.** `--yes` installs, `--check` reports what is registered and
-whether it still points at this checkout, and the bare invocation prints the plan. Same
-three modes as `install-rc-schedule.py`, for the same reason.
+**Read-only by default.** `--yes` installs, `--check` reports whether the registered task
+is the one this checkout would register, and the bare invocation prints the plan. Same
+three modes as `install-reap-schedule.py`, for the same reason.
 
 Stdlib only, and every decision is an importable function tested in
-`tests/test_install_reap_schedule.py`.
+`tests/test_install_installers_schedule.py`.
 """
 
 from __future__ import annotations
@@ -39,23 +40,30 @@ import harness_state
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BOXES_DIR = sweep.BOXES_DIR_NAME
 
 # Stable for `install-rc-schedule.TASK_NAME`'s reason: renaming it orphans whatever a
 # previous version registered.
-TASK_NAME = "devkit-reap-stale"
+TASK_NAME = "devkit-installers"
 
-# Machine maintenance, not branch delivery: standing the agent tier down leaves this
-# running. `tests/test_installer_contract.py` holds the switch's list to this word.
+# Machine maintenance, not branch delivery: standing the agent tier down must not stop
+# the pass that keeps the machine's own jobs registered.
 GROUP = "maintenance"
 
-# `reap-stale.py` writes it on every exit path; `schedule_health.ARTIFACTS` sends a
+# `installers.py` writes it on every exit path; `schedule_health.ARTIFACTS` sends a
 # reader here when the scheduler reports a failure.
-ARTIFACT = "logs/reap-stale.log"
+ARTIFACT = "logs/installers.log"
 
 WINDOWS = os.name == "nt"
 
-DEFAULT_INTERVAL = 15
+# Before the 09:00 workspace-status pass, so the report a person reads describes a
+# machine this pass has already put right; after the small-hours jobs, so it never
+# re-registers one mid-fire.
+DEFAULT_AT = "08:45"
+
+# The logon delay is not decoration: at the instant a logon trigger would otherwise fire
+# the scheduler service is still settling, and `schtasks` answers a query about a task
+# it is mid-way through loading with an error the check reads as "not registered".
+LOGON_DELAY = "PT2M"
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
 
@@ -71,86 +79,81 @@ class Schedule:
     name: str
     python: str
     script: str
-    every: int
-    workspace: str = ""
+    at: str
 
     @property
     def command(self) -> list[str]:
         """The argv the scheduler runs. `maintain` is named explicitly: the default mode
         is read-only on purpose, and a task that became a no-op because a default changed
         is the failure `tests/test_scheduled_jobs.py` is downstream of."""
-        argv = [self.python, self.script, "maintain"]
-        if self.workspace:
-            argv += ["--workspace", self.workspace]
-        return argv
+        return [self.python, self.script, "maintain"]
 
 
 def windowless_python(executable: str = sys.executable) -> str:
     """The windowless interpreter for `executable`, defaulting to this one. Survivable
-    because `reap-stale.main` writes its artifact on every exit path."""
+    because `installers.main` writes its artifact on every exit path."""
     return devkit_schtasks.windowless(executable)
 
 
-def schedule_for(every: int = DEFAULT_INTERVAL, root: Path = REPO_ROOT) -> Schedule:
+def schedule_for(at: str = DEFAULT_AT, root: Path = REPO_ROOT) -> Schedule:
     """Resolve the schedule against *this* interpreter and *this* checkout."""
-    workspace = sweep.default_workspace(root)
     return Schedule(
         name=TASK_NAME,
         python=windowless_python(),
-        script=str((root / "scripts" / "reap-stale.py").resolve()),
-        every=every,
-        workspace=str(workspace) if workspace else "",
+        script=str((root / "scripts" / "installers.py").resolve()),
+        at=at,
     )
 
 
-def valid_interval(every: int) -> bool:
-    """Minutes, positive, at most a day."""
-    return isinstance(every, int) and not isinstance(every, bool) and 1 <= every <= 1440
+def valid_time(at: str) -> bool:
+    """`HH:MM`, 24-hour. Both schedulers take it, and neither says so when it is wrong."""
+    hours, _, minutes = at.partition(":")
+    if not (hours.isdigit() and minutes.isdigit()) or len(hours) != 2 or len(minutes) != 2:
+        return False
+    return 0 <= int(hours) <= 23 and 0 <= int(minutes) <= 59
 
 
 def task_document(schedule: Schedule) -> str:
     """The Windows registration, as a task document, through `devkit_schtasks` for the
     settings a command-line registration cannot express.
 
-    The time limit is shorter than the interval so a wedged fire cannot suppress the next
-    one under `IgnoreNew`: the pass reads one process table and issues a handful of
-    `taskkill`s, each with a five-second grace, and ten minutes is generous for that.
+    Half an hour is generous for ten `--check`s and however many `--yes`es, and finite:
+    `IgnoreNew` means a wedged run suppresses every later fire until the limit expires.
     """
     program, *arguments = schedule.command
     return devkit_schtasks.task_xml(
         program,
         subprocess.list2cmdline(arguments),
-        # No boot trigger, unlike `devkit-rc-servers`: a reboot leaves nothing to reap,
-        # and the first repetition is at most an interval away.
-        devkit_schtasks.repeating_trigger(schedule.every),
-        time_limit="PT10M",
+        devkit_schtasks.daily_trigger(schedule.at) + devkit_schtasks.logon_trigger(LOGON_DELAY),
+        time_limit="PT30M",
+        # `PureWindowsPath`, not `Path`: the document is Windows by construction, so it
+        # has to be split on backslashes whatever host builds it.
         working_dir=str(PureWindowsPath(schedule.script).parent.parent),
-        # Lands disabled when this job has been stood down by name (`harness-switch.py
-        # --off --job`): the ledger is the standing instruction, and an installer that
-        # ignored it would hand the operator back a running job they had switched off.
+        # Lands disabled when this job has been stood down by name. The pass itself is
+        # maintenance and no group stands it down, but `--off --job` can, and an
+        # installer that ignored the ledger would hand the operator back a running job.
         enabled=TASK_NAME not in harness_state.stood_down(),
     )
 
 
 def crontab_line(schedule: Schedule) -> str:
     """The POSIX equivalent, for a machine that is not this one."""
-    return f"*/{schedule.every} * * * * {subprocess.list2cmdline(schedule.command)}"
+    hours, _, minutes = schedule.at.partition(":")
+    return f"{int(minutes)} {int(hours)} * * * {subprocess.list2cmdline(schedule.command)}"
 
 
 def render_plan(schedule: Schedule, windows: bool = WINDOWS) -> str:
     """What `--yes` would do, in the words of whichever scheduler is going to do it."""
     lines = [
-        f"schedule: {schedule.name} -- every {schedule.every} minute(s)",
+        f"schedule: {schedule.name} -- daily at {schedule.at}, and two minutes after logon",
         f"  runs: {subprocess.list2cmdline(schedule.command)}",
         "",
-        "Each fire stops Remote Control sessions idle past `sessionIdleMinutes`, named",
-        "servers rc-servers.py no longer owns once nothing live is under them, and dev",
-        "servers whose agent has gone. Interactive sessions are never candidates.",
+        "Each fire runs every other installer's --check and re-registers whatever has",
+        "drifted: a job never installed, a checkout that moved, an installer that gained a",
+        "flag, a task disabled by nobody. A job stood down by harness-switch.py stays down.",
+        "Options an installer should keep are `devkit.installers` in the workspace file.",
         "",
-        f"Settings are `devkit.reapStale` in {Path(schedule.workspace).name}"
-        if schedule.workspace
-        else "Settings are `devkit.reapStale` in the workspace file.",
-        "Without one the defaults apply and no stray server is ever named.",
+        f"  log: {ARTIFACT}, rewritten on every pass",
         "",
     ]
     if windows:
@@ -175,12 +178,11 @@ def install(schedule: Schedule, runner: Runner = run_command) -> tuple[bool, str
     ok, message = devkit_schtasks.register(schedule.name, task_document(schedule), runner)
     if not ok:
         return False, message
-    return True, f"scheduled {schedule.name} every {schedule.every} minute(s)"
+    return True, f"scheduled {schedule.name} daily at {schedule.at} and at logon"
 
 
 def run_check(schedule: Schedule, runner: Runner = run_command) -> tuple[int, str]:
-    """`(exit code, message)` for `--check`, per `devkit_schtasks.run_check`: the registered
-    task against the document `--yes` would register, so the two cannot disagree."""
+    """`(exit code, message)` for `--check`, per `devkit_schtasks.run_check`."""
     if not WINDOWS:
         return (
             devkit_schtasks.CHECK_CURRENT,
@@ -196,43 +198,39 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--check",
         action="store_true",
-        help="report whether a task is registered and still points at this checkout",
+        help="report whether the registered task is the one this checkout would register",
     )
-    parser.add_argument(
-        "--every",
-        type=int,
-        default=DEFAULT_INTERVAL,
-        help=f"minutes between fires (default: {DEFAULT_INTERVAL})",
-    )
+    parser.add_argument("--at", default=DEFAULT_AT, help="daily start time, HH:MM (24-hour)")
     parser.add_argument(
         "--devkit",
         type=Path,
         default=REPO_ROOT,
         help=(
             "the devkit checkout the task should run from (default: this one). Name the "
-            "*static* checkout when installing from an ephemeral box"
+            "*static* checkout when installing from a temporary one"
         ),
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
-    if not valid_interval(args.every):
-        parser.error(
-            f"--every must be a whole number of minutes from 1 to 1440, not {args.every!r}"
-        )
+    if not valid_time(args.at):
+        parser.error(f"--at must be HH:MM in 24-hour time, not {args.at!r}")
     root = args.devkit.expanduser().resolve()
-    script = root / "scripts" / "reap-stale.py"
+    script = root / "scripts" / "installers.py"
     if not script.is_file():
         print(f"schedule: no runner at {script}", file=sys.stderr)
         return 2
-    if args.yes and BOXES_DIR in root.parts:
+    if args.yes and sweep.source_checkout(root) != root:
+        # A task pointing into a temporary checkout works until that checkout is deleted
+        # and then fails at every logon, in silence. Refused on `--yes` only, so the plan
+        # and the check still read from the place an agent is standing.
         print(
-            f"schedule: {root} is an ephemeral box. Point --devkit at the static "
-            f"checkout, which outlives the boxes.",
+            f"schedule: {root} is a temporary checkout -- an ephemeral box or a claude "
+            f"--worktree worktree. Point --devkit at the static checkout, which outlives both.",
             file=sys.stderr,
         )
         return 2
 
-    schedule = schedule_for(args.every, root)
+    schedule = schedule_for(args.at, root)
     if args.check:
         code, message = run_check(schedule)
         print(message, file=sys.stderr if code else sys.stdout)

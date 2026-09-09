@@ -56,6 +56,11 @@ BOXES_DIR = sweep.BOXES_DIR_NAME
 # would report "nothing scheduled" while the old entry kept firing.
 TASK_NAME = "devkit-upgrade-projects"
 
+# Branch delivery: this job exists to move agent branches along, so
+# `harness-switch.py --off --group jobs` stands it down. `tests/test_installer_contract.py`
+# holds the switch's list to the installers that say this.
+GROUP = "delivery"
+
 # Where this job's account of itself lives -- `upgrade-project.py` writes it, and
 # `schedule_health.ARTIFACTS` sends a reader here when the scheduler reports a failure.
 # Declared on the installer because that is the one place that knows a job exists at
@@ -195,41 +200,6 @@ def crontab_line(schedule: Schedule) -> str:
     return f"{int(minutes)} {int(hours)} * * * {subprocess.list2cmdline(schedule.command)}"
 
 
-def query_argv(name: str = TASK_NAME) -> list[str]:
-    return ["schtasks", "/Query", "/TN", name, "/FO", "LIST", "/V"]
-
-
-def registered_command(stdout: str) -> str:
-    """The command line `schtasks /Query /V` reports, or "" when it reports none.
-
-    Parsed rather than trusted wholesale because the answer that matters is not "is
-    something scheduled" but "is the scheduled thing still *this* checkout". An
-    installer that only checked existence would call a task pointing at a deleted
-    directory healthy.
-    """
-    for line in stdout.splitlines():
-        label, sep, value = line.partition(":")
-        if sep and label.strip().lower() in {"task to run", "tâche à exécuter"}:
-            return value.strip()
-    return ""
-
-
-def drifted(registered: str, schedule: Schedule) -> str:
-    """Why the registered task no longer matches this checkout, or "".
-
-    Compares the *script path*, not the whole command line: the interpreter may
-    legitimately differ (a venv rebuilt, a Python upgraded in place) and rewriting the
-    task over that would be noise. A different script path is the failure worth naming
-    -- it means the checkout moved and the schedule is running something else, or
-    nothing.
-    """
-    if not registered:
-        return "nothing is scheduled"
-    if schedule.script.lower() not in registered.lower():
-        return f"the scheduled task runs `{registered}`, which is not this checkout"
-    return ""
-
-
 def render_plan(schedule: Schedule, windows: bool = WINDOWS) -> str:
     """What `--yes` would do, in the words of whichever scheduler is going to do it."""
     lines = [
@@ -271,15 +241,14 @@ def install(schedule: Schedule, runner: Runner = run_command) -> tuple[bool, str
 
 
 def run_check(schedule: Schedule, runner: Runner = run_command) -> tuple[int, str]:
-    """`(exit code, message)` for `--check`. 1 when the schedule needs attention."""
+    """`(exit code, message)` for `--check`, per `devkit_schtasks.run_check`: the registered
+    task against the document `--yes` would register, so the two cannot disagree."""
     if not WINDOWS:
-        return 0, "not a Windows machine -- nothing this installer can query"
-    result = runner(query_argv(schedule.name))
-    registered = registered_command(result.stdout) if result.returncode == 0 else ""
-    reason = drifted(registered, schedule)
-    if reason:
-        return 1, f"schedule: {reason}. Re-run with --yes to (re)register it."
-    return 0, f"schedule: {schedule.name} is registered and points at this checkout."
+        return (
+            devkit_schtasks.CHECK_CURRENT,
+            "not a Windows machine -- nothing this installer can query",
+        )
+    return devkit_schtasks.run_check(schedule.name, task_document(schedule), runner)
 
 
 def main(argv: list[str] | None = None) -> int:
