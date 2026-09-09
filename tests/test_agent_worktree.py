@@ -527,6 +527,32 @@ def test_a_token_that_names_no_scan_rescans_the_ticked_checkouts(two_stage, monk
     assert asked == [["devkit"]]
 
 
+def test_picked_rows_serves_a_recorded_scan_and_rescans_only_on_a_miss(
+    two_stage, monkeypatch, capsys
+):
+    """The one function behind both row verbs, called directly: a live token is served
+    from the scan the checkout stage recorded, a token naming no scan rescans only the
+    ticked checkouts, and an empty pick is the verb typed by hand, which scans the
+    whole machine as it did before there was a first stage."""
+    assert agent_worktree.main(["tree-projects", "--workspace", str(two_stage)]) == 0
+    token = picker_scan.parse_projects(values(capsys.readouterr().out.splitlines())[0])[1]
+    asked = []
+
+    def fake(_ws, projects=None):
+        asked.append(projects)
+        return SCANNED
+
+    monkeypatch.setattr(agent_worktree, "scan", fake)
+    assert values(agent_worktree.picked_rows(two_stage, f"devkit@{token}", "trees")) == [
+        "devkit:box"
+    ]
+    assert asked == []
+    agent_worktree.picked_rows(two_stage, "devkit@stale", "trees")
+    assert asked == [["devkit"]]
+    agent_worktree.picked_rows(two_stage, "", "bases")
+    assert asked == [["devkit"], None]
+
+
 def test_ticking_only_empty_checkouts_draws_the_sentinel(two_stage, capsys):
     assert agent_worktree.main(["tree-projects", "--workspace", str(two_stage)]) == 0
     token = picker_scan.parse_projects(values(capsys.readouterr().out.splitlines())[0])[1]

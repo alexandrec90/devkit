@@ -47,8 +47,10 @@ from __future__ import annotations
 
 import argparse
 import ast
+import io
 import re
 import sys
+import tokenize
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -232,11 +234,15 @@ def module_pattern(module: Path) -> re.Pattern[str]:
     this module's opening claims it does not have -- and the ratchet turns it into
     pressure to delete a real gap from the baseline as "now covered".
 
-    The file-name spelling is still a plain substring, deliberately: a test that names
-    `scripts/acme-tool.py` in a docstring joins its corpus, because that is also how a
-    test loading it by path spells it and the two are not distinguishable. That is the
-    conservative direction -- it can only admit a test, and `reference_pattern` still has
-    to find the symbol inside it.
+    The file-name spelling is still a plain substring, because that is how a test
+    loading the module by path spells it. It is matched against the file's **code**,
+    never its docstrings or comments: `read_tests` strips both through `code_only`
+    before any pattern sees the text. A docstring explaining that a sibling script is
+    *not* what a file tests used to put that file in the sibling's corpus, where an
+    unrelated `.main()` then read as coverage of the sibling's `main` -- the same false
+    "now covered" verdict as the bare-stem match above, reached through prose instead
+    of a path, and it cost a reporter three diagnostic cycles because the prose moved
+    with the tests when they were split into another file.
     """
     filename = re.escape(module.name)
     snake = re.escape(module.stem.replace("-", "_"))
@@ -287,9 +293,66 @@ def entry(module: Path, symbol: str) -> str:
     return f"{module.as_posix()}::{symbol}"
 
 
+# A string token is a docstring -- or a bare string statement, which is prose too -- when
+# it opens a statement and nothing follows it on that statement.
+_STATEMENT_START = frozenset({tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT})
+_STATEMENT_END = frozenset({tokenize.NEWLINE, tokenize.ENDMARKER})
+_NOT_CODE = frozenset({tokenize.COMMENT, tokenize.NL})
+
+
+def code_only(text: str) -> str:
+    """`text` with every docstring and comment blanked, so only code can name a module.
+
+    Blanked rather than removed -- each is replaced by spaces of the same width, with
+    its newlines kept -- so nothing else in the file moves. String literals that are
+    not docstrings survive: the path a test passes to a loader is an argument, and it
+    is exactly the spelling the corpus is scoped by. Read with the tokenizer rather than
+    `ast`, because a docstring is a token-level fact (a string that opens a statement
+    and ends it) and the tokenizer is what `structure_scan` already trusts for
+    comments. Text it cannot finish is returned unchanged: a gate that raises on a
+    broken test file reports the wrong thing, and the linter reports the right one.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return text
+    lines = io.StringIO(text).readlines()  # split exactly as the tokenizer read it
+
+    def blank(token: tokenize.TokenInfo) -> None:
+        (start_line, start_col), (end_line, end_col) = token.start, token.end
+        for number in range(start_line, end_line + 1):
+            line = lines[number - 1]
+            lo = start_col if number == start_line else 0
+            hi = end_col if number == end_line else len(line.rstrip("\r\n"))
+            lines[number - 1] = line[:lo] + " " * (hi - lo) + line[hi:]
+
+    for token in tokens:
+        if token.type == tokenize.COMMENT:
+            blank(token)
+    code = [token for token in tokens if token.type not in _NOT_CODE]
+    previous = tokenize.NEWLINE
+    for index, token in enumerate(code):
+        following = code[index + 1].type if index + 1 < len(code) else tokenize.ENDMARKER
+        if (
+            token.type == tokenize.STRING
+            and previous in _STATEMENT_START
+            and following in _STATEMENT_END
+        ):
+            blank(token)
+        previous = token.type
+    return "".join(lines)
+
+
 def read_tests(root: Path, cfg: harness_config.Config) -> dict[Path, str]:
-    """The corpus, as `{relative path: text}`, read once for the whole scan."""
-    return {rel: (root / rel).read_text(encoding="utf-8") for rel in test_files(root, cfg)}
+    """The corpus, as `{relative path: text}`, read once for the whole scan.
+
+    Each file is reduced to its code by `code_only` here, at the one place the corpus
+    is read, so every pattern downstream -- `module_pattern`, `reference_pattern` --
+    sees the same text and none can be reached through a docstring.
+    """
+    return {
+        rel: code_only((root / rel).read_text(encoding="utf-8")) for rel in test_files(root, cfg)
+    }
 
 
 def gaps(root: Path, cfg: harness_config.Config, texts: dict[Path, str] | None = None) -> list[str]:
