@@ -2357,6 +2357,14 @@
 			"projects": ["devkit", "carameli", "roguelike"],
 			"spawn": "worktree",
 			"permissionMode": "bypassPermissions"
+		},
+		// Options an installer should keep, keyed by installer file name. The daily
+		// `devkit-installers` pass (`installers.py`) re-registers a scheduled job from
+		// what its installer builds today, and an option chosen at install time is
+		// remembered by nothing but the registered task -- so it goes here, and is passed
+		// to that installer's `--check` and `--yes` alike.
+		"devkit.installers": {
+			"install-reconcile-task.py": ["--merge"]
 		}
 	}
 }

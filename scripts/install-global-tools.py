@@ -64,6 +64,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
+import harness_state
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +73,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # it orphans whatever a previous version registered, so the installer would report
 # "nothing scheduled" while the old entry kept firing.
 TASK_NAME = "devkit-global-tools"
+
+# Machine maintenance, not branch delivery: standing the agent tier down leaves this
+# running. `tests/test_installer_contract.py` holds the switch's list to this word.
+GROUP = "maintenance"
 
 # See the module docstring for why this slot: after the 04:00 prune.
 DEFAULT_TIME = "04:30"
@@ -191,6 +196,10 @@ def task_document(schedule: Schedule, root: Path = REPO_ROOT) -> str:
         subprocess.list2cmdline(arguments),
         devkit_schtasks.daily_trigger(schedule.at),
         working_dir=str(root),
+        # Lands disabled when this job has been stood down by name (`harness-switch.py
+        # --off --job`): the ledger is the standing instruction, and an installer that
+        # ignored it would hand the operator back a running job they had switched off.
+        enabled=TASK_NAME not in harness_state.stood_down(),
     )
 
 
@@ -200,40 +209,8 @@ def crontab_line(schedule: Schedule) -> str:
     return f"{int(minutes)} {int(hours)} * * * {subprocess.list2cmdline(schedule.command)}"
 
 
-def query_argv(name: str = TASK_NAME) -> list[str]:
-    return ["schtasks", "/Query", "/TN", name, "/FO", "LIST", "/V"]
-
-
 def uninstall_argv(name: str = TASK_NAME) -> list[str]:
     return ["schtasks", "/Delete", "/TN", name, "/F"]
-
-
-def registered_command(stdout: str) -> str:
-    """The command line `schtasks /Query /V` reports, or "" when it reports none.
-
-    Parsed rather than trusted wholesale: the question that matters is not "is something
-    scheduled" but "is the scheduled thing still *this* checkout". An installer that
-    only checked existence would call a task pointing into a reaped box healthy.
-    """
-    for line in stdout.splitlines():
-        label, sep, value = line.partition(":")
-        if sep and label.strip().lower() in {"task to run", "tâche à exécuter"}:
-            return value.strip()
-    return ""
-
-
-def drifted(registered: str, schedule: Schedule) -> str:
-    """Why the registered task no longer matches this checkout, or "".
-
-    Compares the *script path*, not the whole command line: an interpreter may
-    legitimately differ (a venv rebuilt, a Python upgraded in place) and rewriting the
-    task over that would be noise.
-    """
-    if not registered:
-        return "nothing is scheduled"
-    if schedule.script.lower() not in registered.lower():
-        return f"the scheduled task runs `{registered}`, which is not this checkout"
-    return ""
 
 
 def render_plan(schedule: Schedule, windows: bool = WINDOWS) -> str:
@@ -275,16 +252,17 @@ def install(
     return True, f"scheduled {schedule.name} daily at {schedule.at}"
 
 
-def run_check(schedule: Schedule, runner: Runner = run_command) -> tuple[int, str]:
-    """`(exit code, message)` for `--check`. 1 when the schedule needs attention."""
+def run_check(
+    schedule: Schedule, runner: Runner = run_command, root: Path = REPO_ROOT
+) -> tuple[int, str]:
+    """`(exit code, message)` for `--check`, per `devkit_schtasks.run_check`: the registered
+    task against the document `--yes` would register, so the two cannot disagree."""
     if not WINDOWS:
-        return 0, "not a Windows machine -- nothing this installer can query"
-    result = runner(query_argv(schedule.name))
-    registered = registered_command(result.stdout) if result.returncode == 0 else ""
-    reason = drifted(registered, schedule)
-    if reason:
-        return 1, f"schedule: {reason}. Re-run with --yes to (re)register it."
-    return 0, f"schedule: {schedule.name} is registered and points at this checkout."
+        return (
+            devkit_schtasks.CHECK_CURRENT,
+            "not a Windows machine -- nothing this installer can query",
+        )
+    return devkit_schtasks.run_check(schedule.name, task_document(schedule, root), runner)
 
 
 def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
@@ -330,7 +308,7 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
         )
         return 0 if ok else 2
     if args.check:
-        code, message = run_check(schedule, runner)
+        code, message = run_check(schedule, runner, root)
         print(message, file=sys.stderr if code else sys.stdout)
         return code
     if not args.yes:

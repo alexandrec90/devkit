@@ -139,33 +139,39 @@ def test_a_checkout_with_no_runner_in_it_is_not_scheduled(tmp_path):
 # --- --check -------------------------------------------------------------------
 
 
-def test_a_task_pointing_at_this_checkout_is_healthy():
-    schedule = installer.schedule_for(root=Path(r"C:\ws\devkit"))
-    assert installer.drifted(f'pythonw.exe "{schedule.script}" --yes', schedule) == ""
+def test_a_task_registered_as_this_checkout_would_register_it_is_healthy(monkeypatch):
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    root = Path(r"C:\ws\devkit")
+    schedule = installer.schedule_for(root=root)
+    runner = FakeRunner(stdout=installer.task_document(schedule, root))
+    code, message = installer.run_check(schedule, runner, root)
+    assert code == 0 and installer.TASK_NAME in message
 
 
-def test_a_task_pointing_somewhere_else_is_named_as_drift():
-    schedule = installer.schedule_for(root=Path(r"C:\ws\devkit"))
-    reason = installer.drifted(r'pythonw.exe "C:\gone\scripts\global-tools.py" --yes', schedule)
-    assert "not this checkout" in reason
+def test_a_task_pointing_somewhere_else_is_named_as_drift(monkeypatch):
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    root = Path(r"C:\ws\devkit")
+    gone = installer.task_document(installer.schedule_for(root=Path(r"C:\gone")), Path(r"C:\gone"))
+    code, message = installer.run_check(
+        installer.schedule_for(root=root), FakeRunner(stdout=gone), root
+    )
+    assert code == 1 and r"C:\gone" in message
 
 
-def test_nothing_registered_is_drift_too_rather_than_silence():
+def test_nothing_registered_is_drift_too_rather_than_silence(monkeypatch):
     """An installer that only checked existence would call a task pointing at a deleted
     directory healthy."""
-    assert (
-        installer.drifted("", installer.schedule_for(root=Path(r"C:\ws\devkit")))
-        == "nothing is scheduled"
-    )
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    root = Path(r"C:\ws\devkit")
+    runner = FakeRunner(code=1, stderr="ERROR: The system cannot find the file specified.")
+    code, message = installer.run_check(installer.schedule_for(root=root), runner, root)
+    assert code == 1 and "nothing is scheduled" in message
 
 
-def test_the_registered_command_is_read_out_of_schtasks_list_output():
-    stdout = "Folder: \\\r\nTaskName:      \\devkit-global-tools\r\nTask To Run:   pythonw.exe x.py --yes\r\n"
-    assert installer.registered_command(stdout) == "pythonw.exe x.py --yes"
-
-
-def test_output_naming_no_task_yields_no_command():
-    assert installer.registered_command("ERROR: The system cannot find the file specified.") == ""
+def test_check_off_windows_has_nothing_to_query(monkeypatch):
+    monkeypatch.setattr(installer, "WINDOWS", False)
+    root = Path("/ws/devkit")
+    assert installer.run_check(installer.schedule_for(root=root), FakeRunner(code=1), root)[0] == 0
 
 
 # --- the plan and the removal --------------------------------------------------

@@ -51,6 +51,12 @@ import sweep
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 TASK_NAME = "devkit-worktree-reconcile"
+
+# Branch delivery: this job exists to move agent branches along, so
+# `harness-switch.py --off --group jobs` stands it down. `tests/test_installer_contract.py`
+# holds the switch's list to the installers that say this.
+GROUP = "delivery"
+
 DEFAULT_INTERVAL_MINUTES = 15
 
 # Where this job's account of itself lives -- `worktree.write_reconcile_log` writes it,
@@ -173,12 +179,39 @@ def _run(argv: list[str]) -> tuple[int, str]:
     return done.returncode, (done.stdout or done.stderr or "").strip()
 
 
-def main(argv: list[str] | None = None) -> int:
+def query_or_remove(args: argparse.Namespace) -> int | None:
+    """The `--status` and `--uninstall` modes; None when neither was asked for.
+
+    Split out of `main` so the install path reads as one piece: what is left there is
+    the refusal, the plan, the check and the registration, all about one document.
+    """
+    if args.status:
+        code, out = _run(query_argv(args.name))
+        print(out or f"no scheduled task called {args.name}")
+        return 0 if code == 0 else 1
+    if args.uninstall:
+        target = uninstall_argv(args.name)
+        if not args.apply:
+            print(f"Would run: {' '.join(target)}\n\nDry run -- re-run with --yes.")
+            return 0
+        code, out = _run(target)
+        print(out or f"removed {args.name}")
+        return code
+    return None
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Every knob the scheduled command carries, read-only unless `--yes`."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--install", action="store_true", default=True)
     mode.add_argument("--uninstall", action="store_true")
     mode.add_argument("--status", action="store_true")
+    mode.add_argument(
+        "--check",
+        action="store_true",
+        help="report whether the registered task is the one this checkout would register",
+    )
     parser.add_argument("--name", default=TASK_NAME)
     parser.add_argument("--minutes", type=int, default=DEFAULT_INTERVAL_MINUTES)
     parser.add_argument(
@@ -210,25 +243,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-free-gb", type=float, default=0.0)
     parser.add_argument("--workspace", type=Path, default=None)
     parser.add_argument("--yes", dest="apply", action="store_true", help="actually call schtasks")
-    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
 
     if not WINDOWS:
         print("install-reconcile-task: Windows-only; nothing to do here.")
         return 0
 
-    if args.status:
-        code, out = _run(query_argv(args.name))
-        print(out or f"no scheduled task called {args.name}")
-        return 0 if code == 0 else 1
-
-    if args.uninstall:
-        target = uninstall_argv(args.name)
-        if not args.apply:
-            print(f"Would run: {' '.join(target)}\n\nDry run -- re-run with --yes.")
-            return 0
-        code, out = _run(target)
-        print(out or f"removed {args.name}")
-        return code
+    handled = query_or_remove(args)
+    if handled is not None:
+        return handled
 
     # `sys.executable` is whichever interpreter installed this, which is the one that
     # will still be there in an hour. A bare `python` would resolve against a PATH the
@@ -264,6 +291,12 @@ def main(argv: list[str] | None = None) -> int:
         args.checkouts,
         args.merge_label,
     )
+    if args.check:
+        code, message = devkit_schtasks.run_check(
+            args.name, task_document(python, arguments, args.minutes), _run_argv
+        )
+        print(message, file=sys.stderr if code else sys.stdout)
+        return code
     if not args.apply:
         parked = "ON -- merged PRs advance each checkout's default branch"
         merging = (

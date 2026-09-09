@@ -146,7 +146,19 @@ Every installer declares `TASK_NAME` and `ARTIFACT`, because `pythonw.exe` sends
 nowhere and a job leaves exactly what it writes itself;
 [`tests/test_scheduled_jobs.py`](../tests/test_scheduled_jobs.py) fails one that skips
 either. For a runner with no artifact of its own, wrap the scheduled call in
-`log-wrap.py --always`. [`windowless-jobs.md`](windowless-jobs.md) covers keeping a job
+`log-wrap.py --always`.
+
+**An installer is driven, not remembered.** `scripts/installers.py` runs every
+`scripts/install-*.py`'s `--check` on a schedule and `--yes` on each that needs it, so
+an installer is only as good as its answer to `--check`: exit 0 current, 1 needs
+(re)installing, 2 left alone. Answer it through `devkit_schtasks.run_check`, handing it
+the same document `--yes` registers, never a private parse of `schtasks` output — six
+installers each carried one, all six compared only the script path, and none could see
+a stood-down job re-enabled by hand or a gained flag. Declare `GROUP` (`delivery` or
+`maintenance`) and pass `enabled=TASK_NAME not in harness_state.stood_down()` to
+`task_xml`, so `harness-switch.py --off --job` lands the job disabled rather than
+skipped. [`tests/test_installer_contract.py`](../tests/test_installer_contract.py)
+holds every installer to all of it, found by name rather than listed. [`windowless-jobs.md`](windowless-jobs.md) covers keeping a job
 window-less — `CREATE_NO_WINDOW` on every spawn in the job's reachable set, paired with a
 **console** `python.exe` as the inner interpreter — and its rules are enforced by that
 same test.

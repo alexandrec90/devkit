@@ -17,6 +17,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
 from support import load_script
 
 schtasks = load_script("scripts/devkit_schtasks.py")
@@ -326,3 +327,137 @@ def test_two_triggers_concatenate_into_one_valid_document():
     )
     assert body.count("<Triggers>") == 1
     assert "<TimeTrigger>" in body and "<BootTrigger>" in body
+
+
+# --- the check every installer answers -------------------------------------------
+#
+# Six installers each parsed `schtasks /Query /FO LIST /V` for a `Task To Run:` label and
+# asked one question of it; four had no check at all. One implementation now, comparing
+# the document the scheduler holds against the one the installer would register, and
+# these pin what that comparison sees.
+
+
+def as_the_scheduler_returns_it(document: str) -> str:
+    """What `schtasks /Query /XML` hands back on a pipe for a task registered from
+    `document`: the same XML with CRCRLF line endings, a UTF-16 declaration over 8-bit
+    bytes, and a byte-order mark. Measured on this machine, not assumed."""
+    return "\ufeff" + document.replace("\n", "\r\r\n")
+
+
+def test_a_task_document_round_trips_through_the_parser():
+    assert schtasks.parse_task(document()) == schtasks.Registration(
+        r"C:\py\pythonw.exe", "script.py --all", True
+    )
+
+
+def test_the_scheduler_s_own_shape_of_the_document_parses_the_same():
+    """An XML parser refuses a `str` carrying an encoding declaration, and the line
+    endings are nobody's idea of XML; both are the pipe's doing, not the task's, which
+    is why the parse is a regex over the document's three fields."""
+
+
+def test_an_entity_in_the_registered_arguments_is_decoded():
+    """A checkout path with `&` in it is escaped on the way in; the comparison has to
+    see the path, not the entity."""
+    registered = document().replace("script.py --all", "&quot;C:\\a &amp; b\\s.py&quot; --all")
+    parsed = schtasks.parse_task(registered)
+    assert parsed is not None and parsed.arguments == '"C:\\a & b\\s.py" --all'
+    assert schtasks.parse_task(as_the_scheduler_returns_it(document())) == schtasks.parse_task(
+        document()
+    )
+
+
+def test_a_disabled_document_reads_as_disabled():
+    parsed = schtasks.parse_task(document(enabled=False))
+    assert parsed is not None and parsed.enabled is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "ERROR: The system cannot find the file specified.",
+        "<Task>not a task document</Task>",
+        f'<?xml version="1.0"?><Task xmlns="{schtasks.TASK_NS}"><Actions><Exec/></Actions></Task>',
+    ],
+    ids=["empty", "not-found", "wrong-shape", "no-command"],
+)
+def test_anything_that_is_not_a_task_document_is_nothing_registered(text):
+    assert schtasks.parse_task(text) is None
+
+
+def test_the_same_registration_is_not_drift():
+    expected = schtasks.parse_task(document())
+    assert schtasks.drift(expected, expected) == []
+
+
+def test_nothing_registered_is_drift():
+    assert schtasks.drift(None, schtasks.parse_task(document())) == ["nothing is scheduled"]
+
+
+def test_a_different_interpreter_is_drift():
+    """The reversal of what the six copies did. `scripts/CLAUDE.md` says the interpreter
+    is part of "which checkout", and the venv trampoline `schedule_health` reports is a
+    task whose interpreter drifted -- a re-register is the fix, so the check must see it."""
+    registered = schtasks.Registration(r"C:\venv\Scripts\pythonw.exe", "script.py --all", True)
+    reasons = schtasks.drift(registered, schtasks.parse_task(document()))
+    assert len(reasons) == 1 and "pythonw.exe" in reasons[0]
+
+
+def test_a_different_argument_is_drift():
+    """An installer that gained a flag: the registered task keeps the old command line
+    until somebody re-registers it, and this is how anybody finds out."""
+    registered = schtasks.Registration(r"C:\py\pythonw.exe", "script.py", True)
+    reasons = schtasks.drift(registered, schtasks.parse_task(document()))
+    assert reasons == ["runs with `script.py`, not `script.py --all`"]
+
+
+def test_enablement_is_drift_in_both_directions():
+    on = schtasks.parse_task(document())
+    off = schtasks.parse_task(document(enabled=False))
+    assert schtasks.drift(off, on) == ["is disabled, and nobody stood it down"]
+    assert schtasks.drift(on, off) == ["is enabled, and it was stood down"]
+
+
+def test_case_quoting_and_whitespace_are_not_drift():
+    """Windows hands a path back in whatever case it was registered with, and the
+    document builder quotes the command it is given."""
+    registered = schtasks.Registration(r'"c:\PY\pythonw.EXE"', "script.py   --all", True)
+    assert schtasks.drift(registered, schtasks.parse_task(document())) == []
+
+
+def test_the_query_asks_for_the_document():
+    assert schtasks.query_xml_argv("devkit-x") == ["schtasks", "/Query", "/TN", "devkit-x", "/XML"]
+
+
+def _answering(returncode: int, stdout: str):
+    return lambda argv: subprocess.CompletedProcess(list(argv), returncode, stdout, "")
+
+
+def test_run_check_is_current_when_the_scheduler_holds_the_same_document():
+    code, message = schtasks.run_check("devkit-x", document(), _answering(0, document()))
+    assert code == schtasks.CHECK_CURRENT
+    assert "devkit-x" in message
+
+
+def test_run_check_is_stale_when_nothing_is_registered():
+    code, message = schtasks.run_check("devkit-x", document(), _answering(1, ""))
+    assert code == schtasks.CHECK_STALE
+    assert "nothing is scheduled" in message and "--yes" in message
+
+
+def test_run_check_names_every_reason_at_once():
+    """A reader fixing one drift should not discover the second on the next pass."""
+    other = schtasks.task_xml(
+        r"C:\other\pythonw.exe", "script.py", schtasks.repeating_trigger(15), enabled=False
+    )
+    code, message = schtasks.run_check("devkit-x", document(), _answering(0, other))
+    assert code == schtasks.CHECK_STALE
+    assert "pythonw.exe" in message and "--all" in message and "disabled" in message
+
+
+def test_run_check_leaves_alone_a_document_it_cannot_read():
+    """That is a bug in the caller, not a state of the machine, and `--yes` on it would
+    register the same unreadable thing."""
+    code, _message = schtasks.run_check("devkit-x", "<nonsense", _answering(0, document()))
+    assert code == schtasks.CHECK_LEFT_ALONE

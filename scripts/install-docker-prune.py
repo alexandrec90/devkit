@@ -53,11 +53,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
+import harness_state
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 TASK_NAME = "devkit-docker-prune"
+
+# Machine maintenance, not branch delivery: standing the agent tier down leaves this
+# running. `tests/test_installer_contract.py` holds the switch's list to this word.
+GROUP = "maintenance"
 
 # 04:00 rather than 03:00: the upgrade job holds that slot, and two `pythonw` jobs
 # starting together on a laptop that just woke up is how one of them times out.
@@ -151,6 +156,10 @@ def task_document(python: str, arguments: str, at: str, root: Path = REPO_ROOT) 
         arguments,
         devkit_schtasks.daily_trigger(at),
         working_dir=str(root),
+        # Lands disabled when this job has been stood down by name (`harness-switch.py
+        # --off --job`): the ledger is the standing instruction, and an installer that
+        # ignored it would hand the operator back a running job they had switched off.
+        enabled=TASK_NAME not in harness_state.stood_down(),
     )
 
 
@@ -175,12 +184,34 @@ def _run(argv: list[str]) -> tuple[int, str]:
     return done.returncode, (done.stdout or done.stderr or "").strip()
 
 
+def query_or_remove(args: argparse.Namespace) -> int | None:
+    """The `--status` and `--uninstall` modes; None when neither was asked for."""
+    if args.status:
+        code, out = _run(query_argv(args.name))
+        print(out or f"no scheduled task called {args.name}")
+        return 0 if code == 0 else 1
+    if args.uninstall:
+        target = uninstall_argv(args.name)
+        if not args.apply:
+            print(f"Would run: {' '.join(target)}\n\nDry run -- re-run with --yes.")
+            return 0
+        code, out = _run(target)
+        print(out or f"removed {args.name}")
+        return code
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--install", action="store_true", default=True)
     mode.add_argument("--uninstall", action="store_true")
     mode.add_argument("--status", action="store_true")
+    mode.add_argument(
+        "--check",
+        action="store_true",
+        help="report whether the registered task is the one this checkout would register",
+    )
     parser.add_argument("--name", default=TASK_NAME)
     parser.add_argument("--at", default=DEFAULT_AT, help="daily start time, HH:MM (24-hour)")
     parser.add_argument("--yes", dest="apply", action="store_true", help="actually call schtasks")
@@ -190,19 +221,9 @@ def main(argv: list[str] | None = None) -> int:
         print("install-docker-prune: Windows-only; nothing to do here.")
         return 0
 
-    if args.status:
-        code, out = _run(query_argv(args.name))
-        print(out or f"no scheduled task called {args.name}")
-        return 0 if code == 0 else 1
-
-    if args.uninstall:
-        target = uninstall_argv(args.name)
-        if not args.apply:
-            print(f"Would run: {' '.join(target)}\n\nDry run -- re-run with --yes.")
-            return 0
-        code, out = _run(target)
-        print(out or f"removed {args.name}")
-        return code
+    handled = query_or_remove(args)
+    if handled is not None:
+        return handled
 
     if args.apply and sweep.source_checkout(REPO_ROOT) != REPO_ROOT:
         # The registered command carries this checkout's path verbatim, and a box is
@@ -221,6 +242,12 @@ def main(argv: list[str] | None = None) -> int:
 
     python = windowless(sys.executable)
     arguments = prune_arguments(sys.executable)
+    if args.check:
+        code, message = devkit_schtasks.run_check(
+            args.name, task_document(python, arguments, args.at), _run_argv
+        )
+        print(message, file=sys.stderr if code else sys.stdout)
+        return code
     if not args.apply:
         print(
             f'Would run: "{python}" {arguments}\n\n'

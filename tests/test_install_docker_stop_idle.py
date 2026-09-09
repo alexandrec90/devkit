@@ -10,7 +10,10 @@ pass, leaves an account of itself, and runs on a laptop at all.
 
 from __future__ import annotations
 
+import argparse
 import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 from support import load_script
@@ -142,3 +145,45 @@ def test_a_dry_run_from_a_box_still_reads(monkeypatch, capsys):
     )
     assert installer.main([]) == 0
     assert "Dry run" in capsys.readouterr().out
+
+
+def test_status_and_uninstall_are_answered_before_any_document_is_built(monkeypatch, capsys):
+    """`query_or_remove` owns the two modes that address the task by name; neither
+    should build a document, and neither exists when nobody asked."""
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    monkeypatch.setattr(installer, "_run", lambda argv: (0, f"ran {argv[1]}"))
+    assert installer.main(["--status"]) == 0
+    assert "ran /query" in capsys.readouterr().out
+    assert installer.main(["--uninstall"]) == 0
+    assert "Dry run" in capsys.readouterr().out
+    assert installer.query_or_remove(argparse.Namespace(status=False, uninstall=False)) is None
+
+
+def _the_document_main_would_register() -> str:
+    """Built the way `main` builds it, from this process's interpreter."""
+    python = installer.windowless(sys.executable)
+    arguments = installer.stop_idle_arguments(sys.executable)
+    return installer.task_document(python, arguments, installer.DEFAULT_AT)
+
+
+def test_check_is_green_when_the_scheduler_holds_the_document_yes_would_register(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    document = _the_document_main_would_register()
+    monkeypatch.setattr(
+        installer,
+        "_run_argv",
+        lambda argv: subprocess.CompletedProcess(list(argv), 0, document, ""),
+    )
+    assert installer.main(["--check"]) == 0
+    assert installer.TASK_NAME in capsys.readouterr().out
+
+
+def test_check_is_red_when_nothing_is_registered(monkeypatch, capsys):
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    monkeypatch.setattr(
+        installer, "_run_argv", lambda argv: subprocess.CompletedProcess(list(argv), 1, "", "ERROR")
+    )
+    assert installer.main(["--check"]) == 1
+    assert "nothing is scheduled" in capsys.readouterr().err

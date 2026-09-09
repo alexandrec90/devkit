@@ -191,49 +191,47 @@ def test_the_named_checkout_is_what_the_task_runs(tmp_path, capsys):
 # --- --check -------------------------------------------------------------------
 
 
-QUERY_OUTPUT = """
-Folder: \\
-HostName:                             DESKTOP
-TaskName:                             \\devkit-upgrade-projects
-Task To Run:                          C:\\py\\python.exe C:\\ws\\devkit\\scripts\\upgrade-project.py --all --yes
-Schedule:                             Scheduling data is not available
-"""
+def holding(document: str):
+    """A `schtasks /Query /XML` that returns `document`."""
+    return lambda argv: subprocess.CompletedProcess(list(argv), 0, document, "")
 
 
-def test_the_registered_command_is_read_out_of_the_query():
-    assert "upgrade-project.py" in sched.registered_command(QUERY_OUTPUT)
+def test_the_check_reads_the_document_the_install_would_register(monkeypatch):
+    """One string for both, so the installer cannot pass its own check with one command
+    line and register another."""
+    monkeypatch.setattr(sched, "WINDOWS", True)
+    code, message = sched.run_check(a_schedule(), holding(sched.task_document(a_schedule())))
+    assert code == 0 and sched.TASK_NAME in message
 
 
-def test_an_empty_query_reports_no_command():
-    assert sched.registered_command("") == ""
+def test_nothing_scheduled_is_reported_as_such(monkeypatch):
+    monkeypatch.setattr(sched, "WINDOWS", True)
+    code, message = sched.run_check(
+        a_schedule(), lambda argv: subprocess.CompletedProcess(list(argv), 1, "", "not found")
+    )
+    assert code == 1 and "nothing is scheduled" in message and "--yes" in message
 
 
-def test_nothing_scheduled_is_reported_as_such():
-    assert sched.drifted("", a_schedule()) == "nothing is scheduled"
-
-
-def test_a_task_pointing_at_this_checkout_is_healthy():
-    assert sched.drifted(sched.registered_command(QUERY_OUTPUT), a_schedule()) == ""
-
-
-def test_a_task_pointing_at_a_different_checkout_is_drift():
+def test_a_task_pointing_at_a_different_checkout_is_drift(monkeypatch):
     """The failure this mode exists for: the checkout moved, the task still fires, and
     it runs something else or nothing at all."""
-    reason = sched.drifted(r"C:\old\devkit\scripts\upgrade-project.py --all --yes", a_schedule())
-    assert "not this checkout" in reason
+    monkeypatch.setattr(sched, "WINDOWS", True)
+    moved = sched.task_document(a_schedule(script=r"C:\old\devkit\scripts\upgrade-project.py"))
+    code, message = sched.run_check(a_schedule(), holding(moved))
+    assert code == 1 and r"C:\old" in message
 
 
-def test_a_rebuilt_interpreter_is_not_reported_as_drift():
-    """The venv gets rebuilt and Python gets upgraded in place; rewriting the task over
-    that would be noise, and noise is what makes a check get ignored."""
-    registered = r"C:\other\python.exe C:\ws\devkit\scripts\upgrade-project.py --all --yes"
-    assert sched.drifted(registered, a_schedule()) == ""
+def test_the_query_asks_for_the_document():
+    """`/XML` is locale-neutral and keeps the command apart from its arguments, which
+    the `Task To Run:` line the old check parsed joined back together and truncated."""
+    seen: list[list[str]] = []
 
+    def runner(argv):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(list(argv), 0, sched.task_document(a_schedule()), "")
 
-def test_the_check_is_case_insensitive_about_paths():
-    """Windows hands back whatever case the task was registered with."""
-    registered = r"c:\WS\DEVKIT\scripts\Upgrade-Project.py --all --yes"
-    assert sched.drifted(registered, a_schedule()) == ""
+    sched.run_check(a_schedule(), runner)
+    assert seen == [sched.devkit_schtasks.query_xml_argv(sched.TASK_NAME)]
 
 
 # --- installing ----------------------------------------------------------------
@@ -256,6 +254,11 @@ def test_a_failed_registration_is_reported_rather_than_assumed(monkeypatch):
     ok, message = sched.install(a_schedule(), FakeRunner(returncode=1, stderr="ERROR: denied"))
     assert not ok
     assert "denied" in message
+
+
+def test_check_off_windows_has_nothing_to_query(monkeypatch):
+    monkeypatch.setattr(sched, "WINDOWS", False)
+    assert sched.run_check(a_schedule(), FakeRunner(returncode=1))[0] == 0
 
 
 def test_a_successful_registration_says_when_it_will_run(monkeypatch):

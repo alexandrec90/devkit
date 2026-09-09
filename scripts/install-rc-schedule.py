@@ -40,6 +40,7 @@ from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
+import harness_state
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +50,10 @@ BOXES_DIR = sweep.BOXES_DIR_NAME
 # renaming it would orphan whatever a previous version registered -- the installer would
 # report "nothing scheduled" while the old entry kept firing.
 TASK_NAME = "devkit-rc-servers"
+
+# Machine maintenance, not branch delivery: standing the agent tier down leaves this
+# running. `tests/test_installer_contract.py` holds the switch's list to this word.
+GROUP = "maintenance"
 
 # Where this job's account of itself lives. `rc-servers.py` writes it on every exit path;
 # `schedule_health.ARTIFACTS` sends a reader here when the scheduler reports a failure.
@@ -163,40 +168,16 @@ def task_document(schedule: Schedule) -> str:
         # has to be split on backslashes whatever host builds it -- see the same line in
         # `install-tray.py`.
         working_dir=str(PureWindowsPath(schedule.script).parent.parent),
+        # Lands disabled when this job has been stood down by name (`harness-switch.py
+        # --off --job`): the ledger is the standing instruction, and an installer that
+        # ignored it would hand the operator back a running job they had switched off.
+        enabled=TASK_NAME not in harness_state.stood_down(),
     )
 
 
 def crontab_line(schedule: Schedule) -> str:
     """The POSIX equivalent, for a machine that is not this one."""
     return f"*/{schedule.every} * * * * {subprocess.list2cmdline(schedule.command)}"
-
-
-def query_argv(name: str = TASK_NAME) -> list[str]:
-    return ["schtasks", "/Query", "/TN", name, "/FO", "LIST", "/V"]
-
-
-def registered_command(stdout: str) -> str:
-    """The command line `schtasks /Query /V` reports, or "" when it reports none."""
-    for line in stdout.splitlines():
-        label, sep, value = line.partition(":")
-        if sep and label.strip().lower() in {"task to run", "tâche à exécuter"}:
-            return value.strip()
-    return ""
-
-
-def drifted(registered: str, schedule: Schedule) -> str:
-    """Why the registered task no longer matches this checkout, or "".
-
-    Compares the script path rather than the whole command line, for
-    `install-upgrade-schedule.drifted`'s reason: the interpreter may legitimately differ
-    after a venv rebuild, and rewriting the task over that would be noise. A different
-    script path means the checkout moved.
-    """
-    if not registered:
-        return "nothing is scheduled"
-    if schedule.script.lower() not in registered.lower():
-        return f"the scheduled task runs `{registered}`, which is not this checkout"
-    return ""
 
 
 def render_plan(schedule: Schedule, windows: bool = WINDOWS) -> str:
@@ -241,15 +222,14 @@ def install(schedule: Schedule, runner: Runner = run_command) -> tuple[bool, str
 
 
 def run_check(schedule: Schedule, runner: Runner = run_command) -> tuple[int, str]:
-    """`(exit code, message)` for `--check`. 1 when the schedule needs attention."""
+    """`(exit code, message)` for `--check`, per `devkit_schtasks.run_check`: the registered
+    task against the document `--yes` would register, so the two cannot disagree."""
     if not WINDOWS:
-        return 0, "not a Windows machine -- nothing this installer can query"
-    result = runner(query_argv(schedule.name))
-    registered = registered_command(result.stdout) if result.returncode == 0 else ""
-    reason = drifted(registered, schedule)
-    if reason:
-        return 1, f"schedule: {reason}. Re-run with --yes to (re)register it."
-    return 0, f"schedule: {schedule.name} is registered and points at this checkout."
+        return (
+            devkit_schtasks.CHECK_CURRENT,
+            "not a Windows machine -- nothing this installer can query",
+        )
+    return devkit_schtasks.run_check(schedule.name, task_document(schedule), runner)
 
 
 def main(argv: list[str] | None = None) -> int:
