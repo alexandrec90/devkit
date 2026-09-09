@@ -1,10 +1,15 @@
 """Tests for `scripts/precommit/run_push_gate.py`, the `devkit-push-gate` hook.
 
-The hook is the PR gate run locally at the pre-push stage, so what it has to get right is
-ordering, stopping, and skipping: CI's three steps in CI's order, the first failure ending
-the run with its exit code, and a project that lacks a step's file told so rather than
-failed. The steps are exercised through an injected runner where the shape is the point,
-and once as a real subprocess where the point is that pre-commit could run it.
+The hook is part of the PR gate run locally at the pre-push stage, so what it has to get
+right is ordering, stopping, and skipping: lint before anything it could rewrite, the
+first failure ending the run with its exit code, and a project that lacks a step's file
+told so rather than failed. The steps are exercised through an injected runner where the
+shape is the point, and once as a real subprocess where the point is that pre-commit could
+run it.
+
+Whether those steps still cover the gate they were copied from is a different question,
+and a hardcoded list here cannot answer it: `tests/test_gate_parity.py` reads
+`.github/workflows/pr-gate.yml` and holds every difference to a written reason.
 """
 
 from __future__ import annotations
@@ -42,9 +47,16 @@ def project(root: Path, *files: str) -> Path:
     return root
 
 
-def test_the_steps_are_the_gates_in_cis_order():
-    """Lint first because it auto-fixes, then the suite, then the vendored tier -- the
-    order `.github/workflows/pr-gate.yml` runs them in."""
+def test_lint_runs_first_because_it_auto_fixes():
+    """Lint first, then the suite, then the vendored tier.
+
+    Only the first position is load-bearing: `lint-all.py` rewrites files, so a step that
+    ran before it would report clean on what it repaired. The two test tiers' order is
+    free -- this used to claim it was `.github/workflows/pr-gate.yml`'s order and was
+    simply wrong (CI runs the vendored tier first), which nothing caught because the
+    literals below are hardcoded and no test here opens the workflow.
+    `tests/test_gate_parity.py` is the one that does; the shape check stays here.
+    """
     assert all(isinstance(step, gate.Step) for step in gate.STEPS)
     assert [step.name for step in gate.STEPS] == ["lint", "tests", "hook tests"]
     assert gate.STEPS[0].argv == ("scripts/lint-all.py",)
