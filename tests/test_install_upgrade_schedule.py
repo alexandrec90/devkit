@@ -221,9 +221,10 @@ def test_a_task_pointing_at_a_different_checkout_is_drift(monkeypatch):
     assert code == 1 and r"C:\old" in message
 
 
-def test_the_query_asks_for_the_document():
+def test_the_query_asks_for_the_document(monkeypatch):
     """`/XML` is locale-neutral and keeps the command apart from its arguments, which
     the `Task To Run:` line the old check parsed joined back together and truncated."""
+    monkeypatch.setattr(sched, "WINDOWS", True)
     seen: list[list[str]] = []
 
     def runner(argv):
