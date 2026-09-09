@@ -47,7 +47,7 @@ complexity::scripts/sweep.py::main = 18
 complexity::scripts/sweep.py::render = 18
 complexity::scripts/sweep.py::run_mode = 20
 complexity::scripts/sweep.py::sync_plan = 18
-complexity::scripts/sync-devkit.py::main = 70
+complexity::scripts/sync-devkit.py::main = 74
 complexity::scripts/upgrade-project.py::main = 26
 complexity::scripts/upgrade-project.py::upgrade_one = 23
 complexity::scripts/workspace-status.py::previews_line = 17
@@ -87,7 +87,7 @@ definitions::scripts/release-pipeline.py = 35
 definitions::scripts/report-workflow-failure.py = 27
 definitions::scripts/resume-sessions.py = 21
 definitions::scripts/sweep.py = 56
-definitions::scripts/sync-devkit.py = 44
+definitions::scripts/sync-devkit.py = 46
 definitions::scripts/upgrade-project.py = 39
 definitions::scripts/workspace-status.py = 31
 definitions::scripts/workspace-task-index.py = 29
@@ -116,7 +116,7 @@ file_lines::scripts/reclaim.py = 1232
 file_lines::scripts/release-pipeline.py = 960
 file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/sweep.py = 1990
-file_lines::scripts/sync-devkit.py = 1427
+file_lines::scripts/sync-devkit.py = 1490
 file_lines::scripts/upgrade-project.py = 1236
 file_lines::scripts/workspace-status.py = 1068
 file_lines::scripts/workspace-task-index.py = 576
@@ -139,7 +139,7 @@ function_lines::scripts/sweep.py::classify = 84
 function_lines::scripts/sweep.py::inspect = 133
 function_lines::scripts/sweep.py::main = 171
 function_lines::scripts/sweep.py::sync_plan = 87
-function_lines::scripts/sync-devkit.py::main = 251
+function_lines::scripts/sync-devkit.py::main = 265
 function_lines::scripts/upgrade-project.py::main = 166
 function_lines::scripts/upgrade-project.py::upgrade_one = 143
 function_lines::scripts/worktree-guard.py::main = 139
@@ -383,3 +383,9 @@ swallowed_errors::scripts/worktree.py = 1
 # 2026-09-07  recorded: upgrade-project.py grows by the one-line branch-policy reinstall rider in main; the rider's logic is its own module (policy_runtime.py) and splitting main is its own change.
 #   file_lines::scripts/upgrade-project.py -> 1236
 #   function_lines::scripts/upgrade-project.py::main -> 166
+
+# 2026-09-08  recorded: sync-devkit.py: --pull now tightens an adopted .devkit-structure.txt after the seed, because a release that shrinks a vendored module or stops scanning vendored paths leaves every consumer's baseline holding lines its code no longer earns, and the vendored stale-line test then reddens the adoption PR on files the consumer never edited -- v0.11.13, v0.11.14 and v0.11.15 were each re-tightened by hand. +63 lines and two definitions in a module already ~3x file_lines; the tighten has to live beside the seed it mirrors, and splitting a MANIFEST-listed 1400-line tool is its own change.
+#   complexity::scripts/sync-devkit.py::main -> 74
+#   definitions::scripts/sync-devkit.py -> 46
+#   file_lines::scripts/sync-devkit.py -> 1490
+#   function_lines::scripts/sync-devkit.py::main -> 265

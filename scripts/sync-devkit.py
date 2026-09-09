@@ -147,8 +147,9 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/tests/test_untested_symbols.py",
     # The structural ratchet: size, complexity, fan-out, cycles, boundaries and
     # suppression counts, held to `.devkit-structure.txt` on the same terms as the
-    # untested-symbol list above -- the file may only shrink, `--pull` seeds it, and
-    # the vendored test is what runs it in a consumer's gate. Two modules because the
+    # untested-symbol list above -- the file may only shrink, `--pull` seeds it once and
+    # tightens it on every pull after, and the vendored test is what runs it in a
+    # consumer's gate. Two modules because the
     # language scanners are testable against a snippet and the judging half is not.
     "scripts/hooks/structure_scan.py",
     "scripts/hooks/tests/test_structure_scan.py",
@@ -1043,6 +1044,54 @@ def seed_structure_baseline(root: Path) -> int | None:
     return len(read_structure_baseline(root))
 
 
+def tighten_structure_baseline(root: Path) -> tuple[int, int] | None:
+    """Drop from an existing baseline what the code no longer earns. `None` if not run.
+
+    The seed's mirror, for every pull after the first. A release that shrinks a vendored
+    module -- or, as v0.11.15 did, stops scanning vendored paths at all -- leaves the
+    consumer's baseline holding numbers its code no longer earns, and the vendored
+    `test_the_baseline_holds_only_what_the_code_still_earns` reddens the adoption PR on
+    files the consumer never edited. Three releases running were re-tightened by hand.
+    `--tighten` only drops and lowers, so this can only shrink the debt a pull records,
+    and it runs out of process for the seed's reason: it is the scanner this pull just
+    delivered. `(dropped, lowered)` is read off the file rather than the exit code,
+    because the checker judges after it tightens -- debt the consumer added itself is
+    still its gate's to report, not a reason for the pull to leave the stale lines in.
+    """
+    script = root / "scripts/hooks/structure_check.py"
+    if not script.is_file() or not (root / STRUCTURE_BASELINE_FILE).is_file():
+        return None
+    before = structure_baseline_values(root)
+    try:
+        result = subprocess.run(
+            [console_python(), str(script), "--tighten"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            creationflags=NO_WINDOW,
+        )
+    except OSError:
+        return None
+    after = structure_baseline_values(root)
+    dropped = sum(1 for key in before if key not in after)
+    lowered = sum(1 for key, value in before.items() if key in after and after[key] < value)
+    # A red exit that moved nothing is a checker that did not get as far as tightening
+    # (a config error, a crash), not a baseline with nothing to drop.
+    if result.returncode != 0 and not (dropped or lowered):
+        return None
+    return dropped, lowered
+
+
+def structure_baseline_values(root: Path) -> dict[str, int]:
+    """`key -> recorded value` for every finding line, so a tighten can be measured."""
+    values: dict[str, int] = {}
+    for line in read_structure_baseline(root):
+        key, sep, value = line.rpartition(" = ")
+        if sep and value.strip().isdigit():
+            values[key.strip()] = int(value)
+    return values
+
+
 def read_structure_baseline(root: Path) -> list[str]:
     """The recorded findings, so a pull can report how much debt it just wrote down."""
     path = root / STRUCTURE_BASELINE_FILE
@@ -1290,6 +1339,13 @@ def main(argv: list[str] | None = None) -> int:
         # After the copy, because it runs the scanner this pull just delivered.
         seeded = seed_untested_baseline(REPO_ROOT) if args.pull else None
         seeded_structure = seed_structure_baseline(REPO_ROOT) if args.pull else None
+        # After the seed, on every pull that did not just seed: a fresh baseline is exact
+        # by construction, and an adopted one holds whatever the last release earned.
+        tightened = (
+            tighten_structure_baseline(REPO_ROOT)
+            if args.pull and seeded_structure is None
+            else None
+        )
         blocks_written, blocks_failed = sync_blocks(from_root, to_root, BLOCK_MANIFEST)
         verb = "pulled" if args.pull else "pushed"
         print(
@@ -1323,6 +1379,13 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"  (adopted the structure ratchet) {STRUCTURE_BASELINE_FILE}: "
                 f"{seeded_structure} finding(s) grandfathered"
+            )
+        if tightened and any(tightened):
+            # Named because it is a project-owned file the pull just rewrote, and the
+            # numbers are what the adoption commit carries that the MANIFEST did not.
+            print(
+                f"  (tightened the structure ratchet) {STRUCTURE_BASELINE_FILE}: dropped "
+                f"{tightened[0]} line(s) the code no longer earns, lowered {tightened[1]}"
             )
         if args.pull:
             # The stamp itself is written above, before the baselines are seeded. It
