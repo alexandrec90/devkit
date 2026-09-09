@@ -377,6 +377,82 @@ def test_read_tests_returns_the_text_of_every_corpus_file(tmp_path):
     }
 
 
+# --- code_only: prose cannot put a file in a corpus ---------------------------
+
+
+def test_code_only_blanks_docstrings_and_comments_and_keeps_layout():
+    """Blanked to spaces, not cut: every remaining token keeps its line and column, and
+    the string a loader is *called with* -- an argument, not a docstring -- survives."""
+    text = (
+        '"""Module prose naming src/acme-tool.py."""\n'
+        "\n"
+        "def test_it():\n"
+        '    """Function prose: acme_tool."""  # trailing acme_tool\n'
+        "    acme = load('src/acme-tool.py')\n"
+        "    acme.alpha()\n"
+    )
+    code = us.code_only(text)
+    assert len(code) == len(text)
+    assert code.splitlines() == [
+        " " * len('"""Module prose naming src/acme-tool.py."""'),
+        "",
+        "def test_it():",
+        "    "
+        + " " * len('"""Function prose: acme_tool."""')
+        + "  "
+        + " " * len("# trailing acme_tool"),
+        "    acme = load('src/acme-tool.py')",
+        "    acme.alpha()",
+    ]
+
+
+def test_code_only_returns_text_that_is_not_python_unchanged():
+    """A broken test file is the linter's and the interpreter's to report; this gate
+    scanning it as written is the same answer it gave before `code_only` existed."""
+    broken = "def test_(:\n    acme.alpha("
+    assert us.code_only(broken) == broken
+    assert us.code_only("") == ""
+
+
+def test_read_tests_returns_the_code_of_every_corpus_file(tmp_path):
+    """`read_tests` is the one place the corpus is read, so it is the one place the
+    stripping has to happen for every pattern downstream to see the same text."""
+    write(tmp_path, "tests/test_acme.py", '"""about acme"""\nacme.alpha()')
+    assert us.read_tests(tmp_path, config(sources=["src"])) == {
+        Path("tests/test_acme.py"): " " * len('"""about acme"""') + "\nacme.alpha()"
+    }
+
+
+def test_a_module_named_only_in_a_docstring_does_not_join_its_corpus(tmp_path):
+    """The defect a harness-defect report named, end to end: a test file whose
+    docstring explains that a sibling script is NOT what it covers, naming the sibling
+    by path, joined the sibling's corpus, and an unrelated `.alpha()` in the same file
+    then read as coverage of the sibling's `alpha`. The ratchet turned that into
+    pressure to delete a real gap from the baseline as "now covered", and moving the
+    tests to another file did not help because the prose moved with them."""
+    write(tmp_path, "src/acme-tool.py", "def alpha():\n    pass\n")
+    write(
+        tmp_path,
+        "tests/test_other.py",
+        '"""Tests for other.py -- not src/acme-tool.py, which is the trap this avoids."""\n'
+        "# acme_tool is measured elsewhere\n"
+        "other.alpha()\n",
+    )
+    assert us.gaps(tmp_path, config(sources=["src"])) == ["src/acme-tool.py::alpha"]
+
+
+def test_a_module_loaded_by_path_in_code_still_joins_its_corpus(tmp_path):
+    """The other direction, so the stripping cannot over-reach: the path spelling in a
+    call argument is exactly how a test loading the module says which one it covers."""
+    write(tmp_path, "src/acme-tool.py", "def alpha():\n    pass\n")
+    write(
+        tmp_path,
+        "tests/test_acme.py",
+        '"""Covers the tool."""\nacme = load("src/acme-tool.py")\nacme.alpha()\n',
+    )
+    assert us.gaps(tmp_path, config(sources=["src"])) == []
+
+
 # --- the baseline file --------------------------------------------------------
 
 

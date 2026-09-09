@@ -105,6 +105,23 @@ def test_json_dumped_to_the_processs_own_stdout_is_not_a_sink():
     assert gi.code_write_targets("json.dump(x, open('out.json', 'w'))") == ["out.json"]
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "json.dump(ib.measure('CLAUDE.md'), sys.stdout)",
+        "json.dump(budget(root / 'scripts/instruction-budget.py'), sys.stdout, indent=2)",
+        "json.dump(dict(sizes(['a.py', 'b.py'])), sys.stderr)",
+    ],
+)
+def test_json_dumped_to_stdout_from_a_call_is_still_not_a_sink(code):
+    """The first argument is a call as often as a name, and the stdout clause used to stop
+    at that call's closing parenthesis: `json.dump(measure('x.py'), sys.stdout)` never
+    reached the stream and was reported as a write to `x.py`. This is the shape of the
+    read-only PowerShell `python -c` a harness-defect report named -- measuring token
+    counts, naming the script it loaded, writing nothing."""
+    assert gi.code_write_targets(code) == []
+
+
 # --- pathlib joins ----------------------------------------------------------
 
 

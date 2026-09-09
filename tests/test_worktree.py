@@ -6298,3 +6298,32 @@ def test_rescue_is_a_subcommand(tmp_path, monkeypatch, capsys):
     assert code == 0
     assert payload["applied"] is False
     assert payload["plan"]["old_branch"] == "agent/x-0801"
+
+
+# --- is_tracked ---------------------------------------------------------------
+
+
+def _ls_files(returncode: int | None, seen: list[list[str]]):
+    """A `subprocess.run` recording argv and answering with one code; None cannot run."""
+
+    def run(argv, **kwargs):
+        seen.append(list(argv))
+        if returncode is None:
+            raise OSError("no git")
+        return subprocess.CompletedProcess(argv, returncode)
+
+    return run
+
+
+@pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False), (None, True)])
+def test_is_tracked_asks_git_and_reads_unknown_as_tracked(
+    tmp_path, monkeypatch, returncode, expected
+):
+    """`ls-files --error-unmatch` answers 0 for a tracked path and 1 for an untracked
+    one. A git that cannot run answers *tracked*: the conservative direction, because a
+    wrong "untracked" is a box that can never be reaped and a wrong "tracked" is a
+    `.env` the operator writes once."""
+    seen: list[list[str]] = []
+    monkeypatch.setattr(worktree.subprocess, "run", _ls_files(returncode, seen))
+    assert worktree.is_tracked(tmp_path, ".env") is expected
+    assert seen == [["git", "-C", str(tmp_path), "ls-files", "--error-unmatch", ".env"]]

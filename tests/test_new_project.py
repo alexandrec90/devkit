@@ -227,6 +227,44 @@ def test_explicit_flags_add_to_a_preset_rather_than_replacing_it(tmp_path):
     assert the_plan.context["redis"] is True  # from the explicit flag
 
 
+def test_a_plan_is_the_decisions_and_writes_nothing(tmp_path):
+    """`Plan` is the boundary between deciding and writing: every field the writers
+    read is on it, and building one touches the disk not at all."""
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    assert isinstance(the_plan, new_project.Plan)
+    assert the_plan.root.parent == tmp_path
+    assert not the_plan.root.exists()
+    assert the_plan.files and all(len(entry) == 3 for entry in the_plan.files)
+    assert isinstance(the_plan.remote, bool) and isinstance(the_plan.register, bool)
+
+
+def test_git_init_seeds_the_default_branch_and_the_first_commit(tmp_path, monkeypatch):
+    """Three git calls, in order, every one in the new root, and `dry_run` handed
+    through to each so `--dry-run` prints the plan and touches nothing."""
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    ran: list[tuple[list[str], Path, bool]] = []
+
+    def record(cmd, cwd, dry_run, check=True):
+        ran.append((list(cmd), cwd, dry_run))
+        return 0
+
+    monkeypatch.setattr(new_project, "run", record)
+    new_project.git_init(the_plan, dry_run=False)
+    assert [cmd[:2] for cmd, _cwd, _dry in ran] == [
+        ["git", "init"],
+        ["git", "add"],
+        ["git", "commit"],
+    ]
+    assert ran[0][0] == ["git", "init", "-b", str(the_plan.context["default_branch"])]
+    assert the_plan.name in ran[2][0][-1]
+    assert {cwd for _cmd, cwd, _dry in ran} == {the_plan.root}
+    assert [dry for _cmd, _cwd, dry in ran] == [False, False, False]
+
+    ran.clear()
+    new_project.git_init(the_plan, dry_run=True)
+    assert [dry for _cmd, _cwd, dry in ran] == [True, True, True]
+
+
 def test_the_generator_reserves_one_slot_and_cuts_no_sibling_checkout():
     """The retired `<name>-b` convention, asserted gone rather than remembered.
 

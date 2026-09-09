@@ -66,6 +66,9 @@ INLINE_CALL = re.compile(
 # `json.dump` is a sink only when its stream is not the process's own stdout or stderr:
 # `json.dump(report, sys.stdout)` is how a measuring script prints its answer, and it
 # names every file it measured. A dump into `open(..., 'w')` is caught by that clause.
+# The lookahead steps over two levels of nested parentheses, because the first argument
+# is as often a call as a name -- `json.dump(measure('CLAUDE.md'), sys.stdout)` -- and a
+# scan that stopped at the inner `)` never reached the stream and reported a write.
 WRITE_SINK = re.compile(
     r"""
       \.write_text\s*\(
@@ -77,7 +80,7 @@ WRITE_SINK = re.compile(
     | \bopen\s*\([^)]*?,\s*['"][^'"]*[wax][^'"]*['"]
     | \bos\.(?:remove|unlink|rename|replace|makedirs|mkdir)\s*\(
     | \bshutil\.(?:copy2?|copyfile|copytree|move|rmtree)\s*\(
-    | \bjson\.dump\s*\((?![^)]*\bsys\.std(?:out|err)\b)
+    | \bjson\.dump\s*\((?!(?:[^()]|\((?:[^()]|\([^()]*\))*\))*\bsys\.std(?:out|err)\b)
     | \bfs\.(?:write|append|rm|unlink|copy|rename)[A-Za-z]*\s*\(
     """,
     re.VERBOSE,
