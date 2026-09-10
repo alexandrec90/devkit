@@ -40,9 +40,10 @@ Stdlib only. Tested in `tests/test_run_push_gate.py`.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,8 +52,8 @@ from _loader import load_by_path
 
 HOOK_ID = "devkit-push-gate"
 
-# What a fake runner in the tests has to look like: called with the argv, `cwd` and
-# `check`, answering a CompletedProcess whose `returncode` is read.
+# What a fake runner in the tests has to look like: called with the argv, `cwd`, `check`
+# and `env`, answering a CompletedProcess whose `returncode` is read.
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
@@ -94,6 +95,40 @@ def interpreter(root: Path) -> str:
     return str(module.interpreter(root, "pytest"))
 
 
+# Git exports these into every hook's environment, naming the repository the push is
+# happening in. They are not hints: each one **overrides a subprocess's `cwd=`**, so a
+# test fixture that builds a throwaway repo and runs `git commit` in it with an inherited
+# environment commits to the real repository instead.
+LEAKED_GIT_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CEILING_DIRECTORIES")
+
+
+def gate_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment the gate's steps run in: this hook's, minus git's own variables.
+
+    Every step here is spawned from inside a git hook, and the suites they run build
+    throwaway repositories by the dozen. Without this scrub those fixtures write to the
+    repository being pushed: observed as `init`, `seed`, `c0`, `c1` and a `checkout` of a
+    fixture's tag landing in a real worktree's reflog, leaving its branch ref pointing at
+    a fixture commit and its index unusable. Nothing reported it -- the push was refused
+    for an unrelated failing test, and the corruption was found afterwards in `git
+    reflog`.
+
+    Scrubbed here rather than in each fixture because this is the seam where the
+    variables enter: one place covers all three steps, every suite under them, and every
+    consumer -- and a fixture that forgets the scrub is not a defect anyone would notice
+    until it has already rewritten a branch. `scripts/hooks/tests/test_session_start.py`
+    scrubs the same four names for the same reason, and is the precedent for the list.
+
+    A step that genuinely wants the pushed repository has `cwd` -- which is the repo root
+    -- and `git rev-parse`, both of which say the same thing without steering an
+    unrelated subprocess.
+    """
+    env = dict(os.environ if environ is None else environ)
+    for leaked in LEAKED_GIT_VARS:
+        env.pop(leaked, None)
+    return env
+
+
 def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
     """Each step with the command that runs it, or None when `root` lacks its file."""
     python = interpreter(root)
@@ -104,12 +139,13 @@ def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
 
 def run_gate(root: Path, runner: Runner = subprocess.run) -> int:
     """Run the steps in order; the first non-zero exit is the hook's, and ends the run."""
+    env = gate_env()
     for step, command in plan(root):
         if command is None:
             print(f"push-gate: {step.name}: no {step.requires} in this project -- skipped")
             continue
         print(f"push-gate: {step.name}: {' '.join(command[1:])}", flush=True)
-        result = runner(command, cwd=root, check=False)
+        result = runner(command, cwd=root, check=False, env=env)
         if result.returncode:
             print(
                 f"push-gate: {step.name} failed (exit {result.returncode}). Fix it from the "

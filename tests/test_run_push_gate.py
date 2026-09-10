@@ -33,9 +33,14 @@ class FakeRunner:
     def __init__(self, exits=None):
         self.exits = exits or {}
         self.calls: list[list[str]] = []
+        # `None` is recorded as itself, not flattened to `{}`: a step spawned with no
+        # `env` inherits git's variables, which is the whole defect, and an empty dict
+        # would let the regression test below pass against it.
+        self.envs: list[dict[str, str] | None] = []
 
-    def __call__(self, argv, *, cwd, check):
+    def __call__(self, argv, *, cwd, check, env=None):
         self.calls.append(list(argv))
+        self.envs.append(None if env is None else dict(env))
         return completed(argv, self.exits.get(argv[1], 0))
 
 
@@ -151,3 +156,49 @@ def test_run_as_pre_commit_would_the_hook_exits_with_the_failing_step(tmp_path):
     assert result.returncode == 4, result.stdout + result.stderr
     assert "push-gate: tests failed (exit 4)" in result.stdout
     assert gate.main.__name__ == "main"
+
+
+# --- git's own variables never reach a step -----------------------------------
+
+
+def test_gate_env_drops_the_variables_git_exports_into_a_hook():
+    """Each of these overrides a subprocess's `cwd=`, so a fixture building a throwaway
+    repo would commit into the repository being pushed instead."""
+    dirty = {
+        "PATH": "/usr/bin",
+        "GIT_DIR": "/repo/.git",
+        "GIT_WORK_TREE": "/repo",
+        "GIT_INDEX_FILE": "/repo/.git/index",
+        "GIT_CEILING_DIRECTORIES": "/",
+    }
+    assert gate.gate_env(dirty) == {"PATH": "/usr/bin"}
+
+
+def test_gate_env_keeps_everything_else_including_other_git_variables():
+    """Only the four that redirect a repository are dropped. `GIT_CONFIG_GLOBAL` and the
+    author identity are inherited on purpose -- a step that runs git legitimately still
+    needs a usable configuration."""
+    env = gate.gate_env({"GIT_CONFIG_GLOBAL": "/gc", "GIT_AUTHOR_NAME": "t", "HOME": "/h"})
+    assert env == {"GIT_CONFIG_GLOBAL": "/gc", "GIT_AUTHOR_NAME": "t", "HOME": "/h"}
+
+
+def test_gate_env_reads_the_real_environment_by_default(monkeypatch):
+    monkeypatch.setenv("GIT_DIR", "/repo/.git")
+    monkeypatch.setenv("DEVKIT_MARKER", "kept")
+    env = gate.gate_env()
+    assert "GIT_DIR" not in env
+    assert env["DEVKIT_MARKER"] == "kept"
+
+
+def test_every_step_is_spawned_with_the_scrubbed_environment(tmp_path, monkeypatch):
+    """The regression: a push ran the suite with `GIT_DIR` still set, and the fixtures
+    under it rewrote the branch being pushed. Asserted per step, not once -- the scrub is
+    only worth having if no step is spawned without it."""
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / ".git"))
+    root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py", "scripts/hooks/tests")
+    runner = FakeRunner()
+    assert gate.run_gate(root, runner) == 0
+    assert len(runner.envs) == len(runner.calls) == 3
+    for step, env in zip(runner.calls, runner.envs, strict=True):
+        assert env is not None, f"{step[1]} inherits the hook's environment"
+        assert "GIT_DIR" not in env, f"{step[1]} runs with GIT_DIR set"
