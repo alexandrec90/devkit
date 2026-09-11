@@ -527,6 +527,24 @@ def test_a_project_with_no_pre_commit_config_says_nothing_at_all(tmp_path, capsy
     assert capsys.readouterr().err == ""
 
 
+def test_the_framework_relays_both_streams(tmp_path, monkeypatch, capsys):
+    """The wiring, not just the guard: a stream the framework forgets to relay is the
+    gate's verdict arriving with nothing to act on. What keeps the non-ASCII in these
+    two from killing the hook is `_utf8_console`, covered end to end above."""
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    monkeypatch.setattr(
+        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
+    result = completed(["pre-commit-test"])
+    result.stdout, result.stderr = "out→\n", "err�\n"
+    runner = FakeRunner({("pre-commit-test", "run", "--hook-stage", "pre-commit"): result})
+
+    assert git_policy._run_pre_commit_framework(tmp_path, runner) == 0
+    captured = capsys.readouterr()
+    assert "out" in captured.out
+    assert "err" in captured.err
+
+
 def _common_dir(main_git: pathlib.Path | None):
     """A runner answering `rev-parse --git-common-dir`, or failing like a non-repository."""
 
