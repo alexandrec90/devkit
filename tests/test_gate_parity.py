@@ -69,6 +69,21 @@ EXEMPT: dict[tuple[str, str], str] = {
 }
 
 
+# The mirror of EXEMPT, and it needs the same discipline for the opposite drift: a step
+# the hook runs and CI does not is one the merge is not gated on, so a green push says
+# more than the PR does. Keyed by `run_push_gate.Step.name`.
+LOCAL_ONLY: dict[str, str] = {
+    "posix rehearsal": (
+        "The only step whose value is a function of the platform it runs on. It fakes the "
+        "host's platform so a Windows workstation exercises the branches CI's "
+        "`ubuntu-latest` runner takes; on that runner it would fake POSIX on POSIX, which "
+        "is `run-tests.py` a second time under a different name. CI does not need it "
+        "because CI *is* the thing being rehearsed -- a test this catches locally is a "
+        "test the existing `devkit tests` step already fails on in CI, ten minutes later."
+    ),
+}
+
+
 def _yaml():
     # Same reason as `test_self_hosting.py`: PyYAML arrives with pre-commit in the dev
     # group rather than on its own, so a partially-provisioned checkout can be without it.
@@ -139,26 +154,62 @@ def test_the_coverage_match_actually_matches_something():
     """The other half of the guard: if `_signature` broke, every step would look like an
     orphan — but every step is also listable in EXEMPT, so the test above could be made to
     pass by exempting the lot. This one fails if the gate stops covering anything."""
-    signatures = [_signature(step) for step in gate.STEPS]
+    shared = [step for step in gate.STEPS if step.name not in LOCAL_ONLY]
+    signatures = [_signature(step) for step in shared]
     covered = [
         f"{job}/{key}"
         for job, key, script in _run_steps()
         if (job, key) not in EXEMPT and any(s in script for s in signatures)
     ]
-    assert len(covered) == len(gate.STEPS), (
-        f"the push gate has {len(gate.STEPS)} steps but only {covered} in CI match them"
+    assert len(covered) == len(shared), (
+        f"the push gate has {len(shared)} steps CI should also run, but only {covered} "
+        f"in CI match them"
     )
 
 
 def test_every_push_gate_step_is_a_check_ci_also_runs():
     """The reverse drift, which is quieter: a local-only step is one the merge is not
-    actually gated on, so a green push says more than the PR does."""
+    actually gated on, so a green push says more than the PR does.
+
+    `LOCAL_ONLY` is the escape hatch, and it is deliberately as expensive to use as
+    `EXEMPT`: a sentence a reader can disagree with, not a shrug.
+    """
     scripts = [script for job, key, script in _run_steps() if (job, key) not in EXEMPT]
     for step in gate.STEPS:
+        if step.name in LOCAL_ONLY:
+            continue
         signature = _signature(step)
         assert any(signature in script for script in scripts), (
             f"push-gate step {step.name!r} runs {signature}, which no non-exempt step of "
-            f"{PR_GATE.name} runs — either CI dropped it or the hook grew a local-only check"
+            f"{PR_GATE.name} runs — either CI dropped it, or the hook grew a local-only "
+            f"check that needs an entry in LOCAL_ONLY in {__file__} saying why CI should "
+            f"not run it too"
+        )
+
+
+def test_no_local_only_entry_outlives_its_step():
+    """A stale entry silently re-exempts whatever step later takes that name."""
+    names = {step.name for step in gate.STEPS}
+    stale = sorted(name for name in LOCAL_ONLY if name not in names)
+    assert not stale, f"LOCAL_ONLY names push-gate steps that no longer exist: {stale}"
+
+
+def test_every_local_only_entry_carries_a_reason():
+    for name, reason in LOCAL_ONLY.items():
+        assert len(reason.split()) >= 8, f"{name} is local-only without saying why"
+
+
+def test_a_local_only_step_is_not_also_in_ci():
+    """The two ledgers must not disagree. An entry here for a step CI does run would be a
+    claim nobody checks, and the reader would believe the wrong one of the two."""
+    scripts = [script for job, key, script in _run_steps() if (job, key) not in EXEMPT]
+    for step in gate.STEPS:
+        if step.name not in LOCAL_ONLY:
+            continue
+        signature = _signature(step)
+        assert not any(signature in script for script in scripts), (
+            f"{step.name!r} is listed in LOCAL_ONLY but {PR_GATE.name} runs {signature} — "
+            f"drop the entry"
         )
 
 

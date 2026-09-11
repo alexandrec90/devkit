@@ -48,25 +48,46 @@ def project(root: Path, *files: str) -> Path:
 
 
 def test_lint_runs_first_because_it_auto_fixes():
-    """Lint first, then the suite, then the vendored tier.
+    """Lint first, then the suite, then the vendored tier, then the POSIX rehearsal.
 
-    Only the first position is load-bearing: `lint-all.py` rewrites files, so a step that
-    ran before it would report clean on what it repaired. The two test tiers' order is
-    free -- this used to claim it was `.github/workflows/pr-gate.yml`'s order and was
-    simply wrong (CI runs the vendored tier first), which nothing caught because the
-    literals below are hardcoded and no test here opens the workflow.
-    `tests/test_gate_parity.py` is the one that does; the shape check stays here.
+    Two positions are load-bearing and the rest is free. `lint-all.py` rewrites files, so
+    a step that ran before it would report clean on what it repaired. The rehearsal runs
+    *after* the suite because it is the same tests under a faked platform: a real failure
+    reported as a platform assumption is the more expensive of the two orders to read.
+    The two test tiers between them are free -- this used to claim their order was
+    `.github/workflows/pr-gate.yml`'s and was simply wrong (CI runs the vendored tier
+    first), which nothing caught because the literals below are hardcoded and no test here
+    opens the workflow. `tests/test_gate_parity.py` is the one that does; the shape check
+    stays here.
     """
     assert all(isinstance(step, gate.Step) for step in gate.STEPS)
-    assert [step.name for step in gate.STEPS] == ["lint", "tests", "hook tests"]
+    assert [step.name for step in gate.STEPS] == [
+        "lint",
+        "tests",
+        "hook tests",
+        "posix rehearsal",
+    ]
     assert gate.STEPS[0].argv == ("scripts/lint-all.py",)
     assert gate.STEPS[1].argv == ("scripts/run-tests.py",)
     assert "pytest" in gate.STEPS[2].argv and "scripts/hooks/tests/" in gate.STEPS[2].argv
+    assert gate.STEPS[3].argv == ("scripts/posix-rehearsal.py",)
+
+
+def test_the_rehearsal_is_skipped_by_a_project_that_does_not_ship_it(tmp_path):
+    """It is devkit-only: not in `sync-devkit.py`'s MANIFEST, so a consuming project has
+    no such file and must not have its push refused over one."""
+    root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py")
+    planned = {step.name: command for step, command in gate.plan(root)}
+    assert planned["posix rehearsal"] is None
 
 
 def test_every_step_runs_when_the_project_has_every_file(tmp_path):
     root = project(
-        tmp_path, "scripts/lint-all.py", "scripts/run-tests.py", "scripts/hooks/tests/test_x.py"
+        tmp_path,
+        "scripts/lint-all.py",
+        "scripts/run-tests.py",
+        "scripts/hooks/tests/test_x.py",
+        "scripts/posix-rehearsal.py",
     )
     runner = FakeRunner()
     assert gate.run_gate(root, runner) == 0
@@ -99,6 +120,7 @@ def test_a_project_without_a_wrapper_skips_that_step_out_loud(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "no scripts/run-tests.py in this project -- skipped" in out
     assert "no scripts/hooks/tests in this project -- skipped" in out
+    assert "no scripts/posix-rehearsal.py in this project -- skipped" in out
 
 
 def test_plan_pairs_each_step_with_a_command_or_none(tmp_path):

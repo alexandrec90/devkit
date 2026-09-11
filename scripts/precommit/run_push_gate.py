@@ -9,11 +9,12 @@ between the two was the routine way a green commit became a red PR: nothing betw
 commit and the runner ever ran mypy or a test.
 
 Three of the commands CI runs, stopping at the first failure so each wrapper's artifact is
-the one still on disk when the push is refused:
+the one still on disk when the push is refused, plus one CI has no use for:
 
   1. `scripts/lint-all.py` -- ruff, mypy, whatever else the project's copy runs
   2. `scripts/run-tests.py` -- the application suite
   3. `pytest scripts/hooks/tests/` -- the vendored harness tier
+  4. `scripts/posix-rehearsal.py` -- the suite again, with the host's platform faked
 
 Lint is first because it auto-fixes: anything that can rewrite a file has to come after
 it, or the later step reports clean on what the earlier one just repaired. The two test
@@ -21,6 +22,13 @@ tiers' order is free, and is deliberately not CI's -- the gate stops at the firs
 so running the application suite second keeps `logs/test-failures.log` the artifact the
 refusal points at, while CI (which has no such stop) runs the fast vendored tier first so
 a broken harness still reports when the application suite is red.
+
+The rehearsal is last because it is the only step that can pass and fail for the same
+reason twice: running it before the suite would report a platform assumption in a test
+that is simply broken, and "fix the real failure first" is the cheaper order. It is also
+the one step with no CI counterpart, which `tests/test_gate_parity.py` requires a written
+reason for -- see `LOCAL_ONLY` there. Running it in CI would rehearse POSIX on a POSIX
+runner, which is the suite a second time and nothing else.
 
 What the gate does *not* reproduce is not a judgement call left to the reader:
 `tests/test_gate_parity.py` reads `.github/workflows/pr-gate.yml` and fails on any `run:`
@@ -69,6 +77,7 @@ STEPS: tuple[Step, ...] = (
     Step("lint", ("scripts/lint-all.py",), "scripts/lint-all.py"),
     Step("tests", ("scripts/run-tests.py",), "scripts/run-tests.py"),
     Step("hook tests", ("-m", "pytest", "scripts/hooks/tests/", "-q"), "scripts/hooks/tests"),
+    Step("posix rehearsal", ("scripts/posix-rehearsal.py",), "scripts/posix-rehearsal.py"),
 )
 
 

@@ -361,12 +361,21 @@ def test_only_the_push_gate_runs_at_the_push_stage():
 
 
 def test_the_push_gate_runs_what_the_pr_gates_test_job_runs():
-    """Local and CI have to be the same three commands, or a green push is not a
-    prediction of a green gate -- which is the whole reason the stage exists."""
+    """Local and CI have to be the same commands, or a green push is not a prediction of
+    a green gate -- which is the whole reason the stage exists.
+
+    The deliberate differences are `tests/test_gate_parity.py`'s `LOCAL_ONLY`, imported
+    rather than restated: two ledgers of the same exemptions would disagree the first
+    time either was edited, and a reader has no way to tell which one is current.
+    """
+    from test_gate_parity import LOCAL_ONLY
+
     gate_hook = load_script("scripts/precommit/run_push_gate.py")
     workflow = (REPO_ROOT / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
     runs = [line.split("run:", 1)[1].strip() for line in workflow.splitlines() if "run:" in line]
     for step in gate_hook.STEPS:
+        if step.name in LOCAL_ONLY:
+            continue
         needle = (
             step.argv[0] if step.argv[0].startswith("scripts/") else "pytest scripts/hooks/tests/"
         )
