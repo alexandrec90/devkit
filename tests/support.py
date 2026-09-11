@@ -68,6 +68,7 @@ import task_branch
 import task_input
 import task_slug
 import worktree
+import wt_profile
 
 # Reached through `worktree` rather than imported again, and not only to spare this file
 # an eleventh suppression: the box teardown is monkeypatched from both test modules, so
@@ -182,6 +183,7 @@ __all__ = [
     "task_slug",
     "vendor_manifest",
     "worktree",
+    "wt_profile",
 ]
 
 

@@ -97,7 +97,7 @@ dependency::pyproject.toml::mypy = 1
 dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::pytest = 1
 dependency::pyproject.toml::ruff = 1
-file_lines::scripts/agent-box.py = 538
+file_lines::scripts/agent-box.py = 544
 file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/fix-prs.py = 768
@@ -389,3 +389,6 @@ swallowed_errors::scripts/worktree.py = 1
 #   definitions::scripts/sync-devkit.py -> 46
 #   file_lines::scripts/sync-devkit.py -> 1490
 #   function_lines::scripts/sync-devkit.py::main -> 265
+
+# 2026-09-11  recorded: The Agent terminal profile: agent-box.py gains the two lines that carry it -- the wt_profile import and the -p pair spliced into wt_argv -- plus a two-line docstring saying what the new parameter is and where its reasoning lives. The module is already 38 lines past file_lines, so a parameter it cannot decline has nowhere else to go; the prose that would have grown it further lives in scripts/wt_profile.py, which owns the decision. resume-sessions.py took the same change and stayed under its limit by folding the sentence into an existing paragraph, which is the whole budget that file had left. The split agent-box.py owes is still owed and is still its own PR: it moves the module fix-prs.py and agent-worktree.py both load by name.
+#   file_lines::scripts/agent-box.py -> 544

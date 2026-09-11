@@ -674,7 +674,20 @@ python scripts/install-installers-schedule.py --yes   # once per machine
 python scripts/installers.py                          # what is current, stale, or left alone
 ```
 
-Two things it deliberately does not decide. A job stood down with `harness-switch.py
+Two of them register no scheduled job at all and are driven by this pass alone.
+`install-git-policy.py` is one; `install-wt-profile.py` is the other, and it registers the
+`Agent` Windows Terminal profile that every agent tab is opened under — without it a
+session is drawn as an ordinary shell, and the `+` beside one answers with the default
+profile in the default directory rather than another tab in that worktree.
+`scripts/wt_profile.py` owns the definition and is what the launchers ask before passing
+`-p`, so a machine that never ran it opens exactly the tabs it always did:
+
+```bash
+python scripts/install-wt-profile.py            # the plan, changing nothing
+python scripts/install-wt-profile.py --yes      # register it (backs the file up first)
+```
+
+Two things the pass deliberately does not decide. A job stood down with `harness-switch.py
 --off --job <name>` is registered **disabled** by its own installer, which is what its
 `--check` then expects to find, so `--on` never needs an install and the pass never
 enables anything. And `install-git-policy.py` answers "nothing installed here" with exit

@@ -367,6 +367,21 @@ def test_wt_args_opens_one_tab_per_session_in_its_own_directory(tmp_path):
         assert str(tmp_path / directory) in args
 
 
+def test_every_tab_in_the_window_opens_under_the_agent_profile(tmp_path):
+    """A window of resumed sessions is a window of paid agents; drawing it as a window of
+    shells is the same defect `agent-box.wt_argv` fixes, one tab at a time."""
+    sessions = [session("aaa", 1.0, tmp_path / "one"), session("bbb", 2.0, tmp_path / "two")]
+    args = rs.wt_args(sessions, profile="Agent")
+    assert args.count("-p") == args.count("new-tab") == 2
+    for index, token in enumerate(args):
+        if token == "new-tab":
+            assert args[index + 1 : index + 3] == ["-p", "Agent"]
+
+
+def test_a_machine_without_the_profile_opens_the_window_it_always_did(tmp_path):
+    assert "-p" not in rs.wt_args([session("aaa", 1.0, tmp_path)])
+
+
 def test_wt_args_lays_the_tabs_out_in_the_order_given(tmp_path):
     sessions = [session("first", 1.0, tmp_path), session("second", 2.0, tmp_path)]
     args = rs.wt_args(sessions)
@@ -676,10 +691,11 @@ def test_each_agent_store_honours_its_config_home(monkeypatch, tmp_path):
 def test_the_script_is_stdlib_only():
     """devkit ships no runtime dependencies, and this runs from a VS Code task.
 
-    `agent_clis` and `task_input` are the only non-stdlib names allowed, and neither is a
-    dependency: both are sibling scripts in the same directory, reached through the
-    `sys.path` insert above them. Naming them here rather than widening the rule keeps a
-    real third-party import from slipping in behind the exception.
+    `agent_clis`, `task_input` and `wt_profile` are the only non-stdlib names allowed, and
+    none is a dependency: all three are sibling scripts in the same directory, reached
+    through the `sys.path` insert above them, and each is stdlib-only itself. Naming them
+    here rather than widening the rule keeps a real third-party import from slipping in
+    behind the exception.
     """
     source = (REPO_ROOT / "scripts" / "resume-sessions.py").read_text(encoding="utf-8")
     for line in source.splitlines():
@@ -698,6 +714,7 @@ def test_the_script_is_stdlib_only():
                 "sys",
                 "task_input",
                 "time",
+                "wt_profile",
                 "dataclasses",
                 "pathlib",
             }, f"non-stdlib import: {line}"
