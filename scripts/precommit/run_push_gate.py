@@ -51,7 +51,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,28 +59,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _loader import load_by_path
 
 HOOK_ID = "devkit-push-gate"
-
-# Git exports these into every hook it runs, and each one takes precedence over a child
-# process's working directory when git resolves which repository it is in. Inherited, they
-# reach every `git` this gate's test suites spawn -- so a test that carefully seeds a
-# throwaway repo and passes `cwd=<tmp>` writes its commits into the *pushing* repository
-# instead. That is not hypothetical: the first push through this gate left the worktree on
-# a detached `seed` commit with the task branch reset to a fixture's `c1`, recoverable only
-# because the real commit was still in the object store.
-#
-# Stripped rather than overridden: the child should discover the repository the way it
-# would from a terminal, which is from its own cwd.
-GIT_REDIRECTS = (
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_COMMON_DIR",
-    "GIT_PREFIX",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_QUARANTINE_PATH",
-    "GIT_INDEX_VERSION",
-)
 
 # What a fake runner in the tests has to look like: called with the argv, `cwd`, `check`
 # and `env`, answering a CompletedProcess whose `returncode` is read.
@@ -126,6 +104,55 @@ def interpreter(root: Path) -> str:
     return str(module.interpreter(root, "pytest"))
 
 
+# Git exports these into every hook's environment, naming the repository the push is
+# happening in. They are not hints: each one **overrides a subprocess's `cwd=`**, so a
+# test fixture that builds a throwaway repo and runs `git commit` in it with an inherited
+# environment commits to the real repository instead.
+#
+# The first three are the ones observed to bite. The rest redirect the same resolution by
+# another route -- the object store, the index format, the ceiling git stops searching at
+# -- and cost nothing to strip: a step that wants the pushed repository has `cwd`.
+LEAKED_GIT_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+    "GIT_INDEX_VERSION",
+)
+
+
+def gate_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment the gate's steps run in: this hook's, minus git's own variables.
+
+    Every step here is spawned from inside a git hook, and the suites they run build
+    throwaway repositories by the dozen. Without this scrub those fixtures write to the
+    repository being pushed: observed as `init`, `seed`, `c0`, `c1` and a `checkout` of a
+    fixture's tag landing in a real worktree's reflog, leaving its branch ref pointing at
+    a fixture commit and its index unusable. Nothing reported it -- the push was refused
+    for an unrelated failing test, and the corruption was found afterwards in `git
+    reflog`.
+
+    Scrubbed here rather than in each fixture because this is the seam where the
+    variables enter: one place covers all four steps, every suite under them, and every
+    consumer -- and a fixture that forgets the scrub is not a defect anyone would notice
+    until it has already rewritten a branch. `scripts/hooks/tests/test_session_start.py`
+    scrubs the first four names for the same reason, and is the precedent for the list.
+
+    A step that genuinely wants the pushed repository has `cwd` -- which is the repo root
+    -- and `git rev-parse`, both of which say the same thing without steering an
+    unrelated subprocess.
+    """
+    env = dict(os.environ if environ is None else environ)
+    for leaked in LEAKED_GIT_VARS:
+        env.pop(leaked, None)
+    return env
+
+
 def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
     """Each step with the command that runs it, or None when `root` lacks its file."""
     python = interpreter(root)
@@ -134,17 +161,9 @@ def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
     ]
 
 
-def environment(base: dict[str, str] | None = None) -> dict[str, str]:
-    """`base` with git's hook-only repository redirects removed. See `GIT_REDIRECTS`."""
-    env = dict(os.environ if base is None else base)
-    for name in GIT_REDIRECTS:
-        env.pop(name, None)
-    return env
-
-
 def run_gate(root: Path, runner: Runner = subprocess.run) -> int:
     """Run the steps in order; the first non-zero exit is the hook's, and ends the run."""
-    env = environment()
+    env = gate_env()
     for step, command in plan(root):
         if command is None:
             print(f"push-gate: {step.name}: no {step.requires} in this project -- skipped")

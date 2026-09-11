@@ -101,7 +101,7 @@ file_lines::scripts/agent-box.py = 538
 file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/fix-prs.py = 768
-file_lines::scripts/git_policy.py = 795
+file_lines::scripts/git_policy.py = 793
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
@@ -390,6 +390,6 @@ swallowed_errors::scripts/worktree.py = 1
 #   file_lines::scripts/sync-devkit.py -> 1490
 #   function_lines::scripts/sync-devkit.py::main -> 265
 
-# 2026-09-11  recorded: git_policy.py gains echo(), the relay that stopped the pre-push stage killing the hook on an encoding: the console here is cp1252, the tools that stage runs (ruff, mypy, pytest) emit characters outside it, and a plain print raised UnicodeEncodeError from inside the hook -- so git push reported a codec instead of the gate, and the output needed to act on it was the thing lost. One definition and its docstring, in the only module that relays a child's output from inside a hook. Recorded rather than split for the reason the 2026-09-05 and 2026-09-07 entries give and this change makes sharper: splitting this module moves a file every workspace-aware script imports AND that is COPIED to ~/.devkit/git-hooks, where it runs with no checkout in reach -- a split has to land in both places at once, which is its own PR with its own reversion check. This is a defect fix in a module already 268 lines past file_lines, which is exactly the case --record exists for.
+# 2026-09-11  recorded: git_policy.py gains _utf8_console and the call to it in main(): the write half of run_command's codec note. Under git the hook's streams are pipes, encoded with cp1252 on Windows, and the gate output it relays is UTF-8 carrying em dashes, arrows and the U+FFFD that errors='replace' leaves, which no codepage encodes -- so a red pre-push gate died at the print that relayed it and a repo-corrupting bug presented as a UnicodeEncodeError traceback. A separate definition rather than a loop inlined in main() so the None-stream case is testable without a git repo. Recorded rather than split for the reason the 2026-09-05 entry gives: this module is COPIED to ~/.devkit/git-hooks and runs with no checkout in reach, so splitting it is its own PR.
 #   definitions::scripts/git_policy.py -> 38
-#   file_lines::scripts/git_policy.py -> 795
+#   file_lines::scripts/git_policy.py -> 793

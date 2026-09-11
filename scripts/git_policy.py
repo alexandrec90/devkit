@@ -606,33 +606,6 @@ NO_PRE_COMMIT = (
 )
 
 
-def echo(text: str, stream=None) -> None:
-    """Relay a child process's captured output without ever failing on an encoding.
-
-    A plain `print` of this text kills the hook, and it took the pre-push stage going
-    live to show it: the console here is cp1252, the tools the gate runs (ruff, mypy,
-    pytest) emit characters that are not in it, and whatever decoded their bytes leaves a
-    U+FFFD behind -- which cp1252 cannot encode either. The traceback then lands in
-    `charmap_encode` with the push refused, naming a codec instead of the gate, and the
-    output the developer needed in order to act is the very thing that was lost.
-
-    Relaying is not the hook's job to be strict about: the gate's verdict is its exit
-    code, and a mangled character in a line of ruff output costs nothing next to a push
-    that fails for a reason nobody can read. So the bytes are forced through the stream's
-    own encoding with `replace`, and a stream that will not take bytes at all (a test's
-    `StringIO`, a captured pipe) falls back to writing the text as it stands.
-    """
-    stream = sys.stdout if stream is None else stream
-    buffer = getattr(stream, "buffer", None)
-    encoding = getattr(stream, "encoding", None) or "utf-8"
-    if buffer is None:
-        stream.write(text)
-        return
-    stream.flush()
-    buffer.write(text.encode(encoding, errors="replace"))
-    buffer.flush()
-
-
 def _run_pre_commit_framework(
     root: Path, runner: Runner, stage: str = "pre-commit", raw_updates: str = ""
 ) -> int:
@@ -655,9 +628,9 @@ def _run_pre_commit_framework(
     args = ["run", "--hook-stage", stage] + (["--all-files"] if stage == "pre-push" else [])
     result = runner([*command, *args], cwd=root)
     if result.stdout:
-        echo(result.stdout)
+        print(result.stdout, end="")
     if result.stderr:
-        echo(result.stderr, stream=sys.stderr)
+        print(result.stderr, end="", file=sys.stderr)
     return result.returncode
 
 
@@ -779,7 +752,30 @@ def run_hook(
     return _run_project_hook(hook_name, args, input_text, root, runner)
 
 
-def main(hook_name: str, argv: Sequence[str] | None = None) -> int:
+def _utf8_console() -> None:
+    """Make the relay of the gate's output unable to raise.
+
+    The write half of the codec note on `run_command`. Under git the hook's streams
+    are pipes, so Python encodes them with the *locale* codec -- cp1252 on a Windows
+    workstation -- while everything this module relays is UTF-8: a test runner's em
+    dashes and arrows, and the U+FFFD that `errors="replace"` puts where a byte could
+    not be decoded, which **no codepage encodes**. Before this, a red pre-push gate
+    whose output carried one such character died at the `print` that relayed it, so
+    the developer saw a `UnicodeEncodeError` traceback with the failure it was
+    relaying nowhere in it -- which is how a repo-corrupting bug came to present as a
+    CPython crash in the hook. `errors="replace"` keeps the guard total: a stream that
+    somehow still cannot take a character costs a `?`, never the report.
+
+    `sys.stdout` is `None` under `pythonw`, and a capture object need not be a
+    `TextIOWrapper`; neither is a reason to raise, so the guard asks first.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+def main(hook_name: str, argv: Sequence[str] | None = None, *, runner: Runner | None = None) -> int:
+    _utf8_console()
     args = list(sys.argv[1:] if argv is None else argv)
     input_text = ""
     if hook_name == "pre-push" and sys.stdin is not None:
@@ -787,7 +783,9 @@ def main(hook_name: str, argv: Sequence[str] | None = None) -> int:
             input_text = sys.stdin.read()
         except (OSError, ValueError):
             input_text = ""
-    return run_hook(hook_name, args, input_text=input_text)
+    return run_hook(
+        hook_name, args, input_text=input_text, runner=run_command if runner is None else runner
+    )
 
 
 if __name__ == "__main__":
