@@ -606,6 +606,33 @@ NO_PRE_COMMIT = (
 )
 
 
+def echo(text: str, stream=None) -> None:
+    """Relay a child process's captured output without ever failing on an encoding.
+
+    A plain `print` of this text kills the hook, and it took the pre-push stage going
+    live to show it: the console here is cp1252, the tools the gate runs (ruff, mypy,
+    pytest) emit characters that are not in it, and whatever decoded their bytes leaves a
+    U+FFFD behind -- which cp1252 cannot encode either. The traceback then lands in
+    `charmap_encode` with the push refused, naming a codec instead of the gate, and the
+    output the developer needed in order to act is the very thing that was lost.
+
+    Relaying is not the hook's job to be strict about: the gate's verdict is its exit
+    code, and a mangled character in a line of ruff output costs nothing next to a push
+    that fails for a reason nobody can read. So the bytes are forced through the stream's
+    own encoding with `replace`, and a stream that will not take bytes at all (a test's
+    `StringIO`, a captured pipe) falls back to writing the text as it stands.
+    """
+    stream = sys.stdout if stream is None else stream
+    buffer = getattr(stream, "buffer", None)
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    if buffer is None:
+        stream.write(text)
+        return
+    stream.flush()
+    buffer.write(text.encode(encoding, errors="replace"))
+    buffer.flush()
+
+
 def _run_pre_commit_framework(
     root: Path, runner: Runner, stage: str = "pre-commit", raw_updates: str = ""
 ) -> int:
@@ -628,9 +655,9 @@ def _run_pre_commit_framework(
     args = ["run", "--hook-stage", stage] + (["--all-files"] if stage == "pre-push" else [])
     result = runner([*command, *args], cwd=root)
     if result.stdout:
-        print(result.stdout, end="")
+        echo(result.stdout)
     if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
+        echo(result.stderr, stream=sys.stderr)
     return result.returncode
 
 

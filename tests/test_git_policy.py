@@ -489,6 +489,70 @@ def test_a_project_with_no_pre_commit_config_says_nothing_at_all(tmp_path, capsy
     assert capsys.readouterr().err == ""
 
 
+class _Cp1252Stream:
+    """A console that encodes like a Windows one: strict cp1252, and it bites."""
+
+    encoding = "cp1252"
+
+    def __init__(self):
+        self.written = bytearray()
+        self.buffer = self
+
+    def write(self, data):
+        if isinstance(data, str):
+            # What `print` does, and what took the push down: strict, and cp1252 has no
+            # mapping for U+FFFD.
+            data.encode(self.encoding)
+            return
+        self.written += data
+
+    def flush(self):
+        pass
+
+
+def test_a_character_the_console_cannot_encode_does_not_kill_the_hook():
+    """The regression, and it cost a refused push: the pre-push stage relays ruff, mypy
+    and pytest output, those carry characters cp1252 has no mapping for, and `print`
+    raised `UnicodeEncodeError` from inside `charmap_encode` -- so the push failed naming
+    a codec, and the gate output that would have explained it was the thing lost."""
+    stream = _Cp1252Stream()
+    git_policy.echo("ruff: � found 1 error → here\n", stream=stream)
+    assert b"ruff: " in stream.written
+    assert b"found 1 error" in stream.written
+
+
+def test_what_can_be_encoded_is_relayed_unchanged():
+    """Only the characters that cannot survive are replaced; a mangled whole would be as
+    useless as the traceback it replaces."""
+    stream = _Cp1252Stream()
+    git_policy.echo("push-gate: clean\n", stream=stream)
+    assert stream.written.decode("cp1252") == "push-gate: clean\n"
+
+
+def test_a_stream_with_no_byte_buffer_is_written_to_directly(capsys):
+    """pytest's capture replaces stdout with an object that has no usable `buffer`, and
+    so does any caller holding a `StringIO`. Relaying has to keep working there, or the
+    tests above would be passing against a path nothing else takes."""
+    git_policy.echo("push-gate: clean\n")
+    assert capsys.readouterr().out == "push-gate: clean\n"
+
+
+def test_the_framework_relays_both_streams_through_it(tmp_path, monkeypatch, capsys):
+    """The wiring, not just the helper: a `print` left on either stream is the bug back."""
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    monkeypatch.setattr(
+        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
+    result = completed(["pre-commit-test"])
+    result.stdout, result.stderr = "out→\n", "err�\n"
+    runner = FakeRunner({("pre-commit-test", "run", "--hook-stage", "pre-commit"): result})
+
+    assert git_policy._run_pre_commit_framework(tmp_path, runner) == 0
+    captured = capsys.readouterr()
+    assert "out" in captured.out
+    assert "err" in captured.err
+
+
 def _common_dir(main_git: pathlib.Path | None):
     """A runner answering `rev-parse --git-common-dir`, or failing like a non-repository."""
 

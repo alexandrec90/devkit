@@ -71,7 +71,7 @@ definitions::scripts/agent_clis.py = 21
 definitions::scripts/devkit_project.py = 50
 definitions::scripts/docker-maint.py = 30
 definitions::scripts/fix-prs.py = 31
-definitions::scripts/git_policy.py = 37
+definitions::scripts/git_policy.py = 38
 definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
 definitions::scripts/hooks/structure_check.py = 42
@@ -101,7 +101,7 @@ file_lines::scripts/agent-box.py = 538
 file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/fix-prs.py = 768
-file_lines::scripts/git_policy.py = 768
+file_lines::scripts/git_policy.py = 795
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
@@ -389,3 +389,7 @@ swallowed_errors::scripts/worktree.py = 1
 #   definitions::scripts/sync-devkit.py -> 46
 #   file_lines::scripts/sync-devkit.py -> 1490
 #   function_lines::scripts/sync-devkit.py::main -> 265
+
+# 2026-09-11  recorded: git_policy.py gains echo(), the relay that stopped the pre-push stage killing the hook on an encoding: the console here is cp1252, the tools that stage runs (ruff, mypy, pytest) emit characters outside it, and a plain print raised UnicodeEncodeError from inside the hook -- so git push reported a codec instead of the gate, and the output needed to act on it was the thing lost. One definition and its docstring, in the only module that relays a child's output from inside a hook. Recorded rather than split for the reason the 2026-09-05 and 2026-09-07 entries give and this change makes sharper: splitting this module moves a file every workspace-aware script imports AND that is COPIED to ~/.devkit/git-hooks, where it runs with no checkout in reach -- a split has to land in both places at once, which is its own PR with its own reversion check. This is a defect fix in a module already 268 lines past file_lines, which is exactly the case --record exists for.
+#   definitions::scripts/git_policy.py -> 38
+#   file_lines::scripts/git_policy.py -> 795

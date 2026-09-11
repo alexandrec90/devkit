@@ -33,9 +33,11 @@ class FakeRunner:
     def __init__(self, exits=None):
         self.exits = exits or {}
         self.calls: list[list[str]] = []
+        self.envs: list[dict[str, str] | None] = []
 
-    def __call__(self, argv, *, cwd, check):
+    def __call__(self, argv, *, cwd, check, env=None):
         self.calls.append(list(argv))
+        self.envs.append(env)
         return completed(argv, self.exits.get(argv[1], 0))
 
 
@@ -121,6 +123,45 @@ def test_a_project_without_a_wrapper_skips_that_step_out_loud(tmp_path, capsys):
     assert "no scripts/run-tests.py in this project -- skipped" in out
     assert "no scripts/hooks/tests in this project -- skipped" in out
     assert "no scripts/posix-rehearsal.py in this project -- skipped" in out
+
+
+def test_gits_hook_redirects_are_stripped_from_every_step(tmp_path):
+    """The regression, and it cost a recovery: git exports `GIT_DIR` and friends into
+    every hook it runs, and each takes precedence over a child's working directory when
+    git resolves which repository it is in.
+
+    Inherited, they reach every `git` the gate's own test suites spawn -- so a test that
+    seeds a throwaway repo and passes `cwd=<tmp>` writes its commits into the repository
+    being pushed. The first push through this gate left this worktree on a detached
+    `seed` commit with the task branch reset to a fixture's `c1`.
+    """
+    root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py")
+    runner = FakeRunner()
+    gate.run_gate(root, runner)
+    for env in runner.envs:
+        assert env is not None, "a step ran with the inherited environment"
+        for name in gate.GIT_REDIRECTS:
+            assert name not in env, f"{name} reached a step and points it at the wrong repo"
+
+
+def test_the_rest_of_the_environment_is_handed_through(tmp_path):
+    """Stripping is surgical: PATH, the venv and anything the project's wrappers read
+    have to survive, or the gate cannot run the tools it exists to run."""
+    env = gate.environment({"PATH": "/usr/bin", "VIRTUAL_ENV": "/v", "GIT_DIR": "/x/.git"})
+    assert env == {"PATH": "/usr/bin", "VIRTUAL_ENV": "/v"}
+
+
+def test_a_terminal_push_with_no_redirects_set_is_unchanged(tmp_path):
+    """`git push` from a shell exports none of these; the scrub must be a no-op there
+    rather than something a developer can tell happened."""
+    assert gate.environment({"PATH": "/usr/bin"}) == {"PATH": "/usr/bin"}
+
+
+def test_the_redirect_list_names_the_one_that_actually_bit():
+    """A list that lost `GIT_DIR` would still look like a scrub and stop nothing."""
+    assert "GIT_DIR" in gate.GIT_REDIRECTS
+    assert "GIT_WORK_TREE" in gate.GIT_REDIRECTS
+    assert "GIT_INDEX_FILE" in gate.GIT_REDIRECTS
 
 
 def test_plan_pairs_each_step_with_a_command_or_none(tmp_path):

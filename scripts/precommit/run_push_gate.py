@@ -48,6 +48,7 @@ Stdlib only. Tested in `tests/test_run_push_gate.py`.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -59,8 +60,30 @@ from _loader import load_by_path
 
 HOOK_ID = "devkit-push-gate"
 
-# What a fake runner in the tests has to look like: called with the argv, `cwd` and
-# `check`, answering a CompletedProcess whose `returncode` is read.
+# Git exports these into every hook it runs, and each one takes precedence over a child
+# process's working directory when git resolves which repository it is in. Inherited, they
+# reach every `git` this gate's test suites spawn -- so a test that carefully seeds a
+# throwaway repo and passes `cwd=<tmp>` writes its commits into the *pushing* repository
+# instead. That is not hypothetical: the first push through this gate left the worktree on
+# a detached `seed` commit with the task branch reset to a fixture's `c1`, recoverable only
+# because the real commit was still in the object store.
+#
+# Stripped rather than overridden: the child should discover the repository the way it
+# would from a terminal, which is from its own cwd.
+GIT_REDIRECTS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+    "GIT_INDEX_VERSION",
+)
+
+# What a fake runner in the tests has to look like: called with the argv, `cwd`, `check`
+# and `env`, answering a CompletedProcess whose `returncode` is read.
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
@@ -111,14 +134,23 @@ def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
     ]
 
 
+def environment(base: dict[str, str] | None = None) -> dict[str, str]:
+    """`base` with git's hook-only repository redirects removed. See `GIT_REDIRECTS`."""
+    env = dict(os.environ if base is None else base)
+    for name in GIT_REDIRECTS:
+        env.pop(name, None)
+    return env
+
+
 def run_gate(root: Path, runner: Runner = subprocess.run) -> int:
     """Run the steps in order; the first non-zero exit is the hook's, and ends the run."""
+    env = environment()
     for step, command in plan(root):
         if command is None:
             print(f"push-gate: {step.name}: no {step.requires} in this project -- skipped")
             continue
         print(f"push-gate: {step.name}: {' '.join(command[1:])}", flush=True)
-        result = runner(command, cwd=root, check=False)
+        result = runner(command, cwd=root, check=False, env=env)
         if result.returncode:
             print(
                 f"push-gate: {step.name} failed (exit {result.returncode}). Fix it from the "
