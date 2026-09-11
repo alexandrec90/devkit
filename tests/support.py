@@ -42,6 +42,29 @@ TEMPLATES = REPO_ROOT / "templates"
 # variable set still wins: `monkeypatch.setenv` runs long after this line.
 os.environ.pop("DEVKIT_HOOKS_OFF", None)
 
+# Git's repo scoping, cleared for the same reason and with far worse consequences if it
+# is not. A hook inherits `GIT_DIR` and `GIT_INDEX_FILE`, so a suite run from inside one
+# -- which is exactly what `devkit-push-gate` does on every push -- hands every test that
+# builds a repo in `tmp_path` and shells out to `git -C <tmp>` the PUSHING repo instead.
+# That is not a failed assertion: on the push this was written for, the fixtures committed
+# into this worktree, moved its branch through four of their own commits and left HEAD
+# detached. `run_push_gate.gate_env` is the fix at the source; this is the suite refusing
+# to act on the variables at all, because any other runner can inherit them too.
+for _leaked in (
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_INDEX_VERSION",
+    "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+    "GIT_NAMESPACE",
+):
+    os.environ.pop(_leaked, None)
+
 # `scripts/` for the importable devkit modules; `scripts/hooks/` so a test can load
 # the vendored harness_config that generated manifests must satisfy.
 for _path in (REPO_ROOT / "scripts", REPO_ROOT / "scripts" / "hooks"):
@@ -68,6 +91,7 @@ import task_branch
 import task_input
 import task_slug
 import worktree
+import wt_profile
 
 # Reached through `worktree` rather than imported again, and not only to spare this file
 # an eleventh suppression: the box teardown is monkeypatched from both test modules, so
@@ -182,6 +206,7 @@ __all__ = [
     "task_slug",
     "vendor_manifest",
     "worktree",
+    "wt_profile",
 ]
 
 

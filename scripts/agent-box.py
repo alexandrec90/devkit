@@ -49,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import devkit_project
 import project_python
 import worktree
+import wt_profile
 
 # Resolved by the second insert above; `scripts/precommit/` is not a package. Used for the
 # one neighbour whose name has a hyphen in it; `worktree` above is imported normally, and
@@ -125,12 +126,17 @@ def ps_quote(text: str) -> str:
     return "'" + str(text).replace("'", "''") + "'"
 
 
-def wt_argv(title: str, cwd: Path, command: str) -> list[str]:
-    """Build one tab, escaping semicolons that wt otherwise treats as tab separators."""
+def wt_argv(title: str, cwd: Path, command: str, profile: str = "") -> list[str]:
+    """Build one tab, escaping semicolons that wt otherwise treats as tab separators.
+
+    `profile` is the Windows Terminal profile it opens under; `""` is the tab this built
+    before there was one, inheriting the default profile. `wt_profile.py` owns why.
+    """
     return [
         "-w",
         WT_WINDOW,
         "new-tab",
+        *(["-p", profile] if profile else []),
         "--title",
         title.replace(";", "\\;"),
         "-d",
@@ -344,7 +350,7 @@ def open_agent(
     if not terminal:
         print(f"Windows Terminal not found; run this yourself:\n  cd {box}\n  {command}")
         return EXIT_OK
-    argv = wt_argv(title or branch, box, command)
+    argv = wt_argv(title or branch, box, command, wt_profile.launch_name())
     print(f"opening {agent} in {box}")
     done = runner([terminal, *argv], check=False)
     return EXIT_OK if done.returncode == 0 else EXIT_FAILED

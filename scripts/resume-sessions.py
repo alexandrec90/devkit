@@ -69,6 +69,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_clis
 import task_input
+import wt_profile
 
 # The update stage, taken as an argument so a test of the launch path cannot spawn a real
 # updater by forgetting to stub one. `agent_clis.run_pass` is its only production value.
@@ -325,13 +326,13 @@ def resume_args(agent: str, session_id: str) -> list[str]:
     return [agent, "resume", session_id]
 
 
-def wt_args(sessions: list[Session], agent: str | None = None) -> list[str]:
+def wt_args(sessions: list[Session], agent: str | None = None, profile: str = "") -> list[str]:
     """The wt.exe argument list: one tab per session, each resuming it in its own cwd.
 
-    `-w -1` forces a new window rather than tabs bolted onto whichever one has focus.
-    The `;` separators are their own tokens because wt parses its command line itself:
-    joined into one string they are swallowed by the outer shell, and every tab after
-    the first is lost.
+    `-w -1` forces a new window rather than tabs bolted onto whichever one has focus, and
+    `profile` is `agent-box.wt_argv`'s argument. The `;` separators are their own tokens
+    because wt parses its command line itself: joined into one string they are swallowed
+    by the outer shell, and every tab after the first is lost.
     """
     args = ["-w", "-1"]
     for index, session in enumerate(sessions):
@@ -339,6 +340,7 @@ def wt_args(sessions: list[Session], agent: str | None = None) -> list[str]:
             args.append(";")
         args += [
             "new-tab",
+            *(["-p", profile] if profile else []),
             "--title",
             tab_title(session),
             "-d",
@@ -484,7 +486,7 @@ def main(argv: list[str] | None = None, agent_pass: AgentPass | None = None) -> 
             print(f"  {line}", file=sys.stderr)
         return 0 if args.dry_run else 1
 
-    command = wt_args(selected)
+    command = wt_args(selected, profile=wt_profile.launch_name())
     if args.dry_run:
         print("\nwt.exe " + subprocess.list2cmdline(command))
         return 0

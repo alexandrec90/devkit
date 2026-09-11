@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from support import load_script
+from support import REPO_ROOT, load_script
 
 gate = load_script("scripts/precommit/run_push_gate.py")
 
@@ -215,7 +215,18 @@ def test_the_scrub_list_is_pinned_to_every_name_that_redirects_a_repository():
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_QUARANTINE_PATH",
         "GIT_INDEX_VERSION",
+        "GIT_NAMESPACE",
     )
+
+
+def test_the_suites_own_bootstrap_drops_the_same_variables():
+    """Two layers, because the gate is not the only thing that can run this suite from
+    inside a git hook. `tests/support.py` clears the same set at import; if the two lists
+    diverge, the one nobody is looking at is the one that lets a fixture write to the
+    real repository."""
+    bootstrap = (REPO_ROOT / "tests" / "support.py").read_text(encoding="utf-8")
+    for name in gate.LEAKED_GIT_VARS:
+        assert f'"{name}"' in bootstrap, f"tests/support.py does not clear {name}"
 
 
 def test_a_terminal_push_with_none_of_them_set_is_unchanged():
