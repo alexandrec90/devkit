@@ -22,9 +22,13 @@ clone, so resolve devkit files through `Path(__file__)` and read layout from
 rev, or a hook fix could never be validated by the hook it fixes. A new hook needs an id
 in both `.pre-commit-hooks.yaml` and `.pre-commit-config.yaml`; a test asserts the sets
 match, with `devkit-drift` as the one documented exception. The channel has two stages:
-commit-time hooks stay sub-second, and `devkit-push-gate` is the PR gate's own three
-commands at the pre-push stage — a check that takes minutes belongs there, never on a
-commit.
+commit-time hooks stay sub-second, and `devkit-push-gate` is the PR gate's own commands at
+the pre-push stage — a check that takes minutes belongs there, never on a commit. Its
+steps are `run_push_gate.STEPS`; each is skipped out loud in a project that does not ship
+the file it needs, which is how a devkit-only step (`scripts/posix-rehearsal.py`) rides in
+the published hook without breaking a consumer. What CI runs and the hook does not, and
+what the hook runs and CI does not, are both held to a written reason by
+[`tests/test_gate_parity.py`](../tests/test_gate_parity.py).
 
 ## Vendoring rules
 

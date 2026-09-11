@@ -110,7 +110,7 @@ devkit ref as the PR gate.
 | `devkit-manifest` | A `.devkit.toml` the harness would silently ignore: unparseable TOML, a path prefix missing its trailing slash, a declared directory that does not exist in the repo, a `[db]`/`[frontend]` block switched on and left half-filled. |
 | `devkit-hooks-stdlib-only` | A third-party import in `scripts/hooks/`. Those scripts run *before* the virtualenv exists, so this cannot be caught by a test suite — which runs inside it. |
 | `devkit-drift` | A vendored file that differs from the pinned devkit rev. |
-| `devkit-push-gate` | Whatever the PR gate would have caught, before the push: `scripts/lint-all.py`, `scripts/run-tests.py`, then the hook tests, in CI's order, stopping at the first failure. Runs at the **pre-push** stage, so a commit stays seconds and a failure is read from `logs/` instead of a workflow artifact. `SKIP=devkit-push-gate git push` bypasses it on purpose. |
+| `devkit-push-gate` | Whatever the PR gate would have caught, before the push: `scripts/lint-all.py`, `scripts/run-tests.py`, then the hook tests, lint first because it auto-fixes, stopping at the first failure. A step whose file the project does not ship is skipped out loud. Runs at the **pre-push** stage, so a commit stays seconds and a failure is read from `logs/` instead of a workflow artifact. `SKIP=devkit-push-gate git push` bypasses it on purpose. |
 
 The commit stage is only fixers and sub-second checks. Everything a PR gate fails on and
 a commit hook did not run — mypy, the suites — is the push stage, which `pre-commit

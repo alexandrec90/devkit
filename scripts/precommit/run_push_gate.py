@@ -9,11 +9,12 @@ between the two was the routine way a green commit became a red PR: nothing betw
 commit and the runner ever ran mypy or a test.
 
 Three of the commands CI runs, stopping at the first failure so each wrapper's artifact is
-the one still on disk when the push is refused:
+the one still on disk when the push is refused, plus one CI has no use for:
 
   1. `scripts/lint-all.py` -- ruff, mypy, whatever else the project's copy runs
   2. `scripts/run-tests.py` -- the application suite
   3. `pytest scripts/hooks/tests/` -- the vendored harness tier
+  4. `scripts/posix-rehearsal.py` -- the suite again, with the host's platform faked
 
 Lint is first because it auto-fixes: anything that can rewrite a file has to come after
 it, or the later step reports clean on what the earlier one just repaired. The two test
@@ -21,6 +22,13 @@ tiers' order is free, and is deliberately not CI's -- the gate stops at the firs
 so running the application suite second keeps `logs/test-failures.log` the artifact the
 refusal points at, while CI (which has no such stop) runs the fast vendored tier first so
 a broken harness still reports when the application suite is red.
+
+The rehearsal is last because it is the only step that can pass and fail for the same
+reason twice: running it before the suite would report a platform assumption in a test
+that is simply broken, and "fix the real failure first" is the cheaper order. It is also
+the one step with no CI counterpart, which `tests/test_gate_parity.py` requires a written
+reason for -- see `LOCAL_ONLY` there. Running it in CI would rehearse POSIX on a POSIX
+runner, which is the suite a second time and nothing else.
 
 What the gate does *not* reproduce is not a judgement call left to the reader:
 `tests/test_gate_parity.py` reads `.github/workflows/pr-gate.yml` and fails on any `run:`
@@ -52,23 +60,8 @@ from _loader import load_by_path
 
 HOOK_ID = "devkit-push-gate"
 
-# The variables git exports to a hook to say which repository, index, worktree and object
-# store its children are to act on. `gate_env` drops exactly these; see its docstring.
-GIT_SCOPING_VARS: tuple[str, ...] = (
-    "GIT_DIR",
-    "GIT_COMMON_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_INDEX_VERSION",
-    "GIT_PREFIX",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_QUARANTINE_PATH",
-    "GIT_NAMESPACE",
-)
-
-# What a fake runner in the tests has to look like: called with the argv, `cwd` and
-# `check`, answering a CompletedProcess whose `returncode` is read.
+# What a fake runner in the tests has to look like: called with the argv, `cwd`, `check`
+# and `env`, answering a CompletedProcess whose `returncode` is read.
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
@@ -85,6 +78,7 @@ STEPS: tuple[Step, ...] = (
     Step("lint", ("scripts/lint-all.py",), "scripts/lint-all.py"),
     Step("tests", ("scripts/run-tests.py",), "scripts/run-tests.py"),
     Step("hook tests", ("-m", "pytest", "scripts/hooks/tests/", "-q"), "scripts/hooks/tests"),
+    Step("posix rehearsal", ("scripts/posix-rehearsal.py",), "scripts/posix-rehearsal.py"),
 )
 
 
@@ -110,35 +104,62 @@ def interpreter(root: Path) -> str:
     return str(module.interpreter(root, "pytest"))
 
 
+# Git exports these into every hook's environment, naming the repository the push is
+# happening in. They are not hints: each one **overrides a subprocess's `cwd=`**, so a
+# test fixture that builds a throwaway repo and runs `git commit` in it with an inherited
+# environment commits to the real repository instead.
+#
+# The first three are the ones observed to bite. The rest redirect the same resolution by
+# another route -- the object store, the index format, the ceiling git stops searching at
+# -- and cost nothing to strip: a step that wants the pushed repository has `cwd`.
+LEAKED_GIT_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+    "GIT_INDEX_VERSION",
+    "GIT_NAMESPACE",
+)
+
+
+def gate_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment the gate's steps run in: this hook's, minus git's own variables.
+
+    Every step here is spawned from inside a git hook, and the suites they run build
+    throwaway repositories by the dozen. Without this scrub those fixtures write to the
+    repository being pushed: observed as `init`, `seed`, `c0`, `c1` and a `checkout` of a
+    fixture's tag landing in a real worktree's reflog, leaving its branch ref pointing at
+    a fixture commit and its index unusable. Nothing reported it -- the push was refused
+    for an unrelated failing test, and the corruption was found afterwards in `git
+    reflog`.
+
+    Scrubbed here rather than in each fixture because this is the seam where the
+    variables enter: one place covers all four steps, every suite under them, and every
+    consumer -- and a fixture that forgets the scrub is not a defect anyone would notice
+    until it has already rewritten a branch. `scripts/hooks/tests/test_session_start.py`
+    scrubs the first four names for the same reason, and is the precedent for the list.
+
+    A step that genuinely wants the pushed repository has `cwd` -- which is the repo root
+    -- and `git rev-parse`, both of which say the same thing without steering an
+    unrelated subprocess.
+    """
+    env = dict(os.environ if environ is None else environ)
+    for leaked in LEAKED_GIT_VARS:
+        env.pop(leaked, None)
+    return env
+
+
 def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
     """Each step with the command that runs it, or None when `root` lacks its file."""
     python = interpreter(root)
     return [
         (step, [python, *step.argv] if (root / step.requires).exists() else None) for step in STEPS
     ]
-
-
-def gate_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    """The environment the steps run under: this one, minus git's repo scoping.
-
-    A hook inherits the variables git uses to tell its own child processes which
-    repository they are operating on -- `GIT_DIR` and `GIT_INDEX_FILE` always, the rest
-    depending on the command. They are correct for the push and poison for a test suite:
-    every test that builds a throwaway repo in `tmp_path` and shells out to `git -C
-    <tmp>` gets the *pushing* repo's index instead of its own, and fails on something
-    that names neither git nor the environment. That is not hypothetical -- it is 96
-    failures across five test modules on the push this was written for, a suite that
-    passes in any terminal, so the gate refused a push for a defect the developer could
-    not reproduce at the one moment they most needed to.
-
-    Removed by name rather than by an all-`GIT_*` sweep: `GIT_SSH_COMMAND`,
-    `GIT_CONFIG_GLOBAL` and the rest of a machine's git configuration are not scoping,
-    and a gate that dropped them would break the tests that shell out to git *properly*.
-    """
-    remaining = dict(os.environ if environ is None else environ)
-    for name in GIT_SCOPING_VARS:
-        remaining.pop(name, None)
-    return remaining
 
 
 def run_gate(root: Path, runner: Runner = subprocess.run) -> int:

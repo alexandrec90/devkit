@@ -1,0 +1,16 @@
+# Tests that are expected to fail under `scripts/posix-rehearsal.py`.
+#
+# Format: `<pytest node id>  # <why it can only pass on Windows>`
+#
+# This file is empty, and that is the steady state worth defending: when the rehearsal
+# was introduced the whole suite passed under it, so every entry added here is a new
+# admission rather than inherited debt.
+#
+# Add a line only when a test genuinely cannot hold off Windows -- it drives `schtasks`,
+# a `windll` binding, or a console-window flag that has no POSIX counterpart. A test that
+# merely *forgot* to say which platform it meant is the defect this rehearsal exists to
+# find: force the branch instead (`monkeypatch.setattr(mod, "WINDOWS", True)`), and leave
+# this file alone.
+#
+# Entries are `xfail(strict=True)`, so a line whose test starts passing under POSIX fails
+# the rehearsal with XPASS. That is the ratchet: delete the line, do not re-explain it.

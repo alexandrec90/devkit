@@ -55,6 +55,7 @@ for _leaked in (
     "GIT_COMMON_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
+    "GIT_CEILING_DIRECTORIES",
     "GIT_INDEX_VERSION",
     "GIT_PREFIX",
     "GIT_OBJECT_DIRECTORY",
@@ -270,6 +271,31 @@ def vendor_manifest(root: Path) -> None:
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source.read_bytes())
+
+
+def windows_layout(tmp_path, *names: str):
+    """Real files named `names` under `tmp_path`, returned in the order given.
+
+    The convention for testing a Windows-shaped interpreter or install layout, and the
+    alternative to the thing that keeps failing CI: a hardcoded literal like
+    `r"C:\\py\\pythonw.exe"`. `Path` splits that into components on Windows and leaves it
+    as one filename on POSIX, so a test built on one asserts a real branch here and a
+    branch that never runs on the `ubuntu-latest` runner -- silently, since the assertion
+    is usually about the *result* rather than the split.
+
+    `scripts/posix-rehearsal.py` deliberately does not gate this class: catching it would
+    mean answering "does not exist" for backslash paths, which is right for a literal and
+    wrong for every real interpreter path on this machine. So it is a convention, and this
+    helper is what makes the convention cheaper than the literal.
+
+        console, _ = windows_layout(tmp_path, "python.exe", "pythonw.exe")
+    """
+    made = []
+    for name in names:
+        target = tmp_path / name
+        target.write_text("", encoding="utf-8")
+        made.append(target)
+    return tuple(made)
 
 
 def load_script(relpath: str):

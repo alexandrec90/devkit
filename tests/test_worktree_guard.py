@@ -1098,12 +1098,85 @@ def test_a_non_box_path_under_worktrees_is_left_alone(root, monkeypatch):
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
 
 
+# Windows' "A required privilege is not held by the client". Creating a symlink there
+# needs SeCreateSymbolicLinkPrivilege, which a non-elevated process holds only with
+# Developer Mode switched on.
+ERROR_PRIVILEGE_NOT_HELD = 1314
+
+
+def _link_directory(link: Path, target: Path) -> None:
+    """A directory link of a kind the guard defends, on any machine.
+
+    `resolve_target` names two link kinds -- `is_symlink() or is_junction()` -- and
+    treats them alike. A symlink is the one POSIX has, so it is tried first; on a
+    Windows box without the privilege for it the fallback is a junction, which needs
+    none, resolves the same way, and is the kind a stray link under `.worktrees/`
+    would actually be there. The alternative was a `skipif` on the privilege, and that
+    is refused twice over: the structure ratchet counts a new skip as giving up, and
+    the machine that skips is exactly the one whose link kind the test would then
+    leave unchecked. Any refusal other than the missing privilege is re-raised: the
+    fallback stands in for one known condition, never for a broken fixture.
+    """
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        if sys.platform != "win32" or error.winerror != ERROR_PRIVILEGE_NOT_HELD:
+            raise
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+
+
+def test_the_link_helper_falls_back_to_a_junction_only_for_the_missing_privilege(root, monkeypatch):
+    """The fallback is Windows-only by construction: a junction is a Windows object,
+    and no POSIX error means what 1314 means, so anywhere else the refusal surfaces."""
+
+    def refuse(self, _target, target_is_directory=False):
+        raise OSError(
+            22,
+            "A required privilege is not held by the client",
+            str(self),
+            ERROR_PRIVILEGE_NOT_HELD,
+        )
+
+    monkeypatch.setattr(Path, "symlink_to", refuse)
+    link = root / ".worktrees" / "carameli"
+    if sys.platform == "win32":
+        _link_directory(link, root / "carameli")
+        assert link.is_junction() and not link.is_symlink()
+        assert (link / "a.py").resolve() == (root / "carameli" / "a.py").resolve()
+    else:
+        with pytest.raises(OSError):
+            _link_directory(link, root / "carameli")
+        assert not link.exists()
+
+
+def test_the_link_helper_lets_any_other_refusal_through(root, monkeypatch):
+    """A link that already exists, a target that does not: those are broken fixtures,
+    and a junction quietly made in their place would pass the test for the wrong reason."""
+
+    def refuse(self, _target, target_is_directory=False):
+        raise FileExistsError(17, "Cannot create a file when that file already exists", str(self))
+
+    monkeypatch.setattr(Path, "symlink_to", refuse)
+    with pytest.raises(FileExistsError):
+        _link_directory(root / ".worktrees" / "carameli", root / "carameli")
+
+
+def test_the_link_helper_makes_a_link_the_guard_recognises(root):
+    """Whichever kind this machine allowed, it is one `resolve_target` names."""
+    link = root / ".worktrees" / "carameli"
+    _link_directory(link, root / "carameli")
+    assert link.is_symlink() or link.is_junction()
+    assert (link / "a.py").resolve() == (root / "carameli" / "a.py").resolve()
+
+
 def test_removing_a_stray_link_under_worktrees_does_not_follow_it(root, monkeypatch):
     """Deleting the link removes no checkout content; resolving its leaf made the guard
     judge the static checkout the link points at and cut an unrelated box instead."""
     workspace = _workspace(root)
     target = root / ".worktrees" / "carameli"
-    target.symlink_to(root / "carameli", target_is_directory=True)
+    _link_directory(target, root / "carameli")
     descendant = str(target / "a.py")
     assert (
         guard.resolve_target(descendant, str(root), [descendant], root / ".worktrees")
