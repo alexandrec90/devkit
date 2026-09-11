@@ -107,7 +107,15 @@ def test_a_machine_that_never_registered_the_profile_opens_the_tab_it_always_did
 
 def test_the_profile_is_read_from_the_machine_rather_than_guessed(monkeypatch, tmp_path):
     """`open_agent` is where the lookup happens, so a spawn on a machine that registered
-    the profile picks it up with nothing passed down the call chain."""
+    the profile picks it up with nothing passed down the call chain.
+
+    Both machine lookups are stubbed, not just the profile one: `open_agent` returns
+    before it spawns anything when `wt` is not on PATH, so a test that stubbed only the
+    profile asserted against an empty call list on every non-Windows runner -- green
+    here, red in CI, which is exactly the split the rehearsal exists to stop.
+    """
+    monkeypatch.setattr(box.shutil, "which", lambda name: "C:/wt.exe" if "wt" in name else None)
+    monkeypatch.setattr(box.harness_switch, "hooks_are_off", lambda *_a: False)
     monkeypatch.setattr(box.wt_profile, "launch_name", lambda: "Agent")
     runner = FakeRunner()
     assert box.open_agent("claude", tmp_path, "agent/thing-0903", runner=runner) == 0
