@@ -40,9 +40,10 @@ Stdlib only. Tested in `tests/test_run_push_gate.py`.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,6 +51,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _loader import load_by_path
 
 HOOK_ID = "devkit-push-gate"
+
+# The variables git exports to a hook to say which repository, index, worktree and object
+# store its children are to act on. `gate_env` drops exactly these; see its docstring.
+GIT_SCOPING_VARS: tuple[str, ...] = (
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_INDEX_VERSION",
+    "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+    "GIT_NAMESPACE",
+)
 
 # What a fake runner in the tests has to look like: called with the argv, `cwd` and
 # `check`, answering a CompletedProcess whose `returncode` is read.
@@ -102,14 +118,38 @@ def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
     ]
 
 
+def gate_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment the steps run under: this one, minus git's repo scoping.
+
+    A hook inherits the variables git uses to tell its own child processes which
+    repository they are operating on -- `GIT_DIR` and `GIT_INDEX_FILE` always, the rest
+    depending on the command. They are correct for the push and poison for a test suite:
+    every test that builds a throwaway repo in `tmp_path` and shells out to `git -C
+    <tmp>` gets the *pushing* repo's index instead of its own, and fails on something
+    that names neither git nor the environment. That is not hypothetical -- it is 96
+    failures across five test modules on the push this was written for, a suite that
+    passes in any terminal, so the gate refused a push for a defect the developer could
+    not reproduce at the one moment they most needed to.
+
+    Removed by name rather than by an all-`GIT_*` sweep: `GIT_SSH_COMMAND`,
+    `GIT_CONFIG_GLOBAL` and the rest of a machine's git configuration are not scoping,
+    and a gate that dropped them would break the tests that shell out to git *properly*.
+    """
+    remaining = dict(os.environ if environ is None else environ)
+    for name in GIT_SCOPING_VARS:
+        remaining.pop(name, None)
+    return remaining
+
+
 def run_gate(root: Path, runner: Runner = subprocess.run) -> int:
     """Run the steps in order; the first non-zero exit is the hook's, and ends the run."""
+    env = gate_env()
     for step, command in plan(root):
         if command is None:
             print(f"push-gate: {step.name}: no {step.requires} in this project -- skipped")
             continue
         print(f"push-gate: {step.name}: {' '.join(command[1:])}", flush=True)
-        result = runner(command, cwd=root, check=False)
+        result = runner(command, cwd=root, check=False, env=env)
         if result.returncode:
             print(
                 f"push-gate: {step.name} failed (exit {result.returncode}). Fix it from the "

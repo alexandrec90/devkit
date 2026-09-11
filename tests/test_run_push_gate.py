@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from support import load_script
+from support import REPO_ROOT, load_script
 
 gate = load_script("scripts/precommit/run_push_gate.py")
 
@@ -33,9 +33,11 @@ class FakeRunner:
     def __init__(self, exits=None):
         self.exits = exits or {}
         self.calls: list[list[str]] = []
+        self.envs: list[dict] = []
 
-    def __call__(self, argv, *, cwd, check):
+    def __call__(self, argv, *, cwd, check, env=None):
         self.calls.append(list(argv))
+        self.envs.append(env)
         return completed(argv, self.exits.get(argv[1], 0))
 
 
@@ -99,6 +101,50 @@ def test_a_project_without_a_wrapper_skips_that_step_out_loud(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "no scripts/run-tests.py in this project -- skipped" in out
     assert "no scripts/hooks/tests in this project -- skipped" in out
+
+
+def test_the_steps_do_not_inherit_the_pushs_git_scoping(tmp_path, monkeypatch):
+    """The regression, and it cost a whole push: a hook inherits `GIT_DIR` and
+    `GIT_INDEX_FILE`, every test that builds a repo in `tmp_path` and shells out to
+    `git -C <tmp>` then acted on the *pushing* repo, and 96 tests across five modules
+    failed inside the gate while passing in any terminal."""
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / ".git"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / ".git" / "index"))
+    root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py")
+    runner = FakeRunner()
+    gate.run_gate(root, runner)
+    assert runner.envs, "no step ran"
+    for env in runner.envs:
+        assert "GIT_DIR" not in env
+        assert "GIT_INDEX_FILE" not in env
+
+
+def test_the_suites_own_bootstrap_drops_the_same_variables():
+    """Two layers, because the gate is not the only thing that can run this suite from
+    inside a git hook. `tests/support.py` clears the same set at import; if the two lists
+    diverge, the one nobody is looking at is the one that lets a fixture write to the
+    real repository."""
+    bootstrap = (REPO_ROOT / "tests" / "support.py").read_text(encoding="utf-8")
+    for name in gate.GIT_SCOPING_VARS:
+        assert f'"{name}"' in bootstrap, f"tests/support.py does not clear {name}"
+
+
+def test_a_machines_own_git_configuration_survives(monkeypatch):
+    """Scoping is dropped by name rather than by sweeping `GIT_*`: a gate that dropped
+    `GIT_SSH_COMMAND` would break the tests that shell out to git properly."""
+    monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /keys/id")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/etc/gitconfig")
+    monkeypatch.setenv("GIT_DIR", "/repo/.git")
+    env = gate.gate_env()
+    assert env["GIT_SSH_COMMAND"] == "ssh -i /keys/id"
+    assert env["GIT_CONFIG_GLOBAL"] == "/etc/gitconfig"
+    assert "GIT_DIR" not in env
+
+
+def test_gate_env_leaves_the_rest_of_the_environment_alone():
+    """It is the developer's shell; the gate narrows it, it does not replace it."""
+    before = {"PATH": "/usr/bin", "VIRTUAL_ENV": "/venv", "GIT_PREFIX": "sub/"}
+    assert gate.gate_env(before) == {"PATH": "/usr/bin", "VIRTUAL_ENV": "/venv"}
 
 
 def test_plan_pairs_each_step_with_a_command_or_none(tmp_path):
