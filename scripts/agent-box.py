@@ -66,8 +66,8 @@ harness_switch = load_by_path("harness_switch", REPO_ROOT / "scripts" / "harness
 
 AGENTS = ("claude", "codex", "none")
 
-# `-w 0` is "the most recently used window", and it creates one when there is none. See
-# the module docstring for why this differs from `resume-sessions.py`.
+# `-w 0` is "the most recently used window", and it creates one when there is none, so a
+# box opens where the operator is looking. `resume-sessions.py` agrees since 2026-09-14.
 WT_WINDOW = "0"
 
 EXIT_OK = 0

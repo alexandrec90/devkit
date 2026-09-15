@@ -62,8 +62,8 @@ def bad(stderr: str = "boom") -> subprocess.CompletedProcess:
 
 def test_the_agent_tab_attaches_to_the_window_the_operator_is_looking_at():
     """`-w 0` is "most recently used window, create one only if there is none", which is
-    the ask. `resume-sessions.py` uses `-w -1` because it opens a *set* of tabs that belong
-    together; one agent in one box is one tab and belongs where the operator already is."""
+    the ask: a box belongs where the operator already is. `resume-sessions.py` forced
+    `-w -1` until 2026-09-14 and now defaults to this too."""
     argv = box.wt_argv("agent/thing-0903", Path("C:/boxes/x"), "claude")
     assert argv[:3] == ["-w", "0", "new-tab"]
     assert "-NoExit" in argv

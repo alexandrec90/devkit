@@ -357,14 +357,26 @@ def test_a_reaped_box_is_partitioned_out(tmp_path):
 def test_wt_args_opens_one_tab_per_session_in_its_own_directory(tmp_path):
     sessions = [session("aaa", 1.0, tmp_path / "one"), session("bbb", 2.0, tmp_path / "two")]
     args = rs.wt_args(sessions)
-    assert args[:2] == ["-w", "-1"]  # a NEW window, never someone else's
+    assert args[:2] == ["-w", "0"]  # the window already open, as every agent task does
     assert args.count("new-tab") == 2
-    assert args.count(";") == 2  # one separator between tabs, one before focus-tab
-    assert args[-3:] == ["focus-tab", "-t", "0"]
+    assert args.count(";") == 1  # one separator between the two tabs, and no more
     for name, directory in (("aaa", "one"), ("bbb", "two")):
         index = args.index(name)
         assert args[index - 1] == "--resume"
         assert str(tmp_path / directory) in args
+
+
+def test_tabs_join_the_current_window_and_claim_no_absolute_tab_index(tmp_path):
+    """The regression the `-w -1` -> `-w 0` change must not introduce.
+
+    `focus-tab -t 0` is an absolute index. Appended to a window that already had tabs it
+    would steal focus to a stranger's tab rather than to the oldest resumed session, and
+    wt cannot name "the first tab this command line opened" -- so the trailer went with
+    the forced new window, and wt leaves focus on the last tab it made.
+    """
+    args = rs.wt_args([session("aaa", 1.0, tmp_path), session("bbb", 2.0, tmp_path)])
+    assert "focus-tab" not in args
+    assert args[-1] == "bbb"  # the newest session's tab is the one wt focuses
 
 
 def test_every_tab_in_the_window_opens_under_the_agent_profile(tmp_path):
@@ -391,16 +403,8 @@ def test_wt_args_lays_the_tabs_out_in_the_order_given(tmp_path):
 def test_each_agent_uses_its_own_resume_syntax(tmp_path):
     claude = rs.wt_args([session("a", 1.0, tmp_path)], agent="claude")
     codex = rs.wt_args([session("a", 1.0, tmp_path)], agent="codex")
-    assert claude[claude.index("claude") :] == [
-        "claude",
-        "--resume",
-        "a",
-        ";",
-        "focus-tab",
-        "-t",
-        "0",
-    ]
-    assert codex[codex.index("codex") :] == ["codex", "resume", "a", ";", "focus-tab", "-t", "0"]
+    assert claude[claude.index("claude") :] == ["claude", "--resume", "a"]
+    assert codex[codex.index("codex") :] == ["codex", "resume", "a"]
 
 
 def test_a_mixed_window_uses_each_sessions_own_resume_syntax(tmp_path):
@@ -604,6 +608,16 @@ def launchable(tmp_path, monkeypatch, calls: list):
 
     monkeypatch.setattr(rs.subprocess, "run", record)
     return store
+
+
+def test_the_task_reaches_wt_asking_for_the_window_already_open(tmp_path, capsys, monkeypatch):
+    """End to end, because `wt_args`'s default is only half of it: `main` has to pass the
+    flag through and say which window it used, or the console line contradicts the tabs."""
+    launched: list = []
+    store = launchable(tmp_path, monkeypatch, launched)
+    assert rs.main(["--sessions-dir", str(store), "--no-update"]) == 0
+    assert launched[0][1:3] == ["-w", "0"]
+    assert "the current Windows Terminal" in capsys.readouterr().out
 
 
 def test_the_clis_are_updated_before_the_tabs_open(tmp_path, capsys, monkeypatch):
