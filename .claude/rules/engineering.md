@@ -28,7 +28,13 @@ that has no test, write the test in the same commit even if the logic didn't cha
   that has never failed is asserting the wrong thing.
 - **Reversion check:** before calling a change complete, identify which test would
   fail if the changed behavior were reverted. If none would, it is not covered yet.
-- **Coverage floors are ratchets:** never lower it merely to make a change pass.
+- **Coverage floors are ratchets:** never lower it merely to make a change pass. The
+  other end of the same rule is the one that slips quietly, because raising a ceiling —
+  a timeout, a retry count, a size or complexity limit, a baseline of known gaps — reads
+  as tuning rather than as relaxing a gate.
+  **A ceiling raised on three consecutive branches is a defect report, not a raise:**
+  find out what is filling it before moving it again, and say in the commit message what
+  you found.
 - **Run targeted tests** — the module you touched — plus the linter, while you work. The
   whole gate runs once, at push time: the `devkit-push-gate` pre-commit hook runs
   `lint-all.py`, `run-tests.py` and the hook tests before a push leaves, so a failure is

@@ -585,6 +585,7 @@ POLICY_CLAUSES = (
     "gaps are not acceptable",
     "fail if the changed behavior were reverted",
     "never lower it merely to make a change pass",
+    "raised on three consecutive branches is a defect report",
     "silently work around a bad instruction",
 )
 
