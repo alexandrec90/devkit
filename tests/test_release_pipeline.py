@@ -19,6 +19,7 @@ from pathlib import Path
 from support import REPO_ROOT, load_script
 
 rp = load_script("scripts/release-pipeline.py")
+rel = load_script("scripts/release.py")
 up = load_script("scripts/upgrade-project.py")
 devkit_project = load_script("scripts/devkit_project.py")
 
@@ -591,6 +592,169 @@ def test_a_directory_that_is_not_a_checkout_answers_nothing(tmp_path):
     assert rp.changed_since_tag(tmp_path, "v0.0.1") == []
 
 
+# --- what a failed prepare leaves behind --------------------------------------
+#
+# A release branch that survives a run nobody can see is a wall, not a resumption
+# point: `worktree add -b` refuses to reuse it, so one failed push at 2am stopped
+# every nightly pass until someone deleted the ref by hand. These go through a real
+# repository with a real `origin` -- the behaviour under test is what the plumbing
+# does to a *ref* when a step fails, which a stubbed `git` would only assert about
+# itself.
+
+
+def test_a_failed_push_takes_its_branch_with_it(tmp_path):
+    """The reason the pipeline could wedge: the bump commit exists, the push does not,
+    and the branch outlives both."""
+    devkit, _, run = _a_devkit_with_origin(tmp_path)
+    run("remote", "set-url", "origin", str(tmp_path / "gone.git"))
+
+    notes: list[str] = []
+    ok, detail = rel.prepare(devkit, "v0.0.2", _git_run, notes.append)
+
+    assert not ok
+    assert "push" in detail
+    assert not rel.local_branch_exists(devkit, "release/v0.0.2", _git_run)
+
+
+def test_a_prepare_that_pushed_keeps_the_branch_the_pr_is_opened_from(tmp_path):
+    """The other half of the same `finally`: `gh pr create --head` resolves the local
+    ref, so a successful run must not clean it up."""
+    devkit, _, _ = _a_devkit_with_origin(tmp_path)
+
+    notes: list[str] = []
+    ok, detail = rel.prepare(devkit, "v0.0.2", _git_run, notes.append)
+
+    assert (ok, detail) == (True, "release/v0.0.2")
+    assert rel.local_branch_exists(devkit, "release/v0.0.2", _git_run)
+    assert rel.pushed_to_origin(devkit, "release/v0.0.2", _git_run) is True
+
+
+def test_a_prepare_that_could_not_bump_leaves_no_branch_either(tmp_path):
+    """Every exit from the worktree except the pushed one has to clear the ref, not
+    just the push -- an unrecognisable `new-project.py` wedged it the same way."""
+    devkit, _, run = _a_devkit_with_origin(tmp_path)
+    (devkit / "scripts" / "new-project.py").write_text("nothing here\n", encoding="utf-8")
+    run("commit", "-am", "drop the constant")
+    run("push", "--quiet", "origin", "HEAD:main")
+    run("fetch", "--quiet", "origin")
+
+    notes: list[str] = []
+    ok, detail = rel.prepare(devkit, "v0.0.2", _git_run, notes.append)
+
+    assert not ok
+    assert rel.FALLBACK_CONST in detail
+    assert not rel.local_branch_exists(devkit, "release/v0.0.2", _git_run)
+
+
+def test_a_stale_unpushed_branch_is_discarded_so_the_run_can_proceed(tmp_path):
+    """The recovery for a branch stranded by a run that predates the fix, or by a kill
+    that skipped the `finally` altogether."""
+    devkit, _, run = _a_devkit_with_origin(tmp_path)
+    run("branch", "release/v0.0.2", "origin/main")
+
+    cleared, note = rel.discard_stale_branch(devkit, "release/v0.0.2", _git_run)
+
+    assert cleared
+    assert "release/v0.0.2" in note
+    assert not rel.local_branch_exists(devkit, "release/v0.0.2", _git_run)
+
+
+def test_a_branch_that_reached_origin_is_never_discarded(tmp_path):
+    """Pushed with no open PR is a state with two plausible remedies and no safe guess:
+    deleting the local ref would hide work that escaped this checkout."""
+    devkit, _, run = _a_devkit_with_origin(tmp_path)
+    run("branch", "release/v0.0.2", "origin/main")
+    run("push", "--quiet", "origin", "release/v0.0.2")
+
+    cleared, reason = rel.discard_stale_branch(devkit, "release/v0.0.2", _git_run)
+
+    assert not cleared
+    assert "on origin" in reason
+    assert rel.local_branch_exists(devkit, "release/v0.0.2", _git_run)
+
+
+def test_an_unreachable_origin_is_not_read_as_never_pushed(tmp_path):
+    """The failure that strands a branch is usually the network, so the run that finds
+    one is the likeliest to be offline -- and 'origin said no such branch' and 'origin
+    did not answer' must not collapse into a delete."""
+    devkit, _, run = _a_devkit_with_origin(tmp_path)
+    run("branch", "release/v0.0.2", "origin/main")
+    run("remote", "set-url", "origin", str(tmp_path / "gone.git"))
+
+    cleared, reason = rel.discard_stale_branch(devkit, "release/v0.0.2", _git_run)
+
+    assert not cleared
+    assert "could not be reached" in reason
+    assert rel.local_branch_exists(devkit, "release/v0.0.2", _git_run)
+
+
+def test_no_stale_branch_is_not_a_refusal_and_says_nothing(tmp_path):
+    """The ordinary path runs this too, so it has to be silent when there is nothing to
+    report -- an empty note is what keeps it off the log."""
+    devkit, _, _ = _a_devkit_with_origin(tmp_path)
+
+    assert rel.discard_stale_branch(devkit, "release/v0.0.2", _git_run) == (True, "")
+
+
+def test_a_discarded_branch_is_reported_rather_than_done_silently(tmp_path):
+    """Recutting a release branch is the kind of housekeeping that has to appear in
+    `logs/devkit-cut-release.log`: it is the only trace that the previous night's run
+    got as far as a commit."""
+    devkit, _, run = _a_devkit_with_origin(tmp_path)
+    run("branch", "release/v0.0.2", "origin/main")
+    notes: list[str] = []
+
+    ok, _ = rel.prepare(devkit, "v0.0.2", _git_run, notes.append)
+
+    assert ok
+    assert [note for note in notes if "discarded the stale unpushed" in note]
+
+
+def test_the_clear_out_happens_before_the_worktree_is_cut(tmp_path):
+    """The wiring, not the helper. `prepare` is reached only once `run_pipeline` has
+    found no PR to resume from, and it has to clear the ref *before* `worktree add -b`
+    is the thing that fails on it."""
+    source = inspect.getsource(rel.prepare)
+
+    assert source.index("discard_stale_branch(devkit, branch, run)") < source.index(
+        '"worktree", "add"'
+    ), "the worktree is cut before the ref is cleared"
+    assert "release.prepare(devkit, version, _run, _say)" in inspect.getsource(rp.run_pipeline)
+
+
+def _git_run(cmd):
+    """Stands in for `release-pipeline.py`'s `_run`, which is what `prepare` spawns
+    through in production -- the same call without its console-discipline flags."""
+    return subprocess.run(list(cmd), capture_output=True, text=True, check=False)
+
+
+def _a_devkit_with_origin(root):
+    """A checkout with a real `origin` and a bumpable `scripts/new-project.py`.
+
+    Returns `(devkit, origin, run)`. `origin` is a bare repo on disk, so pointing the
+    remote at a path that does not exist is how a test makes the network fail.
+    """
+    origin = root / "origin.git"
+    subprocess.run(
+        ["git", "init", "--quiet", "--bare", "--initial-branch", "main", str(origin)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    devkit = root / "devkit"
+    (devkit / "scripts").mkdir(parents=True)
+    run = _a_repo(devkit)
+    run("remote", "add", "origin", str(origin))
+    target = devkit / "scripts" / "new-project.py"
+    target.write_text(f'{rel.FALLBACK_CONST} = "v0.0.1"\n', encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-m", "initial")
+    run("push", "--quiet", "-u", "origin", "HEAD:main")
+    run("fetch", "--quiet", "origin")
+    return devkit, origin, run
+
+
 def _a_repo(root):
     """A real repository, because `changed_since_tag` resolves the default branch and
     then diffs against a remote-tracking ref -- two behaviours a fake `git` would only
@@ -608,4 +772,12 @@ def _a_repo(root):
     run("config", "user.email", "test@example.com")
     run("config", "user.name", "Test")
     run("config", "commit.gpgsign", "false")
+    # `install-git-policy.py` sets `core.hooksPath` *globally*, so on a developer's own
+    # machine the branch policy reaches into a throwaway repo under `tmp_path` and
+    # refuses the first commit -- its branch is `master`, which is protected. Point the
+    # path at an empty directory so these tests answer the same on a machine with the
+    # policy installed and one without.
+    empty = root / ".git" / "no-hooks"
+    empty.mkdir(parents=True, exist_ok=True)
+    run("config", "core.hooksPath", str(empty))
     return run
