@@ -410,10 +410,10 @@ def test_policy_runs_pre_commit_framework_then_project_hook(tmp_path, monkeypatc
     project_hook.write_text("# project hook\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
     )
     monkeypatch.setattr(
-        git_policy, "_project_hook_command", lambda _path, _args: ["project-hook-test"]
+        git_policy.dispatch, "_project_hook_command", lambda _path, _args: ["project-hook-test"]
     )
     runner = FakeRunner(responses)
     assert git_policy.run_hook("pre-commit", [], runner=runner) == 0
@@ -448,7 +448,7 @@ def test_a_push_that_publishes_a_branch_runs_the_pre_push_stage(tmp_path, monkey
     runs it. `--all-files`, because the stage's hooks are `always_run` gates over the
     tree and the staged-diff default would stash unstaged work to run them."""
     monkeypatch.setattr(
-        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
     )
     runner = FakeRunner(_push_responses(tmp_path))
     raw = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n"
@@ -458,7 +458,7 @@ def test_a_push_that_publishes_a_branch_runs_the_pre_push_stage(tmp_path, monkey
 
 def test_the_pre_push_stage_failing_refuses_the_push(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
     )
     responses = _push_responses(tmp_path)
     responses[PUSH_STAGE] = completed(["pre-commit-test"], stdout="tests failed\n", returncode=1)
@@ -474,7 +474,7 @@ def test_a_gate_failure_survives_a_cp1252_console(tmp_path, monkeypatch):
     Before this guard the relay itself raised, so a red gate presented as a CPython
     traceback with the failure it was relaying nowhere in it."""
     monkeypatch.setattr(
-        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
     )
     responses = _push_responses(tmp_path)
     responses[PUSH_STAGE] = completed(
@@ -501,13 +501,13 @@ def test_the_console_guard_tolerates_a_stream_that_cannot_be_reconfigured(monkey
     be a `TextIOWrapper`; neither is a reason for the hook to raise."""
     monkeypatch.setattr(sys, "stdout", None)
     monkeypatch.setattr(sys, "stderr", io.StringIO())
-    git_policy._utf8_console()
+    git_policy.dispatch._utf8_console()
 
 
 def test_a_deletion_or_tag_only_push_skips_the_pre_push_stage(tmp_path, monkeypatch):
     """The stage is minutes of tests, and nothing a deletion could break is in it."""
     monkeypatch.setattr(
-        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
     )
     for raw in (
         f"(delete) {'0' * 40} refs/heads/claude/old {'1' * 40}\n",
@@ -522,13 +522,13 @@ def test_the_commit_stage_argv_is_unchanged_by_the_push_stage(tmp_path, monkeypa
     """The commit stage keeps pre-commit's staged-diff default: the fixers there act
     on the files being committed, and `--all-files` would rewrite the whole tree."""
     monkeypatch.setattr(
-        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
     )
     (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
     runner = FakeRunner(
         {("pre-commit-test", "run", "--hook-stage", "pre-commit"): completed(["pre-commit-test"])}
     )
-    assert git_policy._run_pre_commit_framework(tmp_path, runner) == 0
+    assert git_policy.framework._run_pre_commit_framework(tmp_path, runner) == 0
     assert runner.calls == [("pre-commit-test", "run", "--hook-stage", "pre-commit")]
 
 
@@ -543,7 +543,9 @@ def test_the_framework_runs_with_its_own_directory_first_on_path(tmp_path, monke
     """
     venv_bin = tmp_path / "checkout" / ".venv" / "Scripts"
     monkeypatch.setattr(
-        git_policy, "_pre_commit_command", lambda _root, _runner: [str(venv_bin / "pre-commit")]
+        git_policy.framework,
+        "_pre_commit_command",
+        lambda _root, _runner: [str(venv_bin / "pre-commit")],
     )
     monkeypatch.setenv("PATH", "/usr/bin")
     (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
@@ -555,7 +557,7 @@ def test_the_framework_runs_with_its_own_directory_first_on_path(tmp_path, monke
         }
     )
 
-    assert git_policy._run_pre_commit_framework(tmp_path, runner) == 0
+    assert git_policy.framework._run_pre_commit_framework(tmp_path, runner) == 0
     assert runner.envs[0]["PATH"] == f"{venv_bin}{os.pathsep}/usr/bin"
 
 
@@ -580,9 +582,9 @@ def test_a_missing_framework_names_every_remedy_not_just_the_refusal(tmp_path, m
     """Two agents reported this message in one week; both said it names no remedy, so it
     reads as policy declining the commit rather than as a tool being missing."""
     (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
-    monkeypatch.setattr(git_policy, "_pre_commit_command", lambda _root, _runner: None)
+    monkeypatch.setattr(git_policy.framework, "_pre_commit_command", lambda _root, _runner: None)
 
-    assert git_policy._run_pre_commit_framework(tmp_path, FakeRunner()) == 1
+    assert git_policy.framework._run_pre_commit_framework(tmp_path, FakeRunner()) == 1
     err = capsys.readouterr().err
     assert "is not installed" in err
     assert "pip install pre-commit" in err
@@ -594,7 +596,7 @@ def test_a_missing_framework_names_every_remedy_not_just_the_refusal(tmp_path, m
 
 def test_a_project_with_no_pre_commit_config_says_nothing_at_all(tmp_path, capsys):
     """The framework tier is opt-in: no config file, no message and no refusal."""
-    assert git_policy._run_pre_commit_framework(tmp_path, FakeRunner()) == 0
+    assert git_policy.framework._run_pre_commit_framework(tmp_path, FakeRunner()) == 0
     assert capsys.readouterr().err == ""
 
 
@@ -604,13 +606,13 @@ def test_the_framework_relays_both_streams(tmp_path, monkeypatch, capsys):
     two from killing the hook is `_utf8_console`, covered end to end above."""
     (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
     monkeypatch.setattr(
-        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
     )
     result = completed(["pre-commit-test"])
     result.stdout, result.stderr = "out→\n", "err�\n"
     runner = FakeRunner({("pre-commit-test", "run", "--hook-stage", "pre-commit"): result})
 
-    assert git_policy._run_pre_commit_framework(tmp_path, runner) == 0
+    assert git_policy.framework._run_pre_commit_framework(tmp_path, runner) == 0
     captured = capsys.readouterr()
     assert "out" in captured.out
     assert "err" in captured.err
@@ -643,7 +645,9 @@ def test_a_worktree_finds_the_venv_of_the_checkout_it_belongs_to(tmp_path):
     tool.write_text("", encoding="utf-8")
     worktree = checkout / ".claude" / "worktrees" / "topic"
     worktree.mkdir(parents=True)
-    assert git_policy._pre_commit_command(worktree, _common_dir(checkout / ".git")) == [str(tool)]
+    assert git_policy.framework._pre_commit_command(worktree, _common_dir(checkout / ".git")) == [
+        str(tool)
+    ]
 
 
 def test_a_worktree_with_its_own_venv_keeps_using_it(tmp_path):
@@ -658,20 +662,22 @@ def test_a_worktree_with_its_own_venv_keeps_using_it(tmp_path):
     inner = box / ".venv" / "Scripts" / "pre-commit.exe"
     inner.parent.mkdir(parents=True)
     inner.write_text("", encoding="utf-8")
-    assert git_policy._pre_commit_command(box, _common_dir(checkout / ".git")) == [str(inner)]
+    assert git_policy.framework._pre_commit_command(box, _common_dir(checkout / ".git")) == [
+        str(inner)
+    ]
 
 
 def test_a_directory_git_cannot_answer_for_falls_back_to_itself(tmp_path):
     """`_pre_commit_command` is called with the repo root, so this should not happen --
     and it runs inside a commit hook, where a raise is a commit refused with a traceback
     instead of a reason."""
-    assert git_policy._venv_roots(tmp_path, _common_dir(None)) == (tmp_path,)
+    assert git_policy.framework._venv_roots(tmp_path, _common_dir(None)) == (tmp_path,)
 
 
 def test_a_plain_checkout_looks_in_exactly_one_place(tmp_path):
     """`--git-common-dir` in a non-worktree names that checkout's own `.git`, so the
     fallback must collapse rather than listing the same directory twice."""
-    assert git_policy._venv_roots(tmp_path, _common_dir(tmp_path / ".git")) == (tmp_path,)
+    assert git_policy.framework._venv_roots(tmp_path, _common_dir(tmp_path / ".git")) == (tmp_path,)
 
 
 def test_skip_env_var_reads_only_explicit_off_values_as_off():
@@ -709,7 +715,7 @@ def test_skip_env_var_bypasses_branch_checks_but_still_runs_downstream_hooks(tmp
     )
     (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
     monkeypatch.setattr(
-        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
     )
 
     runner = FakeRunner(responses)
@@ -782,7 +788,8 @@ def test_the_decoding_is_pinned_to_utf8_rather_than_the_ambient_locale(monkeypat
         seen.update(kwargs)
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(git_policy.subprocess, "run", spy)
+    # `_core` is where the spawn lives, so it is where `subprocess` is looked up.
+    monkeypatch.setattr(git_policy._core.subprocess, "run", spy)
     git_policy.run_command(["git", "status"])
     assert seen["encoding"] == "utf-8"
     assert seen["errors"] == "replace"
@@ -822,3 +829,137 @@ def test_failed_policy_never_runs_downstream_hooks(tmp_path):
     runner = FakeRunner(responses)
     assert git_policy.run_hook("pre-commit", [], runner=runner) == 1
     assert ("git", "rev-parse", "--show-toplevel") not in runner.calls
+
+
+# --- the types and queries the package split moved -------------------------------
+#
+# These eight symbols were on `.devkit-untested.txt` against `scripts/git_policy.py`,
+# and moving them to `_core` and `branch` made four of them read as *covered* without a
+# line of test being written -- the corpus for a module is the test files that name it,
+# and the new module names are named by this file for other reasons. Re-keying the
+# baseline would have recorded the same debt at a new path; dropping the four would have
+# laundered it. Both are worse than the third option, which is what the testing rule
+# asks for when a change touches something untested: cover them.
+
+
+def test_a_decision_is_ok_only_when_it_carries_no_errors():
+    """`ok` is what every caller branches on, and warnings must not flip it -- a warning
+    is precisely the case the policy decided *not* to block."""
+    assert git_policy.Decision().ok
+    assert git_policy.Decision(warnings=("slow",)).ok
+    assert not git_policy.Decision(errors=("blocked",)).ok
+    assert not git_policy.Decision(errors=("blocked",), warnings=("slow",)).ok
+
+
+def test_a_push_update_reads_both_spellings_of_a_deletion():
+    """Git spells a deleted ref two ways and the policy must not block either: a
+    deletion has nothing to enforce, and refusing one strands the branch."""
+    zero = "0" * 40
+    assert git_policy.PushUpdate("(delete)", zero, "refs/heads/x", "abc", "x").deletion
+    assert git_policy.PushUpdate("refs/heads/x", zero, "refs/heads/x", "abc", "x").deletion
+    assert not git_policy.PushUpdate("refs/heads/x", "abc", "refs/heads/x", zero, "x").deletion
+
+
+def test_a_tag_update_is_its_own_type_carrying_the_tag():
+    """A separate type from `PushUpdate` on purpose -- a branch is looked up on GitHub
+    and a tag is matched against a shape, so a field lying about which it holds is how
+    the wrong one reaches the wrong check."""
+    update = git_policy.TagUpdate("refs/tags/v1.2.3", "abc", "refs/tags/v1.2.3", "0" * 40, "v1.2.3")
+    assert update.tag == "v1.2.3"
+    assert not update.deletion
+    assert not hasattr(update, "branch")
+
+
+def test_default_branch_prefers_the_remote_head_symbolic_ref():
+    runner = FakeRunner(
+        {
+            ("git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"): completed(
+                ["git"], stdout="origin/trunk\n"
+            )
+        }
+    )
+    assert git_policy.default_branch(runner, "origin") == "trunk"
+
+
+def test_default_branch_falls_back_to_main_then_master_then_gives_up():
+    """A fresh clone often has no `origin/HEAD`, so the fallbacks are the ordinary path
+    rather than the edge case, and "" has to mean "unknown" rather than "main"."""
+    for candidate in ("main", "master"):
+        runner = FakeRunner(
+            {
+                ("git", "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{candidate}"): (
+                    completed(["git"])
+                )
+            }
+        )
+        assert git_policy.default_branch(runner, "origin") == candidate
+    assert git_policy.default_branch(FakeRunner(), "origin") == ""
+
+
+def test_protected_branches_always_holds_main_and_master():
+    """`ALWAYS_PROTECTED` is unconditional: a repo whose default branch is something
+    else must still not take a commit on `main`."""
+    protected = git_policy.protected_branches(FakeRunner(), "origin")
+    assert {"main", "master"} <= protected
+
+
+def test_protected_branches_adds_the_configured_and_the_detected_ones():
+    responses = {
+        ("git", "config", "--get-all", "devkit.branchPolicy.protectedBranch"): completed(
+            ["git"], stdout="release\nstaging\n"
+        ),
+        ("git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"): completed(
+            ["git"], stdout="origin/trunk\n"
+        ),
+    }
+    protected = git_policy.protected_branches(FakeRunner(responses), "origin")
+    assert {"main", "master", "release", "staging", "trunk"} == set(protected)
+
+
+def test_parse_tag_updates_reads_tag_lines_and_ignores_branch_lines():
+    """These were parsed by nothing at all until a hand-pushed v0.9.0 got through: the
+    branch parser drops every `refs/tags/` line, so a tag-only push read as empty."""
+    raw = (
+        f"refs/tags/v1.0.0 abc refs/tags/v1.0.0 {'0' * 40}\n"
+        "refs/heads/work def refs/heads/work ghi\n"
+        "malformed line\n"
+    )
+    updates = git_policy.parse_tag_updates(raw)
+    assert [u.tag for u in updates] == ["v1.0.0"]
+    assert [u.branch for u in git_policy.parse_push_updates(raw)] == ["work"]
+
+
+def test_release_tag_decision_blocks_a_release_tag_and_allows_everything_else():
+    """Pure -- no git, no network -- so it holds in a repo with no remote at all."""
+    blocked = git_policy.release_tag_decision(f"refs/tags/v1.2.3 abc refs/tags/v1.2.3 {'0' * 40}\n")
+    assert not blocked.ok
+    assert "v1.2.3" in blocked.errors[0]
+
+    zero = "0" * 40
+    # A deletion, and a tag that is not a release tag, are both somebody else's business.
+    assert git_policy.release_tag_decision(f"(delete) {zero} refs/tags/v1.2.3 abc\n").ok
+    assert git_policy.release_tag_decision("refs/tags/nightly abc refs/tags/nightly def\n").ok
+    assert git_policy.release_tag_decision("").ok
+
+
+def test_merged_pr_reports_the_url_and_survives_a_broken_answer():
+    """The direct test for the query `_merged_decision` turns into a refusal. Both
+    failure shapes matter: a transport error must read as *unknown* rather than as
+    "not merged", or `failClosed` has nothing to fail closed on."""
+    argv = next(iter(merged_response("topic", [])))
+    found = git_policy.merged_pr(
+        FakeRunner({argv: completed(list(argv), stdout='[{"url": "https://x/pull/9"}]')}),
+        "acme/widgets",
+        "topic",
+    )
+    assert found.url == "https://x/pull/9"
+    assert not found.error
+
+    none = git_policy.merged_pr(
+        FakeRunner({argv: completed(list(argv), stdout="[]")}), "acme/widgets", "topic"
+    )
+    assert none.url == "" and not none.error
+
+    # Both APIs failing is the only case that may report an error.
+    broken = git_policy.merged_pr(FakeRunner(), "acme/widgets", "topic")
+    assert broken.error and not broken.url

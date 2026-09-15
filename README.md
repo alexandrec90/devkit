@@ -204,7 +204,7 @@ they deserve different reactions: **modified** means the installed bytes no long
 match the receipt and should never happen, while **behind** means a newer release
 shipped and just wants a re-run.
 
-Neither compares against the working tree, so editing `scripts/git_policy.py` stays
+Neither compares against the working tree, so editing `scripts/git_policy/` stays
 silent — a check that fires continuously while the policy is being worked on is one
 nobody reads. It is also deliberately *not* a test: a test asserting
 "installed == source" could only be made green by installing work-in-progress code

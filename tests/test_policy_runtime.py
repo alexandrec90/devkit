@@ -120,7 +120,8 @@ def test_the_installer_is_spawned_by_a_console_interpreter_under_pythonw(monkeyp
     """
     console = tmp_path / "python.exe"
     console.write_text("", encoding="utf-8")
-    monkeypatch.setattr(pr.git_policy.sys, "executable", str(tmp_path / "pythonw.exe"))
+    # `_core` owns `console_python`, so it is where `sys` is looked up.
+    monkeypatch.setattr(pr.git_policy._core.sys, "executable", str(tmp_path / "pythonw.exe"))
     assert pr.check_argv(Path("D:/devkit"))[0] == str(console)
 
 
