@@ -1534,12 +1534,45 @@ def test_fallback_devkit_ref_tracks_the_newest_tag():
     you just pushed.
     """
     tag = new_project.latest_devkit_tag()
-    if tag is None:
-        pytest.skip("no tags to compare against")
+    if reason := _nothing_to_compare(new_project.FALLBACK_DEVKIT_REF, tag):
+        pytest.skip(reason)
     assert tag == new_project.FALLBACK_DEVKIT_REF, (
         f"FALLBACK_DEVKIT_REF is {new_project.FALLBACK_DEVKIT_REF!r} but devkit's "
         f"newest tag is {tag!r} — bump the constant"
     )
+
+
+def _version(tag: str) -> tuple[int, ...] | None:
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _nothing_to_compare(constant: str, tag: str | None) -> str:
+    """Why this comparison cannot be made, or "" when it can.
+
+    Two reasons. A checkout with no tags has nothing to compare against at all.
+
+    The second is the local push gate looking at a release branch mid-cut, and it takes
+    two conditions -- the second being why the first cannot be used to silence the test.
+    `devkit-push-gate` sets the variable only when the branch being pushed is a
+    `release/vX.Y.Z` (see `scripts/precommit/run_push_gate.py`), because between step 2's
+    bump and step 6's tag this assertion is red by construction and the gate has no PR to
+    judge that from. But the state still has to *look* like a release in flight -- the
+    constant strictly ahead of the newest tag -- so the variable excuses nothing else. A
+    stale constant, which is what this test exists to catch, is *behind* the newest tag
+    and still fails with the variable set.
+
+    CI never sets it, so the release PR stays red and `gate_verdict` makes the call.
+    """
+    if tag is None:
+        return "no tags to compare against"
+    gate = load_script("scripts/precommit/run_push_gate.py")
+    if not os.environ.get(gate.RELEASE_PREPARE_ENV):
+        return ""
+    bumped, released = _version(constant), _version(tag)
+    if bumped is not None and released is not None and bumped > released:
+        return f"release prepare in flight: {constant} is not tagged yet"
+    return ""
 
 
 def test_latest_devkit_tag_is_none_outside_a_git_repo(tmp_path):

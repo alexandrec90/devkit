@@ -246,3 +246,20 @@ def test_lint_runs_before_the_test_tiers_in_both_gates():
             f"{PR_GATE.name}'s test job runs {tier!r} before lint-all.py, which auto-fixes — "
             f"whatever it repairs, the later step then reports clean. Job order: {test_job}"
         )
+
+
+def test_ci_never_claims_a_release_prepare():
+    """The one difference between the gates that is deliberate, and the assertion that
+    keeps it safe.
+
+    `devkit-push-gate` sets `RELEASE_PREPARE_ENV` when the branch being pushed is a
+    `release/vX.Y.Z`, which lets `test_fallback_devkit_ref_tracks_the_newest_tag` excuse
+    a constant that is ahead of the newest tag -- red by construction between the bump
+    and the tag. The gate may do that because it has no PR to judge from; CI must not,
+    because judging exactly that red is what `release-pipeline.py`'s `gate_verdict` is
+    for, and a release PR that went green would sail past it.
+    """
+    assert gate.RELEASE_PREPARE_ENV not in PR_GATE.read_text(encoding="utf-8"), (
+        f"{PR_GATE.name} sets {gate.RELEASE_PREPARE_ENV}, which would make the "
+        "release PR green and defeat the expected-red check that gates every release"
+    )
