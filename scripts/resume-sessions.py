@@ -494,7 +494,7 @@ def main(argv: list[str] | None = None, agent_pass: AgentPass | None = None) -> 
         return 0
     if args.update:
         update_clis(args.agents, agent_pass)
-    print(f"\nOpening {len(selected)} tab(s) in the current Windows Terminal...")
+    print(f"\nOpening {len(selected)} tab(s) in the current window{wt_profile.launch_note()}")
     return subprocess.run([terminal, *command], check=False).returncode
 
 

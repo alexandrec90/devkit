@@ -351,7 +351,7 @@ def open_agent(
         print(f"Windows Terminal not found; run this yourself:\n  cd {box}\n  {command}")
         return EXIT_OK
     argv = wt_argv(title or branch, box, command, wt_profile.launch_name())
-    print(f"opening {agent} in {box}")
+    print(f"opening {agent} in {box}{wt_profile.launch_note()}")
     done = runner([terminal, *argv], check=False)
     return EXIT_OK if done.returncode == 0 else EXIT_FAILED
 

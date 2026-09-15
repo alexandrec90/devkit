@@ -617,7 +617,18 @@ def test_the_task_reaches_wt_asking_for_the_window_already_open(tmp_path, capsys
     store = launchable(tmp_path, monkeypatch, launched)
     assert rs.main(["--sessions-dir", str(store), "--no-update"]) == 0
     assert launched[0][1:3] == ["-w", "0"]
-    assert "the current Windows Terminal" in capsys.readouterr().out
+    assert "the current window" in capsys.readouterr().out
+
+
+def test_tabs_that_cannot_join_that_window_say_why_instead(tmp_path, capsys, monkeypatch):
+    """`-w 0` is refused across the elevation split, and silence there is what made the
+    same defect get reported twice. `wt_profile.py` owns the mismatch; this pins that
+    `main` prints it beside the line claiming the current window."""
+    launched: list = []
+    store = launchable(tmp_path, monkeypatch, launched)
+    monkeypatch.setattr(rs.wt_profile, "launch_note", lambda: rs.wt_profile.ELEVATION_NOTE)
+    assert rs.main(["--sessions-dir", str(store), "--no-update"]) == 0
+    assert "elevate" in capsys.readouterr().out
 
 
 def test_the_clis_are_updated_before_the_tabs_open(tmp_path, capsys, monkeypatch):

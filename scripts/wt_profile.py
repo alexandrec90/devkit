@@ -23,11 +23,24 @@ already pass, so duplicating a tab never spends a session.
 workstation this was written on turned out to demonstrate: its default profile carries
 `"elevate": true`. A tab built from that profile is an *elevated* session, and Windows
 Terminal cannot host an elevated session as a tab in an unelevated window -- so every
-agent spawn broke out into a separate elevated window with a UAC prompt, rather than
-landing in the window `-w 0` names. The reported symptom was "the task opens my default
-terminal instead of a tab", and the cause was that the tab had no profile of its own to
-open under. `-p` is what stops an agent session inheriting whatever the operator happens
-to have made their default -- elevation included.
+agent spawn broke out into a separate window with a UAC prompt in front of it. The
+reported symptom was "the task opens my default terminal instead of a tab", and the
+cause was that the tab had no profile of its own to open under. `-p` is what stops an
+agent session inheriting whatever the operator happens to have made their default --
+elevation included.
+
+**The separate window outlived that fix, and this is the half to read.** `-p` stops the
+*tab* from elevating; it cannot make an unelevated tab join an *elevated window*,
+because `-w` only ever sees windows at its own elevation. On a machine whose default
+profile elevates, every window the operator opened by hand is an elevated one while VS
+Code -- and so every task it runs, and every `wt.exe` those spawn -- is not. `-w 0` then
+finds nothing it is allowed to join and opens a window of its own: the same reported
+symptom a second time, now without the UAC prompt to explain it. **Nothing in this file
+can fix that**, because the two sides have to match -- run the editor elevated, or drop
+`"elevate"` from the default profile. What devkit does instead is see it coming and say
+so: `launch_note` is the line a launcher prints when it is about to open a tab it knows
+will land in a window of its own, so a stray window reads as an elevation mismatch
+rather than as a task that ignored `-w 0`.
 
 **Why the launchers still ask before passing `-p`.** A `-p` naming a profile that is not
 installed is not fatal -- Windows Terminal runs the overridden command line anyway (probed
@@ -37,9 +50,10 @@ operator who deleted the profile, gets exactly today's behaviour instead.
 
 The definition is installed by `scripts/install-wt-profile.py`; this module owns what is
 installed and how to recognise it, so the installer and the two launchers cannot disagree.
-Every function here is pure except `read_settings`, and it is total: a missing, unreadable
-or malformed settings file is `{}`, never an exception, because its callers are on the
-path that opens an agent.
+Every function here is pure except `read_settings`, `is_elevated` and the two `launch_*`
+wrappers that call them, and all three are total: a missing, unreadable or malformed
+settings file is `{}` and an elevation this cannot determine is "not elevated", never an
+exception, because its callers are on the path that opens an agent.
 
 Tested in `tests/test_wt_profile.py`.
 """
@@ -82,6 +96,16 @@ PROFILE: dict[str, Any] = {
 # Every place Windows Terminal keeps that file, most specific first. The Store build is
 # what `winget`/the Store installs and is what this workstation runs; the third is an
 # unpackaged (portable or scoop) install, which keeps its settings outside `Packages`.
+# What an unelevated launcher prints when the windows on screen are elevated ones. Three
+# lines: what is true, what will therefore happen, and the two ways to make it stop --
+# because an operator reading this is watching a window they did not ask for appear, and
+# a note that only named the cause would leave them with nothing to do about it.
+ELEVATION_NOTE = (
+    '\n  note: Windows Terminal opens elevated windows here ("elevate" on the default'
+    "\n  profile) and this process is not elevated, so the tab gets a window of its own --"
+    "\n  -w 0 cannot cross that split. Run VS Code elevated, or unelevate the profile."
+)
+
 SETTINGS_RELATIVE = (
     Path("Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"),
     Path("Packages/Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe/LocalState/settings.json"),
@@ -193,3 +217,66 @@ def profile_name(settings: dict[str, Any]) -> str:
 def launch_name(local_app_data: str | os.PathLike[str] | None = None) -> str:
     """The profile a tab about to be opened should use, or `""`. What a launcher calls."""
     return profile_name(read_settings(settings_path(local_app_data)))
+
+
+def default_elevates(settings: dict[str, Any]) -> bool:
+    """True when a window the operator opens by hand on this machine is an ELEVATED one.
+
+    The `+` button and every ordinary launch build their window from `defaultProfile`,
+    so that profile's `elevate` is the elevation the windows already on screen have --
+    which is the only thing that decides whether a tab can join one. Read through
+    `profiles.defaults` too, because a field set there applies to every profile that
+    does not override it, and an operator who elevates everything writes it once.
+
+    `defaultProfile` is a GUID in every file Windows Terminal writes, but the schema
+    also accepts a profile NAME and hand-edited files use one; an unresolvable value
+    answers False rather than guessing, since a machine with no such profile is one
+    where nothing about elevation can be claimed.
+    """
+    profiles = settings.get("profiles")
+    inherited = profiles.get("defaults") if isinstance(profiles, dict) else None
+    fallback = inherited.get("elevate") if isinstance(inherited, dict) else None
+    wanted = settings.get("defaultProfile")
+    for entry in profiles_list(settings) if wanted else ():
+        if wanted in (entry.get("guid"), entry.get("name")):
+            return bool(entry.get("elevate", fallback))
+    return False
+
+
+def is_elevated() -> bool:
+    """Whether THIS process holds an elevated token. False everywhere but Windows.
+
+    `sys.platform` rather than `os.name` for the reason `preview-ui-host.py:_kernel32`
+    writes out at length: it is the only spelling of "not Windows" that narrows for
+    mypy, which CI runs on Linux where `ctypes.windll` does not exist. The call itself
+    cannot fail in any documented way, and is guarded anyway -- every caller is opening
+    a paid session, and none of them should lose it to a note about window placement.
+    """
+    # Off Windows there is no elevation split for a tab to be refused by.
+    if sys.platform != "win32":
+        return False
+    import ctypes
+
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except OSError:
+        return False
+
+
+def window_note(settings: dict[str, Any], elevated: bool) -> str:
+    """The note a launcher prints, or `""` when the tab will land where the operator is.
+
+    A trailing string rather than a line of its own because both launchers already
+    print one line before opening a tab, and this belongs to that line: the operator
+    reads "opening claude in ..." and the reason it is about to appear somewhere else
+    in the same breath. Pure, and takes the elevation rather than reading it, so the
+    mismatch is a table in the tests instead of a machine state they would have to fake.
+    """
+    if elevated or not default_elevates(settings):
+        return ""
+    return ELEVATION_NOTE
+
+
+def launch_note(local_app_data: str | os.PathLike[str] | None = None) -> str:
+    """`window_note` for this machine and this process. The other thing a launcher calls."""
+    return window_note(read_settings(settings_path(local_app_data)), is_elevated())
