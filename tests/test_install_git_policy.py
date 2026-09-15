@@ -319,7 +319,14 @@ def test_a_skipped_file_is_not_reported_as_drift_forever(tmp_path):
 def test_in_ref_separates_a_missing_path_from_an_unreadable_one(tmp_path):
     """`read_blob` must stay loud -- a ref that cannot be read is a refusal. Only "this
     ref predates the file" is the benign case, and it is asked for separately."""
-    assert installer.in_ref(REPO_ROOT, "HEAD", "scripts/git_policy.py") is True
+    # The path is asserted against the ref that actually holds it, in both directions:
+    # `scripts/git_policy.py` is in the tags before the package and gone from HEAD,
+    # which is the whole reason `RUNTIME_FILES` lists both layouts. Naming it against
+    # HEAD is what made this test pass right up until the split was *committed* -- the
+    # working tree had already lost the file while HEAD still had it.
+    assert installer.in_ref(REPO_ROOT, "HEAD", "scripts/git_policy/__init__.py") is True
+    assert installer.in_ref(REPO_ROOT, "v0.11.16", "scripts/git_policy.py") is True
+    assert installer.in_ref(REPO_ROOT, "HEAD", "scripts/git_policy.py") is False
     assert installer.in_ref(REPO_ROOT, "HEAD", "scripts/not-a-file.py") is False
     assert installer.in_ref(REPO_ROOT, "v0.0.0-does-not-exist", "scripts/git_policy.py") is False
 
