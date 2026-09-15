@@ -45,7 +45,16 @@ import harness_events  # noqa: E402 - sibling hooks dir, put on the path just ab
 # The event names that mean a human or an agent should look. Kept here rather than in
 # `workspace-status.py` so the session-start line and this tool cannot disagree about
 # what the backlog is; `workspace-status` imports it.
-TRIAGE_EVENTS = ("agent-report", "guard-spawn-failed", "codex-translation-gap")
+TRIAGE_EVENTS = (
+    "agent-report",
+    "guard-spawn-failed",
+    "codex-translation-gap",
+    # `log-wrap.py --always`, i.e. a job on a schedule. Its artifact is overwritten per
+    # run, so a job failing every night keeps only last night's reason and nothing says
+    # how long it has been going -- which is how the nightly release failed three times
+    # unnoticed. Here it is append-only and open until something resolves it.
+    "scheduled-job-failed",
+)
 RESOLVED_EVENT = "triage-resolved"
 
 # The field each event name carries its human-readable substance in, in preference

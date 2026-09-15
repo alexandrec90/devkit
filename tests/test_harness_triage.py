@@ -590,3 +590,40 @@ def test_a_translation_gap_is_a_triage_event():
     assert "codex-translation-gap" in triage.TRIAGE_EVENTS
     items = triage.read_items(_line("codex-translation-gap", agent="codex", detail="novelMember"))
     assert len(triage.open_items(items)) == 1
+
+
+def test_a_failed_scheduled_job_is_a_triage_event():
+    """`log-wrap.py --always` records one. Nobody watches a scheduled job and its
+    artifact is overwritten per run, so without this a job can fail every night and the
+    only evidence is last night's -- which is how the nightly release failed three times
+    before a person hit it by hand."""
+    log_wrap = load_script("scripts/log-wrap.py")
+
+    assert log_wrap.FAILED_EVENT in triage.TRIAGE_EVENTS
+    items = triage.read_items(
+        _line(log_wrap.FAILED_EVENT, message="unattended task 'Devkit: Cut Release' failed")
+    )
+    assert len(triage.open_items(items)) == 1
+
+
+def test_the_same_job_failing_nightly_stays_one_open_defect():
+    """Three bad nights are one thing to fix. The exit code and artifact path are kept
+    off the signature so a job whose failure mode shifts does not fork into two items
+    nobody recognises as the same job."""
+    log_wrap = load_script("scripts/log-wrap.py")
+    message = "unattended task 'Devkit: Cut Release' failed"
+    items = triage.read_items(
+        "\n".join(
+            _line(
+                log_wrap.FAILED_EVENT,
+                stamp=stamp,
+                message=message,
+                exit=code,
+                artifact="logs/r.log",
+            )
+            for stamp, code in (("2026-09-12T06:00:04Z", "2"), ("2026-09-13T06:00:03Z", "2"))
+        )
+    )
+
+    assert len(items) == 2
+    assert len({item.signature for item in items}) == 1

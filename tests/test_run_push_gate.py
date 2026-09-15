@@ -291,3 +291,78 @@ def test_every_step_is_spawned_with_the_scrubbed_environment(tmp_path, monkeypat
         assert env is not None, f"{step[1]} inherits the hook's environment"
         for name in gate.LEAKED_GIT_VARS:
             assert name not in env, f"{step[1]} runs with {name} set, pointing it at the wrong repo"
+
+
+# --- a release prepare is the one push this gate must not judge ---------------
+
+
+def test_a_release_branch_is_named_to_the_steps_it_spawns(tmp_path):
+    """The collision this exists for: the release bump is red by construction until the
+    tag exists, CI is built to merge that one red anyway, and this gate has no PR to read
+    that verdict from. It reports the state and lets the test excuse itself."""
+    root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py")
+    runner = FakeRunner()
+    assert gate.run_gate(root, runner, release_branch="release/v1.2.3") == 0
+    assert runner.envs
+    for env in runner.envs:
+        assert env[gate.RELEASE_PREPARE_ENV] == "release/v1.2.3"
+
+
+def test_an_ordinary_push_carries_no_release_marker(tmp_path):
+    """The exemption may not leak to a branch that merely fails the same test."""
+    root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py")
+    runner = FakeRunner()
+    assert gate.run_gate(root, runner, release_branch="") == 0
+    assert runner.envs
+    for env in runner.envs:
+        assert gate.RELEASE_PREPARE_ENV not in env
+
+
+def test_only_a_release_version_branch_counts():
+    """`release/v1.2.3` and nothing that merely starts like it -- the marker turns off a
+    guard, so the shape that turns it on is exact."""
+    matches = gate.RELEASE_BRANCH_RE.fullmatch
+    assert matches("release/v0.11.17")
+    assert not matches("release/v1.2")
+    assert not matches("release/v1.2.3-rc1")
+    assert not matches("release/candidate")
+    assert not matches("feature/release/v1.2.3")
+
+
+def test_the_branch_is_read_from_head_of_the_pushed_repo(tmp_path):
+    """Read with `cwd` at the repo being pushed, which is the only thing that answers for
+    a throwaway worktree the release pipeline cut moments earlier."""
+    root = tmp_path
+    subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(root), "checkout", "--quiet", "-b", "release/v9.9.9"],
+        check=True,
+        capture_output=True,
+    )
+
+    assert gate.detect_release_branch(root) == "release/v9.9.9"
+
+
+def test_a_directory_that_is_not_a_checkout_is_not_a_release(tmp_path):
+    """`detect_release_branch` runs before any step and must not be the thing that fails
+    a push in a project git cannot answer for."""
+    assert gate.detect_release_branch(tmp_path) == ""
+
+
+def test_a_detached_head_is_not_a_release_branch(tmp_path):
+    """Every CI runner checks out detached, and `rev-parse --abbrev-ref` answers the
+    literal `HEAD` there -- which is why the question is put to `symbolic-ref`. If this
+    ever answered a branch, CI would excuse the red it exists to catch."""
+    root = tmp_path
+    subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True)
+    for args in (
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+        ["commit", "--quiet", "--allow-empty", "-m", "seed"],
+    ):
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(root), "checkout", "--quiet", "--detach"], check=True, capture_output=True
+    )
+
+    assert gate.detect_release_branch(root) == ""

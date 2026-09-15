@@ -49,6 +49,7 @@ Stdlib only. Tested in `tests/test_run_push_gate.py`.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
@@ -168,6 +169,59 @@ def gate_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+# The one push this gate must not judge on its own.
+#
+# A release is cut by bumping `FALLBACK_DEVKIT_REF` to a tag that does not exist yet --
+# the constant has to be committed *before* the tag, or the tag names a commit whose
+# constant is stale. So between the bump and the tag, the test asserting the two agree
+# fails **by design**, and the release PR is red on purpose: CI's job is to confirm that
+# this is the only red and merge anyway, which is the judgement `release-pipeline.py`'s
+# `gate_verdict` encodes.
+#
+# This gate cannot make that judgement -- it has no PR to read a rollup from -- so
+# running the suite here refuses the push and the release can never leave the machine.
+# That is not hypothetical: it stopped the nightly release for three nights, reported
+# each time as a stale branch rather than as this.
+#
+# So the gate names the state instead of judging it, and the test excuses itself only
+# when the constant is genuinely *ahead* of the newest tag. CI never sets this, which is
+# what keeps the release PR red where the judgement belongs -- asserted in
+# `tests/test_gate_parity.py`.
+RELEASE_BRANCH_RE = re.compile(r"^release/v\d+\.\d+\.\d+$")
+RELEASE_PREPARE_ENV = "DEVKIT_PUSH_GATE_RELEASE_PREPARE"
+
+
+def detect_release_branch(root: Path) -> str:
+    """The `release/vX.Y.Z` branch being pushed, or "" when this is an ordinary push.
+
+    Read from `HEAD` rather than from the refs git puts on a pre-push hook's stdin,
+    which pre-commit consumes before a hook it runs ever sees it. The release pipeline
+    pushes from a throwaway worktree checked out on the branch it is cutting, so the two
+    agree there; pushing a release branch you are not standing on is the gap, and it
+    costs a red that CI would catch anyway.
+
+    `symbolic-ref` rather than `rev-parse --abbrev-ref`, which answers the literal string
+    `HEAD` on a detached checkout -- the shape every CI runner is in -- and cannot answer
+    at all before the first commit. This one fails in both cases, which is the answer
+    wanted: not a release branch.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            cwd=root,
+            check=False,
+            env=gate_env(),
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return ""
+    if result.returncode:
+        return ""
+    branch = (result.stdout or "").strip()
+    return branch if RELEASE_BRANCH_RE.fullmatch(branch) else ""
+
+
 def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
     """Each step with the command that runs it, or None when `root` lacks its file."""
     python = interpreter(root)
@@ -176,9 +230,17 @@ def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
     ]
 
 
-def run_gate(root: Path, runner: Runner = subprocess.run) -> int:
+def run_gate(root: Path, runner: Runner = subprocess.run, release_branch: str | None = None) -> int:
     """Run the steps in order; the first non-zero exit is the hook's, and ends the run."""
     env = gate_env()
+    if release_branch is None:
+        release_branch = detect_release_branch(root)
+    if release_branch:
+        env[RELEASE_PREPARE_ENV] = release_branch
+        print(
+            f"push-gate: {release_branch} is a release prepare -- its fallback-ref red is "
+            "CI's to judge, not this gate's"
+        )
     for step, command in plan(root):
         if command is None:
             print(f"push-gate: {step.name}: no {step.requires} in this project -- skipped")
