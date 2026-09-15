@@ -11,14 +11,10 @@ from conftest import REPO_ROOT, load_module
 
 sh = load_module("scripts/sync-devkit.py")
 
-# devkit is the only checkout with no `DEVKIT_VERSION`: the stamp records the upstream
-# commit a vendored copy corresponds to, and the source of truth has no upstream. Same
-# discriminator `upgrade-project.py` uses to tell a project that has never vendored from
-# one that has, so a claim about devkit's own worktree is asked only where it can hold.
-in_the_source_repo = pytest.mark.skipif(
-    (REPO_ROOT / sh.VERSION_FILE).exists(),
-    reason=f"vendored copy ({sh.VERSION_FILE} present); this holds of the devkit repo only",
-)
+# This project's own tiers, for the claims whose answer depends on them. Loaded against
+# `REPO_ROOT` the same way `stop.py` and `structure_check.py` do it, so a test running in
+# a consumer reads that consumer's `.devkit.toml` and not a default.
+CFG = load_module("scripts/hooks/harness_config.py").load(REPO_ROOT)
 
 # The settings tier the pull drives. Loaded here rather than off `sh`, because
 # `sync-devkit.py` imports it on use and deliberately holds no reference: a project's
@@ -1808,18 +1804,32 @@ def test_devkits_own_paths_for_the_gated_tier_never_depend_on_a_consumer():
     )
 
 
-@in_the_source_repo
-def test_devkit_ships_the_source_of_every_gated_path_it_names():
-    """`gated_source_paths()` is only worth having if devkit carries what it names: the
-    release check reads these paths off devkit's own worktree, and a name with no file
-    behind it reports "no unreleased change" about a file that cannot be vendored at all.
+def test_every_gated_path_is_on_disk_exactly_where_it_should_be():
+    """Whether a gated file is present is a question with an answer in every checkout --
+    a different answer, which is why this is one assertion and not a skip.
 
-    Skipped in a consumer rather than asserted there, because a consumer with the
-    frontend tier off has never received these files and never should -- that is the
-    whole point of gating them. Asserting it in the vendored tier turned every generated
-    project's first gate red on arrival, which is the failure this split fixes."""
+    In devkit there is no `DEVKIT_VERSION` (the stamp records the upstream commit a
+    vendored copy came from, and the source of truth has no upstream) and the file must
+    be there: the release check in `new-project.py` reads these paths off devkit's own
+    worktree, so a name with no file behind it reports "no unreleased change" about a
+    file that cannot be vendored at all. devkit's own `[frontend]` tier being off is
+    exactly why `gated_source_paths()` exists and does not gate on it.
+
+    In a consumer the file is present iff that project's frontend tier is on, which is
+    the gate doing its job in both directions -- a `bare` project that received it would
+    mean the gate leaks, and a `fullstack` one that did not would mean the pull skipped
+    a file it was supposed to deliver. Asserting bare presence here instead is what
+    turned every generated project's first gate red on arrival.
+    """
+    vendored = (REPO_ROOT / sh.VERSION_FILE).exists()
     for rel in sh.gated_source_paths():
-        assert (REPO_ROOT / rel).is_file(), rel
+        present = (REPO_ROOT / rel).is_file()
+        if not vendored:
+            assert present, f"devkit vendors {rel} but does not carry it"
+        elif CFG.frontend.enabled:
+            assert present, f"[frontend] is on but {rel} is missing -- run sync-devkit.py --pull"
+        else:
+            assert not present, f"[frontend] is off yet {rel} arrived -- the manifest gate leaks"
 
 
 def test_a_pull_delivers_the_gated_file_only_where_the_tier_is_on(tmp_path, monkeypatch):
