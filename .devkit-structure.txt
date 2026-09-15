@@ -115,6 +115,7 @@ file_lines::scripts/preview-ui-host.py = 1155
 file_lines::scripts/reclaim.py = 1232
 file_lines::scripts/release-pipeline.py = 960
 file_lines::scripts/report-workflow-failure.py = 614
+file_lines::scripts/resume-sessions.py = 502
 file_lines::scripts/sweep.py = 1990
 file_lines::scripts/sync-devkit.py = 1490
 file_lines::scripts/upgrade-project.py = 1236
@@ -396,3 +397,6 @@ swallowed_errors::scripts/worktree.py = 1
 
 # 2026-09-11  recorded: The Agent terminal profile: agent-box.py gains the two lines that carry it -- the wt_profile import and the -p pair spliced into wt_argv -- plus a two-line docstring saying what the new parameter is and where its reasoning lives. The module is already 38 lines past file_lines, so a parameter it cannot decline has nowhere else to go; the prose that would have grown it further lives in scripts/wt_profile.py, which owns the decision. resume-sessions.py took the same change and stayed under its limit by folding the sentence into an existing paragraph, which is the whole budget that file had left. The split agent-box.py owes is still owed and is still its own PR: it moves the module fix-prs.py and agent-worktree.py both load by name.
 #   file_lines::scripts/agent-box.py -> 544
+
+# 2026-09-15  recorded: resume-sessions.py sat at exactly 500 when this change arrived, so the two lines the -w 0 switch costs have nowhere to go. The change itself is four tokens -- the forced -w -1 becomes -w 0 and the focus-tab -t 0 trailer goes with it, because an absolute tab index appended to a window that already had tabs focuses a stranger's rather than the oldest resumed session. What grew is the docstring saying so, trimmed to five lines from a first draft of twelve, and a --new-window opt-out was dropped on the way rather than pay three more baseline lines (main's function_lines and complexity, plus these) for a flag nobody asked for. The split this file owes is the seam its own section comments draw -- reading the transcript store (sessions_root .. select) against launching (resume_args .. main) -- and it is its own PR: tests/test_resume_sessions.py imports the module by path under one name, and the workspace task, agent-box.py's wt_argv comment and scripts/wt_profile.py all point at it by that name.
+#   file_lines::scripts/resume-sessions.py -> 502
