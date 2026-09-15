@@ -27,7 +27,16 @@ import argparse
 import re
 import subprocess
 import sys
+import tempfile
+from collections.abc import Callable, Sequence
 from pathlib import Path
+
+# What `prepare` and the branch-lifecycle helpers below spawn through. They take the
+# caller's runner rather than this module's `_git`: their caller is
+# `release-pipeline.py`, which targets a devkit path given on its command line rather
+# than this file's `REPO_ROOT`, and whose single spawn site carries the console
+# discipline the console-less nightly job needs.
+GitRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -124,6 +133,110 @@ def tag_plan(version: str, main_fallback: str, existing_tags: set[str]) -> tuple
 
 def branch_for(version: str) -> str:
     return f"release/{version}"
+
+
+# --- the release branch's lifecycle -------------------------------------------
+#
+# Here rather than in `release-pipeline.py` because that module is already over every
+# structural limit it has, and because what these need -- `branch_for`, `bump_fallback`,
+# `NEW_PROJECT` -- is this module's vocabulary.
+
+
+def local_branch_exists(devkit: Path, branch: str, run: GitRunner) -> bool:
+    """Whether `branch` is a local ref in `devkit`."""
+    ref = f"refs/heads/{branch}"
+    return run(["git", "-C", str(devkit), "rev-parse", "--verify", "--quiet", ref]).returncode == 0
+
+
+def pushed_to_origin(devkit: Path, branch: str, run: GitRunner) -> bool | None:
+    """Whether `branch` is on origin. `None` when origin could not be asked.
+
+    Put to the remote rather than to a remote-tracking ref, because the checkout asking
+    is one a release already failed in and may not have fetched since: the question is
+    whether the work escaped, not what this clone last saw. The third answer is the one
+    that matters -- the failure that strands a branch is usually the network, so the run
+    that meets one is the likeliest to be offline, and it must not read "I could not
+    ask" as "never pushed" and delete the branch on the strength of it.
+    """
+    result = run(["git", "-C", str(devkit), "ls-remote", "--heads", "origin", branch])
+    if result.returncode != 0:
+        return None
+    return bool(result.stdout.strip())
+
+
+def discard_stale_branch(devkit: Path, branch: str, run: GitRunner) -> tuple[bool, str]:
+    """Clear a local `branch` an interrupted release left behind.
+
+    Unpushed, such a branch is not a resumption point but a wall: nobody can see it,
+    `git worktree add -b` refuses to reuse it, and so every later run dies in `prepare`
+    until someone deletes the ref by hand -- which is how one failed push at 2am stopped
+    the nightly release three nights running. There is nothing in it but a bump the next
+    run recomputes from a newer `main`.
+
+    Answers `(True, note)` when the caller may proceed -- `note` empty when there was
+    nothing to clear -- and `(False, reason)` when the state needs a human.
+    """
+    if not local_branch_exists(devkit, branch, run):
+        return True, ""
+    on_origin = pushed_to_origin(devkit, branch, run)
+    if on_origin is None:
+        return False, (
+            f"{branch} exists locally and origin could not be reached to say whether it "
+            "was ever pushed -- re-run once origin answers"
+        )
+    if on_origin:
+        return False, (
+            f"{branch} is on origin but has no open PR -- reopen its PR, or delete the "
+            "branch on both sides, then re-run"
+        )
+    dropped = run(["git", "-C", str(devkit), "branch", "-D", branch])
+    if dropped.returncode != 0:
+        failure = (dropped.stderr or dropped.stdout).strip()
+        return False, f"could not delete the stale {branch}: {failure}"
+    return True, f"discarded the stale unpushed {branch} left by an interrupted run"
+
+
+def prepare(
+    devkit: Path, version: str, run: GitRunner, say: Callable[[str], None]
+) -> tuple[bool, str]:
+    """Bump, commit and push `release/<version>`, in a worktree cut from origin/main."""
+    branch = branch_for(version)
+    cleared, note = discard_stale_branch(devkit, branch, run)
+    if not cleared:
+        return False, note
+    if note:
+        say(note)
+    pushed = False
+    with tempfile.TemporaryDirectory(prefix="devkit-release-") as tmp:
+        path = Path(tmp) / branch.replace("/", "-")
+        add = run(
+            ["git", "-C", str(devkit), "worktree", "add", "-b", branch, str(path), "origin/main"]
+        )
+        if add.returncode != 0:
+            return False, (add.stderr or add.stdout).strip()
+        try:
+            target = path / NEW_PROJECT.relative_to(REPO_ROOT)
+            updated, previous = bump_fallback(target.read_text(encoding="utf-8"), version)
+            if previous is None:
+                return False, f"no {FALLBACK_CONST} in {target.name}"
+            target.write_text(updated, encoding="utf-8", newline="\n")
+            for step in (
+                ("commit", "-am", f"Release {version}"),
+                ("push", "-u", "origin", branch),
+            ):
+                result = run(["git", "-C", str(path), *step])
+                if result.returncode != 0:
+                    return False, f"`git {' '.join(step)}`: {(result.stderr or '').strip()}"
+            pushed = True
+        finally:
+            run(["git", "-C", str(devkit), "worktree", "remove", "--force", str(path)])
+            # The branch outlives the worktree only once the push has put it on the
+            # remote, where the local ref is what `gh pr create --head` resolves. Left
+            # behind after a failed push it strands every later run instead, so every
+            # exit but that one takes it along -- the bump is one line, recomputed here.
+            if not pushed:
+                run(["git", "-C", str(devkit), "branch", "-D", branch])
+    return True, branch
 
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:

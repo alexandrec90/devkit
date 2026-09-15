@@ -548,36 +548,6 @@ def open_release_pr(devkit: Path, branch: str) -> int:
     return int(data.get("number") or 0)
 
 
-def prepare(devkit: Path, version: str) -> tuple[bool, str]:
-    """Bump, commit and push `release/<version>`, in a worktree cut from origin/main."""
-    branch = release.branch_for(version)
-    with tempfile.TemporaryDirectory(prefix="devkit-release-") as tmp:
-        path = Path(tmp) / branch.replace("/", "-")
-        add = _run(
-            ["git", "-C", str(devkit), "worktree", "add", "-b", branch, str(path), "origin/main"]
-        )
-        if add.returncode != 0:
-            return False, (add.stderr or add.stdout).strip()
-        try:
-            target = path / release.NEW_PROJECT.relative_to(release.REPO_ROOT)
-            updated, previous = release.bump_fallback(target.read_text(encoding="utf-8"), version)
-            if previous is None:
-                return False, f"no {release.FALLBACK_CONST} in {target.name}"
-            target.write_text(updated, encoding="utf-8", newline="\n")
-            for step in (
-                ("commit", "-am", f"Release {version}"),
-                ("push", "-u", "origin", branch),
-            ):
-                result = _run(["git", "-C", str(path), *step])
-                if result.returncode != 0:
-                    return False, f"`git {' '.join(step)}`: {(result.stderr or '').strip()}"
-        finally:
-            _run(["git", "-C", str(devkit), "worktree", "remove", "--force", str(path)])
-            # The branch survives the worktree by design -- it is on the remote now,
-            # and the local ref is what `gh pr create --head` resolves.
-    return True, branch
-
-
 def wait_for_checks(devkit: Path, number: int) -> None:
     """Block until every check on `number` has settled.
 
@@ -733,7 +703,7 @@ def run_pipeline(
             _say(f"reusing the open prepare PR #{number} for {branch}")
         else:
             _say(f"preparing {branch}")
-            ok, detail = prepare(devkit, version)
+            ok, detail = release.prepare(devkit, version, _run, _say)
             if not ok:
                 print(f"release-pipeline: prepare failed: {detail}", file=sys.stderr)
                 return 2

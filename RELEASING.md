@@ -62,13 +62,24 @@ resolved; that mode changes nothing. On the CLI it is
 `vX.Y.Z`), and the run's output survives as `logs/devkit-cut-release.log`.
 
 The run is **resumable and idempotent**: it re-uses an open prepare PR rather than
-opening a second one, and skips straight to the tag phase if `main` already carries the
-bump. So the answer to a run that died in the middle — a dropped network, a closed
-terminal — is to click it again.
+opening a second one, skips straight to the tag phase if `main` already carries the
+bump, and discards a `release/vX.Y.Z` an earlier run left behind without pushing it. So
+the answer to a run that died in the middle — a dropped network, a closed terminal — is
+to click it again.
 
-It stops rather than guesses in three places, and each refusal names what it saw:
+The third of those is the one the first two missed, and it cost three nights: a run
+killed between the bump commit and the push leaves a local branch nobody can see, and
+`git worktree add -b` refuses to reuse it, so every later pass died in step 1 reporting
+only `a branch named 'release/vX.Y.Z' already exists`. `prepare` now takes the branch
+with it on every exit except the pushed one, and a run that meets one anyway asks origin
+whether it was ever pushed before dropping it.
+
+It stops rather than guesses in four places, and each refusal names what it saw:
 
 - the version already exists as a tag, or the level is not a bump and not a `vX.Y.Z`;
+- a `release/vX.Y.Z` branch is already on origin with no open PR, or origin cannot be
+  reached to say whether it was pushed at all — deleting a local ref whose work escaped
+  the checkout is not a guess worth making;
 - the prepare PR's gate is red in **any** way other than the single expected test
   (step 4), including a test job that failed before the suite ran, so no artifact
   names a test at all;
