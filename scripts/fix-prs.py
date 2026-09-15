@@ -510,7 +510,7 @@ def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
     """The worktree already on `branch`, or why one cannot be cut. See `aw.holder`.
 
     Three answers in two fields, because they need three different next moves.
-    `(path, "")` is one of this checkout's own `.claude/worktrees/` and is reused as it
+    `(path, "")` is one of this checkout's own agent worktrees and is reused as it
     stands: this task's ordinary second click is on a PR whose worktree is still open
     from the first, and two worktrees on one branch is a state git will not hold, so
     cutting again would fail on the very thing that means "ready". `(None, "")` is a
@@ -528,13 +528,13 @@ def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
     if not nested:
         return None, (
             f"{branch} is already checked out at {held}, which is outside "
-            f"{aw.WORKTREES_DIR} -- finish the PR from there, or remove that worktree"
+            f"{aw.TIER_SUMMARY} -- finish the PR from there, or remove that worktree"
         )
     return Path(held), ""
 
 
 def cut_tree(project_dir: Path, branch: str, runner=subprocess.run) -> Path | None:
-    """Cut `.claude/worktrees/<name>` on the PR's own head branch. None when git refused.
+    """Cut a default-tier worktree on the PR's own head branch. None when git refused.
 
     The fetch first is `agent-worktree.create`'s and for its reason: a checkout that has
     not fetched is however stale it last was, and here that decides the question below
@@ -548,7 +548,7 @@ def cut_tree(project_dir: Path, branch: str, runner=subprocess.run) -> Path | No
     if not local and remote != 0:
         print(f"  origin has no branch {branch} in {project_dir.name}", file=sys.stderr)
         return None
-    root = project_dir / aw.WORKTREES_DIR
+    root = aw.default_root(project_dir)
     taken = [entry.name for entry in root.iterdir()] if root.is_dir() else []
     path = root / aw.tree_name(branch, taken)
     argv = ["git", "-C", str(project_dir), *aw.add_steps(branch, str(path), local)]

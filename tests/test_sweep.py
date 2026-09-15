@@ -1960,6 +1960,47 @@ def test_a_path_too_shallow_to_be_a_claude_worktree_is_not_one():
     assert sweep.cli_worktree_checkout(Path("/worktrees")) is None
 
 
+def _codex_worktree(home, checkout, name="carameli", digest="2e51"):
+    """A worktree where `codex --worktree` cuts one, with the `.git` pointer that is the
+    only thing on disk tying it to its checkout."""
+    tree = home / "worktrees" / digest / name
+    tree.mkdir(parents=True)
+    gitdir = checkout / ".git" / "worktrees" / name
+    (tree / ".git").write_text(f"gitdir: {gitdir.as_posix()}\n", encoding="utf-8")
+    return tree
+
+
+def test_the_registry_is_found_from_inside_a_codex_worktree(tmp_path, monkeypatch):
+    """`codex --worktree` cuts under its OWN home rather than inside the checkout, so the
+    naive answer is not one directory too deep -- it is on the wrong side of the machine
+    entirely, at `~/.codex/worktrees/<digest>/alex-projects.code-workspace`. Nothing
+    reports that: `workspace-status.py` degrades to silence and `devkit_project.py
+    --adopt-tasks` exits 2 naming a path nobody ever wrote.
+    """
+    home = tmp_path / ".codex"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    checkout = tmp_path / "ws" / "carameli"
+    tree = _codex_worktree(home, checkout)
+    assert sweep.default_workspace(tree) == tmp_path / "ws" / sweep.WORKSPACE_FILE_NAME
+    assert sweep.source_checkout(tree) == checkout
+
+
+def test_a_codex_worktree_already_removed_falls_back_to_being_its_own_checkout(
+    tmp_path, monkeypatch
+):
+    """The one thing the detached tier gives up: with the directory gone there is no
+    `.git` pointer left to read, so this stops being total where the nested tier stays
+    pure. Every caller asks from a directory it is standing in, so the answer is
+    available exactly when it matters -- and `None` here degrades to the pre-existing
+    behaviour rather than to a wrong checkout.
+    """
+    home = tmp_path / ".codex"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    gone = home / "worktrees" / "2e51" / "carameli"
+    assert sweep.cli_worktree_checkout(gone) is None
+    assert sweep.source_checkout(gone) == gone
+
+
 def test_a_static_checkout_is_its_own_source(tmp_path):
     assert sweep.source_checkout(tmp_path / "devkit") == tmp_path / "devkit"
 

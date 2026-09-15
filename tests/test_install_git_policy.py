@@ -185,6 +185,46 @@ def test_a_receipt_missing_its_ref_is_not_a_receipt():
     assert installer.Receipt.parse('{"ref": "v1", "files": "nope"}') is None
 
 
+def test_a_runtime_file_newer_than_the_ref_is_skipped_rather_than_refusing(tmp_path):
+    """THE REF DECIDES THE RUNTIME. `RUNTIME_FILES` grows and releases do not move, so
+    the moment the list gained an entry, every install from the newest TAG -- which is
+    what `main()` defaults to and what `installers.py` re-runs nightly -- would have
+    refused outright, on every machine, until the next release. v0.5.3 predates most of
+    the current list, which is exactly the shape of that failure."""
+    target = tmp_path / "hooks"
+    receipt = installer.install(REPO_ROOT, target, "v0.5.3")
+
+    assert receipt.files, "an old ref still installs what it does have"
+    assert set(receipt.files) <= set(installer.RUNTIME_FILES.values())
+    for name in receipt.files:
+        assert (target / name).is_file()
+
+
+def test_a_skipped_file_is_not_reported_as_drift_forever(tmp_path):
+    """The other half, and the reason the check reads the receipt rather than
+    `RUNTIME_FILES`: a file the ref never had would otherwise report as "not installed"
+    on every nightly check, and every re-install would skip it again."""
+    target = tmp_path / "hooks"
+    receipt = installer.install(REPO_ROOT, target, "v0.5.3")
+    assert installer.compare_install(target, receipt) == []
+
+
+def test_in_ref_separates_a_missing_path_from_an_unreadable_one(tmp_path):
+    """`read_blob` must stay loud -- a ref that cannot be read is a refusal. Only "this
+    ref predates the file" is the benign case, and it is asked for separately."""
+    assert installer.in_ref(REPO_ROOT, "HEAD", "scripts/git_policy.py") is True
+    assert installer.in_ref(REPO_ROOT, "HEAD", "scripts/not-a-file.py") is False
+    assert installer.in_ref(REPO_ROOT, "v0.0.0-does-not-exist", "scripts/git_policy.py") is False
+
+
+def test_every_hook_in_the_map_gets_the_executable_bit(tmp_path):
+    """git skips a hook it cannot execute WITHOUT SAYING SO, so the set that gets chmod
+    is derived from the map rather than listed beside it."""
+    assert installer.HOOK_NAMES == {"pre-commit", "pre-push", "post-checkout"}
+    for source, destination in installer.RUNTIME_FILES.items():
+        assert (destination in installer.HOOK_NAMES) == source.startswith("scripts/git-hooks/")
+
+
 # --- what the check actually compares -----------------------------------------
 
 

@@ -230,11 +230,11 @@ def main(argv: list[str] | None = None) -> int:
         # destroyed by `reconcile` -- so this would install a task that works until the
         # next reconcile pass and then fails nightly, forever, in silence. Same refusal
         # every other installer makes, on `--yes` only so a dry run still reads.
-        # `source_checkout` because it resolves a `.claude/worktrees/` checkout too,
+        # `source_checkout` because it resolves an agent CLI's `--worktree` checkout too,
         # which `BOXES_DIR_NAME in REPO_ROOT.parts` waved through.
         print(
             f"install-docker-prune: {REPO_ROOT} is a temporary checkout -- an ephemeral box or "
-            f"a claude --worktree worktree -- deleted when its work lands. Run this from "
+            f"an agent CLI's --worktree checkout -- deleted when its work lands. Run this from "
             f"the static devkit checkout.",
             file=sys.stderr,
         )

@@ -415,14 +415,19 @@ python scripts/agent-box.py delete --project carameli                 # box and 
 branch policy skipped — on purpose. A pre-commit refusal leaves the work uncommitted in a
 box `reconcile` may reap, while the same rules run in `PR Gate` on a branch that exists.
 
-### A plain worktree, in the directory Claude Code uses
+### A plain worktree, in the directories the agent CLIs use
 
 `claude --worktree <topic>` cuts `.claude/worktrees/<topic>`, enters it and offers
-keep-or-remove on the way out. There is no `codex -w`, so a Codex session that wants
-isolation has to be handed a worktree by something — and `scripts/agent-worktree.py` is
-that something, cutting in the same directory the built-in does so the machine has one
-convention rather than two. It is also where a remote Claude session spawns, which is why
-the delete verb can see worktrees nothing here made:
+keep-or-remove on the way out. `codex --worktree` does the same thing in a different
+shape: `~/.codex/worktrees/<repo-hash>/<name>`, **outside** the checkout, behind a digest
+that names no repo. `scripts/agent-worktree.py` cuts into the first of those, so the
+machine has one convention rather than a third — and reads *both*, along with the tier a
+remote Claude session spawns into, which is why the delete verb can see worktrees nothing
+here made. A row from a non-default tier is labelled with its agent (`codex/<name>`), so
+two tiers holding a directory of the same name stay two rows.
+
+`scripts/hooks/worktree_tiers.py` owns the list. Adding a runtime is one entry in `TIERS`;
+nothing downstream of it names an agent.
 
 ```bash
 python scripts/agent-worktree.py new --pick devkit:main --slug voicemail --agent codex
@@ -452,7 +457,7 @@ it describes what the click is about to destroy.
 
 `reconcile` merges what is green and labelled, so a PR whose base moved under it or whose
 gate failed is the state every scheduled pass steps over. `scripts/fix-prs.py` is the way
-back in: it puts a `.claude/worktrees/` worktree on the PR's own head branch — upstream
+back in: it cuts a worktree on the PR's own head branch — upstream
 set, so a bare push lands on the PR — and opens an agent there already knowing the PR
 number, what is wrong with it and that the job ends with the PR merged once the gate is
 green. Same tier as the two rows above, so *Agent: Delete Worktrees* lists what it left

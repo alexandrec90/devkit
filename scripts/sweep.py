@@ -67,8 +67,10 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))  # the vendored tier
 import devkit_jsonc
 import task_branch as tb
+import worktree_tiers
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -84,13 +86,13 @@ WORKSPACE_FILE_NAME = "alex-projects.code-workspace"
 BOXES_DIR_NAME = ".worktrees"
 NAME_SEP = "--"
 
-# The OTHER worktree directory on this machine, and it is a different tier: this one sits
-# INSIDE a checkout, holds no lease and no port, and is where `claude --worktree` and a
-# remote Claude session put a worktree. `scripts/agent-worktree.py` is the local verb for
-# it. Named here beside the box tier's directory because the two questions below have to
-# answer for both -- a worktree here is two levels under its checkout rather than one
-# level beside it, so the naive parent walk lands somewhere nobody ever wrote.
-CLI_WORKTREES_DIR = (".claude", "worktrees")
+# The OTHER worktree tier, and it is not the boxes: no lease, no port, and it is where a
+# `--worktree` session -- Claude's or Codex's -- and a remote Claude session put a
+# worktree. `scripts/agent-worktree.py` is the local verb for it, and
+# `scripts/hooks/worktree_tiers.py` owns where each runtime puts one -- imported rather
+# than restated, because the shapes no longer share a parent walk: Claude's sits two
+# levels under its checkout, Codex's sits outside it entirely.
+CLI_WORKTREE_TIERS = worktree_tiers.TIERS
 
 
 def default_workspace(repo_root: Path, name: str = WORKSPACE_FILE_NAME) -> Path:
@@ -109,10 +111,10 @@ def default_workspace(repo_root: Path, name: str = WORKSPACE_FILE_NAME) -> Path:
     symptom at all. `worktree.py` was alone in resolving both, so this is its logic
     moved down to where everything else can reach it.
 
-    A `.claude/worktrees/` worktree is the same failure one directory deeper, and it
-    arrived by a different route: nothing here cuts those, so the first ones on the
-    machine were made by `claude --worktree` and by remote sessions, and every script
-    below resolved its workspace to `<checkout>/.claude/worktrees/<file>`. That is the
+    An agent CLI's worktree is the same failure again, by a different route: nothing here
+    cuts those, so the first were made by a `--worktree` session and by remote sessions,
+    and every script below resolved its workspace to `<checkout>/.claude/worktrees/<file>`
+    -- or, once `codex --worktree` existed, to a path under `$CODEX_HOME`. That is the
     directory an agent handed one of these is *running in*, so the naive answer is wrong
     exactly where it is most often asked.
     """
@@ -124,19 +126,17 @@ def default_workspace(repo_root: Path, name: str = WORKSPACE_FILE_NAME) -> Path:
 
 
 def cli_worktree_checkout(repo_root: Path) -> Path | None:
-    """The checkout a `.claude/worktrees/` worktree belongs to; None when it is not one.
+    """The checkout an agent CLI's worktree belongs to; None when `repo_root` is not one.
 
-    Matched on the two directory names above `repo_root` rather than on the branch or on
-    anything git reports, so it is pure and answers for a path that no longer exists --
-    which is what a script resolving its own workspace file needs, and what the box tier's
-    two functions already do for their own directory.
+    A **nested** tier is matched on the directory names above `repo_root` rather than on
+    anything git reports, so it stays pure and answers for a path that no longer exists.
+    A **detached** one cannot: `codex --worktree` cuts `<CODEX_HOME>/worktrees/<hash>/`,
+    where the digest names no checkout, so `worktree_tiers.owning_checkout` reads the
+    worktree's own `.git` pointer instead. That is what stops this being total -- a Codex
+    worktree already removed answers None and the caller treats it as an ordinary
+    checkout, which by then it is. Every caller asks from a directory it is standing in,
     """
-    parents = repo_root.parents
-    if len(parents) < 3:
-        return None
-    if (parents[0].name, parents[1].name) != (CLI_WORKTREES_DIR[1], CLI_WORKTREES_DIR[0]):
-        return None
-    return parents[2]
+    return worktree_tiers.owning_checkout(repo_root)
 
 
 def source_checkout(repo_root: Path) -> Path:

@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import load_module
+from conftest import REPO_ROOT, load_module
 
 sh = load_module("scripts/sync-devkit.py")
 # The settings tier the pull drives. Loaded here rather than off `sh`, because
@@ -1691,3 +1691,135 @@ def test_the_retired_list_reaches_the_settings_pass_from_this_module(tmp_path, m
     )
     monkeypatch.setattr(sh, "RETIRED_PATHS", ("scripts/hooks/made-up.py",))
     assert any("made-up.py" in note for note in sh.settings_pass(root))
+
+
+# --- the gated tier -------------------------------------------------------------
+
+
+def _consumer(root: Path, frontend: str) -> Path:
+    """A project with the given `[frontend]` block. The gate reads `harness_config`
+    relative to the SCRIPT, not to `root`, so through devkit's own `sh` it always finds
+    devkit's copy -- which is the production shape, where the script is inside the
+    consumer. `_consumer_script` below is the fixture for the case where it is not."""
+    _seed(root, ".devkit.toml", frontend)
+    return root
+
+
+def _consumer_script(root: Path, with_config: bool):
+    """`sync-devkit.py` as a consumer actually holds it: a copy under `root/scripts/`,
+    loaded by path, with or without the `scripts/hooks/harness_config.py` beside it that
+    the gate resolves through `__file__`."""
+    import importlib.util
+
+    # Bytes, not `_seed`: that helper writes in the platform codec, and a script that
+    # carries an em dash would arrive as cp1252 and refuse to import as UTF-8.
+    for rel in ("scripts/sync-devkit.py",) + (
+        ("scripts/hooks/harness_config.py",) if with_config else ()
+    ):
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((REPO_ROOT / rel).read_bytes())
+    name = f"_consumer_sync_{'with' if with_config else 'without'}_{abs(hash(str(root)))}"
+    spec = importlib.util.spec_from_file_location(name, root / "scripts" / "sync-devkit.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+ON = "[frontend]\nenabled = true\n"
+ON_WEB = '[frontend]\nenabled = true\ndir = "web"\nsrc = "web/src/"\n'
+OFF = "[frontend]\nenabled = false\n"
+
+
+def test_the_gated_tier_is_absent_where_the_frontend_tier_is_off(tmp_path):
+    """Skipped, not MISSING: that is the whole difference between a gate and an
+    unconditional entry, and it is what lets devkit itself and every stackless project
+    hold a manifest that names a Vite file."""
+    off = _consumer(tmp_path / "off", OFF)
+    assert sh.gated_paths(off) == ()
+    assert sh.manifest_for(off) == tuple(sh.MANIFEST)
+    assert sh.gated_paths(tmp_path / "never-configured") == ()
+
+
+def test_the_gated_tier_resolves_at_the_consumers_own_source_prefix(tmp_path):
+    on = _consumer(tmp_path / "on", ON_WEB)
+    assert sh.frontend_src(on) == "web/src/"
+    assert sh.gated_paths(on) == ("web/src/worktreePort.ts", "web/src/worktreePort.test.ts")
+    assert set(sh.MANIFEST) < set(sh.manifest_for(on))
+
+
+def test_the_source_prefix_is_normalised_to_the_manifests_spelling(tmp_path):
+    """Forward slashes and exactly one trailing `/`, whatever the TOML said: every path
+    in the manifest is spelled that way, and a gated entry joins onto the prefix."""
+    assert (
+        sh.frontend_src(
+            _consumer(tmp_path / "a", '[frontend]\nenabled = true\nsrc = "web\\\\src"\n')
+        )
+        == "web/src/"
+    )
+    assert (
+        sh.frontend_src(
+            _consumer(tmp_path / "b", '[frontend]\nenabled = true\nsrc = "web/src//"\n')
+        )
+        == "web/src/"
+    )
+    assert sh.frontend_src(_consumer(tmp_path / "c", OFF)) == ""
+
+
+def test_the_gated_tier_is_off_until_the_bootstrap_pull_has_landed(tmp_path):
+    """`sync-devkit.py` is copied into a project as the bootstrap of its FIRST pull, at
+    which moment `scripts/hooks/harness_config.py` is not there to read the gate from.
+    The gate answers "off" rather than raising, the first pull delivers the helper the
+    gate needs, and the second pull delivers what the gate selects."""
+    root = tmp_path / "fresh"
+    _seed(root, ".devkit.toml", ON)
+    bootstrap = _consumer_script(root, with_config=False)
+    assert bootstrap.gated_paths(root) == ()
+    delivered = _consumer_script(root, with_config=True)
+    assert delivered.gated_paths(root) == (
+        "frontend/src/worktreePort.ts",
+        "frontend/src/worktreePort.test.ts",
+    )
+
+
+def test_devkits_own_paths_for_the_gated_tier_never_depend_on_a_consumer():
+    """The unreleased-change check asks about devkit's files, and devkit keeps its own
+    frontend tier off -- so `manifest_for(devkit)` would hide exactly the edits that
+    check exists to catch."""
+    assert sh.gated_source_paths() == (
+        "frontend/src/worktreePort.ts",
+        "frontend/src/worktreePort.test.ts",
+    )
+    for rel in sh.gated_source_paths():
+        assert (REPO_ROOT / rel).is_file(), rel
+
+
+def test_a_pull_delivers_the_gated_file_only_where_the_tier_is_on(tmp_path, monkeypatch):
+    """End to end through `main`, against a source repo that carries the file."""
+    src = _repo(
+        tmp_path / "src",
+        tag="v0.5.3",
+        files={
+            "scripts/hooks/x.py": "upstream",
+            "frontend/src/worktreePort.ts": "vendored",
+            "frontend/src/worktreePort.test.ts": "vendored test",
+        },
+    )
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    on = _consumer(tmp_path / "on", ON)
+    _seed(on, sh.PRECOMMIT_FILE, CONFIG)
+    monkeypatch.setattr(sh, "REPO_ROOT", on)
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    assert (on / "frontend" / "src" / "worktreePort.ts").read_text(encoding="utf-8") == "vendored"
+    assert "frontend/src/worktreePort.ts" in sh.read_receipt(on)
+    assert sh.main(["--check", "--src", str(src)]) == 0
+
+    off = _consumer(tmp_path / "off", OFF)
+    _seed(off, sh.PRECOMMIT_FILE, CONFIG)
+    monkeypatch.setattr(sh, "REPO_ROOT", off)
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    assert not (off / "frontend").exists()
+    assert sh.main(["--check", "--src", str(src)]) == 0

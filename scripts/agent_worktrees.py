@@ -1,4 +1,4 @@
-"""What a `.claude/worktrees/` worktree is, and what the two dropdowns draw for it.
+"""What an agent CLI's worktree is, and what the two dropdowns draw for it.
 
 The pure half of `scripts/agent-worktree.py`: parsing `git worktree list`, deciding
 whether a worktree can be removed without losing anything, and building the option file
@@ -7,10 +7,17 @@ and opens terminals, and every decision here is worth asserting without either.
 
 **These are not boxes.** `worktree.py`'s tier lives at `<workspace>/.worktrees/`, holds
 a port lease and a `COMPOSE_PROJECT_NAME`, and is reaped by a scheduled pass. This tier
-is the one Claude Code's `--worktree` flag cuts: a plain git worktree inside the
-checkout, gitignored, with no lease and no reaper. The location is not a preference --
-it is where remote Claude sessions spawn, so anything that only understands one of the
-two directories is blind to half the worktrees on the machine.
+is the one a `--worktree` flag cuts: a plain git worktree with no lease and no reaper.
+The location is not a preference -- it is where remote Claude sessions spawn, so anything
+that only understands one of these directories is blind to some of the worktrees on the
+machine.
+
+**There is more than one such directory, and they are not the same shape.**
+`scripts/hooks/worktree_tiers.py` owns the list: Claude cuts inside the checkout, Codex
+cuts under its own home, keyed by a digest that names no repo. The menus here read every
+tier and remove from every tier; `create` only ever writes to the default one, because a
+second convention for where `codex --worktree` puts things would be worse than the
+built-in.
 
 **`fix-prs.py` reads from here too, and is not a fourth menu.** It cuts a worktree in
 this tier for the PR it was sent at, which is `holder`, `tree_name` and `add_steps` --
@@ -18,12 +25,15 @@ where a worktree for a branch goes, and what git is asked to do when the branch 
 exists. A private copy of those three in that module would be a second answer to a
 question the machine may only have one answer to.
 
-Every function here is pure and tested in `tests/test_agent_worktrees.py`.
+Every function here is pure and tested in `tests/test_agent_worktrees.py`. `env` rides
+through the two that ask which tier a path is in, because one tier's location is read
+from the environment and a pure function may not consult the machine it runs on.
 """
 
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,9 +41,8 @@ from pathlib import Path
 import picker_rows
 import picker_scan
 
-# Relative to a checkout. Spelled with a forward slash because every comparison below is
-# made on `as_posix()` output, which is what `git worktree list --porcelain` prints too.
-WORKTREES_DIR = ".claude/worktrees"
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import worktree_tiers as wt
 
 # `<project>:<name>`, one token because a VS Code input resolves to one string. Both
 # halves are directory names, and a colon is not legal in either on Windows.
@@ -52,6 +61,17 @@ NOTHING = picker_rows.NOTHING
 # always the first row and does not count against it.
 BASE_LIMIT = 10
 
+# Where a NEW worktree for a checkout is cut, and the directories one can be FOUND in --
+# both off the tier list, so neither `create`'s destination nor a refusal's wording can
+# fall behind a tier that gets added. Aliased rather than wrapped: `agent-worktree.py`
+# and `fix-prs.py` both import this module and neither should import a second one to ask
+# where the machine puts a worktree.
+default_root = wt.default_root
+TIER_SUMMARY = " or ".join(
+    f"{tier.home_default}/{'/'.join(tier.segments)}" if tier.detached else "/".join(tier.segments)
+    for tier in wt.TIERS
+)
+
 # What `removal_decision` answers with.
 REMOVE = "remove"  # nothing would be lost; `git worktree remove` will take it
 FORCE = "force"  # something would be lost, and the operator asked for that
@@ -60,9 +80,9 @@ KEEP = "keep"  # something would be lost and nobody asked
 
 @dataclass(frozen=True)
 class Tree:
-    """One worktree under a checkout's `.claude/worktrees/`, as a menu row would name it."""
+    """One of a checkout's agent-CLI worktrees, as a menu row would name it."""
 
-    name: str  # the directory under `.claude/worktrees/`, which is also the pick's tail
+    name: str  # `worktree_tiers.label`: the directory, agent-qualified off the default tier
     path: str
     branch: str  # "" when the worktree is on a detached HEAD
     dirty: int = 0  # `git status --porcelain` lines: tracked edits AND untracked files
@@ -99,54 +119,64 @@ def parse_worktree_list(porcelain: str) -> list[tuple[str, str]]:
     return found
 
 
-def worktrees_root(project_dir: Path) -> str:
-    """`<checkout>/.claude/worktrees/`, in the spelling every comparison here uses.
+def owned(project_dir: Path, path: str, env: dict | None = None) -> bool:
+    """Whether a worktree git listed for `project_dir` is one of the agent tiers'.
 
-    Lowercased posix with a trailing slash, rather than `Path.resolve()`, so the callers
-    stay pure: git prints forward slashes on Windows too, and the case fold is what makes
-    `C:/Users` and `c:/users` the same directory there.
+    Git ran in `project_dir`, so every path it printed already belongs to this checkout
+    -- membership is not in question and is never re-derived here, which is what keeps
+    this pure for the detached tier whose owner only a `.git` read could name.
+
+    What is still checked, and only for a **nested** tier, is that the anchor is *this*
+    checkout: a worktree of this repo dropped inside another checkout's
+    `.claude/worktrees/` reads as that one's, and belongs in that one's menu. The same
+    test excludes a worktree cut inside another worktree, whose nearest anchor upward is
+    that worktree rather than the checkout -- somebody else's business, not this menu's.
     """
-    return (project_dir / WORKTREES_DIR).as_posix().lower().rstrip("/") + "/"
+    matched = wt.match(path, env)
+    if matched is None:
+        return False
+    tier, anchor, _name = matched
+    return tier.detached or wt.same_dir(anchor, project_dir)
 
 
-def nested(project_dir: Path, porcelain: str) -> list[tuple[str, str, str]]:
-    """`(name, path, branch)` for the worktrees under this checkout's `.claude/worktrees/`.
+def nested(
+    project_dir: Path, porcelain: str, env: dict | None = None
+) -> list[tuple[str, str, str]]:
+    """`(name, path, branch)` for this checkout's worktrees, across every agent tier.
 
-    Only the immediate children count -- a worktree cut inside another one is that one's
-    business, not this menu's.
+    `name` is `worktree_tiers.label`: the directory name for the tier this harness cuts
+    into, qualified with its agent for any other. The delete dropdown resolves a ticked
+    row back to a worktree by that string, so two tiers holding a directory of the same
+    name must not both answer to it.
     """
-    root = worktrees_root(project_dir)
     rows = []
     for path, branch in parse_worktree_list(porcelain):
-        tail = Path(path).as_posix()
-        if not tail.lower().startswith(root):
-            continue
-        name = tail[len(root) :].strip("/")
-        if name and "/" not in name:
-            rows.append((name, path, branch))
+        if owned(project_dir, path, env):
+            rows.append((wt.label(path, env), path, branch))
     return sorted(rows)
 
 
-def holder(project_dir: Path, porcelain: str, branch: str) -> tuple[str, bool]:
-    """`(path, nested)` for the worktree already on `branch`; `("", False)` when none is.
+def holder(
+    project_dir: Path, porcelain: str, branch: str, env: dict | None = None
+) -> tuple[str, bool]:
+    """`(path, ours)` for the worktree already on `branch`; `("", False)` when none is.
 
     Git will not check one branch out in two worktrees, so "what holds it" has at most
     one answer and this is the whole of it. The bool separates the two ways a branch can
-    be taken, because they need opposite responses: one of this checkout's own
-    `.claude/worktrees/` is the worktree the caller was about to cut and should be reused
-    instead, while anywhere else -- the checkout itself, a `.worktrees/` box, something
-    cut by hand -- belongs to somebody, and `git worktree add` would refuse it with a
-    message about a branch rather than about the tree that is the actual obstacle.
+    be taken, because they need opposite responses: a worktree in one of this checkout's
+    agent tiers is the one the caller was about to cut and should be reused instead,
+    while anywhere else -- the checkout itself, a `.worktrees/` box, something cut by
+    hand -- belongs to somebody, and `git worktree add` would refuse it with a message
+    about a branch rather than about the tree that is the actual obstacle.
     """
-    root = worktrees_root(project_dir)
     for path, on in parse_worktree_list(porcelain):
         if on and on == branch:
-            return path, Path(path).as_posix().lower().startswith(root)
+            return path, owned(project_dir, path, env)
     return "", False
 
 
 def tree_name(branch: str, taken: Iterable[str]) -> str:
-    """The directory under `.claude/worktrees/` a worktree for `branch` is cut at.
+    """The directory under the default tier a worktree for `branch` is cut at.
 
     The branch's last segment, which is `create`'s spelling (`agent/voicemail-0905` ->
     `voicemail-0905`) generalised to a name nobody here chose: a PR head branch is
@@ -280,7 +310,7 @@ def tree_rows(trees: dict[str, list[Tree]]) -> list[str]:
     """The delete dropdown's lines, or the sentinel when there is nothing to delete."""
     listed = [line for _project, line in tree_entries(trees)]
     return listed or [
-        picker_rows.nothing_row("no worktrees", f"nothing under {WORKTREES_DIR} in any checkout")
+        picker_rows.nothing_row("no worktrees", f"nothing under {TIER_SUMMARY} in any checkout")
     ]
 
 

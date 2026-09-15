@@ -552,8 +552,8 @@ def _venv_roots(root: Path, runner: Runner) -> tuple[Path, ...]:
 
     Read off `--git-common-dir` rather than off a path convention, because the two
     worktree tiers on this machine sit at different depths — `<workspace>/.worktrees/`
-    for a provisioned box and `<checkout>/.claude/worktrees/` for the plain kind
-    `claude --worktree` and `scripts/agent-worktree.py` cut — and git already knows the
+    for a provisioned box, `<checkout>/.claude/worktrees/` and `~/.codex/worktrees/` for
+    the plain kind a `--worktree` flag and `scripts/agent-worktree.py` cut — and git already knows the
     answer for both, and for whatever the third tier turns out to be. A box has its own
     `.venv`, so this changes nothing for one; the ordering keeps it that way.
 

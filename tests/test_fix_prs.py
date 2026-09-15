@@ -412,7 +412,18 @@ def test_a_branch_held_outside_the_tier_is_refused_with_the_directory_named(monk
     tree, refused = fix_prs.existing_tree(checkout, "agent/x")
     assert tree is None
     assert "C:/ws/.worktrees/carameli--x" in refused
-    assert fix_prs.aw.WORKTREES_DIR in refused
+    assert fix_prs.aw.TIER_SUMMARY in refused
+
+
+def test_a_codex_worktree_on_that_branch_is_reused_too(monkeypatch, tmp_path):
+    """The reuse rule is about who cut the tree, not about where it sits. A Codex
+    worktree of this checkout is as adoptable as a Claude one -- and refusing it would
+    send the reader to "remove that worktree" for a tree the harness put them in."""
+    home = tmp_path / ".codex"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    held = f"{home.as_posix()}/worktrees/2e51/carameli"
+    checkout = checkout_listing(monkeypatch, tmp_path, (held, "agent/x"))
+    assert fix_prs.existing_tree(checkout, "agent/x") == (Path(held), "")
 
 
 def test_a_branch_nothing_holds_is_neither_a_tree_nor_a_refusal(monkeypatch, tmp_path):

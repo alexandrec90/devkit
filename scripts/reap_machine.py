@@ -319,7 +319,8 @@ def newest_transcript(directory: Path) -> float:
 def session_activity(session_id: str, project: Path | None, store: Path) -> float | None:
     """When one spawned session last wrote its transcript; `None` when that is unknowable.
 
-    A session spawned into a worktree runs in `.claude/worktrees/bridge-<id>`, and the
+    A session spawned into a worktree runs in `.claude/worktrees/bridge-<id>` -- the tier
+    a remote Claude session spawns into, which is Claude's own rather than Codex's -- and the
     store files that directory under a name carrying the id, so the id finds it. One
     spawned in place shares the project's own directory with every other session there,
     and the newest transcript in it may be an interactive session's -- which errs

@@ -34,11 +34,18 @@
 Two agent sessions run at once, each in its own worktree, each running `npm run dev`.
 `frontend/src/worktreePort.ts` derives a port offset from the checkout's own directory
 name, so the static checkout keeps the conventional port and a worktree gets its own with
-nothing configured — the only thing that works across all three ways a worktree is cut
-(`claude --worktree`, devkit's task, and Remote Control), because two of them run no
-project code at the time. Wire it into `vite.config.ts` as that file's docstring shows,
-and keep `strictPort: true`: the offset is a hash, and without it a collision slides the
-second server onto a port nobody asked for and serves the wrong branch's app.
+nothing configured — the only thing that works across every way a worktree is cut
+(`claude --worktree`, `codex --worktree`, devkit's task, and Remote Control), because
+most of them run no project code at the time. Wire it into `vite.config.ts` as that
+file's docstring shows, and keep `strictPort: true`: the offset is a hash, and without
+it a collision slides the second server onto a port nobody asked for and serves the
+wrong branch's app.
+
+**The file is devkit's, not this project's.** It is vendored by `sync-devkit.py` and
+drift-checked like every other harness file: it arrives on the first
+`python scripts/sync-devkit.py --pull` after `.devkit.toml` says `[frontend] enabled =
+true`, at that section's `src`. Edit it in devkit and pull; a local edit is reported as
+drift by the PR gate.
 
 {{/frontend}}
 ## Environment Variables

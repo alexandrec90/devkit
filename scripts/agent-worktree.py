@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cut and destroy the worktrees Claude Code's `--worktree` flag lives in -- for Codex too.
+"""Cut and destroy the worktrees an agent CLI's `--worktree` flag lives in.
 
 `claude --worktree <topic>` cuts `.claude/worktrees/<topic>`, enters it, and offers
 keep-or-remove on the way out. **Codex has no such flag**, and that is the whole reason
@@ -101,7 +101,7 @@ EXIT_USAGE = 2
 
 
 def trees_for(project_dir: Path) -> list[aw.Tree]:
-    """Every worktree under this checkout's `.claude/worktrees/`, with what it holds.
+    """Every agent-CLI worktree of this checkout, in any tier, with what it holds.
 
     The two counts are what the delete dropdown warns with, so they are read here rather
     than at removal time: a row that says `clean and pushed` is the difference between a
@@ -243,7 +243,7 @@ def create(project: str, workspace: Path, slug: str, base: str, agent: str, runn
     existing = known_branches(git)
     branch = tb.branch_name(tb.slugify(slug or project), existing)
     name = branch.partition("/")[2]
-    path = source / aw.WORKTREES_DIR / name
+    path = aw.default_root(source) / name
     done = runner(
         [
             "git",

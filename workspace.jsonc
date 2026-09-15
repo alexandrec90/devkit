@@ -1154,17 +1154,19 @@
 				},
 				"problemMatcher": []
 			},
-			// The `.claude/worktrees/` pair, and they are NOT the box tier coming back.
+			// The agent-worktree pair, and they are NOT the box tier coming back.
 			// `Worktree: List Boxes` above reports `<workspace>/.worktrees/` — port leases,
-			// COMPOSE_PROJECT_NAMEs, a reaper. These two act on plain git worktrees INSIDE a
-			// checkout, which is where `claude --worktree` puts one and where a remote Claude
-			// session spawns. No lease, no provisioning, nothing to collide with a static
-			// checkout's ports.
+			// COMPOSE_PROJECT_NAMEs, a reaper. These two act on the plain git worktrees an
+			// agent CLI cuts: `claude --worktree` and a remote Claude session put one INSIDE
+			// the checkout, `codex --worktree` puts one under `~/.codex/` behind a repo
+			// digest, and `scripts/hooks/worktree_tiers.py` is the list of both. `new` cuts
+			// into the first; `remove` reads every tier. No lease, no provisioning, nothing
+			// to collide with a static checkout's ports.
 			//
-			// They exist because the built-in is a CLAUDE CODE flag. There is no `codex -w`,
-			// so a Codex session that wants isolation has to be handed a worktree by
-			// something — and putting it anywhere else would leave the machine with two
-			// conventions and two menus each blind to half the worktrees on it.
+			// They existed first because `--worktree` was a CLAUDE CODE flag alone. Codex has
+			// its own now, so what these add is the part neither built-in does: asking which
+			// checkout and which base branch before cutting, and a delete list that reads
+			// every tier rather than the one its own runtime made.
 			// `test_the_box_tier_keeps_one_task_and_it_is_read_only` carries the argument in
 			// full, including why `agent-box.py` stays CLI-only.
 			//
@@ -1230,7 +1232,7 @@
 				// ticking a box. The default refuses, names what would have been lost, and
 				// says which row to pick instead.
 				"label": "Agent: Delete Worktrees",
-				"detail": "Asks which checkouts — each with how many worktrees it holds, which is also the answer to 'did I leave anything in that repo' — then which of their .claude/worktrees/ worktrees to destroy, tick as many as you want, then whether to discard work. Each row says what that worktree holds: uncommitted paths, unpushed commits, or 'clean and pushed'. The default REFUSES anything that would lose work and names it; 'Force' discards it. A worktree's local branch is deleted only when git will take it with 'branch -d', so a branch whose commits exist nowhere else is kept and said so, and origin's copy — and therefore any PR — is never touched. The list covers worktrees this machine made any way at all, including the ones 'claude --worktree' and a remote Claude session cut; both lists come from ONE scan run when the first picker opens, rather than from a file a scheduled pass wrote.",
+				"detail": "Asks which checkouts — each with how many worktrees it holds, which is also the answer to 'did I leave anything in that repo' — then which of their agent-CLI worktrees to destroy, tick as many as you want, then whether to discard work. Each row says what that worktree holds: uncommitted paths, unpushed commits, or 'clean and pushed'. The default REFUSES anything that would lose work and names it; 'Force' discards it. A worktree's local branch is deleted only when git will take it with 'branch -d', so a branch whose commits exist nowhere else is kept and said so, and origin's copy — and therefore any PR — is never touched. The list covers worktrees this machine made any way at all, including the ones 'claude --worktree', 'codex --worktree' and a remote Claude session cut — a row outside the tier this task cuts into is labelled with its agent, as 'codex/<name>'; both lists come from ONE scan run when the first picker opens, rather than from a file a scheduled pass wrote.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -2158,7 +2160,7 @@
 						"value": "claude"
 					},
 					{
-						"label": "Codex — the reason this task exists; there is no `codex -w`",
+						"label": "Codex — or use `codex --worktree`, which cuts under ~/.codex/",
 						"value": "codex"
 					}
 				],

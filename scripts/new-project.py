@@ -203,7 +203,10 @@ def _read_manifest_paths(root: Path) -> tuple[str, ...]:
             return ()
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        return tuple(module.MANIFEST)
+        # Plus the gated tier at devkit's own layout: this list feeds the
+        # unreleased-change warning, which asks about devkit's files, not a consumer's.
+        gated = getattr(module, "gated_source_paths", lambda: ())
+        return tuple(module.MANIFEST) + tuple(gated())
     except (OSError, AttributeError, ImportError, SyntaxError):
         return ()
 

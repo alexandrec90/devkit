@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Devkit global post-checkout dispatcher.
+
+Fires in the new tree whenever one is created -- `git worktree add`, whoever ran it --
+which is the one seam that reaches `claude --worktree`, `codex --worktree` and a person
+at a prompt alike. See `devkit_worktree_env` for what it decides and why it is here
+rather than in an agent hook.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import devkit_worktree_env
+
+if __name__ == "__main__":
+    sys.exit(devkit_worktree_env.main())

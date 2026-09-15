@@ -22,6 +22,7 @@ from support import (
     needs_live_workspace,
     needs_the_static_checkout,
     worktree,
+    worktree_tiers,
 )
 
 devkit_jsonc_loads = devkit_jsonc.loads
@@ -2416,15 +2417,15 @@ def test_the_box_tier_keeps_one_task_and_it_is_read_only(canonical):
     for exactly this reason. A row that duplicates a built-in is the same clutter as a row
     that duplicates a scheduled pass.
 
-    **Two of them are back, and the built-in is exactly why the argument does not cover
-    them.** `--worktree` is a *Claude Code* flag; there is no `codex -w`, so a Codex
-    session that wants isolation has to be handed a worktree by something, and the
-    something has to put it where the built-in does or the machine ends up with two
-    conventions and two menus that each see half the worktrees. `Agent: New Worktree` and
-    `Agent: Delete Worktrees` are that something, they run `agent-worktree.py`, and they
-    live in `.claude/worktrees/` on purpose — it is also where a remote Claude session
-    spawns, which is the other half of what the delete row can see and a built-in bounded
-    to one session cannot. The human they are for is the one who typed this request:
+    **Two of them are back, and the built-ins are exactly why the argument does not cover
+    them.** `--worktree` was a *Claude Code* flag alone when these rows were written; Codex
+    has one now, and it cuts somewhere else entirely — `~/.codex/worktrees/<digest>/`,
+    outside the checkout. So the machine has two conventions whatever this menu does, and
+    what these rows add is what neither built-in does: `Agent: New Worktree` asks which
+    checkout and which base branch before cutting, into `.claude/worktrees/` on purpose —
+    it is also where a remote Claude session spawns — and `Agent: Delete Worktrees` reads
+    EVERY tier, which is the half a built-in bounded to its own runtime and its own session
+    structurally cannot. The human they are for is the one who typed this request:
     somebody driving Codex from the quick-pick.
 
     They are not the box tier either, and the same seam says so. No port lease, no
@@ -2525,18 +2526,23 @@ def test_a_box_is_told_apart_from_a_checkout_by_the_directory_above_it():
     turns this drift check off on the machine it is the only gate for, and a false
     negative is the Stop-gate dead end it exists to end.
 
-    Both disposable tiers count, and the second is here because it caught the dead end
-    again: a branch editing `workspace.jsonc` from a `.claude/worktrees/` worktree had
-    the drift check report its own un-merged edit, with `--adopt-workspace` — the one
-    move that deletes that edit — offered as the fix.
+    Every disposable tier counts, and the agent-CLI ones are here because they caught the
+    dead end again: a branch editing `workspace.jsonc` from a `.claude/worktrees/`
+    worktree had the drift check report its own un-merged edit, with `--adopt-workspace`
+    — the one move that deletes that edit — offered as the fix. Codex's tier is the same
+    hazard from outside the checkout, and reaches this predicate through the shape test
+    rather than through a `.git` read, so it holds for a path that is already gone.
     """
     boxes = Path("C:/ws") / worktree.BOXES_DIR_NAME
+    codex = Path(worktree_tiers.home_of(worktree_tiers.TIERS[1]))
     assert in_an_ephemeral_box(boxes / "devkit--some-task-0824")
     assert in_an_ephemeral_box(Path("C:/ws/devkit/.claude/worktrees/snoopy-sauteeing-gray"))
+    assert in_an_ephemeral_box(codex / "worktrees" / "2e51" / "devkit")
     assert not in_an_ephemeral_box(Path("C:/ws/devkit"))
     assert not in_an_ephemeral_box(boxes)  # the boxes directory is not itself a box
-    # ...nor is the directory the second tier's worktrees sit in.
+    # ...nor is the directory either agent tier's worktrees sit in.
     assert not in_an_ephemeral_box(Path("C:/ws/devkit/.claude/worktrees"))
+    assert not in_an_ephemeral_box(codex / "worktrees" / "2e51")
 
 
 @pytest.mark.parametrize(

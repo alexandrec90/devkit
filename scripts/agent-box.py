@@ -326,7 +326,7 @@ def open_agent(
     """Open one agent tab in `box`. Shared by `spawn`, `attach`, `fix-prs.py` and
     `agent-worktree.py`.
 
-    The last of those is a different tier -- a plain `.claude/worktrees/` worktree with
+    The last of those is a different tier -- a plain agent-CLI worktree with
     no lease and no port -- and shares this anyway, because "which window does the agent
     open in" has to have one answer on a machine. It is also why nothing here says `box`
     to the operator: every caller hands this a worktree, and only some of them are boxes.

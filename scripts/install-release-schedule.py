@@ -343,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
         # `reconcile`. Refused rather than warned. Only on `--yes`: printing the plan
         # from a box is how an agent reads what the install would do before it has
         # anywhere else to run. `source_checkout` rather than `BOXES_DIR in root.parts`
-        # because a `claude --worktree` checkout under `.claude/worktrees/` is deleted
+        # because a `--worktree` checkout, Claude's or Codex's, is deleted
         # the same way and the narrower test waved it through.
         print(
             f"schedule: {root} is a temporary checkout -- an ephemeral box or a claude "
