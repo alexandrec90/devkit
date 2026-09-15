@@ -10,6 +10,16 @@ import pytest
 from conftest import REPO_ROOT, load_module
 
 sh = load_module("scripts/sync-devkit.py")
+
+# devkit is the only checkout with no `DEVKIT_VERSION`: the stamp records the upstream
+# commit a vendored copy corresponds to, and the source of truth has no upstream. Same
+# discriminator `upgrade-project.py` uses to tell a project that has never vendored from
+# one that has, so a claim about devkit's own worktree is asked only where it can hold.
+in_the_source_repo = pytest.mark.skipif(
+    (REPO_ROOT / sh.VERSION_FILE).exists(),
+    reason=f"vendored copy ({sh.VERSION_FILE} present); this holds of the devkit repo only",
+)
+
 # The settings tier the pull drives. Loaded here rather than off `sh`, because
 # `sync-devkit.py` imports it on use and deliberately holds no reference: a project's
 # first pull runs that script before this file exists. Its own contract is covered in
@@ -1787,11 +1797,27 @@ def test_the_gated_tier_is_off_until_the_bootstrap_pull_has_landed(tmp_path):
 def test_devkits_own_paths_for_the_gated_tier_never_depend_on_a_consumer():
     """The unreleased-change check asks about devkit's files, and devkit keeps its own
     frontend tier off -- so `manifest_for(devkit)` would hide exactly the edits that
-    check exists to catch."""
+    check exists to catch.
+
+    The answer is a property of `GATED_MANIFEST`, not of the repo this runs in, so it
+    is asserted everywhere. Whether the files are actually *there* is the half that
+    only devkit can answer -- see below."""
     assert sh.gated_source_paths() == (
         "frontend/src/worktreePort.ts",
         "frontend/src/worktreePort.test.ts",
     )
+
+
+@in_the_source_repo
+def test_devkit_ships_the_source_of_every_gated_path_it_names():
+    """`gated_source_paths()` is only worth having if devkit carries what it names: the
+    release check reads these paths off devkit's own worktree, and a name with no file
+    behind it reports "no unreleased change" about a file that cannot be vendored at all.
+
+    Skipped in a consumer rather than asserted there, because a consumer with the
+    frontend tier off has never received these files and never should -- that is the
+    whole point of gating them. Asserting it in the vendored tier turned every generated
+    project's first gate red on arrival, which is the failure this split fixes."""
     for rel in sh.gated_source_paths():
         assert (REPO_ROOT / rel).is_file(), rel
 
