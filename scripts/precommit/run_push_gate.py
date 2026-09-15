@@ -40,6 +40,7 @@ Stdlib only. Tested in `tests/test_run_push_gate.py`.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -102,14 +103,65 @@ def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
     ]
 
 
+# What git exports to a hook it runs, and what must NOT reach the suite the hook spawns.
+#
+# `git push` starts this hook with `GIT_DIR` (and, from a linked worktree, `GIT_COMMON_DIR`)
+# pointing at the repository being pushed, plus `GIT_PREFIX` and, for the commit-stage
+# hooks, `GIT_INDEX_FILE`. Every git command honours those over its `-C`/cwd, so a test
+# fixture that runs `git -C <tmp> init && git -C <tmp> commit && git -C <tmp> tag` under
+# this hook inits a repo in `<tmp>` and then commits and tags **the repository being
+# pushed**. That is not hypothetical: it put two fixture tags (`v1.0.0`, `v1.1.0`, on
+# commits called `c0` and `c1`) into devkit's own ref store, where `latest_devkit_tag()`
+# read them as the newest release and two tests went red -- and it made a `git status`
+# in a bare `tmp_path` report the pushed repo's files, which is the line in
+# `logs/test-failures.log` that finally named the mechanism. The same suite is clean
+# from a shell because a shell exports none of these.
+#
+# `git rev-parse --local-env-vars` is git's own list of the repo-local variables; this
+# is that list, spelled out so the gate stays a stdlib file with no git call of its own.
+HOOK_ENV_VARS: tuple[str, ...] = (
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+)
+
+
+def child_env(inherited: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment the suite runs in: the hook's, minus what git aimed at this repo.
+
+    The suite has to see the same world it sees from a shell, where every `git` it spawns
+    answers for the directory it was pointed at. Stripping rather than allow-listing,
+    because the venv, `PATH`, the platform's own variables and the project's `.env`-style
+    settings all have to survive, and only the git-local set is the problem.
+    """
+    source = dict(os.environ if inherited is None else inherited)
+    for name in HOOK_ENV_VARS:
+        source.pop(name, None)
+    return source
+
+
 def run_gate(root: Path, runner: Runner = subprocess.run) -> int:
     """Run the steps in order; the first non-zero exit is the hook's, and ends the run."""
+    env = child_env()
     for step, command in plan(root):
         if command is None:
             print(f"push-gate: {step.name}: no {step.requires} in this project -- skipped")
             continue
         print(f"push-gate: {step.name}: {' '.join(command[1:])}", flush=True)
-        result = runner(command, cwd=root, check=False)
+        result = runner(command, cwd=root, check=False, env=env)
         if result.returncode:
             print(
                 f"push-gate: {step.name} failed (exit {result.returncode}). Fix it from the "
