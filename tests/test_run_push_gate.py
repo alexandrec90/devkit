@@ -318,6 +318,40 @@ def test_an_ordinary_push_carries_no_release_marker(tmp_path):
         assert gate.RELEASE_PREPARE_ENV not in env
 
 
+def test_an_inherited_marker_does_not_survive_into_an_ordinary_push(tmp_path, monkeypatch):
+    """The regression, and it stopped a release rather than merely being untidy.
+
+    On a release branch the gate spawns the suite *with* the marker set, and devkit's own
+    suite runs `run_gate`. So the nested run inherited a marker its own `release_branch`
+    never asked for, the test above failed, `run-tests.py` went red, and the push it was
+    gating -- the release push -- was refused. The first release this whole exemption
+    exists to allow was the one it blocked.
+
+    Read the other way round it is the safety property: a marker in the pushing shell
+    must not excuse a guard on a branch the gate did not judge to be a release.
+    """
+    monkeypatch.setenv(gate.RELEASE_PREPARE_ENV, "release/v9.9.9")
+    root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py")
+    runner = FakeRunner()
+
+    assert gate.run_gate(root, runner, release_branch="") == 0
+    assert runner.envs
+    for env in runner.envs:
+        assert gate.RELEASE_PREPARE_ENV not in env
+
+
+def test_the_gates_own_answer_still_wins_over_an_inherited_one(tmp_path, monkeypatch):
+    """Scrubbed first, then set from this run's branch -- so the marker always names the
+    branch being pushed rather than whatever an outer run was cutting."""
+    monkeypatch.setenv(gate.RELEASE_PREPARE_ENV, "release/v9.9.9")
+    root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py")
+    runner = FakeRunner()
+
+    assert gate.run_gate(root, runner, release_branch="release/v1.2.3") == 0
+    for env in runner.envs:
+        assert env[gate.RELEASE_PREPARE_ENV] == "release/v1.2.3"
+
+
 def test_only_a_release_version_branch_counts():
     """`release/v1.2.3` and nothing that merely starts like it -- the marker turns off a
     guard, so the shape that turns it on is exact."""

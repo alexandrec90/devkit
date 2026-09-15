@@ -233,6 +233,13 @@ def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
 def run_gate(root: Path, runner: Runner = subprocess.run, release_branch: str | None = None) -> int:
     """Run the steps in order; the first non-zero exit is the hook's, and ends the run."""
     env = gate_env()
+    # Never inherited. The marker turns a guard off, so this gate's own answer has to be
+    # the only thing that can set it -- a value already in the pushing shell would carry
+    # the exemption onto an ordinary push. The way it actually shows up is subtler than
+    # a stray `export`: on a release branch the gate spawns the suite *with* the marker,
+    # and devkit's own suite runs this function, so without the scrub a nested run
+    # inherits a marker its own `release_branch` never asked for.
+    env.pop(RELEASE_PREPARE_ENV, None)
     if release_branch is None:
         release_branch = detect_release_branch(root)
     if release_branch:
