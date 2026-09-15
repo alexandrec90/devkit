@@ -687,6 +687,13 @@ profile in the default directory rather than another tab in that worktree.
 `scripts/wt_profile.py` owns the definition and is what the launchers ask before passing
 `-p`, so a machine that never ran it opens exactly the tabs it always did:
 
+What no profile can do is put an **unelevated tab in an elevated window**: `-w` only ever
+sees windows at its own elevation. On a machine whose default profile carries
+`"elevate": true`, every window opened by hand is elevated while VS Code is not, so a tab
+spawned from a task gets a window of its own however `-w 0` is spelled. Run VS Code
+elevated, or drop `"elevate"` from the default profile — the two sides have to match, and
+the launchers print which way they are mismatched when they can see it coming.
+
 ```bash
 python scripts/install-wt-profile.py            # the plan, changing nothing
 python scripts/install-wt-profile.py --yes      # register it (backs the file up first)

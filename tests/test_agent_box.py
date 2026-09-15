@@ -122,6 +122,35 @@ def test_the_profile_is_read_from_the_machine_rather_than_guessed(monkeypatch, t
     assert runner.calls[0][runner.calls[0].index("-p") + 1] == "Agent"
 
 
+def test_a_tab_that_cannot_join_the_operators_window_says_why_as_it_opens(monkeypatch, capsys):
+    """The elevation mismatch, reported in the one place it reads as a cause.
+
+    `wt_profile.py` owns what the mismatch is; what this pins is that `open_agent` prints
+    it. Without it a spawn on a machine whose windows are elevated opens a window of its
+    own and says only "opening claude in ..." -- which is how the same defect got
+    reported twice as "the task ignores the terminal I have open".
+    """
+    monkeypatch.setattr(box.shutil, "which", lambda name: "C:/wt.exe" if "wt" in name else None)
+    monkeypatch.setattr(box.harness_switch, "hooks_are_off", lambda *_a: False)
+    monkeypatch.setattr(box.wt_profile, "launch_name", lambda: "Agent")
+    monkeypatch.setattr(box.wt_profile, "launch_note", lambda: box.wt_profile.ELEVATION_NOTE)
+    assert box.open_agent("claude", Path("C:/boxes/x"), "agent/x", runner=FakeRunner()) == 0
+    out = capsys.readouterr().out
+    assert "opening claude" in out and "elevate" in out
+
+
+def test_nothing_is_said_about_windows_when_the_tab_will_land_in_one(monkeypatch, capsys):
+    """The other half, and the one that decides whether the note is bearable: on a
+    machine with no mismatch every spawn prints the line it always did."""
+    monkeypatch.setattr(box.shutil, "which", lambda name: "C:/wt.exe" if "wt" in name else None)
+    monkeypatch.setattr(box.harness_switch, "hooks_are_off", lambda *_a: False)
+    monkeypatch.setattr(box.wt_profile, "launch_name", lambda: "Agent")
+    monkeypatch.setattr(box.wt_profile, "launch_note", lambda: "")
+    assert box.open_agent("claude", Path("C:/boxes/x"), "agent/x", runner=FakeRunner()) == 0
+    printed = capsys.readouterr().out.splitlines()
+    assert len(printed) == 1 and printed[0].startswith("opening claude in ")
+
+
 def test_a_semicolon_in_the_title_or_the_directory_is_escaped_too():
     """Both are legal in a Windows path and in a git branch name, and both are strings
     this module is handed rather than writes."""

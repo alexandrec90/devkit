@@ -60,9 +60,13 @@ def test_the_profile_is_visibly_not_an_ordinary_shell():
 def test_the_profile_does_not_elevate():
     """The workstation's default profile carries `elevate: true`, and Windows Terminal
     cannot host an elevated session as a tab in an unelevated window -- which is why
-    agent tabs that inherited it broke out into a separate window with a UAC prompt
-    instead of landing in the one `-w 0` names. A profile that reintroduced that would
-    reintroduce the whole reported defect."""
+    agent tabs that inherited it broke out into a separate window with a UAC prompt in
+    front of it. A profile that reintroduced that would reintroduce the prompt, and
+    would spend every agent session at full admin rights besides.
+
+    It does not follow that the tab then lands in the window `-w 0` names, and this file
+    claimed it did until 2026-09-15: an unelevated tab cannot join an elevated *window*
+    either. `window_note` below is what devkit can do about that."""
     assert "elevate" not in wt.PROFILE
 
 
@@ -209,3 +213,79 @@ def test_launch_name_reads_this_machines_file(tmp_path):
 
 def test_launch_name_on_a_machine_with_no_windows_terminal_is_empty(tmp_path):
     assert wt.launch_name(tmp_path) == ""
+
+
+# --- the elevation split ------------------------------------------------------------
+#
+# The defect these cover was reported twice, a month apart, in the same words: "the task
+# opens a new terminal window instead of a tab". The first time the tab inherited
+# `elevate` and was refused a seat in an unelevated window; the second time it carried
+# `-p Agent`, was unelevated, and was refused a seat in the operator's ELEVATED one.
+# Neither is fixable from here -- what is fixable is that the second one looked like a
+# task ignoring `-w 0` rather than like an elevation mismatch.
+
+
+def elevating() -> dict:
+    """A settings file whose default profile opens elevated windows."""
+    return settings({**other(), "elevate": True})
+
+
+def test_a_launcher_at_the_same_elevation_as_the_windows_says_nothing():
+    """The ordinary machine, and the one the operator gets by running VS Code elevated.
+    A note on a tab that is about to land correctly is noise on every single spawn."""
+    assert wt.window_note(elevating(), elevated=True) == ""
+    assert wt.window_note(settings(other()), elevated=False) == ""
+    assert wt.window_note({}, elevated=False) == ""
+
+
+def test_an_unelevated_launcher_facing_elevated_windows_is_told_why():
+    note = wt.window_note(elevating(), elevated=False)
+    assert note.startswith("\n"), "it is appended to a line the launcher already prints"
+    assert "elevate" in note, "the setting to change is named"
+    assert "elevated" in note.lower() and "-w 0" in note
+
+
+def test_elevate_inherited_from_profiles_defaults_counts(tmp_path):
+    """An operator who wants everything elevated writes it once, in `profiles.defaults`,
+    and every profile that does not override it is elevated. Reading only the default
+    profile's own key would answer "no mismatch" on exactly that machine."""
+    inherited = settings(other())
+    inherited["profiles"]["defaults"] = {"elevate": True}
+    assert wt.default_elevates(inherited)
+    overridden = settings({**other(), "elevate": False})
+    overridden["profiles"]["defaults"] = {"elevate": True}
+    assert not wt.default_elevates(overridden)
+
+
+def test_the_default_profile_is_resolved_by_guid_or_by_name():
+    """Windows Terminal writes a GUID; the schema allows a name and hand-edited files
+    use one. A default nothing matches claims nothing rather than guessing at the first
+    profile in the list."""
+    by_name = settings({**other("Admin"), "elevate": True})
+    by_name["defaultProfile"] = "Admin"
+    assert wt.default_elevates(by_name)
+    missing = settings({**other(), "elevate": True})
+    missing["defaultProfile"] = "{00000000-0000-0000-0000-000000000000}"
+    assert not wt.default_elevates(missing)
+    assert not wt.default_elevates({"profiles": {"list": [{**other(), "elevate": True}]}})
+
+
+def test_the_elevation_lookup_is_total_and_never_raises():
+    """`launch_note` runs on the path that opens a paid session, like `launch_name`."""
+    for broken in ({}, {"profiles": "nonsense"}, {"defaultProfile": None}, {"profiles": []}):
+        assert wt.default_elevates(broken) is False
+    assert isinstance(wt.is_elevated(), bool)
+
+
+def test_launch_note_reads_this_machines_file(tmp_path, monkeypatch):
+    path = tmp_path / wt.SETTINGS_RELATIVE[0]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(elevating()), encoding="utf-8")
+    monkeypatch.setattr(wt, "is_elevated", lambda: False)
+    assert wt.launch_note(tmp_path) == wt.ELEVATION_NOTE
+    monkeypatch.setattr(wt, "is_elevated", lambda: True)
+    assert wt.launch_note(tmp_path) == ""
+
+
+def test_launch_note_on_a_machine_with_no_windows_terminal_is_empty(tmp_path):
+    assert wt.launch_note(tmp_path) == ""
