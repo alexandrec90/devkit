@@ -335,12 +335,50 @@ def compare_install(target: Path, receipt: Receipt | None) -> list[Drift]:
     return drifted
 
 
+def worktree_drift(source_root: Path, target: Path, receipt: Receipt | None) -> list[Drift]:
+    """For a working-tree install only: installed bytes that the checkout has moved past.
+
+    The hole this fills. `compare_install` asks whether the install still matches its
+    own receipt, and `behind_ref` asks whether a newer *tag* exists -- and `behind_ref`
+    is silent for `WORKTREE_REF` on the reasoning that a working-tree install is
+    already as current as it can be described. It is not. A worktree install has no ref
+    to fall behind, so neither question has anything to say about it, and `--check`
+    printed "up to date" over a dispatcher installed from a checkout that had since
+    gained the whole pre-push wiring: `devkit-push-gate` had not run on any push for
+    five days, and nothing on the machine reported it.
+
+    So the working tree is exactly the right comparison *here*, for the reason
+    `compare_install` gives for refusing it everywhere else -- there, the checkout
+    sitting ahead of a pinned release is the normal state; here, the checkout is what
+    the install claims to be a copy of.
+
+    A source file that has since disappeared is not drift. `install_files` skips what a
+    ref does not hold, and reporting a file the next install would not write either
+    would be a failure nothing could clear.
+    """
+    if receipt is None or receipt.ref != WORKTREE_REF:
+        return []
+    drifted: list[Drift] = []
+    for source_name, destination_name in RUNTIME_FILES.items():
+        if destination_name not in receipt.files:
+            continue
+        source = source_root / source_name
+        try:
+            expected = digest(source.read_bytes())
+        except OSError:
+            continue
+        if receipt.files[destination_name] != expected:
+            drifted.append(Drift(destination_name, "older than the working tree it came from"))
+    return drifted
+
+
 def behind_ref(receipt: Receipt | None, latest: str) -> str:
     """The installed ref when a newer release exists; "" when there is nothing to say.
 
-    Silent when either side is unknown, and silent for a working-tree install --
-    that one is already as current as it can be described, and nagging about it
-    would punish the deliberate escape hatch rather than the accident.
+    Silent when either side is unknown, and silent for a working-tree install: that
+    one has no ref to fall behind, so a tag comparison says nothing true about it.
+    That silence used to be the whole answer for a worktree install and was read as
+    "current"; `worktree_drift` is what actually answers the question, by bytes.
     """
     if receipt is None or not latest or receipt.ref in {WORKTREE_REF, latest}:
         return ""
@@ -381,7 +419,7 @@ def run_check(source_root: Path, target: Path, runner: Runner = run_command) -> 
         return 2
 
     receipt = read_receipt(target)
-    drifted = compare_install(target, receipt)
+    drifted = compare_install(target, receipt) + worktree_drift(source_root, target, receipt)
     latest = resolve_ref(source_root)
     behind = behind_ref(receipt, latest)
     if not drifted and not behind:

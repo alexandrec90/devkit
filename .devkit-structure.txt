@@ -71,12 +71,12 @@ definitions::scripts/agent_clis.py = 21
 definitions::scripts/devkit_project.py = 50
 definitions::scripts/docker-maint.py = 30
 definitions::scripts/fix-prs.py = 31
-definitions::scripts/git_policy.py = 38
+definitions::scripts/git_policy.py = 39
 definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
 definitions::scripts/hooks/structure_check.py = 43
 definitions::scripts/hooks/structure_scan.py = 31
-definitions::scripts/install-git-policy.py = 22
+definitions::scripts/install-git-policy.py = 23
 definitions::scripts/instruction-budget.py = 26
 definitions::scripts/new-project.py = 28
 definitions::scripts/plug-projects.py = 30
@@ -101,12 +101,13 @@ file_lines::scripts/agent-box.py = 544
 file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/fix-prs.py = 768
-file_lines::scripts/git_policy.py = 793
+file_lines::scripts/git_policy.py = 837
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
 file_lines::scripts/hooks/structure_check.py = 1078
-file_lines::scripts/hooks/structure_scan.py = 669
+file_lines::scripts/hooks/structure_scan.py = 680
+file_lines::scripts/install-git-policy.py = 528
 file_lines::scripts/instruction-budget.py = 517
 file_lines::scripts/new-project.py = 863
 file_lines::scripts/plug-projects.py = 922
@@ -119,9 +120,9 @@ file_lines::scripts/resume-sessions.py = 502
 file_lines::scripts/sweep.py = 1990
 file_lines::scripts/sync-devkit.py = 1598
 file_lines::scripts/upgrade-project.py = 1239
-file_lines::scripts/workspace-status.py = 1068
+file_lines::scripts/workspace-status.py = 1077
 file_lines::scripts/workspace-task-index.py = 576
-file_lines::scripts/worktree-guard.py = 2295
+file_lines::scripts/worktree-guard.py = 2309
 file_lines::scripts/worktree.py = 6166
 function_lines::scripts/devkit_project.py::main = 213
 function_lines::scripts/docker-maint.py::generic_prune = 84
@@ -413,3 +414,12 @@ swallowed_errors::scripts/worktree.py = 1
 
 # 2026-09-15  recorded: resume-sessions.py sat at exactly 500 when this change arrived, so the two lines the -w 0 switch costs have nowhere to go. The change itself is four tokens -- the forced -w -1 becomes -w 0 and the focus-tab -t 0 trailer goes with it, because an absolute tab index appended to a window that already had tabs focuses a stranger's rather than the oldest resumed session. What grew is the docstring saying so, trimmed to five lines from a first draft of twelve, and a --new-window opt-out was dropped on the way rather than pay three more baseline lines (main's function_lines and complexity, plus these) for a flag nobody asked for. The split this file owes is the seam its own section comments draw -- reading the transcript store (sessions_root .. select) against launching (resume_args .. main) -- and it is its own PR: tests/test_resume_sessions.py imports the module by path under one name, and the workspace task, agent-box.py's wt_argv comment and scripts/wt_profile.py all point at it by that name.
 #   file_lines::scripts/resume-sessions.py -> 502
+
+# 2026-09-15  recorded: Harness-defect fixes: framework_env (git_policy), worktree_drift (install-git-policy), a narrowed focused-test regex (structure_scan) and two block messages that named no remedy (worktree-guard, workspace-status). FIFTH consecutive raise of file_lines::scripts/git_policy.py, so per the ratchet rule in .claude/rules/engineering.md this is a defect report rather than a raise: the module is 837 lines, 512 of them code across 39 top-level defs, and nothing in it is a god function -- the largest is run_hook at 43 lines. What fills it is three separable responsibilities that have never been cut apart: the branch policy proper (merged-PR lookup, protected branches, release tags), the pre-commit framework tier (_venv_roots, _pre_commit_command, _run_pre_commit_framework, framework_env), and hook dispatch plus plumbing (run_hook, main, run_command, _git). Every raise since cca12dd added to one of the three without moving the seam. The split is not free and that is why it has not happened: RUNTIME_FILES installs this module as a single devkit_git_policy.py into ~/.devkit/git-hooks, so cutting it means new RUNTIME_FILES entries and a machine installing from an older tag getting a partial runtime. Left as a follow-up rather than bundled into a triage pass.
+#   definitions::scripts/git_policy.py -> 39
+#   definitions::scripts/install-git-policy.py -> 23
+#   file_lines::scripts/git_policy.py -> 837
+#   file_lines::scripts/hooks/structure_scan.py -> 680
+#   file_lines::scripts/install-git-policy.py -> 528
+#   file_lines::scripts/workspace-status.py -> 1077
+#   file_lines::scripts/worktree-guard.py -> 2309

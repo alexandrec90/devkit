@@ -3262,3 +3262,25 @@ def test_a_stood_down_branch_tier_returns_before_it_reads_stdin(monkeypatch, mod
     monkeypatch.setenv("DEVKIT_HOOKS_OFF", "branch-tier")
     monkeypatch.setattr(sys, "stdin", None)
     assert hook.main([]) == 0
+
+
+def test_the_claim_hint_names_the_command_that_actually_gets_through():
+    """The reported dead end had two walls, and this is the second one.
+
+    A session was locked out of its own box -- the guard read one session id at spawn
+    and a different one at block time -- so the block fired, this hint sent it to
+    `claim`, and `claim_refusal` then declined because the tree was dirty with that
+    same session's own uncommitted work. Both halves refused, and the escape existed
+    but was named nowhere the reader would be looking. `claim_hint` had no test at all
+    before this, which is why the hint and the refusal could drift apart unnoticed.
+    """
+    box = guard.worktree.Box(
+        name="carameli--x-0806", project="carameli", branch="agent/x-0806", session="other"
+    )
+    hint = guard.claim_hint(box, "s1")
+    assert "claim carameli--x-0806" in hint
+    assert "--session s1" in hint
+    # The condition travels with the escape: `--force` past a live session's dirty tree
+    # is how two sessions come to own one worktree, which is what the refusal prevents.
+    assert "--force" in hint
+    assert "uncommitted" in hint

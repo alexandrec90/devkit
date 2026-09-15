@@ -263,6 +263,23 @@ def test_a_modified_runtime_is_named(tmp_path):
     assert "install-git-policy.py --yes" in line
 
 
+def test_a_worktree_install_the_checkout_moved_past_stays_off_the_status_line(tmp_path):
+    """The deliberate asymmetry with `--check`, pinned so it reads as a choice.
+
+    `install-git-policy.py --check` now reports a working-tree install that the
+    checkout has moved past -- the question nothing used to ask, which let a stale
+    dispatcher sit for five days. This line does not ask it, because the answer is
+    "yes" on every prompt of every session spent editing the policy, and a line that
+    always warns is one nobody reads. If this test starts failing, the status line has
+    gained that behaviour and the tradeoff needs deciding again rather than tuning.
+    """
+    target = installed(tmp_path / "hooks", installer.WORKTREE_REF)
+    (target / "devkit_git_policy.py").write_bytes(
+        (REPO_ROOT / "scripts" / "git_policy.py").read_bytes()
+    )
+    assert ws.policy_line(REPO_ROOT, target, latest="v0.5.3") == ""
+
+
 def test_an_install_from_an_older_release_is_reported_as_behind(tmp_path):
     target = installed(tmp_path / "hooks")
     line = ws.policy_line(REPO_ROOT, target, latest="v0.6.0")

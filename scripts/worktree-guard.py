@@ -1817,11 +1817,25 @@ def foreign_box_reason(box: Box, relative: str) -> str:
 
 
 def claim_hint(box: Box, session: str) -> str:
-    """The sanctioned takeover, spelled as the command that performs it."""
+    """The sanctioned takeover, spelled as the command that performs it.
+
+    `--force` is named here because the command this hint gives can refuse, and a hint
+    that sends a session into a refusal is the same dead end as no hint at all.
+    `claim_refusal` declines a box whose tree is dirty -- rightly, since a takeover of
+    somebody's live workspace loses whichever side does not push next. But the block
+    that prints this hint also fires when a session is locked out of *its own* box,
+    which happens when the id it is identified by changes mid-session: the guard then
+    reports the box as somebody else's and its uncommitted work as theirs, and both
+    halves of the remedy refuse. Naming the escape does not make that judgement for the
+    reader -- it states the condition under which the answer is yes.
+    """
     return (
         f"if the user really has handed that box's work to this session, take its lease "
         f"over instead: python {Path(__file__).parent / 'worktree.py'} claim {box.name} "
         f"--session {session} --yes"
+        f" (add --force if that refuses over uncommitted changes AND the work in the box "
+        f"is this session's own -- which is what a session id that changed mid-task looks "
+        f"like from here)"
     )
 
 
