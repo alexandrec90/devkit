@@ -18,7 +18,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 from support import load_script
 
 gate = load_script("scripts/precommit/run_push_gate.py")
@@ -101,12 +100,10 @@ def test_every_step_runs_with_the_scrubbed_environment(tmp_path, monkeypatch):
 def test_the_stripped_set_is_gits_own_local_list():
     """`git rev-parse --local-env-vars` is the authority on which variables make a git
     command answer for a repository other than its cwd's. Spelled out in the gate so it
-    stays a stdlib file, and held to git's answer here so the copy cannot rot."""
-    import shutil
+    stays a stdlib file, and held to git's answer here so the copy cannot rot. No guard
+    for a machine without git: every fixture in this suite already spawns it."""
     import subprocess
 
-    if shutil.which("git") is None:
-        pytest.skip("no git on PATH")
     listed = subprocess.run(
         ["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, check=True
     ).stdout.split()
