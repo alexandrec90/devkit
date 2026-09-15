@@ -42,6 +42,37 @@ TEMPLATES = REPO_ROOT / "templates"
 # variable set still wins: `monkeypatch.setenv` runs long after this line.
 os.environ.pop("DEVKIT_HOOKS_OFF", None)
 
+# Git's repo scoping, cleared for the same reason and with far worse consequences if it
+# is not. A hook inherits `GIT_DIR` and `GIT_INDEX_FILE`, so a suite run from inside one
+# -- which is exactly what `devkit-push-gate` does on every push -- hands every test that
+# builds a repo in `tmp_path` and shells out to `git -C <tmp>` the PUSHING repo instead.
+# That is not a failed assertion: on the push this was written for, the fixtures committed
+# into this worktree, moved its branch through four of their own commits and left HEAD
+# detached. `run_push_gate.gate_env` is the fix at the source; this is the suite refusing
+# to act on the variables at all, because any other runner can inherit them too.
+for _leaked in (
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_INDEX_VERSION",
+    "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+):
+    os.environ.pop(_leaked, None)
+
 # `scripts/` for the importable devkit modules; `scripts/hooks/` so a test can load
 # the vendored harness_config that generated manifests must satisfy.
 for _path in (REPO_ROOT / "scripts", REPO_ROOT / "scripts" / "hooks"):
@@ -69,6 +100,7 @@ import task_input
 import task_slug
 import worktree
 import worktree_tiers
+import wt_profile
 
 # Reached through `worktree` rather than imported again, and not only to spare this file
 # an eleventh suppression: the box teardown is monkeypatched from both test modules, so
@@ -185,6 +217,7 @@ __all__ = [
     "vendor_manifest",
     "worktree",
     "worktree_tiers",
+    "wt_profile",
 ]
 
 
@@ -252,6 +285,31 @@ def vendor_manifest(root: Path) -> None:
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source.read_bytes())
+
+
+def windows_layout(tmp_path, *names: str):
+    """Real files named `names` under `tmp_path`, returned in the order given.
+
+    The convention for testing a Windows-shaped interpreter or install layout, and the
+    alternative to the thing that keeps failing CI: a hardcoded literal like
+    `r"C:\\py\\pythonw.exe"`. `Path` splits that into components on Windows and leaves it
+    as one filename on POSIX, so a test built on one asserts a real branch here and a
+    branch that never runs on the `ubuntu-latest` runner -- silently, since the assertion
+    is usually about the *result* rather than the split.
+
+    `scripts/posix-rehearsal.py` deliberately does not gate this class: catching it would
+    mean answering "does not exist" for backslash paths, which is right for a literal and
+    wrong for every real interpreter path on this machine. So it is a convention, and this
+    helper is what makes the convention cheaper than the literal.
+
+        console, _ = windows_layout(tmp_path, "python.exe", "pythonw.exe")
+    """
+    made = []
+    for name in names:
+        target = tmp_path / name
+        target.write_text("", encoding="utf-8")
+        made.append(target)
+    return tuple(made)
 
 
 def load_script(relpath: str):

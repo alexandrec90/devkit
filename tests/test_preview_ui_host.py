@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import os
+import sys
 import types
 import urllib.error
 import urllib.request
@@ -551,13 +552,13 @@ def test_wait_times_out_on_a_silent_but_living_server():
 
 def test_stop_takes_the_whole_tree_on_windows(monkeypatch):
     calls = []
-    monkeypatch.setattr(host.os, "name", "nt")
+    monkeypatch.setattr(host.sys, "platform", "win32")
     host.stop(FakeServer(pid=77), run=lambda argv, **kwargs: calls.append(argv) or result())
     assert calls == [["taskkill", "/T", "/F", "/PID", "77"]]
 
 
 def test_stop_terminates_elsewhere(monkeypatch):
-    monkeypatch.setattr(host.os, "name", "posix")
+    monkeypatch.setattr(host.sys, "platform", "linux")
     server = FakeServer()
     host.stop(server, run=None)
     assert server.terminated is True
@@ -642,7 +643,7 @@ def test_this_process_is_alive_and_pid_zero_is_not():
 
 def test_stop_pid_kills_the_tree_on_windows(monkeypatch):
     calls = []
-    monkeypatch.setattr(host.os, "name", "nt")
+    monkeypatch.setattr(host.sys, "platform", "win32")
     host.stop_pid(77, run=lambda argv, **kwargs: calls.append(argv) or result())
     assert calls == [["taskkill", "/T", "/F", "/PID", "77"]]
 
@@ -655,7 +656,7 @@ def test_a_job_object_is_available_and_adopts_this_process(scratch_registry):
     `scratch_registry.real_job` because the autouse fixture has stubbed the module
     attribute out for everyone else, this being the one test that wants the real thing.
     """
-    if os.name != "nt":
+    if sys.platform != "win32":
         pytest.skip("job objects are a Windows facility")
     job = scratch_registry.real_job()
     assert job is not None
@@ -672,7 +673,7 @@ def test_the_kernel_calls_are_prototyped_for_64_bit_handles():
     a 64-bit HANDLE. The call then fails with a Win32 error nothing prints, and the net
     it belonged to is silently not a net -- the failure mode the whole tier exists to
     end. Asserting the prototypes is cheaper than diagnosing that twice."""
-    if os.name != "nt":
+    if sys.platform != "win32":
         pytest.skip("kernel32 is a Windows facility")
     from ctypes import wintypes
 
@@ -773,7 +774,7 @@ def test_a_recycled_pid_not_serving_the_recorded_port_is_left_alone():
 
 
 def test_reaping_stops_the_orphans_and_forgets_the_dead(scratch_registry, monkeypatch):
-    monkeypatch.setattr(host.os, "name", "nt")
+    monkeypatch.setattr(host.sys, "platform", "win32")
     host.record(
         [
             {"pid": 7, "owner": 8, "port": 5300, "ref": "orphan"},
@@ -804,7 +805,7 @@ def test_stopping_ends_even_a_server_whose_owner_is_still_watching(scratch_regis
 
     The owner needs no separate kill -- `watch` returns the moment its last server exits.
     """
-    monkeypatch.setattr(host.os, "name", "nt")
+    monkeypatch.setattr(host.sys, "platform", "win32")
     host.record(
         [
             {"pid": 7, "owner": 8, "port": 5300, "ref": "watched"},

@@ -357,14 +357,41 @@ def test_a_reaped_box_is_partitioned_out(tmp_path):
 def test_wt_args_opens_one_tab_per_session_in_its_own_directory(tmp_path):
     sessions = [session("aaa", 1.0, tmp_path / "one"), session("bbb", 2.0, tmp_path / "two")]
     args = rs.wt_args(sessions)
-    assert args[:2] == ["-w", "-1"]  # a NEW window, never someone else's
+    assert args[:2] == ["-w", "0"]  # the window already open, as every agent task does
     assert args.count("new-tab") == 2
-    assert args.count(";") == 2  # one separator between tabs, one before focus-tab
-    assert args[-3:] == ["focus-tab", "-t", "0"]
+    assert args.count(";") == 1  # one separator between the two tabs, and no more
     for name, directory in (("aaa", "one"), ("bbb", "two")):
         index = args.index(name)
         assert args[index - 1] == "--resume"
         assert str(tmp_path / directory) in args
+
+
+def test_tabs_join_the_current_window_and_claim_no_absolute_tab_index(tmp_path):
+    """The regression the `-w -1` -> `-w 0` change must not introduce.
+
+    `focus-tab -t 0` is an absolute index. Appended to a window that already had tabs it
+    would steal focus to a stranger's tab rather than to the oldest resumed session, and
+    wt cannot name "the first tab this command line opened" -- so the trailer went with
+    the forced new window, and wt leaves focus on the last tab it made.
+    """
+    args = rs.wt_args([session("aaa", 1.0, tmp_path), session("bbb", 2.0, tmp_path)])
+    assert "focus-tab" not in args
+    assert args[-1] == "bbb"  # the newest session's tab is the one wt focuses
+
+
+def test_every_tab_in_the_window_opens_under_the_agent_profile(tmp_path):
+    """A window of resumed sessions is a window of paid agents; drawing it as a window of
+    shells is the same defect `agent-box.wt_argv` fixes, one tab at a time."""
+    sessions = [session("aaa", 1.0, tmp_path / "one"), session("bbb", 2.0, tmp_path / "two")]
+    args = rs.wt_args(sessions, profile="Agent")
+    assert args.count("-p") == args.count("new-tab") == 2
+    for index, token in enumerate(args):
+        if token == "new-tab":
+            assert args[index + 1 : index + 3] == ["-p", "Agent"]
+
+
+def test_a_machine_without_the_profile_opens_the_window_it_always_did(tmp_path):
+    assert "-p" not in rs.wt_args([session("aaa", 1.0, tmp_path)])
 
 
 def test_wt_args_lays_the_tabs_out_in_the_order_given(tmp_path):
@@ -376,16 +403,8 @@ def test_wt_args_lays_the_tabs_out_in_the_order_given(tmp_path):
 def test_each_agent_uses_its_own_resume_syntax(tmp_path):
     claude = rs.wt_args([session("a", 1.0, tmp_path)], agent="claude")
     codex = rs.wt_args([session("a", 1.0, tmp_path)], agent="codex")
-    assert claude[claude.index("claude") :] == [
-        "claude",
-        "--resume",
-        "a",
-        ";",
-        "focus-tab",
-        "-t",
-        "0",
-    ]
-    assert codex[codex.index("codex") :] == ["codex", "resume", "a", ";", "focus-tab", "-t", "0"]
+    assert claude[claude.index("claude") :] == ["claude", "--resume", "a"]
+    assert codex[codex.index("codex") :] == ["codex", "resume", "a"]
 
 
 def test_a_mixed_window_uses_each_sessions_own_resume_syntax(tmp_path):
@@ -591,6 +610,16 @@ def launchable(tmp_path, monkeypatch, calls: list):
     return store
 
 
+def test_the_task_reaches_wt_asking_for_the_window_already_open(tmp_path, capsys, monkeypatch):
+    """End to end, because `wt_args`'s default is only half of it: `main` has to pass the
+    flag through and say which window it used, or the console line contradicts the tabs."""
+    launched: list = []
+    store = launchable(tmp_path, monkeypatch, launched)
+    assert rs.main(["--sessions-dir", str(store), "--no-update"]) == 0
+    assert launched[0][1:3] == ["-w", "0"]
+    assert "the current Windows Terminal" in capsys.readouterr().out
+
+
 def test_the_clis_are_updated_before_the_tabs_open(tmp_path, capsys, monkeypatch):
     """Order is the whole point: launching first hands the new tabs the old binary and
     then rewrites it underneath them."""
@@ -676,10 +705,11 @@ def test_each_agent_store_honours_its_config_home(monkeypatch, tmp_path):
 def test_the_script_is_stdlib_only():
     """devkit ships no runtime dependencies, and this runs from a VS Code task.
 
-    `agent_clis` and `task_input` are the only non-stdlib names allowed, and neither is a
-    dependency: both are sibling scripts in the same directory, reached through the
-    `sys.path` insert above them. Naming them here rather than widening the rule keeps a
-    real third-party import from slipping in behind the exception.
+    `agent_clis`, `task_input` and `wt_profile` are the only non-stdlib names allowed, and
+    none is a dependency: all three are sibling scripts in the same directory, reached
+    through the `sys.path` insert above them, and each is stdlib-only itself. Naming them
+    here rather than widening the rule keeps a real third-party import from slipping in
+    behind the exception.
     """
     source = (REPO_ROOT / "scripts" / "resume-sessions.py").read_text(encoding="utf-8")
     for line in source.splitlines():
@@ -698,6 +728,7 @@ def test_the_script_is_stdlib_only():
                 "sys",
                 "task_input",
                 "time",
+                "wt_profile",
                 "dataclasses",
                 "pathlib",
             }, f"non-stdlib import: {line}"

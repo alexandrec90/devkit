@@ -752,7 +752,30 @@ def run_hook(
     return _run_project_hook(hook_name, args, input_text, root, runner)
 
 
-def main(hook_name: str, argv: Sequence[str] | None = None) -> int:
+def _utf8_console() -> None:
+    """Make the relay of the gate's output unable to raise.
+
+    The write half of the codec note on `run_command`. Under git the hook's streams
+    are pipes, so Python encodes them with the *locale* codec -- cp1252 on a Windows
+    workstation -- while everything this module relays is UTF-8: a test runner's em
+    dashes and arrows, and the U+FFFD that `errors="replace"` puts where a byte could
+    not be decoded, which **no codepage encodes**. Before this, a red pre-push gate
+    whose output carried one such character died at the `print` that relayed it, so
+    the developer saw a `UnicodeEncodeError` traceback with the failure it was
+    relaying nowhere in it -- which is how a repo-corrupting bug came to present as a
+    CPython crash in the hook. `errors="replace"` keeps the guard total: a stream that
+    somehow still cannot take a character costs a `?`, never the report.
+
+    `sys.stdout` is `None` under `pythonw`, and a capture object need not be a
+    `TextIOWrapper`; neither is a reason to raise, so the guard asks first.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+def main(hook_name: str, argv: Sequence[str] | None = None, *, runner: Runner | None = None) -> int:
+    _utf8_console()
     args = list(sys.argv[1:] if argv is None else argv)
     input_text = ""
     if hook_name == "pre-push" and sys.stdin is not None:
@@ -760,7 +783,9 @@ def main(hook_name: str, argv: Sequence[str] | None = None) -> int:
             input_text = sys.stdin.read()
         except (OSError, ValueError):
             input_text = ""
-    return run_hook(hook_name, args, input_text=input_text)
+    return run_hook(
+        hook_name, args, input_text=input_text, runner=run_command if runner is None else runner
+    )
 
 
 if __name__ == "__main__":

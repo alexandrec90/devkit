@@ -62,8 +62,8 @@ def bad(stderr: str = "boom") -> subprocess.CompletedProcess:
 
 def test_the_agent_tab_attaches_to_the_window_the_operator_is_looking_at():
     """`-w 0` is "most recently used window, create one only if there is none", which is
-    the ask. `resume-sessions.py` uses `-w -1` because it opens a *set* of tabs that belong
-    together; one agent in one box is one tab and belongs where the operator already is."""
+    the ask: a box belongs where the operator already is. `resume-sessions.py` forced
+    `-w -1` until 2026-09-14 and now defaults to this too."""
     argv = box.wt_argv("agent/thing-0903", Path("C:/boxes/x"), "claude")
     assert argv[:3] == ["-w", "0", "new-tab"]
     assert "-NoExit" in argv
@@ -88,6 +88,38 @@ def test_the_kill_switchs_semicolon_does_not_open_a_second_tab():
 def test_a_command_with_no_semicolon_reaches_the_tab_untouched():
     """The ordinary case -- `spawn` with the harness running -- must not grow a backslash."""
     assert box.wt_argv("b", Path("C:/boxes/x"), "claude")[-1] == "claude"
+
+
+def test_a_tab_opens_under_the_agent_profile_when_the_machine_has_one():
+    """The `+` button beside an agent tab used to answer with the default profile in the
+    default directory, and Duplicate Tab replayed a bare shell, because a tab built from
+    an overridden command line has no profile of its own. `-p` is what gives it one."""
+    argv = box.wt_argv("agent/thing-0903", Path("C:/boxes/x"), "claude", profile="Agent")
+    assert argv[:5] == ["-w", "0", "new-tab", "-p", "Agent"]
+    assert argv[argv.index("-d") + 1] == str(Path("C:/boxes/x"))
+
+
+def test_a_machine_that_never_registered_the_profile_opens_the_tab_it_always_did():
+    """The installer is a machine-level step; a checkout that has not run it must still
+    open sessions, so no `-p` rather than one naming a profile that is not there."""
+    assert "-p" not in box.wt_argv("b", Path("C:/boxes/x"), "claude")
+
+
+def test_the_profile_is_read_from_the_machine_rather_than_guessed(monkeypatch, tmp_path):
+    """`open_agent` is where the lookup happens, so a spawn on a machine that registered
+    the profile picks it up with nothing passed down the call chain.
+
+    Both machine lookups are stubbed, not just the profile one: `open_agent` returns
+    before it spawns anything when `wt` is not on PATH, so a test that stubbed only the
+    profile asserted against an empty call list on every non-Windows runner -- green
+    here, red in CI, which is exactly the split the rehearsal exists to stop.
+    """
+    monkeypatch.setattr(box.shutil, "which", lambda name: "C:/wt.exe" if "wt" in name else None)
+    monkeypatch.setattr(box.harness_switch, "hooks_are_off", lambda *_a: False)
+    monkeypatch.setattr(box.wt_profile, "launch_name", lambda: "Agent")
+    runner = FakeRunner()
+    assert box.open_agent("claude", tmp_path, "agent/thing-0903", runner=runner) == 0
+    assert runner.calls[0][runner.calls[0].index("-p") + 1] == "Agent"
 
 
 def test_a_semicolon_in_the_title_or_the_directory_is_escaped_too():

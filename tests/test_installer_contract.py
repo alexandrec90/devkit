@@ -5,7 +5,10 @@ artifact, points `schedule_health` at it. This file holds the *installer* contra
 exists because the failure that happened was not inside any installer -- it was that
 nothing could drive them. Two jobs had never been registered on the workstation that runs
 them, two installers had `--check` and four had only `--status`, and the only registry of
-what needed installing was a README table a person had to remember to read.
+what needed installing was a README table a person had to remember to read. Not every
+installer registers a *job* -- the git policy and the Windows Terminal profile are machine
+state this pass keeps current with no schedule of their own -- so the properties below
+split into the ones every installer owes and the ones only a job does.
 
 So the properties are asserted for every installer at once, found rather than listed:
 
@@ -43,7 +46,10 @@ def source_of(name: str) -> str:
 
 def test_there_are_installers_to_hold_to_this():
     assert len(MODULES) >= 10, IDS
-    assert len(JOBS) == len(MODULES) - 1, "only install-git-policy.py registers no job"
+    scheduleless = {"install-git-policy.py", "install-wt-profile.py"}
+    assert {name for name, module in MODULES if not getattr(module, "TASK_NAME", "")} == (
+        scheduleless
+    ), "an installer that registers no job is a deliberate exception; name it here"
 
 
 def test_every_installer_is_discovered_by_the_pass():

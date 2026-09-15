@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from support import load_script
+from support import REPO_ROOT, load_script
 
 gate = load_script("scripts/precommit/run_push_gate.py")
 
@@ -33,11 +33,14 @@ class FakeRunner:
     def __init__(self, exits=None):
         self.exits = exits or {}
         self.calls: list[list[str]] = []
-        self.envs: list[dict[str, str]] = []
+        # `None` is recorded as itself, not flattened to `{}`: a step spawned with no
+        # `env` inherits git's variables, which is the whole defect, and an empty dict
+        # would let the regression test below pass against it.
+        self.envs: list[dict[str, str] | None] = []
 
-    def __call__(self, argv, *, cwd, check, env):
+    def __call__(self, argv, *, cwd, check, env=None):
         self.calls.append(list(argv))
-        self.envs.append(dict(env))
+        self.envs.append(None if env is None else dict(env))
         return completed(argv, self.exits.get(argv[1], 0))
 
 
@@ -49,87 +52,47 @@ def project(root: Path, *files: str) -> Path:
     return root
 
 
-# --- the environment the suite runs in -------------------------------------------
-
-
-def test_the_suite_never_sees_the_repository_git_aimed_the_hook_at():
-    """The report: under `git push`, the hook inherits `GIT_DIR` pointing at the pushed
-    repository, every `git -C <tmp>` in a fixture then answers for THAT repository, and
-    two fixture tags landed in devkit's own ref store where `latest_devkit_tag()` read
-    them as the newest release. A `git status` in a bare `tmp_path` reporting the pushed
-    repo's files is what the artifact showed; this is what stops it."""
-    hooked = {
-        "GIT_DIR": "C:/ws/devkit/.git/worktrees/topic",
-        "GIT_COMMON_DIR": "C:/ws/devkit/.git",
-        "GIT_INDEX_FILE": "C:/ws/devkit/.git/index",
-        "GIT_PREFIX": "",
-        "PATH": "C:/ws/devkit/.venv/Scripts",
-        "VIRTUAL_ENV": "C:/ws/devkit/.venv",
-        "GIT_EDITOR": "true",
-    }
-    scrubbed = gate.child_env(hooked)
-    assert not {name for name in scrubbed if name in gate.HOOK_ENV_VARS}
-    # Everything that is not git's repo-local set survives, `GIT_EDITOR` included: the
-    # scrub is a strip, not an allow-list, because the venv and the platform's own
-    # variables have to reach the suite untouched.
-    assert scrubbed["PATH"] == hooked["PATH"]
-    assert scrubbed["VIRTUAL_ENV"] == hooked["VIRTUAL_ENV"]
-    assert scrubbed["GIT_EDITOR"] == "true"
-
-
-def test_child_env_reads_the_live_environment_by_default(monkeypatch):
-    monkeypatch.setenv("GIT_DIR", "somewhere")
-    monkeypatch.setenv("DEVKIT_PROBE", "kept")
-    live = gate.child_env()
-    assert "GIT_DIR" not in live
-    assert live["DEVKIT_PROBE"] == "kept"
-
-
-def test_every_step_runs_with_the_scrubbed_environment(tmp_path, monkeypatch):
-    """`run_gate` hands the same scrubbed env to every step, so no tier -- lint, the
-    application suite, the hook tests -- can spawn a git that answers for the wrong
-    repository."""
-    monkeypatch.setenv("GIT_DIR", "C:/ws/devkit/.git")
-    root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py", "scripts/hooks/tests/x")
-    runner = FakeRunner()
-    assert gate.run_gate(root, runner) == 0
-    assert len(runner.envs) == len(gate.STEPS)
-    assert all("GIT_DIR" not in env for env in runner.envs)
-
-
-def test_the_stripped_set_is_gits_own_local_list():
-    """`git rev-parse --local-env-vars` is the authority on which variables make a git
-    command answer for a repository other than its cwd's. Spelled out in the gate so it
-    stays a stdlib file, and held to git's answer here so the copy cannot rot. No guard
-    for a machine without git: every fixture in this suite already spawns it."""
-    import subprocess
-
-    listed = subprocess.run(
-        ["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, check=True
-    ).stdout.split()
-    assert set(listed) <= set(gate.HOOK_ENV_VARS), sorted(set(listed) - set(gate.HOOK_ENV_VARS))
-
-
 def test_lint_runs_first_because_it_auto_fixes():
-    """Lint first, then the suite, then the vendored tier.
+    """Lint first, then the suite, then the vendored tier, then the POSIX rehearsal.
 
-    Only the first position is load-bearing: `lint-all.py` rewrites files, so a step that
-    ran before it would report clean on what it repaired. The two test tiers' order is
-    free -- this used to claim it was `.github/workflows/pr-gate.yml`'s order and was
-    simply wrong (CI runs the vendored tier first), which nothing caught because the
-    literals below are hardcoded and no test here opens the workflow.
-    `tests/test_gate_parity.py` is the one that does; the shape check stays here.
+    Two positions are load-bearing and the rest is free. `lint-all.py` rewrites files, so
+    a step that ran before it would report clean on what it repaired. The rehearsal runs
+    *after* the suite because it is the same tests under a faked platform: a real failure
+    reported as a platform assumption is the more expensive of the two orders to read.
+    The two test tiers between them are free -- this used to claim their order was
+    `.github/workflows/pr-gate.yml`'s and was simply wrong (CI runs the vendored tier
+    first), which nothing caught because the literals below are hardcoded and no test here
+    opens the workflow. `tests/test_gate_parity.py` is the one that does; the shape check
+    stays here.
     """
     assert all(isinstance(step, gate.Step) for step in gate.STEPS)
-    assert [step.name for step in gate.STEPS] == ["lint", "tests", "hook tests"]
+    assert [step.name for step in gate.STEPS] == [
+        "lint",
+        "tests",
+        "hook tests",
+        "posix rehearsal",
+    ]
     assert gate.STEPS[0].argv == ("scripts/lint-all.py",)
     assert gate.STEPS[1].argv == ("scripts/run-tests.py",)
     assert "pytest" in gate.STEPS[2].argv and "scripts/hooks/tests/" in gate.STEPS[2].argv
+    assert gate.STEPS[3].argv == ("scripts/posix-rehearsal.py",)
+
+
+def test_the_rehearsal_is_skipped_by_a_project_that_does_not_ship_it(tmp_path):
+    """It is devkit-only: not in `sync-devkit.py`'s MANIFEST, so a consuming project has
+    no such file and must not have its push refused over one."""
+    root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py")
+    planned = {step.name: command for step, command in gate.plan(root)}
+    assert planned["posix rehearsal"] is None
 
 
 def test_every_step_runs_when_the_project_has_every_file(tmp_path):
     root = project(
-        tmp_path, "scripts/lint-all.py", "scripts/run-tests.py", "scripts/hooks/tests/test_x.py"
+        tmp_path,
+        "scripts/lint-all.py",
+        "scripts/run-tests.py",
+        "scripts/hooks/tests/test_x.py",
+        "scripts/posix-rehearsal.py",
     )
     runner = FakeRunner()
     assert gate.run_gate(root, runner) == 0
@@ -162,6 +125,7 @@ def test_a_project_without_a_wrapper_skips_that_step_out_loud(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "no scripts/run-tests.py in this project -- skipped" in out
     assert "no scripts/hooks/tests in this project -- skipped" in out
+    assert "no scripts/posix-rehearsal.py in this project -- skipped" in out
 
 
 def test_plan_pairs_each_step_with_a_command_or_none(tmp_path):
@@ -214,3 +178,116 @@ def test_run_as_pre_commit_would_the_hook_exits_with_the_failing_step(tmp_path):
     assert result.returncode == 4, result.stdout + result.stderr
     assert "push-gate: tests failed (exit 4)" in result.stdout
     assert gate.main.__name__ == "main"
+
+
+# --- git's own variables never reach a step -----------------------------------
+
+
+def test_gate_env_drops_the_variables_git_exports_into_a_hook():
+    """Each of these overrides a subprocess's `cwd=`, so a fixture building a throwaway
+    repo would commit into the repository being pushed instead.
+
+    Driven off the list so the assertion is behavioural -- every name it carries is
+    really popped, rather than the first three being popped and the rest decorative.
+    What stops the list itself shrinking is the pin below, which this cannot do: a
+    name deleted from `LEAKED_GIT_VARS` also disappears from `dirty` here.
+    """
+    dirty = {name: f"/repo/{name}" for name in gate.LEAKED_GIT_VARS}
+    assert gate.gate_env({"PATH": "/usr/bin", **dirty}) == {"PATH": "/usr/bin"}
+
+
+def test_the_scrub_list_is_pinned_to_every_name_that_redirects_a_repository():
+    """The reversion check for the list itself. The first three are the ones that
+    actually rewrote a branch; the rest reach the same resolution by another route --
+    the object store, the index format, the ceiling git stops searching at -- and a
+    list that quietly lost one would still look like a scrub and stop nothing.
+
+    A literal, not a property: this is the one place a deletion has to fail.
+    """
+    assert gate.LEAKED_GIT_VARS == (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_PREFIX",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_QUARANTINE_PATH",
+        "GIT_INDEX_VERSION",
+        "GIT_NAMESPACE",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_SHALLOW_FILE",
+    )
+
+
+def test_the_scrub_covers_every_name_git_calls_repo_local():
+    """The pin above says the list may not shrink; this says it may not fall behind git.
+    `git rev-parse --local-env-vars` is the authority on which variables make a git
+    command answer for a repository other than its cwd's, and the gate spells that list
+    out so it stays stdlib-only -- a copy that cannot rot is the only kind worth having.
+
+    A subset, not an equality: `GIT_CEILING_DIRECTORIES`, `GIT_QUARANTINE_PATH` and
+    `GIT_INDEX_VERSION` are scrubbed too and git does not call them repo-local.
+
+    No guard for a machine without git: every fixture in this suite already spawns it,
+    so a skip here would only hide the one failure the test is for.
+    """
+    listed = subprocess.run(
+        ["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, check=True
+    ).stdout.split()
+    missing = sorted(set(listed) - set(gate.LEAKED_GIT_VARS))
+    assert not missing, f"git calls these repo-local and the gate does not scrub them: {missing}"
+
+
+def test_the_suites_own_bootstrap_drops_the_same_variables():
+    """Two layers, because the gate is not the only thing that can run this suite from
+    inside a git hook. `tests/support.py` clears the same set at import; if the two lists
+    diverge, the one nobody is looking at is the one that lets a fixture write to the
+    real repository."""
+    bootstrap = (REPO_ROOT / "tests" / "support.py").read_text(encoding="utf-8")
+    for name in gate.LEAKED_GIT_VARS:
+        assert f'"{name}"' in bootstrap, f"tests/support.py does not clear {name}"
+
+
+def test_a_terminal_push_with_none_of_them_set_is_unchanged():
+    """`git push` from a shell exports none of these; the scrub must be a no-op there
+    rather than something a developer can tell happened."""
+    assert gate.gate_env({"PATH": "/usr/bin"}) == {"PATH": "/usr/bin"}
+
+
+def test_gate_env_keeps_everything_else_including_other_git_variables():
+    """Only the four that redirect a repository are dropped. `GIT_CONFIG_GLOBAL` and the
+    author identity are inherited on purpose -- a step that runs git legitimately still
+    needs a usable configuration."""
+    env = gate.gate_env({"GIT_CONFIG_GLOBAL": "/gc", "GIT_AUTHOR_NAME": "t", "HOME": "/h"})
+    assert env == {"GIT_CONFIG_GLOBAL": "/gc", "GIT_AUTHOR_NAME": "t", "HOME": "/h"}
+
+
+def test_gate_env_reads_the_real_environment_by_default(monkeypatch):
+    monkeypatch.setenv("GIT_DIR", "/repo/.git")
+    monkeypatch.setenv("DEVKIT_MARKER", "kept")
+    env = gate.gate_env()
+    assert "GIT_DIR" not in env
+    assert env["DEVKIT_MARKER"] == "kept"
+
+
+def test_every_step_is_spawned_with_the_scrubbed_environment(tmp_path, monkeypatch):
+    """The regression: a push ran the suite with `GIT_DIR` still set, and the fixtures
+    under it rewrote the branch being pushed. Asserted per step, not once -- the scrub is
+    only worth having if no step is spawned without it."""
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / ".git"))
+    root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py", "scripts/hooks/tests")
+    runner = FakeRunner()
+    assert gate.run_gate(root, runner) == 0
+    assert len(runner.envs) == len(runner.calls) == 3
+    for step, env in zip(runner.calls, runner.envs, strict=True):
+        assert env is not None, f"{step[1]} inherits the hook's environment"
+        for name in gate.LEAKED_GIT_VARS:
+            assert name not in env, f"{step[1]} runs with {name} set, pointing it at the wrong repo"

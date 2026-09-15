@@ -1,5 +1,6 @@
 """Tests for Devkit's global commit/push branch policy."""
 
+import io
 import json
 import pathlib
 import subprocess
@@ -439,6 +440,43 @@ def test_the_pre_push_stage_failing_refuses_the_push(tmp_path, monkeypatch):
     assert git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=runner) == 1
 
 
+def test_a_gate_failure_survives_a_cp1252_console(tmp_path, monkeypatch):
+    """The hook's stdout is a pipe under git, so on Windows Python picks the locale
+    codec for it -- cp1252 -- while the gate's output is UTF-8 and, after
+    `run_command`'s `errors="replace"`, can carry U+FFFD, which no codepage encodes.
+    Before this guard the relay itself raised, so a red gate presented as a CPython
+    traceback with the failure it was relaying nowhere in it."""
+    monkeypatch.setattr(
+        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
+    responses = _push_responses(tmp_path)
+    responses[PUSH_STAGE] = completed(
+        ["pre-commit-test"],
+        stdout="run-tests.py — 1 failed �\n",
+        stderr="lint-all.py → E999 ✓\n",
+        returncode=1,
+    )
+    stdout = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    stderr = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    raw = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(raw))
+    assert git_policy.main("pre-push", ["origin"], runner=FakeRunner(responses)) == 1
+    stdout.flush()
+    stderr.flush()
+    assert "run-tests.py — 1 failed �" in stdout.buffer.getvalue().decode("utf-8")
+    assert "lint-all.py → E999 ✓" in stderr.buffer.getvalue().decode("utf-8")
+
+
+def test_the_console_guard_tolerates_a_stream_that_cannot_be_reconfigured(monkeypatch):
+    """`sys.stdout` is None under `pythonw`, and a harness's capture object need not
+    be a `TextIOWrapper`; neither is a reason for the hook to raise."""
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    git_policy._utf8_console()
+
+
 def test_a_deletion_or_tag_only_push_skips_the_pre_push_stage(tmp_path, monkeypatch):
     """The stage is minutes of tests, and nothing a deletion could break is in it."""
     monkeypatch.setattr(
@@ -487,6 +525,24 @@ def test_a_project_with_no_pre_commit_config_says_nothing_at_all(tmp_path, capsy
     """The framework tier is opt-in: no config file, no message and no refusal."""
     assert git_policy._run_pre_commit_framework(tmp_path, FakeRunner()) == 0
     assert capsys.readouterr().err == ""
+
+
+def test_the_framework_relays_both_streams(tmp_path, monkeypatch, capsys):
+    """The wiring, not just the guard: a stream the framework forgets to relay is the
+    gate's verdict arriving with nothing to act on. What keeps the non-ASCII in these
+    two from killing the hook is `_utf8_console`, covered end to end above."""
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    monkeypatch.setattr(
+        git_policy, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
+    result = completed(["pre-commit-test"])
+    result.stdout, result.stderr = "out→\n", "err�\n"
+    runner = FakeRunner({("pre-commit-test", "run", "--hook-stage", "pre-commit"): result})
+
+    assert git_policy._run_pre_commit_framework(tmp_path, runner) == 0
+    captured = capsys.readouterr()
+    assert "out" in captured.out
+    assert "err" in captured.err
 
 
 def _common_dir(main_git: pathlib.Path | None):

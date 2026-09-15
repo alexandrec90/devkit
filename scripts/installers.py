@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Keep every devkit installer's work current on this machine, with nobody remembering to.
 
-Each `scripts/install-*.py` registers one thing -- a scheduled job, or the global git
-policy -- and until this pass existed the only thing that ran any of them was a person
+Each `scripts/install-*.py` registers one thing -- a scheduled job, the global git
+policy, or the Windows Terminal profile agent tabs open under -- and until this pass
+existed the only thing that ran any of them was a person
 reading a README. That is the failure the jobs were written to prevent, one tier up: a
 job an installer never registered is invisible to `schedule_health.py`, which reads the
 scheduler and so cannot report what was never there, and a job whose installer gained a

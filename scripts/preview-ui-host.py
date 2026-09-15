@@ -505,7 +505,7 @@ def stop_pid(pid: int, run=subprocess.run) -> None:
     design: a process that already exited makes taskkill complain, and that is not a
     failure of stopping.
     """
-    if os.name == "nt":
+    if sys.platform == "win32":
         run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
     else:  # pragma: no cover - the tests run the Windows branch
         os.kill(pid, signal.SIGTERM)
@@ -519,7 +519,7 @@ def stop(server, run=subprocess.run) -> None:
     cannot have been recycled, so `terminate()` is guaranteed to reach the process this
     run started and `os.kill` on the bare number is not.
     """
-    if os.name == "nt":
+    if sys.platform == "win32":
         stop_pid(server.pid, run)
     else:
         server.terminate()
@@ -540,8 +540,8 @@ def _kernel32() -> Any:
     not: a `type: ignore` is *unused* on the machine this actually runs on, so
     `warn_unused_ignores` moves the same failure here from there -- and `getattr(ctypes,
     "WinDLL")` is rewritten straight back to the attribute access by ruff's B009 in the
-    PostToolUse hook, silently, so it never even reaches a commit. `Any` is the return
-    for the related reason: off Windows there is no type to name.
+    PostToolUse hook, silently, so it never reaches a commit. `Any` is the return because
+    off Windows there is no type to name; every guard in this file is spelled this way.
     """
     if sys.platform != "win32":  # pragma: no cover - the tests run the Windows branch
         return None
@@ -569,7 +569,7 @@ def pid_alive(pid: int) -> bool:
     """
     if pid <= 0:
         return False
-    if os.name != "nt":  # pragma: no cover - the tests run the Windows branch
+    if sys.platform != "win32":  # pragma: no cover - the tests run the Windows branch
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -601,7 +601,7 @@ def kill_on_close_job():
     stops alone. A preview that came up is worth more than a preview that came up with
     a guaranteed teardown, so nothing here is allowed to be fatal.
     """
-    if os.name != "nt":  # pragma: no cover - the tests run the Windows branch
+    if sys.platform != "win32":  # pragma: no cover - the tests run the Windows branch
         return None
     import ctypes
     from ctypes import wintypes
@@ -667,7 +667,7 @@ def adopt(job, pid: int) -> bool:
     orphan reap on the next run both still cover this server, and a line about a job
     object in the middle of a preview is noise about a net that did not have to hold.
     """
-    if job is None or os.name != "nt":  # pragma: no cover - POSIX has no job objects
+    if job is None or sys.platform != "win32":  # pragma: no cover - POSIX has no job
         return False
     from ctypes import wintypes
 

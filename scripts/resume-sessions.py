@@ -20,8 +20,8 @@ last activity, and reading it costs one syscall instead of a megabyte of JSON. O
 head of each transcript is parsed, for the two things the filename does not carry — the
 working directory and the opening prompt, which becomes the tab title.
 
-The tabs are laid out **oldest first**, so reading left to right walks forward through
-the day.
+The tabs are laid out **oldest first** in the Windows Terminal already open, so reading
+left to right walks forward through the day. `wt_args` owns both halves of that.
 
 Two kinds of transcript are deliberately skipped, and both would otherwise displace a
 real session out of the requested set:
@@ -45,7 +45,7 @@ out. `agent_clis.py` owns the pass and the reasoning; this module owns only the 
 
 It runs before `wt.exe` rather than after, and blocks: launching first would hand the new
 tabs the old binary and then rewrite it underneath them. The cost is a few seconds of
-"updating…" before the window appears, and it is the price of the tabs being current.
+"updating…" before the tabs appear, and it is the price of them being current.
 `--list` and `--dry-run` stay read-only, so neither updates anything.
 
 Pure helpers are unit-tested in `tests/test_resume_sessions.py`; `main` is the thin
@@ -69,6 +69,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_clis
 import task_input
+import wt_profile
 
 # The update stage, taken as an argument so a test of the launch path cannot spawn a real
 # updater by forgetting to stub one. `agent_clis.run_pass` is its only production value.
@@ -325,20 +326,24 @@ def resume_args(agent: str, session_id: str) -> list[str]:
     return [agent, "resume", session_id]
 
 
-def wt_args(sessions: list[Session], agent: str | None = None) -> list[str]:
+def wt_args(sessions: list[Session], agent: str | None = None, profile: str = "") -> list[str]:
     """The wt.exe argument list: one tab per session, each resuming it in its own cwd.
 
-    `-w -1` forces a new window rather than tabs bolted onto whichever one has focus.
-    The `;` separators are their own tokens because wt parses its command line itself:
-    joined into one string they are swallowed by the outer shell, and every tab after
-    the first is lost.
+    `-w 0` is the window already open, a new one only if there is none -- where
+    `agent-box.py` puts a box, and what this forced `-w -1` against until 2026-09-14.
+    `focus-tab -t 0` went with it: the index is absolute, so in a window that already had
+    tabs it focuses a stranger's rather than the oldest session, and wt cannot name the
+    tab it just opened. `profile` is `agent-box.wt_argv`'s argument. The `;` separators
+    are their own tokens because wt parses its command line itself: joined into one
+    string they are swallowed by the outer shell, and every tab after the first is lost.
     """
-    args = ["-w", "-1"]
+    args = ["-w", "0"]
     for index, session in enumerate(sessions):
         if index:
             args.append(";")
         args += [
             "new-tab",
+            *(["-p", profile] if profile else []),
             "--title",
             tab_title(session),
             "-d",
@@ -352,7 +357,6 @@ def wt_args(sessions: list[Session], agent: str | None = None) -> list[str]:
             "-Command",
             *resume_args(agent or session.agent, session.session_id),
         ]
-    args += [";", "focus-tab", "-t", "0"]
     return args
 
 
@@ -484,13 +488,13 @@ def main(argv: list[str] | None = None, agent_pass: AgentPass | None = None) -> 
             print(f"  {line}", file=sys.stderr)
         return 0 if args.dry_run else 1
 
-    command = wt_args(selected)
+    command = wt_args(selected, profile=wt_profile.launch_name())
     if args.dry_run:
         print("\nwt.exe " + subprocess.list2cmdline(command))
         return 0
     if args.update:
         update_clis(args.agents, agent_pass)
-    print(f"\nOpening {len(selected)} tab(s) in a new Windows Terminal window...")
+    print(f"\nOpening {len(selected)} tab(s) in the current Windows Terminal...")
     return subprocess.run([terminal, *command], check=False).returncode
 
 
