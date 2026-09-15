@@ -62,6 +62,14 @@ for _leaked in (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_QUARANTINE_PATH",
     "GIT_NAMESPACE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
 ):
     os.environ.pop(_leaked, None)
 
@@ -91,6 +99,7 @@ import task_branch
 import task_input
 import task_slug
 import worktree
+import worktree_tiers
 import wt_profile
 
 # Reached through `worktree` rather than imported again, and not only to spare this file
@@ -150,19 +159,20 @@ def on_a_task_branch(root: Path) -> bool:
 def in_an_ephemeral_box(root: Path) -> bool:
     """True when `root` is a disposable worktree of either tier, not a static checkout.
 
-    Keyed off `worktree.BOXES_DIR_NAME` and `sweep.cli_worktree_checkout` rather than the
-    literals, so none of the three can drift.
+    Keyed off `worktree.BOXES_DIR_NAME` and `worktree_tiers.is_worktree` rather than the
+    literals, so none of them can drift -- and the *shape* test rather than
+    `sweep.cli_worktree_checkout`, because "is this disposable" is answerable from the
+    path alone while "whose is it" is not: Codex's tier needs a `.git` read that a
+    predicate should not depend on.
 
-    Both tiers, because what the marker below actually asks is "is this checkout the one
-    the live workspace file is rendered from", and a `.claude/worktrees/` worktree is no
-    more that than a box is. It read as one until a branch edited `workspace.jsonc` from
+    Every tier, because what the marker below actually asks is "is this checkout the one
+    the live workspace file is rendered from", and an agent CLI's worktree is no more
+    that than a box is. It read as one until a branch edited `workspace.jsonc` from
     inside one and the drift check reported its own un-merged edit as drift -- which is
     the failure the marker exists to prevent, arriving through the tier that did not
     exist when it was written.
     """
-    return root.parent.name == worktree.BOXES_DIR_NAME or (
-        sweep.cli_worktree_checkout(root) is not None
-    )
+    return root.parent.name == worktree.BOXES_DIR_NAME or worktree_tiers.is_worktree(root)
 
 
 # The narrower marker, for every assertion that reads the live file expecting *this*
@@ -206,6 +216,7 @@ __all__ = [
     "task_slug",
     "vendor_manifest",
     "worktree",
+    "worktree_tiers",
     "wt_profile",
 ]
 
@@ -264,7 +275,10 @@ def vendor_manifest(root: Path) -> None:
     is read from `sync-devkit.py` itself, so this and the generator can disagree about
     *how* a file arrives but never about which files do.
     """
-    for rel in load_script("scripts/sync-devkit.py").MANIFEST:
+    # `manifest_for`, not `MANIFEST`: the gated tier is part of what a real pull delivers
+    # to a tree whose `.devkit.toml` switches it on, and a helper that skipped it would
+    # take every test of a gated file out of scope the way the docstring above warns.
+    for rel in load_script("scripts/sync-devkit.py").manifest_for(root):
         source = REPO_ROOT / rel
         if not source.is_file():
             raise AssertionError(f"MANIFEST names {rel}, which is not in devkit")

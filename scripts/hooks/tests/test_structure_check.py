@@ -141,6 +141,61 @@ def test_vendored_paths_read_this_repos_real_sync_script(tmp_path):
     assert ".claude/rules/engineering.md" in paths
 
 
+GATED_SCRIPT = (
+    'MANIFEST: tuple[str, ...] = (\n    "a.py",\n)\n'
+    "GATED_MANIFEST: dict[str, tuple[str, ...]] = {\n"
+    '    "frontend": ("port.ts", "port.test.ts"),\n}\n'
+)
+ON_WEB = '[frontend]\nenabled = true\ndir = "web"\nsrc = "web/src/"\n'
+ON = "[frontend]\nenabled = true\n"
+OFF = "[frontend]\nenabled = false\n"
+
+
+def test_vendored_paths_include_the_gated_tier_where_the_frontend_is_on(tmp_path):
+    """A gated file that reached the project through `--pull` is devkit's debt exactly as
+    an unconditional one is; unskipped, devkit's TypeScript lands in the consumer's
+    baseline. Resolved at that project's own `[frontend] src`, the way
+    `sync-devkit.manifest_for` resolves it."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(tmp_path, "scripts/sync-devkit.py", GATED_SCRIPT)
+    write(tmp_path, ".devkit.toml", ON_WEB)
+    assert sc.vendored_paths(tmp_path) == {"a.py", "web/src/port.ts", "web/src/port.test.ts"}
+
+
+def test_vendored_paths_leave_the_gated_tier_out_where_the_frontend_is_off(tmp_path):
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(tmp_path, "scripts/sync-devkit.py", GATED_SCRIPT)
+    write(tmp_path, ".devkit.toml", OFF)
+    assert sc.vendored_paths(tmp_path) == {"a.py"}
+    (tmp_path / ".devkit.toml").unlink()
+    assert sc.vendored_paths(tmp_path) == {"a.py"}
+
+
+def test_a_gated_literal_that_will_not_evaluate_costs_only_the_gated_half(tmp_path):
+    """`ast.literal_eval` refuses a `Name` key. The unconditional manifest must still
+    be read -- losing the whole exemption over the gated half would redden a consumer
+    on files it cannot fix, the exact regression `vendored_paths` was rewritten for."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(
+        tmp_path,
+        "scripts/sync-devkit.py",
+        'MANIFEST = ("a.py",)\nGATE = "frontend"\nGATED_MANIFEST = {GATE: ("port.ts",)}\n',
+    )
+    write(tmp_path, ".devkit.toml", ON)
+    assert sc.vendored_paths(tmp_path) == {"a.py"}
+
+
+def test_the_real_gated_manifest_is_a_literal_the_scanner_can_read(tmp_path):
+    """The synthetic fixtures prove the parser; this proves the real declaration keeps
+    the shape it needs -- a `Name` key in `sync-devkit.py` would pass every test above
+    and silently empty the exemption in every consumer."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    real = (REPO_ROOT / "scripts" / "sync-devkit.py").read_text(encoding="utf-8")
+    write(tmp_path, "scripts/sync-devkit.py", real)
+    write(tmp_path, ".devkit.toml", ON)
+    assert "frontend/src/worktreePort.ts" in sc.vendored_paths(tmp_path)
+
+
 def test_vendored_paths_survive_a_script_that_does_not_parse(tmp_path):
     write(tmp_path, "DEVKIT_VERSION", "abc\n")
     write(tmp_path, "scripts/sync-devkit.py", "def (:\n")

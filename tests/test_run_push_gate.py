@@ -216,7 +216,34 @@ def test_the_scrub_list_is_pinned_to_every_name_that_redirects_a_repository():
         "GIT_QUARANTINE_PATH",
         "GIT_INDEX_VERSION",
         "GIT_NAMESPACE",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_SHALLOW_FILE",
     )
+
+
+def test_the_scrub_covers_every_name_git_calls_repo_local():
+    """The pin above says the list may not shrink; this says it may not fall behind git.
+    `git rev-parse --local-env-vars` is the authority on which variables make a git
+    command answer for a repository other than its cwd's, and the gate spells that list
+    out so it stays stdlib-only -- a copy that cannot rot is the only kind worth having.
+
+    A subset, not an equality: `GIT_CEILING_DIRECTORIES`, `GIT_QUARANTINE_PATH` and
+    `GIT_INDEX_VERSION` are scrubbed too and git does not call them repo-local.
+
+    No guard for a machine without git: every fixture in this suite already spawns it,
+    so a skip here would only hide the one failure the test is for.
+    """
+    listed = subprocess.run(
+        ["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, check=True
+    ).stdout.split()
+    missing = sorted(set(listed) - set(gate.LEAKED_GIT_VARS))
+    assert not missing, f"git calls these repo-local and the gate does not scrub them: {missing}"
 
 
 def test_the_suites_own_bootstrap_drops_the_same_variables():

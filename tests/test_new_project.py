@@ -160,27 +160,38 @@ def test_archive_rule_renders_required_frontmatter(tmp_path):
     assert '\npaths:\n  - "demo_project/archive/**/*.py"\n---\n' in text
 
 
-def test_frontend_feature_brings_the_worktree_port_helper():
-    """The `frontend` feature shipped no files at all until this one.
-
-    Two agent sessions run at once, each in its own worktree, each on the same
-    conventional dev-server port -- and nothing devkit runs at cut time can fix that for
-    the two of three worktree tiers Claude Code cuts itself. So the derivation has to
-    live in the project's own code, which means the generator has to put it there.
-    """
-    off = {f: False for f in new_project.FEATURES}
-    assert not {d for _, d in new_project.iter_template_files(off) if "worktreePort" in d.name}
-    files = {d.as_posix() for _, d in new_project.iter_template_files({**off, "frontend": True})}
-    assert "frontend/src/worktreePort.ts" in files
+def test_the_worktree_port_helper_is_vendored_not_templated():
+    """It shipped as a `templates/features/frontend` file for one release, which is the
+    one-shot tier: every fix made to it afterwards stayed in devkit, its live copy in a
+    consumer drifted, and both went blind to a new worktree tier with nothing reporting
+    the gap. It has no per-project value, so `scripts/CLAUDE.md`'s rule applies -- it is
+    a MANIFEST file now, gated on `[frontend] enabled`, and the template is gone."""
+    on = {f: (f == "frontend") for f in new_project.FEATURES}
+    assert not {d for _, d in new_project.iter_template_files(on) if "worktreePort" in d.name}
+    assert "frontend/src/worktreePort.ts" in new_project._read_manifest_paths(REPO_ROOT)
 
 
-def test_the_worktree_port_helper_stays_dependency_free(tmp_path):
-    """It is vendored into projects devkit knows nothing about, so its only import may be
-    a Node builtin -- a framework import would make it un-droppable into half of them."""
+def test_the_helper_arrives_on_the_pull_after_the_frontend_tier_is_switched_on(tmp_path):
+    """A `--frontend` project renders `[frontend] enabled = false` on purpose -- the tier
+    fires vitest against a directory that has to be scaffolded first -- so generation
+    does not vendor the file. Flipping the switch and pulling does, at that project's
+    own `[frontend] src`. That is the gate working, not a file going missing."""
     root = generate(tmp_path, {"frontend": True})
-    text = (root / "frontend" / "src" / "worktreePort.ts").read_text(encoding="utf-8")
-    imports = re.findall(r'^import .* from "([^"]+)";', text, re.MULTILINE)
-    assert imports == ["node:path"], imports
+    target = root / "frontend" / "src" / "worktreePort.ts"
+    assert not target.exists()
+    toml = root / ".devkit.toml"
+    text = toml.read_text(encoding="utf-8")
+    # The `[frontend]` switch specifically -- other tiers render `enabled = false` too.
+    head, _, tail = text.partition("[frontend]\n")
+    assert tail.startswith("enabled = false"), "the rendered [frontend] block moved"
+    toml.write_text(
+        head + "[frontend]\n" + tail.replace("enabled = false", "enabled = true", 1),
+        encoding="utf-8",
+    )
+    vendor_manifest(root)
+    assert target.is_file()
+    assert (root / "frontend" / "src" / "worktreePort.test.ts").is_file()
+    assert target.read_bytes() == (REPO_ROOT / "frontend" / "src" / "worktreePort.ts").read_bytes()
 
 
 def test_the_generated_memory_names_the_helper_only_with_a_frontend(tmp_path):

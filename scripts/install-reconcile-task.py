@@ -268,15 +268,16 @@ def main(argv: list[str] | None = None) -> int:
         # destroyed by the very pass being scheduled -- so this installs a task that
         # works until the next reconcile and then fails silently every fifteen minutes
         # forever. `source_checkout`, not `BOXES_DIR_NAME in parts`: that test looked for
-        # `.worktrees/` only and waved a `.claude/worktrees/` checkout -- the kind
-        # `claude --worktree` cuts -- through to register a task that died with the branch.
+        # `.worktrees/` only and waved an agent CLI's `--worktree` checkout -- the kind
+        # `claude --worktree` and `codex --worktree` cut -- through to register a task that
+        # died with the branch.
         #
         # Only on `--yes`: printing the plan from a box is how an agent reads what the
         # install would do, and refusing that would break the read-only mode in the
         # place it is most often invoked from.
         print(
             f"install-reconcile-task: {REPO_ROOT} is a temporary checkout (an ephemeral box "
-            f"or a claude --worktree worktree). Run this from the static devkit checkout.",
+            f"or an agent CLI's --worktree checkout). Run this from the static devkit checkout.",
             file=sys.stderr,
         )
         return 2

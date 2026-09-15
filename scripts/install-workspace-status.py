@@ -233,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
         #
         # `source_checkout` rather than a `BOXES_DIR_NAME in parts` test, and the
         # difference is not pedantry: that test looks for `.worktrees/` and so misses a
-        # `.claude/worktrees/` checkout entirely -- the kind `claude --worktree` cuts,
+        # agent-CLI worktree entirely -- the kind a `--worktree` flag cuts,
         # which is where an agent asked to wire this up is actually standing.
         # `source_checkout` already resolves both, which is why `default_workspace`,
         # `workspace-status.py` and every other installer go through it.

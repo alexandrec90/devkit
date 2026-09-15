@@ -37,9 +37,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TARGET = Path.home() / ".devkit" / "git-hooks"
 RUNTIME_FILES = {
     "scripts/git_policy.py": "devkit_git_policy.py",
+    "scripts/worktree_env.py": "devkit_worktree_env.py",
     "scripts/git-hooks/pre-commit": "pre-commit",
     "scripts/git-hooks/pre-push": "pre-push",
+    "scripts/git-hooks/post-checkout": "post-checkout",
 }
+# Which of those git execs, and therefore which need the executable bit. Derived from the
+# map rather than listed twice: a hook added to one and forgotten in the other installs
+# as a plain file, and git skips a hook it cannot execute WITHOUT SAYING SO -- the same
+# silence `worktree-guard-launch.py` was vendored into for a release.
+HOOK_NAMES = frozenset(
+    destination for source, destination in RUNTIME_FILES.items() if "/git-hooks/" in source
+)
 # Records what was installed and from where, beside the runtime it describes.
 # Without it, "which policy is actually running?" can only be answered by diffing
 # against a checkout -- which is a question about *this* machine that no artifact
@@ -106,6 +115,20 @@ def read_blob(source_root: Path, ref: str, path: str, runner: Runner = run_comma
         detail = (result.stderr or b"").decode("utf-8", "replace").strip()
         raise InstallRefusedError(f"cannot read {path} at {ref}: {detail}")
     return result.stdout
+
+
+def in_ref(source_root: Path, ref: str, path: str, runner: Runner = run_command) -> bool:
+    """Whether `ref` carries `path` at all.
+
+    Asked separately from `read_blob` because the two absences mean opposite things. A
+    ref that cannot be read, or a path a ref was *expected* to have, is a refusal --
+    that is `read_blob`'s job and it must stay loud. A path the ref simply predates is
+    not an error: `RUNTIME_FILES` grows, releases do not move, and the newest tag is
+    what `main()` installs from by default.
+    """
+    return (
+        runner(["git", "-C", str(source_root), "cat-file", "-e", f"{ref}:{path}"]).returncode == 0
+    )
 
 
 def digest(payload: bytes) -> str:
@@ -180,17 +203,30 @@ def install_files(source_root: Path, target: Path, ref: str = WORKTREE_REF) -> d
     """
     target.mkdir(parents=True, exist_ok=True)
     hashes: dict[str, str] = {}
+    skipped: list[str] = []
     for source_name, destination_name in RUNTIME_FILES.items():
         destination = target / destination_name
         if ref == WORKTREE_REF:
             shutil.copy2(source_root / source_name, destination)
+        elif not in_ref(source_root, ref, source_name):
+            # THE REF DECIDES THE RUNTIME. A file added to `RUNTIME_FILES` after `ref`
+            # was cut is not part of that release, and demanding it would make every
+            # install from the newest TAG refuse the moment this list grew -- which is
+            # the default `main()` uses, and which `installers.py` re-runs nightly. So
+            # the newer file is skipped and left out of the receipt, and `--check` is
+            # judged against the receipt rather than against this list, or the skip
+            # would report as drift forever and re-install forever.
+            skipped.append(source_name)
+            continue
         else:
             destination.write_bytes(read_blob(source_root, ref, source_name))
         hashes[destination_name] = digest(destination.read_bytes())
-        if destination_name in {"pre-commit", "pre-push"}:
+        if destination_name in HOOK_NAMES:
             destination.chmod(
                 destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
             )
+    for source_name in skipped:
+        print(f"install-git-policy: {source_name} is newer than {ref}; not installed")
     return hashes
 
 
@@ -275,7 +311,10 @@ def compare_install(target: Path, receipt: Receipt | None) -> list[Drift]:
         # provably stale, but it is unidentifiable, which needs the same fix.
         return [Drift(RECEIPT_NAME, "missing -- cannot tell what is installed")]
     drifted: list[Drift] = []
-    for destination_name in RUNTIME_FILES.values():
+    # The RECEIPT, not `RUNTIME_FILES`: it records what the installed ref actually had,
+    # so a file newer than that ref is not compared rather than reported missing every
+    # night until the next release. See the skip in `install_runtime`.
+    for destination_name in receipt.files:
         destination = target / destination_name
         expected = receipt.files.get(destination_name, "")
         if not destination.is_file():

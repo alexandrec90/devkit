@@ -155,6 +155,10 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/tests/test_structure_scan.py",
     "scripts/hooks/structure_check.py",
     "scripts/hooks/tests/test_structure_check.py",
+    # Where each agent CLI cuts a `--worktree` checkout, and which repo one belongs to.
+    # Ships ahead of its two importers, which import it plainly and fail closed without it.
+    "scripts/hooks/worktree_tiers.py",
+    "scripts/hooks/tests/test_worktree_tiers.py",
     "scripts/hooks/stop.py",
     "scripts/hooks/stop_session.py",
     "scripts/hooks/tests/test_stop.py",
@@ -373,6 +377,109 @@ RETIRED_PATHS: tuple[str, ...] = (
     + _RETIRED_CLAUDE_PATHS
     + tuple(path.replace(".claude/", ".agents/", 1) for path in _RETIRED_CLAUDE_PATHS)
 )
+
+
+# --- the gated tier -----------------------------------------------------------
+# MANIFEST is unconditional: every consumer holds every path, and `--check` reports a
+# missing one. Right for the harness, wrong for a file that only means anything in a
+# project with a particular tier -- the dev server's port derivation is nonsense in
+# devkit itself and in every stackless repo. It used to live in `templates/features/`,
+# the one-shot tier, where every later fix stayed behind and nothing reported the gap.
+#
+# An entry here is keyed on a `.devkit.toml` section and named RELATIVE to that
+# section's source prefix. `manifest_for` resolves it per consumer: present where
+# `[frontend]` is enabled, at that project's `[frontend] src`; absent where it is not,
+# which is the difference between a gate and a MISSING line. devkit's own copy lives at
+# the default prefix, so a consumer whose `src` differs reports the entry as absent from
+# the shared repo -- visible in `--check` -- rather than through a layout mapping nobody
+# has needed yet.
+FRONTEND_GATE = "frontend"
+DEFAULT_FRONTEND_SRC = "frontend/src/"
+# A LITERAL dict, keys spelled as strings: `structure_check.vendored_paths` reads this
+# off the source with `ast.literal_eval` in every consumer, and a `Name` key would make
+# the whole literal unreadable there -- silently, as an empty exemption.
+GATED_MANIFEST: dict[str, tuple[str, ...]] = {
+    # The host-Vite dev server's port derivation and its vitest file. Dependency-free by
+    # contract (`tests/test_worktree_port.py`), so it drops into any Vite project, and
+    # held equal to `scripts/hooks/worktree_tiers.py` by the same test.
+    "frontend": ("worktreePort.ts", "worktreePort.test.ts"),
+}
+
+
+def _load_harness_config(root: Path):
+    """The consumer's own `harness_config` module, or None when it cannot be loaded.
+
+    By path, not by import: this script is copied into a project as the bootstrap of a
+    first `--pull`, at a moment when `scripts/hooks/` does not exist there yet -- so a
+    top-level import would make the bootstrap unloadable. Registered in `sys.modules`
+    before `exec_module`, because that module is nothing but frozen dataclasses and
+    `@dataclass` looks its defining module up by name (`scripts/CLAUDE.md`).
+    """
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "hooks" / "harness_config.py"
+    if not path.is_file():
+        return None
+    name = "_sync_devkit_harness_config"
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+    except (OSError, ImportError, SyntaxError, AttributeError, TypeError):
+        sys.modules.pop(name, None)
+        return None
+
+
+def frontend_src(root: Path) -> str:
+    """`[frontend] src` for the consumer at `root` when that tier is on; "" when it is
+    off, undeclared, or the config helper is not there to read it.
+
+    Normalised to a forward-slash prefix ending in `/`, which is how every path in the
+    manifest is spelled, so a gated entry joins onto it without a second spelling.
+    """
+    module = _load_harness_config(root)
+    if module is None:
+        return ""
+    try:
+        frontend = module.load(root).frontend
+    except (OSError, ValueError, AttributeError, TypeError):
+        return ""
+    if not frontend.enabled:
+        return ""
+    return str(frontend.src).replace("\\", "/").rstrip("/") + "/"
+
+
+def gated_paths(root: Path) -> tuple[str, ...]:
+    """The gated entries the consumer at `root` should hold, at that project's layout."""
+    src = frontend_src(root)
+    if not src:
+        return ()
+    return tuple(src + name for name in GATED_MANIFEST[FRONTEND_GATE])
+
+
+def gated_source_paths() -> tuple[str, ...]:
+    """Where every gated entry lives in devkit, whatever any consumer's layout.
+
+    For the readers that ask "which files does devkit vendor" about devkit itself --
+    the unreleased-change check in `new-project.py` and `upgrade-project.py` -- rather
+    than about a consumer. devkit's own `.devkit.toml` keeps the frontend tier off, so
+    `manifest_for(devkit)` would answer without these and the release check would wave
+    an unreleased edit to them through.
+    """
+    return tuple(DEFAULT_FRONTEND_SRC + name for name in GATED_MANIFEST[FRONTEND_GATE])
+
+
+def manifest_for(root: Path) -> tuple[str, ...]:
+    """Every path devkit vendors into the consumer at `root`: MANIFEST plus its gates.
+
+    `MANIFEST` is read at call time rather than captured, so a test that replaces the
+    module attribute still drives every mode through its own list.
+    """
+    return tuple(MANIFEST) + gated_paths(root)
 
 
 def resolve_src(arg: str | None, env: Mapping[str, str]) -> Path | None:
@@ -1246,11 +1353,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     src = resolve_src(args.src, os.environ)
+    manifest = manifest_for(REPO_ROOT)
 
     if args.list:
         print(f"source: {src or '(unset)'}")
         print(f"vendored version: {read_version(REPO_ROOT) or '(never pulled)'}")
-        for rel in MANIFEST:
+        for rel in manifest:
             print(f"  {rel}")
         if BLOCK_MANIFEST:
             print("vendored blocks (regions of per-project files):")
@@ -1317,10 +1425,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.pull or args.push:
         from_root, to_root = (src, REPO_ROOT) if args.pull else (REPO_ROOT, src)
         managed_removed, preserved, unvendored = (
-            remove_receipt_retired(REPO_ROOT, MANIFEST, src) if args.pull else ([], [], [])
+            remove_receipt_retired(REPO_ROOT, manifest, src) if args.pull else ([], [], [])
         )
-        copied = [rel for rel in MANIFEST if _copy(rel, from_root, to_root)]
-        skipped = [rel for rel in MANIFEST if rel not in copied]
+        copied = [rel for rel in manifest if _copy(rel, from_root, to_root)]
+        skipped = [rel for rel in manifest if rel not in copied]
         removed = (remove_retired(REPO_ROOT) + managed_removed) if args.pull else []
         # After the deletions, never before: pruning a hook whose script survived the
         # pull would disable a live hook.
@@ -1396,7 +1504,7 @@ def main(argv: list[str] | None = None) -> int:
             # those files correspond to, and `stale_pin` reporting "cannot tell"
             # beats it asserting something untrue.
             provisional = source_dirty(src)
-            write_receipt(REPO_ROOT, MANIFEST, tag="" if provisional else (tag or ""))
+            write_receipt(REPO_ROOT, manifest, tag="" if provisional else (tag or ""))
             # The third moving part. Files, stamp and pin land together or the pull
             # is a half-upgrade whose gate fails later pointing at the wrong cause.
             if tag:
@@ -1424,10 +1532,10 @@ def main(argv: list[str] | None = None) -> int:
     if available and vendored and vendored != available:
         # Informational only -- drift is decided by content below, not version.
         print(f"sync-harness: vendored {vendored}, shared repo at {available} (newer available).")
-    drifted, missing, _ = classify(src, REPO_ROOT, MANIFEST)
+    drifted, missing, _ = classify(src, REPO_ROOT, manifest)
     block_drifted, block_unusable, block_ok = classify_blocks(src, REPO_ROOT, BLOCK_MANIFEST)
     retired = retired_present(REPO_ROOT)
-    receipt_retired = receipt_retired_present(REPO_ROOT, MANIFEST)
+    receipt_retired = receipt_retired_present(REPO_ROOT, manifest)
     # Faults in this project's own files: not drift, since `--check` never compares
     # them, but red for the same reason -- an unwired edit guard has no other symptom.
     local, local_summary = local_faults(REPO_ROOT)
@@ -1435,7 +1543,7 @@ def main(argv: list[str] | None = None) -> int:
         drifted or missing or retired or receipt_retired or block_drifted or block_unusable or local
     ):
         blocks = f" and {len(block_ok)} block(s)" if BLOCK_MANIFEST else ""
-        print(f"sync-harness: all {len(MANIFEST)} vendored files{blocks} in sync with {src}.")
+        print(f"sync-harness: all {len(manifest)} vendored files{blocks} in sync with {src}.")
         return 0
     # Named before the file list, because it changes what the file list *means*: a
     # stale pin makes every file added upstream since the pin look like drift, and

@@ -22,6 +22,11 @@ picker_scan = load_script("scripts/picker_scan.py")
 NOW = _dt.datetime(2026, 9, 5, 12, 0, tzinfo=_dt.UTC)
 CHECKOUT = Path("C:/ws/devkit")
 
+# Codex reads its state directory from `CODEX_HOME`. Passed explicitly rather than
+# monkeypatched, because these functions are pure and a suite that let one of them read
+# the machine would pass or fail by whose desktop it ran on.
+CODEX_ENV = {"CODEX_HOME": "C:/home/.codex"}
+
 
 def porcelain(*entries: tuple[str, str]) -> str:
     """`git worktree list --porcelain` output for `(path, branch)` pairs.
@@ -57,12 +62,21 @@ def test_the_parser_survives_empty_and_junk_input():
     assert aw.parse_worktree_list("bare\nHEAD 1a2b\n") == []
 
 
-def test_the_worktrees_root_is_a_lowercased_posix_prefix():
-    """What every path comparison in this module is made against. A trailing slash so
-    `.claude/worktrees-old/` cannot prefix-match `.claude/worktrees/`, and the case fold
-    because the filesystem this runs on has one."""
-    assert aw.worktrees_root(CHECKOUT) == "c:/ws/devkit/.claude/worktrees/"
-    assert aw.worktrees_root(Path("C:/ws/DevKit/")) == "c:/ws/devkit/.claude/worktrees/"
+def test_a_new_worktree_is_cut_in_the_default_tier():
+    """`create` and `fix-prs.cut_tree` share this answer with everything that later has
+    to *find* what they cut, which is why it is one function rather than a literal in
+    each. The default tier is the nested one: a detached tier's directory is keyed by a
+    digest only that runtime knows how to compute."""
+    assert aw.default_root(CHECKOUT) == Path("C:/ws/devkit/.claude/worktrees")
+
+
+def test_the_tier_summary_names_every_directory_a_worktree_can_be_in():
+    """Two messages tell somebody a worktree is *outside* the tiers, which is only a
+    useful sentence if it says what they are -- and it is built from the tier list so it
+    cannot fall behind one that gets added."""
+    summary = aw.TIER_SUMMARY
+    assert ".claude/worktrees" in summary
+    assert "~/.codex/worktrees" in summary
 
 
 def test_only_the_immediate_children_of_the_worktrees_directory_count():
@@ -91,6 +105,60 @@ def test_the_path_comparison_ignores_case_and_slash_direction():
     """
     text = porcelain(("c:/WS/DevKit/.claude/worktrees/Topic", "agent/topic-0905"))
     assert [name for name, _, _ in aw.nested(CHECKOUT, text)] == ["Topic"]
+
+
+def test_owned_reads_membership_off_the_tier_and_never_re_derives_it():
+    """The predicate `nested` and `holder` share. Git ran in the checkout, so a listed
+    path already belongs to it -- what is still asked is which tier it is in, and, for a
+    nested one only, that the checkout it hangs off is this one."""
+    home = CODEX_ENV["CODEX_HOME"]
+    assert aw.owned(CHECKOUT, "C:/ws/devkit/.claude/worktrees/topic", CODEX_ENV)
+    assert aw.owned(CHECKOUT, f"{home}/worktrees/2e51/devkit", CODEX_ENV)
+    # The checkout itself, a box of the other tier, and one cut by hand: none is ours.
+    assert not aw.owned(CHECKOUT, "C:/ws/devkit", CODEX_ENV)
+    assert not aw.owned(CHECKOUT, "C:/ws/.worktrees/devkit--topic-0905", CODEX_ENV)
+    assert not aw.owned(CHECKOUT, "C:/ws/scratch/by-hand", CODEX_ENV)
+    # A nested worktree hanging off SOMEBODY ELSE's checkout belongs in their menu.
+    assert not aw.owned(CHECKOUT, "C:/ws/other/.claude/worktrees/topic", CODEX_ENV)
+
+
+def test_a_codex_worktree_of_this_checkout_is_listed_and_labelled_by_its_agent():
+    """`codex --worktree` cuts OUTSIDE the checkout, under its own home behind a digest,
+    so no prefix of `project_dir` appears in the path at all. Git listed it, which is the
+    whole proof of ownership this needs -- and re-deriving one would mean reading the
+    worktree's `.git`, which this module may not do.
+    """
+    home = CODEX_ENV["CODEX_HOME"]
+    text = porcelain(
+        ("C:/ws/devkit", "main"),
+        ("C:/ws/devkit/.claude/worktrees/topic", "agent/topic-0905"),
+        (f"{home}/worktrees/2e51/devkit", "agent/codex-0905"),
+    )
+    assert aw.nested(CHECKOUT, text, CODEX_ENV) == [
+        ("codex/devkit", f"{home}/worktrees/2e51/devkit", "agent/codex-0905"),
+        ("topic", "C:/ws/devkit/.claude/worktrees/topic", "agent/topic-0905"),
+    ]
+
+
+def test_two_tiers_holding_one_directory_name_are_still_two_rows():
+    """The delete dropdown resolves a ticked row back to a worktree by its name, so a
+    collision would remove whichever the scan happened to list first -- which is not a
+    failure anybody would report, because both rows look right."""
+    home = CODEX_ENV["CODEX_HOME"]
+    text = porcelain(
+        ("C:/ws/devkit/.claude/worktrees/fix-320", "agent/fix-320"),
+        (f"{home}/worktrees/2e51/fix-320", "agent/other-320"),
+    )
+    names = [name for name, _, _ in aw.nested(CHECKOUT, text, CODEX_ENV)]
+    assert names == ["codex/fix-320", "fix-320"]
+
+
+def test_a_codex_shaped_path_under_some_other_directory_is_not_a_worktree_of_the_tier():
+    """A project that happens to keep `worktrees/<x>/<y>` is not Codex's home, and a
+    delete menu that offered its contents would be offering somebody else's directories.
+    """
+    text = porcelain(("C:/ws/scratch/worktrees/2e51/thing", "agent/x"))
+    assert aw.nested(CHECKOUT, text, CODEX_ENV) == []
 
 
 # --- finding, naming and cutting one on a branch that already exists -----------------

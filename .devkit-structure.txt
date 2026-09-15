@@ -74,9 +74,9 @@ definitions::scripts/fix-prs.py = 31
 definitions::scripts/git_policy.py = 38
 definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
-definitions::scripts/hooks/structure_check.py = 42
+definitions::scripts/hooks/structure_check.py = 43
 definitions::scripts/hooks/structure_scan.py = 31
-definitions::scripts/install-git-policy.py = 21
+definitions::scripts/install-git-policy.py = 22
 definitions::scripts/instruction-budget.py = 26
 definitions::scripts/new-project.py = 28
 definitions::scripts/plug-projects.py = 30
@@ -87,7 +87,7 @@ definitions::scripts/release-pipeline.py = 35
 definitions::scripts/report-workflow-failure.py = 27
 definitions::scripts/resume-sessions.py = 21
 definitions::scripts/sweep.py = 56
-definitions::scripts/sync-devkit.py = 46
+definitions::scripts/sync-devkit.py = 51
 definitions::scripts/upgrade-project.py = 39
 definitions::scripts/workspace-status.py = 31
 definitions::scripts/workspace-task-index.py = 29
@@ -105,10 +105,10 @@ file_lines::scripts/git_policy.py = 793
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
-file_lines::scripts/hooks/structure_check.py = 1049
+file_lines::scripts/hooks/structure_check.py = 1078
 file_lines::scripts/hooks/structure_scan.py = 669
 file_lines::scripts/instruction-budget.py = 517
-file_lines::scripts/new-project.py = 860
+file_lines::scripts/new-project.py = 863
 file_lines::scripts/plug-projects.py = 922
 file_lines::scripts/preview-task.py = 1885
 file_lines::scripts/preview-ui-host.py = 1155
@@ -117,8 +117,8 @@ file_lines::scripts/release-pipeline.py = 960
 file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/resume-sessions.py = 502
 file_lines::scripts/sweep.py = 1990
-file_lines::scripts/sync-devkit.py = 1490
-file_lines::scripts/upgrade-project.py = 1236
+file_lines::scripts/sync-devkit.py = 1598
+file_lines::scripts/upgrade-project.py = 1239
 file_lines::scripts/workspace-status.py = 1068
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2295
@@ -140,7 +140,7 @@ function_lines::scripts/sweep.py::classify = 84
 function_lines::scripts/sweep.py::inspect = 133
 function_lines::scripts/sweep.py::main = 171
 function_lines::scripts/sweep.py::sync_plan = 87
-function_lines::scripts/sync-devkit.py::main = 265
+function_lines::scripts/sync-devkit.py::main = 266
 function_lines::scripts/upgrade-project.py::main = 166
 function_lines::scripts/upgrade-project.py::upgrade_one = 143
 function_lines::scripts/worktree-guard.py::main = 139
@@ -193,7 +193,6 @@ nesting_depth::scripts/devkit_jsonc.py::drop_trailing_commas = 5
 nesting_depth::scripts/devkit_project.py::_array_span = 6
 nesting_depth::scripts/devkit_project.py::_entry_spans = 6
 nesting_depth::scripts/devkit_project.py::extract_tasks_text = 6
-nesting_depth::scripts/hooks/harness_events.py::_main_checkout = 5
 nesting_depth::scripts/hooks/structure_check.py::strongly_connected = 5
 nesting_depth::scripts/hooks/structure_scan.py::_complexity = 5
 nesting_depth::scripts/hooks/structure_scan.py::_word_before = 5
@@ -391,6 +390,20 @@ swallowed_errors::scripts/worktree.py = 1
 #   file_lines::scripts/sync-devkit.py -> 1490
 #   function_lines::scripts/sync-devkit.py::main -> 265
 
+# 2026-09-10  recorded: sync-devkit.py gains two MANIFEST entries and the two-line note above them: scripts/hooks/worktree_tiers.py and its test, the module that owns where each agent CLI cuts a --worktree checkout. A MANIFEST entry cannot live anywhere but the MANIFEST -- it IS the path list the drift check compares by -- and the module had to be vendored because stop_session.py and harness_events.py both import it and both are vendored. The module is stdlib-only and under every limit; this file is ~3x file_lines and four earlier records have deferred its split, which is still its own change and still one that moves a file listed in itself.
+#   file_lines::scripts/sync-devkit.py -> 1494
+
+# 2026-09-11  recorded: install-git-policy.py gains in_ref: whether a ref carries a path at all, asked separately from read_blob because the two absences mean opposite things. RUNTIME_FILES grew by two entries (the post-checkout hook and its runtime) and releases do not move, so without this every install from the newest TAG -- main()'s default, and what installers.py re-runs nightly -- would have refused outright on every machine until the next release. The alternative was inlining a cat-file in install_runtime's loop, which buys one definition at the cost of an untestable git call inside a loop that is already the riskiest code in the file. One over the limit, and the module's split is not something a release-safety fix should carry.
+#   definitions::scripts/install-git-policy.py -> 22
+
+# 2026-09-11  recorded: The gated manifest tier. sync-devkit.py gains GATED_MANIFEST and five small functions (a by-path loader for the consumer's harness_config, the frontend prefix, the two path resolvers, manifest_for) plus one line in main -- the cost of making 'a file only one tier can use' expressible in the MANIFEST at all, which scripts/CLAUDE.md required and templates/features/ could not deliver: frontend/src/worktreePort.ts sat there for a release while its live copy drifted and both went blind to a new worktree tier. structure_check.py gains _manifest_literals, extracted so vendored_paths reads the second literal without crossing the complexity limit; new-project.py and upgrade-project.py gain the three-line addition that keeps the unreleased-change check honest about gated files. Every module here was already 2-3x file_lines and definitions with a split deferred by earlier records; sync-devkit.py in particular is itself in the MANIFEST, so its split moves a path every consumer's bootstrap names.
+#   definitions::scripts/hooks/structure_check.py -> 43
+#   definitions::scripts/sync-devkit.py -> 51
+#   file_lines::scripts/hooks/structure_check.py -> 1078
+#   file_lines::scripts/new-project.py -> 863
+#   file_lines::scripts/sync-devkit.py -> 1598
+#   file_lines::scripts/upgrade-project.py -> 1239
+#   function_lines::scripts/sync-devkit.py::main -> 266
 # 2026-09-11  recorded: git_policy.py gains _utf8_console and the call to it in main(): the write half of run_command's codec note. Under git the hook's streams are pipes, encoded with cp1252 on Windows, and the gate output it relays is UTF-8 carrying em dashes, arrows and the U+FFFD that errors='replace' leaves, which no codepage encodes -- so a red pre-push gate died at the print that relayed it and a repo-corrupting bug presented as a UnicodeEncodeError traceback. A separate definition rather than a loop inlined in main() so the None-stream case is testable without a git repo. Recorded rather than split for the reason the 2026-09-05 entry gives: this module is COPIED to ~/.devkit/git-hooks and runs with no checkout in reach, so splitting it is its own PR.
 #   definitions::scripts/git_policy.py -> 38
 #   file_lines::scripts/git_policy.py -> 793

@@ -12,6 +12,7 @@ from pathlib import Path
 from conftest import load_module
 
 hook = load_module("scripts/hooks/stop_session.py")
+tiers = load_module("scripts/hooks/worktree_tiers.py")
 
 
 def _leases(root: Path, boxes: dict) -> None:
@@ -29,8 +30,22 @@ def _box(root: Path, name: str) -> Path:
 
 def _claude_worktree(root: Path, name: str) -> Path:
     """A worktree where `claude --worktree` cuts one: inside the checkout, unregistered."""
-    path = root / hook.CLAUDE_WORKTREES_DIR / name
+    path = tiers.default_root(root) / name
     (path / ".git").mkdir(parents=True)
+    return path
+
+
+def _codex_worktree(home: Path, checkout: Path, name: str, digest: str = "2e51") -> Path:
+    """A worktree where `codex --worktree` cuts one: OUTSIDE the checkout, under the
+    runtime's own home and behind a digest that names no repo.
+
+    The `.git` pointer is written because it is the only thing on disk tying the two
+    together -- which is the whole reason this tier needed a different answer from the
+    prefix test the nested one is satisfied by."""
+    path = home / "worktrees" / digest / name
+    path.mkdir(parents=True)
+    gitdir = checkout / ".git" / "worktrees" / name
+    (path / ".git").write_text(f"gitdir: {gitdir.as_posix()}\n", encoding="utf-8")
     return path
 
 
@@ -91,7 +106,7 @@ def test_a_claude_worktree_is_verified_instead_of_the_checkout_it_lives_in(tmp_p
     tree = _claude_worktree(root, "devkit-320")
     raw = json.dumps({"session_id": "s1", "cwd": str(tree)})
 
-    assert hook.claude_worktree(tree, root) == tree
+    assert hook.cli_worktree(tree, root) == tree
     assert hook.verify_root(raw, root) == tree
 
 
@@ -110,7 +125,7 @@ def test_a_cwd_in_the_checkout_itself_changes_nothing(tmp_path):
     root = tmp_path / "proj"
     root.mkdir()
     (root / "scripts").mkdir()
-    assert hook.claude_worktree(root, root) is None
+    assert hook.cli_worktree(root, root) is None
     assert hook.verify_root(json.dumps({"cwd": str(root / "scripts")}), root) == root
     assert hook.verify_root(json.dumps({"cwd": "   "}), root) == root
 
@@ -119,10 +134,42 @@ def test_a_husk_claude_worktree_falls_back_to_the_checkout(tmp_path):
     """No `.git` means git has stopped tracking it -- the same guard `session_box` makes."""
     root = tmp_path / "proj"
     root.mkdir()
-    husk = root / hook.CLAUDE_WORKTREES_DIR / "dead"
+    husk = tiers.default_root(root) / "dead"
     husk.mkdir(parents=True)
-    assert hook.claude_worktree(husk, root) is None
+    assert hook.cli_worktree(husk, root) is None
     assert hook.verify_root(json.dumps({"cwd": str(husk)}), root) == root
+
+
+def test_a_codex_worktree_is_verified_instead_of_the_checkout_it_was_cut_from(
+    tmp_path, monkeypatch
+):
+    """`codex --worktree` cuts OUTSIDE the checkout, so the prefix test that answers for
+    Claude's tier finds nothing and the gate falls back to the static checkout -- which is
+    exactly the failure `.claude/worktrees/devkit-320` was fixed for, restored by a
+    runtime that did not exist when it was fixed."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    home = tmp_path / ".codex"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    tree = _codex_worktree(home, root, "proj")
+    raw = json.dumps({"session_id": "s1", "cwd": str(tree)})
+
+    assert hook.cli_worktree(tree, root) == tree
+    assert hook.verify_root(raw, root) == tree
+
+
+def test_a_codex_worktree_of_another_checkout_is_not_this_gates_business(tmp_path, monkeypatch):
+    """The detached tier holds every repo's worktrees side by side, so "is it a worktree"
+    is not enough -- a Stop in one project must not be re-aimed at another's tree."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    home = tmp_path / ".codex"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    tree = _codex_worktree(home, other, "other")
+    assert hook.cli_worktree(tree, root) is None
+    assert hook.verify_root(json.dumps({"cwd": str(tree)}), root) == root
 
 
 def test_the_lease_file_outranks_the_cwd(tmp_path):

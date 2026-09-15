@@ -112,6 +112,12 @@ def interpreter(root: Path) -> str:
 # The first three are the ones observed to bite. The rest redirect the same resolution by
 # another route -- the object store, the index format, the ceiling git stops searching at
 # -- and cost nothing to strip: a step that wants the pushed repository has `cwd`.
+#
+# The tail from `GIT_CONFIG` down is the remainder of `git rev-parse --local-env-vars`,
+# git's own answer to "which variables make a git command answer for a repository other
+# than its cwd's". Spelled out rather than shelled out for, so this stays a stdlib file
+# with no git call of its own, and held to git's answer by a test that does run it -- an
+# eleven-name list that merely looked complete is what that test exists to catch.
 LEAKED_GIT_VARS = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -124,6 +130,14 @@ LEAKED_GIT_VARS = (
     "GIT_QUARANTINE_PATH",
     "GIT_INDEX_VERSION",
     "GIT_NAMESPACE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
 )
 
 

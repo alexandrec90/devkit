@@ -45,6 +45,16 @@ what the hook runs and CI does not, are both held to a written reason by
   fix made here after a project was generated stays here, and nothing can report the gap.
   When a file stops having a per-project value, move it into `MANIFEST` rather than
   leaving it rendered.
+- **A file that only one tier can use goes in `GATED_MANIFEST`, not in `templates/`.**
+  `MANIFEST` is unconditional -- every consumer holds every path -- which is right for
+  the harness and wrong for `frontend/src/worktreePort.ts`, which is nonsense in devkit
+  itself and in every stackless repo. The gated tier is keyed on a `.devkit.toml` section
+  (`[frontend] enabled`) and resolved per consumer at that section's `src`, so it is
+  drift-checked and `--pull`ed like everything else and simply absent where the tier is
+  off. The gate reads the *consumer's* `harness_config.py` by path, so it answers "off"
+  on the bootstrap pull that has not delivered that file yet; the second pull delivers
+  what the gate selects. Spell the literal with string keys -- `structure_check` reads
+  it off the source with `ast.literal_eval` in every consumer.
 - **Vendoring a generator does not vendor its output.** `.codex/hooks.json` is written by
   `sync-codex-hooks.py` from the project's own `.claude/settings.json`, so the script is
   in `MANIFEST` and the file it produces cannot be. **Anything generated from a vendored

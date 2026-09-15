@@ -269,18 +269,47 @@ def vendored_paths(root: Path) -> frozenset[str]:
         tree = ast.parse(script.read_text(encoding="utf-8"))
     except (SyntaxError, ValueError, OSError):
         return frozenset()
+    literals = _manifest_literals(tree)
+    if not isinstance(manifest := literals.get("MANIFEST"), (list, tuple)):
+        return frozenset()
+    paths = {str(v) for v in manifest if isinstance(v, str)}
+    # The gated tier: `GATED_MANIFEST` names files RELATIVE to a `.devkit.toml` tier's
+    # source prefix, vendored only where that tier is on. Resolved here the way
+    # `sync-devkit.manifest_for` resolves it, because a gated file that reached this
+    # project through `--pull` is devkit's debt exactly as an unconditional one is --
+    # and unskipped it would put devkit's TypeScript into the consumer's baseline.
+    gated = literals.get("GATED_MANIFEST")
+    if isinstance(gated, dict):
+        frontend = harness_config.load(root).frontend
+        if frontend.enabled:
+            prefix = str(frontend.src).replace("\\", "/").rstrip("/") + "/"
+            for name in gated.get("frontend", ()):
+                if isinstance(name, str):
+                    paths.add(prefix + name)
+    return frozenset(paths)
+
+
+def _manifest_literals(tree: ast.Module) -> dict[str, object]:
+    """`{name: value}` for the module-level `MANIFEST` and `GATED_MANIFEST` literals.
+
+    Both `Assign` and `AnnAssign` (see `vendored_paths`), and a literal that will not
+    evaluate is simply absent -- the caller treats a missing `MANIFEST` as "skip
+    nothing", which is the fail-loud direction for a vendored-file exemption.
+    """
+    found: dict[str, object] = {}
     for node in tree.body:
         bound = getattr(node, "targets", None) or [getattr(node, "target", None)]
         assigned = getattr(node, "value", None)
-        if assigned is not None and any(
-            isinstance(t, ast.Name) and t.id == "MANIFEST" for t in bound
-        ):
-            try:
-                value = ast.literal_eval(assigned)
-            except ValueError:
-                return frozenset()
-            return frozenset(str(v) for v in value if isinstance(v, str))
-    return frozenset()
+        if assigned is None:
+            continue
+        names = {t.id for t in bound if isinstance(t, ast.Name)}
+        for wanted in ("MANIFEST", "GATED_MANIFEST"):
+            if wanted in names:
+                try:
+                    found[wanted] = ast.literal_eval(assigned)
+                except ValueError:
+                    pass
+    return found
 
 
 def _excluded(rel: str, cfg: harness_config.Config) -> bool:

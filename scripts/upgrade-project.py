@@ -519,7 +519,10 @@ def manifest_paths() -> list[str]:
     from _loader import load_by_path
 
     sync = load_by_path("_sync_devkit", SCRIPTS_DIR / "sync-devkit.py")
-    return [str(entry).replace("\\", "/") for entry in sync.MANIFEST]
+    # The gated tier at devkit's own layout too: an unreleased edit to a gated file is
+    # as much an unreleased vendored change as one to any MANIFEST entry.
+    entries = (*sync.MANIFEST, *sync.gated_source_paths())
+    return [str(entry).replace("\\", "/") for entry in entries]
 
 
 def unreleased_vendored_changes(devkit: Path, tag: str) -> list[str]:
