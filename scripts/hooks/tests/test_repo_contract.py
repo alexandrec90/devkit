@@ -745,6 +745,37 @@ def test_skill_references_are_one_level_deep_and_exist():
             )
 
 
+def test_rule_references_exist():
+    """A rule's Markdown link target is a claim too, and nothing checked it.
+
+    `test_skill_references_are_one_level_deep_and_exist` covers `SKILL.md`, and
+    `tests/test_doc_claims.py` covers cited paths -- but only the *backticked* ones,
+    which in a link like ``[`.claude/engineering-evidence.md`](../engineering-evidence.md)``
+    is the link **text**. The target is never read, so a typo or a rename in it dangles
+    in silence. `authoring.md` telling authors to "link references with normal Markdown
+    links so the contract can resolve them" reads as though this was already checked.
+    It matters more now than it did: a rule pointer is the prescribed remedy for the
+    500-line contract, so the pattern is spreading rather than holding still.
+
+    **Existence only**, deliberately, and neither half of the skill assertion may be
+    reused here:
+
+    * Not the sibling assertion. Every `.md` under `.claude/rules/` loads *as a rule*,
+      so a rule's reference has to live outside that directory -- the one place the
+      skill check requires it to be.
+    * Not the one-level-deep assertion. `engineering-evidence.md` links onward to
+      `scripts/*.md`, which is existing, intended content.
+    """
+    missing: list[str] = []
+    for rule in _rule_files():
+        for reference in _local_markdown_references(rule):
+            if not reference.is_file():
+                missing.append(f"{rule.relative_to(REPO_ROOT).as_posix()} -> {reference}")
+    assert not missing, "rules link to Markdown files that do not exist:\n  " + "\n  ".join(
+        sorted(missing)
+    )
+
+
 def test_long_skill_references_have_a_linked_table_of_contents():
     for skill in _skill_files():
         for reference in _local_markdown_references(skill):
