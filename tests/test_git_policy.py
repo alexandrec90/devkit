@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -16,10 +17,15 @@ class FakeRunner:
     def __init__(self, responses=None):
         self.responses = responses or {}
         self.calls: list[tuple[str, ...]] = []
+        # `env` is recorded rather than ignored because it is load-bearing for one
+        # caller: the pre-commit framework's `language: system` hooks are resolved
+        # from it. See `test_the_framework_runs_with_its_own_directory_first_on_path`.
+        self.envs: list[dict[str, str] | None] = []
 
-    def __call__(self, argv, *, input_text=None, cwd=None):
+    def __call__(self, argv, *, input_text=None, cwd=None, env=None):
         key = tuple(argv)
         self.calls.append(key)
+        self.envs.append(env)
         return self.responses.get(
             key,
             subprocess.CompletedProcess(argv, 1, stdout="", stderr="not configured"),
@@ -259,6 +265,27 @@ def test_pre_push_rejects_recreating_a_merged_remote_branch():
     decision = git_policy.evaluate_pre_push("origin", "", raw, FakeRunner(responses))
     assert not decision.ok
     assert "permanently retired" in decision.errors[0]
+
+
+def test_the_retirement_block_names_the_way_forward_not_just_the_refusal():
+    """The reported dead end: a branch retired by its first merged PR still had a
+    second, open PR on it, so the fix for that PR's failing gate could not be
+    committed or pushed. The retirement is correct -- the merged commits are on the
+    default branch already -- but a refusal that stops at "permanently" reads as
+    having no answer, and the session went looking for an override instead of the one
+    `git switch -c` it needed."""
+    responses = git_responses(branch="claude/retired")
+    responses.update(
+        merged_response(
+            "claude/retired",
+            [{"number": 8, "url": "https://github.com/acme/widgets/pull/8", "mergedAt": "now"}],
+        )
+    )
+    error = git_policy.evaluate_pre_commit(FakeRunner(responses)).errors[0]
+    assert "git switch -c" in error
+    # The other half of what was missing: that an open PR does not lift it, so the
+    # next reader does not spend the turn establishing that for themselves.
+    assert "open PR" in error
 
 
 def test_pre_push_allows_deleting_a_retired_branch_without_querying_github():
@@ -505,6 +532,50 @@ def test_the_commit_stage_argv_is_unchanged_by_the_push_stage(tmp_path, monkeypa
     assert runner.calls == [("pre-commit-test", "run", "--hook-stage", "pre-commit")]
 
 
+def test_the_framework_runs_with_its_own_directory_first_on_path(tmp_path, monkeypatch):
+    """The reported dead end: committing from a plain worktree with no `.venv`.
+
+    `_pre_commit_command` found `pre-commit.exe` in the parent checkout's venv and the
+    commit then failed with `Executable detect-secrets-hook not found` -- pre-commit
+    resolves a `language: system` hook from the subprocess `PATH`, which did not hold
+    the venv it had itself been found in. First, not appended: looking past `PATH` is
+    the whole point of `_venv_roots`, so a different copy already on it must not win.
+    """
+    venv_bin = tmp_path / "checkout" / ".venv" / "Scripts"
+    monkeypatch.setattr(
+        git_policy, "_pre_commit_command", lambda _root, _runner: [str(venv_bin / "pre-commit")]
+    )
+    monkeypatch.setenv("PATH", "/usr/bin")
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    runner = FakeRunner(
+        {
+            (str(venv_bin / "pre-commit"), "run", "--hook-stage", "pre-commit"): completed(
+                ["pre-commit"]
+            )
+        }
+    )
+
+    assert git_policy._run_pre_commit_framework(tmp_path, runner) == 0
+    assert runner.envs[0]["PATH"] == f"{venv_bin}{os.pathsep}/usr/bin"
+
+
+def test_framework_env_keeps_the_rest_of_the_environment(tmp_path):
+    """Only `PATH` moves. The framework needs everything else the session had --
+    `GIT_*` scoping from the hook included, since the hooks act on that repository."""
+    env = git_policy.framework_env(
+        [str(tmp_path / "bin" / "pre-commit")], {"PATH": "/usr/bin", "HOME": "/h"}
+    )
+    assert env["HOME"] == "/h"
+    assert env["PATH"].startswith(str(tmp_path / "bin"))
+
+
+def test_framework_env_survives_an_environment_with_no_path(tmp_path):
+    """No `PATH` at all is not a reason to raise, and an empty first entry would put
+    the working directory on it -- which is how a repo file becomes an executable."""
+    env = git_policy.framework_env([str(tmp_path / "bin" / "pre-commit")], {})
+    assert env["PATH"] == str(tmp_path / "bin")
+
+
 def test_a_missing_framework_names_every_remedy_not_just_the_refusal(tmp_path, monkeypatch, capsys):
     """Two agents reported this message in one week; both said it names no remedy, so it
     reads as policy declining the commit rather than as a tool being missing."""
@@ -548,7 +619,7 @@ def test_the_framework_relays_both_streams(tmp_path, monkeypatch, capsys):
 def _common_dir(main_git: pathlib.Path | None):
     """A runner answering `rev-parse --git-common-dir`, or failing like a non-repository."""
 
-    def runner(argv, *, input_text=None, cwd=None):
+    def runner(argv, *, input_text=None, cwd=None, env=None):
         if main_git is None:
             return completed(argv, returncode=1)
         return completed(argv, stdout=f"{main_git}\n")

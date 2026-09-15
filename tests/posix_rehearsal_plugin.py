@@ -29,6 +29,16 @@ this plugin was written after) and it is *not* gated: the parsing is fixable her
 not, and a check that answered "does not exist" for real interpreter paths would be wrong
 far more often than right. `tests/support.py`'s `windows_layout` is the convention instead.
 
+A **machine-capability lookup** is the second class, and it is the one that reads as
+covered when it is not. `shutil.which` answers about the box the suite is running on,
+which no amount of faked platform changes: `scripts/agent-box.py`'s `open_agent` returns
+early when neither `wt.exe` nor `wt` is on `PATH`, true on `ubuntu-latest` and false on a
+Windows dev box, so the branch below it simply does not run there. A test that asserted on
+what that branch recorded went green through the entire local push gate — lint, suite,
+hook tests and this rehearsal — and failed on PR 329 with an `IndexError` on an empty call
+list. The rehearsal does not vouch for a `which()`-gated branch; stub the lookup in the
+test, as `test_the_profile_is_read_from_the_machine_rather_than_guessed` now does.
+
 Run it through `scripts/posix-rehearsal.py`, never by hand. That wrapper puts this file on
 `PYTHONPATH` before pytest starts, which `-p` needs, and it owns the other half of the
 mechanism: the ledger of tests allowed to fail under POSIX. The ledger lives there rather

@@ -138,7 +138,6 @@ scripts/upgrade-project.py::verify_pull
 scripts/workspace-status.py::behind_line
 scripts/workspace-status.py::schedule_lines
 scripts/workspace-status.py::stranded_line
-scripts/worktree-guard.py::claim_hint
 scripts/worktree-guard.py::current_branch
 scripts/worktree-guard.py::deliver
 scripts/worktree-guard.py::edited_path_key

@@ -163,6 +163,7 @@ def run_command(
     *,
     input_text: str | None = None,
     cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command without ever raising into Git's sparse hook error reporting.
 
@@ -185,6 +186,7 @@ def run_command(
         return subprocess.run(
             list(argv),
             cwd=cwd,
+            env=None if env is None else dict(env),
             input=input_text,
             capture_output=True,
             text=True,
@@ -443,10 +445,23 @@ def _merged_decision(
         return Decision()
     result = merged_pr(runner, repo, branch)
     if result.url:
+        # The remedy is named because the refusal alone is a dead end, and an agent
+        # reading it goes looking for an override. The case that produced this: a
+        # branch whose first PR had merged still had a *second*, open PR on it, and
+        # the fix for that PR's failing gate could not be committed or pushed at all.
+        # The retirement is still right -- the merged commits are on the default
+        # branch, so a push here would reopen settled history -- but "permanently"
+        # with nothing after it reads as "there is no way to do this", and what the
+        # session actually needed was one `git switch -c`. Said unconditionally
+        # rather than after checking for an open PR: that check is another `gh` call
+        # on every commit, and the answer does not change the remedy.
         return Decision(
             errors=(
                 f"{action}: branch '{branch}' is permanently retired because its PR merged "
-                f"({result.url})",
+                f"({result.url}). A name is retired once, for good, and an open PR still "
+                f"on it does not lift that. Carry the work to a new branch: "
+                f"git switch -c <new-name> -- an open PR's head can be repointed, or it "
+                f"can be replaced by a PR from the new branch.",
             )
         )
     if not result.error:
@@ -606,6 +621,35 @@ NO_PRE_COMMIT = (
 )
 
 
+def framework_env(
+    command: Sequence[str], environ: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """The environment the framework runs in: its own directory first on `PATH`.
+
+    `_pre_commit_command` deliberately looks past `PATH` -- into this tree's `.venv`
+    and then the checkout's -- because a plain worktree has no virtualenv of its own.
+    That finding is only half an answer. pre-commit resolves a `language: system`
+    hook's executable from the **subprocess `PATH`**, not from wherever it was itself
+    launched, so committing from such a worktree found `pre-commit.exe` two directories
+    up and then failed with `Executable detect-secrets-hook not found` -- the framework
+    and its hooks disagreeing about which environment they are in, reported as a
+    missing tool. Putting the chosen executable's own directory first closes that: the
+    hooks installed beside pre-commit are the ones it was resolved from.
+
+    First rather than appended, so the venv wins over a different copy already on
+    `PATH` -- the whole point of having looked there. A no-op when the command was
+    found on `PATH` to begin with, and harmless for the `-m pre_commit` form, whose
+    interpreter sits in that same directory.
+    """
+    env = dict(os.environ if environ is None else environ)
+    if not command:
+        return env
+    home = str(Path(command[0]).parent)
+    existing = env.get("PATH", "")
+    env["PATH"] = f"{home}{os.pathsep}{existing}" if existing else home
+    return env
+
+
 def _run_pre_commit_framework(
     root: Path, runner: Runner, stage: str = "pre-commit", raw_updates: str = ""
 ) -> int:
@@ -626,7 +670,7 @@ def _run_pre_commit_framework(
     # tree, and without it pre-commit scopes to the *staged* diff -- stashing unstaged
     # work for the duration -- to run hooks that ignore the file list anyway.
     args = ["run", "--hook-stage", stage] + (["--all-files"] if stage == "pre-push" else [])
-    result = runner([*command, *args], cwd=root)
+    result = runner([*command, *args], cwd=root, env=framework_env(command))
     if result.stdout:
         print(result.stdout, end="")
     if result.stderr:

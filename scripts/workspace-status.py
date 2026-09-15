@@ -168,6 +168,15 @@ def policy_line(
     a branch stays silent -- the check would otherwise warn continuously while the
     policy is being worked on, and a line that always warns is one nobody reads.
 
+    `install-git-policy.py`'s third question, `worktree_drift`, is deliberately NOT
+    asked here, and its absence is a choice rather than an oversight. It compares a
+    working-tree install against the checkout it came from, which is the right answer
+    to "is this dispatcher stale" and exactly the thing that warns on every prompt of
+    every session spent editing the policy -- the failure this docstring already names,
+    reached by the one route that is immune to the reasoning above. `--check` is where
+    it lives: deliberate, and re-run on a schedule by `installers.py`, so the five-day
+    stale dispatcher that motivated it is still caught without the line going gray.
+
     Spawn-free, per this file's contract: the receipt carries hashes so verifying
     it costs a read, and `latest` is resolved by the caller from the ref store.
     Silent when nothing is installed (a fresh clone, CI, anyone else's machine)

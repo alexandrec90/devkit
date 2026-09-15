@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 from support import REPO_ROOT, load_script
 
@@ -292,11 +293,78 @@ def test_a_ref_that_predates_the_policy_refuses_with_a_readable_reason():
 
 
 def test_a_working_tree_install_is_never_reported_behind(tmp_path):
-    """It is as current as it can be described; nagging would punish the escape
-    hatch rather than the accident."""
+    """A worktree install has no ref to fall behind, so a *tag* comparison says
+    nothing true about it either way. `worktree_drift` is what answers the question
+    for this ref, by bytes; the tests below it are the ones that hold that."""
     target = tmp_path / "hooks"
     receipt = installer.install(REPO_ROOT, target, installer.WORKTREE_REF)
     assert installer.behind_ref(receipt, "v0.5.3") == ""
+
+
+def _worktree_source(root: Path) -> Path:
+    """A checkout holding just the runtime files, so one can be edited under an install."""
+    for source_name in installer.RUNTIME_FILES:
+        path = root / source_name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {source_name}\n", encoding="utf-8")
+    return root
+
+
+def test_a_worktree_install_is_reported_stale_once_the_checkout_moves_on(tmp_path):
+    """The reported defect, in the state the machine was actually in.
+
+    `--check` said "up to date" over a dispatcher installed from a checkout that had
+    since gained the whole pre-push wiring, so `devkit-push-gate` had not run on any
+    push for five days and nothing said so. Neither existing question could catch it:
+    `compare_install` asks only whether the install still matches its own receipt, and
+    `behind_ref` returns "" for this ref.
+    """
+    source = _worktree_source(tmp_path / "checkout")
+    target = tmp_path / "hooks"
+    receipt = installer.install(source, target, installer.WORKTREE_REF)
+    assert installer.worktree_drift(source, target, receipt) == []
+
+    (source / "scripts" / "git_policy.py").write_text("# the pre-push wiring\n", encoding="utf-8")
+    drifted = installer.worktree_drift(source, target, receipt)
+    assert [d.name for d in drifted] == ["devkit_git_policy.py"]
+    assert "working tree" in drifted[0].reason
+
+
+def test_a_release_install_is_not_judged_against_the_working_tree(tmp_path):
+    """The false positive `compare_install` exists to avoid, and this must not
+    reintroduce it: a checkout ahead of the pinned release is the normal state, so
+    only `WORKTREE_REF` opts into the byte comparison."""
+    source = _worktree_source(tmp_path / "checkout")
+    target = tmp_path / "hooks"
+    receipt = installer.install(source, target, installer.WORKTREE_REF)
+    (source / "scripts" / "git_policy.py").write_text("# moved on\n", encoding="utf-8")
+
+    assert installer.worktree_drift(source, target, replace(receipt, ref="v0.5.3")) == []
+    assert installer.worktree_drift(source, target, None) == []
+
+
+def test_a_source_file_that_has_gone_missing_is_not_reported_as_stale(tmp_path):
+    """`install_files` skips what a source does not hold, so reporting one would be a
+    failure that re-installing could not clear."""
+    source = _worktree_source(tmp_path / "checkout")
+    target = tmp_path / "hooks"
+    receipt = installer.install(source, target, installer.WORKTREE_REF)
+    (source / "scripts" / "git_policy.py").unlink()
+    assert installer.worktree_drift(source, target, receipt) == []
+
+
+def test_check_exits_one_for_a_worktree_install_the_checkout_has_moved_past(tmp_path, monkeypatch):
+    """End to end through `run_check`, because the defect was that this exit code was
+    0 -- the finding existing but not being wired in is the same silence."""
+    source = _worktree_source(tmp_path / "checkout")
+    target = (tmp_path / "hooks").resolve()
+    installer.install(source, target, installer.WORKTREE_REF)
+    monkeypatch.setattr(installer, "resolve_ref", lambda _root=None: "v0.5.3")
+    runner = FakeRunner(hooks_path=f"{target.as_posix()}\n")
+    assert installer.run_check(source, target, runner) == 0
+
+    (source / "scripts" / "git_policy.py").write_text("# the pre-push wiring\n", encoding="utf-8")
+    assert installer.run_check(source, target, runner) == 1
 
 
 def test_behind_is_silent_when_either_side_is_unknown():
