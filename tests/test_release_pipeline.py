@@ -659,6 +659,44 @@ def test_a_stale_unpushed_branch_is_discarded_so_the_run_can_proceed(tmp_path):
     assert not rel.local_branch_exists(devkit, "release/v0.0.2", _git_run)
 
 
+def test_a_worktree_still_holding_the_stale_branch_is_released_too(tmp_path):
+    """The other half of the same wall, and the half that survives a KILL.
+
+    `prepare` cuts its release branch in a throwaway worktree. A run that returns takes
+    it with it; a run that is *killed* -- OOM, a closed terminal -- does not, and git
+    refuses to delete a branch a worktree holds. So dropping the ref alone left
+    `--yes` failing with "cannot delete branch 'release/vX.Y.Z' used by worktree at
+    <temp path>" on every later pass: the same three-nights-running stall this function
+    exists to end, reached through the other door. Hit for real cutting v0.11.19, when
+    the run was killed for memory mid-prepare.
+    """
+    devkit, _, run = _a_devkit_with_origin(tmp_path)
+    held = tmp_path / "scratch" / "release-v0.0.2"
+    run("worktree", "add", "-b", "release/v0.0.2", str(held), "origin/main")
+    assert rel.local_branch_exists(devkit, "release/v0.0.2", _git_run)
+
+    cleared, note = rel.discard_stale_branch(devkit, "release/v0.0.2", _git_run)
+
+    assert cleared, note
+    assert not rel.local_branch_exists(devkit, "release/v0.0.2", _git_run)
+    assert not held.exists()
+    assert "worktree" in note, note
+
+
+def test_the_worktree_holding_a_branch_is_found_by_ref_not_by_path(tmp_path):
+    """The lookup is over `git worktree list --porcelain`, whose records name the branch
+    as a full ref. Matching on anything looser would release the wrong checkout."""
+    devkit, _, run = _a_devkit_with_origin(tmp_path)
+    held = tmp_path / "scratch" / "release-v0.0.2"
+    run("worktree", "add", "-b", "release/v0.0.2", str(held), "origin/main")
+
+    found = rel.worktree_holding(devkit, "release/v0.0.2", _git_run)
+
+    assert Path(found).resolve() == held.resolve()
+    # A branch no worktree holds answers empty rather than guessing at the main one.
+    assert rel.worktree_holding(devkit, "release/v9.9.9", _git_run) == ""
+
+
 def test_a_branch_that_reached_origin_is_never_discarded(tmp_path):
     """Pushed with no open PR is a state with two plausible remedies and no safe guess:
     deleting the local ref would hide work that escaped this checkout."""

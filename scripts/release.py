@@ -164,6 +164,25 @@ def pushed_to_origin(devkit: Path, branch: str, run: GitRunner) -> bool | None:
     return bool(result.stdout.strip())
 
 
+def worktree_holding(devkit: Path, branch: str, run: GitRunner) -> str:
+    """The path of the worktree checked out on `branch`, or "" when none is.
+
+    `git worktree list --porcelain` emits a blank-line-separated record per worktree,
+    `worktree <path>` first and `branch <ref>` last for a non-detached one.
+    """
+    listing = run(["git", "-C", str(devkit), "worktree", "list", "--porcelain"])
+    if listing.returncode != 0:
+        return ""
+    ref = f"refs/heads/{branch}"
+    path = ""
+    for line in (listing.stdout or "").splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree ") :].strip()
+        elif line.strip() == f"branch {ref}":
+            return path
+    return ""
+
+
 def discard_stale_branch(devkit: Path, branch: str, run: GitRunner) -> tuple[bool, str]:
     """Clear a local `branch` an interrupted release left behind.
 
@@ -189,11 +208,30 @@ def discard_stale_branch(devkit: Path, branch: str, run: GitRunner) -> tuple[boo
             f"{branch} is on origin but has no open PR -- reopen its PR, or delete the "
             "branch on both sides, then re-run"
         )
+    # A run that was KILLED rather than returned -- OOM, a closed terminal -- leaves its
+    # throwaway worktree registered, and git refuses to delete a branch a worktree holds.
+    # Dropping the ref was only ever half the wall: `--yes` would then fail with
+    # "cannot delete branch 'release/vX.Y.Z' used by worktree at <temp path>" on every
+    # later pass, which is the same three-nights-running failure this function exists to
+    # end, reached by the other door. `prune` clears registrations whose directory is
+    # already gone; one that survives has to be removed, and it is this run's own
+    # scratch directory holding nothing but a bump the next pass recomputes.
+    run(["git", "-C", str(devkit), "worktree", "prune"])
+    holder = worktree_holding(devkit, branch, run)
+    if holder:
+        released = run(["git", "-C", str(devkit), "worktree", "remove", holder, "--force"])
+        if released.returncode != 0:
+            failure = (released.stderr or released.stdout).strip()
+            return False, (
+                f"{branch} is held by the worktree at {holder}, which could not be "
+                f"removed: {failure}"
+            )
     dropped = run(["git", "-C", str(devkit), "branch", "-D", branch])
     if dropped.returncode != 0:
         failure = (dropped.stderr or dropped.stdout).strip()
         return False, f"could not delete the stale {branch}: {failure}"
-    return True, f"discarded the stale unpushed {branch} left by an interrupted run"
+    held = f" (released the worktree at {holder})" if holder else ""
+    return True, f"discarded the stale unpushed {branch} left by an interrupted run{held}"
 
 
 def prepare(
