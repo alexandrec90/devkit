@@ -57,6 +57,18 @@ def test_a_conflicting_pr_is_broken():
     assert fix_prs.broken_reason(pr(mergeable="CONFLICTING")) == "merge conflict"
 
 
+@pytest.mark.parametrize("mergeable", ["UNKNOWN", None, "CONFLICTING"])
+@pytest.mark.parametrize("rollup", [[], [{"conclusion": "SUCCESS"}]])
+def test_a_dirty_merge_is_broken_without_failed_checks(mergeable, rollup):
+    entry = pr(mergeable=mergeable, mergeStateStatus="DIRTY", statusCheckRollup=rollup)
+    assert fix_prs.broken_reason(entry) == "merge conflict"
+
+
+@pytest.mark.parametrize("state", ["UNKNOWN", "BLOCKED", "BEHIND", "UNSTABLE", "CLEAN", None])
+def test_other_merge_states_are_not_conflicts(state):
+    assert fix_prs.broken_reason(pr(mergeable="UNKNOWN", mergeStateStatus=state)) == ""
+
+
 def test_a_failed_check_run_is_broken():
     entry = pr(statusCheckRollup=[{"conclusion": "SUCCESS"}, {"conclusion": "FAILURE"}])
     assert fix_prs.broken_reason(entry) == "1 check failing"
@@ -68,9 +80,11 @@ def test_a_failed_legacy_status_context_counts_too():
     assert fix_prs.broken_reason(entry) == "1 check failing"
 
 
-def test_both_kinds_of_broken_are_reported_together():
+@pytest.mark.parametrize("mergeable", ["CONFLICTING", "UNKNOWN"])
+def test_both_kinds_of_broken_are_reported_together(mergeable):
     entry = pr(
-        mergeable="CONFLICTING",
+        mergeable=mergeable,
+        mergeStateStatus="DIRTY",
         statusCheckRollup=[{"conclusion": "FAILURE"}, {"conclusion": "TIMED_OUT"}],
     )
     assert fix_prs.broken_reason(entry) == "merge conflict + 2 checks failing"
@@ -122,6 +136,63 @@ def test_only_the_broken_ones_are_listed(monkeypatch, tmp_path):
     payload = json.dumps([pr(number=1), pr(number=2, mergeable="CONFLICTING")])
     monkeypatch.setattr(fix_prs.sweep, "gh_for", gh_returning(0, payload))
     assert [entry["number"] for entry in fix_prs.broken_prs(tmp_path)] == [2]
+
+
+@pytest.mark.parametrize("mergeable", ["UNKNOWN", None])
+@pytest.mark.parametrize(
+    "fresh,reason",
+    [
+        ({"mergeable": "CONFLICTING"}, "merge conflict"),
+        ({"mergeable": "UNKNOWN", "mergeStateStatus": "DIRTY"}, "merge conflict"),
+        ({"mergeable": "MERGEABLE"}, ""),
+        ({"mergeable": "UNKNOWN"}, ""),
+        ({"mergeable": "CONFLICTING", "state": "CLOSED"}, ""),
+        ({"mergeable": "CONFLICTING", "isDraft": True}, ""),
+    ],
+)
+def test_scan_refreshes_unknown_mergeability_once(monkeypatch, tmp_path, mergeable, fresh, reason):
+    calls = []
+
+    def gh(*args):
+        calls.append(args[:3])
+        asked = args[args.index("--json") + 1].split(",")
+        entry = pr(mergeable=mergeable, statusCheckRollup=[])
+        if args[1] == "view":
+            entry.update(fresh)
+        payload = {key: value for key, value in entry.items() if key in asked}
+        return subprocess.CompletedProcess(
+            [], 0, json.dumps([payload] if args[1] == "list" else payload), ""
+        )
+
+    monkeypatch.setattr(fix_prs.sweep, "gh_for", lambda _path: gh)
+    found = fix_prs.broken_prs(tmp_path)
+    assert calls == [("pr", "list", "--state"), ("pr", "view", "412")]
+    assert [fix_prs.broken_reason(entry) for entry in found] == ([reason] if reason else [])
+    if found:
+        assert found[0]["updatedAt"] == pr()["updatedAt"]
+        assert "merge conflict" in fix_prs.rows({"devkit": found}, NOW)[0]
+
+
+def test_refresh_failure_keeps_known_check_failures(monkeypatch, tmp_path):
+    entry = pr(mergeable="UNKNOWN", statusCheckRollup=[{"conclusion": "FAILURE"}])
+    monkeypatch.setattr(fix_prs.sweep, "gh_for", gh_returning(0, json.dumps([entry])))
+    monkeypatch.setattr(fix_prs, "pr_view", lambda *_args: {})
+    assert fix_prs.broken_prs(tmp_path) == [entry]
+
+
+def test_settled_conflicts_and_drafts_need_no_refresh(monkeypatch, tmp_path):
+    entries = [
+        pr(mergeable="CONFLICTING", statusCheckRollup=[]),
+        pr(isDraft=True, mergeable="UNKNOWN"),
+    ]
+    monkeypatch.setattr(fix_prs.sweep, "gh_for", gh_returning(0, json.dumps(entries)))
+    monkeypatch.setattr(fix_prs, "pr_view", lambda *_args: pytest.fail("unnecessary refresh"))
+    assert fix_prs.broken_prs(tmp_path) == entries[:1]
+
+
+@pytest.mark.parametrize("fields", [fix_prs.PR_LIST_FIELDS, fix_prs.PR_VIEW_FIELDS])
+def test_both_queries_request_both_conflict_signals(fields):
+    assert {"mergeable", "mergeStateStatus"} <= set(fields.split(","))
 
 
 @pytest.mark.parametrize(
@@ -726,9 +797,12 @@ def test_the_view_asks_for_every_field_the_launch_path_reads():
     assert {"state", "isDraft", "mergeable", "statusCheckRollup", "headRefName"} <= asked
 
 
-def test_a_broken_pr_opens_a_tab_titled_for_the_pr(monkeypatch, tmp_path):
+@pytest.mark.parametrize("mergeable", ["CONFLICTING", "UNKNOWN"])
+def test_a_broken_pr_opens_a_tab_titled_for_the_pr(monkeypatch, tmp_path, mergeable):
     """Several tabs can be open at once on branches that all begin `agent/`."""
-    code, opened = run_one_with(monkeypatch, tmp_path, pr(mergeable="CONFLICTING"))
+    code, opened = run_one_with(
+        monkeypatch, tmp_path, pr(mergeable=mergeable, mergeStateStatus="DIRTY")
+    )
     assert code == 0
     assert opened["kwargs"]["title"] == "carameli #412"
     assert "#412" in opened["kwargs"]["prompt"]
