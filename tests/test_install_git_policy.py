@@ -44,7 +44,7 @@ def test_install_copies_all_runtime_files_and_marks_hooks_executable(tmp_path):
     target = tmp_path / "hooks"
     installer.install_files(REPO_ROOT, target)
 
-    assert (target / "devkit_git_policy.py").is_file()
+    assert (target / "devkit_git_policy" / "__init__.py").is_file()
     for name in ("pre-commit", "pre-push"):
         hook = target / name
         assert hook.is_file()
@@ -55,7 +55,9 @@ def test_install_copies_all_runtime_files_and_marks_hooks_executable(tmp_path):
 def test_installed_wrappers_delegate_to_the_policy_module(tmp_path):
     target = tmp_path / "hooks"
     installer.install_files(REPO_ROOT, target)
-    (target / "devkit_git_policy.py").write_text(
+    # Stub the package's `__init__`, not a flat module: a flat `devkit_git_policy.py`
+    # beside the package would be *shadowed* by it and this would assert nothing.
+    (target / "devkit_git_policy" / "__init__.py").write_text(
         "def main(name):\n    print(f'delegated:{name}')\n    return 0\n",
         encoding="utf-8",
     )
@@ -116,6 +118,106 @@ def test_reinstall_accepts_the_same_global_hooks_path(tmp_path):
 # in the running code while the source and the README both described it.
 
 
+def test_the_policy_is_listed_in_both_layouts_so_an_older_tag_still_installs():
+    """The entry that stops a merge from bricking every machine's git hooks.
+
+    `scripts/git_policy.py` became the `scripts/git_policy/` package, and
+    `install_files` skips a `RUNTIME_FILES` source the ref does not hold. Listing only
+    the package would therefore make `--yes` from the newest TAG -- what `main()`
+    defaults to and what `installers.py` re-runs nightly -- install no policy at all
+    until the next release, leaving the hooks importing a module that is not there.
+    """
+    assert "scripts/git_policy.py" in installer.RUNTIME_FILES
+    assert "scripts/git_policy/__init__.py" in installer.RUNTIME_FILES
+    assert installer.POLICY_ENTRYPOINTS == {
+        "devkit_git_policy.py",
+        "devkit_git_policy/__init__.py",
+    }
+
+
+def test_an_install_that_found_no_policy_at_all_refuses():
+    """The backstop, so "no policy installed" is unrepresentable rather than unlikely.
+
+    A per-file skip is right for a runtime that gained a file and catastrophic for the
+    policy module, because the hooks run on every commit in every repository on the
+    machine -- so the failure is total and arrives with no warning.
+    """
+    assert installer.install_refusal({"pre-commit": "x"}, "v0.0.1") != ""
+    assert "nothing to import" in installer.install_refusal({}, "v0.0.1")
+    # Either layout on its own satisfies it; neither is required in particular.
+    assert installer.install_refusal({"devkit_git_policy.py": "x"}, "v0.5.3") == ""
+    assert installer.install_refusal({"devkit_git_policy/__init__.py": "x"}, "HEAD") == ""
+
+
+def test_installing_from_a_ref_without_either_layout_raises(tmp_path):
+    """End to end through `install_files`, not just the predicate: the refusal has to
+    be wired in, or the check exists and the brick still ships."""
+    empty = tmp_path / "checkout"
+    (empty / "scripts").mkdir(parents=True)
+    try:
+        installer.install_files(empty, tmp_path / "hooks", installer.WORKTREE_REF)
+    except installer.InstallRefusedError as error:
+        assert "nothing to import" in str(error)
+    else:
+        raise AssertionError("an install with no policy module must refuse")
+
+
+def test_a_worktree_install_skips_the_layout_the_checkout_does_not_have(tmp_path, capsys):
+    """And says which, in words that do not send the reader looking for a release.
+
+    The skip message used to read "is newer than <ref>" for every skip. Printed over
+    `scripts/git_policy.py` -- a file no future ref will hold, because it became the
+    package -- that is a claim about a release that is never coming.
+    """
+    installer.install_files(REPO_ROOT, tmp_path / "hooks", installer.WORKTREE_REF)
+    out = capsys.readouterr().out
+    assert "scripts/git_policy.py not in the working tree" in out
+    assert "newer than" not in out
+
+
+def _imports_from(target: Path) -> str:
+    """`__file__` of `devkit_git_policy` imported the way the hook wrapper imports it.
+
+    In a child process on purpose: the name must be resolved from `target` by a fresh
+    interpreter, exactly as `pre-commit` does, not found in this one's `sys.modules`.
+    """
+    probe = (
+        f"import sys; sys.path.insert(0, r'{target}');"
+        "import devkit_git_policy as p; print(p.__file__)"
+    )
+    done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    return done.stdout.strip()
+
+
+def test_a_pre_package_tag_installs_a_policy_the_hooks_can_still_import(tmp_path):
+    """v0.11.16 is a real tag that predates the package, and `main()` installs from the
+    newest tag by default -- so this is the ordinary path on every machine until the
+    release after the split, not a hypothetical."""
+    target = tmp_path / "hooks"
+    receipt = installer.install(REPO_ROOT, target, "v0.11.16")
+    assert "devkit_git_policy.py" in receipt.files
+    assert not (target / "devkit_git_policy").exists()
+    assert _imports_from(target).endswith("devkit_git_policy.py")
+
+
+def test_the_package_shadows_a_flat_module_an_older_install_left_behind(tmp_path):
+    """The upgrade, which needs no cleanup step to be safe.
+
+    Installing the package over a pre-package install leaves the old
+    `devkit_git_policy.py` on disk -- nothing deletes it, and the receipt no longer
+    names it. That is harmless only because Python prefers a package to a same-named
+    module on `sys.path`, and "harmless only because" is exactly the kind of claim that
+    needs a test rather than a comment.
+    """
+    target = tmp_path / "hooks"
+    installer.install(REPO_ROOT, target, "v0.11.16")
+    installer.install(REPO_ROOT, target, installer.WORKTREE_REF)
+
+    assert (target / "devkit_git_policy.py").is_file(), "the stale file is expected to remain"
+    assert _imports_from(target).endswith(str(Path("devkit_git_policy") / "__init__.py"))
+
+
 def test_the_default_source_is_a_released_tag_not_the_working_tree():
     """The prevention, in one assertion. A working-tree install must be something
     you ask for by name, never what you get by not thinking about it."""
@@ -163,7 +265,11 @@ def test_installing_records_what_was_installed(tmp_path):
 
     assert (target / installer.RECEIPT_NAME).is_file()
     assert receipt.ref == installer.WORKTREE_REF
-    assert set(receipt.files) == set(installer.RUNTIME_FILES.values())
+    # Every destination *except* the layout this ref does not have. `RUNTIME_FILES`
+    # carries the policy in both spellings so an install from a tag cut before the
+    # package still works, which means one of the two is always legitimately skipped.
+    expected = set(installer.RUNTIME_FILES.values()) - {"devkit_git_policy.py"}
+    assert set(receipt.files) == expected
     assert installer.read_receipt(target) == receipt
 
 
@@ -213,7 +319,14 @@ def test_a_skipped_file_is_not_reported_as_drift_forever(tmp_path):
 def test_in_ref_separates_a_missing_path_from_an_unreadable_one(tmp_path):
     """`read_blob` must stay loud -- a ref that cannot be read is a refusal. Only "this
     ref predates the file" is the benign case, and it is asked for separately."""
-    assert installer.in_ref(REPO_ROOT, "HEAD", "scripts/git_policy.py") is True
+    # The path is asserted against the ref that actually holds it, in both directions:
+    # `scripts/git_policy.py` is in the tags before the package and gone from HEAD,
+    # which is the whole reason `RUNTIME_FILES` lists both layouts. Naming it against
+    # HEAD is what made this test pass right up until the split was *committed* -- the
+    # working tree had already lost the file while HEAD still had it.
+    assert installer.in_ref(REPO_ROOT, "HEAD", "scripts/git_policy/__init__.py") is True
+    assert installer.in_ref(REPO_ROOT, "v0.11.16", "scripts/git_policy.py") is True
+    assert installer.in_ref(REPO_ROOT, "HEAD", "scripts/git_policy.py") is False
     assert installer.in_ref(REPO_ROOT, "HEAD", "scripts/not-a-file.py") is False
     assert installer.in_ref(REPO_ROOT, "v0.0.0-does-not-exist", "scripts/git_policy.py") is False
 

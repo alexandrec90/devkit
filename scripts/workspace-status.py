@@ -153,7 +153,7 @@ def policy_line(
 ) -> str:
     """The branch-policy half; "" when there is nothing to say.
 
-    The global hooks are a *copy* of `scripts/git_policy.py`, so they go stale
+    The global hooks are a *copy* of `scripts/git_policy/`, so they go stale
     invisibly: the hooks keep firing, they just enforce an older policy. Nothing
     else in the workspace would ever mention it, which is how a runtime came to be
     missing its escape hatch for two days while the source had it -- the only
