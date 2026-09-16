@@ -461,9 +461,10 @@ back in: it cuts a worktree on the PR's own head branch — upstream
 set, so a bare push lands on the PR — and opens an agent there already knowing the PR
 number, what is wrong with it and that the job ends with the PR merged once the gate is
 green. Same tier as the two rows above, so *Agent: Delete Worktrees* lists what it left
-behind, and a second click on the same PR reuses the worktree the first one cut. A head
-branch already checked out somewhere else — the checkout itself, a `.worktrees/` box —
-is reported with that directory named rather than cut over.
+behind, and a second click on the same PR reuses the worktree the first one cut. An
+existing Claude or Codex worktree, or a live devkit box matching the checkout and PR
+branch, is reused too. Other locations, including the static checkout, are reported
+with that directory named.
 
 ```bash
 python scripts/fix-prs.py --list                              # what is red, per checkout

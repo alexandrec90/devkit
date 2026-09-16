@@ -404,14 +404,17 @@ def test_a_worktree_already_on_that_branch_is_reused_rather_than_cut(monkeypatch
     assert fix_prs.existing_tree(checkout, "agent/x") == (Path(held), "")
 
 
-def test_a_branch_held_outside_the_tier_is_refused_with_the_directory_named(monkeypatch, tmp_path):
-    """A box of the other tier, the checkout itself, a worktree cut by hand: `git
-    worktree add` fails on all three talking about the *branch*, when the tree holding it
-    is what the reader has to go and deal with."""
-    checkout = checkout_listing(monkeypatch, tmp_path, ("C:/ws/.worktrees/carameli--x", "agent/x"))
+@pytest.mark.parametrize("location", ["carameli", "manual", ".worktrees/carameli--x"])
+def test_a_branch_held_outside_the_tier_is_refused_with_the_directory_named(
+    monkeypatch, tmp_path, location
+):
+    """Static checkouts, manual trees and unrecognized boxes still need a named refusal."""
+    held = (tmp_path / location).as_posix()
+    checkout = checkout_listing(monkeypatch, tmp_path, (held, "agent/x"))
+    monkeypatch.setattr(fix_prs.worktree, "live_boxes", lambda root: {})
     tree, refused = fix_prs.existing_tree(checkout, "agent/x")
     assert tree is None
-    assert "C:/ws/.worktrees/carameli--x" in refused
+    assert held in refused
     assert fix_prs.aw.TIER_SUMMARY in refused
 
 
@@ -424,6 +427,48 @@ def test_a_codex_worktree_on_that_branch_is_reused_too(monkeypatch, tmp_path):
     held = f"{home.as_posix()}/worktrees/2e51/carameli"
     checkout = checkout_listing(monkeypatch, tmp_path, (held, "agent/x"))
     assert fix_prs.existing_tree(checkout, "agent/x") == (Path(held), "")
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude", "claude-bg"])
+def test_a_pr_in_a_live_devkit_box_opens_in_that_box(monkeypatch, tmp_path, agent):
+    branch = "agent/auto/devkit-upgrade"
+    box = fix_prs.worktree.Box(name="carameli--upgrade", project="carameli", branch=branch)
+    held = fix_prs.worktree.box_path(tmp_path, box.name)
+    checkout_listing(monkeypatch, tmp_path, (held.as_posix(), branch))
+    monkeypatch.setattr(fix_prs.worktree, "live_boxes", lambda root: {box.name: box})
+    monkeypatch.setattr(
+        fix_prs, "pr_view", lambda *_: pr(headRefName=branch, mergeable="CONFLICTING")
+    )
+    monkeypatch.setattr(fix_prs, "cut_tree", lambda *_: pytest.fail("reuse the existing box"))
+    opened = []
+    monkeypatch.setattr(
+        fix_prs.agent_box, "open_agent", lambda cli, tree, *a, **k: opened.append((cli, tree)) or 0
+    )
+    monkeypatch.setattr(
+        fix_prs, "launch_background", lambda cli, tree, *a, **k: opened.append((cli, tree)) or 0
+    )
+
+    assert fix_prs.run_one(fix_prs.Pick("carameli", 412), tmp_path / "w.code-workspace", agent) == 0
+    assert opened == [(fix_prs.AGENT_MODES[agent][0], held)]
+
+
+@pytest.mark.parametrize("mismatch", ["project", "branch", "path", "missing"])
+def test_a_box_must_match_the_checkout_branch_and_worktree(monkeypatch, tmp_path, mismatch):
+    held = tmp_path / ".worktrees" / "carameli--upgrade"
+    checkout = checkout_listing(monkeypatch, tmp_path, (held.as_posix(), "agent/x"))
+    box = fix_prs.worktree.Box(
+        name="carameli--other" if mismatch == "path" else held.name,
+        project="other" if mismatch == "project" else "carameli",
+        branch="agent/other" if mismatch == "branch" else "agent/x",
+    )
+    monkeypatch.setattr(
+        fix_prs.worktree,
+        "live_boxes",
+        lambda root: {} if mismatch == "missing" else {box.name: box},
+    )
+    tree, refused = fix_prs.existing_tree(checkout, "agent/x")
+    assert tree is None
+    assert held.as_posix() in refused
 
 
 def test_a_branch_nothing_holds_is_neither_a_tree_nor_a_refusal(monkeypatch, tmp_path):
