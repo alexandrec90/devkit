@@ -113,6 +113,18 @@ def framework_env(
     return env
 
 
+# Printed once, before the push stage's wait. Deliberately says how long and why it is
+# quiet: "minutes" is the fact that stops the wait being read as a hang, and naming the
+# bypass keeps a deliberate work-in-progress push from becoming a `--no-verify` habit --
+# which would take the branch policy down with the gate.
+PUSH_STAGE_NOTICE = (
+    "[devkit] pre-push: running this project's pre-push hooks over the whole tree.",
+    "  This is the PR gate's own commands (lint, tests) and takes minutes.",
+    "  pre-commit holds each hook's output until it exits, so expect a quiet wait.",
+    "  Deliberate WIP push: SKIP=devkit-push-gate git push",
+)
+
+
 def _run_pre_commit_framework(
     root: Path, runner: Runner, stage: str = "pre-commit", raw_updates: str = ""
 ) -> int:
@@ -133,7 +145,24 @@ def _run_pre_commit_framework(
     # tree, and without it pre-commit scopes to the *staged* diff -- stashing unstaged
     # work for the duration -- to run hooks that ignore the file list anyway.
     args = ["run", "--hook-stage", stage] + (["--all-files"] if stage == "pre-push" else [])
-    result = runner([*command, *args], cwd=root, env=framework_env(command))
+    if stage == "pre-push":
+        # Streaming gets pre-commit's own progress line out immediately, but pre-commit
+        # buffers each *hook's* output until that hook exits -- so a gate that runs lint
+        # and two test tiers still spends minutes between its banner and its first
+        # result. This is the only notice that can be printed before that wait begins,
+        # and the wait is what gets misread: a push that is working looks exactly like a
+        # push that is wedged, and the answer to the second one is another push.
+        for line in PUSH_STAGE_NOTICE:
+            emit(line)
+    # `stream=True`: relay the framework's output as it is produced rather than after it
+    # finishes. Nothing here parses it -- only the exit code is read -- and the push stage
+    # is minutes of lint and tests, so captured it made `git push` print nothing at all
+    # until the gate was over. That silence was read as a hang and answered with a second
+    # push, which started a second full gate on the same machine; three concurrent gates
+    # starving each other is how a branch stopped landing at all. The relay below still
+    # runs, because `run_command` falls back to capturing whenever this process has no
+    # stdout of its own to lend -- a scheduled job under `pythonw.exe`, or a test harness.
+    result = runner([*command, *args], cwd=root, env=framework_env(command), stream=True)
     if result.stdout:
         emit(result.stdout, end="")
     if result.stderr:

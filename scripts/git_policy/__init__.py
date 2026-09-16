@@ -70,6 +70,7 @@ from ._core import (
     TagUpdate,
     console_python,
     emit,
+    inheritable_streams,
     run_command,
 )
 from .branch import (
@@ -116,6 +117,7 @@ __all__ = [
     "framework",
     "framework_env",
     "github_repo",
+    "inheritable_streams",
     "main",
     "merged_pr",
     "parse_push_updates",
