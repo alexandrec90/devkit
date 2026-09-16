@@ -121,9 +121,10 @@ def test_every_repo_this_job_can_serve_ignores_claude_code_s_own_worktrees(path)
 
 
 def test_no_permission_mode_is_granted_by_default():
-    """A phone opens spawned sessions in `auto` with no way to switch, so
-    `bypassPermissions` here is the only route to one -- and a standing grant on an
-    unattended machine. Opting in belongs to the person whose machine it is."""
+    """The mode a spawned session runs in comes from the client that creates it, and the
+    mobile app sends `auto`, so a mode set here does not reach a phone at all. On whatever
+    it does reach it is a standing grant on an unattended machine, and opting in belongs
+    to the person whose machine it is."""
     assert rc_config.Config().permission_mode == ""
 
 
