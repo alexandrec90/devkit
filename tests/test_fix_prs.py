@@ -1144,3 +1144,47 @@ def test_stray_report_names_every_checkout_and_says_nothing_ran():
     for text in (one, many):
         assert "nothing was run" in text
         assert "vscode-tasks.md" in text
+
+
+# --- the two helpers broken_prs delegates the re-query to ------------------------------
+
+
+@pytest.mark.parametrize(
+    "entry,expected",
+    [
+        ({"number": 1, "mergeable": "UNKNOWN"}, True),
+        ({"number": 2, "mergeable": None}, True),
+        ({"number": 3, "mergeable": "MERGEABLE"}, False),
+        ({"number": 4, "mergeable": "CONFLICTING"}, False),
+        ({"number": 5, "mergeable": "UNKNOWN", "mergeStateStatus": "DIRTY"}, False),
+        ({"number": 6, "mergeable": "UNKNOWN", "isDraft": True}, False),
+        ({"mergeable": "UNKNOWN"}, False),
+    ],
+)
+def test_unresolved_mergeability_picks_only_rows_worth_asking_about(entry, expected):
+    """Settled verdicts, drafts and rows with no number are all nothing to ask GitHub."""
+    assert bool(fix_prs.unresolved_mergeability([entry])) is expected
+
+
+def test_refresh_unresolved_asks_once_per_row_and_merges_in_place(monkeypatch, tmp_path):
+    asked = []
+
+    def view(project_dir, number):
+        asked.append(number)
+        return {"mergeable": "CONFLICTING"}
+
+    monkeypatch.setattr(fix_prs, "pr_view", view)
+    entries = [
+        {"number": 7, "mergeable": "UNKNOWN", "statusCheckRollup": []},
+        {"number": 8, "mergeable": "MERGEABLE"},
+    ]
+    assert fix_prs.refresh_unresolved(tmp_path, entries) is None
+    assert asked == [7]
+    assert entries[0]["mergeable"] == "CONFLICTING"
+    assert entries[0]["statusCheckRollup"] == []  # the list's own fields survive the merge
+    assert entries[1]["mergeable"] == "MERGEABLE"
+
+
+def test_refresh_unresolved_asks_nobody_when_every_row_is_settled(monkeypatch, tmp_path):
+    monkeypatch.setattr(fix_prs, "pr_view", lambda *a: pytest.fail("should not be asked"))
+    fix_prs.refresh_unresolved(tmp_path, [{"number": 9, "mergeable": "MERGEABLE"}])
