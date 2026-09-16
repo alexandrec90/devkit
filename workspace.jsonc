@@ -52,6 +52,9 @@
 		},
 		{
 			"path": "roguelike"
+		},
+		{
+			"path": "social-scraper"
 		}
 	],
 	"extensions": {
@@ -1314,7 +1317,8 @@
 								"devkit",
 								"data-lake",
 								"sports_betting",
-								"roguelike"
+								"roguelike",
+								"social-scraper"
 							]
 						}
 					]
@@ -1352,7 +1356,8 @@
 								"ibkr_trader",
 								"data-lake",
 								"sports_betting",
-								"roguelike"
+								"roguelike",
+								"social-scraper"
 							]
 						}
 					]
@@ -1370,7 +1375,8 @@
 					"devkit",
 					"data-lake",
 					"sports_betting",
-					"roguelike"
+					"roguelike",
+					"social-scraper"
 				],
 				"default": "carameli"
 			},
@@ -1924,7 +1930,8 @@
 					"devkit",
 					"data-lake",
 					"sports_betting",
-					"roguelike"
+					"roguelike",
+					"social-scraper"
 				],
 				"default": "carameli"
 			},
