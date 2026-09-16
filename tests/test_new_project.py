@@ -1377,6 +1377,13 @@ def test_generated_automerge_can_create_the_labels_it_applies(tmp_path):
         # succeeded on a PR's current head SHA, which the event-driven job is handed by
         # its trigger and a scheduled pass has to go and find.
         "actions": "read",
+        # `checks: read` is the sweep's other half, for the evidence the runs API does
+        # not hold -- whether anything *else* wired onto the PR is unfinished or red.
+        # Exact-dict on purpose: a generated project that is handed a scope short is a
+        # sweep that 403s hourly in a repo whose owner never wrote this file. Which
+        # scopes the script actually needs is derived from its source, not pinned, in
+        # `scripts/hooks/tests/test_merge_dependabot_prs.py`.
+        "checks": "read",
         "contents": "write",
         "issues": "write",
         "pull-requests": "write",
