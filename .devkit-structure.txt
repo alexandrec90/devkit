@@ -97,7 +97,7 @@ dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::pytest = 1
 dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 544
-file_lines::scripts/devkit_project.py = 1725
+file_lines::scripts/devkit_project.py = 1731
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/fix-prs.py = 768
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
@@ -430,3 +430,6 @@ swallowed_errors::scripts/worktree.py = 1
 #   definitions::scripts/sync-devkit.py -> 53
 #   file_lines::scripts/sync-devkit.py -> 1649
 #   function_lines::scripts/sync-devkit.py::main -> 271
+
+# 2026-09-16  recorded: one ACTIONS entry registering memory-inventory; devkit_project.py is 1731/500 and already carries the split-the-module finding, which this does not make newly true
+#   file_lines::scripts/devkit_project.py -> 1731

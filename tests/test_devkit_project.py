@@ -384,6 +384,9 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # job N times and report nothing on runs 2..N. Scoping it to devkit is what lets
         # the task pin `--project devkit` and offer no picker.
         "reclaim",
+        # The read-only page beside it, scoped for exactly `reclaim`'s reason: one process
+        # table on the machine, so once per checkout would print the same page N times.
+        "memory-inventory",
         # Born scoped, for `reclaim`'s reason rather than its own: the menu it picks from
         # is assembled from the box registry and the port registry, and there is exactly
         # one of each on this machine. So the question "which checkout" has no answer to

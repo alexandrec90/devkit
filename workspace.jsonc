@@ -574,6 +574,34 @@
 				"problemMatcher": []
 			},
 			{
+				// Read-only. The memory half of the question "Reclaim Resources" cannot fix:
+				// who holds the commit charge, which claude processes are yours and which
+				// are phone sessions nobody has touched, what the MCP servers cost, which
+				// dev servers still have an owner, and what reap-stale would stop. See
+				// ACTIONS["memory-inventory"].
+				"label": "Machine: What Is Eating Memory",
+				"detail": "Lists the images holding the most memory, every claude process with its role and idle time, the MCP servers, every dev server with its owner, and what `reap-stale.py reap` would stop. Touches nothing; also written to devkit/logs/memory-inventory.log.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"devkit",
+					"memory-inventory"
+				],
+				"icon": {
+					"id": "pulse",
+					"color": "terminal.ansiYellow"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"clear": true,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
 				// Reviewing a UI change before its PR merges, and the whole task is a Vite dev
 				// server: `npm run dev` on each ticked ref's frontend, one free port each. NO
 				// Docker — no box, no compose stack, no image build, no named volume.

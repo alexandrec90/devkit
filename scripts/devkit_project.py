@@ -223,6 +223,12 @@ ACTIONS: dict[str, Action] = {
     "reclaim": Action(
         "scripts/reclaim.py", "Machine: Reclaim Resources", ("--yes",), projects=DEVKIT_ONLY
     ),
+    # The read-only half of `reclaim`'s memory question -- who holds the commit charge,
+    # which `claude` processes are yours, what `reap-stale.py` would stop -- and scoped
+    # for `reclaim`'s reason: one machine, one inventory, no checkout to pick.
+    "memory-inventory": Action(
+        "scripts/memory-inventory.py", "Machine: What Is Eating Memory", projects=DEVKIT_ONLY
+    ),
     # Reviewing a UI change before its PR merges: host Vite on the picked branches'
     # frontends -- `npm run dev`, one port each, no Docker anywhere in it.
     #

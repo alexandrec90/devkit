@@ -33,6 +33,7 @@ an ancestry that reaches a living host is owned however old it is.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import re
@@ -95,20 +96,33 @@ STOP_GRACE_SECONDS = 5
 
 PS_QUERY = (
     "Get-CimInstance Win32_Process | "
-    "Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress"
+    "Select-Object ProcessId,ParentProcessId,Name,CommandLine,"
+    "PrivatePageCount,WorkingSetSize,CreationDate | ConvertTo-Json -Compress"
 )
+
+# `ConvertTo-Json` renders a CIM date one of two ways depending on which PowerShell
+# answered: Windows PowerShell writes `\/Date(<ms since epoch>)\/`, pwsh writes ISO 8601.
+_CIM_DATE = re.compile(r"Date\((-?\d+)\)")
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
 
 
 @dataclass(frozen=True)
 class Process:
-    """One row of the table. `name` is the bare lowercase stem, `claude` not `claude.EXE`."""
+    """One row of the table. `name` is the bare lowercase stem, `claude` not `claude.EXE`.
+
+    Memory and age are `memory-inventory.py`'s concern: absent from a POSIX `ps` row and
+    from any hand-written table that does not care, and ignored by every classification
+    here, so a table built without them classifies exactly as one built with them.
+    """
 
     pid: int
     ppid: int
     name: str
     cmdline: str
+    private: int = 0  # bytes this process alone has committed
+    rss: int = 0  # working set, bytes
+    created: float = 0.0  # epoch seconds; 0.0 when unknown
 
 
 @dataclass(frozen=True)
@@ -161,15 +175,32 @@ def parse_windows_table(text: str) -> list[Process]:
         if isinstance(pid, bool) or not isinstance(pid, int) or not isinstance(ppid, int):
             continue
         name, cmdline = row.get("Name"), row.get("CommandLine")
+        private, rss = row.get("PrivatePageCount"), row.get("WorkingSetSize")
         table.append(
             Process(
                 pid,
                 ppid,
                 agent_clis.normalise_process(name if isinstance(name, str) else ""),
                 cmdline if isinstance(cmdline, str) else "",
+                private=max(0, private) if isinstance(private, int) else 0,
+                rss=max(0, rss) if isinstance(rss, int) else 0,
+                created=cim_epoch(row.get("CreationDate")),
             )
         )
     return table
+
+
+def cim_epoch(value: object) -> float:
+    """A CIM date as `ConvertTo-Json` wrote it, in epoch seconds; `0.0` for anything else."""
+    if not isinstance(value, str):
+        return 0.0
+    match = _CIM_DATE.search(value)
+    if match:
+        return int(match.group(1)) / 1000.0
+    try:
+        return _dt.datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def parse_posix_table(text: str) -> list[Process]:
