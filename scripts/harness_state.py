@@ -34,6 +34,7 @@ Tested in `tests/test_harness_state.py`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -60,6 +61,13 @@ def _state_root() -> Path:
 
 STATE_DIR = _state_root() / "logs" / "harness-switch"
 LEDGER = STATE_DIR / "ledger.json"
+
+# `root_key`'s ceiling, and how much of it a truncated key spends on its digest. 64 is
+# chosen against MAX_PATH rather than against taste: `STASH` plus the longest instruction
+# relpath (`.claude/rules/<name>.md`) leaves room for a key this size under any plausible
+# state root, including a pytest tmp directory.
+KEY_MAX = 64
+KEY_DIGEST = 12
 STASH = STATE_DIR / "files"
 
 # What Claude Code injects without being asked. `.claude/skills/` is absent by design --
@@ -187,14 +195,30 @@ def stood_down(path: Path | None = None) -> frozenset[str]:
 
 
 def root_key(root: Path) -> str:
-    """A filename-safe name for a root, stable across runs.
+    """A filename-safe name for a root, stable across runs, and **bounded**.
 
     The drive letter is kept (`c/Users/...` -> `c-Users-...`) because two roots differing
     only by drive are two roots, and a key that collided would restore one checkout's file
     into another.
+
+    The bound is the half that was missing. The held path is `STASH / root_key / relpath`,
+    so a key as long as the root's own path makes that sum grow with how deep the checkout
+    sits -- and Windows' MAX_PATH is 260 unless `LongPathsEnabled` is set, which it is not
+    by default. Under pytest's tmp base the mangled root lands *inside* a directory whose
+    path already contains it, and the doubling put ten tests over the limit with
+    `WinError 206` before a single assertion ran. The machine setting would have hidden
+    that rather than fixed it, so the bound belongs here.
+
+    The **tail** is what survives truncation: a checkout's own name is the end of its
+    path, and it is the part a human reads in the stash directory. A digest of the whole
+    path is appended to carry the uniqueness the discarded head was holding.
     """
     text = root.resolve().as_posix()
-    return "".join(char if char.isalnum() or char in "-_" else "-" for char in text).strip("-")
+    flat = "".join(char if char.isalnum() or char in "-_" else "-" for char in text).strip("-")
+    if len(flat) <= KEY_MAX:
+        return flat
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:KEY_DIGEST]
+    return f"{flat[-(KEY_MAX - KEY_DIGEST - 1) :].strip('-')}-{digest}"
 
 
 def instruction_files(root: Path) -> list[Path]:
