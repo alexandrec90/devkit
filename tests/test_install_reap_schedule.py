@@ -205,7 +205,13 @@ def test_check_is_routed_through_run_check(monkeypatch, capsys):
     assert "nothing" in capsys.readouterr().err
 
 
-def test_yes_is_routed_through_install(monkeypatch, capsys):
+def test_yes_is_routed_through_install(monkeypatch, capsys, tmp_path):
+    # A *static* checkout, built rather than borrowed: `--yes` refuses a path with
+    # BOXES_DIR in its parts, and `REPO_ROOT` is exactly that whenever the suite runs
+    # inside a box -- which is where `worktree.py new` puts every agent.
+    static = tmp_path / "devkit"
+    (static / "scripts").mkdir(parents=True)
+    (static / "scripts" / "reap-stale.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(installer, "install", lambda schedule: (True, "scheduled"))
-    assert installer.main(["--yes", "--devkit", str(REPO_ROOT)]) == 0
+    assert installer.main(["--yes", "--devkit", str(static)]) == 0
     assert "scheduled" in capsys.readouterr().out
