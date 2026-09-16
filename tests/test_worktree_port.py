@@ -8,9 +8,9 @@ change to what the assertions parse.
 
 Two mirrors are held here, and a third property:
 
-- `WORKTREE_DIRS` against `worktree_tiers.TIERS` plus the box tier -- "where a worktree
-  can be" has one owner on the Python side and this is the only place the TS copy is
-  compared to it.
+- `WORKTREE_DIRS` against `worktree_tiers.ALL_TIERS` -- "where a worktree can be" has
+  one owner on the Python side and this is the only place the TS copy is compared to
+  it.
 - `SLOT_SPAN` against `ports.toml`'s `registry.max_slots` -- the derived dev port only
   stays inside the frontend base's reserved span while the two agree.
 - Dependency-free: the config loads this file, so its only imports are Node builtins.
@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from pathlib import PurePosixPath
 
-from support import REPO_ROOT, devkit_ports, load_script, worktree, worktree_tiers
+from support import REPO_ROOT, devkit_ports, load_script, worktree_tiers
 
 sync = load_script("scripts/sync-devkit.py")
 
@@ -55,10 +55,15 @@ def _as_marker(tier) -> tuple[tuple[str, ...], int]:
 
 
 def test_the_typescript_tier_list_mirrors_the_python_one():
-    """Every tier `worktree_tiers.TIERS` names, at the same depth, plus the box tier the
-    Python side keeps in `worktree.BOXES_DIR_NAME` -- and nothing else."""
-    expected = {_as_marker(tier) for tier in worktree_tiers.TIERS}
-    expected.add(((worktree.BOXES_DIR_NAME,), 1))
+    """Every tier `worktree_tiers.ALL_TIERS` names, at the same depth -- and nothing else.
+
+    One set against one set. This used to union the box tier in off
+    `worktree.BOXES_DIR_NAME`, because the Python side had no list of all three: the two
+    agent tiers were in `worktree_tiers` and the box tier's directory was spelled
+    privately in six modules. That union was the assertion admitting it -- the mirror is
+    only as good as there being something to mirror.
+    """
+    expected = {_as_marker(tier) for tier in worktree_tiers.ALL_TIERS}
     assert _worktree_dirs(SOURCE.read_text(encoding="utf-8")) == expected
 
 

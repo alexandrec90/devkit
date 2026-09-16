@@ -106,10 +106,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # a project would show up as untracked files in that project's `git status`, which is
 # the `needs-branch` verdict this whole tier exists to stop manufacturing.
 #
-# The name is `sweep`'s now, not this module's: resolving the workspace file from inside
-# a box needs it, and that resolution had to move somewhere every workspace-aware script
-# can import (see `sweep.default_workspace`). Re-exported rather than re-spelled so the
-# tier's own callers keep reading `worktree.BOXES_DIR_NAME`.
+# The name is not this module's and no longer `sweep`'s either: `worktree_tiers` holds it
+# beside the two agent-CLI tiers, because the modules that needed it are vendored hooks
+# running in checkouts that have neither this file nor `sweep.py`. Re-exported down that
+# chain rather than re-spelled, so callers keep reading `worktree.BOXES_DIR_NAME`.
 BOXES_DIR_NAME = sweep.BOXES_DIR_NAME
 LEASE_FILE_NAME = "leases.json"
 

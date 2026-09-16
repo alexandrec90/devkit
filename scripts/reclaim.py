@@ -112,6 +112,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+# Every worktree root's directory name, in the module that owns them -- stdlib-only, so
+# importable here despite this script running before any venv exists.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import worktree_tiers
+
+BOXES_DIR_NAME = worktree_tiers.BOXES_DIR_NAME
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 GB = 1_000_000_000
@@ -135,12 +141,6 @@ PROTECTED_STAGING = ("$GetCurrent", "$WINDOWS.~BT", "$WINDOWS.~WS", "Windows.old
 
 # `<product>-<revision>` -- how playwright, and only playwright, names a browser build.
 _REVISIONED = re.compile(r"^(?P<product>.+?)-(?P<revision>\d+)$")
-
-# Where the box tier lives under the workspace. Duplicated from `sweep.BOXES_DIR_NAME`
-# for the reason `worktree.py` states at its own copy: this script runs before any venv
-# exists and must not import a sibling to learn one directory name. A test asserts the
-# two agree.
-BOXES_DIR_NAME = ".worktrees"
 
 # Windows Search's crawl-scope API (`ISearchCrawlScopeManager`) is a raw-IUnknown COM
 # interface: `ctypes` cannot call it and PowerShell's late binder cannot either, since
