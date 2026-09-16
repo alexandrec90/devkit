@@ -99,18 +99,18 @@ SCAN_NAME = "fix-prs"
 # at once; the cap is here so a runaway bot cannot turn one dropdown into a thousand.
 PR_LIMIT = 50
 
-# `gh pr list` fields. `mergeable` is the conflict half and `statusCheckRollup` the gate
-# half; `isDraft` is what a draft is excluded by.
-PR_LIST_FIELDS = "number,title,headRefName,updatedAt,url,isDraft,mergeable,statusCheckRollup"
+# Ask for both conflict signals: `mergeable: CONFLICTING` and `mergeStateStatus: DIRTY`.
+# `statusCheckRollup` is the gate half; `isDraft` is what a draft is excluded by.
+PR_LIST_FIELDS = (
+    "number,title,headRefName,updatedAt,url,isDraft,mergeable,mergeStateStatus,statusCheckRollup"
+)
 
 # ...and the same question asked of one PR at launch time, plus the base branch, which is
 # what the agent has to merge in when the answer is a conflict, and `state`/`isDraft`,
 # which the scan gets free from `--state open` and this half has to ask for: a closed PR
 # keeps its last FAILURE in the rollup, so without them it still reads as broken and the
 # run dies in `resume` on the head branch GitHub deleted when it closed.
-PR_VIEW_FIELDS = (
-    "number,title,headRefName,baseRefName,url,state,isDraft,mergeable,statusCheckRollup"
-)
+PR_VIEW_FIELDS = "number,title,headRefName,baseRefName,url,state,isDraft,mergeable,mergeStateStatus,statusCheckRollup"
 OPEN = "OPEN"  # the one state worth a tree; CLOSED and MERGED both delete the head branch
 
 # How GitHub says the branch no longer merges cleanly. `UNKNOWN` is its answer while the
@@ -183,12 +183,52 @@ def broken_reason(pr: dict) -> str:
     if not isinstance(pr, dict) or pr.get("isDraft"):
         return ""
     reasons = []
-    if str(pr.get("mergeable") or "").upper() == CONFLICTING:
+    if (
+        str(pr.get("mergeable") or "").upper() == CONFLICTING
+        or str(pr.get("mergeStateStatus") or "").upper() == "DIRTY"
+    ):
         reasons.append("merge conflict")
     failed = failing_checks(pr.get("statusCheckRollup"))
     if failed:
         reasons.append(f"{failed} check{'s' if failed != 1 else ''} failing")
     return " + ".join(reasons)
+
+
+def unresolved_mergeability(entries: list[dict]) -> list[dict]:
+    """The rows GitHub has not finished judging: no verdict yet, and not already dirty.
+
+    Drafts are out because nothing downstream reads them, and a row with no integer
+    `number` cannot be asked about.
+    """
+    return [
+        entry
+        for entry in entries
+        if not entry.get("isDraft")
+        and str(entry.get("mergeable") or "UNKNOWN").upper() == "UNKNOWN"
+        and str(entry.get("mergeStateStatus") or "").upper() != "DIRTY"
+        and isinstance(entry.get("number"), int)
+    ]
+
+
+def refresh_unresolved(project_dir: Path, entries: list[dict]) -> None:
+    """Ask GitHub again about the rows it had not judged yet. Mutates `entries` in place.
+
+    `gh pr list` answers while mergeability is still being calculated, so a conflict can
+    arrive as `UNKNOWN` and read as clean -- and a conflicted PR can have no failing
+    check at all, which leaves nothing else to notice it by. Fanned out, so the picker
+    does not pay one round trip per PR.
+    """
+    unresolved = unresolved_mergeability(entries)
+    if not unresolved:
+        return
+    with futures.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(unresolved))) as pool:
+        pending = {
+            pool.submit(pr_view, project_dir, entry["number"]): entry for entry in unresolved
+        }
+        for future in futures.as_completed(pending):
+            # A failed view is {}, preserving the list's known check failures and
+            # updatedAt (which the launch-time view does not request).
+            pending[future].update(future.result())
 
 
 def broken_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
@@ -213,7 +253,9 @@ def broken_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
         return []
     if not isinstance(entries, list):
         return []
-    return [entry for entry in entries if isinstance(entry, dict) and broken_reason(entry)]
+    entries = [entry for entry in entries if isinstance(entry, dict)]
+    refresh_unresolved(project_dir, entries)
+    return [entry for entry in entries if entry.get("state", OPEN) == OPEN and broken_reason(entry)]
 
 
 # --- the rows the picker draws ----------------------------------------------------
@@ -445,10 +487,9 @@ def parse_pick(token: str) -> Pick | None:
 def pr_view(project_dir: Path, number: int) -> dict:
     """The PR as it is *now*, not as the menu last saw it. Empty on any failure.
 
-    The menu is up to a quarter of an hour old, which is long enough for the gate to have
-    gone green or for a rebase to have cleared the conflict. What the agent is told has
-    to be current, so this is read at launch time -- and it is also the check that stops
-    a worktree being cut for a PR that no longer needs one.
+    The picker scans live, but a gate can go green or a rebase clear the conflict while
+    the person chooses. Read again at launch to avoid cutting an unnecessary worktree.
+    The scan also uses this once for each PR whose mergeability is still unknown.
     """
     try:
         result = sweep.gh_for(project_dir)("pr", "view", str(number), "--json", PR_VIEW_FIELDS)
