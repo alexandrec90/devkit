@@ -776,7 +776,7 @@ or, with the knobs:
 "devkit.remoteControl": {
   "projects": ["devkit"],
   "spawn": "same-dir",              // or "worktree" — see below
-  "permissionMode": "acceptEdits",  // a standing grant — opt in deliberately
+  "permissionMode": "acceptEdits",  // reaches the server; a phone session ignores it
   "idleMinutes": 20,                // transcript silence before a restart is allowed
   "updateAt": "04:45",              // after devkit-global-tools, deliberately
   "capacity": 8,                    // sessions per server; the CLI's own default is 32
@@ -785,10 +785,15 @@ or, with the knobs:
 }
 ```
 
-`permissionMode` is the one knob a phone cannot work around. A session spawned from the
-mobile app opens in `auto` and the UI offers no way to switch, so `bypassPermissions`
-here is the only route to one — and it is a standing grant on an unattended machine,
-which is why it is opt-in.
+`permissionMode` reaches the server as `--permission-mode`, and **it does not raise the
+mode of a session the phone spawns.** A spawned session is handed the server's mode as the
+CLI's `--inherit-permission-mode`, "used only when nothing else configures one" — and the
+mobile app configures one when it creates the session, so the session lands in `auto`
+however this is set. A `permissions.defaultMode` of `bypassPermissions` in
+`~/.claude/settings.json` loses to the app the same way. What a phone session does honour
+is a `permissions.allow` entry, which applies in `auto` mode too, so that is where a
+standing grant for a phone actually goes. Either way it is a standing grant on an
+unattended machine reachable from the internet, which is why neither is a default.
 
 `spawn` chooses where an on-demand session lands. **`worktree` mode is not the box tier
 `worktree.py` owns** — Claude Code cuts its own worktrees under
