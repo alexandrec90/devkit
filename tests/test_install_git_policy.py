@@ -9,6 +9,9 @@ from pathlib import Path
 from support import REPO_ROOT, load_script
 
 installer = load_script("scripts/install-git-policy.py")
+# The layout tier moved to its own module; the names it owns are read from there
+# rather than re-exported through the installer purely to keep a test import alive.
+layout = load_script("scripts/install_policy_layout.py")
 
 
 def test_run_command_captures_both_streams_without_raising():
@@ -129,7 +132,7 @@ def test_the_policy_is_listed_in_both_layouts_so_an_older_tag_still_installs():
     """
     assert "scripts/git_policy.py" in installer.RUNTIME_FILES
     assert "scripts/git_policy/__init__.py" in installer.RUNTIME_FILES
-    assert installer.POLICY_ENTRYPOINTS == {
+    assert layout.POLICY_ENTRYPOINTS == {
         "devkit_git_policy.py",
         "devkit_git_policy/__init__.py",
     }
@@ -268,7 +271,7 @@ def test_installing_from_a_ref_writes_that_refs_bytes(tmp_path):
     written = {
         source: destination
         for source, destination in installer.RUNTIME_FILES.items()
-        if destination in installer.POLICY_ENTRYPOINTS and installer.in_ref(REPO_ROOT, ref, source)
+        if destination in layout.POLICY_ENTRYPOINTS and installer.in_ref(REPO_ROOT, ref, source)
     }
     assert written, f"{ref} carries neither policy layout"
     for source, destination in written.items():
