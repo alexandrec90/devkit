@@ -87,7 +87,7 @@ definitions::scripts/release-pipeline.py = 34
 definitions::scripts/report-workflow-failure.py = 27
 definitions::scripts/resume-sessions.py = 21
 definitions::scripts/sweep.py = 56
-definitions::scripts/sync-devkit.py = 51
+definitions::scripts/sync-devkit.py = 53
 definitions::scripts/upgrade-project.py = 39
 definitions::scripts/workspace-status.py = 31
 definitions::scripts/workspace-task-index.py = 29
@@ -118,7 +118,7 @@ file_lines::scripts/release-pipeline.py = 930
 file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/resume-sessions.py = 502
 file_lines::scripts/sweep.py = 1990
-file_lines::scripts/sync-devkit.py = 1598
+file_lines::scripts/sync-devkit.py = 1649
 file_lines::scripts/upgrade-project.py = 1239
 file_lines::scripts/workspace-status.py = 1077
 file_lines::scripts/workspace-task-index.py = 576
@@ -141,7 +141,7 @@ function_lines::scripts/sweep.py::classify = 84
 function_lines::scripts/sweep.py::inspect = 133
 function_lines::scripts/sweep.py::main = 171
 function_lines::scripts/sweep.py::sync_plan = 87
-function_lines::scripts/sync-devkit.py::main = 266
+function_lines::scripts/sync-devkit.py::main = 271
 function_lines::scripts/upgrade-project.py::main = 166
 function_lines::scripts/upgrade-project.py::upgrade_one = 143
 function_lines::scripts/worktree-guard.py::main = 139
@@ -423,3 +423,8 @@ swallowed_errors::scripts/worktree.py = 1
 #   file_lines::scripts/install-git-policy.py -> 528
 #   file_lines::scripts/workspace-status.py -> 1077
 #   file_lines::scripts/worktree-guard.py -> 2309
+
+# 2026-09-16  recorded: sync-devkit.py gains source_map and copy_ends: the gated tier had no translation between devkit's layout (frontend/src/) and a consumer's ([frontend] src), so both sides were probed with the consumer's path and devkit was asked for a file it has never had at that name -- which is what stopped roguelike adopting v0.11.17 after the release itself succeeded. SEVENTH consecutive raise on this file (09-02, 09-05, 09-07, 09-08, 09-10, 09-11), so per the ratchet rule here is what is filling it, measured rather than assumed: of 1649 lines, main is 271 of them with ZERO docstring lines and complexity 74, while the other 52 definitions are all <= 46 lines and average 14. The module is not uniformly bloated and "split it by responsibility" is the wrong remedy: it is one CLI dispatcher that grew a branch per mode, wrapped around a well-factored library. The split that six records deferred is really "extract main's modes into named functions", which needs no new module and so does not touch the bootstrap constraint that has been the stated blocker every time -- sync-devkit.py is copied ALONE into a project as the bootstrap of a first --pull, so it cannot import siblings. Filed as a harness defect; doing it inside a fix for a stuck release would be scope creep. complexity is unchanged at 74 here because copy_ends takes the direction branch out of main.
+#   definitions::scripts/sync-devkit.py -> 53
+#   file_lines::scripts/sync-devkit.py -> 1649
+#   function_lines::scripts/sync-devkit.py::main -> 271
