@@ -227,12 +227,27 @@ def test_the_default_source_is_a_released_tag_not_the_working_tree():
 
 
 def test_installing_from_a_ref_writes_that_refs_bytes(tmp_path):
+    """Whichever layout the resolved ref actually carries.
+
+    This pinned `scripts/git_policy.py` until v0.11.18, the first tag cut after the flat
+    module became the `scripts/git_policy/` package -- so it asserted against a path no
+    current release holds and failed the moment `FALLBACK_DEVKIT_REF` caught up with the
+    tag. `install_files` already skips a `RUNTIME_FILES` entry the ref does not hold,
+    which is what keeps an install from an *older* tag working; the test owed the same
+    tolerance and did not have it.
+    """
     target = tmp_path / "hooks"
     ref = installer.resolve_ref(REPO_ROOT)
     installer.install(REPO_ROOT, target, ref)
 
-    expected = installer.read_blob(REPO_ROOT, ref, "scripts/git_policy.py")
-    assert (target / "devkit_git_policy.py").read_bytes() == expected
+    carried = [
+        (source, destination)
+        for source, destination in installer.RUNTIME_FILES.items()
+        if destination in installer.POLICY_ENTRYPOINTS and installer.in_ref(REPO_ROOT, ref, source)
+    ]
+    assert carried, f"{ref} carries no policy entrypoint at all"
+    for source, destination in carried:
+        assert (target / destination).read_bytes() == installer.read_blob(REPO_ROOT, ref, source)
 
 
 def test_an_unresolvable_ref_refuses_rather_than_installing_nothing():
@@ -529,3 +544,107 @@ def test_the_drift_report_names_the_fix(tmp_path):
     )
     assert "pre-commit" in report
     assert "--yes" in report
+
+
+# --- uninstall ----------------------------------------------------------------
+
+
+def test_render_uninstall_plan_names_every_step_and_the_one_it_declines(tmp_path):
+    """The plan is read before anything is removed, so it has to say what stays too --
+    `fetch.prune` is left set, and a reader who is not told that will assume otherwise."""
+    plan = installer.render_uninstall_plan(tmp_path / "hooks")
+    assert "core.hooksPath" in plan
+    assert "devkit.branchPolicy.failClosed" in plan
+    assert str(tmp_path / "hooks") in plan
+    assert "fetch.prune" in plan and "left set" in plan
+
+
+def test_uninstall_clears_the_hooks_path_before_deleting_what_it_points_at(tmp_path):
+    """The ordering **is** the safety property. A global `core.hooksPath` naming a
+    directory that does not exist fails every git command in every repository on the
+    machine, so between the two steps the path must either still resolve or be unset --
+    never name a deleted directory.
+    """
+    target = tmp_path / "hooks"
+    target.mkdir()
+    (target / "pre-commit").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    runner = FakeRunner(hooks_path=target.resolve().as_posix())
+
+    order: list[str] = []
+    real = installer.shutil.rmtree
+
+    def watched(path, *args, **kwargs):
+        order.append("rmtree")
+        return real(path, *args, **kwargs)
+
+    def watching(argv):
+        if "--unset" in argv and "core.hooksPath" in argv:
+            order.append("unset")
+        return runner(argv)
+
+    installer.shutil.rmtree = watched
+    try:
+        installer.uninstall(target, watching)
+    finally:
+        installer.shutil.rmtree = real
+
+    assert order == ["unset", "rmtree"], "the files went before the config pointing at them"
+    assert not target.exists()
+
+
+def test_uninstall_leaves_someone_elses_hooks_path_alone(tmp_path):
+    """The same test `ensure_compatible_hooks_path` applies on the way in: a path this
+    installer did not set is not this installer's to clear."""
+    target = tmp_path / "hooks"
+    target.mkdir()
+    runner = FakeRunner(hooks_path="C:/someone-elses-hooks")
+    undone = installer.unconfigure_git(target, runner)
+    assert "core.hooksPath" not in undone
+    assert not any("--unset" in call and "core.hooksPath" in call for call in runner.calls)
+
+
+def test_uninstall_keeps_fetch_prune(tmp_path):
+    """A general git preference this installer happened to turn on, not devkit's own
+    setting -- removing a behaviour the operator may now rely on is the worse error."""
+    target = tmp_path / "hooks"
+    target.mkdir()
+    runner = FakeRunner(hooks_path=target.resolve().as_posix())
+    installer.unconfigure_git(target, runner)
+    assert not any("fetch.prune" in call for call in runner.calls)
+
+
+def test_uninstall_survives_a_machine_where_nothing_was_installed(tmp_path):
+    """`--unset` on an absent key exits 5, which is 'nothing to do' rather than a fault;
+    an uninstall whose goal is a state has to read that as success."""
+
+    class Absent(FakeRunner):
+        def __call__(self, argv):
+            self.calls.append(tuple(argv))
+            if "--unset" in argv:
+                return subprocess.CompletedProcess(argv, 5, "", "")
+            return subprocess.CompletedProcess(argv, 1, "", "")
+
+    done = installer.uninstall(tmp_path / "never-installed", Absent())
+    assert done == []
+
+
+def test_the_uninstall_is_a_dry_run_until_yes(tmp_path, capsys):
+    target = tmp_path / "hooks"
+    target.mkdir()
+    (target / "pre-commit").write_text("x", encoding="utf-8")
+    assert installer.main(["--uninstall", "--target", str(target)]) == 0
+    assert "Dry run" in capsys.readouterr().out
+    assert target.exists(), "the dry run removed the runtime"
+
+
+def test_build_parser_accepts_every_verb_and_the_apply_flag_with_them():
+    """The CLI, as its own function so `main` holds decisions rather than declarations.
+
+    The assertion that matters is `--uninstall --yes`: while `--yes` sat in the same
+    mutually-exclusive group as the verbs, argparse rejected that combination outright, so
+    the uninstall had no dry run to offer and the bare verb had to act on the machine.
+    """
+    parser = installer.build_parser()
+    assert parser.parse_args(["--uninstall", "--yes"]).uninstall is True
+    assert parser.parse_args(["--check"]).check is True
+    parser.parse_args([])

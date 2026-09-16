@@ -24,6 +24,7 @@ So the properties are asserted for every installer at once, found rather than li
 from __future__ import annotations
 
 import inspect
+import re
 
 import pytest
 from support import REPO_ROOT, load_script
@@ -61,6 +62,66 @@ def test_every_installer_answers_check_and_yes(name):
     source = source_of(name)
     assert '"--check"' in source, f"{name} has no --check, so nothing can ask it"
     assert '"--yes"' in source, f"{name} has no --yes, so nothing can repair it"
+
+
+@pytest.mark.parametrize("name", IDS)
+def test_every_installer_answers_uninstall(name):
+    """Decommissioning a machine is a verb the whole set has to answer, not five of it.
+
+    While eight installers had no `--uninstall`, the workspace could not honestly offer
+    the verb for any of them: a checklist that silently did nothing for eight of thirteen
+    ticks is worse than no checklist.
+    """
+    assert '"--uninstall"' in source_of(name), (
+        f"{name} has no --uninstall, so this machine cannot be decommissioned from it"
+    )
+
+
+@pytest.mark.parametrize("name", IDS)
+def test_no_installer_mutates_the_machine_before_yes(name):
+    """`--uninstall` on its own prints a plan; it does not act.
+
+    `install-global-tools.py` shipped the other way -- `--uninstall` shared the
+    mutually-exclusive group with `--yes`, so the dry run was unspellable and the bare
+    verb deleted the live task. It cost a registered `devkit-global-tools` during the
+    audit that added this. The tell is structural and cheap to check: `--yes` must not be
+    in the same exclusive group as the verbs, or the two cannot be combined at all.
+    """
+    source = source_of(name)
+    verbs = re.search(
+        r"mode\s*=\s*parser\.add_mutually_exclusive_group\(\)(.*?)\n    args\s*=",
+        source,
+        re.S,
+    )
+    assert verbs is not None, f"{name}: no verb group found to check"
+    # `(?<![\w])` so this is the verb group itself and not `apply_mode`, which is the
+    # separate group two installers use to keep `--dry-run` and `--yes` exclusive of
+    # each other while both stay combinable with a verb.
+    in_verb_group = re.search(r"(?<![\w])mode\.add_argument\(\s*\n?\s*\"--yes\"", verbs.group(1))
+    assert in_verb_group is None, (
+        f"{name}: --yes is one of the mutually-exclusive verbs, so `--uninstall --yes` "
+        "cannot be spelled and the uninstall has no dry run"
+    )
+
+
+SHARED_ARGV = (["--check"], ["--uninstall"], ["--uninstall", "--yes"], ["--yes"])
+
+
+@pytest.mark.parametrize("argv", SHARED_ARGV, ids=[" ".join(a) for a in SHARED_ARGV])
+@pytest.mark.parametrize(("name", "module"), MODULES, ids=IDS)
+def test_every_installer_parses_the_shared_verbs(name, module, argv):
+    """The four spellings every installer owes, asserted through its real parser.
+
+    `--uninstall --yes` is the one that matters. While `--yes` sat in the same
+    mutually-exclusive group as the verbs, argparse *rejected* that combination -- which
+    is why `install-global-tools.py` had no dry run and its bare `--uninstall` deleted a
+    live scheduled task. argparse signals a rejected command line by raising `SystemExit`,
+    so parsing without one is the whole assertion.
+
+    Asserted here rather than by reading the source, and parametrized per argv so a
+    failure names the spelling that broke.
+    """
+    module.build_parser().parse_args(argv)
 
 
 def _never_spawn(argv):

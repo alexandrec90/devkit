@@ -360,6 +360,62 @@ def configure_git(target: Path, runner: Runner = run_command) -> None:
         _require_ok(result, f"could not configure {key}")
 
 
+def unconfigure_git(target: Path, runner: Runner = run_command) -> list[str]:
+    """Undo what `configure_git` set, and report what was undone.
+
+    **`core.hooksPath` is cleared, and only when it still points here.** A global
+    `core.hooksPath` naming a directory that does not exist makes *every* git command on
+    the machine fail, in every repository, with an error naming a path rather than this
+    installer -- so leaving it set is the one outcome an uninstall must not produce, and
+    clearing somebody else's is the other. That is the same test
+    `ensure_compatible_hooks_path` applies on the way in.
+
+    `devkit.branchPolicy.failClosed` goes too: it is devkit's own namespace and means
+    nothing once the hooks it gates are gone. **`fetch.prune` deliberately stays.** It is
+    not devkit's setting in any meaningful sense -- it is a widely-wanted git default this
+    installer happened to turn on -- and taking away a behaviour the operator may now rely
+    on is worse than leaving a harmless one behind.
+    """
+    undone = []
+    if _configured_hooks_path(runner) == target.resolve().as_posix():
+        result = runner(["git", "config", "--global", "--unset", "core.hooksPath"])
+        _require_ok(result, "could not clear core.hooksPath")
+        undone.append("core.hooksPath")
+    # `--unset` on a key that is not set exits 5, which is "nothing to do" and not a
+    # failure; anything else is.
+    result = runner(["git", "config", "--global", "--unset", "devkit.branchPolicy.failClosed"])
+    if result.returncode == 0:
+        undone.append("devkit.branchPolicy.failClosed")
+    elif result.returncode != 5:
+        _require_ok(result, "could not clear devkit.branchPolicy.failClosed")
+    return undone
+
+
+def uninstall(target: Path, runner: Runner = run_command) -> list[str]:
+    """Remove the installed runtime and the configuration pointing at it.
+
+    **Configuration first, files second**, which is the whole safety property: between the
+    two steps the hooks path either names a directory that still exists or is unset, and
+    never a deleted one. Reversing the order leaves every git command on the machine
+    broken for the width of the window, and permanently if the second step fails.
+    """
+    done = [f"git config --global --unset {key}" for key in unconfigure_git(target, runner)]
+    if target.is_dir():
+        shutil.rmtree(target)
+        done.append(f"removed {target}")
+    return done
+
+
+def render_uninstall_plan(target: Path) -> str:
+    return (
+        "Devkit global Git policy uninstall:\n"
+        "  git config --global --unset core.hooksPath (only while it points here)\n"
+        "  git config --global --unset devkit.branchPolicy.failClosed\n"
+        f"  remove {target}\n"
+        "\n`fetch.prune` is left set: it is a general git preference rather than devkit's."
+    )
+
+
 @dataclass(frozen=True)
 class Drift:
     """One installed file that no longer matches the source it was copied from."""
@@ -527,7 +583,10 @@ def render_plan(target: Path, ref: str = WORKTREE_REF) -> str:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI. Its own function so `main` holds decisions rather than declarations --
+    the shape `structure_check`'s `function_lines` limit asks for, and the one
+    `install-reconcile-task.py` already had."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--target",
@@ -535,19 +594,22 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_TARGET,
         help=f"stable runtime directory (default: {DEFAULT_TARGET})",
     )
+    # The verbs. `--yes` / `--dry-run` are deliberately *not* among them: they say whether
+    # to apply, and `--uninstall --yes` has to be expressible.
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
+    apply_mode = parser.add_mutually_exclusive_group()
+    apply_mode.add_argument(
         "--dry-run",
         dest="dry_run",
         action="store_true",
         default=True,
-        help="print the install plan without changing anything (default)",
+        help="print the plan without changing anything (default)",
     )
-    mode.add_argument(
+    apply_mode.add_argument(
         "--yes",
         dest="dry_run",
         action="store_false",
-        help="copy the hooks and update global Git configuration",
+        help="apply: copy the hooks and update global Git configuration, or confirm an --uninstall",
     )
     mode.add_argument(
         "--check",
@@ -555,6 +617,14 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "report whether the installed runtime still matches this checkout; "
             "exit 1 when it has drifted, 2 when nothing is installed here"
+        ),
+    )
+    mode.add_argument(
+        "--uninstall",
+        action="store_true",
+        help=(
+            "remove the installed runtime and the global config pointing at it "
+            "(dry run unless --yes)"
         ),
     )
     parser.add_argument(
@@ -575,10 +645,28 @@ def main(argv: list[str] | None = None) -> int:
             "is how a runtime once ended up missing an escape hatch its source had"
         ),
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
     target = args.target.expanduser().resolve()
     if args.check:
         return run_check(REPO_ROOT, target)
+    if args.uninstall:
+        print(render_uninstall_plan(target))
+        if args.dry_run:
+            print("\nDry run -- nothing changed. Re-run with --yes to uninstall.")
+            return 0
+        try:
+            done = uninstall(target)
+        except (InstallRefusedError, OSError) as error:
+            print(f"\ninstall-git-policy: REFUSED -- {error}", file=sys.stderr)
+            return 2
+        print("\n" + ("\n".join(f"  {line}" for line in done) or "  nothing was installed here"))
+        print("install-git-policy: uninstalled")
+        return 0
     if args.from_worktree and args.ref:
         parser.error("--ref and --from-worktree choose different sources; pass one")
 

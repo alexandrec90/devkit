@@ -75,7 +75,7 @@ definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
 definitions::scripts/hooks/structure_check.py = 43
 definitions::scripts/hooks/structure_scan.py = 31
-definitions::scripts/install-git-policy.py = 25
+definitions::scripts/install-git-policy.py = 29
 definitions::scripts/instruction-budget.py = 26
 definitions::scripts/new-project.py = 28
 definitions::scripts/plug-projects.py = 30
@@ -97,7 +97,7 @@ dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::pytest = 1
 dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 544
-file_lines::scripts/devkit_project.py = 1725
+file_lines::scripts/devkit_project.py = 1735
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/fix-prs.py = 768
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
@@ -105,7 +105,7 @@ file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
 file_lines::scripts/hooks/structure_check.py = 1078
 file_lines::scripts/hooks/structure_scan.py = 680
-file_lines::scripts/install-git-policy.py = 602
+file_lines::scripts/install-git-policy.py = 690
 file_lines::scripts/instruction-budget.py = 517
 file_lines::scripts/new-project.py = 863
 file_lines::scripts/plug-projects.py = 922
@@ -425,3 +425,8 @@ swallowed_errors::scripts/worktree.py = 1
 # 2026-09-15  recorded: The git_policy split lands here: install-git-policy.py gains worktree_drift (the stale-worktree-install check), install_refusal (the backstop that makes an install with no policy module unrepresentable) and _make_room (a nested destination's parent), plus the RUNTIME_FILES comment explaining why the policy is listed in both layouts. Second raise for this module, not a fifth, so it is a raise rather than a defect report -- but it now shows the same shape git_policy.py did, and saying so here is the point: it holds the runtime layout, the receipt, the drift comparison, ref reading (read_blob/in_ref/resolve_ref), hooks-path configuration, plan rendering and the CLI. That is the seam if it is raised again; do not let it reach five.
 #   definitions::scripts/install-git-policy.py -> 25
 #   file_lines::scripts/install-git-policy.py -> 602
+
+# 2026-09-16  recorded: The machine tier's install/uninstall parity. Two modules gain lines that have nowhere else to go, and both were already far past these limits before this change. devkit_project.py gains ONE ACTIONS entry and its reasoning (the 'installers' action behind the Machine: Scheduled Jobs task) -- ACTIONS is the single place a dispatched task can be declared, which is the same precedent recorded here on 09-05. install-git-policy.py gains the uninstall the other twelve installers now also have: unconfigure_git, uninstall, render_uninstall_plan and build_parser. THIRD consecutive raise for install-git-policy.py, so per the ratchet rule in .claude/rules/engineering.md this is a defect report rather than a raise. Measured what fills it: of 690 lines, no function is a god function -- main is 63 after this change's own build_parser extraction, and the largest is install_files at 52. What fills it is SIX separable responsibilities that have never been cut apart, exactly as the 09-15 record predicted: the runtime layout (RUNTIME_FILES, POLICY_ENTRYPOINTS, HOOK_NAMES), ref reading (resolve_ref/read_blob/in_ref/_generator), the receipt (Receipt/read_receipt/digest), installing (install_files/install/_make_room/install_refusal), drift comparison (Drift/compare_install/worktree_drift/behind_ref/render_drift), and git configuration plus the CLI (configure_git/unconfigure_git/uninstall/ensure_compatible_hooks_path/run_check/build_parser/main). The seam to cut first is the drift tier: it is five definitions, it imports nothing the install path needs, and it is the half installers.py calls on every maintenance pass. Not bundled here because this change already touches all thirteen installers and a split of the policy installer needs its own reversion check.
+#   definitions::scripts/install-git-policy.py -> 29
+#   file_lines::scripts/devkit_project.py -> 1735
+#   file_lines::scripts/install-git-policy.py -> 690

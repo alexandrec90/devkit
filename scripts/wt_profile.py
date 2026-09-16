@@ -200,6 +200,26 @@ def merged(settings: dict[str, Any]) -> dict[str, Any]:
     return updated
 
 
+def without(settings: dict[str, Any]) -> dict[str, Any]:
+    """`settings` with devkit's profile dropped -- a new object, input untouched.
+
+    The inverse of `merged`, and matched to it: the profile is found by GUID, so a
+    same-named profile the operator wrote themselves is left where it is. Only devkit's
+    own entry goes, and nothing else in the file is touched -- `profiles.defaults`, the
+    key bindings and the colour schemes are all somebody else's.
+    """
+    updated = dict(settings)
+    profiles = updated.get("profiles")
+    entries = [
+        dict(entry) for entry in profiles_list(settings) if entry.get("guid") != PROFILE_GUID
+    ]
+    if isinstance(profiles, dict):
+        updated["profiles"] = {**profiles, "list": entries}
+    else:
+        updated["profiles"] = {"list": entries}
+    return updated
+
+
 def profile_name(settings: dict[str, Any]) -> str:
     """`"Agent"` when a profile of that NAME is registered, `""` otherwise.
 

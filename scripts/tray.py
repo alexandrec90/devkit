@@ -68,7 +68,13 @@ SW_SHOWNORMAL = 1
 # reports is an index into the list the menu was built from.
 CMD_REFRESH = 100
 CMD_EXIT = 101
+CMD_INSTALLERS = 102
 FIRST_JOB = 200
+
+# `installers.py`'s artifact. It answers the one question the job rows cannot: those come
+# from `schedule_health`, which reads the *scheduler*, so a job that was never registered
+# at all is invisible there -- there is nothing to read. This is where that shows up.
+INSTALLERS_ARTIFACT = Path("logs/installers.log")
 
 # How often to ask the scheduler, in milliseconds. Two minutes: the fastest devkit job
 # runs every fifteen, so anything tighter is asking a question whose answer cannot have
@@ -339,6 +345,7 @@ class Tray:
         if not self.states:
             user32.AppendMenuW(menu, MF_STRING, 0, "no scheduled jobs registered")
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+        user32.AppendMenuW(menu, MF_STRING, CMD_INSTALLERS, "Installers report")
         user32.AppendMenuW(menu, MF_STRING, CMD_REFRESH, "Refresh now")
         user32.AppendMenuW(menu, MF_STRING, CMD_EXIT, "Exit")
 
@@ -358,14 +365,36 @@ class Tray:
         artifact = self.states[index].artifact
         if not artifact:
             return
-        path = REPO_ROOT / artifact
-        if path.is_file():
-            # `ShellExecuteW` rather than `os.startfile`: the same effect, through a
-            # handle this module already holds, and without a lint suppression that
-            # every future reader would have to re-justify.
-            shell32.ShellExecuteW(None, "open", str(path), None, None, SW_SHOWNORMAL)
+        self.open_path(REPO_ROOT / artifact)
+
+    def open_path(self, path: Path) -> bool:
+        """Hand a file to the shell. False when it is not there, which is not an error.
+
+        A job that has never run has written no artifact. Clicking its row must do nothing
+        rather than raise inside a message handler, where an exception takes the whole tray
+        down -- leaving no icon, which looks exactly like "nothing is wrong".
+        """
+        if not path.is_file():
+            return False
+        # `ShellExecuteW` rather than `os.startfile`: the same effect, through a
+        # handle this module already holds, and without a lint suppression that
+        # every future reader would have to re-justify.
+        shell32.ShellExecuteW(None, "open", str(path), None, None, SW_SHOWNORMAL)
+        return True
 
     # --- the loop ------------------------------------------------------------
+
+    def _on_command(self, hwnd, command: int) -> None:
+        """One menu click. Its own method so `_on_message` stays a flat dispatch on the
+        message id rather than nesting a second dispatch inside one of its arms."""
+        if command == CMD_EXIT:
+            user32.DestroyWindow(hwnd)
+        elif command == CMD_REFRESH:
+            self.poll()
+        elif command == CMD_INSTALLERS:
+            self.open_path(REPO_ROOT / INSTALLERS_ARTIFACT)
+        elif command >= FIRST_JOB:
+            self.open_artifact(command - FIRST_JOB)
 
     def _on_message(self, hwnd, message, wparam, lparam):
         if message == WM_TIMER:
@@ -375,13 +404,7 @@ class Tray:
             self.show_menu()
             return 0
         if message == WM_COMMAND:
-            command = wparam & 0xFFFF
-            if command == CMD_EXIT:
-                user32.DestroyWindow(hwnd)
-            elif command == CMD_REFRESH:
-                self.poll()
-            elif command >= FIRST_JOB:
-                self.open_artifact(command - FIRST_JOB)
+            self._on_command(hwnd, wparam & 0xFFFF)
             return 0
         if message == WM_DESTROY:
             self.notify(NIM_DELETE)

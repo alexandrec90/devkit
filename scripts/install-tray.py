@@ -37,6 +37,7 @@ from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
+import installer_cli
 import harness_state
 import sweep
 
@@ -218,10 +219,44 @@ def run_check(schedule: Schedule, runner: Runner = run_command) -> tuple[int, st
     return devkit_schtasks.run_check(schedule.name, task_document(schedule), runner)
 
 
-def main(argv: list[str] | None = None) -> int:
+def checkout_refusal(root: Path, apply: bool) -> str:
+    """Why `root` cannot be the checkout this task runs from, or "" when it can.
+
+    Both refusals are about a path that will outlive the command registering it: one
+    checks the runner is there at all, the other that it is not inside an ephemeral box --
+    `reconcile` deletes those when their PR merges, taking the task's `<Command>` with it,
+    silently and days later.
+    """
+    script = root / "scripts" / "tray.py"
+    if not script.is_file():
+        return f"schedule: no tray at {script}"
+    if apply and BOXES_DIR in root.parts:
+        return (
+            f"schedule: {root} is an ephemeral box. Point --devkit at the static "
+            f"checkout, which outlives the boxes."
+        )
+    return ""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI. Its own function so `main` holds decisions rather than declarations --
+    the shape `structure_check`'s `function_lines` limit asks for, and the one
+    `install-reconcile-task.py` already had."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--yes", action="store_true", help="register the task")
+    mode.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove the registered task (dry run unless --yes)",
+    )
+    mode.add_argument(
+        "--status", action="store_true", help="print what the scheduler currently holds"
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="apply: register the task, or confirm an --uninstall",
+    )
     mode.add_argument("--check", action="store_true", help="report what is registered")
     mode.add_argument(
         "--restart",
@@ -244,7 +279,33 @@ def main(argv: list[str] | None = None) -> int:
             "into .worktrees/ dies the moment reconcile reaps it"
         ),
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+    # `--yes` is the apply flag for two verbs now rather than a verb itself, so it can no
+    # longer sit in the mutually-exclusive group -- `--uninstall --yes` has to be
+    # expressible. Restarting is still not something one applies, so the exclusion this
+    # installer alone needs is stated here instead of inferred from the group.
+    if args.restart and args.yes:
+        parser.error("--restart acts on the registered task; it takes no --yes")
+
+    # Before every other check here: removing a task must not require the runner it points
+    # at to still exist, which is exactly the state a moved or half-uninstalled checkout is
+    # in. `installer_cli.answer` owns what the two verbs mean for all thirteen installers.
+    handled = installer_cli.answer(
+        TASK_NAME,
+        status=args.status,
+        uninstall=args.uninstall,
+        apply=args.yes,
+        run=run_command,
+        windows=WINDOWS,
+    )
+    if handled is not None:
+        return handled
 
     if not valid_poll(args.poll_seconds):
         parser.error(
@@ -258,16 +319,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if ok else 2
 
     root = args.devkit.expanduser().resolve()
-    script = root / "scripts" / "tray.py"
-    if not script.is_file():
-        print(f"schedule: no tray at {script}", file=sys.stderr)
-        return 2
-    if args.yes and BOXES_DIR in root.parts:
-        print(
-            f"schedule: {root} is an ephemeral box. Point --devkit at the static "
-            f"checkout, which outlives the boxes.",
-            file=sys.stderr,
-        )
+    refusal = checkout_refusal(root, args.yes)
+    if refusal:
+        print(refusal, file=sys.stderr)
         return 2
 
     schedule = schedule_for(args.poll_seconds, root)

@@ -335,3 +335,129 @@ def test_run_command_captures_and_reports_a_spawn_failure_as_a_code(tmp_path):
     ends it with nine installers unchecked."""
     missing = installers.run_command([str(tmp_path / "no-such-python"), "x", "--check"])
     assert missing.returncode == 3 and missing.stderr
+
+
+# --- uninstall ------------------------------------------------------------------
+
+
+class Removals:
+    """A runner that answers `--uninstall` from a table and records every argv."""
+
+    def __init__(self, codes: dict[str, int] | None = None):
+        self.codes = codes or {}
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv):
+        self.calls.append(list(argv))
+        script = Path(argv[1]).name
+        return subprocess.CompletedProcess(
+            list(argv), self.codes.get(script, 0), f"{script} removed\n", ""
+        )
+
+
+def test_short_name_is_what_a_person_ticks(tmp_path):
+    """The file name is the stable identifier -- `TASK_NAME` is not, because two
+    installers register no job at all -- but nobody wants `install-` and `.py` in a
+    picker, and the workspace checklist is spelled in these."""
+    assert installers.short_name(Path("scripts/install-reap-schedule.py")) == "reap-schedule"
+    assert installers.short_name(Path("scripts/install-tray.py")) == "tray"
+
+
+def test_remove_passes_yes_through_and_reports_the_installers_last_word(tmp_path):
+    root = a_checkout(tmp_path, "install-alpha.py")
+    script = root / "scripts" / "install-alpha.py"
+    runner = Removals()
+    outcome = installers.remove(script, "py", [], True, runner)
+    assert outcome.verdict == installers.REMOVED
+    assert "install-alpha.py removed" in outcome.detail
+    assert runner.calls == [["py", str(script), "--uninstall", "--yes"]]
+
+
+def test_remove_without_apply_asks_for_a_plan_only(tmp_path):
+    root = a_checkout(tmp_path, "install-alpha.py")
+    script = root / "scripts" / "install-alpha.py"
+    runner = Removals()
+    assert installers.remove(script, "py", [], False, runner).verdict == installers.WOULD_REMOVE
+    assert runner.calls == [["py", str(script), "--uninstall"]]
+
+
+def test_the_maintainer_comes_off_first(tmp_path):
+    """It registers the job whose `maintain` pass re-registers everything else, so taking
+    it last would have the next logon quietly undo the uninstall -- indistinguishable, to
+    the operator, from an uninstall that never worked."""
+    root = a_checkout(tmp_path, "install-zed.py", installers.MAINTAINER, "install-alpha.py")
+    order = [p.name for p in installers.uninstall_order(installers.discover(root))]
+    assert order[0] == installers.MAINTAINER
+    assert order[1:] == ["install-alpha.py", "install-zed.py"], "the rest lost their order"
+
+
+def test_uninstall_is_dry_until_yes(tmp_path):
+    root = a_checkout(tmp_path, "install-alpha.py")
+    runner = Removals()
+    outcomes = installers.decommission(root, False, {}, runner, python="py")
+    assert [o.verdict for o in outcomes] == [installers.WOULD_REMOVE]
+    assert runner.calls[0][2:] == ["--uninstall"], "a dry run passed --yes"
+
+
+def test_uninstall_with_yes_confirms_each_installer(tmp_path):
+    root = a_checkout(tmp_path, "install-alpha.py", "install-beta.py")
+    runner = Removals()
+    outcomes = installers.decommission(root, True, {}, runner, python="py")
+    assert [o.verdict for o in outcomes] == [installers.REMOVED, installers.REMOVED]
+    assert all(argv[2:] == ["--uninstall", "--yes"] for argv in runner.calls)
+
+
+def test_a_failed_removal_is_reported_and_does_not_stop_the_rest(tmp_path):
+    root = a_checkout(tmp_path, "install-alpha.py", "install-beta.py")
+    runner = Removals({"install-alpha.py": 2})
+    outcomes = installers.decommission(root, True, {}, runner, python="py")
+    assert [o.verdict for o in outcomes] == [installers.FAILED, installers.REMOVED]
+    assert installers.exit_code(outcomes) == 2
+
+
+def test_nothing_ticked_means_everything_not_nothing(tmp_path):
+    """A `multiPick` the operator dismissed sends "", and a run that silently did nothing
+    would be read as "there was nothing to do"."""
+    assert installers.parse_only("") == []
+    root = a_checkout(tmp_path, "install-alpha.py", "install-beta.py")
+    chosen, missing = installers.select(installers.discover(root), [])
+    assert [p.name for p in chosen] == ["install-alpha.py", "install-beta.py"]
+    assert missing == []
+
+
+def test_a_tick_may_be_spelled_short_or_long(tmp_path):
+    root = a_checkout(tmp_path, "install-alpha.py")
+    for spelling in ("alpha", "install-alpha", "install-alpha.py"):
+        chosen, missing = installers.select(installers.discover(root), [spelling])
+        assert [p.name for p in chosen] == ["install-alpha.py"], spelling
+        assert missing == []
+
+
+def test_the_checklist_separator_and_stray_spaces_survive():
+    assert installers.parse_only(" tray , reap-schedule ,, ") == ["tray", "reap-schedule"]
+
+
+def test_a_tick_that_matches_nothing_is_reported_rather_than_ignored(tmp_path):
+    """Five boxes ticked, four run, and a report that reads as a complete success is the
+    exact failure a checklist is supposed to prevent."""
+    root = a_checkout(tmp_path, "install-alpha.py")
+    outcomes = installers.decommission(root, True, {}, Removals(), python="py", only=["ghost"])
+    assert [(o.installer, o.verdict) for o in outcomes] == [("ghost", installers.FAILED)]
+    assert installers.exit_code(outcomes) == 2
+
+
+def test_a_narrowed_status_only_checks_what_was_ticked(tmp_path):
+    root = a_checkout(tmp_path, "install-alpha.py", "install-beta.py")
+    runner = Answers({"install-alpha.py": 0, "install-beta.py": 0})
+    outcomes = installers.reconcile(root, False, {}, runner, python="py", only=["beta"])
+    assert [o.installer for o in outcomes] == ["install-beta.py"]
+    assert runner.modes_for("install-alpha.py") == []
+
+
+def test_uninstall_carries_the_same_per_installer_options_the_check_does(tmp_path):
+    """An option that changes *what* was registered has to reach the removal too, or the
+    uninstall addresses a different task than the install created."""
+    root = a_checkout(tmp_path, "install-alpha.py")
+    runner = Removals()
+    installers.decommission(root, True, {"install-alpha.py": ["--merge"]}, runner, python="py")
+    assert runner.calls[0][2:] == ["--uninstall", "--yes", "--merge"]
