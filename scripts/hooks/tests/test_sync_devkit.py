@@ -1859,3 +1859,137 @@ def test_a_pull_delivers_the_gated_file_only_where_the_tier_is_on(tmp_path, monk
     assert sh.main(["--pull", "--src", str(src)]) == 0
     assert not (off / "frontend").exists()
     assert sh.main(["--check", "--src", str(src)]) == 0
+
+
+# --- the two layouts are not the same path ------------------------------------
+#
+# devkit keeps its copy at `frontend/src/`; a single-package consumer sets
+# `dir = "."` and wants it at `src/`. Both sides used to be probed with the
+# consumer's spelling, so devkit was asked for a file it has never had at that name.
+
+
+def test_the_source_map_is_empty_where_both_layouts_agree(tmp_path):
+    """Every MANIFEST entry, and a consumer whose `src` is devkit's own, need no
+    translation -- an entry in the map would be a rename waiting to happen."""
+    assert sh.source_map(_consumer(tmp_path / "off", OFF)) == {}
+    assert sh.source_map(_consumer(tmp_path / "default", ON)) == {}
+
+
+def test_the_source_map_translates_a_consumer_whose_layout_differs(tmp_path):
+    """Keyed by the consumer's path, valued at devkit's -- the direction every caller
+    needs, since the manifest is spelled at the consumer's layout throughout."""
+    assert sh.source_map(_consumer(tmp_path / "web", ON_WEB)) == {
+        "web/src/worktreePort.ts": "frontend/src/worktreePort.ts",
+        "web/src/worktreePort.test.ts": "frontend/src/worktreePort.test.ts",
+    }
+
+
+def test_copy_ends_remaps_only_the_devkit_side_of_each_direction():
+    """The direction is the whole of it. `manifest` is spelled at the consumer's layout,
+    so a pull reads devkit's spelling and writes the consumer's, and a push does the
+    reverse -- remapping both ends, or the wrong one, silently relocates the file."""
+    sources = {"src/worktreePort.ts": "frontend/src/worktreePort.ts"}
+
+    assert sh.copy_ends("src/worktreePort.ts", sources, pull=True) == (
+        "frontend/src/worktreePort.ts",
+        "src/worktreePort.ts",
+    )
+    assert sh.copy_ends("src/worktreePort.ts", sources, pull=False) == (
+        "src/worktreePort.ts",
+        "frontend/src/worktreePort.ts",
+    )
+
+
+def test_copy_ends_leaves_an_unmapped_entry_identical_on_both_sides():
+    """Every MANIFEST entry takes this path, so the untranslated case is the common one
+    and must not depend on the map having a key for it."""
+    for pull in (True, False):
+        assert sh.copy_ends("scripts/hooks/stop.py", {}, pull=pull) == (
+            "scripts/hooks/stop.py",
+            "scripts/hooks/stop.py",
+        )
+
+
+def test_a_single_package_consumer_adopts_the_gated_tier(tmp_path, monkeypatch):
+    """The regression, and it is roguelike's exact shape: `dir = "."`, `src = "src/"`.
+
+    It stopped the v0.11.17 adoption pass after the release itself had succeeded -- the
+    pull skipped both files as absent from the shared repo, and the commit gate then
+    reported them MISSING from a repo that has always carried them at `frontend/src/`.
+    """
+    src = _repo(
+        tmp_path / "src",
+        tag="v0.5.3",
+        files={
+            "scripts/hooks/x.py": "upstream",
+            "frontend/src/worktreePort.ts": "vendored",
+            "frontend/src/worktreePort.test.ts": "vendored test",
+        },
+    )
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    flat = _consumer(tmp_path / "flat", '[frontend]\nenabled = true\ndir = "."\nsrc = "src/"\n')
+    _seed(flat, sh.PRECOMMIT_FILE, CONFIG)
+    monkeypatch.setattr(sh, "REPO_ROOT", flat)
+
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    assert (flat / "src" / "worktreePort.ts").read_text(encoding="utf-8") == "vendored"
+    assert (flat / "src" / "worktreePort.test.ts").read_text(encoding="utf-8") == "vendored test"
+    # Never at devkit's layout: the consumer's own prefix is the whole point of the gate.
+    assert not (flat / "frontend").exists()
+    assert "src/worktreePort.ts" in sh.read_receipt(flat)
+    # The half that actually failed: the gate must not call these MISSING.
+    assert sh.main(["--check", "--src", str(src)]) == 0
+
+
+def test_a_check_reports_real_drift_at_the_translated_path(tmp_path, monkeypatch):
+    """The mapping may not become a blind spot: an edit to the consumer's copy is still
+    drift against devkit's, even though the two are at different paths."""
+    src = _repo(
+        tmp_path / "src",
+        tag="v0.5.3",
+        files={
+            "scripts/hooks/x.py": "upstream",
+            "frontend/src/worktreePort.ts": "vendored",
+            "frontend/src/worktreePort.test.ts": "vendored test",
+        },
+    )
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    flat = _consumer(tmp_path / "flat", '[frontend]\nenabled = true\ndir = "."\nsrc = "src/"\n')
+    _seed(flat, sh.PRECOMMIT_FILE, CONFIG)
+    monkeypatch.setattr(sh, "REPO_ROOT", flat)
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+
+    (flat / "src" / "worktreePort.ts").write_text("locally edited", encoding="utf-8")
+    drifted, missing, _ = sh.classify(src, flat, sh.manifest_for(flat))
+
+    assert "src/worktreePort.ts" in drifted
+    assert missing == []
+
+
+def test_a_push_sends_the_gated_file_back_to_devkits_layout(tmp_path, monkeypatch):
+    """The mirror direction. A project that authored a fix to its copy has to land it
+    where devkit keeps it, or the next release vendors the old bytes back out."""
+    src = _repo(
+        tmp_path / "src",
+        tag="v0.5.3",
+        files={
+            "scripts/hooks/x.py": "upstream",
+            "frontend/src/worktreePort.ts": "vendored",
+            "frontend/src/worktreePort.test.ts": "vendored test",
+        },
+    )
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    flat = _consumer(tmp_path / "flat", '[frontend]\nenabled = true\ndir = "."\nsrc = "src/"\n')
+    _seed(flat, sh.PRECOMMIT_FILE, CONFIG)
+    monkeypatch.setattr(sh, "REPO_ROOT", flat)
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    (flat / "src" / "worktreePort.ts").write_text("authored here", encoding="utf-8")
+
+    assert sh.main(["--push", "--src", str(src)]) == 0
+    assert (src / "frontend" / "src" / "worktreePort.ts").read_text(
+        encoding="utf-8"
+    ) == "authored here"
+    assert not (src / "src").exists()
