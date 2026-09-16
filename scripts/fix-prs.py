@@ -40,6 +40,12 @@ still drew a row, and clicking it sent `resume` at a head branch GitHub had dele
 the picker opens. `run_one` still re-reads the PR it was handed, because a scan of six
 checkouts is seconds of quick-pick and a person then reads the list.
 
+**Whether a PR still merges is `scripts/pr_mergeability.py`'s question**, and it is a
+question with three answers rather than two: GitHub computes mergeability on demand and
+invalidates it whenever the base branch moves, so a scan run in the minute after a merge
+asks about a whole checkout it has not re-judged. That module owns what to do about the
+third answer, because reading it as "merges fine" is a row that silently is not here.
+
 Every function that decides something is pure and tested in `tests/test_fix_prs.py`;
 the ones that spawn take a runner.
 """
@@ -63,6 +69,7 @@ import agent_worktrees as aw
 import devkit_project
 import picker_rows
 import picker_scan
+import pr_mergeability as mergeability
 import sweep
 import task_input
 import worktree
@@ -99,25 +106,22 @@ SCAN_NAME = "fix-prs"
 # at once; the cap is here so a runaway bot cannot turn one dropdown into a thousand.
 PR_LIMIT = 50
 
-# `gh pr list` fields. `mergeable` is the conflict half and `statusCheckRollup` the gate
-# half; `isDraft` is what a draft is excluded by.
-PR_LIST_FIELDS = "number,title,headRefName,updatedAt,url,isDraft,mergeable,statusCheckRollup"
+# Ask for both conflict signals: `mergeable: CONFLICTING` and `mergeStateStatus: DIRTY`.
+# `statusCheckRollup` is the gate half; `isDraft` is what a draft is excluded by.
+PR_LIST_FIELDS = (
+    "number,title,headRefName,updatedAt,url,isDraft,mergeable,mergeStateStatus,statusCheckRollup"
+)
 
 # ...and the same question asked of one PR at launch time, plus the base branch, which is
 # what the agent has to merge in when the answer is a conflict, and `state`/`isDraft`,
 # which the scan gets free from `--state open` and this half has to ask for: a closed PR
 # keeps its last FAILURE in the rollup, so without them it still reads as broken and the
 # run dies in `resume` on the head branch GitHub deleted when it closed.
-PR_VIEW_FIELDS = (
-    "number,title,headRefName,baseRefName,url,state,isDraft,mergeable,statusCheckRollup"
-)
-OPEN = "OPEN"  # the one state worth a tree; CLOSED and MERGED both delete the head branch
-
-# How GitHub says the branch no longer merges cleanly. `UNKNOWN` is its answer while the
-# mergeability job is still running, and is deliberately NOT treated as a conflict: a PR
-# opened seconds ago reports it, and a menu that called those broken would offer every
-# fresh PR on the machine.
-CONFLICTING = "CONFLICTING"
+PR_VIEW_FIELDS = "number,title,headRefName,baseRefName,url,state,isDraft,mergeable,mergeStateStatus,statusCheckRollup"
+# The one state worth a tree; CLOSED and MERGED both delete the head branch. Rebound from
+# `pr_mergeability` rather than spelled again: both modules turn on it, and GitHub's
+# vocabulary -- including the three answers it gives about merging -- has one owner there.
+OPEN = mergeability.OPEN
 
 # Rollup conclusions that mean a check has failed rather than passed, is running, or was
 # never required. `SKIPPED` and `NEUTRAL` are absent because both are how a correctly
@@ -183,12 +187,22 @@ def broken_reason(pr: dict) -> str:
     if not isinstance(pr, dict) or pr.get("isDraft"):
         return ""
     reasons = []
-    if str(pr.get("mergeable") or "").upper() == CONFLICTING:
+    if mergeability.conflicted(pr):
         reasons.append("merge conflict")
     failed = failing_checks(pr.get("statusCheckRollup"))
     if failed:
         reasons.append(f"{failed} check{'s' if failed != 1 else ''} failing")
     return " + ".join(reasons)
+
+
+def settle_mergeability(project_dir: Path, entries: list[dict]) -> None:
+    """`pr_mergeability.settle`, with this checkout's `gh pr view` as the ask.
+
+    Named rather than spelled as a lambda at each call site, because both paths need the
+    same binding: the scan re-asks about a page of rows, and the launch path re-asks
+    about the single PR a person just ticked.
+    """
+    mergeability.settle(lambda number: pr_view(project_dir, number), entries)
 
 
 def broken_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
@@ -213,7 +227,9 @@ def broken_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
         return []
     if not isinstance(entries, list):
         return []
-    return [entry for entry in entries if isinstance(entry, dict) and broken_reason(entry)]
+    entries = [entry for entry in entries if isinstance(entry, dict)]
+    settle_mergeability(project_dir, entries)
+    return [entry for entry in entries if entry.get("state", OPEN) == OPEN and broken_reason(entry)]
 
 
 # --- the rows the picker draws ----------------------------------------------------
@@ -445,10 +461,9 @@ def parse_pick(token: str) -> Pick | None:
 def pr_view(project_dir: Path, number: int) -> dict:
     """The PR as it is *now*, not as the menu last saw it. Empty on any failure.
 
-    The menu is up to a quarter of an hour old, which is long enough for the gate to have
-    gone green or for a rebase to have cleared the conflict. What the agent is told has
-    to be current, so this is read at launch time -- and it is also the check that stops
-    a worktree being cut for a PR that no longer needs one.
+    The picker scans live, but a gate can go green or a rebase clear the conflict while
+    the person chooses. Read again at launch to avoid cutting an unnecessary worktree.
+    The scan also uses this once for each PR whose mergeability is still unknown.
     """
     try:
         result = sweep.gh_for(project_dir)("pr", "view", str(number), "--json", PR_VIEW_FIELDS)
@@ -621,6 +636,12 @@ def run_one(
     if state != OPEN:
         print(f"{pick.project} #{pick.number}: {state.lower()} since the scan -- nothing to do")
         return EXIT_OK
+    # The same re-ask the scan does, for the same reason and one the launch path feels
+    # more sharply: between the click and here, anything merging to the base branch puts
+    # this PR's verdict back to `UNKNOWN`, and an unresolved verdict read straight off
+    # this view says "nothing wrong with it now" -- a ticked row that opens nothing,
+    # reports success, and leaves the PR exactly as red as it was.
+    settle_mergeability(project_dir, [pr])
     reason = broken_reason(pr)
     if not reason:
         print(f"{pick.project} #{pick.number}: nothing wrong with it now -- nothing to do")

@@ -70,12 +70,12 @@ definitions::scripts/agent-box.py = 21
 definitions::scripts/agent_clis.py = 21
 definitions::scripts/devkit_project.py = 50
 definitions::scripts/docker-maint.py = 30
-definitions::scripts/fix-prs.py = 31
+definitions::scripts/fix-prs.py = 32
 definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
 definitions::scripts/hooks/structure_check.py = 43
 definitions::scripts/hooks/structure_scan.py = 31
-definitions::scripts/install-git-policy.py = 25
+definitions::scripts/install-git-policy.py = 24
 definitions::scripts/instruction-budget.py = 26
 definitions::scripts/new-project.py = 28
 definitions::scripts/plug-projects.py = 30
@@ -99,13 +99,13 @@ dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 544
 file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
-file_lines::scripts/fix-prs.py = 768
+file_lines::scripts/fix-prs.py = 789
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
 file_lines::scripts/hooks/structure_check.py = 1078
 file_lines::scripts/hooks/structure_scan.py = 680
-file_lines::scripts/install-git-policy.py = 602
+file_lines::scripts/install-git-policy.py = 568
 file_lines::scripts/instruction-budget.py = 517
 file_lines::scripts/new-project.py = 863
 file_lines::scripts/plug-projects.py = 922
@@ -430,3 +430,7 @@ swallowed_errors::scripts/worktree.py = 1
 #   definitions::scripts/sync-devkit.py -> 53
 #   file_lines::scripts/sync-devkit.py -> 1649
 #   function_lines::scripts/sync-devkit.py::main -> 271
+
+# 2026-09-16  recorded: FIFTH record deferring the same fix-prs.py split, which by engineering.md's own three-branch rule is a defect report rather than a raise. What is filling it, measured: the scan-and-menu half (broken_reason..refresh_menu) is 470 lines against the launch half's 250, and every one of the five records names that same seam. This change adds 41 lines and 2 definitions by extracting refresh_unresolved/unresolved_mergeability out of broken_prs, which took that function from complexity 21 back under the limit of 15 -- the trade the 2026-09-06 record already ruled on, per-function over module-level. The split is still owed and still moves the path the workspace task block names for the live --rows picker, so it is still its own PR. Reported via report-harness-defect.py.
+#   definitions::scripts/fix-prs.py -> 33
+#   file_lines::scripts/fix-prs.py -> 809

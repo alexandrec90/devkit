@@ -29,53 +29,25 @@ import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+# The layout tier, beside this file. `scripts/` is on `sys.path` both when this runs as a
+# script and when the suite loads it by path, so a plain import resolves either way.
+# Re-exported rather than reached through, so nothing that already said
+# `installer.RUNTIME_FILES` has to change.
+from install_policy_layout import (
+    HOOK_NAMES,
+    RUNTIME_FILES,
+    clear_shadowing_entrypoint,
+    entrypoint_path,
+    install_refusal,
+    shadowing_entrypoint,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TARGET = Path.home() / ".devkit" / "git-hooks"
-RUNTIME_FILES = {
-    # THE POLICY IN BOTH LAYOUTS, deliberately, and this entry is why an install from an
-    # older tag still works. `scripts/git_policy.py` was one module until it became the
-    # `scripts/git_policy/` package; a ref cut before that has the file and not the
-    # package, and a ref cut after has the package and not the file. `install_files`
-    # already skips a `RUNTIME_FILES` entry the ref does not hold, so listing both means
-    # each ref installs the layout it actually has -- and dropping the flat entry would
-    # make `--yes` from the newest tag install *no policy at all* until the next release,
-    # on every machine, with the hooks left importing a module that is not there.
-    # `install_refusal` is the backstop that makes that unrepresentable rather than
-    # merely unlikely.
-    #
-    # The two can also coexist in one install directory, and the winner is the right one:
-    # Python prefers a package to a same-named flat module on `sys.path`, so a
-    # `devkit_git_policy.py` left by an older install is shadowed by the package rather
-    # than preferred, and the upgrade needs no cleanup step to be safe.
-    "scripts/git_policy.py": "devkit_git_policy.py",
-    "scripts/git_policy/__init__.py": "devkit_git_policy/__init__.py",
-    "scripts/git_policy/_core.py": "devkit_git_policy/_core.py",
-    "scripts/git_policy/branch.py": "devkit_git_policy/branch.py",
-    "scripts/git_policy/dispatch.py": "devkit_git_policy/dispatch.py",
-    "scripts/git_policy/framework.py": "devkit_git_policy/framework.py",
-    "scripts/worktree_env.py": "devkit_worktree_env.py",
-    "scripts/git-hooks/pre-commit": "pre-commit",
-    "scripts/git-hooks/pre-push": "pre-push",
-    "scripts/git-hooks/post-checkout": "post-checkout",
-}
-# The destinations that between them have to yield an importable `devkit_git_policy`.
-# Derived from the map so a future layout change cannot forget it.
-POLICY_ENTRYPOINTS = frozenset({"devkit_git_policy.py", "devkit_git_policy/__init__.py"})
-# Which of those git execs, and therefore which need the executable bit. Derived from the
-# map rather than listed twice: a hook added to one and forgotten in the other installs
-# as a plain file, and git skips a hook it cannot execute WITHOUT SAYING SO -- the same
-# silence `worktree-guard-launch.py` was vendored into for a release.
-HOOK_NAMES = frozenset(
-    destination for source, destination in RUNTIME_FILES.items() if "/git-hooks/" in source
-)
-# Records what was installed and from where, beside the runtime it describes.
-# Without it, "which policy is actually running?" can only be answered by diffing
-# against a checkout -- which is a question about *this* machine that no artifact
-# on this machine could answer.
 RECEIPT_NAME = "installed.json"
 # The sentinel `ref` for an install taken from the working tree rather than a
 # commit. Recorded verbatim so a receipt never claims a provenance it does not have.
@@ -276,32 +248,13 @@ def install_files(source_root: Path, target: Path, ref: str = WORKTREE_REF) -> d
             )
     for source_name, why in skipped:
         print(f"install-git-policy: {source_name} {why}; not installed")
+    cleared = clear_shadowing_entrypoint(target, hashes)
+    if cleared:
+        print(f"install-git-policy: removed {cleared}, left by an install of the other layout")
     refusal = install_refusal(hashes, ref)
     if refusal:
         raise InstallRefusedError(refusal)
     return hashes
-
-
-def install_refusal(hashes: Mapping[str, str], ref: str) -> str:
-    """Why this install must not stand, or "" when it may.
-
-    The one thing the per-file skip cannot be allowed to do. Skipping a file the ref
-    does not hold is right for a runtime that *gained* a file; it is catastrophic for
-    the policy module itself, because a skip there leaves the hooks importing a
-    `devkit_git_policy` that is not there -- and they run on every commit in every
-    repository on the machine, so the failure is total and arrives with no warning.
-
-    Pure, and checked against what was actually written rather than against
-    `RUNTIME_FILES`, so it stays true whichever layout the ref turned out to have.
-    """
-    if set(hashes) & POLICY_ENTRYPOINTS:
-        return ""
-    return (
-        f"{ref} holds neither the policy module nor the policy package, so this install "
-        "would leave the git hooks with nothing to import. Install from a ref that has "
-        "one: the tags before the package have scripts/git_policy.py, and the tags from "
-        "the package on have scripts/git_policy/."
-    )
 
 
 def install(source_root: Path, target: Path, ref: str = WORKTREE_REF) -> Receipt:
@@ -406,6 +359,19 @@ def compare_install(target: Path, receipt: Receipt | None) -> list[Drift]:
             continue
         if actual != expected:
             drifted.append(Drift(destination_name, "modified since it was installed"))
+    # The receipt can only describe what it wrote. A leftover of the OTHER layout is
+    # invisible to the loop above and is the one difference that changes which code
+    # runs, so it is asked about separately.
+    stale = shadowing_entrypoint(receipt.files)
+    if stale and entrypoint_path(target, stale).exists():
+        drifted.append(
+            Drift(
+                stale,
+                "left by an older install and shadows the runtime this receipt describes"
+                if "/" in stale
+                else "left by an older install of the flat module",
+            )
+        )
     return drifted
 
 

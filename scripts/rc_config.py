@@ -60,11 +60,23 @@ RC_SETTING = "devkit.remoteControl"
 DEFAULT_SPAWN = "same-dir"
 
 # Empty means "pass no `--permission-mode`", so a server inherits whatever the project's
-# own settings say. Not defaulted even though a phone is the one client that cannot
-# escalate for itself -- a session spawned from the mobile app opens in `auto` and the UI
-# offers no switch, so `bypassPermissions` set here is the only route to one. That is a
-# standing grant on an unattended machine reachable from the internet, which is exactly
-# why the opt-in belongs to the person whose machine it is rather than to this default.
+# own settings say.
+#
+# **It does not raise the mode of a session the phone spawns, and nothing in this file
+# can.** The server hands its own mode down as the CLI's `--inherit-permission-mode`,
+# whose help reads "used only when nothing else configures one" -- and the mobile app
+# configures one when it creates the session, so a spawned session lands in `auto`
+# however this is set. A `permissions.defaultMode` of `bypassPermissions` in the user's
+# settings loses to the app the same way. Measured against a live server rather than
+# reasoned: the launch argv carried `bypassPermissions` and the first user message of the
+# session it spawned recorded `auto`. What a phone session does honour is a
+# `permissions.allow` entry, which applies in `auto` mode too -- that is where a standing
+# grant for a phone actually goes, and it is Claude Code's knob rather than this job's.
+#
+# Passed through anyway, because this is the only place to say it at all, and still not
+# defaulted: whatever a mode set here reaches, it is a standing grant on an unattended
+# machine reachable from the internet, and that opt-in belongs to the person whose
+# machine it is rather than to this default.
 DEFAULT_PERMISSION_MODE = ""
 
 # Minutes of transcript silence before a project's server may be restarted. Twenty is

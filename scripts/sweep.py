@@ -75,20 +75,20 @@ import worktree_tiers
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 WORKSPACE_FILE_NAME = "alex-projects.code-workspace"
-# Where the ephemeral tier keeps its boxes, relative to the workspace root, and the
-# separator between project and topic in a box name (`devkit--fix-thing-0810`). Defined
-# here rather than in `worktree.py` because the two resolvers below need them and
+# Where the ephemeral tier keeps its boxes, relative to the workspace root, re-exported
+# off the tier list so `worktree.py` and the rest of this module's callers keep reading
+# `sweep.BOXES_DIR_NAME` while only one file spells the directory. It moved to
+# `worktree_tiers` because the copies that needed it could not reach here: that module is
+# vendored and stdlib-only, and a Stop hook in a consuming project has no `sweep.py`.
+BOXES_DIR_NAME = worktree_tiers.BOXES_DIR_NAME
+# The separator between project and topic in a box name (`devkit--fix-thing-0810`).
+# Defined here rather than in `worktree.py` because the two resolvers below need it and
 # worktree.py imports this module, never the other way round.
-#
-# `scripts/sync-codex-hooks.py` keeps a private copy of BOXES_DIR_NAME and must: it is
-# VENDORED, and a consuming project has no `sweep.py` to import. That one is a
-# deliberate duplicate, not a miss.
-BOXES_DIR_NAME = ".worktrees"
 NAME_SEP = "--"
 
-# The OTHER worktree tier, and it is not the boxes: no lease, no port, and it is where a
-# `--worktree` session -- Claude's or Codex's -- and a remote Claude session put a
-# worktree. `scripts/agent-worktree.py` is the local verb for it, and
+# The OTHER worktree tiers, and they are not the boxes: no lease, no port, and they are
+# where a `--worktree` session -- Claude's or Codex's -- and a remote Claude session put
+# a worktree. `scripts/agent-worktree.py` is the local verb for them, and
 # `scripts/hooks/worktree_tiers.py` owns where each runtime puts one -- imported rather
 # than restated, because the shapes no longer share a parent walk: Claude's sits two
 # levels under its checkout, Codex's sits outside it entirely.

@@ -38,8 +38,14 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# The directory names a worktree is cut into, so `SKIP_DIRS` below names none of them
+# itself. `worktree_tiers` is stdlib-only, so importing it costs this module nothing.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import worktree_tiers
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -80,15 +86,16 @@ SKIP_DIRS = frozenset(
     {
         ".git",
         ".venv",
-        ".worktrees",
-        # `.claude/worktrees/<name>`, where `claude --worktree` and a Remote Control
-        # server started with `--spawn worktree` cut theirs. `.worktrees` above is the
-        # box tier, which sits *beside* every checkout and so was never reachable from
-        # here; these land inside it. Without this the switch treats a nested worktree's
-        # own `CLAUDE.md` files as this root's and moves them aside -- files it does not
-        # own, in a checkout it was not asked about, restored to the wrong root if that
-        # worktree is removed before the switch goes back on.
-        "worktrees",
+        # Every worktree tier's innermost directory: `.worktrees` for the box tier, which
+        # sits *beside* every checkout and so was never reachable from here, and
+        # `worktrees` for the nested `.claude/worktrees/<name>` a `claude --worktree`
+        # session or a `--spawn worktree` Remote Control server cuts inside it. Without
+        # the second the switch treats a nested worktree's own `CLAUDE.md` files as this
+        # root's and moves them aside -- files it does not own, in a checkout it was not
+        # asked about, restored to the wrong root if that worktree is removed before the
+        # switch goes back on. Off `worktree_tiers` so a tier added there is skipped here
+        # without anyone remembering to.
+        *worktree_tiers.MARKER_NAMES,
         "__pycache__",
         ".pytest_cache",
         "node_modules",
