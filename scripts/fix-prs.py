@@ -15,16 +15,13 @@ to a PR branch": Claude Code's `--from-pr` *resumes a session linked to a PR*, w
 needs that session to still exist on this machine. Cutting the worktree is the spelling
 that works on a PR nobody has touched this week.
 
-**The worktree is a `.claude/worktrees/` one, not a box, and that is the whole of where
-this tool puts things.** Every worktree on this machine lives under a checkout's
-`.claude/worktrees/`, which is where `claude --worktree` cuts, where a remote session
-spawns, and what `agent-worktree.py` lists and removes -- so a PR fixed from here is
-visible to the same two dropdowns as everything else, and reachable by the same delete
-row. `scripts/agent_worktrees.py` owns the three decisions that takes (`holder`,
-`tree_name`, `add_steps`); what is here is the PR half. The box tier -- `worktree.py`,
-a port lease, a `COMPOSE_PROJECT_NAME`, a provisioned toolchain and a reaper -- is still
-`agent-box.py spawn`'s, for a session that runs a compose stack, and this task no longer
-cuts one.
+**New worktrees go under `.claude/worktrees/`.** `agent-worktree.py` lists and removes
+them. Existing Claude and Codex worktrees are reused, as are live devkit boxes whose
+project, branch and path match the PR's checkout and head. Upgrade PRs already have
+such boxes; refusing them prevents the task from fixing those PRs. Reuse leaves the
+box's lease and lifecycle with `worktree.py`. This task creates no boxes or port leases.
+`scripts/agent_worktrees.py` owns `holder`, `tree_name` and `add_steps`; what is here is
+the PR half.
 
 **Three agent modes, and the third one is an asymmetry rather than an omission.**
 `claude` and `codex` each open a Windows Terminal tab, the same one `agent-box.py`
@@ -507,17 +504,10 @@ def seed_prompt(project: str, pr: dict, reason: str) -> str:
 
 
 def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
-    """The worktree already on `branch`, or why one cannot be cut. See `aw.holder`.
+    """Return a reusable tree, an unheld branch `(None, "")`, or `(None, refusal)`.
 
-    Three answers in two fields, because they need three different next moves.
-    `(path, "")` is one of this checkout's own agent worktrees and is reused as it
-    stands: this task's ordinary second click is on a PR whose worktree is still open
-    from the first, and two worktrees on one branch is a state git will not hold, so
-    cutting again would fail on the very thing that means "ready". `(None, "")` is a
-    branch nothing holds, which is the case `cut_tree` exists for. `(None, why)` is a
-    branch held somewhere this tool does not own -- the checkout itself, a `.worktrees/`
-    box, a worktree cut by hand -- where the honest answer is the sentence naming the
-    directory, not a `git worktree add` that fails talking about the branch instead.
+    Git permits only one worktree per branch. Reuse agent worktrees and matching live
+    boxes; name the directory for other holders rather than attempting another cut.
     """
     listed = sweep.git_for(project_dir)("worktree", "list", "--porcelain")
     if listed.returncode != 0:
@@ -526,9 +516,19 @@ def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
     if not held:
         return None, ""
     if not nested:
+        # Upgrade PRs already have a box on their head branch. Reuse it just as
+        # agent-box attach does, without creating a tree or changing its lease.
+        root = project_dir.parent
+        for box in worktree.live_boxes(root).values():
+            if (
+                box.project == project_dir.name
+                and box.branch == branch
+                and Path(held).resolve() == worktree.box_path(root, box.name).resolve()
+            ):
+                return Path(held), ""
         return None, (
-            f"{branch} is already checked out at {held}, which is outside "
-            f"{aw.TIER_SUMMARY} -- finish the PR from there, or remove that worktree"
+            f"{branch} is already checked out at {held}, which is not in "
+            f"{aw.TIER_SUMMARY} or a matching live devkit box -- finish the PR from there"
         )
     return Path(held), ""
 
