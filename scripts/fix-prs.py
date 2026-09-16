@@ -194,6 +194,43 @@ def broken_reason(pr: dict) -> str:
     return " + ".join(reasons)
 
 
+def unresolved_mergeability(entries: list[dict]) -> list[dict]:
+    """The rows GitHub has not finished judging: no verdict yet, and not already dirty.
+
+    Drafts are out because nothing downstream reads them, and a row with no integer
+    `number` cannot be asked about.
+    """
+    return [
+        entry
+        for entry in entries
+        if not entry.get("isDraft")
+        and str(entry.get("mergeable") or "UNKNOWN").upper() == "UNKNOWN"
+        and str(entry.get("mergeStateStatus") or "").upper() != "DIRTY"
+        and isinstance(entry.get("number"), int)
+    ]
+
+
+def refresh_unresolved(project_dir: Path, entries: list[dict]) -> None:
+    """Ask GitHub again about the rows it had not judged yet. Mutates `entries` in place.
+
+    `gh pr list` answers while mergeability is still being calculated, so a conflict can
+    arrive as `UNKNOWN` and read as clean -- and a conflicted PR can have no failing
+    check at all, which leaves nothing else to notice it by. Fanned out, so the picker
+    does not pay one round trip per PR.
+    """
+    unresolved = unresolved_mergeability(entries)
+    if not unresolved:
+        return
+    with futures.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(unresolved))) as pool:
+        pending = {
+            pool.submit(pr_view, project_dir, entry["number"]): entry for entry in unresolved
+        }
+        for future in futures.as_completed(pending):
+            # A failed view is {}, preserving the list's known check failures and
+            # updatedAt (which the launch-time view does not request).
+            pending[future].update(future.result())
+
+
 def broken_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
     """The open PRs of one checkout that are broken, newest first. Empty on any failure.
 
@@ -217,26 +254,7 @@ def broken_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
     if not isinstance(entries, list):
         return []
     entries = [entry for entry in entries if isinstance(entry, dict)]
-    # The list can arrive before GitHub has calculated mergeability. Give unresolved
-    # PRs one fresh view before filtering: a conflict can have no checks at all. Fan
-    # these reads out too, so the picker does not wait for one round trip per PR.
-    unresolved = [
-        entry
-        for entry in entries
-        if not entry.get("isDraft")
-        and str(entry.get("mergeable") or "UNKNOWN").upper() == "UNKNOWN"
-        and str(entry.get("mergeStateStatus") or "").upper() != "DIRTY"
-        and isinstance(entry.get("number"), int)
-    ]
-    if unresolved:
-        with futures.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(unresolved))) as pool:
-            pending = {
-                pool.submit(pr_view, project_dir, entry["number"]): entry for entry in unresolved
-            }
-            for future in futures.as_completed(pending):
-                # A failed view is {}, preserving the list's known check failures and
-                # updatedAt (which the launch-time view does not request).
-                pending[future].update(future.result())
+    refresh_unresolved(project_dir, entries)
     return [entry for entry in entries if entry.get("state", OPEN) == OPEN and broken_reason(entry)]
 
 
