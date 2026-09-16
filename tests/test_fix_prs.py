@@ -140,17 +140,23 @@ def test_only_the_broken_ones_are_listed(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("mergeable", ["UNKNOWN", None])
 @pytest.mark.parametrize(
-    "fresh,reason",
+    "fresh,reason,asks",
     [
-        ({"mergeable": "CONFLICTING"}, "merge conflict"),
-        ({"mergeable": "UNKNOWN", "mergeStateStatus": "DIRTY"}, "merge conflict"),
-        ({"mergeable": "MERGEABLE"}, ""),
-        ({"mergeable": "UNKNOWN"}, ""),
-        ({"mergeable": "CONFLICTING", "state": "CLOSED"}, ""),
-        ({"mergeable": "CONFLICTING", "isDraft": True}, ""),
+        ({"mergeable": "CONFLICTING"}, "merge conflict", 1),
+        ({"mergeable": "UNKNOWN", "mergeStateStatus": "DIRTY"}, "merge conflict", 1),
+        ({"mergeable": "MERGEABLE"}, "", 1),
+        # The answer that is not one. Asked again to the budget and then left as the list
+        # had it, which reads as clean -- bounded, rather than a poll a person waits out.
+        ({"mergeable": "UNKNOWN"}, "", fix_prs.mergeability.ASKS),
+        # Both of these settle the row on the first ask, so neither spends the budget:
+        # a closed PR is one GitHub will never judge, and a draft is never a row.
+        ({"mergeable": "CONFLICTING", "state": "CLOSED"}, "", 1),
+        ({"mergeable": "CONFLICTING", "isDraft": True}, "", 1),
     ],
 )
-def test_scan_refreshes_unknown_mergeability_once(monkeypatch, tmp_path, mergeable, fresh, reason):
+def test_the_scan_asks_again_about_a_verdict_that_has_not_arrived(
+    monkeypatch, tmp_path, mergeable, fresh, reason, asks
+):
     calls = []
 
     def gh(*args):
@@ -165,8 +171,9 @@ def test_scan_refreshes_unknown_mergeability_once(monkeypatch, tmp_path, mergeab
         )
 
     monkeypatch.setattr(fix_prs.sweep, "gh_for", lambda _path: gh)
+    monkeypatch.setattr(fix_prs.mergeability, "WAIT", 0)
     found = fix_prs.broken_prs(tmp_path)
-    assert calls == [("pr", "list", "--state"), ("pr", "view", "412")]
+    assert calls == [("pr", "list", "--state"), *[("pr", "view", "412")] * asks]
     assert [fix_prs.broken_reason(entry) for entry in found] == ([reason] if reason else [])
     if found:
         assert found[0]["updatedAt"] == pr()["updatedAt"]
@@ -175,9 +182,14 @@ def test_scan_refreshes_unknown_mergeability_once(monkeypatch, tmp_path, mergeab
 
 def test_refresh_failure_keeps_known_check_failures(monkeypatch, tmp_path):
     entry = pr(mergeable="UNKNOWN", statusCheckRollup=[{"conclusion": "FAILURE"}])
+    asked = []
     monkeypatch.setattr(fix_prs.sweep, "gh_for", gh_returning(0, json.dumps([entry])))
-    monkeypatch.setattr(fix_prs, "pr_view", lambda *_args: {})
+    monkeypatch.setattr(fix_prs, "pr_view", lambda *_args: asked.append(1) or {})
+    monkeypatch.setattr(fix_prs.mergeability, "WAIT", 0)
     assert fix_prs.broken_prs(tmp_path) == [entry]
+    # A view that answers nothing is indistinguishable from one that answers `UNKNOWN`,
+    # so it costs the same budget and no more.
+    assert len(asked) == fix_prs.mergeability.ASKS
 
 
 def test_settled_conflicts_and_drafts_need_no_refresh(monkeypatch, tmp_path):
@@ -720,13 +732,18 @@ def test_a_background_session_that_failed_to_start_is_a_failure(monkeypatch, tmp
 # --- one PR, end to end -----------------------------------------------------------
 
 
-def run_one_with(monkeypatch, tmp_path, view: dict, mode: str = "claude"):
-    """`run_one` with every subprocess replaced. Returns `(code, opened)`."""
+def run_one_with(monkeypatch, tmp_path, view: dict, mode: str = "claude", then: dict | None = None):
+    """`run_one` with every subprocess replaced. Returns `(code, opened)`.
+
+    `then` is what a second reading of the PR answers, which only an unresolved `view`
+    ever asks for -- see the re-ask on the launch path.
+    """
     (tmp_path / "carameli").mkdir(exist_ok=True)
     workspace = tmp_path / "w" / "alex.code-workspace"
     workspace.parent.mkdir(exist_ok=True)
     opened: dict = {}
-    monkeypatch.setattr(fix_prs, "pr_view", lambda _dir, _n: view)
+    answers = iter([view] if then is None else [view, then])
+    monkeypatch.setattr(fix_prs, "pr_view", lambda _dir, _n: next(answers, view))
     monkeypatch.setattr(fix_prs, "existing_tree", lambda *a, **k: (None, ""))
     monkeypatch.setattr(fix_prs, "cut_tree", lambda *a, **k: Path("/trees/x"))
     monkeypatch.setattr(
@@ -806,6 +823,17 @@ def test_a_broken_pr_opens_a_tab_titled_for_the_pr(monkeypatch, tmp_path, mergea
     assert code == 0
     assert opened["kwargs"]["title"] == "carameli #412"
     assert "#412" in opened["kwargs"]["prompt"]
+
+
+def test_the_launch_path_asks_again_rather_than_calling_an_unjudged_pr_fine(monkeypatch, tmp_path):
+    """Anything merging to the base branch between the click and here puts this PR's
+    verdict back to `UNKNOWN`, and `broken_reason` reads one as clean -- so without the
+    second ask the ticked row opens nothing, reports success, and leaves the PR as red
+    as it was. The scan's own re-ask cannot cover this: it ran before the click."""
+    view = pr(mergeable="UNKNOWN", statusCheckRollup=[])
+    code, opened = run_one_with(monkeypatch, tmp_path, view, then={"mergeable": "CONFLICTING"})
+    assert code == 0
+    assert "merge conflict" in opened["kwargs"]["prompt"]
 
 
 def test_the_background_mode_does_not_open_a_tab(monkeypatch, tmp_path):
@@ -1146,45 +1174,18 @@ def test_stray_report_names_every_checkout_and_says_nothing_ran():
         assert "vscode-tasks.md" in text
 
 
-# --- the two helpers broken_prs delegates the re-query to ------------------------------
+# --- what the scan does with an unjudged verdict ---------------------------------------
+#
+# `pr_mergeability` owns the asking and is tested on its own; what is left here is the
+# binding -- that the scan hands it this checkout's `gh pr view`, and that a row it could
+# not settle keeps everything the list knew about it.
 
 
-@pytest.mark.parametrize(
-    "entry,expected",
-    [
-        ({"number": 1, "mergeable": "UNKNOWN"}, True),
-        ({"number": 2, "mergeable": None}, True),
-        ({"number": 3, "mergeable": "MERGEABLE"}, False),
-        ({"number": 4, "mergeable": "CONFLICTING"}, False),
-        ({"number": 5, "mergeable": "UNKNOWN", "mergeStateStatus": "DIRTY"}, False),
-        ({"number": 6, "mergeable": "UNKNOWN", "isDraft": True}, False),
-        ({"mergeable": "UNKNOWN"}, False),
-    ],
-)
-def test_unresolved_mergeability_picks_only_rows_worth_asking_about(entry, expected):
-    """Settled verdicts, drafts and rows with no number are all nothing to ask GitHub."""
-    assert bool(fix_prs.unresolved_mergeability([entry])) is expected
-
-
-def test_refresh_unresolved_asks_once_per_row_and_merges_in_place(monkeypatch, tmp_path):
+def test_the_scan_asks_with_this_checkouts_own_gh(monkeypatch, tmp_path):
     asked = []
-
-    def view(project_dir, number):
-        asked.append(number)
-        return {"mergeable": "CONFLICTING"}
-
-    monkeypatch.setattr(fix_prs, "pr_view", view)
-    entries = [
-        {"number": 7, "mergeable": "UNKNOWN", "statusCheckRollup": []},
-        {"number": 8, "mergeable": "MERGEABLE"},
-    ]
-    assert fix_prs.refresh_unresolved(tmp_path, entries) is None
-    assert asked == [7]
-    assert entries[0]["mergeable"] == "CONFLICTING"
-    assert entries[0]["statusCheckRollup"] == []  # the list's own fields survive the merge
-    assert entries[1]["mergeable"] == "MERGEABLE"
-
-
-def test_refresh_unresolved_asks_nobody_when_every_row_is_settled(monkeypatch, tmp_path):
-    monkeypatch.setattr(fix_prs, "pr_view", lambda *a: pytest.fail("should not be asked"))
-    fix_prs.refresh_unresolved(tmp_path, [{"number": 9, "mergeable": "MERGEABLE"}])
+    monkeypatch.setattr(
+        fix_prs, "pr_view", lambda directory, number: asked.append((directory, number)) or {}
+    )
+    monkeypatch.setattr(fix_prs.mergeability, "WAIT", 0)
+    fix_prs.settle_mergeability(tmp_path, [pr(mergeable="UNKNOWN")])
+    assert asked == [(tmp_path, 412)] * fix_prs.mergeability.ASKS

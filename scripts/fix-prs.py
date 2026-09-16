@@ -40,6 +40,12 @@ still drew a row, and clicking it sent `resume` at a head branch GitHub had dele
 the picker opens. `run_one` still re-reads the PR it was handed, because a scan of six
 checkouts is seconds of quick-pick and a person then reads the list.
 
+**Whether a PR still merges is `scripts/pr_mergeability.py`'s question**, and it is a
+question with three answers rather than two: GitHub computes mergeability on demand and
+invalidates it whenever the base branch moves, so a scan run in the minute after a merge
+asks about a whole checkout it has not re-judged. That module owns what to do about the
+third answer, because reading it as "merges fine" is a row that silently is not here.
+
 Every function that decides something is pure and tested in `tests/test_fix_prs.py`;
 the ones that spawn take a runner.
 """
@@ -63,6 +69,7 @@ import agent_worktrees as aw
 import devkit_project
 import picker_rows
 import picker_scan
+import pr_mergeability as mergeability
 import sweep
 import task_input
 import worktree
@@ -111,13 +118,10 @@ PR_LIST_FIELDS = (
 # keeps its last FAILURE in the rollup, so without them it still reads as broken and the
 # run dies in `resume` on the head branch GitHub deleted when it closed.
 PR_VIEW_FIELDS = "number,title,headRefName,baseRefName,url,state,isDraft,mergeable,mergeStateStatus,statusCheckRollup"
-OPEN = "OPEN"  # the one state worth a tree; CLOSED and MERGED both delete the head branch
-
-# How GitHub says the branch no longer merges cleanly. `UNKNOWN` is its answer while the
-# mergeability job is still running, and is deliberately NOT treated as a conflict: a PR
-# opened seconds ago reports it, and a menu that called those broken would offer every
-# fresh PR on the machine.
-CONFLICTING = "CONFLICTING"
+# The one state worth a tree; CLOSED and MERGED both delete the head branch. Rebound from
+# `pr_mergeability` rather than spelled again: both modules turn on it, and GitHub's
+# vocabulary -- including the three answers it gives about merging -- has one owner there.
+OPEN = mergeability.OPEN
 
 # Rollup conclusions that mean a check has failed rather than passed, is running, or was
 # never required. `SKIPPED` and `NEUTRAL` are absent because both are how a correctly
@@ -183,10 +187,7 @@ def broken_reason(pr: dict) -> str:
     if not isinstance(pr, dict) or pr.get("isDraft"):
         return ""
     reasons = []
-    if (
-        str(pr.get("mergeable") or "").upper() == CONFLICTING
-        or str(pr.get("mergeStateStatus") or "").upper() == "DIRTY"
-    ):
+    if mergeability.conflicted(pr):
         reasons.append("merge conflict")
     failed = failing_checks(pr.get("statusCheckRollup"))
     if failed:
@@ -194,41 +195,14 @@ def broken_reason(pr: dict) -> str:
     return " + ".join(reasons)
 
 
-def unresolved_mergeability(entries: list[dict]) -> list[dict]:
-    """The rows GitHub has not finished judging: no verdict yet, and not already dirty.
+def settle_mergeability(project_dir: Path, entries: list[dict]) -> None:
+    """`pr_mergeability.settle`, with this checkout's `gh pr view` as the ask.
 
-    Drafts are out because nothing downstream reads them, and a row with no integer
-    `number` cannot be asked about.
+    Named rather than spelled as a lambda at each call site, because both paths need the
+    same binding: the scan re-asks about a page of rows, and the launch path re-asks
+    about the single PR a person just ticked.
     """
-    return [
-        entry
-        for entry in entries
-        if not entry.get("isDraft")
-        and str(entry.get("mergeable") or "UNKNOWN").upper() == "UNKNOWN"
-        and str(entry.get("mergeStateStatus") or "").upper() != "DIRTY"
-        and isinstance(entry.get("number"), int)
-    ]
-
-
-def refresh_unresolved(project_dir: Path, entries: list[dict]) -> None:
-    """Ask GitHub again about the rows it had not judged yet. Mutates `entries` in place.
-
-    `gh pr list` answers while mergeability is still being calculated, so a conflict can
-    arrive as `UNKNOWN` and read as clean -- and a conflicted PR can have no failing
-    check at all, which leaves nothing else to notice it by. Fanned out, so the picker
-    does not pay one round trip per PR.
-    """
-    unresolved = unresolved_mergeability(entries)
-    if not unresolved:
-        return
-    with futures.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(unresolved))) as pool:
-        pending = {
-            pool.submit(pr_view, project_dir, entry["number"]): entry for entry in unresolved
-        }
-        for future in futures.as_completed(pending):
-            # A failed view is {}, preserving the list's known check failures and
-            # updatedAt (which the launch-time view does not request).
-            pending[future].update(future.result())
+    mergeability.settle(lambda number: pr_view(project_dir, number), entries)
 
 
 def broken_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
@@ -254,7 +228,7 @@ def broken_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
     if not isinstance(entries, list):
         return []
     entries = [entry for entry in entries if isinstance(entry, dict)]
-    refresh_unresolved(project_dir, entries)
+    settle_mergeability(project_dir, entries)
     return [entry for entry in entries if entry.get("state", OPEN) == OPEN and broken_reason(entry)]
 
 
@@ -662,6 +636,12 @@ def run_one(
     if state != OPEN:
         print(f"{pick.project} #{pick.number}: {state.lower()} since the scan -- nothing to do")
         return EXIT_OK
+    # The same re-ask the scan does, for the same reason and one the launch path feels
+    # more sharply: between the click and here, anything merging to the base branch puts
+    # this PR's verdict back to `UNKNOWN`, and an unresolved verdict read straight off
+    # this view says "nothing wrong with it now" -- a ticked row that opens nothing,
+    # reports success, and leaves the PR exactly as red as it was.
+    settle_mergeability(project_dir, [pr])
     reason = broken_reason(pr)
     if not reason:
         print(f"{pick.project} #{pick.number}: nothing wrong with it now -- nothing to do")
