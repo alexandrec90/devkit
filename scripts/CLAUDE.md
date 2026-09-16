@@ -100,6 +100,15 @@ commands; [`worktree-guard.md`](worktree-guard.md) covers what the guard judges,
 declines, and what `agent-box.py` couples to when `harness-switch.py` has stood the tier
 down.
 
+**That directory name is `worktree_tiers.BOXES_DIR_NAME` and belongs nowhere else.**
+`scripts/hooks/worktree_tiers.py` holds every worktree root on the
+machine — the box tier beside the two an agent CLI cuts — because the modules that need
+it are vendored hooks in checkouts that have no `worktree.py` and no `sweep.py`. Six of
+them had spelled it privately, each with a comment saying why its copy had to exist;
+`tests/test_worktree_tiers_single_source.py` is what stops a seventh. The box tier stays
+out of `TIERS` and in `ALL_TIERS`: it anchors on the workspace, not a checkout, and it is
+the one tier with a lease and a reaper, so `git worktree remove` on it leaks both.
+
 The static tier's problem is that a checkout **outlives its task** — `needs-branch`,
 `spent-branch`, `home_ref` and the rest of `sweep.py`'s workload are every one of them a
 state a checkout can only reach by surviving the work done in it. A box cut fresh off

@@ -31,7 +31,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from support import load_script
+from support import load_script, worktree_tiers
 
 reclaim = load_script("scripts/reclaim.py")
 
@@ -794,12 +794,17 @@ def test_a_full_disk_skips_reconcile_rather_than_reaping_open_prs(monkeypatch, t
 # --- the search indexer --------------------------------------------------------
 
 
-def test_boxes_dir_name_agrees_with_sweep():
-    """`workspace_root` recognises a box by the directory it sits in; sweep owns that
-    name. A silent rename there would make every box-launched run ask the indexer about
-    `.worktrees/` instead of the workspace."""
-    sweep = load_script("scripts/sweep.py")
-    assert reclaim.BOXES_DIR_NAME == sweep.BOXES_DIR_NAME
+def test_boxes_dir_name_comes_from_the_tier_list():
+    """`workspace_root` recognises a box by the directory it sits in, and
+    `worktree_tiers` owns that name -- for every tier, in the one module a script running
+    before any virtualenv can still import. A silent rename there would make every
+    box-launched run ask the indexer about `.worktrees/` instead of the workspace.
+
+    Asserted against the owner rather than against `sweep`, which this used to compare
+    to: `sweep` is now a re-export, so the old assertion held two aliases of one value
+    up against each other and could not have failed."""
+    assert reclaim.BOXES_DIR_NAME is worktree_tiers.BOXES_DIR_NAME
+    assert reclaim.BOXES_DIR_NAME == worktree_tiers.BOX_TIER.segments[-1]
 
 
 def test_workspace_root_is_the_parent_of_a_checkout(tmp_path):

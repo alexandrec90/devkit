@@ -86,7 +86,8 @@ import { basename, sep } from 'node:path'
  * sit above the worktree, and how many levels above the leaf the marker starts. Depth
  * 1 is the marker immediately above; depth 2 leaves one opaque level between them.
  *
- * Mirrors `TIERS` in devkit's `scripts/hooks/worktree_tiers.py` plus the box tier;
+ * Mirrors `ALL_TIERS` in devkit's `scripts/hooks/worktree_tiers.py`, which is the one
+ * place every worktree root on a machine is listed;
  * `tests/test_worktree_port.py` there fails if the two lists disagree. One deliberate
  * narrowing: the Python side anchors Codex's tier on `$CODEX_HOME`, while this file —
  * which never asks the environment — spells that home's default directory name. A
