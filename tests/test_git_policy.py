@@ -21,11 +21,16 @@ class FakeRunner:
         # caller: the pre-commit framework's `language: system` hooks are resolved
         # from it. See `test_the_framework_runs_with_its_own_directory_first_on_path`.
         self.envs: list[dict[str, str] | None] = []
+        # Recorded for the same reason as `env`: the push stage asks for a passthrough
+        # run so its output is not held until the gate finishes, and a call that stops
+        # asking is invisible in every other assertion here.
+        self.streamed: list[bool] = []
 
-    def __call__(self, argv, *, input_text=None, cwd=None, env=None):
+    def __call__(self, argv, *, input_text=None, cwd=None, env=None, stream=False):
         key = tuple(argv)
         self.calls.append(key)
         self.envs.append(env)
+        self.streamed.append(stream)
         return self.responses.get(
             key,
             subprocess.CompletedProcess(argv, 1, stdout="", stderr="not configured"),
@@ -618,10 +623,79 @@ def test_the_framework_relays_both_streams(tmp_path, monkeypatch, capsys):
     assert "err" in captured.err
 
 
+def test_the_framework_run_is_streamed_not_held_until_it_finishes(tmp_path, monkeypatch):
+    """The push stage is minutes of lint and tests, and captured it printed nothing at
+    all until the gate was over -- which reads as a hung `git push`, and the answer to a
+    hung push is another push, each starting its own full gate on the same machine.
+
+    Reversion check: drop `stream=True` at the call site and this is the test that fails.
+    """
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    monkeypatch.setattr(
+        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
+    publishing = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n"
+    for stage, args, raw in (
+        ("pre-commit", ("run", "--hook-stage", "pre-commit"), ""),
+        ("pre-push", ("run", "--hook-stage", "pre-push", "--all-files"), publishing),
+    ):
+        runner = FakeRunner({("pre-commit-test", *args): completed(["pre-commit-test"])})
+        verdict = git_policy.framework._run_pre_commit_framework(
+            tmp_path, runner, stage=stage, raw_updates=raw
+        )
+        assert verdict == 0, stage
+        assert runner.streamed == [True], stage
+
+
+def test_a_streamed_run_leaves_the_childs_output_on_the_inherited_handles(tmp_path, capfd):
+    """The point of the flag: the child writes to this process's stdout itself, so there
+    is nothing left to return -- and `[str]` stays honest rather than becoming `None`."""
+    result = git_policy.run_command(
+        [sys.executable, "-c", "import sys; print('live'); print('bad', file=sys.stderr)"],
+        cwd=tmp_path,
+        stream=True,
+    )
+    captured = capfd.readouterr()
+    assert result.returncode == 0
+    assert result.stdout == "" and result.stderr == ""
+    assert "live" in captured.out
+    assert "bad" in captured.err
+
+
+def test_a_streamed_run_still_captures_when_there_is_no_stdout_to_lend(tmp_path, monkeypatch):
+    """`pythonw.exe` gives a scheduled job `sys.stdout is None`. Passing that through
+    would leave the child with nowhere to write, so the flag has to degrade to the
+    capture-and-relay path rather than lose the gate's output entirely."""
+    monkeypatch.setattr(sys, "stdout", None)
+    result = git_policy.run_command(
+        [sys.executable, "-c", "print('captured')"], cwd=tmp_path, stream=True
+    )
+    assert result.returncode == 0
+    assert "captured" in result.stdout
+
+
+def test_a_command_that_does_not_exist_is_still_an_exit_code_when_streaming(tmp_path):
+    """`run_command` never raises into git's hook reporting, streaming or not."""
+    result = git_policy.run_command(
+        ["definitely-not-a-real-command-xyz"], cwd=tmp_path, stream=True
+    )
+    assert result.returncode == 127
+    assert result.stderr
+
+
+def test_inheritable_streams_rejects_a_stream_with_no_descriptor(monkeypatch):
+    """A harness's capture object is not a file and `pythonw` supplies no stdout at all.
+    Neither is a reason to raise, and both mean the child cannot be handed the handle."""
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    assert git_policy.inheritable_streams() is False
+    monkeypatch.setattr(sys, "stdout", None)
+    assert git_policy.inheritable_streams() is False
+
+
 def _common_dir(main_git: pathlib.Path | None):
     """A runner answering `rev-parse --git-common-dir`, or failing like a non-repository."""
 
-    def runner(argv, *, input_text=None, cwd=None, env=None):
+    def runner(argv, *, input_text=None, cwd=None, env=None, stream=False):
         if main_git is None:
             return completed(argv, returncode=1)
         return completed(argv, stdout=f"{main_git}\n")

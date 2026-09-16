@@ -171,14 +171,47 @@ def emit(text: str, *, stream: typing.TextIO | None = None, end: str = "\n") -> 
         stream.write(payload.encode(encoding, "replace").decode(encoding, "replace"))
 
 
+def inheritable_streams() -> bool:
+    """Whether this process has real stdout *and* stderr a child could write to directly.
+
+    `pythonw.exe` gives a scheduled job `sys.stdout is None`, and a test harness may
+    replace both with in-memory objects that have no file descriptor. A child handed
+    either of those has nowhere to write, so `run_command` only passes its streams
+    through when this says both are real -- and captures as it always did otherwise.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            return False
+        try:
+            stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            return False
+    return True
+
+
 def run_command(
     argv: Sequence[str],
     *,
     input_text: str | None = None,
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
+    stream: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command without ever raising into Git's sparse hook error reporting.
+
+    `stream=True` is for the one command here that is not a question with an answer but
+    a **gate that takes minutes**: the pre-commit framework at the push stage. Captured,
+    its output arrives in one block after it finishes, so `git push` prints nothing for
+    the whole run -- which is indistinguishable from a hang, and was read as one. The
+    reaction to a hung push is another push, and each one starts its own full gate on the
+    same machine, so the spiral ends with N suites starving each other and no branch ever
+    landing. Streaming costs the returned `stdout`/`stderr` (the child owns the handles,
+    so there is nothing left to capture) and gives back the only thing that tells a slow
+    gate from a stuck one. Callers that parse output must not ask for it.
+
+    It also sidesteps `emit`'s re-encoding entirely on that path: the child writes its own
+    bytes to the inherited handle rather than handing us a string to encode for a console
+    whose codepage may not have it.
 
     The encoding is named rather than left to `text=True`, and that is not a nicety.
     `text=True` alone decodes with the *locale* codec -- `cp1252` on a Windows
@@ -195,21 +228,43 @@ def run_command(
     path in some other codepage, a tool writing raw bytes -- must degrade to a
     replacement character, never to a lost stream.
     """
+    # `input_text` needs a pipe on stdin, which is orthogonal to the output handles, so
+    # it does not disqualify a passthrough -- but no caller asks for both today.
+    passthrough = stream and inheritable_streams()
+    handles: dict[str, typing.Any] = {"capture_output": True}
+    if passthrough:
+        # Ours first, or the buffered lines we have already written land after the
+        # child's, which writes straight to the same handle.
+        for ours in (sys.stdout, sys.stderr):
+            ours.flush()
+        # **Named explicitly, not left to inherit.** `NO_WINDOW` is why: a child spawned
+        # with `CREATE_NO_WINDOW` and no `STARTF_USESTDHANDLES` gets its standard handles
+        # bound to the *hidden console* Windows just made for it, so everything it writes
+        # is discarded -- silently, with a zero exit code, which is the failure this flag
+        # exists to prevent rather than a version of it. Handing over the descriptors sets
+        # `STARTF_USESTDHANDLES`, and the child writes where this process writes.
+        handles = {"stdout": sys.stdout.fileno(), "stderr": sys.stderr.fileno()}
     try:
-        return subprocess.run(
+        result = subprocess.run(
             list(argv),
             cwd=cwd,
             env=None if env is None else dict(env),
             input=input_text,
-            capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
             check=False,
             creationflags=NO_WINDOW,
+            **handles,
         )
     except OSError as error:
         return subprocess.CompletedProcess(list(argv), 127, stdout="", stderr=str(error))
+    # A passthrough run leaves both `None`. Every caller tests these for truthiness
+    # before relaying them, so normalising keeps the annotated `[str]` honest rather
+    # than changing any behaviour.
+    return subprocess.CompletedProcess(
+        result.args, result.returncode, stdout=result.stdout or "", stderr=result.stderr or ""
+    )
 
 
 def _git(runner: Runner, *args: str) -> subprocess.CompletedProcess[str]:

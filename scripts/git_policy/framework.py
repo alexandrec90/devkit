@@ -133,7 +133,15 @@ def _run_pre_commit_framework(
     # tree, and without it pre-commit scopes to the *staged* diff -- stashing unstaged
     # work for the duration -- to run hooks that ignore the file list anyway.
     args = ["run", "--hook-stage", stage] + (["--all-files"] if stage == "pre-push" else [])
-    result = runner([*command, *args], cwd=root, env=framework_env(command))
+    # `stream=True`: relay the framework's output as it is produced rather than after it
+    # finishes. Nothing here parses it -- only the exit code is read -- and the push stage
+    # is minutes of lint and tests, so captured it made `git push` print nothing at all
+    # until the gate was over. That silence was read as a hang and answered with a second
+    # push, which started a second full gate on the same machine; three concurrent gates
+    # starving each other is how a branch stopped landing at all. The relay below still
+    # runs, because `run_command` falls back to capturing whenever this process has no
+    # stdout of its own to lend -- a scheduled job under `pythonw.exe`, or a test harness.
+    result = runner([*command, *args], cwd=root, env=framework_env(command), stream=True)
     if result.stdout:
         emit(result.stdout, end="")
     if result.stderr:
