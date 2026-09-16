@@ -647,6 +647,32 @@ def test_the_framework_run_is_streamed_not_held_until_it_finishes(tmp_path, monk
         assert runner.streamed == [True], stage
 
 
+def test_the_push_stage_says_it_will_be_quiet_before_it_goes_quiet(tmp_path, monkeypatch, capsys):
+    """Streaming gets pre-commit's banner out at once, but pre-commit still buffers each
+    hook's own output until that hook exits -- so the minutes in between are silent, and
+    that silence is what was read as a hang. The notice has to precede the wait, and the
+    commit stage must not get it: those hooks are sub-second."""
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    monkeypatch.setattr(
+        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
+    publishing = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n"
+    args = ("run", "--hook-stage", "pre-push", "--all-files")
+    runner = FakeRunner({("pre-commit-test", *args): completed(["pre-commit-test"])})
+
+    git_policy.framework._run_pre_commit_framework(
+        tmp_path, runner, stage="pre-push", raw_updates=publishing
+    )
+    out = capsys.readouterr().out
+    assert "takes minutes" in out
+    assert "SKIP=devkit-push-gate" in out
+
+    commit_args = ("run", "--hook-stage", "pre-commit")
+    quiet = FakeRunner({("pre-commit-test", *commit_args): completed(["pre-commit-test"])})
+    git_policy.framework._run_pre_commit_framework(tmp_path, quiet)
+    assert capsys.readouterr().out == ""
+
+
 def test_a_streamed_run_leaves_the_childs_output_on_the_inherited_handles(tmp_path, capfd):
     """The point of the flag: the child writes to this process's stdout itself, so there
     is nothing left to return -- and `[str]` stays honest rather than becoming `None`."""
