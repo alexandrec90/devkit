@@ -29,12 +29,13 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-# The instructions switch's record, so a stood-down tier is reported at its real weight
-# rather than at zero. This tool exists to answer "what is a session paying for these
-# files"; with the files moved aside the honest answer is what they *would* cost, and a
-# report saying nothing is loaded would read as the pruning having already been done.
+# `harness_state` is the instructions switch's record, so a stood-down tier is reported at
+# its real weight rather than at zero -- a report saying nothing is loaded reads as the
+# pruning having been done. `worktree_tiers` is every directory the walk below skips.
 import harness_state
+import worktree_tiers as wt
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -198,11 +199,11 @@ def _memory_files(root: Path) -> list[Path]:
     nothing is loaded while that group is off would read as the pruning having already
     been done, and `_read` finds each body wherever it currently is.
 
-    Deliberately skips `.worktrees/` and dependency trees: an ephemeral box holds a copy
-    of the same files, and counting those reports a workspace as carrying ten times the
-    instruction load it does.
+    Skips every worktree tier, off `MARKER_NAMES` rather than a literal: each holds a
+    copy of the same files. The literal was `.worktrees` alone -- the one tier *outside*
+    the checkout, so the only one unreachable here, while eleven nested copies counted.
     """
-    skip = {".worktrees", "node_modules", ".venv", ".git", "__pycache__", "templates"}
+    skip = {*wt.MARKER_NAMES, "node_modules", ".venv", ".git", "__pycache__", "templates"}
     found = set(root.rglob("CLAUDE.md")) | _switched_off(root)
     return sorted(
         path
@@ -226,9 +227,7 @@ def _switched_off(root: Path) -> set[Path]:
 def discover(root: Path, vendored: frozenset[str]) -> list[Doc]:
     """Every instruction file under `root`, classified by tier.
 
-    Deliberately skips `.worktrees/` and dependency trees: an ephemeral box holds a
-    copy of the same files, and counting those reports a workspace as carrying ten
-    times the instruction load it does.
+    Skips every worktree tier -- see `_memory_files`, the one walk here that recurses.
     """
     docs: list[Doc] = []
 
@@ -329,7 +328,7 @@ def workspace_of(root: Path) -> Path:
     directory is the largest on the machine.
     """
     parent = root.parent
-    return parent.parent if parent.name == ".worktrees" else parent
+    return parent.parent if parent.name == wt.BOXES_DIR_NAME else parent
 
 
 def live_slugs(root: Path) -> set[str]:
@@ -342,7 +341,8 @@ def live_slugs(root: Path) -> set[str]:
     project's, and reporting them as orphaned invites deleting them.
     """
     workspace = workspace_of(root)
-    candidates = [root, workspace, *_children(workspace), *_children(workspace / ".worktrees")]
+    boxes = workspace / wt.BOXES_DIR_NAME
+    candidates = [root, workspace, *_children(workspace), *_children(boxes)]
     return {slug_for(path) for path in candidates if path.is_dir()}
 
 

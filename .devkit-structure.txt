@@ -70,7 +70,7 @@ definitions::scripts/agent-box.py = 21
 definitions::scripts/agent_clis.py = 21
 definitions::scripts/devkit_project.py = 50
 definitions::scripts/docker-maint.py = 30
-definitions::scripts/fix-prs.py = 31
+definitions::scripts/fix-prs.py = 32
 definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
 definitions::scripts/hooks/structure_check.py = 43
@@ -99,7 +99,7 @@ dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 544
 file_lines::scripts/devkit_project.py = 1731
 file_lines::scripts/docker-maint.py = 790
-file_lines::scripts/fix-prs.py = 768
+file_lines::scripts/fix-prs.py = 789
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
@@ -431,5 +431,8 @@ swallowed_errors::scripts/worktree.py = 1
 #   file_lines::scripts/sync-devkit.py -> 1649
 #   function_lines::scripts/sync-devkit.py::main -> 271
 
+# 2026-09-16  recorded: FIFTH record deferring the same fix-prs.py split, which by engineering.md's own three-branch rule is a defect report rather than a raise. What is filling it, measured: the scan-and-menu half (broken_reason..refresh_menu) is 470 lines against the launch half's 250, and every one of the five records names that same seam. This change adds 41 lines and 2 definitions by extracting refresh_unresolved/unresolved_mergeability out of broken_prs, which took that function from complexity 21 back under the limit of 15 -- the trade the 2026-09-06 record already ruled on, per-function over module-level. The split is still owed and still moves the path the workspace task block names for the live --rows picker, so it is still its own PR. Reported via report-harness-defect.py.
+#   definitions::scripts/fix-prs.py -> 33
+#   file_lines::scripts/fix-prs.py -> 809
 # 2026-09-16  recorded: one ACTIONS entry registering memory-inventory; devkit_project.py is 1731/500 and already carries the split-the-module finding, which this does not make newly true
 #   file_lines::scripts/devkit_project.py -> 1731
