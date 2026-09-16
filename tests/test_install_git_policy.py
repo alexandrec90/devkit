@@ -231,8 +231,23 @@ def test_installing_from_a_ref_writes_that_refs_bytes(tmp_path):
     ref = installer.resolve_ref(REPO_ROOT)
     installer.install(REPO_ROOT, target, ref)
 
-    expected = installer.read_blob(REPO_ROOT, ref, "scripts/git_policy.py")
-    assert (target / "devkit_git_policy.py").read_bytes() == expected
+    # Every entry the ref actually holds, rather than one hard-coded name. The policy
+    # ships as the flat `scripts/git_policy.py` in refs cut before the package and as
+    # `scripts/git_policy/` after it, and `RUNTIME_FILES` carries both on purpose -- so
+    # naming the flat module here asserted the layout of whichever tag happened to be
+    # newest when this was written, and went red on the first release after the split.
+    # Reading the mapping instead covers the hooks and `worktree_env` too, which the
+    # single-file spelling never did.
+    checked = 0
+    for source_name, destination_name in installer.RUNTIME_FILES.items():
+        if not installer.in_ref(REPO_ROOT, ref, source_name):
+            continue
+        expected = installer.read_blob(REPO_ROOT, ref, source_name)
+        assert (target / destination_name).read_bytes() == expected, destination_name
+        checked += 1
+    # Without this the loop passes by running no assertions at all, which is how a ref
+    # that holds none of the runtime would read as a successful install.
+    assert checked, f"{ref} holds no RUNTIME_FILES entry"
 
 
 def test_an_unresolvable_ref_refuses_rather_than_installing_nothing():
