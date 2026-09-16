@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import typing
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -142,6 +143,32 @@ class MergedPR:
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def emit(text: str, *, stream: typing.TextIO | None = None, end: str = "\n") -> None:
+    """Write `text` to a console that may not be able to encode it.
+
+    The other half of `run_command`'s `errors="replace"`, and it has been missing for as
+    long as that decision has existed. Decoding a tool's output leniently is what stops a
+    stream being lost; it also means every string this package relays can contain U+FFFD,
+    plus whatever else the tool emitted that UTF-8 carried and the console's codepage does
+    not. `print` to a `cp1252` stdout then raises `UnicodeEncodeError` *from inside the
+    hook*, which git reports as a failed hook: one replacement character anywhere in
+    `pre-commit`'s output blocked every push in every repository on the machine, and the
+    traceback named the encoder rather than anything the user had done.
+
+    Lenient on the failing path only. The common console is UTF-8 and encodes the text
+    exactly; re-encoding everything defensively would make *that* output lossy to protect
+    a case it is not in. `TextIOWrapper.write` encodes the whole string before writing any
+    of it, so nothing is emitted twice when the retry runs.
+    """
+    stream = sys.stdout if stream is None else stream
+    payload = text + end
+    try:
+        stream.write(payload)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "ascii"
+        stream.write(payload.encode(encoding, "replace").decode(encoding, "replace"))
 
 
 def run_command(
