@@ -339,7 +339,11 @@ UNATTENDED: dict[str, str] = {
     "scripts/sync-devkit.py": "upgrade-project.py spawns it per project, once per pass",
     "scripts/policy_runtime.py": "upgrade-project.py runs its policy-reinstall rider once per pass",
     "scripts/release.py": "release-pipeline.py imports it for the version and bump helpers",
-    "scripts/git_policy.py": "the single spawn point git-merge-default.py runs git through",
+    # `_core` and not the package: the split left `run_command` -- and `NO_WINDOW` with
+    # it -- in exactly one module, and `branch`, `framework` and `dispatch` reach git
+    # only through the injected runner. Naming the one file that spawns is the point of
+    # this map, so it follows the spawn rather than the package.
+    "scripts/git_policy/_core.py": "the single spawn point git-merge-default.py runs git through",
     "scripts/agent_clis.py": "global-tools.py runs the agent-CLI stage of every nightly pass",
     # not scheduled, but the same failure: an agent hook's parent is whatever launched
     # the agent, and an editor's extension host has no console either.
@@ -350,7 +354,7 @@ UNATTENDED: dict[str, str] = {
 # A module in `UNATTENDED` that spawns nothing passes vacuously, so each one has to say
 # which module does the spawning for it.
 DELEGATES_ITS_SPAWNS: dict[str, str] = {
-    "scripts/git-merge-default.py": "scripts/git_policy.py",
+    "scripts/git-merge-default.py": "scripts/git_policy/_core.py",
     "scripts/worktree-guard.py": "scripts/guard_probes.py",
     "scripts/rc-servers.py": "scripts/rc_machine.py",
     "scripts/reap-stale.py": "scripts/reap_machine.py",

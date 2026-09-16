@@ -274,8 +274,8 @@ def test_a_worktree_install_the_checkout_moved_past_stays_off_the_status_line(tm
     gained that behaviour and the tradeoff needs deciding again rather than tuning.
     """
     target = installed(tmp_path / "hooks", installer.WORKTREE_REF)
-    (target / "devkit_git_policy.py").write_bytes(
-        (REPO_ROOT / "scripts" / "git_policy.py").read_bytes()
+    (target / "devkit_git_policy" / "__init__.py").write_bytes(
+        (REPO_ROOT / "scripts" / "git_policy" / "__init__.py").read_bytes()
     )
     assert ws.policy_line(REPO_ROOT, target, latest="v0.5.3") == ""
 

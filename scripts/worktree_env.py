@@ -24,7 +24,7 @@ there is one place to put this and it covers every runtime including the ones th
 not exist yet.
 
 **The checkout is resolved through `git rev-parse --git-common-dir`**, not through a
-path convention, for the reason `git_policy._venv_roots` gives: the worktree tiers on
+path convention, for the reason `git_policy.framework._venv_roots` gives: the worktree tiers on
 this machine sit at different depths and outside the checkout entirely, and git already
 knows the answer for all of them -- and for whatever the next tier turns out to be.
 

@@ -71,12 +71,11 @@ definitions::scripts/agent_clis.py = 21
 definitions::scripts/devkit_project.py = 50
 definitions::scripts/docker-maint.py = 30
 definitions::scripts/fix-prs.py = 31
-definitions::scripts/git_policy.py = 39
 definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
 definitions::scripts/hooks/structure_check.py = 43
 definitions::scripts/hooks/structure_scan.py = 31
-definitions::scripts/install-git-policy.py = 23
+definitions::scripts/install-git-policy.py = 25
 definitions::scripts/instruction-budget.py = 26
 definitions::scripts/new-project.py = 28
 definitions::scripts/plug-projects.py = 30
@@ -101,13 +100,12 @@ file_lines::scripts/agent-box.py = 544
 file_lines::scripts/devkit_project.py = 1725
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/fix-prs.py = 768
-file_lines::scripts/git_policy.py = 837
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
 file_lines::scripts/hooks/structure_check.py = 1078
 file_lines::scripts/hooks/structure_scan.py = 680
-file_lines::scripts/install-git-policy.py = 528
+file_lines::scripts/install-git-policy.py = 602
 file_lines::scripts/instruction-budget.py = 517
 file_lines::scripts/new-project.py = 863
 file_lines::scripts/plug-projects.py = 922
@@ -423,6 +421,10 @@ swallowed_errors::scripts/worktree.py = 1
 #   file_lines::scripts/install-git-policy.py -> 528
 #   file_lines::scripts/workspace-status.py -> 1077
 #   file_lines::scripts/worktree-guard.py -> 2309
+
+# 2026-09-15  recorded: The git_policy split lands here: install-git-policy.py gains worktree_drift (the stale-worktree-install check), install_refusal (the backstop that makes an install with no policy module unrepresentable) and _make_room (a nested destination's parent), plus the RUNTIME_FILES comment explaining why the policy is listed in both layouts. Second raise for this module, not a fifth, so it is a raise rather than a defect report -- but it now shows the same shape git_policy.py did, and saying so here is the point: it holds the runtime layout, the receipt, the drift comparison, ref reading (read_blob/in_ref/resolve_ref), hooks-path configuration, plan rendering and the CLI. That is the seam if it is raised again; do not let it reach five.
+#   definitions::scripts/install-git-policy.py -> 25
+#   file_lines::scripts/install-git-policy.py -> 602
 
 # 2026-09-16  recorded: sync-devkit.py gains source_map and copy_ends: the gated tier had no translation between devkit's layout (frontend/src/) and a consumer's ([frontend] src), so both sides were probed with the consumer's path and devkit was asked for a file it has never had at that name -- which is what stopped roguelike adopting v0.11.17 after the release itself succeeded. SEVENTH consecutive raise on this file (09-02, 09-05, 09-07, 09-08, 09-10, 09-11), so per the ratchet rule here is what is filling it, measured rather than assumed: of 1649 lines, main is 271 of them with ZERO docstring lines and complexity 74, while the other 52 definitions are all <= 46 lines and average 14. The module is not uniformly bloated and "split it by responsibility" is the wrong remedy: it is one CLI dispatcher that grew a branch per mode, wrapped around a well-factored library. The split that six records deferred is really "extract main's modes into named functions", which needs no new module and so does not touch the bootstrap constraint that has been the stated blocker every time -- sync-devkit.py is copied ALONE into a project as the bootstrap of a first --pull, so it cannot import siblings. Filed as a harness defect; doing it inside a fix for a stuck release would be scope creep. complexity is unchanged at 74 here because copy_ends takes the direction branch out of main.
 #   definitions::scripts/sync-devkit.py -> 53

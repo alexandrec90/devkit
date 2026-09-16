@@ -29,19 +29,42 @@ import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TARGET = Path.home() / ".devkit" / "git-hooks"
 RUNTIME_FILES = {
+    # THE POLICY IN BOTH LAYOUTS, deliberately, and this entry is why an install from an
+    # older tag still works. `scripts/git_policy.py` was one module until it became the
+    # `scripts/git_policy/` package; a ref cut before that has the file and not the
+    # package, and a ref cut after has the package and not the file. `install_files`
+    # already skips a `RUNTIME_FILES` entry the ref does not hold, so listing both means
+    # each ref installs the layout it actually has -- and dropping the flat entry would
+    # make `--yes` from the newest tag install *no policy at all* until the next release,
+    # on every machine, with the hooks left importing a module that is not there.
+    # `install_refusal` is the backstop that makes that unrepresentable rather than
+    # merely unlikely.
+    #
+    # The two can also coexist in one install directory, and the winner is the right one:
+    # Python prefers a package to a same-named flat module on `sys.path`, so a
+    # `devkit_git_policy.py` left by an older install is shadowed by the package rather
+    # than preferred, and the upgrade needs no cleanup step to be safe.
     "scripts/git_policy.py": "devkit_git_policy.py",
+    "scripts/git_policy/__init__.py": "devkit_git_policy/__init__.py",
+    "scripts/git_policy/_core.py": "devkit_git_policy/_core.py",
+    "scripts/git_policy/branch.py": "devkit_git_policy/branch.py",
+    "scripts/git_policy/dispatch.py": "devkit_git_policy/dispatch.py",
+    "scripts/git_policy/framework.py": "devkit_git_policy/framework.py",
     "scripts/worktree_env.py": "devkit_worktree_env.py",
     "scripts/git-hooks/pre-commit": "pre-commit",
     "scripts/git-hooks/pre-push": "pre-push",
     "scripts/git-hooks/post-checkout": "post-checkout",
 }
+# The destinations that between them have to yield an importable `devkit_git_policy`.
+# Derived from the map so a future layout change cannot forget it.
+POLICY_ENTRYPOINTS = frozenset({"devkit_git_policy.py", "devkit_git_policy/__init__.py"})
 # Which of those git execs, and therefore which need the executable bit. Derived from the
 # map rather than listed twice: a hook added to one and forgotten in the other installs
 # as a plain file, and git skips a hook it cannot execute WITHOUT SAYING SO -- the same
@@ -194,6 +217,19 @@ def read_receipt(target: Path) -> Receipt | None:
         return None
 
 
+def _make_room(destination: Path) -> None:
+    """Create a destination's parent directory, and only when something will be written.
+
+    Called at the write rather than at the top of the loop, which is where it was first
+    put and was wrong: a skipped entry would still have created the directory, so
+    installing from a tag that predates the package left an empty `devkit_git_policy/`
+    beside the flat module it did install. An empty directory is a *namespace* package,
+    and while a real module still wins over one, shipping an empty package directory
+    next to the module it looks like is a trap for whoever reads the install next.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+
 def install_files(source_root: Path, target: Path, ref: str = WORKTREE_REF) -> dict[str, str]:
     """Write the runtime into `target` from `ref`; return installed name -> sha256.
 
@@ -203,10 +239,22 @@ def install_files(source_root: Path, target: Path, ref: str = WORKTREE_REF) -> d
     """
     target.mkdir(parents=True, exist_ok=True)
     hashes: dict[str, str] = {}
-    skipped: list[str] = []
+    # (source, why) rather than bare names: the two skips have different causes now, and
+    # "newer than the ref" printed over a file the ref was never going to hold sends the
+    # reader looking for a release that would fix it.
+    skipped: list[tuple[str, str]] = []
     for source_name, destination_name in RUNTIME_FILES.items():
         destination = target / destination_name
         if ref == WORKTREE_REF:
+            # The same skip the ref branch makes, for the same reason: the working tree
+            # holds ONE of the policy's two layouts, so the other is legitimately absent
+            # rather than a broken checkout. Before the package this could not happen --
+            # every `RUNTIME_FILES` source was always present -- and `copy2` raising here
+            # would refuse the whole install over a file no ref was ever going to have.
+            if not (source_root / source_name).is_file():
+                skipped.append((source_name, "not in the working tree"))
+                continue
+            _make_room(destination)
             shutil.copy2(source_root / source_name, destination)
         elif not in_ref(source_root, ref, source_name):
             # THE REF DECIDES THE RUNTIME. A file added to `RUNTIME_FILES` after `ref`
@@ -216,18 +264,44 @@ def install_files(source_root: Path, target: Path, ref: str = WORKTREE_REF) -> d
             # the newer file is skipped and left out of the receipt, and `--check` is
             # judged against the receipt rather than against this list, or the skip
             # would report as drift forever and re-install forever.
-            skipped.append(source_name)
+            skipped.append((source_name, f"not in {ref}"))
             continue
         else:
+            _make_room(destination)
             destination.write_bytes(read_blob(source_root, ref, source_name))
         hashes[destination_name] = digest(destination.read_bytes())
         if destination_name in HOOK_NAMES:
             destination.chmod(
                 destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
             )
-    for source_name in skipped:
-        print(f"install-git-policy: {source_name} is newer than {ref}; not installed")
+    for source_name, why in skipped:
+        print(f"install-git-policy: {source_name} {why}; not installed")
+    refusal = install_refusal(hashes, ref)
+    if refusal:
+        raise InstallRefusedError(refusal)
     return hashes
+
+
+def install_refusal(hashes: Mapping[str, str], ref: str) -> str:
+    """Why this install must not stand, or "" when it may.
+
+    The one thing the per-file skip cannot be allowed to do. Skipping a file the ref
+    does not hold is right for a runtime that *gained* a file; it is catastrophic for
+    the policy module itself, because a skip there leaves the hooks importing a
+    `devkit_git_policy` that is not there -- and they run on every commit in every
+    repository on the machine, so the failure is total and arrives with no warning.
+
+    Pure, and checked against what was actually written rather than against
+    `RUNTIME_FILES`, so it stays true whichever layout the ref turned out to have.
+    """
+    if set(hashes) & POLICY_ENTRYPOINTS:
+        return ""
+    return (
+        f"{ref} holds neither the policy module nor the policy package, so this install "
+        "would leave the git hooks with nothing to import. Install from a ref that has "
+        "one: the tags before the package have scripts/git_policy.py, and the tags from "
+        "the package on have scripts/git_policy/."
+    )
 
 
 def install(source_root: Path, target: Path, ref: str = WORKTREE_REF) -> Receipt:
