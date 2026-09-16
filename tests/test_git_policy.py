@@ -963,3 +963,65 @@ def test_merged_pr_reports_the_url_and_survives_a_broken_answer():
     # Both APIs failing is the only case that may report an error.
     broken = git_policy.merged_pr(FakeRunner(), "acme/widgets", "topic")
     assert broken.error and not broken.url
+
+
+# --- relaying output to a console that cannot encode it ----------------------------
+
+
+class NarrowStream(io.StringIO):
+    """A `cp1252` console. `io.StringIO` accepts anything, so the codepage is modelled
+    rather than inherited -- what the real `TextIOWrapper` does is encode on write and
+    raise before emitting a byte, which is what makes the retry in `emit` safe."""
+
+    encoding = "cp1252"
+
+    def write(self, text: str) -> int:
+        text.encode(self.encoding)  # raises UnicodeEncodeError, exactly as a console does
+        return super().write(text)
+
+
+def test_emit_survives_a_console_that_cannot_encode_the_replacement_character():
+    """The regression. `run_command` decodes with `errors="replace"` on purpose, so any
+    output this package relays can carry U+FFFD; printing that to a `cp1252` stdout
+    raised `UnicodeEncodeError` *inside the hook*, which git reports as a failed hook.
+    One replacement character in `pre-commit`'s output blocked every push on the
+    machine, and the traceback named the encoder rather than anything the user did."""
+    stream = NarrowStream()
+    git_policy.emit("ruff: ok \ufffd done", stream=stream, end="")
+    written = stream.getvalue()
+    assert "ruff: ok" in written and "done" in written
+    assert "\ufffd" not in written  # degraded, not lost
+
+
+def test_emit_does_not_degrade_output_a_console_can_encode():
+    """Lenient on the failing path only. A UTF-8 console gets the text exactly; a blanket
+    re-encode would make the common case lossy to protect a case it is not in."""
+    stream = io.StringIO()  # encodes anything, like a UTF-8 console
+    git_policy.emit("caf\u00e9 \ufffd", stream=stream, end="")
+    assert stream.getvalue() == "caf\u00e9 \ufffd"
+
+
+def test_emit_writes_each_payload_once_when_the_retry_runs():
+    """`TextIOWrapper.write` encodes the whole string before writing any of it, so the
+    failing attempt emits nothing. If that ever stopped holding, the fallback would
+    double every line it rescued."""
+    stream = NarrowStream()
+    git_policy.emit("\ufffd", stream=stream, end="")
+    assert len(stream.getvalue()) == 1
+
+
+def test_the_dispatcher_relays_hook_output_through_emit():
+    """The end of the wire. `emit` existing is worth nothing if the sites that relay a
+    subprocess's captured output still call `print`."""
+    source = (support.REPO_ROOT / "scripts" / "git_policy" / "dispatch.py").read_text(
+        encoding="utf-8"
+    )
+    framework = (support.REPO_ROOT / "scripts" / "git_policy" / "framework.py").read_text(
+        encoding="utf-8"
+    )
+    for name, text in (("dispatch.py", source), ("framework.py", framework)):
+        assert "print(" not in text, (
+            f"{name} calls print(); this package relays strings decoded with "
+            'errors="replace" and must go through emit() so a narrow console cannot '
+            "turn a hook's output into a failed hook"
+        )

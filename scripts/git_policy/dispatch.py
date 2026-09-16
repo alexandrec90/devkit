@@ -27,8 +27,10 @@ from ._core import (
     _repo_root,
     _stdout,
     console_python,
+    emit,
     run_command,
 )
+
 from .branch import evaluate_pre_commit, evaluate_pre_push, policy_skipped
 from .framework import _run_pre_commit_framework
 
@@ -58,16 +60,16 @@ def _run_project_hook(
         return 0
     command = _project_hook_command(hook, args)
     if command is None:
-        print(
+        emit(
             f"[devkit branch policy] cannot execute project hook {hook}: sh is unavailable",
-            file=sys.stderr,
+            stream=sys.stderr,
         )
         return 1
     result = runner(command, input_text=input_text or None, cwd=root)
     if result.stdout:
-        print(result.stdout, end="")
+        emit(result.stdout, end="")
     if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
+        emit(result.stderr, end="", stream=sys.stderr)
     return result.returncode
 
 
@@ -133,17 +135,17 @@ def run_hook(
 
     artifact = _write_artifact(hook_name, decision, runner)
     for warning in decision.warnings:
-        print(f"[devkit branch policy] WARNING: {warning}", file=sys.stderr)
+        emit(f"[devkit branch policy] WARNING: {warning}", stream=sys.stderr)
     if not decision.ok:
         for error in decision.errors:
-            print(f"[devkit branch policy] {error}", file=sys.stderr)
+            emit(f"[devkit branch policy] {error}", stream=sys.stderr)
         if artifact is not None:
-            print(f"[devkit branch policy] details: {artifact}", file=sys.stderr)
+            emit(f"[devkit branch policy] details: {artifact}", stream=sys.stderr)
         return 1
 
     root = _repo_root(runner)
     if root is None:
-        print("[devkit branch policy] cannot locate repository root", file=sys.stderr)
+        emit("[devkit branch policy] cannot locate repository root", stream=sys.stderr)
         return 1
     framework_result = _run_pre_commit_framework(root, runner, hook_name, input_text)
     if framework_result:
