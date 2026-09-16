@@ -230,6 +230,58 @@ def _make_room(destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
 
 
+def shadowing_entrypoint(installed: Mapping[str, str]) -> str:
+    """The policy layout an install holding `installed` did NOT write, when it wrote one.
+
+    `RUNTIME_FILES` lists both layouts so either ref installs the one it has, and the
+    comment there used to argue the two could safely coexist: Python prefers a package
+    to a same-named flat module, so a `devkit_git_policy.py` left by an older install is
+    shadowed rather than preferred. True, and it only covers the upgrade direction.
+
+    Going the other way -- reinstalling from a tag that predates the package, which is
+    what `main()` does by default and what `installers.py` re-runs nightly -- writes the
+    flat module underneath a `devkit_git_policy/` an earlier install left behind. The
+    package still wins, so every hook on the machine imports the STALE package while
+    `--check` reports the runtime current at the ref it just installed. Nothing is red
+    and nothing is what it says it is.
+
+    Returns "" when the install wrote neither entrypoint or (impossibly) both, because
+    `install_refusal` owns the first case and the second is not a shadow.
+    """
+    written = set(installed) & POLICY_ENTRYPOINTS
+    if len(written) != 1:
+        return ""
+    return next(iter(POLICY_ENTRYPOINTS - written))
+
+
+def entrypoint_path(target: Path, entrypoint: str) -> Path:
+    """What to look at on disk for `entrypoint` -- the package DIRECTORY, not its
+    `__init__.py`. An empty `devkit_git_policy/` is a namespace package and still
+    shadows a flat module, so the directory is the thing that has to be gone."""
+    if "/" in entrypoint:
+        return target / entrypoint.split("/", 1)[0]
+    return target / entrypoint
+
+
+def clear_shadowing_entrypoint(target: Path, installed: Mapping[str, str]) -> str:
+    """Remove the layout this install did not write. Returns what went, or "".
+
+    Deleting rather than warning, because the two live at a path this installer owns
+    entirely and a warning at install time is read by nobody at commit time.
+    """
+    stale = shadowing_entrypoint(installed)
+    if not stale:
+        return ""
+    path = entrypoint_path(target, stale)
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.is_file():
+        path.unlink()
+    else:
+        return ""
+    return stale
+
+
 def install_files(source_root: Path, target: Path, ref: str = WORKTREE_REF) -> dict[str, str]:
     """Write the runtime into `target` from `ref`; return installed name -> sha256.
 
@@ -276,6 +328,9 @@ def install_files(source_root: Path, target: Path, ref: str = WORKTREE_REF) -> d
             )
     for source_name, why in skipped:
         print(f"install-git-policy: {source_name} {why}; not installed")
+    cleared = clear_shadowing_entrypoint(target, hashes)
+    if cleared:
+        print(f"install-git-policy: removed {cleared}, left by an install of the other layout")
     refusal = install_refusal(hashes, ref)
     if refusal:
         raise InstallRefusedError(refusal)
@@ -406,6 +461,19 @@ def compare_install(target: Path, receipt: Receipt | None) -> list[Drift]:
             continue
         if actual != expected:
             drifted.append(Drift(destination_name, "modified since it was installed"))
+    # The receipt can only describe what it wrote. A leftover of the OTHER layout is
+    # invisible to the loop above and is the one difference that changes which code
+    # runs, so it is asked about separately.
+    stale = shadowing_entrypoint(receipt.files)
+    if stale and entrypoint_path(target, stale).exists():
+        drifted.append(
+            Drift(
+                stale,
+                "left by an older install and shadows the runtime this receipt describes"
+                if "/" in stale
+                else "left by an older install of the flat module",
+            )
+        )
     return drifted
 
 

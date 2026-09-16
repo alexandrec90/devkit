@@ -201,21 +201,42 @@ def test_a_pre_package_tag_installs_a_policy_the_hooks_can_still_import(tmp_path
     assert _imports_from(target).endswith("devkit_git_policy.py")
 
 
-def test_the_package_shadows_a_flat_module_an_older_install_left_behind(tmp_path):
-    """The upgrade, which needs no cleanup step to be safe.
+def test_an_upgrade_takes_the_layout_it_replaced_with_it(tmp_path):
+    """This used to assert the opposite, and the reasoning it recorded was half a case.
 
-    Installing the package over a pre-package install leaves the old
-    `devkit_git_policy.py` on disk -- nothing deletes it, and the receipt no longer
-    names it. That is harmless only because Python prefers a package to a same-named
-    module on `sys.path`, and "harmless only because" is exactly the kind of claim that
-    needs a test rather than a comment.
+    It said the leftover `devkit_git_policy.py` was "harmless only because Python
+    prefers a package to a same-named module on `sys.path`" -- correct, and it only
+    ever covered the upgrade direction. Going back the other way, which is what
+    `main()` does by default and `installers.py` re-runs nightly, writes the flat
+    module underneath the package and the package keeps winning: every hook on the
+    machine imports a release nobody chose while the receipt names the one just
+    installed. "Harmless only because" turned out to be load-bearing on which way you
+    were walking, so the install no longer leaves the pair to resolution order.
     """
     target = tmp_path / "hooks"
     installer.install(REPO_ROOT, target, "v0.11.16")
+    assert (target / "devkit_git_policy.py").is_file(), "v0.11.16 is the flat-module layout"
+
     installer.install(REPO_ROOT, target, installer.WORKTREE_REF)
 
-    assert (target / "devkit_git_policy.py").is_file(), "the stale file is expected to remain"
+    assert not (target / "devkit_git_policy.py").exists(), "the replaced layout must go"
     assert _imports_from(target).endswith(str(Path("devkit_git_policy") / "__init__.py"))
+
+
+def test_downgrading_to_a_pre_package_tag_leaves_the_module_actually_importable(tmp_path):
+    """The direction the old test did not have, and the one that bit a real machine.
+
+    Installing v0.11.16 over a package install must leave `devkit_git_policy.py` as
+    what imports -- not a flat module sitting unreachable under a stale package.
+    """
+    target = tmp_path / "hooks"
+    installer.install(REPO_ROOT, target, installer.WORKTREE_REF)
+    assert (target / "devkit_git_policy" / "__init__.py").is_file()
+
+    installer.install(REPO_ROOT, target, "v0.11.16")
+
+    assert not (target / "devkit_git_policy").exists(), "the stale package must go"
+    assert _imports_from(target).endswith("devkit_git_policy.py")
 
 
 def test_the_default_source_is_a_released_tag_not_the_working_tree():
@@ -227,12 +248,32 @@ def test_the_default_source_is_a_released_tag_not_the_working_tree():
 
 
 def test_installing_from_a_ref_writes_that_refs_bytes(tmp_path):
+    """Whichever layout the ref has -- the flat module or the package.
+
+    This pinned `scripts/git_policy.py` by name, and that is not a detail of the
+    assertion: it is the one thing `install_files` is written NOT to assume, because a
+    ref cut before the package split has the module and a ref cut after has the package.
+    The test only sees the ref `resolve_ref` returns, which is the newest TAG -- so it
+    stayed green on every branch and went red for the first time inside the release
+    pipeline's `phase=tag`, where the staged tag is the first ref with no flat module.
+    A red suite there is a refusal to publish, so v0.11.18 was prepared, merged, and
+    never tagged; `FALLBACK_DEVKIT_REF` then named a tag that did not exist, which is
+    what reddened main's nightly. A test that hard-codes one side of a supported fork
+    fails at the worst possible moment.
+    """
     target = tmp_path / "hooks"
     ref = installer.resolve_ref(REPO_ROOT)
     installer.install(REPO_ROOT, target, ref)
 
-    expected = installer.read_blob(REPO_ROOT, ref, "scripts/git_policy.py")
-    assert (target / "devkit_git_policy.py").read_bytes() == expected
+    written = {
+        source: destination
+        for source, destination in installer.RUNTIME_FILES.items()
+        if destination in installer.POLICY_ENTRYPOINTS and installer.in_ref(REPO_ROOT, ref, source)
+    }
+    assert written, f"{ref} carries neither policy layout"
+    for source, destination in written.items():
+        expected = installer.read_blob(REPO_ROOT, ref, source)
+        assert (target / destination).read_bytes() == expected
 
 
 def test_an_unresolvable_ref_refuses_rather_than_installing_nothing():
@@ -529,3 +570,93 @@ def test_the_drift_report_names_the_fix(tmp_path):
     )
     assert "pre-commit" in report
     assert "--yes" in report
+
+
+# --- the two layouts must never coexist -------------------------------------------
+
+
+"""`RUNTIME_FILES` lists both the flat module and the package so that either ref can be
+installed from. The cost is that an install directory can end up holding both, and
+Python's resolution order decides which one every hook on the machine imports -- a
+package beats a same-named flat module. Reinstalling from a tag that predates the split
+therefore writes a module that nothing will import, underneath a package nothing
+updated, and the receipt records the module. `--check` then reports the runtime current
+at the ref it just installed while the hooks run code from some other release."""
+
+
+def _install_dir_with_both_layouts(tmp_path):
+    """An install directory as a real machine had it: a package left by a newer install
+    and the flat module an older tag writes back over the top."""
+    target = tmp_path / "hooks"
+    (target / "devkit_git_policy").mkdir(parents=True)
+    (target / "devkit_git_policy" / "__init__.py").write_text("STALE", encoding="utf-8")
+    (target / "devkit_git_policy.py").write_text("fresh", encoding="utf-8")
+    return target
+
+
+def test_installing_the_flat_module_removes_a_package_that_would_shadow_it():
+    installed = {"devkit_git_policy.py": "abc"}
+    assert installer.shadowing_entrypoint(installed) == "devkit_git_policy/__init__.py"
+
+
+def test_installing_the_package_names_the_flat_module_as_the_stale_one():
+    installed = {"devkit_git_policy/__init__.py": "abc"}
+    assert installer.shadowing_entrypoint(installed) == "devkit_git_policy.py"
+
+
+def test_an_install_that_wrote_no_entrypoint_has_no_shadow_to_clear():
+    """`install_refusal` owns that case and must stay the thing that reports it."""
+    assert installer.shadowing_entrypoint({"pre-commit": "abc"}) == ""
+
+
+def test_the_package_directory_is_what_gets_removed_not_its_init():
+    """An empty `devkit_git_policy/` is a namespace package and still shadows a flat
+    module, so deleting only `__init__.py` would leave the shadow in place."""
+    assert (
+        installer.entrypoint_path(Path("hooks"), "devkit_git_policy/__init__.py")
+        == Path("hooks") / "devkit_git_policy"
+    )
+
+
+def test_clearing_removes_the_whole_stale_package(tmp_path):
+    target = _install_dir_with_both_layouts(tmp_path)
+    cleared = installer.clear_shadowing_entrypoint(target, {"devkit_git_policy.py": "abc"})
+    assert cleared == "devkit_git_policy/__init__.py"
+    assert not (target / "devkit_git_policy").exists()
+    assert (target / "devkit_git_policy.py").read_text(encoding="utf-8") == "fresh"
+
+
+def test_clearing_is_a_no_op_when_there_is_nothing_to_clear(tmp_path):
+    target = tmp_path / "hooks"
+    target.mkdir()
+    (target / "devkit_git_policy.py").write_text("fresh", encoding="utf-8")
+    assert installer.clear_shadowing_entrypoint(target, {"devkit_git_policy.py": "abc"}) == ""
+
+
+def test_check_reports_a_package_shadowing_the_module_the_receipt_names(tmp_path):
+    """The half `compare_install` could not see. It walks the receipt, and the receipt
+    can only describe what it wrote -- so the one file that changes which code runs was
+    the one file never looked at."""
+    target = _install_dir_with_both_layouts(tmp_path)
+    receipt = installer.Receipt(
+        ref="v0.11.17",
+        installed_at="2026-09-16T00:00:00Z",
+        files={"devkit_git_policy.py": installer.digest(b"fresh")},
+    )
+    drifted = installer.compare_install(target, receipt)
+    names = [d.name for d in drifted]
+    assert "devkit_git_policy/__init__.py" in names, drifted
+    assert any("shadows" in d.reason for d in drifted), drifted
+
+
+def test_check_stays_quiet_when_only_the_receipts_own_layout_is_present(tmp_path):
+    """The check has to be silent in the normal case or nobody reads it."""
+    target = tmp_path / "hooks"
+    target.mkdir()
+    (target / "devkit_git_policy.py").write_text("fresh", encoding="utf-8")
+    receipt = installer.Receipt(
+        ref="v0.11.17",
+        installed_at="2026-09-16T00:00:00Z",
+        files={"devkit_git_policy.py": installer.digest(b"fresh")},
+    )
+    assert installer.compare_install(target, receipt) == []

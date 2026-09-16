@@ -108,14 +108,27 @@ This condemns neither **diagnosing a failure** (`gh run view --log-failed` and t
 after it are the work, not waiting — send them to a file where the volume warrants) nor
 **asking once**. The waste begins at the *second* identical poll.
 
-**"No checks reported" has two causes needing opposite responses**: a gate that has not
-started *yet*, and one that never will, because a `CONFLICTING` PR has no merge ref to
-build against. Ask once, after a push — `gh pr view <N> --json
-mergeStateStatus,statusCheckRollup`. `CONFLICTING` means merge `origin/<default>` and
-push. `BLOCKED`/`UNSTABLE`/`CLEAN` mean the run exists and `--watch` is right. `UNKNOWN` is
-the ordinary answer in the seconds after a push and says nothing either way. If you get the
-message anyway, tell the two apart by **how long the call took, not what it said**: a
-`--watch` back in about a second never waited, so re-issue it once.
+**"No checks reported" has three causes needing opposite responses.** Ask once, after a
+push — `gh pr view <N> --json mergeStateStatus,statusCheckRollup`:
+
+| What you see | What it is | What to do |
+| --- | --- | --- |
+| `CONFLICTING` | no merge ref to build against, so the gate never will run | merge `origin/<default>` and push |
+| `BLOCKED`/`CLEAN` | the run exists | `--watch` is right |
+| `UNKNOWN` | the ordinary answer in the seconds after a push | says nothing either way; ask again |
+| `UNSTABLE` **with an empty rollup** | a run exists that the PR cannot show you | `gh run list --branch <head> --event workflow_dispatch` |
+
+That last row is the one that reads as the first and is its opposite. **A push made with
+`GITHUB_TOKEN` raises no `pull_request` event**, so a workflow that commits to a PR branch
+— a lock repair, a generated-file sync — leaves the only gate evidence on a run it
+dispatched itself, and a `workflow_dispatch` run is not in the PR's check rollup. The PR
+reads exactly like one whose gate has not started. carameli #347 sat four days that way
+while its dispatched gate had *failed*, on a real test, with the fix a one-line command.
+`UNSTABLE` is the tell: a gate that has not started yet cannot make a PR unstable.
+
+If you get the message anyway, tell the not-started case from the rest by **how long the
+call took, not what it said**: a `--watch` back in about a second never waited, so
+re-issue it once.
 
 When the gate will outlast anything useful you could do meanwhile, stop: report that the
 branch is pushed and the gate is running, and let the result arrive in a fresh session.
