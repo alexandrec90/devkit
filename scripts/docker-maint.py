@@ -327,16 +327,26 @@ def generic_up(extra: list[str] | None = None) -> int:
 
 
 def generic_down(extra: list[str] | None = None) -> int:
-    """`compose down` -- containers only.
+    """`compose stop` -- the containers are kept, so Docker Desktop can start them.
 
-    Named volumes and the data in them survive. `-v`/`--volumes` is never added here
-    and must never be: this runs from a one-click task over a project picker, which is
-    the last place a database should be destroyable by choosing the wrong entry.
+    `stop`, not `down`, and the mode keeps its historical name. `down` deletes the
+    containers and the network, after which nothing in Docker Desktop's UI can bring
+    the stack back -- its start button issues `compose start`, which only starts
+    containers that exist -- and the next start is a `compose up` from a task. A
+    stopped stack is exactly the state `stop-idle` leaves behind and the one
+    `restart: unless-stopped` respects across reboots; the start button, the task and
+    the stop hook all bring it back in seconds. Anyone who wants the containers gone
+    runs `docker compose down` by hand.
+
+    Named volumes and the data in them survive either way. `-v`/`--volumes` is never
+    added here and must never be: this runs from a one-click task over a project
+    picker, which is the last place a database should be destroyable by choosing the
+    wrong entry.
     """
     if not compose_file():
         return _no_stack_here()
-    print(banner("Docker Compose Down (generic)"))
-    return run(["docker", "compose", "down", *(extra or [])], timeout=300)
+    print(banner("Docker Compose Stop (generic)"))
+    return run(["docker", "compose", "stop", *(extra or [])], timeout=300)
 
 
 def generic_restart_engine() -> int:
@@ -515,8 +525,17 @@ def generic_prune(idle_only: bool = False) -> int:
     # are megabytes, and an `until=` filter cannot rescue the case, because it reads
     # creation time rather than stop time and so cannot tell a stack parked last night
     # from one abandoned in June.
+    #
+    # No `network prune` either, for the same parked stack. It removes every network
+    # with no RUNNING container attached, and a stopped container still pins its
+    # network by ID -- so at 04:00 it deleted `carameli_default` out from under the
+    # eight containers `stop-idle` had parked at 03:30, and every press of Docker
+    # Desktop's start button (which issues `compose start`, and `start` creates no
+    # network) then failed with `network <hex id> not found` until carameli's own
+    # `docker-up.py` force-recreated the stack (2026-09-17, and the "backend exited
+    # overnight" it had been blamed on before that). A compose network is a few bytes
+    # of daemon state and no VHDX space, so pruning them reclaims nothing.
     run(["docker", "image", "prune", "-af"], timeout=600)
-    run(["docker", "network", "prune", "-f"], timeout=600)
     run(["docker", "builder", "prune", "-af"], timeout=600)
 
     print("\n  Stopping Docker for exclusive VHDX access ...")
