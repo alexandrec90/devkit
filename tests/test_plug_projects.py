@@ -265,7 +265,7 @@ def test_an_error_does_not_end_the_loop():
         (Candidate("alpha", plugged=True, on_disk=True, on_github=True), "ticking retires it"),
         (
             Candidate("zeta", plugged=True, on_disk=False, on_github=True),
-            "leaving it alone clones acme/zeta",
+            "ticking clones acme/zeta here",
         ),
         (Candidate("gamma", plugged=False, on_disk=False, on_github=True), "clones acme/gamma"),
         (Candidate("delta", plugged=False, on_disk=True, on_github=False), "CREATES the private"),
@@ -379,6 +379,56 @@ def test_a_row_nobody_ticked_is_left_exactly_as_it_is():
     assert toggled_selection(("gamma",), {"alpha", "beta"}) == {"alpha", "beta", "gamma"}
 
 
+def test_a_tick_on_a_project_registered_elsewhere_is_a_clone_not_a_toggle():
+    """`beta` is in the registry and not on this PC. Read as a toggle its tick would
+    retire it on every workstation, when the person ticking it here almost always
+    wants the checkout -- so `clone_picks` takes it out before the toggles are read."""
+    candidates = inventory(REGISTRY, ["alpha"], ["alpha", "beta", "gamma"])
+    picked = ("beta", "gamma")
+
+    clones = plug_projects.clone_picks(picked, candidates)
+
+    assert clones == {"beta"}
+    rest = tuple(n for n in picked if n not in clones)
+    assert toggled_selection(rest, {"alpha", "beta"}) == {"alpha", "beta", "gamma"}
+
+
+def test_a_registered_project_with_no_repo_is_not_a_clone_pick():
+    """Nothing to clone from, so its tick stays a toggle: retiring a registry entry
+    that names a repo that is gone is exactly what an unplug is for."""
+    candidates = inventory(REGISTRY, ["alpha"], ["alpha"])
+    assert plug_projects.clone_picks(("beta",), candidates) == set()
+
+
+def test_scripted_selection_reads_the_three_meanings_of_a_registered_elsewhere_row():
+    """`beta` is registered and not here. A tick on it is a clone and never a toggle;
+    `--plug beta` is a clone; `--unplug alpha` says nothing about it and clones nothing."""
+    candidates = inventory(REGISTRY, ["alpha"], ["alpha", "beta", "gamma"])
+    scripted = plug_projects.scripted_selection
+
+    assert scripted(candidates, ticks=("beta", "gamma"), plug=[], unplug=[]) == (
+        {"alpha", "beta", "gamma"},
+        {"beta"},
+    )
+    assert scripted(candidates, ticks=None, plug=["beta"], unplug=[]) == (
+        {"alpha", "beta"},
+        {"beta"},
+    )
+    assert scripted(candidates, ticks=None, plug=[], unplug=["alpha"]) == ({"beta"}, set())
+
+
+def test_after_apply_notes_send_nobody_to_commit_after_a_clone_only_run():
+    """A clone edits nothing in the registry, so there is no `workspace.jsonc` to ship."""
+    notes = plug_projects.after_apply_notes
+    assert notes([Step(plug_projects.CLONE, "beta", clone=True)]) == []
+    assert any(
+        "commit workspace.jsonc" in line for line in notes([Step(plug_projects.UNPLUG, "a")])
+    )
+    plugged = notes([Step(plug_projects.PLUG, "a")])
+    assert any("commit workspace.jsonc" in line for line in plugged)
+    assert any("ports.toml" in line for line in plugged)
+
+
 def test_toggling_is_its_own_inverse():
     """What makes the answer safe to apply against a registry that moved under it: the
     same pick, applied twice, is the state it started from."""
@@ -428,26 +478,37 @@ def test_a_registered_project_missing_from_disk_is_planned_as_a_clone():
     Four registered projects were missing from disk, none was offered, and the answer was
     a hand-written `gh repo clone` loop."""
     candidates = inventory(REGISTRY, [], ["alpha", "beta"])
-    steps = plan(candidates, {"alpha", "beta"})
+    steps = plan(candidates, {"alpha", "beta"}, clone={"alpha", "beta"})
 
     assert [(s.action, s.name, s.clone) for s in steps] == [
         (plug_projects.CLONE, "alpha", True),
         (plug_projects.CLONE, "beta", True),
     ]
-    assert "clone from GitHub" in describe(steps[0])
+    assert "clone from GitHub onto this PC" in describe(steps[0])
+
+
+def test_a_clone_happens_only_for_the_rows_named_as_clones():
+    """The registry is global and the checkout is per PC, so a registered project with
+    no checkout here is the ordinary state of every other workstation -- not a request.
+    The quick-pick's answer names only what was ticked, and `--unplug beta` says nothing
+    about alpha; both used to clone every such row as a side effect."""
+    candidates = inventory(REGISTRY, [], ["alpha", "beta"])
+    assert plan(candidates, {"alpha", "beta"}) == []
+    assert [s.name for s in plan(candidates, {"alpha", "beta"}, clone={"alpha"})] == ["alpha"]
 
 
 def test_the_clone_step_leaves_the_registry_alone():
     """It is already registered. Re-registering would be a no-op edit to the file every
     window on the machine reads, and `apply_registry` is the one place that says so."""
     candidates = inventory(REGISTRY, [], ["alpha", "beta"])
-    assert apply_registry(REGISTRY, plan(candidates, {"alpha", "beta"})) == REGISTRY
+    steps = plan(candidates, {"alpha", "beta"}, clone={"alpha", "beta"})
+    assert apply_registry(REGISTRY, steps) == REGISTRY
 
 
 def test_a_registered_project_with_no_repo_to_clone_from_is_left_alone():
     """Nothing to clone from, so the step would only fail. A registry entry naming a
     repo that is gone is an unplug's problem, not a clone's."""
-    assert plan(inventory(REGISTRY, [], []), {"alpha", "beta"}) == []
+    assert plan(inventory(REGISTRY, [], []), {"alpha", "beta"}, clone={"alpha", "beta"}) == []
     assert not plug_projects.needs_clone(
         Candidate("a", plugged=True, on_disk=False, on_github=False)
     )
@@ -467,7 +528,7 @@ def test_the_listing_says_which_registered_rows_are_not_on_disk():
     """The row has to carry it: nothing else distinguishes a registered project that is
     present from one that only exists in the registry, and both draw as ticked."""
     lines = render(inventory(REGISTRY, ["alpha"], ["alpha", "beta"]), {"alpha", "beta"})
-    assert "registered, not on disk: will clone" in lines[1]
+    assert "registered, not on this PC: will clone" in lines[1]
     assert "will clone" not in lines[0]
 
 
@@ -558,6 +619,22 @@ def test_a_live_file_that_differs_and_is_unstamped_is_a_hand_edit(tmp_path):
     live = tmp_path / REGISTRY_NAME
     live.write_text('{"folders": [{"path": "nothing-like-it"}]}', encoding="utf-8", newline="\n")
     assert live_carries_a_hand_edit(live)
+
+
+def test_a_project_this_machine_does_not_hold_is_not_a_hand_edit(tmp_path):
+    """The live file is this machine's view: a project registered from another PC is
+    left out of it by devkit's own render, so its absence must not read as somebody's
+    edit -- or the picker refuses on every other workstation, over the very row it
+    exists to offer."""
+    canonical = devkit_project.canonical_text()
+    names = devkit_project.known_projects(canonical)
+    for name in names[1:]:
+        (tmp_path / name).mkdir()
+    live = tmp_path / REGISTRY_NAME
+    live.write_text(
+        devkit_project.unregister(canonical, [names[0]]), encoding="utf-8", newline="\n"
+    )
+    assert not live_carries_a_hand_edit(live)
 
 
 # --- the hazards ------------------------------------------------------------
@@ -814,6 +891,32 @@ def test_a_project_registered_since_the_scan_survives_a_click(ticking, capsys):
     assert main(["--picks", "gamma", "--yes"]) == 0
     assert ticking == [Step(plug_projects.PLUG, "gamma", clone=True)]
     assert "unplug" not in capsys.readouterr().out
+
+
+def test_ticking_a_project_registered_elsewhere_clones_it_here(listed, ticking, capsys):
+    """The row the other workstations see after one of them plugs a project in. Its
+    tick clones the checkout and leaves the registry alone -- read as a toggle it would
+    have retired the project everywhere, and the old "leaving it alone clones it" was
+    a clone no pick could reach, because no picks is a no-op."""
+    monkeypatch_candidates = inventory(REGISTRY, ["alpha"], ["alpha", "beta"])
+    listed[:] = monkeypatch_candidates
+    assert main(["--picks", "beta", "--yes"]) == 0
+    assert ticking == [Step(plug_projects.CLONE, "beta", clone=True)]
+    out = capsys.readouterr().out
+    assert "clone   beta" in out
+    assert "commit workspace.jsonc" not in out, "a clone edits nothing in the registry"
+
+
+def test_unplugging_one_project_does_not_clone_the_others_absent_here(listed, ticking):
+    listed[:] = inventory(REGISTRY, ["alpha"], ["alpha", "beta"])
+    assert main(["--unplug", "alpha", "--yes"]) == 0
+    assert ticking == [Step(plug_projects.UNPLUG, "alpha")]
+
+
+def test_plugging_a_project_registered_elsewhere_by_name_clones_it_here(listed, ticking):
+    listed[:] = inventory(REGISTRY, ["alpha"], ["alpha", "beta"])
+    assert main(["--plug", "beta", "--yes"]) == 0
+    assert ticking == [Step(plug_projects.CLONE, "beta", clone=True)]
 
 
 def test_a_name_that_is_no_longer_a_candidate_is_dropped_with_a_note(ticking, capsys):

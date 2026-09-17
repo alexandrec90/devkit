@@ -830,9 +830,11 @@ def workspace_sync_line(workspace: Path) -> str:
     try:
         if not devkit_project.CANONICAL_WORKSPACE.is_file() or not workspace.is_file():
             return ""
+        # This machine's view, not the whole registry: a project registered from another
+        # workstation and not cloned here is left out of the render, so it is not drift.
         problems = devkit_project.workspace_drift(
             devkit_jsonc.loads(workspace.read_text(encoding="utf-8")),
-            devkit_jsonc.loads(devkit_project.canonical_text()),
+            devkit_jsonc.loads(devkit_project.canonical_view(workspace)[0]),
         )
         if not problems:
             return ""

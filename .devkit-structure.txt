@@ -68,7 +68,7 @@ complexity::scripts/worktree.py::render_survey = 21
 definitions::scripts/agent-box.py = 21
 definitions::scripts/agent_clis.py = 21
 definitions::scripts/broken_pr_menu.py = 21
-definitions::scripts/devkit_project.py = 50
+definitions::scripts/devkit_project.py = 54
 definitions::scripts/docker-maint.py = 30
 definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
@@ -76,7 +76,7 @@ definitions::scripts/hooks/structure_check.py = 43
 definitions::scripts/hooks/structure_scan.py = 31
 definitions::scripts/instruction-budget.py = 26
 definitions::scripts/new-project.py = 28
-definitions::scripts/plug-projects.py = 30
+definitions::scripts/plug-projects.py = 33
 definitions::scripts/preview-task.py = 59
 definitions::scripts/preview-ui-host.py = 35
 definitions::scripts/reclaim.py = 48
@@ -96,7 +96,7 @@ dependency::pyproject.toml::pytest = 1
 dependency::pyproject.toml::pytest-xdist = 1
 dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 544
-file_lines::scripts/devkit_project.py = 1741
+file_lines::scripts/devkit_project.py = 1814
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
@@ -105,7 +105,7 @@ file_lines::scripts/hooks/structure_check.py = 1078
 file_lines::scripts/hooks/structure_scan.py = 680
 file_lines::scripts/instruction-budget.py = 517
 file_lines::scripts/new-project.py = 873
-file_lines::scripts/plug-projects.py = 922
+file_lines::scripts/plug-projects.py = 1013
 file_lines::scripts/preview-task.py = 1885
 file_lines::scripts/preview-ui-host.py = 1155
 file_lines::scripts/reclaim.py = 1232
@@ -115,7 +115,7 @@ file_lines::scripts/resume-sessions.py = 502
 file_lines::scripts/sweep.py = 1990
 file_lines::scripts/sync-devkit.py = 1865
 file_lines::scripts/upgrade-project.py = 1239
-file_lines::scripts/workspace-status.py = 1077
+file_lines::scripts/workspace-status.py = 1079
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2330
 file_lines::scripts/worktree.py = 6177
@@ -454,3 +454,10 @@ swallowed_errors::scripts/worktree.py = 1
 
 # 2026-09-17  recorded: new-project.py +10 for the sys.modules registration its manifest loader was missing, and the six-line comment saying why. _read_manifest_paths execs sync-devkit.py by path; @dataclass resolves string annotations by looking the defining module up in sys.modules BY NAME, so exec-before-register dies inside dataclasses the moment the target grows a dataclass -- which sync-devkit.py did in this same change -- and the except clause caught the AttributeError and answered with an EMPTY manifest. Nothing reported it: the stale-pin warning this feeds had nothing to compare, and three unrelated tests failed claiming a vendored path was missing from a list that had never been read. scripts/CLAUDE.md already carries the rule; this was the one loader in the repo that had not applied it, and the two other hand-rolled loaders (hook-tests-live.py, posix-rehearsal.py) both already did. The module is 363 lines past file_lines and its split is deferred elsewhere; a silent-empty-manifest fix is not the change that should carry it.
 #   file_lines::scripts/new-project.py -> 873
+
+# 2026-09-17  recorded: The per-machine view of the registry (machine_view, canonical_view, absent_projects, left_out_line) belongs beside publish/adopt/check in devkit_project.py, the one module that owns the canonical-versus-live comparison; the clone-here reading of a tick (scripted_selection, clone_picks, after_apply_notes) belongs beside plan and main in plug-projects.py; workspace-status.py gains the two comment lines saying why its session-start sync compares against the view. All three are far past file_lines and each has been recorded before (2026-09-02, 2026-09-05, 2026-09-06): their splits are their own change, and this is the third consecutive growth of plug-projects.py, so that split is now due.
+#   definitions::scripts/devkit_project.py -> 54
+#   definitions::scripts/plug-projects.py -> 33
+#   file_lines::scripts/devkit_project.py -> 1814
+#   file_lines::scripts/plug-projects.py -> 1013
+#   file_lines::scripts/workspace-status.py -> 1079

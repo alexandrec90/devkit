@@ -1039,9 +1039,15 @@ def workspace_pair(tmp_path, monkeypatch):
 
     The real pair cannot be used: rendering WRITES the live workspace file, which every
     VS Code window on this machine is reading.
+
+    Every registered project gets a directory beside the live file, so the pair stands
+    for a workstation holding the whole registry and `machine_view` is the identity.
+    The view's own tests take one away.
     """
     canonical = tmp_path / "workspace.jsonc"
     canonical.write_text(devkit_project.canonical_text(), encoding="utf-8", newline="\n")
+    for name in known_projects(devkit_project.canonical_text()):
+        (tmp_path / name).mkdir()
     live = tmp_path / "alex-projects.code-workspace"
     live.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
     monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
@@ -1156,10 +1162,15 @@ def test_a_current_live_file_is_stamped_without_being_rewritten(workspace_pair):
 
 
 def _add_a_folder(canonical):
-    """One unambiguous difference, in the key the drift report names rather than diffs."""
+    """One unambiguous difference, in the key the drift report names rather than diffs.
+
+    The checkout is created beside it, because a registered project with no checkout
+    here is not a difference at all -- it is what this machine's view leaves out.
+    """
     payload = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))
     payload["folders"] = [*payload.get("folders", []), {"path": "invented"}]
     canonical.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
+    (canonical.parent / "invented").mkdir(exist_ok=True)
 
 
 def test_publish_workspace_reports_which_of_the_three_things_it_did(workspace_pair):
@@ -1337,6 +1348,131 @@ def test_a_missing_live_file_is_still_an_error_for_every_other_action(workspace_
 
     assert _run(live, "--check-workspace") == 2
     assert _run(live, "--list") == 2
+
+
+# --- this machine's view: the registry is global, the checkouts are not ------
+
+
+def _take_one_away(workspace_pair):
+    """Remove one registered project's checkout from beside the live file, and stamp
+    the live file as devkit's own render -- the state of every other workstation the
+    moment a project is plugged in on one of them."""
+    canonical, live = workspace_pair
+    gone = known_projects(canonical.read_text(encoding="utf-8"))[0]
+    (live.parent / gone).rmdir()
+    devkit_project.write_stamp(live, devkit_project.semantic_digest(live.read_text("utf-8")))
+    return gone
+
+
+def _project_picker_options(text):
+    inputs = {i["id"]: i for i in devkit_jsonc_loads(text)["tasks"]["inputs"]}
+    return inputs["project"]["args"]["optionGroups"][0]["options"]
+
+
+def test_the_view_leaves_out_a_registered_project_with_no_checkout_here(workspace_pair):
+    """Rendered whole, a project plugged in on one workstation put a folder VS Code
+    could not open into every other workstation's window, and only a hand-typed
+    `gh repo clone` cleared it. The view takes the folder AND its picker options out,
+    through `unregister`, so the two cannot disagree about what registration touches."""
+    canonical, live = workspace_pair
+    gone = _take_one_away(workspace_pair)
+
+    text, left_out = devkit_project.machine_view(canonical.read_text("utf-8"), live.parent)
+
+    assert left_out == [gone]
+    assert gone not in known_projects(text)
+    assert gone not in _project_picker_options(text)
+    assert gone in _project_picker_options(canonical.read_text("utf-8"))
+
+
+def test_a_machine_holding_everything_renders_the_registry_unchanged(workspace_pair):
+    canonical, live = workspace_pair
+    text = canonical.read_text(encoding="utf-8")
+    assert devkit_project.machine_view(text, live.parent) == (text, [])
+
+
+def test_a_machine_holding_nothing_renders_the_whole_registry(tmp_path):
+    """A `folders` array cannot be emptied, and a live file with no checkout beside it
+    is not sitting where the registry describes -- so there is nothing to filter by."""
+    text = devkit_project.canonical_text()
+    assert devkit_project.machine_view(text, tmp_path / "nowhere") == (text, [])
+
+
+def test_absent_projects_keeps_registry_order(workspace_pair):
+    canonical, live = workspace_pair
+    names = known_projects(canonical.read_text(encoding="utf-8"))
+    for name in (names[2], names[0]):
+        (live.parent / name).rmdir()
+    assert devkit_project.absent_projects(canonical.read_text("utf-8"), live.parent) == [
+        names[0],
+        names[2],
+    ]
+
+
+def test_a_render_devkit_wrote_whole_is_re_rendered_as_the_view_without_force(workspace_pair):
+    """The upgrade path on every other workstation: the live file carries the folder
+    because devkit itself rendered it there, so the stamp matches and the publish
+    proceeds -- and afterwards the pair agrees, so nothing reports the project as drift
+    on every session start for the rest of time."""
+    _canonical, live = workspace_pair
+    gone = _take_one_away(workspace_pair)
+
+    outcome, _problems = devkit_project.publish_workspace(live)
+
+    assert outcome == devkit_project.RENDER_PUBLISHED
+    assert gone not in known_projects(live.read_text(encoding="utf-8"))
+    assert devkit_project.publish_workspace(live) == (devkit_project.RENDER_CURRENT, [])
+    assert _run(live, "--check-workspace") == 0
+
+
+def test_a_checkout_that_appears_is_rendered_on_the_next_publish(workspace_pair):
+    """The clone half of plugging a project in on this PC: nothing edits the registry,
+    the checkout simply exists now, and the next publish carries it as canonical-ahead."""
+    _canonical, live = workspace_pair
+    gone = _take_one_away(workspace_pair)
+    assert devkit_project.publish_workspace(live)[0] == devkit_project.RENDER_PUBLISHED
+    (live.parent / gone).mkdir()
+
+    outcome, problems = devkit_project.publish_workspace(live)
+
+    assert outcome == devkit_project.RENDER_PUBLISHED
+    assert f"{devkit_project.AHEAD_FOLDER}{gone}" in problems
+    assert gone in known_projects(live.read_text(encoding="utf-8"))
+
+
+def test_the_check_names_what_this_machine_does_not_render(workspace_pair, capsys):
+    _canonical, live = workspace_pair
+    gone = _take_one_away(workspace_pair)
+    devkit_project.publish_workspace(live)
+
+    assert _run(live, "--check-workspace") == 0
+    out = capsys.readouterr().out
+    assert "matches" in out and "not checked out on this machine" in out and gone in out
+
+
+def test_adopt_re_registers_what_this_machine_leaves_out(workspace_pair):
+    """An adopt is a whole-file overwrite of the copy every machine shares. From a
+    workstation holding part of the registry, the live file lacks the rest -- and
+    writing it as-is would retire those projects everywhere, silently, for a settings
+    change. So they go back in first, and the adopt is not refused over them either:
+    they are not a loss, they are this machine's view."""
+    canonical, live = workspace_pair
+    gone = _take_one_away(workspace_pair)
+    devkit_project.publish_workspace(live)
+    _hand_edit(live)
+
+    assert _run(live, "--adopt-workspace") == 0
+
+    adopted = canonical.read_text(encoding="utf-8")
+    assert gone in known_projects(adopted)
+    assert gone in _project_picker_options(adopted)
+    assert devkit_jsonc_loads(adopted)["settings"]["invented.setting"] is True
+    assert _run(live, "--check-workspace") == 0
+
+
+def test_left_out_line_names_the_projects_and_is_empty_for_none():
+    assert devkit_project.left_out_line([]) == ""
+    assert "alpha, beta" in devkit_project.left_out_line(["alpha", "beta"])
 
 
 def test_a_written_stamp_reads_back_and_a_missing_one_is_not_an_error(tmp_path):
@@ -2621,8 +2757,11 @@ def test_the_live_workspace_matches_the_canonical_copy():
     way out of that.
     """
     text = LIVE_WORKSPACE.read_text(encoding="utf-8")
+    # This machine's view, as every real comparison is: a project registered from
+    # another workstation and not cloned here is left out of the render, not drift.
     problems = devkit_project.workspace_drift(
-        devkit_jsonc_loads(text), devkit_jsonc_loads(devkit_project.canonical_text())
+        devkit_jsonc_loads(text),
+        devkit_jsonc_loads(devkit_project.canonical_view(LIVE_WORKSPACE)[0]),
     )
     keep = (
         "or --adopt-workspace to keep the live edits"

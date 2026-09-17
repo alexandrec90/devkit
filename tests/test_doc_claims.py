@@ -260,9 +260,9 @@ def _is_tracked(relpath: str) -> bool:
 
     `_exists` reads the working tree, which is the right question for "is this cited
     path real" and the wrong one for "is this exemption still needed". The two differ
-    for anything generated: `logs/` is gitignored, so `logs/plug-menu.json` is present
-    for anyone who has run the plug menu or `worktree.py reconcile` and absent in a
-    fresh checkout — which is exactly what its own exemption says. Asking the working
+    for anything generated: `logs/` is gitignored, so a file the harness writes there is
+    present for anyone who has run it and absent in a fresh checkout — which is exactly
+    what such a file's exemption says. Asking the working
     tree made `test_exemptions_are_still_needed` fail on a developer machine and pass
     in CI on the same commit, and the entry it demanded be dropped was the one entry
     whose stated reason predicted the failure.
@@ -381,9 +381,6 @@ ALLOWED_MISSING = {
     ".devkit-workspace-render.json": "the render stamp, written beside the LIVE "
     "workspace file -- which lives outside every repo, so the stamp can never be in one; "
     "test_the_stamp_sits_beside_the_live_file_not_under_devkit_logs pins where it goes",
-    "logs/plug-menu.json": "the plug/unplug checklist's cached options -- a generated "
-    "file under the gitignored `logs/`, written by `--refresh-menu` and by `worktree.py "
-    "reconcile`, so it exists on a machine that has run either and never in a clone",
     "pyvenv.cfg": "the file that makes a directory a virtualenv, named as the thing "
     "`devkit_schtasks.windowless` reads at runtime; it exists in every `.venv`, all of "
     "which are untracked, and never at the root of the repo",
@@ -594,24 +591,26 @@ def test_exemptions_are_still_needed():
 def test_a_generated_file_on_disk_does_not_retire_its_exemption():
     """Running the harness must not redden the suite for having been run.
 
-    `logs/` is gitignored, so `logs/plug-menu.json` appears the first time anyone opens
-    the plug menu or lets `worktree.py reconcile` fire — and from then on
-    `test_exemptions_are_still_needed` demanded the removal of an exemption whose own
-    sentence says the file "exists on a machine that has run either and never in a
-    clone". The test contradicted the entry it was checking, and only ever off a clone,
-    so CI could not see it.
+    `logs/` is gitignored, so a generated file there appears the first time anyone runs
+    the script that writes it — and from then on `test_exemptions_are_still_needed`
+    demanded the removal of an exemption whose own sentence said the file "exists on a
+    machine that has run it and never in a clone". The test contradicted the entry it
+    was checking, and only ever off a clone, so CI could not see it. It was caught on
+    the plug picker's cached menu, `logs/plug-menu.json`; that file is retired and its
+    exemption with it, so this pins the predicate the fix moved the test onto rather
+    than any one entry: "resurrected" is read off what git tracks, never off the disk.
 
     Written to fail deterministically wherever it runs: it puts the file there itself.
     """
-    generated = REPO_ROOT / "logs" / "plug-menu.json"
+    probe = "logs/doc-claims-probe.json"
+    generated = REPO_ROOT / probe
     ours = not generated.exists()
     generated.parent.mkdir(parents=True, exist_ok=True)
     if ours:
         generated.write_text("{}", encoding="utf-8")
     try:
-        assert _exists("logs/plug-menu.json"), "precondition: it is on disk"
-        assert not _is_tracked("logs/plug-menu.json"), "and still not in a clone"
-        test_exemptions_are_still_needed()
+        assert _exists(probe), "precondition: it is on disk"
+        assert not _is_tracked(probe), "a gitignored file on disk must not read as tracked"
     finally:
         if ours:
             generated.unlink()
