@@ -97,7 +97,7 @@ dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::pytest = 1
 dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 544
-file_lines::scripts/devkit_project.py = 1735
+file_lines::scripts/devkit_project.py = 1741
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/fix-prs.py = 789
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
@@ -439,3 +439,8 @@ swallowed_errors::scripts/worktree.py = 1
 #   definitions::scripts/install-git-policy.py -> 28
 #   file_lines::scripts/devkit_project.py -> 1735
 #   file_lines::scripts/install-git-policy.py -> 656
+# 2026-09-16  recorded: one ACTIONS entry registering memory-inventory; devkit_project.py is 1731/500 and already carries the split-the-module finding, which this does not make newly true
+#   file_lines::scripts/devkit_project.py -> 1731
+
+# 2026-09-17  recorded: Merge arithmetic, not new debt: origin/main recorded devkit_project.py at 1735 for the 'installers' ACTIONS entry and this branch recorded 1731 for 'memory-inventory'. Both actions are independent registry entries, so the merge keeps both and the union costs 1741 -- six lines over main's figure, which is exactly the memory-inventory entry and its three-line comment. Neither half is re-argued here; both records above stand, as does the module split they and five earlier records defer. ACTIONS remains the single place a dispatched task can be declared, which is why an entry has nowhere else to go.
+#   file_lines::scripts/devkit_project.py -> 1741

@@ -391,6 +391,9 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # -- so what the click is for is the two decisions a schedule cannot make: seeing
         # the set, and taking it back off the machine.
         "installers",
+        # The read-only page beside `reclaim`, scoped for exactly its reason: one process
+        # table on the machine, so once per checkout would print the same page N times.
+        "memory-inventory",
         # Born scoped, for `reclaim`'s reason rather than its own: the menu it picks from
         # is assembled from the box registry and the port registry, and there is exactly
         # one of each on this machine. So the question "which checkout" has no answer to
