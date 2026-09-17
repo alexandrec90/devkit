@@ -120,7 +120,6 @@ file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2330
 file_lines::scripts/worktree.py = 6177
 function_lines::scripts/devkit_project.py::main = 213
-function_lines::scripts/docker-maint.py::generic_prune = 84
 function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
 function_lines::scripts/lint-all.py::main = 89
 function_lines::scripts/new-project.py::main = 143
