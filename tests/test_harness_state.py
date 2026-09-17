@@ -107,6 +107,27 @@ def test_root_keys_separate_two_roots_with_the_same_name(tmp_path):
     assert state.root_key(tmp_path / "a" / "proj") != state.root_key(tmp_path / "b" / "proj")
 
 
+def test_a_root_key_is_bounded_however_deep_the_root_is(tmp_path):
+    """The held path is `STASH / root_key / relpath`, and Windows stops at 260 characters.
+
+    Unbounded, the key grew with the root's own path: the whole suite failed with
+    `WinError 206` on a machine whose `LongPathsEnabled` is 0, because pytest's tmp base
+    appears both as the stash root and, mangled, inside it.
+    """
+    deep = tmp_path.joinpath(*["a-fairly-long-directory-name"] * 12, "proj")
+    assert len(state.root_key(deep)) <= state.KEY_MAX
+
+
+def test_two_deep_roots_that_differ_only_in_their_head_get_different_keys(tmp_path):
+    """Truncation keeps the tail, so the part that distinguishes these is the part it
+    discards -- the digest is what stops one checkout restoring into the other."""
+    tail = [*["a-fairly-long-directory-name"] * 12, "proj"]
+    first = state.root_key(tmp_path.joinpath("alpha", *tail))
+    second = state.root_key(tmp_path.joinpath("bravo", *tail))
+    assert first != second
+    assert len(first) <= state.KEY_MAX
+
+
 # --- the round trip ------------------------------------------------------------------
 
 
