@@ -252,10 +252,12 @@ def test_ci_never_claims_a_release_prepare():
     """The one difference between the gates that is deliberate, and the assertion that
     keeps it safe.
 
-    `devkit-push-gate` sets `RELEASE_PREPARE_ENV` when the branch being pushed is a
-    `release/vX.Y.Z`, which lets `test_fallback_devkit_ref_tracks_the_newest_tag` excuse
-    a constant that is ahead of the newest tag -- red by construction between the bump
-    and the tag. The gate may do that because it has no PR to judge from; CI must not,
+    `devkit-push-gate` sets `RELEASE_PREPARE_ENV` when it detects a release prepare --
+    a `release/vX.Y.Z` branch, or a `FALLBACK_DEVKIT_REF` naming no tag, which is the
+    state `main` is in between the bump merging and the tag landing. That lets
+    `test_fallback_devkit_ref_tracks_the_newest_tag` excuse a constant that is ahead of
+    the newest tag -- red by construction between the bump and the tag. The gate may do
+    that because it has no PR to judge from; CI must not,
     because judging exactly that red is what `release-pipeline.py`'s `gate_verdict` is
     for, and a release PR that went green would sail past it.
     """

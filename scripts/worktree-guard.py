@@ -1770,7 +1770,7 @@ def resolve_target(
 
 
 def foreign_box(
-    resolved: Path, root: Path, boxes: Mapping[str, Box], session: str
+    resolved: Path, root: Path, boxes: Mapping[str, Box], session: str, cwd: str = ""
 ) -> tuple[Box, str] | None:
     """`(box, path relative to it)` when this edit targets a box leased to someone else.
 
@@ -1778,6 +1778,7 @@ def foreign_box(
 
     - the session's own box, including one whose lease records a hand-abbreviated
       session id (`sessions_match`);
+    - **the box this call is standing in** (`cwd`), whatever the lease says — see below;
     - an **unowned** box (empty lease session): an adopted orphan's lease cannot name
       an owner, so there is nobody to defend and blocking would dead-end every box
       that survived a lost lease file;
@@ -1790,14 +1791,34 @@ def foreign_box(
     unconditional, and a second session that found a live box through `worktree.py
     list` could adopt it wholesale: two sessions' edits interleaved in one worktree
     until one of them watched files change under it mid-turn.
+
+    **`cwd` is here because the session id is not stable and the lease assumed it was.**
+    A reported session had its box cut and leased under one id, was later identified by
+    a different one, and was then blocked out of its own box as "leased to a different
+    session" — after which the guard cut it a duplicate box and `worktree.py claim`
+    refused the recovery, because `claim` declines a dirty tree and the dirt was the
+    locked-out session's own. Every half of that is downstream of one comparison the
+    harness cannot guarantee: the id the guard reads at spawn time and the one it reads
+    at block time are both Claude Code's to choose.
+
+    `cwd` is the second, independent fact, and it is the stronger one. A session whose
+    working directory *is* the box is not adopting it — it is in it, which is the state
+    the lease was recording in the first place. This reopens nothing: the cross-session
+    adoption above is a session sitting in its own checkout writing an absolute path
+    into somebody's box, and its `cwd` is nowhere near. A second session that has
+    already `cd`'d into the box has adopted it by every measure a PreToolUse hook has,
+    and blocking its writes would only mean it edits with a tool the guard cannot see.
     """
     if not session:
         return None
+    standing_in = Path(cwd).resolve() if cwd else None
     for box in boxes.values():
         home = worktree.box_path(root, box.name).resolve()
         if not _within(resolved, home):
             continue
         if not box.session or worktree.sessions_match(box.session, session):
+            return None
+        if standing_in is not None and _within(standing_in, home):
             return None
         try:
             relative = str(resolved.relative_to(home))
@@ -2257,7 +2278,7 @@ def main(argv: list[str] | None = None) -> int:
         target = resolve_target(candidate, cwd, removals, worktree.boxes_root(root))
         if target is not None and _within(target, worktree.boxes_root(root).resolve()):
             boxes = worktree.live_boxes(root)
-            conflict = foreign_box(target, root, boxes, session)
+            conflict = foreign_box(target, root, boxes, session, cwd)
             if conflict is None:
                 continue
             box, relative = conflict

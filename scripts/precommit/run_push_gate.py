@@ -187,8 +187,24 @@ def gate_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
 # when the constant is genuinely *ahead* of the newest tag. CI never sets this, which is
 # what keeps the release PR red where the judgement belongs -- asserted in
 # `tests/test_gate_parity.py`.
+#
+# The window is **wider than the release branch**, which is what this used to miss. The
+# release PR merges the bump into `main` and the tag is pushed after; between those two
+# moments every ordinary branch cut from `main` carries the untagged constant, and none
+# of them is a `release/vX.Y.Z`. So the excuse reached only the release pipeline's own
+# pushes and the whole machine was locked out of pushing anything else. It is not a
+# theoretical window: v0.11.18 was merged and its tag refused by a red release suite
+# (fixed in #347), leaving `main` in this state for a day with every branch's push gate
+# red on a test about a release nobody was cutting.
+#
+# Widening it costs nothing, because the branch was never what made the excuse safe --
+# `_nothing_to_compare` in `tests/test_new_project.py` re-checks that the constant is
+# strictly *ahead* of the newest tag, so a stale constant (the thing the test exists to
+# catch) still fails with the variable set, on any branch.
 RELEASE_BRANCH_RE = re.compile(r"^release/v\d+\.\d+\.\d+$")
 RELEASE_PREPARE_ENV = "DEVKIT_PUSH_GATE_RELEASE_PREPARE"
+FALLBACK_REF_RE = re.compile(r"""^FALLBACK_DEVKIT_REF\s*=\s*["'](v[^"']+)["']""", re.MULTILINE)
+FALLBACK_REF_SOURCE = "scripts/new-project.py"
 
 
 def detect_release_branch(root: Path) -> str:
@@ -220,6 +236,59 @@ def detect_release_branch(root: Path) -> str:
         return ""
     branch = (result.stdout or "").strip()
     return branch if RELEASE_BRANCH_RE.fullmatch(branch) else ""
+
+
+def untagged_bump(root: Path) -> str:
+    """`FALLBACK_DEVKIT_REF` when it names a tag this repo does not have, else "".
+
+    This is the state `test_fallback_devkit_ref_tracks_the_newest_tag` is red by
+    construction in, read off the working tree rather than off the branch name -- which
+    is what makes the excuse cover the window after the release PR merges and not only
+    the pipeline's own pushes.
+
+    Returns "" for every repo that is not devkit: a consumer has no
+    `scripts/new-project.py`, so there is no constant, no such test, and nothing to
+    excuse. A `git tag -l` that cannot run answers "" too, for the same reason
+    `detect_release_branch` does -- this runs before any step, and must not be the thing
+    that fails the push.
+    """
+    source = root / FALLBACK_REF_SOURCE
+    try:
+        match = FALLBACK_REF_RE.search(source.read_text(encoding="utf-8"))
+    except OSError:
+        return ""
+    if match is None:
+        return ""
+    ref = match.group(1)
+    try:
+        result = subprocess.run(
+            ["git", "tag", "--list", ref],
+            cwd=root,
+            check=False,
+            env=gate_env(),
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return ""
+    if result.returncode:
+        return ""
+    return "" if (result.stdout or "").strip() else ref
+
+
+def detect_release_prepare(root: Path) -> str:
+    """Why this push is exempt from the fallback-ref assertion, or "" when it is not.
+
+    Two shapes, because the release is two commits and the window between them belongs
+    to every branch: the `release/vX.Y.Z` branch being cut, and -- afterwards -- a
+    constant on `main` naming a tag that does not exist yet. The string is a reason
+    rather than a flag so the line the gate prints says which one it found.
+    """
+    branch = detect_release_branch(root)
+    if branch:
+        return branch
+    ref = untagged_bump(root)
+    return f"{FALLBACK_REF_SOURCE} names {ref}, which is not tagged yet" if ref else ""
 
 
 # The hook tier measured 186s serially here and 55s across eight workers, and it is the
@@ -259,7 +328,9 @@ def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
     ]
 
 
-def run_gate(root: Path, runner: Runner = subprocess.run, release_branch: str | None = None) -> int:
+def run_gate(
+    root: Path, runner: Runner = subprocess.run, release_prepare: str | None = None
+) -> int:
     """Run the steps in order; the first non-zero exit is the hook's, and ends the run."""
     env = gate_env()
     # Never inherited. The marker turns a guard off, so this gate's own answer has to be
@@ -267,14 +338,14 @@ def run_gate(root: Path, runner: Runner = subprocess.run, release_branch: str | 
     # the exemption onto an ordinary push. The way it actually shows up is subtler than
     # a stray `export`: on a release branch the gate spawns the suite *with* the marker,
     # and devkit's own suite runs this function, so without the scrub a nested run
-    # inherits a marker its own `release_branch` never asked for.
+    # inherits a marker its own `release_prepare` never asked for.
     env.pop(RELEASE_PREPARE_ENV, None)
-    if release_branch is None:
-        release_branch = detect_release_branch(root)
-    if release_branch:
-        env[RELEASE_PREPARE_ENV] = release_branch
+    if release_prepare is None:
+        release_prepare = detect_release_prepare(root)
+    if release_prepare:
+        env[RELEASE_PREPARE_ENV] = release_prepare
         print(
-            f"push-gate: {release_branch} is a release prepare -- its fallback-ref red is "
+            f"push-gate: {release_prepare} is a release prepare -- its fallback-ref red is "
             "CI's to judge, not this gate's"
         )
     for step, command in plan(root):

@@ -125,16 +125,35 @@ PUSH_STAGE_NOTICE = (
 )
 
 
+def _push_publishes_nothing(raw_updates: str) -> bool:
+    """Is this pre-push payload one the PR gate has no reason to run for?
+
+    The push stage runs for a push that publishes a branch, and not for a deletion or a
+    tag-only push: the stage is the PR gate (minutes of tests), and nothing a deletion
+    could break is in it. `pre-commit install` would wire the same stage itself; this
+    dispatcher owns `core.hooksPath`, so it has to run it in its place.
+
+    The **empty payload** is why this is a function rather than the `all(...)` it used
+    to be. `all([])` is vacuously true, so a payload with no branch lines skipped the
+    gate -- which is right for a tag-only push, whose payload has `refs/tags/` lines and
+    no branch ones, and wrong for a payload that is empty because nothing could be read.
+    `dispatch.main` sets `input_text=""` whenever reading git's stdin raises, so a failed
+    read turned the whole PR gate off for that push, silently and with nothing printed:
+    the one failure a gate must not answer by standing down. An empty payload now falls
+    through to the gate, which costs a run nobody needed in the case where git really
+    pushed nothing, and that is the side to be wrong on.
+    """
+    if not raw_updates.strip():
+        return False
+    return all(u.deletion for u in parse_push_updates(raw_updates))
+
+
 def _run_pre_commit_framework(
     root: Path, runner: Runner, stage: str = "pre-commit", raw_updates: str = ""
 ) -> int:
     if not (root / ".pre-commit-config.yaml").is_file():
         return 0
-    # The push stage runs for a push that publishes a branch, and not for a deletion or
-    # a tag-only push: the stage is the PR gate (minutes of tests), and nothing a
-    # deletion could break is in it. `pre-commit install` would wire the same stage
-    # itself; this dispatcher owns `core.hooksPath`, so it has to run it in its place.
-    if stage == "pre-push" and all(u.deletion for u in parse_push_updates(raw_updates)):
+    if stage == "pre-push" and _push_publishes_nothing(raw_updates):
         return 0
     command = _pre_commit_command(root, runner)
     if command is None:

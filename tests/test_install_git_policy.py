@@ -12,6 +12,12 @@ installer = load_script("scripts/install-git-policy.py")
 # The layout tier moved to its own module; the names it owns are read from there
 # rather than re-exported through the installer purely to keep a test import alive.
 layout = load_script("scripts/install_policy_layout.py")
+# Same again for the receipt-and-drift tier, cut out when the installer's structural
+# ceiling was raised a third consecutive time. `installer` still resolves the names its
+# own `run_check` calls, because it imports them; the ones only a test reaches for are
+# read from the module that owns them. Its own unit tests are in
+# `tests/test_policy_drift.py`.
+drift = load_script("scripts/policy_drift.py")
 
 
 def test_run_command_captures_both_streams_without_raising():
@@ -569,7 +575,7 @@ def test_check_exits_two_when_the_hooks_path_belongs_to_someone_else(tmp_path):
 
 def test_the_drift_report_names_the_fix(tmp_path):
     report = installer.render_drift(
-        tmp_path, [installer.Drift("pre-commit", "modified since it was installed")]
+        tmp_path, [drift.Drift("pre-commit", "modified since it was installed")]
     )
     assert "pre-commit" in report
     assert "--yes" in report
@@ -703,24 +709,24 @@ def _install_dir_with_both_layouts(tmp_path):
 
 def test_installing_the_flat_module_removes_a_package_that_would_shadow_it():
     installed = {"devkit_git_policy.py": "abc"}
-    assert installer.shadowing_entrypoint(installed) == "devkit_git_policy/__init__.py"
+    assert layout.shadowing_entrypoint(installed) == "devkit_git_policy/__init__.py"
 
 
 def test_installing_the_package_names_the_flat_module_as_the_stale_one():
     installed = {"devkit_git_policy/__init__.py": "abc"}
-    assert installer.shadowing_entrypoint(installed) == "devkit_git_policy.py"
+    assert layout.shadowing_entrypoint(installed) == "devkit_git_policy.py"
 
 
 def test_an_install_that_wrote_no_entrypoint_has_no_shadow_to_clear():
     """`install_refusal` owns that case and must stay the thing that reports it."""
-    assert installer.shadowing_entrypoint({"pre-commit": "abc"}) == ""
+    assert layout.shadowing_entrypoint({"pre-commit": "abc"}) == ""
 
 
 def test_the_package_directory_is_what_gets_removed_not_its_init():
     """An empty `devkit_git_policy/` is a namespace package and still shadows a flat
     module, so deleting only `__init__.py` would leave the shadow in place."""
     assert (
-        installer.entrypoint_path(Path("hooks"), "devkit_git_policy/__init__.py")
+        layout.entrypoint_path(Path("hooks"), "devkit_git_policy/__init__.py")
         == Path("hooks") / "devkit_git_policy"
     )
 

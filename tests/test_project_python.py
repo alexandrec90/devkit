@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from support import load_script
+from support import REPO_ROOT, load_script
 
 project_python = load_script("scripts/project_python.py")
 
@@ -169,6 +169,31 @@ def test_re_exec_says_out_loud_which_checkout_it_borrowed_from(tmp_path, monkeyp
     message = capsys.readouterr().err
     assert str(main) in message
     assert "provision" in message
+
+
+def test_the_borrow_notice_names_a_remedy_a_session_worktree_can_spell():
+    """The reported dead end, and it was one word.
+
+    The notice used to end `worktree.py provision <box>`. A `.claude/worktrees/<name>`
+    tree -- what `claude --worktree` cuts, and what a large share of this machine's
+    sessions run in -- has no lease and no box name, so an agent standing in one reads a
+    remedy addressed to a tier it is not in and concludes there is none. It then
+    hand-resolves the parent checkout's interpreter, which is what the notice was trying
+    to save it from. `provision_target` has taken a plain path since it learned to
+    provision a static checkout; only the wording said otherwise.
+
+    Asserted against `worktree.py`'s own parser rather than as a string match, so the
+    two cannot drift: the notice may only name a spelling the verb accepts.
+    """
+    source = (REPO_ROOT / "scripts" / "worktree.py").read_text(encoding="utf-8")
+    assert 'metavar="box|path"' in source, (
+        "worktree.py provision no longer advertises a path; the borrow notice must "
+        "stop promising one"
+    )
+    notice = (REPO_ROOT / "scripts" / "project_python.py").read_text(encoding="utf-8")
+    assert "provision <box or path>" in notice, (
+        "the borrow notice names `<box>`, which a session worktree cannot spell"
+    )
 
 
 def test_re_exec_is_silent_when_the_venv_is_the_projects_own(tmp_path, monkeypatch, capsys):
