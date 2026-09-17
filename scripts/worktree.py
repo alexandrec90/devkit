@@ -5656,6 +5656,17 @@ def _run_rescue(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+# Spelled out because `<box>` alone cost a session. `.claude/worktrees/<name>` -- what
+# `claude --worktree` cuts -- has no lease and no box name, so an agent standing in one
+# read every "provision" message as addressed to a tier it was not in and hand-resolved
+# the parent checkout's interpreter instead. `provision_target` has taken a plain path
+# since it learned to provision a static checkout; only the wording said otherwise.
+PROVISION_TARGET_HELP = (
+    "a live box's name, or a path to any checkout or worktree -- a session worktree "
+    "under .claude/worktrees/ included, which has no lease and no name here"
+)
+
+
 def provision_target(root: Path, name: str) -> tuple[str, Path]:
     """The tree `provision <name>` means: a live box, or a static checkout.
 
@@ -5892,8 +5903,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     add_common_args(look)
 
-    provision = sub.add_parser("provision", help="install an existing box's toolchain")
-    provision.add_argument("box")
+    provision = sub.add_parser("provision", help="install a box, checkout or worktree's toolchain")
+    provision.add_argument("box", metavar="box|path", help=PROVISION_TARGET_HELP)
     add_common_args(provision)
 
     takeover = sub.add_parser(

@@ -17,19 +17,51 @@ the gates, the hooks — whatever project the session that hit it was scoped to,
 consumer repo has nothing to fix but a vendored copy to `--pull` once the fix ships here.
 That is why this skill is not in `sync-devkit.py`'s `MANIFEST`.
 
-**What does not follow is that everything on the ledger is devkit's**, and this paragraph
-used to say it did. A project owns some of the scripts an agent runs — `run-tests.py`,
-`lint-all.py`, the harness a task dispatches — and where those have diverged from
-`templates/core/`, a report about one is a report about that project. The 2026-08-26
-sweep found four in a row: an empty failure artifact on an env skip, `lint-all` linting
-zero files where git is absent and calling it success, `markdownlint --fix` over `**/*.md`
-while gating on the changed set. None of the three exists in devkit's templates.
+**What does not follow is that everything on the ledger is devkit's.** A project owns some
+of the scripts an agent runs — `run-tests.py`, `lint-all.py`, the harness a task
+dispatches — and where those have diverged from `templates/core/`, a report about one is a
+report about that project. The 2026-08-26 sweep found four in a row: an empty failure
+artifact on an env skip, `lint-all` linting zero files where git is absent and calling it
+success, `markdownlint --fix` over `**/*.md` while gating on the changed set. None of the
+three exists in devkit's templates.
 
 The check is one grep, and it is worth it before you start fixing: if the file the report
 names has a `templates/core/` counterpart, compare them; if devkit has no such file at
-all, the report belongs to the project that filed it. Leave it open, say so in your
-report, and name the session that could take it — a fix written here would land in a file
-devkit does not ship.
+all, the fix belongs in that project's checkout — `<workspace>/<project>/`, which is on
+this machine and which this session can edit like any other directory.
+
+**That changes where the fix lands, never whether it is made.** §3 says why: this skill is
+the only thing that reads this ledger, so a group it declines to fix is a group nothing
+will ever fix.
+
+## Nothing is left open
+
+This is the one rule the rest of the skill is arranged around, and it is worth stating
+before the steps rather than inside them.
+
+Every group is either **retired with a fix** or **retired as not-a-defect with the
+evidence** (§2). There is no third outcome. A backlog entry that survives a sweep has been
+read by an agent, judged real, and handed to the next agent — who pays the same
+verification cost to reach the same conclusion, and hands it on again. That is the exact
+loop the ledger replaced, restored one deferral at a time, and it is worse than the
+original because each pass leaves a note saying somebody looked.
+
+Three deferrals that read as prudence and are not:
+
+| Reading | Why it is not a reason |
+| --- | --- |
+| "this belongs in its own PR" | **Bundling unrelated fixes here is correct.** A triage sweep is not a feature branch, and a reviewer reading one PR of six fixes costs less than six groups nobody fixes. Say in the PR body that it is a sweep and give each fix its own section. |
+| "this is a refactor, not a defect" | A structural ceiling raised three times **is** a defect report — `.claude/rules/engineering.md` says so — and the report has already done the measuring. Cut it. |
+| "this is project X's file, not devkit's" | Then fix it in project X's checkout. The ownership check routes the change; it does not excuse it. |
+
+The only thing that ever stays the user's call is §3's two irreversibles: **discarding work
+that exists only in a box**, and **cutting a release**. Ask about those; decide everything
+else.
+
+If a group is genuinely beyond one session — a fix needing a decision only the user can
+make, or an outage you cannot reproduce — that is a question for the user **in the turn
+you find it**, not a line in a closing report. Ask it, get the answer, fix it. A sweep
+ends with the backlog empty.
 
 > Every command below is issued bare. None is on the Bash blocklist, and a wrapper here
 > buys no second bound.
@@ -101,19 +133,35 @@ Never resolve a group you have not answered one of those four for. Ageing out wa
 hole this replaced; a note that says "probably fine" is the same hole with a command in
 front of it.
 
-## 3. Fix what survives, in one box, in the same turn
+## 3. Fix every group that survives, in the same turn
 
 The execution default applies unchanged: what is worth naming is worth doing. Fix the
 live groups, with a test each per `.claude/rules/engineering.md` — for a false-positive
 block, the regression test is the exact command the report named.
 
+**This skill is the last safety net.** Nothing else reads this ledger: not CI, not a
+scheduled job, not a person. In a repo where every file was written by an agent and prose
+has no compiler, the backlog is the only place a defect nobody had time for is written
+down — so a group this skill declines is not deferred, it is dropped, with a paper trail
+that makes the next sweep pay the verification cost again before dropping it again. Three
+of the groups cleared on 2026-09-17 had been read and deferred by earlier sweeps; the
+oldest was fifteen days old and its fix was ninety minutes of work.
+
+So the sweep ends at zero. Bundle the fixes into **one PR** — unrelated is fine and
+expected, a section per fix in the body — and prefer a large reviewed sweep to a small one
+that leaves a list.
+
+**A fix in another project's checkout is still this sweep's work.** `<workspace>/<project>`
+is on this machine. Edit it there, run that project's own gate, and open its PR the same
+way; note in this PR's body which sibling PRs the sweep opened. Nothing about the ledger
+being devkit's makes a carameli file unfixable from a devkit session.
+
 Two things stay the user's call, because both are irreversible and neither is yours to
 assume: **discarding work that exists only in a box**, and **a fix that has to be
 released** rather than merged (a vendored-tier change reaches consumers only through
-`sync-devkit.py --pull` against a tag — say so in the PR, and see `RELEASING.md`).
-
-If a group's fix is genuinely out of scope for one change, leave it open and say why in
-the report. An open item costs nothing; a laundered one costs the next agent.
+`sync-devkit.py --pull` against a tag — say so in the PR, and see `RELEASING.md`). Neither
+is a reason to leave the group open: make the change, and say in the report that a release
+is what carries it.
 
 ## 4. Record what retired it — this is the step that makes the list shrink
 
@@ -140,6 +188,11 @@ yet is the one claim on this ledger nothing can check.
 ## Reporting
 
 Give the user the shape, then the work: how many groups were open, how many were already
-fixed (and by what), how many are now fixed here, and what is left open with the reason.
-A count that only went down because things were retired is worth saying out loud — it is
-the failure mode this tool was built to make visible.
+fixed (and by what), and how many are now fixed here. A count that only went down because
+things were retired is worth saying out loud — it is the failure mode this tool was built
+to make visible.
+
+**End by re-running `python scripts/harness_triage.py` and quoting the count.** The sweep
+is finished when it prints zero open, and a non-zero count is the report's headline, not a
+footnote: say which group, and what you need from the user to close it. "Left open with a
+reason" is not an outcome this skill has.

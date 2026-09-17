@@ -218,9 +218,17 @@ def re_exec(
         # alternative here is no tools at all -- but it is still a different directory's
         # install than the one the caller named, and a version surprise traced back to a
         # line nobody printed costs more than the line does.
+        #
+        # The remedy is spelled `<box or path>` because it used to say `<box>`, and that
+        # one word cost a session. `.claude/worktrees/<name>` -- what `claude --worktree`
+        # cuts -- has no lease and no box name, so an agent standing in one reads a
+        # remedy addressed to a tier it is not in, concludes the harness has nothing for
+        # it, and starts hand-resolving the parent checkout's interpreter. The verb took
+        # a plain path the whole time. A line that names a remedy the reader cannot spell
+        # is the same dead end as no line at all.
         print(
             f"project_python: no {VENV_DIR} in {root}; using the one in {lender} "
-            f"(give the box its own with `worktree.py provision <box>`)",
+            f"(give this tree its own with `worktree.py provision <box or path>`)",
             file=sys.stderr,
         )
     try:

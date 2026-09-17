@@ -47,7 +47,6 @@ complexity::scripts/sweep.py::main = 18
 complexity::scripts/sweep.py::render = 18
 complexity::scripts/sweep.py::run_mode = 20
 complexity::scripts/sweep.py::sync_plan = 18
-complexity::scripts/sync-devkit.py::main = 74
 complexity::scripts/upgrade-project.py::main = 26
 complexity::scripts/upgrade-project.py::upgrade_one = 23
 complexity::scripts/workspace-status.py::previews_line = 17
@@ -68,14 +67,13 @@ complexity::scripts/worktree.py::render_reconcile = 19
 complexity::scripts/worktree.py::render_survey = 21
 definitions::scripts/agent-box.py = 21
 definitions::scripts/agent_clis.py = 21
+definitions::scripts/broken_pr_menu.py = 21
 definitions::scripts/devkit_project.py = 50
 definitions::scripts/docker-maint.py = 30
-definitions::scripts/fix-prs.py = 32
 definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
 definitions::scripts/hooks/structure_check.py = 43
 definitions::scripts/hooks/structure_scan.py = 31
-definitions::scripts/install-git-policy.py = 28
 definitions::scripts/instruction-budget.py = 26
 definitions::scripts/new-project.py = 28
 definitions::scripts/plug-projects.py = 30
@@ -86,7 +84,7 @@ definitions::scripts/release-pipeline.py = 34
 definitions::scripts/report-workflow-failure.py = 27
 definitions::scripts/resume-sessions.py = 21
 definitions::scripts/sweep.py = 56
-definitions::scripts/sync-devkit.py = 53
+definitions::scripts/sync-devkit.py = 71
 definitions::scripts/upgrade-project.py = 39
 definitions::scripts/workspace-status.py = 31
 definitions::scripts/workspace-task-index.py = 29
@@ -99,13 +97,11 @@ dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 544
 file_lines::scripts/devkit_project.py = 1735
 file_lines::scripts/docker-maint.py = 790
-file_lines::scripts/fix-prs.py = 789
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
 file_lines::scripts/hooks/structure_check.py = 1078
 file_lines::scripts/hooks/structure_scan.py = 680
-file_lines::scripts/install-git-policy.py = 656
 file_lines::scripts/instruction-budget.py = 517
 file_lines::scripts/new-project.py = 863
 file_lines::scripts/plug-projects.py = 922
@@ -116,12 +112,12 @@ file_lines::scripts/release-pipeline.py = 930
 file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/resume-sessions.py = 502
 file_lines::scripts/sweep.py = 1990
-file_lines::scripts/sync-devkit.py = 1649
+file_lines::scripts/sync-devkit.py = 1865
 file_lines::scripts/upgrade-project.py = 1239
 file_lines::scripts/workspace-status.py = 1077
 file_lines::scripts/workspace-task-index.py = 576
-file_lines::scripts/worktree-guard.py = 2309
-file_lines::scripts/worktree.py = 6166
+file_lines::scripts/worktree-guard.py = 2330
+file_lines::scripts/worktree.py = 6177
 function_lines::scripts/devkit_project.py::main = 213
 function_lines::scripts/docker-maint.py::generic_prune = 84
 function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
@@ -139,7 +135,6 @@ function_lines::scripts/sweep.py::classify = 84
 function_lines::scripts/sweep.py::inspect = 133
 function_lines::scripts/sweep.py::main = 171
 function_lines::scripts/sweep.py::sync_plan = 87
-function_lines::scripts/sync-devkit.py::main = 271
 function_lines::scripts/upgrade-project.py::main = 166
 function_lines::scripts/upgrade-project.py::upgrade_one = 143
 function_lines::scripts/worktree-guard.py::main = 139
@@ -439,3 +434,10 @@ swallowed_errors::scripts/worktree.py = 1
 #   definitions::scripts/install-git-policy.py -> 28
 #   file_lines::scripts/devkit_project.py -> 1735
 #   file_lines::scripts/install-git-policy.py -> 656
+
+# 2026-09-17  recorded: The three deferred structural splits, cut. All three were harness-defect reports on the /triage-harness ledger rather than raises: install-git-policy.py at its THIRD consecutive raise, fix-prs.py at its FIFTH, sync-devkit.py at its SEVENTH, each record naming the same seam and deferring it again. Two modules leave this baseline entirely: fix-prs.py (789 lines, 32 definitions -> under both limits) loses the scan-and-menu half to scripts/broken_pr_menu.py, and install-git-policy.py (656, 28 -> under both) loses the receipt-and-drift tier to scripts/policy_drift.py. sync-devkit.py loses main (271 lines, complexity 74) and every per-function finding it had. What is recorded is the arithmetic of those cuts and nothing else. broken_pr_menu.py = 21 definitions, one over, on its first line here: it is the half of a 32-definition module that the other half came under its limit by shedding, and its own file_lines is well inside. sync-devkit.py rises to 71 definitions and 1865 lines because the split had to happen INSIDE the file -- it is copied alone into a project for a first --pull, before any sibling exists, which is the constraint six earlier records cited to defer this and which was never the reason main was 271 lines: the other 52 definitions averaged 14. Naming main's four modes and the two phases of each is exactly what the complexity and function_lines advice asks for, and the 2026-09-06 record already settled which side of that trade to take. The two remaining lines are defect fixes in modules that were already far past file_lines with nowhere else to put anything: worktree-guard.py +21 for the cwd clause and its reasoning in foreign_box, which stops a session being locked out of the box it is standing in when Claude Code changes its session id mid-session; worktree.py +11 for PROVISION_TARGET_HELP, which says the verb takes a path so a session worktree stops reading `provision <box>` as addressed to a tier it is not in.
+#   definitions::scripts/broken_pr_menu.py -> 21
+#   definitions::scripts/sync-devkit.py -> 71
+#   file_lines::scripts/sync-devkit.py -> 1865
+#   file_lines::scripts/worktree-guard.py -> 2330
+#   file_lines::scripts/worktree.py -> 6177

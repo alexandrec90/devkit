@@ -196,6 +196,13 @@ def test_the_corpus_is_only_the_tests_that_name_the_module():
         "assert '--ignore=tests/acme_tool' in ADDOPTS",  # a path that merely contains it
         "# acme_tool is the one this does NOT cover",  # prose naming the module
         "acme_tool_helpers.alpha()",  # a longer name that starts with it
+        # The **code route**: the path spelled as an ordinary string, in a position that
+        # names the script without reaching it. Each of these was enough to join the
+        # corpus while the file-name alternative was a plain substring.
+        "wrapped = ['python', 'scripts/acme-tool.py', '--changed']",  # an argv element
+        "assert out == 'ran scripts/acme-tool.py'",  # a log line quoting it
+        "ARTIFACTS = {'scripts/acme-tool.py': 'logs/acme.log'}",  # a mapping key
+        "assert 'scripts/acme-tool.py' in manifest",  # a membership check
     ],
 )
 def test_a_module_named_only_in_passing_does_not_join_its_corpus(text):
@@ -239,7 +246,9 @@ def test_corpus_files_names_the_files_the_corpus_is_made_of():
 @pytest.mark.parametrize(
     "text",
     [
-        "load_module('scripts/acme-tool.py')",  # the file name
+        "load_module('scripts/acme-tool.py')",  # the file name, as a loader's argument
+        'load_script("scripts/acme-tool.py")',  # the same, double-quoted
+        "hook = REPO_ROOT / 'scripts/acme-tool.py'",  # the path-join spelling
         "import acme_tool",  # an import
         "acme_tool.alpha()",  # an attribute off it
         "acme_tool = load_module('x')",  # a binding

@@ -197,11 +197,20 @@ def _read_manifest_paths(root: Path) -> tuple[str, ...]:
     second thing to forget to update when the manifest grows.
     """
     path = root / "scripts" / "sync-devkit.py"
+    name = "_sync_harness_manifest"
     try:
-        spec = importlib.util.spec_from_file_location("_sync_harness_manifest", path)
+        spec = importlib.util.spec_from_file_location(name, path)
         if spec is None or spec.loader is None:
             return ()
         module = importlib.util.module_from_spec(spec)
+        # In `sys.modules` BEFORE `exec_module`, per `scripts/CLAUDE.md`. `@dataclass`
+        # resolves its string annotations by looking the defining module up by name, so
+        # exec-first dies inside `dataclasses` with `AttributeError: 'NoneType' object
+        # has no attribute '__dict__'` the moment the target grows a dataclass -- which
+        # `sync-devkit.py` did, and the `except` below then swallowed it and answered
+        # with an EMPTY manifest. Three tests failed saying a vendored path was missing
+        # from a list that had simply not been read.
+        sys.modules[name] = module
         spec.loader.exec_module(module)
         # Plus the gated tier at devkit's own layout: this list feeds the
         # unreleased-change warning, which asks about devkit's files, not a consumer's.
@@ -209,6 +218,8 @@ def _read_manifest_paths(root: Path) -> tuple[str, ...]:
         return tuple(module.MANIFEST) + tuple(gated())
     except (OSError, AttributeError, ImportError, SyntaxError):
         return ()
+    finally:
+        sys.modules.pop(name, None)
 
 
 @dataclass

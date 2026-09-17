@@ -1,15 +1,24 @@
-"""`scripts/fix-prs.py`: what counts as broken, what the dropdown draws, and what the
-agent is told.
+"""`scripts/fix-prs.py`: what the agent is told, how the session opens, and the CLI.
+
+What *counts* as broken and what the dropdown draws moved to
+`tests/test_broken_pr_menu.py` with the module, when this script's `file_lines` was
+recorded a fifth time against the same never-cut seam. The CLI tests stayed because the
+CLI stayed: `devkit_project.ACTIONS` names `scripts/fix-prs.py` for the live `--rows`
+picker, so the library was cut out from under the entrypoint rather than the other way
+round, and nothing the workspace task block spells by hand changed.
 
 Every decision in that script is a pure function taking the shapes `gh` returns, so this
 suite drives those directly and never a network. The two that spawn take a runner, and
 the tests for them assert the argv rather than the effect.
+
+**Patch the module that owns the name.** `fix-prs.py` reaches the menu tier as
+`menu.<name>`, so `monkeypatch.setattr(fix_prs, "scan", ...)` binds nothing the code
+reads -- the stub goes in and the real `gh` path runs anyway.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
-import json
 import subprocess
 from pathlib import Path
 
@@ -22,6 +31,12 @@ from support import load_script
 # has already loaded -- and it is the one this suite monkeypatches. It also costs no
 # `sys.path` bootstrap here, so this file needs no file-wide `noqa` to sit under one.
 fix_prs = load_script("scripts/fix-prs.py")
+# The scan-and-menu half, cut into its own module when `file_lines` here was recorded
+# a fifth time. The CLI did not move -- `devkit_project.ACTIONS` names
+# `scripts/fix-prs.py` and a dropdown's command line is spelled by hand -- so every
+# `main` test below is unchanged. What moved is where the menu's own names live, and
+# the sections that tested them directly are now in `tests/test_broken_pr_menu.py`.
+menu = load_script("scripts/broken_pr_menu.py")
 picker_rows = load_script("scripts/picker_rows.py")
 agent_box = load_script("scripts/agent-box.py")
 
@@ -44,338 +59,6 @@ def pr(**fields) -> dict:
     }
     base.update(fields)
     return base
-
-
-# --- what counts as broken --------------------------------------------------------
-
-
-def test_a_green_mergeable_pr_is_not_broken():
-    assert fix_prs.broken_reason(pr()) == ""
-
-
-def test_a_conflicting_pr_is_broken():
-    assert fix_prs.broken_reason(pr(mergeable="CONFLICTING")) == "merge conflict"
-
-
-@pytest.mark.parametrize("mergeable", ["UNKNOWN", None, "CONFLICTING"])
-@pytest.mark.parametrize("rollup", [[], [{"conclusion": "SUCCESS"}]])
-def test_a_dirty_merge_is_broken_without_failed_checks(mergeable, rollup):
-    entry = pr(mergeable=mergeable, mergeStateStatus="DIRTY", statusCheckRollup=rollup)
-    assert fix_prs.broken_reason(entry) == "merge conflict"
-
-
-@pytest.mark.parametrize("state", ["UNKNOWN", "BLOCKED", "BEHIND", "UNSTABLE", "CLEAN", None])
-def test_other_merge_states_are_not_conflicts(state):
-    assert fix_prs.broken_reason(pr(mergeable="UNKNOWN", mergeStateStatus=state)) == ""
-
-
-def test_a_failed_check_run_is_broken():
-    entry = pr(statusCheckRollup=[{"conclusion": "SUCCESS"}, {"conclusion": "FAILURE"}])
-    assert fix_prs.broken_reason(entry) == "1 check failing"
-
-
-def test_a_failed_legacy_status_context_counts_too():
-    """One rollup mixes both shapes, and only the check-run half carries `conclusion`."""
-    entry = pr(statusCheckRollup=[{"state": "ERROR"}, {"state": "SUCCESS"}])
-    assert fix_prs.broken_reason(entry) == "1 check failing"
-
-
-@pytest.mark.parametrize("mergeable", ["CONFLICTING", "UNKNOWN"])
-def test_both_kinds_of_broken_are_reported_together(mergeable):
-    entry = pr(
-        mergeable=mergeable,
-        mergeStateStatus="DIRTY",
-        statusCheckRollup=[{"conclusion": "FAILURE"}, {"conclusion": "TIMED_OUT"}],
-    )
-    assert fix_prs.broken_reason(entry) == "merge conflict + 2 checks failing"
-
-
-def test_a_pending_gate_is_not_a_failure():
-    """A run in flight is the normal state seconds after a push; a menu that called it
-    broken would offer every PR on the machine."""
-    assert fix_prs.broken_reason(pr(statusCheckRollup=[{"conclusion": None}])) == ""
-
-
-@pytest.mark.parametrize("conclusion", ["SKIPPED", "NEUTRAL", "SUCCESS"])
-def test_a_check_that_did_not_apply_is_not_a_failure(conclusion):
-    assert fix_prs.broken_reason(pr(statusCheckRollup=[{"conclusion": conclusion}])) == ""
-
-
-def test_unknown_mergeability_is_not_a_conflict():
-    """GitHub reports UNKNOWN while the job is still running, which every fresh PR is."""
-    assert fix_prs.broken_reason(pr(mergeable="UNKNOWN")) == ""
-
-
-def test_a_draft_is_never_broken_however_red_it_is():
-    """A draft is not asking to be merged, so an agent sent at it has no finish line."""
-    entry = pr(isDraft=True, mergeable="CONFLICTING", statusCheckRollup=[{"conclusion": "FAILURE"}])
-    assert fix_prs.broken_reason(entry) == ""
-
-
-@pytest.mark.parametrize("rollup", [None, "FAILURE", 7, [None, "x", {"conclusion": 3}]])
-def test_a_rollup_shape_this_does_not_know_counts_as_zero(rollup):
-    """Total rather than raising: this decides whether a row appears in a dropdown, and a
-    menu that could not be built is worse than a row that is merely wrong."""
-    assert fix_prs.failing_checks(rollup) == 0
-
-
-# --- the source ------------------------------------------------------------------
-
-
-def gh_returning(code: int, out: str):
-    def gh_for(_path):
-        def gh(*_args):
-            return subprocess.CompletedProcess([], code, out, "")
-
-        return gh
-
-    return gh_for
-
-
-def test_only_the_broken_ones_are_listed(monkeypatch, tmp_path):
-    payload = json.dumps([pr(number=1), pr(number=2, mergeable="CONFLICTING")])
-    monkeypatch.setattr(fix_prs.sweep, "gh_for", gh_returning(0, payload))
-    assert [entry["number"] for entry in fix_prs.broken_prs(tmp_path)] == [2]
-
-
-@pytest.mark.parametrize("mergeable", ["UNKNOWN", None])
-@pytest.mark.parametrize(
-    "fresh,reason,asks",
-    [
-        ({"mergeable": "CONFLICTING"}, "merge conflict", 1),
-        ({"mergeable": "UNKNOWN", "mergeStateStatus": "DIRTY"}, "merge conflict", 1),
-        ({"mergeable": "MERGEABLE"}, "", 1),
-        # The answer that is not one. Asked again to the budget and then left as the list
-        # had it, which reads as clean -- bounded, rather than a poll a person waits out.
-        ({"mergeable": "UNKNOWN"}, "", fix_prs.mergeability.ASKS),
-        # Both of these settle the row on the first ask, so neither spends the budget:
-        # a closed PR is one GitHub will never judge, and a draft is never a row.
-        ({"mergeable": "CONFLICTING", "state": "CLOSED"}, "", 1),
-        ({"mergeable": "CONFLICTING", "isDraft": True}, "", 1),
-    ],
-)
-def test_the_scan_asks_again_about_a_verdict_that_has_not_arrived(
-    monkeypatch, tmp_path, mergeable, fresh, reason, asks
-):
-    calls = []
-
-    def gh(*args):
-        calls.append(args[:3])
-        asked = args[args.index("--json") + 1].split(",")
-        entry = pr(mergeable=mergeable, statusCheckRollup=[])
-        if args[1] == "view":
-            entry.update(fresh)
-        payload = {key: value for key, value in entry.items() if key in asked}
-        return subprocess.CompletedProcess(
-            [], 0, json.dumps([payload] if args[1] == "list" else payload), ""
-        )
-
-    monkeypatch.setattr(fix_prs.sweep, "gh_for", lambda _path: gh)
-    monkeypatch.setattr(fix_prs.mergeability, "WAIT", 0)
-    found = fix_prs.broken_prs(tmp_path)
-    assert calls == [("pr", "list", "--state"), *[("pr", "view", "412")] * asks]
-    assert [fix_prs.broken_reason(entry) for entry in found] == ([reason] if reason else [])
-    if found:
-        assert found[0]["updatedAt"] == pr()["updatedAt"]
-        assert "merge conflict" in fix_prs.rows({"devkit": found}, NOW)[0]
-
-
-def test_refresh_failure_keeps_known_check_failures(monkeypatch, tmp_path):
-    entry = pr(mergeable="UNKNOWN", statusCheckRollup=[{"conclusion": "FAILURE"}])
-    asked = []
-    monkeypatch.setattr(fix_prs.sweep, "gh_for", gh_returning(0, json.dumps([entry])))
-    monkeypatch.setattr(fix_prs, "pr_view", lambda *_args: asked.append(1) or {})
-    monkeypatch.setattr(fix_prs.mergeability, "WAIT", 0)
-    assert fix_prs.broken_prs(tmp_path) == [entry]
-    # A view that answers nothing is indistinguishable from one that answers `UNKNOWN`,
-    # so it costs the same budget and no more.
-    assert len(asked) == fix_prs.mergeability.ASKS
-
-
-def test_settled_conflicts_and_drafts_need_no_refresh(monkeypatch, tmp_path):
-    entries = [
-        pr(mergeable="CONFLICTING", statusCheckRollup=[]),
-        pr(isDraft=True, mergeable="UNKNOWN"),
-    ]
-    monkeypatch.setattr(fix_prs.sweep, "gh_for", gh_returning(0, json.dumps(entries)))
-    monkeypatch.setattr(fix_prs, "pr_view", lambda *_args: pytest.fail("unnecessary refresh"))
-    assert fix_prs.broken_prs(tmp_path) == entries[:1]
-
-
-@pytest.mark.parametrize("fields", [fix_prs.PR_LIST_FIELDS, fix_prs.PR_VIEW_FIELDS])
-def test_both_queries_request_both_conflict_signals(fields):
-    assert {"mergeable", "mergeStateStatus"} <= set(fields.split(","))
-
-
-@pytest.mark.parametrize(
-    "code,out", [(1, ""), (0, "not json"), (0, json.dumps({"message": "Bad credentials"}))]
-)
-def test_a_gh_failure_loses_the_rows_and_keeps_the_menu(monkeypatch, tmp_path, code, out):
-    """An offline or unauthenticated machine must not fail the reconcile pass that calls
-    this; it loses the rows, and the next pass writes them again."""
-    monkeypatch.setattr(fix_prs.sweep, "gh_for", gh_returning(code, out))
-    assert fix_prs.broken_prs(tmp_path) == []
-
-
-def test_the_pr_is_re_read_live_rather_than_trusted_to_the_menu(monkeypatch, tmp_path):
-    """The dropdown can be a quarter of an hour old, so what the agent is told about a PR
-    comes from here and not from the row that was clicked."""
-    monkeypatch.setattr(fix_prs.sweep, "gh_for", gh_returning(0, json.dumps(pr(number=9))))
-    assert fix_prs.pr_view(tmp_path, 9)["number"] == 9
-
-
-@pytest.mark.parametrize("code,out", [(1, ""), (0, "not json"), (0, "[]")])
-def test_a_pr_view_that_cannot_be_read_is_empty_rather_than_a_traceback(
-    monkeypatch, tmp_path, code, out
-):
-    """`[]` is in here because `gh` returning the wrong SHAPE must land in the same place
-    as `gh` failing: `run_one` branches on emptiness, and a list would reach `.get`."""
-    monkeypatch.setattr(fix_prs.sweep, "gh_for", gh_returning(code, out))
-    assert fix_prs.pr_view(tmp_path, 9) == {}
-
-
-# --- the rows the picker draws ----------------------------------------------------
-
-
-def fields(row: str) -> list[str]:
-    return row.split(picker_rows.FIELD_SEP)
-
-
-def test_a_row_is_the_four_fields_the_extension_splits_on():
-    """`shellCommand.execute` returns the FIRST field and draws the other three, so a row
-    that runs the fields together sends an agent at a label."""
-    row = fix_prs.menu_row("carameli", pr(mergeable="CONFLICTING"), NOW)
-    assert fields(row) == [
-        "carameli:412",
-        "#412 agent/sweep-labels-0904",
-        "carameli -- merge conflict -- 3h ago",
-        "Teach the sweep about labels",
-    ]
-
-
-def test_a_pr_title_goes_through_the_shared_containment():
-    """A PR title is the one field here a person wrote. `tests/test_picker_rows.py` owns
-    what `cell` does to a separator and a newline; this asserts the title is not the
-    field that skipped it."""
-    broke = pr(title="fix: a|b" + chr(10) + "and more", mergeable="CONFLICTING")
-    row = fix_prs.menu_row("devkit", broke, NOW)
-    assert len(fields(row)) == 4
-    assert chr(10) not in row
-    assert fields(row)[3] == "fix: a/b and more"
-
-
-def test_the_checkout_is_on_every_row_because_the_list_is_flat():
-    """Still on the row even though a checkout stage asks first, because that stage is
-    a multi-select: three ticked checkouts give one ranked menu, and a row in it that
-    did not say which repo it came from would be unreadable."""
-    row = fix_prs.menu_row("roguelike", pr(mergeable="CONFLICTING"), NOW)
-    assert fields(row)[2].startswith("roguelike -- ")
-
-
-def test_rows_are_newest_first_across_every_checkout():
-    older = pr(number=1, updatedAt="2026-09-01T09:00:00Z")
-    newer = pr(number=2, updatedAt="2026-09-04T09:00:00Z")
-    drawn = fix_prs.rows({"devkit": [older], "carameli": [newer]}, NOW)
-    assert [fields(row)[0] for row in drawn] == ["carameli:2", "devkit:1"]
-
-
-def test_a_machine_with_nothing_broken_draws_the_sentinel_rather_than_no_rows():
-    """An empty quick-pick says nothing about whether the scan ran."""
-    drawn = fix_prs.rows({"devkit": [], "carameli": []}, NOW)
-    assert len(drawn) == 1
-    assert fix_prs.parse_pick(fields(drawn[0])[0]) is None
-    assert "nothing broken" in drawn[0]
-
-
-def test_the_sentinel_row_says_picking_it_runs_nothing():
-    """It has to read as a non-action rather than as a PR whose title nobody filled in."""
-    row = fix_prs.placeholder_row()
-    assert fields(row)[3] == "picking this runs nothing"
-
-
-@pytest.mark.parametrize(
-    "stamp,expected",
-    [
-        ("2026-09-04T11:30:00Z", "just now"),
-        ("2026-09-04T09:00:00Z", "3h ago"),
-        ("2026-09-01T12:00:00Z", "3d ago"),
-        ("not a date", "?"),
-        ("", "?"),
-    ],
-)
-def test_age_is_coarse_and_never_raises(stamp, expected):
-    assert fix_prs.age(stamp, NOW) == expected
-
-
-def test_the_scan_covers_the_registry_not_just_the_stack_projects(monkeypatch, tmp_path):
-    workspace = tmp_path / "alex.code-workspace"
-    workspace.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(fix_prs.devkit_project, "known_projects", lambda _text: ["a", "b"])
-    monkeypatch.setattr(fix_prs, "broken_prs", lambda _dir: [])
-    assert sorted(fix_prs.scan(workspace)) == ["a", "b"]
-
-
-def test_the_scan_asks_every_checkout_at_once_and_keeps_the_answers_paired(monkeypatch, tmp_path):
-    """A person is waiting on this now, so the calls run concurrently -- and a pool hands
-    results back in completion order, which would pair the wrong PRs with the wrong
-    checkout if the mapping were built from that."""
-    workspace = tmp_path / "alex.code-workspace"
-    workspace.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(fix_prs.devkit_project, "known_projects", lambda _text: ["slow", "fast"])
-    monkeypatch.setattr(
-        fix_prs,
-        "broken_prs",
-        lambda project_dir: [pr(number=1 if project_dir.name == "slow" else 2)],
-    )
-    found = fix_prs.scan(workspace)
-    assert found["slow"][0]["number"] == 1
-    assert found["fast"][0]["number"] == 2
-
-
-def test_an_empty_registry_scans_to_nothing_rather_than_an_empty_pool(tmp_path):
-    """`ThreadPoolExecutor` refuses `max_workers=0`, so a workspace with no checkouts has
-    to be answered before the pool is built."""
-    workspace = tmp_path / "alex.code-workspace"
-    workspace.write_text("{}", encoding="utf-8")
-    assert fix_prs.scan(workspace, projects=[]) == {}
-
-
-def test_a_pick_is_one_token_the_extension_can_return():
-    """A VS Code input resolves to a single string, so both halves ride in one value."""
-    assert fix_prs.pick_value("carameli", 412) == "carameli:412"
-
-
-# --- reading a pick ---------------------------------------------------------------
-
-
-def test_a_pick_is_a_checkout_and_a_number():
-    assert fix_prs.parse_pick("carameli:412") == fix_prs.Pick("carameli", 412)
-
-
-def test_the_sentinel_row_parses_to_nothing_rather_than_failing():
-    assert fix_prs.parse_pick("none") is None
-
-
-def test_the_sentinel_carries_no_leading_dash_argparse_would_read_as_a_flag():
-    """It reaches the script as `--picks <value>`; a value starting with `-` is an option
-    to argparse, and the task fails with a usage error on a click that meant `nothing`."""
-    assert not fix_prs.placeholder_row().startswith("-")
-
-
-@pytest.mark.parametrize("token", ["carameli", "", ":412", "carameli:head"])
-def test_a_token_the_menu_could_not_have_written_is_refused(token):
-    """A malformed pick means the menu file and this parser disagree; running the rest of
-    the batch while dropping one is how a PR looks looked-at and was not."""
-    with pytest.raises(fix_prs.FixError):
-        fix_prs.parse_pick(token)
-
-
-def test_ticked_rows_split_on_the_space_and_de_duplicate():
-    assert fix_prs.split_picks("a:1 b:2 a:1") == ["a:1", "b:2"]
-
-
-def test_nothing_ticked_splits_to_nothing():
-    assert fix_prs.split_picks("") == []
 
 
 # --- what the agent is told -------------------------------------------------------
@@ -519,9 +202,7 @@ def test_a_pr_in_a_live_devkit_box_opens_in_that_box(monkeypatch, tmp_path, agen
     held = fix_prs.worktree.box_path(tmp_path, box.name)
     checkout_listing(monkeypatch, tmp_path, (held.as_posix(), branch))
     monkeypatch.setattr(fix_prs.worktree, "live_boxes", lambda root: {box.name: box})
-    monkeypatch.setattr(
-        fix_prs, "pr_view", lambda *_: pr(headRefName=branch, mergeable="CONFLICTING")
-    )
+    monkeypatch.setattr(menu, "pr_view", lambda *_: pr(headRefName=branch, mergeable="CONFLICTING"))
     monkeypatch.setattr(fix_prs, "cut_tree", lambda *_: pytest.fail("reuse the existing box"))
     opened = []
     monkeypatch.setattr(
@@ -531,7 +212,7 @@ def test_a_pr_in_a_live_devkit_box_opens_in_that_box(monkeypatch, tmp_path, agen
         fix_prs, "launch_background", lambda cli, tree, *a, **k: opened.append((cli, tree)) or 0
     )
 
-    assert fix_prs.run_one(fix_prs.Pick("carameli", 412), tmp_path / "w.code-workspace", agent) == 0
+    assert fix_prs.run_one(menu.Pick("carameli", 412), tmp_path / "w.code-workspace", agent) == 0
     assert opened == [(fix_prs.AGENT_MODES[agent][0], held)]
 
 
@@ -743,7 +424,7 @@ def run_one_with(monkeypatch, tmp_path, view: dict, mode: str = "claude", then: 
     workspace.parent.mkdir(exist_ok=True)
     opened: dict = {}
     answers = iter([view] if then is None else [view, then])
-    monkeypatch.setattr(fix_prs, "pr_view", lambda _dir, _n: next(answers, view))
+    monkeypatch.setattr(menu, "pr_view", lambda _dir, _n: next(answers, view))
     monkeypatch.setattr(fix_prs, "existing_tree", lambda *a, **k: (None, ""))
     monkeypatch.setattr(fix_prs, "cut_tree", lambda *a, **k: Path("/trees/x"))
     monkeypatch.setattr(
@@ -755,7 +436,7 @@ def run_one_with(monkeypatch, tmp_path, view: dict, mode: str = "claude", then: 
         fix_prs, "launch_background", lambda *args, **kwargs: opened.update(bg=args) or 0
     )
     (tmp_path / "w" / "carameli").mkdir(exist_ok=True)
-    code = fix_prs.run_one(fix_prs.Pick("carameli", 412), workspace, mode)
+    code = fix_prs.run_one(menu.Pick("carameli", 412), workspace, mode)
     return code, opened
 
 
@@ -810,7 +491,7 @@ def test_a_pr_turned_draft_since_the_scan_gets_no_worktree(monkeypatch, tmp_path
 def test_the_view_asks_for_every_field_the_launch_path_reads():
     """A field `run_one` branches on and `PR_VIEW_FIELDS` omits is always absent, which
     is indistinguishable from the harmless value -- how the closed-PR bug survived."""
-    asked = set(fix_prs.PR_VIEW_FIELDS.split(","))
+    asked = set(menu.PR_VIEW_FIELDS.split(","))
     assert {"state", "isDraft", "mergeable", "statusCheckRollup", "headRefName"} <= asked
 
 
@@ -854,7 +535,7 @@ def test_an_open_worktree_on_the_head_branch_is_used_and_nothing_is_cut(monkeypa
     workspace.parent.mkdir(exist_ok=True)
     (tmp_path / "w" / "carameli").mkdir(exist_ok=True)
     opened: dict = {}
-    monkeypatch.setattr(fix_prs, "pr_view", lambda _dir, _n: pr(mergeable="CONFLICTING"))
+    monkeypatch.setattr(menu, "pr_view", lambda _dir, _n: pr(mergeable="CONFLICTING"))
     monkeypatch.setattr(fix_prs, "existing_tree", lambda *a, **k: (Path("/trees/held"), ""))
     monkeypatch.setattr(fix_prs, "cut_tree", explode)
     monkeypatch.setattr(
@@ -862,7 +543,7 @@ def test_an_open_worktree_on_the_head_branch_is_used_and_nothing_is_cut(monkeypa
         "open_agent",
         lambda *args, **kwargs: opened.update(args=args) or 0,
     )
-    assert fix_prs.run_one(fix_prs.Pick("carameli", 412), workspace, "claude") == 0
+    assert fix_prs.run_one(menu.Pick("carameli", 412), workspace, "claude") == 0
     assert opened["args"][1] == Path("/trees/held")
 
 
@@ -879,13 +560,13 @@ def test_a_branch_held_outside_the_tier_stops_the_run_and_opens_nothing(
     workspace = tmp_path / "w" / "alex.code-workspace"
     workspace.parent.mkdir(exist_ok=True)
     (tmp_path / "w" / "carameli").mkdir(exist_ok=True)
-    monkeypatch.setattr(fix_prs, "pr_view", lambda _dir, _n: pr(mergeable="CONFLICTING"))
+    monkeypatch.setattr(menu, "pr_view", lambda _dir, _n: pr(mergeable="CONFLICTING"))
     monkeypatch.setattr(
         fix_prs, "existing_tree", lambda *a, **k: (None, "agent/x is checked out at C:/ws/devkit")
     )
     monkeypatch.setattr(fix_prs, "cut_tree", explode)
     monkeypatch.setattr(fix_prs.agent_box, "open_agent", explode)
-    code = fix_prs.run_one(fix_prs.Pick("carameli", 412), workspace, "claude")
+    code = fix_prs.run_one(menu.Pick("carameli", 412), workspace, "claude")
     assert code == fix_prs.EXIT_FAILED
     assert "checked out at C:/ws/devkit" in capsys.readouterr().err
 
@@ -901,11 +582,20 @@ def test_a_batch_reports_the_worst_outcome(monkeypatch, tmp_path):
     workspace = tmp_path / "alex.code-workspace"
     codes = iter([0, 1, 0])
     monkeypatch.setattr(fix_prs, "run_one", lambda *a, **k: next(codes))
-    picks = [fix_prs.Pick("a", 1), fix_prs.Pick("a", 2), fix_prs.Pick("a", 3)]
+    picks = [menu.Pick("a", 1), menu.Pick("a", 2), menu.Pick("a", 3)]
     assert fix_prs.run(picks, workspace, "claude") == 1
 
 
 # --- the CLI ----------------------------------------------------------------------
+# From here on the tests drive `main`, so they cross both modules by design: the CLI is
+# here and the rows it prints are the menu's. That is why the split left these sections
+# behind rather than following the code -- `tests/test_broken_pr_menu.py` covers the
+# menu's decisions on their own, and what is below is the wiring between the two.
+
+
+def fields(row: str) -> list[str]:
+    """One picker row split into the four fields `shellCommand.execute` draws."""
+    return row.split(picker_rows.FIELD_SEP)
 
 
 @pytest.fixture
@@ -946,23 +636,23 @@ def test_rows_prints_the_picker_lines_and_nothing_else(workspace, monkeypatch, c
     """This stdout IS the quick-pick: every line it carries becomes an option, so a
     status line here would be a row a person could tick."""
     monkeypatch.setattr(
-        fix_prs, "scan", lambda _ws: {"devkit": [pr(mergeable="CONFLICTING")], "carameli": []}
+        menu, "scan", lambda _ws: {"devkit": [pr(mergeable="CONFLICTING")], "carameli": []}
     )
     assert fix_prs.main(["--rows", "--workspace", str(workspace)]) == 0
     printed = capsys.readouterr().out.splitlines()
     assert printed == [
         "devkit:412|#412 agent/sweep-labels-0904|devkit -- merge conflict -- "
-        + fix_prs.age("2026-09-04T09:00:00Z")
+        + menu.age("2026-09-04T09:00:00Z")
         + "|Teach the sweep about labels"
     ]
 
 
 def test_rows_draws_the_sentinel_when_the_machine_is_clean(workspace, monkeypatch, capsys):
-    monkeypatch.setattr(fix_prs, "scan", lambda _ws: {"devkit": [], "carameli": []})
+    monkeypatch.setattr(menu, "scan", lambda _ws: {"devkit": [], "carameli": []})
     assert fix_prs.main(["--rows", "--workspace", str(workspace)]) == 0
     printed = capsys.readouterr().out.splitlines()
     assert len(printed) == 1
-    assert fix_prs.parse_pick(printed[0].split(picker_rows.FIELD_SEP)[0]) is None
+    assert menu.parse_pick(printed[0].split(picker_rows.FIELD_SEP)[0]) is None
 
 
 # --- the checkout stage, and the scan it hands on -----------------------------
@@ -978,7 +668,7 @@ BROKEN = {"devkit": [pr(number=1, mergeable="CONFLICTING")], "carameli": [], "ro
 
 
 def test_the_checkout_rows_count_what_each_one_holds():
-    drawn = fix_prs.project_rows(BROKEN, "tok")
+    drawn = menu.project_rows(BROKEN, "tok")
     assert [fields(row)[1] for row in drawn] == ["devkit", "carameli", "roguelike"]
     assert fields(drawn[0])[2] == "1 broken PR"
 
@@ -988,32 +678,32 @@ def test_a_checkout_with_nothing_broken_is_listed_and_says_so():
     checkout silently missing from the menu cannot be told apart from one the scan
     could not reach, and ticking a checkout to find it empty spends a click to learn
     what the scan already knew."""
-    drawn = fix_prs.project_rows(BROKEN, "tok")
+    drawn = menu.project_rows(BROKEN, "tok")
     assert fields(drawn[1])[2] == "nothing broken"
 
 
 def test_the_fullest_checkout_is_offered_first():
     found = {"a": [], "b": [pr(number=1), pr(number=2)], "c": [pr(number=3)]}
-    assert [fields(row)[1] for row in fix_prs.project_rows(found, "tok")] == ["b", "c", "a"]
+    assert [fields(row)[1] for row in menu.project_rows(found, "tok")] == ["b", "c", "a"]
 
 
 def test_a_checkout_row_carries_the_token_the_second_stage_reads():
-    row = fix_prs.project_rows(BROKEN, "tok123")[0]
+    row = menu.project_rows(BROKEN, "tok123")[0]
     assert fix_prs.picker_scan.parse_projects(fields(row)[0]) == (["devkit"], "tok123")
 
 
 def test_no_checkouts_at_all_draws_a_sentinel_rather_than_an_empty_menu():
-    drawn = fix_prs.project_rows({}, "tok")
+    drawn = menu.project_rows({}, "tok")
     assert len(drawn) == 1
     assert fields(drawn[0])[0] == picker_rows.NOTHING
 
 
 def test_the_second_stage_serves_the_first_stages_scan_without_rescanning(workspace, monkeypatch):
-    token = fix_prs.picker_scan.write(fix_prs.SCAN_NAME, fix_prs.scan_entries(BROKEN, NOW))
+    token = fix_prs.picker_scan.write(menu.SCAN_NAME, menu.scan_entries(BROKEN, NOW))
     monkeypatch.setattr(
-        fix_prs, "scan", lambda *_a: pytest.fail("the cached scan should have been enough")
+        menu, "scan", lambda *_a: pytest.fail("the cached scan should have been enough")
     )
-    drawn = fix_prs.picked_rows(workspace, f"devkit@{token}", NOW)
+    drawn = menu.picked_rows(workspace, f"devkit@{token}", NOW)
     assert [fields(row)[0] for row in drawn] == ["devkit:1"]
 
 
@@ -1022,9 +712,9 @@ def test_the_second_stage_keeps_the_ranking_across_several_ticked_checkouts(work
         "devkit": [pr(number=1, updatedAt="2026-09-01T09:00:00Z")],
         "carameli": [pr(number=2, updatedAt="2026-09-04T09:00:00Z")],
     }
-    token = fix_prs.picker_scan.write(fix_prs.SCAN_NAME, fix_prs.scan_entries(found, NOW))
-    monkeypatch.setattr(fix_prs, "scan", lambda *_a: pytest.fail("should not rescan"))
-    drawn = fix_prs.picked_rows(workspace, f"devkit@{token},carameli@{token}", NOW)
+    token = fix_prs.picker_scan.write(menu.SCAN_NAME, menu.scan_entries(found, NOW))
+    monkeypatch.setattr(menu, "scan", lambda *_a: pytest.fail("should not rescan"))
+    drawn = menu.picked_rows(workspace, f"devkit@{token},carameli@{token}", NOW)
     assert [fields(row)[0] for row in drawn] == ["carameli:2", "devkit:1"]
 
 
@@ -1038,42 +728,42 @@ def test_a_token_that_names_no_scan_rescans_only_the_ticked_checkouts(workspace,
         asked.append(projects)
         return {"devkit": [pr(number=9, mergeable="CONFLICTING")]}
 
-    monkeypatch.setattr(fix_prs, "scan", fake)
-    drawn = fix_prs.picked_rows(workspace, "devkit@stale", NOW)
+    monkeypatch.setattr(menu, "scan", fake)
+    drawn = menu.picked_rows(workspace, "devkit@stale", NOW)
     assert asked == [["devkit"]]
     assert [fields(row)[0] for row in drawn] == ["devkit:9"]
 
 
 def test_ticked_checkouts_with_nothing_broken_draw_the_sentinel(workspace, monkeypatch):
-    token = fix_prs.picker_scan.write(fix_prs.SCAN_NAME, fix_prs.scan_entries(BROKEN, NOW))
-    monkeypatch.setattr(fix_prs, "scan", lambda *_a: pytest.fail("should not rescan"))
-    drawn = fix_prs.picked_rows(workspace, f"carameli@{token}", NOW)
+    token = fix_prs.picker_scan.write(menu.SCAN_NAME, menu.scan_entries(BROKEN, NOW))
+    monkeypatch.setattr(menu, "scan", lambda *_a: pytest.fail("should not rescan"))
+    drawn = menu.picked_rows(workspace, f"carameli@{token}", NOW)
     assert len(drawn) == 1
-    assert fix_prs.parse_pick(fields(drawn[0])[0]) is None
+    assert menu.parse_pick(fields(drawn[0])[0]) is None
 
 
 def test_no_checkout_stage_at_all_lists_the_whole_machine(workspace, monkeypatch):
     """`--rows` typed by hand has no first stage, and answers the way it did before
     there was one."""
-    monkeypatch.setattr(fix_prs, "scan", lambda _ws: BROKEN)
-    assert [fields(row)[0] for row in fix_prs.picked_rows(workspace, "", NOW)] == ["devkit:1"]
+    monkeypatch.setattr(menu, "scan", lambda _ws: BROKEN)
+    assert [fields(row)[0] for row in menu.picked_rows(workspace, "", NOW)] == ["devkit:1"]
 
 
 def test_project_rows_records_the_scan_the_second_stage_will_read(workspace, monkeypatch, capsys):
-    monkeypatch.setattr(fix_prs, "scan", lambda _ws: BROKEN)
+    monkeypatch.setattr(menu, "scan", lambda _ws: BROKEN)
     assert fix_prs.main(["--project-rows", "--workspace", str(workspace)]) == 0
     printed = capsys.readouterr().out.splitlines()
     projects, token = fix_prs.picker_scan.parse_projects(printed[0].split(picker_rows.FIELD_SEP)[0])
     assert projects == ["devkit"]
-    assert fix_prs.picker_scan.read(fix_prs.SCAN_NAME, token) is not None
+    assert fix_prs.picker_scan.read(menu.SCAN_NAME, token) is not None
 
 
 # --- the guard on the two stages disagreeing ----------------------------------
 
 
 def test_a_pick_from_a_ticked_checkout_is_not_a_stray():
-    picks = [fix_prs.Pick("devkit", 1)]
-    assert fix_prs.strayed_picks(picks, "devkit@tok,carameli@tok") == []
+    picks = [menu.Pick("devkit", 1)]
+    assert menu.strayed_picks(picks, "devkit@tok,carameli@tok") == []
 
 
 def test_a_pick_from_a_checkout_the_first_stage_did_not_return_is_named():
@@ -1082,13 +772,13 @@ def test_a_pick_from_a_checkout_the_first_stage_did_not_return_is_named():
     `${input:...}` from the value it recorded when that input LAST ran, so an input
     order that stopped putting the checkout stage first would filter by the previous
     click's checkouts. This is what makes that loud instead of silent."""
-    picks = [fix_prs.Pick("devkit", 1), fix_prs.Pick("roguelike", 2)]
-    assert fix_prs.strayed_picks(picks, "devkit@tok") == ["roguelike"]
+    picks = [menu.Pick("devkit", 1), menu.Pick("roguelike", 2)]
+    assert menu.strayed_picks(picks, "devkit@tok") == ["roguelike"]
 
 
 def test_no_checkout_stage_means_nothing_to_disagree_with():
     """A hand-typed `--picks` has no first stage, and must not be refused for it."""
-    assert fix_prs.strayed_picks([fix_prs.Pick("devkit", 1)], "") == []
+    assert menu.strayed_picks([menu.Pick("devkit", 1)], "") == []
 
 
 def test_a_stray_pick_refuses_the_whole_run(workspace, monkeypatch, capsys):
@@ -1114,7 +804,7 @@ def test_a_missing_workspace_file_is_a_usage_error(tmp_path, capsys):
 
 def test_list_prints_the_same_rows_the_dropdown_would_draw(workspace, monkeypatch, capsys):
     monkeypatch.setattr(
-        fix_prs, "scan", lambda _ws: {"devkit": [pr(mergeable="CONFLICTING")], "carameli": []}
+        menu, "scan", lambda _ws: {"devkit": [pr(mergeable="CONFLICTING")], "carameli": []}
     )
     assert fix_prs.main(["--list", "--workspace", str(workspace)]) == 0
     out = capsys.readouterr().out
@@ -1156,17 +846,17 @@ def test_listed_is_the_one_ranking_both_callers_read():
     ranked list would draw the right PRs in the wrong order."""
     older = pr(number=1, updatedAt="2026-09-01T09:00:00Z")
     newer = pr(number=2, updatedAt="2026-09-04T09:00:00Z")
-    ranked = fix_prs.listed({"devkit": [older], "carameli": [newer]})
+    ranked = menu.listed({"devkit": [older], "carameli": [newer]})
     assert [(project, entry["number"]) for project, entry in ranked] == [
         ("carameli", 2),
         ("devkit", 1),
     ]
-    assert [project for project, _line in fix_prs.scan_entries({"devkit": [older]})] == ["devkit"]
+    assert [project for project, _line in menu.scan_entries({"devkit": [older]})] == ["devkit"]
 
 
 def test_stray_report_names_every_checkout_and_says_nothing_ran():
-    one = fix_prs.stray_report(["roguelike"])
-    many = fix_prs.stray_report(["carameli", "roguelike"])
+    one = menu.stray_report(["roguelike"])
+    many = menu.stray_report(["carameli", "roguelike"])
     assert "ticked a PR from roguelike" in one
     assert "ticked PRs from carameli, roguelike" in many
     for text in (one, many):
@@ -1184,8 +874,8 @@ def test_stray_report_names_every_checkout_and_says_nothing_ran():
 def test_the_scan_asks_with_this_checkouts_own_gh(monkeypatch, tmp_path):
     asked = []
     monkeypatch.setattr(
-        fix_prs, "pr_view", lambda directory, number: asked.append((directory, number)) or {}
+        menu, "pr_view", lambda directory, number: asked.append((directory, number)) or {}
     )
-    monkeypatch.setattr(fix_prs.mergeability, "WAIT", 0)
-    fix_prs.settle_mergeability(tmp_path, [pr(mergeable="UNKNOWN")])
-    assert asked == [(tmp_path, 412)] * fix_prs.mergeability.ASKS
+    monkeypatch.setattr(menu.mergeability, "WAIT", 0)
+    menu.settle_mergeability(tmp_path, [pr(mergeable="UNKNOWN")])
+    assert asked == [(tmp_path, 412)] * menu.mergeability.ASKS

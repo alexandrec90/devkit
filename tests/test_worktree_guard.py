@@ -1077,6 +1077,73 @@ def test_a_box_leased_under_an_abbreviated_session_id_still_admits_its_session(r
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
 
 
+def test_a_session_is_never_locked_out_of_the_box_it_is_standing_in(root, monkeypatch, capsys):
+    """The reported dead end, and every part of it followed from one unstable id.
+
+    A session had its box cut and the lease written under the id the guard read at spawn
+    time; later the same session was identified by a different id, so the guard reported
+    its own box as somebody else's, cut it a duplicate, and `worktree.py claim` refused
+    the recovery because `claim` declines a dirty tree and the dirt was the locked-out
+    session's own work. Both ids are Claude Code's to choose and neither is a fact the
+    harness can pin, so the lease comparison cannot be the only question asked.
+
+    `cwd` is the second fact, and here it disagrees with the lease: the payload's session
+    matches nothing, and the call is coming from inside the box. Standing in it is not
+    adopting it.
+
+    Reversion check: drop the `standing_in` clause in `foreign_box` and this blocks.
+    """
+    workspace = _workspace(root)
+    box = root / ".worktrees" / "carameli--x-0806"
+    _lease(root, "carameli--x-0806", project="carameli", session="the-id-at-spawn-time")
+    target = box / "app" / "main.py"
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(payload(path=str(target), cwd=str(box), session="a-different-id-later-on")),
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
+    assert "different session" not in guidance(capsys)
+
+
+def test_standing_elsewhere_still_cannot_write_into_a_leased_box(root, monkeypatch, capsys):
+    """The other half, and the reason the `cwd` exemption reopens nothing.
+
+    The adoption this guard was written for is a session sitting in its own checkout and
+    writing an absolute path into somebody else's box -- so its `cwd` is nowhere near the
+    box, and the exemption above never fires for it. Same lease, same foreign id as the
+    test before; only the working directory differs, and it is what decides.
+    """
+    workspace = _workspace(root)
+    _lease(root, "carameli--x-0806", project="carameli", session="the-owner")
+    target = root / ".worktrees" / "carameli--x-0806" / "app" / "main.py"
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(payload(path=str(target), cwd=str(root), session="a-passer-by")),
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert "different session" in guidance(capsys)
+
+
+def test_a_sibling_box_is_foreign_even_from_inside_another_box(root, monkeypatch, capsys):
+    """`cwd` exempts the box it is *in*, not the tier. A session working in its own box
+    that reaches across into a neighbour's is the original collision, arriving from one
+    directory further in."""
+    workspace = _workspace(root)
+    mine = root / ".worktrees" / "carameli--mine-0806"
+    mine.mkdir(parents=True)
+    _lease(root, "carameli--x-0806", project="carameli", session="the-owner")
+    target = root / ".worktrees" / "carameli--x-0806" / "app" / "main.py"
+    monkeypatch.setattr(
+        "sys.stdin",
+        _stdin(payload(path=str(target), cwd=str(mine), session="next-door")),
+    )
+
+    assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_BLOCK
+    assert "different session" in guidance(capsys)
+
+
 def test_an_unowned_box_is_left_alone(root, monkeypatch):
     """An adopted orphan carries no session (`worktree.py` cannot rebuild one), so there
     is no owner to defend and blocking would dead-end every box that survived a lost
