@@ -394,9 +394,8 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help=(
             "explicitly do not apply -- the default, and redundant on the command line. "
-            "It exists so the workspace picker's safe branch emits a real token: an empty "
-            "`${input:...}` does not vanish from the args array, it reaches argparse as a "
-            "stray positional and the task fails"
+            "It exists so the workspace picker's safe branch emits a real token; "
+            "`installer_picker.DRY_RUN` is that branch and records why"
         ),
     )
     parser.add_argument(

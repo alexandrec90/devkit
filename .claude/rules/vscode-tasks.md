@@ -184,7 +184,22 @@ never renders.
   `scripts/new-project.py` carries the redundant-looking `--dry-run` and `--remote` flags
   alongside their negations. The exception is a picker feeding `scripts/devkit_project.py`,
   which strips empties before exec; `lintScope` relies on that and says so where it is
-  defined.
+  defined. A **live** picker has a second reason for the same rule and it holds even
+  there: `filterEmptyResults` drops a row with an empty value, and a quick-pick left with
+  no options is an error rather than a default.
+- **A prompt only one branch reads is still asked, and the fix is an input that declines
+  to ask.** VS Code resolves every `${input:...}` a task's arguments name, unconditionally
+  and in the order they appear, and there are no conditional inputs — so *Machine:
+  Scheduled Jobs* asked "apply an uninstall?" after a `status` that removes nothing, which
+  is the question a person answers wrongly once and then stops reading. What there is, is
+  `useSingleResult`: a `shellCommand.execute` input whose command returns exactly one row
+  takes it without drawing anything. So the *command* branches — `installer_picker.apply_rows`
+  returns one row for every verb but `uninstall` and two for that one — and the dependent
+  prompt appears only where it means something, while the destructive path keeps both of
+  its deliberate picks. The price is the chain's price: the input it reads must also be a
+  `shellCommand.execute` one and must come **earlier in the task's arguments**, per the
+  two conditions below. Folding the answers into one wider pick is the alternative, and it
+  costs the second pick — which is exactly what a destructive verb should not be spending.
 - **A scope that fits in a picker is a picker, not a second task.** Two tasks whose labels
   differ only in how much they cover sit adjacent in the quick-pick and cost an icon, a
   `detail` and — where dispatched — a second `ACTIONS` entry for one flag. What earns a

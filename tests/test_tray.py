@@ -209,9 +209,41 @@ def test_the_installers_report_is_the_one_row_the_scheduler_cannot_supply():
 def test_the_menu_command_ids_do_not_collide_with_a_job_row():
     """Job rows are `FIRST_JOB + index`, so a fixed id at or above it would be read as a
     click on whichever job happened to sit at that offset."""
-    fixed = {tray.CMD_REFRESH, tray.CMD_EXIT, tray.CMD_INSTALLERS}
-    assert len(fixed) == 3, "two menu commands share an id"
+    fixed = {tray.CMD_REFRESH, tray.CMD_INSTALLERS}
+    assert len(fixed) == 2, "two menu commands share an id"
     assert max(fixed) < tray.FIRST_JOB
+
+
+def test_the_menu_cannot_close_the_tray():
+    """The `Exit` row is gone and must stay gone. It ran `DestroyWindow` and nothing else:
+    the icon went, every scheduled job carried on, and the machine lost the only thing
+    that *reports* them -- which looks exactly like a machine with nothing wrong. One
+    stray click a millimetre below `Refresh now` bought that state, and the way back was
+    a command nothing in the menu named."""
+    assert not hasattr(tray, "CMD_EXIT")
+    assert "user32.DestroyWindow" not in win32_calls(), (
+        "the tray closes itself again -- whatever reaches this call is a click away from "
+        "an icon nobody can get back without a command the menu does not name"
+    )
+
+
+def test_the_retired_exit_id_is_not_handed_to_something_else(monkeypatch):
+    """`101` was `Exit`. A `WM_COMMAND` still carrying it -- a queued click, a menu
+    message in flight -- must land on nothing rather than on whatever id was assigned
+    next, which is why the number is retired rather than reused."""
+    assert 101 not in {tray.CMD_REFRESH, tray.CMD_INSTALLERS}
+    assert 101 < tray.FIRST_JOB
+
+    icon = tray.Tray.__new__(tray.Tray)
+    icon.states = []
+    monkeypatch.setattr(icon, "poll", lambda: pytest.fail("the retired id refreshed"))
+    monkeypatch.setattr(
+        icon, "open_path", lambda _path: pytest.fail("the retired id opened an artifact")
+    )
+    monkeypatch.setattr(
+        icon, "open_artifact", lambda _index: pytest.fail("the retired id opened an artifact")
+    )
+    icon._on_command(None, 101)
 
 
 def test_the_window_class_struct_declares_its_own_size():
