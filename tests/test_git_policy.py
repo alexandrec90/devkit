@@ -523,6 +523,26 @@ def test_a_deletion_or_tag_only_push_skips_the_pre_push_stage(tmp_path, monkeypa
         assert PUSH_STAGE not in runner.calls
 
 
+def test_an_unreadable_push_payload_runs_the_gate_rather_than_standing_down(tmp_path, monkeypatch):
+    """An empty payload is not a tag-only push, and used to be treated as one.
+
+    The skip was `all(u.deletion for u in parse_push_updates(raw))`, and `all([])` is
+    vacuously true -- so *any* payload with no branch lines skipped the stage. A
+    tag-only push has `refs/tags/` lines and no branch ones and is meant to skip; a
+    payload that is empty because `dispatch.main` could not read git's stdin
+    (`input_text=""` on `OSError`/`ValueError`) is the opposite case, and it turned the
+    whole PR gate off for that push with nothing printed.
+
+    Reversion check: restore the bare `all(...)` and this is the test that fails.
+    """
+    monkeypatch.setattr(
+        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
+    runner = FakeRunner(_push_responses(tmp_path))
+    assert git_policy.run_hook("pre-push", ["origin"], input_text="", runner=runner) == 0
+    assert PUSH_STAGE in runner.calls, "an unreadable payload must not disable the gate"
+
+
 def test_the_commit_stage_argv_is_unchanged_by_the_push_stage(tmp_path, monkeypatch):
     """The commit stage keeps pre-commit's staged-diff default: the fixers there act
     on the files being committed, and `--all-files` would rewrite the whole tree."""

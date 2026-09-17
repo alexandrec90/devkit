@@ -1559,15 +1559,18 @@ def _nothing_to_compare(constant: str, tag: str | None) -> str:
 
     Two reasons. A checkout with no tags has nothing to compare against at all.
 
-    The second is the local push gate looking at a release branch mid-cut, and it takes
-    two conditions -- the second being why the first cannot be used to silence the test.
-    `devkit-push-gate` sets the variable only when the branch being pushed is a
-    `release/vX.Y.Z` (see `scripts/precommit/run_push_gate.py`), because between step 2's
-    bump and step 6's tag this assertion is red by construction and the gate has no PR to
-    judge that from. But the state still has to *look* like a release in flight -- the
-    constant strictly ahead of the newest tag -- so the variable excuses nothing else. A
-    stale constant, which is what this test exists to catch, is *behind* the newest tag
-    and still fails with the variable set.
+    The second is the local push gate looking at a release in flight, and it takes two
+    conditions -- the second being why the first cannot be used to silence the test.
+    `devkit-push-gate` sets the variable only when it detects one (see
+    `run_push_gate.detect_release_prepare`), because between step 2's bump and step 6's
+    tag this assertion is red by construction and the gate has no PR to judge that from.
+    That detection is deliberately *not* only the `release/vX.Y.Z` branch: once the
+    release PR merges, `main` carries the untagged constant and every branch cut from it
+    fails here, which locked the machine out of pushing anything for a day when v0.11.18
+    merged and its tag was refused. But the state still has to *look* like a release in
+    flight -- the constant strictly ahead of the newest tag -- so the variable excuses
+    nothing else. A stale constant, which is what this test exists to catch, is *behind*
+    the newest tag and still fails with the variable set.
 
     CI never sets it, so the release PR stays red and `gate_verdict` makes the call.
     """

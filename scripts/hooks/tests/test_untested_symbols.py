@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import dataclasses
 import re
-import time
 from pathlib import Path
 
 import pytest
@@ -615,16 +614,56 @@ adopted = pytest.mark.skipif(
 
 @adopted
 def test_every_public_symbol_is_named_by_a_test():
-    started = time.monotonic()
     uncovered, _ = us.verdict(REPO_ROOT, us.CFG)
-    elapsed = time.monotonic() - started
     assert not uncovered, (
         "write a test naming these, do not add them to the baseline: " + ", ".join(uncovered)
     )
-    # This gate runs on every push, so its cost is paid on every push. One verdict took
-    # 25s before `referenced_names`; the bound is loose enough for a slow runner and
-    # tight enough that a return to per-symbol regex scans cannot pass it.
-    assert elapsed < 10, f"the live scan took {elapsed:.1f}s; see referenced_names"
+
+
+@adopted
+def test_the_live_scan_reads_each_test_file_once_rather_than_once_per_symbol(monkeypatch):
+    """The cost guard, counted rather than timed.
+
+    This gate runs on every push, so its cost is paid on every push, and one verdict took
+    25s before `referenced_names`: the scan ran `reference_pattern(symbol).search(corpus)`
+    for every public symbol in the repo. What makes that shape impossible is structural --
+    one pass per test file, no per-symbol regex at all -- so that is what is asserted.
+
+    It replaces `assert elapsed < 10`, which measured the machine and not the code. The
+    true cost on an ordinary Windows laptop is 5-7s warm and 11.7s cold, and the cold
+    overrun reproduced on `main` in a clean worktree: a bound with no margin over the
+    passing case cannot tell a 25s regression from a cold page cache, so it failed
+    randomly while protecting nothing. Raising 10 to N would have been the ceiling-raise
+    `.claude/rules/engineering.md` refuses; counting the work removes the ceiling instead.
+
+    Reversion check: put a `reference_pattern(symbol).search(...)` back in `gaps` and the
+    second assertion fails -- immediately, on any machine, in any cache state.
+    """
+    reads: list[int] = []
+    patterns: list[str] = []
+    real_referenced_names, real_reference_pattern = us.referenced_names, us.reference_pattern
+
+    def counted_referenced_names(text):
+        reads.append(len(text))
+        return real_referenced_names(text)
+
+    def counted_reference_pattern(symbol):
+        patterns.append(symbol)
+        return real_reference_pattern(symbol)
+
+    monkeypatch.setattr(us, "referenced_names", counted_referenced_names)
+    monkeypatch.setattr(us, "reference_pattern", counted_reference_pattern)
+    us.verdict(REPO_ROOT, us.CFG)
+
+    corpus = len(us.test_files(REPO_ROOT, us.CFG))
+    assert len(reads) == corpus, (
+        f"the scan made {len(reads)} passes over a {corpus}-file corpus; it must make one "
+        "per file -- see referenced_names"
+    )
+    assert not patterns, (
+        f"the scan built {len(patterns)} per-symbol patterns; that is the 25s shape "
+        "`referenced_names` replaced"
+    )
 
 
 @adopted

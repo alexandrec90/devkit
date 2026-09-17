@@ -302,7 +302,7 @@ def test_a_release_branch_is_named_to_the_steps_it_spawns(tmp_path):
     that verdict from. It reports the state and lets the test excuse itself."""
     root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py")
     runner = FakeRunner()
-    assert gate.run_gate(root, runner, release_branch="release/v1.2.3") == 0
+    assert gate.run_gate(root, runner, release_prepare="release/v1.2.3") == 0
     assert runner.envs
     for env in runner.envs:
         assert env[gate.RELEASE_PREPARE_ENV] == "release/v1.2.3"
@@ -312,7 +312,7 @@ def test_an_ordinary_push_carries_no_release_marker(tmp_path):
     """The exemption may not leak to a branch that merely fails the same test."""
     root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py")
     runner = FakeRunner()
-    assert gate.run_gate(root, runner, release_branch="") == 0
+    assert gate.run_gate(root, runner, release_prepare="") == 0
     assert runner.envs
     for env in runner.envs:
         assert gate.RELEASE_PREPARE_ENV not in env
@@ -322,7 +322,7 @@ def test_an_inherited_marker_does_not_survive_into_an_ordinary_push(tmp_path, mo
     """The regression, and it stopped a release rather than merely being untidy.
 
     On a release branch the gate spawns the suite *with* the marker set, and devkit's own
-    suite runs `run_gate`. So the nested run inherited a marker its own `release_branch`
+    suite runs `run_gate`. So the nested run inherited a marker its own `release_prepare`
     never asked for, the test above failed, `run-tests.py` went red, and the push it was
     gating -- the release push -- was refused. The first release this whole exemption
     exists to allow was the one it blocked.
@@ -334,7 +334,7 @@ def test_an_inherited_marker_does_not_survive_into_an_ordinary_push(tmp_path, mo
     root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py")
     runner = FakeRunner()
 
-    assert gate.run_gate(root, runner, release_branch="") == 0
+    assert gate.run_gate(root, runner, release_prepare="") == 0
     assert runner.envs
     for env in runner.envs:
         assert gate.RELEASE_PREPARE_ENV not in env
@@ -347,7 +347,7 @@ def test_the_gates_own_answer_still_wins_over_an_inherited_one(tmp_path, monkeyp
     root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py")
     runner = FakeRunner()
 
-    assert gate.run_gate(root, runner, release_branch="release/v1.2.3") == 0
+    assert gate.run_gate(root, runner, release_prepare="release/v1.2.3") == 0
     for env in runner.envs:
         assert env[gate.RELEASE_PREPARE_ENV] == "release/v1.2.3"
 
@@ -400,3 +400,92 @@ def test_a_detached_head_is_not_a_release_branch(tmp_path):
     )
 
     assert gate.detect_release_branch(root) == ""
+
+
+def _repo_with_tag(root: Path, tag: str = "") -> Path:
+    """A checkout on `main` with one commit, optionally tagged."""
+    subprocess.run(
+        ["git", "init", "--quiet", "-b", "main", str(root)], check=True, capture_output=True
+    )
+    for args in (
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+        ["commit", "--quiet", "--allow-empty", "-m", "seed"],
+    ):
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    if tag:
+        subprocess.run(["git", "-C", str(root), "tag", tag], check=True, capture_output=True)
+    return root
+
+
+def _with_fallback(root: Path, ref: str) -> Path:
+    source = root / gate.FALLBACK_REF_SOURCE
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(f'FALLBACK_DEVKIT_REF = "{ref}"\n', encoding="utf-8")
+    return root
+
+
+def test_a_bump_on_main_that_has_no_tag_yet_is_a_release_prepare(tmp_path):
+    """The window the branch check missed, and it locked the machine out for a day.
+
+    The release PR merges the bump into `main` and the tag is pushed after it. Between
+    those two moments every ordinary branch cut from `main` carries a
+    `FALLBACK_DEVKIT_REF` naming a tag that does not exist, so
+    `test_fallback_devkit_ref_tracks_the_newest_tag` is red on all of them -- and none of
+    them is a `release/vX.Y.Z`, so the excuse reached none of them either. v0.11.18 sat
+    in that state while its tag was refused by a red release suite, and every push on the
+    machine was refused by a test about a release nobody was cutting.
+    """
+    root = _with_fallback(_repo_with_tag(tmp_path, "v1.2.3"), "v1.2.4")
+    assert gate.untagged_bump(root) == "v1.2.4"
+    assert "v1.2.4" in gate.detect_release_prepare(root)
+
+
+def test_a_constant_that_names_the_newest_tag_is_not_a_release_prepare(tmp_path):
+    """The ordinary state, on `main` and on every branch cut from it: nothing to excuse,
+    so the assertion stays live."""
+    root = _with_fallback(_repo_with_tag(tmp_path, "v1.2.3"), "v1.2.3")
+    assert gate.untagged_bump(root) == ""
+    assert gate.detect_release_prepare(root) == ""
+
+
+def test_a_stale_constant_still_reads_as_a_release_prepare_and_is_refused_downstream(tmp_path):
+    """The widened excuse does not have to tell a bump from a stale constant, and this
+    pins that it does not try.
+
+    `untagged_bump` answers on one fact -- the constant names no tag -- which a constant
+    left *behind* a later tag never does: `v1.2.3` is tagged, so it reads as ordinary.
+    The case that does slip through is a constant naming a tag that never existed, and
+    `_nothing_to_compare` in `tests/test_new_project.py` refuses it on the other side by
+    re-checking that the constant is strictly ahead of the newest tag. Two independent
+    conditions, which is why widening the first one costs nothing.
+    """
+    root = _with_fallback(_repo_with_tag(tmp_path, "v1.2.3"), "v1.2.3")
+    subprocess.run(["git", "-C", str(root), "tag", "v1.3.0"], check=True, capture_output=True)
+    assert gate.untagged_bump(root) == "", "a constant behind the newest tag is not a prepare"
+
+
+def test_a_project_with_no_fallback_constant_is_never_a_release_prepare(tmp_path):
+    """Every consumer: no `scripts/new-project.py`, no constant, no such test, nothing to
+    excuse. The detector must answer that without touching git."""
+    root = _repo_with_tag(tmp_path, "v1.2.3")
+    assert gate.untagged_bump(root) == ""
+    assert gate.detect_release_prepare(root) == ""
+
+
+def test_an_untagged_bump_outside_a_checkout_does_not_fail_the_push(tmp_path):
+    """`untagged_bump` runs before any step, like `detect_release_branch`, so a directory
+    git cannot answer for has to yield "" rather than raise."""
+    root = _with_fallback(tmp_path, "v1.2.4")
+    assert gate.untagged_bump(root) == ""
+
+
+def test_the_release_prepare_marker_reaches_the_steps_from_an_untagged_bump(tmp_path):
+    """End to end: the state on `main`, not a branch name, is what sets the marker."""
+    root = _with_fallback(_repo_with_tag(tmp_path, "v1.2.3"), "v1.2.4")
+    project(root, "scripts/lint-all.py", "scripts/run-tests.py")
+    runner = FakeRunner()
+    assert gate.run_gate(root, runner) == 0
+    assert runner.envs
+    for env in runner.envs:
+        assert "v1.2.4" in env[gate.RELEASE_PREPARE_ENV]
