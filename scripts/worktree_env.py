@@ -28,15 +28,35 @@ path convention, for the reason `git_policy.framework._venv_roots` gives: the wo
 this machine sit at different depths and outside the checkout entirely, and git already
 knows the answer for all of them -- and for whatever the next tier turns out to be.
 
+**The same seam gives the worktree its own `.venv`.** A linked worktree checks out
+tracked files only, so a `claude --worktree` session starts with no interpreter of its
+own and every test run in it borrows the checkout's (`project_python.borrowed_from`
+says so on every re-exec). The edit-time and session-start agent hooks that used to
+close that gap are exactly the ones an operator switches off with `DEVKIT_HOOKS_OFF`,
+and `worktree.py provision <path>` is a verb somebody has to remember. This hook fires
+before the session's first turn, whoever cut the tree, so it runs the `uv sync` that
+`scripts/hooks/toolchain.py` would name -- under three conditions that keep it seconds
+rather than minutes: the project is uv-locked, `uv` is on `PATH`, and the checkout it
+was cut from already has a `.venv`, which is the one on-disk fact that says this machine
+provisions this project and its uv cache is warm. A cold checkout gets nothing and
+`ship.py --preflight` still names the command; `DEVKIT_SKIP_WORKTREE_PROVISION=1`
+skips the step for a `git worktree add` that wants a bare tree.
+
 Every decision here is a pure function; `main` is the only part that touches git or the
 disk. Tested in `tests/test_worktree_env.py`.
 """
 
 from __future__ import annotations
 
+import importlib.util
+import os
 import re
+import shutil
 import subprocess
 import sys
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 # `post-checkout` is handed `<old-oid> <new-oid> <branch-flag>`. A **fresh** checkout --
@@ -190,7 +210,177 @@ def checkout_of(root: Path) -> Path | None:
     return Path(common).parent
 
 
-def main(argv: list[str] | None = None, root: Path | None = None) -> int:
+def name_compose_project(here: Path, checkout: Path) -> str:
+    """Write the worktree's compose project name; the line to print, or "" when nothing was."""
+    if not has_compose_file(here):
+        return ""
+    # Only where the project already treats `.env` as local state. Creating an untracked
+    # file in a repo that tracks it would put a permanent entry in every `git status`,
+    # which is the cost this harness refuses to impose elsewhere for the same reason.
+    # Read off the exit code rather than through `_git`: `check-ignore --quiet` prints
+    # nothing either way, so stdout cannot tell the two answers apart.
+    if not ignores_env(here):
+        return ""
+    name = compose_project(checkout.name, here.name)
+    target = here / ENV_FILE
+    try:
+        existing = target.read_text(encoding="utf-8") if target.is_file() else ""
+        updated = rendered(existing, name)
+        if updated == existing:
+            return ""
+        target.write_text(updated, encoding="utf-8")
+    except OSError:
+        return ""
+    return f"devkit: {ENV_FILE} {KEY}={name} (this worktree's own compose project)"
+
+
+# --- the worktree's own interpreter -------------------------------------------
+
+LOCKFILE = "uv.lock"
+VENV_DIR = ".venv"
+# The `uv sync` spelling `scripts/hooks/toolchain.py` and `worktree.provision_steps`
+# both use, so the three cannot name different commands.
+UV_SYNC = ("uv", "sync", "--all-extras", "--all-groups")
+# Generous because it is a ceiling, not an expectation: a warm-cache sync is seconds, and
+# the checkout-has-a-venv condition is what keeps this on the warm path. The timeout is
+# for the day the network is gone, so `git worktree add` still returns.
+PROVISION_TIMEOUT = 600
+SKIP_PROVISION_VAR = "DEVKIT_SKIP_WORKTREE_PROVISION"
+# The worktree's own vendored copy of the manifest reader -- this hook is installed
+# machine-wide with no repo of its own, so the project's `[python]` table is read through
+# the code that ships beside it.
+HARNESS_CONFIG = Path("scripts") / "hooks" / "harness_config.py"
+
+
+@dataclass(frozen=True)
+class Toolchain:
+    """The facts that decide whether this worktree gets a `uv sync`, and the command."""
+
+    locked: bool
+    own_venv: bool
+    checkout_venv: bool
+    uv: str | None
+    install_command: str = ""
+    python_version: str = ""
+
+    @classmethod
+    def observe(cls, here: Path, checkout: Path, uv: str | None = None) -> Toolchain:
+        install_command, python_version = manifest_python(here)
+        return cls(
+            locked=(here / LOCKFILE).is_file(),
+            own_venv=(here / VENV_DIR).is_dir(),
+            checkout_venv=(checkout / VENV_DIR).is_dir(),
+            uv=shutil.which("uv") if uv is None else uv,
+            install_command=install_command,
+            python_version=python_version,
+        )
+
+    def command(self) -> tuple[str, ...]:
+        """The argv to run, or () when this tree is not one to provision here.
+
+        Only the uv-locked model, deliberately. The other ladders in
+        `toolchain.python_fix` are two commands joined by a shell `&&`, and a manifest
+        `install_command` is a shell string by contract; a post-checkout hook that ran
+        either would be a shell in the middle of somebody's `git worktree add`. Those
+        projects keep the box tier's provisioner, which runs them through one.
+        """
+        if not self.locked or self.own_venv or not self.checkout_venv or not self.uv:
+            return ()
+        if self.install_command:
+            return ()
+        pin = ("--python", self.python_version) if self.python_version else ()
+        return (self.uv, *UV_SYNC[1:], *pin)
+
+
+def manifest_python(here: Path) -> tuple[str, str]:
+    """`[python] install_command` and `version` from this tree's own `.devkit.toml`.
+
+    Through the `harness_config` vendored into the tree rather than a TOML parse of our
+    own, so the defaults and aliases stay one copy; a tree without the harness answers
+    ("", ""), which is the unpinned `uv sync` and correct for it.
+    """
+    module_path = here / HARNESS_CONFIG
+    if not module_path.is_file():
+        return "", ""
+    # The same recipe as `scripts/precommit/_loader.load_by_path`, inlined against the
+    # rule in `scripts/CLAUDE.md` that says not to: this file is installed alone into
+    # `~/.devkit/git-hooks` (`install_policy_layout.RUNTIME_FILES`) with no `_loader`
+    # beside it, and a hook that imports a sibling it was not installed with is one that
+    # dies on every `worktree add` on the machine.
+    name = "_worktree_env_harness_config"
+    try:
+        spec = importlib.util.spec_from_file_location(name, module_path)
+        if spec is None or spec.loader is None:
+            return "", ""
+        module = importlib.util.module_from_spec(spec)
+        # Registered before it runs: `dataclass` resolves a class's module through
+        # `sys.modules`, and `harness_config` is nothing but frozen dataclasses.
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+            python = module.load(here).python
+        finally:
+            sys.modules.pop(name, None)
+        return str(python.install_command or ""), str(python.version or "")
+    except (ImportError, OSError, SyntaxError, AttributeError, TypeError, ValueError):
+        # A half-vendored module, a manifest that does not parse (`TOMLDecodeError` is a
+        # `ValueError`), a `load` whose signature or result moved. A hook must not die
+        # over a manifest it could not read, and the unpinned sync is the right answer
+        # for a tree that could not say its pin.
+        return "", ""
+
+
+def provision(
+    here: Path,
+    checkout: Path,
+    runner=subprocess.run,
+    environ: Mapping[str, str] | None = None,
+    uv: str | None = None,
+) -> str:
+    """Give the worktree its own `.venv` when the conditions hold; the line to print.
+
+    "" when nothing ran. Captured rather than streamed: `uv sync` on the warm path prints
+    a progress screen worth nothing to the person whose `worktree add` this is inside,
+    and the failure tail is relayed with the command so the fix is one paste.
+    """
+    env = os.environ if environ is None else environ
+    if env.get(SKIP_PROVISION_VAR):
+        return ""
+    command = Toolchain.observe(here, checkout, uv=uv).command()
+    if not command:
+        return ""
+    # Spelled with the bare `uv` rather than the resolved executable: the line is a
+    # command to paste, and `C:\...\Scripts\uv.EXE sync` is not one anybody types.
+    spelled = " ".join((UV_SYNC[0], *command[1:]))
+    started = time.monotonic()
+    try:
+        done = runner(
+            list(command),
+            cwd=str(here),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=PROVISION_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return f"devkit: `{spelled}` did not finish in {PROVISION_TIMEOUT}s; run it here by hand"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"devkit: could not run `{spelled}` ({exc}); run it here by hand"
+    if done.returncode != 0:
+        tail = " | ".join((done.stderr or "").strip().splitlines()[-3:])
+        return f"devkit: `{spelled}` failed ({tail}); run it here by hand"
+    elapsed = time.monotonic() - started
+    return f"devkit: {VENV_DIR} provisioned by `{spelled}` in {elapsed:.0f}s (this worktree's own)"
+
+
+def main(
+    argv: list[str] | None = None,
+    root: Path | None = None,
+    runner=subprocess.run,
+    environ: Mapping[str, str] | None = None,
+) -> int:
     """The hook. Always exits 0: git ignores a `post-checkout` status, and a traceback
     printed over somebody's `worktree add` is the only harm this could do."""
     args = sys.argv[1:] if argv is None else argv
@@ -198,25 +388,14 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         return 0
     here = Path.cwd() if root is None else root
     checkout = checkout_of(here)
-    if checkout is None or not has_compose_file(here):
+    if checkout is None:
         return 0
-    # Only where the project already treats `.env` as local state. Creating an untracked
-    # file in a repo that tracks it would put a permanent entry in every `git status`,
-    # which is the cost this harness refuses to impose elsewhere for the same reason.
-    # Read off the exit code rather than through `_git`: `check-ignore --quiet` prints
-    # nothing either way, so stdout cannot tell the two answers apart.
-    if not ignores_env(here):
-        return 0
-    name = compose_project(checkout.name, here.name)
-    target = here / ENV_FILE
-    try:
-        existing = target.read_text(encoding="utf-8") if target.is_file() else ""
-        updated = rendered(existing, name)
-        if updated != existing:
-            target.write_text(updated, encoding="utf-8")
-            print(f"devkit: {ENV_FILE} {KEY}={name} (this worktree's own compose project)")
-    except OSError:
-        return 0
+    for line in (
+        name_compose_project(here, checkout),
+        provision(here, checkout, runner=runner, environ=environ),
+    ):
+        if line:
+            print(line)
     return 0
 
 

@@ -275,6 +275,22 @@ thing consumers pin — because only a release workflow runs the suite against t
 path for one already published, and any other tag shape is ignored. `RELEASING.md` has
 the release this was written for.
 
+The global `post-checkout` hook (`scripts/worktree_env.py`) fires once, in the new tree,
+whenever one is created — `git worktree add`, whoever ran it, which is the one seam that
+reaches `claude --worktree`, `codex --worktree` and a person at a prompt alike, and stays
+on when the agent hooks are switched off. It does two things a linked worktree otherwise
+lacks, each only when its conditions hold:
+
+- writes the worktree its own `COMPOSE_PROJECT_NAME` into a gitignored `.env`, so a
+  worktree named after its repo cannot adopt the checkout's containers and volumes;
+- runs `uv sync` so the tree has its own `.venv` before a session's first turn, rather
+  than borrowing the checkout's interpreter for every test run. Only for a uv-locked
+  project whose checkout already has a `.venv` — the on-disk fact that says the machine's
+  uv cache is warm, so the sync is seconds inside the `worktree add` rather than minutes.
+  A cold checkout gets nothing and `ship.py --preflight` still names the command;
+  `DEVKIT_SKIP_WORKTREE_PROVISION=1` skips it for a `git worktree add` that wants a bare
+  tree.
+
 GitHub verification fails closed by default. Temporarily degrade it to a warning when
 offline with:
 
@@ -478,8 +494,10 @@ python scripts/agent-worktree.py rows                          # the delete drop
 python scripts/agent-worktree.py bases                         # the base-branch dropdown's rows
 ```
 
-**Not the box tier.** No port lease, no `COMPOSE_PROJECT_NAME`, no toolchain provisioning
-and no reaper — `agent-box.py spawn` above is still the verb for a session that runs a
+**Not the box tier.** No port lease, no reaper, and no provisioner of its own — what a
+tree in this tier gets is what the global `post-checkout` hook above gives every new
+worktree: its own `COMPOSE_PROJECT_NAME`, and a `.venv` when the checkout's is there to
+warm the cache. `agent-box.py spawn` above is still the verb for a session that runs a
 compose stack. The branch is `agent/<slug>-<mmdd>` cut `--no-track` off `origin/<base>`,
 so `/ship` and the branch policy read it exactly as they read a box's.
 
