@@ -34,6 +34,12 @@
 	// A *reference* checkout — one registered here to be read but never shipped from —
 	// goes in `sweep.DEFAULT_EXCLUDE` and `devkit_project.NOT_PROJECTS` as well. Both
 	// sets are empty today: every folder below is a real project.
+	//
+	// This list is GLOBAL — every project on every workstation — and the live file is
+	// not: it is rendered through `devkit_project.machine_view`, which leaves out every
+	// project with no checkout beside it, so plugging a project in on one PC does not
+	// put a folder VS Code cannot open into every other PC's window. The plug picker
+	// draws such a project as "registered, not on this PC" and its tick clones it.
 	"folders": [
 		{
 			"path": "carameli"
@@ -345,7 +351,7 @@
 				// task and the bare CLI, whose checkbox loop log-wrap could not carry
 				// anyway (it pipes stdout by line, so an unfinished prompt never appears).
 				"label": "Workspace: Plug / Unplug Projects",
-				"detail": "Every project — in the workspace registry, on disk, and on GitHub — scanned when the picker opens. Ticking FLIPS one: an unregistered project is plugged in (cloning its repo, or creating the repo when only the folder exists), and a registered one is retired from the registry, which touches NOTHING on disk. Tick nothing and nothing changes. Edits devkit's workspace.jsonc and republishes the live .code-workspace, so it refuses from a task branch or a box.",
+				"detail": "Every project — in the workspace registry, on disk, and on GitHub — scanned when the picker opens. Ticking acts on one: a project registered from another PC is cloned onto this one (the registry is untouched), an unregistered project is plugged in (cloning its repo, or creating the repo when only the folder exists), and a registered project on this PC is retired from the registry on every PC, which touches NOTHING on disk. Tick nothing and nothing changes. Edits devkit's workspace.jsonc and republishes the live .code-workspace, so it refuses from a task branch or a box.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -2486,7 +2492,7 @@
 				"args": {
 					"command": "python \"${workspaceFolder:devkit}/scripts/plug-projects.py\" --rows",
 					"cwd": "${workspaceFolder:devkit}",
-					"description": "Which projects should change? Tick to flip: registered ones retire, the rest are plugged in.",
+					"description": "Which projects should change? Tick to act: one registered elsewhere is cloned here, one on this PC is retired everywhere, the rest are plugged in.",
 					"fieldSeparator": "|",
 					"multiselect": true,
 					"multiselectSeparator": " ",

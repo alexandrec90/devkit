@@ -1104,46 +1104,54 @@ republishing; missing any of the three leaves a project half-registered.
 
 `scripts/plug-projects.py` is the whole operation as a checkbox list. The VS Code task
 **"Workspace: Plug / Unplug Projects"** draws that list as a quick-pick with real
-checkboxes, ticked exactly as the registry stands, each row saying what its own tick
-will do; OK applies it and Escape changes nothing. The pick is the confirmation, so the
-task asks nothing in the terminal.
+checkboxes, scanned live when it opens, each row saying what its own tick will do; OK
+applies it and Escape changes nothing. The pick is the confirmation, so the task asks
+nothing in the terminal. A tick is an **action on that row**, not a picture of the
+registry: the extension behind the picker cannot open a list pre-ticked, so an
+untouched row says nothing and an empty pick changes nothing.
 
 ```bash
 python scripts/plug-projects.py            # the list, then tick and apply
 python scripts/plug-projects.py --list     # read-only; works from a box too
 python scripts/plug-projects.py --plug apt-finder --unplug geo --yes
-python scripts/plug-projects.py --refresh-menu   # rebuild the quick-pick's options
+python scripts/plug-projects.py --plug social-scraper --yes   # registered elsewhere: clone it here
 ```
-
-The quick-pick reads `logs/plug-menu.json`, because the extension behind a VS Code
-input can read a file and cannot run a command. `--refresh-menu` writes it, this script
-rewrites it after every apply, and `worktree.py reconcile` rewrites it on its scheduled
-pass — so nobody has to remember. Two consequences follow from the file being written
-before the click rather than during it: a refresh whose `gh` listing failed writes
-nothing at all, rather than rows offering to create repositories that already exist;
-and the answer is read as an **edit of the rows it offered**, so a project registered
-since the file was written is left alone instead of silently retired.
 
 It inventories three sources and shows the union, so a project is visible whether or
 not the workspace currently knows about it:
 
 | Source | Read from |
 | --- | --- |
-| plugged | the `folders` list, minus `NOT_PROJECTS` |
+| plugged | the `folders` list of devkit's `workspace.jsonc`, minus `NOT_PROJECTS` |
 | on disk | directories beside the workspace file carrying a `.git` or a `.devkit.toml` |
 | on GitHub | `gh repo list --no-archived` |
 
+**The registry is global; the checkouts are per machine.** `workspace.jsonc` is
+committed, so a project plugged in on one PC is registered on every PC that pulls
+devkit — but each PC's live `.code-workspace` is rendered through
+`devkit_project.machine_view`, the registry minus every project with no checkout
+beside the file. So the other PCs see nothing until they choose to: the picker draws
+the project as *registered, not on this PC*, and ticking that row clones it here and
+leaves the registry alone. Two workstations holding two different subsets of the
+registry is the ordinary state. To drop a project from one PC only, delete its
+checkout — the next render leaves it out — and `--check-workspace` names what a
+machine's render omits.
+
 Ticking an unplugged project clones its repo when only the repo exists, and creates
 the repo when only the folder does — so the checkbox is the whole action in both
-directions. Unticking **touches nothing on disk**: it removes the entry and leaves
-the folder exactly where it was, which is what makes the toggle safe to experiment
-with. Before it unplugs, it names anything that would be stranded — a live box on
-that project, uncommitted files, unpushed commits — and refuses without `--force`.
+directions. Ticking a registered project that is on this PC retires it from the
+registry, on every PC, and **touches nothing on disk**: it removes the entry and
+leaves the folder exactly where it was, which is what makes the toggle safe to
+experiment with. Before it unplugs, it names anything that would be stranded — a live
+box on that project, uncommitted files, unpushed commits — and refuses without
+`--force`.
 
 The write path is canonical-then-publish, never a hand edit of the live file, so the
 run refuses from a task branch, from inside a box, and over a live workspace file
 carrying an edit devkit never wrote. Its own edit to `workspace.jsonc` is left
-uncommitted, on the same terms as `--adopt-workspace`: ship it on a task branch.
+uncommitted, on the same terms as `--adopt-workspace`: ship it on a task branch. A
+clone onto this PC edits nothing there. Every run's failures land in
+`logs/plug-projects.log`, overwritten per run and emptied by a clean one.
 
 ### Host ports: `ports.toml`
 

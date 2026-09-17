@@ -89,6 +89,16 @@ reviews it, and two agents editing it race with last-writer-wins and nothing to 
 the loser's edit *from*. Editing `workspace.jsonc` on a branch puts the conflict in git,
 where a conflict has two visible sides.
 
+**The render is this machine's view, not the whole registry.** `folders` in
+`workspace.jsonc` is global — every project on every workstation — and the live file is
+`devkit_project.machine_view` of it: the same text with every project that has no checkout
+beside the file taken out, folder entry and picker options both, through `unregister`.
+Every comparison of live against canonical goes through `canonical_view` for that reason,
+or a project cloned on another PC reads as drift here on every run; and an adopt
+re-registers what this machine leaves out before it writes the copy every machine shares.
+A project registered elsewhere reaches a PC through the plug picker's *registered, not on
+this PC* row, whose tick clones it, and leaves a PC by its checkout being deleted.
+
 **The other direction still exists, for the edits that are not yours to route.** VS Code
 rewrites the file itself when a workspace setting is changed through its UI.
 `--adopt-workspace` records the live file back into `workspace.jsonc` for committing on a
@@ -207,10 +217,12 @@ never renders.
   empty quick-pick cannot be told apart from a command that failed to run.
 - **A live multi-select must explain what a tick does.** `plugSelection` runs
   `scripts/plug-projects.py --rows` when it opens; each selected project toggles its
-  registry membership. Its description and row details must say that, because the old
-  cached checklist used ticks to represent the entire registry. No selection changes
-  nothing; `tests/test_plug_projects.py` and `tests/test_devkit_project.py` cover that
-  contract and the task wiring.
+  registry membership, except a project registered elsewhere and absent here, whose
+  tick clones it onto this PC. Its description and row details must say that, because
+  the old cached checklist used ticks to represent the entire registry, and a row must
+  never promise what an untouched row does — no selection changes nothing, so "leaving
+  it alone clones it" was a clone nobody could reach. `tests/test_plug_projects.py` and
+  `tests/test_devkit_project.py` cover that contract and the task wiring.
 - **A picker that needs an extension declares it in `extensions.recommendations`, and two
   things hold that.** A `command` input is dead on a machine without the extension behind
   it, and it fails naming a *command* rather than a package: `rioj7.command-variable`

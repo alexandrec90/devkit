@@ -1046,6 +1046,30 @@ def test_a_publishable_difference_is_published_not_merely_reported(tmp_path, mon
     assert "reload the window" in line
 
 
+def test_a_project_registered_elsewhere_is_left_out_not_reported_as_drift(tmp_path, monkeypatch):
+    """The other workstation's session start, after a project was plugged in on one.
+    The registry is global and the checkout is not, so the render is this machine's
+    view and the pair agrees once it is written -- rather than a line about a folder
+    this machine never asked for, on every session start until someone clones it."""
+    canonical_text = ws.devkit_project.canonical_text()
+    canonical = tmp_path / "workspace.jsonc"
+    canonical.write_text(canonical_text, encoding="utf-8", newline="\n")
+    monkeypatch.setattr(ws.devkit_project, "CANONICAL_WORKSPACE", canonical)
+    names = ws.devkit_project.known_projects(canonical_text)
+    for name in names[1:]:
+        (tmp_path / name).mkdir()
+    _checkout(monkeypatch)
+    live = tmp_path / ws.devkit_project.DEFAULT_WORKSPACE.name
+    live.write_text(canonical_text, encoding="utf-8", newline="\n")
+    ws.devkit_project.write_stamp(live, ws.devkit_project.semantic_digest(canonical_text))
+
+    line = ws.workspace_sync_line(live)
+
+    assert "published" in line
+    assert names[0] not in ws.devkit_project.known_projects(live.read_text(encoding="utf-8"))
+    assert ws.workspace_sync_line(live) == ""
+
+
 def test_a_live_edit_devkit_never_wrote_is_refused_rather_than_overwritten(tmp_path, monkeypatch):
     """No stamp means someone else's edit. `publish_workspace` owns that refusal."""
     _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})

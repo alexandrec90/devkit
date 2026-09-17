@@ -1319,6 +1319,58 @@ RENDER_CURRENT = "current"
 RENDER_REFUSED = "refused"
 
 
+# --- this machine's view of the registry ---------------------------------------
+#
+# The registry is global and the checkouts are not. `workspace.jsonc` is committed, so
+# a project plugged in on one workstation is registered on every workstation that pulls
+# devkit -- and rendered verbatim, that put a folder VS Code cannot open in every other
+# window on every other machine, with `plug-projects.py` the only thing that could
+# clear it. The disk is the per-machine fact, so the disk decides: the live file is the
+# canonical copy minus every registered project with no checkout beside it, and an
+# adopt puts those back before anything is written to the copy every machine shares.
+
+
+def absent_projects(text: str, root: Path) -> list[str]:
+    """Registered projects with no checkout under `root`, in registry order."""
+    return [name for name in known_projects(text) if not (root / name).is_dir()]
+
+
+def machine_view(text: str, root: Path) -> tuple[str, list[str]]:
+    """The canonical text as the workstation whose checkouts live under `root` renders it.
+
+    Returns `(text, left_out)`: the registry text with every absent project's folder
+    entry and picker options removed, through `unregister` so the two cannot disagree
+    about what registration touches, and the names it removed.
+
+    A machine holding none of them renders the whole list. A `folders` array cannot be
+    emptied -- `unregister` refuses to drop the last element, and a workspace with no
+    folder is not one -- and a live file with no checkout beside it at all is not
+    sitting where the registry describes, so there is nothing for the filter to say.
+    """
+    absent = absent_projects(text, root)
+    if not absent or len(absent) == len(known_projects(text)):
+        return text, []
+    return unregister(text, absent), absent
+
+
+def canonical_view(live: Path) -> tuple[str, list[str]]:
+    """`machine_view` of devkit's copy, for the workstation `live` belongs to.
+
+    Every comparison of the live file against the canonical copy goes through here --
+    the publish, the check, the adopt, the session-start sync line and the plug
+    script's early refusal -- because a comparison against the unfiltered copy reports
+    every project this machine does not hold as drift, on every run, forever.
+    """
+    return machine_view(canonical_text(), live.parent)
+
+
+def left_out_line(left_out: list[str]) -> str:
+    """The one line that says what this machine's render omits; "" when nothing."""
+    if not left_out:
+        return ""
+    return f"  not checked out on this machine, so not rendered: {', '.join(left_out)}"
+
+
 def publish_workspace(live: Path, *, force: bool = False) -> tuple[str, list[str]]:
     """Render the canonical copy over `live`, unless that would discard someone's edit.
 
@@ -1349,15 +1401,18 @@ def publish_workspace(live: Path, *, force: bool = False) -> tuple[str, list[str
     given and naming no live edit at all. The click stayed red until someone typed
     `--force`, which is the one verb that discards, for a state in which nothing was at
     risk. So `live_only` decides, and the stamp only breaks the tie it names.
+
+    **What is rendered is this machine's view** -- `canonical_view` -- so a project
+    registered from another workstation and not cloned here is neither written into
+    the live file nor reported as drift against it.
     """
+    canonical, _left_out = canonical_view(live)
     if not live.is_file():
-        canonical = canonical_text()
         live.parent.mkdir(parents=True, exist_ok=True)
         live.write_text(canonical, encoding="utf-8", newline="\n")
         write_stamp(live, semantic_digest(canonical))
         return RENDER_PUBLISHED, [f"{live.name} did not exist -- created from the canonical copy"]
     text = live.read_text(encoding="utf-8")
-    canonical = canonical_text()
     problems = workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical))
     if not problems:
         write_stamp(live, semantic_digest(text))
@@ -1395,10 +1450,18 @@ def adopt_workspace(live: Path, text: str, *, force: bool = False) -> int:
     to show it went: the tasks of PR #292 were one click from exactly that, because the
     publish refusal named `--adopt-workspace` as the remedy for a live edit that had to
     be merged by hand instead.
+
+    The live file is this machine's view, so the projects it leaves out are put back
+    with `register` before the canonical copy is written: an adopt from a workstation
+    holding two of seven checkouts must not retire the other five everywhere. A
+    re-registered entry lands where `insert_folder` puts one -- at the end of the
+    list, before any reference checkout -- so the diff may reorder `folders`; that is
+    visible in the PR, where a silent retirement would not have been.
     """
+    canonical, left_out = canonical_view(live) if CANONICAL_WORKSPACE.is_file() else ("", [])
     losses = canonical_only(
-        workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical_text()))
-        if CANONICAL_WORKSPACE.is_file()
+        workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical))
+        if canonical
         else []
     )
     if losses and not force:
@@ -1418,9 +1481,11 @@ def adopt_workspace(live: Path, text: str, *, force: bool = False) -> int:
         return 1
     # Written directly rather than printed for redirection: the file carries en-dashes
     # and arrows, and a redirected stdout on Windows is cp1252.
-    CANONICAL_WORKSPACE.write_text(text, encoding="utf-8", newline="\n")
+    CANONICAL_WORKSPACE.write_text(register(text, left_out), encoding="utf-8", newline="\n")
     write_stamp(live, semantic_digest(text))
     print(f"adopted {live.name} into {CANONICAL_WORKSPACE.name}")
+    if left_out:
+        print(f"  re-registered what this machine does not hold: {', '.join(left_out)}")
     print("commit it on a task branch -- that is what gives the edit a reviewer")
     return 0
 
@@ -1432,13 +1497,18 @@ def check_workspace(live: Path, text: str) -> int:
     a file every VS Code window writes could disagree, and the exit code would then not
     be about the text the caller validated.
     """
-    problems = workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical_text()))
+    canonical, left_out = canonical_view(live)
+    problems = workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical))
     if not problems:
         print(f"{live.name}: matches {CANONICAL_WORKSPACE.name}")
+        if left_out:
+            print(left_out_line(left_out))
         return 0
     print(f"{live.name} has drifted from {CANONICAL_WORKSPACE.name}:")
     for problem in problems:
         print(f"  {problem}")
+    if left_out:
+        print(left_out_line(left_out))
     print(keep_hint(problems, "  -> keep the live edits:  "))
     print(f"  -> publish the canonical: {RENDER_HINT} --render-workspace")
     return 1
@@ -1467,6 +1537,9 @@ def render_workspace(live: Path, *, force: bool = False) -> int:
     print(f"rendered {CANONICAL_WORKSPACE.name} -> {live.name}")
     for problem in problems:
         print(f"  {problem}")
+    left_out = canonical_view(live)[1]
+    if left_out:
+        print(left_out_line(left_out))
     return 0
 
 

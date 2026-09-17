@@ -17,13 +17,23 @@ Three sources feed the list, because a project can be in any two of them:
 | yes | yes | no  | registers it |
 | no  | yes | no  | clones it first |
 | yes | no  | no  | creates the private repo and pushes first |
+| no  | yes | yes | clones it onto this PC; the registry is untouched |
 | yes | yes | yes | nothing — it is already checked |
 
-Unchecking is the inverse and **touches nothing on disk**: unplugging is a registry
-edit, so it stays reversible by checking the box again. What it does cost is
-visibility — an unregistered project is invisible to every sweep, and to the guard that
-routes an agent's edit into a box — which is why `unplug_hazards` refuses over live
-boxes and unpushed commits rather than silently orphaning them.
+**The registry is global and the checkout is per machine.** `workspace.jsonc` is
+committed, so a project plugged in on one workstation is registered on all of them —
+but each machine's live file is `devkit_project.machine_view`, the registry minus every
+project not checked out beside it. That is why the fourth row exists: on the other
+machines the project is registered and absent, the picker offers it as one row saying
+so, and ticking that row clones it here without editing the registry at all. Two PCs
+holding two different subsets of the registry is the ordinary state, not a half-applied
+sync. To drop a project from one PC only, delete its checkout; the next render leaves
+it out. Unchecking a project that *is* on this PC retires it from the registry — on
+every machine — and **touches nothing on disk**, so it stays reversible by checking
+the box again. What it does cost is visibility — an unregistered project is invisible
+to every sweep, and to the guard that routes an agent's edit into a box — which is why
+`unplug_hazards` refuses over live boxes and unpushed commits rather than silently
+orphaning them.
 
 The write goes to devkit's **canonical** `workspace.jsonc` and is then rendered over
 the live file by `publish_workspace`, per `.claude/rules/vscode-tasks.md`: the live file
@@ -48,8 +58,8 @@ applied, it matches what the terminal loop's `toggle` verb has always done, and 
 nothing is a no-op in both directions instead of a request to retire every project.
 
 Pure helpers (`inventory`, `render`, `parse_command`, `plan`, `edit_verdict`, `rows`,
-`toggled_selection`) carry the decisions and are unit-tested in
-`tests/test_plug_projects.py`; `main` is the subprocess-and-prompt shell around them.
+`toggled_selection`, `clone_picks`, `scripted_selection`) carry the decisions and are
+unit-tested in `tests/test_plug_projects.py`; `main` is the shell around them.
 """
 
 from __future__ import annotations
@@ -226,7 +236,7 @@ def render(candidates: list[Candidate], checked: set[str]) -> list[str]:
         if ticked != candidate.plugged:
             pending = "  <- will plug" if ticked else "  <- will unplug"
         elif ticked and needs_clone(candidate):
-            pending = "  <- registered, not on disk: will clone"
+            pending = "  <- registered, not on this PC: will clone"
         note = "" if candidate.harnessed or not candidate.on_disk else "  (no .devkit.toml)"
         mark = "x" if ticked else " "
         lines.append(
@@ -330,14 +340,22 @@ def toggle_detail(candidate: Candidate, owner: str) -> str:
     directions cost wildly different things -- retiring a registry entry is reversible
     and touches no disk, while plugging one can clone, or create and push, a repository.
 
-    The one row whose tick is not the interesting half is a registered project missing
-    from disk: `needs_clone` already makes *leaving it alone* clone it, so the sentence
-    names the default rather than the toggle.
+    The one row whose tick is not a registry toggle is a project registered from
+    another workstation and absent here: its tick clones the checkout onto this PC and
+    leaves the registry alone. It used to read "leaving it alone clones it", which the
+    task could never deliver -- an untouched picker resolves to no picks, and no picks
+    is a no-op -- so the clone was only ever reachable by hand.
     """
     if candidate.plugged and needs_clone(candidate):
-        return f"registered but not on disk -- leaving it alone clones {owner}/{candidate.name}"
+        return (
+            f"registered, not on this PC -- ticking clones {owner}/{candidate.name} here "
+            "(the registry is untouched)"
+        )
     if candidate.plugged:
-        return "in the registry -- ticking retires it (registry only; nothing on disk is touched)"
+        return (
+            "in the registry -- ticking retires it on every PC "
+            "(registry only; nothing on disk is touched)"
+        )
     if not candidate.on_disk:
         return f"not on disk -- ticking clones {owner}/{candidate.name} first"
     if not candidate.on_github:
@@ -414,9 +432,65 @@ def toggled_selection(picked: tuple[str, ...], plugged: set[str]) -> set[str]:
 
     Names the scan did not offer cannot appear here, so nothing filters them: they would
     have to be typed by hand into `--picks`, and `main` rejects an unknown name before
-    this is reached.
+    this is reached. Nor can a clone pick: `clone_picks` takes those out first, because
+    flipping a registered-elsewhere row would read as its retirement.
     """
     return set(plugged).symmetric_difference(picked)
+
+
+def scripted_selection(
+    candidates: list[Candidate],
+    *,
+    ticks: tuple[str, ...] | None,
+    plug: list[str],
+    unplug: list[str],
+) -> tuple[set[str], set[str]]:
+    """`(registry the run asks for, projects to clone here)` for the two scripted entries.
+
+    The quick-pick's answer (`ticks`) and the `--plug`/`--unplug` flags read "clone it
+    here" differently, which is why `plan` takes the clone set explicitly. A tick on a
+    registered-elsewhere row is a clone and not a toggle, so it is taken out before the
+    toggles are read; `--plug` of such a project is a clone; and `--unplug` of one says
+    nothing about the others, where it used to clone every one of them as a side effect.
+    """
+    checked = {c.name for c in candidates if c.plugged}
+    if ticks is not None:
+        clone_here = clone_picks(ticks, candidates)
+        rest = tuple(name for name in ticks if name not in clone_here)
+        return toggled_selection(rest, checked), clone_here
+    return (checked | set(plug)) - set(unplug), set(plug)
+
+
+def after_apply_notes(steps: list[Step]) -> list[str]:
+    """What still needs a human once the steps have run; empty for a clone-only run.
+
+    A clone edits nothing in the registry -- the project was registered already, from
+    another workstation -- so there is nothing to commit and the note would send
+    someone to ship a `workspace.jsonc` that has not changed.
+    """
+    notes = []
+    if any(s.action != CLONE for s in steps):
+        notes.append(
+            f"  commit {devkit_project.CANONICAL_WORKSPACE.name} on a task branch -- it is devkit's"
+        )
+        notes.append(
+            "  copy of the registry, and an uncommitted one stops the session-start publish."
+        )
+    if any(s.action == PLUG for s in steps):
+        notes.append("  a project with a stack also needs a slot in ports.toml; add it by hand.")
+    return notes
+
+
+def clone_picks(picked: tuple[str, ...], candidates: list[Candidate]) -> set[str]:
+    """The ticks that mean "clone it onto this PC" rather than "flip its registration".
+
+    A registered project with no checkout here is the one row where a toggle is the
+    wrong reading: the registry already has it, so flipping it would retire it on every
+    workstation, when the person ticking it on *this* one almost always wants the
+    checkout. Its tick is therefore a clone, and the registry is left alone.
+    """
+    by_name = {c.name: c for c in candidates}
+    return {name for name in picked if name in by_name and needs_clone(by_name[name])}
 
 
 # --- deciding what to do ----------------------------------------------------------
@@ -426,12 +500,19 @@ def plan(
     candidates: list[Candidate],
     checked: set[str],
     hazards: dict[str, tuple[str, ...]] | None = None,
+    clone: set[str] | frozenset[str] = frozenset(),
 ) -> list[Step]:
     """Every ticked-but-unregistered and registered-but-unticked project, as work.
 
     Unplugs come first. Both halves are one `register`/`unregister` call each, so the
     order only decides what the preview reads like — and a list that retires before it
     adds matches how the numbers in the list will move.
+
+    `clone` names the registered-elsewhere projects to clone onto this PC. It is
+    explicit rather than "every checked row that `needs_clone`" because every caller
+    means something different by an untouched row: the quick-pick's answer names only
+    what was ticked, `--unplug` names nothing about the rest, and only the terminal
+    loop's `apply` is a statement about every box it drew.
     """
     found = hazards or {}
     steps = []
@@ -452,14 +533,16 @@ def plan(
                     init_git=candidate.on_disk and not candidate.is_git,
                 )
             )
-    # A registered project that is not on disk is the fresh-workstation case, and it is
-    # the one row where the tick and the registry already agree -- so both loops above
-    # skip it and no verb offered the clone. Four projects were in `folders`, none was on
-    # disk, and the answer was a hand-written `gh repo clone` loop. This keeps one verb
-    # for "make the registry true here": the registry half is already done, so the step
-    # carries only the disk half.
+    # A registered project that is not on disk is the fresh-workstation case, and the
+    # other-workstation case -- and it is the one row where the tick and the registry
+    # already agree, so both loops above skip it and no verb offered the clone. Four
+    # projects were in `folders`, none was on disk, and the answer was a hand-written
+    # `gh repo clone` loop. This keeps one verb for "make the registry true here": the
+    # registry half is already done, so the step carries only the disk half.
     steps.extend(
-        Step(CLONE, c.name, clone=True) for c in candidates if c.name in checked and needs_clone(c)
+        Step(CLONE, c.name, clone=True)
+        for c in candidates
+        if c.name in checked and c.name in clone and needs_clone(c)
     )
     return steps
 
@@ -481,7 +564,7 @@ def describe(step: Step) -> str:
         tail = f"  ({'; '.join(step.hazards)})" if step.hazards else ""
         return f"  unplug  {step.name}   registry only, nothing on disk is touched{tail}"
     if step.action == CLONE:
-        return f"  clone   {step.name}   already registered, clone from GitHub"
+        return f"  clone   {step.name}   registered elsewhere, clone from GitHub onto this PC"
     extra = []
     if step.clone:
         extra.append("clone from GitHub")
@@ -547,7 +630,7 @@ def live_carries_a_hand_edit(live: Path) -> bool:
     """
     text = live.read_text(encoding="utf-8")
     drift = devkit_project.workspace_drift(
-        devkit_jsonc.loads(text), devkit_jsonc.loads(devkit_project.canonical_text())
+        devkit_jsonc.loads(text), devkit_jsonc.loads(devkit_project.canonical_view(live)[0])
     )
     return bool(drift) and devkit_project.semantic_digest(text) != devkit_project.read_stamp(live)
 
@@ -690,8 +773,12 @@ def gather() -> tuple[list[Candidate], list[str]]:
     the list is still true and still togglable, and the only thing lost is the ability
     to clone or to create — both of which the plan names explicitly, so a step that
     needed the missing half cannot be reached by accident.
+
+    The registry is read from devkit's canonical copy, not the live file: the live file
+    is this machine's view and leaves out every project not checked out here, which is
+    exactly the row this picker has to draw as "registered, not on this PC".
     """
-    registry = LIVE_WORKSPACE.read_text(encoding="utf-8")
+    registry = devkit_project.canonical_text()
     disk = disk_projects(WORKSPACE_ROOT)
     warnings: list[str] = []
     try:
@@ -714,13 +801,17 @@ def _apply(steps: list[Step], owner: str, out) -> None:
             out(f"  create  {owner}/{step.name} (private)")
             create_repo(owner, step.name, WORKSPACE_ROOT / step.name, _run, init=step.init_git)
 
+    # A clone-only run edits nothing in the registry -- the project was registered
+    # already -- and still publishes: the live file is this machine's view, and the
+    # checkout that just appeared is what puts the folder into it.
     canonical = devkit_project.CANONICAL_WORKSPACE
-    canonical.write_text(
-        apply_registry(canonical.read_text(encoding="utf-8"), steps),
-        encoding="utf-8",
-        newline="\n",
-    )
-    out(f"  update  {canonical.name} (folders + every maintained picker)")
+    if any(s.action != CLONE for s in steps):
+        canonical.write_text(
+            apply_registry(canonical.read_text(encoding="utf-8"), steps),
+            encoding="utf-8",
+            newline="\n",
+        )
+        out(f"  update  {canonical.name} (folders + every maintained picker)")
 
     outcome, changes = devkit_project.publish_workspace(LIVE_WORKSPACE)
     if outcome == devkit_project.RENDER_REFUSED:
@@ -852,26 +943,28 @@ def main(argv: list[str] | None = None) -> int:
         write_artifact([verdict])
         return 1
 
-    checked = {c.name for c in candidates if c.plugged}
-    if args.picks is not None:
-        checked = toggled_selection(ticks, checked)
-    elif args.plug or args.unplug:
-        checked = (checked | set(args.plug)) - set(args.unplug)
+    if args.picks is not None or args.plug or args.unplug:
+        checked, clone_here = scripted_selection(
+            candidates,
+            ticks=ticks if args.picks is not None else None,
+            plug=args.plug,
+            unplug=args.unplug,
+        )
     else:
         print("")
-        chosen = interactive(candidates, checked, input)
+        chosen = interactive(candidates, {c.name for c in candidates if c.plugged}, input)
         if chosen is None:
             print("  nothing changed")
             write_artifact([])
             return 0
-        checked = chosen
+        checked, clone_here = chosen, set(chosen)
 
     hazards = {
         c.name: unplug_hazards(c.name, WORKSPACE_ROOT, sweep.git_for(WORKSPACE_ROOT / c.name))
         for c in candidates
         if c.plugged and c.name not in checked
     }
-    steps = plan(candidates, checked, hazards)
+    steps = plan(candidates, checked, hazards, clone=clone_here)
     if not steps:
         print("  nothing to change")
         write_artifact([])
@@ -910,10 +1003,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print("")
-    print(f"  commit {devkit_project.CANONICAL_WORKSPACE.name} on a task branch -- it is devkit's")
-    print("  copy of the registry, and an uncommitted one stops the session-start publish.")
-    if any(s.action == PLUG for s in steps):
-        print("  a project with a stack also needs a slot in ports.toml; add it by hand.")
+    for line in after_apply_notes(steps):
+        print(line)
     write_artifact([])
     return 0
 
