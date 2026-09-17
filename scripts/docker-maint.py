@@ -327,16 +327,21 @@ def generic_up(extra: list[str] | None = None) -> int:
 
 
 def generic_down(extra: list[str] | None = None) -> int:
-    """`compose down` -- containers only.
+    """`compose stop` -- the containers are kept, so Docker Desktop can start them.
 
-    Named volumes and the data in them survive. `-v`/`--volumes` is never added here
-    and must never be: this runs from a one-click task over a project picker, which is
-    the last place a database should be destroyable by choosing the wrong entry.
+    `stop`, not `down` (the mode keeps its old name): `down` deletes the containers,
+    and Docker Desktop's start button issues `compose start`, which can only start
+    containers that exist -- after a `down` the stack comes back only from a task.
+    `docker compose down` by hand is how the containers themselves go.
+
+    Named volumes survive either way. `-v`/`--volumes` is never added here and must
+    never be: this runs from a one-click task over a project picker, which is the
+    last place a database should be destroyable by choosing the wrong entry.
     """
     if not compose_file():
         return _no_stack_here()
-    print(banner("Docker Compose Down (generic)"))
-    return run(["docker", "compose", "down", *(extra or [])], timeout=300)
+    print(banner("Docker Compose Stop (generic)"))
+    return run(["docker", "compose", "stop", *(extra or [])], timeout=300)
 
 
 def generic_restart_engine() -> int:
@@ -500,23 +505,18 @@ def generic_prune(idle_only: bool = False) -> int:
             print(banner("ENGINE UNAVAILABLE -- nothing pruned"))
             return 1
 
-    # `image`, not `system`, and the distinction is the whole reason this line is spelled
-    # out. `system prune -af` removes stopped containers FIRST and then every image
-    # nothing references -- so a stack that `stop-idle` parked at 03:30 has its
-    # containers deleted at 04:00, which un-references its images inside the same
-    # command, and the next `docker-up` is a cold rebuild rather than a start. That is
-    # not a hypothetical: carameli lost its whole stack and every `carameli-*` image to
-    # this pair on 2026-08-27, having been stopped by the job whose docstring calls
-    # handing this one an idle machine a feature.
-    #
-    # `image prune -a` counts a *stopped* container as a reference, so a parked stack
-    # survives the night and a genuinely orphaned image still goes -- which is where the
-    # GB are. Containers are deliberately not pruned here at all: their writable layers
-    # are megabytes, and an `until=` filter cannot rescue the case, because it reads
-    # creation time rather than stop time and so cannot tell a stack parked last night
-    # from one abandoned in June.
+    # `image`, not `system`, and no `network prune`: both count only what is RUNNING as
+    # in use, so both undo the 03:30 `stop-idle` parking half an hour later. `system
+    # prune -af` deleted carameli's parked containers and then every `carameli-*` image
+    # they had referenced (2026-08-27; the next `up` was a cold rebuild). `network prune`
+    # deleted `carameli_default` under the parked containers, which still pinned its ID,
+    # so Docker Desktop's start button -- `compose start`, which creates no network --
+    # failed with `network <hex id> not found` until the task force-recreated the stack
+    # (2026-09-17). `image prune -a` counts a stopped container as a reference, so a
+    # parked stack survives and an orphaned image still goes, which is where the GB
+    # are. Containers are never pruned: writable layers are megabytes, and `until=`
+    # reads creation time, not stop time. A network is bytes and no VHDX space.
     run(["docker", "image", "prune", "-af"], timeout=600)
-    run(["docker", "network", "prune", "-f"], timeout=600)
     run(["docker", "builder", "prune", "-af"], timeout=600)
 
     print("\n  Stopping Docker for exclusive VHDX access ...")
