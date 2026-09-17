@@ -17,6 +17,12 @@ dev = [
   "ruff>=0.16.6",
   "mypy>=2.3.1",
   "pytest>=8.3",
+  # The push gate runs pytest three times -- the suite, the vendored hook tier, and the
+  # suite again under `posix-rehearsal.py`'s faked platform -- which was fifteen minutes
+  # of a `git push` on eight idle cores. `scripts/pytest_parallel.py` adds `-n auto` when
+  # this is installed and leaves the run serial when it is not, so it is a speedup rather
+  # than a requirement: nothing here imports it.
+  "pytest-xdist>=3.6",
   # devkit publishes pre-commit hooks (.pre-commit-hooks.yaml) and runs them on itself
   # (.pre-commit-config.yaml), so the runner is part of the host toolchain. It also
   # brings PyYAML, which the tests covering those config files parse with.

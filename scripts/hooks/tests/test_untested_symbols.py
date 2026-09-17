@@ -615,16 +615,22 @@ adopted = pytest.mark.skipif(
 
 @adopted
 def test_every_public_symbol_is_named_by_a_test():
-    started = time.monotonic()
+    started = time.process_time()
     uncovered, _ = us.verdict(REPO_ROOT, us.CFG)
-    elapsed = time.monotonic() - started
+    elapsed = time.process_time() - started
     assert not uncovered, (
         "write a test naming these, do not add them to the baseline: " + ", ".join(uncovered)
     )
     # This gate runs on every push, so its cost is paid on every push. One verdict took
     # 25s before `referenced_names`; the bound is loose enough for a slow runner and
     # tight enough that a return to per-symbol regex scans cannot pass it.
-    assert elapsed < 10, f"the live scan took {elapsed:.1f}s; see referenced_names"
+    #
+    # CPU time, not wall clock, because the gate now runs under `pytest -n auto`: eight
+    # workers on eight cores means this scan is descheduled by its own suite, and a
+    # wall-clock read charges it for the other seven. Measured here the scan is 6.2s of
+    # CPU against 6.7s of wall, so the bound keeps its tightness -- it is the same test
+    # of the same work, read off a clock that co-tenancy cannot move.
+    assert elapsed < 10, f"the live scan took {elapsed:.1f}s of CPU; see referenced_names"
 
 
 @adopted

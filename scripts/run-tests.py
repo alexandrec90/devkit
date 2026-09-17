@@ -100,12 +100,30 @@ def _reexec(module: str) -> int | None:
     return project_python.re_exec(REPO_ROOT, module, sys.argv)
 
 
+def _parallel_args() -> list[str]:
+    """`-n auto` when xdist is installed, nothing when it is not.
+
+    Imported by path and optional, for the same reason `_reexec` imports
+    `project_python` that way: this file is copied into a bare temp repo holding
+    nothing but itself, and a module-level import would turn a missing sibling into
+    "this will not start at all". A suite that runs serially is the behaviour this
+    script had for its whole life; a suite that does not run is not.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import pytest_parallel
+    except ImportError:
+        return []
+    return pytest_parallel.args()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--changed", action="store_true", help="run pytest's last-failed subset")
     args, extra = parser.parse_known_args(argv)
 
     cmd = [sys.executable, "-m", "pytest", "--tb=short", "-q"]
+    cmd += _parallel_args()
     if args.changed:
         cmd += ["--last-failed", "--last-failed-no-failures", "all"]
     cmd += [a for a in extra if a]

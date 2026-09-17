@@ -133,9 +133,30 @@ def _display(path: Path) -> str:
         return str(path)
 
 
+def _parallel_args() -> list[str]:
+    """`-n auto` when xdist is installed, nothing when it is not.
+
+    Optional and by path, the same shape as `_reexec`'s `project_python` import: the
+    rehearsal running serially is what it always did, so a missing sibling degrades
+    rather than failing the step.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import pytest_parallel
+    except ImportError:
+        return []
+    return pytest_parallel.args()
+
+
 def command(python: str = sys.executable) -> list[str]:
-    """The pytest invocation, as a list, so the tests can assert it without running it."""
-    return [python, "-m", "pytest", "-p", PLUGIN, "--tb=short", "-q"]
+    """The pytest invocation, as a list, so the tests can assert it without running it.
+
+    The rehearsal is the whole suite a second time, so it is the single most expensive
+    step in the gate and the one that most wants the workers. `-p PLUGIN` reaches them:
+    xdist starts each worker from this same argv, so the platform fake is installed in
+    every one rather than only in the controller.
+    """
+    return [python, "-m", "pytest", "-p", PLUGIN, "--tb=short", "-q", *_parallel_args()]
 
 
 def environment(base: dict[str, str] | None = None) -> dict[str, str]:

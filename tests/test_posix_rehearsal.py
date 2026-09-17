@@ -433,3 +433,33 @@ def test_a_test_that_forces_the_branch_still_passes(tmp_path):
     the branch has to keep working, or the only way to green is to delete coverage."""
     result = _rehearse(tmp_path, CAREFUL_TEST)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_command_asks_for_workers_when_xdist_is_installed(monkeypatch):
+    """The rehearsal is the whole suite a second time -- 320s serially here, 111s across
+    eight workers -- so it is the single step that most wants them.
+
+    Reversion check: drop `_parallel_args()` from `command()` and this fails.
+    """
+    monkeypatch.setattr(rehearsal, "_parallel_args", lambda: ["-n", "auto"])
+    argv = rehearsal.command("py")
+    assert argv[-2:] == ["-n", "auto"]
+    # The plugin must still be named, and before the flag: xdist starts each worker from
+    # this argv, so `-p` is how the platform fake reaches them rather than only the
+    # controller.
+    assert argv[argv.index("-p") + 1] == plugin.__name__
+
+
+def test_the_command_is_unchanged_where_xdist_is_absent(monkeypatch):
+    """A project without the plugin keeps exactly the invocation it always had; `-n`
+    handed to a pytest with no xdist is a usage error that would fail the step."""
+    monkeypatch.setattr(rehearsal, "_parallel_args", list)
+    assert rehearsal.command("py") == [
+        "py",
+        "-m",
+        "pytest",
+        "-p",
+        plugin.__name__,
+        "--tb=short",
+        "-q",
+    ]
