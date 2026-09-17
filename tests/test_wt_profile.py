@@ -289,3 +289,48 @@ def test_launch_note_reads_this_machines_file(tmp_path, monkeypatch):
 
 def test_launch_note_on_a_machine_with_no_windows_terminal_is_empty(tmp_path):
     assert wt.launch_note(tmp_path) == ""
+
+
+# --- without: the inverse of merged --------------------------------------------
+
+
+def test_without_drops_only_devkits_profile():
+    settings = wt.merged({"profiles": {"list": [{"guid": "{other}", "name": "PowerShell"}]}})
+    assert wt.installed(settings) is not None
+    stripped = wt.without(settings)
+    assert wt.installed(stripped) is None
+    assert [entry["guid"] for entry in wt.profiles_list(stripped)] == ["{other}"]
+
+
+def test_without_leaves_a_same_named_profile_somebody_else_wrote():
+    """`merged` finds devkit's entry by GUID, so `without` has to as well -- an operator's
+    own profile called Agent is theirs."""
+    theirs = {"guid": "{not-devkits}", "name": wt.PROFILE_NAME}
+    stripped = wt.without({"profiles": {"list": [theirs]}})
+    assert wt.profiles_list(stripped) == [theirs]
+
+
+def test_without_touches_nothing_else_in_the_file():
+    """`profiles.defaults`, the schemes and the keybindings are all somebody else's."""
+    settings = wt.merged(
+        {
+            "profiles": {"defaults": {"font": {"size": 12}}, "list": []},
+            "schemes": [{"name": "Campbell"}],
+            "keybindings": [{"command": "copy"}],
+        }
+    )
+    stripped = wt.without(settings)
+    assert stripped["profiles"]["defaults"] == {"font": {"size": 12}}
+    assert stripped["schemes"] == [{"name": "Campbell"}]
+    assert stripped["keybindings"] == [{"command": "copy"}]
+
+
+def test_without_does_not_mutate_its_input():
+    settings = wt.merged({"profiles": {"list": []}})
+    before = json.dumps(settings, sort_keys=True)
+    wt.without(settings)
+    assert json.dumps(settings, sort_keys=True) == before
+
+
+def test_without_is_a_no_op_when_the_profile_was_never_there():
+    assert wt.profiles_list(wt.without({"profiles": {"list": []}})) == []

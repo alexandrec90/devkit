@@ -223,6 +223,16 @@ ACTIONS: dict[str, Action] = {
     "reclaim": Action(
         "scripts/reclaim.py", "Machine: Reclaim Resources", ("--yes",), projects=DEVKIT_ONLY
     ),
+    # The scheduled jobs themselves, as a verb a human can reach. Scoped for `reclaim`'s
+    # reason: the jobs are machine state with no project dimension, so an unscoped action
+    # would run the same pass once per ticked checkout.
+    #
+    # Deliberately *not* how the jobs are kept current -- `devkit-installers` does that,
+    # daily and at logon, and a button that has to be remembered would be the same defect
+    # this whole tier exists to remove. What a human needs the click for is the two things
+    # a schedule cannot decide: seeing the set at all, and taking it back off again.
+    # `--yes` rides in from the task's own picker, so the uninstall is read before it runs.
+    "installers": Action("scripts/installers.py", "Machine: Scheduled Jobs", projects=DEVKIT_ONLY),
     # The read-only half of `reclaim`'s memory question -- who holds the commit charge,
     # which `claude` processes are yours, what `reap-stale.py` would stop -- and scoped
     # for `reclaim`'s reason: one machine, one inventory, no checkout to pick.

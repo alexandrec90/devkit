@@ -267,3 +267,37 @@ def test_installing_from_an_ephemeral_box_is_refused(tmp_path, capsys):
     (box / "scripts" / "tray.py").write_text("", encoding="utf-8")
     assert installer.main(["--yes", "--devkit", str(box)]) == 2
     assert "ephemeral box" in capsys.readouterr().err
+
+
+def test_checkout_refusal_names_a_missing_runner(tmp_path):
+    """Both refusals are about a path that will outlive the command registering it."""
+    assert "no tray at" in installer.checkout_refusal(tmp_path, apply=True)
+
+
+def test_checkout_refusal_accepts_a_static_checkout(tmp_path):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "tray.py").write_text("", encoding="utf-8")
+    assert installer.checkout_refusal(tmp_path, apply=True) == ""
+
+
+def test_checkout_refusal_lets_a_box_be_inspected_but_not_installed_from(tmp_path):
+    """`--check` and the bare plan may be run from anywhere -- it is registering a
+    `<Command>` inside a directory `reconcile` will delete that has to be refused."""
+    box = tmp_path / installer.BOXES_DIR / "devkit--x"
+    (box / "scripts").mkdir(parents=True)
+    (box / "scripts" / "tray.py").write_text("", encoding="utf-8")
+    assert installer.checkout_refusal(box, apply=False) == ""
+    assert "ephemeral box" in installer.checkout_refusal(box, apply=True)
+
+
+def test_build_parser_accepts_every_verb_and_the_apply_flag_with_them():
+    """The CLI, as its own function so `main` holds decisions rather than declarations.
+
+    The assertion that matters is `--uninstall --yes`: while `--yes` sat in the same
+    mutually-exclusive group as the verbs, argparse rejected that combination outright, so
+    the uninstall had no dry run to offer and the bare verb had to act on the machine.
+    """
+    parser = installer.build_parser()
+    assert parser.parse_args(["--uninstall", "--yes"]).uninstall is True
+    assert parser.parse_args(["--check"]).check is True
+    parser.parse_args([])

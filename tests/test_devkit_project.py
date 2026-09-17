@@ -384,7 +384,14 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # job N times and report nothing on runs 2..N. Scoping it to devkit is what lets
         # the task pin `--project devkit` and offer no picker.
         "reclaim",
-        # The read-only page beside it, scoped for exactly `reclaim`'s reason: one process
+        # Born scoped, for `reclaim`'s reason exactly: the scheduled jobs are machine
+        # state with no project dimension, so an unscoped action would run the same pass
+        # once per ticked checkout and report nothing on runs 2..N. It is deliberately not
+        # the thing that keeps the jobs current -- `devkit-installers` does that at logon
+        # -- so what the click is for is the two decisions a schedule cannot make: seeing
+        # the set, and taking it back off the machine.
+        "installers",
+        # The read-only page beside `reclaim`, scoped for exactly its reason: one process
         # table on the machine, so once per checkout would print the same page N times.
         "memory-inventory",
         # Born scoped, for `reclaim`'s reason rather than its own: the menu it picks from
