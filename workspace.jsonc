@@ -593,11 +593,17 @@
 				// a human needs the click for is what a schedule cannot decide: seeing
 				// the set, and taking it back off the machine.
 				//
-				// `uninstall` is dry until the second picker says `--yes`, so the plan is
+				// `uninstall` is dry until the third picker says `--yes`, so the plan is
 				// read before anything is removed. It takes the maintainer off FIRST; see
 				// `installers.MAINTAINER` for why that ordering is load-bearing.
+				//
+				// That third picker is asked ONLY by `uninstall`, and it is the input
+				// rather than the task that arranges it -- VS Code resolves every
+				// `${input:...}` in these arguments whatever the earlier answers were.
+				// `installerApply` carries how, and `scripts/installer_picker.py` is what both
+				// of them run to draw a list that never changes.
 				"label": "Machine: Scheduled Jobs",
-				"detail": "Tick the jobs (or none, for all) and pick a verb. status: what the scheduler holds, changing nothing. maintain: re-register whatever drifted — the same pass devkit-installers runs at logon. uninstall: take them off this machine, DRY until you pick --yes.",
+				"detail": "Tick the jobs (or none, for all), then say what to do with them: check only (report, change nothing), install or repair (register whatever is missing — how a job gets onto a machine), or remove (DRY until a third prompt, which only remove is asked, says so).",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -1484,54 +1490,55 @@
 			},
 			{
 				// `status` first, because the read-only verb is the one you want most
-				// often and a mis-click on the default should change nothing.
+				// often and a mis-click on the first row should change nothing.
+				//
+				// The list is static, so this runs a command for none of the usual
+				// reasons -- it is not fresher than a templated one and it costs a
+				// spawn. It is a `shellCommand.execute` input because the input AFTER
+				// it has to read its answer, and that extension is the only place a
+				// pick is recorded: a `pickString` here substitutes empty into
+				// `installerApply`'s command, which would make `--yes` unreachable.
 				"id": "installerVerb",
-				"type": "pickString",
-				"description": "What should happen to them?",
-				"options": [
-					{
-						"label": "status",
-						"value": "status",
-						"description": "What the scheduler holds. Changes nothing."
-					},
-					{
-						"label": "maintain",
-						"value": "maintain",
-						"description": "Re-register whatever drifted — the pass devkit-installers runs at logon."
-					},
-					{
-						"label": "uninstall",
-						"value": "uninstall",
-						"description": "Take them off this machine. Dry unless you pick --yes next."
-					}
-				],
-				"default": "status"
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/installer_picker.py\" verb",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "What should happen to them?",
+					"fieldSeparator": "|",
+					"rememberPrevious": false
+				}
 			},
 			{
-				// Only `uninstall` reads this; `status` and `maintain` ignore it. Kept as
-				// a separate pick rather than folded into the verb so the destructive
-				// combination takes two deliberate choices, and so the default answer to
-				// the second one is still "no".
+				// Only `uninstall` reads this, and until 2026-09-17 it was asked anyway:
+				// VS Code resolves every `${input:...}` a task's arguments name,
+				// unconditionally and in the order they appear, so "Apply an uninstall?"
+				// followed a `status` that removes nothing. There are no conditional
+				// inputs; what there is, is an input that can decline to ask. The command
+				// returns ONE row for every verb but `uninstall`, and `useSingleResult`
+				// takes a list of one without drawing a quick-pick.
+				//
+				// So the destructive path still takes two deliberate choices -- the verb,
+				// then dry-run-or-apply with dry run first -- and the other two paths now
+				// take none. `installer_picker.apply_rows` owns both branches.
+				//
+				// It must come AFTER `installerVerb` in the task's arguments, which is the
+				// order VS Code resolves them in and the only thing making the lookup
+				// live: with nothing recorded this run the extension falls back to what
+				// that input returned in some EARLIER click, silently. Both halves are
+				// `shellCommand.execute` ones for the same reason -- see `previewCheckout`
+				// for the mechanism and what its silent failure looked like.
 				"id": "installerApply",
-				"type": "pickString",
-				"description": "Apply an uninstall? (ignored by status and maintain)",
-				"options": [
-					{
-						"label": "dry run",
-						// A real token, not "". An empty `${input:...}` does not vanish
-						// from the args array -- it reaches argparse as a stray positional
-						// and the task fails. `--dry-run` is redundant with the default
-						// for exactly this reason, as on sweep.py and new-project.py.
-						"value": "--dry-run",
-						"description": "Print what would be removed. Nothing changes."
-					},
-					{
-						"label": "--yes",
-						"value": "--yes",
-						"description": "Actually remove them."
-					}
-				],
-				"default": ""
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/installer_picker.py\" apply --verb \"${input:installerVerb}\"",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "Apply the uninstall?",
+					"fieldSeparator": "|",
+					"useSingleResult": true,
+					"rememberPrevious": false
+				}
 			},
 			{
 				// The daemon restart/fix actions are machine-scoped. Running either once

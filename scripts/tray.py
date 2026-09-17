@@ -19,7 +19,10 @@ started by Task Scheduler before any virtualenv is guaranteed to exist.
 Windows only. `main` says so and exits 0 elsewhere rather than failing: a POSIX machine
 running devkit is a supported thing, and a missing tray is not a fault there.
 
-Run it directly to see it; `install-tray.py` registers it to start at logon.
+Run it directly to see it; `install-tray.py` registers it to start at logon and `--restart`
+replaces the running one, while `schtasks /End /TN devkit-tray` stops it. **The menu
+cannot**: an `Exit` row that did nothing but `DestroyWindow` left every job running and
+nothing reporting them, which looks exactly like a machine with nothing wrong.
 """
 
 from __future__ import annotations
@@ -65,9 +68,10 @@ HWND_MESSAGE = -3
 SW_SHOWNORMAL = 1
 
 # Menu command ids. Jobs occupy `FIRST_JOB` upward, one per row, so the id a click
-# reports is an index into the list the menu was built from.
+# reports is an index into the list the menu was built from. There is no `Exit` (the
+# docstring says why) and `101` stays retired: a stale `WM_COMMAND` carrying it must land
+# on nothing rather than on whatever id is added next.
 CMD_REFRESH = 100
-CMD_EXIT = 101
 CMD_INSTALLERS = 102
 FIRST_JOB = 200
 
@@ -165,7 +169,6 @@ _ARGTYPES: dict[str, list[Any]] = {
     # tray does.
     "user32.DefWindowProcW": [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM],
     "user32.DestroyMenu": [wintypes.HMENU],
-    "user32.DestroyWindow": [wintypes.HWND],
     "user32.SetForegroundWindow": [wintypes.HWND],
     "user32.SetTimer": [wintypes.HWND, ctypes.c_size_t, wintypes.UINT, wintypes.LPVOID],
     "shell32.Shell_NotifyIconW": [wintypes.DWORD, ctypes.c_void_p],
@@ -347,7 +350,6 @@ class Tray:
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
         user32.AppendMenuW(menu, MF_STRING, CMD_INSTALLERS, "Installers report")
         user32.AppendMenuW(menu, MF_STRING, CMD_REFRESH, "Refresh now")
-        user32.AppendMenuW(menu, MF_STRING, CMD_EXIT, "Exit")
 
         point = wintypes.POINT()
         user32.GetCursorPos(ctypes.byref(point))
@@ -387,9 +389,7 @@ class Tray:
     def _on_command(self, hwnd, command: int) -> None:
         """One menu click. Its own method so `_on_message` stays a flat dispatch on the
         message id rather than nesting a second dispatch inside one of its arms."""
-        if command == CMD_EXIT:
-            user32.DestroyWindow(hwnd)
-        elif command == CMD_REFRESH:
+        if command == CMD_REFRESH:
             self.poll()
         elif command == CMD_INSTALLERS:
             self.open_path(REPO_ROOT / INSTALLERS_ARTIFACT)

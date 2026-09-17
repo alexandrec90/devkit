@@ -78,18 +78,27 @@ the only command a machine ever needs typed at it.
 ```
 
 It wingets git, Python, uv and VS Code; clones devkit; persists `DEVKIT_DIR`; runs
-`install-installers-schedule.py --yes`; installs the two VS Code extensions the workspace
-tasks resolve their inputs through; and names anything left that only you can answer, such
-as an unset git identity. Every step checks before it acts, so re-running it repairs a
-machine rather than doubling anything up. `-Path` chooses where to clone,
-`-SkipPrerequisites` leaves the software to whatever else manages it.
+`install-installers-schedule.py --yes` and then `installers.py maintain`, which is the
+step that actually puts every job on the machine rather than waiting for the first logon;
+installs the two VS Code extensions the workspace tasks resolve their inputs through; and
+names anything left that only you can answer, such as an unset git identity. Every step
+checks before it acts, so re-running it repairs a machine rather than doubling anything
+up. `-Path` chooses where to clone, `-SkipPrerequisites` leaves the software to whatever
+else manages it.
 
 **After that line the machine maintains itself.** `install-installers-schedule.py` is the
 one installer anybody runs by hand, because it registers `devkit-installers` — which
 discovers every other `scripts/install-*.py` by glob and runs its `--check`, and its
 `--yes` where that says to, daily and at every logon. An installer added next month is
 picked up with no registration step. The tray icon reports what the scheduler is doing,
-and the *Machine: Scheduled Jobs* workspace task manages the set by hand when you want to.
+and the *Machine: Scheduled Jobs* workspace task manages the set by hand when you want to
+— tick the jobs, then **check only** (`status`), **install or repair** (`maintain`, the
+same pass the schedule runs, and what repairs a machine that has drifted) or **remove**
+(`uninstall`, which asks once more before it does anything).
+
+The tray has no *Exit*: closing it removed the icon and left every job running, which is
+indistinguishable from a machine with nothing to report. `schtasks /End /TN devkit-tray`
+stops it and `python scripts/install-tray.py --restart` brings it back.
 
 To take it all off again:
 
