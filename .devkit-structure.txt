@@ -95,6 +95,7 @@ definitions::scripts/worktree.py = 157
 dependency::pyproject.toml::mypy = 1
 dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::pytest = 1
+dependency::pyproject.toml::pytest-xdist = 1
 dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 544
 file_lines::scripts/devkit_project.py = 1725
@@ -434,3 +435,6 @@ swallowed_errors::scripts/worktree.py = 1
 # 2026-09-16  recorded: FIFTH record deferring the same fix-prs.py split, which by engineering.md's own three-branch rule is a defect report rather than a raise. What is filling it, measured: the scan-and-menu half (broken_reason..refresh_menu) is 470 lines against the launch half's 250, and every one of the five records names that same seam. This change adds 41 lines and 2 definitions by extracting refresh_unresolved/unresolved_mergeability out of broken_prs, which took that function from complexity 21 back under the limit of 15 -- the trade the 2026-09-06 record already ruled on, per-function over module-level. The split is still owed and still moves the path the workspace task block names for the live --rows picker, so it is still its own PR. Reported via report-harness-defect.py.
 #   definitions::scripts/fix-prs.py -> 33
 #   file_lines::scripts/fix-prs.py -> 809
+
+# 2026-09-17  recorded: pytest-xdist: the push gate ran pytest three times serially (438s + 186s + 320s measured here) on eight idle cores. -n auto takes the same three to 109s + 55s + 111s, all green. Optional at every call site -- scripts/pytest_parallel.py adds the flag only when the plugin imports, so a checkout without it keeps the serial run rather than failing on an unrecognised argument.
+#   dependency::pyproject.toml::pytest-xdist -> 1

@@ -181,3 +181,30 @@ def test_it_runs_pytest_with_this_interpreter(artifact, monkeypatch):
     seen = stub_pytest(monkeypatch, 0)
     run_tests.main([])
     assert seen[0][:3] == [run_tests.sys.executable, "-m", "pytest"]
+
+
+def test_the_suite_is_handed_to_workers_when_xdist_is_installed(artifact, monkeypatch):
+    """438s serially on this workstation, 109s across eight workers, and the gate runs
+    this on every push.
+
+    Reversion check: drop `_parallel_args()` from `main()` and this fails.
+    """
+    seen = stub_pytest(monkeypatch, 0)
+    monkeypatch.setattr(run_tests, "_parallel_args", lambda: ["-n", "auto"])
+    run_tests.main([])
+    assert seen[0][-2:] == ["-n", "auto"]
+
+
+def test_the_command_is_unchanged_where_xdist_is_absent(artifact, monkeypatch):
+    seen = stub_pytest(monkeypatch, 0)
+    monkeypatch.setattr(run_tests, "_parallel_args", list)
+    run_tests.main([])
+    assert "-n" not in seen[0]
+
+
+def test_the_changed_subset_still_parallelises(artifact, monkeypatch):
+    """`--last-failed` and xdist compose; the flag must not be dropped on that path."""
+    seen = stub_pytest(monkeypatch, 0)
+    monkeypatch.setattr(run_tests, "_parallel_args", lambda: ["-n", "auto"])
+    run_tests.main(["--changed"])
+    assert "-n" in seen[0] and "--last-failed" in seen[0]

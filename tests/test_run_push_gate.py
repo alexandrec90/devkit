@@ -86,7 +86,7 @@ def test_the_rehearsal_is_skipped_by_a_project_that_does_not_ship_it(tmp_path):
     assert planned["posix rehearsal"] is None
 
 
-def test_every_step_runs_when_the_project_has_every_file(tmp_path):
+def test_every_step_runs_when_the_project_has_every_file(tmp_path, monkeypatch):
     root = project(
         tmp_path,
         "scripts/lint-all.py",
@@ -94,6 +94,10 @@ def test_every_step_runs_when_the_project_has_every_file(tmp_path):
         "scripts/hooks/tests/test_x.py",
         "scripts/posix-rehearsal.py",
     )
+    # Pinned rather than probed: the hook tier's step gains `-n auto` on a machine that
+    # has xdist, so left to the real probe this asserts a different argv depending on
+    # where it runs. The parallel spelling has its own tests at the end of this file.
+    monkeypatch.setattr(gate, "parallel_args", lambda _python: [])
     runner = FakeRunner()
     assert gate.run_gate(root, runner) == 0
     assert [call[1:] for call in runner.calls] == [list(step.argv) for step in gate.STEPS]
@@ -400,3 +404,59 @@ def test_a_detached_head_is_not_a_release_branch(tmp_path):
     )
 
     assert gate.detect_release_branch(root) == ""
+
+
+# --- parallel hook-tier run -----------------------------------------------------------
+
+
+def _probe(returncode):
+    """A runner standing in for the xdist probe against the project's interpreter."""
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, returncode)
+
+    return runner, calls
+
+
+def test_the_probe_asks_the_projects_interpreter_not_this_one():
+    """The question is whether `interpreter(root)` has xdist -- a different venv, and
+    routinely a different Python, from the one running this hook. `find_spec` here would
+    answer for the wrong process and could hand `-n` to a pytest that cannot take it."""
+    runner, calls = _probe(0)
+    assert gate.parallel_args("C:/proj/.venv/python.exe", runner) == ["-n", "auto"]
+    assert calls[0][0] == "C:/proj/.venv/python.exe"
+    assert "xdist" in calls[0][-1]
+
+
+def test_a_consumer_without_xdist_keeps_the_serial_hook_run():
+    runner, _ = _probe(1)
+    assert gate.parallel_args("py", runner) == []
+
+
+def test_a_probe_that_cannot_even_start_is_not_a_failed_gate():
+    """An unspawnable interpreter is a problem the *step* will report properly. Raising
+    here would refuse the push from inside an optimisation."""
+
+    def explode(argv, **kwargs):
+        raise OSError("no such interpreter")
+
+    assert gate.parallel_args("py", explode) == []
+
+
+def test_only_the_pytest_step_is_given_workers(tmp_path, monkeypatch):
+    """`lint-all.py`, `run-tests.py` and `posix-rehearsal.py` are project-owned wrappers
+    that decide for themselves; handing them a pytest flag they never parse is a usage
+    error in three scripts this file does not own."""
+    for step in gate.STEPS:
+        target = tmp_path / step.requires
+        target.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(gate, "interpreter", lambda _root: "py")
+    monkeypatch.setattr(gate, "parallel_args", lambda _python: ["-n", "auto"])
+
+    commands = {step.name: command for step, command in gate.plan(tmp_path)}
+    assert commands[gate.PYTEST_STEP][-2:] == ["-n", "auto"]
+    for name, command in commands.items():
+        if name != gate.PYTEST_STEP:
+            assert "-n" not in command, name
