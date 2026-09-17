@@ -159,8 +159,8 @@ def on_a_task_branch(root: Path) -> bool:
 def in_an_ephemeral_box(root: Path) -> bool:
     """True when `root` is a disposable worktree of either tier, not a static checkout.
 
-    Keyed off `worktree.BOXES_DIR_NAME` and `worktree_tiers.is_worktree` rather than the
-    literals, so none of them can drift -- and the *shape* test rather than
+    Keyed off `worktree_tiers` for both halves rather than the literals, so none of them
+    can drift -- and the *shape* test rather than
     `sweep.cli_worktree_checkout`, because "is this disposable" is answerable from the
     path alone while "whose is it" is not: Codex's tier needs a `.git` read that a
     predicate should not depend on.
@@ -172,7 +172,7 @@ def in_an_ephemeral_box(root: Path) -> bool:
     the failure the marker exists to prevent, arriving through the tier that did not
     exist when it was written.
     """
-    return root.parent.name == worktree.BOXES_DIR_NAME or worktree_tiers.is_worktree(root)
+    return worktree_tiers.is_box(root) or worktree_tiers.is_worktree(root)
 
 
 # The narrower marker, for every assertion that reads the live file expecting *this*

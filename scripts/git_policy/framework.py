@@ -14,7 +14,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from ._core import Runner, _git, _stdout, console_python
+from ._core import Runner, _git, _stdout, console_python, emit
 from .branch import parse_push_updates
 
 
@@ -127,7 +127,7 @@ def _run_pre_commit_framework(
     command = _pre_commit_command(root, runner)
     if command is None:
         for line in NO_PRE_COMMIT:
-            print(line, file=sys.stderr)
+            emit(line, stream=sys.stderr)
         return 1
     # `--all-files` for the push stage: its hooks are `always_run` gates over the whole
     # tree, and without it pre-commit scopes to the *staged* diff -- stashing unstaged
@@ -135,7 +135,7 @@ def _run_pre_commit_framework(
     args = ["run", "--hook-stage", stage] + (["--all-files"] if stage == "pre-push" else [])
     result = runner([*command, *args], cwd=root, env=framework_env(command))
     if result.stdout:
-        print(result.stdout, end="")
+        emit(result.stdout, end="")
     if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
+        emit(result.stderr, end="", stream=sys.stderr)
     return result.returncode

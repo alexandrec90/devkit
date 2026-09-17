@@ -390,9 +390,9 @@ RETIRED_PATHS: tuple[str, ...] = (
 # section's source prefix. `manifest_for` resolves it per consumer: present where
 # `[frontend]` is enabled, at that project's `[frontend] src`; absent where it is not,
 # which is the difference between a gate and a MISSING line. devkit's own copy lives at
-# the default prefix, so a consumer whose `src` differs reports the entry as absent from
-# the shared repo -- visible in `--check` -- rather than through a layout mapping nobody
-# has needed yet.
+# the default prefix, and `source_map` is the translation between the two layouts --
+# every path outside this dict is spelled identically on both sides, so the map is empty
+# for most consumers and absent from every MANIFEST entry.
 FRONTEND_GATE = "frontend"
 DEFAULT_FRONTEND_SRC = "frontend/src/"
 # A LITERAL dict, keys spelled as strings: `structure_check.vendored_paths` reads this
@@ -459,6 +459,31 @@ def gated_paths(root: Path) -> tuple[str, ...]:
     if not src:
         return ()
     return tuple(src + name for name in GATED_MANIFEST[FRONTEND_GATE])
+
+
+def source_map(root: Path) -> dict[str, str]:
+    """Consumer-relative path -> devkit-relative path, for entries whose layouts differ.
+
+    Empty for every MANIFEST entry, which is vendored at the same path on both sides,
+    and empty again for a consumer whose `[frontend] src` happens to be devkit's own
+    prefix. It has content only where the gated tier lands somewhere else: a
+    single-package project sets `dir = "."` and `src = "src/"`, so the entry it should
+    hold is `src/worktreePort.ts` while devkit's copy is at `frontend/src/`.
+
+    Until this existed both sides were probed with the *consumer's* path, so devkit was
+    asked for a file it has never had at that name. The pull skipped it as absent and
+    the commit gate then reported it MISSING from the shared repo -- which is what
+    stopped roguelike adopting v0.11.17 after the release itself had succeeded. The
+    comment above predicted exactly this and deferred it as a layout mapping nobody had
+    needed yet; roguelike is the consumer that needed it.
+
+    Keyed on the whole path rather than assembled by prefix arithmetic, so a `src` that
+    normalises oddly cannot produce a half-formed key that matches nothing.
+    """
+    src = frontend_src(root)
+    if not src or src == DEFAULT_FRONTEND_SRC:
+        return {}
+    return {src + name: DEFAULT_FRONTEND_SRC + name for name in GATED_MANIFEST[FRONTEND_GATE]}
 
 
 def gated_source_paths() -> tuple[str, ...]:
@@ -748,12 +773,18 @@ def classify(
 
     `missing_in_src` are files absent from the shared repo (it does not have them
     yet -- e.g. before a first `--push`); they are reported, never silently OK.
+
+    The shared repo is probed at *its* spelling of each path, which differs from the
+    consumer's only for the gated tier (`source_map`). Probing it at the consumer's
+    spelling is what made a project whose `[frontend] src` is not devkit's own report
+    two files as MISSING from a repo that has always had them.
     """
+    sources = source_map(repo_root)
     drifted: list[str] = []
     missing: list[str] = []
     ok: list[str] = []
     for rel in manifest:
-        src_bytes = _read(src / rel)
+        src_bytes = _read(src / sources.get(rel, rel))
         if src_bytes is None:
             missing.append(rel)
             continue
@@ -903,12 +934,27 @@ def sync_blocks(
     return written, failed
 
 
-def _copy(rel: str, from_root: Path, to_root: Path) -> bool:
-    """Copy one manifest file from_root -> to_root. False when the source is absent."""
-    source = from_root / rel
+def copy_ends(rel: str, sources: Mapping[str, str], pull: bool) -> tuple[str, str]:
+    """`(from_rel, to_rel)` for one entry, given the direction.
+
+    `manifest` is spelled at the consumer's layout throughout, because the receipt and
+    the retired sweep are about this project's own files. Only the devkit end is ever
+    remapped, and which end that is is the whole of the direction.
+    """
+    devkit_rel = sources.get(rel, rel)
+    return (devkit_rel, rel) if pull else (rel, devkit_rel)
+
+
+def _copy(from_rel: str, to_rel: str, from_root: Path, to_root: Path) -> bool:
+    """Copy one manifest file from_root -> to_root. False when the source is absent.
+
+    Two relative paths rather than one, because the gated tier does not live at the same
+    place on both sides -- see `source_map`. They are equal for every other entry.
+    """
+    source = from_root / from_rel
     if not source.exists():
         return False
-    dest = to_root / rel
+    dest = to_root / to_rel
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, dest)
     return True
@@ -1427,7 +1473,12 @@ def main(argv: list[str] | None = None) -> int:
         managed_removed, preserved, unvendored = (
             remove_receipt_retired(REPO_ROOT, manifest, src) if args.pull else ([], [], [])
         )
-        copied = [rel for rel in manifest if _copy(rel, from_root, to_root)]
+        sources = source_map(REPO_ROOT)
+        copied = [
+            rel
+            for rel in manifest
+            if _copy(*copy_ends(rel, sources, args.pull), from_root, to_root)
+        ]
         skipped = [rel for rel in manifest if rel not in copied]
         removed = (remove_retired(REPO_ROOT) + managed_removed) if args.pull else []
         # After the deletions, never before: pruning a hook whose script survived the

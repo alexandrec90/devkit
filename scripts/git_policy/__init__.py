@@ -69,6 +69,7 @@ from ._core import (
     Runner,
     TagUpdate,
     console_python,
+    emit,
     run_command,
 )
 from .branch import (
@@ -109,6 +110,7 @@ __all__ = [
     "console_python",
     "default_branch",
     "dispatch",
+    "emit",
     "evaluate_pre_commit",
     "evaluate_pre_push",
     "framework",

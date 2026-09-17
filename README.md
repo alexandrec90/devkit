@@ -461,8 +461,13 @@ remote Claude session spawns into, which is why the delete verb can see worktree
 here made. A row from a non-default tier is labelled with its agent (`codex/<name>`), so
 two tiers holding a directory of the same name stay two rows.
 
-`scripts/hooks/worktree_tiers.py` owns the list. Adding a runtime is one entry in `TIERS`;
-nothing downstream of it names an agent.
+`scripts/hooks/worktree_tiers.py` owns the list — **all three tiers**, the box tier
+included, so `.worktrees` is spelled there and nowhere else. Adding a runtime is one entry
+in `TIERS`; nothing downstream of it names an agent or a directory. `TIERS` is the two
+tiers an agent CLI cuts into and is what path-matching answers for; `ALL_TIERS` adds the
+box tier for a caller that means every worktree root on the machine, and the box tier
+stays out of the first because it anchors on the workspace, carries a port lease, and is
+reaped by `worktree.py`, which `git worktree remove` on it would leak.
 
 ```bash
 python scripts/agent-worktree.py new --pick devkit:main --slug voicemail --agent codex
@@ -811,7 +816,7 @@ or, with the knobs:
 "devkit.remoteControl": {
   "projects": ["devkit"],
   "spawn": "same-dir",              // or "worktree" — see below
-  "permissionMode": "acceptEdits",  // a standing grant — opt in deliberately
+  "permissionMode": "acceptEdits",  // reaches the server; a phone session ignores it
   "idleMinutes": 20,                // transcript silence before a restart is allowed
   "updateAt": "04:45",              // after devkit-global-tools, deliberately
   "capacity": 8,                    // sessions per server; the CLI's own default is 32
@@ -820,19 +825,31 @@ or, with the knobs:
 }
 ```
 
-`permissionMode` is the one knob a phone cannot work around. A session spawned from the
-mobile app opens in `auto` and the UI offers no way to switch, so `bypassPermissions`
-here is the only route to one — and it is a standing grant on an unattended machine,
-which is why it is opt-in.
+`permissionMode` reaches the server as `--permission-mode`, and **it does not raise the
+mode of a session the phone spawns.** A spawned session is handed the server's mode as the
+CLI's `--inherit-permission-mode`, "used only when nothing else configures one" — and the
+mobile app configures one when it creates the session, so the session lands in `auto`
+however this is set. A `permissions.defaultMode` of `bypassPermissions` in
+`~/.claude/settings.json` loses to the app the same way. What a phone session does honour
+is a `permissions.allow` entry, which applies in `auto` mode too, so that is where a
+standing grant for a phone actually goes. Either way it is a standing grant on an
+unattended machine reachable from the internet, which is why neither is a default.
 
 `spawn` chooses where an on-demand session lands. **`worktree` mode is not the box tier
 `worktree.py` owns** — Claude Code cuts its own worktrees under
-`<repo>/.claude/worktrees/<name>`, inside the checkout — but it is not an unmanaged tier
-either. Claude Code offers keep-or-remove when a worktree session exits, naming what
-would be lost, and its retention sweep (`cleanupPeriodDays`, 30 days unless you set it)
-removes a stale one only when it is clean, fully pushed, unlocked and carries Claude
-Code's own creation marker. So they do not accumulate, and one holding real work is never
-swept.
+`<repo>/.claude/worktrees/<name>`, inside the checkout, and **nothing in this harness
+reaps that tier.** Claude Code offers keep-or-remove when a worktree session exits,
+naming what would be lost, and its retention sweep (`cleanupPeriodDays`, 30 days unless
+you set it) removes a stale one only when it is clean, fully pushed, unlocked and carries
+Claude Code's own creation marker. Every one of those conditions is a way to miss: an
+unpushed commit or one untracked file keeps a worktree forever, and a project whose
+pre-commit hooks rewrite a *tracked generated* file — carameli's `.secrets.baseline`,
+which `detect-secrets --baseline` restamps on every run — leaves every session worktree
+permanently dirty and so permanently ineligible. They accumulate: 78 across three
+checkouts by 2026-09-16, three of them holding unshipped work with tests. Nothing holding
+work is ever swept, which is the half of the guarantee that does hold; the other half is
+that nothing empty is swept either. `agent-worktree.py`'s delete menu is the manual
+remedy, across every tier in `scripts/hooks/worktree_tiers.py`.
 
 The single thing the tier does not get is the **stack** half: no port lease and no
 `COMPOSE_PROJECT_NAME`, so two concurrent sessions that each bring a compose stack up
