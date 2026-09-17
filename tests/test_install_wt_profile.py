@@ -200,3 +200,45 @@ def test_a_settings_path_that_is_not_there_is_left_alone_rather_than_created(tmp
     assert installer.main(["--settings", str(missing), "--yes"]) == 2
     assert not missing.exists()
     assert "no Windows Terminal settings.json" in capsys.readouterr().err
+
+
+# --- uninstall ----------------------------------------------------------------
+
+
+def test_the_uninstall_is_a_dry_run_until_yes(live, capsys):
+    installer.main(["--settings", str(live), "--yes"])
+    capsys.readouterr()
+    assert installer.main(["--settings", str(live), "--uninstall"]) == 0
+    assert "Dry run" in capsys.readouterr().out
+    assert wt.installed(wt.read_settings(live)) is not None, "the dry run removed the profile"
+
+
+def test_the_uninstall_removes_the_profile_and_leaves_a_backup(live, capsys):
+    installer.main(["--settings", str(live), "--yes"])
+    capsys.readouterr()
+    assert installer.main(["--settings", str(live), "--uninstall", "--yes"]) == 0
+    assert "removed" in capsys.readouterr().out
+    assert wt.installed(wt.read_settings(live)) is None
+    assert list(live.parent.glob("settings.json.devkit-*.bak")), "no backup was written"
+
+
+def test_uninstalling_what_is_not_there_says_so_and_rewrites_nothing(live, capsys):
+    """An uninstall's goal is a state, so 'already absent' is success -- and the file must
+    not be rewritten for it, because rewriting is what costs the operator their comments."""
+    before = live.read_text(encoding="utf-8")
+    assert installer.main(["--settings", str(live), "--uninstall", "--yes"]) == 0
+    assert "is not in" in capsys.readouterr().out
+    assert live.read_text(encoding="utf-8") == before
+
+
+def test_build_parser_accepts_every_verb_and_the_apply_flag_with_them():
+    """The CLI, as its own function so `main` holds decisions rather than declarations.
+
+    The assertion that matters is `--uninstall --yes`: while `--yes` sat in the same
+    mutually-exclusive group as the verbs, argparse rejected that combination outright, so
+    the uninstall had no dry run to offer and the bare verb had to act on the machine.
+    """
+    parser = installer.build_parser()
+    assert parser.parse_args(["--uninstall", "--yes"]).uninstall is True
+    assert parser.parse_args(["--check"]).check is True
+    parser.parse_args([])

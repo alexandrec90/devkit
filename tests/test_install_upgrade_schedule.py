@@ -304,3 +304,16 @@ def test_the_posix_plan_offers_a_crontab_line_rather_than_schtasks():
     rendered = sched.render_plan(a_schedule(), windows=False)
     assert "crontab" in rendered
     assert "schtasks" not in rendered
+
+
+def test_build_parser_accepts_every_verb_and_the_apply_flag_with_them():
+    """The CLI, as its own function so `main` holds decisions rather than declarations.
+
+    The assertion that matters is `--uninstall --yes`: while `--yes` sat in the same
+    mutually-exclusive group as the verbs, argparse rejected that combination outright, so
+    the uninstall had no dry run to offer and the bare verb had to act on the machine.
+    """
+    parser = sched.build_parser()
+    assert parser.parse_args(["--uninstall", "--yes"]).uninstall is True
+    assert parser.parse_args(["--check"]).check is True
+    parser.parse_args([])

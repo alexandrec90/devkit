@@ -159,12 +159,21 @@ def test_status_and_uninstall_are_answered_before_any_document_is_built(monkeypa
     """`query_or_remove` owns the two modes that address the task by name; neither
     should build a document, and neither exists when nobody asked."""
     monkeypatch.setattr(installer, "WINDOWS", True)
-    monkeypatch.setattr(installer, "_run", lambda argv: (0, f"ran {argv[1]}"))
+    monkeypatch.setattr(
+        installer,
+        "_run_argv",
+        lambda argv: subprocess.CompletedProcess(list(argv), 0, f"ran {argv[1]}", ""),
+    )
     assert installer.main(["--status"]) == 0
-    assert "ran /query" in capsys.readouterr().out
+    assert "ran /Query" in capsys.readouterr().out
     assert installer.main(["--uninstall"]) == 0
     assert "Dry run" in capsys.readouterr().out
-    assert installer.query_or_remove(argparse.Namespace(status=False, uninstall=False)) is None
+    assert (
+        installer.query_or_remove(
+            argparse.Namespace(name="devkit-x", status=False, uninstall=False, apply=False)
+        )
+        is None
+    )
 
 
 def _the_document_main_would_register() -> str:
@@ -197,3 +206,16 @@ def test_check_is_red_when_nothing_is_registered(monkeypatch, capsys):
     )
     assert installer.main(["--check"]) == 1
     assert "nothing is scheduled" in capsys.readouterr().err
+
+
+def test_build_parser_accepts_every_verb_and_the_apply_flag_with_them():
+    """The CLI, as its own function so `main` holds decisions rather than declarations.
+
+    The assertion that matters is `--uninstall --yes`: while `--yes` sat in the same
+    mutually-exclusive group as the verbs, argparse rejected that combination outright, so
+    the uninstall had no dry run to offer and the bare verb had to act on the machine.
+    """
+    parser = installer.build_parser()
+    assert parser.parse_args(["--uninstall", "--yes"]).uninstall is True
+    assert parser.parse_args(["--check"]).check is True
+    parser.parse_args([])

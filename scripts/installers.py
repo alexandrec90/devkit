@@ -39,8 +39,19 @@ decision, not maintenance.
 
 Read-only by default: `status` runs every `--check` and writes the report; `maintain`
 is what the scheduler runs. The artifact `logs/installers.log` is rewritten every pass,
-on a clean one too, so its mtime says the job is alive. Stdlib only, and every decision
-is an importable function tested in `tests/test_installers.py`.
+on a clean one too, so its mtime says the job is alive.
+
+**`uninstall` is the way back off a machine**, and it is the mode the workspace's
+*Machine: Scheduled Jobs* task drives. Dry until `--yes`, and safe to run twice: every
+installer reports a thing that was already gone as removed rather than as a failure, so
+a second pass over a decommissioned machine is a clean run. It takes `MAINTAINER` off
+first, for the reason recorded there. What it does **not** touch is the checkout, the
+`logs/` artifacts or `~/.claude` -- this removes what the installers *registered*, which
+is the half that outlives a deleted clone and would otherwise keep firing against a path
+that no longer exists.
+
+Stdlib only, and every decision is an importable function tested in
+`tests/test_installers.py`.
 """
 
 from __future__ import annotations
@@ -58,6 +69,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
 import devkit_schtasks
+import installer_cli
 import harness_state
 import sweep
 
@@ -84,8 +96,19 @@ STALE = "stale"
 LEFT_ALONE = "left alone"
 REINSTALLED = "reinstalled"
 FAILED = "failed"
+REMOVED = "removed"
+WOULD_REMOVE = "would remove"
+
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
+
+# The selection vocabulary lives in `installer_cli` with the other command-line
+# concepts; named here too so the pass and its tests read as one module.
+MAINTAINER = installer_cli.MAINTAINER
+short_name = installer_cli.short_name
+parse_only = installer_cli.parse_only
+select = installer_cli.select
+uninstall_order = installer_cli.uninstall_order
 
 
 def run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -236,6 +259,7 @@ def reconcile(
     options: dict[str, list[str]],
     runner: Runner | None = None,
     python: str = "",
+    only: Sequence[str] = (),
 ) -> list[Outcome]:
     """Every installer's verdict, repaired where `apply` says to and the verdict allows.
 
@@ -246,17 +270,62 @@ def reconcile(
 
     `runner` is resolved here rather than as a default argument, so a test that replaces
     `run_command` on the module replaces what `main` actually spawns with.
+
+    `only` narrows the set to what a checklist ticked; empty is everything, which is what
+    the scheduled pass always wants.
     """
     interpreter = python or sweep.console_python()
     spawn = runner or run_command
-    outcomes = []
-    for script in discover(root):
+    chosen, missing = select(discover(root), only)
+    outcomes = [Outcome(name, FAILED, "no installer of that name here") for name in missing]
+    for script in chosen:
         extra = options.get(script.name, [])
         outcome = check(script, interpreter, extra, spawn)
         if apply and outcome.verdict == STALE:
             outcome = repair(script, interpreter, extra, spawn)
         outcomes.append(outcome)
     return outcomes
+
+
+def remove(
+    script: Path, python: str, options: Sequence[str], apply: bool, runner: Runner
+) -> Outcome:
+    """One installer's `--uninstall`, dry unless `apply`.
+
+    Every installer treats "it was not there" as success, so a second pass over a machine
+    already decommissioned is a clean run rather than thirteen failures -- which is what
+    makes this safe to tick twice.
+    """
+    argv = [python, str(script), "--uninstall", *(["--yes"] if apply else []), *options]
+    result = runner(argv)
+    if result.returncode:
+        return Outcome(
+            script.name, FAILED, f"--uninstall exited {result.returncode}: {last_line(result)}"
+        )
+    return Outcome(script.name, REMOVED if apply else WOULD_REMOVE, last_line(result))
+
+
+def decommission(
+    root: Path,
+    apply: bool,
+    options: dict[str, list[str]],
+    runner: Runner | None = None,
+    python: str = "",
+    only: Sequence[str] = (),
+) -> list[Outcome]:
+    """Take every installer's work off this machine, maintainer first.
+
+    `only` narrows it to a ticked subset -- which is a partial decommission, and leaves
+    `devkit-installers` running unless it was ticked too. That is the operator's call to
+    make, and `render` says so rather than second-guessing it.
+    """
+    interpreter = python or sweep.console_python()
+    spawn = runner or run_command
+    chosen, missing = select(discover(root), only)
+    return [Outcome(name, FAILED, "no installer of that name here") for name in missing] + [
+        remove(script, interpreter, options.get(script.name, []), apply, spawn)
+        for script in uninstall_order(chosen)
+    ]
 
 
 def stood_down_without_installer(names: frozenset[str], root: Path) -> list[str]:
@@ -307,11 +376,36 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "mode",
         nargs="?",
         default="status",
-        choices=("status", "maintain"),
+        choices=("status", "maintain", "uninstall"),
         help=(
             "status: run every installer's --check and report (default). maintain: what "
             "the scheduler runs -- also --yes on each one that needs it, named so a "
-            "changed default cannot silently make the job a no-op."
+            "changed default cannot silently make the job a no-op. uninstall: take every "
+            "installer's work off this machine, dry unless --yes."
+        ),
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="apply an `uninstall`; ignored by the read-only and self-healing modes",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "explicitly do not apply -- the default, and redundant on the command line. "
+            "It exists so the workspace picker's safe branch emits a real token: an empty "
+            "`${input:...}` does not vanish from the args array, it reaches argparse as a "
+            "stray positional and the task fails"
+        ),
+    )
+    parser.add_argument(
+        "--only",
+        default="",
+        help=(
+            "comma-separated installer names to act on, `install-` and `.py` optional "
+            "(e.g. `tray,reap-schedule`). Empty means all, which is what the scheduled "
+            "pass wants; the workspace checklist is what fills it"
         ),
     )
     parser.add_argument("--workspace", type=Path, default=None)
@@ -332,7 +426,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = sweep.source_checkout(args.devkit.expanduser().resolve())
     workspace = args.workspace or sweep.default_workspace(root)
     options = read_options(Path(workspace) if workspace else None)
-    outcomes = reconcile(root, args.mode == "maintain", options)
+    only = parse_only(args.only)
+    if args.mode == "uninstall":
+        # `--dry-run` wins over `--yes`, which only matters if a picker ever sends both:
+        # the safe reading of a contradictory instruction is the one that changes nothing.
+        outcomes = decommission(root, args.yes and not args.dry_run, options, only=only)
+    else:
+        outcomes = reconcile(root, args.mode == "maintain", options, only=only)
     orphans = stood_down_without_installer(harness_state.stood_down(), root)
     text = render(outcomes, orphans, _dt.datetime.now(), args.mode)
     write_artifact(text, root)

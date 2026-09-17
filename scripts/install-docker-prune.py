@@ -53,6 +53,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
+import installer_cli
 import harness_state
 import sweep
 
@@ -164,11 +165,13 @@ def task_document(python: str, arguments: str, at: str, root: Path = REPO_ROOT) 
 
 
 def uninstall_argv(name: str) -> list[str]:
-    return ["schtasks", "/delete", "/tn", name, "/f"]
+    """This module's own name for it, because its tests are written against that; the
+    argv itself is `installer_cli`'s."""
+    return installer_cli.uninstall_argv(name)
 
 
 def query_argv(name: str) -> list[str]:
-    return ["schtasks", "/query", "/tn", name]
+    return installer_cli.query_argv(name)
 
 
 def _run_argv(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -179,29 +182,33 @@ def _run_argv(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(list(argv), 1, "", str(exc))
 
 
-def _run(argv: list[str]) -> tuple[int, str]:
-    done = _run_argv(argv)
-    return done.returncode, (done.stdout or done.stderr or "").strip()
-
-
 def query_or_remove(args: argparse.Namespace) -> int | None:
-    """The `--status` and `--uninstall` modes; None when neither was asked for."""
-    if args.status:
-        code, out = _run(query_argv(args.name))
-        print(out or f"no scheduled task called {args.name}")
-        return 0 if code == 0 else 1
-    if args.uninstall:
-        target = uninstall_argv(args.name)
-        if not args.apply:
-            print(f"Would run: {' '.join(target)}\n\nDry run -- re-run with --yes.")
-            return 0
-        code, out = _run(target)
-        print(out or f"removed {args.name}")
-        return code
-    return None
+    """The `--status` and `--uninstall` modes; None when neither was asked for.
+
+    Delegates rather than deciding. This module carried a copy of the logic and so did
+    three others, and all four had drifted from what the six installers wired later do:
+    a task that was already gone read as a *failure* here and as success there, so one
+    tick of the workspace's uninstall verb would report both for the same machine state.
+    `installer_cli.query_or_remove` is the single implementation now.
+    """
+    handled = installer_cli.query_or_remove(
+        args.name,
+        status=args.status,
+        uninstall=args.uninstall,
+        apply=args.apply,
+        run=_run_argv,
+    )
+    if handled is None:
+        return None
+    code, message = handled
+    print(message)
+    return code
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI. Its own function so `main` holds decisions rather than declarations --
+    the shape `structure_check`'s `function_lines` limit asks for, and the one
+    `install-reconcile-task.py` already had."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--install", action="store_true", default=True)
@@ -215,6 +222,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--name", default=TASK_NAME)
     parser.add_argument("--at", default=DEFAULT_AT, help="daily start time, HH:MM (24-hour)")
     parser.add_argument("--yes", dest="apply", action="store_true", help="actually call schtasks")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     if not WINDOWS:

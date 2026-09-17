@@ -115,15 +115,17 @@ def test_the_interpreter_is_the_action_not_part_of_the_arguments():
 
 def test_uninstall_names_the_task_and_does_not_prompt():
     argv = installer.uninstall_argv("devkit-worktree-reconcile")
-    assert argv[:2] == ["schtasks", "/delete"]
+    assert argv[:2] == ["schtasks", "/Delete"]
     assert "devkit-worktree-reconcile" in argv
-    assert "/f" in argv
+    assert "/F" in argv
 
 
 def test_a_dry_run_never_calls_schtasks(monkeypatch, capsys):
     monkeypatch.setattr(installer, "WINDOWS", True)
     monkeypatch.setattr(
-        installer, "_run", lambda argv: (_ for _ in ()).throw(AssertionError("called schtasks"))
+        installer,
+        "_run_argv",
+        lambda argv: (_ for _ in ()).throw(AssertionError("called schtasks")),
     )
     assert installer.main([]) == 0
     assert "Dry run" in capsys.readouterr().out
@@ -139,12 +141,21 @@ def test_status_and_uninstall_are_answered_before_any_document_is_built(monkeypa
     """`query_or_remove` owns the two modes that ask the scheduler about the task by
     name; neither should build a document, and neither exists when nobody asked."""
     monkeypatch.setattr(installer, "WINDOWS", True)
-    monkeypatch.setattr(installer, "_run", lambda argv: (0, f"ran {argv[1]}"))
+    monkeypatch.setattr(
+        installer,
+        "_run_argv",
+        lambda argv: subprocess.CompletedProcess(list(argv), 0, f"ran {argv[1]}", ""),
+    )
     assert installer.main(["--status"]) == 0
-    assert "ran /query" in capsys.readouterr().out
+    assert "ran /Query" in capsys.readouterr().out
     assert installer.main(["--uninstall"]) == 0
     assert "Dry run" in capsys.readouterr().out
-    assert installer.query_or_remove(argparse.Namespace(status=False, uninstall=False)) is None
+    assert (
+        installer.query_or_remove(
+            argparse.Namespace(name="devkit-x", status=False, uninstall=False, apply=False)
+        )
+        is None
+    )
 
 
 def _the_document_main_would_register() -> str:

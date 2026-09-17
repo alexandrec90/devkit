@@ -384,6 +384,13 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # job N times and report nothing on runs 2..N. Scoping it to devkit is what lets
         # the task pin `--project devkit` and offer no picker.
         "reclaim",
+        # Born scoped, for `reclaim`'s reason exactly: the scheduled jobs are machine
+        # state with no project dimension, so an unscoped action would run the same pass
+        # once per ticked checkout and report nothing on runs 2..N. It is deliberately not
+        # the thing that keeps the jobs current -- `devkit-installers` does that at logon
+        # -- so what the click is for is the two decisions a schedule cannot make: seeing
+        # the set, and taking it back off the machine.
+        "installers",
         # Born scoped, for `reclaim`'s reason rather than its own: the menu it picks from
         # is assembled from the box registry and the port registry, and there is exactly
         # one of each on this machine. So the question "which checkout" has no answer to

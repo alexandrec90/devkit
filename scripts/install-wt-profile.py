@@ -119,14 +119,10 @@ def run_check(path: Path | None) -> int:
     return 1
 
 
-def main(argv: list[str] | None = None) -> int:
-    # The plan prints the profile field by field, and one of those fields is an emoji
-    # icon; a Windows console is cp1252 and raised UnicodeEncodeError on it rather than
-    # printing the plan. Same fix, and the same reason, as `resume-sessions.py`.
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
-
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI. Its own function so `main` holds decisions rather than declarations --
+    the shape `structure_check`'s `function_lines` limit asks for, and the one
+    `install-reconcile-task.py` already had."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--settings",
@@ -134,19 +130,22 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Windows Terminal settings.json (default: this machine's, if it has one)",
     )
+    # The verbs. `--yes` / `--dry-run` are deliberately *not* among them: they say whether
+    # to apply, and `--uninstall --yes` has to be expressible.
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
+    apply_mode = parser.add_mutually_exclusive_group()
+    apply_mode.add_argument(
         "--dry-run",
         dest="dry_run",
         action="store_true",
         default=True,
         help="print the plan without changing anything (default)",
     )
-    mode.add_argument(
+    apply_mode.add_argument(
         "--yes",
         dest="dry_run",
         action="store_false",
-        help="register the profile in Windows Terminal's settings.json",
+        help="apply: register the profile, or confirm an --uninstall",
     )
     mode.add_argument(
         "--check",
@@ -156,6 +155,23 @@ def main(argv: list[str] | None = None) -> int:
             "missing or has drifted, 2 when Windows Terminal is not installed here"
         ),
     )
+    mode.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove the profile from Windows Terminal's settings.json (dry run unless --yes)",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    # The plan prints the profile field by field, and one of those fields is an emoji
+    # icon; a Windows console is cp1252 and raised UnicodeEncodeError on it rather than
+    # printing the plan. Same fix, and the same reason, as `resume-sessions.py`.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+    parser = build_parser()
     args = parser.parse_args(argv)
     path = args.settings or wt_profile.settings_path()
     if args.check:
@@ -167,6 +183,23 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    if args.uninstall:
+        try:
+            settings = wt_profile.read_settings(path)
+            if wt_profile.installed(settings) is None:
+                print(f"install-wt-profile: {wt_profile.PROFILE_NAME} is not in {path}")
+                return 0
+            print(f"Would remove profile {wt_profile.PROFILE_NAME} from {path}")
+            if args.dry_run:
+                print("\nDry run -- nothing changed. Re-run with --yes to remove it.")
+                return 0
+            backup = write_settings(path, wt_profile.without(settings))
+        except OSError as error:
+            print(f"\ninstall-wt-profile: REFUSED -- {error}", file=sys.stderr)
+            return 2
+        print(f"\ninstall-wt-profile: removed {wt_profile.PROFILE_NAME}; backup at {backup}")
+        return 0
 
     try:
         text = path.read_text(encoding="utf-8")

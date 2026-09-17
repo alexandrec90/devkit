@@ -55,6 +55,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
+import installer_cli
 import harness_state
 import sweep
 
@@ -310,10 +311,25 @@ def run_check(schedule: Schedule, runner: Runner = run_command) -> tuple[int, st
     return devkit_schtasks.run_check(schedule.name, task_document(schedule), runner)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI. Its own function so `main` holds decisions rather than declarations --
+    the shape `structure_check`'s `function_lines` limit asks for, and the one
+    `install-reconcile-task.py` already had."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--yes", action="store_true", help="register the task")
+    mode.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove the registered task (dry run unless --yes)",
+    )
+    mode.add_argument(
+        "--status", action="store_true", help="print what the scheduler currently holds"
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="apply: register the task, or confirm an --uninstall",
+    )
     mode.add_argument(
         "--check",
         action="store_true",
@@ -330,7 +346,26 @@ def main(argv: list[str] | None = None) -> int:
             "into .worktrees/ dies the moment reconcile reaps it"
         ),
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+    # Before every other check here: removing a task must not require the runner it points
+    # at to still exist, which is exactly the state a moved or half-uninstalled checkout is
+    # in. `installer_cli.answer` owns what the two verbs mean for all thirteen installers.
+    handled = installer_cli.answer(
+        TASK_NAME,
+        status=args.status,
+        uninstall=args.uninstall,
+        apply=args.yes,
+        run=run_command,
+        windows=WINDOWS,
+    )
+    if handled is not None:
+        return handled
 
     if not valid_time(args.at):
         parser.error(f"--at must be HH:MM in 24-hour time, not {args.at!r}")

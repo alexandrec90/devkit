@@ -1,5 +1,5 @@
 ---
-description: Baseline engineering policy shared by every devkit project — test coverage, script conventions, the vendored harness seam, and the instruction-feedback loop
+description: Baseline engineering policy shared by every devkit project — test coverage, script conventions, the vendored harness seam, and the harness feedback loop that files every defect report on the central ledger
 ---
 
 # Rule: Baseline engineering policy
@@ -159,6 +159,13 @@ What polling has cost is in
 All scripts under `scripts/` are Python — a local desktop and a CI runner are rarely the
 same OS.
 
+**One exception, and it is the only one that can exist:** a *bootstrap* that provisions
+the interpreter cannot be written in it. A script that runs before Python is installed —
+and nothing else — may be a native shell script, and it says in its own header why it is
+not Python. Anything that can assume an interpreter does; "it was easier in PowerShell"
+is not the exception, and a second native script doing work the first could have handed
+to Python is the shape this clause exists to refuse.
+
 - **Expose pure importable functions** behind `if __name__ == '__main__'`, so the logic is
   testable without spawning a subprocess, and keep side effects inside `main()`: the suite
   imports these modules.
@@ -231,22 +238,35 @@ install step.
 The stamp rule, the switch's values and reach, and the drift check for a machine with no
 devkit clone are in [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
-## Guardrail: the instruction-file feedback loop
+## Guardrail: the harness feedback loop
 
 If an instruction in a skill, a rule or a `CLAUDE.md` sent you into a dead end or a wasted
 operation — or a mistake you made would have been prevented by one that isn't there — flag
-it in your report with the file, the line, and a proposed edit.
+it in your report with the file, the line, and a proposed edit. **The harness itself is in
+scope on the same terms**, and this is the half that goes unfiled because it does not look
+like prose: a hook that blocked a correct command, a vendored script that crashed or
+reported success while doing nothing, a guard that refused an edit it should have allowed,
+a scheduled job whose artifact disagrees with what it did.
 
 **Never silently work around a bad instruction.** That fixes your turn and leaves the next
 agent at the same wall; these files only improve if the failures they cause are reported as
 defects in them.
 
-Give the flag a durable copy too — it complements the flag in your reply rather than
-replacing it, and exits 0 on a machine with no `$DEVKIT_DIR`:
+**Saying it in your reply does not file it.** A reply is read once, by someone who is
+mid-task and did not ask to be a bug tracker; the next agent to hit the same wall sees
+none of it. So every flag gets a durable copy on this machine's central ledger, **in the
+turn you noticed it** rather than at the end of the task you may not finish. This
+complements the flag in your reply rather than replacing it, and exits 0 on a machine with
+no `$DEVKIT_DIR`:
 
 ```bash
 python scripts/hooks/report-harness-defect.py --message "<what went wrong>" --command "<the exact command, when one triggered it>"
 ```
+
+The ledger is machine-wide rather than per-project, and a devkit session works it down
+with `/triage-harness` — which is why a report is worth filing from a repo that cannot fix
+the thing it is about, and why "I mentioned it in chat" is the one outcome that leaves the
+defect exactly where it was.
 
 When the defect is in the **vendored harness** rather than in prose, run
 `python scripts/sync-devkit.py --check` first and put its answer, with `DEVKIT_VERSION`, in

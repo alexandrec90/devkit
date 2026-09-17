@@ -188,16 +188,59 @@ def test_a_posix_machine_is_given_the_line_to_paste_rather_than_a_faked_install(
     assert "crontab" in plan and "* * *" in plan
 
 
-def test_uninstall_removes_the_task_by_name(tmp_path):
+def test_uninstall_removes_the_task_by_name(tmp_path, monkeypatch):
+    # Forced, because the verb is answered by `installer_cli.answer`, which reports
+    # "Windows-only; nothing to do here" off Windows -- so without this the assertion
+    # below passes vacuously on a POSIX runner. `scripts/posix-rehearsal.py` is what
+    # caught it.
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    runner = FakeRunner()
+    assert (
+        installer.main(
+            ["--uninstall", "--yes", "--devkit", str(fake_checkout(tmp_path))], runner=runner
+        )
+        == 0
+    )
+    # The query comes first: absence is established by asking, never by reading the
+    # delete's localised error text (`installer_cli.remove`).
+    assert runner.calls == [
+        ["schtasks", "/Query", "/TN", installer.TASK_NAME],
+        ["schtasks", "/Delete", "/TN", installer.TASK_NAME, "/F"],
+    ]
+
+
+def test_uninstall_is_a_dry_run_until_yes(tmp_path, monkeypatch):
+    """This installer used to delete the task on the bare `--uninstall`, alone among the
+    thirteen: `--uninstall` shared the mutually-exclusive group with `--yes`, so the dry
+    run could not be spelled and the verb had to act. It cost a live
+    `devkit-global-tools` registration during an audit of exactly this.
+
+    `WINDOWS` is forced so the empty `calls` below means "the dry run changed nothing"
+    rather than "there is no scheduler on this platform".
+    """
+    monkeypatch.setattr(installer, "WINDOWS", True)
     runner = FakeRunner()
     assert (
         installer.main(["--uninstall", "--devkit", str(fake_checkout(tmp_path))], runner=runner)
         == 0
     )
-    assert runner.calls == [["schtasks", "/Delete", "/TN", installer.TASK_NAME, "/F"]]
+    assert runner.calls == [], "the bare --uninstall reached the scheduler"
 
 
 def test_the_bare_invocation_registers_nothing(tmp_path):
     runner = FakeRunner()
     assert installer.main(["--devkit", str(fake_checkout(tmp_path))], runner=runner) == 0
     assert runner.calls == []
+
+
+def test_build_parser_accepts_every_verb_and_the_apply_flag_with_them():
+    """The CLI, as its own function so `main` holds decisions rather than declarations.
+
+    The assertion that matters is `--uninstall --yes`: while `--yes` sat in the same
+    mutually-exclusive group as the verbs, argparse rejected that combination outright, so
+    the uninstall had no dry run to offer and the bare verb had to act on the machine.
+    """
+    parser = installer.build_parser()
+    assert parser.parse_args(["--uninstall", "--yes"]).uninstall is True
+    assert parser.parse_args(["--check"]).check is True
+    parser.parse_args([])
