@@ -233,6 +233,12 @@ ACTIONS: dict[str, Action] = {
     # a schedule cannot decide: seeing the set at all, and taking it back off again.
     # `--yes` rides in from the task's own picker, so the uninstall is read before it runs.
     "installers": Action("scripts/installers.py", "Machine: Scheduled Jobs", projects=DEVKIT_ONLY),
+    # The read-only half of `reclaim`'s memory question -- who holds the commit charge,
+    # which `claude` processes are yours, what `reap-stale.py` would stop -- and scoped
+    # for `reclaim`'s reason: one machine, one inventory, no checkout to pick.
+    "memory-inventory": Action(
+        "scripts/memory-inventory.py", "Machine: What Is Eating Memory", projects=DEVKIT_ONLY
+    ),
     # Reviewing a UI change before its PR merges: host Vite on the picked branches'
     # frontends -- `npm run dev`, one port each, no Docker anywhere in it.
     #
