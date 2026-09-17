@@ -63,6 +63,41 @@ generated project has, it treated pytest's "no tests collected" as a failure, an
 `tests/test_self_hosting.py` is what keeps devkit from drifting back into shipping a
 utility it does not use.
 
+## New workstation
+
+One line, once, per machine. There is no way to make it zero — every VS Code task in this
+workspace lives in the workspace file, which arrives with the clone this makes — but it is
+the only command a machine ever needs typed at it.
+
+```powershell
+# Dry run is the DEFAULT: prints every step, changes nothing.
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/alexandrec90/devkit/main/scripts/bootstrap-machine.ps1)))
+
+# Apply.
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/alexandrec90/devkit/main/scripts/bootstrap-machine.ps1))) -Yes
+```
+
+It wingets git, Python, uv and VS Code; clones devkit; persists `DEVKIT_DIR`; runs
+`install-installers-schedule.py --yes`; installs the two VS Code extensions the workspace
+tasks resolve their inputs through; and names anything left that only you can answer, such
+as an unset git identity. Every step checks before it acts, so re-running it repairs a
+machine rather than doubling anything up. `-Path` chooses where to clone,
+`-SkipPrerequisites` leaves the software to whatever else manages it.
+
+**After that line the machine maintains itself.** `install-installers-schedule.py` is the
+one installer anybody runs by hand, because it registers `devkit-installers` — which
+discovers every other `scripts/install-*.py` by glob and runs its `--check`, and its
+`--yes` where that says to, daily and at every logon. An installer added next month is
+picked up with no registration step. The tray icon reports what the scheduler is doing,
+and the *Machine: Scheduled Jobs* workspace task manages the set by hand when you want to.
+
+To take it all off again:
+
+```bash
+python scripts/installers.py uninstall        # dry run: what would go
+python scripts/installers.py uninstall --yes
+```
+
 ## Consuming it in a project
 
 ```bash

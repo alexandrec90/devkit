@@ -52,6 +52,9 @@
 		},
 		{
 			"path": "roguelike"
+		},
+		{
+			"path": "social-scraper"
 		}
 	],
 	"extensions": {
@@ -564,6 +567,47 @@
 				"icon": {
 					"id": "flame",
 					"color": "terminal.ansiBrightRed"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"clear": true,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				// The jobs are ticked, not typed, and nothing ticked means ALL of them —
+				// `installers.parse_only` owns that, because a picker the operator
+				// dismissed must not become a silent no-op they read as "nothing to do".
+				//
+				// This is NOT how the jobs stay current. `devkit-installers` does that,
+				// daily and at logon, discovering every `scripts/install-*.py` by glob —
+				// a button someone has to remember is the defect that tier removes. What
+				// a human needs the click for is what a schedule cannot decide: seeing
+				// the set, and taking it back off the machine.
+				//
+				// `uninstall` is dry until the second picker says `--yes`, so the plan is
+				// read before anything is removed. It takes the maintainer off FIRST; see
+				// `installers.MAINTAINER` for why that ordering is load-bearing.
+				"label": "Machine: Scheduled Jobs",
+				"detail": "Tick the jobs (or none, for all) and pick a verb. status: what the scheduler holds, changing nothing. maintain: re-register whatever drifted — the same pass devkit-installers runs at logon. uninstall: take them off this machine, DRY until you pick --yes.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"devkit",
+					"installers",
+					"${input:installerVerb}",
+					// One token, not a flag and a value: `plan_command` drops empty
+					// arguments, and a flag whose value went with them is left dangling.
+					"--only=${input:installerJobs}",
+					"${input:installerApply}"
+				],
+				"icon": {
+					"id": "checklist",
+					"color": "terminal.ansiBrightCyan"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1314,7 +1358,8 @@
 								"devkit",
 								"data-lake",
 								"sports_betting",
-								"roguelike"
+								"roguelike",
+								"social-scraper"
 							]
 						}
 					]
@@ -1352,11 +1397,107 @@
 								"ibkr_trader",
 								"data-lake",
 								"sports_betting",
-								"roguelike"
+								"roguelike",
+								"social-scraper"
 							]
 						}
 					]
 				}
+			},
+			{
+				// The installer short names -- `install-<this>.py`. `minCount` is 0 on
+				// purpose, unlike `adoptProjects` above: an empty tick list means EVERY
+				// job here, which is the common case for `status` and `maintain` and is
+				// what `installers.parse_only` reads "" as. A name that matches nothing
+				// is reported as a failure rather than skipped, so a list that goes stale
+				// against `scripts/install-*.py` says so on the next run instead of
+				// quietly doing less than it was asked.
+				//
+				// Not remembered (`pickString`, no `key`): unlike the nightly consumer
+				// set, the interesting tick here is different every time, and a
+				// remembered one would silently re-apply last week's subset to an
+				// `uninstall`.
+				"id": "installerJobs",
+				"type": "command",
+				"command": "extension.commandvariable.pickStringRemember",
+				"args": {
+					"description": "Which jobs? (none = all of them)",
+					"key": "installerJobs",
+					"multiPick": true,
+					"separator": ",",
+					"optionGroups": [
+						{
+							"label": "Tick jobs, or none for all",
+							"minCount": 0,
+							"options": [
+								"docker-prune",
+								"docker-stop-idle",
+								"git-policy",
+								"global-tools",
+								"installers-schedule",
+								"rc-schedule",
+								"reap-schedule",
+								"reconcile-task",
+								"release-schedule",
+								"tray",
+								"upgrade-schedule",
+								"workspace-status",
+								"wt-profile"
+							]
+						}
+					]
+				}
+			},
+			{
+				// `status` first, because the read-only verb is the one you want most
+				// often and a mis-click on the default should change nothing.
+				"id": "installerVerb",
+				"type": "pickString",
+				"description": "What should happen to them?",
+				"options": [
+					{
+						"label": "status",
+						"value": "status",
+						"description": "What the scheduler holds. Changes nothing."
+					},
+					{
+						"label": "maintain",
+						"value": "maintain",
+						"description": "Re-register whatever drifted — the pass devkit-installers runs at logon."
+					},
+					{
+						"label": "uninstall",
+						"value": "uninstall",
+						"description": "Take them off this machine. Dry unless you pick --yes next."
+					}
+				],
+				"default": "status"
+			},
+			{
+				// Only `uninstall` reads this; `status` and `maintain` ignore it. Kept as
+				// a separate pick rather than folded into the verb so the destructive
+				// combination takes two deliberate choices, and so the default answer to
+				// the second one is still "no".
+				"id": "installerApply",
+				"type": "pickString",
+				"description": "Apply an uninstall? (ignored by status and maintain)",
+				"options": [
+					{
+						"label": "dry run",
+						// A real token, not "". An empty `${input:...}` does not vanish
+						// from the args array -- it reaches argparse as a stray positional
+						// and the task fails. `--dry-run` is redundant with the default
+						// for exactly this reason, as on sweep.py and new-project.py.
+						"value": "--dry-run",
+						"description": "Print what would be removed. Nothing changes."
+					},
+					{
+						"label": "--yes",
+						"value": "--yes",
+						"description": "Actually remove them."
+					}
+				],
+				"default": ""
 			},
 			{
 				// The daemon restart/fix actions are machine-scoped. Running either once
@@ -1370,7 +1511,8 @@
 					"devkit",
 					"data-lake",
 					"sports_betting",
-					"roguelike"
+					"roguelike",
+					"social-scraper"
 				],
 				"default": "carameli"
 			},
@@ -1924,7 +2066,8 @@
 					"devkit",
 					"data-lake",
 					"sports_betting",
-					"roguelike"
+					"roguelike",
+					"social-scraper"
 				],
 				"default": "carameli"
 			},

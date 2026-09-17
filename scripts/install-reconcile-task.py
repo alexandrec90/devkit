@@ -45,6 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
+import installer_cli
 import harness_state
 import sweep
 
@@ -154,50 +155,44 @@ def task_document(python: str, arguments: str, minutes: int) -> str:
 
 
 def uninstall_argv(name: str) -> list[str]:
-    return ["schtasks", "/delete", "/tn", name, "/f"]
+    """This module's own name for it, because its tests are written against that; the
+    argv itself is `installer_cli`'s."""
+    return installer_cli.uninstall_argv(name)
 
 
 def query_argv(name: str) -> list[str]:
-    return ["schtasks", "/query", "/tn", name]
+    return installer_cli.query_argv(name)
 
 
 def _run_argv(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    """`devkit_schtasks.Runner` shape: the process, not a summary of it.
-
-    A failure to *spawn* is reported as a returncode rather than raised, so the caller
-    has one thing to inspect. `schtasks` missing entirely is not an exception worth a
-    traceback in an installer whose whole job is to say what it could and could not do.
-    """
+    """`devkit_schtasks.Runner` shape: a spawn failure is a returncode, not a traceback."""
     try:
         return subprocess.run(list(argv), capture_output=True, text=True, timeout=60, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         return subprocess.CompletedProcess(list(argv), 1, "", str(exc))
 
 
-def _run(argv: list[str]) -> tuple[int, str]:
-    done = _run_argv(argv)
-    return done.returncode, (done.stdout or done.stderr or "").strip()
-
-
 def query_or_remove(args: argparse.Namespace) -> int | None:
     """The `--status` and `--uninstall` modes; None when neither was asked for.
 
-    Split out of `main` so the install path reads as one piece: what is left there is
-    the refusal, the plan, the check and the registration, all about one document.
+    Delegates rather than deciding. This module carried a copy of the logic and so did
+    three others, and all four had drifted from what the six installers wired later do:
+    a task that was already gone read as a *failure* here and as success there, so one
+    tick of the workspace's uninstall verb would report both for the same machine state.
+    `installer_cli.query_or_remove` is the single implementation now.
     """
-    if args.status:
-        code, out = _run(query_argv(args.name))
-        print(out or f"no scheduled task called {args.name}")
-        return 0 if code == 0 else 1
-    if args.uninstall:
-        target = uninstall_argv(args.name)
-        if not args.apply:
-            print(f"Would run: {' '.join(target)}\n\nDry run -- re-run with --yes.")
-            return 0
-        code, out = _run(target)
-        print(out or f"removed {args.name}")
-        return code
-    return None
+    handled = installer_cli.query_or_remove(
+        args.name,
+        status=args.status,
+        uninstall=args.uninstall,
+        apply=args.apply,
+        run=_run_argv,
+    )
+    if handled is None:
+        return None
+    code, message = handled
+    print(message)
+    return code
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -75,7 +75,7 @@ definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
 definitions::scripts/hooks/structure_check.py = 43
 definitions::scripts/hooks/structure_scan.py = 31
-definitions::scripts/install-git-policy.py = 24
+definitions::scripts/install-git-policy.py = 28
 definitions::scripts/instruction-budget.py = 26
 definitions::scripts/new-project.py = 28
 definitions::scripts/plug-projects.py = 30
@@ -98,7 +98,7 @@ dependency::pyproject.toml::pytest = 1
 dependency::pyproject.toml::pytest-xdist = 1
 dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 544
-file_lines::scripts/devkit_project.py = 1725
+file_lines::scripts/devkit_project.py = 1735
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/fix-prs.py = 789
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
@@ -106,7 +106,7 @@ file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
 file_lines::scripts/hooks/structure_check.py = 1078
 file_lines::scripts/hooks/structure_scan.py = 680
-file_lines::scripts/install-git-policy.py = 568
+file_lines::scripts/install-git-policy.py = 656
 file_lines::scripts/instruction-budget.py = 517
 file_lines::scripts/new-project.py = 863
 file_lines::scripts/plug-projects.py = 922
@@ -435,6 +435,11 @@ swallowed_errors::scripts/worktree.py = 1
 # 2026-09-16  recorded: FIFTH record deferring the same fix-prs.py split, which by engineering.md's own three-branch rule is a defect report rather than a raise. What is filling it, measured: the scan-and-menu half (broken_reason..refresh_menu) is 470 lines against the launch half's 250, and every one of the five records names that same seam. This change adds 41 lines and 2 definitions by extracting refresh_unresolved/unresolved_mergeability out of broken_prs, which took that function from complexity 21 back under the limit of 15 -- the trade the 2026-09-06 record already ruled on, per-function over module-level. The split is still owed and still moves the path the workspace task block names for the live --rows picker, so it is still its own PR. Reported via report-harness-defect.py.
 #   definitions::scripts/fix-prs.py -> 33
 #   file_lines::scripts/fix-prs.py -> 809
+
+# 2026-09-16  recorded: The machine tier's install/uninstall parity, re-measured after merging origin/main. Two modules gain lines that have nowhere else to go, and both were already far past these limits before this change. devkit_project.py gains ONE ACTIONS entry and its reasoning (the 'installers' action behind the Machine: Scheduled Jobs task) -- ACTIONS is the single place a dispatched task can be declared, which is the same precedent recorded here on 09-05. install-git-policy.py gains the uninstall the other twelve installers now also have: unconfigure_git, uninstall, render_uninstall_plan and build_parser. THIRD consecutive raise for install-git-policy.py, so per the ratchet rule in .claude/rules/engineering.md this is a defect report rather than a raise. Measured what fills it: of 656 lines, no function is a god function -- main is 36 after this change's own build_parser extraction, and the largest are build_parser at 63, install_files at 53 and compare_install at 52. The 09-15 record predicted six separable responsibilities and named the runtime layout as one of them; main has since cut that tier out into scripts/install_policy_layout.py, so RUNTIME_FILES and POLICY_ENTRYPOINTS are no longer here and the earlier 690/29 figures this record first carried are superseded. FIVE remain uncut: ref reading (resolve_ref/read_blob/in_ref/_generator), the receipt (Receipt/read_receipt/digest), installing (install_files/install/_make_room), drift comparison (Drift/compare_install/worktree_drift/behind_ref/render_drift), and git configuration plus the CLI (configure_git/unconfigure_git/uninstall/ensure_compatible_hooks_path/run_check/build_parser/main). The seam to cut first is still the drift tier: it is five definitions, it imports nothing the install path needs, and it is the half installers.py calls on every maintenance pass. Not bundled here because this change already touches all thirteen installers and a split of the policy installer needs its own reversion check.
+#   definitions::scripts/install-git-policy.py -> 28
+#   file_lines::scripts/devkit_project.py -> 1735
+#   file_lines::scripts/install-git-policy.py -> 656
 
 # 2026-09-17  recorded: pytest-xdist: the push gate ran pytest three times serially (438s + 186s + 320s measured here) on eight idle cores. -n auto takes the same three to 109s + 55s + 111s, all green. Optional at every call site -- scripts/pytest_parallel.py adds the flag only when the plugin imports, so a checkout without it keeps the serial run rather than failing on an unrecognised argument.
 #   dependency::pyproject.toml::pytest-xdist -> 1

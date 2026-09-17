@@ -64,6 +64,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
+import installer_cli
 import harness_state
 import sweep
 
@@ -210,7 +211,9 @@ def crontab_line(schedule: Schedule) -> str:
 
 
 def uninstall_argv(name: str = TASK_NAME) -> list[str]:
-    return ["schtasks", "/Delete", "/TN", name, "/F"]
+    """This module's own name for it, because its tests are written against that; the
+    argv itself is `installer_cli`'s."""
+    return installer_cli.uninstall_argv(name)
 
 
 def render_plan(schedule: Schedule, windows: bool = WINDOWS) -> str:
@@ -265,16 +268,34 @@ def run_check(
     return devkit_schtasks.run_check(schedule.name, task_document(schedule, root), runner)
 
 
-def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI. Its own function so `main` holds decisions rather than declarations --
+    the shape `structure_check`'s `function_lines` limit asks for, and the one
+    `install-reconcile-task.py` already had."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--yes", action="store_true", help="register the task")
     mode.add_argument(
         "--check",
         action="store_true",
         help="report whether a task is registered and still points at this checkout",
     )
-    mode.add_argument("--uninstall", action="store_true", help="remove the task")
+    mode.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove the registered task (dry run unless --yes)",
+    )
+    mode.add_argument(
+        "--status", action="store_true", help="print what the scheduler currently holds"
+    )
+    # Out of the group, because it is the apply flag for two verbs rather than a verb.
+    # While it was in the group, `--uninstall --yes` could not be spelled at all -- which
+    # is why this installer's uninstall used to delete the task on the bare invocation,
+    # alone among the thirteen in having no dry run to get wrong.
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="apply: register the task, or confirm an --uninstall",
+    )
     parser.add_argument("--at", default=DEFAULT_TIME, help="daily start time, HH:MM (24-hour)")
     parser.add_argument(
         "--devkit",
@@ -286,7 +307,26 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
             "into .worktrees/ dies the moment reconcile reaps it"
         ),
     )
+    return parser
+
+
+def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
+    parser = build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+    # Before every other check here: removing a task must not require the runner it points
+    # at to still exist, which is exactly the state a moved or half-uninstalled checkout is
+    # in. `installer_cli.answer` owns what the two verbs mean for all thirteen installers.
+    handled = installer_cli.answer(
+        TASK_NAME,
+        status=args.status,
+        uninstall=args.uninstall,
+        apply=args.yes,
+        run=runner,
+        windows=WINDOWS,
+    )
+    if handled is not None:
+        return handled
 
     if not valid_time(args.at):
         parser.error(f"--at must be HH:MM in 24-hour time, not {args.at!r}")
@@ -297,16 +337,6 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
 
     schedule = schedule_for(args.at, root)
 
-    if args.uninstall:
-        result = runner(uninstall_argv(schedule.name))
-        ok = result.returncode == 0
-        print(
-            f"removed {schedule.name}"
-            if ok
-            else f"could not remove {schedule.name}: {result.stderr.strip()}",
-            file=sys.stdout if ok else sys.stderr,
-        )
-        return 0 if ok else 2
     if args.check:
         code, message = run_check(schedule, runner, root)
         print(message, file=sys.stderr if code else sys.stdout)

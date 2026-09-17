@@ -215,3 +215,16 @@ def test_yes_is_routed_through_install(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(installer, "install", lambda schedule: (True, "scheduled"))
     assert installer.main(["--yes", "--devkit", str(static)]) == 0
     assert "scheduled" in capsys.readouterr().out
+
+
+def test_build_parser_accepts_every_verb_and_the_apply_flag_with_them():
+    """The CLI, as its own function so `main` holds decisions rather than declarations.
+
+    The assertion that matters is `--uninstall --yes`: while `--yes` sat in the same
+    mutually-exclusive group as the verbs, argparse rejected that combination outright, so
+    the uninstall had no dry run to offer and the bare verb had to act on the machine.
+    """
+    parser = installer.build_parser()
+    assert parser.parse_args(["--uninstall", "--yes"]).uninstall is True
+    assert parser.parse_args(["--check"]).check is True
+    parser.parse_args([])

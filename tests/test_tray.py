@@ -186,6 +186,34 @@ def test_make_icon_is_a_no_op_without_a_windows_dll(monkeypatch):
     assert tray.make_icon((1, 2, 3)) is None
 
 
+def test_a_missing_artifact_is_declined_rather_than_raised(tmp_path):
+    """`open_path` runs inside a window procedure. An exception there takes the whole
+    tray down, and the operator is left with no icon -- which looks exactly like a tray
+    reporting that nothing is wrong. A job that has never run has no artifact yet, so
+    this is the ordinary case rather than the exotic one."""
+    assert tray.Tray().open_path(tmp_path / "never-written.log") is False
+
+
+def test_the_installers_report_is_the_one_row_the_scheduler_cannot_supply():
+    """Every other row comes from `schedule_health`, which reads the scheduler -- so a job
+    that was never registered at all is invisible there, because there is nothing to read.
+    `installers.py`'s artifact is where that shows up, which is why it earns a menu row of
+    its own rather than being folded in with the jobs."""
+    assert str(tray.INSTALLERS_ARTIFACT).replace("\\", "/") == "logs/installers.log"
+    installers = load_script("scripts/installers.py")
+    assert tray.INSTALLERS_ARTIFACT == installers.ARTIFACT, (
+        "the tray opens a path installers.py does not write"
+    )
+
+
+def test_the_menu_command_ids_do_not_collide_with_a_job_row():
+    """Job rows are `FIRST_JOB + index`, so a fixed id at or above it would be read as a
+    click on whichever job happened to sit at that offset."""
+    fixed = {tray.CMD_REFRESH, tray.CMD_EXIT, tray.CMD_INSTALLERS}
+    assert len(fixed) == 3, "two menu commands share an id"
+    assert max(fixed) < tray.FIRST_JOB
+
+
 def test_the_window_class_struct_declares_its_own_size():
     """`WNDCLASSEX` is registered by `cbSize`, and a struct whose fields do not match the
     size it declares is refused by `RegisterClassExW` with no error the caller sees."""
