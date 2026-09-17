@@ -10,6 +10,7 @@ makes an owned process look like a leftover fails here before it fails on a desk
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import subprocess
 import time
@@ -84,6 +85,24 @@ def test_windows_rows_are_read_with_names_normalised_and_null_command_lines_kept
         P(4, 0, "system", ""),
         P(18584, 13432, "claude", r"C:\bin\claude.EXE remote-control --name devkit"),
     ]
+
+
+def test_memory_and_age_are_read_when_the_lister_reports_them():
+    text = (
+        '{"ProcessId":7,"ParentProcessId":1,"Name":"node.exe","CommandLine":"node x",'
+        '"PrivatePageCount":1048576,"WorkingSetSize":2097152,"CreationDate":"\\/Date(1757253540000)\\/"}'
+    )
+    row = reap_machine.parse_windows_table(text)[0]
+    assert (row.private, row.rss, row.created) == (1048576, 2097152, 1757253540.0)
+    assert reap_machine.parse_windows_table('{"ProcessId":7,"ParentProcessId":1}')[0].private == 0
+
+
+def test_a_cim_date_is_read_in_either_spelling_and_nothing_else():
+    assert reap_machine.cim_epoch("/Date(1757253540000)/") == 1757253540.0
+    iso = _dt.datetime(2026, 9, 7, 13, 59, tzinfo=_dt.timezone.utc).timestamp()
+    assert reap_machine.cim_epoch("2026-09-07T13:59:00+00:00") == iso
+    assert reap_machine.cim_epoch("yesterday") == 0.0
+    assert reap_machine.cim_epoch(None) == 0.0
 
 
 def test_a_single_row_comes_back_as_an_object_and_is_still_a_table():

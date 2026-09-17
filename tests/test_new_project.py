@@ -1832,3 +1832,50 @@ def test_generated_claude_settings_keep_the_bash_cap_hook(tmp_path):
     ]
 
     assert any("scripts/hooks/enforce-capped-bash.py" in command for command in bash_handlers)
+
+
+def test_the_manifest_survives_a_sync_tool_that_defines_a_dataclass(tmp_path):
+    """The silent failure this loader had, and it took three other tests down with it.
+
+    `_read_manifest_paths` execs `sync-devkit.py` by path. `@dataclass` resolves its
+    string annotations by looking the defining module up in `sys.modules` **by name**,
+    so a loader that execs before registering dies inside `dataclasses` with
+    `AttributeError: 'NoneType' object has no attribute '__dict__'` -- and the `except`
+    here catches `AttributeError` and answers with an empty tuple. Nothing reported it:
+    the stale-pin warning this feeds simply had nothing to compare, and three unrelated
+    tests failed saying a vendored path was missing from a list that was never read.
+    `scripts/CLAUDE.md` names the rule; this is what enforces it on the one loader in
+    the repo that had not applied it.
+
+    Reversion check: drop the `sys.modules[name] = module` line and this fails.
+    """
+    root = tmp_path / "devkit"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "sync-devkit.py").write_text(
+        "from __future__ import annotations\n"
+        "from dataclasses import dataclass\n"
+        "\n"
+        "MANIFEST = ('scripts/hooks/harness_config.py',)\n"
+        "\n"
+        "@dataclass(frozen=True)\n"
+        "class Outcome:\n"
+        "    copied: list[str]\n",
+        encoding="utf-8",
+    )
+
+    assert new_project._read_manifest_paths(root) == ("scripts/hooks/harness_config.py",)
+
+
+def test_reading_the_manifest_leaves_no_module_behind(tmp_path):
+    """Registered for the exec and removed after it. The name is this repo's own
+    `sync-devkit.py`, and leaving it in `sys.modules` would hand the next caller --
+    including a test that has since edited the file -- a stale copy."""
+    before = dict(sys.modules)
+    new_project._read_manifest_paths(REPO_ROOT)
+    assert set(sys.modules) - set(before) == set()
+
+
+def test_an_unreadable_sync_tool_is_still_an_empty_manifest(tmp_path):
+    """The `except` is not the defect and must stay: a project with no sync tool at all
+    has no manifest, and that is a first-class answer rather than a crash."""
+    assert new_project._read_manifest_paths(tmp_path) == ()

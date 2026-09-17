@@ -903,6 +903,12 @@ python scripts/reap-stale.py status               # what it would stop, touching
 python scripts/install-reap-schedule.py --yes     # every 15 minutes, from the static checkout
 ```
 
+The *Machine: What Is Eating Memory* task (`scripts/memory-inventory.py`) is the
+read-only page in front of that: the images holding the most memory, every `claude`
+process with its role and idle time, the MCP servers, every dev server with its owner,
+and `reap-stale.py status`'s own verdict as the last section. It answers the question a
+person asks before deciding what to close, without starting an agent to ask it.
+
 One limit worth knowing: a session spawned in place shares the project's transcript
 directory with every interactive session there, and the ids never appear inside a
 transcript, so such a session reads as active for as long as anyone works in that

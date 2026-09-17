@@ -291,11 +291,40 @@ def detect_release_prepare(root: Path) -> str:
     return f"{FALLBACK_REF_SOURCE} names {ref}, which is not tagged yet" if ref else ""
 
 
+# The hook tier measured 186s serially here and 55s across eight workers, and it is the
+# one step whose argv this file owns -- `lint-all.py`, `run-tests.py` and
+# `posix-rehearsal.py` are project-owned wrappers that decide for themselves.
+#
+# Probed with a subprocess rather than `importlib.util.find_spec`, because the question
+# is about `interpreter(root)` -- the *project's* venv, which is not this hook's
+# interpreter and routinely not even the same Python. Asking the wrong process would
+# hand `-n` to a pytest with no xdist, which is a usage error that fails the gate over a
+# speedup. A consumer that has not installed xdist simply keeps the serial run.
+XDIST_PROBE = "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('xdist') else 1)"
+PYTEST_STEP = "hook tests"
+
+
+def parallel_args(python: str, runner: Runner = subprocess.run) -> list[str]:
+    """`["-n", "auto"]` when `python` can import xdist, `[]` when it cannot or cannot say."""
+    try:
+        probe = runner([python, "-c", XDIST_PROBE], check=False, capture_output=True)
+    except OSError:
+        return []
+    return ["-n", "auto"] if probe.returncode == 0 else []
+
+
 def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
     """Each step with the command that runs it, or None when `root` lacks its file."""
     python = interpreter(root)
+    workers = parallel_args(python)
     return [
-        (step, [python, *step.argv] if (root / step.requires).exists() else None) for step in STEPS
+        (
+            step,
+            [python, *step.argv, *(workers if step.name == PYTEST_STEP else ())]
+            if (root / step.requires).exists()
+            else None,
+        )
+        for step in STEPS
     ]
 
 

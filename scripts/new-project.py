@@ -84,7 +84,7 @@ PRESETS: dict[str, tuple[str, ...]] = {
 # users who cannot hit the fast path. So it must track the newest tag, and
 # `test_fallback_devkit_ref_tracks_the_newest_tag` fails at release time if a tag
 # lands without it being bumped. Bump it in the same commit as the tag.
-FALLBACK_DEVKIT_REF = "v0.11.19"
+FALLBACK_DEVKIT_REF = "v0.11.20"
 
 
 class GeneratorError(RuntimeError):
@@ -203,13 +203,12 @@ def _read_manifest_paths(root: Path) -> tuple[str, ...]:
         if spec is None or spec.loader is None:
             return ()
         module = importlib.util.module_from_spec(spec)
-        # In `sys.modules` BEFORE `exec_module`, per `scripts/CLAUDE.md`. `@dataclass`
-        # resolves its string annotations by looking the defining module up by name, so
-        # exec-first dies inside `dataclasses` with `AttributeError: 'NoneType' object
-        # has no attribute '__dict__'` the moment the target grows a dataclass -- which
-        # `sync-devkit.py` did, and the `except` below then swallowed it and answered
-        # with an EMPTY manifest. Three tests failed saying a vendored path was missing
-        # from a list that had simply not been read.
+        # In `sys.modules` BEFORE `exec_module`, per `scripts/CLAUDE.md`: `@dataclass`
+        # resolves string annotations by module name, so exec-first dies inside
+        # `dataclasses` the moment the target grows one. `sync-devkit.py` did, and the
+        # `except` below swallowed the `AttributeError` and answered with an EMPTY
+        # manifest -- three tests then failed saying a vendored path was missing from a
+        # list that had simply not been read.
         sys.modules[name] = module
         spec.loader.exec_module(module)
         # Plus the gated tier at devkit's own layout: this list feeds the

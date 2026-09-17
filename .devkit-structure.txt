@@ -93,9 +93,10 @@ definitions::scripts/worktree.py = 157
 dependency::pyproject.toml::mypy = 1
 dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::pytest = 1
+dependency::pyproject.toml::pytest-xdist = 1
 dependency::pyproject.toml::ruff = 1
 file_lines::scripts/agent-box.py = 544
-file_lines::scripts/devkit_project.py = 1735
+file_lines::scripts/devkit_project.py = 1741
 file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
@@ -103,7 +104,7 @@ file_lines::scripts/hooks/stop.py = 1110
 file_lines::scripts/hooks/structure_check.py = 1078
 file_lines::scripts/hooks/structure_scan.py = 680
 file_lines::scripts/instruction-budget.py = 517
-file_lines::scripts/new-project.py = 863
+file_lines::scripts/new-project.py = 873
 file_lines::scripts/plug-projects.py = 922
 file_lines::scripts/preview-task.py = 1885
 file_lines::scripts/preview-ui-host.py = 1155
@@ -441,3 +442,15 @@ swallowed_errors::scripts/worktree.py = 1
 #   file_lines::scripts/sync-devkit.py -> 1865
 #   file_lines::scripts/worktree-guard.py -> 2330
 #   file_lines::scripts/worktree.py -> 6177
+
+# 2026-09-16  recorded: one ACTIONS entry registering memory-inventory; devkit_project.py is 1731/500 and already carries the split-the-module finding, which this does not make newly true
+#   file_lines::scripts/devkit_project.py -> 1731
+
+# 2026-09-17  recorded: Merge arithmetic, not new debt: origin/main recorded devkit_project.py at 1735 for the 'installers' ACTIONS entry and this branch recorded 1731 for 'memory-inventory'. Both actions are independent registry entries, so the merge keeps both and the union costs 1741 -- six lines over main's figure, which is exactly the memory-inventory entry and its three-line comment. Neither half is re-argued here; both records above stand, as does the module split they and five earlier records defer. ACTIONS remains the single place a dispatched task can be declared, which is why an entry has nowhere else to go.
+#   file_lines::scripts/devkit_project.py -> 1741
+
+# 2026-09-17  recorded: pytest-xdist: the push gate ran pytest three times serially (438s + 186s + 320s measured here) on eight idle cores. -n auto takes the same three to 109s + 55s + 111s, all green. Optional at every call site -- scripts/pytest_parallel.py adds the flag only when the plugin imports, so a checkout without it keeps the serial run rather than failing on an unrecognised argument.
+#   dependency::pyproject.toml::pytest-xdist -> 1
+
+# 2026-09-17  recorded: new-project.py +10 for the sys.modules registration its manifest loader was missing, and the six-line comment saying why. _read_manifest_paths execs sync-devkit.py by path; @dataclass resolves string annotations by looking the defining module up in sys.modules BY NAME, so exec-before-register dies inside dataclasses the moment the target grows a dataclass -- which sync-devkit.py did in this same change -- and the except clause caught the AttributeError and answered with an EMPTY manifest. Nothing reported it: the stale-pin warning this feeds had nothing to compare, and three unrelated tests failed claiming a vendored path was missing from a list that had never been read. scripts/CLAUDE.md already carries the rule; this was the one loader in the repo that had not applied it, and the two other hand-rolled loaders (hook-tests-live.py, posix-rehearsal.py) both already did. The module is 363 lines past file_lines and its split is deferred elsewhere; a silent-empty-manifest fix is not the change that should carry it.
+#   file_lines::scripts/new-project.py -> 873

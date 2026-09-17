@@ -645,6 +645,14 @@ def test_the_live_scan_reads_each_test_file_once_rather_than_once_per_symbol(mon
     randomly while protecting nothing. Raising 10 to N would have been the ceiling-raise
     `.claude/rules/engineering.md` refuses; counting the work removes the ceiling instead.
 
+    An intervening change on `main` had moved the same assertion from wall clock to
+    `time.process_time()`, which fixes the half this test met while the gate was being
+    parallelised -- eight xdist workers descheduling the scan and a wall-clock read
+    charging it for the other seven. It is a real improvement and it is not this one: a
+    CPU-time bound is still a number about the machine, so the same test stays green on
+    a fast core and red on a slow one while saying nothing about whether the per-symbol
+    scan came back. This counts the scan instead, which no clock can be wrong about.
+
     Reversion check: put a `reference_pattern(symbol).search(...)` back in `gaps` and the
     second assertion fails -- immediately, on any machine, in any cache state.
     """
