@@ -262,6 +262,8 @@ def test_the_record_says_what_shipped_what_went_what_was_held_and_why():
         tuple(held),
         (),
         ("devkit #9 -- would send",),
+        (),
+        (decision(fix_plan.SKIP, failure(kind=fix_plan.BRANCH, base="main", number=0)),),
     )
     text = fix_cycle.render(account)
     assert isinstance(harness, fix_cycle.Harness)
@@ -271,7 +273,8 @@ def test_the_record_says_what_shipped_what_went_what_was_held_and_why():
     assert lines[2].startswith("harness  RED -- 1 harness failure")
     assert lines[3].startswith("upstream devkit #9")
     assert lines[4].startswith("held     carameli #3 -- held until")
-    assert lines[5].startswith("sent     devkit #9")
+    assert lines[5].startswith("skip     carameli origin/main -- ")
+    assert lines[6].startswith("sent     devkit #9")
 
 
 def test_only_a_green_labelled_adoption_is_mergeable_unattended():

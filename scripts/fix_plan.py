@@ -20,12 +20,14 @@ shapes `gh` returns, so `tests/test_fix_plan.py` drives every branch without a n
   test, the vendored file, or the template behind the project-owned file it names --
   belongs upstream. The same fix made eight times in eight consumers is the cost this
   file exists to refuse.
-- **Two shapes are never dispatched.** A release PR is red by construction
+- **Three shapes are never dispatched.** A release PR is red by construction
   (`RELEASING.md`: `test_fallback_devkit_ref_tracks_the_newest_tag` fails until the
   tag exists, and `release-pipeline.py` judges exactly that red), so an agent sent at
-  it can only fail or force. An adoption PR for a tag that is no longer the newest is
+  it can only fail or force -- and so is the default branch at the release commit,
+  until the tag points at it. An adoption PR for a tag that is no longer the newest is
   superseded -- `upgrade-project.py` closes it on its next pass -- so fixing it would
   land a vendored copy the next sweep immediately replaces.
+- **What the session is told** is `fix_prompts.py`, one function per shape.
 - **The ledger** is what makes a second click safe. Every dispatch is recorded under a
   key that names the failure *and the commit it was observed on* (the PR head sha, or
   the run id for a scheduled workflow), so clicking again sends nothing at a failure an
@@ -47,11 +49,20 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-# The three sources of red this plans for. A `COMMIT` is a session's intent the fix pass
+# The four sources of red this plans for. A `COMMIT` is a session's intent the fix pass
 # could not commit: the commit stage refused it, and the branch is the worktree it sits in.
+# A `BRANCH` is a default branch whose own gate is red: a push landed red, so nothing
+# rebased onto it can be green and every PR against it inherits the failure.
 PR = "pr"
 NIGHTLY = "nightly"
 COMMIT = "commit"
+BRANCH = "branch"
+
+# The one test a release commit fails by construction, and the reason a red default
+# branch is not always red: `release-pipeline.py` bumps `FALLBACK_DEVKIT_REF` to a tag
+# that does not exist until the release workflow cuts it on the same commit. That
+# workflow spells the same name as `EXPECTED_RED_TEST`; a test pins the two together.
+RELEASE_TEST = "test_fallback_devkit_ref_tracks_the_newest_tag"
 
 # What a decision does with its failures.
 DISPATCH = "dispatch"  # one agent, in a worktree on the failure's own branch
@@ -93,9 +104,9 @@ KEY_DIGEST = 12
 class Failure:
     """One red thing, with everything the plan and the prompt need to know about it."""
 
-    kind: str  # PR or NIGHTLY
+    kind: str  # PR, NIGHTLY, COMMIT or BRANCH
     project: str  # the checkout name in the workspace registry
-    number: int  # PR number, or the tracker issue's number for a nightly
+    number: int  # PR number, or the tracker issue's number for a nightly; 0 otherwise
     title: str
     url: str
     head: str = ""  # PR head branch; empty for a nightly, which has no branch yet
@@ -168,6 +179,20 @@ def is_vendored(sig: tuple[str, ...]) -> bool:
     return bool(sig) and all(entry.startswith(VENDORED_TESTS) for entry in sig)
 
 
+def is_release_red(sig: tuple[str, ...]) -> bool:
+    """The signature is the newest-tag test and nothing else: a release commit's red."""
+    return bool(sig) and all(entry.rsplit("::", 1)[-1] == RELEASE_TEST for entry in sig)
+
+
+def name_of(failure: Failure) -> str:
+    """How a failure is named in a record: `#412`, the branch it sits on, or `origin/main`."""
+    if failure.kind == BRANCH:
+        return f"origin/{failure.base}"
+    if failure.kind == COMMIT:
+        return failure.head
+    return f"#{failure.number}"
+
+
 # --- the two shapes that never get an agent -------------------------------------------
 
 
@@ -189,6 +214,28 @@ def adoption_tag(head: str, prefixes: Iterable[str]) -> str:
     return ""
 
 
+def skip_reason(failure: Failure, latest_tag: str, prefixes: tuple[str, ...]) -> str:
+    """Why this failure gets no agent, or "" when it gets one. Three shapes, each said."""
+    on_branch = failure.kind in (PR, COMMIT)
+    if on_branch and is_release(failure.head):
+        return (
+            "red by construction: a release PR fails the newest-tag test until the "
+            "tag exists, and release-pipeline.py judges that red itself"
+        )
+    adopts = adoption_tag(failure.head, prefixes) if on_branch else ""
+    if adopts and latest_tag and adopts != latest_tag:
+        return (
+            f"superseded: adopts {adopts} and the newest release is {latest_tag}; "
+            "the upgrade sweep closes it on its next pass"
+        )
+    if failure.kind == BRANCH and is_release_red(failure.signature):
+        return (
+            "red by construction: the release commit fails the newest-tag test until "
+            "its tag exists, and release-pipeline.py judges that itself"
+        )
+    return ""
+
+
 # --- the plan -----------------------------------------------------------------------
 
 
@@ -207,27 +254,8 @@ def plan(
     grouped: dict[tuple[str, ...], list[Failure]] = {}
     decisions: list[Decision] = []
     for failure in sorted(failures, key=lambda f: (f.kind, f.project, f.number)):
-        on_branch = failure.kind in (PR, COMMIT)
-        if on_branch and is_release(failure.head):
-            decisions.append(
-                Decision(
-                    SKIP,
-                    "red by construction: a release PR fails the newest-tag test until the "
-                    "tag exists, and release-pipeline.py judges that red itself",
-                    (failure,),
-                )
-            )
-            continue
-        adopts = adoption_tag(failure.head, prefixes) if on_branch else ""
-        if adopts and latest_tag and adopts != latest_tag:
-            decisions.append(
-                Decision(
-                    SKIP,
-                    f"superseded: adopts {adopts} and the newest release is {latest_tag}; "
-                    "the upgrade sweep closes it on its next pass",
-                    (failure,),
-                )
-            )
+        if why := skip_reason(failure, latest_tag, prefixes):
+            decisions.append(Decision(SKIP, why, (failure,)))
             continue
         if CONFLICT in failure.signature:
             # A conflict is resolved before anything else about the PR is knowable: its
@@ -255,7 +283,7 @@ def plan(
 
 def describe(failure: Failure) -> str:
     """The one-line reason a row is red, for the report and the prompt."""
-    if failure.kind == NIGHTLY:
+    if failure.kind in (NIGHTLY, BRANCH):
         head = f"{failure.workflow} workflow failing on origin/{failure.base}"
     else:
         head = failure.reason or "red"
@@ -312,81 +340,6 @@ def already_sent(decision: Decision, ledger: dict[str, dict]) -> str:
     return str(entry.get("when", "?")) if isinstance(entry, dict) else ""
 
 
-# --- what the agent is told -----------------------------------------------------------
-
-
-def _ids(sig: tuple[str, ...]) -> str:
-    return ", ".join(entry for entry in sig if entry != CONFLICT) or "see the run"
-
-
-def pr_prompt(failure: Failure) -> str:
-    """One branch, in its own worktree: a conflict to resolve, a refused commit, or a red PR.
-
-    Three shapes, one function, because the worktree and the finish line are the same
-    and only the middle differs. The conflict prompt names no failure on purpose: the
-    gate cannot have run, and a resolver told "also fix the tests" fixes the wrong thing.
-    """
-    stop = "If it cannot be done, stop and say what is in the way."
-    vcs = "git"
-    if CONFLICT in failure.signature:
-        return (
-            f"PR #{failure.number} in {failure.project} has a merge conflict with "
-            f"origin/{failure.base}. This worktree is checked out on its head branch "
-            f"{failure.head} with its upstream set, so a bare {vcs} push lands on the PR. "
-            f"Merge origin/{failure.base} in, resolve the conflicts so that both sides' "
-            "intent survives, push, and stop: the gate runs on the push, and whatever it "
-            f"says is the next pass's business, not this session's. {stop}"
-        )
-    if failure.kind == COMMIT:
-        return (
-            f"The commit stage refused the change on {failure.head} in {failure.project}: "
-            f"{_ids(failure.signature)}. The pre-commit output is in {EVIDENCE_DIR}/ in this "
-            "worktree, which is the worktree the change was made in. Fix what it reports, "
-            "rewrite logs/ship-intent.md only if the message no longer fits, and stop: the "
-            f"fix pass commits, pushes and opens the PR. {stop}"
-        )
-    return (
-        f"PR #{failure.number} in {failure.project} is stuck: {failure.reason}. "
-        f"Failing: {_ids(failure.signature)}. The gate's own logs are in {EVIDENCE_DIR}/ "
-        "in this worktree -- read them before running anything. "
-        f"This worktree is checked out on the PR head branch {failure.head} with its "
-        f"upstream set, so a bare {vcs} push lands on the PR. "
-        f"Merge origin/{failure.base} in, fix what the gate is failing on, run the "
-        "targeted tests and the linter, push, and stop: the gate runs on the push and the "
-        f"fix pass reads it. {stop}"
-    )
-
-
-def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
-    """One devkit session for a vendored failure several consumers share."""
-    projects = sorted({f.project for f in failures})
-    urls = ", ".join(f"{f.project} {f.url}" for f in sorted(failures, key=lambda f: f.project))
-    sig = tuple(sorted({entry for f in failures for entry in f.signature}))
-    return (
-        f"The harness is failing in {len(projects)} checkout(s) "
-        f"({', '.join(projects)}): {_ids(sig)}. The fix belongs here in devkit, "
-        "once -- in the vendored file, the test, or the template that generates the "
-        "project-owned file it names -- not in each consumer. Each project's gate logs "
-        f"are in {EVIDENCE_DIR}/<project>/ in this worktree. This worktree is on the "
-        f"fresh branch {branch} off the default branch; when the fix is green, ship it "
-        f"with the ship skill and say which consumer PRs it unblocks: {urls}. "
-        "If it cannot be fixed here, stop and say what is in the way."
-    )
-
-
-def nightly_prompt(failure: Failure, branch: str) -> str:
-    """A scheduled workflow that failed on the default branch: fix on a fresh branch."""
-    return (
-        f"The {failure.workflow} workflow in {failure.project} is failing on "
-        f"origin/{failure.base}; issue #{failure.number} ({failure.url}) tracks it. "
-        f"Failing: {_ids(failure.signature)}. Its logs are in {EVIDENCE_DIR}/ in this "
-        f"worktree. This worktree is on the fresh branch {branch} off "
-        f"origin/{failure.base}. Fix it, run the targeted tests and the linter, and ship "
-        "it with the ship skill; the issue closes itself when the workflow next passes. "
-        "If it cannot be fixed, stop and say what is in the way."
-    )
-
-
 # --- the report ---------------------------------------------------------------------
 
 
@@ -394,7 +347,7 @@ def render(decisions: Iterable[Decision], ledger: dict[str, dict]) -> str:
     """The plan, for the terminal: what will be sent, what was already, what is skipped."""
     lines = []
     for decision in decisions:
-        names = ", ".join(f"{f.project} #{f.number}" for f in decision.failures)
+        names = ", ".join(f"{f.project} {name_of(f)}" for f in decision.failures)
         sent = already_sent(decision, ledger)
         if decision.action == SKIP:
             lines.append(f"skip     {names} -- {decision.note}")

@@ -148,18 +148,6 @@ def test_the_newest_release_is_read_as_written(monkeypatch, tmp_path):
     assert ev.newest_release(tmp_path) == "v0.11.21"
 
 
-def test_the_default_branch_is_green_when_its_newest_completed_gate_passed():
-    runs = [
-        {"databaseId": 3, "status": "in_progress", "conclusion": ""},
-        {"databaseId": 2, "status": "completed", "conclusion": "success"},
-        {"databaseId": 1, "status": "completed", "conclusion": "failure"},
-    ]
-    assert ev.default_branch_green(table({("run", "list"): runs}), "main") is True
-    assert ev.default_branch_green(table({("run", "list"): runs[2:]}), "main") is False
-    assert ev.default_branch_green(table({("run", "list"): runs[:1]}), "main") is None
-    assert ev.default_branch_green(table({}), "main") is None
-
-
 def test_no_tags_is_no_answer(monkeypatch, tmp_path):
     monkeypatch.setattr(
         ev.sweep, "git_for", lambda _p: lambda *a: subprocess.CompletedProcess(a, 1, "", "")
@@ -315,3 +303,114 @@ def test_evidence_already_in_the_worktree_is_left_where_it_is(tmp_path):
 def test_nothing_to_place_places_nothing(tmp_path, evidence):
     failure = fix_plan.Failure(fix_plan.PR, "carameli", 1, "", "", evidence=evidence)
     assert ev.place(failure, tmp_path) is None
+
+
+# --- a default branch's own gate --------------------------------------------------------
+
+
+RELEASE_RED = f"FAILED tests/test_new_project.py::{fix_plan.RELEASE_TEST} - bump the constant\n"
+
+
+def test_one_slot_per_failure_named_for_what_it_is():
+    assert ev.evidence_slot(fix_plan.Failure(fix_plan.PR, "carameli", 412, "", "")) == (
+        "carameli-pr-412"
+    )
+    assert ev.evidence_slot(fix_plan.Failure(fix_plan.NIGHTLY, "carameli", 9, "", "")) == (
+        "carameli-nightly-9"
+    )
+    assert ev.evidence_slot(
+        fix_plan.Failure(fix_plan.COMMIT, "carameli", 0, "", "", head="agent/i-0919")
+    ) == ("carameli-commit-agent-i-0919")
+    assert ev.evidence_slot(
+        fix_plan.Failure(fix_plan.BRANCH, "devkit", 0, "", "", base="main")
+    ) == ("devkit-branch-main")
+
+
+def test_the_newest_completed_run_is_the_branchs_verdict():
+    runs = [
+        {"databaseId": 3, "status": "in_progress", "conclusion": ""},
+        {"databaseId": 2, "status": "completed", "conclusion": "failure"},
+    ]
+    assert ev.default_branch_run(table({("run", "list"): runs}), "main")["databaseId"] == 2
+    assert ev.default_branch_run(table({("run", "list"): runs[:1]}), "main") == {}
+    assert ev.default_branch_run(table({}), "main") == {}
+
+
+def test_a_tag_pointing_at_the_sha_is_the_release_workflows_verdict():
+    assert ev.is_tagged(lambda *a: subprocess.CompletedProcess(a, 0, "v0.11.23\n", ""), "fb17")
+    assert not ev.is_tagged(lambda *a: subprocess.CompletedProcess(a, 0, "\n", ""), "fb17")
+    assert not ev.is_tagged(lambda *a: subprocess.CompletedProcess(a, 1, "", ""), "fb17")
+    assert not ev.is_tagged(lambda *a: pytest.fail("no sha, no call"), "")
+
+
+def branch_world(monkeypatch, conclusion: str, summary: str, tags: str):
+    runs = [
+        {
+            "databaseId": 55,
+            "status": "completed",
+            "conclusion": conclusion,
+            "headSha": "fb17a310",
+            "url": "u/55",
+            "workflowName": "PR Gate",
+        }
+    ]
+
+    def gh(*args):
+        if args[:2] == ("run", "list"):
+            return subprocess.CompletedProcess(args, 0, json.dumps(runs), "")
+        if args[:2] == ("run", "download"):
+            target = Path(args[-1]) / "test-failures"
+            target.mkdir(parents=True)
+            (target / "test-failures.log").write_text(summary, encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(f"unexpected {args}")
+
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+    monkeypatch.setattr(
+        ev.sweep, "git_for", lambda _p: lambda *a: subprocess.CompletedProcess(a, 0, tags, "")
+    )
+    monkeypatch.setattr(ev.tb, "detect_default_branch", lambda _git, fallback="main": "main")
+
+
+def test_a_green_default_branch_is_green_and_no_failure(monkeypatch, tmp_path):
+    branch_world(monkeypatch, "success", "", "")
+    assert ev.read_default_branch("devkit", tmp_path, tmp_path / "ev") == (True, None)
+
+
+def test_a_red_default_branch_is_a_failure_with_its_run_downloaded(monkeypatch, tmp_path):
+    branch_world(monkeypatch, "failure", SUMMARY, "")
+    green, failure = ev.read_default_branch("carameli", tmp_path, tmp_path / "ev")
+    assert green is False and failure is not None
+    assert (failure.kind, failure.project, failure.number) == (fix_plan.BRANCH, "carameli", 0)
+    assert (failure.base, failure.sha, failure.run_id) == ("main", "fb17a310", "55")
+    assert failure.workflow == "PR Gate" and failure.url == "u/55"
+    assert failure.signature == ("tests/test_x.py::test_y",)
+    assert Path(failure.evidence) == tmp_path / "ev" / "carameli-branch-main"
+
+
+def test_a_tagged_release_commits_red_is_green(monkeypatch, tmp_path):
+    """The v0.11.23 shape: main's newest gate failed on the newest-tag test and nothing
+    else, and the tag now points at that commit -- the release accepted it."""
+    branch_world(monkeypatch, "failure", RELEASE_RED, "v0.11.23\n")
+    assert ev.read_default_branch("devkit", tmp_path, tmp_path / "ev") == (True, None)
+
+
+def test_an_untagged_release_commits_red_is_a_failure_for_the_plan_to_skip(monkeypatch, tmp_path):
+    branch_world(monkeypatch, "failure", RELEASE_RED, "")
+    green, failure = ev.read_default_branch("devkit", tmp_path, tmp_path / "ev")
+    assert green is False and failure is not None
+    assert fix_plan.is_release_red(failure.signature)
+
+
+def test_an_unreadable_gate_is_no_verdict(monkeypatch, tmp_path):
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: table({}))
+    monkeypatch.setattr(ev.sweep, "git_for", lambda _p: lambda *a: None)
+    monkeypatch.setattr(ev.tb, "detect_default_branch", lambda _git, fallback="main": "main")
+    assert ev.read_default_branch("devkit", tmp_path, tmp_path / "ev") == (None, None)
+
+
+def test_every_checkout_on_disk_has_its_default_branch_read(monkeypatch, tmp_path):
+    workspace = tmp_path / "alex.code-workspace"
+    (tmp_path / "devkit").mkdir()
+    monkeypatch.setattr(ev, "read_default_branch", lambda name, _d, _r: (name == "devkit", None))
+    assert ev.collect_default_branches(workspace, ["devkit", "missing"]) == {"devkit": (True, None)}
