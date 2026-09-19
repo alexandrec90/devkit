@@ -384,6 +384,10 @@ ALLOWED_MISSING = {
     "pyvenv.cfg": "the file that makes a directory a virtualenv, named as the thing "
     "`devkit_schtasks.windowless` reads at runtime; it exists in every `.venv`, all of "
     "which are untracked, and never at the root of the repo",
+    ".github/pull_request_template.md": "the file the ship skill names in order to say "
+    "not to go looking for one; its absence is the decision, since `gh pr create "
+    "--body-file` overrides a template and the PR body shape lives in that vendored "
+    "step instead",
 }
 
 # Version literals prose is allowed to carry, with the reason each is not a pin that
@@ -415,6 +419,32 @@ def test_no_skill_wraps_a_command_the_gate_does_not_block():
             if command.startswith(("python ", "python3 ")):
                 offenders.append(f"{skill.parent.name}: {command}")
     assert not offenders, "wrapped commands the gate does not block: " + "; ".join(offenders)
+
+
+def test_a_skill_that_names_a_pr_template_says_body_file_overrides_it():
+    """A PR template is a prefill for the web UI, and `--body-file` overrides it.
+
+    So the lookup is pure cost: a glob and a read on every ship, which can change
+    nothing about the body that actually gets sent. The ship skill used to say
+    "inspect the repository's PR template" one clause before it passed `--body-file`,
+    and agents duly went looking -- in a repo that has no template, and never will,
+    because the body shape belongs in the vendored step where it is drift-checked.
+
+    Naming a template is fine; naming it *without* the override fact is what recreates
+    the wasted lookup, here or in any skill that later grows one.
+    """
+    offenders: list[str] = []
+    for skill in sorted(REPO_ROOT.glob(".claude/skills/*/SKILL.md")):
+        text = skill.read_text(encoding="utf-8")
+        if not re.search(r"pull_request_template|PR template", text, re.IGNORECASE):
+            continue
+        if not re.search(r"`--body-file`[^.]{0,80}overrides", text):
+            offenders.append(skill.parent.name)
+    assert not offenders, (
+        "skills name a PR template without saying `--body-file` overrides one: "
+        + ", ".join(offenders)
+        + ". Say so, or stop naming the template."
+    )
 
 
 def test_the_repo_carries_no_agents_md():
