@@ -44,6 +44,35 @@ Also glance at `.worktrees/` itself: a directory there that no row names is a cl
 nothing registered (`git -C <dir> worktree list` says whether it is even a worktree), and
 nothing will ever reap it. Treat it as stranded with no lease.
 
+### The session tier, which no schedule reaps either
+
+```bash
+python scripts/agent-worktree.py list
+```
+
+`.claude/worktrees/<name>` — what `claude --worktree` and a remote session cut — is a
+second stranding surface, and the reason it needs naming here is that **every signal this
+skill runs on is absent there**: no lease, so `reconcile` never sees one; no registration,
+so `worktree.py list` does not either; not under `.worktrees/`, so the paragraph above
+misses it too. The only thing that ever removed one was Claude Code's own offer on the way
+out, which applies only to a worktree that is **UNCHANGED** — and a repo whose commit
+hooks rewrite a generated file (devkit's `detect-secrets` rewrites `.secrets.baseline`'s
+`generated_at` on every commit) has no such worktree, so the offer never fires and they
+accumulate without limit. 78 across devkit, carameli and roguelike when this was reported,
+three of them holding unshipped work with tests.
+
+Steps 2 and 3 judge one of these exactly as they judge a box — the diff is the diff —
+and only step 4 differs, because there is no lease to rescue or reap. Confirm the
+directory is a worktree with `worktree list` inside it, then remove it from the project
+checkout with `worktree remove <name>`, which the `remove` verb of
+[`scripts/agent-worktree.py`](../../../scripts/agent-worktree.py) also drives.
+
+Removing without `--force` is the right default here and not the timidity it looks like:
+it refuses a dirty tree, which is the one case step 3 may not have read yet, and **the
+branch survives either way** — so a removal never destroys committed work, only the
+checkout of it. Ship the ones holding work first, as an ordinary push and `gh pr create`;
+`worktree.py rescue` is the box tier's verb and does not apply.
+
 ## 2. Read each one
 
 Per box, in this order, and stop as soon as the decision is clear:
