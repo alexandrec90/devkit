@@ -289,13 +289,13 @@ ACTIONS: dict[str, Action] = {
     # registry and one port registry on this machine. Run once per selected checkout it
     # would draw the same cross-checkout dropdown two or three times over. The project
     # dimension lives INSIDE the menu, as the first of the two nested pickers.
-    "fix-prs": Action("scripts/fix-prs.py", "Agent: Fix What Is Red", projects=DEVKIT_ONLY),
+    "fix-pass": Action("scripts/fix-pass.py", "Agent: Fix What Is Red", projects=DEVKIT_ONLY),
     # The worktree pair. Both runtimes cut their own now -- `claude --worktree` inside the
     # checkout, `codex --worktree` under `~/.codex/` behind a repo digest -- so these rows
     # are not the only way to get one. They stay because `new` asks which checkout and
     # which base branch first, and `remove` is the only verb that reads every tier at once.
     #
-    # DEVKIT_ONLY and a literal `--project devkit` for `fix-prs`'s reason exactly: the
+    # DEVKIT_ONLY and a literal `--project devkit` for `fix-pass`'s reason exactly: the
     # menu is one scan across every checkout in the registry, so the checkout is a column
     # in the dropdown rather than a scope for the task. Run per selected checkout, each
     # would draw the same cross-checkout list two or three times over.

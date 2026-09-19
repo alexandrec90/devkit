@@ -102,6 +102,7 @@ BRANCH_DELIVERY_JOBS = (
     "devkit-worktree-reconcile",
     "devkit-upgrade-projects",
     "devkit-release",
+    "devkit-fix-pass",
 )
 
 # What reads as "off" to a human must not switch the harness off, the same asymmetry

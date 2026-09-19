@@ -47,12 +47,15 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-# The two sources of red this plans for.
+# The three sources of red this plans for. A `COMMIT` is a session's intent the fix pass
+# could not commit: the commit stage refused it, and the branch is the worktree it sits in.
 PR = "pr"
 NIGHTLY = "nightly"
+COMMIT = "commit"
 
 # What a decision does with its failures.
 DISPATCH = "dispatch"  # one agent, in a worktree on the failure's own branch
+RESOLVE = "resolve"  # the same worktree, a conflict-only prompt, and nothing about the gate
 UPSTREAM = "upstream"  # one agent in devkit, for a signature shared across consumers
 SKIP = "skip"  # nothing, and the note says why
 
@@ -204,7 +207,8 @@ def plan(
     grouped: dict[tuple[str, ...], list[Failure]] = {}
     decisions: list[Decision] = []
     for failure in sorted(failures, key=lambda f: (f.kind, f.project, f.number)):
-        if failure.kind == PR and is_release(failure.head):
+        on_branch = failure.kind in (PR, COMMIT)
+        if on_branch and is_release(failure.head):
             decisions.append(
                 Decision(
                     SKIP,
@@ -214,7 +218,7 @@ def plan(
                 )
             )
             continue
-        adopts = adoption_tag(failure.head, prefixes) if failure.kind == PR else ""
+        adopts = adoption_tag(failure.head, prefixes) if on_branch else ""
         if adopts and latest_tag and adopts != latest_tag:
             decisions.append(
                 Decision(
@@ -224,6 +228,12 @@ def plan(
                     (failure,),
                 )
             )
+            continue
+        if CONFLICT in failure.signature:
+            # A conflict is resolved before anything else about the PR is knowable: its
+            # gate has no merge ref to run against. The resolver is told nothing about
+            # the failures; if it is still red afterwards, the next pass sees a plain one.
+            decisions.append(Decision(RESOLVE, describe(failure), (failure,)))
             continue
         grouped.setdefault(failure.signature, []).append(failure)
 
@@ -310,16 +320,40 @@ def _ids(sig: tuple[str, ...]) -> str:
 
 
 def pr_prompt(failure: Failure) -> str:
-    """One PR, on its own head branch, with the gate's own words in the worktree."""
+    """One branch, in its own worktree: a conflict to resolve, a refused commit, or a red PR.
+
+    Three shapes, one function, because the worktree and the finish line are the same
+    and only the middle differs. The conflict prompt names no failure on purpose: the
+    gate cannot have run, and a resolver told "also fix the tests" fixes the wrong thing.
+    """
+    stop = "If it cannot be done, stop and say what is in the way."
+    vcs = "git"
+    if CONFLICT in failure.signature:
+        return (
+            f"PR #{failure.number} in {failure.project} has a merge conflict with "
+            f"origin/{failure.base}. This worktree is checked out on its head branch "
+            f"{failure.head} with its upstream set, so a bare {vcs} push lands on the PR. "
+            f"Merge origin/{failure.base} in, resolve the conflicts so that both sides' "
+            "intent survives, push, and stop: the gate runs on the push, and whatever it "
+            f"says is the next pass's business, not this session's. {stop}"
+        )
+    if failure.kind == COMMIT:
+        return (
+            f"The commit stage refused the change on {failure.head} in {failure.project}: "
+            f"{_ids(failure.signature)}. The pre-commit output is in {EVIDENCE_DIR}/ in this "
+            "worktree, which is the worktree the change was made in. Fix what it reports, "
+            "rewrite logs/ship-intent.md only if the message no longer fits, and stop: the "
+            f"fix pass commits, pushes and opens the PR. {stop}"
+        )
     return (
         f"PR #{failure.number} in {failure.project} is stuck: {failure.reason}. "
         f"Failing: {_ids(failure.signature)}. The gate's own logs are in {EVIDENCE_DIR}/ "
         "in this worktree -- read them before running anything. "
         f"This worktree is checked out on the PR head branch {failure.head} with its "
-        "upstream set, so a bare git push lands on the PR. "
+        f"upstream set, so a bare {vcs} push lands on the PR. "
         f"Merge origin/{failure.base} in, fix what the gate is failing on, run the "
-        "targeted tests and the linter, push, and then merge the PR once the gate is "
-        "green. If it cannot be made green, stop and say what is in the way."
+        "targeted tests and the linter, push, and stop: the gate runs on the push and the "
+        f"fix pass reads it. {stop}"
     )
 
 
@@ -327,10 +361,10 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
     """One devkit session for a vendored failure several consumers share."""
     projects = sorted({f.project for f in failures})
     urls = ", ".join(f"{f.project} {f.url}" for f in sorted(failures, key=lambda f: f.project))
-    sig = next((f.signature for f in failures if f.signature), ())
+    sig = tuple(sorted({entry for f in failures for entry in f.signature}))
     return (
-        f"The same vendored test(s) fail on the open PR of {len(projects)} consumer "
-        f"projects ({', '.join(projects)}): {_ids(sig)}. The fix belongs here in devkit, "
+        f"The harness is failing in {len(projects)} checkout(s) "
+        f"({', '.join(projects)}): {_ids(sig)}. The fix belongs here in devkit, "
         "once -- in the vendored file, the test, or the template that generates the "
         "project-owned file it names -- not in each consumer. Each project's gate logs "
         f"are in {EVIDENCE_DIR}/<project>/ in this worktree. This worktree is on the "

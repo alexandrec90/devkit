@@ -453,7 +453,7 @@ python scripts/harness-switch.py --off --job devkit-tray  # one scheduled job, f
 | --- | --- | --- |
 | `hooks` | every hook, the branch tier included | `DEVKIT_HOOKS_OFF=1` in the user settings and the user environment |
 | `instructions` | every `CLAUDE.md` and `.claude/rules/*.md`, at every tier | moved to `logs/harness-switch/`, tracked ones marked `skip-worktree` |
-| `jobs` | `devkit-worktree-reconcile`, `devkit-upgrade-projects`, `devkit-release` | `schtasks /Change /DISABLE` |
+| `jobs` | `devkit-worktree-reconcile`, `devkit-upgrade-projects`, `devkit-release`, `devkit-fix-pass` | `schtasks /Change /DISABLE` |
 
 Nothing is deleted: files are held and restored byte for byte, jobs are disabled rather
 than unregistered, and `--on` is the inverse of `--off`. A job stood down by name or by
@@ -520,17 +520,36 @@ list, whose rows carry what each worktree holds (`clean and pushed`, `2 uncommit
 path(s)`): read from a cache, that warning would be as old as the last scheduled pass, and
 it describes what the click is about to destroy.
 
-### Sending an agent at whatever is red
+### Shipping is an intent file; the fix pass does the rest
 
-`reconcile` merges what is green and labelled, so a PR whose base moved under it or whose
-gate failed is the state every scheduled pass steps over, and a scheduled workflow that
-failed on the default branch has no PR at all — only the issue
-`scheduled-failure-issue.yml` opens for it. `scripts/fix-prs.py` is the way back in for
-both, and it decides for itself what to send an agent at. The *Agent: Fix What Is Red*
-task asks one question — which agent — and the script scans every checkout for red PRs
-and open scheduled-failure issues, downloads what each gate actually said (the
-`logs/test-failures.log` artifact, or the failed step names when there is none), and
-plans from that:
+A session that is done writes `logs/ship-intent.md` into its worktree — the commit
+subject on the first line, the body after a blank one — and stops. That is the whole of
+the `ship` skill now. No session commits, pushes, opens a PR or waits on a gate: the only
+thing it knows that nothing else can recover is *why* the change was made.
+
+`scripts/fix-pass.py` is what does the rest, every half hour once `devkit.fixPass` in the
+workspace file is switched on (`scripts/install-fix-pass-task.py` registers it, wired and
+off), or by hand through the *Agent: Fix What Is Red* task, which passes `dispatch`
+explicitly and asks only which agent. One pass, in order:
+
+1. **Ship every intent.** Run the tree's commit-stage fixers, commit with the message,
+   push with the push gate skipped, open the PR with the `automerge` label, record the
+   outcome in `logs/ship-state.json` beside the intent. A dirty tree with no intent is a
+   session still working and is never touched; a refused commit is a failure like any
+   other, with the pre-commit output as its evidence.
+2. **Collect everything red** — refused commits, red PRs, open scheduled-failure issues —
+   with what each gate actually said (`scripts/gate_evidence.py`), and classify each as
+   harness, project or unknown (`scripts/fix_cycle.py`).
+3. **Harness first.** While anything harness-shaped is red — a vendored test, a
+   signature shared across consumers, devkit's own default branch, a release still being
+   adopted — one devkit session gets the whole set and every project fixer is held, and
+   the record says so.
+4. **Then projects**, conflicts first, each under the dispatch ledger and a daily cap.
+5. **Merge green adoption PRs**, and nothing else. Every other green PR waits for you.
+
+`--mode plan` writes the whole plan to `logs/fix-pass.log` and does nothing, which is
+what the scheduled job does while the switch says `plan`. What each dispatch looks like
+(`scripts/fix_plan.py`):
 
 - **A red PR** gets a worktree on its own head branch — upstream set, so a bare push
   lands on the PR — with the gate's logs under `logs/gate/` and a prompt naming the
@@ -549,15 +568,14 @@ plans from that:
   is superseded — the upgrade sweep closes those itself.
 
 A ledger under the workspace's `.worktrees/` records every dispatch against the commit it
-was observed on, so a second click sends nothing at a failure an agent is already on;
-`--redo` overrides it, and `--dry-run` prints the plan and opens nothing. **Nothing
-schedules this**: a session is paid for, and the dispatch stays behind a click by
-decision.
+was observed on, so a second pass sends nothing at a failure an agent is already on, and
+`fix_cycle.PER_TARGET_PER_DAY` and `PER_DAY` cap what a day can spend; past the cap a
+target reads "needs a human". A scheduled pass always uses `claude-bg`.
 
 ```bash
-python scripts/fix-prs.py --dry-run                           # the plan, nothing opened
-python scripts/fix-prs.py --agent claude                      # send it, one tab per decision
-python scripts/fix-prs.py --list                              # what is red, per checkout
+python scripts/fix-pass.py --mode plan                        # the whole pass, nothing done
+python scripts/fix-pass.py --mode dispatch --agent claude     # one pass, tabs you can watch
+python scripts/fix-prs.py --dry-run                           # the PR half alone, no shipping
 python scripts/fix-prs.py --picks "devkit:88 roguelike:16"    # by hand: these PRs, no plan
 ```
 
@@ -743,6 +761,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-tray` | `scripts/install-tray.py` | at logon, resident | `logs/tray.log` |
 | `devkit-installers` | `scripts/install-installers-schedule.py` | daily 08:45, and at logon | `logs/installers.log` |
 | `devkit-workspace-status` | `scripts/install-workspace-status.py` | daily 09:00 | `logs/scheduled-workspace-status.log` |
+| `devkit-fix-pass` | `scripts/install-fix-pass-task.py` | every 30 min, behind `devkit.fixPass` | `logs/fix-pass.log` |
 
 #### The one installer you run by hand
 

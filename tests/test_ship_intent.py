@@ -1,0 +1,293 @@
+"""`scripts/ship_intent.py`: the intent file, and what the pass does with one.
+
+Every git, pre-commit and gh call goes through an injected runner or a patched `gh_for`,
+so the suite asserts the argv and the state file, never a repository.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import fix_plan
+import ship_intent
+
+NOW = _dt.datetime(2026, 9, 19, 9, 0, tzinfo=_dt.UTC)
+
+
+def intent(tmp_path, subject="Teach the sweep about labels", body="Because.") -> ship_intent.Intent:
+    tree = tmp_path / "carameli" / ".claude" / "worktrees" / "labels"
+    (tree / "logs").mkdir(parents=True, exist_ok=True)
+    (tree / ship_intent.INTENT_FILE).write_text(f"{subject}\n\n{body}\n", encoding="utf-8")
+    return ship_intent.Intent("carameli", tree, "agent/labels-0919", subject, body)
+
+
+class Runner:
+    """Answers every argv with 0 and `answers[verb]`, recording what ran and where."""
+
+    def __init__(
+        self, answers: dict[str, tuple[int, str, str]] | None = None, porcelain=" M a.py\n"
+    ):
+        self.answers = answers or {}
+        self.porcelain = porcelain
+        self.calls: list[tuple[list[str], Path, dict | None]] = []
+
+    def __call__(self, argv, cwd, env=None):
+        self.calls.append(([str(a) for a in argv], Path(cwd), env))
+        verb = " ".join(str(a) for a in argv[:2])
+        if argv[:3] == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(argv, 0, self.porcelain, "")
+        if argv[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(argv, 0, "abc123\n", "")
+        code, out, err = self.answers.get(verb, (0, "", ""))
+        return subprocess.CompletedProcess(argv, code, out, err)
+
+    def verbs(self) -> list[str]:
+        return [" ".join(argv[:2]) for argv, _cwd, _env in self.calls]
+
+
+def gh_ok(*_a):
+    return lambda *args: subprocess.CompletedProcess(["gh", *args], 0, "https://x/pull/7", "")
+
+
+# --- the intent file ----------------------------------------------------------------
+
+
+def test_the_first_line_is_the_subject_and_the_rest_is_the_body():
+    assert ship_intent.parse_intent("# Fix the thing\n\nBecause it\nwas broken.\n") == (
+        "Fix the thing",
+        "Because it\nwas broken.",
+    )
+    assert ship_intent.parse_intent("   \n") == ("", "")
+
+
+def test_the_digest_is_the_words_not_the_file(tmp_path):
+    one = intent(tmp_path)
+    same = ship_intent.Intent("other", tmp_path, "agent/x", one.subject, one.body)
+    assert one.digest == same.digest
+    assert one.digest != intent(tmp_path, body="Different.").digest
+
+
+def test_intents_are_found_across_every_worktree_of_every_checkout(tmp_path, monkeypatch):
+    """Through `git worktree list`, so a box, a `--worktree` checkout and the static
+    checkout on a task branch are all the same case; the default branch is not."""
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "devkit").mkdir()
+    ready = intent(tmp_path)
+    parked = tmp_path / "carameli"
+    (parked / "logs").mkdir()
+    (parked / ship_intent.INTENT_FILE).write_text("Never\n", encoding="utf-8")
+    listing = (
+        f"worktree {parked.as_posix()}\nHEAD 1\nbranch refs/heads/main\n\n"
+        f"worktree {ready.tree.as_posix()}\nHEAD 2\nbranch refs/heads/agent/labels-0919\n\n"
+        f"worktree {(tmp_path / 'nowhere').as_posix()}\nHEAD 3\nbranch refs/heads/agent/other\n"
+    )
+
+    def git_for(project_dir):
+        def git(*args):
+            if args[:2] == ("worktree", "list"):
+                mine = listing if project_dir.name == "carameli" else ""
+                return subprocess.CompletedProcess(args, 0, mine, "")
+            if args[0] == "symbolic-ref":
+                return subprocess.CompletedProcess(args, 0, "origin/main\n", "")
+            return subprocess.CompletedProcess(args, 1, "", "")
+
+        return git
+
+    found = ship_intent.find_intents(tmp_path, ["carameli", "devkit", "ghost"], git_for)
+    assert [(i.project, i.branch, i.subject) for i in found] == [
+        ("carameli", "agent/labels-0919", "Teach the sweep about labels")
+    ]
+
+
+def test_a_checkout_git_cannot_list_is_passed_over(tmp_path):
+    (tmp_path / "carameli").mkdir()
+    assert (
+        ship_intent.find_intents(
+            tmp_path, ["carameli"], lambda _d: lambda *a: subprocess.CompletedProcess(a, 1, "", "")
+        )
+        == []
+    )
+
+
+# --- shipping one --------------------------------------------------------------------
+
+
+def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_opens_the_pr(
+    tmp_path, monkeypatch
+):
+    one = intent(tmp_path)
+    run = Runner()
+    plans = []
+
+    def ensure_pr(gh, plan):
+        plans.append(plan)
+        return "https://x/pull/7", True, ""
+
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", ensure_pr)
+    out = ship_intent.ship_one(one, r"C:\py\python.exe", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.SHIPPED and out.url == "https://x/pull/7"
+    assert run.verbs() == [
+        "git status",
+        r"C:\py\python.exe scripts/ship.py",
+        "git add",
+        "git commit",
+        "git push",
+        "git rev-parse",
+    ]
+    fix, add, commit, push = run.calls[1:5]
+    assert fix[0][1:] == ["scripts/ship.py", "--fix"] and fix[1] == one.tree
+    assert add[0] == ["git", "add", "-A"]
+    assert commit[0] == ["git", "commit", "-F", str(ship_intent.INTENT_FILE)]
+    assert push[0] == ["git", "push", "-u", "origin", "agent/labels-0919"]
+    assert push[2]["SKIP"] == ship_intent.SKIP_PUSH_GATE
+    plan = plans[0]
+    assert (plan.pr_title, plan.pr_body, plan.pr_head, plan.pr_base) == (
+        one.subject,
+        one.body,
+        one.branch,
+        "main",
+    )
+    assert plan.pr_labels == (ship_intent.sweep.AUTOMERGE_LABEL,)
+    state = ship_intent.read_state(one.tree)
+    assert state["stage"] == ship_intent.SHIPPED
+    assert state["intent"] == one.digest and state["sha"] == "abc123"
+
+
+def test_the_commit_half_names_the_step_that_refused(tmp_path):
+    one = intent(tmp_path)
+    assert ship_intent.commit_intent(one, "py", Runner()) == ("", "")
+    step, output = ship_intent.commit_intent(
+        one, "py", Runner({"git add": (1, "", "index locked")})
+    )
+    assert (step, output) == ("add", "index locked")
+
+
+def test_a_refused_commit_stage_is_recorded_with_its_output_and_nothing_is_pushed(tmp_path):
+    one = intent(tmp_path)
+    run = Runner({r"C:\py\python.exe scripts/ship.py": (1, "", "Executable `ruff` not found")})
+    out = ship_intent.ship_one(one, r"C:\py\python.exe", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.REFUSED
+    assert "git push" not in run.verbs()
+    state = ship_intent.read_state(one.tree)
+    assert state["stage"] == ship_intent.REFUSED and state["step"] == "fixers"
+    assert "not found" in state["output"]
+
+
+def test_a_commit_the_hooks_refuse_is_recorded_at_the_commit_step(tmp_path):
+    one = intent(tmp_path)
+    run = Runner({"git commit": (1, "detect secrets.....Failed", "")})
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.REFUSED
+    assert ship_intent.read_state(one.tree)["step"] == "commit"
+
+
+def test_a_failed_push_is_a_failure_not_a_refusal_and_leaves_no_refused_state(tmp_path):
+    one = intent(tmp_path)
+    run = Runner({"git push": (1, "", "could not resolve host")})
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.FAILED and "push" in out.detail
+    assert ship_intent.read_state(one.tree) == {}
+
+
+def test_a_pr_that_could_not_be_opened_is_a_failure_to_retry(tmp_path, monkeypatch):
+    one = intent(tmp_path)
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("", False, "no auth"))
+    out = ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW)
+    assert out.stage == ship_intent.FAILED and "no auth" in out.detail
+
+
+def test_an_intent_already_shipped_with_a_clean_tree_is_not_shipped_twice(tmp_path, monkeypatch):
+    one = intent(tmp_path)
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    assert (
+        ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW).stage == ship_intent.SHIPPED
+    )
+    again = Runner(porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", again, gh_ok, NOW).stage == ship_intent.SKIPPED
+    assert again.verbs() == ["git status"]
+
+
+def test_a_rewritten_intent_ships_again_and_a_clean_tree_still_pushes(tmp_path, monkeypatch):
+    """The session edited after shipping and rewrote the file: new words, new commit. A
+    clean tree with an unshipped intent still pushes -- the commits are already there."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW)
+    two = intent(tmp_path, body="Rewritten.")
+    run = Runner(porcelain="")
+    assert ship_intent.ship_one(two, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert "git commit" not in run.verbs() and "git push" in run.verbs()
+
+
+def test_already_shipped_needs_the_same_words_and_a_clean_tree(tmp_path):
+    one = intent(tmp_path)
+    shipped = {"stage": ship_intent.SHIPPED, "intent": one.digest}
+    assert ship_intent.already_shipped(one, shipped, "")
+    assert not ship_intent.already_shipped(one, shipped, " M a.py\n")
+    assert not ship_intent.already_shipped(one, {"stage": ship_intent.SHIPPED, "intent": "x"}, "")
+    assert not ship_intent.already_shipped(one, {}, "")
+
+
+def test_the_state_file_round_trips_and_a_corrupt_one_reads_as_empty(tmp_path):
+    ship_intent.write_state(tmp_path, {"stage": "shipped"})
+    assert ship_intent.read_state(tmp_path) == {"stage": "shipped"}
+    (tmp_path / ship_intent.STATE_FILE).write_text("{nope", encoding="utf-8")
+    assert ship_intent.read_state(tmp_path) == {}
+
+
+def test_the_one_spawn_is_window_less():
+    """The pass is a scheduled job; `tests/test_scheduled_jobs.py` reads the source, and
+    this reads the call."""
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    original = ship_intent.subprocess.run
+    ship_intent.subprocess.run = fake_run
+    try:
+        ship_intent.run_quiet(["git", "status"], Path("."))
+    finally:
+        ship_intent.subprocess.run = original
+    assert seen["creationflags"] == ship_intent.sweep.NO_WINDOW
+    assert seen["capture_output"] is True
+
+
+# --- a refusal as a failure ----------------------------------------------------------
+
+
+def test_a_refusal_becomes_a_commit_failure_with_its_output_placed_in_the_worktree(tmp_path):
+    one = intent(tmp_path)
+    ship_intent.write_state(
+        one.tree,
+        {"stage": ship_intent.REFUSED, "step": "commit", "output": "FAILED tests/t.py::a - x\n"},
+    )
+    failure = ship_intent.refusal_failure(ship_intent.Outcome(one, ship_intent.REFUSED), "main")
+    assert failure.kind == fix_plan.COMMIT
+    assert (failure.project, failure.head, failure.base) == ("carameli", one.branch, "main")
+    assert failure.signature == ("tests/t.py::a",)
+    assert failure.sha == one.digest
+    placed = Path(failure.evidence) / "pre-commit.log"
+    assert placed == one.tree / fix_plan.EVIDENCE_DIR / "pre-commit.log"
+    assert placed.read_text(encoding="utf-8").startswith("FAILED")
+
+
+def test_a_refusal_with_no_test_ids_is_signed_by_its_step(tmp_path):
+    one = intent(tmp_path)
+    ship_intent.write_state(
+        one.tree, {"stage": ship_intent.REFUSED, "step": "fixers", "output": "Executable not found"}
+    )
+    failure = ship_intent.refusal_failure(ship_intent.Outcome(one, ship_intent.REFUSED), "main")
+    assert failure.signature == ("fixers refused",)
+
+
+@pytest.mark.parametrize("branch,shippable", [("agent/x-0919", True), ("main", False)])
+def test_only_a_task_branch_is_shippable(branch, shippable):
+    assert ship_intent.ship.is_shippable(branch, "main")[0] is shippable
