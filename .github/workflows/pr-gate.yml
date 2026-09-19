@@ -191,3 +191,61 @@ jobs:
             cd "$GITHUB_WORKSPACE"
             echo "::endgroup::"
           done
+
+  upgrade-rehearsal:
+    name: A project on the previous release survives adopting this one
+    runs-on: ubuntu-latest
+    # The regression this exists for: v0.11.21 widened a vendored gate
+    # (`test_untested_symbols` began demanding a test for `scripts/lint-all.py::main`,
+    # a project-owned file no template test covers), devkit's own gate passed because
+    # devkit has that test, and `generated-project` above passed because a FRESH render
+    # seeds its baseline. Only a project that already existed failed -- and every
+    # consumer is one. The adoption PR went red in eight repos, and each cost an agent
+    # session to rediscover one cause. Nothing here rehearsed an upgrade.
+    #
+    # So: render a project with the PREVIOUS release's generator, pull this PR's tree
+    # into it the way `upgrade-project.py` does in every consumer, and run the gate the
+    # consumer's own PR would run. It cannot catch a project-specific breakage, but the
+    # class above -- a vendored change that assumes something a fresh render has and an
+    # upgraded project does not -- is exactly what it catches, before the fan-out.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history and tags: the previous release is found by tag, and the
+          # generator at that tag pins the newest tag it can see.
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install ruff pytest uv mypy
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "devkit CI"
+      - name: Render a project at the previous release, then pull this tree into it
+        # `git tag --sort=-v:refname` rather than `git describe`: the question is which
+        # release is newest, not which is reachable from a PR merge commit -- the same
+        # distinction `new-project.latest_devkit_tag` documents. On a release PR the
+        # newest tag is still the previous release, which is the right base to rehearse.
+        #
+        # The pull runs TWICE, the way `upgrade-project.pull_to_fixpoint` does: the first
+        # pull replaces `sync-devkit.py` itself, and the second runs the pulled copy so
+        # a manifest entry only the new version knows about is also delivered.
+        # `--allow-untagged` because a PR tree has no tag; that leaves the pre-commit pin
+        # stale, which is a config drift the checks below deliberately do not include.
+        run: |
+          set -euo pipefail
+          prev="$(git tag --sort=-v:refname | head -n 1)"
+          echo "rehearsing an upgrade from $prev to $(git rev-parse --short HEAD)"
+          git worktree add --detach /tmp/devkit-prev "$prev"
+          rm -rf /tmp/upgrade && mkdir -p /tmp/upgrade
+          python /tmp/devkit-prev/scripts/new-project.py probe_upgrade \
+            --preset bare --parent /tmp/upgrade --no-remote --yes
+          cd /tmp/upgrade/probe_upgrade
+          python scripts/sync-devkit.py --pull --src "$GITHUB_WORKSPACE" --allow-untagged
+          python scripts/sync-devkit.py --pull --src "$GITHUB_WORKSPACE" --allow-untagged
+          git add -A && git commit -qm "Adopt devkit $(git -C "$GITHUB_WORKSPACE" rev-parse --short HEAD)"
+          python -m pytest scripts/hooks/tests/ -q
+          python scripts/run-tests.py
+          python scripts/lint-all.py
+          DEVKIT_DIR="$GITHUB_WORKSPACE" python scripts/sync-devkit.py --check

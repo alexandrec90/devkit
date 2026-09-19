@@ -1,29 +1,34 @@
-"""`scripts/fix-prs.py`: what the agent is told, how the session opens, and the CLI.
+"""`scripts/fix-prs.py`: how a session opens, the planned path, and the CLI.
 
-What *counts* as broken and what the dropdown draws moved to
-`tests/test_broken_pr_menu.py` with the module, when this script's `file_lines` was
-recorded a fifth time against the same never-cut seam. The CLI tests stayed because the
-CLI stayed: `devkit_project.ACTIONS` names `scripts/fix-prs.py` for the live `--rows`
-picker, so the library was cut out from under the entrypoint rather than the other way
-round, and nothing the workspace task block spells by hand changed.
+What *counts* as broken lives in `tests/test_broken_pr_menu.py` with the scan; what to
+*send* is `tests/test_fix_plan.py`; what the gate *said* is `tests/test_gate_evidence.py`.
+What is here is the acting half -- the worktree on a PR's head branch, the fresh branch
+for a failure that has none, the tab or the background session -- and `main`, which
+wires the four together and is what the task block's one remaining question reaches.
 
-Every decision in that script is a pure function taking the shapes `gh` returns, so this
-suite drives those directly and never a network. The two that spawn take a runner, and
+Every decision in the script is a pure function taking the shapes `gh` returns, so this
+suite drives those directly and never a network. The ones that spawn take a runner, and
 the tests for them assert the argv rather than the effect.
 
 **Patch the module that owns the name.** `fix-prs.py` reaches the menu tier as
-`menu.<name>`, so `monkeypatch.setattr(fix_prs, "scan", ...)` binds nothing the code
-reads -- the stub goes in and the real `gh` path runs anyway.
+`menu.<name>` and the evidence as `gate_evidence.<name>`, so
+`monkeypatch.setattr(fix_prs, "scan", ...)` binds nothing the code reads -- the stub goes
+in and the real `gh` path runs anyway.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
-from support import load_script
+from support import REPO_ROOT, load_script
+
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import fix_plan
 
 # `support.load_script` rather than `_loader.load_by_path`, which is what the script
 # itself uses: `load_by_path` overwrites `sys.modules[name]`, so reaching `agent-box.py`
@@ -31,16 +36,12 @@ from support import load_script
 # has already loaded -- and it is the one this suite monkeypatches. It also costs no
 # `sys.path` bootstrap here, so this file needs no file-wide `noqa` to sit under one.
 fix_prs = load_script("scripts/fix-prs.py")
-# The scan-and-menu half, cut into its own module when `file_lines` here was recorded
-# a fifth time. The CLI did not move -- `devkit_project.ACTIONS` names
-# `scripts/fix-prs.py` and a dropdown's command line is spelled by hand -- so every
-# `main` test below is unchanged. What moved is where the menu's own names live, and
-# the sections that tested them directly are now in `tests/test_broken_pr_menu.py`.
 menu = load_script("scripts/broken_pr_menu.py")
-picker_rows = load_script("scripts/picker_rows.py")
 agent_box = load_script("scripts/agent-box.py")
+evidence = fix_prs.gate_evidence
+assert fix_prs.fix_plan is fix_plan, "one copy of the plan, or the stubs bind nothing"
 
-NOW = _dt.datetime(2026, 9, 4, 12, 0, tzinfo=_dt.UTC)
+NOW = _dt.datetime(2026, 9, 18, 12, 0, tzinfo=_dt.UTC)
 
 
 def pr(**fields) -> dict:
@@ -50,6 +51,7 @@ def pr(**fields) -> dict:
         "title": "Teach the sweep about labels",
         "headRefName": "agent/sweep-labels-0904",
         "baseRefName": "main",
+        "headRefOid": "abc123",
         "updatedAt": "2026-09-04T09:00:00Z",
         "url": "https://github.com/x/y/pull/412",
         "state": "OPEN",
@@ -61,25 +63,30 @@ def pr(**fields) -> dict:
     return base
 
 
+def failure(**fields) -> fix_plan.Failure:
+    base: dict[str, Any] = {
+        "kind": fix_plan.PR,
+        "project": "carameli",
+        "number": 412,
+        "title": "T",
+        "url": "u/412",
+        "head": "agent/sweep-labels-0904",
+        "base": "main",
+        "sha": "abc123",
+        "reason": "1 check failing",
+        "signature": ("tests/test_x.py::test_y",),
+    }
+    base.update(fields)
+    return fix_plan.Failure(**base)
+
+
+@pytest.fixture(autouse=True)
+def no_evidence_fetch(monkeypatch):
+    """The evidence tier is a network; here every PR's evidence is the PR itself."""
+    monkeypatch.setattr(evidence, "read_pr", lambda _dir, found, _root: found)
+
+
 # --- what the agent is told -------------------------------------------------------
-
-
-def test_the_prompt_names_the_pr_the_fault_and_the_finish_line():
-    text = fix_prs.seed_prompt("carameli", pr(), "merge conflict")
-    assert "#412" in text
-    assert "carameli" in text
-    assert "merge conflict" in text
-    assert "origin/main" in text
-    assert "agent/sweep-labels-0904" in text
-    assert "green" in text
-
-
-def test_the_prompt_is_one_line():
-    """A newline ends `wt`'s command outright and has no escape, so the prompt is
-    flattened. A `;` needs no flattening -- `agent_box.wt_argv` escapes it on the way
-    into the tab, which it must do anyway for the kill switch's own semicolon."""
-    text = fix_prs.seed_prompt("x", pr(title="a; b"), "1 check failing; and more")
-    assert "\n" not in text
 
 
 def test_tab_safe_collapses_whitespace_and_leaves_semicolons_to_the_escaper():
@@ -107,7 +114,7 @@ def test_the_hooks_off_prefix_survives_a_prompt(monkeypatch):
     assert command.endswith("claude 'do the thing'")
 
 
-# --- opening the session ----------------------------------------------------------
+# --- the worktree -----------------------------------------------------------------
 
 
 def fake_git(answers: dict[tuple[str, ...], tuple[int, str]], default=(1, "")):
@@ -236,8 +243,8 @@ def test_a_box_must_match_the_checkout_branch_and_worktree(monkeypatch, tmp_path
 
 
 def test_a_branch_nothing_holds_is_neither_a_tree_nor_a_refusal(monkeypatch, tmp_path):
-    """The two empties are the case `cut_tree` exists for, and `run_one` branches on the
-    difference between them."""
+    """The two empties are the case `cut_tree` exists for, and the launch path branches
+    on the difference between them."""
     checkout = checkout_listing(monkeypatch, tmp_path, (str(tmp_path / "carameli"), "main"))
     assert fix_prs.existing_tree(checkout, "agent/x") == (None, "")
 
@@ -295,8 +302,9 @@ def test_a_branch_this_checkout_already_has_is_not_recreated_from_origin(monkeyp
 def test_a_head_branch_origin_no_longer_has_is_reported_before_git_cuts(
     monkeypatch, tmp_path, capsys
 ):
-    """The stale-menu case one layer below `run_one`'s state check: a fetch that found no
-    such ref means there is nothing to cut from, and the message says which branch."""
+    """The stale-scan case one layer below the launch path's state check: a fetch that
+    found no such ref means there is nothing to cut from, and the message says which
+    branch."""
     path, run = cut_with(monkeypatch, tmp_path, local=False, remote=False)
     assert path is None
     assert run.git_args() == [["fetch", "--quiet", "origin"]]
@@ -326,8 +334,8 @@ def test_cutting_one_lands_where_the_delete_dropdown_scans(monkeypatch, tmp_path
 
 
 def test_a_git_refusal_yields_no_worktree_rather_than_a_path(monkeypatch, tmp_path):
-    """`run_one` turns None into an exit 1; a path to a directory git declined to create
-    would turn it into an agent opened in nothing."""
+    """The launch path turns None into an exit 1; a path to a directory git declined to
+    create would turn it into an agent opened in nothing."""
     checkout = tmp_path / "carameli"
     (checkout / ".claude" / "worktrees").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(
@@ -343,6 +351,72 @@ def test_a_git_refusal_yields_no_worktree_rather_than_a_path(monkeypatch, tmp_pa
         return subprocess.CompletedProcess(argv, code, "", "already exists")
 
     assert fix_prs.cut_tree(checkout, "agent/x", runner) is None
+
+
+# --- a fresh branch, for a failure that has none ---------------------------------------
+
+
+def test_an_upstream_fix_is_named_for_the_failing_test_under_the_agent_prefix():
+    sig = (
+        "scripts/hooks/tests/test_untested_symbols.py::test_every_public_symbol_is_named_by_a_test",
+    )
+    decision = fix_plan.Decision(fix_plan.UPSTREAM, "n", (failure(signature=sig),))
+    branch = fix_prs.fix_branch(decision, NOW)
+    assert branch.startswith(fix_prs.tb.BRANCH_PREFIX + "fix-test-every-public")
+    assert branch.endswith("-0918")
+
+
+def test_a_nightly_fix_is_named_for_the_workflow():
+    nightly = failure(kind=fix_plan.NIGHTLY, workflow="Nightly", head="")
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (nightly,))
+    assert fix_prs.fix_branch(decision, NOW) == "agent/fix-nightly-0918"
+
+
+def fresh_with(monkeypatch, tmp_path, taken: tuple[str, ...] = ()):
+    checkout = tmp_path / "carameli"
+    (checkout / ".claude" / "worktrees").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        fix_prs.sweep,
+        "git_for",
+        lambda _path: fake_git(
+            {("rev-parse", "--verify", "--quiet", f"refs/heads/{name}"): (0, "") for name in taken}
+        ),
+    )
+    run = FakeRun()
+    return fix_prs.cut_fresh_tree(checkout, "agent/fix-nightly-0918", "main", run), run
+
+
+def test_a_fresh_branch_is_cut_off_the_default_branch_after_a_fetch(monkeypatch, tmp_path):
+    (path, branch), run = fresh_with(monkeypatch, tmp_path)
+    fetch, add = run.git_args()
+    assert fetch == ["fetch", "--quiet", "origin"]
+    assert add == ["worktree", "add", "--no-track", "-b", branch, str(path), "origin/main"]
+    assert branch == "agent/fix-nightly-0918"
+    assert path.parts[-3:] == (".claude", "worktrees", "fix-nightly-0918")
+
+
+def test_a_branch_the_checkout_already_has_gets_a_counter(monkeypatch, tmp_path):
+    """Two clicks on two nightlies of one project on one day want two branches."""
+    (path, branch), _run = fresh_with(
+        monkeypatch, tmp_path, taken=("agent/fix-nightly-0918", "agent/fix-nightly-0918-2")
+    )
+    assert branch == "agent/fix-nightly-0918-3"
+    assert path.name == "fix-nightly-0918-3"
+
+
+def test_a_git_refusal_on_a_fresh_branch_names_the_branch(monkeypatch, tmp_path):
+    checkout = tmp_path / "carameli"
+    (checkout / ".claude" / "worktrees").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(fix_prs.sweep, "git_for", lambda _path: fake_git({}))
+
+    def runner(argv, **kwargs):
+        code = 0 if "fetch" in [str(a) for a in argv] else 128
+        return subprocess.CompletedProcess(argv, code, "", "nope")
+
+    assert fix_prs.cut_fresh_tree(checkout, "agent/fix-x", "main", runner) == (None, "agent/fix-x")
+
+
+# --- opening the session ----------------------------------------------------------
 
 
 def test_the_background_argv_passes_the_prompt_as_one_argument():
@@ -410,7 +484,24 @@ def test_a_background_session_that_failed_to_start_is_a_failure(monkeypatch, tmp
     assert fix_prs.launch_background("claude", tmp_path, "p", False, runner) == fix_prs.EXIT_FAILED
 
 
-# --- one PR, end to end -----------------------------------------------------------
+def test_open_session_is_the_one_place_a_mode_becomes_a_tab_or_a_background(monkeypatch, tmp_path):
+    opened = []
+    monkeypatch.setattr(
+        fix_prs.agent_box,
+        "open_agent",
+        lambda cli, tree, branch, run, **k: opened.append(("tab", cli, k["title"])) or 0,
+    )
+    monkeypatch.setattr(
+        fix_prs,
+        "launch_background",
+        lambda cli, tree, prompt, off, run: opened.append(("bg", cli, prompt)) or 0,
+    )
+    fix_prs.open_session("codex", tmp_path, "agent/x", "p", "t")
+    fix_prs.open_session("claude-bg", tmp_path, "agent/x", "p", "t")
+    assert opened == [("tab", "codex", "t"), ("bg", "claude", "p")]
+
+
+# --- one PR, by hand ----------------------------------------------------------------
 
 
 def run_one_with(monkeypatch, tmp_path, view: dict, mode: str = "claude", then: dict | None = None):
@@ -443,8 +534,8 @@ def run_one_with(monkeypatch, tmp_path, view: dict, mode: str = "claude", then: 
 def test_a_pr_that_went_green_since_the_scan_is_reported_not_given_a_worktree(
     monkeypatch, tmp_path, capsys
 ):
-    """The menu can be a quarter of an hour old. Reporting good news as a failure would
-    put a red icon and a toast on a PR that fixed itself."""
+    """Reporting good news as a failure would put a red icon and a toast on a PR that
+    fixed itself."""
     code, opened = run_one_with(monkeypatch, tmp_path, pr())
     assert code == 0
     assert not opened
@@ -489,28 +580,37 @@ def test_a_pr_turned_draft_since_the_scan_gets_no_worktree(monkeypatch, tmp_path
 
 
 def test_the_view_asks_for_every_field_the_launch_path_reads():
-    """A field `run_one` branches on and `PR_VIEW_FIELDS` omits is always absent, which
-    is indistinguishable from the harmless value -- how the closed-PR bug survived."""
+    """A field the launch path branches on and `PR_VIEW_FIELDS` omits is always absent,
+    which is indistinguishable from the harmless value -- how the closed-PR bug survived.
+    `headRefOid` and `baseRefName` are the plan's: the commit the evidence is read at and
+    the branch the fix merges into."""
     asked = set(menu.PR_VIEW_FIELDS.split(","))
-    assert {"state", "isDraft", "mergeable", "statusCheckRollup", "headRefName"} <= asked
+    needed = {"state", "isDraft", "mergeable", "statusCheckRollup", "headRefName"}
+    assert needed | {"headRefOid", "baseRefName"} <= asked
+    assert {"headRefOid", "baseRefName"} <= set(menu.PR_LIST_FIELDS.split(","))
 
 
 @pytest.mark.parametrize("mergeable", ["CONFLICTING", "UNKNOWN"])
-def test_a_broken_pr_opens_a_tab_titled_for_the_pr(monkeypatch, tmp_path, mergeable):
-    """Several tabs can be open at once on branches that all begin `agent/`."""
+def test_a_broken_pr_opens_a_tab_titled_for_the_pr_with_the_planned_prompt(
+    monkeypatch, tmp_path, mergeable
+):
+    """Several tabs can be open at once on branches that all begin `agent/`. The prompt
+    is the plan's, not a second spelling: `--picks` is the planned path minus the plan."""
     code, opened = run_one_with(
         monkeypatch, tmp_path, pr(mergeable=mergeable, mergeStateStatus="DIRTY")
     )
     assert code == 0
     assert opened["kwargs"]["title"] == "carameli #412"
     assert "#412" in opened["kwargs"]["prompt"]
+    assert fix_plan.EVIDENCE_DIR in opened["kwargs"]["prompt"]
+    assert "\n" not in opened["kwargs"]["prompt"]
 
 
 def test_the_launch_path_asks_again_rather_than_calling_an_unjudged_pr_fine(monkeypatch, tmp_path):
     """Anything merging to the base branch between the click and here puts this PR's
     verdict back to `UNKNOWN`, and `broken_reason` reads one as clean -- so without the
-    second ask the ticked row opens nothing, reports success, and leaves the PR as red
-    as it was. The scan's own re-ask cannot cover this: it ran before the click."""
+    second ask the pick opens nothing, reports success, and leaves the PR as red as it
+    was. The scan's own re-ask cannot cover this: it ran before the click."""
     view = pr(mergeable="UNKNOWN", statusCheckRollup=[])
     code, opened = run_one_with(monkeypatch, tmp_path, view, then={"mergeable": "CONFLICTING"})
     assert code == 0
@@ -586,16 +686,224 @@ def test_a_batch_reports_the_worst_outcome(monkeypatch, tmp_path):
     assert fix_prs.run(picks, workspace, "claude") == 1
 
 
+# --- the planned path ---------------------------------------------------------------
+
+
+@pytest.fixture
+def root(tmp_path):
+    """A workspace root with a devkit and a carameli checkout, and the workspace file."""
+    for name in ("devkit", "carameli"):
+        (tmp_path / name).mkdir()
+    (tmp_path / "alex.code-workspace").write_text("{}", encoding="utf-8")
+    return tmp_path
+
+
+def capture_sessions(monkeypatch):
+    opened: list[dict] = []
+    monkeypatch.setattr(
+        fix_prs,
+        "open_session",
+        lambda mode, tree, branch, prompt, title, runner=None: (
+            opened.append(
+                {"mode": mode, "tree": tree, "branch": branch, "prompt": prompt, "title": title}
+            )
+            or 0
+        ),
+    )
+    return opened
+
+
+def test_a_planned_pr_gets_its_evidence_placed_and_the_plans_prompt(monkeypatch, root):
+    placed = []
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (None, ""))
+    monkeypatch.setattr(
+        fix_prs, "cut_tree", lambda *a: root / "carameli" / ".claude" / "worktrees" / "x"
+    )
+    monkeypatch.setattr(
+        evidence, "place", lambda f, tree, sub="": placed.append((f.number, tree, sub))
+    )
+    opened = capture_sessions(monkeypatch)
+    assert fix_prs.dispatch_pr(failure(), root, "claude") == 0
+    assert placed == [(412, root / "carameli" / ".claude" / "worktrees" / "x", "")]
+    assert opened[0]["branch"] == "agent/sweep-labels-0904"
+    assert opened[0]["title"] == "carameli #412"
+    assert opened[0]["prompt"] == fix_prs.tab_safe(fix_plan.pr_prompt(failure()))
+
+
+def test_a_planned_pr_whose_branch_is_held_elsewhere_opens_nothing(monkeypatch, root, capsys):
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (None, "held at C:/elsewhere"))
+    monkeypatch.setattr(fix_prs, "cut_tree", lambda *a: pytest.fail("must not cut"))
+    assert fix_prs.dispatch_pr(failure(), root, "claude") == fix_prs.EXIT_FAILED
+    assert "held at C:/elsewhere" in capsys.readouterr().err
+
+
+def test_an_upstream_decision_opens_one_session_in_devkit_with_every_projects_logs(
+    monkeypatch, root
+):
+    """The v0.11.21 shape: three consumers, one devkit worktree, the logs of each under
+    their own name, and one prompt naming all three PRs."""
+    group = (
+        failure(project="carameli", number=412, url="u/412"),
+        failure(project="roguelike", number=16, url="u/16"),
+    )
+    decision = fix_plan.Decision(fix_plan.UPSTREAM, "one vendored failure", group)
+    cut = []
+    placed = []
+    monkeypatch.setattr(fix_prs.tb, "detect_default_branch", lambda _git: "main")
+    monkeypatch.setattr(
+        fix_prs,
+        "cut_fresh_tree",
+        lambda project_dir, branch, base, runner: (
+            cut.append((project_dir, branch, base))
+            or (root / "devkit" / ".claude" / "worktrees" / "fix", branch)
+        ),
+    )
+    monkeypatch.setattr(evidence, "place", lambda f, tree, sub="": placed.append((f.project, sub)))
+    opened = capture_sessions(monkeypatch)
+    assert fix_prs.dispatch_fresh(decision, root, "claude-bg") == 0
+    assert cut[0][0] == root / "devkit"
+    assert cut[0][1].startswith("agent/fix-") and cut[0][2] == "main"
+    assert placed == [("carameli", "carameli"), ("roguelike", "roguelike")]
+    assert opened[0]["mode"] == "claude-bg"
+    assert "u/412" in opened[0]["prompt"] and "u/16" in opened[0]["prompt"]
+    assert opened[0]["title"].startswith("devkit agent/fix-")
+
+
+def test_a_nightly_decision_opens_in_its_own_project_off_its_default_branch(monkeypatch, root):
+    nightly = failure(
+        kind=fix_plan.NIGHTLY, head="", base="master", workflow="Nightly", number=9, run_id="55"
+    )
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "Nightly failing", (nightly,))
+    cut = []
+    monkeypatch.setattr(
+        fix_prs,
+        "cut_fresh_tree",
+        lambda project_dir, branch, base, runner: (
+            cut.append((project_dir, branch, base))
+            or (root / "carameli" / ".claude" / "worktrees" / "n", branch)
+        ),
+    )
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    opened = capture_sessions(monkeypatch)
+    assert fix_prs.dispatch_fresh(decision, root, "codex") == 0
+    assert cut == [
+        (
+            root / "carameli",
+            "agent/fix-nightly-" + _dt.datetime.now(_dt.UTC).strftime("%m%d"),
+            "master",
+        )
+    ]
+    assert "Nightly workflow in carameli" in opened[0]["prompt"]
+    assert opened[0]["title"] == "carameli Nightly"
+
+
+def test_a_fresh_cut_git_refused_opens_nothing(monkeypatch, root, capsys):
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(kind=fix_plan.NIGHTLY, head=""),))
+    monkeypatch.setattr(fix_prs, "cut_fresh_tree", lambda *a: (None, "agent/fix-nightly-0918"))
+    monkeypatch.setattr(fix_prs, "open_session", lambda *a, **k: pytest.fail("nothing to open in"))
+    assert fix_prs.dispatch_fresh(decision, root, "claude") == fix_prs.EXIT_FAILED
+    assert "could not cut agent/fix-nightly-0918" in capsys.readouterr().err
+
+
+def test_a_checkout_the_workspace_does_not_have_opens_nothing(monkeypatch, root, capsys):
+    decision = fix_plan.Decision(
+        fix_plan.DISPATCH, "n", (failure(kind=fix_plan.NIGHTLY, head="", project="ghost"),)
+    )
+    assert fix_prs.dispatch_fresh(decision, root, "claude") == fix_prs.EXIT_FAILED
+    assert "no checkout 'ghost'" in capsys.readouterr().err
+
+
+def planned(monkeypatch, root, failures, latest="v0-11-21"):
+    """`run_plan` with the scan, the evidence and the dispatches all replaced."""
+    sent: list[str] = []
+    monkeypatch.setattr(menu, "scan", lambda _ws: {"carameli": [], "devkit": []})
+    monkeypatch.setattr(evidence, "collect", lambda _ws, _found: failures)
+    monkeypatch.setattr(evidence, "latest_tag", lambda _devkit: latest)
+    monkeypatch.setattr(
+        fix_prs, "dispatch_pr", lambda f, *_a: sent.append(f"pr {f.project}#{f.number}") or 0
+    )
+    monkeypatch.setattr(
+        fix_prs,
+        "dispatch_fresh",
+        lambda d, *_a: sent.append(f"{d.action} {','.join(f.project for f in d.failures)}") or 0,
+    )
+    return sent
+
+
+def test_the_plan_is_printed_and_a_dry_run_opens_nothing(monkeypatch, root, capsys):
+    sent = planned(monkeypatch, root, [failure(), failure(head="release/v0.12.0", number=2)])
+    workspace = root / "alex.code-workspace"
+    assert fix_prs.run_plan(workspace, "claude", dry_run=True, redo=False) == 0
+    out = capsys.readouterr().out
+    assert "dispatch carameli #412" in out
+    assert "skip     carameli #2 -- red by construction" in out
+    assert sent == []
+
+
+def test_a_click_sends_what_is_new_records_it_and_a_second_click_sends_nothing(
+    monkeypatch, root, capsys
+):
+    """The ledger is the whole reason a click is safe to repeat: the second one reports
+    the first rather than spending a second session on the same failure."""
+    sent = planned(monkeypatch, root, [failure()])
+    workspace = root / "alex.code-workspace"
+    assert fix_prs.run_plan(workspace, "claude", dry_run=False, redo=False) == 0
+    assert sent == ["pr carameli#412"]
+    ledger = fix_plan.read_ledger(fix_prs.worktree.boxes_root(root) / fix_plan.LEDGER_NAME)
+    assert list(ledger) == [fix_plan.failure_key(failure())]
+
+    capsys.readouterr()
+    assert fix_prs.run_plan(workspace, "claude", dry_run=False, redo=False) == 0
+    assert sent == ["pr carameli#412"]
+    assert "already dispatched" in capsys.readouterr().out
+
+    assert fix_prs.run_plan(workspace, "claude", dry_run=False, redo=True) == 0
+    assert sent == ["pr carameli#412", "pr carameli#412"]
+
+
+def test_a_repushed_pr_that_is_still_red_is_sent_again(monkeypatch, root):
+    """A new head sha is a new key: the fix an agent pushed did not work, and that is
+    worth a second look rather than a ledger line saying it was handled."""
+    sent = planned(monkeypatch, root, [failure(sha="first")])
+    workspace = root / "alex.code-workspace"
+    fix_prs.run_plan(workspace, "claude", dry_run=False, redo=False)
+    monkeypatch.setattr(evidence, "collect", lambda _ws, _found: [failure(sha="second")])
+    fix_prs.run_plan(workspace, "claude", dry_run=False, redo=False)
+    assert sent == ["pr carameli#412", "pr carameli#412"]
+
+
+def test_an_upstream_group_and_a_nightly_go_through_the_fresh_branch_path(monkeypatch, root):
+    vendored = ("scripts/hooks/tests/test_a.py::t",)
+    sent = planned(
+        monkeypatch,
+        root,
+        [
+            failure(project="carameli", number=1, signature=vendored),
+            failure(project="roguelike", number=2, signature=vendored),
+            failure(
+                kind=fix_plan.NIGHTLY, head="", number=9, sha="", run_id="55", workflow="Nightly"
+            ),
+        ],
+    )
+    assert fix_prs.run_plan(root / "alex.code-workspace", "claude", dry_run=False, redo=False) == 0
+    assert sorted(sent) == ["dispatch carameli", "upstream carameli,roguelike"]
+
+
+def test_a_dispatch_that_failed_to_open_is_not_recorded_and_is_the_exit_code(monkeypatch, root):
+    planned(monkeypatch, root, [failure()])
+    monkeypatch.setattr(fix_prs, "dispatch_pr", lambda *_a: fix_prs.EXIT_FAILED)
+    workspace = root / "alex.code-workspace"
+    assert fix_prs.run_plan(workspace, "claude", dry_run=False, redo=False) == fix_prs.EXIT_FAILED
+    assert fix_plan.read_ledger(fix_prs.worktree.boxes_root(root) / fix_plan.LEDGER_NAME) == {}
+
+
+def test_a_superseded_adoption_is_neither_sent_nor_recorded(monkeypatch, root):
+    sent = planned(monkeypatch, root, [failure(head="agent/auto/devkit-upgrade-v0-11-20-0916")])
+    assert fix_prs.run_plan(root / "alex.code-workspace", "claude", dry_run=False, redo=False) == 0
+    assert sent == []
+
+
 # --- the CLI ----------------------------------------------------------------------
-# From here on the tests drive `main`, so they cross both modules by design: the CLI is
-# here and the rows it prints are the menu's. That is why the split left these sections
-# behind rather than following the code -- `tests/test_broken_pr_menu.py` covers the
-# menu's decisions on their own, and what is below is the wiring between the two.
-
-
-def fields(row: str) -> list[str]:
-    """One picker row split into the four fields `shellCommand.execute` draws."""
-    return row.split(picker_rows.FIELD_SEP)
 
 
 @pytest.fixture
@@ -607,194 +915,37 @@ def workspace(tmp_path):
 
 def test_a_dismissed_picker_runs_nothing_and_is_not_a_failure(workspace, capsys):
     """Ahead of argparse: a cancel reported as a usage error is a red icon, a toast and
-    a `logs/` artifact for a run the user called off."""
-    code = fix_prs.main(
-        ["--picks", "${input:brokenPrRow}", "--agent", "claude", "--workspace", str(workspace)]
-    )
-    assert code == 0
-    assert "cancelled" in capsys.readouterr().out
-
-
-def test_the_guard_sits_ahead_of_the_choices_check(workspace, capsys):
-    """`--agent` carries `choices=`, which would turn the literal into a usage error."""
+    a `logs/` artifact for a run the user called off. `--agent` carries `choices=`, which
+    would turn the literal into a usage error on its own."""
     code = fix_prs.main(["--agent", "${input:fixAgent}", "--workspace", str(workspace)])
     assert code == 0
     assert "cancelled" in capsys.readouterr().out
 
 
-def test_nothing_ticked_runs_nothing(workspace, capsys):
-    assert fix_prs.main(["--picks", "", "--workspace", str(workspace)]) == 0
-    assert "nothing to do" in capsys.readouterr().out
-
-
-def test_only_the_sentinel_ticked_runs_nothing(workspace, capsys):
-    assert fix_prs.main(["--picks", "none", "--workspace", str(workspace)]) == 0
-    assert "nothing to do" in capsys.readouterr().out
-
-
-def test_rows_prints_the_picker_lines_and_nothing_else(workspace, monkeypatch, capsys):
-    """This stdout IS the quick-pick: every line it carries becomes an option, so a
-    status line here would be a row a person could tick."""
+def test_no_picks_is_the_planned_path(workspace, monkeypatch):
+    seen = {}
     monkeypatch.setattr(
-        menu, "scan", lambda _ws: {"devkit": [pr(mergeable="CONFLICTING")], "carameli": []}
+        fix_prs, "run_plan", lambda ws, mode, dry_run, redo: seen.update(locals()) or 0
     )
-    assert fix_prs.main(["--rows", "--workspace", str(workspace)]) == 0
-    printed = capsys.readouterr().out.splitlines()
-    assert printed == [
-        "devkit:412|#412 agent/sweep-labels-0904|devkit -- merge conflict -- "
-        + menu.age("2026-09-04T09:00:00Z")
-        + "|Teach the sweep about labels"
-    ]
+    assert fix_prs.main(["--agent", "codex", "--dry-run", "--workspace", str(workspace)]) == 0
+    assert (seen["mode"], seen["dry_run"], seen["redo"]) == ("codex", True, False)
+    assert seen["ws"] == workspace.resolve()
 
 
-def test_rows_draws_the_sentinel_when_the_machine_is_clean(workspace, monkeypatch, capsys):
-    monkeypatch.setattr(menu, "scan", lambda _ws: {"devkit": [], "carameli": []})
-    assert fix_prs.main(["--rows", "--workspace", str(workspace)]) == 0
-    printed = capsys.readouterr().out.splitlines()
-    assert len(printed) == 1
-    assert menu.parse_pick(printed[0].split(picker_rows.FIELD_SEP)[0]) is None
-
-
-# --- the checkout stage, and the scan it hands on -----------------------------
-
-
-@pytest.fixture(autouse=True)
-def scans_in_tmp(tmp_path, monkeypatch):
-    """Keep every scan write inside the test, out of the repo's `logs/`."""
-    monkeypatch.setattr(fix_prs.picker_scan, "SCANS_DIR", tmp_path / "scans")
-
-
-BROKEN = {"devkit": [pr(number=1, mergeable="CONFLICTING")], "carameli": [], "roguelike": []}
-
-
-def test_the_checkout_rows_count_what_each_one_holds():
-    drawn = menu.project_rows(BROKEN, "tok")
-    assert [fields(row)[1] for row in drawn] == ["devkit", "carameli", "roguelike"]
-    assert fields(drawn[0])[2] == "1 broken PR"
-
-
-def test_a_checkout_with_nothing_broken_is_listed_and_says_so():
-    """The whole reason stage one costs a scan instead of reading the registry: a
-    checkout silently missing from the menu cannot be told apart from one the scan
-    could not reach, and ticking a checkout to find it empty spends a click to learn
-    what the scan already knew."""
-    drawn = menu.project_rows(BROKEN, "tok")
-    assert fields(drawn[1])[2] == "nothing broken"
-
-
-def test_the_fullest_checkout_is_offered_first():
-    found = {"a": [], "b": [pr(number=1), pr(number=2)], "c": [pr(number=3)]}
-    assert [fields(row)[1] for row in menu.project_rows(found, "tok")] == ["b", "c", "a"]
-
-
-def test_a_checkout_row_carries_the_token_the_second_stage_reads():
-    row = menu.project_rows(BROKEN, "tok123")[0]
-    assert fix_prs.picker_scan.parse_projects(fields(row)[0]) == (["devkit"], "tok123")
-
-
-def test_no_checkouts_at_all_draws_a_sentinel_rather_than_an_empty_menu():
-    drawn = menu.project_rows({}, "tok")
-    assert len(drawn) == 1
-    assert fields(drawn[0])[0] == picker_rows.NOTHING
-
-
-def test_the_second_stage_serves_the_first_stages_scan_without_rescanning(workspace, monkeypatch):
-    token = fix_prs.picker_scan.write(menu.SCAN_NAME, menu.scan_entries(BROKEN, NOW))
+def test_picks_by_hand_skip_the_plan(workspace, monkeypatch):
+    ran = {}
+    monkeypatch.setattr(fix_prs, "run_plan", lambda *a: pytest.fail("picks must not plan"))
     monkeypatch.setattr(
-        menu, "scan", lambda *_a: pytest.fail("the cached scan should have been enough")
+        fix_prs, "run", lambda picks, ws, mode: ran.update(picks=picks, mode=mode) or 0
     )
-    drawn = menu.picked_rows(workspace, f"devkit@{token}", NOW)
-    assert [fields(row)[0] for row in drawn] == ["devkit:1"]
-
-
-def test_the_second_stage_keeps_the_ranking_across_several_ticked_checkouts(workspace, monkeypatch):
-    found = {
-        "devkit": [pr(number=1, updatedAt="2026-09-01T09:00:00Z")],
-        "carameli": [pr(number=2, updatedAt="2026-09-04T09:00:00Z")],
-    }
-    token = fix_prs.picker_scan.write(menu.SCAN_NAME, menu.scan_entries(found, NOW))
-    monkeypatch.setattr(menu, "scan", lambda *_a: pytest.fail("should not rescan"))
-    drawn = menu.picked_rows(workspace, f"devkit@{token},carameli@{token}", NOW)
-    assert [fields(row)[0] for row in drawn] == ["carameli:2", "devkit:1"]
-
-
-def test_a_token_that_names_no_scan_rescans_only_the_ticked_checkouts(workspace, monkeypatch):
-    """The miss path, and the reason a miss is safe: it costs a scan of what was
-    ticked, which is less than the scan stage one already did, and it cannot serve a
-    row anybody wrote earlier."""
-    asked = []
-
-    def fake(_ws, projects=None):
-        asked.append(projects)
-        return {"devkit": [pr(number=9, mergeable="CONFLICTING")]}
-
-    monkeypatch.setattr(menu, "scan", fake)
-    drawn = menu.picked_rows(workspace, "devkit@stale", NOW)
-    assert asked == [["devkit"]]
-    assert [fields(row)[0] for row in drawn] == ["devkit:9"]
-
-
-def test_ticked_checkouts_with_nothing_broken_draw_the_sentinel(workspace, monkeypatch):
-    token = fix_prs.picker_scan.write(menu.SCAN_NAME, menu.scan_entries(BROKEN, NOW))
-    monkeypatch.setattr(menu, "scan", lambda *_a: pytest.fail("should not rescan"))
-    drawn = menu.picked_rows(workspace, f"carameli@{token}", NOW)
-    assert len(drawn) == 1
-    assert menu.parse_pick(fields(drawn[0])[0]) is None
-
-
-def test_no_checkout_stage_at_all_lists_the_whole_machine(workspace, monkeypatch):
-    """`--rows` typed by hand has no first stage, and answers the way it did before
-    there was one."""
-    monkeypatch.setattr(menu, "scan", lambda _ws: BROKEN)
-    assert [fields(row)[0] for row in menu.picked_rows(workspace, "", NOW)] == ["devkit:1"]
-
-
-def test_project_rows_records_the_scan_the_second_stage_will_read(workspace, monkeypatch, capsys):
-    monkeypatch.setattr(menu, "scan", lambda _ws: BROKEN)
-    assert fix_prs.main(["--project-rows", "--workspace", str(workspace)]) == 0
-    printed = capsys.readouterr().out.splitlines()
-    projects, token = fix_prs.picker_scan.parse_projects(printed[0].split(picker_rows.FIELD_SEP)[0])
-    assert projects == ["devkit"]
-    assert fix_prs.picker_scan.read(menu.SCAN_NAME, token) is not None
-
-
-# --- the guard on the two stages disagreeing ----------------------------------
-
-
-def test_a_pick_from_a_ticked_checkout_is_not_a_stray():
-    picks = [menu.Pick("devkit", 1)]
-    assert menu.strayed_picks(picks, "devkit@tok,carameli@tok") == []
-
-
-def test_a_pick_from_a_checkout_the_first_stage_did_not_return_is_named():
-    """Nothing in the two stages can produce this: stage two draws only what stage one
-    returned. So it is evidence the chain misfired -- the extension resolves
-    `${input:...}` from the value it recorded when that input LAST ran, so an input
-    order that stopped putting the checkout stage first would filter by the previous
-    click's checkouts. This is what makes that loud instead of silent."""
-    picks = [menu.Pick("devkit", 1), menu.Pick("roguelike", 2)]
-    assert menu.strayed_picks(picks, "devkit@tok") == ["roguelike"]
-
-
-def test_no_checkout_stage_means_nothing_to_disagree_with():
-    """A hand-typed `--picks` has no first stage, and must not be refused for it."""
-    assert menu.strayed_picks([menu.Pick("devkit", 1)], "") == []
-
-
-def test_a_stray_pick_refuses_the_whole_run(workspace, monkeypatch, capsys):
-    monkeypatch.setattr(fix_prs, "run", lambda *_a: pytest.fail("nothing may be spawned"))
     code = fix_prs.main(
-        [
-            "--picks",
-            "roguelike:2",
-            "--checkouts",
-            "devkit@tok",
-            "--workspace",
-            str(workspace),
-        ]
+        ["--picks", "devkit:88 roguelike:16", "--agent", "claude-bg", "--workspace", str(workspace)]
     )
-    assert code == fix_prs.EXIT_USAGE
-    assert "roguelike" in capsys.readouterr().err
+    assert code == 0
+    assert ran == {
+        "picks": [menu.Pick("devkit", 88), menu.Pick("roguelike", 16)],
+        "mode": "claude-bg",
+    }
 
 
 def test_a_missing_workspace_file_is_a_usage_error(tmp_path, capsys):
@@ -802,7 +953,7 @@ def test_a_missing_workspace_file_is_a_usage_error(tmp_path, capsys):
     assert "no workspace file" in capsys.readouterr().err
 
 
-def test_list_prints_the_same_rows_the_dropdown_would_draw(workspace, monkeypatch, capsys):
+def test_list_prints_what_is_red_per_checkout(workspace, monkeypatch, capsys):
     monkeypatch.setattr(
         menu, "scan", lambda _ws: {"devkit": [pr(mergeable="CONFLICTING")], "carameli": []}
     )
@@ -819,12 +970,18 @@ def test_an_unknown_checkout_is_a_usage_error_not_a_traceback(workspace, capsys)
     assert "unknown checkout" in capsys.readouterr().err
 
 
-def test_the_terminal_listing_draws_the_same_rows_as_the_dropdown():
-    """`--list` is what a machine with no VS Code has, so it must not be a second answer
-    to the question the menu answers."""
+def test_a_malformed_pick_is_a_usage_error(workspace, capsys):
+    assert (
+        fix_prs.main(["--picks", "carameli:head", "--workspace", str(workspace)])
+        == fix_prs.EXIT_USAGE
+    )
+    assert "does not name a PR number" in capsys.readouterr().err
+
+
+def test_the_terminal_listing_is_per_checkout_fullest_first():
     found = {"devkit": [pr(mergeable="CONFLICTING")], "carameli": []}
     text = fix_prs.render_scan(found)
-    assert "devkit: 1 broken" in text
+    assert text.splitlines()[0] == "devkit: 1 broken"
     assert "  #412 agent/sweep-labels-0904 -- merge conflict" in text
     assert "carameli: nothing broken" in text
 
@@ -832,50 +989,15 @@ def test_the_terminal_listing_draws_the_same_rows_as_the_dropdown():
 def test_the_parser_defaults_to_a_watchable_tab_and_offers_only_the_known_modes():
     """The default is the tab because a session that pushes to a real branch and can merge
     a real PR is one worth being able to interrupt; `choices` is `AGENT_MODES` so a row in
-    the picker and a mode here can never drift apart."""
+    the task and a mode here can never drift apart. No picks and no flags is the plan."""
     parser = fix_prs.build_parser()
     args = parser.parse_args([])
-    assert (args.agent, args.picks, args.rows, args.list) == ("claude", "", False, False)
+    assert (args.agent, args.picks, args.list, args.dry_run, args.redo) == (
+        "claude",
+        "",
+        False,
+        False,
+        False,
+    )
     action = next(a for a in parser._actions if a.dest == "agent")
     assert sorted(action.choices) == sorted(fix_prs.AGENT_MODES)
-
-
-def test_listed_is_the_one_ranking_both_callers_read():
-    """`rows` prints it and `scan_entries` records it for the second stage to filter,
-    so it is named once rather than sorted twice: a stage two filtering a differently
-    ranked list would draw the right PRs in the wrong order."""
-    older = pr(number=1, updatedAt="2026-09-01T09:00:00Z")
-    newer = pr(number=2, updatedAt="2026-09-04T09:00:00Z")
-    ranked = menu.listed({"devkit": [older], "carameli": [newer]})
-    assert [(project, entry["number"]) for project, entry in ranked] == [
-        ("carameli", 2),
-        ("devkit", 1),
-    ]
-    assert [project for project, _line in menu.scan_entries({"devkit": [older]})] == ["devkit"]
-
-
-def test_stray_report_names_every_checkout_and_says_nothing_ran():
-    one = menu.stray_report(["roguelike"])
-    many = menu.stray_report(["carameli", "roguelike"])
-    assert "ticked a PR from roguelike" in one
-    assert "ticked PRs from carameli, roguelike" in many
-    for text in (one, many):
-        assert "nothing was run" in text
-        assert "vscode-tasks.md" in text
-
-
-# --- what the scan does with an unjudged verdict ---------------------------------------
-#
-# `pr_mergeability` owns the asking and is tested on its own; what is left here is the
-# binding -- that the scan hands it this checkout's `gh pr view`, and that a row it could
-# not settle keeps everything the list knew about it.
-
-
-def test_the_scan_asks_with_this_checkouts_own_gh(monkeypatch, tmp_path):
-    asked = []
-    monkeypatch.setattr(
-        menu, "pr_view", lambda directory, number: asked.append((directory, number)) or {}
-    )
-    monkeypatch.setattr(menu.mergeability, "WAIT", 0)
-    menu.settle_mergeability(tmp_path, [pr(mergeable="UNKNOWN")])
-    assert asked == [(tmp_path, 412)] * menu.mergeability.ASKS
