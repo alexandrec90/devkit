@@ -197,7 +197,8 @@ a week while one nobody looked at vanished silently; both failure directions at 
 well as on write, because from a box those differ and the log is append-only. **`agent=`
 is part of `Item.signature`** so the same hook failing under two runtimes is two items —
 a hook that misbehaves under one routinely behaves under the other — while **`host=`
-deliberately is not**, since one defect hit on two machines is one defect. The
-`/triage-harness` skill works the backlog, and it is devkit-only on purpose: every defect
-on this ledger is a defect in devkit, whatever project the session that hit it was scoped
-to.
+deliberately is not**, since one defect hit on two machines is one defect. The fix pass
+(`fix-pass.py`) sends the open backlog to its devkit session with everything else
+harness-shaped, and the `/triage-harness` skill is the same sweep run by hand; both are
+devkit-only on purpose: every defect on this ledger is a defect in devkit, whatever
+project the session that hit it was scoped to.

@@ -7,10 +7,14 @@ argument-hint: 'Optional: a project name, an event name, or a group id to work o
 
 # Work the harness-defect backlog
 
-`.claude/rules/engineering.md` requires an agent to *report* a harness defect rather than
-route around it, and `scripts/hooks/report-harness-defect.py` gives that report a durable
-home. Nothing consumed the reports. This skill is the other end: it is why filing one is
-worth an agent's turn.
+Project sessions no longer file harness defects — `.claude/rules/engineering.md` takes
+the harness off their plate — so what reaches this ledger now is what the harness records
+about itself: a scheduled job failing (`log-wrap.py --always`), and the reports already
+on it. `scripts/fix-pass.py` sends the open backlog to its devkit session with everything
+else harness-shaped, and that session works it by the steps below. This skill is the
+same sweep run by hand. **Read `logs/fix-pass.log` first**: a session the pass has
+already sent at the backlog is on a branch of its own, and a second sweep at the same
+groups is two branches at one defect.
 
 Devkit-only, deliberately. A defect in the harness is a defect in **devkit** — the guard,
 the gates, the hooks — whatever project the session that hit it was scoped to, and a
@@ -152,8 +156,9 @@ expected, a section per fix in the body — and prefer a large reviewed sweep to
 that leaves a list.
 
 **A fix in another project's checkout is still this sweep's work.** `<workspace>/<project>`
-is on this machine. Edit it there, run that project's own gate, and open its PR the same
-way; note in this PR's body which sibling PRs the sweep opened. Nothing about the ledger
+is on this machine. Edit it there, run its targeted tests, and leave a
+`logs/ship-intent.md` in that checkout the same way; say in this intent's body which
+sibling intents the sweep left, and the fix pass opens each PR. Nothing about the ledger
 being devkit's makes a carameli file unfixable from a devkit session.
 
 Two things stay the user's call, because both are irreversible and neither is yours to
@@ -182,8 +187,9 @@ literal ids when a group needs splitting.
 - Ids are content-addressed, not line numbers — a resolution written today still names
   its event after a thousand appends.
 
-Resolve **after** the fix is pushed, not before. A note naming a PR that does not exist
-yet is the one claim on this ledger nothing can check.
+Resolve **after** the fix is in your intent, not before, and name the branch when there
+is no PR number yet: the fix pass opens the PR from the intent, and a note naming a PR
+that does not exist is the one claim on this ledger nothing can check.
 
 ## Reporting
 

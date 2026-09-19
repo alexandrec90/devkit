@@ -57,6 +57,9 @@ PR = "pr"
 NIGHTLY = "nightly"
 COMMIT = "commit"
 BRANCH = "branch"
+# The harness-defect ledger's open backlog (`harness_triage.py`), as one failure for the
+# devkit session: every entry on it is a devkit defect, whichever project filed it.
+LEDGER = "ledger"
 
 # The one test a release commit fails by construction, and the reason a red default
 # branch is not always red: `release-pipeline.py` bumps `FALLBACK_DEVKIT_REF` to a tag
@@ -190,6 +193,8 @@ def name_of(failure: Failure) -> str:
         return f"origin/{failure.base}"
     if failure.kind == COMMIT:
         return failure.head
+    if failure.kind == LEDGER:
+        return LEDGER
     return f"#{failure.number}"
 
 
@@ -283,7 +288,9 @@ def plan(
 
 def describe(failure: Failure) -> str:
     """The one-line reason a row is red, for the report and the prompt."""
-    if failure.kind in (NIGHTLY, BRANCH):
+    if failure.kind == LEDGER:
+        head = f"{len(failure.signature)} open group(s) on the harness-defect ledger"
+    elif failure.kind in (NIGHTLY, BRANCH):
         head = f"{failure.workflow} workflow failing on origin/{failure.base}"
     else:
         head = failure.reason or "red"

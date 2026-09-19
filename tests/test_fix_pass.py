@@ -60,6 +60,7 @@ def world(tmp_path, monkeypatch):
         "intents": [],
         "failures": [],
         "branches": {"devkit": (True, None), "carameli": (True, None)},
+        "backlog": None,
         "pending": [],
         "dispatched": [],
         "merged": [],
@@ -92,6 +93,9 @@ def world(tmp_path, monkeypatch):
         lambda _ws, _projects: dict(table["branches"]),
     )
     monkeypatch.setattr(fix_pass, "pending_adoptions", lambda root, projects, tag: table["pending"])
+    monkeypatch.setattr(
+        fix_pass.fix_backlog, "ledger_failure", lambda devkit_dir, root: table["backlog"]
+    )
     monkeypatch.setattr(
         fix_pass,
         "dispatch",
@@ -216,6 +220,35 @@ def test_an_untagged_release_commits_red_main_holds_everything_and_sends_nobody(
     text = artifact(world)
     assert "harness  RED" in text and "held     carameli #2" in text
     assert "skip     devkit origin/main -- red by construction" in text
+
+
+def test_collect_red_gathers_prs_default_branches_and_the_backlog_with_devkits_verdict(world):
+    backlog = failure(kind=fix_plan.LEDGER, project="devkit", number=0, head="")
+    world["failures"] = [failure(number=2)]
+    world["branches"] = {"devkit": (False, red_main()), "carameli": (True, None)}
+    world["backlog"] = backlog
+    failures, green = fix_pass.collect_red(world["workspace"], ["devkit", "carameli"], [])
+    assert [f.kind for f in failures] == [fix_plan.PR, fix_plan.BRANCH, fix_plan.LEDGER]
+    assert green is False
+
+
+def test_the_ledgers_open_backlog_rides_in_the_devkit_session(world):
+    """Every entry on the harness-defect ledger is a devkit defect, so an open backlog
+    is harness red like a vendored test is, and goes to the one devkit session."""
+    world["failures"] = [failure(number=2)]
+    world["backlog"] = failure(
+        kind=fix_plan.LEDGER,
+        project="devkit",
+        number=0,
+        head="",
+        workflow="harness ledger",
+        signature=("scheduled-job-failed devkit [84ada64c] x1",),
+    )
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == 0
+    assert world["dispatched"] == [(fix_plan.UPSTREAM, "claude")]
+    text = artifact(world)
+    assert "upstream devkit ledger -- the harness is red" in text
+    assert "held     carameli #2" in text
 
 
 def test_a_projects_red_main_is_a_project_failure_sent_once_the_harness_is_clean(world):

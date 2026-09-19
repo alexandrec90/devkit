@@ -125,6 +125,19 @@ def test_the_branch_prompt_names_the_base_the_run_the_ids_and_the_fresh_branch()
         assert expected in text
 
 
+def test_the_upstream_prompt_sends_the_session_at_the_ledger_only_when_the_backlog_is_in_it():
+    backlog = red_main(
+        kind=fix_plan.LEDGER, workflow="harness ledger", signature=("agent-report devkit [a] x2",)
+    )
+    with_it = fix_prompts.upstream_prompt((backlog, failure()), "agent/fix")
+    assert "devkit ledger -- 1 open group(s) on the harness-defect ledger" in with_it
+    assert "harness_triage.py --resolve-like" in with_it
+    assert ".claude/skills/triage-harness/SKILL.md" in with_it
+    assert fix_prompts.LEDGER_STEPS in with_it
+    without = fix_prompts.upstream_prompt((failure(),), "agent/fix")
+    assert "resolve-like" not in without
+
+
 def test_the_upstream_prompt_reads_each_failure_with_what_its_gate_said():
     """devkit's own red main beside a consumer's shared vendored failure: one session,
     and each named the way the record names it, with its own reason."""

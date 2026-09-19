@@ -17,7 +17,17 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fix_plan import COMMIT, CONFLICT, EVIDENCE_DIR, Failure, describe, name_of
+from fix_plan import COMMIT, CONFLICT, EVIDENCE_DIR, LEDGER, Failure, describe, name_of
+
+# What the devkit session is told about the harness-defect ledger, when the backlog is
+# among its failures. No quotes or backticks: the sentence crosses a `wt` command line.
+LEDGER_STEPS = (
+    " The ledger groups are in that directory's harness-triage.log: work them as "
+    ".claude/skills/triage-harness/SKILL.md says -- verify each against current code "
+    "before believing it, fix what is real, and retire each group with "
+    "python scripts/harness_triage.py --resolve-like ID --note WHAT-FIXED-IT once the "
+    "fix is in your intent."
+)
 
 
 def _ids(sig: tuple[str, ...]) -> str:
@@ -79,10 +89,11 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
         f"{rows}. The fix belongs here in devkit, once -- in the vendored file, the "
         "test, or the template that generates the project-owned file it names -- not in "
         f"each consumer. Each failure's gate logs are under {EVIDENCE_DIR}/ in this "
-        "worktree, one directory per failure. This worktree is on the fresh branch "
-        f"{branch} off the default branch; when the fix is green, ship it with the ship "
-        f"skill and say which of these it unblocks: {urls}. "
-        "If it cannot be fixed here, stop and say what is in the way."
+        "worktree, one directory per failure."
+        + (LEDGER_STEPS if any(f.kind == LEDGER for f in ordered) else "")
+        + f" This worktree is on the fresh branch {branch} off the default branch; when "
+        "the fix is green, ship it with the ship skill and say which of these it "
+        f"unblocks: {urls}. If it cannot be fixed here, stop and say what is in the way."
     )
 
 

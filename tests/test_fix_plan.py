@@ -348,6 +348,11 @@ def test_a_failure_is_named_by_its_pr_its_branch_or_its_default_branch():
     assert fix_plan.name_of(failure(kind=fix_plan.NIGHTLY, number=7)) == "#7"
     assert fix_plan.name_of(failure(kind=fix_plan.COMMIT, number=0, head="agent/i")) == "agent/i"
     assert fix_plan.name_of(red_main()) == "origin/main"
+    backlog = red_main(kind=fix_plan.LEDGER, signature=("agent-report devkit [a] x2", "b"))
+    assert fix_plan.name_of(backlog) == "ledger"
+    assert fix_plan.describe(backlog) == (
+        "2 open group(s) on the harness-defect ledger: agent-report devkit [a] x2, b"
+    )
 
 
 def test_the_release_test_is_the_one_the_pipeline_expects_red():

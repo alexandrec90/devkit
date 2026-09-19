@@ -21,3 +21,11 @@ logs/
 # it, and anything reading dirtiness (`sweep.classify`, the session-start banner) calls
 # the checkout `holds_uncommitted` for as long as the worktree exists.
 .claude/worktrees/
+
+# Written into checkouts by a tool outside this repo -- an `AGENTS.md` mirror of the
+# root `CLAUDE.md` (2026-09-02, and again 2026-09-19 beside a `.codex/config.toml`, in
+# two checkouts in the same second). The repo carries Codex-native context instead
+# (`tests/test_doc_claims.py::test_the_repo_carries_no_agents_md`), and the fix pass
+# commits with `add -A`, so neither may be stageable however often they reappear.
+/AGENTS.md
+/.codex/config.toml

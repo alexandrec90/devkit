@@ -542,9 +542,10 @@ explicitly and asks only which agent. One pass, in order:
    (`scripts/gate_evidence.py`), and classify each as harness, project or unknown
    (`scripts/fix_cycle.py`).
 3. **Harness first.** While anything harness-shaped is red — a vendored test, a
-   signature shared across consumers, devkit's own default branch, a release still being
-   adopted — one devkit session gets the whole set and every project fixer is held, and
-   the record says so.
+   signature shared across consumers, devkit's own default branch, an open backlog on
+   the harness-defect ledger (`scripts/harness_triage.py`, the `/triage-harness`
+   sweep's reader), a release still being adopted — one devkit session gets the whole
+   set and every project fixer is held, and the record says so.
 4. **Then projects**, conflicts first, each under the dispatch ledger and a daily cap.
 5. **Merge green adoption PRs**, and nothing else. Every other green PR waits for you.
 
