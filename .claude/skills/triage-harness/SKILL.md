@@ -156,10 +156,20 @@ expected, a section per fix in the body — and prefer a large reviewed sweep to
 that leaves a list.
 
 **A fix in another project's checkout is still this sweep's work.** `<workspace>/<project>`
-is on this machine. Edit it there, run its targeted tests, and leave a
-`logs/ship-intent.md` in that checkout the same way; say in this intent's body which
-sibling intents the sweep left, and the fix pass opens each PR. Nothing about the ledger
-being devkit's makes a carameli file unfixable from a devkit session.
+is on this machine, but **never edit that static checkout**: it sits on its default
+branch, the fix pass cannot open a PR from there, and the first sweep to do it left a
+carameli fix unstaged on `master` where nothing would ever ship it. Cut a worktree on a
+task branch first, from this devkit checkout:
+
+```bash
+python scripts/agent-worktree.py new --pick "carameli:master" --slug agents-md-ignore --agent none
+```
+
+It prints the path, under that project's `.claude/worktrees/`. Edit there, run its
+targeted tests there, and leave a `logs/ship-intent.md` there the same way; say in this
+intent's body which sibling intents the sweep left, and the fix pass opens each PR.
+Nothing about the ledger being devkit's makes a carameli file unfixable from a devkit
+session.
 
 Two things stay the user's call, because both are irreversible and neither is yours to
 assume: **discarding work that exists only in a box**, and **a fix that has to be

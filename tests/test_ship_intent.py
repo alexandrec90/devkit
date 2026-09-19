@@ -100,9 +100,15 @@ def test_intents_are_found_across_every_worktree_of_every_checkout(tmp_path, mon
         return git
 
     found = ship_intent.find_intents(tmp_path, ["carameli", "devkit", "ghost"], git_for)
-    assert [(i.project, i.branch, i.subject) for i in found] == [
-        ("carameli", "agent/labels-0919", "Teach the sweep about labels")
+    assert [(i.project, i.branch, i.subject, bool(i.blocked)) for i in found] == [
+        ("carameli", "main", "Never", True),
+        ("carameli", "agent/labels-0919", "Teach the sweep about labels", False),
     ]
+    assert found[0].blocked == ship_intent.ship.is_shippable("main", "main")[1], (
+        "an intent on the default branch is reported with the shippable rule's own "
+        "reason, never silently passed over: the first ledger sweep left a carameli fix "
+        "unstaged on master that way"
+    )
 
 
 def test_a_checkout_git_cannot_list_is_passed_over(tmp_path):

@@ -413,6 +413,20 @@ def test_the_artifact_is_written_under_logs(tmp_path):
     assert path.read_text(encoding="utf-8") == "hello\n"
 
 
+def test_a_blocked_intent_is_said_and_never_shipped_in_any_mode(monkeypatch, tmp_path):
+    stuck = ship_intent.Intent(
+        "carameli", tmp_path, "master", "S", "B", blocked="master is the default branch"
+    )
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: [stuck])
+    monkeypatch.setattr(
+        fix_pass.ship_intent, "ship_one", lambda *a: pytest.fail("a blocked intent never ships")
+    )
+    lines, refused = fix_pass.ship_intents(tmp_path, ["carameli"], fix_cycle.DISPATCH)
+    assert refused == [] and len(lines) == 1
+    assert lines[0].startswith("carameli master -- NOT shipped: master is the default branch")
+    assert "agent-worktree.py new" in lines[0]
+
+
 def test_ship_intents_in_plan_mode_only_says_what_it_would_do(monkeypatch, tmp_path):
     one = ship_intent.Intent("carameli", tmp_path, "agent/i", "S", "B")
     monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: [one])

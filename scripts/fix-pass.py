@@ -95,6 +95,13 @@ def ship_intents(
     refused: list[fix_plan.Failure] = []
     for intent in ship_intent.find_intents(root, projects):
         where = f"{intent.project} {intent.branch}"
+        if intent.blocked:
+            # Work a session left where no PR can be opened from: said, never shipped.
+            lines.append(
+                f"{where} -- NOT shipped: {intent.blocked}; move the work to a task branch "
+                f"(agent-worktree.py new) and leave the intent there"
+            )
+            continue
         if mode != fix_cycle.DISPATCH:
             lines.append(f"{where} -- would ship: {intent.subject}")
             continue
