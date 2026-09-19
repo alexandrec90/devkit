@@ -48,8 +48,8 @@ import worktree_tiers as wt
 # halves are directory names, and a colon is not legal in either on Windows.
 PICK_SEP = ":"
 
-# What joins several ticked rows into that one string. A space, matching `previewRow` and
-# `brokenPrRow`: neither half can contain one.
+# What joins several ticked rows into that one string. A space, matching `previewRow`:
+# neither half can contain one.
 PICK_LIST_SEP = " "
 
 # The value a row carries when picking it should run nothing, re-exported from

@@ -1,66 +1,53 @@
 #!/usr/bin/env python3
-"""Send an agent at the PRs that are already red, one worktree per PR.
+"""Send an agent at everything that is red, deciding for itself what "everything" means.
 
-A PR goes red two ways and both of them wait for a person: `origin/<default>` moved
-under it (`mergeable: CONFLICTING`), or its gate failed. Neither is work anybody wants
-to do by hand, and neither is work the scheduled tier will ever do -- `worktree.py
-reconcile` merges only what is *green* and carries the merge label, so a red PR is
-precisely the state it steps over every quarter hour, forever.
+The task asks one question -- which agent -- and this script answers the rest. It scans
+every checkout for a red PR and every open scheduled-failure issue, reads what each gate
+actually said, and plans: a PR gets a session on its own head branch; a vendored test
+failing across several consumers gets **one** session in devkit; a release PR (red by
+construction) and an adoption PR for a superseded release get none, out loud. The plan
+is `scripts/fix_plan.py`, the evidence is `scripts/gate_evidence.py`, and what is here
+is the acting half: worktrees, prompts, sessions, and the ledger that stops a second
+click sending a second agent at the same failure.
 
-**The unit of work is one PR in one worktree on that PR's own head branch.** Not a new
+It used to ask which PRs. That was the expensive part, and not in clicks: eight
+consumers red on one devkit release were eight ticked rows and eight sessions each
+rediscovering one cause. `--picks` survives as a hand-typed override for a terminal.
+
+**The unit of work for a PR is one worktree on that PR's own head branch.** Not a new
 branch: the fix belongs on the branch under review, so the worktree is cut on the head
 branch with `origin/<head>` as its upstream and a bare push lands where the PR is
-looking. That is also this repo's answer to "is there a CLI flag that attaches an agent
-to a PR branch": Claude Code's `--from-pr` *resumes a session linked to a PR*, which
-needs that session to still exist on this machine. Cutting the worktree is the spelling
-that works on a PR nobody has touched this week.
+looking. (Claude Code's `--from-pr` *resumes a session linked to a PR*, which needs that
+session to still exist here; cutting the worktree works on a PR nobody touched this
+week.) A failure with no branch of its own -- a nightly, a shared vendored failure --
+gets a fresh branch off the default one and a prompt that ends with the ship skill.
 
 **New worktrees go under `.claude/worktrees/`.** `agent-worktree.py` lists and removes
 them. Existing Claude and Codex worktrees are reused, as are live devkit boxes whose
 project, branch and path match the PR's checkout and head. Upgrade PRs already have
 such boxes; refusing them prevents the task from fixing those PRs. Reuse leaves the
 box's lease and lifecycle with `worktree.py`. This task creates no boxes or port leases.
-`scripts/agent_worktrees.py` owns `holder`, `tree_name` and `add_steps`; what is here is
-the PR half.
+`scripts/agent_worktrees.py` owns `holder`, `tree_name` and the `add` argv.
 
-**Three agent modes, and the third one is an asymmetry rather than an omission.**
-`claude` and `codex` each open a Windows Terminal tab, the same one `agent-box.py`
-opens; `claude-bg` is `claude --bg`, which returns an id immediately and is read back
-with `claude attach` / `claude logs`. There is no `codex-bg` row because Codex has no
-background session: `codex exec` is non-interactive but streams to the terminal it was
-started in and hands back nothing to attach to. Offering a row per agent per mode would
-have made that difference silent; three rows makes it visible in the dropdown.
+**Three agent modes.** `claude` and `codex` each open a Windows Terminal tab, the one
+`agent-box.py` opens; `claude-bg` is `claude --bg`, read back with `claude attach` /
+`claude logs`. There is no `codex-bg`: `codex exec` streams to the terminal it was
+started in and hands back nothing to attach to.
 
-**The menu is live, and that is a change of writer rather than of shape.** It used to be
-a JSON file rebuilt every fifteen minutes by `worktree.reconcile`, because
-`rioj7.command-variable` reads a file and cannot run a command -- so the rows were stale
-by construction, and stale in the one direction that costs: a PR closed since the scan
-still drew a row, and clicking it sent `resume` at a head branch GitHub had deleted.
-`--rows` is that scan with no file under it, run by `shellCommand.execute` at the moment
-the picker opens. `run_one` still re-reads the PR it was handed, because a scan of six
-checkouts is seconds of quick-pick and a person then reads the list.
-
-**Whether a PR still merges is `scripts/pr_mergeability.py`'s question**, and it is a
-question with three answers rather than two: GitHub computes mergeability on demand and
-invalidates it whenever the base branch moves, so a scan run in the minute after a merge
-asks about a whole checkout it has not re-judged. That module owns what to do about the
-third answer, because reading it as "merges fine" is a row that silently is not here.
-
-**What counts as broken, and the rows the picker draws, are `scripts/broken_pr_menu.py`.**
-That half was cut out when this file's `file_lines` was recorded a fifth time against
-the seam its own section headers drew. The entrypoint stayed here on purpose:
-`devkit_project.ACTIONS` names `scripts/fix-prs.py` for the live `--rows` picker, and a
-dropdown's command line is spelled by hand in the workspace task block, so the library
-came out from under the CLI rather than the CLI moving to it.
+**Click-only, by decision.** Nothing schedules this. A session is paid for, and a
+dispatch loop that spent one in the background on a failure nobody was going to look
+at is the outcome the ledger and the plan exist to avoid; the scheduled tier merges
+green PRs and reaps boxes, and stops there.
 
 Every function that decides something is pure and tested in `tests/test_fix_prs.py`
-(with the menu tier's own in `tests/test_broken_pr_menu.py`); the ones that spawn take
-a runner.
+(with the plan's own in `tests/test_fix_plan.py` and the evidence's in
+`tests/test_gate_evidence.py`); the ones that spawn take a runner.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import os
 import shutil
 import subprocess
@@ -69,42 +56,35 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+import adoption_prs
 import agent_worktrees as aw
 import devkit_project
-import picker_rows
-import picker_scan
+import fix_plan
+import gate_evidence
 import sweep
+import task_branch as tb
 import task_input
 import worktree
 
-# The scan-and-menu half, cut into its own module when this file's `file_lines` was
-# recorded a fifth time against the same never-cut seam. The **entrypoint stayed
-# here**: `devkit_project.ACTIONS` names `scripts/fix-prs.py` for the live `--rows`
-# picker, and a dropdown's command line is spelled by hand in the workspace task
-# block, so cutting the library out instead leaves that path and every flag on it
-# exactly where they were.
-#
-# Qualified rather than imported name by name, and that is the load-bearing part.
-# `menu.picked_rows` calls `menu.scan` through its own module global, so a `from`
-# import would leave two bindings for one function and a caller patching the wrong
-# one -- which is exactly what the test suite did on the first cut, silently taking
-# the real `gh` path while asserting against a stub.
+# Qualified rather than imported name by name, and that is the load-bearing part: the
+# menu's functions call each other through their own module globals, so a `from` import
+# would leave two bindings for one function and a caller patching the wrong one -- which
+# is exactly what the test suite did on the first cut, silently taking the real `gh`
+# path while asserting against a stub.
 import broken_pr_menu as menu
 
 # `agent-box.py` is hyphenated, so it cannot be a plain import. Loaded by path for the
 # one thing worth sharing rather than copying: how a tab's command line is built and
-# which window it lands in. `worktree` above is imported normally on purpose -- see the
-# note on the same pair of inserts in `agent-box.py`.
+# which window it lands in. `worktree` above is imported normally on purpose -- see
+# the note on the same pair of inserts in `agent-box.py`.
 from _loader import load_by_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 agent_box = load_by_path("agent_box", REPO_ROOT / "scripts" / "agent-box.py")
 
-# The agent modes the picker offers. The value is what reaches `--agent`; the mapping is
-# to how the session is opened, which is the whole of the difference between them. These
-# stay here rather than moving with the menu: they describe launching, which is this
-# half's whole subject, and the menu never reads them.
+# The agent modes the task offers. The value is what reaches `--agent`; the mapping is
+# to how the session is opened, which is the whole of the difference between them.
 TAB = "tab"  # a Windows Terminal tab, watched by whoever clicked
 BACKGROUND = "bg"  # `claude --bg`, read back with `claude attach` / `claude logs`
 AGENT_MODES: dict[str, tuple[str, str]] = {
@@ -112,6 +92,9 @@ AGENT_MODES: dict[str, tuple[str, str]] = {
     "claude-bg": ("claude", BACKGROUND),
     "codex": ("codex", TAB),
 }
+
+# The checkout a shared vendored failure is fixed in: this repo, by its registry name.
+DEVKIT = "devkit"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -133,29 +116,7 @@ def tab_safe(text: str) -> str:
     return " ".join(str(text).split())
 
 
-def seed_prompt(project: str, pr: dict, reason: str) -> str:
-    """The opening instruction the agent's session starts with.
-
-    It names the PR, what is wrong with it *now*, and the finish line -- because a
-    session opened with no prompt starts by rediscovering all three, and this task exists
-    to skip exactly that. The merge is stated as a condition rather than an instruction
-    (`once the gate is green`) so the agent that cannot get there reports instead of
-    forcing: `--admin` is not in anybody's prompt here.
-    """
-    number = pr.get("number", "?")
-    base = pr.get("baseRefName", "the base branch")
-    head = pr.get("headRefName", "its head branch")
-    return tab_safe(
-        f"PR #{number} in {project} is stuck: {reason}. "
-        f"This worktree is checked out on the PR head branch {head} with its upstream set, "
-        f"so a bare git push lands on the PR. "
-        f"Merge origin/{base} in, fix what the gate is failing on, run the targeted "
-        f"tests and the linter, push, and then merge the PR once the gate is green. "
-        f"If it cannot be made green, stop and say what is in the way."
-    )
-
-
-# --- opening the session ----------------------------------------------------------
+# --- the worktree -----------------------------------------------------------------
 
 
 def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
@@ -210,11 +171,56 @@ def cut_tree(project_dir: Path, branch: str, runner=subprocess.run) -> Path | No
     if runner(argv, check=False).returncode != 0:
         return None
     # Nothing is written to make this appear in the delete dropdown, because that menu
-    # has no file behind it any more: `agent-worktree.py rows` scans
-    # `git worktree list --porcelain` when the picker opens, and `aw.nested` selects
-    # exactly the directory cut above. The worktree you just cut is in the list because
-    # it exists, not because a writer remembered to say so.
+    # has no file behind it: `agent-worktree.py rows` scans `git worktree list
+    # --porcelain` when the picker opens, and `aw.nested` selects exactly the directory
+    # cut above. The worktree you just cut is in the list because it exists.
     return path
+
+
+def fix_branch(decision: fix_plan.Decision, now: _dt.datetime | None = None) -> str:
+    """The fresh branch a fix with no branch of its own starts on.
+
+    Under `tb.BRANCH_PREFIX` rather than the automation namespace: a person clicked,
+    and the PR the ship skill opens from it is one they asked for. The date suffix is
+    `worktree.plan_new`'s convention, so the branch reads beside every other agent cut.
+    """
+    stamp = (now or _dt.datetime.now(_dt.UTC)).strftime("%m%d")
+    first = decision.failures[0]
+    if decision.action == fix_plan.UPSTREAM:
+        test = next((s for s in first.signature if "::" in s), "vendored").rsplit("::", 1)[-1]
+        topic = f"fix {tb.slugify(test, max_len=24)}"
+    else:
+        topic = f"fix {first.workflow or 'nightly'}"
+    return f"{tb.BRANCH_PREFIX}{tb.slugify(topic)}-{stamp}"
+
+
+def cut_fresh_tree(
+    project_dir: Path, branch: str, base: str, runner=subprocess.run
+) -> tuple[Path | None, str]:
+    """Cut a default-tier worktree on a new `branch` off `origin/<base>`.
+
+    The branch is renamed with a counter when the checkout already has one of that
+    name: two clicks on two different nightlies of one project on one day want two
+    branches, and git would otherwise refuse the second with the first's name.
+    """
+    git = sweep.git_for(project_dir)
+    runner(["git", "-C", str(project_dir), "fetch", "--quiet", "origin"], check=False)
+    name, counter = branch, 2
+    while git("rev-parse", "--verify", "--quiet", f"refs/heads/{name}").returncode == 0:
+        name, counter = f"{branch}-{counter}", counter + 1
+    root = aw.default_root(project_dir)
+    taken = [entry.name for entry in root.iterdir()] if root.is_dir() else []
+    path = root / aw.tree_name(name, taken)
+    # `--no-track`, as `create` is: the upstream belongs to the first push, not to the
+    # default branch the worktree was cut from, which is where a bare push would land.
+    add = ("worktree", "add", "--no-track", "-b", name, str(path), f"origin/{base}")
+    argv = ["git", "-C", str(project_dir), *add]
+    if runner(argv, check=False).returncode != 0:
+        return None, name
+    return path, name
+
+
+# --- opening the session ----------------------------------------------------------
 
 
 def background_argv(cli: str, prompt: str) -> list[str]:
@@ -250,16 +256,28 @@ def launch_background(
     return EXIT_OK
 
 
+def open_session(
+    mode: str, tree: Path, branch: str, prompt: str, title: str, runner=subprocess.run
+) -> int:
+    """The one place a mode becomes a tab or a background session."""
+    cli, how = AGENT_MODES[mode]
+    if how == BACKGROUND:
+        return launch_background(
+            cli, tree, prompt, agent_box.harness_switch.hooks_are_off(), runner
+        )
+    return agent_box.open_agent(cli, tree, branch, runner, prompt=prompt, title=title)
+
+
 def run_one(
     pick: menu.Pick,
     workspace: Path,
     mode: str,
     runner=subprocess.run,
 ) -> int:
-    """One PR, end to end: read it, get a worktree on its branch, open the agent in it.
+    """One hand-picked PR: read it live, gather its evidence, send it the planned way.
 
     Returns non-zero for anything that stopped this PR getting an agent. A PR that went
-    green, or that left the open set entirely, is `EXIT_OK` and no worktree: the menu was
+    green, or that left the open set entirely, is `EXIT_OK` and no worktree: the pick was
     stale, the work is done or abandoned, and reporting that as a failure would put a
     red icon on good news.
     """
@@ -274,56 +292,35 @@ def run_one(
         return EXIT_FAILED
     state = str(pr.get("state") or menu.OPEN).upper()
     if state != menu.OPEN:
-        print(
-            f"{pick.project} #{pick.number}: {state.lower()} since the menu.scan -- nothing to do"
-        )
+        print(f"{pick.project} #{pick.number}: {state.lower()} since the scan -- nothing to do")
         return EXIT_OK
-    # The same re-ask the menu.scan does, for the same reason and one the launch path feels
+    # The same re-ask the scan does, for the same reason and one the launch path feels
     # more sharply: between the click and here, anything merging to the base branch puts
     # this PR's verdict back to `UNKNOWN`, and an unresolved verdict read straight off
-    # this view says "nothing wrong with it now" -- a ticked row that opens nothing,
+    # this view says "nothing wrong with it now" -- a session that opens nothing,
     # reports success, and leaves the PR exactly as red as it was.
     menu.settle_mergeability(project_dir, [pr])
-    reason = menu.broken_reason(pr)
-    if not reason:
+    if not menu.broken_reason(pr):
         print(f"{pick.project} #{pick.number}: nothing wrong with it now -- nothing to do")
         return EXIT_OK
-
-    branch = str(pr.get("headRefName") or "")
-    if not branch:
+    if not pr.get("headRefName"):
         print(f"{pick.project} #{pick.number}: gh reported no head branch -- skipped")
         return EXIT_FAILED
-
-    print(f"{pick.project} #{pick.number} ({reason}) on {branch}")
-    tree, refused = existing_tree(project_dir, branch)
-    if refused:
-        print(f"  {refused}", file=sys.stderr)
-        return EXIT_FAILED
-    tree = tree or cut_tree(project_dir, branch, runner)
-    if tree is None:
-        print(f"  no worktree for {branch}; nothing opened", file=sys.stderr)
-        return EXIT_FAILED
-    print(f"  worktree {tree}")
-
-    cli, how = AGENT_MODES[mode]
-    prompt = seed_prompt(pick.project, pr, reason)
-    if how == BACKGROUND:
-        return launch_background(
-            cli, tree, prompt, agent_box.harness_switch.hooks_are_off(), runner
-        )
-    return agent_box.open_agent(
-        cli, tree, branch, runner, prompt=prompt, title=f"{pick.project} #{pick.number}"
+    failure = gate_evidence.read_pr(
+        project_dir,
+        gate_evidence.pr_failure(pick.project, pr),
+        gate_evidence.evidence_root(workspace),
     )
+    return dispatch_pr(failure, root, mode, runner)
 
 
 def run(picks: list[menu.Pick], workspace: Path, mode: str, runner=subprocess.run) -> int:
-    """Every ticked PR in turn. The worst exit code, so one failure is still reported.
+    """Every picked PR in turn. The worst exit code, so one failure is still reported.
 
-    In turn rather than at once, and the reason survived the move off the box tier
-    intact even though the expensive half of it did not: several ticked PRs are usually
-    several PRs of the *same* checkout, `git worktree add` takes that checkout's index
-    lock, and a fetch runs before each one. Three at once is three git processes
-    queueing on one lock, with the failures arriving interleaved with the tabs.
+    In turn rather than at once: several picks are usually several PRs of the *same*
+    checkout, `git worktree add` takes that checkout's index lock, and a fetch runs
+    before each one. Three at once is three git processes queueing on one lock, with
+    the failures arriving interleaved with the tabs.
     """
     worst = EXIT_OK
     for pick in picks:
@@ -331,8 +328,92 @@ def run(picks: list[menu.Pick], workspace: Path, mode: str, runner=subprocess.ru
     return worst
 
 
+# --- the planned path ---------------------------------------------------------------
+
+
+def dispatch_pr(failure: fix_plan.Failure, root: Path, mode: str, runner=subprocess.run) -> int:
+    """A planned PR: its own head branch, the gate's logs beside it, the plan's prompt."""
+    project_dir = root / failure.project
+    print(f"{failure.project} #{failure.number} ({failure.reason}) on {failure.head}")
+    tree, refused = existing_tree(project_dir, failure.head)
+    if refused:
+        print(f"  {refused}", file=sys.stderr)
+        return EXIT_FAILED
+    tree = tree or cut_tree(project_dir, failure.head, runner)
+    if tree is None:
+        print(f"  no worktree for {failure.head}; nothing opened", file=sys.stderr)
+        return EXIT_FAILED
+    gate_evidence.place(failure, tree)
+    print(f"  worktree {tree}")
+    prompt = tab_safe(fix_plan.pr_prompt(failure))
+    title = f"{failure.project} #{failure.number}"
+    return open_session(mode, tree, failure.head, prompt, title, runner)
+
+
+def dispatch_fresh(
+    decision: fix_plan.Decision, root: Path, mode: str, runner=subprocess.run
+) -> int:
+    """A nightly, or a vendored failure shared across consumers: a fresh branch."""
+    first = decision.failures[0]
+    upstream = decision.action == fix_plan.UPSTREAM
+    project = DEVKIT if upstream else first.project
+    project_dir = root / project
+    if not project_dir.is_dir():
+        print(f"  no checkout {project!r} in {root}; nothing opened", file=sys.stderr)
+        return EXIT_FAILED
+    base = tb.detect_default_branch(sweep.git_for(project_dir)) if upstream else first.base
+    print(f"{project}: {decision.note}")
+    tree, branch = cut_fresh_tree(project_dir, fix_branch(decision), base, runner)
+    if tree is None:
+        print(f"  could not cut {branch} off origin/{base}; nothing opened", file=sys.stderr)
+        return EXIT_FAILED
+    for failure in decision.failures:
+        gate_evidence.place(failure, tree, failure.project if upstream else "")
+    print(f"  worktree {tree} on {branch}")
+    if upstream:
+        prompt, title = fix_plan.upstream_prompt(decision.failures, branch), f"devkit {branch}"
+    else:
+        prompt, title = fix_plan.nightly_prompt(first, branch), f"{project} {first.workflow}"
+    return open_session(mode, tree, branch, tab_safe(prompt), title, runner)
+
+
+def run_plan(workspace: Path, mode: str, dry_run: bool, redo: bool, runner=subprocess.run) -> int:
+    """Scan, read the evidence, plan, print the plan, then send what is new.
+
+    The ledger is written only for a dispatch that opened: a session that failed to
+    start is not one a second click should be told already happened.
+    """
+    root = workspace.parent
+    found = menu.scan(workspace)
+    failures = gate_evidence.collect(workspace, found)
+    latest = gate_evidence.latest_tag(root / DEVKIT)
+    decisions = fix_plan.plan(failures, latest, adoption_prs.adoption_prefixes())
+    ledger_path = worktree.boxes_root(root) / fix_plan.LEDGER_NAME
+    ledger = fix_plan.read_ledger(ledger_path)
+    print(fix_plan.render(decisions, ledger))
+    if dry_run:
+        return EXIT_OK
+    worst = EXIT_OK
+    for decision in decisions:
+        if decision.action == fix_plan.SKIP:
+            continue
+        if not redo and fix_plan.already_sent(decision, ledger):
+            continue
+        if decision.action == fix_plan.DISPATCH and decision.failures[0].kind == fix_plan.PR:
+            code = dispatch_pr(decision.failures[0], root, mode, runner)
+        else:
+            code = dispatch_fresh(decision, root, mode, runner)
+        if code == EXIT_OK:
+            fix_plan.record(ledger_path, fix_plan.decision_key(decision), decision.note)
+        worst = max(worst, code)
+    return worst
+
+
+# --- the CLI ------------------------------------------------------------------------
+
+
 def render_scan(found: dict[str, list[dict]]) -> str:
-    """`--list`, for the terminal. The same rows the dropdown would draw."""
+    """`--list`, for the terminal: what is red, per checkout, before any evidence."""
     lines = []
     for project in sorted(found, key=lambda name: (-len(found[name]), name)):
         prs = found[project]
@@ -347,33 +428,22 @@ def render_scan(found: dict[str, list[dict]]) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
-        "--picks",
-        default="",
-        help=f"ticked rows, `<project>{menu.PICK_SEP}<number>` joined by a space",
-    )
-    parser.add_argument(
         "--agent",
         default="claude",
         choices=sorted(AGENT_MODES),
         help="which CLI opens, and whether it opens in a tab or in the background",
     )
     parser.add_argument(
-        "--rows",
-        action="store_true",
-        help="print the picker's rows (`value|label|description|detail`) and stop",
-    )
-    parser.add_argument(
-        "--project-rows",
-        action="store_true",
-        help="print the CHECKOUT picker's rows and stop, recording the menu.scan they came from",
-    )
-    parser.add_argument(
-        "--checkouts",
+        "--picks",
         default="",
         help=(
-            f"ticked checkouts, `<project>{picker_scan.SEP}<menu.scan token>` joined by "
-            f"`{picker_scan.LIST_SEP}` -- what the checkout picker returns"
+            f"by hand: specific PRs, `<project>{menu.PICK_SEP}<number>` joined by a space; "
+            "skips the plan and the ledger"
         ),
+    )
+    parser.add_argument("--dry-run", action="store_true", help="print the plan and open nothing")
+    parser.add_argument(
+        "--redo", action="store_true", help="send again what the ledger says was already sent"
     )
     parser.add_argument("--list", action="store_true", help="print the broken PRs and stop")
     parser.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
@@ -397,30 +467,13 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
 
     try:
-        if args.project_rows:
-            found = menu.scan(workspace)
-            token = picker_scan.write(menu.SCAN_NAME, menu.scan_entries(found))
-            picker_rows.emit(menu.project_rows(found, token))
-            return EXIT_OK
-        if args.rows:
-            picker_rows.emit(menu.picked_rows(workspace, args.checkouts))
-            return EXIT_OK
         if args.list:
             print(render_scan(menu.scan(workspace)))
             return EXIT_OK
-
         tokens = menu.split_picks(args.picks)
         if not tokens:
-            print("fix-prs: nothing ticked -- nothing to do")
-            return EXIT_OK
-        picks = [pick for pick in (menu.parse_pick(token) for token in tokens) if pick is not None]
-        if not picks:
-            print("fix-prs: only the `nothing broken` row was ticked -- nothing to do")
-            return EXIT_OK
-        strayed = menu.strayed_picks(picks, args.checkouts)
-        if strayed:
-            print(f"fix-prs: {menu.stray_report(strayed)}", file=sys.stderr)
-            return EXIT_USAGE
+            return run_plan(workspace, args.agent, args.dry_run, args.redo)
+        picks = [menu.parse_pick(token) for token in tokens]
         return run(picks, workspace, args.agent)
     except (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError) as exc:
         print(f"fix-prs: {exc}", file=sys.stderr)

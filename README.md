@@ -520,37 +520,52 @@ list, whose rows carry what each worktree holds (`clean and pushed`, `2 uncommit
 path(s)`): read from a cache, that warning would be as old as the last scheduled pass, and
 it describes what the click is about to destroy.
 
-### Sending an agent at a PR that is already red
+### Sending an agent at whatever is red
 
 `reconcile` merges what is green and labelled, so a PR whose base moved under it or whose
-gate failed is the state every scheduled pass steps over. `scripts/fix-prs.py` is the way
-back in: it cuts a worktree on the PR's own head branch — upstream
-set, so a bare push lands on the PR — and opens an agent there already knowing the PR
-number, what is wrong with it and that the job ends with the PR merged once the gate is
-green. Same tier as the two rows above, so *Agent: Delete Worktrees* lists what it left
-behind, and a second click on the same PR reuses the worktree the first one cut. An
-existing Claude or Codex worktree, or a live devkit box matching the checkout and PR
-branch, is reused too. Other locations, including the static checkout, are reported
-with that directory named.
+gate failed is the state every scheduled pass steps over, and a scheduled workflow that
+failed on the default branch has no PR at all — only the issue
+`scheduled-failure-issue.yml` opens for it. `scripts/fix-prs.py` is the way back in for
+both, and it decides for itself what to send an agent at. The *Agent: Fix What Is Red*
+task asks one question — which agent — and the script scans every checkout for red PRs
+and open scheduled-failure issues, downloads what each gate actually said (the
+`logs/test-failures.log` artifact, or the failed step names when there is none), and
+plans from that:
+
+- **A red PR** gets a worktree on its own head branch — upstream set, so a bare push
+  lands on the PR — with the gate's logs under `logs/gate/` and a prompt naming the
+  failing tests. Same tier as the rows above, so *Agent: Delete Worktrees* lists what it
+  left behind; an existing Claude or Codex worktree, or a live devkit box on the PR
+  branch, is reused.
+- **One vendored test failing in two or more consumers** is one devkit defect, and gets
+  **one** session in devkit, on a fresh branch, with every consumer's logs beside it and
+  the affected PRs named. This is the shape a devkit release fans out into, and the one
+  the old per-PR dropdown cost eight sessions on.
+- **A failing scheduled workflow** gets a fresh branch off the default branch in that
+  project, the run's logs, and a prompt that ends with the ship skill; the issue closes
+  itself when the workflow next passes.
+- **Two shapes get nothing, out loud.** A release PR is red by construction until its tag
+  exists (`RELEASING.md`), and an adoption PR for a release that is no longer the newest
+  is superseded — the upgrade sweep closes those itself.
+
+A ledger under the workspace's `.worktrees/` records every dispatch against the commit it
+was observed on, so a second click sends nothing at a failure an agent is already on;
+`--redo` overrides it, and `--dry-run` prints the plan and opens nothing. **Nothing
+schedules this**: a session is paid for, and the dispatch stays behind a click by
+decision.
 
 ```bash
+python scripts/fix-prs.py --dry-run                           # the plan, nothing opened
+python scripts/fix-prs.py --agent claude                      # send it, one tab per decision
 python scripts/fix-prs.py --list                              # what is red, per checkout
-python scripts/fix-prs.py --picks carameli:313 --agent claude # a tab you can watch
-python scripts/fix-prs.py --picks "devkit:88 roguelike:16" --agent claude-bg
-python scripts/fix-prs.py --rows                             # the dropdown's rows, live
+python scripts/fix-prs.py --picks "devkit:88 roguelike:16"    # by hand: these PRs, no plan
 ```
 
 `claude-bg` is `claude --bg`: it returns a session id and `claude agents`, `claude logs
 <id>` and `claude attach <id>` read it back. There is no `codex-bg` — `codex exec` is
 non-interactive but streams into the terminal that started it and leaves nothing to
-reattach to. The *Agent: Fix a Broken PR* task is the same thing with a dropdown, and that
-dropdown runs `--rows` when you open it — one `gh` call per checkout, fanned out, so the
-list is a live scan rather than a cached one. A pick is then re-read again before anything
-is spawned, so a PR that went green, was closed or was merged in between is reported and
-skipped. It needs the `augustocdias.tasks-shell-input` extension, which is what lets a VS
-Code input run a command at all; the daily `devkit-workspace-status` pass reports it when
-it is missing, and toasts, because the failure it prevents names a *command* rather than a
-package and so cannot be searched for.
+reattach to. Every PR is re-read live before anything is spawned, so one that went green,
+was closed or was merged since the scan is reported and skipped.
 
 ### Running someone else's branch before it merges
 

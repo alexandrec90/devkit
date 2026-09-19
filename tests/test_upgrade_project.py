@@ -188,42 +188,6 @@ def test_two_same_day_releases_do_not_share_a_branch_name():
 # --- an adoption already up for review ---------------------------------------
 
 
-def test_the_branch_stem_is_built_from_the_box_tiers_own_namer():
-    """Restating `agent/` or the slug rules here would give the stem a second author,
-    and a rename in `task_branch` would stop matching without failing anything."""
-    stem = up.upgrade_branch_stem("v0.10.2")
-    assert stem == f"{up.tb.AUTOMATION_PREFIX}{up.tb.slugify(up.upgrade_slug('v0.10.2'))}-"
-    # And it really is a prefix of what the box tier would cut, on any day.
-    cut = up.tb.branch_name(
-        up.tb.slugify(up.upgrade_slug("v0.10.2")),
-        set(),
-        _dt.date(2026, 8, 20),
-        prefix=up.tb.AUTOMATION_PREFIX,
-    )
-    assert cut.startswith(stem)
-
-
-def test_the_upgrade_branch_says_no_session_asked_for_it():
-    """This sweep cuts the same vendoring commit in every consumer, nightly, and a
-    reviewer opening `preview-task.py` was being offered all of them ahead of the change
-    they had asked to look at. The namespace is what that menu filters on, so it is a
-    contract here rather than a naming preference -- and it stays inside `agent/`, so
-    the branch still ships like any other."""
-    stem = up.upgrade_branch_stem("v0.11.2")
-    assert up.tb.is_automation_branch(stem)
-    assert up.tb.is_managed_task_branch(stem)
-
-
-def test_only_one_stem_is_ever_cut_however_many_are_searched_for():
-    """`upgrade_branch_stems` widens the *lookup* and must never widen the *naming* --
-    a run that cut the legacy stem back would undo the move on the next nightly."""
-    stems = up.upgrade_branch_stems("v0.11.2")
-    assert stems[0] == up.upgrade_branch_stem("v0.11.2")
-    assert any(not up.tb.is_automation_branch(stem) for stem in stems)
-    # `str.startswith` takes the tuple as-is; a list would raise at the call site.
-    assert isinstance(stems, tuple)
-
-
 def test_an_open_pr_for_this_release_is_found(tmp_path, monkeypatch):
     """The duplicate this exists to prevent: `DEVKIT_VERSION` on the default branch only
     moves when an adoption *merges*, so a PR that is open-but-red leaves every later run
@@ -292,6 +256,18 @@ def test_a_gh_that_cannot_answer_never_blocks_the_upgrade(tmp_path, monkeypatch)
     assert up.open_adoption_pr(tmp_path, "v0.10.2") == ""
     monkeypatch.setattr(up.sweep, "gh_for", lambda _p: gh_listing("not json at all"))
     assert up.open_adoption_pr(tmp_path, "v0.10.2") == ""
+
+
+def test_the_pending_check_closes_the_superseded_ones_first(tmp_path, monkeypatch, capsys):
+    """`main` asks one question -- is this release's adoption in flight? -- and the
+    superseded ones are closed on the way to the answer, so a project whose v0.11.20 PR
+    sat red does not keep it beside the v0.11.21 one."""
+    closed: list[tuple[Path, str]] = []
+    monkeypatch.setattr(up, "close_superseded", lambda p, t: closed.append((p, t)) or ["#170"])
+    monkeypatch.setattr(up, "open_adoption_pr", lambda _p, _t: "#171 u/171")
+    assert up.pending_adoption(tmp_path, "carameli", "v0.11.21") == "#171 u/171"
+    assert closed == [(tmp_path, "v0.11.21")]
+    assert "closed #170, superseded by devkit v0.11.21" in capsys.readouterr().out
 
 
 def test_the_commit_names_the_release():

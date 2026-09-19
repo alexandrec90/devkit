@@ -741,10 +741,16 @@
 				// reaped after three days. `worktree.py resume --branch` is what does work on a
 				// PR nobody has touched this week.
 				//
-				// Machine scope, not project scope — one scan across every checkout, so the
-				// checkout is a field on each row rather than a scope for the task. The picker
-				// runs that scan itself, at click time; see the note on `brokenPrRow` for what
-				// the cached menu it replaced cost. See ACTIONS["fix-prs"].
+				// Machine scope, not project scope — one scan across every checkout, and the
+				// script decides what to send an agent at. It used to ask: tick the checkouts,
+				// tick the PRs. The ticking was the expensive part, and not in clicks — eight
+				// consumers red on one devkit release were eight ticked rows and eight sessions
+				// each rediscovering one cause. `scripts/fix_plan.py` now reads what each gate
+				// actually said and plans: a PR gets its own session, one vendored test failing
+				// across consumers gets ONE session in devkit, a release PR (red by
+				// construction) and a superseded adoption get none. A ledger keyed on the
+				// commit each failure was seen at makes a second click send nothing twice.
+				// See ACTIONS["fix-prs"].
 				//
 				// Which agent opens is where Claude and Codex stop matching, and that is why it
 				// is spelled as three rows rather than an agent picker plus a background
@@ -753,20 +759,15 @@
 				// streams into the terminal that started it and hands back nothing to reattach
 				// to. A `codex-bg` row would have to be a lie or a silent downgrade.
 				//
-				// `focus` because a run asks nothing further but prints the box path and, in
-				// background mode, the session id — the one line the terminal has that nothing
-				// else will show you.
-				// `--checkouts` is spelled FIRST and that is load-bearing, not cosmetic.
-				// `augustocdias.tasks-shell-input` resolves one input's `${input:<id>}`
-				// reference from the value it recorded when that input last ran, so the
-				// checkout stage has to resolve before the row stage does -- and the order
-				// VS Code resolves them in is the order they appear here, left to right.
-				// The extension's README says so as its one documented limitation. Get it
-				// backwards and the row list filters by the PREVIOUS click's checkouts,
-				// which is why the receiving script also refuses a pick from a checkout
-				// this stage did not return rather than trusting the ordering alone.
-				"label": "Agent: Fix a Broken PR",
-				"detail": "Asks which checkouts — every one, with a count of what is red in it, so 'nothing broken' is an answer rather than a repo silently missing from a list — then which of their broken PRs: the open ones with a merge conflict or a failing gate, drafts excluded, most recently touched first. Tick several checkouts and you get one ranked list across them, with the checkout on every row. Then which agent opens on them. Each ticked PR opens an agent on that PR's own head branch, already knowing the PR number, what is wrong with it right now, and that the job ends with the PR merged once the gate is green. Existing Claude or Codex worktrees and matching live devkit boxes are reused. Otherwise a plain worktree is cut with its upstream set so a bare push lands on the PR; it needs no port slot or toolchain provisioning. THIS SPENDS A PAID AGENT SESSION PER TICKED PR, and those sessions push to a real branch and can merge a real PR. Both lists come from ONE GitHub scan, run when the first picker opens, so neither can be older than the click and the second question costs no wait; what a click acts on is then re-read again at launch: a PR that went green, was closed or was merged in between is reported and skipped rather than given a session. 'claude' and 'codex' open a terminal tab you can watch and steer; 'claude (background)' returns an id instead and is read back with 'claude agents', 'claude logs <id>' and 'claude attach <id>' — nothing is watching it, so a permission prompt it cannot answer sits there until you look.",
+				// `focus` because a run asks nothing further but prints the plan, each worktree
+				// path and, in background mode, the session ids — the lines the terminal has
+				// that nothing else will show you.
+				//
+				// Click-only, by decision. Nothing schedules this: a session is paid for, and a
+				// dispatch loop that spent one in the background on a failure nobody was going
+				// to look at is the outcome the ledger and the plan exist to avoid.
+				"label": "Agent: Fix What Is Red",
+				"detail": "Asks only which agent. The script scans every checkout for red PRs (a merge conflict or a failing gate, drafts excluded) and every open scheduled-failure issue, downloads what each gate actually said, prints the plan, and sends: a red PR gets an agent on its own head branch with the gate's logs under logs/gate/ and the failing tests named in the prompt; one vendored test failing in two or more consumers gets ONE agent in devkit on a fresh branch, with every consumer's logs and the affected PRs named; a failing nightly gets an agent on a fresh branch in that project, ending with the ship skill. A release PR (red by construction until its tag exists) and an adoption PR for a release that is no longer the newest are reported and skipped. A ledger records each dispatch against the commit it was seen on, so a second click sends nothing at a failure an agent is already on. THIS SPENDS A PAID AGENT SESSION PER DECISION, and those sessions push to real branches and can merge real PRs. Every PR is re-read live before anything is spawned. 'claude' and 'codex' open a terminal tab you can watch and steer; 'claude (background)' returns ids instead and is read back with 'claude agents', 'claude logs <id>' and 'claude attach <id>' — nothing is watching it, so a permission prompt it cannot answer sits there until you look. From a terminal, `fix-prs.py --dry-run` prints the plan and opens nothing.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -774,8 +775,6 @@
 					"--project",
 					"devkit",
 					"fix-prs",
-					"--checkouts=${input:fixCheckout}",
-					"--picks=${input:brokenPrRow}",
 					"--agent=${input:fixAgent}"
 				],
 				"icon": {
@@ -2142,9 +2141,10 @@
 				"default": "auto"
 			},
 			{
-				// Live, like `brokenPrRow` and for the reason its note carries: this list used to
-				// be a JSON file that only `worktree.py reconcile` wrote, so it was stale by
-				// construction and froze silently the moment that pass was stood down.
+				// Live, and here is why: this list used to be a JSON file that only `worktree.py
+				// reconcile` wrote, so it was stale by construction and froze silently the moment
+				// that pass was stood down -- and stale in the direction that costs, drawing a
+				// row for a PR closed since the scan.
 				// `preview-task.py --rows` scans the machine when the picker opens -- boxes, open
 				// PRs and recent branches, one checkout per thread, about two seconds for six.
 				//
@@ -2202,77 +2202,6 @@
 					"fieldSeparator": "|",
 					"multiselect": true,
 					"multiselectSeparator": " ",
-					"rememberPrevious": false
-				}
-			},
-			{
-				// The one picker in this file that runs a command instead of reading a file, and
-				// the reason is what the file cost. `rioj7.command-variable` reads and templates
-				// JSON and cannot run anything, so every other list here is whatever the last
-				// scheduled pass wrote — stale by construction, and stale in the direction that
-				// costs: a PR closed since the scan still drew a row, and clicking it sent
-				// `worktree.py resume` at a head branch GitHub had deleted when it closed. The row
-				// was a day old because the pass that wrote it had been switched off, and nothing
-				// about a dropdown says that.
-				//
-				// `augustocdias.tasks-shell-input` runs `fix-prs.py --rows` at the moment the
-				// picker opens, so the list is a `gh` scan of every checkout and cannot be older
-				// than the click. The script fans that scan out across the checkouts, which is what
-				// keeps it near a second rather than the five a serial pass took — a picker is a
-				// person waiting.
-				//
-				// `fieldSeparator` splits each line into `value|label|description|detail`, of which
-				// only the value comes back; the script strips the separator out of a PR title
-				// rather than trusting GitHub not to carry one. A machine with nothing broken draws
-				// one `none` row rather than an empty list, because an empty quick-pick says nothing
-				// about whether the scan ran, and `fix-prs.py` answers that value by running nothing.
-				//
-				// The checkout stage is back and is NOT the file-backed one: it runs the same
-				// live `gh` scan, records it, and hands this input a token naming that write.
-				// See `previewCheckout` for the extension mechanism that makes two dependent
-				// live pickers possible, and `scripts/picker_scan.py` for why a token rather
-				// than a timestamp -- a stale read is not made unlikely here, it is made
-				// unrepresentable.
-				//
-				// The checkout stays on each row anyway, because this stage is multi-select:
-				// two ticked checkouts give one menu ranked newest-first across both.
-				//
-				// Dismissing it is still the script's job to notice — the extension returns nothing,
-				// VS Code substitutes nothing, and the task starts with the literal
-				// `${input:brokenPrRow}` in its argv, which `scripts/task_input.py` recognises ahead
-				// of argparse.
-				"id": "fixCheckout",
-				"type": "command",
-				"command": "shellCommand.execute",
-				"args": {
-					"command": "python \"${workspaceFolder:devkit}/scripts/fix-prs.py\" --project-rows",
-					"cwd": "${workspaceFolder:devkit}",
-					"description": "Which checkouts? Tick as many as you want; the next list covers all of them.",
-					"fieldSeparator": "|",
-					"multiselect": true,
-					"multiselectSeparator": ",",
-					"rememberPrevious": false
-				}
-			},
-			{
-				// Stage two. See `previewCheckout` / `previewRow` for the mechanism; what is
-				// particular here is that stage one is worth its scan even when you know which
-				// repo you want. It draws every checkout with a COUNT, so "devkit -- nothing
-				// broken" is an answer rather than a checkout mysteriously absent from a list,
-				// and that is the one thing the flat menu could not say.
-				"id": "brokenPrRow",
-				"type": "command",
-				"command": "shellCommand.execute",
-				"args": {
-					"command": "python \"${workspaceFolder:devkit}/scripts/fix-prs.py\" --rows --checkouts=\"${input:fixCheckout}\"",
-					"cwd": "${workspaceFolder:devkit}",
-					"description": "Which broken PR should an agent be sent at? Tick as many as you want.",
-					"fieldSeparator": "|",
-					"multiselect": true,
-					"multiselectSeparator": " ",
-					// Never offer the last pick again: a PR that was broken an hour ago is the one
-					// most likely to have been fixed since, and a remembered row is the staleness
-					// this input was rewritten to remove.
 					"rememberPrevious": false
 				}
 			},
@@ -2432,7 +2361,7 @@
 				// silently until `claude logs <id>` is read.
 				"id": "fixAgent",
 				"type": "pickString",
-				"description": "Which agent should open on the ticked PRs?",
+				"description": "Which agent should be sent at what is red?",
 				"options": [
 					{
 						"label": "Claude — a terminal tab you can watch and steer",

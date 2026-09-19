@@ -225,8 +225,9 @@ never renders.
   `value|label|description|detail` split on `fieldSeparator`, only the value returned, and
   every field through `cell`, because a separator in a PR title silently makes a fifth
   field and a newline silently makes a second, unpickable row. **The cost is the wait**,
-  since the picker is a person watching an empty box: fan the calls out (`fix-prs.scan`
-  and `preview-task.collect` run one checkout per thread) and keep it to a second or two.
+  since the picker is a person watching an empty box: fan the calls out
+  (`broken_pr_menu.scan` and `preview-task.collect` run one checkout per thread) and keep
+  it to a second or two.
   A **second, dependent** stage costs no second wait: it filters what the first recorded.
   A scan that finds nothing draws `picker_rows.nothing_row` rather than no rows — an
   empty quick-pick cannot be told apart from a command that failed to run.

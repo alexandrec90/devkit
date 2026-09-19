@@ -66,6 +66,26 @@ EXEMPT: dict[tuple[str, str], str] = {
         "tree, not against devkit — which is why the exemption is consulted before the "
         "coverage match below rather than after it."
     ),
+    ("upgrade-rehearsal", "pip install ruff pytest uv mypy"): (
+        "Provisioning for the upgrade-rehearsal job, not a check."
+    ),
+    ("upgrade-rehearsal", "Configure git identity"): (
+        "Runner setup — the generator makes an initial commit and the rehearsal commits "
+        "the pull, and a bare runner has no identity. A workstation already has one."
+    ),
+    (
+        "upgrade-rehearsal",
+        "Render a project at the previous release, then pull this tree into it",
+    ): (
+        "CI-only for the same cost reason as the generated-project block, and one more: "
+        "it needs the previous release checked out beside this tree, which a push from a "
+        "workstation mid-task has no clean place to put. The class it catches — a vendored "
+        "change that assumes something a fresh render has and an upgraded project does not "
+        "— can only break when the MANIFEST, a vendored test or a template changes, and "
+        "the consumer fan-out it prevents is the eight red adoption PRs of v0.11.21. Like "
+        "the generated-project block it *names* the push gate's wrappers to run them "
+        "inside the rendered tree, so the exemption is consulted before the coverage match."
+    ),
 }
 
 
@@ -128,7 +148,12 @@ def test_the_workflow_scan_is_not_vacuous():
     """A parse that found nothing would pass every assertion in this file."""
     steps = _run_steps()
     assert len(steps) >= 5, f"only {len(steps)} run steps found in {PR_GATE.name}"
-    assert {job for job, _, _ in steps} >= {"test", "pre-commit", "generated-project"}
+    assert {job for job, _, _ in steps} >= {
+        "test",
+        "pre-commit",
+        "generated-project",
+        "upgrade-rehearsal",
+    }
 
 
 def test_every_ci_step_is_reproduced_locally_or_exempt_with_a_reason():

@@ -2136,7 +2136,7 @@ def test_no_task_detail_promises_a_checkout_question_it_does_not_ask(canonical):
     """A `detail` may not say it asks which checkout unless a checkout picker feeds it.
 
     Four tasks said it while asking nothing, for two releases. `Preview: Open a UI
-    Branch`, `Agent: Fix a Broken PR`, `Agent: New Worktree` and `Agent: Delete
+    Branch`, `Agent: Fix What Is Red`, `Agent: New Worktree` and `Agent: Delete
     Worktrees` each dropped their checkout stage when their list went live — on the
     since-corrected belief that a live picker could not have one — and every one of them
     kept the "Asks which checkout, then which of its ..." opening the two-stage version
@@ -2581,7 +2581,7 @@ def test_the_box_tier_keeps_one_task_and_it_is_read_only(canonical):
     `agent_box.open_agent`, because two copies of "which window does the agent open in"
     is the duplication that seam exists to prevent.
 
-    **`Agent: Fix a Broken PR` is a third row in that tier, and that is not a
+    **`Agent: Fix What Is Red` is a third row in that tier, and that is not a
     contradiction either.** Every part of what it does is a thing `claude --worktree` has
     no shape for: the worktree sits on the *PR's own head branch* with upstream set so a
     bare push lands on the PR, and the session opens already knowing which PR, what is

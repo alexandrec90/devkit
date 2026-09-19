@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Which open PRs are broken, and the rows the picker draws from them.
+"""Which open PRs are broken: the scan behind `scripts/fix-prs.py`.
 
 Cut out of `scripts/fix-prs.py`, whose `file_lines` had been recorded **five** times
 (649, 660, 639, 769, 809 against a limit of 500), every record naming this same seam and
@@ -7,27 +7,23 @@ every one deferring it: the scan-and-menu half against the launch half.
 `.claude/rules/engineering.md` makes a third consecutive raise a defect report, and
 nothing had scheduled the split in eleven days.
 
-**The entrypoint deliberately did not move.** Each earlier record read the seam the other
-way round -- the menu becoming the new module -- and balked, because
-`devkit_project.ACTIONS` names `scripts/fix-prs.py` for the live `--rows` picker and
-moving it would change a command line the workspace task block spells by hand. Cutting
-the *library* out instead leaves that path, that CLI and every one of its flags exactly
-where they were, so the split needs no reversion check against the dropdown at all. That
-is why this file is named for what it holds rather than for the task it serves.
-
-The token format lives here whole: `pick_value` writes it and `parse_pick` reads it, and
-a picker whose two ends can disagree about its own encoding is the bug that separating
-them would invite. What stays in `fix-prs.py` is everything that acts -- reading one PR,
-writing the agent's prompt, cutting the tree, opening the session.
+**The menu half is gone, and the name outlived it on purpose.** This module drew the
+rows of a two-stage quick-pick -- tick the checkouts, tick the PRs -- until the ticking
+turned out to be the expensive part: eight consumers red on one devkit release were
+eight ticked rows and eight sessions rediscovering one cause. `scripts/fix_plan.py` now
+decides what gets a session, from the gate's own evidence, and the task asks only which
+agent. What stays here is the scan itself -- what counts as broken, and every open PR of
+every checkout at once -- and reading one PR live. The file keeps its name because
+`tests/test_broken_pr_menu.py`, the untested-symbols baseline and the structure ratchet
+all key on it, and a rename buys nothing a reader needs.
 
 Stdlib plus this repo's own modules. Tested in `tests/test_broken_pr_menu.py`, with the
-end-to-end picker behaviour still in `tests/test_fix_prs.py`.
+CLI that drives it in `tests/test_fix_prs.py`.
 """
 
 from __future__ import annotations
 
 import concurrent.futures as futures
-import datetime as _dt
 import json
 import sys
 from dataclasses import dataclass
@@ -35,25 +31,22 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_project
-import picker_rows
-import picker_scan
 import pr_mergeability as mergeability
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# What `picker_scan` files this task's stage-one write under. One name per picker, so
-# two tasks scanning at once cannot read each other's rows.
-SCAN_NAME = "fix-prs"
-
 # How many open PRs to ask about per checkout. Well past what any of these repos carries
-# at once; the cap is here so a runaway bot cannot turn one dropdown into a thousand.
+# at once; the cap is here so a runaway bot cannot turn one scan into a thousand rows.
 PR_LIMIT = 50
 
 # Ask for both conflict signals: `mergeable: CONFLICTING` and `mergeStateStatus: DIRTY`.
 # `statusCheckRollup` is the gate half; `isDraft` is what a draft is excluded by.
+# `baseRefName` and `headRefOid` are what the plan needs without a second `pr view`: the
+# branch a fix merges into, and the commit the gate's evidence has to be read at.
 PR_LIST_FIELDS = (
-    "number,title,headRefName,updatedAt,url,isDraft,mergeable,mergeStateStatus,statusCheckRollup"
+    "number,title,headRefName,baseRefName,headRefOid,updatedAt,url,isDraft,mergeable,"
+    "mergeStateStatus,statusCheckRollup"
 )
 
 # The one state worth a tree; CLOSED and MERGED both delete the head branch. Rebound from
@@ -70,20 +63,22 @@ FAILED_CONCLUSIONS = frozenset(
 # The same, for the legacy status-context shape `statusCheckRollup` still mixes in.
 FAILED_STATES = frozenset({"FAILURE", "ERROR"})
 
-# `<project>:<number>`, one token because a VS Code input resolves to one string. A
-# checkout name cannot contain a colon (it is a directory name and a
-# `COMPOSE_PROJECT_NAME`), so the first one always separates the halves.
-# ...and the same question asked of one PR at launch time, plus the base branch, which is
-# what the agent has to merge in when the answer is a conflict, and `state`/`isDraft`,
-# which the scan gets free from `--state open` and this half has to ask for: a closed PR
-# keeps its last FAILURE in the rollup, so without them it still reads as broken and the
-# run dies in `resume` on the head branch GitHub deleted when it closed.
-PR_VIEW_FIELDS = "number,title,headRefName,baseRefName,url,state,isDraft,mergeable,mergeStateStatus,statusCheckRollup"
+# The same question asked of one PR at launch time, plus the base branch, which is what
+# the agent has to merge in when the answer is a conflict, and `state`/`isDraft`, which
+# the scan gets free from `--state open` and this half has to ask for: a closed PR keeps
+# its last FAILURE in the rollup, so without them it still reads as broken and the run
+# dies in `resume` on the head branch GitHub deleted when it closed.
+PR_VIEW_FIELDS = (
+    "number,title,headRefName,baseRefName,headRefOid,url,state,isDraft,mergeable,"
+    "mergeStateStatus,statusCheckRollup"
+)
 
+# `<project>:<number>`, the one token `--picks` takes by hand. A checkout name cannot
+# contain a colon (it is a directory name and a `COMPOSE_PROJECT_NAME`), so the first one
+# always separates the halves.
 PICK_SEP = ":"
 
-# What joins several ticked rows into that one string. A space, matching `previewRow`
-# and chosen on the same terms: neither half can contain one.
+# What joins several picks into one argument. A space: neither half can contain one.
 PICK_LIST_SEP = " "
 
 # How many checkouts `scan` asks about at once. Well above the registry's size, so the
@@ -177,181 +172,13 @@ def broken_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
     return [entry for entry in entries if entry.get("state", OPEN) == OPEN and broken_reason(entry)]
 
 
-# --- the rows the picker draws ----------------------------------------------------
-
-
-def age(stamp: str, now: _dt.datetime | None = None) -> str:
-    """`2026-09-04T10:11:12Z` -> `3h ago`. `?` when the stamp cannot be read.
-
-    Coarse on purpose: the reader is deciding which of four red PRs to look at, and
-    minutes past the first hour are not part of that decision.
-    """
-    try:
-        moment = _dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return "?"
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=_dt.UTC)
-    delta = (now or _dt.datetime.now(_dt.UTC)) - moment
-    hours = delta.total_seconds() / 3600
-    if hours < 1:
-        return "just now"
-    if hours < 24:
-        return f"{int(hours)}h ago"
-    return f"{int(hours // 24)}d ago"
-
-
-def pick_value(project: str, number: object) -> str:
-    """The one token a ticked row resolves to."""
-    return f"{project}{PICK_SEP}{number}"
-
-
-def menu_row(project: str, pr: dict, now: _dt.datetime | None = None) -> str:
-    """One quick-pick line for a broken PR.
-
-    The checkout is in the description rather than the label because the list is flat --
-    `shellCommand.execute` resolves one input per command, and a "which checkout, then
-    which of its PRs" pair would be two, which VS Code gives no sight of each other. One
-    scan across every checkout was always the question this task asked; the two-stage
-    picker was how a *file* keyed its rows, not what a reader wanted.
-    """
-    number = pr.get("number", "?")
-    return picker_rows.row(
-        pick_value(project, pr.get("number", "")),
-        f"#{number} {pr.get('headRefName', '')}",
-        f"{project} -- {broken_reason(pr)} -- {age(str(pr.get('updatedAt', '')), now)}",
-        pr.get("title", ""),
-    )
-
-
-def picked_rows(workspace: Path, checkouts: str, now: _dt.datetime | None = None) -> list[str]:
-    """Stage two: the rows for the ticked checkouts, from stage one's scan if it is theirs.
-
-    The token decides, and a miss is answered by scanning rather than by serving
-    anything older -- see `picker_scan`. The rescan covers only what was ticked, so the
-    fallback costs less than the scan stage one already did.
-
-    An empty `checkouts` means the chain did not run at all, which is a person calling
-    `--rows` by hand: that answers with the whole machine, the way it did before there
-    was a first stage.
-    """
-    projects, token = picker_scan.parse_projects(checkouts)
-    if not projects:
-        return rows(scan(workspace), now)
-    cached = picker_scan.read(SCAN_NAME, token)
-    if cached is not None:
-        return picker_scan.select(cached, projects) or [placeholder_row()]
-    return rows(scan(workspace, projects), now)
-
-
-def strayed_picks(picks: list[Pick], checkouts: str) -> list[str]:
-    """Ticked PRs whose checkout was not ticked in the first stage.
-
-    Nothing in the two stages can produce one: stage two draws only the checkouts stage
-    one returned. So a stray is evidence the chain itself misfired -- the extension
-    resolves `${input:...}` against a value it recorded when that input last ran, so an
-    input order that stopped putting the checkout stage first would quietly filter by
-    the *previous* click's checkouts. That is the one failure mode of this design that
-    could be silent, and this is what makes it loud.
-
-    Empty `checkouts` returns nothing, because a hand-typed `--picks` has no first stage
-    to disagree with.
-    """
-    ticked, _ = picker_scan.parse_projects(checkouts)
-    if not ticked:
-        return []
-    return sorted({pick.project for pick in picks} - set(ticked))
-
-
-def stray_report(strayed: list[str]) -> str:
-    """What to print when a pick names a checkout the first stage did not."""
-    return (
-        f"ticked {'a PR' if len(strayed) == 1 else 'PRs'} from {', '.join(strayed)}, which the "
-        "checkout picker did not return -- the two picker stages disagree, so nothing was run. "
-        "See `.claude/rules/vscode-tasks.md` on the order the inputs have to appear in."
-    )
-
-
-def placeholder_row() -> str:
-    """The row a scan that found nothing draws. See `picker_rows.nothing_row`."""
-    return picker_rows.nothing_row(
-        "nothing broken", "every open PR on this machine is green, or a draft"
-    )
-
-
-def listed(found: dict[str, list[dict]]) -> list[tuple[str, dict]]:
-    """Every broken PR as `(checkout, pr)`, most recently touched first.
-
-    One ranking, named once, because two callers depend on it being the same one:
-    `rows` prints it and `scan_entries` records it for the second stage to filter. A
-    stage two that filtered a differently-ranked list would draw the right PRs in the
-    wrong order, which is the kind of wrong nobody reports.
-    """
-    pairs = [(project, pr) for project, prs in found.items() for pr in prs]
-    pairs.sort(key=lambda pair: str(pair[1].get("updatedAt", "")), reverse=True)
-    return pairs
-
-
-def rows(found: dict[str, list[dict]], now: _dt.datetime | None = None) -> list[str]:
-    """Every broken PR in `found` as a quick-pick line, most recently touched first.
-
-    Newest first rather than grouped by checkout, and that survived the checkout stage
-    coming back: whoever ticked three checkouts is choosing which red PR to send a
-    session at, not re-sorting them by repo. The checkout stays on every row because
-    `found` can hold several.
-    """
-    return [menu_row(project, pr, now) for project, pr in listed(found)] or [placeholder_row()]
-
-
-def scan_entries(
-    found: dict[str, list[dict]], now: _dt.datetime | None = None
-) -> list[tuple[str, str]]:
-    """What stage one hands stage two: every row, tagged with its checkout, in rank.
-
-    The rendered rows rather than the PRs, because `menu_row` has already made every
-    decision stage two would otherwise make again -- a second stage that re-renders is
-    a second place for the format to drift. Built through `listed` so the order is the
-    one `rows` prints, which is the order `picker_scan.select` then preserves.
-    """
-    return [(project, menu_row(project, pr, now)) for project, pr in listed(found)]
-
-
-def project_rows(found: dict[str, list[dict]], token: str) -> list[str]:
-    """Stage one: one row per checkout, saying how much red is in it.
-
-    A checkout with nothing broken is listed rather than dropped, and this is the whole
-    argument for stage one costing a full scan instead of just reading the registry.
-    "devkit -- nothing broken" is an answer; a menu that silently omits devkit is
-    indistinguishable from one that could not reach it, and a reader who ticks a
-    checkout to find it empty has paid a click to learn what the scan already knew.
-    """
-    if not found:
-        return [
-            picker_rows.nothing_row(
-                "no checkouts", "the workspace registry named nothing that could be scanned"
-            )
-        ]
-    listed = []
-    for project in sorted(found, key=lambda name: (-len(found[name]), name)):
-        count = len(found[project])
-        listed.append(
-            picker_scan.project_row(
-                project,
-                token,
-                f"{count} broken PR{'' if count == 1 else 's'}" if count else "nothing broken",
-                "tick as many checkouts as you want -- the next list covers all of them",
-            )
-        )
-    return listed
-
-
 def scan(workspace: Path, projects: list[str] | None = None) -> dict[str, list[dict]]:
     """Every checkout in the registry, and the broken PRs it has.
 
-    Concurrent because a person is watching: this now runs when the picker opens rather
-    than on a scheduled pass, and six serial `gh pr list` calls are five seconds of empty
-    quick-pick. The calls share nothing and `broken_prs` is total, so a pool of them
-    cannot fail differently from the loop it replaced -- only sooner.
+    Concurrent because a person is watching: this runs at the click rather than on a
+    scheduled pass, and six serial `gh pr list` calls are five seconds of nothing. The
+    calls share nothing and `broken_prs` is total, so a pool of them cannot fail
+    differently from the loop it replaced -- only sooner.
     """
     text = workspace.read_text(encoding="utf-8")
     names = devkit_project.known_projects(text) if projects is None else projects
@@ -375,29 +202,20 @@ class Pick:
 
 
 def split_picks(text: str) -> list[str]:
-    """The ticked tokens, in the order the extension joined them. Duplicates dropped."""
+    """The picked tokens, in the order given. Duplicates dropped."""
     return list(dict.fromkeys(token for token in str(text).split(PICK_LIST_SEP) if token))
 
 
-def parse_pick(token: str) -> Pick | None:
-    """`carameli:412` -> `Pick("carameli", 412)`. None for the `nothing broken` row.
+def parse_pick(token: str) -> Pick:
+    """`carameli:412` -> `Pick("carameli", 412)`.
 
-    Raises for a token that is neither, rather than skipping it: a malformed pick means
-    the menu file and this parser disagree, and running the rest of a batch while
-    silently dropping one is how a user ends up believing a PR was looked at.
+    Raises for anything else, rather than skipping it: a malformed pick is a typo in a
+    hand-written argument, and running the rest of a batch while silently dropping one
+    is how a user ends up believing a PR was looked at.
     """
-    # Ahead of the split, because the sentinel is a bare word: `picker_rows.NOTHING`
-    # carries no `PICK_SEP` and would otherwise read as a project with no number. The
-    # `<project>:none` spelling below is what the cached menu wrote, kept because a
-    # remembered pick from before that change must still mean "nothing" rather than
-    # raise at a person who clicked the row that said so.
-    if str(token) == picker_rows.NOTHING:
-        return None
     project, _, tail = str(token).partition(PICK_SEP)
     if not project or not tail:
         raise FixError(f"cannot read the pick {token!r}; expected <project>{PICK_SEP}<number>")
-    if tail == picker_rows.NOTHING:
-        return None
     if not tail.isdigit():
         raise FixError(f"{token!r} does not name a PR number")
     return Pick(project, int(tail))

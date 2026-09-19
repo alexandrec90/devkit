@@ -1,11 +1,12 @@
-"""`scripts/broken_pr_menu.py`: what counts as broken, and the rows the picker draws.
+"""`scripts/broken_pr_menu.py`: what counts as broken, and the scan that finds it.
 
 Split out of `tests/test_fix_prs.py` alongside the module itself, when `fix-prs.py`'s
 `file_lines` was recorded a fifth time against the same never-cut seam. The division is
-the one the two modules draw: everything here decides *what to offer*, from the shapes
-`gh` returns; everything left there *acts* -- reads one PR again, writes the prompt,
-cuts the tree, opens the session -- and the CLI tests stayed with it because the CLI
-did not move.
+the one the two modules draw: everything here decides *what is red*, from the shapes
+`gh` returns; everything left there *acts* -- reads one PR again, cuts the tree, opens
+the session -- and the CLI tests stayed with it because the CLI did not move. The rows
+a picker once drew from this scan are gone with the picker; `tests/test_fix_plan.py`
+covers what replaced the ticking.
 
 Every decision in the module is a pure function taking those shapes, so this suite
 drives them directly and never a network. The two that spawn take a runner, and the
@@ -22,7 +23,6 @@ import pytest
 from support import load_script
 
 menu = load_script("scripts/broken_pr_menu.py")
-picker_rows = load_script("scripts/picker_rows.py")
 
 NOW = _dt.datetime(2026, 9, 4, 12, 0, tzinfo=_dt.UTC)
 
@@ -176,7 +176,6 @@ def test_the_scan_asks_again_about_a_verdict_that_has_not_arrived(
     assert [menu.broken_reason(entry) for entry in found] == ([reason] if reason else [])
     if found:
         assert found[0]["updatedAt"] == pr()["updatedAt"]
-        assert "merge conflict" in menu.rows({"devkit": found}, NOW)[0]
 
 
 def test_refresh_failure_keeps_known_check_failures(monkeypatch, tmp_path):
@@ -233,79 +232,6 @@ def test_a_pr_view_that_cannot_be_read_is_empty_rather_than_a_traceback(
     assert menu.pr_view(tmp_path, 9) == {}
 
 
-# --- the rows the picker draws ----------------------------------------------------
-
-
-def fields(row: str) -> list[str]:
-    return row.split(picker_rows.FIELD_SEP)
-
-
-def test_a_row_is_the_four_fields_the_extension_splits_on():
-    """`shellCommand.execute` returns the FIRST field and draws the other three, so a row
-    that runs the fields together sends an agent at a label."""
-    row = menu.menu_row("carameli", pr(mergeable="CONFLICTING"), NOW)
-    assert fields(row) == [
-        "carameli:412",
-        "#412 agent/sweep-labels-0904",
-        "carameli -- merge conflict -- 3h ago",
-        "Teach the sweep about labels",
-    ]
-
-
-def test_a_pr_title_goes_through_the_shared_containment():
-    """A PR title is the one field here a person wrote. `tests/test_picker_rows.py` owns
-    what `cell` does to a separator and a newline; this asserts the title is not the
-    field that skipped it."""
-    broke = pr(title="fix: a|b" + chr(10) + "and more", mergeable="CONFLICTING")
-    row = menu.menu_row("devkit", broke, NOW)
-    assert len(fields(row)) == 4
-    assert chr(10) not in row
-    assert fields(row)[3] == "fix: a/b and more"
-
-
-def test_the_checkout_is_on_every_row_because_the_list_is_flat():
-    """Still on the row even though a checkout stage asks first, because that stage is
-    a multi-select: three ticked checkouts give one ranked menu, and a row in it that
-    did not say which repo it came from would be unreadable."""
-    row = menu.menu_row("roguelike", pr(mergeable="CONFLICTING"), NOW)
-    assert fields(row)[2].startswith("roguelike -- ")
-
-
-def test_rows_are_newest_first_across_every_checkout():
-    older = pr(number=1, updatedAt="2026-09-01T09:00:00Z")
-    newer = pr(number=2, updatedAt="2026-09-04T09:00:00Z")
-    drawn = menu.rows({"devkit": [older], "carameli": [newer]}, NOW)
-    assert [fields(row)[0] for row in drawn] == ["carameli:2", "devkit:1"]
-
-
-def test_a_machine_with_nothing_broken_draws_the_sentinel_rather_than_no_rows():
-    """An empty quick-pick says nothing about whether the scan ran."""
-    drawn = menu.rows({"devkit": [], "carameli": []}, NOW)
-    assert len(drawn) == 1
-    assert menu.parse_pick(fields(drawn[0])[0]) is None
-    assert "nothing broken" in drawn[0]
-
-
-def test_the_sentinel_row_says_picking_it_runs_nothing():
-    """It has to read as a non-action rather than as a PR whose title nobody filled in."""
-    row = menu.placeholder_row()
-    assert fields(row)[3] == "picking this runs nothing"
-
-
-@pytest.mark.parametrize(
-    "stamp,expected",
-    [
-        ("2026-09-04T11:30:00Z", "just now"),
-        ("2026-09-04T09:00:00Z", "3h ago"),
-        ("2026-09-01T12:00:00Z", "3d ago"),
-        ("not a date", "?"),
-        ("", "?"),
-    ],
-)
-def test_age_is_coarse_and_never_raises(stamp, expected):
-    assert menu.age(stamp, NOW) == expected
-
-
 def test_the_scan_covers_the_registry_not_just_the_stack_projects(monkeypatch, tmp_path):
     workspace = tmp_path / "alex.code-workspace"
     workspace.write_text("{}", encoding="utf-8")
@@ -339,34 +265,29 @@ def test_an_empty_registry_scans_to_nothing_rather_than_an_empty_pool(tmp_path):
     assert menu.scan(workspace, projects=[]) == {}
 
 
-def test_a_pick_is_one_token_the_extension_can_return():
-    """A VS Code input resolves to a single string, so both halves ride in one value."""
-    assert menu.pick_value("carameli", 412) == "carameli:412"
-
-
-# --- reading a pick ---------------------------------------------------------------
-
-
 def test_a_pick_is_a_checkout_and_a_number():
     assert menu.parse_pick("carameli:412") == menu.Pick("carameli", 412)
 
 
-def test_the_sentinel_row_parses_to_nothing_rather_than_failing():
-    assert menu.parse_pick("none") is None
-
-
-def test_the_sentinel_carries_no_leading_dash_argparse_would_read_as_a_flag():
-    """It reaches the script as `--picks <value>`; a value starting with `-` is an option
-    to argparse, and the task fails with a usage error on a click that meant `nothing`."""
-    assert not menu.placeholder_row().startswith("-")
-
-
-@pytest.mark.parametrize("token", ["carameli", "", ":412", "carameli:head"])
-def test_a_token_the_menu_could_not_have_written_is_refused(token):
-    """A malformed pick means the menu file and this parser disagree; running the rest of
-    the batch while dropping one is how a PR looks looked-at and was not."""
+@pytest.mark.parametrize("token", ["carameli", "", ":412", "carameli:head", "none"])
+def test_a_token_that_is_not_a_pick_is_refused(token):
+    """A malformed pick is a typo in a hand-written argument; running the rest of the
+    batch while dropping one is how a PR looks looked-at and was not. `none` is here
+    because the sentinel row that once meant it is gone with the picker."""
     with pytest.raises(menu.FixError):
         menu.parse_pick(token)
+
+
+def test_the_scan_settles_with_this_checkouts_own_gh(monkeypatch, tmp_path):
+    """`pr_mergeability` owns the asking and is tested on its own; what is left here is
+    the binding -- that `settle_mergeability` hands it this checkout's `gh pr view`."""
+    asked = []
+    monkeypatch.setattr(
+        menu, "pr_view", lambda directory, number: asked.append((directory, number)) or {}
+    )
+    monkeypatch.setattr(menu.mergeability, "WAIT", 0)
+    menu.settle_mergeability(tmp_path, [pr(mergeable="UNKNOWN")])
+    assert asked == [(tmp_path, 412)] * menu.mergeability.ASKS
 
 
 def test_ticked_rows_split_on_the_space_and_de_duplicate():

@@ -73,7 +73,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import json
 import subprocess
 import sys
 import tempfile
@@ -84,6 +83,11 @@ from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import policy_runtime
+from adoption_prs import (
+    close_superseded,
+    open_adoption_pr,
+    upgrade_slug,
+)
 import sweep
 import task_branch as tb
 import task_input
@@ -268,96 +272,17 @@ def _same_path(left: Path, right: Path) -> bool:
         return False
 
 
-# The topic every upgrade branch is named for; `upgrade_slug` appends the release.
-UPGRADE_SLUG = "devkit upgrade"
+def pending_adoption(project: Path, name: str, tag: str) -> str:
+    """`open_adoption_pr`, after closing what `tag` supersedes.
 
-
-def upgrade_slug(tag: str) -> str:
-    """The topic `worktree.plan_new` names this upgrade's branch and box from.
-
-    Carries the tag, and that is a correctness requirement rather than a label: a
-    branch name whose PR merged is *permanently retired* by the branch policy, and
-    `plan_new` disambiguates only against refs that still exist -- a squash-merged,
-    branch-deleted PR leaves none. Named by date alone, the morning release's merged
-    adoption therefore blocked every commit of the afternoon's (v0.9.0 -> v0.9.1, in
-    three consumers at once). One release is one operation, so the release is the
-    name.
-
-    The name is also what makes a rerun recognisable: `open_adoption_pr` matches the
-    branch stem below, so the second run of a release finds the first run's PR instead
-    of opening its own.
+    One call from `main` rather than two, because `main`'s complexity is at the ceiling
+    the structure ratchet records for it and this decision is one the loop there
+    already makes -- "is the adoption for this release in flight?" -- only asked after
+    the older ones stop being.
     """
-    return f"{UPGRADE_SLUG} {tag}"
-
-
-def upgrade_branch_stem(tag: str) -> str:
-    """The prefix every branch this script cuts for `tag` starts with.
-
-    `worktree.plan_new` appends `-<mmdd>` and, for a same-day rerun, `-<n>` -- so the
-    stem is as much of the name as is fixed by the release. Built from `tb` rather
-    than spelled out, because the two halves are the box tier's to decide: a rename
-    there that this file restated would silently stop matching.
-
-    Under `tb.AUTOMATION_PREFIX`, because nobody asked for this branch. It is the same
-    vendoring commit in every consumer, cut nightly by a scheduled job, and it was
-    crowding out the change a reviewer had actually asked to see -- twenty-eight of
-    `preview-task.py`'s twenty-nine rows, on the day that menu was first printed. The
-    namespace is what lets that menu drop them without guessing from a slug.
-    """
-    return f"{tb.AUTOMATION_PREFIX}{tb.slugify(upgrade_slug(tag))}-"
-
-
-def upgrade_branch_stems(tag: str) -> tuple[str, ...]:
-    """Every stem an open adoption PR for `tag` might be on: what this cuts, and what it
-    cut before the automation namespace existed.
-
-    The legacy spelling is not tidiness -- dropping it would reintroduce the exact
-    duplicate this file already collected three PRs from. `open_adoption_pr` is the only
-    thing standing between an in-flight adoption and a second one, and on the first run
-    after this change every adoption in flight is on the old name. It costs one extra
-    `startswith` per open PR and stops mattering once those merge; delete it when no
-    consumer has an open PR under `tb.BRANCH_PREFIX` for an upgrade, which is a fact
-    about the fleet rather than about this file.
-    """
-    return (
-        upgrade_branch_stem(tag),
-        f"{tb.BRANCH_PREFIX}{tb.slugify(upgrade_slug(tag))}-",
-    )
-
-
-def open_adoption_pr(project: Path, tag: str) -> str:
-    """`#<n> <url>` for an open PR already adopting `tag` in `project`; "" when none.
-
-    **The currency test alone is not enough to stop a duplicate.**
-    `is_current_on_remote` reads `DEVKIT_VERSION` off `origin/<default>`, which only
-    changes when an adoption *merges* -- so between opening a PR and merging it, every
-    run judges the project out of date and cuts another box, another branch and another
-    PR for the same release. carameli collected three for v0.10.2 (#170, #174, #175) in
-    sixteen hours that way, because the first one's gate was red and it sat open: a
-    scheduled run at 03:00, a manual rerun, and one more the following morning.
-
-    Matching is by branch stem rather than by title, because the title is prose this
-    script owns today and could reword tomorrow, while the branch name is the identity
-    the box registry and `reconcile` already key on.
-
-    **Fails open.** No `gh`, no auth, a repo with no remote: all answer "" and the run
-    proceeds exactly as it did before this existed. A duplicate PR is a nuisance; a
-    scheduled upgrade that stops running because the CLI is missing is a silent one.
-    """
-    listed = sweep.gh_for(project)(
-        "pr", "list", "--state", "open", "--limit", "100", "--json", "number,headRefName,url"
-    )
-    if listed.returncode != 0:
-        return ""
-    try:
-        rows = json.loads(listed.stdout or "[]")
-    except json.JSONDecodeError:
-        return ""
-    stems = upgrade_branch_stems(tag)
-    for row in rows if isinstance(rows, list) else []:
-        if str(row.get("headRefName", "")).startswith(stems):
-            return f"#{row.get('number')} {row.get('url', '')}".strip()
-    return ""
+    for closed in close_superseded(project, tag):
+        print(f"upgrade: {name} -- closed {closed}, superseded by devkit {tag}")
+    return open_adoption_pr(project, tag)
 
 
 def commit_message(tag: str, files: int | str) -> str:
@@ -1176,7 +1101,7 @@ def main(argv: list[str] | None = None) -> int:
         # the answer can differ from the stamp's: the adoption exists, it is just not
         # merged yet. Skipping is right whatever is holding it up -- a red gate, a
         # review, a human -- because a second identical PR fixes none of them.
-        elif pending := open_adoption_pr(root / name, tag):
+        elif pending := pending_adoption(root / name, name, tag):
             print(f"upgrade: {name} -- devkit {tag} is already up for adoption in {pending}.")
         else:
             todo.append(name)
