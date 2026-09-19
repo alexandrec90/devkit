@@ -363,6 +363,10 @@ def _instruction_files() -> list:
 ALLOWED_MISSING = {
     ".vscode/tasks.json": "the file devkit does NOT own -- its absence is the rule, and "
     "test_devkit_ships_no_project_level_tasks enforces it",
+    "logs/ship-intent.md": "written by a session into its own worktree when it is done, "
+    "read and consumed by the fix pass; under the ignored `logs/`, so never in the repo",
+    "logs/ship-state.json": "the fix pass's record beside that intent, under the same "
+    "ignored `logs/`",
     "check-lock-markers.py": "a project-owned Stop tier devkit has no lockfiles for; "
     "its absence is an explicit skip, documented in test_repo_contract.py",
     "test_codex_hooks_contract.py": "carameli's, cited as the coupling the vendored "
@@ -384,10 +388,6 @@ ALLOWED_MISSING = {
     "pyvenv.cfg": "the file that makes a directory a virtualenv, named as the thing "
     "`devkit_schtasks.windowless` reads at runtime; it exists in every `.venv`, all of "
     "which are untracked, and never at the root of the repo",
-    ".github/pull_request_template.md": "the file the ship skill names in order to say "
-    "not to go looking for one; its absence is the decision, since `gh pr create "
-    "--body-file` overrides a template and the PR body shape lives in that vendored "
-    "step instead",
 }
 
 # Version literals prose is allowed to carry, with the reason each is not a pin that

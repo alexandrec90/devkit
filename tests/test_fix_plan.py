@@ -19,6 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_plan
 
 PREFIXES = ("agent/auto/devkit-upgrade-", "agent/devkit-upgrade-")
+VENDORED_SIG = (
+    "scripts/hooks/tests/test_untested_symbols.py::test_every_public_symbol_is_named_by_a_test",
+)
 NOW = _dt.datetime(2026, 9, 18, 12, 0, tzinfo=_dt.UTC)
 
 SUMMARY = """\
@@ -291,6 +294,7 @@ def test_a_corrupt_ledger_is_empty_rather_than_a_traceback(tmp_path):
 
 def test_the_pr_prompt_names_the_pr_the_fault_the_ids_the_logs_and_the_finish_line():
     text = fix_plan.pr_prompt(failure())
+    assert "fix pass reads it" in text
     for expected in (
         "#412",
         "carameli",
@@ -299,7 +303,6 @@ def test_the_pr_prompt_names_the_pr_the_fault_the_ids_the_logs_and_the_finish_li
         fix_plan.EVIDENCE_DIR,
         "agent/auto/devkit-upgrade-v0-11-21-0917",
         "origin/main",
-        "green",
     ):
         assert expected in text
 
@@ -310,7 +313,7 @@ def test_the_upstream_prompt_names_every_project_and_pr_and_ends_in_the_ship_ski
         failure(project="roguelike", number=16, url="u/16"),
     )
     text = fix_plan.upstream_prompt(group, "agent/fix-x-0918")
-    assert "2 consumer projects (carameli, roguelike)" in text
+    assert "2 checkout(s) (carameli, roguelike)" in text
     assert "carameli u/412" in text and "roguelike u/16" in text
     assert "not in each consumer" in text
     assert "ship skill" in text and "agent/fix-x-0918" in text
@@ -327,9 +330,38 @@ def test_the_nightly_prompt_names_the_workflow_the_issue_and_the_fresh_branch():
     assert "closes itself" in text
 
 
-def test_a_conflict_is_not_listed_among_the_failing_ids():
+def test_a_conflicted_pr_gets_the_resolver_prompt_which_names_no_failure():
+    """The gate cannot have run, and a resolver told "also fix the tests" fixes the
+    wrong thing; whatever the gate says after the push is the next pass's business."""
     text = fix_plan.pr_prompt(failure(signature=(fix_plan.CONFLICT, "tests/t.py::a")))
-    assert "Failing: tests/t.py::a." in text
+    assert "merge conflict with origin/main" in text
+    assert "tests/t.py::a" not in text and "Failing" not in text
+    assert "next pass" in text
+
+
+def test_a_refused_commit_gets_the_prompt_for_its_own_worktree():
+    refused = failure(kind=fix_plan.COMMIT, number=0, signature=("commit refused: secrets",))
+    text = fix_plan.pr_prompt(refused)
+    assert "The commit stage refused the change on agent/auto/devkit-upgrade-v0-11-21-0917" in text
+    assert "logs/ship-intent.md" in text and "fix pass commits" in text
+
+
+def test_the_upstream_prompt_names_every_id_across_the_group():
+    group = (failure(signature=("a::t",)), failure(project="x", signature=("b::u",)))
+    text = fix_plan.upstream_prompt(group, "agent/fix")
+    assert "a::t, b::u" in text
+
+
+def test_a_conflict_is_its_own_decision_and_never_grouped_upstream():
+    red = [
+        failure(project="a", number=1, signature=(fix_plan.CONFLICT, *VENDORED_SIG)),
+        failure(project="b", number=2, signature=VENDORED_SIG),
+    ]
+    decisions = fix_plan.plan(red, "v0-11-21", PREFIXES)
+    assert actions(decisions) == [
+        (fix_plan.RESOLVE, ["a#1"]),
+        (fix_plan.DISPATCH, ["b#2"]),
+    ]
 
 
 # --- the report ---------------------------------------------------------------------

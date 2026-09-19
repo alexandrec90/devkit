@@ -146,6 +146,7 @@ ARTIFACTS: dict[str, str] = {
     "devkit-tray": "logs/tray.log",
     "devkit-workspace-status": "logs/scheduled-workspace-status.log",
     "devkit-installers": "logs/installers.log",
+    "devkit-fix-pass": "logs/fix-pass.log",
 }
 
 

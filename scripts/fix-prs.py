@@ -334,7 +334,8 @@ def run(picks: list[menu.Pick], workspace: Path, mode: str, runner=subprocess.ru
 def dispatch_pr(failure: fix_plan.Failure, root: Path, mode: str, runner=subprocess.run) -> int:
     """A planned PR: its own head branch, the gate's logs beside it, the plan's prompt."""
     project_dir = root / failure.project
-    print(f"{failure.project} #{failure.number} ({failure.reason}) on {failure.head}")
+    name = f"#{failure.number}" if failure.number else failure.head
+    print(f"{failure.project} {name} ({failure.reason}) on {failure.head}")
     tree, refused = existing_tree(project_dir, failure.head)
     if refused:
         print(f"  {refused}", file=sys.stderr)
@@ -346,8 +347,7 @@ def dispatch_pr(failure: fix_plan.Failure, root: Path, mode: str, runner=subproc
     gate_evidence.place(failure, tree)
     print(f"  worktree {tree}")
     prompt = tab_safe(fix_plan.pr_prompt(failure))
-    title = f"{failure.project} #{failure.number}"
-    return open_session(mode, tree, failure.head, prompt, title, runner)
+    return open_session(mode, tree, failure.head, prompt, f"{failure.project} {name}", runner)
 
 
 def dispatch_fresh(
@@ -399,8 +399,10 @@ def run_plan(workspace: Path, mode: str, dry_run: bool, redo: bool, runner=subpr
             continue
         if not redo and fix_plan.already_sent(decision, ledger):
             continue
-        if decision.action == fix_plan.DISPATCH and decision.failures[0].kind == fix_plan.PR:
-            code = dispatch_pr(decision.failures[0], root, mode, runner)
+        first = decision.failures[0]
+        on_branch = first.kind in (fix_plan.PR, fix_plan.COMMIT)
+        if decision.action in (fix_plan.DISPATCH, fix_plan.RESOLVE) and on_branch:
+            code = dispatch_pr(first, root, mode, runner)
         else:
             code = dispatch_fresh(decision, root, mode, runner)
         if code == EXIT_OK:

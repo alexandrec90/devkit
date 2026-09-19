@@ -417,7 +417,7 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # than a scope for the task. Run per selected checkout it would draw the same
         # cross-checkout dropdown two or three times over. The dispatch pins
         # `--project devkit` and asks which PR instead.
-        "fix-prs",
+        "fix-pass",
         # Born scoped, and the same kind again: one scan across every checkout, so the
         # checkout is the first of the nested pickers rather than a scope for the task.
         # The pair exists because `claude --worktree` has no Codex counterpart -- see

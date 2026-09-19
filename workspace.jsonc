@@ -750,7 +750,7 @@
 				// across consumers gets ONE session in devkit, a release PR (red by
 				// construction) and a superseded adoption get none. A ledger keyed on the
 				// commit each failure was seen at makes a second click send nothing twice.
-				// See ACTIONS["fix-prs"].
+				// See ACTIONS["fix-pass"].
 				//
 				// Which agent opens is where Claude and Codex stop matching, and that is why it
 				// is spelled as three rows rather than an agent picker plus a background
@@ -767,14 +767,15 @@
 				// dispatch loop that spent one in the background on a failure nobody was going
 				// to look at is the outcome the ledger and the plan exist to avoid.
 				"label": "Agent: Fix What Is Red",
-				"detail": "Asks only which agent. The script scans every checkout for red PRs (a merge conflict or a failing gate, drafts excluded) and every open scheduled-failure issue, downloads what each gate actually said, prints the plan, and sends: a red PR gets an agent on its own head branch with the gate's logs under logs/gate/ and the failing tests named in the prompt; one vendored test failing in two or more consumers gets ONE agent in devkit on a fresh branch, with every consumer's logs and the affected PRs named; a failing nightly gets an agent on a fresh branch in that project, ending with the ship skill. A release PR (red by construction until its tag exists) and an adoption PR for a release that is no longer the newest are reported and skipped. A ledger records each dispatch against the commit it was seen on, so a second click sends nothing at a failure an agent is already on. THIS SPENDS A PAID AGENT SESSION PER DECISION, and those sessions push to real branches and can merge real PRs. Every PR is re-read live before anything is spawned. 'claude' and 'codex' open a terminal tab you can watch and steer; 'claude (background)' returns ids instead and is read back with 'claude agents', 'claude logs <id>' and 'claude attach <id>' — nothing is watching it, so a permission prompt it cannot answer sits there until you look. From a terminal, `fix-prs.py --dry-run` prints the plan and opens nothing.",
+				"detail": "Asks only which agent. The script scans every checkout for red PRs (a merge conflict or a failing gate, drafts excluded) and every open scheduled-failure issue, downloads what each gate actually said, prints the plan, and sends: a red PR gets an agent on its own head branch with the gate's logs under logs/gate/ and the failing tests named in the prompt; one vendored test failing in two or more consumers gets ONE agent in devkit on a fresh branch, with every consumer's logs and the affected PRs named; a failing nightly gets an agent on a fresh branch in that project, ending with the ship skill. A release PR (red by construction until its tag exists) and an adoption PR for a release that is no longer the newest are reported and skipped. A ledger records each dispatch against the commit it was seen on, so a second click sends nothing at a failure an agent is already on. THIS SPENDS A PAID AGENT SESSION PER DECISION, and those sessions push to real branches and can merge real PRs. Every PR is re-read live before anything is spawned. 'claude' and 'codex' open a terminal tab you can watch and steer; 'claude (background)' returns ids instead and is read back with 'claude agents', 'claude logs <id>' and 'claude attach <id>' — nothing is watching it, so a permission prompt it cannot answer sits there until you look. This is one run of the fix pass with dispatch on: it also ships every worktree that carries a logs/ship-intent.md (fixers, commit, push, PR), holds every project fixer while the harness is red, and merges green adoption PRs and nothing else. From a terminal, `fix-pass.py --mode plan` prints the plan and does nothing.",
 				"type": "process",
 				"command": "python",
 				"args": [
 					"${workspaceFolder:devkit}/scripts/devkit_project.py",
 					"--project",
 					"devkit",
-					"fix-prs",
+					"fix-pass",
+					"--mode=dispatch",
 					"--agent=${input:fixAgent}"
 				],
 				"icon": {
@@ -2479,7 +2480,14 @@
 		// remembered by nothing but the registered task -- so it goes here, and is passed
 		// to that installer's `--check` and `--yes` alike.
 		"devkit.installers": {
-			"install-reconcile-task.py": ["--merge"]
-		}
+			// No `--merge`: the fix pass merges green ADOPTION PRs itself and nothing else,
+			// so every other green PR waits for a person. Reconcile keeps reaping.
+			"install-reconcile-task.py": []
+		},
+		// The fix pass's switch (`fix_cycle.SETTING`): `off` writes one line and exits,
+		// `plan` writes what it would do, `dispatch` does it. The scheduled job reads it
+		// every half hour; the VS Code task passes `dispatch` by hand. Off until a week of
+		// manual passes has read right -- the wiring is complete either way.
+		"devkit.fixPass": "off"
 	}
 }

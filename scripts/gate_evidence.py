@@ -165,16 +165,45 @@ def nightly_issues(gh: Gh) -> list[dict]:
 # --- the newest release, for the superseded rule ------------------------------------------
 
 
-def latest_tag(devkit: Path) -> str:
-    """devkit's newest tag by version order, slugified the way branch names are.
-
-    Empty when git cannot say, which the plan reads as "call nothing superseded".
-    """
+def newest_release(devkit: Path) -> str:
+    """devkit's newest tag by version order, as written (`v0.11.21`); "" when it cannot say."""
     tags = sweep.git_for(devkit)("tag", "--sort=-v:refname")
     if tags.returncode != 0:
         return ""
-    first = next((line.strip() for line in tags.stdout.splitlines() if line.strip()), "")
-    return tb.slugify(first) if first else ""
+    return next((line.strip() for line in tags.stdout.splitlines() if line.strip()), "")
+
+
+def latest_tag(devkit: Path) -> str:
+    """The same, slugified the way branch names are, for the superseded rule.
+
+    Empty when there is no tag to read, which the plan reads as "call nothing superseded".
+    """
+    newest = newest_release(devkit)
+    return tb.slugify(newest) if newest else ""
+
+
+def default_branch_green(gh: Gh, base: str) -> bool | None:
+    """Whether the newest completed gate run on `base` passed; None when unreadable."""
+    listed = _json(
+        gh(
+            "run",
+            "list",
+            "--branch",
+            base,
+            "--workflow",
+            GATE_WORKFLOW,
+            "--limit",
+            str(RUN_LIMIT),
+            "--json",
+            RUN_LIST_FIELDS,
+        )
+    )
+    if not isinstance(listed, list):
+        return None
+    for run in listed:
+        if isinstance(run, dict) and str(run.get("status", "")) == "completed":
+            return str(run.get("conclusion", "")) == "success"
+    return None
 
 
 # --- collecting everything red ------------------------------------------------------------
@@ -265,6 +294,10 @@ def place(failure: fix_plan.Failure, tree: Path, subdir: str = "") -> Path | Non
     if not source.is_dir():
         return None
     target = tree / fix_plan.EVIDENCE_DIR / subdir if subdir else tree / fix_plan.EVIDENCE_DIR
+    if source.resolve() == target.resolve():
+        # A refused commit's evidence is written straight into the worktree the fixer
+        # opens in; copying it onto itself would delete it first.
+        return target
     shutil.rmtree(target, ignore_errors=True)
     shutil.copytree(source, target)
     return target

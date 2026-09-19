@@ -139,6 +139,27 @@ def test_the_newest_tag_is_slugified_like_a_branch(monkeypatch, tmp_path):
     assert ev.latest_tag(tmp_path) == "v0-11-21"
 
 
+def test_the_newest_release_is_read_as_written(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        ev.sweep,
+        "git_for",
+        lambda _p: lambda *a: subprocess.CompletedProcess(a, 0, "v0.11.21\nv0.11.20\n", ""),
+    )
+    assert ev.newest_release(tmp_path) == "v0.11.21"
+
+
+def test_the_default_branch_is_green_when_its_newest_completed_gate_passed():
+    runs = [
+        {"databaseId": 3, "status": "in_progress", "conclusion": ""},
+        {"databaseId": 2, "status": "completed", "conclusion": "success"},
+        {"databaseId": 1, "status": "completed", "conclusion": "failure"},
+    ]
+    assert ev.default_branch_green(table({("run", "list"): runs}), "main") is True
+    assert ev.default_branch_green(table({("run", "list"): runs[2:]}), "main") is False
+    assert ev.default_branch_green(table({("run", "list"): runs[:1]}), "main") is None
+    assert ev.default_branch_green(table({}), "main") is None
+
+
 def test_no_tags_is_no_answer(monkeypatch, tmp_path):
     monkeypatch.setattr(
         ev.sweep, "git_for", lambda _p: lambda *a: subprocess.CompletedProcess(a, 1, "", "")
@@ -277,6 +298,17 @@ def test_the_evidence_is_placed_under_logs_gate_in_the_worktree(tmp_path):
     assert (placed / "test-failures.log").read_text(encoding="utf-8") == SUMMARY
     nested = ev.place(failure, tree, "carameli")
     assert nested == tree / "logs" / "gate" / "carameli"
+
+
+def test_evidence_already_in_the_worktree_is_left_where_it_is(tmp_path):
+    """A refused commit's evidence is written straight into the worktree the fixer
+    opens in; copying it onto itself would delete it first."""
+    target = tmp_path / "tree" / fix_plan.EVIDENCE_DIR
+    target.mkdir(parents=True)
+    (target / "pre-commit.log").write_text("x", encoding="utf-8")
+    failure = fix_plan.Failure(fix_plan.COMMIT, "carameli", 0, "", "", evidence=str(target))
+    assert ev.place(failure, tmp_path / "tree") == target
+    assert (target / "pre-commit.log").read_text(encoding="utf-8") == "x"
 
 
 @pytest.mark.parametrize("evidence", ["", "C:/nowhere/at/all"])

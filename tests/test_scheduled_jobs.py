@@ -123,6 +123,12 @@ def test_reconcile_writes_the_file_its_installer_advertises():
     assert installer.ARTIFACT == worktree.RECONCILE_LOG
 
 
+def test_the_fix_pass_writes_the_file_its_installer_advertises():
+    installer = load_script("scripts/install-fix-pass-task.py")
+    runner = load_script("scripts/fix-pass.py")
+    assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
+
+
 def test_the_release_pass_writes_the_file_its_installer_advertises():
     """Same shape as the prune: `release-pipeline.py` writes no artifact of its own --
     most of its runs are clicks, and `devkit_project.plan_command` wraps those. The
@@ -330,6 +336,11 @@ UNATTENDED: dict[str, str] = {
     "scripts/schedule_health.py": "the schtasks the tray spawns every poll, and the status pass",
     "scripts/workspace-status.py": "devkit-workspace-status runs it daily, and it spawns git",
     "scripts/installers.py": "devkit-installers runs it daily and at logon; it spawns every installer",
+    "scripts/fix-pass.py": "devkit-fix-pass runs it every half hour, behind the workspace switch",
+    "scripts/ship_intent.py": "the fixers, commit and push the pass makes per intent, and the runner it hands fix-prs.py",
+    "scripts/fix-prs.py": "the worktree cut and the session the pass opens; spawns only through the runner it is handed",
+    "scripts/gate_evidence.py": "the gh the pass reads every gate through",
+    "scripts/broken_pr_menu.py": "the gh the pass scans every checkout through",
     "scripts/log-wrap.py": "the wrapper four of those jobs are launched through",
     # reached from `workspace-status.py --notify`, which is the one script that imports
     # it rather than being wrapped in `notify-wrap.py`; see that flag's docstring.
@@ -360,6 +371,10 @@ DELEGATES_ITS_SPAWNS: dict[str, str] = {
     "scripts/reap-stale.py": "scripts/reap_machine.py",
     "scripts/tray.py": "scripts/schedule_health.py",
     "scripts/tray_state.py": "scripts/schedule_health.py",
+    "scripts/fix-pass.py": "scripts/ship_intent.py",
+    "scripts/fix-prs.py": "scripts/ship_intent.py",
+    "scripts/gate_evidence.py": "scripts/sweep.py",
+    "scripts/broken_pr_menu.py": "scripts/sweep.py",
 }
 
 SPAWN_ATTRS = frozenset({"run", "Popen", "call", "check_call", "check_output"})

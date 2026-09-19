@@ -872,6 +872,34 @@ def test_a_repushed_pr_that_is_still_red_is_sent_again(monkeypatch, root):
     assert sent == ["pr carameli#412", "pr carameli#412"]
 
 
+def test_a_conflict_and_a_refused_commit_go_through_the_branch_path(monkeypatch, root):
+    """Both hold a branch in a worktree; neither has a PR number worth a title."""
+    sent = planned(
+        monkeypatch,
+        root,
+        [
+            failure(number=1, signature=(fix_plan.CONFLICT,)),
+            failure(
+                kind=fix_plan.COMMIT, number=0, head="agent/i-0919", signature=("commit refused",)
+            ),
+        ],
+    )
+    assert fix_prs.run_plan(root / "alex.code-workspace", "claude", dry_run=False, redo=False) == 0
+    assert sorted(sent) == ["pr carameli#0", "pr carameli#1"]
+
+
+def test_a_refused_commit_is_titled_by_its_branch(monkeypatch, root):
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (root / "carameli" / "t", ""))
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    opened = capture_sessions(monkeypatch)
+    refused = failure(
+        kind=fix_plan.COMMIT, number=0, head="agent/i-0919", signature=("commit refused",)
+    )
+    assert fix_prs.dispatch_pr(refused, root, "claude") == 0
+    assert opened[0]["title"] == "carameli agent/i-0919"
+    assert "commit stage refused" in opened[0]["prompt"]
+
+
 def test_an_upstream_group_and_a_nightly_go_through_the_fresh_branch_path(monkeypatch, root):
     vendored = ("scripts/hooks/tests/test_a.py::t",)
     sent = planned(

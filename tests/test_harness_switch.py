@@ -172,6 +172,7 @@ def test_the_jobs_group_names_only_the_branch_delivery_jobs():
         "devkit-worktree-reconcile",
         "devkit-upgrade-projects",
         "devkit-release",
+        "devkit-fix-pass",
     }
 
 
@@ -306,7 +307,7 @@ def test_a_job_absent_at_switch_time_is_still_recorded_by_name(tmp_path, monkeyp
 
 
 def test_standing_one_delivery_job_back_up_leaves_the_rest_of_the_group_down(tmp_path, monkeypatch):
-    """The case this was built for: the branch tier off, and two of its three jobs
+    """The case this was built for: the branch tier off, and two of its four jobs
     wanted back."""
     monkeypatch.setattr(switch, "WINDOWS", True)
     workspace = tmp_path / "w.code-workspace"
@@ -318,7 +319,7 @@ def test_standing_one_delivery_job_back_up_leaves_the_rest_of_the_group_down(tmp
         runner=lambda argv, **_: _ok(argv),
         jobs=("devkit-upgrade-projects", "devkit-release"),
     )
-    assert harness_state.Ledger.load().jobs == ("devkit-worktree-reconcile",)
+    assert harness_state.Ledger.load().jobs == ("devkit-fix-pass", "devkit-worktree-reconcile")
 
 
 def _run_ok(argv, **_kwargs):
