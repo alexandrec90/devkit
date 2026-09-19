@@ -101,7 +101,7 @@ def test_generic_skips_a_delegate_that_exists(stack, commands):
     (stack / "scripts").mkdir()
     (stack / "scripts" / "docker-down.py").write_text("")
     docker_maint.main(["down", "--generic"])
-    assert commands == [["docker", "compose", "down"]]
+    assert commands == [["docker", "compose", "stop"]]
 
 
 def test_the_delegates_exit_code_is_the_answer(stack, monkeypatch):
@@ -131,9 +131,13 @@ def test_generic_up_forwards_what_it_was_given(stack, commands):
     assert commands == [["docker", "compose", "up", "-d", "--build"]]
 
 
-def test_generic_down_stops_containers_only(stack, commands):
+def test_generic_down_stops_and_keeps_the_containers(stack, commands):
+    """`stop`, never `down`: Docker Desktop's start button issues `compose start`,
+    which can only start containers that still exist. A `down` here meant the stack
+    could never again be started from the UI, only from the task."""
     docker_maint.main(["down"])
-    assert commands == [["docker", "compose", "down"]]
+    assert commands == [["docker", "compose", "stop"]]
+    assert "down" not in commands[0], "deletes the containers Desktop would start"
 
 
 def test_generic_down_never_destroys_volumes(stack, commands):
@@ -296,8 +300,16 @@ def test_the_prune_never_removes_containers_or_volumes(monkeypatch, tmp_path):
     -a` counts a stopped container as a reference, which is the whole fix -- a parked
     stack survives, a genuinely orphaned layer still goes.
 
+    `network prune` is the same bug one layer down and took a year longer to see: it
+    counts only a *running* container as a reference, so on 2026-09-17 it deleted
+    `carameli_default` under the eight containers `stop-idle` had just parked, and
+    Docker Desktop's start button (`compose start`, which creates no network) failed
+    with `network <hex id> not found` until the task force-recreated the stack. A
+    network reclaims no disk, so nothing is lost by never pruning one.
+
     Asserted on the verbs rather than one exact argv, so any later line reaching for
-    `system prune` or `container prune` fails here whatever else it changes.
+    `system prune`, `container prune` or `network prune` fails here whatever else it
+    changes.
     """
     calls: list[list[str]] = []
     monkeypatch.setattr(docker_maint, "run", lambda cmd, **_kw: (calls.append(list(cmd)), 0)[1])
@@ -317,6 +329,7 @@ def test_the_prune_never_removes_containers_or_volumes(monkeypatch, tmp_path):
         assert argv[:3] != ["docker", "system", "prune"], f"removes stopped containers: {argv}"
         assert argv[:3] != ["docker", "container", "prune"], f"costs a rebuild: {argv}"
         assert argv[:3] != ["docker", "volume", "prune"], f"named volumes are data: {argv}"
+        assert argv[:3] != ["docker", "network", "prune"], f"strands a parked stack: {argv}"
 
     # And it still reclaims: the two lines that are where the GB actually are.
     assert ["docker", "image", "prune", "-af"] in calls
