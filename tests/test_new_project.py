@@ -359,6 +359,16 @@ def test_every_feature_combination_renders(tmp_path, features):
     assert (root / ".devkit.toml").exists()
 
 
+def test_a_generated_project_cannot_stage_a_root_agents_md(tmp_path):
+    """A `CLAUDE.md` mirrored to `AGENTS.md` by a tool outside the repo is a second
+    instruction tree that drifts from the first, and it is the copy nothing tests.
+    devkit deleted its own tracked one in v0.6.0 and `git add -A` recommitted it twice
+    in sweep commits, because an untracked file no `.gitignore` excludes is invisible to
+    every gate. Rooted, so a vendored `AGENTS.md` deeper in the tree is left alone."""
+    ignore = (generate(tmp_path, {}) / ".gitignore").read_text(encoding="utf-8")
+    assert "/AGENTS.md" in ignore.splitlines()
+
+
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
 def test_no_unrendered_template_tag_survives(tmp_path, features):
     # The failure this catches: an inline `{{#flag}}` or a typo'd `{{ var }}` that

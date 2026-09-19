@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import codex_context
 import devkit_jsonc
 import devkit_project
 import harness_triage as _triage
@@ -691,7 +692,7 @@ def guard_line(root: Path, settings: Path = ROOT_SETTINGS) -> str:
     )
 
 
-def toolchain_lines(which=shutil.which, git=None, extensions=None) -> list[str]:
+def toolchain_lines(which=shutil.which, git=None, extensions=None, codex=None) -> list[str]:
     """The workstation prerequisites nothing else reports missing; [] when they are set.
 
     Reported here for `guard_line`'s reason: none has a symptom at the moment it is
@@ -702,9 +703,14 @@ def toolchain_lines(which=shutil.which, git=None, extensions=None) -> list[str]:
     operation whose whole purpose is to get work off a machine. The third, a workspace
     task's VS Code extension, is `vscode_extensions.py`; injected rather than called so
     this function's own tests do not depend on what the machine running them installed.
+    The fourth, `codex_context.py`, is the same shape one runtime over: two files in
+    `CODEX_HOME` decide whether Codex reads a repo's instruction tier at all, neither is
+    in any repository, and a session that has read none of `.claude/rules/` is
+    indistinguishable from one that has.
 
-    All three were found by hand on a fresh workstation bootstrap, which is exactly the
-    session that has no idea which of its failures are its own doing.
+    The first three were found by hand on a fresh workstation bootstrap, which is exactly
+    the session that has no idea which of its failures are its own doing; the fourth was
+    found by a session noticing README asserting a mitigation this machine had lost.
     """
     run = git or _git
     lines = []
@@ -720,7 +726,8 @@ def toolchain_lines(which=shutil.which, git=None, extensions=None) -> list[str]:
             f"'Author identity unknown', `sweep.py --ship` included "
             f"(fix: git config --global {unset[0]} ...)"
         )
-    return lines + (extensions or vscode_extensions.report_lines)()
+    reporters = (extensions or vscode_extensions.report_lines, codex or codex_context.report_lines)
+    return lines + [line for report in reporters for line in report()]
 
 
 def schedule_lines() -> list[str]:

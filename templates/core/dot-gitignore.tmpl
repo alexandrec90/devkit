@@ -54,6 +54,18 @@ Thumbs.db
 .vscode/*.log
 .vscode/.ropeproject/
 
+# Written into checkouts by a tool outside this repo -- an `AGENTS.md` mirror of the
+# root `CLAUDE.md`, produced by running it through `CLAUDE.md`->`AGENTS.md` and a
+# case-insensitive `claude`->`Codex`. Nothing here generates it and nothing would
+# regenerate it: Codex reads `CLAUDE.md` through `project_doc_fallback_filenames`, so a
+# repo-level `AGENTS.md` is a second instruction tree that drifts from the first and is
+# the copy nothing tests. devkit deleted its own tracked one in v0.6.0 and it came back
+# twice through `git add -A` in sweep commits, because an untracked file no `.gitignore`
+# excludes is invisible to every gate. Ignored rather than merely deleted for that
+# reason, and pinned at the root so a genuine `AGENTS.md` inside a vendor directory is
+# left alone.
+/AGENTS.md
+
 # Worktrees Claude Code cuts for itself under `--spawn worktree` / `--worktree`. This is
 # NOT the `<workspace>/.worktrees/` box tier — that one lives outside every checkout and
 # `worktree.py` owns it. These land *inside* the repo, so without this line every
