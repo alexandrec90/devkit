@@ -291,6 +291,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"fix-pass: {exc}", file=sys.stderr)
         write_artifact(f"fix-pass: FAILED -- {exc}")
         return EXIT_USAGE
+    except Exception as exc:
+        # A crash is the one outcome the record must not miss: the first real dispatch
+        # died on a TypeError, and the artifact still described the previous pass.
+        write_artifact(f"fix-pass: CRASHED -- {type(exc).__name__}: {exc}")
+        raise
 
 
 if __name__ == "__main__":

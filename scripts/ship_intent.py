@@ -89,16 +89,28 @@ class Outcome:
     url: str = ""
 
 
-def run_quiet(argv: list[str], cwd: Path, env: dict[str, str] | None = None):
-    """The one spawn this module makes, window-less because the pass is scheduled."""
+def run_quiet(
+    argv: list[str], cwd: Path | str | None = None, env: dict[str, str] | None = None, **kwargs
+):
+    """The one spawn this module makes, window-less because the pass is scheduled.
+
+    Takes `subprocess.run`'s keywords, because the pass hands this to `fix-prs.py` as
+    its runner and that tier -- `cut_tree`, `agent-box.open_agent`, `launch_background`
+    -- calls its runner exactly as it would call `subprocess.run`: `check=False`, no
+    `cwd`, its own `capture_output`. The first dispatch the pass ever made died on
+    `TypeError` here, with the record unwritten, because every test on either side
+    had replaced the other. The window flag and a non-raising call are forced; the
+    rest is the caller's.
+    """
+    options: dict = {"capture_output": True, "text": True}
+    options.update(kwargs)
+    options["check"] = False
     return subprocess.run(
         argv,
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        check=False,
+        cwd=None if cwd is None else str(cwd),
         env=env,
         creationflags=sweep.NO_WINDOW,
+        **options,
     )
 
 
@@ -171,12 +183,14 @@ def _default_branch(git) -> str:
 
 
 def already_shipped(intent: Intent, state: dict, porcelain: str) -> bool:
-    """Shipped at these exact words, with nothing changed since: nothing to do."""
-    return (
-        state.get("stage") == SHIPPED
-        and state.get("intent") == intent.digest
-        and not porcelain.strip()
-    )
+    """Shipped, with nothing changed in the tree since: nothing to do.
+
+    The words are deliberately not compared. A message edited after the ship, with no
+    file changed, has no commit to carry it; shipping again would push nothing and ask
+    for a second PR on a branch whose first may already have merged. The digest is
+    still recorded, for the record's own sake -- what the tree *was* shipped as.
+    """
+    return state.get("stage") == SHIPPED and not porcelain.strip()
 
 
 def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str]:

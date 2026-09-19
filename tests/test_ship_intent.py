@@ -213,25 +213,41 @@ def test_an_intent_already_shipped_with_a_clean_tree_is_not_shipped_twice(tmp_pa
     assert again.verbs() == ["git status"]
 
 
-def test_a_rewritten_intent_ships_again_and_a_clean_tree_still_pushes(tmp_path, monkeypatch):
-    """The session edited after shipping and rewrote the file: new words, new commit. A
-    clean tree with an unshipped intent still pushes -- the commits are already there."""
+def test_a_rewritten_intent_on_a_clean_shipped_tree_is_nothing_to_ship(tmp_path, monkeypatch):
+    """New words with no changed file have no commit to carry them. The first pass after
+    #375 merged found exactly this -- the message edited after the ship, the tree clean --
+    and would have pushed nothing and asked for a second PR on a retired branch."""
     monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
     one = intent(tmp_path)
     ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW)
     two = intent(tmp_path, body="Rewritten.")
     run = Runner(porcelain="")
-    assert ship_intent.ship_one(two, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert ship_intent.ship_one(two, "py", "main", run, gh_ok, NOW).stage == ship_intent.SKIPPED
+    assert run.verbs() == ["git status"]
+
+
+def test_a_clean_tree_whose_last_ship_failed_still_pushes(tmp_path, monkeypatch):
+    """The commits are already there from the attempt whose push failed: nothing to
+    commit, everything to push."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    ship_intent.write_state(one.tree, {"stage": ship_intent.FAILED, "intent": one.digest})
+    run = Runner(porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
     assert "git commit" not in run.verbs() and "git push" in run.verbs()
 
 
-def test_already_shipped_needs_the_same_words_and_a_clean_tree(tmp_path):
+def test_already_shipped_needs_a_clean_tree_and_not_the_same_words(tmp_path):
+    """A message edited after the ship with nothing else changed has no commit to carry
+    it: the first pass after a merge would otherwise push nothing and ask for a second
+    PR on a retired branch."""
     one = intent(tmp_path)
     shipped = {"stage": ship_intent.SHIPPED, "intent": one.digest}
     assert ship_intent.already_shipped(one, shipped, "")
     assert not ship_intent.already_shipped(one, shipped, " M a.py\n")
-    assert not ship_intent.already_shipped(one, {"stage": ship_intent.SHIPPED, "intent": "x"}, "")
+    assert ship_intent.already_shipped(one, {"stage": ship_intent.SHIPPED, "intent": "x"}, "")
     assert not ship_intent.already_shipped(one, {}, "")
+    assert not ship_intent.already_shipped(one, {"stage": ship_intent.REFUSED}, "")
 
 
 def test_the_state_file_round_trips_and_a_corrupt_one_reads_as_empty(tmp_path):
@@ -258,6 +274,22 @@ def test_the_one_spawn_is_window_less():
         ship_intent.subprocess.run = original
     assert seen["creationflags"] == ship_intent.sweep.NO_WINDOW
     assert seen["capture_output"] is True
+
+
+def test_run_quiet_is_called_the_way_the_dispatcher_calls_subprocess_run(tmp_path):
+    """`fix-prs.py` and `agent-box.py` call their runner as they would `subprocess.run`
+    -- `check=False` and no `cwd`, or `capture_output` and `text` of their own. The
+    first real dispatch died on a `TypeError` here because every test on either side
+    had stubbed the other; this one runs the real spawn in each of those shapes."""
+    hello = [sys.executable, "-c", "import os; print(os.getcwd())"]
+    bare = ship_intent.run_quiet(hello, check=False)
+    assert bare.returncode == 0 and bare.stdout.strip()
+    captured = ship_intent.run_quiet(hello, capture_output=True, text=True, check=False)
+    assert captured.returncode == 0
+    there = ship_intent.run_quiet(hello, cwd=str(tmp_path), check=True)
+    assert Path(there.stdout.strip()).resolve() == tmp_path.resolve()
+    failing = ship_intent.run_quiet([sys.executable, "-c", "raise SystemExit(3)"], check=True)
+    assert failing.returncode == 3, "a runner that raised would take the pass down"
 
 
 # --- a refusal as a failure ----------------------------------------------------------
