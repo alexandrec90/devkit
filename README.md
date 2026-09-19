@@ -1343,6 +1343,13 @@ unscoped rules plus rules whose `paths` match the files being edited. The reposi
 `CLAUDE.md` remains the rule index; copying rule bodies into `AGENTS.md` would create a
 second instruction tree that can drift.
 
+**Both of those files are machine-local, so nothing in this repository can assert
+them** — and on 2026-09-18 a session found `~/.codex/AGENTS.md` holding the no-hooks
+policy and no bridge at all, with this paragraph still claiming otherwise and nothing
+anywhere red. `scripts/codex_context.py` is the check that would have said so:
+`workspace-status.py` reports a missing fallback setting or a lost bridge beside the
+other workstation prerequisites, and stays silent on a machine with no `CODEX_HOME`.
+
 `sync-codex-context.py` mirrors only `.claude/skills/` to `.agents/skills/` and invokes
 `sync-codex-hooks.py` to regenerate `.codex/hooks.json` from the `settings.json` hooks
 block when a repository has opted into `.codex/`. Both scripts are in the `MANIFEST`,
