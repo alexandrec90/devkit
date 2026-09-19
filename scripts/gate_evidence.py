@@ -55,7 +55,7 @@ ISSUE_SUFFIX = reporter.issue_title("")
 # The run URL in that issue's facts table.
 RUN_URL = re.compile(r"/actions/runs/(\d+)")
 
-RUN_LIST_FIELDS = "databaseId,headSha,conclusion,status,url"
+RUN_LIST_FIELDS = "databaseId,headSha,conclusion,status,url,workflowName"
 RUN_VIEW_FIELDS = "jobs,conclusion,headSha,url"
 ISSUE_FIELDS = "number,title,body,url"
 
@@ -182,8 +182,12 @@ def latest_tag(devkit: Path) -> str:
     return tb.slugify(newest) if newest else ""
 
 
-def default_branch_green(gh: Gh, base: str) -> bool | None:
-    """Whether the newest completed gate run on `base` passed; None when unreadable."""
+def default_branch_run(gh: Gh, base: str) -> dict:
+    """The newest *completed* gate run on `base`; `{}` when there is none to read.
+
+    Completed, not newest: the run for the push that just landed is the one still in
+    progress, and its absence of a verdict says nothing about the branch.
+    """
     listed = _json(
         gh(
             "run",
@@ -199,11 +203,21 @@ def default_branch_green(gh: Gh, base: str) -> bool | None:
         )
     )
     if not isinstance(listed, list):
-        return None
+        return {}
     for run in listed:
         if isinstance(run, dict) and str(run.get("status", "")) == "completed":
-            return str(run.get("conclusion", "")) == "success"
-    return None
+            return run
+    return {}
+
+
+def is_tagged(git: Gh, sha: str) -> bool:
+    """Whether a tag points at `sha`: the release workflow's own verdict on a release commit."""
+    if not sha:
+        return False
+    pointed = git("tag", "--points-at", sha)
+    if getattr(pointed, "returncode", 1) != 0:
+        return False
+    return bool(str(getattr(pointed, "stdout", "") or "").strip())
 
 
 # --- collecting everything red ------------------------------------------------------------
@@ -212,6 +226,17 @@ def default_branch_green(gh: Gh, base: str) -> bool | None:
 def evidence_root(workspace: Path) -> Path:
     """Where downloads land before a worktree exists to copy them into."""
     return workspace.parent / ".evidence"
+
+
+def evidence_slot(failure: fix_plan.Failure) -> str:
+    """The directory one failure's evidence lives in: `carameli-pr-412`, `devkit-branch-main`.
+
+    One name per failure, used both under `evidence_root` and under `logs/gate/` when a
+    devkit session gets several failures' logs side by side -- two failures of one
+    project under a directory named for the project would overwrite each other.
+    """
+    where = failure.number or tb.slugify(failure.head or failure.base or "?")
+    return f"{failure.project}-{failure.kind}-{where}"
 
 
 def pr_failure(project: str, pr: dict) -> fix_plan.Failure:
@@ -236,11 +261,62 @@ def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_pla
     run_id = str(run.get("databaseId", "") or "")
     if not run_id:
         return replace(failure, signature=fix_plan.signature(conflicted, [], []))
-    where = root / f"{failure.project}-pr-{failure.number}"
+    where = root / evidence_slot(failure)
     texts = download_logs(gh, run_id, where)
     jobs = run_jobs(gh, run_id) if not texts else []
     sig = fix_plan.signature(conflicted, texts, jobs)
     return replace(failure, signature=sig, run_id=run_id, evidence=str(where) if texts else "")
+
+
+def read_default_branch(
+    project: str, project_dir: Path, root: Path
+) -> tuple[bool | None, fix_plan.Failure | None]:
+    """`(green, failure)` for the project's own default branch.
+
+    `green` is None when the gate's verdict could not be read. A red run whose only
+    failure is the newest-tag test is a release commit's: green once the tag points at
+    that commit (the release workflow accepted it, and the test passes on the next
+    push), and a failure the plan skips out loud while the tag does not exist yet.
+    """
+    gh = sweep.gh_for(project_dir)
+    git = sweep.git_for(project_dir)
+    base = tb.detect_default_branch(git, fallback="main")
+    run = default_branch_run(gh, base)
+    if not run:
+        return None, None
+    if str(run.get("conclusion", "")) == "success":
+        return True, None
+    run_id = str(run.get("databaseId", "") or "")
+    failure = fix_plan.Failure(
+        kind=fix_plan.BRANCH,
+        project=project,
+        number=0,
+        title=f"{run.get('workflowName') or GATE_WORKFLOW} red on {base}",
+        url=str(run.get("url", "")),
+        base=base,
+        sha=str(run.get("headSha", "")),
+        run_id=run_id,
+        workflow=str(run.get("workflowName") or GATE_WORKFLOW),
+    )
+    where = root / evidence_slot(failure)
+    texts = download_logs(gh, run_id, where) if run_id else []
+    jobs = run_jobs(gh, run_id) if run_id and not texts else []
+    sig = fix_plan.signature(False, texts, jobs)
+    if fix_plan.is_release_red(sig) and is_tagged(git, failure.sha):
+        return True, None
+    return False, replace(failure, signature=sig, evidence=str(where) if texts else "")
+
+
+def collect_default_branches(
+    workspace: Path, projects: list[str]
+) -> dict[str, tuple[bool | None, fix_plan.Failure | None]]:
+    """Every checkout's default branch, read the same way a PR's gate is."""
+    root = evidence_root(workspace)
+    return {
+        name: read_default_branch(name, workspace.parent / name, root)
+        for name in projects
+        if (workspace.parent / name).is_dir()
+    }
 
 
 def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_plan.Failure:
@@ -261,7 +337,7 @@ def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_
     )
     if not run_id:
         return failure
-    where = root / f"{project}-nightly-{number}"
+    where = root / evidence_slot(failure)
     texts = download_logs(gh, run_id, where)
     jobs = run_jobs(gh, run_id) if not texts else []
     sig = fix_plan.signature(False, texts, jobs)

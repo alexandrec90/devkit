@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from support import load_script
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_plan
@@ -289,69 +290,6 @@ def test_a_corrupt_ledger_is_empty_rather_than_a_traceback(tmp_path):
     assert fix_plan.read_ledger(path) == {}
 
 
-# --- what the agent is told -----------------------------------------------------------
-
-
-def test_the_pr_prompt_names_the_pr_the_fault_the_ids_the_logs_and_the_finish_line():
-    text = fix_plan.pr_prompt(failure())
-    assert "fix pass reads it" in text
-    for expected in (
-        "#412",
-        "carameli",
-        "1 check failing",
-        "test_every_public_symbol_is_named_by_a_test",
-        fix_plan.EVIDENCE_DIR,
-        "agent/auto/devkit-upgrade-v0-11-21-0917",
-        "origin/main",
-    ):
-        assert expected in text
-
-
-def test_the_upstream_prompt_names_every_project_and_pr_and_ends_in_the_ship_skill():
-    group = (
-        failure(project="carameli", number=412, url="u/412"),
-        failure(project="roguelike", number=16, url="u/16"),
-    )
-    text = fix_plan.upstream_prompt(group, "agent/fix-x-0918")
-    assert "2 checkout(s) (carameli, roguelike)" in text
-    assert "carameli u/412" in text and "roguelike u/16" in text
-    assert "not in each consumer" in text
-    assert "ship skill" in text and "agent/fix-x-0918" in text
-
-
-def test_the_nightly_prompt_names_the_workflow_the_issue_and_the_fresh_branch():
-    nightly = failure(
-        kind=fix_plan.NIGHTLY, workflow="Nightly", number=7, url="u/7", signature=("tests/t.py::a",)
-    )
-    text = fix_plan.nightly_prompt(nightly, "agent/fix-nightly-0918")
-    assert "Nightly workflow in carameli" in text
-    assert "issue #7 (u/7)" in text
-    assert "origin/main" in text and "agent/fix-nightly-0918" in text
-    assert "closes itself" in text
-
-
-def test_a_conflicted_pr_gets_the_resolver_prompt_which_names_no_failure():
-    """The gate cannot have run, and a resolver told "also fix the tests" fixes the
-    wrong thing; whatever the gate says after the push is the next pass's business."""
-    text = fix_plan.pr_prompt(failure(signature=(fix_plan.CONFLICT, "tests/t.py::a")))
-    assert "merge conflict with origin/main" in text
-    assert "tests/t.py::a" not in text and "Failing" not in text
-    assert "next pass" in text
-
-
-def test_a_refused_commit_gets_the_prompt_for_its_own_worktree():
-    refused = failure(kind=fix_plan.COMMIT, number=0, signature=("commit refused: secrets",))
-    text = fix_plan.pr_prompt(refused)
-    assert "The commit stage refused the change on agent/auto/devkit-upgrade-v0-11-21-0917" in text
-    assert "logs/ship-intent.md" in text and "fix pass commits" in text
-
-
-def test_the_upstream_prompt_names_every_id_across_the_group():
-    group = (failure(signature=("a::t",)), failure(project="x", signature=("b::u",)))
-    text = fix_plan.upstream_prompt(group, "agent/fix")
-    assert "a::t, b::u" in text
-
-
 def test_a_conflict_is_its_own_decision_and_never_grouped_upstream():
     red = [
         failure(project="a", number=1, signature=(fix_plan.CONFLICT, *VENDORED_SIG)),
@@ -382,3 +320,66 @@ def test_the_report_says_what_will_be_sent_what_was_and_what_is_skipped(tmp_path
 
 def test_an_empty_plan_says_so():
     assert fix_plan.render([], {}) == "nothing is red"
+
+
+# --- a red default branch -----------------------------------------------------------
+
+
+def red_main(**fields) -> fix_plan.Failure:
+    base: dict[str, Any] = {
+        "kind": fix_plan.BRANCH,
+        "project": "devkit",
+        "number": 0,
+        "head": "",
+        "base": "main",
+        "sha": "fb17a31",
+        "run_id": "35471200282",
+        "workflow": "PR Gate",
+        "url": "u/run",
+        "reason": "",
+        "signature": ("tests/test_new_project.py::" + fix_plan.RELEASE_TEST,),
+    }
+    base.update(fields)
+    return failure(**base)
+
+
+def test_a_failure_is_named_by_its_pr_its_branch_or_its_default_branch():
+    assert fix_plan.name_of(failure()) == "#412"
+    assert fix_plan.name_of(failure(kind=fix_plan.NIGHTLY, number=7)) == "#7"
+    assert fix_plan.name_of(failure(kind=fix_plan.COMMIT, number=0, head="agent/i")) == "agent/i"
+    assert fix_plan.name_of(red_main()) == "origin/main"
+    backlog = red_main(kind=fix_plan.LEDGER, signature=("agent-report devkit [a] x2", "b"))
+    assert fix_plan.name_of(backlog) == "ledger"
+    assert fix_plan.describe(backlog) == (
+        "2 open group(s) on the harness-defect ledger: agent-report devkit [a] x2, b"
+    )
+
+
+def test_the_release_test_is_the_one_the_pipeline_expects_red():
+    """One spelling, in two files: the pipeline judges a release PR by it, and the plan
+    reads a red default branch by it."""
+    pipeline = load_script("scripts/release-pipeline.py")
+    assert fix_plan.RELEASE_TEST == pipeline.EXPECTED_RED_TEST
+
+
+def test_a_release_commits_red_is_skipped_out_loud_and_any_other_red_main_is_sent():
+    assert fix_plan.is_release_red(("tests/test_new_project.py::" + fix_plan.RELEASE_TEST,))
+    assert not fix_plan.is_release_red(())
+    assert not fix_plan.is_release_red((fix_plan.RELEASE_TEST, "tests/t.py::other"))
+    decisions = fix_plan.plan(
+        [red_main(), red_main(project="carameli", signature=("tests/t.py::other",))],
+        "v0-11-23",
+        PREFIXES,
+    )
+    assert actions(decisions) == [
+        (fix_plan.SKIP, ["devkit#0"]),
+        (fix_plan.DISPATCH, ["carameli#0"]),
+    ]
+    assert "red by construction" in decisions[0].note and "tag exists" in decisions[0].note
+    assert fix_plan.skip_reason(decisions[0].failures[0], "v0-11-23", PREFIXES) == (
+        decisions[0].note
+    )
+    assert fix_plan.skip_reason(decisions[1].failures[0], "v0-11-23", PREFIXES) == ""
+    assert fix_plan.describe(decisions[1].failures[0]).startswith(
+        "PR Gate workflow failing on origin/main: tests/t.py::other"
+    )

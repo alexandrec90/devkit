@@ -372,6 +372,12 @@ def test_a_nightly_fix_is_named_for_the_workflow():
     assert fix_prs.fix_branch(decision, NOW) == "agent/fix-nightly-0918"
 
 
+def test_an_upstream_fix_with_no_test_id_is_named_for_the_workflow():
+    red = failure(kind=fix_plan.BRANCH, workflow="PR Gate", head="", signature=("Drift",))
+    decision = fix_plan.Decision(fix_plan.UPSTREAM, "n", (red,))
+    assert fix_prs.fix_branch(decision, NOW) == "agent/fix-pr-gate-0918"
+
+
 def fresh_with(monkeypatch, tmp_path, taken: tuple[str, ...] = ()):
     checkout = tmp_path / "carameli"
     (checkout / ".claude" / "worktrees").mkdir(parents=True, exist_ok=True)
@@ -727,7 +733,7 @@ def test_a_planned_pr_gets_its_evidence_placed_and_the_plans_prompt(monkeypatch,
     assert placed == [(412, root / "carameli" / ".claude" / "worktrees" / "x", "")]
     assert opened[0]["branch"] == "agent/sweep-labels-0904"
     assert opened[0]["title"] == "carameli #412"
-    assert opened[0]["prompt"] == fix_prs.tab_safe(fix_plan.pr_prompt(failure()))
+    assert opened[0]["prompt"] == fix_prs.tab_safe(fix_prs.fix_prompts.pr_prompt(failure()))
 
 
 def test_a_planned_pr_whose_branch_is_held_elsewhere_opens_nothing(monkeypatch, root, capsys):
@@ -763,10 +769,32 @@ def test_an_upstream_decision_opens_one_session_in_devkit_with_every_projects_lo
     assert fix_prs.dispatch_fresh(decision, root, "claude-bg") == 0
     assert cut[0][0] == root / "devkit"
     assert cut[0][1].startswith("agent/fix-") and cut[0][2] == "main"
-    assert placed == [("carameli", "carameli"), ("roguelike", "roguelike")]
+    assert placed == [("carameli", "carameli-pr-412"), ("roguelike", "roguelike-pr-16")]
     assert opened[0]["mode"] == "claude-bg"
     assert "u/412" in opened[0]["prompt"] and "u/16" in opened[0]["prompt"]
     assert opened[0]["title"].startswith("devkit agent/fix-")
+
+
+def test_a_red_default_branch_opens_in_its_own_project_with_the_branch_prompt(monkeypatch, root):
+    red = failure(
+        kind=fix_plan.BRANCH, head="", number=0, workflow="PR Gate", run_id="55", sha="fb17a310"
+    )
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "PR Gate failing", (red,))
+    cut = []
+    monkeypatch.setattr(
+        fix_prs,
+        "cut_fresh_tree",
+        lambda project_dir, branch, base, runner: (
+            cut.append((project_dir, branch, base))
+            or (root / "carameli" / ".claude" / "worktrees" / "m", branch)
+        ),
+    )
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    opened = capture_sessions(monkeypatch)
+    assert fix_prs.dispatch_fresh(decision, root, "claude") == 0
+    assert cut[0][0] == root / "carameli" and cut[0][2] == "main"
+    assert "red on origin/main itself" in opened[0]["prompt"]
+    assert opened[0]["title"] == "carameli main"
 
 
 def test_a_nightly_decision_opens_in_its_own_project_off_its_default_branch(monkeypatch, root):

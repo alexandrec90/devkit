@@ -59,7 +59,8 @@ def world(tmp_path, monkeypatch):
         "workspace": workspace,
         "intents": [],
         "failures": [],
-        "green": True,
+        "branches": {"devkit": (True, None), "carameli": (True, None)},
+        "backlog": None,
         "pending": [],
         "dispatched": [],
         "merged": [],
@@ -87,9 +88,14 @@ def world(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(fix_pass.gate_evidence, "newest_release", lambda _d: "v0.11.22")
     monkeypatch.setattr(
-        fix_pass.gate_evidence, "default_branch_green", lambda gh, base: table["green"]
+        fix_pass.gate_evidence,
+        "collect_default_branches",
+        lambda _ws, _projects: dict(table["branches"]),
     )
     monkeypatch.setattr(fix_pass, "pending_adoptions", lambda root, projects, tag: table["pending"])
+    monkeypatch.setattr(
+        fix_pass.fix_backlog, "ledger_failure", lambda devkit_dir, root: table["backlog"]
+    )
     monkeypatch.setattr(
         fix_pass,
         "dispatch",
@@ -109,6 +115,16 @@ def test_off_writes_one_line_and_touches_nothing(world):
     assert fix_pass.run(world["workspace"], fix_cycle.OFF, "claude-bg", NOW) == 0
     assert "mode=off" in artifact(world)
     assert world["dispatched"] == [] and world["shipped"] == []
+
+
+def test_a_switched_off_fire_leaves_a_manual_passs_record_alone(world):
+    """The scheduled job fires every half hour; during the manual week the record of a
+    hand-run pass is what is being read, and an `off` fire has nothing to say over it."""
+    fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW)
+    before = artifact(world)
+    assert "mode=plan" in before
+    assert fix_pass.run(world["workspace"], fix_cycle.OFF, "claude-bg", NOW) == 0
+    assert artifact(world) == before
 
 
 def test_plan_writes_the_whole_plan_and_sends_nothing(world):
@@ -150,11 +166,97 @@ def test_while_the_harness_is_red_only_one_devkit_session_goes(world):
         failure(project="carameli", number=1, signature=VENDORED),
         failure(project="carameli", number=2),
     ]
-    world["green"] = False
+    world["branches"]["devkit"] = (False, red_main())
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
     assert world["dispatched"] == [(fix_plan.UPSTREAM, "claude-bg")]
     text = artifact(world)
     assert "harness  RED" in text and "held     carameli #2" in text
+
+
+def red_main(**fields) -> fix_plan.Failure:
+    base: dict[str, Any] = {
+        "kind": fix_plan.BRANCH,
+        "project": "devkit",
+        "number": 0,
+        "head": "",
+        "base": "main",
+        "sha": "fb17a310",
+        "run_id": "55",
+        "workflow": "PR Gate",
+        "url": "u/55",
+        "reason": "",
+        # Not the PR helper's id: the same id in two projects is a shared signature,
+        # which is harness by classification and a different test's subject.
+        "signature": ("tests/test_devkit.py::t",),
+    }
+    base.update(fields)
+    return failure(**base)
+
+
+def test_a_red_devkit_main_alone_sends_one_devkit_session_and_holds_the_projects(world):
+    """What the first manual pass did not do: it held four carameli PRs behind a red
+    devkit main and sent nobody at the main, because the red was a reason and not a
+    failure. Now it is both."""
+    world["failures"] = [failure(number=2)]
+    world["branches"]["devkit"] = (False, red_main())
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == 0
+    assert world["dispatched"] == [(fix_plan.UPSTREAM, "claude")]
+    text = artifact(world)
+    assert "harness  RED -- 1 harness failure(s) open; devkit's default-branch gate is red" in text
+    assert "upstream devkit origin/main" in text
+    assert "held     carameli #2" in text and "sent     devkit origin/main -- upstream" in text
+
+
+def test_an_untagged_release_commits_red_main_holds_everything_and_sends_nobody(world):
+    """Between the release merge and its tag, main is red by construction: the pass says
+    which red it is holding behind, and sends no session at a test the tag will fix."""
+    world["failures"] = [failure(number=2)]
+    world["branches"]["devkit"] = (
+        False,
+        red_main(signature=("tests/test_new_project.py::" + fix_plan.RELEASE_TEST,)),
+    )
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == 0
+    assert world["dispatched"] == []
+    text = artifact(world)
+    assert "harness  RED" in text and "held     carameli #2" in text
+    assert "skip     devkit origin/main -- red by construction" in text
+
+
+def test_collect_red_gathers_prs_default_branches_and_the_backlog_with_devkits_verdict(world):
+    backlog = failure(kind=fix_plan.LEDGER, project="devkit", number=0, head="")
+    world["failures"] = [failure(number=2)]
+    world["branches"] = {"devkit": (False, red_main()), "carameli": (True, None)}
+    world["backlog"] = backlog
+    failures, green = fix_pass.collect_red(world["workspace"], ["devkit", "carameli"], [])
+    assert [f.kind for f in failures] == [fix_plan.PR, fix_plan.BRANCH, fix_plan.LEDGER]
+    assert green is False
+
+
+def test_the_ledgers_open_backlog_rides_in_the_devkit_session(world):
+    """Every entry on the harness-defect ledger is a devkit defect, so an open backlog
+    is harness red like a vendored test is, and goes to the one devkit session."""
+    world["failures"] = [failure(number=2)]
+    world["backlog"] = failure(
+        kind=fix_plan.LEDGER,
+        project="devkit",
+        number=0,
+        head="",
+        workflow="harness ledger",
+        signature=("scheduled-job-failed devkit [84ada64c] x1",),
+    )
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == 0
+    assert world["dispatched"] == [(fix_plan.UPSTREAM, "claude")]
+    text = artifact(world)
+    assert "upstream devkit ledger -- the harness is red" in text
+    assert "held     carameli #2" in text
+
+
+def test_a_projects_red_main_is_a_project_failure_sent_once_the_harness_is_clean(world):
+    world["branches"]["carameli"] = (False, red_main(project="carameli"))
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == 0
+    assert world["dispatched"] == [(fix_plan.DISPATCH, "claude")]
+    assert "harness  clean" in artifact(world)
+    assert "sent     carameli origin/main -- dispatch" in artifact(world)
 
 
 def test_a_refused_commit_is_a_failure_the_pass_sends_at_the_same_worktree(
@@ -174,7 +276,7 @@ def test_a_refused_commit_is_a_failure_the_pass_sends_at_the_same_worktree(
     )
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
     assert world["dispatched"] == [(fix_plan.DISPATCH, "claude-bg")]
-    assert "carameli #0 -- dispatch" in artifact(world)
+    assert "carameli agent/i-0919 -- dispatch" in artifact(world)
 
 
 def test_a_session_that_failed_to_open_is_the_exit_code_and_not_recorded(world, monkeypatch):

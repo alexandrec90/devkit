@@ -60,6 +60,7 @@ import adoption_prs
 import agent_worktrees as aw
 import devkit_project
 import fix_plan
+import fix_prompts
 import gate_evidence
 import sweep
 import task_branch as tb
@@ -187,7 +188,8 @@ def fix_branch(decision: fix_plan.Decision, now: _dt.datetime | None = None) -> 
     stamp = (now or _dt.datetime.now(_dt.UTC)).strftime("%m%d")
     first = decision.failures[0]
     if decision.action == fix_plan.UPSTREAM:
-        test = next((s for s in first.signature if "::" in s), "vendored").rsplit("::", 1)[-1]
+        fallback = first.workflow or "vendored"
+        test = next((s for s in first.signature if "::" in s), fallback).rsplit("::", 1)[-1]
         topic = f"fix {tb.slugify(test, max_len=24)}"
     else:
         topic = f"fix {first.workflow or 'nightly'}"
@@ -346,7 +348,7 @@ def dispatch_pr(failure: fix_plan.Failure, root: Path, mode: str, runner=subproc
         return EXIT_FAILED
     gate_evidence.place(failure, tree)
     print(f"  worktree {tree}")
-    prompt = tab_safe(fix_plan.pr_prompt(failure))
+    prompt = tab_safe(fix_prompts.pr_prompt(failure))
     return open_session(mode, tree, failure.head, prompt, f"{failure.project} {name}", runner)
 
 
@@ -368,12 +370,15 @@ def dispatch_fresh(
         print(f"  could not cut {branch} off origin/{base}; nothing opened", file=sys.stderr)
         return EXIT_FAILED
     for failure in decision.failures:
-        gate_evidence.place(failure, tree, failure.project if upstream else "")
+        # One directory per failure: a devkit session can hold two of one project's.
+        gate_evidence.place(failure, tree, gate_evidence.evidence_slot(failure) if upstream else "")
     print(f"  worktree {tree} on {branch}")
     if upstream:
-        prompt, title = fix_plan.upstream_prompt(decision.failures, branch), f"devkit {branch}"
+        prompt, title = fix_prompts.upstream_prompt(decision.failures, branch), f"devkit {branch}"
+    elif first.kind == fix_plan.BRANCH:
+        prompt, title = fix_prompts.branch_prompt(first, branch), f"{project} {first.base}"
     else:
-        prompt, title = fix_plan.nightly_prompt(first, branch), f"{project} {first.workflow}"
+        prompt, title = fix_prompts.nightly_prompt(first, branch), f"{project} {first.workflow}"
     return open_session(mode, tree, branch, tab_safe(prompt), title, runner)
 
 

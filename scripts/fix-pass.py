@@ -7,9 +7,13 @@ One pass, whether a click or the scheduler started it:
    worktree and nothing else (`ship_intent.py`). The pass runs the fixers, commits with
    that message, pushes with the push gate skipped, opens the PR with the label and
    records the outcome. A refused commit becomes a failure like any other.
-2. **Collect everything red.** Refused commits, red PRs and open scheduled-failure
-   issues, each with the gate's own artifact (`gate_evidence.py`), planned by
-   `fix_plan.py` and classified by `fix_cycle.py`.
+2. **Collect everything red.** Refused commits, red PRs, open scheduled-failure issues
+   and every default branch whose own gate is red, each with the gate's own artifact
+   (`gate_evidence.py`), plus the harness-defect ledger's open backlog
+   (`harness_triage.py`) as one failure with its groups as evidence; planned by
+   `fix_plan.py` and classified by `fix_cycle.py`. A release commit's red -- the
+   newest-tag test, until the tag exists -- is skipped out loud, and reads as green once
+   the tag points at it.
 3. **Harness first.** While anything harness-shaped is red -- a vendored test, a shared
    signature, devkit's own gate, a release mid-adoption -- one devkit session gets the
    whole set and every project fixer is held, out loud.
@@ -46,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import adoption_prs
 import broken_pr_menu as menu
 import devkit_project
+import fix_backlog
 import fix_cycle
 import fix_plan
 import gate_evidence
@@ -115,6 +120,27 @@ def pending_adoptions(root: Path, projects: list[str], tag: str) -> list[str]:
     ]
 
 
+def collect_red(
+    workspace: Path, projects: list[str], refused: list[fix_plan.Failure]
+) -> tuple[list[fix_plan.Failure], bool | None]:
+    """Step 2. Everything red, and devkit's default-branch verdict (None: unreadable).
+
+    Each default branch's own gate is read beside the PRs: a red one is a failure to
+    send a session at (devkit's is the harness itself), not only a reason to hold. The
+    harness-defect ledger's open backlog rides along as one failure of its own.
+    """
+    found = menu.scan(workspace)
+    branches = gate_evidence.collect_default_branches(workspace, projects)
+    failures = refused + gate_evidence.collect(workspace, found)
+    failures += [failure for _, failure in branches.values() if failure]
+    devkit_dir = workspace.parent / fix_cycle.DEVKIT
+    if devkit_dir.is_dir():
+        backlog = fix_backlog.ledger_failure(devkit_dir, gate_evidence.evidence_root(workspace))
+        failures += [backlog] if backlog else []
+    green, _ = branches.get(fix_cycle.DEVKIT, (None, None))
+    return failures, green
+
+
 def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
     """Step 5. The one merge the pass makes; `(lines for the record)`."""
     merged: list[str] = []
@@ -160,29 +186,25 @@ def dispatch(decision: fix_plan.Decision, root: Path, agent: str) -> int:
 def run(workspace: Path, mode: str, agent: str, now: _dt.datetime | None = None) -> int:
     now = now or _dt.datetime.now(_dt.UTC)
     if mode == fix_cycle.OFF:
-        write_artifact(f"fix-pass: mode=off -- set {fix_cycle.SETTING} to plan or dispatch")
+        # A switched-off fire did nothing, so it says so only where nothing else has:
+        # every half hour it would otherwise erase the record a manual pass just wrote,
+        # which is the one thing worth reading during the manual week.
+        if not (REPO_ROOT / ARTIFACT).is_file():
+            write_artifact(f"fix-pass: mode=off -- set {fix_cycle.SETTING} to plan or dispatch")
         return EXIT_OK
     root = workspace.parent
     projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
 
     shipped, refused = ship_intents(root, projects, mode)
-    found = menu.scan(workspace)
-    failures = refused + gate_evidence.collect(workspace, found)
+    failures, green = collect_red(workspace, projects, refused)
     newest = gate_evidence.newest_release(root / fix_cycle.DEVKIT)
     decisions = fix_plan.plan(
         failures, tb.slugify(newest) if newest else "", adoption_prs.adoption_prefixes()
     )
     classes = fix_cycle.classify_all(failures)
-    devkit_dir = root / fix_cycle.DEVKIT
-    green = (
-        gate_evidence.default_branch_green(
-            sweep.gh_for(devkit_dir), tb.detect_default_branch(sweep.git_for(devkit_dir))
-        )
-        if devkit_dir.is_dir()
-        else None
-    )
     harness = fix_cycle.harness_state(classes, green, pending_adoptions(root, projects, newest))
     go, held = fix_cycle.phase(decisions, classes, harness)
+    skipped = [d for d in decisions if d.action == fix_plan.SKIP]
 
     ledger_path = worktree.boxes_root(root) / fix_plan.LEDGER_NAME
     ledger = fix_plan.read_ledger(ledger_path)
@@ -190,7 +212,7 @@ def run(workspace: Path, mode: str, agent: str, now: _dt.datetime | None = None)
     capped: list[tuple[fix_plan.Decision, str]] = []
     worst = EXIT_OK
     for decision in go:
-        names = ", ".join(f"{f.project} #{f.number}" for f in decision.failures)
+        names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
         if when := fix_plan.already_sent(decision, ledger):
             capped.append((decision, f"already dispatched at {when}"))
             continue
@@ -221,6 +243,7 @@ def run(workspace: Path, mode: str, agent: str, now: _dt.datetime | None = None)
             tuple(capped),
             tuple(sent),
             tuple(merged),
+            tuple(skipped),
         )
     )
     print(text)

@@ -537,13 +537,15 @@ explicitly and asks only which agent. One pass, in order:
    outcome in `logs/ship-state.json` beside the intent. A dirty tree with no intent is a
    session still working and is never touched; a refused commit is a failure like any
    other, with the pre-commit output as its evidence.
-2. **Collect everything red** — refused commits, red PRs, open scheduled-failure issues —
-   with what each gate actually said (`scripts/gate_evidence.py`), and classify each as
-   harness, project or unknown (`scripts/fix_cycle.py`).
+2. **Collect everything red** — refused commits, red PRs, open scheduled-failure issues,
+   and every default branch whose own gate is red — with what each gate actually said
+   (`scripts/gate_evidence.py`), and classify each as harness, project or unknown
+   (`scripts/fix_cycle.py`).
 3. **Harness first.** While anything harness-shaped is red — a vendored test, a
-   signature shared across consumers, devkit's own default branch, a release still being
-   adopted — one devkit session gets the whole set and every project fixer is held, and
-   the record says so.
+   signature shared across consumers, devkit's own default branch, an open backlog on
+   the harness-defect ledger (`scripts/harness_triage.py`, the `/triage-harness`
+   sweep's reader), a release still being adopted — one devkit session gets the whole
+   set and every project fixer is held, and the record says so.
 4. **Then projects**, conflicts first, each under the dispatch ledger and a daily cap.
 5. **Merge green adoption PRs**, and nothing else. Every other green PR waits for you.
 
@@ -563,9 +565,15 @@ what the scheduled job does while the switch says `plan`. What each dispatch loo
 - **A failing scheduled workflow** gets a fresh branch off the default branch in that
   project, the run's logs, and a prompt that ends with the ship skill; the issue closes
   itself when the workflow next passes.
-- **Two shapes get nothing, out loud.** A release PR is red by construction until its tag
-  exists (`RELEASING.md`), and an adoption PR for a release that is no longer the newest
-  is superseded — the upgrade sweep closes those itself.
+- **A red default branch** — a push that landed red — gets a fresh branch off that base
+  in its own project with the run's logs; devkit's is the harness itself, and goes to the
+  one devkit session with everything else harness-shaped.
+- **Three shapes get nothing, out loud.** A release PR is red by construction until its
+  tag exists (`RELEASING.md`), and so is the default branch at the release commit — its
+  gate fails the newest-tag test and nothing else, and it reads as green once the tag
+  points at it. An adoption PR for a release that is no longer the newest is
+  superseded — the upgrade sweep closes those itself. Each skip is a line in the
+  record, so a pass that holds everything says which red it is holding behind.
 
 A ledger under the workspace's `.worktrees/` records every dispatch against the commit it
 was observed on, so a second pass sends nothing at a failure an agent is already on, and

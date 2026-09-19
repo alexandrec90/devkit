@@ -269,10 +269,14 @@ class Account:
     capped: tuple[tuple[fix_plan.Decision, str], ...] = ()
     sent: tuple[str, ...] = ()
     merged: tuple[str, ...] = ()
+    # What the plan declined out loud: a release PR, a superseded adoption, a release
+    # commit's red. In the record because a pass that holds everything behind one of
+    # these has to say which one, or "harness RED" reads as a defect nobody can find.
+    skipped: tuple[fix_plan.Decision, ...] = ()
 
 
 def _names(decision: fix_plan.Decision) -> str:
-    return ", ".join(f"{f.project} #{f.number}" for f in decision.failures)
+    return ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
 
 
 def render(account: Account) -> str:
@@ -286,6 +290,7 @@ def render(account: Account) -> str:
     lines += [f"{d.action:8} {_names(d)} -- {d.note}" for d in account.go]
     lines += [f"held     {_names(d)} -- {why}" for d, why in account.held]
     lines += [f"capped   {_names(d)} -- {why}" for d, why in account.capped]
+    lines += [f"skip     {_names(d)} -- {d.note}" for d in account.skipped]
     lines += [f"sent     {line}" for line in account.sent]
     lines += [f"merged   {line}" for line in account.merged]
     return "\n".join(lines)
