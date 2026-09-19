@@ -394,6 +394,19 @@ def test_a_missing_workspace_is_a_usage_error(tmp_path, capsys):
     assert "no workspace file" in capsys.readouterr().err
 
 
+def test_a_crash_is_written_to_the_record_before_the_traceback(world, monkeypatch, tmp_path):
+    """The first real dispatch died on a TypeError and the artifact still described the
+    previous pass; a crash is the one outcome the record must not miss."""
+
+    def boom(ws, mode, agent):
+        raise TypeError("run_quiet() got an unexpected keyword argument 'check'")
+
+    monkeypatch.setattr(fix_pass, "run", boom)
+    with pytest.raises(TypeError):
+        fix_pass.main(["--mode", "plan", "--workspace", str(world["workspace"])])
+    assert artifact(world).startswith("fix-pass: CRASHED -- TypeError: run_quiet()")
+
+
 def test_the_artifact_is_written_under_logs(tmp_path):
     path = fix_pass.write_artifact("hello", tmp_path)
     assert path == tmp_path / "logs" / "fix-pass.log"
