@@ -388,10 +388,6 @@ ALLOWED_MISSING = {
     "pyvenv.cfg": "the file that makes a directory a virtualenv, named as the thing "
     "`devkit_schtasks.windowless` reads at runtime; it exists in every `.venv`, all of "
     "which are untracked, and never at the root of the repo",
-    ".github/pull_request_template.md": "the file the ship skill names in order to say "
-    "not to go looking for one; its absence is the decision, since `gh pr create "
-    "--body-file` overrides a template and the PR body shape lives in that vendored "
-    "step instead",
 }
 
 # Version literals prose is allowed to carry, with the reason each is not a pin that
