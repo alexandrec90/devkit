@@ -179,12 +179,73 @@ def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
     return merged
 
 
+def update_branch(failure: fix_plan.Failure, root: Path) -> int:
+    """An `UPDATE`: merge the base into the PR on GitHub, so its gate re-runs as-is now.
+
+    No session and no worktree. A PR that comes back green is done; one still red at
+    the new sha is a new ledger key and gets its session next pass; one GitHub cannot
+    update (a conflict) reads `CONFLICTING` next pass and goes to the resolver.
+    """
+    done = sweep.gh_for(root / failure.project)("pr", "update-branch", str(failure.number))
+    if done.returncode != 0:
+        why = (done.stderr or done.stdout or "").strip().splitlines()
+        print(
+            f"  {failure.project} #{failure.number}: update-branch failed: {why[-1] if why else '?'}"
+        )
+        return EXIT_FAILED
+    print(f"  {failure.project} #{failure.number}: branch updated; the gate re-runs")
+    return EXIT_OK
+
+
 def dispatch(decision: fix_plan.Decision, root: Path, agent: str) -> int:
     first = decision.failures[0]
+    if decision.action == fix_plan.UPDATE:
+        return update_branch(first, root)
     on_branch = first.kind in (fix_plan.PR, fix_plan.COMMIT)
     if decision.action in (fix_plan.DISPATCH, fix_plan.RESOLVE) and on_branch:
         return fix_prs.dispatch_pr(first, root, agent, ship_intent.run_quiet)
     return fix_prs.dispatch_fresh(decision, root, agent, ship_intent.run_quiet)
+
+
+def send_all(
+    go: list[fix_plan.Decision],
+    ledger_path: Path,
+    root: Path,
+    mode: str,
+    agent: str,
+    now: _dt.datetime,
+) -> tuple[list[str], list[tuple[fix_plan.Decision, str]], int]:
+    """Steps 3 and 4: what the phase let through, each under the ledger and the caps.
+
+    `(sent lines, capped decisions with why, worst exit code)`. The ledger is written
+    only for a dispatch that opened; one that failed to is not something the next pass
+    should be told already happened.
+    """
+    ledger = fix_plan.read_ledger(ledger_path)
+    sent: list[str] = []
+    capped: list[tuple[fix_plan.Decision, str]] = []
+    worst = EXIT_OK
+    for decision in go:
+        names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
+        if when := fix_plan.already_sent(decision, ledger):
+            capped.append((decision, f"already dispatched at {when}"))
+            continue
+        ok, why = fix_cycle.within_caps(decision, ledger, now)
+        if not ok:
+            capped.append((decision, why))
+            continue
+        if mode != fix_cycle.DISPATCH:
+            would = "would update the branch" if decision.action == fix_plan.UPDATE else None
+            sent.append(f"{names} -- {would or f'would send ({decision.action})'}")
+            continue
+        if dispatch(decision, root, agent) == EXIT_OK:
+            fix_plan.record(ledger_path, fix_plan.decision_key(decision), decision.note, now)
+            ledger = fix_plan.read_ledger(ledger_path)
+            sent.append(f"{names} -- {decision.action}")
+        else:
+            sent.append(f"{names} -- FAILED to open a session")
+            worst = EXIT_FAILED
+    return sent, capped, worst
 
 
 # --- the pass -----------------------------------------------------------------------------
@@ -214,30 +275,7 @@ def run(workspace: Path, mode: str, agent: str, now: _dt.datetime | None = None)
     skipped = [d for d in decisions if d.action == fix_plan.SKIP]
 
     ledger_path = worktree.boxes_root(root) / fix_plan.LEDGER_NAME
-    ledger = fix_plan.read_ledger(ledger_path)
-    sent: list[str] = []
-    capped: list[tuple[fix_plan.Decision, str]] = []
-    worst = EXIT_OK
-    for decision in go:
-        names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
-        if when := fix_plan.already_sent(decision, ledger):
-            capped.append((decision, f"already dispatched at {when}"))
-            continue
-        ok, why = fix_cycle.within_caps(decision, ledger, now)
-        if not ok:
-            capped.append((decision, why))
-            continue
-        if mode != fix_cycle.DISPATCH:
-            sent.append(f"{names} -- would send ({decision.action})")
-            continue
-        code = dispatch(decision, root, agent)
-        if code == EXIT_OK:
-            fix_plan.record(ledger_path, fix_plan.decision_key(decision), decision.note, now)
-            ledger = fix_plan.read_ledger(ledger_path)
-            sent.append(f"{names} -- {decision.action}")
-        else:
-            sent.append(f"{names} -- FAILED to open a session")
-            worst = EXIT_FAILED
+    sent, capped, worst = send_all(go, ledger_path, root, mode, agent, now)
 
     merged = merge_green_adoptions(root, projects) if mode == fix_cycle.DISPATCH else []
     text = fix_cycle.render(

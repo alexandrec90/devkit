@@ -20,6 +20,9 @@ shapes `gh` returns, so `tests/test_fix_plan.py` drives every branch without a n
   test, the vendored file, or the template behind the project-owned file it names --
   belongs upstream. The same fix made eight times in eight consumers is the cost this
   file exists to refuse.
+- **A PR behind its base is updated, not fixed.** Its gate ran against a base that
+  has moved, so what it says may already be fixed on the base; the pass updates the
+  branch and reads the new run next time. No session is spent on it.
 - **Three shapes are never dispatched.** A release PR is red by construction
   (`RELEASING.md`: `test_fallback_devkit_ref_tracks_the_newest_tag` fails until the
   tag exists, and `release-pipeline.py` judges exactly that red), so an agent sent at
@@ -71,6 +74,7 @@ RELEASE_TEST = "test_fallback_devkit_ref_tracks_the_newest_tag"
 DISPATCH = "dispatch"  # one agent, in a worktree on the failure's own branch
 RESOLVE = "resolve"  # the same worktree, a conflict-only prompt, and nothing about the gate
 UPSTREAM = "upstream"  # one agent in devkit, for a signature shared across consumers
+UPDATE = "update"  # no agent: the PR is behind its base, so update it and let the gate re-run
 SKIP = "skip"  # nothing, and the note says why
 
 # Where the vendored test tier lives in every consumer. A failing id under it is a
@@ -120,6 +124,7 @@ class Failure:
     reason: str = ""  # `broken_pr_menu.broken_reason`, for a PR
     signature: tuple[str, ...] = ()
     evidence: str = ""  # the directory the run's artifacts were downloaded to
+    behind: bool = False  # PR only: its head lacks the base's tip, so its gate is stale
 
 
 @dataclass(frozen=True)
@@ -267,6 +272,15 @@ def plan(
             # gate has no merge ref to run against. The resolver is told nothing about
             # the failures; if it is still red afterwards, the next pass sees a plain one.
             decisions.append(Decision(RESOLVE, describe(failure), (failure,)))
+            continue
+        if failure.behind:
+            # Red against an old base is not yet evidence about the change: #379 was
+            # red on a pip-audit finding master had already fixed, and the session sent
+            # at it did nothing but merge master in. Update the branch, re-read next
+            # pass; a PR still red at the new sha is a new key and gets its session.
+            decisions.append(
+                Decision(UPDATE, f"{describe(failure)}; behind origin/{failure.base}", (failure,))
+            )
             continue
         grouped.setdefault(failure.signature, []).append(failure)
 

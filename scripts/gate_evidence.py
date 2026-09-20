@@ -33,6 +33,7 @@ import fix_plan
 import sweep
 import task_branch as tb
 from _loader import load_by_path
+from branch_facts import branch_tip, is_behind, is_tagged
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -210,16 +211,6 @@ def default_branch_run(gh: Gh, base: str) -> dict:
     return {}
 
 
-def is_tagged(git: Gh, sha: str) -> bool:
-    """Whether a tag points at `sha`: the release workflow's own verdict on a release commit."""
-    if not sha:
-        return False
-    pointed = git("tag", "--points-at", sha)
-    if getattr(pointed, "returncode", 1) != 0:
-        return False
-    return bool(str(getattr(pointed, "stdout", "") or "").strip())
-
-
 # --- collecting everything red ------------------------------------------------------------
 
 
@@ -257,15 +248,22 @@ def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_pla
     """The PR's gate at its head sha: run, jobs, artifacts, into a signature."""
     gh = sweep.gh_for(project_dir)
     conflicted = fix_plan.CONFLICT in failure.reason
+    behind = not conflicted and is_behind(sweep.git_for(project_dir), failure.base, failure.sha)
     run = gate_run(gh, failure.head, failure.sha)
     run_id = str(run.get("databaseId", "") or "")
     if not run_id:
-        return replace(failure, signature=fix_plan.signature(conflicted, [], []))
+        return replace(failure, signature=fix_plan.signature(conflicted, [], []), behind=behind)
     where = root / evidence_slot(failure)
     texts = download_logs(gh, run_id, where)
     jobs = run_jobs(gh, run_id) if not texts else []
     sig = fix_plan.signature(conflicted, texts, jobs)
-    return replace(failure, signature=sig, run_id=run_id, evidence=str(where) if texts else "")
+    return replace(
+        failure,
+        signature=sig,
+        run_id=run_id,
+        evidence=str(where) if texts else "",
+        behind=behind,
+    )
 
 
 def read_default_branch(
@@ -273,16 +271,23 @@ def read_default_branch(
 ) -> tuple[bool | None, fix_plan.Failure | None]:
     """`(green, failure)` for the project's own default branch.
 
-    `green` is None when the gate's verdict could not be read. A red run whose only
-    failure is the newest-tag test is a release commit's: green once the tag points at
-    that commit (the release workflow accepted it, and the test passes on the next
-    push), and a failure the plan skips out loud while the tag does not exist yet.
+    `green` is None when the gate's verdict could not be read -- including when the
+    newest completed run is not at the branch's tip. carameli's gate has no `push`
+    trigger, so its "newest run on master" was a May run four months behind the tip,
+    and a session was spent proving it stale; a verdict that is not about the current
+    commit is no verdict. A red run whose only failure is the newest-tag test is a
+    release commit's: green once the tag points at that commit (the release workflow
+    accepted it, and the test passes on the next push), and a failure the plan skips
+    out loud while the tag does not exist yet.
     """
     gh = sweep.gh_for(project_dir)
     git = sweep.git_for(project_dir)
     base = tb.detect_default_branch(git, fallback="main")
     run = default_branch_run(gh, base)
     if not run:
+        return None, None
+    tip = branch_tip(git, base)
+    if not tip or str(run.get("headSha", "")) != tip:
         return None, None
     if str(run.get("conclusion", "")) == "success":
         return True, None
@@ -312,11 +317,14 @@ def collect_default_branches(
 ) -> dict[str, tuple[bool | None, fix_plan.Failure | None]]:
     """Every checkout's default branch, read the same way a PR's gate is."""
     root = evidence_root(workspace)
-    return {
-        name: read_default_branch(name, workspace.parent / name, root)
-        for name in projects
-        if (workspace.parent / name).is_dir()
-    }
+    verdicts = {}
+    for name in projects:
+        project_dir = workspace.parent / name
+        if not project_dir.is_dir():
+            continue
+        sweep.git_for(project_dir)("fetch", "--quiet", "origin")
+        verdicts[name] = read_default_branch(name, project_dir, root)
+    return verdicts
 
 
 def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_plan.Failure:
@@ -355,6 +363,9 @@ def collect(workspace: Path, found: dict[str, list[dict]]) -> list[fix_plan.Fail
     failures: list[fix_plan.Failure] = []
     for project, prs in found.items():
         project_dir = workspace.parent / project
+        # One fetch per checkout, so `is_behind` and the tip checks compare against
+        # what origin has now rather than whenever this checkout last looked.
+        sweep.git_for(project_dir)("fetch", "--quiet", "origin")
         for pr in prs:
             failures.append(read_pr(project_dir, pr_failure(project, pr), root))
         for issue in nightly_issues(sweep.gh_for(project_dir)):

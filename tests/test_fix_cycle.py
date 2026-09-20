@@ -151,13 +151,20 @@ def test_several_harness_decisions_fold_into_one_session():
     assert held == []
 
 
-def test_once_clean_project_fixers_go_with_conflicts_first():
+def test_once_clean_project_fixers_go_updates_first_then_conflicts():
+    """An update is free and may turn the PR green by itself; a conflict's gate cannot
+    run at all; a plain red gets its session last."""
     conflict = failure(number=1, signature=(fix_plan.CONFLICT,))
     red = failure(number=2)
-    decisions = [decision(fix_plan.DISPATCH, red), decision(fix_plan.RESOLVE, conflict)]
-    classes = fix_cycle.classify_all([red, conflict])
+    behind = failure(number=3, behind=True)
+    decisions = [
+        decision(fix_plan.DISPATCH, red),
+        decision(fix_plan.RESOLVE, conflict),
+        decision(fix_plan.UPDATE, behind),
+    ]
+    classes = fix_cycle.classify_all([red, conflict, behind])
     go, held = fix_cycle.phase(decisions, classes, fix_cycle.harness_state({}, True, []))
-    assert [d.action for d in go] == [fix_plan.RESOLVE, fix_plan.DISPATCH]
+    assert [d.action for d in go] == [fix_plan.UPDATE, fix_plan.RESOLVE, fix_plan.DISPATCH]
     assert held == []
 
 

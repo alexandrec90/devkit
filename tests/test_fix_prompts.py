@@ -49,7 +49,7 @@ def red_main(**fields) -> fix_plan.Failure:
 
 
 def test_the_pr_prompt_names_the_pr_the_fault_the_ids_the_logs_and_the_finish_line():
-    text = fix_prompts.pr_prompt(failure())
+    text = fix_prompts.pr_prompt(failure(evidence="C:/ev/carameli-pr-412"))
     assert "fix pass reads it" in text
     for expected in (
         "#412",
@@ -111,7 +111,8 @@ def test_the_upstream_prompt_names_every_id_across_the_group():
 
 def test_the_branch_prompt_names_the_base_the_run_the_ids_and_the_fresh_branch():
     text = fix_prompts.branch_prompt(
-        red_main(project="carameli", signature=("tests/t.py::a",)), "agent/fix-pr-gate-0919"
+        red_main(project="carameli", signature=("tests/t.py::a",), evidence="C:/ev/x"),
+        "agent/fix-pr-gate-0919",
     )
     for expected in (
         "PR Gate workflow in carameli is red on origin/main itself",
@@ -123,6 +124,27 @@ def test_the_branch_prompt_names_the_base_the_run_the_ids_and_the_fresh_branch()
         "ship skill",
     ):
         assert expected in text
+
+
+def test_a_prompt_says_when_no_artifact_came_down_instead_of_naming_an_empty_directory():
+    """Two sessions were told the logs were under logs/gate/ and spent turns finding
+    the directory absent: the run had aged out, or uploaded nothing."""
+    none = failure(evidence="", url="u/412")
+    some = failure(evidence="C:/ev/carameli-pr-412")
+    assert "No artifact came down from the run; read it at u/412" in fix_prompts.pr_prompt(none)
+    assert fix_plan.EVIDENCE_DIR not in fix_prompts.pr_prompt(none)
+    assert fix_plan.EVIDENCE_DIR in fix_prompts.pr_prompt(some)
+    nightly = failure(kind=fix_plan.NIGHTLY, workflow="Nightly", number=7, url="u/7", evidence="")
+    assert "No artifact came down" in fix_prompts.nightly_prompt(nightly, "agent/fix")
+    assert "No artifact came down" in fix_prompts.branch_prompt(red_main(evidence=""), "agent/fix")
+    assert "read the run at its URL" in fix_prompts.upstream_prompt((none,), "agent/fix")
+
+
+def test_the_resolver_is_told_to_keep_the_hooks_on():
+    """The first resolver the pass sent used --no-verify on its merge commit and flagged
+    it itself; the prompt now says so before it can happen."""
+    text = fix_prompts.pr_prompt(failure(signature=(fix_plan.CONFLICT,)))
+    assert "never --no-verify" in text
 
 
 def test_the_upstream_prompt_sends_the_session_at_the_ledger_only_when_the_backlog_is_in_it():

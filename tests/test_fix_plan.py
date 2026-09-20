@@ -343,6 +343,24 @@ def red_main(**fields) -> fix_plan.Failure:
     return failure(**base)
 
 
+def test_a_pr_behind_its_base_is_updated_not_fixed_unless_it_conflicts():
+    """#379 was red on a pip-audit finding master had already fixed, and the session
+    sent at it did nothing but merge master in. A conflict still goes to the resolver:
+    GitHub cannot update a conflicted branch."""
+    behind = failure(number=1, head="agent/a", signature=("tests/t.py::a",), behind=True)
+    conflicted = failure(number=2, head="agent/b", signature=(fix_plan.CONFLICT,), behind=True)
+    plain = failure(number=3, head="agent/c", signature=("tests/t.py::a",))
+    decisions = fix_plan.plan([behind, conflicted, plain], "v0-11-23", PREFIXES)
+    assert actions(decisions) == [
+        (fix_plan.UPDATE, ["carameli#1"]),
+        (fix_plan.RESOLVE, ["carameli#2"]),
+        (fix_plan.DISPATCH, ["carameli#3"]),
+    ]
+    assert decisions[0].note.endswith("behind origin/main")
+    assert "sent" not in fix_plan.render(decisions, {}).splitlines()[0]
+    assert fix_plan.render(decisions, {}).splitlines()[0].startswith("update   carameli #1")
+
+
 def test_a_failure_is_named_by_its_pr_its_branch_or_its_default_branch():
     assert fix_plan.name_of(failure()) == "#412"
     assert fix_plan.name_of(failure(kind=fix_plan.NIGHTLY, number=7)) == "#7"
