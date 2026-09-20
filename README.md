@@ -565,6 +565,10 @@ what the scheduled job does while the switch says `plan`. What each dispatch loo
 - **A failing scheduled workflow** gets a fresh branch off the default branch in that
   project, the run's logs, and a prompt that ends with the ship skill; the issue closes
   itself when the workflow next passes.
+- **A red PR that is behind its base** is updated, not fixed: `gh pr update-branch`,
+  no session, and the pass reads the new run next time. Its red may already be fixed
+  on the base, and a session sent at it can only merge the base in. A PR the update
+  cannot reach — a conflict — goes to the resolver as before.
 - **A red default branch** — a push that landed red — gets a fresh branch off that base
   in its own project with the run's logs; devkit's is the harness itself, and goes to the
   one devkit session with everything else harness-shaped.

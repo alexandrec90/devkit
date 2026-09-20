@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -290,6 +291,60 @@ def test_a_session_that_failed_to_open_is_the_exit_code_and_not_recorded(world, 
         == {}
     )
     assert "FAILED to open" in artifact(world)
+
+
+def test_an_update_is_one_gh_call_and_no_session(monkeypatch, tmp_path):
+    calls = []
+
+    def gh_for(project_dir):
+        def gh(*args):
+            calls.append((project_dir.name, args))
+            code = 0 if args[2] == "379" else 1
+            return subprocess.CompletedProcess(args, code, "", "GraphQL: merge conflict")
+
+        return gh
+
+    monkeypatch.setattr(fix_pass.sweep, "gh_for", gh_for)
+    monkeypatch.setattr(fix_pass.fix_prs, "dispatch_pr", lambda *a: pytest.fail("no session"))
+    monkeypatch.setattr(fix_pass.fix_prs, "dispatch_fresh", lambda *a: pytest.fail("no session"))
+    behind = failure(number=379, behind=True)
+    assert (
+        fix_pass.dispatch(fix_plan.Decision(fix_plan.UPDATE, "n", (behind,)), tmp_path, "claude")
+        == 0
+    )
+    assert calls == [("carameli", ("pr", "update-branch", "379"))]
+    stuck = failure(number=381, behind=True)
+    assert fix_pass.update_branch(stuck, tmp_path) == fix_pass.EXIT_FAILED, (
+        "GitHub refuses to update a conflicted branch; the next pass reads it as a conflict"
+    )
+
+
+def test_plan_mode_says_an_update_would_be_an_update(world):
+    world["failures"] = [failure(behind=True)]
+    fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW)
+    assert "carameli #412 -- would update the branch" in artifact(world)
+
+
+def test_send_all_records_only_what_opened_and_caps_the_rest(world, tmp_path):
+    ledger_path = tmp_path / "dispatch.json"
+    go = [
+        fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=1),)),
+        fix_plan.Decision(fix_plan.UPDATE, "n", (failure(number=2, behind=True),)),
+    ]
+    sent, capped, worst = fix_pass.send_all(
+        go, ledger_path, tmp_path, fix_cycle.DISPATCH, "claude", NOW
+    )
+    assert worst == 0 and capped == []
+    assert sent == ["carameli #1 -- dispatch", "carameli #2 -- update"]
+    assert len(fix_plan.read_ledger(ledger_path)) == 2
+    sent, capped, worst = fix_pass.send_all(
+        go, ledger_path, tmp_path, fix_cycle.DISPATCH, "claude", NOW
+    )
+    assert (
+        sent == []
+        and [why for _, why in capped]
+        == ["already dispatched at " + NOW.isoformat(timespec="seconds")] * 2
+    )
 
 
 def test_dispatch_routes_a_branch_to_the_pr_path_and_the_rest_to_a_fresh_one(monkeypatch, tmp_path):

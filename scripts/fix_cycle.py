@@ -188,8 +188,9 @@ def phase(
     """`(go, held)`: what this pass sends, and what it holds with the reason.
 
     Skips are never in either list. While the harness is red, every harness decision is
-    folded into one devkit session and every project one is held. Once clean, conflicts
-    go first: a conflicted PR's gate cannot run, so nothing else about it is knowable.
+    folded into one devkit session and every project one is held. Once clean, updates go
+    first (free, and they may turn the PR green by themselves), then conflicts: a
+    conflicted PR's gate cannot run, so nothing else about it is knowable.
     """
     live = [d for d in decisions if d.action != fix_plan.SKIP]
     harness_ones = [d for d in live if decision_class(d, classes) == HARNESS]
@@ -198,7 +199,8 @@ def phase(
         why = "held until the harness is clean: " + "; ".join(harness.reasons)
         go = [fold_harness(harness_ones)] if harness_ones else []
         return go, [(d, why) for d in project_ones]
-    ordered = sorted(project_ones, key=lambda d: 0 if d.action == fix_plan.RESOLVE else 1)
+    rank = {fix_plan.UPDATE: 0, fix_plan.RESOLVE: 1}
+    ordered = sorted(project_ones, key=lambda d: rank.get(d.action, 2))
     return harness_ones + ordered, []
 
 

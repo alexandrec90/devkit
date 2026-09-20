@@ -608,7 +608,7 @@ def test_a_broken_pr_opens_a_tab_titled_for_the_pr_with_the_planned_prompt(
     assert code == 0
     assert opened["kwargs"]["title"] == "carameli #412"
     assert "#412" in opened["kwargs"]["prompt"]
-    assert fix_plan.EVIDENCE_DIR in opened["kwargs"]["prompt"]
+    assert "No artifact came down" in opened["kwargs"]["prompt"], "nothing was downloaded here"
     assert "\n" not in opened["kwargs"]["prompt"]
 
 
