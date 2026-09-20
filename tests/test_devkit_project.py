@@ -2578,7 +2578,7 @@ def test_the_box_tier_keeps_one_task_and_it_is_read_only(canonical):
     `COMPOSE_PROJECT_NAME`, no toolchain provisioning and no reaper — `agent-box.py spawn`
     is still the answer for a session that runs a compose stack, and stays CLI-only, so
     the box tier now has no clicked entry point at all. What every one of these shares is
-    `agent_box.open_agent`, because two copies of "which window does the agent open in"
+    `agent_tabs.open_agent`, because two copies of "which window does the agent open in"
     is the duplication that seam exists to prevent.
 
     **`Agent: Fix What Is Red` is a third row in that tier, and that is not a

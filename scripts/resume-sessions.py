@@ -21,7 +21,8 @@ head of each transcript is parsed, for the two things the filename does not carr
 working directory and the opening prompt, which becomes the tab title.
 
 The tabs are laid out **oldest first** in the Windows Terminal already open, so reading
-left to right walks forward through the day. `wt_args` owns both halves of that.
+left to right walks forward through the day; `wt_args` owns both halves, over the same
+`agent_tabs.tab_argv` a *fresh* session opens in.
 
 Two kinds of transcript are deliberately skipped, and both would otherwise displace a
 real session out of the requested set:
@@ -58,7 +59,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -68,8 +68,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_clis
+import agent_tabs
 import task_input
 import wt_profile
+from agent_models import NOTHING_PICKED, Launch, add_arguments
 
 # The update stage, taken as an argument so a test of the launch path cannot spawn a real
 # updater by forgetting to stub one. `agent_clis.run_pass` is its only production value.
@@ -319,58 +321,47 @@ def describe(session: Session) -> str:
 # --- launching ---------------------------------------------------------------
 
 
-def resume_args(agent: str, session_id: str) -> list[str]:
-    """The agent-specific CLI syntax for resuming one interactive session."""
+def resume_args(agent: str, session_id: str, launch: Launch = NOTHING_PICKED) -> list[str]:
+    """The agent-specific CLI syntax for resuming one interactive session.
+
+    Both CLIs take the model and effort flags on their resume path, which is why they are
+    offered at all: the usual reason to reopen a session is that it needs more of something
+    than it got. Asked for per `agent`, because this is the one caller opening a MIXED
+    batch from one pick -- `Launch.model_for` owns what that means for the other's tabs.
+    """
+    flags = launch.flags(agent)
     if agent == "claude":
-        return [agent, "--resume", session_id]
-    return [agent, "resume", session_id]
+        return [agent, "--resume", session_id, *flags]
+    return [agent, "resume", session_id, *flags]
 
 
-def wt_args(sessions: list[Session], agent: str | None = None, profile: str = "") -> list[str]:
+def wt_args(
+    sessions: list[Session], agent: str = "", profile: str = "", launch: Launch = NOTHING_PICKED
+) -> list[str]:
     """The wt.exe argument list: one tab per session, each resuming it in its own cwd.
 
-    `-w 0` is the window already open, a new one only if there is none -- where
-    `agent-box.py` puts a box, and what this forced `-w -1` against until 2026-09-14.
-    `focus-tab -t 0` went with it: the index is absolute, so in a window that already had
-    tabs it focuses a stranger's rather than the oldest session, and wt cannot name the
-    tab it just opened. `profile` is `agent-box.wt_argv`'s argument. The `;` separators
-    are their own tokens because wt parses its command line itself: joined into one
-    string they are swallowed by the outer shell, and every tab after the first is lost.
+    Each tab is `agent_tabs.tab_argv`, the same tab a fresh session opens in, which owns
+    the `-w 0` window, the profile and the `;` escaping. Left here is the part only a
+    batch has: one `-w` for the run, and `;` SEPARATORS as their own tokens -- wt parses
+    its own command line, and a `;` joined into a neighbour is swallowed by the shell.
     """
-    args = ["-w", "0"]
+    args = ["-w", agent_tabs.WT_WINDOW]
     for index, session in enumerate(sessions):
         if index:
             args.append(";")
-        args += [
-            "new-tab",
-            *(["-p", profile] if profile else []),
-            "--title",
-            tab_title(session),
-            "-d",
-            str(session.cwd),
-            # -NoExit keeps the tab alive after the agent exits, so a session that dies
-            # immediately still leaves its error on screen. Everything after -Command is
-            # concatenated into the one command line the tab runs.
-            "pwsh.exe",
-            "-NoLogo",
-            "-NoExit",
-            "-Command",
-            *resume_args(agent or session.agent, session.session_id),
-        ]
+        resume = " ".join(resume_args(agent or session.agent, session.session_id, launch))
+        args += agent_tabs.tab_argv(tab_title(session), session.cwd, resume, profile)
     return args
 
 
-def shell_lines(sessions: list[Session], agent: str | None = None) -> list[str]:
+def shell_lines(
+    sessions: list[Session], agent: str = "", launch: Launch = NOTHING_PICKED
+) -> list[str]:
     """The same work as one command per session, for a machine with no Windows Terminal."""
     return [
-        f'cd "{session.cwd}" && {" ".join(resume_args(agent or session.agent, session.session_id))}'
-        for session in sessions
+        f'cd "{s.cwd}" && ' + " ".join(resume_args(agent or s.agent, s.session_id, launch))
+        for s in sessions
     ]
-
-
-def find_terminal() -> str:
-    """Path to wt.exe, or "" when Windows Terminal is not installed."""
-    return shutil.which("wt.exe") or shutil.which("wt") or ""
 
 
 # --- entrypoint -------------------------------------------------------------
@@ -399,21 +390,8 @@ def update_clis(agents: Sequence[str], agent_pass: AgentPass | None = None) -> N
         print(line)
 
 
-def main(argv: list[str] | None = None, agent_pass: AgentPass | None = None) -> int:
-    # Prompts carry arrows, dashes and emoji; a Windows console is cp1252 and would
-    # raise UnicodeEncodeError mid-report rather than printing the sessions it found.
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
-
-    # Before argparse: `--agent` has a `type=` that would reject the literal
-    # `${input:resumeAgents}` a dismissed checkbox list leaves behind, turning a cancel
-    # into a usage error. This task carries no wrapper, so the guard has to be here.
-    dismissed = task_input.cancelled_inputs(sys.argv[1:] if argv is None else argv)
-    if dismissed:
-        print(task_input.cancel_report("resume-sessions", dismissed))
-        return 0
-
+def build_parser() -> argparse.ArgumentParser:
+    """This script's CLI. Out of `main`, which spent forty lines deciding nothing."""
     parser = argparse.ArgumentParser(
         description="Reopen the most recently active Claude and/or Codex sessions."
     )
@@ -449,7 +427,28 @@ def main(argv: list[str] | None = None, agent_pass: AgentPass | None = None) -> 
         action="store_false",
         help="skip the CLI update pass that otherwise runs just before the tabs open",
     )
+    add_arguments(parser)
+    return parser
+
+
+def main(argv: list[str] | None = None, agent_pass: AgentPass | None = None) -> int:
+    # Prompts carry arrows, dashes and emoji; a Windows console is cp1252 and would
+    # raise UnicodeEncodeError mid-report rather than printing the sessions it found.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+    # Before argparse: `--agent` has a `type=` that would reject the literal
+    # `${input:resumeAgents}` a dismissed checkbox list leaves behind, turning a cancel
+    # into a usage error. This task carries no wrapper, so the guard has to be here.
+    dismissed = task_input.cancelled_inputs(sys.argv[1:] if argv is None else argv)
+    if dismissed:
+        print(task_input.cancel_report("resume-sessions", dismissed))
+        return 0
+
+    parser = build_parser()
     args = parser.parse_args(argv)
+    launch = Launch.parse("", args.model, args.effort)
 
     if args.count < 1:
         print("resume-sessions: --count must be at least 1", file=sys.stderr)
@@ -466,6 +465,7 @@ def main(argv: list[str] | None = None, agent_pass: AgentPass | None = None) -> 
     selected = select(live, args.count)
     owners = "/".join(agent.title() for agent in args.agents)
     print(f"Resuming {len(selected)} {owners} session(s), oldest tab first:")
+    print(launch.notes(args.agents), end="")
     for index, session in enumerate(selected, start=1):
         print(f"  {index}. {describe(session)}")
 
@@ -481,14 +481,14 @@ def main(argv: list[str] | None = None, agent_pass: AgentPass | None = None) -> 
     if args.list:
         return 0
 
-    terminal = find_terminal()
+    terminal = agent_tabs.find_terminal()
     if not terminal:
         print("\nWindows Terminal (wt.exe) not found; run these yourself:", file=sys.stderr)
-        for line in shell_lines(selected):
+        for line in shell_lines(selected, launch=launch):
             print(f"  {line}", file=sys.stderr)
         return 0 if args.dry_run else 1
 
-    command = wt_args(selected, profile=wt_profile.launch_name())
+    command = wt_args(selected, profile=wt_profile.launch_name(), launch=launch)
     if args.dry_run:
         print("\nwt.exe " + subprocess.list2cmdline(command))
         return 0

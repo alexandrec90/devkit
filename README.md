@@ -475,6 +475,34 @@ python scripts/agent-box.py delete --project carameli                 # box and 
 branch policy skipped — on purpose. A pre-commit refusal leaves the work uncommitted in a
 box `reconcile` may reap, while the same rules run in `PR Gate` on a branch that exists.
 
+### Which model, at what effort
+
+Every verb that opens a session — `agent-box.py spawn`/`attach`, `agent-worktree.py new`,
+`fix-prs.py`, `resume-sessions.py` — takes the same optional `--model` and `--effort`, and
+opening one is the same `agent_tabs.open_agent` in all four. Passing neither opens the
+agent at whatever `/model` or `~/.codex/config.toml` already selects, which is what they
+did before the flags existed.
+
+**The list of models is not written down anywhere in this repo.** Both CLIs cache their
+own catalogue — Claude Code under `~/.claude/cache/model-catalog/`, Codex at
+`~/.codex/models_cache.json` — and refresh it every session, so `scripts/agent_models.py`
+reads the file the vendor's own client wrote. A model released this morning is offered
+this afternoon with no edit here and no devkit release; one that is withdrawn stops being
+offered. The effort levels come from the same file **per model**, which is why Claude's
+Haiku offers none (it takes no `--effort` at all) and Codex's `ultra` is offered only when
+Codex is the only CLI in play.
+
+```bash
+python scripts/agent-options.py models --agent=claude   # the dropdown, as it will draw
+python scripts/agent-options.py efforts --agent=claude --model=claude:claude-opus-5
+python scripts/agent-worktree.py new --pick devkit:main --model=claude:claude-opus-5 \
+    --effort=max
+```
+
+The three workspace tasks that spend a session ask for all of this as a chain — which
+agent, then which of that CLI's models, then which of that model's levels — and a stage
+with one possible answer is never drawn. `.claude/rules/vscode-tasks.md` owns the wiring.
+
 ### A plain worktree, in the directories the agent CLIs use
 
 `claude --worktree <topic>` cuts `.claude/worktrees/<topic>`, enters it and offers

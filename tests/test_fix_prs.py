@@ -28,16 +28,16 @@ import pytest
 from support import REPO_ROOT, load_script
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import agent_models
 import fix_plan
 
-# `support.load_script` rather than `_loader.load_by_path`, which is what the script
-# itself uses: `load_by_path` overwrites `sys.modules[name]`, so reaching `agent-box.py`
-# that way would hand this process a second copy of a module `tests/test_agent_box.py`
-# has already loaded -- and it is the one this suite monkeypatches. It also costs no
-# `sys.path` bootstrap here, so this file needs no file-wide `noqa` to sit under one.
+# `support.load_script` rather than `_loader.load_by_path`: the latter overwrites
+# `sys.modules[name]`, so reaching a module that way would hand this process a second
+# copy of one another suite has already loaded -- and it is the one this suite
+# monkeypatches. It also costs no `sys.path` bootstrap here, so this file needs no
+# file-wide `noqa` to sit under one.
 fix_prs = load_script("scripts/fix-prs.py")
 menu = load_script("scripts/broken_pr_menu.py")
-agent_box = load_script("scripts/agent-box.py")
 evidence = fix_prs.gate_evidence
 assert fix_prs.fix_plan is fix_plan, "one copy of the plan, or the stubs bind nothing"
 
@@ -91,27 +91,6 @@ def no_evidence_fetch(monkeypatch):
 
 def test_tab_safe_collapses_whitespace_and_leaves_semicolons_to_the_escaper():
     assert fix_prs.tab_safe(" a;\n b  c ") == "a; b c"
-
-
-def test_a_prompt_reaches_powershell_as_a_single_quoted_literal():
-    """Single quotes because PowerShell expands `$` and backticks inside double ones."""
-    command = agent_box.agent_command("claude", False, "fix $env:PATH and `x`")
-    assert command == "claude 'fix $env:PATH and `x`'"
-
-
-def test_an_apostrophe_in_a_prompt_is_doubled_not_escaped():
-    assert agent_box.ps_quote("it's") == "'it''s'"
-
-
-def test_a_session_with_no_prompt_is_unchanged():
-    """`spawn` and `attach` hand over a box with no topic, and must keep doing so."""
-    assert agent_box.agent_command("codex", False) == "codex"
-
-
-def test_the_hooks_off_prefix_survives_a_prompt(monkeypatch):
-    command = agent_box.agent_command("claude", True, "do the thing")
-    assert command.startswith("$env:")
-    assert command.endswith("claude 'do the thing'")
 
 
 # --- the worktree -----------------------------------------------------------------
@@ -212,15 +191,17 @@ def test_a_pr_in_a_live_devkit_box_opens_in_that_box(monkeypatch, tmp_path, agen
     monkeypatch.setattr(menu, "pr_view", lambda *_: pr(headRefName=branch, mergeable="CONFLICTING"))
     monkeypatch.setattr(fix_prs, "cut_tree", lambda *_: pytest.fail("reuse the existing box"))
     opened = []
-    monkeypatch.setattr(
-        fix_prs.agent_box, "open_agent", lambda cli, tree, *a, **k: opened.append((cli, tree)) or 0
-    )
-    monkeypatch.setattr(
-        fix_prs, "launch_background", lambda cli, tree, *a, **k: opened.append((cli, tree)) or 0
-    )
 
-    assert fix_prs.run_one(menu.Pick("carameli", 412), tmp_path / "w.code-workspace", agent) == 0
-    assert opened == [(fix_prs.AGENT_MODES[agent][0], held)]
+    def record(launch, tree, *_a, **_k):
+        opened.append((launch.cli, tree))
+        return 0
+
+    monkeypatch.setattr(fix_prs.agent_tabs, "open_agent", record)
+    monkeypatch.setattr(fix_prs.agent_tabs, "launch_background", record)
+
+    launch = agent_models.Launch(agent)
+    assert fix_prs.run_one(menu.Pick("carameli", 412), tmp_path / "w.code-workspace", launch) == 0
+    assert opened == [(launch.cli, held)]
 
 
 @pytest.mark.parametrize("mismatch", ["project", "branch", "path", "missing"])
@@ -425,12 +406,6 @@ def test_a_git_refusal_on_a_fresh_branch_names_the_branch(monkeypatch, tmp_path)
 # --- opening the session ----------------------------------------------------------
 
 
-def test_the_background_argv_passes_the_prompt_as_one_argument():
-    """No shell in this mode, so no quoting -- and the words handed over are the same
-    ones the tab mode hands over."""
-    assert fix_prs.background_argv("claude", "do a; b") == ["claude", "--bg", "do a; b"]
-
-
 def test_the_three_modes_map_to_two_clis_and_two_ways_of_opening():
     """Codex has no background session, so there is deliberately no `codex-bg`."""
     assert fix_prs.AGENT_MODES["claude"] == ("claude", fix_prs.TAB)
@@ -439,72 +414,52 @@ def test_the_three_modes_map_to_two_clis_and_two_ways_of_opening():
     assert "codex-bg" not in fix_prs.AGENT_MODES
 
 
-def test_the_background_launch_runs_the_resolved_exe_in_the_box(monkeypatch, tmp_path):
-    seen = {}
-
-    def runner(argv, **kwargs):
-        seen.update(argv=argv, kwargs=kwargs)
-        return subprocess.CompletedProcess(argv, 0, "session abc123", "")
-
-    # `which` resolves to an absolute path, and that resolved path is what must be
-    # spawned: the argv is handed to `subprocess.run` with no shell, so the bare name
-    # would be looked up a second time -- against the child's PATH, not this one's.
-    resolved = r"C:\bin\claude.exe"
-    monkeypatch.setattr(fix_prs.shutil, "which", lambda _cli: resolved)
-    code = fix_prs.launch_background("claude", tmp_path, "fix #412", False, runner)
-    assert code == fix_prs.EXIT_OK
-    assert seen["argv"] == [resolved, "--bg", "fix #412"]
-    assert seen["kwargs"]["cwd"] == str(tmp_path)
-    assert fix_prs.agent_box.harness_switch.HOOKS_OFF_ENV not in seen["kwargs"]["env"]
-
-
-def test_the_background_launch_carries_the_hooks_switch_as_an_env_var(monkeypatch, tmp_path):
-    """There is no shell in this mode, so the `$env:` prefix the tab uses has nowhere to
-    go -- the switch has to reach the child through its environment or not at all."""
-    seen = {}
-
-    def runner(argv, **kwargs):
-        seen.update(kwargs)
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr(fix_prs.shutil, "which", lambda _cli: "claude")
-    fix_prs.launch_background("claude", tmp_path, "p", True, runner)
-    switch = fix_prs.agent_box.harness_switch
-    assert seen["env"][switch.HOOKS_OFF_ENV] == switch.HOOKS_OFF_VALUE
-
-
-def test_a_cli_that_is_not_on_path_is_reported_rather_than_spawned(monkeypatch, tmp_path, capsys):
-    def explode(*_a, **_k):
-        raise AssertionError("nothing should be spawned")
-
-    monkeypatch.setattr(fix_prs.shutil, "which", lambda _cli: None)
-    assert fix_prs.launch_background("claude", tmp_path, "p", False, explode) == fix_prs.EXIT_FAILED
-    assert "not on PATH" in capsys.readouterr().out
-
-
-def test_a_background_session_that_failed_to_start_is_a_failure(monkeypatch, tmp_path):
-    def runner(argv, **_kwargs):
-        return subprocess.CompletedProcess(argv, 1, "", "no credit")
-
-    monkeypatch.setattr(fix_prs.shutil, "which", lambda _cli: "claude")
-    assert fix_prs.launch_background("claude", tmp_path, "p", False, runner) == fix_prs.EXIT_FAILED
-
-
 def test_open_session_is_the_one_place_a_mode_becomes_a_tab_or_a_background(monkeypatch, tmp_path):
     opened = []
     monkeypatch.setattr(
-        fix_prs.agent_box,
+        fix_prs.agent_tabs,
         "open_agent",
-        lambda cli, tree, branch, run, **k: opened.append(("tab", cli, k["title"])) or 0,
+        lambda launch, tree, branch, run, **k: opened.append(("tab", launch.cli, k["title"])) or 0,
     )
     monkeypatch.setattr(
-        fix_prs,
+        fix_prs.agent_tabs,
         "launch_background",
-        lambda cli, tree, prompt, off, run: opened.append(("bg", cli, prompt)) or 0,
+        lambda launch, tree, prompt, off, run: opened.append(("bg", launch.cli, prompt)) or 0,
     )
-    fix_prs.open_session("codex", tmp_path, "agent/x", "p", "t")
-    fix_prs.open_session("claude-bg", tmp_path, "agent/x", "p", "t")
+    fix_prs.open_session(agent_models.Launch("codex"), tmp_path, "agent/x", "p", "t")
+    fix_prs.open_session(agent_models.Launch("claude-bg"), tmp_path, "agent/x", "p", "t")
     assert opened == [("tab", "codex", "t"), ("bg", "claude", "p")]
+
+
+def test_the_model_and_effort_reach_both_modes_and_neither_invents_a_default(monkeypatch, tmp_path):
+    """One pick, two ways of opening, the same flags -- and nothing when nothing was picked.
+
+    The background mode and the tab have to hand the agent the same words for a report
+    about one to say anything about the other, and that now covers the model as well as
+    the prompt. The empty case is the other half and is the one a regression would reach
+    first: a session opened with no pick must carry no `--model` at all, because passing
+    the configured value and passing nothing are different things the moment the
+    configuration changes between the click and the spawn.
+    """
+    seen: dict = {}
+    monkeypatch.setattr(
+        fix_prs.agent_tabs,
+        "open_agent",
+        lambda launch, tree, branch, run, **_k: seen.update(tab=launch) or 0,
+    )
+    monkeypatch.setattr(
+        fix_prs.agent_tabs,
+        "launch_background",
+        lambda launch, tree, prompt, off, run: seen.update(bg=launch) or 0,
+    )
+    flags = ["--model", "claude-opus-5", "--effort", "max"]
+    for mode in ("claude", "claude-bg"):
+        chosen = agent_models.Launch.parse(mode, "claude:claude-opus-5", "max")
+        fix_prs.open_session(chosen, tmp_path, "agent/x", "p", "t")
+    assert seen["tab"].flags() == flags and seen["bg"].flags() == flags
+
+    fix_prs.open_session(agent_models.Launch("claude"), tmp_path, "agent/x", "p", "t")
+    assert seen["tab"].flags() == []
 
 
 # --- one PR, by hand ----------------------------------------------------------------
@@ -525,15 +480,15 @@ def run_one_with(monkeypatch, tmp_path, view: dict, mode: str = "claude", then: 
     monkeypatch.setattr(fix_prs, "existing_tree", lambda *a, **k: (None, ""))
     monkeypatch.setattr(fix_prs, "cut_tree", lambda *a, **k: Path("/trees/x"))
     monkeypatch.setattr(
-        fix_prs.agent_box,
+        fix_prs.agent_tabs,
         "open_agent",
         lambda *args, **kwargs: opened.update(args=args, kwargs=kwargs) or 0,
     )
     monkeypatch.setattr(
-        fix_prs, "launch_background", lambda *args, **kwargs: opened.update(bg=args) or 0
+        fix_prs.agent_tabs, "launch_background", lambda *args, **kwargs: opened.update(bg=args) or 0
     )
     (tmp_path / "w" / "carameli").mkdir(exist_ok=True)
-    code = fix_prs.run_one(menu.Pick("carameli", 412), workspace, mode)
+    code = fix_prs.run_one(menu.Pick("carameli", 412), workspace, agent_models.Launch(mode))
     return code, opened
 
 
@@ -645,11 +600,13 @@ def test_an_open_worktree_on_the_head_branch_is_used_and_nothing_is_cut(monkeypa
     monkeypatch.setattr(fix_prs, "existing_tree", lambda *a, **k: (Path("/trees/held"), ""))
     monkeypatch.setattr(fix_prs, "cut_tree", explode)
     monkeypatch.setattr(
-        fix_prs.agent_box,
+        fix_prs.agent_tabs,
         "open_agent",
         lambda *args, **kwargs: opened.update(args=args) or 0,
     )
-    assert fix_prs.run_one(menu.Pick("carameli", 412), workspace, "claude") == 0
+    assert (
+        fix_prs.run_one(menu.Pick("carameli", 412), workspace, agent_models.Launch("claude")) == 0
+    )
     assert opened["args"][1] == Path("/trees/held")
 
 
@@ -671,8 +628,8 @@ def test_a_branch_held_outside_the_tier_stops_the_run_and_opens_nothing(
         fix_prs, "existing_tree", lambda *a, **k: (None, "agent/x is checked out at C:/ws/devkit")
     )
     monkeypatch.setattr(fix_prs, "cut_tree", explode)
-    monkeypatch.setattr(fix_prs.agent_box, "open_agent", explode)
-    code = fix_prs.run_one(menu.Pick("carameli", 412), workspace, "claude")
+    monkeypatch.setattr(fix_prs.agent_tabs, "open_agent", explode)
+    code = fix_prs.run_one(menu.Pick("carameli", 412), workspace, agent_models.Launch("claude"))
     assert code == fix_prs.EXIT_FAILED
     assert "checked out at C:/ws/devkit" in capsys.readouterr().err
 
@@ -689,7 +646,7 @@ def test_a_batch_reports_the_worst_outcome(monkeypatch, tmp_path):
     codes = iter([0, 1, 0])
     monkeypatch.setattr(fix_prs, "run_one", lambda *a, **k: next(codes))
     picks = [menu.Pick("a", 1), menu.Pick("a", 2), menu.Pick("a", 3)]
-    assert fix_prs.run(picks, workspace, "claude") == 1
+    assert fix_prs.run(picks, workspace, agent_models.Launch("claude")) == 1
 
 
 # --- the planned path ---------------------------------------------------------------
@@ -709,9 +666,16 @@ def capture_sessions(monkeypatch):
     monkeypatch.setattr(
         fix_prs,
         "open_session",
-        lambda mode, tree, branch, prompt, title, runner=None: (
+        lambda launch, tree, branch, prompt, title, runner=None: (
             opened.append(
-                {"mode": mode, "tree": tree, "branch": branch, "prompt": prompt, "title": title}
+                {
+                    "mode": launch.agent,
+                    "tree": tree,
+                    "branch": branch,
+                    "prompt": prompt,
+                    "title": title,
+                    "launch": launch,
+                }
             )
             or 0
         ),
@@ -729,7 +693,7 @@ def test_a_planned_pr_gets_its_evidence_placed_and_the_plans_prompt(monkeypatch,
         evidence, "place", lambda f, tree, sub="": placed.append((f.number, tree, sub))
     )
     opened = capture_sessions(monkeypatch)
-    assert fix_prs.dispatch_pr(failure(), root, "claude") == 0
+    assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
     assert placed == [(412, root / "carameli" / ".claude" / "worktrees" / "x", "")]
     assert opened[0]["branch"] == "agent/sweep-labels-0904"
     assert opened[0]["title"] == "carameli #412"
@@ -739,7 +703,9 @@ def test_a_planned_pr_gets_its_evidence_placed_and_the_plans_prompt(monkeypatch,
 def test_a_planned_pr_whose_branch_is_held_elsewhere_opens_nothing(monkeypatch, root, capsys):
     monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (None, "held at C:/elsewhere"))
     monkeypatch.setattr(fix_prs, "cut_tree", lambda *a: pytest.fail("must not cut"))
-    assert fix_prs.dispatch_pr(failure(), root, "claude") == fix_prs.EXIT_FAILED
+    assert (
+        fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == fix_prs.EXIT_FAILED
+    )
     assert "held at C:/elsewhere" in capsys.readouterr().err
 
 
@@ -766,7 +732,7 @@ def test_an_upstream_decision_opens_one_session_in_devkit_with_every_projects_lo
     )
     monkeypatch.setattr(evidence, "place", lambda f, tree, sub="": placed.append((f.project, sub)))
     opened = capture_sessions(monkeypatch)
-    assert fix_prs.dispatch_fresh(decision, root, "claude-bg") == 0
+    assert fix_prs.dispatch_fresh(decision, root, agent_models.Launch("claude-bg")) == 0
     assert cut[0][0] == root / "devkit"
     assert cut[0][1].startswith("agent/fix-") and cut[0][2] == "main"
     assert placed == [("carameli", "carameli-pr-412"), ("roguelike", "roguelike-pr-16")]
@@ -791,7 +757,7 @@ def test_a_red_default_branch_opens_in_its_own_project_with_the_branch_prompt(mo
     )
     monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
     opened = capture_sessions(monkeypatch)
-    assert fix_prs.dispatch_fresh(decision, root, "claude") == 0
+    assert fix_prs.dispatch_fresh(decision, root, agent_models.Launch("claude")) == 0
     assert cut[0][0] == root / "carameli" and cut[0][2] == "main"
     assert "red on origin/main itself" in opened[0]["prompt"]
     assert opened[0]["title"] == "carameli main"
@@ -813,7 +779,7 @@ def test_a_nightly_decision_opens_in_its_own_project_off_its_default_branch(monk
     )
     monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
     opened = capture_sessions(monkeypatch)
-    assert fix_prs.dispatch_fresh(decision, root, "codex") == 0
+    assert fix_prs.dispatch_fresh(decision, root, agent_models.Launch("codex")) == 0
     assert cut == [
         (
             root / "carameli",
@@ -829,7 +795,9 @@ def test_a_fresh_cut_git_refused_opens_nothing(monkeypatch, root, capsys):
     decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(kind=fix_plan.NIGHTLY, head=""),))
     monkeypatch.setattr(fix_prs, "cut_fresh_tree", lambda *a: (None, "agent/fix-nightly-0918"))
     monkeypatch.setattr(fix_prs, "open_session", lambda *a, **k: pytest.fail("nothing to open in"))
-    assert fix_prs.dispatch_fresh(decision, root, "claude") == fix_prs.EXIT_FAILED
+    assert (
+        fix_prs.dispatch_fresh(decision, root, agent_models.Launch("claude")) == fix_prs.EXIT_FAILED
+    )
     assert "could not cut agent/fix-nightly-0918" in capsys.readouterr().err
 
 
@@ -837,7 +805,9 @@ def test_a_checkout_the_workspace_does_not_have_opens_nothing(monkeypatch, root,
     decision = fix_plan.Decision(
         fix_plan.DISPATCH, "n", (failure(kind=fix_plan.NIGHTLY, head="", project="ghost"),)
     )
-    assert fix_prs.dispatch_fresh(decision, root, "claude") == fix_prs.EXIT_FAILED
+    assert (
+        fix_prs.dispatch_fresh(decision, root, agent_models.Launch("claude")) == fix_prs.EXIT_FAILED
+    )
     assert "no checkout 'ghost'" in capsys.readouterr().err
 
 
@@ -861,7 +831,7 @@ def planned(monkeypatch, root, failures, latest="v0-11-21"):
 def test_the_plan_is_printed_and_a_dry_run_opens_nothing(monkeypatch, root, capsys):
     sent = planned(monkeypatch, root, [failure(), failure(head="release/v0.12.0", number=2)])
     workspace = root / "alex.code-workspace"
-    assert fix_prs.run_plan(workspace, "claude", dry_run=True, redo=False) == 0
+    assert fix_prs.run_plan(workspace, agent_models.Launch("claude"), dry_run=True, redo=False) == 0
     out = capsys.readouterr().out
     assert "dispatch carameli #412" in out
     assert "skip     carameli #2 -- red by construction" in out
@@ -875,17 +845,21 @@ def test_a_click_sends_what_is_new_records_it_and_a_second_click_sends_nothing(
     the first rather than spending a second session on the same failure."""
     sent = planned(monkeypatch, root, [failure()])
     workspace = root / "alex.code-workspace"
-    assert fix_prs.run_plan(workspace, "claude", dry_run=False, redo=False) == 0
+    assert (
+        fix_prs.run_plan(workspace, agent_models.Launch("claude"), dry_run=False, redo=False) == 0
+    )
     assert sent == ["pr carameli#412"]
     ledger = fix_plan.read_ledger(fix_prs.worktree.boxes_root(root) / fix_plan.LEDGER_NAME)
     assert list(ledger) == [fix_plan.failure_key(failure())]
 
     capsys.readouterr()
-    assert fix_prs.run_plan(workspace, "claude", dry_run=False, redo=False) == 0
+    assert (
+        fix_prs.run_plan(workspace, agent_models.Launch("claude"), dry_run=False, redo=False) == 0
+    )
     assert sent == ["pr carameli#412"]
     assert "already dispatched" in capsys.readouterr().out
 
-    assert fix_prs.run_plan(workspace, "claude", dry_run=False, redo=True) == 0
+    assert fix_prs.run_plan(workspace, agent_models.Launch("claude"), dry_run=False, redo=True) == 0
     assert sent == ["pr carameli#412", "pr carameli#412"]
 
 
@@ -894,9 +868,9 @@ def test_a_repushed_pr_that_is_still_red_is_sent_again(monkeypatch, root):
     worth a second look rather than a ledger line saying it was handled."""
     sent = planned(monkeypatch, root, [failure(sha="first")])
     workspace = root / "alex.code-workspace"
-    fix_prs.run_plan(workspace, "claude", dry_run=False, redo=False)
+    fix_prs.run_plan(workspace, agent_models.Launch("claude"), dry_run=False, redo=False)
     monkeypatch.setattr(evidence, "collect", lambda _ws, _found: [failure(sha="second")])
-    fix_prs.run_plan(workspace, "claude", dry_run=False, redo=False)
+    fix_prs.run_plan(workspace, agent_models.Launch("claude"), dry_run=False, redo=False)
     assert sent == ["pr carameli#412", "pr carameli#412"]
 
 
@@ -912,7 +886,12 @@ def test_a_conflict_and_a_refused_commit_go_through_the_branch_path(monkeypatch,
             ),
         ],
     )
-    assert fix_prs.run_plan(root / "alex.code-workspace", "claude", dry_run=False, redo=False) == 0
+    assert (
+        fix_prs.run_plan(
+            root / "alex.code-workspace", agent_models.Launch("claude"), dry_run=False, redo=False
+        )
+        == 0
+    )
     assert sorted(sent) == ["pr carameli#0", "pr carameli#1"]
 
 
@@ -923,7 +902,7 @@ def test_a_refused_commit_is_titled_by_its_branch(monkeypatch, root):
     refused = failure(
         kind=fix_plan.COMMIT, number=0, head="agent/i-0919", signature=("commit refused",)
     )
-    assert fix_prs.dispatch_pr(refused, root, "claude") == 0
+    assert fix_prs.dispatch_pr(refused, root, agent_models.Launch("claude")) == 0
     assert opened[0]["title"] == "carameli agent/i-0919"
     assert "commit stage refused" in opened[0]["prompt"]
 
@@ -941,7 +920,12 @@ def test_an_upstream_group_and_a_nightly_go_through_the_fresh_branch_path(monkey
             ),
         ],
     )
-    assert fix_prs.run_plan(root / "alex.code-workspace", "claude", dry_run=False, redo=False) == 0
+    assert (
+        fix_prs.run_plan(
+            root / "alex.code-workspace", agent_models.Launch("claude"), dry_run=False, redo=False
+        )
+        == 0
+    )
     assert sorted(sent) == ["dispatch carameli", "upstream carameli,roguelike"]
 
 
@@ -949,13 +933,21 @@ def test_a_dispatch_that_failed_to_open_is_not_recorded_and_is_the_exit_code(mon
     planned(monkeypatch, root, [failure()])
     monkeypatch.setattr(fix_prs, "dispatch_pr", lambda *_a: fix_prs.EXIT_FAILED)
     workspace = root / "alex.code-workspace"
-    assert fix_prs.run_plan(workspace, "claude", dry_run=False, redo=False) == fix_prs.EXIT_FAILED
+    assert (
+        fix_prs.run_plan(workspace, agent_models.Launch("claude"), dry_run=False, redo=False)
+        == fix_prs.EXIT_FAILED
+    )
     assert fix_plan.read_ledger(fix_prs.worktree.boxes_root(root) / fix_plan.LEDGER_NAME) == {}
 
 
 def test_a_superseded_adoption_is_neither_sent_nor_recorded(monkeypatch, root):
     sent = planned(monkeypatch, root, [failure(head="agent/auto/devkit-upgrade-v0-11-20-0916")])
-    assert fix_prs.run_plan(root / "alex.code-workspace", "claude", dry_run=False, redo=False) == 0
+    assert (
+        fix_prs.run_plan(
+            root / "alex.code-workspace", agent_models.Launch("claude"), dry_run=False, redo=False
+        )
+        == 0
+    )
     assert sent == []
 
 
@@ -981,18 +973,18 @@ def test_a_dismissed_picker_runs_nothing_and_is_not_a_failure(workspace, capsys)
 def test_no_picks_is_the_planned_path(workspace, monkeypatch):
     seen = {}
     monkeypatch.setattr(
-        fix_prs, "run_plan", lambda ws, mode, dry_run, redo: seen.update(locals()) or 0
+        fix_prs, "run_plan", lambda ws, launch, dry_run, redo: seen.update(locals()) or 0
     )
     assert fix_prs.main(["--agent", "codex", "--dry-run", "--workspace", str(workspace)]) == 0
-    assert (seen["mode"], seen["dry_run"], seen["redo"]) == ("codex", True, False)
+    assert (seen["launch"].agent, seen["dry_run"], seen["redo"]) == ("codex", True, False)
     assert seen["ws"] == workspace.resolve()
 
 
 def test_picks_by_hand_skip_the_plan(workspace, monkeypatch):
     ran = {}
-    monkeypatch.setattr(fix_prs, "run_plan", lambda *a: pytest.fail("picks must not plan"))
+    monkeypatch.setattr(fix_prs, "run_plan", lambda *a, **k: pytest.fail("picks must not plan"))
     monkeypatch.setattr(
-        fix_prs, "run", lambda picks, ws, mode: ran.update(picks=picks, mode=mode) or 0
+        fix_prs, "run", lambda picks, ws, launch: ran.update(picks=picks, mode=launch.agent) or 0
     )
     code = fix_prs.main(
         ["--picks", "devkit:88 roguelike:16", "--agent", "claude-bg", "--workspace", str(workspace)]
@@ -1002,6 +994,66 @@ def test_picks_by_hand_skip_the_plan(workspace, monkeypatch):
         "picks": [menu.Pick("devkit", 88), menu.Pick("roguelike", 16)],
         "mode": "claude-bg",
     }
+
+
+def test_the_cli_carries_the_model_pick_to_every_session_it_opens(workspace, monkeypatch):
+    """`--model`/`--effort` are carried, never interpreted, all the way from the picker.
+
+    The pair reaches `main` as the quick-pick's own tokens -- `<agent>:<id>` and a bare
+    level -- and `main`'s only job is to turn them into the `Options` every dispatch
+    below it takes. It is the flags that must arrive, so this asserts those rather than
+    the tokens: they are what the agent is actually opened with, and they are where the
+    two CLIs stop agreeing.
+    """
+    seen = {}
+    monkeypatch.setattr(
+        fix_prs, "run_plan", lambda ws, launch, dry_run, redo: seen.update(o=launch) or 0
+    )
+    assert (
+        fix_prs.main(
+            [
+                "--agent",
+                "codex",
+                "--dry-run",
+                "--model=codex:gpt-6-astra",
+                "--effort=xhigh",
+                "--workspace",
+                str(workspace),
+            ]
+        )
+        == 0
+    )
+    assert seen["o"].flags("codex") == [
+        "-m",
+        "gpt-6-astra",
+        "-c",
+        'model_reasoning_effort="xhigh"',
+    ]
+
+
+def test_the_default_rows_reach_the_cli_as_no_flags_at_all(workspace, monkeypatch):
+    """`default` is the picker's "leave it alone", and it must not become a flag.
+
+    Both pickers always draw a first row, so `--model=default --effort=default` is the
+    argument list of an ordinary click that answered neither question. It has to open
+    exactly the session that today's `fix-prs.py` opens with no flags: passing the
+    configured value instead would pin it at the moment of the click, which is not what
+    the row says.
+    """
+    seen = {}
+    monkeypatch.setattr(
+        fix_prs, "run_plan", lambda ws, launch, dry_run, redo: seen.update(o=launch) or 0
+    )
+    fix_prs.main(
+        [
+            "--dry-run",
+            "--model=default",
+            "--effort=default",
+            "--workspace",
+            str(workspace),
+        ]
+    )
+    assert seen["o"].flags("claude") == [] and seen["o"].flags("codex") == []
 
 
 def test_a_missing_workspace_file_is_a_usage_error(tmp_path, capsys):

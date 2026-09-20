@@ -20,14 +20,16 @@ built-in cannot give a box is a port lease and a `COMPOSE_PROJECT_NAME`, which i
 `spawn` is still for. `test_the_box_tier_keeps_one_task_and_it_is_read_only` owns the
 reasoning.
 
-**`spawn` and `attach` share `open_agent`, and that is the point of having both.**
-`attach` is literally the tail of `spawn`; two copies of the terminal-launching logic
-would be two answers to "which window does the agent open in".
+**`spawn` and `attach` both end in `agent_tabs.open_agent`, and so do the other two
+tasks that spend a session.** How a tab is opened was here until 2026-09-19 and is now
+`scripts/agent_tabs.py`, which its own docstring explains: two copies of "which window
+does the agent open in" would be two answers, and three scripts were reaching this
+hyphenated filename through `load_by_path` to avoid writing a second one.
 
 `scripts/worktree-guard.md` carries the two decisions a change here has to preserve --
 why `ship` bypasses the pre-commit gate, and why `worktree.py new --json` is an interface
-because this reads it. Two more live where they are made: `wt_argv` on which window a tab
-lands in, and `choose` on why a prompt here is a whole flushed line.
+because this reads it. One more lives where it is made: `choose`, on why a prompt here is
+a whole flushed line.
 
 Every subprocess-spawning function takes a runner, and the argv builders are pure; the
 tests drive those rather than git. Tested in `tests/test_agent_box.py`.
@@ -38,37 +40,22 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+import agent_models
+import agent_tabs
 import devkit_project
 import project_python
 import worktree
-import wt_profile
-
-# Resolved by the second insert above; `scripts/precommit/` is not a package. Used for the
-# one neighbour whose name has a hyphen in it; `worktree` above is imported normally, and
-# that distinction is load-bearing. `load_by_path` overwrites `sys.modules[name]` with a
-# fresh copy, so loading `worktree` that way would give this process a SECOND worktree
-# module -- and a test that patches one copy would then be asserting about the other.
-# `tests/test_preview_task.py` failed exactly that way, and only when the whole suite ran.
-from _loader import load_by_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKTREE = REPO_ROOT / "scripts" / "worktree.py"
 
-harness_switch = load_by_path("harness_switch", REPO_ROOT / "scripts" / "harness-switch.py")
-
 AGENTS = ("claude", "codex", "none")
-
-# `-w 0` is "the most recently used window", and it creates one when there is none, so a
-# box opens where the operator is looking. `resume-sessions.py` agrees since 2026-09-14.
-WT_WINDOW = "0"
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -91,64 +78,6 @@ class Candidate:
 
 
 # --- pure argv builders -------------------------------------------------------------
-
-
-def agent_command(agent: str, hooks_off: bool, prompt: str = "") -> str:
-    """The one command line the terminal tab runs.
-
-    A string rather than an argv because `wt` hands everything after `-Command` to
-    PowerShell as a single line anyway, and the environment assignment has to be part of
-    it: `wt` has no way to set a variable for the child it spawns.
-
-    `prompt` is the session's opening instruction, and it is optional because the two
-    callers want opposite things. `spawn` and `attach` hand over a box with no topic --
-    the person who asked for it is about to type one. `fix-prs.py` already knows the
-    whole job (which PR, what is wrong with it, where it has to end up), and a session
-    that starts by rediscovering that is the cost that task exists to remove. Assembled
-    HERE rather than there so one place still owns what a tab's command line looks like.
-    """
-    prefix = (
-        f"$env:{harness_switch.HOOKS_OFF_ENV}='{harness_switch.HOOKS_OFF_VALUE}'; "
-        if hooks_off
-        else ""
-    )
-    return f"{prefix}{agent} {ps_quote(prompt)}" if prompt else f"{prefix}{agent}"
-
-
-def ps_quote(text: str) -> str:
-    """`text` as a PowerShell single-quoted literal.
-
-    Single quotes rather than double: PowerShell expands `$` and backticks inside a
-    double-quoted string, so a prompt naming `$env:` -- or a branch with a backtick in
-    it -- would be rewritten on its way to the agent. Doubling is how a single quote is
-    escaped inside one.
-    """
-    return "'" + str(text).replace("'", "''") + "'"
-
-
-def wt_argv(title: str, cwd: Path, command: str, profile: str = "") -> list[str]:
-    """Build one tab, escaping semicolons that wt otherwise treats as tab separators.
-
-    `profile` is the Windows Terminal profile it opens under; `""` is the tab this built
-    before there was one, inheriting the default profile. `wt_profile.py` owns why.
-    """
-    return [
-        "-w",
-        WT_WINDOW,
-        "new-tab",
-        *(["-p", profile] if profile else []),
-        "--title",
-        title.replace(";", "\\;"),
-        "-d",
-        str(cwd).replace(";", "\\;"),
-        # -NoExit for `resume-sessions.py`'s reason: an agent that dies on startup still
-        # leaves its error on screen instead of closing the tab it printed it in.
-        "pwsh.exe",
-        "-NoLogo",
-        "-NoExit",
-        "-Command",
-        command.replace(";", "\\;"),
-    ]
 
 
 def lint_fix_argvs(python: str, target: Path) -> list[list[str]]:
@@ -321,47 +250,12 @@ def choose(candidates: list[Candidate], branch: str, noun: str, reader=input) ->
 # --- the verbs ----------------------------------------------------------------------
 
 
-def open_agent(
-    agent: str,
-    box: Path,
-    branch: str,
-    runner=subprocess.run,
-    prompt: str = "",
-    title: str = "",
-) -> int:
-    """Open one agent tab in `box`. Shared by `spawn`, `attach`, `fix-prs.py` and
-    `agent-worktree.py`.
-
-    The last of those is a different tier -- a plain agent-CLI worktree with
-    no lease and no port -- and shares this anyway, because "which window does the agent
-    open in" has to have one answer on a machine. It is also why nothing here says `box`
-    to the operator: every caller hands this a worktree, and only some of them are boxes.
-
-    `title` overrides the tab's name, which the branch answers for a box cut to do one
-    thing. `fix-prs.py` passes the PR instead: several of its tabs can be open at once,
-    on branches whose names all begin `agent/`, and a strip of tabs that agree for their
-    first eleven characters names nothing.
-    """
-    if agent == "none":
-        print(f"no agent requested; the worktree is at {box}")
-        return EXIT_OK
-    terminal = shutil.which("wt.exe") or shutil.which("wt")
-    command = agent_command(agent, harness_switch.hooks_are_off(), prompt)
-    if not terminal:
-        print(f"Windows Terminal not found; run this yourself:\n  cd {box}\n  {command}")
-        return EXIT_OK
-    argv = wt_argv(title or branch, box, command, wt_profile.launch_name())
-    print(f"opening {agent} in {box}{wt_profile.launch_note()}")
-    done = runner([terminal, *argv], check=False)
-    return EXIT_OK if done.returncode == 0 else EXIT_FAILED
-
-
 def spawn(
     project: str,
     workspace: Path,
     slug: str,
     base: str,
-    agent: str,
+    launch: agent_models.Launch,
     runner=subprocess.run,
 ) -> int:
     """Cut the branch and box, provision it, then hand it to the agent."""
@@ -394,7 +288,7 @@ def spawn(
     for note in plan.get("notes", []):
         print(f"  {note}")
     print(f"box {plan['box']['name']} on {branch}\n  {box}")
-    return open_agent(agent, box, branch, runner)
+    return agent_tabs.open_agent(launch, box, branch, runner)
 
 
 def ship(project: str, workspace: Path, branch: str, runner=subprocess.run, reader=input) -> int:
@@ -487,12 +381,17 @@ def delete(project: str, workspace: Path, branch: str, runner=subprocess.run, re
 
 
 def attach(
-    project: str, workspace: Path, branch: str, agent: str, runner=subprocess.run, reader=input
+    project: str,
+    workspace: Path,
+    branch: str,
+    launch: agent_models.Launch,
+    runner=subprocess.run,
+    reader=input,
 ) -> int:
     candidate = choose(boxes_for(project, workspace), branch, "run an agent in", reader)
     if candidate is None:
         return EXIT_FAILED
-    return open_agent(agent, Path(candidate.path), candidate.branch, runner)
+    return agent_tabs.open_agent(launch, Path(candidate.path), candidate.branch, runner)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -509,6 +408,11 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--project", required=True)
     run.add_argument("--branch", default="")
     run.add_argument("--agent", default="claude", choices=AGENTS)
+
+    # Only the two verbs that open a session. `ship` and `delete` spend none, so a model
+    # flag on them would be a question with no consumer.
+    for opened in (new, run):
+        agent_models.add_arguments(opened)
 
     out = sub.add_parser("ship", help="commit, push and open the PR for a box")
     out.add_argument("--project", required=True)
@@ -528,10 +432,11 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
 
     try:
-        if args.verb == "spawn":
-            return spawn(args.project, workspace, args.slug, args.base, args.agent)
-        if args.verb == "attach":
-            return attach(args.project, workspace, args.branch, args.agent)
+        if args.verb in ("spawn", "attach"):
+            launch = agent_models.Launch.parse(args.agent, args.model, args.effort)
+            if args.verb == "spawn":
+                return spawn(args.project, workspace, args.slug, args.base, launch)
+            return attach(args.project, workspace, args.branch, launch)
         if args.verb == "ship":
             return ship(args.project, workspace, args.branch)
         return delete(args.project, workspace, args.branch)

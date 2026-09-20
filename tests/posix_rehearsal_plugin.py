@@ -31,7 +31,7 @@ far more often than right. `tests/support.py`'s `windows_layout` is the conventi
 
 A **machine-capability lookup** is the second class, and it is the one that reads as
 covered when it is not. `shutil.which` answers about the box the suite is running on,
-which no amount of faked platform changes: `scripts/agent-box.py`'s `open_agent` returns
+which no amount of faked platform changes: `scripts/agent_tabs.py`'s `open_agent` returns
 early when neither `wt.exe` nor `wt` is on `PATH`, true on `ubuntu-latest` and false on a
 Windows dev box, so the branch below it simply does not run there. A test that asserted on
 what that branch recorded went green through the entire local push gate — lint, suite,

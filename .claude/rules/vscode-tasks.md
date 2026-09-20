@@ -313,6 +313,26 @@ never renders.
   `upgrade-project.picked_nothing` and its caller in `release-pipeline.main`. That reading
   is downstream of `argparse`, so `upgrade-project.main` also runs the `task_input` check
   ahead of the parser, per the Escape bullet above.
+- **A task that spends a session asks which agent, which model and what effort, in that
+  order, and every stage is `scripts/agent-options.py`.** Three tasks do -- *Agent: Fix
+  What Is Red*, *Agent: New Worktree*, *Agents: Resume Recent Sessions* -- and the agent
+  list had already drifted three ways while it was spelled three times in this file. The
+  model list is worse than drift-prone: it is **not this repo's to write**. Both CLIs
+  cache their own catalogue and refresh it every session, so `scripts/agent_models.py`
+  reads the vendor's file and the dropdown is current with no edit here. The same file
+  gives the effort levels **per model**, which is why the third stage reads the second
+  rather than the first.
+  Three consequences, and `tests/test_agent_options.py` holds all of them:
+  - the three inputs appear **left to right in dependence order** in the task's
+    arguments, and each is a `shellCommand.execute` one, per the chaining bullet above --
+    which is why the agent pickers stopped being `pickString`s. Nothing was lost: a
+    dispatched task's cancel comes from `devkit_project.py` recognising the literal;
+  - **every stage sets `useSingleResult`**, so a machine with no catalogue is asked no
+    model question and a model that takes no effort level is asked no effort question.
+    Without it this would be two more prompts on tasks that already ask four;
+  - **the first row of the model and effort lists passes no flag at all** -- not the
+    configured value, which is a different thing the moment the configuration changes
+    between the click and the spawn.
 - **A task meant to run twice at once says so with `runOptions.instanceLimit`.** The
   default is **1**, and re-running an active task offers to terminate it instead — which
   made comparing two preview branches look impossible while `worktree.py` underneath had
