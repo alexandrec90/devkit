@@ -148,7 +148,9 @@ def test_dispatch_ships_intents_sends_fixers_records_them_and_merges_adoptions(w
     ledger = fix_plan.read_ledger(
         fix_pass.worktree.boxes_root(world["workspace"].parent) / fix_plan.LEDGER_NAME
     )
-    assert list(ledger) == [fix_plan.failure_key(failure())]
+    assert list(ledger) == [
+        fix_plan.decision_key(fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),)))
+    ]
     text = artifact(world)
     assert "sent     carameli #412 -- dispatch" in text
     assert "merged   carameli #9" in text

@@ -878,7 +878,9 @@ def test_a_click_sends_what_is_new_records_it_and_a_second_click_sends_nothing(
     assert fix_prs.run_plan(workspace, "claude", dry_run=False, redo=False) == 0
     assert sent == ["pr carameli#412"]
     ledger = fix_plan.read_ledger(fix_prs.worktree.boxes_root(root) / fix_plan.LEDGER_NAME)
-    assert list(ledger) == [fix_plan.failure_key(failure())]
+    assert list(ledger) == [
+        fix_plan.decision_key(fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),)))
+    ]
 
     capsys.readouterr()
     assert fix_prs.run_plan(workspace, "claude", dry_run=False, redo=False) == 0

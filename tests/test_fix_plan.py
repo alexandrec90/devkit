@@ -267,9 +267,14 @@ def test_an_upstream_decision_is_one_key_for_the_group():
     assert fix_plan.decision_key(repushed) != key
 
 
-def test_a_single_decision_is_keyed_as_its_failure():
+def test_a_single_decision_is_keyed_as_its_failure_under_the_action_taken():
+    """The action is in the key because the pass's decision can change while the failure
+    does not: devkit #381 was dispatched at its head sha under the wrong action, and the
+    corrected pass has to be able to send the resolver at that very sha."""
     decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
-    assert fix_plan.decision_key(decision) == fix_plan.failure_key(failure())
+    assert fix_plan.decision_key(decision).startswith(fix_plan.failure_key(failure()) + ":")
+    resolve = fix_plan.Decision(fix_plan.RESOLVE, "n", (failure(),))
+    assert fix_plan.decision_key(resolve) != fix_plan.decision_key(decision)
 
 
 def test_the_ledger_records_and_answers_the_second_click(tmp_path):
