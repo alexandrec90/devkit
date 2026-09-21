@@ -50,6 +50,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import adoption_prs
+import agent_models
 import broken_pr_menu as menu
 import devkit_project
 import fix_backlog
@@ -199,14 +200,14 @@ def update_branch(failure: fix_plan.Failure, root: Path) -> int:
     return EXIT_OK
 
 
-def dispatch(decision: fix_plan.Decision, root: Path, agent: str) -> int:
+def dispatch(decision: fix_plan.Decision, root: Path, launch: agent_models.Launch) -> int:
     first = decision.failures[0]
     if decision.action == fix_plan.UPDATE:
         return update_branch(first, root)
     on_branch = first.kind in (fix_plan.PR, fix_plan.COMMIT)
     if decision.action in (fix_plan.DISPATCH, fix_plan.RESOLVE) and on_branch:
-        return fix_prs.dispatch_pr(first, root, agent, ship_intent.run_quiet)
-    return fix_prs.dispatch_fresh(decision, root, agent, ship_intent.run_quiet)
+        return fix_prs.dispatch_pr(first, root, launch, ship_intent.run_quiet)
+    return fix_prs.dispatch_fresh(decision, root, launch, ship_intent.run_quiet)
 
 
 def send_all(
@@ -214,7 +215,7 @@ def send_all(
     ledger_path: Path,
     root: Path,
     mode: str,
-    agent: str,
+    launch: agent_models.Launch,
     now: _dt.datetime,
 ) -> tuple[list[str], list[tuple[fix_plan.Decision, str]], int]:
     """Steps 3 and 4: what the phase let through, each under the ledger and the caps.
@@ -240,7 +241,7 @@ def send_all(
             would = "would update the branch" if decision.action == fix_plan.UPDATE else None
             sent.append(f"{names} -- {would or f'would send ({decision.action})'}")
             continue
-        if dispatch(decision, root, agent) == EXIT_OK:
+        if dispatch(decision, root, launch) == EXIT_OK:
             fix_plan.record(ledger_path, fix_plan.decision_key(decision), decision.note, now)
             ledger = fix_plan.read_ledger(ledger_path)
             sent.append(f"{names} -- {decision.action}")
@@ -253,7 +254,12 @@ def send_all(
 # --- the pass -----------------------------------------------------------------------------
 
 
-def run(workspace: Path, mode: str, agent: str, now: _dt.datetime | None = None) -> int:
+def run(
+    workspace: Path,
+    mode: str,
+    launch: agent_models.Launch,
+    now: _dt.datetime | None = None,
+) -> int:
     now = now or _dt.datetime.now(_dt.UTC)
     if mode == fix_cycle.OFF:
         # A switched-off fire did nothing, so it says so only where nothing else has:
@@ -277,7 +283,7 @@ def run(workspace: Path, mode: str, agent: str, now: _dt.datetime | None = None)
     skipped = [d for d in decisions if d.action == fix_plan.SKIP]
 
     ledger_path = worktree.boxes_root(root) / fix_plan.LEDGER_NAME
-    sent, capped, worst = send_all(go, ledger_path, root, mode, agent, now)
+    sent, capped, worst = send_all(go, ledger_path, root, mode, launch, now)
 
     merged = merge_green_adoptions(root, projects) if mode == fix_cycle.DISPATCH else []
     text = fix_cycle.render(
@@ -318,6 +324,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="the scheduled job: mode from the workspace file, agent forced to claude-bg",
     )
     parser.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
+    # Carried, never interpreted: the pair reaches `fix-prs.open_session` unchanged. A
+    # scheduled pass passes neither and so opens at whatever the CLI is configured with,
+    # which is the only defensible default for a run nobody is at the keyboard for.
+    agent_models.add_arguments(parser)
     return parser
 
 
@@ -332,8 +342,9 @@ def main(argv: list[str] | None = None) -> int:
     agent = SCHEDULED_AGENT if args.scheduled else args.agent
     if args.scheduled:
         mode = fix_cycle.mode_from_workspace(text)
+    launch = agent_models.Launch.parse(agent, args.model, args.effort)
     try:
-        return run(workspace, mode, agent)
+        return run(workspace, mode, launch)
     except (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError) as exc:
         print(f"fix-pass: {exc}", file=sys.stderr)
         write_artifact(f"fix-pass: FAILED -- {exc}")

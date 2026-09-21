@@ -767,7 +767,7 @@
 				// dispatch loop that spent one in the background on a failure nobody was going
 				// to look at is the outcome the ledger and the plan exist to avoid.
 				"label": "Agent: Fix What Is Red",
-				"detail": "Asks only which agent. The script scans every checkout for red PRs (a merge conflict or a failing gate, drafts excluded), every open scheduled-failure issue and each default branch's own gate, downloads what each gate actually said, prints the plan, and sends: a red PR gets an agent on its own head branch with the gate's logs under logs/gate/ and the failing tests named in the prompt; one vendored test failing in two or more consumers gets ONE agent in devkit on a fresh branch, with every consumer's logs and the affected PRs named; a failing nightly gets an agent on a fresh branch in that project, ending with the ship skill. A release PR (red by construction until its tag exists) and an adoption PR for a release that is no longer the newest are reported and skipped. A ledger records each dispatch against the commit it was seen on, so a second click sends nothing at a failure an agent is already on. THIS SPENDS A PAID AGENT SESSION PER DECISION, and those sessions push to real branches and can merge real PRs. Every PR is re-read live before anything is spawned. 'claude' and 'codex' open a terminal tab you can watch and steer; 'claude (background)' returns ids instead and is read back with 'claude agents', 'claude logs <id>' and 'claude attach <id>' — nothing is watching it, so a permission prompt it cannot answer sits there until you look. This is one run of the fix pass with dispatch on: it also ships every worktree that carries a logs/ship-intent.md (fixers, commit, push, PR), holds every project fixer while the harness is red, and merges green adoption PRs and nothing else. From a terminal, `fix-pass.py --mode plan` prints the plan and does nothing.",
+				"detail": "Asks which agent, then which model and how much reasoning effort — both optional, and the first row of each leaves whatever the CLI is already configured with alone. The model list is read from that CLI's own cached catalogue, so it is whatever it currently offers rather than a list written here; the effort list is the picked model's own, so a model that takes no effort level asks nothing. One pick covers the whole batch, which is the unit worth choosing at: a click can open four sessions across three repos. The script scans every checkout for red PRs (a merge conflict or a failing gate, drafts excluded), every open scheduled-failure issue and each default branch's own gate, downloads what each gate actually said, prints the plan, and sends: a red PR gets an agent on its own head branch with the gate's logs under logs/gate/ and the failing tests named in the prompt; one vendored test failing in two or more consumers gets ONE agent in devkit on a fresh branch, with every consumer's logs and the affected PRs named; a failing nightly gets an agent on a fresh branch in that project, ending with the ship skill. A release PR (red by construction until its tag exists) and an adoption PR for a release that is no longer the newest are reported and skipped. A ledger records each dispatch against the commit it was seen on, so a second click sends nothing at a failure an agent is already on. THIS SPENDS A PAID AGENT SESSION PER DECISION, and those sessions push to real branches and can merge real PRs. Every PR is re-read live before anything is spawned. 'claude' and 'codex' open a terminal tab you can watch and steer; 'claude (background)' returns ids instead and is read back with 'claude agents', 'claude logs <id>' and 'claude attach <id>' — nothing is watching it, so a permission prompt it cannot answer sits there until you look. This is one run of the fix pass with dispatch on: it also ships every worktree that carries a logs/ship-intent.md (fixers, commit, push, PR), holds every project fixer while the harness is red, and merges green adoption PRs and nothing else. From a terminal, `fix-pass.py --mode plan` prints the plan and does nothing.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -776,7 +776,13 @@
 					"devkit",
 					"fix-pass",
 					"--mode=dispatch",
-					"--agent=${input:fixAgent}"
+					"--agent=${input:fixAgent}",
+					// After the agent, and before the effort: `agent-options.py` reads each
+					// from the one before it, and VS Code resolves inputs in the order they
+					// appear here. `.claude/rules/vscode-tasks.md` carries what a wrong order
+					// does, which is draw a confidently wrong list rather than fail.
+					"--model=${input:fixModel}",
+					"--effort=${input:fixEffort}"
 				],
 				"icon": {
 					"id": "git-pull-request",
@@ -1276,7 +1282,7 @@
 			// quietly filtered by an earlier click.
 			{
 				"label": "Agent: New Worktree",
-				"detail": "Asks which checkouts — each with how many branches it can offer — then which branch to cut from: that checkout's default branch first, then origin's most recently committed ones. Tick several checkouts to compare their branches in one list; the new worktree is cut from the one branch you then pick. Then what the branch is about and which agent to open. Cuts agent/<slug>-<mmdd> off origin/<base> with no upstream, puts a worktree for it under the checkout's .claude/worktrees/, and opens Claude or Codex in a Windows Terminal tab scoped to it, attaching to the window you are already looking at. This is the plain-worktree tier: no port lease, no COMPOSE_PROJECT_NAME and no toolchain provisioning, so a session that needs a compose stack wants 'agent-box.py spawn' instead. Leave the topic blank to name the branch after the checkout. THIS SPENDS A PAID AGENT SESSION. Both lists come from ONE scan, run when the first picker opens, reading each checkout's origin refs — so they are as fresh as that checkout's last fetch rather than as fresh as a scheduled pass, and the second question costs no wait.",
+				"detail": "Asks which checkouts — each with how many branches it can offer — then which branch to cut from: that checkout's default branch first, then origin's most recently committed ones. Tick several checkouts to compare their branches in one list; the new worktree is cut from the one branch you then pick. Then what the branch is about, which agent to open, and — both optional — which model and how much reasoning effort, whose first rows leave the CLI's own setting alone. The model list is read from that CLI's own cached catalogue rather than written here, and the effort list is the picked model's own, so a model that takes no effort level asks nothing. Cuts agent/<slug>-<mmdd> off origin/<base> with no upstream, puts a worktree for it under the checkout's .claude/worktrees/, and opens Claude or Codex in a Windows Terminal tab scoped to it, attaching to the window you are already looking at. This is the plain-worktree tier: no port lease, no COMPOSE_PROJECT_NAME and no toolchain provisioning, so a session that needs a compose stack wants 'agent-box.py spawn' instead. Leave the topic blank to name the branch after the checkout. THIS SPENDS A PAID AGENT SESSION. Both lists come from ONE scan, run when the first picker opens, reading each checkout's origin refs — so they are as fresh as that checkout's last fetch rather than as fresh as a scheduled pass, and the second question costs no wait.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -1287,7 +1293,11 @@
 					"--checkouts=${input:worktreeBaseCheckout}",
 					"--pick=${input:worktreeBase}",
 					"--slug=${input:worktreeTopic}",
-					"--agent=${input:worktreeAgent}"
+					"--agent=${input:worktreeAgent}",
+					// After the agent and before the effort; see the same pair on
+					// `Agent: Fix What Is Red` for why the order is load-bearing.
+					"--model=${input:worktreeModel}",
+					"--effort=${input:worktreeEffort}"
 				],
 				"icon": {
 					"id": "rocket",
@@ -1348,13 +1358,21 @@
 				// wherever they happened, so the script reads the transcript store — which
 				// records each session's own directory — instead of asking.
 				"label": "Agents: Resume Recent Sessions",
-				"detail": "Check Claude, Codex, or both and choose how many sessions, then reopen the globally most recent matching sessions as tabs in the Windows Terminal window you already have open (a new one only if there is none), one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it. The checked CLIs are updated first, which takes a few seconds and is the one moment they can be — an update cannot replace a binary a running agent is executing, so any agent already up is skipped.",
+				"detail": "Check Claude, Codex, or both, optionally pick a model and a reasoning effort for the reopened sessions — the first row of each leaves the CLI's own setting alone — and choose how many sessions, then reopen the globally most recent matching sessions as tabs in the Windows Terminal window you already have open (a new one only if there is none), one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it. A model picked for one CLI applies to that CLI's tabs and leaves the other's on their own default. The checked CLIs are updated first, which takes a few seconds and is the one moment they can be — an update cannot replace a binary a running agent is executing, so any agent already up is skipped.",
 				"type": "process",
 				"command": "python",
 				"args": [
 					"scripts/resume-sessions.py",
 					"--agent",
 					"${input:resumeAgents}",
+					// After the agent and before the effort; see the same pair on
+					// `Agent: Fix What Is Red` for why the order is load-bearing. Spelled
+					// with an `=` unlike their neighbours here, because this task is not a
+					// dispatch: nothing strips an empty argument on the way, and `--model`
+					// followed by `""` would reach argparse as a lone flag swallowing the
+					// next one. Every branch of both pickers returns a real token anyway.
+					"--model=${input:resumeModel}",
+					"--effort=${input:resumeEffort}",
 					"--count",
 					"${input:resumeSessionCount}"
 				],
@@ -2067,22 +2085,89 @@
 				// Selecting both agents means one global recency slice, not `count` from
 				// each store. The extension joins the checked values into the one token
 				// accepted by resume-sessions.py's `--agent` option.
+				//
+				// A `shellCommand.execute` list rather than the `pickStringRemember` it was
+				// until the model pickers arrived, and the swap is forced rather than
+				// preferred: `agentModel` reads THIS input's answer inside its own command,
+				// and that extension records an answer for its own inputs and for nothing
+				// else. A `pickStringRemember` in this position substitutes empty, which
+				// would draw both catalogues however few agents were ticked. The rows are
+				// `agent-options.py`'s, shared with the two tasks below, which is what stops
+				// three agent lists drifting apart again.
 				"id": "resumeAgents",
 				"type": "command",
-				"command": "extension.commandvariable.pickStringRemember",
+				"command": "shellCommand.execute",
 				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-options.py\" agents --agent=resume",
+					"cwd": "${workspaceFolder:devkit}",
 					"description": "Which agents' sessions should be considered? Check both for last X across either agent.",
-					"key": "resumeAgents",
-					"multiPick": true,
-					"multiPickStorage": "workspace",
-					"separator": ",",
-					"optionGroups": [
-						{
-							"label": "Select one or both agents",
-							"minCount": 1,
-							"options": ["claude", "codex"]
-						}
-					]
+					"fieldSeparator": "|",
+					"multiselect": true,
+					"multiselectSeparator": ",",
+					"rememberPrevious": false
+				}
+			},
+			// The model-and-effort chain, three times over, and the repetition is the
+			// extension's rather than a choice. Each of the three session-spending tasks
+			// asks its OWN agent question -- one offers a background mode, one must not,
+			// one is a checkbox list -- and `shellCommand.execute` substitutes
+			// `${input:<id>}` by id, so a stage that reads "whichever agent this task
+			// picked" has to name that task's input. What is shared is everything with a
+			// decision in it: one script, `scripts/agent-options.py`, draws all nine lists,
+			// and `scripts/agent_models.py` reads the CLIs' own catalogues behind them.
+			//
+			// Read `resumeModel` and `resumeEffort` below for what each stage is doing; the
+			// other four say only what differs.
+			{
+				// Stage two for the resume task, and the one with both agents in play at
+				// once: the list is grouped `Claude -- Opus 5`, `Codex -- GPT-6-Astra`, and
+				// the value carries its agent so a Claude pick opens the Claude tabs and
+				// leaves the Codex tabs on their own default rather than failing the batch.
+				//
+				// Nothing here writes the model names down. Both CLIs cache their own
+				// catalogue on disk and refresh it every session, so this reads the file the
+				// vendor's own client wrote -- a model released this week is in the dropdown
+				// with no edit to this file, and one that was withdrawn stops being offered.
+				//
+				// `useSingleResult` is what keeps this from being one more question on a
+				// task that already asks two. With no catalogue cached -- a fresh machine,
+				// or a CLI that has never been run -- the command returns the default row
+				// alone and the extension takes it without drawing anything at all.
+				"id": "resumeModel",
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-options.py\" models --agent=\"${input:resumeAgents}\"",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "Which model? The first row leaves each CLI's own setting alone.",
+					"fieldSeparator": "|",
+					"useSingleResult": true,
+					"rememberPrevious": false
+				}
+			},
+			{
+				// Stage three, and it asks about the MODEL rather than the agent, because
+				// the levels are per model and the catalogues say so. Claude's Haiku takes
+				// no `--effort` at all, so picking it collapses this list to its default row
+				// and `useSingleResult` skips the prompt. With both CLIs ticked the offer is
+				// narrowed to the levels BOTH accept -- Codex's `ultra` has no Claude
+				// equivalent, and offering it here would open the Claude half of the batch
+				// on a flag its CLI rejects.
+				//
+				// Its `${input:resumeModel}` is why both stages above are
+				// `shellCommand.execute` inputs and why all three appear left to right in
+				// the task's arguments -- see `previewCheckout` for the mechanism and what
+				// getting that order wrong looks like when it fails silently.
+				"id": "resumeEffort",
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-options.py\" efforts --agent=\"${input:resumeAgents}\" --model=\"${input:resumeModel}\"",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "How much reasoning? The first row leaves each CLI's own setting alone.",
+					"fieldSeparator": "|",
+					"useSingleResult": true,
+					"rememberPrevious": false
 				}
 			},
 			{
@@ -2262,23 +2347,53 @@
 				// never opened. `none` exists on the CLI for cutting a worktree with nothing
 				// in it, and is not a row: that is `git worktree add`, which needs no menu.
 				//
-				// A `pickString` rather than a command picker, for `fixAgent`'s reason: one
-				// answer, a fixed list, and VS Code's own input aborts the task when it is
-				// escaped. Every branch carries a real token.
+				// A `shellCommand.execute` list rather than the `pickString` it was until the
+				// model chain arrived, and the swap costs one thing worth naming: VS Code's
+				// own inputs abort the run when escaped and a command input cannot. Nothing
+				// is lost here only because this task is a DISPATCH -- `devkit_project.py`
+				// sees the unresolved literal and exits 0 having run nothing, which
+				// `test_every_task_with_a_command_picker_can_be_cancelled` holds it to. What
+				// the swap buys is the two stages below, which can read an answer this
+				// extension recorded and could read nothing from a `pickString`.
 				"id": "worktreeAgent",
-				"type": "pickString",
-				"description": "Which agent should open in the new worktree?",
-				"options": [
-					{
-						"label": "Claude — a terminal tab you can watch and steer",
-						"value": "claude"
-					},
-					{
-						"label": "Codex — or use `codex --worktree`, which cuts under ~/.codex/",
-						"value": "codex"
-					}
-				],
-				"default": "claude"
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-options.py\" agents --agent=worktree",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "Which agent should open in the new worktree?",
+					"fieldSeparator": "|",
+					"useSingleResult": true,
+					"rememberPrevious": false
+				}
+			},
+			{
+				// See `resumeModel`. One CLI in play here, so the list is that CLI's alone.
+				"id": "worktreeModel",
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-options.py\" models --agent=\"${input:worktreeAgent}\"",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "Which model should the new session open at?",
+					"fieldSeparator": "|",
+					"useSingleResult": true,
+					"rememberPrevious": false
+				}
+			},
+			{
+				// See `resumeEffort`.
+				"id": "worktreeEffort",
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-options.py\" efforts --agent=\"${input:worktreeAgent}\" --model=\"${input:worktreeModel}\"",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "How much reasoning should it spend?",
+					"fieldSeparator": "|",
+					"useSingleResult": true,
+					"rememberPrevious": false
+				}
 			},
 			{
 				// The other half, and the one where staleness cost the most: each row warns with
@@ -2350,35 +2465,61 @@
 				// nothing to reattach to. Spelling this as an orthogonal toggle would have
 				// meant a `codex-bg` that either lies or quietly becomes a foreground run.
 				//
-				// A `pickString` rather than a command picker: one answer, a fixed list, and
-				// VS Code's own input aborts the task when it is escaped, which is the cancel
-				// this task would otherwise have to get from `fix-prs.py`. Every branch carries
-				// a real token, so nothing empty can reach argparse.
+				// A `shellCommand.execute` list rather than the `pickString` it was until the
+				// model chain arrived — `worktreeAgent` carries why, including where the
+				// cancel comes from now. Every branch carries a real token, so nothing empty
+				// can reach argparse.
 				//
-				// The tab is the default because a session that pushes to a real branch and can
-				// merge a real PR is one worth being able to interrupt. Background is the right
-				// answer for a batch — four red PRs across three repos — and its cost is stated
-				// on the row: nobody is watching, so a permission prompt it cannot answer waits
-				// silently until `claude logs <id>` is read.
+				// The tab is the first row because a session that pushes to a real branch and
+				// can merge a real PR is one worth being able to interrupt. Background is the
+				// right answer for a batch — four red PRs across three repos — and its cost is
+				// stated on the row: nobody is watching, so a permission prompt it cannot
+				// answer waits silently until `claude logs <id>` is read.
 				"id": "fixAgent",
-				"type": "pickString",
-				"description": "Which agent should be sent at what is red?",
-				"options": [
-					{
-						"label": "Claude — a terminal tab you can watch and steer",
-						"value": "claude"
-					},
-					{
-						"label": "Claude (background) — returns an id, read it back with `claude logs`",
-						"value": "claude-bg",
-						"description": "nothing is watching it; a prompt it cannot answer waits until you look"
-					},
-					{
-						"label": "Codex — a terminal tab; Codex has no background session",
-						"value": "codex"
-					}
-				],
-				"default": "claude"
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-options.py\" agents --agent=fix",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "Which agent should be sent at what is red?",
+					"fieldSeparator": "|",
+					"useSingleResult": true,
+					"rememberPrevious": false
+				}
+			},
+			{
+				// See `resumeModel`. The mode above may be `claude-bg`, which is the Claude
+				// CLI: `agent-options.py` reads the CLI out of the mode so the catalogue is
+				// the right one whether the session lands in a tab or in the background.
+				//
+				// One model for the whole batch, and that is the unit worth choosing at: a
+				// click here can open four sessions across three repos, and what the pick
+				// decides is how much this pass costs.
+				"id": "fixModel",
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-options.py\" models --agent=\"${input:fixAgent}\"",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "Which model should the sessions open at?",
+					"fieldSeparator": "|",
+					"useSingleResult": true,
+					"rememberPrevious": false
+				}
+			},
+			{
+				// See `resumeEffort`.
+				"id": "fixEffort",
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/agent-options.py\" efforts --agent=\"${input:fixAgent}\" --model=\"${input:fixModel}\"",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "How much reasoning should each session spend?",
+					"fieldSeparator": "|",
+					"useSingleResult": true,
+					"rememberPrevious": false
+				}
 			},
 			{
 				// Both branches carry a real flag rather than one being an empty default:

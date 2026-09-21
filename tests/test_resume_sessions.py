@@ -16,6 +16,7 @@ import pytest
 from support import REPO_ROOT, devkit_project, load_script
 
 rs = load_script("scripts/resume-sessions.py")
+agent_models = load_script("scripts/agent_models.py")
 
 
 # --- fixtures ---------------------------------------------------------------
@@ -354,15 +355,21 @@ def test_a_reaped_box_is_partitioned_out(tmp_path):
 # --- the launch command ------------------------------------------------------
 
 
+def commands(args: list[str]) -> list[str]:
+    """Each tab's command line. One token per tab since the tabs became
+    `agent_tabs.tab_argv`, which takes the whole command as a string -- everything after
+    `-Command` was concatenated by pwsh into one line anyway."""
+    return [args[i + 1] for i, token in enumerate(args) if token == "-Command"]
+
+
 def test_wt_args_opens_one_tab_per_session_in_its_own_directory(tmp_path):
     sessions = [session("aaa", 1.0, tmp_path / "one"), session("bbb", 2.0, tmp_path / "two")]
     args = rs.wt_args(sessions)
     assert args[:2] == ["-w", "0"]  # the window already open, as every agent task does
     assert args.count("new-tab") == 2
     assert args.count(";") == 1  # one separator between the two tabs, and no more
-    for name, directory in (("aaa", "one"), ("bbb", "two")):
-        index = args.index(name)
-        assert args[index - 1] == "--resume"
+    assert commands(args) == ["claude --resume aaa", "claude --resume bbb"]
+    for directory in ("one", "two"):
         assert str(tmp_path / directory) in args
 
 
@@ -376,12 +383,12 @@ def test_tabs_join_the_current_window_and_claim_no_absolute_tab_index(tmp_path):
     """
     args = rs.wt_args([session("aaa", 1.0, tmp_path), session("bbb", 2.0, tmp_path)])
     assert "focus-tab" not in args
-    assert args[-1] == "bbb"  # the newest session's tab is the one wt focuses
+    assert args[-1].endswith("bbb")  # the newest session's tab is the one wt focuses
 
 
 def test_every_tab_in_the_window_opens_under_the_agent_profile(tmp_path):
     """A window of resumed sessions is a window of paid agents; drawing it as a window of
-    shells is the same defect `agent-box.wt_argv` fixes, one tab at a time."""
+    shells is the same defect `agent_tabs.wt_argv` fixes, one tab at a time."""
     sessions = [session("aaa", 1.0, tmp_path / "one"), session("bbb", 2.0, tmp_path / "two")]
     args = rs.wt_args(sessions, profile="Agent")
     assert args.count("-p") == args.count("new-tab") == 2
@@ -396,15 +403,17 @@ def test_a_machine_without_the_profile_opens_the_window_it_always_did(tmp_path):
 
 def test_wt_args_lays_the_tabs_out_in_the_order_given(tmp_path):
     sessions = [session("first", 1.0, tmp_path), session("second", 2.0, tmp_path)]
-    args = rs.wt_args(sessions)
-    assert args.index("first") < args.index("second")
+    assert commands(rs.wt_args(sessions)) == [
+        "claude --resume first",
+        "claude --resume second",
+    ]
 
 
 def test_each_agent_uses_its_own_resume_syntax(tmp_path):
     claude = rs.wt_args([session("a", 1.0, tmp_path)], agent="claude")
     codex = rs.wt_args([session("a", 1.0, tmp_path)], agent="codex")
-    assert claude[claude.index("claude") :] == ["claude", "--resume", "a"]
-    assert codex[codex.index("codex") :] == ["codex", "resume", "a"]
+    assert commands(claude) == ["claude --resume a"]
+    assert commands(codex) == ["codex resume a"]
 
 
 def test_a_mixed_window_uses_each_sessions_own_resume_syntax(tmp_path):
@@ -414,13 +423,34 @@ def test_a_mixed_window_uses_each_sessions_own_resume_syntax(tmp_path):
             session("codex-id", 2.0, tmp_path, agent="codex"),
         ]
     )
-    assert args[args.index("claude") : args.index(";")] == [
-        "claude",
-        "--resume",
-        "claude-id",
+    assert commands(args) == ["claude --resume claude-id", "codex resume codex-id"]
+
+
+def test_a_model_pick_reaches_only_the_tabs_of_the_cli_it_was_picked_for(tmp_path):
+    """One click can reopen both CLIs' sessions, and `-m claude-opus-5` would fail the
+    Codex half. The effort is agent-neutral and does reach both; `Launch.model_for` owns
+    the reading, and this is where a regression in it would be felt."""
+    launch = rs.Launch.parse("", "claude:claude-opus-5", "high")
+    args = rs.wt_args(
+        [
+            session("claude-id", 1.0, tmp_path, agent="claude"),
+            session("codex-id", 2.0, tmp_path, agent="codex"),
+        ],
+        launch=launch,
+    )
+    assert commands(args) == [
+        "claude --resume claude-id --model claude-opus-5 --effort high",
+        'codex resume codex-id -c model_reasoning_effort="high"',
     ]
-    codex_index = args.index("codex")
-    assert args[codex_index : codex_index + 3] == ["codex", "resume", "codex-id"]
+
+
+def test_no_pick_reopens_exactly_what_it_reopened_before_the_pickers_existed(tmp_path):
+    """The half a regression reaches first: `default` in both dropdowns must add no flag,
+    because passing the configured value and passing nothing differ the moment the
+    configuration changes between the click and the tab."""
+    launch = rs.Launch.parse("", agent_models.DEFAULT, agent_models.DEFAULT)
+    args = rs.wt_args([session("a", 1.0, tmp_path)], launch=launch)
+    assert commands(args) == ["claude --resume a"]
 
 
 def test_a_prompt_cannot_rearrange_the_window(tmp_path):
@@ -528,7 +558,7 @@ def test_dry_run_prints_the_command_line_and_launches_nothing(tmp_path, capsys, 
     store, cwd = tmp_path / "store", tmp_path / "repo"
     cwd.mkdir()
     write_transcript(store, "sess", cwd=cwd, prompt="a task", mtime=1000.0)
-    monkeypatch.setattr(rs, "find_terminal", lambda: r"C:\wt.exe")
+    monkeypatch.setattr(rs.agent_tabs, "find_terminal", lambda: r"C:\wt.exe")
 
     def refuse(*_args, **_kwargs):
         raise AssertionError("--dry-run must not launch anything")
@@ -584,7 +614,7 @@ def test_without_windows_terminal_it_prints_the_commands_and_fails(tmp_path, cap
     store, cwd = tmp_path / "store", tmp_path / "repo"
     cwd.mkdir()
     write_transcript(store, "sess", cwd=cwd, prompt="a task", mtime=1000.0)
-    monkeypatch.setattr(rs, "find_terminal", lambda: "")
+    monkeypatch.setattr(rs.agent_tabs, "find_terminal", lambda: "")
     assert rs.main(["--sessions-dir", str(store)]) == 1
     assert "claude --resume sess" in capsys.readouterr().err
 
@@ -597,7 +627,7 @@ def launchable(tmp_path, monkeypatch, calls: list):
     store, cwd = tmp_path / "store", tmp_path / "repo"
     cwd.mkdir()
     write_transcript(store, "sess", cwd=cwd, prompt="a task", mtime=1000.0)
-    monkeypatch.setattr(rs, "find_terminal", lambda: r"C:\wt.exe")
+    monkeypatch.setattr(rs.agent_tabs, "find_terminal", lambda: r"C:\wt.exe")
 
     class Result:
         returncode = 0
@@ -716,11 +746,11 @@ def test_each_agent_store_honours_its_config_home(monkeypatch, tmp_path):
 def test_the_script_is_stdlib_only():
     """devkit ships no runtime dependencies, and this runs from a VS Code task.
 
-    `agent_clis`, `task_input` and `wt_profile` are the only non-stdlib names allowed, and
-    none is a dependency: all three are sibling scripts in the same directory, reached
-    through the `sys.path` insert above them, and each is stdlib-only itself. Naming them
-    here rather than widening the rule keeps a real third-party import from slipping in
-    behind the exception.
+    `agent_clis`, `agent_models`, `task_input` and `wt_profile` are the only non-stdlib
+    names allowed, and none is a dependency: all four are sibling scripts in the same
+    directory, reached through the `sys.path` insert above them, and each is stdlib-only
+    itself. Naming them here rather than widening the rule keeps a real third-party
+    import from slipping in behind the exception.
     """
     source = (REPO_ROOT / "scripts" / "resume-sessions.py").read_text(encoding="utf-8")
     for line in source.splitlines():
@@ -729,6 +759,7 @@ def test_the_script_is_stdlib_only():
             assert module in {
                 "__future__",
                 "agent_clis",
+                "agent_models",
                 "argparse",
                 "collections",
                 "json",
@@ -737,6 +768,7 @@ def test_the_script_is_stdlib_only():
                 "shutil",
                 "subprocess",
                 "sys",
+                "agent_tabs",
                 "task_input",
                 "time",
                 "wt_profile",
@@ -746,6 +778,15 @@ def test_the_script_is_stdlib_only():
 
 
 def test_the_workspace_task_passes_the_resume_agent_checkboxes():
+    """The agent question is still a checkbox list, and it is now a live one.
+
+    It was a `pickStringRemember` until the model chain arrived. The swap is forced
+    rather than cosmetic: `resumeModel` reads this input's answer inside its own
+    command, and `shellCommand.execute` is the only place that extension records one --
+    from anything else it substitutes empty and would draw both catalogues however few
+    agents were ticked. `multiselect` is the property that has to survive: one global
+    recency slice across both stores is the question this task asks.
+    """
     source = devkit_project.canonical_tasks_text()
     task = source[source.index('"label": "Agents: Resume Recent Sessions"') :]
     task = task[: task.index('"problemMatcher"')]
@@ -753,11 +794,32 @@ def test_the_workspace_task_passes_the_resume_agent_checkboxes():
     assert '"${input:resumeAgents}"' in task
 
     picker = source[source.index('"id": "resumeAgents"') :]
-    picker = picker[: picker.index('"id": "resumeSessionCount"')]
-    assert '"multiPick": true' in picker
-    assert '"minCount": 1' in picker
-    assert '"claude"' in picker
-    assert '"codex"' in picker
+    picker = picker[: picker.index('"id": "resumeModel"')]
+    assert '"command": "shellCommand.execute"' in picker
+    assert '"multiselect": true' in picker
+    assert '"multiselectSeparator": ","' in picker
+    assert "agent-options.py" in picker
+
+
+def test_the_resume_task_asks_for_the_model_after_the_agent_and_the_effort_after_that():
+    """The chain's order, on the one task that is not a dispatch.
+
+    `augustocdias.tasks-shell-input` resolves a later input's `${input:<id>}` against
+    the value it recorded when that input last ran, and VS Code resolves inputs in the
+    order they appear in the arguments. Out of order, both stages draw a list from some
+    earlier click rather than failing -- which on this task means resuming sessions at a
+    model nobody picked this time. `tests/test_devkit_project.py` holds the same
+    property for every task; this one pins the spelling the script actually parses.
+    """
+    source = devkit_project.canonical_tasks_text()
+    task = source[source.index('"label": "Agents: Resume Recent Sessions"') :]
+    task = task[: task.index('"problemMatcher"')]
+    assert task.index("${input:resumeAgents}") < task.index("${input:resumeModel}")
+    assert task.index("${input:resumeModel}") < task.index("${input:resumeEffort}")
+    # `=`-joined, not two tokens: nothing strips an empty argument on this task's way to
+    # the script, so a lone `--model` would swallow the flag after it.
+    assert '"--model=${input:resumeModel}"' in task
+    assert '"--effort=${input:resumeEffort}"' in task
 
 
 def test_a_dismissed_agent_checkbox_list_opens_no_tabs(monkeypatch, capsys):
@@ -775,3 +837,14 @@ def test_a_dismissed_agent_checkbox_list_opens_no_tabs(monkeypatch, capsys):
     monkeypatch.setattr(rs.subprocess, "run", refuse)
     assert rs.main(["--agent", "${input:resumeAgents}", "--count", "4"]) == 0
     assert "cancelled" in capsys.readouterr().out
+
+
+def test_the_parser_is_its_own_function_and_still_carries_every_flag_the_task_passes():
+    """Out of `main` for `structure_check`'s `function_lines`; what must not change is
+    what it accepts, because the workspace task spells all five by hand."""
+    args = rs.build_parser().parse_args(
+        ["--agent", "claude,codex", "--count", "7", "--model=claude:x", "--effort=max"]
+    )
+    assert args.agents == ("claude", "codex")
+    assert (args.count, args.model, args.effort) == (7, "claude:x", "max")
+    assert rs.build_parser().parse_args([]).agents == ("claude",)

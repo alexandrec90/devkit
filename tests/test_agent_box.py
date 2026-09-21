@@ -57,132 +57,6 @@ def bad(stderr: str = "boom") -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess([], 1, "", stderr)
 
 
-# --- the terminal ---------------------------------------------------------------------
-
-
-def test_the_agent_tab_attaches_to_the_window_the_operator_is_looking_at():
-    """`-w 0` is "most recently used window, create one only if there is none", which is
-    the ask: a box belongs where the operator already is. `resume-sessions.py` forced
-    `-w -1` until 2026-09-14 and now defaults to this too."""
-    argv = box.wt_argv("agent/thing-0903", Path("C:/boxes/x"), "claude")
-    assert argv[:3] == ["-w", "0", "new-tab"]
-    assert "-NoExit" in argv
-    assert argv[-1] == "claude"
-    assert argv[argv.index("-d") + 1] == str(Path("C:/boxes/x"))
-
-
-def test_the_kill_switchs_semicolon_does_not_open_a_second_tab():
-    """The regression this file exists for: `wt` re-parses its own command line, so the
-    `;` `agent_command` writes between the assignment and the agent used to end the tab's
-    command there and start a second sub-command out of the rest -- two tabs per PR, the
-    second one answering "The system cannot find the file specified" because it tried to
-    launch `claude '<prompt>'` as an executable."""
-    command = box.agent_command("claude", True, "fix it")
-    argv = box.wt_argv("agent/thing-0903", Path("C:/boxes/x"), command)
-    embedded = argv[argv.index("-Command") + 1]
-    assert ";" in command
-    assert embedded == command.replace(";", "\\;")
-    assert ";" not in embedded.replace("\\;", "")
-
-
-def test_a_command_with_no_semicolon_reaches_the_tab_untouched():
-    """The ordinary case -- `spawn` with the harness running -- must not grow a backslash."""
-    assert box.wt_argv("b", Path("C:/boxes/x"), "claude")[-1] == "claude"
-
-
-def test_a_tab_opens_under_the_agent_profile_when_the_machine_has_one():
-    """The `+` button beside an agent tab used to answer with the default profile in the
-    default directory, and Duplicate Tab replayed a bare shell, because a tab built from
-    an overridden command line has no profile of its own. `-p` is what gives it one."""
-    argv = box.wt_argv("agent/thing-0903", Path("C:/boxes/x"), "claude", profile="Agent")
-    assert argv[:5] == ["-w", "0", "new-tab", "-p", "Agent"]
-    assert argv[argv.index("-d") + 1] == str(Path("C:/boxes/x"))
-
-
-def test_a_machine_that_never_registered_the_profile_opens_the_tab_it_always_did():
-    """The installer is a machine-level step; a checkout that has not run it must still
-    open sessions, so no `-p` rather than one naming a profile that is not there."""
-    assert "-p" not in box.wt_argv("b", Path("C:/boxes/x"), "claude")
-
-
-def test_the_profile_is_read_from_the_machine_rather_than_guessed(monkeypatch, tmp_path):
-    """`open_agent` is where the lookup happens, so a spawn on a machine that registered
-    the profile picks it up with nothing passed down the call chain.
-
-    Both machine lookups are stubbed, not just the profile one: `open_agent` returns
-    before it spawns anything when `wt` is not on PATH, so a test that stubbed only the
-    profile asserted against an empty call list on every non-Windows runner -- green
-    here, red in CI, which is exactly the split the rehearsal exists to stop.
-    """
-    monkeypatch.setattr(box.shutil, "which", lambda name: "C:/wt.exe" if "wt" in name else None)
-    monkeypatch.setattr(box.harness_switch, "hooks_are_off", lambda *_a: False)
-    monkeypatch.setattr(box.wt_profile, "launch_name", lambda: "Agent")
-    runner = FakeRunner()
-    assert box.open_agent("claude", tmp_path, "agent/thing-0903", runner=runner) == 0
-    assert runner.calls[0][runner.calls[0].index("-p") + 1] == "Agent"
-
-
-def test_a_tab_that_cannot_join_the_operators_window_says_why_as_it_opens(monkeypatch, capsys):
-    """The elevation mismatch, reported in the one place it reads as a cause.
-
-    `wt_profile.py` owns what the mismatch is; what this pins is that `open_agent` prints
-    it. Without it a spawn on a machine whose windows are elevated opens a window of its
-    own and says only "opening claude in ..." -- which is how the same defect got
-    reported twice as "the task ignores the terminal I have open".
-    """
-    monkeypatch.setattr(box.shutil, "which", lambda name: "C:/wt.exe" if "wt" in name else None)
-    monkeypatch.setattr(box.harness_switch, "hooks_are_off", lambda *_a: False)
-    monkeypatch.setattr(box.wt_profile, "launch_name", lambda: "Agent")
-    monkeypatch.setattr(box.wt_profile, "launch_note", lambda: box.wt_profile.ELEVATION_NOTE)
-    assert box.open_agent("claude", Path("C:/boxes/x"), "agent/x", runner=FakeRunner()) == 0
-    out = capsys.readouterr().out
-    assert "opening claude" in out and "elevate" in out
-
-
-def test_nothing_is_said_about_windows_when_the_tab_will_land_in_one(monkeypatch, capsys):
-    """The other half, and the one that decides whether the note is bearable: on a
-    machine with no mismatch every spawn prints the line it always did."""
-    monkeypatch.setattr(box.shutil, "which", lambda name: "C:/wt.exe" if "wt" in name else None)
-    monkeypatch.setattr(box.harness_switch, "hooks_are_off", lambda *_a: False)
-    monkeypatch.setattr(box.wt_profile, "launch_name", lambda: "Agent")
-    monkeypatch.setattr(box.wt_profile, "launch_note", lambda: "")
-    assert box.open_agent("claude", Path("C:/boxes/x"), "agent/x", runner=FakeRunner()) == 0
-    printed = capsys.readouterr().out.splitlines()
-    assert len(printed) == 1 and printed[0].startswith("opening claude in ")
-
-
-def test_a_semicolon_in_the_title_or_the_directory_is_escaped_too():
-    """Both are legal in a Windows path and in a git branch name, and both are strings
-    this module is handed rather than writes."""
-    argv = box.wt_argv("agent/odd;name", Path("C:/box;es/x"), "claude")
-    assert argv[argv.index("--title") + 1] == "agent/odd\\;name"
-    assert ";" not in argv[argv.index("-d") + 1].replace("\\;", "")
-
-
-def test_the_kill_switch_is_exported_into_the_tab_when_it_is_on():
-    """Claude reads `env` out of the user settings file. Codex reads no settings file of
-    ours, so without this a Codex session in a box would run hooks the operator had
-    switched off everywhere else."""
-    assert box.agent_command("codex", True).startswith("$env:DEVKIT_HOOKS_OFF='1'; ")
-    assert box.agent_command("codex", True).endswith("codex")
-
-
-def test_nothing_is_exported_when_the_harness_is_running():
-    assert box.agent_command("claude", False) == "claude"
-
-
-def test_asking_for_no_agent_opens_no_terminal(capsys):
-    assert box.open_agent("none", Path("C:/boxes/x"), "agent/x", runner=_never) == box.EXIT_OK
-    assert "no agent requested" in capsys.readouterr().out
-
-
-def test_a_machine_without_windows_terminal_is_told_what_to_type(monkeypatch, capsys):
-    monkeypatch.setattr(box.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(box.harness_switch, "hooks_are_off", lambda *_a: False)
-    assert box.open_agent("claude", Path("C:/boxes/x"), "agent/x", runner=_never) == box.EXIT_OK
-    assert "run this yourself" in capsys.readouterr().out
-
-
 def _never(*_args, **_kwargs):
     raise AssertionError("nothing should have been spawned")
 
@@ -447,7 +321,9 @@ def test_spawn_passes_the_base_through_and_opens_the_agent(monkeypatch, capsys):
     plan = {"path": "C:/boxes/p--x", "box": {"name": "p--x", "branch": "agent/x-0903"}, "notes": []}
     runner = FakeRunner({"new": ok(json.dumps(plan))})
     opened: list[tuple] = []
-    monkeypatch.setattr(box, "open_agent", lambda *args, **_k: opened.append(args) or box.EXIT_OK)
+    monkeypatch.setattr(
+        box.agent_tabs, "open_agent", lambda *args, **_k: opened.append(args) or box.EXIT_OK
+    )
     assert box.spawn("p", Path("C:/ws"), "x", "release/1.2", "codex", runner=runner) == box.EXIT_OK
     assert runner.calls[0][runner.calls[0].index("--base") + 1] == "release/1.2"
     assert opened[0][:3] == ("codex", Path("C:/boxes/p--x"), "agent/x-0903")
@@ -464,14 +340,16 @@ def test_attach_opens_the_agent_in_the_box_it_was_given(monkeypatch):
     function -- two copies would be two answers to which window the agent opens in."""
     monkeypatch.setattr(box, "boxes_for", lambda *_a, **_k: candidates("x"))
     opened: list[tuple] = []
-    monkeypatch.setattr(box, "open_agent", lambda *args, **_k: opened.append(args) or box.EXIT_OK)
+    monkeypatch.setattr(
+        box.agent_tabs, "open_agent", lambda *args, **_k: opened.append(args) or box.EXIT_OK
+    )
     assert box.attach("p", Path("C:/ws"), "agent/x", "codex", runner=_never) == box.EXIT_OK
     assert opened[0][:3] == ("codex", Path("C:/boxes/x"), "agent/x")
 
 
 def test_attach_opens_nothing_when_no_box_was_chosen(monkeypatch):
     monkeypatch.setattr(box, "boxes_for", lambda *_a, **_k: [])
-    monkeypatch.setattr(box, "open_agent", _never)
+    monkeypatch.setattr(box.agent_tabs, "open_agent", _never)
     assert box.attach("p", Path("C:/ws"), "", "claude", runner=_never) == box.EXIT_FAILED
 
 

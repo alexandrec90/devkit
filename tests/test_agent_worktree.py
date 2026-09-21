@@ -14,12 +14,17 @@ import pytest
 from support import load_script
 
 # `support.load_script` rather than `_loader.load_by_path`, for `tests/test_fix_prs.py`'s
-# reason: the latter overwrites `sys.modules[name]`, so `agent-box.py` would be loaded a
-# second time into a process whose other suites monkeypatch the first copy.
+# reason: the latter overwrites `sys.modules[name]`, so a module would be loaded a second
+# time into a process whose other suites monkeypatch the first copy.
 agent_worktree = load_script("scripts/agent-worktree.py")
 picker_rows = load_script("scripts/picker_rows.py")
 picker_scan = load_script("scripts/picker_scan.py")
 aw = agent_worktree.aw
+
+# The three agent answers `create` takes, as the object the pickers now produce.
+CLAUDE = agent_worktree.agent_models.Launch("claude")
+CODEX = agent_worktree.agent_models.Launch("codex")
+NONE = agent_worktree.agent_models.Launch("none")
 
 
 class FakeRun:
@@ -246,12 +251,14 @@ def test_a_new_worktree_is_cut_no_track_off_origin_after_a_fetch(workspace, monk
     this checkout last was."""
     opened = {}
     monkeypatch.setattr(
-        agent_worktree.agent_box,
+        agent_worktree.agent_tabs,
         "open_agent",
-        lambda agent, box, branch, runner: opened.update(agent=agent, box=box, branch=branch) or 0,
+        lambda launch, box, branch, runner, **_k: (
+            opened.update(agent=launch.cli, box=box, branch=branch) or 0
+        ),
     )
     run = FakeRun()
-    assert agent_worktree.create("devkit", workspace, "voicemail", "main", "codex", run) == 0
+    assert agent_worktree.create("devkit", workspace, "voicemail", "main", CODEX, run) == 0
 
     fetch, add = run.git_args()
     assert fetch == ["fetch", "--quiet", "origin"]
@@ -263,10 +270,33 @@ def test_a_new_worktree_is_cut_no_track_off_origin_after_a_fetch(workspace, monk
     assert opened["branch"] == add[4]
 
 
+def test_the_model_pick_reaches_the_tab_and_no_pick_reaches_it_as_nothing(workspace, monkeypatch):
+    """`create` carries the pair and interprets neither, which is the whole seam.
+
+    `agent-worktree.py` has no opinion about models: it hands `open_agent` the same
+    `Launch` every other launcher does, so the flags a tab opens with are decided in one
+    place for the whole repo. The second half is the one a regression reaches first -- a
+    `new` with no pickers in front of it must still open exactly the session it opened
+    before any of this existed.
+    """
+    opened = {}
+    monkeypatch.setattr(
+        agent_worktree.agent_tabs,
+        "open_agent",
+        lambda launch, box, branch, runner, **_k: opened.update(launch=launch) or 0,
+    )
+    chosen = agent_worktree.agent_models.Launch.parse("claude", "claude:claude-sonnet-5", "low")
+    agent_worktree.create("devkit", workspace, "t", "main", chosen, FakeRun())
+    assert opened["launch"].flags() == ["--model", "claude-sonnet-5", "--effort", "low"]
+
+    agent_worktree.create("devkit", workspace, "t", "main", CLAUDE, FakeRun())
+    assert opened["launch"].flags() == []
+
+
 def test_a_blank_topic_names_the_branch_after_the_checkout(workspace, monkeypatch):
-    monkeypatch.setattr(agent_worktree.agent_box, "open_agent", lambda *a, **k: 0)
+    monkeypatch.setattr(agent_worktree.agent_tabs, "open_agent", lambda *a, **k: 0)
     run = FakeRun()
-    agent_worktree.create("devkit", workspace, "", "main", "none", run)
+    agent_worktree.create("devkit", workspace, "", "main", NONE, run)
     assert run.git_args()[1][4].startswith("agent/devkit-")
 
 
@@ -279,20 +309,18 @@ def test_a_base_origin_does_not_have_is_refused_before_anything_is_cut(workspace
         lambda _path: fake_git({}, default=(1, "")),
     )
     run = FakeRun()
-    assert agent_worktree.create("devkit", workspace, "topic", "nope", "claude", run) == 2
+    assert agent_worktree.create("devkit", workspace, "topic", "nope", CLAUDE, run) == 2
     assert not [call for call in run.git_args() if call[:2] == ["worktree", "add"]]
 
 
 def test_no_agent_is_opened_when_the_worktree_was_not_cut(workspace, monkeypatch):
     """A tab in a directory that does not exist is worse than no tab."""
     monkeypatch.setattr(
-        agent_worktree.agent_box,
+        agent_worktree.agent_tabs,
         "open_agent",
         lambda *a, **k: pytest.fail("opened an agent in a worktree that was never cut"),
     )
-    assert (
-        agent_worktree.create("devkit", workspace, "topic", "main", "claude", FakeRun([0, 1])) == 1
-    )
+    assert agent_worktree.create("devkit", workspace, "topic", "main", CLAUDE, FakeRun([0, 1])) == 1
 
 
 # --- destroying one ------------------------------------------------------------------

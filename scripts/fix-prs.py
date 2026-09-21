@@ -30,9 +30,11 @@ box's lease and lifecycle with `worktree.py`. This task creates no boxes or port
 `scripts/agent_worktrees.py` owns `holder`, `tree_name` and the `add` argv.
 
 **Three agent modes.** `claude` and `codex` each open a Windows Terminal tab, the one
-`agent-box.py` opens; `claude-bg` is `claude --bg`, read back with `claude attach` /
+`agent_tabs.py` opens; `claude-bg` is `claude --bg`, read back with `claude attach` /
 `claude logs`. There is no `codex-bg`: `codex exec` streams to the terminal it was
-started in and hands back nothing to attach to.
+started in and hands back nothing to attach to. Which model and effort a mode opens at
+rides along in the same `agent_models.Launch`, and is the picker's answer, never this
+module's guess.
 
 **Click-only, by decision.** Nothing schedules this. A session is paid for, and a
 dispatch loop that spent one in the background on a failure nobody was going to look
@@ -48,15 +50,14 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
-import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import adoption_prs
+import agent_models
+import agent_tabs
 import agent_worktrees as aw
 import devkit_project
 import fix_plan
@@ -74,15 +75,7 @@ import worktree
 # path while asserting against a stub.
 import broken_pr_menu as menu
 
-# `agent-box.py` is hyphenated, so it cannot be a plain import. Loaded by path for the
-# one thing worth sharing rather than copying: how a tab's command line is built and
-# which window it lands in. `worktree` above is imported normally on purpose -- see
-# the note on the same pair of inserts in `agent-box.py`.
-from _loader import load_by_path
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-agent_box = load_by_path("agent_box", REPO_ROOT / "scripts" / "agent-box.py")
 
 # The agent modes the task offers. The value is what reaches `--agent`; the mapping is
 # to how the session is opened, which is the whole of the difference between them.
@@ -110,7 +103,7 @@ def tab_safe(text: str) -> str:
 
     A newline ends `wt`'s command outright, and there is no escape for one, so the
     prompt is flattened rather than quoted. Semicolons are *not* touched here:
-    `agent_box.wt_argv` escapes them for every string that reaches a tab, which it has
+    `agent_tabs.wt_argv` escapes them for every string that reaches a tab, which it has
     to do anyway for the kill switch's own `;` that this function can never see, and two
     owners for one hazard is how the prefix went unescaped in the first place.
     """
@@ -225,56 +218,23 @@ def cut_fresh_tree(
 # --- opening the session ----------------------------------------------------------
 
 
-def background_argv(cli: str, prompt: str) -> list[str]:
-    """`claude --bg <prompt>`, as an argv rather than a command line.
-
-    No shell here, so no quoting: the prompt is one argument. That is the one thing the
-    background mode has strictly better than the tab, and it is why `tab_safe` is applied
-    to the prompt anyway -- the two modes must hand the agent the same words, or a report
-    about one says nothing about the other.
-    """
-    return [cli, "--bg", prompt]
-
-
-def launch_background(
-    cli: str, tree: Path, prompt: str, hooks_off: bool, runner=subprocess.run
-) -> int:
-    """Start a detached session and print the id that reads it back."""
-    exe = shutil.which(cli)
-    if not exe:
-        print(f"fix-prs: {cli} is not on PATH; run this yourself:\n  cd {tree}\n  {cli} --bg ...")
-        return EXIT_FAILED
-    env = dict(os.environ)
-    if hooks_off:
-        env[agent_box.harness_switch.HOOKS_OFF_ENV] = agent_box.harness_switch.HOOKS_OFF_VALUE
-    done = runner(
-        background_argv(exe, prompt), cwd=str(tree), capture_output=True, text=True, env=env
-    )
-    sys.stdout.write(done.stdout or "")
-    sys.stderr.write(done.stderr or "")
-    if done.returncode != 0:
-        return EXIT_FAILED
-    print("  read it back with `claude agents`, `claude logs <id>`, `claude attach <id>`")
-    return EXIT_OK
-
-
 def open_session(
-    mode: str, tree: Path, branch: str, prompt: str, title: str, runner=subprocess.run
+    launch: agent_models.Launch,
+    tree: Path,
+    branch: str,
+    prompt: str,
+    title: str,
+    runner=subprocess.run,
 ) -> int:
     """The one place a mode becomes a tab or a background session."""
-    cli, how = AGENT_MODES[mode]
-    if how == BACKGROUND:
-        return launch_background(
-            cli, tree, prompt, agent_box.harness_switch.hooks_are_off(), runner
-        )
-    return agent_box.open_agent(cli, tree, branch, runner, prompt=prompt, title=title)
+    if AGENT_MODES[launch.agent][1] == BACKGROUND:
+        off = agent_tabs.harness_switch.hooks_are_off()
+        return agent_tabs.launch_background(launch, tree, prompt, off, runner)
+    return agent_tabs.open_agent(launch, tree, branch, runner, prompt=prompt, title=title)
 
 
 def run_one(
-    pick: menu.Pick,
-    workspace: Path,
-    mode: str,
-    runner=subprocess.run,
+    pick: menu.Pick, workspace: Path, launch: agent_models.Launch, runner=subprocess.run
 ) -> int:
     """One hand-picked PR: read it live, gather its evidence, send it the planned way.
 
@@ -313,10 +273,12 @@ def run_one(
         gate_evidence.pr_failure(pick.project, pr),
         gate_evidence.evidence_root(workspace),
     )
-    return dispatch_pr(failure, root, mode, runner)
+    return dispatch_pr(failure, root, launch, runner)
 
 
-def run(picks: list[menu.Pick], workspace: Path, mode: str, runner=subprocess.run) -> int:
+def run(
+    picks: list[menu.Pick], workspace: Path, launch: agent_models.Launch, runner=subprocess.run
+) -> int:
     """Every picked PR in turn. The worst exit code, so one failure is still reported.
 
     In turn rather than at once: several picks are usually several PRs of the *same*
@@ -326,14 +288,16 @@ def run(picks: list[menu.Pick], workspace: Path, mode: str, runner=subprocess.ru
     """
     worst = EXIT_OK
     for pick in picks:
-        worst = max(worst, run_one(pick, workspace, mode, runner))
+        worst = max(worst, run_one(pick, workspace, launch, runner))
     return worst
 
 
 # --- the planned path ---------------------------------------------------------------
 
 
-def dispatch_pr(failure: fix_plan.Failure, root: Path, mode: str, runner=subprocess.run) -> int:
+def dispatch_pr(
+    failure: fix_plan.Failure, root: Path, launch: agent_models.Launch, runner=subprocess.run
+) -> int:
     """A planned PR: its own head branch, the gate's logs beside it, the plan's prompt."""
     project_dir = root / failure.project
     name = f"#{failure.number}" if failure.number else failure.head
@@ -349,11 +313,11 @@ def dispatch_pr(failure: fix_plan.Failure, root: Path, mode: str, runner=subproc
     gate_evidence.place(failure, tree)
     print(f"  worktree {tree}")
     prompt = tab_safe(fix_prompts.pr_prompt(failure))
-    return open_session(mode, tree, failure.head, prompt, f"{failure.project} {name}", runner)
+    return open_session(launch, tree, failure.head, prompt, f"{failure.project} {name}", runner)
 
 
 def dispatch_fresh(
-    decision: fix_plan.Decision, root: Path, mode: str, runner=subprocess.run
+    decision: fix_plan.Decision, root: Path, launch: agent_models.Launch, runner=subprocess.run
 ) -> int:
     """A nightly, or a vendored failure shared across consumers: a fresh branch."""
     first = decision.failures[0]
@@ -379,10 +343,16 @@ def dispatch_fresh(
         prompt, title = fix_prompts.branch_prompt(first, branch), f"{project} {first.base}"
     else:
         prompt, title = fix_prompts.nightly_prompt(first, branch), f"{project} {first.workflow}"
-    return open_session(mode, tree, branch, tab_safe(prompt), title, runner)
+    return open_session(launch, tree, branch, tab_safe(prompt), title, runner)
 
 
-def run_plan(workspace: Path, mode: str, dry_run: bool, redo: bool, runner=subprocess.run) -> int:
+def run_plan(
+    workspace: Path,
+    launch: agent_models.Launch,
+    dry_run: bool,
+    redo: bool,
+    runner=subprocess.run,
+) -> int:
     """Scan, read the evidence, plan, print the plan, then send what is new.
 
     The ledger is written only for a dispatch that opened: a session that failed to
@@ -407,9 +377,9 @@ def run_plan(workspace: Path, mode: str, dry_run: bool, redo: bool, runner=subpr
         first = decision.failures[0]
         on_branch = first.kind in (fix_plan.PR, fix_plan.COMMIT)
         if decision.action in (fix_plan.DISPATCH, fix_plan.RESOLVE) and on_branch:
-            code = dispatch_pr(first, root, mode, runner)
+            code = dispatch_pr(first, root, launch, runner)
         else:
-            code = dispatch_fresh(decision, root, mode, runner)
+            code = dispatch_fresh(decision, root, launch, runner)
         if code == EXIT_OK:
             fix_plan.record(ledger_path, fix_plan.decision_key(decision), decision.note)
         worst = max(worst, code)
@@ -454,6 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--list", action="store_true", help="print the broken PRs and stop")
     parser.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
+    agent_models.add_arguments(parser)
     return parser
 
 
@@ -477,11 +448,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.list:
             print(render_scan(menu.scan(workspace)))
             return EXIT_OK
+        launch = agent_models.Launch.parse(args.agent, args.model, args.effort)
         tokens = menu.split_picks(args.picks)
         if not tokens:
-            return run_plan(workspace, args.agent, args.dry_run, args.redo)
+            return run_plan(workspace, launch, args.dry_run, args.redo)
         picks = [menu.parse_pick(token) for token in tokens]
-        return run(picks, workspace, args.agent)
+        return run(picks, workspace, launch)
     except (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError) as exc:
         print(f"fix-prs: {exc}", file=sys.stderr)
         return EXIT_USAGE

@@ -100,7 +100,11 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fix_pass,
         "dispatch",
-        lambda decision, root, agent: table["dispatched"].append((decision.action, agent)) or 0,
+        lambda decision, root, agent, options=None: (
+            table["dispatched"].append((decision.action, agent))
+            or table.update(opened=options)
+            or 0
+        ),
     )
     monkeypatch.setattr(fix_pass, "merge_green_adoptions", lambda root, projects: table["merged"])
     monkeypatch.setattr(fix_pass, "REPO_ROOT", tmp_path / "devkit")
@@ -284,7 +288,7 @@ def test_a_refused_commit_is_a_failure_the_pass_sends_at_the_same_worktree(
 
 def test_a_session_that_failed_to_open_is_the_exit_code_and_not_recorded(world, monkeypatch):
     world["failures"] = [failure()]
-    monkeypatch.setattr(fix_pass, "dispatch", lambda *a: 1)
+    monkeypatch.setattr(fix_pass, "dispatch", lambda *a, **k: 1)
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 1
     assert (
         fix_plan.read_ledger(
@@ -354,12 +358,12 @@ def test_dispatch_routes_a_branch_to_the_pr_path_and_the_rest_to_a_fresh_one(mon
     monkeypatch.setattr(
         fix_pass.fix_prs,
         "dispatch_pr",
-        lambda f, root, agent, runner: seen.append(("pr", runner)) or 0,
+        lambda f, root, agent, runner, options=None: seen.append(("pr", runner)) or 0,
     )
     monkeypatch.setattr(
         fix_pass.fix_prs,
         "dispatch_fresh",
-        lambda d, root, agent, runner: seen.append(("fresh", runner)) or 0,
+        lambda d, root, agent, runner, options=None: seen.append(("fresh", runner)) or 0,
     )
     fix_pass.dispatch(fix_plan.Decision(fix_plan.RESOLVE, "n", (failure(),)), tmp_path, "claude-bg")
     fix_pass.dispatch(
@@ -425,7 +429,9 @@ def test_the_cli_reads_the_switch_from_the_workspace_and_forces_the_background_a
     workspace = tmp_path / "alex.code-workspace"
     workspace.write_text('{"settings": {"devkit.fixPass": "plan"}}', encoding="utf-8")
     seen = []
-    monkeypatch.setattr(fix_pass, "run", lambda ws, mode, agent: seen.append((mode, agent)) or 0)
+    monkeypatch.setattr(
+        fix_pass, "run", lambda ws, mode, launch, **k: seen.append((mode, launch.agent)) or 0
+    )
     assert fix_pass.main(["--scheduled", "--agent", "codex", "--workspace", str(workspace)]) == 0
     assert (
         fix_pass.main(["--mode", "dispatch", "--agent", "codex", "--workspace", str(workspace)])
@@ -455,7 +461,7 @@ def test_a_crash_is_written_to_the_record_before_the_traceback(world, monkeypatc
     """The first real dispatch died on a TypeError and the artifact still described the
     previous pass; a crash is the one outcome the record must not miss."""
 
-    def boom(ws, mode, agent):
+    def boom(ws, mode, launch, **_kwargs):
         raise TypeError("run_quiet() got an unexpected keyword argument 'check'")
 
     monkeypatch.setattr(fix_pass, "run", boom)

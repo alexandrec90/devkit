@@ -103,7 +103,6 @@ scripts/report-workflow-failure.py::run_facts
 scripts/report-workflow-failure.py::stopped_body
 scripts/report-workflow-failure.py::sweep
 scripts/resume-sessions.py::describe
-scripts/resume-sessions.py::find_terminal
 scripts/resume-sessions.py::resume_args
 scripts/schedule_health.py::virtualenv_interpreter
 scripts/ship.py::backoff_delays

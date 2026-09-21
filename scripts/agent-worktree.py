@@ -28,7 +28,7 @@ provisioning and no reaper.
 `templates/features/frontend/frontend/src/worktreePort.ts`; its docstring owns the wiring
 and collision handling. Existing projects need to adopt it themselves. This command
 does not configure their server or allocate a port lease.
-The one thing shared is how a terminal tab is opened, which is `agent_box.open_agent` --
+The one thing shared is how a terminal tab is opened, which is `agent_tabs.open_agent` --
 two copies of that would be two answers to "which window does the agent open in".
 
 The menus are live, and there is no file under them. Both are `shellCommand.execute`
@@ -61,7 +61,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+import agent_models
+import agent_tabs
 import agent_worktrees as aw
 import devkit_project
 import picker_rows
@@ -70,14 +71,6 @@ import sweep
 import task_branch as tb
 import task_input
 import worktree
-
-# `agent-box.py` is hyphenated, so it cannot be a plain import. Loaded by path for the
-# one thing worth sharing rather than copying -- see the module docstring.
-from _loader import load_by_path
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
-agent_box = load_by_path("agent_box", REPO_ROOT / "scripts" / "agent-box.py")
 
 # How many checkouts `scan` reads at once. A worktree scan is three `git` calls per
 # checkout and one more per worktree found, which is seconds in a row; the picker runs
@@ -222,7 +215,9 @@ def scan(
     )
 
 
-def create(project: str, workspace: Path, slug: str, base: str, agent: str, runner) -> int:
+def create(
+    project: str, workspace: Path, slug: str, base: str, launch: agent_models.Launch, runner
+) -> int:
     """Cut the branch and the worktree, then hand it to the agent.
 
     `--no-track` and a fetch first, both copied from `worktree.spawn_plan` and for its
@@ -263,7 +258,7 @@ def create(project: str, workspace: Path, slug: str, base: str, agent: str, runn
         print("agent-worktree: the worktree was not cut; nothing to open", file=sys.stderr)
         return EXIT_FAILED
     print(f"{branch} off origin/{ref}\n  {path}")
-    return agent_box.open_agent(agent, path, branch, runner)
+    return agent_tabs.open_agent(launch, path, branch, runner)
 
 
 def remove_one(project: str, source: Path, tree: aw.Tree, forced: bool, runner) -> int:
@@ -332,6 +327,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--slug", default="", help="what the branch is about; blank names it after the project"
     )
     new.add_argument("--agent", default="claude", choices=AGENTS)
+    # `remove` takes neither: destroying a worktree opens no session.
+    agent_models.add_arguments(new)
 
     gone = sub.add_parser("remove", help="destroy the ticked worktrees")
     gone.add_argument("--picks", default="", help="ticked rows joined by a space")
@@ -481,7 +478,8 @@ def main(argv: list[str] | None = None, runner=subprocess.run) -> int:
             if strayed:
                 print(stray_report(strayed, "a base branch"), file=sys.stderr)
                 return EXIT_USAGE
-            return create(pick[0], workspace, args.slug, pick[1], args.agent, runner)
+            launch = agent_models.Launch.parse(args.agent, args.model, args.effort)
+            return create(pick[0], workspace, args.slug, pick[1], launch, runner)
         picks = [p for p in (aw.parse_pick(t) for t in aw.split_picks(args.picks)) if p]
         if not picks:
             print("agent-worktree: nothing ticked -- nothing to do")
