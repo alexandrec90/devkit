@@ -645,10 +645,15 @@ def test_the_fix_names_a_forward_slash_path_on_every_platform(tmp_path):
 def toolchain(**over):
     """A fully-provisioned workstation, minus whatever the caller overrides.
 
-    The extension reporter is injected rather than left to its default because the
-    default reads the machine running the tests -- which would make every assertion here
-    depend on what its VS Code happens to have installed."""
-    args = {"which": lambda _n: "/usr/bin/uv", "git": lambda *a: "someone", "extensions": list}
+    The extension and Codex reporters are injected rather than left to their defaults
+    because both read the machine running the tests -- which would make every assertion
+    here depend on what its VS Code has installed and how its `CODEX_HOME` is set up."""
+    args = {
+        "which": lambda _n: "/usr/bin/uv",
+        "git": lambda *a: "someone",
+        "extensions": list,
+        "codex": list,
+    }
     return ws.toolchain_lines(**{**args, **over})
 
 
@@ -682,12 +687,21 @@ def test_a_missing_vs_code_extension_joins_the_other_prerequisites():
     assert toolchain(extensions=lambda: ["no such extension"]) == ["no such extension"]
 
 
-def test_the_extension_reporter_defaults_to_the_real_one():
-    """An injected default that nothing wires up in production is a test passing alone."""
+def test_the_injected_reporters_default_to_the_real_ones():
+    """An injected default that nothing wires up in production is a test passing alone.
+    Both reporters read this machine, so what is asserted is that the wiring reaches
+    them -- not what they find here."""
     assert ws.vscode_extensions.report_lines is not None
+    assert ws.codex_context.report_lines is not None
     assert ws.toolchain_lines(which=lambda _n: "/usr/bin/uv", git=lambda *a: "someone") == (
-        ws.vscode_extensions.report_lines()
+        ws.vscode_extensions.report_lines() + ws.codex_context.report_lines()
     )
+
+
+def test_a_codex_that_cannot_read_the_rules_joins_the_other_prerequisites():
+    """Same category and the same reason as the three above -- no symptom at the moment
+    it is wrong. `codex_context.py` owns which files decide it; this is the wiring."""
+    assert toolchain(codex=lambda: ["no rule bridge"]) == ["no rule bridge"]
 
 
 @needs_live_workspace

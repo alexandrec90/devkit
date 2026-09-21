@@ -573,7 +573,10 @@ explicitly and asks only which agent. One pass, in order:
    signature shared across consumers, devkit's own default branch, an open backlog on
    the harness-defect ledger (`scripts/harness_triage.py`, the `/triage-harness`
    sweep's reader), a release still being adopted — one devkit session gets the whole
-   set and every project fixer is held, and the record says so.
+   set and every project fixer is held, and the record says so. A harness PR that is
+   merely behind its base or conflicted is the exception: an update is a GitHub call and
+   a resolver needs the PR's own head branch, so each goes as itself, ahead of the
+   devkit session, rather than into a fresh branch that could never land on it.
 4. **Then projects**, conflicts first, each under the dispatch ledger and a daily cap.
 5. **Merge green adoption PRs**, and nothing else. Every other green PR waits for you.
 
@@ -593,6 +596,10 @@ what the scheduled job does while the switch says `plan`. What each dispatch loo
 - **A failing scheduled workflow** gets a fresh branch off the default branch in that
   project, the run's logs, and a prompt that ends with the ship skill; the issue closes
   itself when the workflow next passes.
+- **A red PR that is behind its base** is updated, not fixed: `gh pr update-branch`,
+  no session, and the pass reads the new run next time. Its red may already be fixed
+  on the base, and a session sent at it can only merge the base in. A PR the update
+  cannot reach — a conflict — goes to the resolver as before.
 - **A red default branch** — a push that landed red — gets a fresh branch off that base
   in its own project with the run's logs; devkit's is the harness itself, and goes to the
   one devkit session with everything else harness-shaped.
@@ -1370,6 +1377,13 @@ Repository skills still live at `.agents/skills/`, while Codex hooks live at
 unscoped rules plus rules whose `paths` match the files being edited. The repository's
 `CLAUDE.md` remains the rule index; copying rule bodies into `AGENTS.md` would create a
 second instruction tree that can drift.
+
+**Both of those files are machine-local, so nothing in this repository can assert
+them** — and on 2026-09-18 a session found `~/.codex/AGENTS.md` holding the no-hooks
+policy and no bridge at all, with this paragraph still claiming otherwise and nothing
+anywhere red. `scripts/codex_context.py` is the check that would have said so:
+`workspace-status.py` reports a missing fallback setting or a lost bridge beside the
+other workstation prerequisites, and stays silent on a machine with no `CODEX_HOME`.
 
 `sync-codex-context.py` mirrors only `.claude/skills/` to `.agents/skills/` and invokes
 `sync-codex-hooks.py` to regenerate `.codex/hooks.json` from the `settings.json` hooks

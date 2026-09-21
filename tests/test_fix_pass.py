@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -151,7 +152,9 @@ def test_dispatch_ships_intents_sends_fixers_records_them_and_merges_adoptions(w
     ledger = fix_plan.read_ledger(
         fix_pass.worktree.boxes_root(world["workspace"].parent) / fix_plan.LEDGER_NAME
     )
-    assert list(ledger) == [fix_plan.failure_key(failure())]
+    assert list(ledger) == [
+        fix_plan.decision_key(fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),)))
+    ]
     text = artifact(world)
     assert "sent     carameli #412 -- dispatch" in text
     assert "merged   carameli #9" in text
@@ -296,6 +299,60 @@ def test_a_session_that_failed_to_open_is_the_exit_code_and_not_recorded(world, 
     assert "FAILED to open" in artifact(world)
 
 
+def test_an_update_is_one_gh_call_and_no_session(monkeypatch, tmp_path):
+    calls = []
+
+    def gh_for(project_dir):
+        def gh(*args):
+            calls.append((project_dir.name, args))
+            code = 0 if args[2] == "379" else 1
+            return subprocess.CompletedProcess(args, code, "", "GraphQL: merge conflict")
+
+        return gh
+
+    monkeypatch.setattr(fix_pass.sweep, "gh_for", gh_for)
+    monkeypatch.setattr(fix_pass.fix_prs, "dispatch_pr", lambda *a: pytest.fail("no session"))
+    monkeypatch.setattr(fix_pass.fix_prs, "dispatch_fresh", lambda *a: pytest.fail("no session"))
+    behind = failure(number=379, behind=True)
+    assert (
+        fix_pass.dispatch(fix_plan.Decision(fix_plan.UPDATE, "n", (behind,)), tmp_path, "claude")
+        == 0
+    )
+    assert calls == [("carameli", ("pr", "update-branch", "379"))]
+    stuck = failure(number=381, behind=True)
+    assert fix_pass.update_branch(stuck, tmp_path) == fix_pass.EXIT_FAILED, (
+        "GitHub refuses to update a conflicted branch; the next pass reads it as a conflict"
+    )
+
+
+def test_plan_mode_says_an_update_would_be_an_update(world):
+    world["failures"] = [failure(behind=True)]
+    fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW)
+    assert "carameli #412 -- would update the branch" in artifact(world)
+
+
+def test_send_all_records_only_what_opened_and_caps_the_rest(world, tmp_path):
+    ledger_path = tmp_path / "dispatch.json"
+    go = [
+        fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=1),)),
+        fix_plan.Decision(fix_plan.UPDATE, "n", (failure(number=2, behind=True),)),
+    ]
+    sent, capped, worst = fix_pass.send_all(
+        go, ledger_path, tmp_path, fix_cycle.DISPATCH, "claude", NOW
+    )
+    assert worst == 0 and capped == []
+    assert sent == ["carameli #1 -- dispatch", "carameli #2 -- update"]
+    assert len(fix_plan.read_ledger(ledger_path)) == 2
+    sent, capped, worst = fix_pass.send_all(
+        go, ledger_path, tmp_path, fix_cycle.DISPATCH, "claude", NOW
+    )
+    assert (
+        sent == []
+        and [why for _, why in capped]
+        == ["already dispatched at " + NOW.isoformat(timespec="seconds")] * 2
+    )
+
+
 def test_dispatch_routes_a_branch_to_the_pr_path_and_the_rest_to_a_fresh_one(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(
@@ -417,6 +474,20 @@ def test_the_artifact_is_written_under_logs(tmp_path):
     path = fix_pass.write_artifact("hello", tmp_path)
     assert path == tmp_path / "logs" / "fix-pass.log"
     assert path.read_text(encoding="utf-8") == "hello\n"
+
+
+def test_a_blocked_intent_is_said_and_never_shipped_in_any_mode(monkeypatch, tmp_path):
+    stuck = ship_intent.Intent(
+        "carameli", tmp_path, "master", "S", "B", blocked="master is the default branch"
+    )
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: [stuck])
+    monkeypatch.setattr(
+        fix_pass.ship_intent, "ship_one", lambda *a: pytest.fail("a blocked intent never ships")
+    )
+    lines, refused = fix_pass.ship_intents(tmp_path, ["carameli"], fix_cycle.DISPATCH)
+    assert refused == [] and len(lines) == 1
+    assert lines[0].startswith("carameli master -- NOT shipped: master is the default branch")
+    assert "agent-worktree.py new" in lines[0]
 
 
 def test_ship_intents_in_plan_mode_only_says_what_it_would_do(monkeypatch, tmp_path):

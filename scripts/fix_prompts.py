@@ -34,6 +34,18 @@ def _ids(sig: tuple[str, ...]) -> str:
     return ", ".join(entry for entry in sig if entry != CONFLICT) or "see the run"
 
 
+def _logs(failure: Failure) -> str:
+    """Where the evidence is -- and, when none came down, that none did.
+
+    Two sessions were told the logs were under `logs/gate/` and spent turns finding the
+    directory absent: the run had aged out, or uploaded nothing. Saying so is cheaper.
+    """
+    if failure.evidence:
+        return f"The gate's own logs are in {EVIDENCE_DIR}/ in this worktree -- read them first."
+    where = failure.url or "the run"
+    return f"No artifact came down from the run; read it at {where} first."
+
+
 def pr_prompt(failure: Failure) -> str:
     """One branch, in its own worktree: a conflict to resolve, a refused commit, or a red PR.
 
@@ -49,7 +61,8 @@ def pr_prompt(failure: Failure) -> str:
             f"origin/{failure.base}. This worktree is checked out on its head branch "
             f"{failure.head} with its upstream set, so a bare {vcs} push lands on the PR. "
             f"Merge origin/{failure.base} in, resolve the conflicts so that both sides' "
-            "intent survives, push, and stop: the gate runs on the push, and whatever it "
+            "intent survives, commit with the hooks running as they are (never "
+            "--no-verify), push, and stop: the gate runs on the push, and whatever it "
             f"says is the next pass's business, not this session's. {stop}"
         )
     if failure.kind == COMMIT:
@@ -62,8 +75,7 @@ def pr_prompt(failure: Failure) -> str:
         )
     return (
         f"PR #{failure.number} in {failure.project} is stuck: {failure.reason}. "
-        f"Failing: {_ids(failure.signature)}. The gate's own logs are in {EVIDENCE_DIR}/ "
-        "in this worktree -- read them before running anything. "
+        f"Failing: {_ids(failure.signature)}. {_logs(failure)} "
         f"This worktree is checked out on the PR head branch {failure.head} with its "
         f"upstream set, so a bare {vcs} push lands on the PR. "
         f"Merge origin/{failure.base} in, fix what the gate is failing on, run the "
@@ -89,7 +101,8 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
         f"{rows}. The fix belongs here in devkit, once -- in the vendored file, the "
         "test, or the template that generates the project-owned file it names -- not in "
         f"each consumer. Each failure's gate logs are under {EVIDENCE_DIR}/ in this "
-        "worktree, one directory per failure."
+        "worktree, one directory per failure that uploaded any; for the rest, read the "
+        "run at its URL."
         + (LEDGER_STEPS if any(f.kind == LEDGER for f in ordered) else "")
         + f" This worktree is on the fresh branch {branch} off the default branch; when "
         "the fix is green, ship it with the ship skill and say which of these it "
@@ -102,8 +115,8 @@ def branch_prompt(failure: Failure, branch: str) -> str:
     return (
         f"The {failure.workflow} workflow in {failure.project} is red on "
         f"origin/{failure.base} itself, at {failure.sha[:12] or 'its head'} ({failure.url}). "
-        f"Failing: {_ids(failure.signature)}. Its logs are in {EVIDENCE_DIR}/ in this "
-        f"worktree. This worktree is on the fresh branch {branch} off origin/{failure.base}, "
+        f"Failing: {_ids(failure.signature)}. {_logs(failure)} "
+        f"This worktree is on the fresh branch {branch} off origin/{failure.base}, "
         "so the failure reproduces here. Fix it, run the targeted tests and the linter, "
         "and ship it with the ship skill; every PR against this base is red until it lands. "
         "If it cannot be fixed, stop and say what is in the way."
@@ -115,8 +128,8 @@ def nightly_prompt(failure: Failure, branch: str) -> str:
     return (
         f"The {failure.workflow} workflow in {failure.project} is failing on "
         f"origin/{failure.base}; issue #{failure.number} ({failure.url}) tracks it. "
-        f"Failing: {_ids(failure.signature)}. Its logs are in {EVIDENCE_DIR}/ in this "
-        f"worktree. This worktree is on the fresh branch {branch} off "
+        f"Failing: {_ids(failure.signature)}. {_logs(failure)} "
+        f"This worktree is on the fresh branch {branch} off "
         f"origin/{failure.base}. Fix it, run the targeted tests and the linter, and ship "
         "it with the ship skill; the issue closes itself when the workflow next passes. "
         "If it cannot be fixed, stop and say what is in the way."

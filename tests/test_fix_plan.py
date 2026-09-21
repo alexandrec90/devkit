@@ -267,9 +267,14 @@ def test_an_upstream_decision_is_one_key_for_the_group():
     assert fix_plan.decision_key(repushed) != key
 
 
-def test_a_single_decision_is_keyed_as_its_failure():
+def test_a_single_decision_is_keyed_as_its_failure_under_the_action_taken():
+    """The action is in the key because the pass's decision can change while the failure
+    does not: devkit #381 was dispatched at its head sha under the wrong action, and the
+    corrected pass has to be able to send the resolver at that very sha."""
     decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
-    assert fix_plan.decision_key(decision) == fix_plan.failure_key(failure())
+    assert fix_plan.decision_key(decision).startswith(fix_plan.failure_key(failure()) + ":")
+    resolve = fix_plan.Decision(fix_plan.RESOLVE, "n", (failure(),))
+    assert fix_plan.decision_key(resolve) != fix_plan.decision_key(decision)
 
 
 def test_the_ledger_records_and_answers_the_second_click(tmp_path):
@@ -341,6 +346,24 @@ def red_main(**fields) -> fix_plan.Failure:
     }
     base.update(fields)
     return failure(**base)
+
+
+def test_a_pr_behind_its_base_is_updated_not_fixed_unless_it_conflicts():
+    """#379 was red on a pip-audit finding master had already fixed, and the session
+    sent at it did nothing but merge master in. A conflict still goes to the resolver:
+    GitHub cannot update a conflicted branch."""
+    behind = failure(number=1, head="agent/a", signature=("tests/t.py::a",), behind=True)
+    conflicted = failure(number=2, head="agent/b", signature=(fix_plan.CONFLICT,), behind=True)
+    plain = failure(number=3, head="agent/c", signature=("tests/t.py::a",))
+    decisions = fix_plan.plan([behind, conflicted, plain], "v0-11-23", PREFIXES)
+    assert actions(decisions) == [
+        (fix_plan.UPDATE, ["carameli#1"]),
+        (fix_plan.RESOLVE, ["carameli#2"]),
+        (fix_plan.DISPATCH, ["carameli#3"]),
+    ]
+    assert decisions[0].note.endswith("behind origin/main")
+    assert "sent" not in fix_plan.render(decisions, {}).splitlines()[0]
+    assert fix_plan.render(decisions, {}).splitlines()[0].startswith("update   carameli #1")
 
 
 def test_a_failure_is_named_by_its_pr_its_branch_or_its_default_branch():

@@ -151,13 +151,51 @@ def test_several_harness_decisions_fold_into_one_session():
     assert held == []
 
 
-def test_once_clean_project_fixers_go_with_conflicts_first():
+def test_a_conflicted_harness_pr_gets_its_resolver_rather_than_the_devkit_session():
+    """devkit #381 was a conflict, and the fold sent an upstream session at it: a fresh
+    branch off the default, told to fix the harness, with no way to land on the PR at
+    all. An action that names a branch operation on one PR cannot be folded into a
+    session that has no branch."""
+    conflicted = failure(project="devkit", number=381, signature=(fix_plan.CONFLICT,))
+    classes = fix_cycle.classify_all([conflicted])
+    harness = fix_cycle.harness_state(classes, True, [])
+    go, held = fix_cycle.phase([decision(fix_plan.RESOLVE, conflicted)], classes, harness)
+    assert not harness.clean
+    assert [d.action for d in go] == [fix_plan.RESOLVE]
+    assert go[0].failures == (conflicted,)
+    assert held == []
+
+
+def test_a_behind_harness_pr_is_updated_rather_than_folded():
+    """An `UPDATE` is a GitHub call against one PR, not a session; folding it spends an
+    agent on what a merge would have done for nothing."""
+    behind = failure(project="devkit", number=9, behind=True)
+    red = failure(project="devkit", number=10)
+    classes = fix_cycle.classify_all([behind, red])
+    go, held = fix_cycle.phase(
+        [decision(fix_plan.DISPATCH, red), decision(fix_plan.UPDATE, behind)],
+        classes,
+        fix_cycle.harness_state(classes, True, []),
+    )
+    assert [d.action for d in go] == [fix_plan.UPDATE, fix_plan.UPSTREAM]
+    assert go[1].failures == (red,)
+    assert held == []
+
+
+def test_once_clean_project_fixers_go_updates_first_then_conflicts():
+    """An update is free and may turn the PR green by itself; a conflict's gate cannot
+    run at all; a plain red gets its session last."""
     conflict = failure(number=1, signature=(fix_plan.CONFLICT,))
     red = failure(number=2)
-    decisions = [decision(fix_plan.DISPATCH, red), decision(fix_plan.RESOLVE, conflict)]
-    classes = fix_cycle.classify_all([red, conflict])
+    behind = failure(number=3, behind=True)
+    decisions = [
+        decision(fix_plan.DISPATCH, red),
+        decision(fix_plan.RESOLVE, conflict),
+        decision(fix_plan.UPDATE, behind),
+    ]
+    classes = fix_cycle.classify_all([red, conflict, behind])
     go, held = fix_cycle.phase(decisions, classes, fix_cycle.harness_state({}, True, []))
-    assert [d.action for d in go] == [fix_plan.RESOLVE, fix_plan.DISPATCH]
+    assert [d.action for d in go] == [fix_plan.UPDATE, fix_plan.RESOLVE, fix_plan.DISPATCH]
     assert held == []
 
 
@@ -213,6 +251,9 @@ def test_the_target_is_the_pr_the_branch_or_devkit():
     assert fix_cycle.target_of("pr:carameli:412:abc:deadbeef") == "pr:carameli:412"
     assert fix_cycle.target_of("commit:carameli:0:abc:deadbeef") == "commit:carameli:0"
     assert fix_cycle.target_of("upstream:3:deadbeef") == fix_cycle.DEVKIT
+    # The action the key ends in is a suffix, so two dispatches about one PR still
+    # draw on the same target's daily budget.
+    assert fix_cycle.target_of("pr:carameli:412:abc:deadbeef:resolve") == "pr:carameli:412"
 
 
 def test_a_target_past_its_daily_count_needs_a_human():

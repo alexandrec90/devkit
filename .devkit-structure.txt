@@ -70,7 +70,7 @@ definitions::scripts/devkit_project.py = 54
 definitions::scripts/docker-maint.py = 30
 definitions::scripts/hooks/harness_config.py = 32
 definitions::scripts/hooks/stop.py = 51
-definitions::scripts/hooks/structure_check.py = 43
+definitions::scripts/hooks/structure_check.py = 39
 definitions::scripts/hooks/structure_scan.py = 31
 definitions::scripts/instruction-budget.py = 26
 definitions::scripts/new-project.py = 28
@@ -98,7 +98,7 @@ file_lines::scripts/docker-maint.py = 790
 file_lines::scripts/hooks/enforce-capped-bash.py = 629
 file_lines::scripts/hooks/harness_config.py = 655
 file_lines::scripts/hooks/stop.py = 1110
-file_lines::scripts/hooks/structure_check.py = 1078
+file_lines::scripts/hooks/structure_check.py = 1014
 file_lines::scripts/hooks/structure_scan.py = 680
 file_lines::scripts/instruction-budget.py = 517
 file_lines::scripts/new-project.py = 873
@@ -110,9 +110,9 @@ file_lines::scripts/release-pipeline.py = 930
 file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/resume-sessions.py = 502
 file_lines::scripts/sweep.py = 1990
-file_lines::scripts/sync-devkit.py = 1865
+file_lines::scripts/sync-devkit.py = 1871
 file_lines::scripts/upgrade-project.py = 1164
-file_lines::scripts/workspace-status.py = 1079
+file_lines::scripts/workspace-status.py = 1086
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2330
 file_lines::scripts/worktree.py = 6177
@@ -177,6 +177,7 @@ function_params::scripts/worktree.py::resume_plan = 11
 function_params::scripts/worktree.py::spawn_plan = 14
 imports::scripts/preview-task.py = 22
 imports::scripts/preview-ui-host.py = 25
+imports::scripts/workspace-status.py = 21
 imports::scripts/worktree.py = 23
 nesting_depth::scripts/devkit_jsonc.py::blank_comments = 5
 nesting_depth::scripts/devkit_jsonc.py::drop_trailing_commas = 5
@@ -456,3 +457,16 @@ swallowed_errors::scripts/worktree.py = 1
 #   file_lines::scripts/devkit_project.py -> 1814
 #   file_lines::scripts/plug-projects.py -> 1013
 #   file_lines::scripts/workspace-status.py -> 1079
+
+# 2026-09-19  recorded: A /triage-harness sweep. Three modules move and one is cut in half, so what is recorded here is only the two the cut could not reach.
+#
+#   sync-devkit.py +6: two MANIFEST entries and the four-line note above them, for scripts/hooks/structure_baseline.py and its test. A manifest entry cannot live anywhere but the MANIFEST -- it IS the path list the drift check compares by -- and this is the sixth record saying so. What fills it was measured rather than assumed: of 1871 lines, 227 are the three literal path lists, 432 are docstrings and 325 are comments -- so 53% is data and prose a split would move without reducing, and the 71 definitions are the number to watch instead. The seam is the marker-block tier against the whole-file tier, and it moves a file listed inside itself, which is why six records have left it alone.
+#
+#   workspace-status.py +7 lines and +1 import: one import and a two-line call site for scripts/codex_context.py, plus five docstring lines naming the fourth workstation prerequisite. The check itself is a NEW module on the precedent the 2026-09-05 record set for vscode_extensions.py, so what lands here is the adapter and not the knowledge of which files decide whether Codex reads a repo's rules. imports 21 is a new key, not a raise, and it is the one import this change could not avoid.
+#
+#   structure_check.py is NOT recorded, and that is the point of the sweep. file_lines had been raised on three branches -- 1042, 1050, 1078 -- each note saying the split was its own change, which engineering.md calls a defect report rather than a raise. So the fourth is the split: the baseline-file tier (the format, the reader, the writer, the --record log) is now scripts/hooks/structure_baseline.py, and the judge drops to 1014 lines and 39 definitions -- both under their recorded numbers, which --tighten has already lowered. Nothing was recorded to land the defect that started this: --record wrote only the FIRST line of a multi-line reason as a comment and left the rest in the baseline as bare prose.
+#
+#   This reason is itself four paragraphs long because that fix is in it. Before it, every line below the first would have corrupted the file it is being written to.
+#   file_lines::scripts/sync-devkit.py -> 1871
+#   file_lines::scripts/workspace-status.py -> 1087
+#   imports::scripts/workspace-status.py -> 21

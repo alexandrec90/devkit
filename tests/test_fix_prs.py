@@ -563,7 +563,7 @@ def test_a_broken_pr_opens_a_tab_titled_for_the_pr_with_the_planned_prompt(
     assert code == 0
     assert opened["kwargs"]["title"] == "carameli #412"
     assert "#412" in opened["kwargs"]["prompt"]
-    assert fix_plan.EVIDENCE_DIR in opened["kwargs"]["prompt"]
+    assert "No artifact came down" in opened["kwargs"]["prompt"], "nothing was downloaded here"
     assert "\n" not in opened["kwargs"]["prompt"]
 
 
@@ -850,7 +850,9 @@ def test_a_click_sends_what_is_new_records_it_and_a_second_click_sends_nothing(
     )
     assert sent == ["pr carameli#412"]
     ledger = fix_plan.read_ledger(fix_prs.worktree.boxes_root(root) / fix_plan.LEDGER_NAME)
-    assert list(ledger) == [fix_plan.failure_key(failure())]
+    assert list(ledger) == [
+        fix_plan.decision_key(fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),)))
+    ]
 
     capsys.readouterr()
     assert (

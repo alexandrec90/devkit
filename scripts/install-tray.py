@@ -21,6 +21,17 @@ on its next run; the tray imported `tray.py` once at logon and holds it for the 
 so a change to the icon is invisible -- with no error anywhere -- until the process is
 replaced. The logon trigger's own answer is "log out", which is why this flag exists.
 
+**So `--check` asks whether the resident process is current, not only the
+registration.** Re-registering the same command line says nothing about the code the
+running tray imported, and the two questions came apart the first time they could: a
+tray started 2026-09-17 15:19 went on drawing an `Exit` row that had been deleted from
+`tray.py` at 16:46 the same day, while this installer's check reported "current" every
+morning until someone noticed on the 19th. It was answering a different question from
+the one being asked of it. It now also compares the scheduler's `Last Run Time` against
+every module in `TRAY_MODULES`, and `--yes` restarts a tray older than its own source --
+which is the half that makes the new answer something `installers.py maintain` repairs
+rather than repeats.
+
 Stdlib only, and every decision is an importable function tested in
 `tests/test_install_tray.py`.
 """
@@ -28,6 +39,7 @@ Stdlib only, and every decision is an importable function tested in
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import os
 import subprocess
 import sys
@@ -39,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
 import installer_cli
 import harness_state
+import schedule_health
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +73,26 @@ WINDOWS = os.name == "nt"
 NO_TIME_LIMIT = "PT0S"
 
 DEFAULT_POLL_SECONDS = 120
+
+# Every module the resident tray holds from logon to logout: `tray.py` and the siblings
+# it imports, transitively. All of them, not `tray.py` alone -- the icon's pixels are in
+# `tray_icon` and what counts as a problem is in `schedule_health`, so watching only the
+# file the task names would miss most of what a person edits when they change what the
+# tray shows. `tests/test_install_tray.py` walks the real import graph and holds this
+# tuple to it, because a sibling import nobody added here would reintroduce the exact
+# silence this mechanism exists to end.
+#
+# Module names, not filenames, and that is not cosmetic: `tests/test_scheduled_jobs.py`
+# reads every `*.py` literal in an installer as a script that installer *launches* and
+# demands console suppression of it. These are imported by the tray, launched by nobody.
+TRAY_MODULES = (
+    "tray",
+    "tray_icon",
+    "tray_state",
+    "schedule_health",
+    "devkit_schtasks",
+    "harness_state",
+)
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
 
@@ -173,6 +206,87 @@ def restart(schedule: Schedule, runner: Runner = run_command) -> tuple[bool, str
     return True, f"restarted {schedule.name}; it is running the tray as it is on disk now"
 
 
+def last_run_argv(name: str = TASK_NAME) -> list[str]:
+    """`schtasks`' verbose CSV for one task -- the row `last_started` reads."""
+    return ["schtasks", "/Query", "/TN", name, "/FO", "CSV", "/V"]
+
+
+def last_started(name: str, runner: Runner = run_command) -> _dt.datetime | None:
+    """When the scheduler last started this task, or None when it cannot say.
+
+    `Last Run Time`, not the process table. The tray is started by this task and by
+    nothing else, so the scheduler already holds the answer to the second -- it matched
+    `Get-Process`'s `StartTime` exactly on the machine this was written for -- and
+    reading it costs one more `schtasks`, where asking Windows for a process start time
+    means WMI: a subprocess and a parse of its own, for a worse answer (several
+    `pythonw.exe` are running, and which one is the tray is only knowable from the
+    command line the scheduler already knows).
+
+    The parse is `schedule_health`'s, locale traps and all, rather than a second reader
+    of the same CSV -- `parse_time` covers the product of Windows' short-date and
+    long-time settings, which is four formats and was a bug there before it was a
+    docstring.
+    """
+    result = runner(last_run_argv(name))
+    if result.returncode != 0:
+        return None
+    jobs = schedule_health.parse_tasks(result.stdout or "", prefix=name)
+    return jobs[0].last_run if jobs else None
+
+
+def stale_sources(
+    started: _dt.datetime | None,
+    scripts_dir: Path,
+    names: Sequence[str] = TRAY_MODULES,
+) -> list[str]:
+    """Which of the tray's modules have changed since the run now drawing the icon.
+
+    Takes module names and reports filenames, because the answer is read by a person in
+    a check message and `tray_icon.py` is what they will go and look at.
+
+    Both sides are naive local time: `schedule_health.parse_time` reads a local stamp
+    off `schtasks`, and `fromtimestamp` without a timezone returns one, so they compare
+    directly. Do not "fix" either into UTC alone.
+
+    **Empty when the scheduler cannot say when it started.** A task that has never run
+    is the logon trigger's business, and calling that stale would have `maintain` repair
+    it on every pass forever rather than once -- a check whose repair cannot clear it is
+    worse than the silence it replaced. A module that has gone missing is skipped for
+    the same reason: it is a broken checkout, which `checkout_refusal` reports, and no
+    restart fixes it.
+    """
+    if started is None:
+        return []
+    changed = []
+    for name in names:
+        source = scripts_dir / f"{name}.py"
+        try:
+            edited = _dt.datetime.fromtimestamp(source.stat().st_mtime)
+        except OSError:
+            continue
+        if edited > started:
+            changed.append(source.name)
+    return changed
+
+
+def stale_resident(schedule: Schedule, runner: Runner = run_command) -> list[str]:
+    """The tray's modules newer than the process drawing the icon. `[]` means current.
+
+    Read against the *registered* script's directory, which is the checkout the running
+    tray imported from -- by the time this is asked, `devkit_schtasks.run_check` has
+    already established that the registration is the one this checkout would write, so
+    the two are the same directory or the caller never got here.
+
+    **A stood-down tray is never stale.** `--off --job devkit-tray` is a standing
+    instruction not to be running one, and restarting it to pick up an edit would hand
+    the operator back the job they switched off -- the same reading `task_document`
+    gives the ledger when it registers the task disabled.
+    """
+    if schedule.name in harness_state.stood_down():
+        return []
+    return stale_sources(last_started(schedule.name, runner), Path(schedule.script).parent)
+
+
 def render_plan(schedule: Schedule, windows: bool = WINDOWS) -> str:
     """What `--yes` would do, in the words of whichever system is going to do it."""
     lines = [
@@ -199,24 +313,55 @@ def render_plan(schedule: Schedule, windows: bool = WINDOWS) -> str:
 
 
 def install(schedule: Schedule, runner: Runner = run_command) -> tuple[bool, str]:
-    """Register it. `(ok, message)`; POSIX is reported as unsupported rather than faked."""
+    """Register it, and replace a tray older than the modules on disk. `(ok, message)`;
+    POSIX is reported as unsupported rather than faked.
+
+    The restart is what makes `run_check`'s second answer repairable. `installers.py
+    maintain` repairs a stale check by running `--yes`, and registering alone would
+    leave the same process drawing the same stale icon -- so the check would report the
+    identical thing tomorrow, and every morning after, which is a pass that has learnt
+    to complain rather than to fix.
+    """
     if not WINDOWS:
         return False, "not a Windows machine -- there is no notification area to draw into"
     ok, message = devkit_schtasks.register(schedule.name, task_document(schedule), runner)
     if not ok:
         return False, message
-    return True, f"scheduled {schedule.name} at logon"
+    scheduled = f"scheduled {schedule.name} at logon"
+    if not stale_resident(schedule, runner):
+        return True, scheduled
+    restarted, note = restart(schedule, runner)
+    return restarted, f"{scheduled}; {note}"
 
 
 def run_check(schedule: Schedule, runner: Runner = run_command) -> tuple[int, str]:
-    """`(exit code, message)` for `--check`, per `devkit_schtasks.run_check`: the registered
-    task against the document `--yes` would register, so the two cannot disagree."""
+    """`(exit code, message)` for `--check`: the registration, and then the process.
+
+    The first question is `devkit_schtasks.run_check`'s -- the registered task against
+    the document `--yes` would register, so the two cannot disagree. The second is this
+    installer's alone, because only this job is resident: a registration that is exactly
+    right says nothing about the code the process started from it is still holding.
+    Drift in the registration wins when both are wrong, since re-registering is what
+    would fix it and the restart comes with that anyway.
+    """
     if not WINDOWS:
         return (
             devkit_schtasks.CHECK_CURRENT,
             "not a Windows machine -- nothing this installer can query",
         )
-    return devkit_schtasks.run_check(schedule.name, task_document(schedule), runner)
+    code, message = devkit_schtasks.run_check(schedule.name, task_document(schedule), runner)
+    if code != devkit_schtasks.CHECK_CURRENT:
+        return code, message
+    stale = stale_resident(schedule, runner)
+    if not stale:
+        return code, message
+    return (
+        devkit_schtasks.CHECK_STALE,
+        f"schedule: {schedule.name} is registered as this checkout would register it, "
+        f"but the tray drawing the icon started before {', '.join(stale)} changed, and a "
+        f"resident process holds the modules it imported at logon. Re-run with --yes to "
+        f"restart it.",
+    )
 
 
 def checkout_refusal(root: Path, apply: bool) -> str:

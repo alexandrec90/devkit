@@ -15,6 +15,9 @@ exists because every other job in the repo is a pass that finishes:
 
 from __future__ import annotations
 
+import ast
+import datetime as _dt
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -301,3 +304,204 @@ def test_build_parser_accepts_every_verb_and_the_apply_flag_with_them():
     assert parser.parse_args(["--uninstall", "--yes"]).uninstall is True
     assert parser.parse_args(["--check"]).check is True
     parser.parse_args([])
+
+
+# --- the resident half of --check -------------------------------------------
+#
+# A registration that is exactly right says nothing about the code the process started
+# from it is still holding. The tray that went on drawing a deleted `Exit` row for two
+# days was registered perfectly the whole time, and this installer said so every morning.
+
+
+def csv_row(last_run: str, name: str = "\\" + installer.TASK_NAME) -> str:
+    """One `schtasks /FO CSV /V` task, with the columns `parse_tasks` reads."""
+    columns = (
+        "TaskName,Next Run Time,Status,Last Run Time,Last Result,Task To Run,Scheduled Task State"
+    )
+    return f'{columns}\n"{name}","N/A","Running","{last_run}","0","pythonw.exe","Enabled"\n'
+
+
+def scheduler(document: str = "", last_run: str = "2026-09-17 15:19:33", xml_code: int = 0):
+    """A runner answering both questions `run_check` asks -- `/XML` with the registered
+    document, `/FO CSV` with the row carrying `Last Run Time`."""
+
+    def runner(argv):
+        if "/XML" in argv:
+            return completed(document, xml_code)
+        return completed(csv_row(last_run))
+
+    return runner
+
+
+def tray_schedule(scripts: Path) -> object:
+    return installer.Schedule(
+        installer.TASK_NAME, r"C:\py\pythonw.exe", str(scripts / "tray.py"), 120
+    )
+
+
+def touch(source: Path, when: _dt.datetime) -> None:
+    os.utime(source, (when.timestamp(), when.timestamp()))
+
+
+@pytest.fixture
+def resident(monkeypatch, tmp_path):
+    """A checkout whose tray modules are all older than the run that is drawing them."""
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    monkeypatch.setattr(installer.harness_state, "stood_down", lambda: set())
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in installer.TRAY_MODULES:
+        source = scripts / f"{name}.py"
+        source.write_text("", encoding="utf-8")
+        touch(source, _dt.datetime(2026, 9, 17, 9, 0))
+    return scripts
+
+
+def test_the_last_run_query_asks_about_one_task_in_parseable_form():
+    argv = installer.last_run_argv()
+    assert argv[argv.index("/TN") + 1] == installer.TASK_NAME
+    assert argv[argv.index("/FO") + 1] == "CSV" and "/V" in argv
+
+
+def test_last_started_reads_the_scheduler_rather_than_the_process_table():
+    started = installer.last_started(
+        installer.TASK_NAME, runner=lambda argv: completed(csv_row("2026-09-17 15:19:33"))
+    )
+    assert started == _dt.datetime(2026, 9, 17, 15, 19, 33)
+
+
+def test_last_started_is_unknown_when_the_scheduler_will_not_answer():
+    assert installer.last_started(installer.TASK_NAME, lambda argv: completed(returncode=1)) is None
+    assert installer.last_started(installer.TASK_NAME, lambda argv: completed("")) is None
+
+
+def test_a_module_edited_since_the_run_is_stale(resident):
+    touch(resident / "tray_icon.py", _dt.datetime(2026, 9, 18, 11, 0))
+    started = _dt.datetime(2026, 9, 17, 15, 19, 33)
+    assert installer.stale_sources(started, resident) == ["tray_icon.py"]
+
+
+def test_a_checkout_older_than_the_run_is_not_stale(resident):
+    assert installer.stale_sources(_dt.datetime(2026, 9, 17, 15, 19, 33), resident) == []
+
+
+def test_a_tray_that_has_never_run_is_not_stale(resident):
+    """A repair that cannot clear the condition it reports is worse than the silence it
+    replaced -- `maintain` would restart the task on every pass, forever."""
+    touch(resident / "tray.py", _dt.datetime(2026, 9, 18, 11, 0))
+    assert installer.stale_sources(None, resident) == []
+
+
+def test_a_missing_module_is_not_reported_as_an_edit(resident):
+    (resident / "tray_state.py").unlink()
+    assert installer.stale_sources(_dt.datetime(2026, 9, 17, 15, 19, 33), resident) == []
+
+
+def test_a_stood_down_tray_is_never_stale(resident, monkeypatch):
+    """Restarting it to pick up an edit hands back the job the operator switched off."""
+    monkeypatch.setattr(installer.harness_state, "stood_down", lambda: {installer.TASK_NAME})
+    touch(resident / "tray.py", _dt.datetime(2026, 9, 18, 11, 0))
+    assert installer.stale_resident(tray_schedule(resident), runner=scheduler()) == []
+
+
+def test_check_is_red_when_the_running_tray_predates_its_own_source(resident):
+    touch(resident / "tray.py", _dt.datetime(2026, 9, 17, 16, 46, 41))
+    schedule = tray_schedule(resident)
+    code, message = installer.run_check(
+        schedule, runner=scheduler(installer.task_document(schedule))
+    )
+    assert code == 1
+    assert "tray.py" in message and "--yes" in message
+
+
+def test_check_stays_green_when_the_resident_tray_is_current(resident):
+    schedule = tray_schedule(resident)
+    code, message = installer.run_check(
+        schedule, runner=scheduler(installer.task_document(schedule))
+    )
+    assert code == 0 and "registered as this checkout would register it" in message
+
+
+def test_registration_drift_is_reported_ahead_of_a_stale_process(resident):
+    """Both wrong is still one repair: re-registering, which brings the restart with it."""
+    touch(resident / "tray.py", _dt.datetime(2026, 9, 18, 11, 0))
+    moved = installer.task_document(
+        installer.Schedule(installer.TASK_NAME, r"C:\py\pythonw.exe", r"C:\old\tray.py", 120)
+    )
+    code, message = installer.run_check(tray_schedule(resident), runner=scheduler(moved))
+    assert code == 1 and r"C:\old" in message
+
+
+def test_installing_restarts_a_tray_older_than_its_source(resident, monkeypatch):
+    """The half that makes the new answer repairable: `maintain` repairs a stale check by
+    running `--yes`, and registering alone changes nothing the check was reporting."""
+    touch(resident / "tray.py", _dt.datetime(2026, 9, 18, 11, 0))
+    monkeypatch.setattr(
+        installer.devkit_schtasks, "register", lambda name, xml, run: (True, "registered")
+    )
+    verbs = []
+
+    def runner(argv):
+        verbs.append(argv[1])
+        return completed(csv_row("2026-09-17 15:19:33")) if "/Query" in argv else completed()
+
+    ok, message = installer.install(tray_schedule(resident), runner=runner)
+    assert ok is True
+    assert [verb for verb in verbs if verb in {"/End", "/Run"}] == ["/End", "/Run"]
+    assert "at logon" in message and "restarted" in message
+
+
+def test_installing_leaves_a_current_tray_alone(resident, monkeypatch):
+    monkeypatch.setattr(
+        installer.devkit_schtasks, "register", lambda name, xml, run: (True, "registered")
+    )
+    verbs = []
+
+    def runner(argv):
+        verbs.append(argv[1])
+        return completed(csv_row("2026-09-17 15:19:33"))
+
+    ok, message = installer.install(tray_schedule(resident), runner=runner)
+    assert ok is True and message.endswith("at logon")
+    assert "/End" not in verbs and "/Run" not in verbs
+
+
+def test_a_restart_that_failed_fails_the_install(resident, monkeypatch):
+    """Reporting success over an install that left the old icon up is how the tray went
+    two days without anyone knowing the registration was not the whole question."""
+    touch(resident / "tray.py", _dt.datetime(2026, 9, 18, 11, 0))
+    monkeypatch.setattr(
+        installer.devkit_schtasks, "register", lambda name, xml, run: (True, "registered")
+    )
+
+    def runner(argv):
+        if "/Query" in argv:
+            return completed(csv_row("2026-09-17 15:19:33"))
+        return completed("ERROR: cannot find the task", returncode=1)
+
+    ok, _ = installer.install(tray_schedule(resident), runner=runner)
+    assert ok is False
+
+
+def test_every_module_the_tray_holds_is_watched_for_an_edit():
+    """`TRAY_MODULES` against the real import graph. A sibling import added to any of
+    those modules and not added here is invisible to `--check` -- which is the exact
+    silence the resident check exists to end, reintroduced one import at a time."""
+    scripts = REPO_ROOT / "scripts"
+    seen: set[str] = set()
+    queue = ["tray"]
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        source = (scripts / f"{name}.py").read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                found = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                found = [node.module]
+            else:
+                continue
+            queue += [module for module in found if (scripts / f"{module}.py").is_file()]
+    assert set(installer.TRAY_MODULES) == seen

@@ -43,6 +43,15 @@ def table(answers: dict[tuple[str, ...], object], code: int = 0) -> Table:
     return Table(answers, code)
 
 
+@pytest.fixture(autouse=True)
+def no_real_git(monkeypatch):
+    """No test here may reach the real git: the reader fetches and asks for tips now.
+    A test that wants answers installs its own `git_for` over this one."""
+    monkeypatch.setattr(
+        ev.sweep, "git_for", lambda _p: lambda *a: subprocess.CompletedProcess(a, 1, "", "")
+    )
+
+
 # --- the gate run behind a PR ----------------------------------------------------------
 
 
@@ -336,13 +345,6 @@ def test_the_newest_completed_run_is_the_branchs_verdict():
     assert ev.default_branch_run(table({}), "main") == {}
 
 
-def test_a_tag_pointing_at_the_sha_is_the_release_workflows_verdict():
-    assert ev.is_tagged(lambda *a: subprocess.CompletedProcess(a, 0, "v0.11.23\n", ""), "fb17")
-    assert not ev.is_tagged(lambda *a: subprocess.CompletedProcess(a, 0, "\n", ""), "fb17")
-    assert not ev.is_tagged(lambda *a: subprocess.CompletedProcess(a, 1, "", ""), "fb17")
-    assert not ev.is_tagged(lambda *a: pytest.fail("no sha, no call"), "")
-
-
 def branch_world(monkeypatch, conclusion: str, summary: str, tags: str):
     runs = [
         {
@@ -366,9 +368,13 @@ def branch_world(monkeypatch, conclusion: str, summary: str, tags: str):
         raise AssertionError(f"unexpected {args}")
 
     monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
-    monkeypatch.setattr(
-        ev.sweep, "git_for", lambda _p: lambda *a: subprocess.CompletedProcess(a, 0, tags, "")
-    )
+
+    def git(*args):
+        # `rev-parse origin/main` answers the tip; `tag --points-at` answers the tags.
+        out = "fb17a310\n" if args[0] == "rev-parse" else tags
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    monkeypatch.setattr(ev.sweep, "git_for", lambda _p: git)
     monkeypatch.setattr(ev.tb, "detect_default_branch", lambda _git, fallback="main": "main")
 
 
@@ -407,6 +413,30 @@ def test_an_unreadable_gate_is_no_verdict(monkeypatch, tmp_path):
     monkeypatch.setattr(ev.sweep, "git_for", lambda _p: lambda *a: None)
     monkeypatch.setattr(ev.tb, "detect_default_branch", lambda _git, fallback="main": "main")
     assert ev.read_default_branch("devkit", tmp_path, tmp_path / "ev") == (None, None)
+
+
+def test_a_run_that_is_not_at_the_branch_tip_is_no_verdict(monkeypatch, tmp_path):
+    """carameli's gate has no push trigger, so its newest run on master was a May run
+    four months behind the tip; a session was spent proving it stale."""
+    branch_world(monkeypatch, "failure", SUMMARY, "")
+    monkeypatch.setattr(
+        ev.sweep,
+        "git_for",
+        lambda _p: lambda *a: subprocess.CompletedProcess(a, 0, "c70f5f7\n", ""),
+    )
+    assert ev.read_default_branch("carameli", tmp_path, tmp_path / "ev") == (None, None)
+
+
+def test_reading_a_pr_marks_it_behind_unless_it_conflicts(monkeypatch, tmp_path):
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: table({}))
+    monkeypatch.setattr(ev.sweep, "git_for", lambda _p: lambda *a: None)
+    monkeypatch.setattr(ev, "is_behind", lambda git, base, sha: True)
+    plain = ev.read_pr(tmp_path, ev.pr_failure("carameli", pr()), tmp_path / "ev")
+    assert plain.behind is True
+    conflicted = ev.read_pr(
+        tmp_path, ev.pr_failure("carameli", pr(mergeable="CONFLICTING")), tmp_path / "ev"
+    )
+    assert conflicted.behind is False and fix_plan.CONFLICT in conflicted.signature
 
 
 def test_every_checkout_on_disk_has_its_default_branch_read(monkeypatch, tmp_path):

@@ -74,6 +74,11 @@ class Intent:
     branch: str
     subject: str
     body: str
+    # Why this intent cannot be shipped from where it sits -- on the default branch,
+    # say -- or "". The pass reports a blocked intent rather than passing it over: an
+    # intent nothing mentions is work that sits unstaged on `master` until a person
+    # happens to look, which is how the first ledger sweep's carameli fix was found.
+    blocked: str = ""
 
     @property
     def digest(self) -> str:
@@ -145,9 +150,9 @@ def find_intents(root: Path, projects: list[str], git_for=sweep.git_for) -> list
     """Every worktree of every registered checkout that carries an intent file.
 
     Through `git worktree list`, so a box, a `--worktree` checkout and the static
-    checkout on a task branch are all found the same way; a tree on a branch a PR
-    cannot be opened from (`ship.is_shippable`) is passed over rather than shipped
-    somewhere surprising.
+    checkout on a task branch are all found the same way. A tree on a branch a PR
+    cannot be opened from (`ship.is_shippable`) is returned `blocked` with the reason,
+    for the record, rather than shipped somewhere surprising or silently passed over.
     """
     found: list[Intent] = []
     for project in projects:
@@ -164,12 +169,10 @@ def find_intents(root: Path, projects: list[str], git_for=sweep.git_for) -> list
             intent_path = tree / INTENT_FILE
             if not branch or not intent_path.is_file():
                 continue
-            shippable, _why = ship.is_shippable(branch, default)
-            if not shippable:
-                continue
+            shippable, why = ship.is_shippable(branch, default)
             subject, body = parse_intent(intent_path.read_text(encoding="utf-8", errors="replace"))
             if subject:
-                found.append(Intent(project, tree, branch, subject, body))
+                found.append(Intent(project, tree, branch, subject, body, "" if shippable else why))
     return found
 
 
