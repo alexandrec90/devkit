@@ -80,6 +80,15 @@ HARNESS_REFUSALS = (
     "environment",
 )
 
+# Actions the fold cannot take, because each *is* an operation on one named PR rather
+# than a piece of work. An `UPDATE` is a `gh pr update-branch` call and no session at
+# all; a `RESOLVE` needs a worktree on the PR's own head branch, which is the one thing
+# an upstream session -- a fresh branch off the default -- does not have. devkit #381
+# was a conflict folded this way, and the session it opened was told to fix the harness
+# "in the vendored file, the test, or the template" on a branch that could never land
+# on the PR. A harness PR in either shape goes as itself, before the folded session.
+BRANCH_SHAPED = (fix_plan.UPDATE, fix_plan.RESOLVE)
+
 # The budget. Two a day per target because the second is the retry after a fix that
 # did not take; the third is the loop nobody asked for.
 PER_TARGET_PER_DAY = 2
@@ -187,25 +196,34 @@ def phase(
 ) -> tuple[list[fix_plan.Decision], list[tuple[fix_plan.Decision, str]]]:
     """`(go, held)`: what this pass sends, and what it holds with the reason.
 
-    Skips are never in either list. While the harness is red, every harness decision is
-    folded into one devkit session and every project one is held. Once clean, updates go
-    first (free, and they may turn the PR green by themselves), then conflicts: a
-    conflicted PR's gate cannot run, so nothing else about it is knowable.
+    Skips are never in either list. While the harness is red, every *foldable* harness
+    decision becomes one devkit session and every project one is held. Once clean,
+    updates go first (free, and they may turn the PR green by themselves), then
+    conflicts: a conflicted PR's gate cannot run, so nothing else about it is knowable.
+    That same order holds for the branch-shaped decisions the fold cannot take.
     """
     live = [d for d in decisions if d.action != fix_plan.SKIP]
     harness_ones = [d for d in live if decision_class(d, classes) == HARNESS]
     project_ones = [d for d in live if decision_class(d, classes) != HARNESS]
+    rank = {fix_plan.UPDATE: 0, fix_plan.RESOLVE: 1}
     if not harness.clean:
         why = "held until the harness is clean: " + "; ".join(harness.reasons)
-        go = [fold_harness(harness_ones)] if harness_ones else []
+        go = sorted(
+            (d for d in harness_ones if d.action in BRANCH_SHAPED), key=lambda d: rank[d.action]
+        )
+        foldable = [d for d in harness_ones if d.action not in BRANCH_SHAPED]
+        if foldable:
+            go.append(fold_harness(foldable))
         return go, [(d, why) for d in project_ones]
-    rank = {fix_plan.UPDATE: 0, fix_plan.RESOLVE: 1}
     ordered = sorted(project_ones, key=lambda d: rank.get(d.action, 2))
     return harness_ones + ordered, []
 
 
 def fold_harness(decisions: list[fix_plan.Decision]) -> fix_plan.Decision:
-    """One devkit session for every harness failure this pass found."""
+    """One devkit session for every foldable harness failure this pass found.
+
+    Never called with a `BRANCH_SHAPED` decision: see the constant.
+    """
     if len(decisions) == 1 and decisions[0].action == fix_plan.UPSTREAM:
         return decisions[0]
     failures = tuple(f for d in decisions for f in d.failures)

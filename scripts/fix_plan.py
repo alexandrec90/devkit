@@ -330,10 +330,18 @@ def decision_key(decision: Decision) -> str:
 
     Any member re-observed at a new sha changes the key: a consumer whose PR was
     re-pushed and is still red under the same signature is a reason to look again.
+
+    A single failure is keyed under the **action** as well, because what the pass
+    decides can change while the failure does not -- which is how a dispatch this pass
+    got wrong becomes unrepeatable. devkit #381 was recorded at its head sha as an
+    upstream session; nobody was going to push to a conflicted PR, so without the
+    action in the key the corrected pass would read its own bad dispatch as reason
+    enough never to send the resolver. `fix_cycle.target_of` reads the first three
+    fields, so the suffix leaves the daily budget per PR exactly where it was.
     """
     keys = sorted(failure_key(f) for f in decision.failures)
     if len(keys) == 1:
-        return keys[0]
+        return f"{keys[0]}:{decision.action}"
     digest = hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()
     return f"{UPSTREAM}:{len(keys)}:{digest[:KEY_DIGEST]}"
 

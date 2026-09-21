@@ -545,7 +545,10 @@ explicitly and asks only which agent. One pass, in order:
    signature shared across consumers, devkit's own default branch, an open backlog on
    the harness-defect ledger (`scripts/harness_triage.py`, the `/triage-harness`
    sweep's reader), a release still being adopted — one devkit session gets the whole
-   set and every project fixer is held, and the record says so.
+   set and every project fixer is held, and the record says so. A harness PR that is
+   merely behind its base or conflicted is the exception: an update is a GitHub call and
+   a resolver needs the PR's own head branch, so each goes as itself, ahead of the
+   devkit session, rather than into a fresh branch that could never land on it.
 4. **Then projects**, conflicts first, each under the dispatch ledger and a daily cap.
 5. **Merge green adoption PRs**, and nothing else. Every other green PR waits for you.
 
