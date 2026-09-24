@@ -24,9 +24,16 @@ import fix_plan
 import ship_intent
 
 fix_pass = load_script("scripts/fix-pass.py")
+MISSING_TOOLS = fix_pass.missing_tools  # the real preflight, before `tools_on_path` stubs it
 
 NOW = _dt.datetime(2026, 9, 19, 9, 0, tzinfo=_dt.UTC)
 VENDORED = ("scripts/hooks/tests/test_a.py::t",)
+
+
+@pytest.fixture(autouse=True)
+def tools_on_path(monkeypatch):
+    """Every CLI the preflight asks for is present unless a test says otherwise."""
+    monkeypatch.setattr(fix_pass, "missing_tools", lambda: [])
 
 
 def failure(**fields) -> fix_plan.Failure:
@@ -468,6 +475,70 @@ def test_a_crash_is_written_to_the_record_before_the_traceback(world, monkeypatc
     with pytest.raises(TypeError):
         fix_pass.main(["--mode", "plan", "--workspace", str(world["workspace"])])
     assert artifact(world).startswith("fix-pass: CRASHED -- TypeError: run_quiet()")
+
+
+def test_a_cli_missing_from_path_is_named_before_the_pass_starts(world, monkeypatch, capsys):
+    """`gh` installed after VS Code started is absent from every task's PATH; the pass
+    died on a `FileNotFoundError` naming no program. It now names it and never starts."""
+    monkeypatch.setattr(fix_pass, "missing_tools", lambda: ["gh"])
+    monkeypatch.setattr(fix_pass, "run", lambda *a, **k: pytest.fail("the pass started"))
+    code = fix_pass.main(["--mode", "dispatch", "--workspace", str(world["workspace"])])
+    assert code == fix_pass.EXIT_USAGE
+    assert "not usable from this PATH: gh" in capsys.readouterr().err
+    assert artifact(world).startswith("fix-pass: FAILED -- not usable from this PATH: gh")
+    assert "restart VS Code" in artifact(world)
+
+
+def test_missing_tools_counts_a_store_alias_and_a_missing_binary_alike(monkeypatch):
+    """`python3` found on PATH but exiting 9009 is the Store alias: the ruff hooks refused
+    the ship and the post-checkout hook failed `git worktree add`, naming no program."""
+    spawned = []
+
+    def fake(argv, **_kwargs):
+        spawned.append(argv)
+        if argv[0] == "gh":
+            raise FileNotFoundError("gh")
+        return subprocess.CompletedProcess(argv, 9009 if argv[0] == "python3" else 0)
+
+    monkeypatch.setattr(fix_pass.subprocess, "run", fake)
+    assert MISSING_TOOLS() == ["gh", "python3"]
+    assert ["python3", "-c", ""] in spawned and ["git", "--version"] in spawned
+
+
+def test_runs_is_the_exit_code_and_an_unspawnable_binary_is_false(monkeypatch):
+    for code, expected in ((0, True), (9009, False)):
+        monkeypatch.setattr(
+            fix_pass.subprocess,
+            "run",
+            lambda argv, _c=code, **_k: subprocess.CompletedProcess(argv, _c),
+        )
+        assert fix_pass.runs(["python3", "-c", ""]) is expected
+
+    def missing(*_a, **_k):
+        raise FileNotFoundError("gh")
+
+    monkeypatch.setattr(fix_pass.subprocess, "run", missing)
+    assert fix_pass.runs(["gh", "--version"]) is False
+
+
+def test_missing_tools_is_empty_when_every_tool_runs(monkeypatch):
+    monkeypatch.setattr(
+        fix_pass.subprocess, "run", lambda argv, **_k: subprocess.CompletedProcess(argv, 0)
+    )
+    assert MISSING_TOOLS() == []
+
+
+def test_the_bootstrap_provides_every_cli_the_pass_requires():
+    """A fresh machine got no `gh` from `bootstrap-machine.ps1`, and the first pass died."""
+    script = (REPO_ROOT / "scripts" / "bootstrap-machine.ps1").read_text(encoding="utf-8")
+    for tool in fix_pass.REQUIRED_TOOLS:
+        wanted = "Test-Runs 'python3'" if tool == "python3" else f"Command = '{tool}'"
+        assert wanted in script, tool
+
+
+def test_a_switched_off_pass_needs_no_cli(world, monkeypatch):
+    monkeypatch.setattr(fix_pass, "missing_tools", lambda: pytest.fail("probed while off"))
+    assert fix_pass.main(["--mode", "off", "--workspace", str(world["workspace"])]) == 0
 
 
 def test_the_artifact_is_written_under_logs(tmp_path):

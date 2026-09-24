@@ -10,7 +10,9 @@
 
   It does the seven steps a workstation needed by hand, none of which was written down:
 
-    1. winget the prerequisites: git, Python, uv, VS Code.
+    1. winget the prerequisites: git, uv, the GitHub CLI, VS Code -- then Python from uv,
+       so `python3` is a real interpreter and not the Microsoft Store alias every devkit
+       hook would otherwise hit.
     2. clone devkit.
     3. persist DEVKIT_DIR, without which the harness ledger silently no-ops.
     4. run install-installers-schedule.py --yes -- the ONE installer a machine ever runs
@@ -22,7 +24,8 @@
        through. Without them roughly twenty tasks fail with
        "command 'extension.commandvariable.pickStringRemember' not found", which names a
        command rather than a package and so cannot be searched for.
-    7. report whatever is left that only a human can answer -- notably the git identity.
+    7. report whatever is left that only a human can answer -- notably the git identity,
+       `gh auth login`, and restarting a VS Code that was open during the installs.
 
   Idempotent: every step checks before it acts, so re-running it repairs a machine rather
   than doubling anything up. Dry by default, like every installer in this repo; -Yes
@@ -69,6 +72,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:Planned = @()
 $script:Problems = @()
+$script:SoftwareInstalled = $false
 
 function Step($message) { Write-Host "==> $message" -ForegroundColor Cyan }
 function Note($message) { Write-Host "    $message" }
@@ -84,8 +88,9 @@ function Would($message) {
 # from this shell, and PATH is what every later step depends on.
 $Prerequisites = @(
     @{ Command = 'git';  Id = 'Git.Git';                  Name = 'Git' }
-    @{ Command = 'python'; Id = 'Python.Python.3.13';     Name = 'Python' }
     @{ Command = 'uv';   Id = 'astral-sh.uv';             Name = 'uv' }
+    # Every PR, gate and fix-pass read goes through it; the fix pass refuses to start without it.
+    @{ Command = 'gh';   Id = 'GitHub.cli';               Name = 'GitHub CLI' }
     @{ Command = 'code'; Id = 'Microsoft.VisualStudioCode'; Name = 'VS Code' }
 )
 
@@ -100,13 +105,23 @@ function Test-Command($name) {
     $null -ne (Get-Command $name -ErrorAction SilentlyContinue)
 }
 
+# Found is not enough for Python: a fresh Windows has `python.exe` and `python3.exe` in
+# WindowsApps as Microsoft Store aliases, which print "Python was not found" and exit 9009.
+function Test-Runs($name) {
+    if (-not (Test-Command $name)) { return $false }
+    # The alias writes to stderr, which Windows PowerShell 5.1 makes terminating under Stop.
+    $ErrorActionPreference = 'Continue'
+    & $name -c 'import sys' *> $null
+    $LASTEXITCODE -eq 0
+}
+
 # --- 1. prerequisites ---------------------------------------------------------
 
 Step 'Prerequisites'
 if ($SkipPrerequisites) {
     Note 'skipped (-SkipPrerequisites)'
 } elseif (-not (Test-Command 'winget')) {
-    Warn 'winget is not on PATH -- install App Installer from the Microsoft Store, or install git, Python, uv and VS Code yourself.'
+    Warn 'winget is not on PATH -- install App Installer from the Microsoft Store, or install git, uv, gh and VS Code yourself.'
     $script:Problems += 'winget unavailable; prerequisites not checked'
 } else {
     foreach ($tool in $Prerequisites) {
@@ -119,12 +134,57 @@ if ($SkipPrerequisites) {
             Note "installing $($tool.Name)..."
             winget install --exact --id $tool.Id --accept-source-agreements --accept-package-agreements --silent
             if ($LASTEXITCODE -ne 0) { $script:Problems += "winget failed for $($tool.Id)" }
+            else { $script:SoftwareInstalled = $true }
         }
     }
     # winget edits the machine PATH, which this already-running process does not see.
     if ($Yes) {
         $env:PATH = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
                     [Environment]::GetEnvironmentVariable('Path', 'User')
+    }
+}
+
+# --- 1b. Python, from uv ------------------------------------------------------
+#
+# Not from winget: python.org's installer ships no python3.exe, and every devkit git hook
+# and every pre-commit `language: script` entry starts `#!/usr/bin/env python3`. On Windows
+# that name then falls through to the Microsoft Store alias, which exits 9009. The global
+# post-checkout hook fails, so `git worktree add` exits non-zero ("could not cut ...
+# nothing opened"), and every ruff hook refuses the commit. `uv python install --default`
+# puts a real python.exe and python3.exe in uv's bin directory. That directory has to come
+# before WindowsApps on the user PATH, because WindowsApps is where the aliases live.
+
+Step 'Python'
+if ((Test-Runs 'python3') -and (Test-Runs 'python')) {
+    Note 'python and python3: both run'
+} elseif (-not (Test-Command 'uv')) {
+    Warn 'python/python3 are missing or only the Store aliases, and uv is not on PATH to install them -- every devkit hook will exit 9009.'
+    $script:Problems += 'no python3 that runs'
+} else {
+    Would 'uv python install --default   # a real python.exe and python3.exe'
+    if ($Yes) {
+        uv python install --default
+        if ($LASTEXITCODE -ne 0) { $script:Problems += 'uv python install --default failed' }
+        else { $script:SoftwareInstalled = $true }
+    }
+    $bin = (uv python dir --bin | Out-String).Trim().TrimEnd('\')
+    $parts = @([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ })
+    $binAt = -1; $aliasAt = -1
+    for ($i = 0; $i -lt $parts.Count; $i++) {
+        if ($binAt -lt 0 -and $parts[$i].TrimEnd('\') -eq $bin) { $binAt = $i }
+        if ($aliasAt -lt 0 -and $parts[$i] -like '*\Microsoft\WindowsApps*') { $aliasAt = $i }
+    }
+    if ($binAt -lt 0 -or ($aliasAt -ge 0 -and $binAt -gt $aliasAt)) {
+        Would "put $bin first on the user PATH, ahead of the WindowsApps aliases"
+        if ($Yes) {
+            $rest = @($parts | Where-Object { $_.TrimEnd('\') -ne $bin })
+            [Environment]::SetEnvironmentVariable('Path', ((@($bin) + $rest) -join ';'), 'User')
+            $env:PATH = "$bin;$env:PATH"
+            $script:SoftwareInstalled = $true
+        }
+    }
+    if ($Yes -and -not (Test-Runs 'python3')) {
+        $script:Problems += 'python3 still does not run after uv python install --default'
     }
 }
 
@@ -247,6 +307,22 @@ if (Test-Command 'git') {
             Warn "git $key is unset -- every commit fails with 'Author identity unknown'. Fix: git config --global $key ..."
         }
     }
+}
+if (Test-Command 'gh') {
+    # Logged out, gh writes to stderr: see Test-Runs for why that needs Continue.
+    $ErrorActionPreference = 'Continue'
+    gh auth status *> $null
+    $loggedIn = $LASTEXITCODE -eq 0
+    $ErrorActionPreference = 'Stop'
+    if (-not $loggedIn) {
+        Warn 'gh is not logged in -- every PR and gate read fails. Fix: gh auth login'
+    }
+}
+# A VS Code task inherits the PATH VS Code was launched with, so a tool installed while it
+# was open is invisible to every task until it is fully quit -- "Agent: Fix what is red"
+# then dies on a FileNotFoundError that names no program.
+if ($script:SoftwareInstalled -and (Get-Process -Name 'Code' -ErrorAction SilentlyContinue)) {
+    Warn 'VS Code was running while software was installed -- quit every window and reopen it, or its tasks will not find the new tools.'
 }
 Note "Open the workspace: $workspace"
 Note 'Then run "Workspace: Plug / Unplug Projects" to clone the projects registered from other PCs.'
