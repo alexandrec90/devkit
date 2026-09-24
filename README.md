@@ -554,8 +554,10 @@ off), or by hand through the *Agent: Fix What Is Red* task, which passes `dispat
 explicitly and asks only which agent. One pass, in order:
 
 1. **Ship every intent.** Run the tree's commit-stage fixers, commit with the message,
-   push with the push gate skipped, open the PR with the `automerge` label, record the
-   outcome in `logs/ship-state.json` beside the intent. A dirty tree with no intent is a
+   push with the push gate skipped, open the PR *without* the `automerge` label (a
+   green one waits for a person; the label is for adoptions, Dependabot and the Codex
+   mirror, whose gate is the whole review), record the outcome in `logs/ship-state.json`
+   beside the intent. A dirty tree with no intent is a
    session still working and is never touched; a refused commit is a failure like any
    other, with the pre-commit output as its evidence.
 2. **Collect everything red** — refused commits, red PRs, open scheduled-failure issues,
