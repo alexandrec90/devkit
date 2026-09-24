@@ -912,7 +912,7 @@ def register(text: str, names: list[str]) -> str:
     return updated
 
 
-def _drop_element(text: str, scan: str, start: int, end: int, *, may_empty: bool = False) -> str:
+def _drop_element(text: str, scan: str, start: int, end: int) -> str:
     """Remove the array element at `text[start:end]`, taking one comma with it.
 
     Two shapes, because a JSON array's separator belongs to whichever neighbour
@@ -923,12 +923,6 @@ def _drop_element(text: str, scan: str, start: int, end: int, *, may_empty: bool
 
     Offsets are read from `scan`, the comment-blanked copy, so a `//` line sitting
     between two entries cannot contribute a comma the parser never saw.
-
-    The only element is refused unless `may_empty`: a `folders` list with nothing in it
-    is not a workspace, but a picker with nothing in it is -- `adoptProjects` on a
-    machine holding only devkit has no consumer to offer, and refusing that crashed
-    the render that creates a fresh workstation's live file. Emptied, the array keeps
-    its brackets and loses everything between them.
     """
     after = end
     while after < len(scan) and scan[after] in " \t\r\n":
@@ -951,8 +945,6 @@ def _drop_element(text: str, scan: str, start: int, end: int, *, may_empty: bool
         before -= 1
     if before > 0 and scan[before - 1] == ",":
         return text[: before - 1] + text[end:]
-    if may_empty and before > 0 and scan[before - 1] == "[" and scan[after : after + 1] == "]":
-        return text[:before] + text[after:]
     raise RegistryEditError("cannot remove the only element of an array")
 
 
@@ -998,10 +990,10 @@ def _retarget_default(text: str, scan: str, close_at: int, replacement: str) -> 
 def remove_picker_option(text: str, name: str) -> str:
     """Drop `name` from every maintained picker. The inverse of `insert_picker_option`.
 
-    A picker that never listed it is left alone rather than failed on: `mergeCheckout`
-    lists more than the registry, `adoptProjects` lists less, and an older workspace file
-    may carry fewer pickers, so "not there" is the same outcome as "removed" and neither
-    is an error.
+    A picker that never listed it is left alone: `mergeCheckout` lists more than the
+    registry, `adoptProjects` less, and an older file may carry fewer pickers. One left
+    with no option is emptied, not refused -- `adoptProjects` on a PC holding only devkit
+    -- because `_drop_element`'s refusal crashed a fresh machine's first render.
     """
     updated = text
     for picker_id in MAINTAINED_PICKERS:
@@ -1028,12 +1020,12 @@ def remove_picker_option(text: str, name: str) -> str:
             raise RegistryEditError(f'the "{picker_id}" options are not a plain string list')
 
         remaining = [o for o in devkit_jsonc.loads(scan[open_at : close_at + 1]) if o != name]
-        updated = _drop_element(updated, scan, at, at + len(token), may_empty=True)
         if not remaining:
+            updated = updated[: open_at + 1] + updated[close_at:]
             continue
-        # Re-derive the span from the UPDATED text rather than reusing `close_at`: the
-        # last-element branch of `_drop_element` cuts backwards, so every offset past
-        # the removal has moved and a stale one lands mid-token.
+        updated = _drop_element(updated, scan, at, at + len(token))
+        # Re-derive the span from the UPDATED text: `_drop_element`'s last-element branch
+        # cuts backwards, so a stale `close_at` would land mid-token.
         after = devkit_jsonc.blank_comments(updated)
         options_at = after.find('"options"', after.find(f'"id": "{picker_id}"'))
         updated = _retarget_default(updated, after, _array_span(after, options_at)[1], remaining[0])
