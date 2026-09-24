@@ -1398,6 +1398,41 @@ def test_a_machine_holding_nothing_renders_the_whole_registry(tmp_path):
     assert devkit_project.machine_view(text, tmp_path / "nowhere") == (text, [])
 
 
+def test_a_machine_holding_only_devkit_renders_without_crashing(workspace_pair):
+    """The fresh workstation right after the bootstrap: devkit is cloned and nothing
+    else is. `adoptProjects` lists the registry minus devkit, so the view empties it --
+    and `_drop_element` refused to remove an array's only element, so the render that
+    creates the live file died with `RegistryEditError` on the one machine that needed
+    it, before any project could be cloned through the plug picker."""
+    canonical, live = workspace_pair
+    names = known_projects(canonical.read_text(encoding="utf-8"))
+    for name in names:
+        if name != "devkit":
+            (live.parent / name).rmdir()
+    live.unlink()
+    devkit_project.stamp_path(live).unlink(missing_ok=True)
+
+    assert _run(live, "--render-workspace") == 0
+
+    rendered = live.read_text(encoding="utf-8")
+    assert known_projects(rendered) == ["devkit"]
+    inputs = {i["id"]: i for i in devkit_jsonc_loads(rendered)["tasks"]["inputs"]}
+    assert _input_options(inputs["adoptProjects"]) == []
+    assert _run(live, "--check-workspace") == 0
+
+
+def test_a_picker_may_be_emptied_but_the_folders_list_may_not():
+    """A picker with no options is honest -- nothing on this PC to adopt a release into --
+    while a workspace with no folder is not a workspace at all."""
+    text = '{"tasks": {"inputs": [{"id": "project", "options": ["alpha"]}]}}'
+    assert (
+        devkit_jsonc_loads(remove_picker_option(text, "alpha"))["tasks"]["inputs"][0]["options"]
+        == []
+    )
+    with pytest.raises(RegistryEditError, match="only element"):
+        remove_folder('{"folders": [{"path": "alpha"}]}', "alpha")
+
+
 def test_absent_projects_keeps_registry_order(workspace_pair):
     canonical, live = workspace_pair
     names = known_projects(canonical.read_text(encoding="utf-8"))

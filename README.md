@@ -80,7 +80,8 @@ the only command a machine ever needs typed at it.
 It wingets git, Python, uv and VS Code; clones devkit; persists `DEVKIT_DIR`; runs
 `install-installers-schedule.py --yes` and then `installers.py maintain`, which is the
 step that actually puts every job on the machine rather than waiting for the first logon;
-installs the two VS Code extensions the workspace tasks resolve their inputs through; and
+renders the live workspace file with `devkit_project.py --render-workspace`, since nothing
+else writes it before `devkit-workspace-status`'s first daily pass; installs the two VS Code extensions the workspace tasks resolve their inputs through; and
 names anything left that only you can answer, such as an unset git identity. Every step
 checks before it acts, so re-running it repairs a machine rather than doubling anything
 up. `-Path` chooses where to clone, `-SkipPrerequisites` leaves the software to whatever

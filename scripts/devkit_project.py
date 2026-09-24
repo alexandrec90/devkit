@@ -912,7 +912,7 @@ def register(text: str, names: list[str]) -> str:
     return updated
 
 
-def _drop_element(text: str, scan: str, start: int, end: int) -> str:
+def _drop_element(text: str, scan: str, start: int, end: int, *, may_empty: bool = False) -> str:
     """Remove the array element at `text[start:end]`, taking one comma with it.
 
     Two shapes, because a JSON array's separator belongs to whichever neighbour
@@ -923,6 +923,12 @@ def _drop_element(text: str, scan: str, start: int, end: int) -> str:
 
     Offsets are read from `scan`, the comment-blanked copy, so a `//` line sitting
     between two entries cannot contribute a comma the parser never saw.
+
+    The only element is refused unless `may_empty`: a `folders` list with nothing in it
+    is not a workspace, but a picker with nothing in it is -- `adoptProjects` on a
+    machine holding only devkit has no consumer to offer, and refusing that crashed
+    the render that creates a fresh workstation's live file. Emptied, the array keeps
+    its brackets and loses everything between them.
     """
     after = end
     while after < len(scan) and scan[after] in " \t\r\n":
@@ -945,6 +951,8 @@ def _drop_element(text: str, scan: str, start: int, end: int) -> str:
         before -= 1
     if before > 0 and scan[before - 1] == ",":
         return text[: before - 1] + text[end:]
+    if may_empty and before > 0 and scan[before - 1] == "[" and scan[after : after + 1] == "]":
+        return text[:before] + text[after:]
     raise RegistryEditError("cannot remove the only element of an array")
 
 
@@ -1020,7 +1028,7 @@ def remove_picker_option(text: str, name: str) -> str:
             raise RegistryEditError(f'the "{picker_id}" options are not a plain string list')
 
         remaining = [o for o in devkit_jsonc.loads(scan[open_at : close_at + 1]) if o != name]
-        updated = _drop_element(updated, scan, at, at + len(token))
+        updated = _drop_element(updated, scan, at, at + len(token), may_empty=True)
         if not remaining:
             continue
         # Re-derive the span from the UPDATED text rather than reusing `close_at`: the
