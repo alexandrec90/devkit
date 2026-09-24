@@ -20,6 +20,7 @@ from support import REPO_ROOT, load_script
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import fix_cycle
+import fix_ledger
 import fix_plan
 import ship_intent
 
@@ -66,6 +67,8 @@ def world(tmp_path, monkeypatch):
         "dispatched": [],
         "merged": [],
         "shipped": [],
+        "blocked": [],
+        "order": [],
     }
     monkeypatch.setattr(
         fix_pass.devkit_project, "known_projects", lambda _t: ["devkit", "carameli"]
@@ -74,7 +77,6 @@ def world(tmp_path, monkeypatch):
         fix_pass.ship_intent, "find_intents", lambda root, projects: table["intents"]
     )
     monkeypatch.setattr(fix_pass.push_gate, "interpreter", lambda tree: "py")
-    monkeypatch.setattr(fix_pass.tb, "detect_default_branch", lambda git, fallback="main": "main")
     monkeypatch.setattr(
         fix_pass.ship_intent,
         "ship_one",
@@ -83,9 +85,18 @@ def world(tmp_path, monkeypatch):
             or ship_intent.Outcome(intent, ship_intent.SHIPPED, "u")
         ),
     )
-    monkeypatch.setattr(fix_pass.menu, "scan", lambda _ws: {"devkit": [], "carameli": []})
     monkeypatch.setattr(
-        fix_pass.gate_evidence, "collect", lambda _ws, _found: list(table["failures"])
+        fix_pass.menu, "scan", lambda _ws, projects=None: {name: [] for name in projects or []}
+    )
+    monkeypatch.setattr(
+        fix_pass.gate_evidence,
+        "collect",
+        lambda _ws, found: (
+            table["order"].append(("collect", sorted(found))) or list(table["failures"])
+        ),
+    )
+    monkeypatch.setattr(
+        fix_pass.fix_reports, "find_blocked", lambda root, projects: list(table["blocked"])
     )
     monkeypatch.setattr(fix_pass.gate_evidence, "newest_release", lambda _d: "v0.11.22")
     monkeypatch.setattr(
@@ -106,7 +117,13 @@ def world(tmp_path, monkeypatch):
             or 0
         ),
     )
-    monkeypatch.setattr(fix_pass, "merge_green_adoptions", lambda root, projects: table["merged"])
+    monkeypatch.setattr(
+        fix_pass,
+        "merge_green_adoptions",
+        lambda root, projects: (
+            table["order"].append(("merge", sorted(projects))) or table["merged"]
+        ),
+    )
     monkeypatch.setattr(fix_pass, "REPO_ROOT", tmp_path / "devkit")
     return table
 
@@ -149,11 +166,11 @@ def test_dispatch_ships_intents_sends_fixers_records_them_and_merges_adoptions(w
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "codex", NOW) == 0
     assert world["shipped"] == ["agent/i-0919"]
     assert world["dispatched"] == [(fix_plan.DISPATCH, "codex")]
-    ledger = fix_plan.read_ledger(
-        fix_pass.worktree.boxes_root(world["workspace"].parent) / fix_plan.LEDGER_NAME
+    ledger = fix_ledger.read_ledger(
+        fix_pass.worktree.boxes_root(world["workspace"].parent) / fix_ledger.LEDGER_NAME
     )
     assert list(ledger) == [
-        fix_plan.decision_key(fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),)))
+        fix_ledger.decision_key(fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),)))
     ]
     text = artifact(world)
     assert "sent     carameli #412 -- dispatch" in text
@@ -241,7 +258,9 @@ def test_collect_red_gathers_prs_default_branches_and_the_backlog_with_devkits_v
 
 def test_the_ledgers_open_backlog_rides_in_the_devkit_session(world):
     """Every entry on the harness-defect ledger is a devkit defect, so an open backlog
-    is harness red like a vendored test is, and goes to the one devkit session."""
+    goes to the one devkit session -- alone, when nothing else is harness-shaped. It
+    is not a reason to hold the projects: one unresolved hook event anywhere was
+    holding every project fixer."""
     world["failures"] = [failure(number=2)]
     world["backlog"] = failure(
         kind=fix_plan.LEDGER,
@@ -252,10 +271,11 @@ def test_the_ledgers_open_backlog_rides_in_the_devkit_session(world):
         signature=("scheduled-job-failed devkit [84ada64c] x1",),
     )
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == 0
-    assert world["dispatched"] == [(fix_plan.UPSTREAM, "claude")]
+    assert world["dispatched"] == [(fix_plan.UPSTREAM, "claude"), (fix_plan.DISPATCH, "claude")]
     text = artifact(world)
-    assert "upstream devkit ledger -- the harness is red" in text
-    assert "held     carameli #2" in text
+    assert "harness  clean" in text
+    assert "upstream devkit ledger -- harness-shaped in 1 checkout(s) (devkit)" in text
+    assert "sent     carameli #2 -- dispatch" in text and "held" not in text
 
 
 def test_a_projects_red_main_is_a_project_failure_sent_once_the_harness_is_clean(world):
@@ -291,8 +311,8 @@ def test_a_session_that_failed_to_open_is_the_exit_code_and_not_recorded(world, 
     monkeypatch.setattr(fix_pass, "dispatch", lambda *a, **k: 1)
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 1
     assert (
-        fix_plan.read_ledger(
-            fix_pass.worktree.boxes_root(world["workspace"].parent) / fix_plan.LEDGER_NAME
+        fix_ledger.read_ledger(
+            fix_pass.worktree.boxes_root(world["workspace"].parent) / fix_ledger.LEDGER_NAME
         )
         == {}
     )
@@ -342,7 +362,7 @@ def test_send_all_records_only_what_opened_and_caps_the_rest(world, tmp_path):
     )
     assert worst == 0 and capped == []
     assert sent == ["carameli #1 -- dispatch", "carameli #2 -- update"]
-    assert len(fix_plan.read_ledger(ledger_path)) == 2
+    assert len(fix_ledger.read_ledger(ledger_path)) == 2
     sent, capped, worst = fix_pass.send_all(
         go, ledger_path, tmp_path, fix_cycle.DISPATCH, "claude", NOW
     )
@@ -358,12 +378,12 @@ def test_dispatch_routes_a_branch_to_the_pr_path_and_the_rest_to_a_fresh_one(mon
     monkeypatch.setattr(
         fix_pass.fix_prs,
         "dispatch_pr",
-        lambda f, root, agent, runner, options=None: seen.append(("pr", runner)) or 0,
+        lambda f, root, agent, runner, key: seen.append(("pr", runner)) or 0,
     )
     monkeypatch.setattr(
         fix_pass.fix_prs,
         "dispatch_fresh",
-        lambda d, root, agent, runner, options=None: seen.append(("fresh", runner)) or 0,
+        lambda d, root, agent, runner, key: seen.append(("fresh", runner)) or 0,
     )
     fix_pass.dispatch(fix_plan.Decision(fix_plan.RESOLVE, "n", (failure(),)), tmp_path, "claude-bg")
     fix_pass.dispatch(
@@ -484,8 +504,8 @@ def test_a_blocked_intent_is_said_and_never_shipped_in_any_mode(monkeypatch, tmp
     monkeypatch.setattr(
         fix_pass.ship_intent, "ship_one", lambda *a: pytest.fail("a blocked intent never ships")
     )
-    lines, refused = fix_pass.ship_intents(tmp_path, ["carameli"], fix_cycle.DISPATCH)
-    assert refused == [] and len(lines) == 1
+    lines, refused, failed = fix_pass.ship_intents(tmp_path, ["carameli"], fix_cycle.DISPATCH)
+    assert refused == [] and len(lines) == 1 and not failed
     assert lines[0].startswith("carameli master -- NOT shipped: master is the default branch")
     assert "agent-worktree.py new" in lines[0]
 
@@ -496,5 +516,165 @@ def test_ship_intents_in_plan_mode_only_says_what_it_would_do(monkeypatch, tmp_p
     monkeypatch.setattr(
         fix_pass.ship_intent, "ship_one", lambda *a: pytest.fail("plan mode ships nothing")
     )
-    lines, refused = fix_pass.ship_intents(tmp_path, ["carameli"], fix_cycle.PLAN)
-    assert lines == ["carameli agent/i -- would ship: S"] and refused == []
+    lines, refused, failed = fix_pass.ship_intents(tmp_path, ["carameli"], fix_cycle.PLAN)
+    assert lines == ["carameli agent/i -- would ship: S"] and refused == [] and not failed
+
+
+# --- what the last review found ---------------------------------------------------------
+
+
+def test_green_adoptions_are_merged_before_the_red_is_read(world):
+    """Read first, the release whose adoptions just went green held the projects for
+    one more pass; merged first, the hold lifts on this one."""
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
+    assert world["order"] == [
+        ("merge", ["carameli", "devkit"]),
+        ("collect", ["carameli", "devkit"]),
+    ]
+
+
+def test_a_project_on_hold_still_ships_its_intent_but_is_not_read(world, monkeypatch):
+    """`devkit.onHold` was honoured by the upgrade sweep only; the pass scanned and sent
+    sessions at paused checkouts."""
+    world["workspace"].write_text(
+        '{"folders": [{"path": "devkit"}, {"path": "carameli"}, {"path": "paused"}], '
+        '"settings": {"devkit.onHold": ["paused"]}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        fix_pass.devkit_project, "known_projects", lambda _t: ["devkit", "carameli", "paused"]
+    )
+    seen = []
+    monkeypatch.setattr(
+        fix_pass.ship_intent, "find_intents", lambda root, projects: seen.append(projects) or []
+    )
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
+    assert seen == [["devkit", "carameli", "paused"]]
+    assert world["order"] == [
+        ("merge", ["carameli", "devkit"]),
+        ("collect", ["carameli", "devkit"]),
+    ]
+    assert "on hold  paused -- nothing red is read there (devkit.onHold)" in artifact(world)
+
+
+def test_a_blocked_report_marks_the_ledger_and_no_second_session_goes(world):
+    """The one channel back from a fixer: what it could not do is on the record as
+    "needs a human", and the pass stops spending sessions on it -- for good, not for a
+    day, because the session did report."""
+    world["failures"] = [failure()]
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
+    key = fix_ledger.decision_key(fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),)))
+    world["blocked"] = [
+        fix_pass.fix_reports.Blocked("carameli", Path("t"), "agent/x-0919", key, "needs a database")
+    ]
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW + _dt.timedelta(days=30))
+    assert len(world["dispatched"]) == 1
+    text = artifact(world)
+    assert "blocked  carameli agent/x-0919 -- needs a database" in text
+    assert "capped   carameli #412 -- needs a human: needs a database" in text
+    world["blocked"] = [
+        fix_pass.fix_reports.Blocked("carameli", Path("t"), "agent/y", "", "hand-picked tree")
+    ]
+    fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude", NOW)
+    assert "blocked  carameli agent/y -- hand-picked tree (no dispatch on the ledger" in artifact(
+        world
+    )
+
+
+def test_a_dispatch_a_day_old_is_sent_again(world):
+    """A session that died leaves only its ledger entry; after a day the pass looks
+    again, under the same caps, rather than saying "already dispatched" for a week."""
+    world["failures"] = [failure()]
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW + _dt.timedelta(hours=12))
+    assert len(world["dispatched"]) == 1
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW + _dt.timedelta(hours=25))
+    assert len(world["dispatched"]) == 2
+
+
+def test_a_pr_behind_a_red_base_waits_for_the_bases_fixer(world):
+    """The 09-19 pass: carameli's master, #379 and #381, three sessions in one second."""
+    world["failures"] = [failure(number=379), failure(number=381, signature=())]
+    world["branches"]["carameli"] = (False, red_main(project="carameli"))
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
+    assert world["dispatched"] == [(fix_plan.DISPATCH, "claude")]
+    text = artifact(world)
+    assert "sent     carameli origin/main -- dispatch" in text
+    assert "held     carameli #379 -- held: origin/main is red in carameli" in text
+    assert "held     carameli #381 -- held: origin/main is red in carameli" in text
+
+
+def test_an_adoption_pr_red_on_its_own_project_goes_while_its_release_is_the_only_hold(world):
+    """The release was still being adopted because this PR was red, and this PR was held
+    because the release was still being adopted."""
+    world["pending"] = ["carameli"]
+    adoption = failure(
+        number=7, head="agent/auto/devkit-upgrade-v0-11-22-0921", signature=("lint src/a.py",)
+    )
+    world["failures"] = [adoption, failure(number=8)]
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
+    assert world["dispatched"] == [(fix_plan.DISPATCH, "claude")]
+    text = artifact(world)
+    assert "harness  RED -- the newest release is still being adopted in carameli" in text
+    assert "sent     carameli #7 -- dispatch" in text
+    assert "held     carameli #8 -- held until the harness is clean" in text
+
+
+def test_record_blocked_marks_only_a_stamped_report(monkeypatch, tmp_path):
+    ledger_path = tmp_path / "dispatch.json"
+    fix_ledger.record(ledger_path, "pr:carameli:412:abc:d:dispatch", "n", NOW)
+    reports = [
+        fix_pass.fix_reports.Blocked(
+            "carameli", Path("t"), "agent/x", "pr:carameli:412:abc:d:dispatch", "no db"
+        ),
+        fix_pass.fix_reports.Blocked("carameli", Path("u"), "agent/y", "", "by hand"),
+    ]
+    monkeypatch.setattr(fix_pass.fix_reports, "find_blocked", lambda root, projects: reports)
+    lines = fix_pass.record_blocked(tmp_path, ["carameli"], ledger_path)
+    assert lines[0] == "carameli agent/x -- no db"
+    assert lines[1].startswith("carameli agent/y -- by hand (no dispatch on the ledger")
+    ledger = fix_ledger.read_ledger(ledger_path)
+    assert ledger["pr:carameli:412:abc:d:dispatch"]["blocked"] == "no db" and len(ledger) == 1
+
+
+def test_a_failed_ship_is_the_exit_code(world, monkeypatch):
+    one = ship_intent.Intent("carameli", Path("t"), "agent/i-0919", "S", "B")
+    world["intents"] = [one]
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda intent, python, base: ship_intent.Outcome(intent, ship_intent.FAILED, "push: no"),
+    )
+    assert (
+        fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == fix_pass.EXIT_FAILED
+    )
+    assert "shipped  carameli agent/i-0919 -- failed: push: no" in artifact(world)
+
+
+def test_dispatching_a_refused_commit_sets_its_intent_aside(monkeypatch, tmp_path):
+    """With the intent gone, the fixer's edits are a dirty tree with no intent -- a
+    session still working -- until it ships; the next pass does not re-run the commit
+    stage over half of them."""
+    tree = tmp_path / "carameli" / ".claude" / "worktrees" / "i"
+    (tree / "logs").mkdir(parents=True)
+    (tree / ship_intent.INTENT_FILE).write_text("S\n\nB\n", encoding="utf-8")
+    refused = failure(
+        kind=fix_plan.COMMIT,
+        number=0,
+        head="agent/i-0919",
+        signature=("commit refused",),
+        tree=str(tree),
+    )
+    keys = []
+    monkeypatch.setattr(
+        fix_pass.fix_prs, "dispatch_pr", lambda f, root, agent, runner, key: keys.append(key) or 0
+    )
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (refused,))
+    assert fix_pass.dispatch(decision, tmp_path, "claude") == 0
+    assert keys == [fix_ledger.decision_key(decision)]
+    assert not (tree / ship_intent.INTENT_FILE).exists()
+    assert (tree / ship_intent.REFUSED_FILE).read_text(encoding="utf-8") == "S\n\nB\n"
+    (tree / ship_intent.INTENT_FILE).write_text("S\n", encoding="utf-8")
+    monkeypatch.setattr(fix_pass.fix_prs, "dispatch_pr", lambda *a: 1)
+    assert fix_pass.dispatch(decision, tmp_path, "claude") == 1
+    assert (tree / ship_intent.INTENT_FILE).exists(), "a session that did not open leaves it"

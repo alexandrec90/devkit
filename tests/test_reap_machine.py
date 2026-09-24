@@ -346,9 +346,24 @@ def test_alive_is_read_off_tasklist_and_unknown_is_alive():
     assert reap_machine.pid_alive(123, boom, windows=True)
 
 
-def test_alive_off_windows_asks_the_kernel():
-    assert reap_machine.pid_alive(os.getpid(), windows=False)
-    assert not reap_machine.pid_alive(2**22 - 1, windows=False) or True  # may exist; no crash
+def test_alive_off_windows_asks_the_kernel(monkeypatch):
+    """Through a stubbed `os.kill`, never the real one: on Windows `os.kill(pid, 0)` is
+    `TerminateProcess`, and the real probe on the test's own pid killed the whole pytest
+    run at 45% on every local pass, with no summary to say so."""
+    asked = []
+
+    def kill(pid, sig):
+        asked.append((pid, sig))
+        if pid == 4242:
+            raise ProcessLookupError
+        if pid == 4243:
+            raise PermissionError
+
+    monkeypatch.setattr(reap_machine.os, "kill", kill)
+    assert reap_machine.pid_alive(4241, windows=False)
+    assert not reap_machine.pid_alive(4242, windows=False)
+    assert reap_machine.pid_alive(4243, windows=False), "denied is alive, not gone"
+    assert asked == [(4241, 0), (4242, 0), (4243, 0)]
 
 
 def test_stop_is_polite_first_and_forces_only_what_survives():

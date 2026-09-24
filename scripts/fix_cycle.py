@@ -40,6 +40,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
+import fix_ledger
 import fix_plan
 
 HARNESS = "harness"
@@ -48,6 +49,9 @@ UNKNOWN = "unknown"
 
 # The switch, under `"settings"` in the workspace file beside `devkit.onHold`.
 SETTING = "devkit.fixPass"
+# The pause list beside it, spelled here only for the record line; `sweep.on_hold`
+# reads it.
+SETTING_ON_HOLD = "devkit.onHold"
 OFF = "off"
 PLAN = "plan"
 DISPATCH = "dispatch"
@@ -99,6 +103,11 @@ PER_DAY = 8
 class Harness:
     clean: bool
     reasons: tuple[str, ...]
+    # The one reason is a release still being adopted: nothing of the harness is red,
+    # the consumers just have not merged it yet. An adoption PR's own project-shaped
+    # failure goes through that hold, because it *is* the adoption -- held, it was red
+    # because it was held and held because it was red.
+    only_adopting: bool = False
 
 
 # --- the switch -----------------------------------------------------------------------
@@ -127,96 +136,133 @@ def shared_signatures(failures: Iterable[fix_plan.Failure]) -> set[tuple[str, ..
     return {sig for sig, projects in seen.items() if len(projects) >= 2}
 
 
-def _names_harness_path(entry: str) -> bool:
-    text = entry.removeprefix("lint ")
-    return any(text.startswith(path) for path in HARNESS_PATHS)
+def _harness_shaped(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> bool:
+    """The failure is the harness's by where it is, what it shares, or what it names.
+
+    An adoption PR is classified like any other PR, by what is failing: a vendored test
+    is the harness, the project's own lint under a new rule is the project's. Which
+    of the two it is decides where the fixer goes -- the one devkit session, or the
+    adoption branch itself.
+    """
+    return (
+        failure.project == DEVKIT
+        or bool(failure.signature and failure.signature in shared)
+        or fix_plan.is_vendored(failure.signature)
+    )
 
 
 def classify(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> str:
-    if failure.project == DEVKIT:
-        return HARNESS
-    if failure.signature and failure.signature in shared:
-        return HARNESS
-    if fix_plan.is_vendored(failure.signature):
+    if _harness_shaped(failure, shared):
         return HARNESS
     ids = [entry for entry in failure.signature if entry != fix_plan.CONFLICT]
-    if ids and all(_names_harness_path(entry) for entry in ids):
+    if ids and all(entry.removeprefix("lint ").startswith(HARNESS_PATHS) for entry in ids):
         return HARNESS
     if failure.kind == fix_plan.COMMIT and any(
         marker in " ".join(ids).lower() for marker in HARNESS_REFUSALS
     ):
         return HARNESS
-    if not ids:
-        return UNKNOWN
-    return PROJECT
+    return PROJECT if ids else UNKNOWN
 
 
 def classify_all(failures: Iterable[fix_plan.Failure]) -> dict[str, str]:
     """Class per failure, keyed the way the ledger keys them."""
     listed = list(failures)
     shared = shared_signatures(listed)
-    return {fix_plan.failure_key(f): classify(f, shared) for f in listed}
+    return {fix_ledger.failure_key(f): classify(f, shared) for f in listed}
 
 
 # --- the phase gate -------------------------------------------------------------------
 
 
 def harness_state(
-    classes: dict[str, str], devkit_green: bool | None, pending_adoptions: Iterable[str]
+    classes: dict[str, str], devkit_green: bool | str | None, pending_adoptions: Iterable[str]
 ) -> Harness:
     """Clean only when nothing harness-shaped is red and no release is mid-adoption.
 
     `devkit_green` is None when the gate's verdict could not be read, which counts as
-    not clean: an unreadable harness is not one to send project fixers behind.
+    not clean: an unreadable harness is not one to send project fixers behind. It is
+    `fix_plan.RUNNING` when the run at the tip has not finished, which is not a reason:
+    the verdict before it stands, and holding on it held every project fixer for the
+    pass after every merge to devkit main.
+
+    The harness-defect ledger's backlog is harness-shaped and rides in the devkit
+    session when one goes, but does not by itself make one go: one unresolved hook
+    event anywhere was holding every project fixer.
     """
     reasons = []
-    red = sum(1 for cls in classes.values() if cls == HARNESS)
+    red = sum(
+        1
+        for key, cls in classes.items()
+        if cls == HARNESS and fix_ledger.key_kind(key) != fix_plan.LEDGER
+    )
     if red:
         reasons.append(f"{red} harness failure(s) open")
     if devkit_green is None:
         reasons.append("devkit's default-branch gate could not be read")
-    elif not devkit_green:
+    elif devkit_green is False:
         reasons.append("devkit's default-branch gate is red")
     pending = sorted(set(pending_adoptions))
     if pending:
         reasons.append(f"the newest release is still being adopted in {', '.join(pending)}")
-    return Harness(not reasons, tuple(reasons))
+    return Harness(not reasons, tuple(reasons), bool(pending) and len(reasons) == 1)
 
 
 def decision_class(decision: fix_plan.Decision, classes: dict[str, str]) -> str:
     """A decision is harness if any failure under it is."""
-    found = {classes.get(fix_plan.failure_key(f), UNKNOWN) for f in decision.failures}
+    found = {classes.get(fix_ledger.failure_key(f), UNKNOWN) for f in decision.failures}
     if HARNESS in found or decision.action == fix_plan.UPSTREAM:
         return HARNESS
     return PROJECT if PROJECT in found else UNKNOWN
 
 
 def phase(
-    decisions: Iterable[fix_plan.Decision], classes: dict[str, str], harness: Harness
+    decisions: Iterable[fix_plan.Decision],
+    classes: dict[str, str],
+    harness: Harness,
+    prefixes: Iterable[str] = (),
 ) -> tuple[list[fix_plan.Decision], list[tuple[fix_plan.Decision, str]]]:
     """`(go, held)`: what this pass sends, and what it holds with the reason.
 
-    Skips are never in either list. While the harness is red, every *foldable* harness
-    decision becomes one devkit session and every project one is held. Once clean,
-    updates go first (free, and they may turn the PR green by themselves), then
-    conflicts: a conflicted PR's gate cannot run, so nothing else about it is knowable.
-    That same order holds for the branch-shaped decisions the fold cannot take.
+    Skips are never in either list; a `HOLD` the plan made -- a PR behind a red base --
+    is held with the plan's own note, clean or not. While the harness is red, every
+    *foldable* harness decision becomes one devkit session and every project one is
+    held, except an adoption PR's own project-shaped failure when the release it
+    adopts is the only reason (`Harness.only_adopting`): that hold is the PR itself.
+    Once clean, updates go first (free, and they may turn the PR green by themselves),
+    then conflicts: a conflicted PR's gate cannot run, so nothing else about it is
+    knowable. That same order holds for the branch-shaped decisions the fold cannot
+    take.
     """
-    live = [d for d in decisions if d.action != fix_plan.SKIP]
+    planned_holds = [(d, d.note) for d in decisions if d.action == fix_plan.HOLD]
+    live = [d for d in decisions if d.action not in (fix_plan.SKIP, fix_plan.HOLD)]
     harness_ones = [d for d in live if decision_class(d, classes) == HARNESS]
     project_ones = [d for d in live if decision_class(d, classes) != HARNESS]
-    rank = {fix_plan.UPDATE: 0, fix_plan.RESOLVE: 1}
+    go = _harness_first(harness_ones)
     if not harness.clean:
+        adopting = [
+            d for d in project_ones if harness.only_adopting and fix_plan.is_adoption(d, prefixes)
+        ]
         why = "held until the harness is clean: " + "; ".join(harness.reasons)
-        go = sorted(
-            (d for d in harness_ones if d.action in BRANCH_SHAPED), key=lambda d: rank[d.action]
-        )
-        foldable = [d for d in harness_ones if d.action not in BRANCH_SHAPED]
-        if foldable:
-            go.append(fold_harness(foldable))
-        return go, [(d, why) for d in project_ones]
-    ordered = sorted(project_ones, key=lambda d: rank.get(d.action, 2))
-    return harness_ones + ordered, []
+        held = [(d, why) for d in project_ones if d not in adopting]
+        return go + sorted(adopting, key=lambda d: RANK.get(d.action, 2)), held + planned_holds
+    # Clean, so what is harness-shaped here is the ledger backlog and nothing else:
+    # still one folded devkit session, still first, and nobody held behind it.
+    return go + sorted(project_ones, key=lambda d: RANK.get(d.action, 2)), planned_holds
+
+
+# The order within a phase: updates first (free), then conflicts (nothing else about
+# the PR is knowable until it is resolved), then the rest.
+RANK = {fix_plan.UPDATE: 0, fix_plan.RESOLVE: 1}
+
+
+def _harness_first(harness_ones: list[fix_plan.Decision]) -> list[fix_plan.Decision]:
+    """The branch-shaped harness decisions as themselves, then the rest folded into one."""
+    branch_shaped = (d for d in harness_ones if d.action in BRANCH_SHAPED)
+    go = sorted(branch_shaped, key=lambda d: RANK.get(d.action, 2))
+    foldable = [d for d in harness_ones if d.action not in BRANCH_SHAPED]
+    if foldable:
+        go.append(fold_harness(foldable))
+    return go
 
 
 def fold_harness(decisions: list[fix_plan.Decision]) -> fix_plan.Decision:
@@ -230,7 +276,7 @@ def fold_harness(decisions: list[fix_plan.Decision]) -> fix_plan.Decision:
     projects = sorted({f.project for f in failures})
     return fix_plan.Decision(
         fix_plan.UPSTREAM,
-        f"the harness is red in {len(projects)} checkout(s) ({', '.join(projects)}); "
+        f"harness-shaped in {len(projects)} checkout(s) ({', '.join(projects)}); "
         "one devkit session for all of it",
         failures,
     )
@@ -248,14 +294,29 @@ def target_of(key: str) -> str:
 
 
 def sent_today(ledger: dict[str, dict], now: _dt.datetime) -> dict[str, int]:
-    """Dispatches per target on `now`'s date, from the ledger's own timestamps."""
+    """Sessions per target on `now`'s date, from the ledger's own timestamps.
+
+    An `UPDATE` is recorded for idempotence but is one `gh` call and no session, so it
+    is not counted: after a release merge, a handful of behind PRs once spent the whole
+    day's budget on free branch updates and the real fixers waited for tomorrow.
+    """
     counts: dict[str, int] = {}
     day = now.date().isoformat()
     for key, entry in ledger.items():
+        if key.endswith(f":{fix_plan.UPDATE}"):
+            continue
         if isinstance(entry, dict) and str(entry.get("when", "")).startswith(day):
             target = target_of(key)
             counts[target] = counts.get(target, 0) + 1
     return counts
+
+
+def is_blind(decision: fix_plan.Decision) -> bool:
+    """No failure under it has any evidence: no test id, no lint line, no failed step."""
+    return all(
+        not [entry for entry in f.signature if entry != fix_plan.CONFLICT]
+        for f in decision.failures
+    )
 
 
 def within_caps(
@@ -265,10 +326,20 @@ def within_caps(
     per_target: int = PER_TARGET_PER_DAY,
     per_day: int = PER_DAY,
 ) -> tuple[bool, str]:
+    """Whether this dispatch fits today's budget, and why not when it does not.
+
+    An update is free and always fits. A blind dispatch -- nothing to name -- gets one
+    slot rather than two: the second slot is the retry after a fix that did not take,
+    and a session that starts from nothing cannot be told from one that did.
+    """
+    if decision.action == fix_plan.UPDATE:
+        return True, ""
     counts = sent_today(ledger, now)
     if sum(counts.values()) >= per_day:
         return False, f"the pass has sent {per_day} sessions today; the rest wait for tomorrow"
-    target = target_of(fix_plan.decision_key(decision))
+    target = target_of(fix_ledger.decision_key(decision))
+    if is_blind(decision) and counts.get(target, 0) >= 1:
+        return False, f"{target} has had its one session today with no evidence -- needs a human"
     if counts.get(target, 0) >= per_target:
         return False, f"{target} has had {per_target} sessions today -- needs a human"
     return True, ""
@@ -293,6 +364,12 @@ class Account:
     # commit's red. In the record because a pass that holds everything behind one of
     # these has to say which one, or "harness RED" reads as a defect nobody can find.
     skipped: tuple[fix_plan.Decision, ...] = ()
+    # Checkouts the workspace file pauses (`devkit.onHold`): intents there still ship,
+    # nothing red there is read, and the record says so rather than reading as green.
+    on_hold: tuple[str, ...] = ()
+    # What a dispatched session reported it could not do, one line each: the one
+    # channel back from a fixer, and what "needs a human" is about.
+    blocked: tuple[str, ...] = ()
 
 
 def _names(decision: fix_plan.Decision) -> str:
@@ -304,9 +381,13 @@ def render(account: Account) -> str:
     harness = account.harness
     lines = [f"fix-pass: mode={account.mode}"]
     lines += [f"shipped  {line}" for line in account.shipped]
+    if account.on_hold:
+        names = ", ".join(account.on_hold)
+        lines.append(f"on hold  {names} -- nothing red is read there ({SETTING_ON_HOLD})")
     lines.append(
         "harness  clean" if harness.clean else "harness  RED -- " + "; ".join(harness.reasons)
     )
+    lines += [f"blocked  {line}" for line in account.blocked]
     lines += [f"{d.action:8} {_names(d)} -- {d.note}" for d in account.go]
     lines += [f"held     {_names(d)} -- {why}" for d, why in account.held]
     lines += [f"capped   {_names(d)} -- {why}" for d, why in account.capped]
@@ -320,13 +401,6 @@ def render(account: Account) -> str:
 
 
 GREEN = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
-
-
-def _labels(row: dict) -> set[str]:
-    return {
-        str(entry.get("name", "")) if isinstance(entry, dict) else str(entry)
-        for entry in row.get("labels", []) or []
-    }
 
 
 def _gate_green(row: dict) -> bool:
@@ -350,6 +424,10 @@ def green_adoptions(rows: Iterable[dict], prefixes: tuple[str, ...], label: str)
         if isinstance(row, dict)
         and not row.get("isDraft")
         and str(row.get("headRefName", "")).startswith(prefixes)
-        and label in _labels(row)
+        and label
+        in {
+            str(entry.get("name", "")) if isinstance(entry, dict) else str(entry)
+            for entry in row.get("labels", []) or []
+        }
         and _gate_green(row)
     ]

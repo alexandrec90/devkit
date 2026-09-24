@@ -145,7 +145,10 @@ def test_the_newest_tag_is_slugified_like_a_branch(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(["git", *args], 0, "v0.11.21\nv0.11.20\n", "")
 
     monkeypatch.setattr(ev.sweep, "git_for", lambda _p: git)
-    assert ev.latest_tag(tmp_path) == "v0-11-21"
+    assert ev.newest_release(tmp_path) == "v0.11.21"
+    assert ev.tb.slugify(ev.newest_release(tmp_path)) == "v0-11-21", (
+        "the plan compares it to adoption branch names, which are slugs"
+    )
 
 
 def test_the_newest_release_is_read_as_written(monkeypatch, tmp_path):
@@ -161,7 +164,7 @@ def test_no_tags_is_no_answer(monkeypatch, tmp_path):
     monkeypatch.setattr(
         ev.sweep, "git_for", lambda _p: lambda *a: subprocess.CompletedProcess(a, 1, "", "")
     )
-    assert ev.latest_tag(tmp_path) == ""
+    assert ev.newest_release(tmp_path) == ""
 
 
 # --- collecting everything red ------------------------------------------------------------
@@ -335,14 +338,17 @@ def test_one_slot_per_failure_named_for_what_it_is():
     ) == ("devkit-branch-main")
 
 
-def test_the_newest_completed_run_is_the_branchs_verdict():
+def test_the_newest_completed_run_at_the_tip_is_the_branchs_verdict(monkeypatch, tmp_path):
+    """An unfinished run for some other commit above it says nothing; the completed one
+    at the tip is the verdict."""
     runs = [
-        {"databaseId": 3, "status": "in_progress", "conclusion": ""},
-        {"databaseId": 2, "status": "completed", "conclusion": "failure"},
+        {"databaseId": 3, "status": "in_progress", "conclusion": "", "headSha": "elsewhere"},
+        {"databaseId": 2, "status": "completed", "conclusion": "success", "headSha": "fb17a310"},
     ]
-    assert ev.default_branch_run(table({("run", "list"): runs}), "main")["databaseId"] == 2
-    assert ev.default_branch_run(table({("run", "list"): runs[:1]}), "main") == {}
-    assert ev.default_branch_run(table({}), "main") == {}
+    tip_world(monkeypatch, runs)
+    assert ev.read_default_branch("devkit", tmp_path, tmp_path / "ev") == (True, None)
+    tip_world(monkeypatch, runs[:1])
+    assert ev.read_default_branch("devkit", tmp_path, tmp_path / "ev") == (None, None)
 
 
 def branch_world(monkeypatch, conclusion: str, summary: str, tags: str):
@@ -444,3 +450,89 @@ def test_every_checkout_on_disk_has_its_default_branch_read(monkeypatch, tmp_pat
     (tmp_path / "devkit").mkdir()
     monkeypatch.setattr(ev, "read_default_branch", lambda name, _d, _r: (name == "devkit", None))
     assert ev.collect_default_branches(workspace, ["devkit", "missing"]) == {"devkit": (True, None)}
+
+
+# --- the verdicts that are not verdicts -------------------------------------------------
+
+
+def tip_world(monkeypatch, runs: list[dict], tip: str = "fb17a310"):
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: table({("run", "list"): runs}))
+    monkeypatch.setattr(
+        ev.sweep,
+        "git_for",
+        lambda _p: lambda *a: subprocess.CompletedProcess(a, 0, f"{tip}\n", ""),
+    )
+    monkeypatch.setattr(ev.tb, "detect_default_branch", lambda _git, fallback="main": "main")
+
+
+def test_a_gate_still_running_at_the_tip_is_running_not_unreadable(monkeypatch, tmp_path):
+    """Every pass in the minutes after a merge to devkit main read the newest *completed*
+    run, found it at the previous sha, said "could not be read" and held every project
+    fixer behind a gate that was merely running."""
+    runs = [
+        {"databaseId": 3, "status": "in_progress", "conclusion": "", "headSha": "fb17a310"},
+        {"databaseId": 2, "status": "completed", "conclusion": "success", "headSha": "older"},
+    ]
+    tip_world(monkeypatch, runs)
+    assert ev.read_default_branch("devkit", tmp_path, tmp_path / "ev") == (fix_plan.RUNNING, None)
+
+
+def test_a_cancelled_run_at_the_tip_is_no_verdict_rather_than_red(monkeypatch, tmp_path):
+    """Anything but success read as red, so a cancelled run became a devkit session sent
+    at an empty signature."""
+    runs = [
+        {"databaseId": 3, "status": "completed", "conclusion": "cancelled", "headSha": "fb17a310"}
+    ]
+    tip_world(monkeypatch, runs)
+    assert ev.read_default_branch("devkit", tmp_path, tmp_path / "ev") == (None, None)
+
+
+def test_the_default_branch_runs_are_the_listed_dicts_newest_first_or_nothing():
+    runs = [{"databaseId": 3, "status": "in_progress"}, "junk", {"databaseId": 2}]
+    assert ev.default_branch_runs(table({("run", "list"): runs}), "main") == [runs[0], runs[2]]
+    assert ev.default_branch_runs(table({}), "main") == []
+    assert ev.default_branch_runs(table({("run", "list"): {"not": "a list"}}), "main") == []
+
+
+def test_the_runs_behind_failing_checks_are_read_off_the_rollup():
+    rollup = [
+        {"conclusion": "FAILURE", "detailsUrl": "https://github.com/x/y/actions/runs/91/job/5"},
+        {"conclusion": "SUCCESS", "detailsUrl": "https://github.com/x/y/actions/runs/92/job/6"},
+        {"state": "FAILURE", "targetUrl": "https://github.com/x/y/actions/runs/93/job/7"},
+        {"conclusion": "FAILURE", "detailsUrl": "https://github.com/x/y/actions/runs/91/job/8"},
+        {"conclusion": "FAILURE", "detailsUrl": "https://example.com/not-a-run"},
+        "junk",
+    ]
+    assert ev.run_ids_from_rollup(rollup) == ("91", "93")
+    assert ev.run_ids_from_rollup(None) == ()
+    assert ev.pr_failure("carameli", pr(statusCheckRollup=rollup)).check_runs == ("91", "93")
+
+
+def test_a_failing_check_from_another_workflow_is_its_own_evidence(monkeypatch, tmp_path):
+    """Three of nine ledger entries were "no artifact and no failed step named": the
+    gate workflow's run list had nothing at the sha because the failing check belonged
+    to another workflow, and a session was sent blind at a run the rollup named."""
+    rollup = [
+        {"conclusion": "FAILURE", "detailsUrl": "https://github.com/x/y/actions/runs/91/job/5"}
+    ]
+    downloaded = []
+
+    def gh(*args):
+        if args[:2] == ("run", "list"):
+            return subprocess.CompletedProcess(args, 0, "[]", "")
+        if args[:2] == ("run", "download"):
+            downloaded.append(args[2])
+            target = Path(args[-1]) / "test-failures"
+            target.mkdir(parents=True)
+            (target / "test-failures.log").write_text(SUMMARY, encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(f"unexpected {args}")
+
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+    monkeypatch.setattr(ev, "is_behind", lambda git, base, sha: False)
+    failure = ev.read_pr(
+        tmp_path, ev.pr_failure("carameli", pr(statusCheckRollup=rollup)), tmp_path / "ev"
+    )
+    assert downloaded == ["91"]
+    assert failure.run_id == "91" and failure.signature == ("tests/test_x.py::test_y",)
+    assert Path(failure.evidence) == tmp_path / "ev" / "carameli-pr-412"
