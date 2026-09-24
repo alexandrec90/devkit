@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_ports
 import devkit_project
 from devkit_render import TemplateError, render
+from project_env import lock_dependencies, missing_commit_tooling, provision_environment
 
 DEVKIT_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = DEVKIT_ROOT / "templates"
@@ -535,33 +536,28 @@ def vendor_harness(plan: Plan, dry_run: bool) -> None:
     run([sys.executable, "scripts/sync-codex-context.py"], plan.root, dry_run, check=False)
 
 
-def lock_dependencies(plan: Plan, dry_run: bool) -> None:
-    """Generate `uv.lock` so the project starts reproducible.
+def announce(plan: Plan, dry_run: bool) -> None:
+    """Print what is about to be generated, then refuse a run whose commit cannot succeed.
 
-    Best-effort by design: locking resolves against PyPI, so it needs uv installed
-    and a network. When it cannot run, the project is still complete and valid --
-    every consumer of the lock (`uv sync`, the Dockerfile's `uv.lock*` glob,
-    session-start.sh's detection) degrades to resolving fresh. So a failure here
-    prints what to run and continues rather than aborting a scaffold that is
-    otherwise finished.
-
-    Runs before `git_init` so the lock lands in the initial commit.
+    The refusal is here, before `main` writes anything, because a half-generated
+    directory blocks the re-run (`plan` rejects a non-empty root). A dry run only warns.
     """
-    if dry_run:
-        print("  run     uv lock    (in the new project)")
-        return
-    if shutil.which("uv") is None:
-        print("  skip    uv lock -- uv is not installed")
-        print("          The project has no uv.lock; run `uv lock` in it to add one.")
-        return
-    result = subprocess.run(["uv", "lock"], cwd=plan.root, capture_output=True, text=True)
-    if result.returncode != 0:
-        tail = (result.stderr or result.stdout).strip().splitlines()[-3:]
-        print("  warn    uv lock failed -- continuing without a lockfile")
-        for line in tail:
-            print(f"          {line}")
-        return
-    print("  write   uv.lock")
+    run_mode = "DRY RUN — nothing will be written" if dry_run else "generating"
+    ref = str(plan.context["devkit_ref"])
+    print(f"devkit new-project: {run_mode}")
+    print(f"  project   {plan.name}  ->  {plan.root}")
+    print(f"  slot      {plan.context['slot']}")
+    print(f"  features  {', '.join(f for f in FEATURES if plan.context[f]) or '(none)'}")
+    print(f"  remote    {'yes' if plan.remote else 'no'}")
+    print(f"  devkit    {ref} (pinned by the generated PR gate)")
+    print()
+    _warn_if_pin_is_stale(ref)
+    _warn_if_pre_commit_channel_is_unpublished(ref)
+    missing = missing_commit_tooling()
+    if missing and not dry_run:
+        raise GeneratorError(f"{missing}\nNothing was written.")
+    if missing:
+        print(f"  WARNING: {missing}\n")
 
 
 def git_init(plan: Plan, dry_run: bool) -> None:
@@ -835,25 +831,14 @@ def main(argv: list[str] | None = None) -> int:
         registry = devkit_ports.load(DEVKIT_ROOT)
         the_plan = plan(args, registry)
 
-        # Not `mode`: that name is already bound to the argparse mutually-exclusive
-        # group above, and rebinding it here shadows the group with a str.
-        run_mode = "DRY RUN — nothing will be written" if args.dry_run else "generating"
-        print(f"devkit new-project: {run_mode}")
-        print(f"  project   {the_plan.name}  ->  {the_plan.root}")
-        print(f"  slot      {the_plan.context['slot']}")
-        print(f"  features  {', '.join(f for f in FEATURES if the_plan.context[f]) or '(none)'}")
-        print(f"  remote    {'yes' if the_plan.remote else 'no'}")
-        print(f"  devkit    {the_plan.context['devkit_ref']} (pinned by the generated PR gate)")
-        print()
-        _warn_if_pin_is_stale(str(the_plan.context["devkit_ref"]))
-        _warn_if_pre_commit_channel_is_unpublished(str(the_plan.context["devkit_ref"]))
-
+        announce(the_plan, args.dry_run)
         if not args.dry_run:
             the_plan.root.mkdir(parents=True, exist_ok=True)
         render_tree(the_plan, args.dry_run)
         write_package(the_plan, args.dry_run)
         vendor_harness(the_plan, args.dry_run)
-        lock_dependencies(the_plan, args.dry_run)
+        lock_dependencies(the_plan.root, args.dry_run)
+        provision_environment(the_plan.root, args.dry_run)
         git_init(the_plan, args.dry_run)
         register_in_workspace(the_plan, args.dry_run)
         create_remote(the_plan, args.dry_run)

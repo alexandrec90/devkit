@@ -1484,6 +1484,58 @@ def test_lock_step_is_skipped_gracefully_without_uv(tmp_path, monkeypatch):
     assert not (root / "uv.lock").exists()
 
 
+def _which(*present: str):
+    return lambda name: f"/bin/{name}" if name in present else None
+
+
+def test_a_real_run_refuses_before_writing_when_the_commit_cannot_succeed(
+    tmp_path, capsys, monkeypatch
+):
+    """Found generating web-lod: the tree was written, then `git commit` was refused by
+    the pre-commit gate, and the half-built directory blocked the re-run."""
+    monkeypatch.setattr(new_project.shutil, "which", _which())
+    argv = ["demo_project", "--preset", "bare", "--parent", str(tmp_path), "--no-remote"]
+
+    assert new_project.main([*argv, "--yes"]) == 1
+
+    assert "Nothing was written" in capsys.readouterr().err
+    assert not (tmp_path / "demo_project").exists()
+
+
+def test_announce_prints_the_plan_and_passes_when_the_commit_can_run(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(new_project.shutil, "which", _which("uv"))
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+
+    new_project.announce(the_plan, dry_run=False)
+
+    out = capsys.readouterr().out
+    assert out.startswith("devkit new-project: generating")
+    assert f"project   {the_plan.name}" in out
+    assert "WARNING: neither" not in out
+
+
+def test_announce_refuses_a_real_run_and_only_warns_a_dry_one(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(new_project.shutil, "which", _which())
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+
+    with pytest.raises(new_project.GeneratorError, match="Nothing was written"):
+        new_project.announce(the_plan, dry_run=False)
+
+    new_project.announce(the_plan, dry_run=True)
+    assert "WARNING: neither uv nor pre-commit" in capsys.readouterr().out
+
+
+def test_a_dry_run_warns_about_missing_commit_tooling_and_finishes(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(new_project.shutil, "which", _which())
+    argv = ["demo_project", "--preset", "bare", "--parent", str(tmp_path), "--no-remote"]
+
+    assert new_project.main(argv) == 0
+
+    out = capsys.readouterr().out
+    assert "WARNING: neither uv nor pre-commit" in out
+    assert "uv sync --all-extras --all-groups" in out
+
+
 def test_compose_publishes_every_port_through_a_variable(tmp_path):
     # The whole reason parallel worktrees work. A literal host port here is the bug
     # that makes two checkouts un-runnable at the same time.
