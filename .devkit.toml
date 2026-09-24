@@ -33,7 +33,8 @@ unit_tests = "tests"
 [python]
 version = "3.12"
 
-# The PreToolUse Bash output cap, wired in .claude/settings.json. devkit takes the
+# The Bash output cap `invoke-capped.py` applies (the capped-Bash hook that also read it
+# is no longer wired). devkit takes the
 # defaults; they are stated explicitly rather than omitted so that this file documents
 # the tier it runs, and so a change to the neutral default in harness_config.py shows up
 # here as a diff rather than silently moving devkit's own cap.

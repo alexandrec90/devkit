@@ -69,7 +69,7 @@ jobs:
         # turning this gate into a no-op.
         #
         # MANIFEST files are vendored byte-identical, and every adopter runs
-        # `ruff format` on edit (lint-fix.py) or in its lint job. An unformatted
+        # `ruff format` at commit time or in its lint job. An unformatted
         # file here is therefore rewritten downstream on first touch, and the
         # adopter's `sync-devkit.py --check` then reports drift it did not cause
         # — which is exactly how v0.4.0 shipped a 101-char line in

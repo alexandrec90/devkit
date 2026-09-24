@@ -1,9 +1,10 @@
 # devkit
 
 A portable agent-coding harness for **Claude Code / Codex**: the project-agnostic
-hook scripts (auto-lint-on-edit, capped Bash, pre-stop PR-gate verification), the
-session lifecycle, and the Codex skill/hook compatibility tooling — **vendored into
-each project** and configured per-project through `.devkit.toml`.
+scripts, rules and skills, the session lifecycle, and the Codex skill compatibility
+tooling — **vendored into each project** and configured per-project through
+`.devkit.toml`. No coding-agent hook is wired anywhere (see
+[below](#devkit-runs-its-own-harness)); commit-time gates run through git and pre-commit.
 
 One source of truth, tested in isolation, pulled into every repo. No submodule: each
 project commits its own copy, so cloning a single project still gets everything.
@@ -33,29 +34,28 @@ project commits its own copy, so cloning a single project still gets everything.
   [`templates/core/dot-devkit.toml.tmpl`](templates/core/dot-devkit.toml.tmpl),
   which is what a new project is rendered with. The `.devkit.toml` in *this*
   repo used to serve that role by holding a copy of carameli's; it now describes
-  **devkit**, because devkit runs these hooks on itself and a hook reading another
+  **devkit**, because devkit runs these scripts on itself and a script reading another
   project's shape acts on directories that are not here.
 
 ## devkit runs its own harness
 
-Everything devkit ships is wired up here, on itself — `.claude/settings.json` fires
-the same hook set the generator emits, against devkit's own scripts.
+Everything devkit ships runs here, on itself, against devkit's own scripts. The one
+exception is **coding-agent hooks**: none is wired, here or in any generated project —
+`.claude/settings.json` carries no `hooks` block, `.codex/hooks.json` is empty, and
+`sync-devkit.py --pull` strips a consumer's. The hook scripts under `scripts/hooks/` and
+`.claude/hooks/` are still vendored, but nothing runs them.
 
 | Utility | Wired by |
 | --- | --- |
-| SessionStart provisioning | `.claude/hooks/session-start.sh` (uv-native: `pyproject.toml` + `uv.lock`) |
-| Task naming | `scripts/task_slug.py` records the prompt's slug; `scripts/worktree-guard.py` names the box it cuts after it |
-| Work isolation | `scripts/worktree-guard.py` routes an edit that would land on a home branch into an ephemeral box |
-| Auto-lint on edit | `scripts/hooks/lint-fix.py` |
-| Pre-stop verification | `scripts/hooks/stop.py` → `scripts/lint-all.py`, `scripts/run-tests.py`, both test trees |
 | Tests must exist | `tests/test_test_contract.py` (a `test_<stem>.py` per script) and `scripts/hooks/untested_symbols.py` (every public callable named by a test, ratcheted against `.devkit-untested.txt`) |
 | Shape must not degrade | `scripts/hooks/structure_check.py` (size, complexity, fan-out, cycles, orphans, suppressions, dependencies and declared boundaries, ratcheted against `.devkit-structure.txt`; `--tighten` after a fix, `[structure]` in `.devkit.toml` to tune) |
-| Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log`, `logs/stop-verify.log` |
+| Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log` |
 | Scheduled-failure reporting | `.github/workflows/scheduled-failure-issue.yml` → `scripts/report-workflow-failure.py` opens one assigned issue when `Nightly` fails, and closes it when it passes |
 | VS Code tasks | the multi-root workspace file — devkit owns no `.vscode/tasks.json`, which is the rule it prescribes |
 
-Not decoration — a hook that only runs downstream is a hook nobody tests. Wiring
-these up surfaced four bugs that had shipped to every consumer: the Stop hook passed
+Not decoration — a utility that only runs downstream is a utility nobody tests. When
+the agent hooks were still wired, running them here surfaced four bugs that had shipped
+to every consumer: the Stop hook passed
 `--no-secrets` to a lint runner that rejected it (argparse exit 2, so Tier 1 failed on
 *every* stop in *every* generated project), it invoked a `check-lock-markers.py` no
 generated project has, it treated pytest's "no tests collected" as a failure, and with
@@ -184,9 +184,8 @@ Two consequences worth knowing:
 devkit runs these on itself via [`.pre-commit-config.yaml`](.pre-commit-config.yaml),
 wired as `repo: local` — pinning a rev there would validate a released tag's hooks against
 the working tree trying to change them, so a hook fix could never be tested by the hook it
-fixes. `.claude/hooks/session-start.sh` runs `pre-commit install` when a config is
-present, unless the global dispatcher below is installed and already owns that job.
-Either way, a fresh clone or sandbox gets the gate without anyone remembering to.
+fixes. The global dispatcher below, once installed, owns the commit-time gate for every
+repository on the machine; without it, run `pre-commit install` in the clone.
 
 ## Global branch-lifecycle policy
 
@@ -286,8 +285,8 @@ the release this was written for.
 
 The global `post-checkout` hook (`scripts/worktree_env.py`) fires once, in the new tree,
 whenever one is created — `git worktree add`, whoever ran it, which is the one seam that
-reaches `claude --worktree`, `codex --worktree` and a person at a prompt alike, and stays
-on when the agent hooks are switched off. It does two things a linked worktree otherwise
+reaches `claude --worktree`, `codex --worktree` and a person at a prompt alike, with no
+agent hook involved. It does two things a linked worktree otherwise
 lacks, each only when its conditions hold:
 
 - writes the worktree its own `COMPOSE_PROJECT_NAME` into a gitignored `.env`, so a
@@ -354,14 +353,6 @@ git switch --no-track -c agent/new-task origin/main
 The global pre-commit hook intentionally rejects commits while the slot is parked,
 making branch creation mandatory before new work is committed.
 
-**This is the human flow, and an agent editing here now gets a box instead.** A branch
-cut this way carries no commits yet, and `worktree-guard.py` reads exactly that — a
-managed task branch with nothing on it protects no PR, so the edit is routed rather
-than allowed to land. Once the branch has a commit of its own the guard declines again,
-which is what keeps "check out PR #42 and fix it" working. If you want an agent to keep
-working *in* this checkout on a fresh branch, commit something first; if you do not
-care which directory it happens in, that is what the ephemeral tier below is for.
-
 ### Ephemeral worktrees (boxes)
 
 The section above is the *static* tier: a checkout that outlives the task, parked and
@@ -403,8 +394,7 @@ so continuing the task through it would open a second PR for the same work. `res
 takes the branch instead (`--branch`, `--pr N`, or, with `--session`, the one the reap
 ledger records for that session), checks it out with `origin/<branch>` as its upstream
 so a bare push still lands where the PR is watching, and refuses a branch origin no
-longer has. `worktree-guard.py` asks for it before it cuts anything, so a session whose
-box was reaped mid-task lands back on its own branch without knowing it had left.
+longer has.
 
 A port lease is not the whole story, because a setting *derived* from a port is not a
 port. Seeding copies the source checkout's `.env` verbatim, so a value naming the
@@ -428,13 +418,10 @@ the seeded line in force is at least a value somebody chose.
 
 Boxes live in `<workspace>/.worktrees/` and are deliberately absent from the multi-root
 workspace file — registering one would hand `sweep.py` a second owner for its lifecycle.
-`scripts/worktree-guard.py`, wired as a PreToolUse hook at the workspace root, is what
-puts work in one automatically: an agent editing a checkout its session is not inside
-gets a box spawned and the path handed back, instead of a commit on that repo's home
-branch. The same hook holds the boundary between boxes: each one is leased to the
-session it was cut for, an edit aimed into another session's box is blocked toward the
-editor's own, and `claim` is the deliberate handover for when the user moves a task
-between sessions.
+Nothing cuts one automatically: `scripts/worktree-guard.py` is kept but not wired as an
+agent hook, so a box is made on purpose, through `worktree.py new` or
+`agent-box.py spawn` below. Each box is leased to the session it was cut for, and
+`claim` is the deliberate handover for when the user moves a task between sessions.
 
 ### Switching the harness off, and driving the same tier by hand
 
@@ -451,7 +438,7 @@ python scripts/harness-switch.py --off --job devkit-tray  # one scheduled job, f
 
 | Group | What it stands down | How |
 | --- | --- | --- |
-| `hooks` | every hook, the branch tier included | `DEVKIT_HOOKS_OFF=1` in the user settings and the user environment |
+| `hooks` | every switchable hook script — none is wired today, so this changes nothing until one is | `DEVKIT_HOOKS_OFF=1` in the user settings and the user environment |
 | `instructions` | every `CLAUDE.md` and `.claude/rules/*.md`, at every tier | moved to `logs/harness-switch/`, tracked ones marked `skip-worktree` |
 | `jobs` | `devkit-worktree-reconcile`, `devkit-upgrade-projects`, `devkit-release`, `devkit-fix-pass` | `schtasks /Change /DISABLE` |
 
@@ -461,7 +448,7 @@ group is recorded in the ledger, and its installer registers it *disabled* from 
 so the nightly `devkit-installers` pass keeps it registered without ever starting it.
 Skills are never touched — they cost nothing until a session invokes one by name.
 
-With the branch tier off, `scripts/agent-box.py` is what cuts, runs, ships and destroys a
+With no branch tier wired, `scripts/agent-box.py` is what cuts, runs, ships and destroys a
 box on purpose. It is one verb per workspace task, and the tasks are the intended way in:
 
 ```bash
@@ -1022,16 +1009,16 @@ is one more reason `spawn: worktree` is the setting to prefer.
 #### The tray indicator: nothing is ever totally invisible
 
 Unattended jobs are invisible by construction. They run windowless, their stdout goes
-nowhere, and the only sign one has stopped is a line at the start of the next session —
-which requires someone to start a session. `devkit-tray` is the always-on half of that:
+nowhere, and the only sign one has stopped is a line in the next `workspace-status.py`
+report — which requires someone to read it. `devkit-tray` is the always-on half of that:
 one notification-area icon, green when every registered job is healthy, amber when one
 is late or has never run, red when one has failed or is disabled. Right-click lists them
 all; clicking a job opens its own log.
 
 It makes no judgement of its own — `schedule_health.problems` decides what counts as a
 problem, and the tray adds only how loud each answer is. A second opinion would be worse
-than no indicator, because it would disagree with the session-start line about the same
-machine. A machine with nothing registered shows **amber, not green**: green over a set
+than no indicator, because it would disagree with the `workspace-status.py` line about
+the same machine. A machine with nothing registered shows **amber, not green**: green over a set
 of zero jobs is the most misleading thing it could say.
 
 ```bash
@@ -1098,7 +1085,7 @@ auto_stop = true` in the project's own `.devkit.toml`) and shows no established
 connection to a published port -- with a grace window for anything recently started --
 is stopped. `docker stop`, never `down`: containers and named volumes survive, and a
 stopped stack stays stopped across reboots until something wants it again
-(`docker-maint.py up`, or the stop hook's `*_STOP_TESTS_AUTOSTART` tier). Opt-in is
+(`docker-maint.py up`). Opt-in is
 the safety property: a collector-style stack doing scheduled work with no client
 connected looks exactly like an idle one, so it is safe by default rather than by
 being remembered.
@@ -1201,8 +1188,8 @@ can delete.
 Creating one is not the only way a project enters the workspace, and deleting the
 folder is not how it leaves. The registry is the `folders` list in the workspace
 file, and **every tool here reads it** — `sweep.py`, `worktree.py`,
-`workspace-status.py`, the task dispatcher's project pickers, and the worktree guard
-that decides whether an agent's edit needs a box. Editing that list by hand means
+`workspace-status.py`, the task dispatcher's project pickers, and the (unwired)
+worktree guard. Editing that list by hand means
 editing the canonical copy, remembering the four pickers that mirror it, and
 republishing; missing any of the three leaves a project half-registered.
 
@@ -1295,9 +1282,9 @@ and runs its suites, because devkit's own suite passes precisely when devkit's
 manifest is the one being hard-coded against.
 
 devkit's own `.devkit.toml` describes **devkit** — it held a copy of a consumer's for a
-while, which was harmless as an example and not as configuration, since these hooks now
-run here and a hook reading another project's shape acts on directories that are not
-here. So the tiers devkit does not have are off in it, and the vendored suite skips them
+while, which was harmless as an example and not as configuration, since the vendored
+scripts run here and one reading another project's shape acts on directories that are
+not here. So the tiers devkit does not have are off in it, and the vendored suite skips them
 locally; the `generated-project` job above is what exercises them.
 
 ### The repo contract
@@ -1322,9 +1309,9 @@ noticed.** The contract asserts only what a repo's own config decides —
   `db_servce` reads as "unset", and the tier quietly falls back to a default that
   does not match the compose file.
 
-Everything gated on the repo actually wiring `stop.py` as a Stop hook, which is what
-keeps devkit's fixture manifest from being held to devkit's files. Tiers whose script
-is project-owned (`check-lock-markers.py`, whose sentinels name that project's own
+The script-and-path checks are gated on the repo wiring `stop.py` as a Stop hook. No
+agent hook is wired anywhere now, so those skip in every repo; the manifest-spelling
+checks are ungated and still run. Tiers whose script is project-owned (`check-lock-markers.py`, whose sentinels name that project's own
 lockfiles) stay optional and skip explicitly.
 
 ### The shared instruction tier
@@ -1388,7 +1375,9 @@ other workstation prerequisites, and stays silent on a machine with no `CODEX_HO
 `sync-codex-context.py` mirrors only `.claude/skills/` to `.agents/skills/` and invokes
 `sync-codex-hooks.py` to regenerate `.codex/hooks.json` from the `settings.json` hooks
 block when a repository has opted into `.codex/`. Both scripts are in the `MANIFEST`,
-and `new-project.py` runs the compatibility sync at creation.
+and `new-project.py` runs the compatibility sync at creation. No agent hook is wired, so
+that block is absent and the generated file is `{"hooks": {}}`; the converter and adapter
+below are kept, tested, and inert.
 
 The shared `Agent: Sync Codex Context` task snapshots a clean home branch before it runs.
 When the sync changes committed artifacts, the dispatcher moves those outputs to a
@@ -1498,26 +1487,21 @@ setting without spending a model call.
 
 ### The shell output cap
 
-For Claude Code, `enforce-capped-bash.py` (PreToolUse) blocks a short, closed list of
-commands whose output grows with the repository — `ls`, `cat`, `find`, `tree`, `du`,
-`env`, `git status`, an uncounted `git log`, and a raw `git diff`/`git show`. Everything
-else runs uncapped. `invoke-capped.py` is one of the three ways out it names, and the
-unconditional bound on every call is `BASH_MAX_OUTPUT_LENGTH` in `.claude/settings.json`.
-Both scripts are vendored and ship together — the gate names the wrapper's path in its
-block message, so vendoring one without the other offers a remedy the repo does not have.
+The bound on every Claude Code Bash call is `BASH_MAX_OUTPUT_LENGTH` in
+`.claude/settings.json`, which truncates output that already exists. No hook gates the
+call itself. `enforce-capped-bash.py` — a blocklist of commands whose output grows with
+the repository — is still vendored with `invoke-capped.py`, the wrapper it names in its
+block message, but it is not wired, so nothing runs it.
 
 The gate used to require every Bash call to *prove* it was bounded. Its docstring records
 why that ended, with the measurement: 46% of every block it ever issued was its own false
 positive rather than a command anyone needed to rewrite.
 
-Codex's shell tool already bounds captured output. The hook converter therefore drops
-this handler, removes a `PreToolUse` group or event left empty by the drop, and preserves
-unrelated handlers that shared the group. This avoids the deny-and-retry cycle without
-weakening Claude's Bash policy.
+Codex's shell tool already bounds captured output, so the hook converter drops this
+handler should it ever be wired.
 
-Cap size is `[bash] max_bytes` / `head_bytes` in `.devkit.toml`, read by both Claude-side
-scripts, so the number the agent is told to use is the number it actually gets. The
-wrapper uses the platform shell and preserves the exit code, while `| head -c N` keeps
+`invoke-capped.py` is still usable by hand. Its cap size is `[bash] max_bytes` /
+`head_bytes` in `.devkit.toml`. The wrapper uses the platform shell and preserves the exit code, while `| head -c N` keeps
 POSIX syntax but masks the exit code behind `head`'s.
 
 ## Scope note

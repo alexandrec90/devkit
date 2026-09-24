@@ -7,13 +7,17 @@ argument-hint: 'Optional: a project name, an event name, or a group id to work o
 
 # Work the harness-defect backlog
 
-`.claude/rules/engineering.md` requires an agent to *report* a harness defect rather than
-route around it, and `scripts/hooks/report-harness-defect.py` gives that report a durable
-home. Nothing consumed the reports. This skill is the other end: it is why filing one is
-worth an agent's turn.
+Project sessions no longer file harness defects — `.claude/rules/engineering.md` takes
+the harness off their plate — so what reaches this ledger now is what the harness records
+about itself: a scheduled job failing (`log-wrap.py --always`), and the reports already
+on it. `scripts/fix-pass.py` sends the open backlog to its devkit session with everything
+else harness-shaped, and that session works it by the steps below. This skill is the
+same sweep run by hand. **Read `logs/fix-pass.log` first**: a session the pass has
+already sent at the backlog is on a branch of its own, and a second sweep at the same
+groups is two branches at one defect.
 
-Devkit-only, deliberately. A defect in the harness is a defect in **devkit** — the guard,
-the gates, the hooks — whatever project the session that hit it was scoped to, and a
+Devkit-only, deliberately. A defect in the harness is a defect in **devkit** — the gates,
+the scheduled jobs, the vendored scripts — whatever project the session that hit it was scoped to, and a
 consumer repo has nothing to fix but a vendored copy to `--pull` once the fix ships here.
 That is why this skill is not in `sync-devkit.py`'s `MANIFEST`.
 
@@ -63,8 +67,7 @@ make, or an outage you cannot reproduce — that is a question for the user **in
 you find it**, not a line in a closing report. Ask it, get the answer, fix it. A sweep
 ends with the backlog empty.
 
-> Every command below is issued bare. None is on the Bash blocklist, and a wrapper here
-> buys no second bound.
+> Every command below is issued bare. A wrapper here buys no second bound.
 
 ## 1. Read the backlog as groups, not as lines
 
@@ -85,8 +88,10 @@ Three event names reach it, and they want different treatment:
 | `guard-spawn-failed` | an edit was blocked and no box could be cut for it | the `detail=` field: it carries the exception |
 | `codex-translation-gap` | a hook's answer did not survive Codex's schema — a member refused or stripped | the `detail=` field: it names the members |
 
-Everything else on the ledger — `guard-route`, `guard-block`, `capped-bash-block`,
-`lint-fix-block` — is forensics, not a backlog. `check-logs` §7 covers reading those.
+No agent hook is wired any more, so the last two are old rows only: nothing new writes
+them. Everything else on the ledger — `guard-route`, `guard-block`, `capped-bash-block`,
+`lint-fix-block`, likewise historical — is forensics, not a backlog. `check-logs` §7
+covers reading those.
 
 A `codex-translation-gap` group wants one question the other two do not: **is the project
 name real?** `harness_events.record(root=None)` resolves `$DEVKIT_DIR`, so a test that
@@ -118,12 +123,13 @@ in this order — the first answer that lands ends it:
    `gh pr list --state merged --limit 20 --search "<keyword>"`. A merged PR that changed
    the behaviour retires the group; go to step 4 with its number.
 2. **Does it still reproduce?** Run the `command=` field, or the equivalent, against the
-   working tree. A capped-Bash or guard block reproduces in one call.
+   working tree. An old capped-Bash or guard block reproduces against the script's
+   decision function in one call, though no hook runs it any more.
 3. **Was the report itself wrong?** An agent that wrapped a command the blocklist never
    named, or renamed a branch to get past a check, filed a defect against a gate doing
    its job. Retire it with a note saying so — that is a real resolution, not a dismissal.
-   So is a block **no devkit hook produced**: a refusal quoting "stays inside the
-   worktree" or "cannot be shown not to be git" is Claude Code's own `claude --worktree`
+   So is a block **no devkit hook produced** — none is wired: a refusal quoting "stays
+   inside the worktree" or "cannot be shown not to be git" is Claude Code's own `claude --worktree`
    isolation guard, and one grep of `scripts/` for the quoted words settles it.
 4. **`version=` says whether the reporter's copy was current.** A consumer at
    `DEVKIT_VERSION` weeks behind may be reporting something `main` already fixed. Check
@@ -152,9 +158,20 @@ expected, a section per fix in the body — and prefer a large reviewed sweep to
 that leaves a list.
 
 **A fix in another project's checkout is still this sweep's work.** `<workspace>/<project>`
-is on this machine. Edit it there, run that project's own gate, and open its PR the same
-way; note in this PR's body which sibling PRs the sweep opened. Nothing about the ledger
-being devkit's makes a carameli file unfixable from a devkit session.
+is on this machine, but **never edit that static checkout**: it sits on its default
+branch, the fix pass cannot open a PR from there, and the first sweep to do it left a
+carameli fix unstaged on `master` where nothing would ever ship it. Cut a worktree on a
+task branch first, from this devkit checkout:
+
+```bash
+python scripts/agent-worktree.py new --pick "carameli:master" --slug agents-md-ignore --agent none
+```
+
+It prints the path, under that project's `.claude/worktrees/`. Edit there, run its
+targeted tests there, and leave a `logs/ship-intent.md` there the same way; say in this
+intent's body which sibling intents the sweep left, and the fix pass opens each PR.
+Nothing about the ledger being devkit's makes a carameli file unfixable from a devkit
+session.
 
 Two things stay the user's call, because both are irreversible and neither is yours to
 assume: **discarding work that exists only in a box**, and **a fix that has to be
@@ -182,8 +199,9 @@ literal ids when a group needs splitting.
 - Ids are content-addressed, not line numbers — a resolution written today still names
   its event after a thousand appends.
 
-Resolve **after** the fix is pushed, not before. A note naming a PR that does not exist
-yet is the one claim on this ledger nothing can check.
+Resolve **after** the fix is in your intent, not before, and name the branch when there
+is no PR number yet: the fix pass opens the PR from the intent, and a note naming a PR
+that does not exist is the one claim on this ledger nothing can check.
 
 ## Reporting
 

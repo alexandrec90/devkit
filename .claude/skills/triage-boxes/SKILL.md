@@ -26,8 +26,7 @@ That is the whole job here: read each stranded box, decide, act, and end with no
 Devkit-only, deliberately: the boxes belong to the workspace, not to any one project, and
 this is where `worktree.py` lives. It is not in `sync-devkit.py`'s `MANIFEST`.
 
-> Every command below is issued bare. None is on the Bash blocklist, and a wrapper here
-> buys no second bound.
+> Every command below is issued bare. A wrapper here buys no second bound.
 
 ## 1. List them
 
