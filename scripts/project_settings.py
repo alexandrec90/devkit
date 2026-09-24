@@ -137,7 +137,7 @@ def check_notes(root: Path, codex_file: str, codex_stale: bool) -> list[tuple[st
     notes: list[tuple[str, str]] = []
     payload = read(root)
     if hook_entries(payload):
-        events = ", ".join(sorted(payload["hooks"]))
+        events = ", ".join(strip_hooks(payload)[1])
         notes.append(
             (
                 "the project settings wire an agent hook",
