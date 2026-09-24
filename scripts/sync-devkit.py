@@ -242,6 +242,9 @@ MANIFEST: tuple[str, ...] = (
     # first CI run.
     ".claude/rules/engineering.md",
     ".claude/rules/authoring.md",
+    # What a coding session leaves to the fix pass (commit, push, PR, the full suite),
+    # and the fixer sessions exempt from that.
+    ".claude/rules/session-scope.md",
     # The reference half of the policy above. Vendored because the pointers into it are:
     # an unvendored target would leave every consumer's engineering.md citing a path that
     # does not exist there. It sits *outside* `.claude/rules/` on purpose -- every `.md`
