@@ -77,12 +77,17 @@ the only command a machine ever needs typed at it.
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/alexandrec90/devkit/main/scripts/bootstrap-machine.ps1))) -Yes
 ```
 
-It wingets git, Python, uv and VS Code; clones devkit; persists `DEVKIT_DIR`; runs
+It wingets git, uv, the GitHub CLI and VS Code; installs Python with
+`uv python install --default` rather than from python.org, whose installer ships no
+`python3.exe` and so leaves every devkit hook on the Microsoft Store alias (uv's bin
+directory goes ahead of `WindowsApps` on the user PATH); clones devkit; persists `DEVKIT_DIR`; runs
 `install-installers-schedule.py --yes` and then `installers.py maintain`, which is the
 step that actually puts every job on the machine rather than waiting for the first logon;
 renders the live workspace file with `devkit_project.py --render-workspace`, since nothing
 else writes it before `devkit-workspace-status`'s first daily pass; installs the two VS Code extensions the workspace tasks resolve their inputs through; and
-names anything left that only you can answer, such as an unset git identity. Every step
+names anything left that only you can answer, such as an unset git identity, a `gh` that
+is not logged in, or a VS Code that was open during the installs and must be fully
+restarted — its tasks keep the PATH it launched with. Every step
 checks before it acts, so re-running it repairs a machine rather than doubling anything
 up. `-Path` chooses where to clone, `-SkipPrerequisites` leaves the software to whatever
 else manages it.
@@ -1183,6 +1188,11 @@ Individual `--with-*` flags add to a preset; they never subtract.
 Everything local and reversible happens before the two outward-facing steps
 (creating the GitHub repo, pushing). A failure before that leaves a directory you
 can delete.
+
+The initial commit runs the new project's pre-commit gate, so the generator builds the
+project's `.venv` with `uv sync` first. With neither `uv` nor `pre-commit` on `PATH` it
+refuses before writing anything. A tool installed after VS Code started is not on its
+`PATH` until VS Code restarts.
 
 ### Plugging a project in and out
 
