@@ -38,8 +38,7 @@ package = false
 
 [tool.pytest.ini_options]
 # devkit's own suite only. `scripts/hooks/tests/` is the vendored tier — it ships into
-# every consuming project and runs as its own step (in CI, in the Stop hook, and as its
-# own VS Code task), so keeping it out of `testpaths` is what makes the two trees
+# every consuming project and runs as its own step (in CI and as its own VS Code task), so keeping it out of `testpaths` is what makes the two trees
 # separately runnable. This mirrors the `testpaths` every generated project gets.
 testpaths = ["tests"]
 addopts = '-q -m "not paid"'

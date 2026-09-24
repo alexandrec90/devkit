@@ -2,8 +2,8 @@
 
 A harness that is only ever wired downstream is a harness nobody tests. Every check
 here exists because the absence of the thing it asserts was, at some point, real:
-devkit shipped hooks with no `.claude/settings.json` to fire them, a manifest describing
-a different project, and a Stop hook invoking a lint runner this repo did not have.
+a manifest describing a different project, and a Stop hook invoking a lint runner this
+repo did not have. Agent hooks are the exception: none is wired, here or downstream.
 
 These are contract tests, not style preferences — each one fails loudly if devkit drifts
 back into shipping a utility it does not itself use.
@@ -31,50 +31,22 @@ from support import (
 SETTINGS = REPO_ROOT / ".claude" / "settings.json"
 TEMPLATE_SETTINGS = TEMPLATES / "core" / "dot-claude" / "settings.json.tmpl"
 
-# Hook commands are written as `${CLAUDE_PROJECT_DIR:-.}/<path>`; this pulls the paths.
-HOOK_PATH_RE = re.compile(r"\$\{CLAUDE_PROJECT_DIR:-\.\}/([^\"]+?\.(?:py|sh))")
-
 
 def _settings() -> dict:
     """devkit's own settings, parsed strictly.
 
     Strictly on purpose: Claude Code does not accept comments in `settings.json`, and an
-    unparseable file does not warn — it silently disables every hook in it, which is the
-    exact failure this whole module exists to prevent.
+    unparseable file does not warn.
     """
     return json.loads(SETTINGS.read_text(encoding="utf-8"))
 
 
-def test_devkit_has_settings_wiring_its_own_hooks():
-    assert SETTINGS.exists(), "devkit ships hook scripts but has nothing to fire them"
-    hooks = _settings()["hooks"]
-    # The events that carry devkit's own utilities. SessionStart provisions the venv,
-    # PostToolUse auto-formats on edit, Stop runs pre-stop verification; without these
-    # three the harness is inert no matter what else the file says.
-    for event in ("SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"):
-        assert event in hooks, f"{event} is not wired in devkit's own settings"
-
-
-def test_every_hook_devkit_wires_actually_exists():
-    """A hook command pointing at a missing script fires every turn and fails silently."""
-    referenced = HOOK_PATH_RE.findall(SETTINGS.read_text(encoding="utf-8"))
-    assert referenced, "no hook scripts referenced — the regex or the file shape changed"
-    for rel in referenced:
-        assert (REPO_ROOT / rel).exists(), f"{rel} is wired as a hook but does not exist"
-
-
-def test_devkit_wires_every_hook_event_the_template_does():
-    """devkit must not fall behind the settings it generates for other projects.
-
-    The template is the specification of "what a project gets". If it grows a hook event,
-    devkit should have it too — otherwise the repo authoring the harness is the one repo
-    running an older version of it.
-    """
-    template_hooks = set(re.findall(r'"(\w+)": \[', TEMPLATE_SETTINGS.read_text(encoding="utf-8")))
-    # `hooks` itself is not an event.
-    template_events = {name for name in template_hooks if name != "hooks"}
-    missing = template_events - set(_settings()["hooks"])
-    assert not missing, f"the template wires {sorted(missing)} but devkit does not"
+def test_no_agent_hook_is_wired_in_devkit_or_the_template():
+    """No agent hook is wired anywhere. devkit's own settings and the ones it generates
+    for every new project both carry none, and a pull strips them from the rest."""
+    assert "hooks" not in _settings(), "devkit's own settings wire an agent hook"
+    template = json.loads(TEMPLATE_SETTINGS.read_text(encoding="utf-8"))
+    assert "hooks" not in template, "the template wires an agent hook into every project"
 
 
 # Settings that belong to whoever is *driving* the session, not to the repo being

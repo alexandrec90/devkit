@@ -92,10 +92,6 @@ DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 SOURCE_ROOT = sweep.source_checkout(REPO_ROOT)
 # Where `install-git-policy.py` puts the runtime the global hooks actually execute.
 POLICY_TARGET = Path.home() / ".devkit" / "git-hooks"
-# The workspace-root settings file that wires the cross-checkout edit guard. Not inside
-# any repo -- see `guard_line` for why that is exactly why it needs reporting.
-ROOT_SETTINGS = Path(".claude") / "settings.json"
-GUARD_SCRIPT = "worktree-guard.py"
 _GB = 1024**3
 # Free space at each session start, so "where did 20 GB go" is a subtraction rather
 # than archaeology. Under the permanent checkout's `logs/` for `events_line`'s reason.
@@ -662,41 +658,10 @@ def _age(seconds: float) -> str:
     return f"{hours}h" if hours < 24 else f"{hours // 24}d {hours % 24}h"
 
 
-def guard_line(root: Path, settings: Path = ROOT_SETTINGS) -> str:
-    """Reports a workspace root that does not run the cross-checkout edit guard.
-
-    This once said the guard was "wired in every repo that vendors devkit's settings".
-    It was not — settings are never vendored, so no consumer ran it until
-    `project_settings.py` began back-filling the hook on `--pull` — and that sentence is
-    why the gap went a release unreported. The root is the case only a line like this
-    can cover: it is not inside any repository, so no test here can hold its wiring.
-
-    Absent-is-silent everywhere else in this file, and it is the wrong default here: an
-    unwired guard has no symptom at all. The edits land on home branches, and the sweep
-    reports the resulting `needs-branch` backlog days later as though a human had left it
-    there. So a root that has no settings file, or one that never names the guard, is
-    reported -- but only on a machine that has a multi-root workspace to begin with,
-    which `main` has already established by the time this is called.
-    """
-    path = root / settings
-    try:
-        if path.is_file() and GUARD_SCRIPT in path.read_text(encoding="utf-8"):
-            return ""
-    except OSError:
-        return ""
-    return (
-        f"cross-checkout edit guard not wired at the workspace root: an edit from a "
-        f"root session lands on a checkout's home branch with no task branch under it "
-        f"(fix: add a PreToolUse hook running devkit/scripts/{GUARD_SCRIPT} "
-        f"to {settings.as_posix()})"
-    )
-
-
 def toolchain_lines(which=shutil.which, git=None, extensions=None, codex=None) -> list[str]:
     """The workstation prerequisites nothing else reports missing; [] when they are set.
 
-    Reported here for `guard_line`'s reason: none has a symptom at the moment it is
-    wrong. A machine with no `uv` cannot provision anything at all -- devkit is uv-native,
+    Reported here because none has a symptom at the moment it is wrong. A machine with no `uv` cannot provision anything at all -- devkit is uv-native,
     so `worktree.py new`, `provision` and `session-start.sh` all end in the same failure
     wearing three different messages -- and an unset git identity surfaces as `sweep.py
     --ship` dying at `git commit` with `Author identity unknown`, at the end of the one
@@ -899,7 +864,6 @@ def render(
     policy: str = "",
     adoption: str = "",
     boxes: str = "",
-    guard: str = "",
     retired: str = "",
     scheduler: str = "",
     schedule: list[str] | None = None,
@@ -925,7 +889,6 @@ def render(
         adoption,
         boxes,
         previews,
-        guard,
         retired,
         events,
         workspace_sync,
@@ -1046,7 +1009,6 @@ def main(argv: list[str] | None = None) -> int:
             policy_line(latest=latest),
             adoption_line(root, names),
             boxes_line(box_survey(workspace)),
-            guard_line(root),
             retired_hooks_line(root, names),
             scheduler,
             schedule,

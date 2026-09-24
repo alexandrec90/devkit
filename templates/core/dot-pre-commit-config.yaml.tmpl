@@ -1,6 +1,5 @@
 # Local git gate, in two stages. Install once per clone with `pre-commit install` — the
-# `default_install_hook_types` line makes that one command wire both stages — and
-# `.claude/hooks/session-start.sh` does it automatically, so agent sessions get it too.
+# `default_install_hook_types` line makes that one command wire both stages.
 #
 # The commit stage is the fast, deterministic subset of the PR gate: fixers and
 # sub-second checks, so a commit is never held up by a judgement. The pre-push stage is
@@ -41,8 +40,8 @@ repos:
       - id: devkit-push-gate
 
   # --- formatting and lint ----------------------------------------------------
-  # The same fixers the `lint-fix.py` PostToolUse hook applies after every agent edit, so
-  # a human commit and an agent commit converge instead of reformatting each other.
+  # The same fixers `lint-fix.py` applies (no agent hook runs it today), so a human
+  # commit and an agent commit converge instead of reformatting each other.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.0
     hooks:

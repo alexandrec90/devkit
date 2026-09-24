@@ -524,27 +524,18 @@ def test_generated_harness_manifest_is_readable_by_harness_config(tmp_path, feat
         assert config.frontend.test_cmd == ("run", "test:run")
 
 
-def test_a_generated_project_wires_the_guard_the_way_a_pull_would(tmp_path):
-    """Two paths deliver the same hook -- `templates/` for a project generated after
-    the shim existed, `sync-devkit.py --pull` for every project generated before one --
-    and they must agree on which tools it sees. When they drift, which of your calls
-    reach the guard depends on the month the repo was created, and nothing says so.
-    """
+@pytest.mark.parametrize("features", FEATURE_MATRIX)
+def test_a_generated_project_wires_no_agent_hook(tmp_path, features):
+    """No agent hook is wired anywhere, under any preset. And a pull into a freshly
+    generated project agrees there is nothing to unwire."""
     ps = load_script("scripts/project_settings.py")
-    # The bare preset: the guard is core wiring, so it must not depend on a feature.
-    root = generate(tmp_path, {})
+    root = generate(tmp_path, features)
     settings = json.loads((root / ".claude" / "settings.json").read_text(encoding="utf-8"))
-    groups = [
-        group
-        for group in settings["hooks"][ps.GUARD_EVENT]
-        if any(ps.GUARD_HOOK in entry["command"] for entry in group["hooks"])
-    ]
-    assert len(groups) == 1, "the template wires the guard exactly once"
-    assert groups[0]["matcher"] == ps.GUARD_MATCHER
-    assert ps.GUARD_COMMAND in [entry["command"] for entry in groups[0]["hooks"]]
-    # And the back-fill agrees it is already wired, so a pull into a freshly generated
-    # project does not append a second copy.
-    assert ps.wire_guard(settings)[1] is False
+    assert "hooks" not in settings
+    assert ps.settings_pass(root) == []
+    codex = root / ".codex" / "hooks.json"
+    if codex.is_file():
+        assert json.loads(codex.read_text(encoding="utf-8")) == {"hooks": {}}
 
 
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
@@ -1793,19 +1784,6 @@ def test_generator_subprocesses_waive_the_branch_policy(monkeypatch, tmp_path):
     assert "PATH" in {k.upper() for k in env}
 
 
-def test_claude_settings_only_wires_hooks_that_are_actually_vendored(tmp_path):
-    # A hook command pointing at a script the MANIFEST does not ship fires on every
-    # turn and fails silently. Carameli's settings reference several such
-    # project-local hooks; a generated project must not inherit those.
-    manifest_text = (REPO_ROOT / "scripts" / "sync-devkit.py").read_text(encoding="utf-8")
-    root = generate(tmp_path, {})
-    settings = (root / ".claude" / "settings.json").read_text(encoding="utf-8")
-    for referenced in re.findall(r"\$\{CLAUDE_PROJECT_DIR:-\.\}/([^\"]+?\.(?:py|sh))", settings):
-        assert referenced in manifest_text, (
-            f"{referenced} is wired as a hook but is not in sync-devkit.py's MANIFEST"
-        )
-
-
 def test_generated_telemetry_endpoint_is_the_shared_collector_not_the_project_slot(tmp_path):
     """A generated project must export to the one collector, not to its own slot.
 
@@ -1826,22 +1804,6 @@ def test_generated_telemetry_endpoint_is_the_shared_collector_not_the_project_sl
     # The other half of the bargain: with one endpoint for everyone, the resource
     # attributes are the only thing left that says which project sent a metric.
     assert "service.name=" in env["OTEL_RESOURCE_ATTRIBUTES"]
-
-
-def test_generated_claude_settings_keep_the_bash_cap_hook(tmp_path):
-    """Codex drops this one handler; generation must not weaken Claude with it."""
-    root = generate(tmp_path, {})
-    settings = json.loads((root / ".claude/settings.json").read_text(encoding="utf-8"))
-    groups = settings["hooks"]["PreToolUse"]
-
-    bash_handlers = [
-        handler["command"]
-        for group in groups
-        if group.get("matcher") == "^Bash$"
-        for handler in group["hooks"]
-    ]
-
-    assert any("scripts/hooks/enforce-capped-bash.py" in command for command in bash_handlers)
 
 
 def test_the_manifest_survives_a_sync_tool_that_defines_a_dataclass(tmp_path):
