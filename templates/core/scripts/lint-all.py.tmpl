@@ -236,8 +236,8 @@ def main(argv: list[str] | None = None) -> int:
             f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
         )
 
-    # `.claude/hooks/session-start.sh` installs this into every session, so a
-    # provisioned checkout has it. A real executable rather than a `-m` module, so
+    # `uv sync` installs this into the project's venv, so a provisioned checkout has
+    # it. A real executable rather than a `-m` module, so
     # run_tool's FileNotFoundError branch is what degrades a missing one to a terminal
     # note instead of an unfixable artifact entry. The workflow files are not linted
     # here: actionlint runs from `.pre-commit-config.yaml`, where pre-commit builds the

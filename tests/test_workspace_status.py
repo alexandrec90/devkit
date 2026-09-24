@@ -14,6 +14,7 @@ reaches a person.
 
 import json
 import os
+from pathlib import Path
 
 from support import LIVE_WORKSPACE, REPO_ROOT, load_script, needs_live_workspace, sweep
 
@@ -598,48 +599,12 @@ def test_the_report_is_toolchain_and_render_and_nothing_else(monkeypatch, capsys
     assert "checklist" not in capsys.readouterr().out
 
 
-# --- the guard that is wired outside every repo -------------------------------
-
-
-def test_a_root_that_runs_the_guard_says_nothing(tmp_path):
-    settings = tmp_path / ".claude" / "settings.json"
-    settings.parent.mkdir()
-    settings.write_text(
-        json.dumps(
-            {
-                "hooks": {
-                    "PreToolUse": [
-                        {"hooks": [{"command": "python3 devkit/scripts/worktree-guard.py"}]}
-                    ]
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert ws.guard_line(tmp_path) == ""
-
-
-def test_a_root_with_no_settings_file_at_all_is_reported(tmp_path):
-    """Absent is silence everywhere else in this file, and is the wrong default here: an
-    unwired guard has no symptom. The edits land on home branches and surface days later
-    as a `needs-branch` backlog that looks like someone left it there by hand."""
-    line = ws.guard_line(tmp_path)
-    assert "not wired at the workspace root" in line
-    assert "worktree-guard.py" in line
-
-
-def test_a_settings_file_that_wires_other_hooks_but_not_the_guard_is_reported(tmp_path):
-    """The likelier shape of the failure: a root that has settings for something else."""
-    settings = tmp_path / ".claude" / "settings.json"
-    settings.parent.mkdir()
-    settings.write_text(json.dumps({"hooks": {"Stop": [{"hooks": []}]}}), encoding="utf-8")
-    assert "not wired" in ws.guard_line(tmp_path)
-
-
-def test_the_fix_names_a_forward_slash_path_on_every_platform(tmp_path):
-    """The line is read on Windows, where `Path` renders backslashes that then have to be
-    escaped by whoever pastes them into JSON."""
-    assert ".claude/settings.json" in ws.guard_line(tmp_path)
+def test_no_agent_hook_is_expected_at_the_workspace_root():
+    """No agent hook is wired anywhere, so a root with no `.claude/settings.json` is the
+    intended state and the daily pass must not report it. This used to demand the
+    cross-checkout edit guard there, and failed the push gate on a machine without it."""
+    assert not hasattr(ws, "guard_line")
+    assert "worktree-guard" not in Path(ws.__file__).read_text(encoding="utf-8")
 
 
 def toolchain(**over):
@@ -662,7 +627,7 @@ def test_a_workstation_with_uv_and_a_git_identity_says_nothing():
 
 
 def test_a_missing_uv_is_reported_because_nothing_can_provision_without_it():
-    """`guard_line`'s reason: it has no symptom at the moment it is wrong. devkit is
+    """It has no symptom at the moment it is wrong. devkit is
     uv-native, so `worktree.py new`, `provision` and `session-start.sh` all end in the
     same failure wearing three different messages."""
     (line,) = toolchain(which=lambda _n: None)
@@ -704,14 +669,6 @@ def test_a_codex_that_cannot_read_the_rules_joins_the_other_prerequisites():
     assert toolchain(codex=lambda: ["no rule bridge"]) == ["no rule bridge"]
 
 
-@needs_live_workspace
-def test_this_workstations_root_actually_runs_the_guard():
-    """The wiring itself lives outside every repository, so this is the only place it can
-    be asserted at all -- and it is the wiring that decides whether the guard exists for
-    the sessions it was written for."""
-    assert ws.guard_line(LIVE_WORKSPACE.parent) == ""
-
-
 # --- the unattended pass, when it has stopped --------------------------------
 
 
@@ -743,7 +700,7 @@ def test_a_pass_that_stopped_days_ago_is_reported(tmp_path):
 
 
 def test_a_workstation_that_never_installed_the_task_is_left_alone(tmp_path):
-    """Absent is silence here, unlike `guard_line`: a standing demand to install a
+    """Absent is silence here: a standing demand to install a
     Windows-only convenience is a line you learn to skim, which is the failure this one
     is trying to fix rather than repeat."""
     assert ws.scheduler_line(tmp_path, now=1_800_000_000.0) == ""

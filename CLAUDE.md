@@ -38,9 +38,9 @@ half — every cited path exists, and instruction prose pins no version — acro
 
 Read the interpreter version and the dev tools off [`pyproject.toml`](pyproject.toml).
 What is not readable there is that the empty runtime dependency list is a **constraint,
-not a state**: the vendored hooks run before a virtualenv exists, in a repo devkit does
-not control, so an import of anything installed breaks provisioning on exactly the
-sessions the harness exists to set up. The same contract is why there is no stack here —
+not a state**: the vendored scripts and the git and pre-commit hooks run before a
+virtualenv exists, in a repo devkit does not control, so an import of anything installed
+breaks them on exactly the fresh clones they exist to guard. The same contract is why there is no stack here —
 no database, no frontend, no compose file — which is what lets CI run with no service
 containers and why `.devkit.toml` turns both of those tiers off.
 

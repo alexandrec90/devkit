@@ -10,7 +10,6 @@ cut a worktree per edit rather than one per (session, project).
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -2695,21 +2694,6 @@ def test_a_patch_names_no_branch_move(root, monkeypatch):
         ),
     )
     assert guard.main(["--workspace", str(workspace)]) == guard.EXIT_ALLOW
-
-
-def test_the_hook_is_wired_for_every_tool_it_judges():
-    """The code half is useless without the matcher half, and they live in different
-    files: `MUTATING_TOOLS` in the hook, a regex in `.claude/settings.json`. devkit runs
-    the harness it ships, so its own settings are the copy this can check."""
-    settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
-    matchers = [
-        entry["matcher"]
-        for entry in settings["hooks"]["PreToolUse"]
-        if any("worktree-guard" in hook.get("command", "") for hook in entry["hooks"])
-    ]
-    assert matchers, "worktree-guard.py is not wired in devkit's own settings"
-    for tool in guard.MUTATING_TOOLS:
-        assert any(re.fullmatch(matcher, tool) for matcher in matchers), tool
 
 
 # --- two guards, one call ---------------------------------------------------

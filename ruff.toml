@@ -9,9 +9,8 @@ exclude = ["templates"]
 
 # Make that exclusion hold for explicitly-named paths too. By default `exclude` is
 # only consulted while *walking* a directory, so a file passed on the command line is
-# linted regardless — and the two things that lint devkit now do exactly that: the
-# `lint-fix.py` PostToolUse hook passes the file just edited, and `lint-all.py
-# --changed` passes the diff. Without this, editing `templates/core/scripts/notify.py`
+# linted regardless — and the things that lint devkit do exactly that: pre-commit
+# passes the staged files, and `lint-all.py --changed` passes the diff. Without this, editing `templates/core/scripts/notify.py`
 # gets it checked under devkit's config (whose `scripts/**` allowances do not match
 # that path, so the bandit subprocess warnings fire on intentional calls) and
 # *reformatted* in place — devkit rewriting its own template content as a side effect
@@ -31,7 +30,7 @@ force-exclude = true
 #   T20  stray print() calls
 #
 # They were also nearly free to violate already: `ruff check --fix` rewrites all of
-# them silently in the lint-fix PostToolUse hook, in pre-commit, and in lint-all.py.
+# them silently in pre-commit and in lint-all.py.
 # What enforcing them bought was churn in every diff, not a bug caught.
 select = ["E", "F", "B", "ASYNC", "S", "RUF"]
 

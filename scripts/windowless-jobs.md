@@ -113,5 +113,5 @@ Two consequences, both now enforced rather than written down:
   when its PR merges, and the base install outlives every venv.
 - **A source scan cannot close this class of bug, so one check reads the machine.**
   `schedule_health.virtualenv_interpreter` compares each registered task's `Task To Run`
-  against `pyvenv.cfg` and reports it at session start. All three rounds of this bug were
+  against `pyvenv.cfg` and reports it in the `workspace-status.py` pass. All three rounds of this bug were
   found by a human watching windows flash; that is the loop this replaces.

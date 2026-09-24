@@ -1,5 +1,12 @@
 # The guard: what it judges, and what it declines
 
+> **Not wired anywhere.** No coding-agent hook is — not in devkit, not at the workspace
+> root, not in a generated project (`sync-devkit.py --pull` strips a consumer's `hooks`
+> block). `worktree-guard.py` and its `worktree-guard-launch.py` shim are kept and tested,
+> but nothing runs them; a box is cut on purpose, through `worktree.py new` or
+> `agent-box.py spawn`. What follows describes the guard's decisions as code, and how it
+> behaved while it was wired.
+
 `worktree-guard.py` is the PreToolUse tier that keeps an agent's edit off a static
 checkout's home branch. `scripts/CLAUDE.md` carries the *lifecycle* half of the
 ephemeral tier — what `worktree.py` must preserve when it destroys a box; this file
@@ -101,15 +108,12 @@ still open. The hook tier passes it never, and `spawn_plan`'s reasoning for cutt
   defect `sweep.NEEDS_PR` had. A box is judged too, against the branch its lease records,
   because `reconcile` looks a box's PR up by that name.
 - **The matcher is the other half, and it is not vendored.** A tool the guard judges but
-  `.claude/settings.json` does not list is a tier that silently covers nothing, and each
-  project owns its own copy of that file. `test_the_hook_is_wired_for_every_tool_it_judges`
-  compares `MUTATING_TOOLS` against devkit's matcher so at least the source of truth
-  cannot drift; a machine's user-level registration is outside every repo and has to be
-  widened by hand.
-- **Two copies of the guard run on every call, and they race for the box.** It is
-  registered in the user's `settings.json` and in the project's, and Claude Code fires
-  both; each plans a box for the same `(session, project)` and the loser's `git worktree
-  add` dies on the branch the winner has just created. Because the two responses are
+  the registering `settings.json` does not list is a tier that silently covers nothing.
+  Were the hook wired again, its matcher would have to list every tool in
+  `MUTATING_TOOLS`.
+- **Two registered copies of the guard raced for the box.** While it was registered in
+  the user's `settings.json` and in the project's, Claude Code fired both; each plans a
+  box for the same `(session, project)` and the loser's `git worktree add` dies on the branch the winner has just created. Because the two responses are
   merged into one object, the agent was handed a spawn-failure error *beside* an
   `additionalContext` saying the edit had been applied in the box — and nothing had been
   written either way, so believing the context meant building on a change that did not
