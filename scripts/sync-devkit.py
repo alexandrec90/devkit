@@ -213,12 +213,9 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/tests/test_ship.py",
     "scripts/hooks/session-sync.py",
     "scripts/hooks/tests/test_session_sync.py",
-    # `branch-per-task.py` and `branch-on-write.py` were here. They cut a task branch
-    # *inside* the checkout the session was in, which is the one thing that made a
-    # checkout outlive its task -- and every state `sweep.py` hunts for follows from
-    # that. `worktree-guard.py` now routes the same edit into an ephemeral box instead,
-    # so the branch is cut somewhere disposable. See `RETIRED_HOOKS` below: `--pull`
-    # deletes these files, so it also has to drop the settings entries pointing at them.
+    # `branch-per-task.py` and `branch-on-write.py` were here: a branch cut *inside* the
+    # session's checkout is what made a checkout outlive its task. `worktree-guard.py` cuts
+    # it in a disposable box now; `RETIRED_HOOKS` below deletes both and their settings.
     ".claude/hooks/session-start.sh",
     "scripts/hooks/tests/test_session_start.py",
     # What a fresh worktree lacks and the command that installs it: the one ladder
