@@ -1184,6 +1184,11 @@ Everything local and reversible happens before the two outward-facing steps
 (creating the GitHub repo, pushing). A failure before that leaves a directory you
 can delete.
 
+The initial commit runs the new project's pre-commit gate, so the generator builds the
+project's `.venv` with `uv sync` first. With neither `uv` nor `pre-commit` on `PATH` it
+refuses before writing anything. A tool installed after VS Code started is not on its
+`PATH` until VS Code restarts.
+
 ### Plugging a project in and out
 
 Creating one is not the only way a project enters the workspace, and deleting the
