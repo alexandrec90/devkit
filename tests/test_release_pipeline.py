@@ -386,6 +386,29 @@ def test_a_devkit_git_refuses_plans_no_first_release(tmp_path, capsys, monkeypat
     assert "no release tag exists yet" not in out + err
 
 
+@pytest.mark.parametrize(
+    ("code", "stdout", "stderr", "expected"),
+    [
+        (0, "v1.0.0\nv0.9.0\n", "", ""),
+        (0, "v0.9.0\n", "", "reported success but v1.0.0 is not here after a fetch"),
+        (128, "", "fatal: dubious ownership", "unreadable here: fatal: dubious ownership"),
+    ],
+)
+def test_a_pushed_tag_is_confirmed_only_when_git_can_see_it(
+    monkeypatch, code, stdout, stderr, expected
+):
+    """A tag list git refused is not "the tag is missing": the push may well have landed."""
+
+    def run(cmd, *_args, **_kwargs):
+        if cmd[-2:] == ["tag", "--list"]:
+            return subprocess.CompletedProcess(cmd, code, stdout=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")  # the fetch
+
+    monkeypatch.setattr(rp, "_run", run)
+    missing = rp.tag_missing(Path("devkit"), "v1.0.0")
+    assert (expected in missing) if expected else missing == ""
+
+
 def test_backing_out_of_the_consumer_checklist_cuts_no_release(capsys):
     """The other half of the pair in `upgrade-project`: there an escaped picker is a
     graceful no-op, because the picker IS the subject. Here the click is the whole
