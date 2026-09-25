@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_cycle
+import fix_ledger
 import fix_plan
 
 NOW = _dt.datetime(2026, 9, 19, 9, 0, tzinfo=_dt.UTC)
@@ -101,8 +102,8 @@ def test_no_evidence_is_unknown_and_a_conflict_alone_is_unknown():
 def test_classify_all_is_keyed_like_the_ledger():
     red = [failure(number=1), failure(project="devkit", number=2, signature=("tests/t.py::d",))]
     classes = fix_cycle.classify_all(red)
-    assert classes[fix_plan.failure_key(red[1])] == fix_cycle.HARNESS
-    assert classes[fix_plan.failure_key(red[0])] == fix_cycle.PROJECT
+    assert classes[fix_ledger.failure_key(red[1])] == fix_cycle.HARNESS
+    assert classes[fix_ledger.failure_key(red[0])] == fix_cycle.PROJECT
 
 
 # --- the phase gate -------------------------------------------------------------------
@@ -258,7 +259,7 @@ def test_the_target_is_the_pr_the_branch_or_devkit():
 
 def test_a_target_past_its_daily_count_needs_a_human():
     one = decision(fix_plan.DISPATCH, failure())
-    key = fix_plan.decision_key(one)
+    key = fix_ledger.decision_key(one)
     today = NOW.isoformat()
     ledger = {
         key + "1": {"when": today, "what": "n"},
@@ -368,3 +369,107 @@ def test_only_a_green_labelled_adoption_is_mergeable_unattended():
     ]
     prefixes = ("agent/auto/devkit-upgrade-", "agent/devkit-upgrade-")
     assert [r["number"] for r in fix_cycle.green_adoptions(rows, prefixes, "automerge")] == [1]
+
+
+# --- the budget leaks, and what closes them ------------------------------------------
+
+
+def test_an_update_never_draws_on_the_session_budget():
+    """After a release merge, a handful of behind PRs burnt the eight daily slots on
+    free `gh pr update-branch` calls and the real fixers read "sent 8 sessions today"."""
+    today = NOW.isoformat()
+    ledger = {f"pr:p{i}:{i}:s:d:update": {"when": today, "what": "n"} for i in range(10)}
+    assert fix_cycle.sent_today(ledger, NOW) == {}
+    update = decision(fix_plan.UPDATE, failure(number=99, behind=True))
+    full = {f"pr:p{i}:{i}:s:d": {"when": today, "what": "n"} for i in range(fix_cycle.PER_DAY)}
+    assert fix_cycle.within_caps(update, full, NOW) == (True, "")
+
+
+def test_a_dispatch_with_no_evidence_gets_one_session_a_day_not_two():
+    """A session sent at "no artifact and no failed step named" is pure discovery, the
+    most expensive kind; the retry a second slot exists for is a fix that did not take,
+    which a blind session cannot be told from."""
+    blind = decision(fix_plan.DISPATCH, failure(signature=()))
+    ledger = {"pr:carameli:412:other:digest": {"when": NOW.isoformat(), "what": "n"}}
+    ok, why = fix_cycle.within_caps(blind, ledger, NOW)
+    assert not ok and "no evidence" in why and "needs a human" in why
+    assert fix_cycle.within_caps(decision(fix_plan.DISPATCH, failure()), ledger, NOW) == (True, "")
+
+
+def test_an_adoption_pr_is_classified_by_what_fails_and_its_own_release_never_holds_it():
+    """An adoption red for a project-shaped reason -- the upgrade broke the project's
+    own lint -- was held because the release was still being adopted, and the release
+    was still being adopted because it was red: a deadlock only a person broke. It goes
+    now, on its own branch, while that release is the only hold; red on a vendored test
+    it is the harness and folds into the devkit session like any other."""
+    prefixes = ("agent/auto/devkit-upgrade-",)
+    head = "agent/auto/devkit-upgrade-v0-11-21-0917"
+    own = decision(fix_plan.DISPATCH, failure(number=1, head=head, signature=("lint src/a.py",)))
+    vendored = decision(fix_plan.DISPATCH, failure(number=2, head=head, signature=VENDORED))
+    other = decision(fix_plan.DISPATCH, failure(number=3))
+    assert fix_plan.is_adoption(own, prefixes) and not fix_plan.is_adoption(other, prefixes)
+    classes = fix_cycle.classify_all([*own.failures, *vendored.failures, *other.failures])
+    assert classes[fix_ledger.failure_key(own.failures[0])] == fix_cycle.PROJECT
+    assert classes[fix_ledger.failure_key(vendored.failures[0])] == fix_cycle.HARNESS
+
+    adopting = fix_cycle.harness_state({}, True, ["carameli"])
+    assert not adopting.clean and adopting.only_adopting
+    go, held = fix_cycle.phase([own, other], classes, adopting, prefixes)
+    assert go == [own] and [d for d, _why in held] == [other]
+
+    red_too = fix_cycle.harness_state(classes, True, ["carameli"])
+    assert not red_too.only_adopting
+    go, held = fix_cycle.phase([own, vendored, other], classes, red_too, prefixes)
+    assert [d.action for d in go] == [fix_plan.UPSTREAM]
+    assert [d for d, _why in held] == [own, other]
+
+
+def test_the_ledger_backlog_rides_along_without_holding_anyone():
+    """One unresolved hook event anywhere held every project fixer; the backlog goes to
+    the devkit session when one is sent and is not by itself a reason to send one."""
+    backlog = failure(kind=fix_plan.LEDGER, project="devkit", number=0, head="")
+    classes = fix_cycle.classify_all([backlog])
+    assert classes[fix_ledger.failure_key(backlog)] == fix_cycle.HARNESS
+    assert fix_cycle.harness_state(classes, True, []).clean
+
+
+def test_a_gate_running_at_the_tip_is_not_a_reason_to_hold():
+    """Every pass in the minutes after a merge to devkit main read "could not be read"
+    and held every project fixer behind a gate that was merely running."""
+    assert fix_cycle.harness_state({}, fix_plan.RUNNING, []).clean
+    assert not fix_cycle.harness_state({}, None, []).clean
+
+
+def test_a_held_decision_is_held_with_its_own_note_clean_or_not():
+    held_one = fix_plan.Decision(
+        fix_plan.HOLD, "held: origin/main is red in carameli", (failure(),)
+    )
+    clean = fix_cycle.harness_state({}, True, [])
+    go, held = fix_cycle.phase([held_one], {}, clean)
+    assert go == [] and held == [(held_one, "held: origin/main is red in carameli")]
+    red = fix_cycle.harness_state({"k": fix_cycle.HARNESS}, True, [])
+    go, held = fix_cycle.phase([held_one], {}, red)
+    assert go == [] and held == [(held_one, "held: origin/main is red in carameli")]
+
+
+def test_a_decision_is_blind_when_no_failure_under_it_names_anything():
+    assert fix_cycle.is_blind(decision(fix_plan.DISPATCH, failure(signature=())))
+    assert fix_cycle.is_blind(decision(fix_plan.RESOLVE, failure(signature=(fix_plan.CONFLICT,))))
+    assert not fix_cycle.is_blind(decision(fix_plan.DISPATCH, failure()))
+    mixed = decision(fix_plan.UPSTREAM, failure(signature=()), failure(number=2))
+    assert not fix_cycle.is_blind(mixed), "one failure with evidence is enough to start from"
+
+
+def test_the_record_names_the_projects_on_hold_and_the_blocked_reports():
+    account = fix_cycle.Account(
+        fix_cycle.PLAN,
+        fix_cycle.harness_state({}, True, []),
+        on_hold=("data-lake", "ibkr_trader"),
+        blocked=("carameli agent/x -- needs a database the runner lacks",),
+    )
+    lines = fix_cycle.render(account).splitlines()
+    assert lines[1] == (
+        "on hold  data-lake, ibkr_trader -- nothing red is read there (devkit.onHold)"
+    )
+    assert lines[2] == "harness  clean"
+    assert lines[3] == "blocked  carameli agent/x -- needs a database the runner lacks"

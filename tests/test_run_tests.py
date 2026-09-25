@@ -31,6 +31,11 @@ def artifact(tmp_path, monkeypatch) -> Path:
     path = tmp_path / "logs" / "test-failures.log"
     monkeypatch.setattr(run_tests, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(run_tests, "ARTIFACT", path)
+    # A bare temp root has no git to ask, which is the "run the suite" case; the tests
+    # for the targeted default replace this with a changed set of their own.
+    monkeypatch.setattr(run_tests, "changed_paths", lambda root, run=None: None)
+    for name in run_tests.FULL_SUITE_ENV:
+        monkeypatch.delenv(name, raising=False)
     return path
 
 
@@ -208,3 +213,136 @@ def test_the_changed_subset_still_parallelises(artifact, monkeypatch):
     monkeypatch.setattr(run_tests, "_parallel_args", lambda: ["-n", "auto"])
     run_tests.main(["--changed"])
     assert "-n" in seen[0] and "--last-failed" in seen[0]
+
+
+# --- the default is what changed ----------------------------------------------------
+
+
+def changed(monkeypatch, tmp_path, *paths: str, tests: tuple[str, ...] = ()):
+    """A changed set for the runner to target, and the test files that exist for it."""
+    for name in tests:
+        (tmp_path / "tests").mkdir(exist_ok=True)
+        (tmp_path / "tests" / name).write_text("", encoding="utf-8")
+    monkeypatch.setattr(run_tests, "changed_paths", lambda root, run=None: list(paths))
+
+
+def test_tests_for_names_a_test_file_by_its_module_and_a_test_by_itself(tmp_path):
+    for name in ("test_fix_pass.py", "test_sweep.py"):
+        (tmp_path / "tests").mkdir(exist_ok=True)
+        (tmp_path / "tests" / name).write_text("", encoding="utf-8")
+    paths = [
+        "scripts/fix-pass.py",
+        "scripts\\sweep.py",
+        "tests/test_sweep.py",
+        "scripts/nothing_tested.py",
+        "README.md",
+        "tests/support.py",
+    ]
+    assert run_tests.tests_for(paths, tmp_path) == (
+        ["tests/test_fix_pass.py", "tests/test_sweep.py"],
+        ["scripts/nothing_tested.py", "README.md", "tests/support.py"],
+    )
+
+
+def test_by_default_only_the_tests_named_by_the_changed_files_run(artifact, monkeypatch, tmp_path):
+    """Every agent ran the whole suite by reflex and hit the same harness red, one
+    session after another; the gate is CI's, and the default here is what the change
+    could have broken."""
+    changed(monkeypatch, tmp_path, "scripts/fix_plan.py", "README.md", tests=("test_fix_plan.py",))
+    seen = stub_pytest(monkeypatch, 0)
+    assert run_tests.main([]) == 0
+    assert seen[0][-1] == "tests/test_fix_plan.py"
+
+
+def test_nothing_named_runs_nothing_and_says_so(artifact, monkeypatch, tmp_path, capsys):
+    changed(monkeypatch, tmp_path, "README.md", "scripts/untested.py")
+    seen = stub_pytest(monkeypatch, 0)
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("stale", encoding="utf-8")
+    assert run_tests.main([]) == 0
+    assert seen == [] and artifact.read_text(encoding="utf-8") == ""
+    out = capsys.readouterr().out
+    assert "no test named for README.md" in out and "no test named for scripts/untested.py" in out
+    assert "--all runs the suite" in out
+
+
+def test_all_ci_pre_commit_and_explicit_targets_run_the_whole_suite(
+    artifact, monkeypatch, tmp_path
+):
+    """The gate and the push gate mirror it want everything; `--all` is the person's
+    spelling of the same, and an explicit target is already a choice."""
+    changed(monkeypatch, tmp_path, "scripts/fix_plan.py", tests=("test_fix_plan.py",))
+    seen = stub_pytest(monkeypatch, 0)
+    monkeypatch.setattr(run_tests, "_parallel_args", list)
+    run_tests.main(["--all"])
+    monkeypatch.setenv("CI", "true")
+    run_tests.main([])
+    monkeypatch.delenv("CI")
+    monkeypatch.setenv("PRE_COMMIT", "1")
+    run_tests.main([])
+    monkeypatch.delenv("PRE_COMMIT")
+    run_tests.main(["tests/test_sweep.py"])
+    assert [cmd[-1] for cmd in seen] == ["-q", "-q", "-q", "tests/test_sweep.py"]
+
+
+def test_when_git_cannot_say_what_changed_the_suite_runs(artifact, monkeypatch, capsys):
+    seen = stub_pytest(monkeypatch, 0)
+    monkeypatch.setattr(run_tests, "_parallel_args", list)
+    assert run_tests.main([]) == 0
+    assert seen[0][-1] == "-q"
+    assert "git cannot say what changed" in capsys.readouterr().out
+
+
+def git_answers(answers: dict[tuple[str, ...], tuple[int, str]]):
+    seen: list[tuple[str, ...]] = []
+
+    def run(cmd, **_kwargs):
+        args = tuple(cmd[1:])
+        seen.append(args)
+        code, out = answers.get(args, (1, ""))
+        return subprocess.CompletedProcess(cmd, code, out, "")
+
+    return run, seen
+
+
+def test_changed_paths_is_everything_since_the_branch_left_origins_default(tmp_path):
+    run, seen = git_answers(
+        {
+            ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): (
+                0,
+                "refs/remotes/origin/main\n",
+            ),
+            ("merge-base", "HEAD", "origin/main"): (0, "abc123\n"),
+            ("diff", "--name-only", "abc123"): (0, "scripts/b.py\nscripts/a.py\n"),
+            ("ls-files", "--others", "--exclude-standard"): (0, "tests/test_new.py\n"),
+        }
+    )
+    assert run_tests.changed_paths(tmp_path, run) == [
+        "scripts/a.py",
+        "scripts/b.py",
+        "tests/test_new.py",
+    ]
+    assert seen[0] == ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+
+
+def test_changed_paths_is_none_without_an_origin_to_compare_against(tmp_path):
+    run, _seen = git_answers({})
+    assert run_tests.changed_paths(tmp_path, run) is None
+
+
+def test_the_default_branch_is_origins_head_then_main_or_master(tmp_path):
+    run, _seen = git_answers(
+        {
+            ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): (
+                0,
+                "refs/remotes/origin/trunk\n",
+            )
+        }
+    )
+    assert run_tests.default_branch(tmp_path, run) == "trunk"
+    run, _seen = git_answers(
+        {("rev-parse", "--verify", "--quiet", "refs/remotes/origin/master"): (0, "")}
+    )
+    assert run_tests.default_branch(tmp_path, run) == "master"
+    run, _seen = git_answers({})
+    assert run_tests.default_branch(tmp_path, run) == "main"

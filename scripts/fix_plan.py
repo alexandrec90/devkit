@@ -31,12 +31,12 @@ shapes `gh` returns, so `tests/test_fix_plan.py` drives every branch without a n
   superseded -- `upgrade-project.py` closes it on its next pass -- so fixing it would
   land a vendored copy the next sweep immediately replaces.
 - **What the session is told** is `fix_prompts.py`, one function per shape.
-- **The ledger** is what makes a second click safe. Every dispatch is recorded under a
-  key that names the failure *and the commit it was observed on* (the PR head sha, or
-  the run id for a scheduled workflow), so clicking again sends nothing at a failure an
-  agent is already on, and a fix that pushed a new sha is a new key when it is still
-  red. The user chose click-only over a scheduled dispatch precisely because a session
-  costs real money and a loop that spent one silently would be the worst outcome here.
+- **A PR against a red default branch is held**, out loud, for the base's fixer: it
+  inherits the base's failure, and one pass sent a base and two of its PRs three
+  sessions in one second for one cause.
+- **The ledger** (`fix_ledger.py`) is what makes a second click safe: every dispatch is
+  recorded against the commit it was observed on, so clicking again sends nothing at a
+  failure an agent is already on.
 
 Stdlib only, and no `gh`: the evidence arrives as arguments. `scripts/gate_evidence.py`
 is the half that asks GitHub.
@@ -44,13 +44,14 @@ is the half that asks GitHub.
 
 from __future__ import annotations
 
-import datetime as _dt
-import hashlib
-import json
 import re
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import task_branch as tb
 
 # The four sources of red this plans for. A `COMMIT` is a session's intent the fix pass
 # could not commit: the commit stage refused it, and the branch is the worktree it sits in.
@@ -76,6 +77,11 @@ RESOLVE = "resolve"  # the same worktree, a conflict-only prompt, and nothing ab
 UPSTREAM = "upstream"  # one agent in devkit, for a signature shared across consumers
 UPDATE = "update"  # no agent: the PR is behind its base, so update it and let the gate re-run
 SKIP = "skip"  # nothing, and the note says why
+HOLD = "hold"  # nothing this pass: its base is red, and the base's fixer goes first
+
+# A default branch's gate verdict beside True and False: a run at the tip that has not
+# finished. Not a hold reason -- the verdict before it stands -- and not "unreadable".
+RUNNING = "running"
 
 # Where the vendored test tier lives in every consumer. A failing id under it is a
 # devkit defect by construction, because the file is byte-identical everywhere.
@@ -91,9 +97,6 @@ CONFLICT = "merge conflict"
 # because every project ignores that directory, so nothing here can be committed.
 EVIDENCE_DIR = "logs/gate"
 
-# The ledger's file name; `fix-prs.py` puts it beside the box tier's lease file.
-LEDGER_NAME = "dispatch.json"
-
 # pytest's short-summary line, `FAILED tests/x.py::test_y - AssertionError: ...`. The
 # id alone is the signature: the message carries a line number or a value that changes
 # between two runs of the same failure.
@@ -101,10 +104,6 @@ FAILED_LINE = re.compile(r"^FAILED (\S+)")
 # ruff (`path:1:2: E501 ...`) and mypy (`path:1: error: ...`) both start with the file
 # and a line; the file is the stable part.
 LINT_LINE = re.compile(r"^(\S+?\.\w+):\d+(?::\d+)?: (?:error|[A-Z]{1,4}\d{3,4})\b")
-
-# Ledger keys are the sha256 of the signature, cut to this many hex digits: enough that
-# two signatures on one machine cannot collide, short enough to read in a log line.
-KEY_DIGEST = 12
 
 
 @dataclass(frozen=True)
@@ -125,6 +124,12 @@ class Failure:
     signature: tuple[str, ...] = ()
     evidence: str = ""  # the directory the run's artifacts were downloaded to
     behind: bool = False  # PR only: its head lacks the base's tip, so its gate is stale
+    # PR only: the runs behind its failing checks, off the rollup, for when the gate
+    # workflow's own run list has nothing at this sha -- a required check from another
+    # workflow, a consumer whose gate is named differently.
+    check_runs: tuple[str, ...] = ()
+    # COMMIT only: the worktree the refused intent sits in, which is where the fixer opens.
+    tree: str = ""
 
 
 @dataclass(frozen=True)
@@ -224,6 +229,12 @@ def adoption_tag(head: str, prefixes: Iterable[str]) -> str:
     return ""
 
 
+def is_adoption(decision: Decision, prefixes: Iterable[str]) -> bool:
+    """Any failure under it is an adoption PR."""
+    named = tuple(prefixes)
+    return any(f.kind == PR and bool(adoption_tag(f.head, named)) for f in decision.failures)
+
+
 def skip_reason(failure: Failure, latest_tag: str, prefixes: tuple[str, ...]) -> str:
     """Why this failure gets no agent, or "" when it gets one. Three shapes, each said."""
     on_branch = failure.kind in (PR, COMMIT)
@@ -256,33 +267,28 @@ def plan(
 ) -> list[Decision]:
     """Every failure placed under exactly one decision, in a stable order.
 
-    `latest_tag` is already slugified the way branch names are, and empty means "cannot
-    tell", in which case no adoption PR is called superseded: an unknown newest tag must
-    not silently skip every adoption on the machine.
+    `latest_tag` is devkit's newest release as written (`v0.11.21`) or already as a
+    branch slug; it is compared to adoption branch names, so it is slugified here.
+    Empty means "cannot tell", in which case no adoption PR is called superseded: an
+    unknown newest tag must not silently skip every adoption on the machine.
     """
     prefixes = tuple(adoption_prefixes)
+    latest = tb.slugify(latest_tag) if latest_tag else ""
     grouped: dict[tuple[str, ...], list[Failure]] = {}
     decisions: list[Decision] = []
-    for failure in sorted(failures, key=lambda f: (f.kind, f.project, f.number)):
-        if why := skip_reason(failure, latest_tag, prefixes):
+    listed = list(failures)
+    red_bases = {
+        (f.project, f.base)
+        for f in listed
+        if f.kind == BRANCH and not skip_reason(f, latest, prefixes)
+    }
+    for failure in sorted(listed, key=lambda f: (f.kind, f.project, f.number)):
+        if why := skip_reason(failure, latest, prefixes):
             decisions.append(Decision(SKIP, why, (failure,)))
-            continue
-        if CONFLICT in failure.signature:
-            # A conflict is resolved before anything else about the PR is knowable: its
-            # gate has no merge ref to run against. The resolver is told nothing about
-            # the failures; if it is still red afterwards, the next pass sees a plain one.
-            decisions.append(Decision(RESOLVE, describe(failure), (failure,)))
-            continue
-        if failure.behind:
-            # Red against an old base is not yet evidence about the change: #379 was
-            # red on a pip-audit finding master had already fixed, and the session sent
-            # at it did nothing but merge master in. Update the branch, re-read next
-            # pass; a PR still red at the new sha is a new key and gets its session.
-            decisions.append(
-                Decision(UPDATE, f"{describe(failure)}; behind origin/{failure.base}", (failure,))
-            )
-            continue
-        grouped.setdefault(failure.signature, []).append(failure)
+        elif placed := _place(failure, red_bases):
+            decisions.append(placed)
+        else:
+            grouped.setdefault(failure.signature, []).append(failure)
 
     for sig, group in grouped.items():
         projects = sorted({f.project for f in group})
@@ -300,6 +306,35 @@ def plan(
     return decisions
 
 
+def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None:
+    """The decision a failure gets on its own, before any grouping; None to group it.
+
+    A conflict is decided first: its gate has no merge ref to run against, GitHub
+    cannot update the branch, and the resolver is told nothing about the failures. A
+    behind PR is a free update, and goes even against a red base: the update is what
+    lands the base's fix on the PR once that fix is in (#379 was red on a pip-audit
+    finding master had already fixed, and the session sent at it did nothing but merge
+    master in). Anything else against a red base is held: every PR against a red base
+    inherits its failure, a nightly runs on the same commit, and a resolver is a session
+    whose merge the base's fix may move. The base's fixer goes alone.
+    """
+    against_red = failure.kind in (PR, NIGHTLY) and (failure.project, failure.base) in red_bases
+    if CONFLICT in failure.signature and not against_red:
+        return Decision(RESOLVE, describe(failure), (failure,))
+    if failure.behind and CONFLICT not in failure.signature:
+        return Decision(UPDATE, f"{describe(failure)}; behind origin/{failure.base}", (failure,))
+    if against_red:
+        return Decision(HOLD, held_note(failure), (failure,))
+    return None
+
+
+def held_note(failure: Failure) -> str:
+    return (
+        f"held: origin/{failure.base} is red in {failure.project}, and its fixer goes "
+        "first; re-read once it is green"
+    )
+
+
 def describe(failure: Failure) -> str:
     """The one-line reason a row is red, for the report and the prompt."""
     if failure.kind == LEDGER:
@@ -313,75 +348,3 @@ def describe(failure: Failure) -> str:
         more = f" (+{len(failure.signature) - 4} more)" if len(failure.signature) > 4 else ""
         return f"{head}: {shown}{more}"
     return f"{head}: no artifact and no failed step named -- read the run at {failure.url}"
-
-
-# --- the ledger ---------------------------------------------------------------------
-
-
-def failure_key(failure: Failure) -> str:
-    """What one dispatch is remembered as: the failure, at the commit it was seen on."""
-    digest = hashlib.sha256("\n".join(failure.signature).encode("utf-8")).hexdigest()
-    at = failure.sha or failure.run_id or "?"
-    return f"{failure.kind}:{failure.project}:{failure.number}:{at}:{digest[:KEY_DIGEST]}"
-
-
-def decision_key(decision: Decision) -> str:
-    """An upstream decision is one dispatch for the whole group, so one key.
-
-    Any member re-observed at a new sha changes the key: a consumer whose PR was
-    re-pushed and is still red under the same signature is a reason to look again.
-
-    A single failure is keyed under the **action** as well, because what the pass
-    decides can change while the failure does not -- which is how a dispatch this pass
-    got wrong becomes unrepeatable. devkit #381 was recorded at its head sha as an
-    upstream session; nobody was going to push to a conflicted PR, so without the
-    action in the key the corrected pass would read its own bad dispatch as reason
-    enough never to send the resolver. `fix_cycle.target_of` reads the first three
-    fields, so the suffix leaves the daily budget per PR exactly where it was.
-    """
-    keys = sorted(failure_key(f) for f in decision.failures)
-    if len(keys) == 1:
-        return f"{keys[0]}:{decision.action}"
-    digest = hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()
-    return f"{UPSTREAM}:{len(keys)}:{digest[:KEY_DIGEST]}"
-
-
-def read_ledger(path: Path) -> dict[str, dict]:
-    """The recorded dispatches. Unreadable is empty: a corrupt ledger must not block."""
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
-def record(path: Path, key: str, note: str, now: _dt.datetime | None = None) -> None:
-    ledger = read_ledger(path)
-    when = (now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds")
-    ledger[key] = {"when": when, "what": note}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def already_sent(decision: Decision, ledger: dict[str, dict]) -> str:
-    """When this exact dispatch was already made, or "" when it is new."""
-    entry = ledger.get(decision_key(decision))
-    return str(entry.get("when", "?")) if isinstance(entry, dict) else ""
-
-
-# --- the report ---------------------------------------------------------------------
-
-
-def render(decisions: Iterable[Decision], ledger: dict[str, dict]) -> str:
-    """The plan, for the terminal: what will be sent, what was already, what is skipped."""
-    lines = []
-    for decision in decisions:
-        names = ", ".join(f"{f.project} {name_of(f)}" for f in decision.failures)
-        sent = already_sent(decision, ledger)
-        if decision.action == SKIP:
-            lines.append(f"skip     {names} -- {decision.note}")
-        elif sent:
-            lines.append(f"sent     {names} -- already dispatched at {sent} (--redo to send again)")
-        else:
-            lines.append(f"{decision.action:8} {names} -- {decision.note}")
-    return "\n".join(lines) or "nothing is red"

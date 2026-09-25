@@ -17,6 +17,7 @@ import pytest
 from support import load_script
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import fix_ledger
 import fix_plan
 
 PREFIXES = ("agent/auto/devkit-upgrade-", "agent/devkit-upgrade-")
@@ -196,6 +197,8 @@ def test_an_adoption_of_an_older_release_is_skipped_as_superseded():
     (decision,) = fix_plan.plan(red, "v0-11-21", PREFIXES)
     assert decision.action == fix_plan.SKIP
     assert "superseded" in decision.note and "v0-11-21" in decision.note
+    (as_written,) = fix_plan.plan(red, "v0.11.21", PREFIXES)
+    assert as_written == decision, "the tag as git writes it is compared as a branch slug"
 
 
 def test_an_unknown_newest_release_calls_nothing_superseded():
@@ -239,62 +242,6 @@ def test_describe_names_the_reason_and_the_first_few_ids():
 # --- the ledger ---------------------------------------------------------------------
 
 
-def test_the_key_names_the_failure_at_the_commit_it_was_seen_on():
-    """A fix that pushed a new sha and is still red is a new key: worth a second look.
-    The same sha under the same signature is the same dispatch."""
-    same = fix_plan.failure_key(failure())
-    assert same == fix_plan.failure_key(failure(title="renamed"))
-    assert same != fix_plan.failure_key(failure(sha="def456"))
-    assert same != fix_plan.failure_key(failure(signature=("tests/t.py::other",)))
-    assert same.startswith("pr:carameli:412:abc123:")
-
-
-def test_a_nightly_is_keyed_by_its_run():
-    nightly = failure(kind=fix_plan.NIGHTLY, sha="", run_id="4242", number=7)
-    assert fix_plan.failure_key(nightly).startswith("nightly:carameli:7:4242:")
-
-
-def test_an_upstream_decision_is_one_key_for_the_group():
-    group = (failure(project="a", number=1), failure(project="b", number=2))
-    decision = fix_plan.Decision(fix_plan.UPSTREAM, "n", group)
-    key = fix_plan.decision_key(decision)
-    assert key.startswith("upstream:2:")
-    reordered = fix_plan.Decision(fix_plan.UPSTREAM, "n", group[::-1])
-    assert fix_plan.decision_key(reordered) == key
-    repushed = fix_plan.Decision(
-        fix_plan.UPSTREAM, "n", (group[0], failure(project="b", number=2, sha="new"))
-    )
-    assert fix_plan.decision_key(repushed) != key
-
-
-def test_a_single_decision_is_keyed_as_its_failure_under_the_action_taken():
-    """The action is in the key because the pass's decision can change while the failure
-    does not: devkit #381 was dispatched at its head sha under the wrong action, and the
-    corrected pass has to be able to send the resolver at that very sha."""
-    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
-    assert fix_plan.decision_key(decision).startswith(fix_plan.failure_key(failure()) + ":")
-    resolve = fix_plan.Decision(fix_plan.RESOLVE, "n", (failure(),))
-    assert fix_plan.decision_key(resolve) != fix_plan.decision_key(decision)
-
-
-def test_the_ledger_records_and_answers_the_second_click(tmp_path):
-    path = tmp_path / "boxes" / "dispatch.json"
-    decision = fix_plan.Decision(fix_plan.DISPATCH, "1 check failing", (failure(),))
-    assert fix_plan.already_sent(decision, fix_plan.read_ledger(path)) == ""
-    fix_plan.record(path, fix_plan.decision_key(decision), decision.note, NOW)
-    ledger = fix_plan.read_ledger(path)
-    assert fix_plan.already_sent(decision, ledger) == "2026-09-18T12:00:00+00:00"
-    assert ledger[fix_plan.decision_key(decision)]["what"] == "1 check failing"
-
-
-def test_a_corrupt_ledger_is_empty_rather_than_a_traceback(tmp_path):
-    path = tmp_path / "dispatch.json"
-    path.write_text("{not json", encoding="utf-8")
-    assert fix_plan.read_ledger(path) == {}
-    path.write_text("[1, 2]", encoding="utf-8")
-    assert fix_plan.read_ledger(path) == {}
-
-
 def test_a_conflict_is_its_own_decision_and_never_grouped_upstream():
     red = [
         failure(project="a", number=1, signature=(fix_plan.CONFLICT, *VENDORED_SIG)),
@@ -308,23 +255,6 @@ def test_a_conflict_is_its_own_decision_and_never_grouped_upstream():
 
 
 # --- the report ---------------------------------------------------------------------
-
-
-def test_the_report_says_what_will_be_sent_what_was_and_what_is_skipped(tmp_path):
-    sent = fix_plan.Decision(fix_plan.DISPATCH, "1 check failing: t", (failure(number=1),))
-    fresh = fix_plan.Decision(fix_plan.UPSTREAM, "one vendored failure", (failure(number=2),))
-    skipped = fix_plan.Decision(fix_plan.SKIP, "red by construction", (failure(number=3),))
-    path = tmp_path / "dispatch.json"
-    fix_plan.record(path, fix_plan.decision_key(sent), sent.note, NOW)
-    text = fix_plan.render([sent, fresh, skipped], fix_plan.read_ledger(path))
-    lines = text.splitlines()
-    assert lines[0].startswith("sent     carameli #1 -- already dispatched at 2026-09-18")
-    assert lines[1].startswith("upstream carameli #2 -- one vendored failure")
-    assert lines[2].startswith("skip     carameli #3 -- red by construction")
-
-
-def test_an_empty_plan_says_so():
-    assert fix_plan.render([], {}) == "nothing is red"
 
 
 # --- a red default branch -----------------------------------------------------------
@@ -362,8 +292,8 @@ def test_a_pr_behind_its_base_is_updated_not_fixed_unless_it_conflicts():
         (fix_plan.DISPATCH, ["carameli#3"]),
     ]
     assert decisions[0].note.endswith("behind origin/main")
-    assert "sent" not in fix_plan.render(decisions, {}).splitlines()[0]
-    assert fix_plan.render(decisions, {}).splitlines()[0].startswith("update   carameli #1")
+    assert "sent" not in fix_ledger.render(decisions, {}).splitlines()[0]
+    assert fix_ledger.render(decisions, {}).splitlines()[0].startswith("update   carameli #1")
 
 
 def test_a_failure_is_named_by_its_pr_its_branch_or_its_default_branch():
@@ -406,3 +336,60 @@ def test_a_release_commits_red_is_skipped_out_loud_and_any_other_red_main_is_sen
     assert fix_plan.describe(decisions[1].failures[0]).startswith(
         "PR Gate workflow failing on origin/main: tests/t.py::other"
     )
+
+
+# --- a red default branch holds its own PRs -------------------------------------------
+
+
+def test_a_red_default_branch_holds_its_prs_and_nightlies_and_frees_only_updates():
+    """The 09-19 pass sent carameli's master, #379 and #381 three sessions in the same
+    second for what was one cause. Every PR against a red base inherits its failure,
+    so the base's fixer goes alone; a behind PR is still a free update, a refused
+    commit is pre-commit's verdict and not the base's, and another base is untouched."""
+    red = red_main(project="carameli", signature=("tests/t.py::a",))
+    inherits = failure(number=1, head="agent/a", signature=("tests/t.py::a",))
+    other = failure(number=2, head="agent/b", signature=("tests/t.py::b",))
+    behind = failure(number=3, head="agent/c", signature=("tests/t.py::a",), behind=True)
+    conflicted = failure(number=4, head="agent/d", signature=(fix_plan.CONFLICT,))
+    nightly = failure(kind=fix_plan.NIGHTLY, number=5, head="", signature=("tests/t.py::n",))
+    refused = failure(kind=fix_plan.COMMIT, number=0, head="agent/e", signature=("x refused",))
+    elsewhere = failure(number=6, head="agent/f", base="develop", signature=("tests/t.py::a",))
+    decisions = fix_plan.plan(
+        [red, inherits, other, behind, conflicted, nightly, refused, elsewhere],
+        "v0-11-23",
+        PREFIXES,
+    )
+    assert actions(decisions) == [
+        (fix_plan.HOLD, ["carameli#5"]),
+        (fix_plan.HOLD, ["carameli#1"]),
+        (fix_plan.HOLD, ["carameli#2"]),
+        (fix_plan.UPDATE, ["carameli#3"]),
+        (fix_plan.HOLD, ["carameli#4"]),
+        (fix_plan.DISPATCH, ["carameli#0"]),
+        (fix_plan.DISPATCH, ["carameli#6"]),
+        (fix_plan.DISPATCH, ["carameli#0"]),
+    ]
+    assert decisions[5].failures[0].kind == fix_plan.BRANCH
+    assert decisions[7].failures[0].kind == fix_plan.COMMIT
+    assert decisions[0].note.startswith("held: origin/main is red in carameli")
+    assert "held     carameli #1 -- held: origin/main" in fix_ledger.render(decisions, {})
+
+
+def test_a_release_commits_red_base_holds_nothing():
+    """That red is skipped out loud, and a skipped base must not hold the PRs behind it."""
+    decisions = fix_plan.plan(
+        [red_main(project="carameli"), failure(number=1, head="agent/a")], "v0-11-23", PREFIXES
+    )
+    assert actions(decisions) == [
+        (fix_plan.SKIP, ["carameli#0"]),
+        (fix_plan.DISPATCH, ["carameli#1"]),
+    ]
+
+
+# --- the ledger ages, and a blocked report never does -------------------------------
+
+
+def test_the_held_note_names_the_base_and_the_project():
+    note = fix_plan.held_note(failure(project="roguelike", base="master"))
+    assert note.startswith("held: origin/master is red in roguelike")
+    assert note.endswith("re-read once it is green")

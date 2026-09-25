@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fix_cycle
+import fix_ledger
 import fix_plan
 import gate_evidence
 import harness_triage as triage
@@ -47,7 +48,7 @@ def ledger_failure(devkit_dir: Path, root: Path) -> fix_plan.Failure | None:
         title=f"{len(grouped)} open group(s) on the harness-defect ledger",
         url="",
         base=tb.detect_default_branch(sweep.git_for(devkit_dir), fallback="main"),
-        sha=ids[: fix_plan.KEY_DIGEST],
+        sha=ids[: fix_ledger.KEY_DIGEST],
         workflow="harness ledger",
         signature=signature,
     )
