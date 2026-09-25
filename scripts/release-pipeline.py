@@ -463,7 +463,18 @@ def _gh_json(args: Sequence[str], cwd: Path) -> object | None:
 
 
 def existing_tags(devkit: Path) -> list[str]:
+    """Every tag in `devkit`; raises `RuntimeError` with git's words when git cannot say.
+
+    Never [] for a failure. An empty list is `next_version`'s cue for the *first*
+    release, so a git refusal read as "no tags" plans v0.1.0 over a repo at v0.9.1 --
+    which the 2026-09-25 scheduled run did, against a checkout git refused for dubious
+    ownership, and reported as "no release tag exists yet".
+    """
     result = _run(["git", "-C", str(devkit), "tag", "--list"])
+    if result.returncode != 0:
+        raise RuntimeError(
+            (result.stderr or result.stdout).strip() or f"git exit {result.returncode}"
+        )
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
@@ -776,7 +787,13 @@ def run_pipeline(
         )
 
     _run(["git", "-C", str(devkit), "fetch", "--tags", "--quiet", "origin"])
-    if version not in existing_tags(devkit):
+    try:
+        fetched = existing_tags(devkit)
+    except RuntimeError as exc:
+        return _stop(
+            f"{version} was pushed by {RELEASE_WORKFLOW} but its tags are unreadable here: {exc}"
+        )
+    if version not in fetched:
         return _stop(f"{RELEASE_WORKFLOW} reported success but {version} is not here after a fetch")
     _say(f"{version} is tagged.")
 
@@ -890,7 +907,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     _run(["git", "-C", str(args.devkit), "fetch", "--tags", "--quiet", "origin"])
-    tags = existing_tags(args.devkit)
+    try:
+        tags = existing_tags(args.devkit)
+    except RuntimeError as exc:
+        print(f"release-pipeline: could not read devkit's tags: {exc}", file=sys.stderr)
+        return 2
     version, refusal = next_version(tags, args.level)
     if refusal:
         print(f"release-pipeline: {refusal}", file=sys.stderr)

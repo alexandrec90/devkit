@@ -489,7 +489,15 @@ def test_the_tag_list_is_newest_first_and_agrees_with_the_latest():
     *set* and the *pick* can never disagree about what the newest release is."""
     tags = up.release_tags(REPO_ROOT)
     assert tags and tags[0] == up.latest_tag(REPO_ROOT)
-    assert up.release_tags(REPO_ROOT / "no-such-directory") == []
+
+
+def test_an_unreadable_tag_list_raises_with_gits_words(tmp_path):
+    """Not []: an empty list means "devkit has no releases", and every caller acts on
+    that -- the refusal to adopt, the first-release plan. A failure has to stay one."""
+    with pytest.raises(RuntimeError, match="fatal:"):
+        up.release_tags(tmp_path / "no-such-directory")
+    with pytest.raises(RuntimeError, match="fatal:"):
+        up.latest_tag(tmp_path / "no-such-directory")
 
 
 # --- the upgrade happens in a box, never in the checkout ----------------------
@@ -877,8 +885,24 @@ def test_an_untagged_devkit_stops_the_whole_run_once(tmp_path, capsys):
     """Same fact about devkit for every project; repeating it per project would read
     as four problems rather than one."""
     ws = workspace(tmp_path, "carameli", "carameli-b")
-    assert up.main(["--all", "--workspace", str(ws), "--devkit", str(tmp_path / "nope")]) == 1
+    devkit = tmp_path / "devkit-untagged"
+    subprocess.run(["git", "init", "-q", str(devkit)], check=True)
+    assert up.main(["--all", "--workspace", str(ws), "--devkit", str(devkit)]) == 1
     assert capsys.readouterr().err.count("no release tags") == 1
+
+
+def test_a_devkit_git_cannot_read_is_not_an_untagged_one(tmp_path, capsys):
+    """The 2026-09-25 regression. The scheduled run met a checkout git refused for
+    dubious ownership and told the operator to cut a first release of a repo at v0.9.1,
+    dropping git's own message -- the only line that named the fix. A directory git
+    cannot open stands in for the refusal: same exit, same "fatal:" on stderr."""
+    ws = workspace(tmp_path, "carameli")
+    code = up.main(["--all", "--workspace", str(ws), "--devkit", str(tmp_path / "nope")])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "could not read devkit's release tags" in err
+    assert "fatal:" in err
+    assert "no release tags" not in err
 
 
 def test_naming_the_devkit_source_is_an_error_not_a_skip(tmp_path, capsys, monkeypatch):
