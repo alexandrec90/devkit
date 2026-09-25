@@ -5,6 +5,8 @@ checkable form of RELEASING.md steps 3-5, and getting it wrong breaks projects
 generated afterwards rather than anything here.
 """
 
+import subprocess
+
 import pytest
 from support import REPO_ROOT, load_script
 
@@ -113,6 +115,21 @@ def test_phase_two_tags_main_once_the_bump_landed():
     # By name, not HEAD: the merge happened on the remote and a stale local
     # checkout would otherwise tag the wrong commit.
     assert steps[0] == "git tag v0.5.3 origin/main"
+
+
+def test_an_unreadable_tag_list_is_refused_not_read_as_empty(capsys, monkeypatch):
+    """An empty set passes both plans' "that tag already exists" refusal, so a git
+    failure read as one would re-cut an immutable release. It stops at the read."""
+    failed = subprocess.CompletedProcess(
+        [], 128, stdout="", stderr="fatal: detected dubious ownership"
+    )
+    monkeypatch.setattr(release, "_git", lambda *_args: failed)
+    with pytest.raises(RuntimeError, match="dubious ownership"):
+        release.existing_tags()
+    assert release.main(["v0.9.1", "--tag"]) == 2
+    assert (
+        "could not read devkit's tags: fatal: detected dubious ownership" in capsys.readouterr().err
+    )
 
 
 def test_phase_two_still_refuses_an_existing_tag():

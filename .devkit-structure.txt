@@ -77,12 +77,12 @@ definitions::scripts/plug-projects.py = 33
 definitions::scripts/preview-task.py = 59
 definitions::scripts/preview-ui-host.py = 35
 definitions::scripts/reclaim.py = 48
-definitions::scripts/release-pipeline.py = 34
+definitions::scripts/release-pipeline.py = 35
 definitions::scripts/report-workflow-failure.py = 27
 definitions::scripts/resume-sessions.py = 21
 definitions::scripts/sweep.py = 56
 definitions::scripts/sync-devkit.py = 71
-definitions::scripts/upgrade-project.py = 36
+definitions::scripts/upgrade-project.py = 37
 definitions::scripts/workspace-status.py = 30
 definitions::scripts/workspace-task-index.py = 29
 definitions::scripts/worktree-guard.py = 60
@@ -105,12 +105,12 @@ file_lines::scripts/plug-projects.py = 1013
 file_lines::scripts/preview-task.py = 1885
 file_lines::scripts/preview-ui-host.py = 1155
 file_lines::scripts/reclaim.py = 1232
-file_lines::scripts/release-pipeline.py = 930
+file_lines::scripts/release-pipeline.py = 953
 file_lines::scripts/report-workflow-failure.py = 614
 file_lines::scripts/resume-sessions.py = 502
 file_lines::scripts/sweep.py = 1990
 file_lines::scripts/sync-devkit.py = 1868
-file_lines::scripts/upgrade-project.py = 1164
+file_lines::scripts/upgrade-project.py = 1187
 file_lines::scripts/workspace-status.py = 1048
 file_lines::scripts/workspace-task-index.py = 576
 file_lines::scripts/worktree-guard.py = 2330
@@ -125,12 +125,12 @@ function_lines::scripts/preview-task.py::main = 94
 function_lines::scripts/preview-task.py::wait_for_all = 88
 function_lines::scripts/preview-ui-host.py::main = 145
 function_lines::scripts/reclaim.py::main = 108
-function_lines::scripts/release-pipeline.py::run_pipeline = 127
+function_lines::scripts/release-pipeline.py::run_pipeline = 126
 function_lines::scripts/sweep.py::classify = 84
 function_lines::scripts/sweep.py::inspect = 133
 function_lines::scripts/sweep.py::main = 171
 function_lines::scripts/sweep.py::sync_plan = 87
-function_lines::scripts/upgrade-project.py::main = 166
+function_lines::scripts/upgrade-project.py::main = 161
 function_lines::scripts/upgrade-project.py::upgrade_one = 143
 function_lines::scripts/worktree-guard.py::main = 139
 function_lines::scripts/worktree-guard.py::redirect_decision = 94
@@ -469,3 +469,9 @@ swallowed_errors::scripts/worktree.py = 1
 #   file_lines::scripts/sync-devkit.py -> 1871
 #   file_lines::scripts/workspace-status.py -> 1087
 #   imports::scripts/workspace-status.py -> 21
+
+# 2026-09-25  recorded: devkit #393: a git refusal read as 'no release tags' planned v0.1.0 over v0.9.1. existing_tags/release_tags now raise with git's words, and each caller stops on it. release-pipeline.py and upgrade-project.py were already ~2x file_lines and definitions; the branch logic moved into one helper each (tag_missing, devkit_releases) so run_pipeline and upgrade main stay at their recorded complexity and length, and only the module totals grow. Splitting either module is its own change.
+#   definitions::scripts/release-pipeline.py -> 35
+#   definitions::scripts/upgrade-project.py -> 37
+#   file_lines::scripts/release-pipeline.py -> 953
+#   file_lines::scripts/upgrade-project.py -> 1187

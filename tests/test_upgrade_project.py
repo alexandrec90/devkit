@@ -468,8 +468,8 @@ def test_a_project_with_no_receipt_at_all_proves_nothing(tmp_path):
 
 
 def test_nothing_is_concluded_from_an_empty_tag_list(tmp_path):
-    """`release_tags` answers [] for a devkit it could not query. Reading "ahead"
-    into that would refuse every project in the workspace over one bad git call."""
+    """An empty set proves nothing about a project's receipt. Reading "ahead" into it
+    would refuse every project in the workspace over a devkit with no tags."""
     receipt(tmp_path, "v0.8.0")
     assert up.unreleased_adoption(tmp_path, []) == ""
 
@@ -489,7 +489,33 @@ def test_the_tag_list_is_newest_first_and_agrees_with_the_latest():
     *set* and the *pick* can never disagree about what the newest release is."""
     tags = up.release_tags(REPO_ROOT)
     assert tags and tags[0] == up.latest_tag(REPO_ROOT)
-    assert up.release_tags(REPO_ROOT / "no-such-directory") == []
+
+
+def test_an_unreadable_tag_list_raises_with_gits_words(tmp_path):
+    """Not []: an empty list means "devkit has no releases", and every caller acts on
+    that -- the refusal to adopt, the first-release plan. A failure has to stay one."""
+    with pytest.raises(RuntimeError, match="fatal:"):
+        up.release_tags(tmp_path / "no-such-directory")
+    with pytest.raises(RuntimeError, match="fatal:"):
+        up.latest_tag(tmp_path / "no-such-directory")
+
+
+def test_the_run_adopts_the_newest_release_and_carries_the_whole_set():
+    tag, tags, refusal = up.devkit_releases(REPO_ROOT)
+    assert refusal is None
+    assert tags and tag == tags[0]
+
+
+def test_an_unreadable_devkit_is_exit_2_with_gits_words(tmp_path):
+    """Exit 2, not the no-tag 1: nothing is known about devkit's releases."""
+    tag, tags, refusal = up.devkit_releases(tmp_path / "no-such-directory")
+    assert (tag, tags) == ("", [])
+    assert refusal and refusal[0] == 2 and "fatal:" in refusal[1]
+
+
+def test_a_devkit_with_no_tags_is_exit_1(monkeypatch):
+    monkeypatch.setattr(up, "release_tags", lambda _devkit: [])
+    assert up.devkit_releases(REPO_ROOT) == ("", [], (1, f"upgrade: {up.NO_TAG}"))
 
 
 # --- the upgrade happens in a box, never in the checkout ----------------------
@@ -877,8 +903,24 @@ def test_an_untagged_devkit_stops_the_whole_run_once(tmp_path, capsys):
     """Same fact about devkit for every project; repeating it per project would read
     as four problems rather than one."""
     ws = workspace(tmp_path, "carameli", "carameli-b")
-    assert up.main(["--all", "--workspace", str(ws), "--devkit", str(tmp_path / "nope")]) == 1
+    devkit = tmp_path / "devkit-untagged"
+    subprocess.run(["git", "init", "-q", str(devkit)], check=True)
+    assert up.main(["--all", "--workspace", str(ws), "--devkit", str(devkit)]) == 1
     assert capsys.readouterr().err.count("no release tags") == 1
+
+
+def test_a_devkit_git_cannot_read_is_not_an_untagged_one(tmp_path, capsys):
+    """The 2026-09-25 regression. The scheduled run met a checkout git refused for
+    dubious ownership and told the operator to cut a first release of a repo at v0.9.1,
+    dropping git's own message -- the only line that named the fix. A directory git
+    cannot open stands in for the refusal: same exit, same "fatal:" on stderr."""
+    ws = workspace(tmp_path, "carameli")
+    code = up.main(["--all", "--workspace", str(ws), "--devkit", str(tmp_path / "nope")])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "could not read devkit's release tags" in err
+    assert "fatal:" in err
+    assert "no release tags" not in err
 
 
 def test_naming_the_devkit_source_is_an_error_not_a_skip(tmp_path, capsys, monkeypatch):
