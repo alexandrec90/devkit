@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import broken_pr_menu as menu
 import fix_plan
+import junit_report
 import sweep
 import task_branch as tb
 from _loader import load_by_path
@@ -115,24 +116,21 @@ def run_jobs(gh: Gh, run_id: str) -> list[dict]:
     return [job for job in jobs if isinstance(job, dict)] if isinstance(jobs, list) else []
 
 
-def download_logs(gh: Gh, run_id: str, dest: Path) -> list[str]:
-    """Every `.log` the run uploaded, downloaded under `dest`, as text.
+def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]]:
+    """`(artifact texts, jobs)`: the run's artifacts downloaded under `dest` and read by
+    `junit_report`, and its jobs whenever those texts name nothing.
 
     `dest` is emptied first: an earlier download of a different run in the same slot
-    would otherwise hand the plan a signature from the wrong commit.
+    would otherwise hand the plan a signature from the wrong commit. The jobs are asked
+    for not merely when nothing came down: an artifact that downloads and says nothing
+    -- an empty lint log on a run whose tests failed -- used to stop the failed step
+    names being asked for, and the failure went out blind.
     """
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     done = gh("run", "download", str(run_id), "-D", str(dest))
-    if getattr(done, "returncode", 1) != 0:
-        return []
-    texts = []
-    for log in sorted(dest.rglob("*.log")):
-        try:
-            texts.append(log.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            continue
-    return texts
+    texts = junit_report.read_artifacts(dest) if getattr(done, "returncode", 1) == 0 else []
+    return texts, [] if fix_plan.signature_from_logs(texts) else run_jobs(gh, run_id)
 
 
 # --- scheduled failures ----------------------------------------------------------------
@@ -295,9 +293,9 @@ def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_pla
     jobs: list[dict] = []
     for run_id in run_ids:
         dest = where / run_id if len(run_ids) > 1 else where
-        found = download_logs(gh, run_id, dest)
+        found, failed_jobs = run_evidence(gh, run_id, dest)
         texts += found
-        jobs += run_jobs(gh, run_id) if not found else []
+        jobs += failed_jobs
     sig = fix_plan.signature(conflicted, texts, jobs)
     return replace(
         failure,
@@ -348,8 +346,7 @@ def read_default_branch(
         workflow=str(run.get("workflowName") or GATE_WORKFLOW),
     )
     where = root / evidence_slot(failure)
-    texts = download_logs(gh, run_id, where) if run_id else []
-    jobs = run_jobs(gh, run_id) if run_id and not texts else []
+    texts, jobs = run_evidence(gh, run_id, where) if run_id else ([], [])
     sig = fix_plan.signature(False, texts, jobs)
     if fix_plan.is_release_red(sig) and is_tagged(git, failure.sha):
         return True, None
@@ -390,8 +387,7 @@ def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_
     if not run_id:
         return failure
     where = root / evidence_slot(failure)
-    texts = download_logs(gh, run_id, where)
-    jobs = run_jobs(gh, run_id) if not texts else []
+    texts, jobs = run_evidence(gh, run_id, where)
     sig = fix_plan.signature(False, texts, jobs)
     return replace(failure, signature=sig, run_id=run_id, evidence=str(where) if texts else "")
 

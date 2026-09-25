@@ -44,6 +44,7 @@ is the half that asks GitHub.
 
 from __future__ import annotations
 
+import functools
 import re
 import sys
 from collections.abc import Iterable
@@ -51,7 +52,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import task_branch as tb
+from _loader import load_by_path
 
 # The four sources of red this plans for. A `COMMIT` is a session's intent the fix pass
 # could not commit: the commit stage refused it, and the branch is the worktree it sits in.
@@ -187,9 +190,47 @@ def signature(conflicted: bool, texts: Iterable[str], jobs: Iterable[dict]) -> t
     return tuple(parts)
 
 
+@functools.cache
+def vendored_paths() -> frozenset[str] | None:
+    """`sync-devkit.py`'s MANIFEST beside this file; None when it cannot be read.
+
+    Read from the tool itself, as `new-project.py` does, so there is no second list to
+    forget. None falls back to the directory prefix alone -- the answer before this
+    existed -- rather than calling every path project-owned.
+    """
+    try:
+        module = load_by_path(
+            "_fix_plan_manifest", Path(__file__).resolve().parent / "sync-devkit.py"
+        )
+        return frozenset(module.MANIFEST) | frozenset(module.gated_source_paths())
+    except (OSError, AttributeError, ImportError, SyntaxError):
+        return None
+
+
+def entry_path(entry: str) -> str:
+    """The file a signature entry names: `lint a.py` and `a.py::test_b` are both `a.py`."""
+    return entry.removeprefix("lint ").split("::", 1)[0]
+
+
+def in_vendored_tier(entry: str, prefixes: tuple[str, ...] = (VENDORED_TESTS,)) -> bool:
+    """The entry names a file under `prefixes` that devkit actually ships.
+
+    A directory prefix is not enough: a consumer keeps its own tests beside the vendored
+    ones -- carameli's `scripts/hooks/tests/test_codex_hooks_contract.py` is deliberately
+    not in the MANIFEST -- and one of those red on an adoption is the project's to fix on
+    its adoption branch, not a devkit session's on a fresh branch that cannot reach it.
+    A prefix that is itself a file (`.pre-commit-config.yaml`) is taken as named.
+    """
+    path = entry_path(entry)
+    if not path.startswith(prefixes):
+        return False
+    known = vendored_paths()
+    return known is None or path in known or path in prefixes
+
+
 def is_vendored(sig: tuple[str, ...]) -> bool:
     """Every id in the signature is a vendored test -- the shape that belongs upstream."""
-    return bool(sig) and all(entry.startswith(VENDORED_TESTS) for entry in sig)
+    return bool(sig) and all(in_vendored_tier(entry) for entry in sig)
 
 
 def is_release_red(sig: tuple[str, ...]) -> bool:

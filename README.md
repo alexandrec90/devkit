@@ -628,13 +628,16 @@ what the scheduled job does while the switch says `plan`. What each dispatch loo
   record, so a pass that holds everything says which red it is holding behind.
 
 A ledger under the workspace's `.worktrees/` records every dispatch against the commit it
-was observed on, so a second pass sends nothing at a failure an agent is already on, and
-`fix_cycle.PER_TARGET_PER_DAY` and `PER_DAY` cap what a day can spend; past the cap a
-target reads "needs a human". Branch updates are recorded but never counted, a dispatch
-with no evidence gets one slot rather than two, and an entry older than a day
-(`fix_ledger.RESEND_AFTER`) no longer blocks one re-send (`MAX_SENDS`) — a session that
-died leaves nothing else — unless the session reported itself blocked, which never
-expires. A scheduled pass always uses `claude-bg`.
+was observed on, so a second pass sends nothing at a failure an agent is already on. The
+retry policy is per *problem* — the same failures on the same PR, at any commit: after
+`fix_ledger.ATTEMPTS` sessions left it unchanged it reads "needs a human", and one whose
+failures changed is progress and goes again. A problem with no evidence gets one session.
+`fix_cycle.PER_TARGET_PER_DAY` and `PER_DAY` are only fuses behind that, for a pass whose
+reading has gone wrong. Branch updates are recorded but never counted, and an entry older
+than `fix_ledger.RESEND_AFTER` no longer blocks one re-send — a session that died leaves
+nothing else — unless the session reported itself blocked, which never expires. An open
+adoption holds only its own project's other PRs. Every pass appends a line to
+`logs/fix-pass.history.jsonl`. A scheduled pass always uses `claude-bg`.
 
 ```bash
 python scripts/fix-pass.py --mode plan                        # the whole pass, nothing done

@@ -28,7 +28,7 @@ fix_pass = load_script("scripts/fix-pass.py")
 MISSING_TOOLS = fix_pass.missing_tools  # the real preflight, before `tools_on_path` stubs it
 
 NOW = _dt.datetime(2026, 9, 19, 9, 0, tzinfo=_dt.UTC)
-VENDORED = ("scripts/hooks/tests/test_a.py::t",)
+VENDORED = ("scripts/hooks/tests/test_untested_symbols.py::t",)
 
 
 @pytest.fixture(autouse=True)
@@ -652,15 +652,58 @@ def test_a_blocked_report_marks_the_ledger_and_no_second_session_goes(world):
     )
 
 
-def test_a_dispatch_a_day_old_is_sent_again(world):
-    """A session that died leaves only its ledger entry; after a day the pass looks
-    again, under the same caps, rather than saying "already dispatched" for a week."""
+def test_a_dispatch_past_the_resend_window_is_sent_again(world):
+    """A session that died leaves only its ledger entry; after the window the pass looks
+    again rather than saying "already dispatched" for a week."""
     world["failures"] = [failure()]
     fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
-    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW + _dt.timedelta(hours=12))
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW + _dt.timedelta(hours=5))
     assert len(world["dispatched"]) == 1
-    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW + _dt.timedelta(hours=25))
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW + _dt.timedelta(hours=7))
     assert len(world["dispatched"]) == 2
+
+
+def test_fixers_go_while_the_failure_moves_and_stop_when_it_does_not(world):
+    """The retry policy end to end: a fixer pushes (new sha) and the same test is still
+    red -- one more; again -- a person. A fixer that changed what fails made progress."""
+    for sha in ("a1", "b2", "c3"):
+        world["failures"] = [failure(sha=sha)]
+        fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
+    assert len(world["dispatched"]) == 2
+    assert "2 session(s) sent and it is still red unchanged -- needs a human" in artifact(world)
+    world["failures"] = [failure(sha="d4", signature=("tests/test_other.py::t",))]
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
+    assert len(world["dispatched"]) == 3
+
+
+def test_every_pass_leaves_a_line_in_the_history(world):
+    """The record is overwritten per pass, so a run of passes that sent nothing left no
+    trace of having happened; the history is what shows it."""
+    world["failures"] = [failure()]
+    for _ in range(2):
+        fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
+    path = world["workspace"].parent / "devkit" / fix_pass.HISTORY
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [len(line["sent"]) for line in lines] == [1, 0]
+    assert "already dispatched" in lines[1]["capped"][0]
+    assert lines[1]["harness"] == "clean"
+
+
+def test_the_history_keeps_only_its_last_lines(world, monkeypatch):
+    monkeypatch.setattr(fix_pass, "HISTORY_KEEP", 3)
+    for _ in range(5):
+        fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude", NOW)
+    path = world["workspace"].parent / "devkit" / fix_pass.HISTORY
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 3
+
+
+def test_append_history_starts_the_file_and_appends_to_it(tmp_path):
+    account = fix_cycle.Account(fix_cycle.PLAN, fix_cycle.harness_state({}, True, []))
+    path = fix_pass.append_history(account, NOW, tmp_path)
+    assert path == tmp_path / fix_pass.HISTORY
+    fix_pass.append_history(account, NOW, tmp_path)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["mode"] for line in lines] == [fix_cycle.PLAN] * 2
 
 
 def test_a_pr_behind_a_red_base_waits_for_the_bases_fixer(world):
@@ -675,20 +718,26 @@ def test_a_pr_behind_a_red_base_waits_for_the_bases_fixer(world):
     assert "held     carameli #381 -- held: origin/main is red in carameli" in text
 
 
-def test_an_adoption_pr_red_on_its_own_project_goes_while_its_release_is_the_only_hold(world):
+def test_an_open_adoption_goes_and_holds_only_its_own_projects_other_prs(world):
     """The release was still being adopted because this PR was red, and this PR was held
-    because the release was still being adopted."""
+    because the release was still being adopted -- and so was every other project's."""
     world["pending"] = ["carameli"]
     adoption = failure(
         number=7, head="agent/auto/devkit-upgrade-v0-11-22-0921", signature=("lint src/a.py",)
     )
-    world["failures"] = [adoption, failure(number=8)]
+    world["failures"] = [
+        adoption,
+        failure(number=8),
+        failure(project="devkit", number=9, signature=("tests/test_d.py::t",)),
+    ]
     fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
-    assert world["dispatched"] == [(fix_plan.DISPATCH, "claude")]
+    assert world["dispatched"] == [(fix_plan.DISPATCH, "claude")] * 2
     text = artifact(world)
-    assert "harness  RED -- the newest release is still being adopted in carameli" in text
+    assert "harness  clean" in text
+    assert "adopting carameli" in text
     assert "sent     carameli #7 -- dispatch" in text
-    assert "held     carameli #8 -- held until the harness is clean" in text
+    assert "sent     devkit #9 -- dispatch" in text
+    assert "held     carameli #8 -- held until the newest release is adopted in carameli" in text
 
 
 def test_record_blocked_marks_only_a_stamped_report(monkeypatch, tmp_path):
