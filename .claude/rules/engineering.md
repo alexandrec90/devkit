@@ -41,6 +41,11 @@ that has no test, write the test in the same commit even if the logic didn't cha
   the pass downloads the artifact and sends a fresh session at the failure with the
   failing tests named. The `devkit-push-gate` pre-commit hook still guards a push a
   person makes by hand.
+- **When you run them, run them in the project's environment, never the machine's
+  `python`** — `uv run pytest <path>` where the project has a `uv.lock`. The machine
+  interpreter is kept bare on purpose, because the hook scripts must survive one, so
+  `python -m pytest` there fails with `No module named pytest`. The dev tools are the
+  project's dev group, not a global install.
 - **Fix failures in the code, not in the assertion.** Relaxing an assertion to get green
   deletes the only evidence that something is wrong.
 - A skipped or `xfail` test carries a linked issue or a one-line reason in the marker.

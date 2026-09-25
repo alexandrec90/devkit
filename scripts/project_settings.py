@@ -11,7 +11,8 @@ somewhere else to be.
 The pull makes one pass over that file: it **unwires every agent hook**. No hook is
 wired anywhere -- not devkit's, not the template's, not one a project added -- so a
 consumer's settings lose their whole `hooks` block on the pull that delivers this. The
-hook scripts are still vendored, and inert while nothing names them.
+hook scripts are still vendored, and inert while nothing names them. `--check` reports
+a block still there, since a project only pulls when asked to.
 
 Stdlib only, like everything else here that runs before a virtualenv exists.
 
@@ -125,10 +126,25 @@ def check_notes(root: Path, codex_file: str, codex_stale: bool) -> list[tuple[st
     compares. A stale Codex mirror is reported anyway because Codex reads that file, not
     the settings it was generated from.
 
+    A wired agent hook is reported too. The pull strips one, but a project only pulls
+    when asked to, so a branch cut before the unwiring -- or a block added back by hand
+    -- ran `SessionStart` again with every gate green. Wired means an entry, not a key:
+    `{"hooks": {}}` runs nothing.
+
     Returned as a list rather than printed so `main` neither grows a branch per fault
     nor has to word the summary; both were what pushed that function past its limits.
     """
     notes: list[tuple[str, str]] = []
+    payload = read(root)
+    if hook_entries(payload):
+        events = ", ".join(strip_hooks(payload)[1])
+        notes.append(
+            (
+                "the project settings wire an agent hook",
+                f"WIRED   {SETTINGS_FILE} -- wires {events}; no agent hook is wired "
+                f"anywhere. Delete its `hooks` block, or run `sync-devkit.py --pull`",
+            )
+        )
     if codex_stale:
         notes.append(
             (

@@ -1243,9 +1243,29 @@ def test_check_fails_on_a_stale_codex_artifact_with_everything_else_in_sync(
     assert "drifted from the shared repo" not in reported
 
 
+def test_check_fails_on_a_wired_agent_hook_with_everything_else_in_sync(
+    tmp_path, monkeypatch, capsys
+):
+    """A branch cut before the unwiring still carries its `hooks` block, and only a pull
+    strips one. The gate is the one thing that runs on it, so the gate has to say so."""
+    src = _repo(tmp_path / "src", tag="v0.5.3", files={"scripts/hooks/x.py": "upstream"})
+    repo = _codex_project(tmp_path / "proj")
+    _seed(repo, "scripts/hooks/x.py", "upstream")
+    sh.regenerate_codex_hooks(repo)
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    assert sh.main(["--check", "--src", str(src)]) != 0
+    reported = capsys.readouterr().err
+    assert "WIRED" in reported
+    assert "drifted from the shared repo" not in reported
+
+
 def test_check_passes_once_the_codex_artifact_is_regenerated(tmp_path, monkeypatch):
     src = _repo(tmp_path / "src", tag="v0.5.3", files={"scripts/hooks/x.py": "upstream"})
     repo = _codex_project(tmp_path / "proj")
+    # Settings that wire nothing: a wired hook is a fault of its own, tested above.
+    _seed(repo, sh.SETTINGS_FILE, "{}")
     _seed(repo, "scripts/hooks/x.py", "upstream")
     sh.regenerate_codex_hooks(repo)
     monkeypatch.setattr(sh, "REPO_ROOT", repo)

@@ -136,6 +136,26 @@ def test_an_unguarded_project_is_not_a_check_fault(tmp_path):
     assert ps.check_summary([]) == ""
 
 
+def test_a_wired_agent_hook_is_a_check_fault(tmp_path):
+    """The pull strips a `hooks` block, but a project only pulls when asked to. A branch
+    cut before the unwiring, or a block added back by hand, wired `SessionStart` again
+    with every gate green -- so the gate that runs on every PR has to say so."""
+    root = _project(tmp_path, _hook("bash .claude/hooks/session-start.sh", "SessionStart"))
+    notes = ps.check_notes(root, ".codex/hooks.json", codex_stale=False)
+    ((label, message),) = notes
+    assert "WIRED" in message
+    assert "SessionStart" in message
+    assert ps.check_summary(notes) == label
+
+
+def test_an_empty_hooks_block_wires_nothing_and_is_not_a_check_fault(tmp_path):
+    """`{"hooks": {}}` runs nothing, and a project that cannot read its settings is one
+    this cannot speak about rather than one with a fault."""
+    assert ps.check_notes(_project(tmp_path, {"hooks": {}}), ".codex/hooks.json", False) == []
+    _seed(tmp_path, ps.SETTINGS_FILE, "{not json,")
+    assert ps.check_notes(tmp_path, ".codex/hooks.json", codex_stale=False) == []
+
+
 def test_a_stale_codex_mirror_is_still_a_check_fault(tmp_path):
     notes = ps.check_notes(_project(tmp_path), ".codex/hooks.json", codex_stale=True)
     ((label, message),) = notes
