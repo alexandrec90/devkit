@@ -22,6 +22,7 @@ own use of these names still exercised through `tests/test_upgrade_project.py`.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 import sys
 from pathlib import Path
 
@@ -178,3 +179,39 @@ def close_superseded(project: Path, tag: str) -> list[str]:
         if gh("pr", "close", number, "--comment", note).returncode == 0:
             closed.append(f"#{number}")
     return closed
+
+
+# --- green adoptions, the one thing the pass merges ---------------------------------------
+
+
+GREEN = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
+
+
+def _gate_green(row: dict) -> bool:
+    rollup = row.get("statusCheckRollup") or []
+    if not isinstance(rollup, list) or not rollup:
+        return False
+    verdicts = {str(node.get("conclusion") or node.get("state") or "").upper() for node in rollup}
+    return verdicts <= GREEN and str(row.get("mergeable", "")).upper() != "CONFLICTING"
+
+
+def green_adoptions(rows: Iterable[dict], prefixes: tuple[str, ...], label: str) -> list[dict]:
+    """Open adoption PRs whose gate passed and that carry the label: mergeable unattended.
+
+    An adoption is upstream churn whose green gate is the whole review, and letting
+    those land is what keeps a release's fan-out from piling up in the queue. Nothing
+    else is merged by the pass; every other green PR waits for a person.
+    """
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and not row.get("isDraft")
+        and str(row.get("headRefName", "")).startswith(prefixes)
+        and label
+        in {
+            str(entry.get("name", "")) if isinstance(entry, dict) else str(entry)
+            for entry in row.get("labels", []) or []
+        }
+        and _gate_green(row)
+    ]

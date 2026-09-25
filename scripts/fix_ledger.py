@@ -16,6 +16,12 @@ Two things an entry can say beyond "sent": that it is old enough to look at agai
 session reported itself blocked (`mark_blocked`, which never expires, because the
 session did report and what it reported needs a person).
 
+And one thing the entries say together: how many sessions one *problem* has had
+(`problem_key`, the key less its commit). That is the retry policy -- a failure that
+survives `ATTEMPTS` fixers unchanged needs a person, one that changed is progress --
+and it replaced a per-target daily cap that could not tell a fixer making progress
+from one failing the same way twice, so it rationed both.
+
 Stdlib plus `fix_plan`. Tested in `tests/test_fix_ledger.py`.
 """
 
@@ -41,9 +47,21 @@ KEY_DIGEST = 12
 # How long a recorded dispatch stops the same one being made again. A session that
 # died -- on a permission prompt nobody answered, on a crash -- leaves nothing but its
 # ledger entry, and an entry that never expired held a red PR for a week with the
-# record saying "already dispatched". After this long the pass looks again, under the
-# same daily caps; a *blocked* entry never expires.
-RESEND_AFTER = _dt.timedelta(hours=24)
+# record saying "already dispatched". After this long the pass looks again, under
+# `ATTEMPTS`; a *blocked* entry never expires. Longer than any fixer runs, and short
+# enough that a dead one costs an afternoon rather than a day.
+RESEND_AFTER = _dt.timedelta(hours=6)
+
+# How many sessions one *problem* gets in its life: the same failures on the same
+# target under the same action, at whatever commit they were seen. The second is the
+# retry after a fix that did not take; a third at an unchanged signature is a fixer
+# that cannot, and the one outcome worth refusing. A signature that changed is
+# progress -- some failures went, or new ones came -- and is a new problem, so the
+# limit is on repeating a failure rather than on the target. Counted over the life of
+# the ledger, not a day, so a PR flipping between two signatures does not buy more.
+ATTEMPTS = 2
+# A problem with no evidence cannot show progress: its one session is all it gets.
+BLIND_ATTEMPTS = 1
 
 # How many sessions one key gets in its life: the dispatch and one re-send. The entry
 # counts them, so a failure whose session dies every day does not buy a session every
@@ -87,6 +105,34 @@ def decision_key(decision: fix_plan.Decision) -> str:
     return f"{fix_plan.UPSTREAM}:{len(keys)}:{digest[:KEY_DIGEST]}"
 
 
+def problem_key(decision: fix_plan.Decision) -> str:
+    """`decision_key` without the commit: what `ATTEMPTS` counts sessions against.
+
+    A fixer that pushed and left the same tests red produced a new sha, so a new
+    `decision_key`, and used to read as a fresh failure; under this key it is the
+    same problem again, which is exactly the loop to stop.
+    """
+    keys = sorted(_drop_commit(failure_key(f)) for f in decision.failures)
+    if len(keys) == 1:
+        return f"{keys[0]}:{decision.action}"
+    digest = hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()
+    return f"{fix_plan.UPSTREAM}:{len(keys)}:{digest[:KEY_DIGEST]}:problem"
+
+
+def _drop_commit(key: str) -> str:
+    """`kind:project:number:<sha>:digest[:action]` less its fourth field."""
+    parts = key.split(":")
+    return ":".join(parts[:3] + parts[4:]) if len(parts) >= 5 else key
+
+
+def problem_of(key: str, entry: object) -> str:
+    """The problem an entry was recorded under; derived from a single-failure key for
+    an entry written before `record` kept it, and "" for a group, which cannot be."""
+    if isinstance(entry, dict) and entry.get("problem"):
+        return str(entry["problem"])
+    return _drop_commit(key) if len(key.split(":")) == 6 else ""
+
+
 # --- the file -------------------------------------------------------------------------
 
 
@@ -104,11 +150,15 @@ def _write(path: Path, ledger: dict[str, dict]) -> None:
     path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def record(path: Path, key: str, note: str, now: _dt.datetime | None = None) -> None:
-    """One more session sent under `key`: the newest time, and how many so far."""
+def record(
+    path: Path, key: str, note: str, now: _dt.datetime | None = None, problem: str = ""
+) -> None:
+    """One more session sent under `key`: the newest time, how many so far, and the
+    `problem_key` it counts against when the caller knows it."""
     ledger = read_ledger(path)
     when = (now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds")
-    ledger[key] = {"when": when, "what": note, "sent": sends(ledger.get(key)) + 1}
+    entry = {"when": when, "what": note, "sent": sends(ledger.get(key)) + 1}
+    ledger[key] = {**entry, "problem": problem} if problem else entry
     _write(path, ledger)
 
 
@@ -141,9 +191,26 @@ def mark_blocked(path: Path, key: str, reason: str) -> bool:
 
 
 def blocked_reason(decision: fix_plan.Decision, ledger: dict[str, dict]) -> str:
-    """What the session sent at this decision said was in the way, or "" when nothing."""
+    """What a session sent at this decision -- or at the same problem on an earlier
+    commit -- said was in the way, or "" when nothing.
+
+    The problem half is what keeps a report standing after an unrelated push: the
+    blocker a fixer named does not go away because the sha moved.
+    """
     entry = ledger.get(decision_key(decision))
-    return str(entry.get("blocked", "")) if isinstance(entry, dict) else ""
+    if isinstance(entry, dict) and entry.get("blocked"):
+        return str(entry["blocked"])
+    problem = problem_key(decision)
+    for key, other in ledger.items():
+        if isinstance(other, dict) and other.get("blocked") and problem_of(key, other) == problem:
+            return str(other["blocked"])
+    return ""
+
+
+def attempts(decision: fix_plan.Decision, ledger: dict[str, dict]) -> int:
+    """Sessions already sent at this decision's problem, at any commit."""
+    problem = problem_key(decision)
+    return sum(sends(entry) for key, entry in ledger.items() if problem_of(key, entry) == problem)
 
 
 def already_sent(
