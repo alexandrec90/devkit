@@ -143,6 +143,8 @@ def _harness_shaped(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> 
     is the harness, the project's own lint under a new rule is the project's. Which
     of the two it is decides where the fixer goes -- the one devkit session, or the
     adoption branch itself.
+
+    A devkit PR is not the harness by any of these: see `classify`.
     """
     return (
         failure.project == DEVKIT
@@ -152,9 +154,15 @@ def _harness_shaped(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> 
 
 
 def classify(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> str:
+    ids = [entry for entry in failure.signature if entry != fix_plan.CONFLICT]
+    # A devkit PR is red on its own diff: one against a red main is held by the plan
+    # before it gets here. Its vendored tests judge its own code -- the ratchets above
+    # all -- so the fix lands on its head branch, never in the upstream session, whose
+    # fresh branch off main has nothing to fix and cannot reach the PR (devkit #393, #394).
+    if failure.project == DEVKIT and failure.kind == fix_plan.PR:
+        return PROJECT if ids else UNKNOWN
     if _harness_shaped(failure, shared):
         return HARNESS
-    ids = [entry for entry in failure.signature if entry != fix_plan.CONFLICT]
     if ids and all(entry.removeprefix("lint ").startswith(HARNESS_PATHS) for entry in ids):
         return HARNESS
     if failure.kind == fix_plan.COMMIT and any(

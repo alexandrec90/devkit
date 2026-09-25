@@ -65,8 +65,31 @@ def test_a_vendored_test_is_the_harness():
     assert fix_cycle.classify(failure(signature=VENDORED), set()) == fix_cycle.HARNESS
 
 
-def test_anything_in_devkit_is_the_harness():
-    assert fix_cycle.classify(failure(project="devkit"), set()) == fix_cycle.HARNESS
+def test_anything_in_devkit_but_a_pr_is_the_harness():
+    for kind in (fix_plan.BRANCH, fix_plan.NIGHTLY, fix_plan.LEDGER):
+        assert fix_cycle.classify(failure(kind=kind, project="devkit"), set()) == fix_cycle.HARNESS
+
+
+def test_a_devkit_pr_red_on_its_own_diff_is_fixed_on_its_own_branch():
+    """devkit #393 and #394 were red on the vendored ratchets -- a ceiling and the
+    untested-symbol baseline, both judging the PR's own code -- while main was green.
+    Classed as the harness, they were folded into the upstream session: a fresh branch
+    off main, told to fix the harness, with nothing on main to fix and no way to land on
+    either PR. A PR against a red base is already held by the plan, so a devkit PR that
+    reaches here is red on its own diff, vendored test or not."""
+    for signature in (
+        VENDORED,
+        ("scripts/hooks/tests/test_structure_check.py::test_nothing_is_new",),
+        ("lint scripts/hooks/stop.py",),
+        ("tests/test_x.py::t",),
+    ):
+        red = failure(project="devkit", number=393, signature=signature)
+        assert fix_cycle.classify(red, set()) == fix_cycle.PROJECT
+        classes = fix_cycle.classify_all([red])
+        harness = fix_cycle.harness_state(classes, True, [])
+        go, held = fix_cycle.phase([decision(fix_plan.DISPATCH, red)], classes, harness)
+        assert harness.clean and held == []
+        assert [(d.action, d.failures) for d in go] == [(fix_plan.DISPATCH, (red,))]
 
 
 def test_a_signature_shared_by_two_projects_is_the_harness():
@@ -100,7 +123,7 @@ def test_no_evidence_is_unknown_and_a_conflict_alone_is_unknown():
 
 
 def test_classify_all_is_keyed_like_the_ledger():
-    red = [failure(number=1), failure(project="devkit", number=2, signature=("tests/t.py::d",))]
+    red = [failure(number=1), failure(project="a", number=2, signature=VENDORED)]
     classes = fix_cycle.classify_all(red)
     assert classes[fix_ledger.failure_key(red[1])] == fix_cycle.HARNESS
     assert classes[fix_ledger.failure_key(red[0])] == fix_cycle.PROJECT
@@ -137,17 +160,17 @@ def test_while_the_harness_is_red_one_devkit_session_goes_and_every_project_fixe
 
 
 def test_several_harness_decisions_fold_into_one_session():
-    devkit_pr = failure(project="devkit", number=9)
+    vendored = failure(project="c", number=9, signature=VENDORED)
     shared = [failure(project="a", number=1), failure(project="b", number=2)]
     decisions = [
-        decision(fix_plan.DISPATCH, devkit_pr),
+        decision(fix_plan.DISPATCH, vendored),
         decision(fix_plan.DISPATCH, shared[0]),
         decision(fix_plan.DISPATCH, shared[1]),
     ]
-    classes = fix_cycle.classify_all([devkit_pr, *shared])
+    classes = fix_cycle.classify_all([vendored, *shared])
     go, held = fix_cycle.phase(decisions, classes, fix_cycle.harness_state(classes, True, []))
     assert len(go) == 1 and go[0].action == fix_plan.UPSTREAM
-    assert sorted(f.project for f in go[0].failures) == ["a", "b", "devkit"]
+    assert sorted(f.project for f in go[0].failures) == ["a", "b", "c"]
     assert "3 checkout(s)" in go[0].note
     assert held == []
 
@@ -157,7 +180,7 @@ def test_a_conflicted_harness_pr_gets_its_resolver_rather_than_the_devkit_sessio
     branch off the default, told to fix the harness, with no way to land on the PR at
     all. An action that names a branch operation on one PR cannot be folded into a
     session that has no branch."""
-    conflicted = failure(project="devkit", number=381, signature=(fix_plan.CONFLICT,))
+    conflicted = failure(project="a", number=381, signature=VENDORED)
     classes = fix_cycle.classify_all([conflicted])
     harness = fix_cycle.harness_state(classes, True, [])
     go, held = fix_cycle.phase([decision(fix_plan.RESOLVE, conflicted)], classes, harness)
@@ -170,8 +193,8 @@ def test_a_conflicted_harness_pr_gets_its_resolver_rather_than_the_devkit_sessio
 def test_a_behind_harness_pr_is_updated_rather_than_folded():
     """An `UPDATE` is a GitHub call against one PR, not a session; folding it spends an
     agent on what a merge would have done for nothing."""
-    behind = failure(project="devkit", number=9, behind=True)
-    red = failure(project="devkit", number=10)
+    behind = failure(project="a", number=9, behind=True, signature=VENDORED)
+    red = failure(project="a", number=10, signature=VENDORED)
     classes = fix_cycle.classify_all([behind, red])
     go, held = fix_cycle.phase(
         [decision(fix_plan.DISPATCH, red), decision(fix_plan.UPDATE, behind)],
@@ -220,7 +243,9 @@ def test_unknown_goes_to_the_project_bucket():
 
 
 def test_a_decision_is_harness_if_any_failure_under_it_is():
-    mixed = decision(fix_plan.DISPATCH, failure(number=1), failure(project="devkit", number=2))
+    mixed = decision(
+        fix_plan.DISPATCH, failure(number=1), failure(project="a", number=2, signature=VENDORED)
+    )
     classes = fix_cycle.classify_all(mixed.failures)
     assert fix_cycle.decision_class(mixed, classes) == fix_cycle.HARNESS
     plain = decision(fix_plan.DISPATCH, failure(number=1))
