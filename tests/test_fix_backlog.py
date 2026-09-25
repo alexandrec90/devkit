@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_backlog
+import fix_ledger
 import fix_plan
 
 
@@ -32,7 +33,7 @@ def test_the_backlog_becomes_one_failure_with_its_groups_as_evidence(monkeypatch
     assert len(backlog.signature) == 2, "two groups, not three lines"
     assert backlog.signature[0].startswith("agent-report carameli [")
     assert backlog.signature[0].endswith(" x2")
-    assert len(backlog.sha) == fix_plan.KEY_DIGEST
+    assert len(backlog.sha) == fix_ledger.KEY_DIGEST
     log = Path(backlog.evidence) / "harness-triage.log"
     assert "Scheduled: Devkit Release" in log.read_text(encoding="utf-8")
     assert fix_plan.describe(backlog).startswith("2 open group(s) on the harness-defect ledger")

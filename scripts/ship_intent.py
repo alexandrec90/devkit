@@ -16,8 +16,16 @@ recorded too, with the pre-commit output as evidence, so the pass can tell it fr
 session still working: no intent file means hands off, an intent with a refusal means a
 dispatchable failure, an intent already shipped at this tree's state means nothing to do.
 
+**The intent is consumed.** Once shipped it becomes `logs/ship-intent.shipped.md`; once
+a fixer is sent at a refusal it becomes `logs/ship-intent.refused.md` (the pass does
+that at dispatch, `set_aside`). So the file exists only between a session writing it
+and the pass acting on it, and shipping again is always a fresh intent -- the ship
+skill writes one.
+
 **A dirty tree with no intent file is never touched.** That is the whole line between
 "still working" and "done", and it is drawn by the session, not guessed from the tree.
+It is also what makes a fixer safe in a reused worktree: its edits are a dirty tree
+with no intent until it ships.
 
 Both files live under `logs/`, which every project ignores, so neither can be committed
 by the `git add -A` this runs. Every spawn is window-less: the pass is a scheduled job.
@@ -39,9 +47,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
-import agent_worktrees as aw
 import fix_plan
+import fix_reports
 import sweep
+import task_branch as tb
 from _loader import load_by_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +62,14 @@ ship = load_by_path("ship", REPO_ROOT / "scripts" / "ship.py")
 
 INTENT_FILE = Path("logs") / "ship-intent.md"
 STATE_FILE = Path("logs") / "ship-state.json"
+# Where the intent goes once the pass has acted on it. Shipped: the words that went
+# out, kept for the record. Refused: the message a fixer was sent to earn, kept where
+# that fixer can reuse it. Either way `INTENT_FILE` is gone, so a tree with edits and
+# no intent is a session still working -- including the fixer's own -- and the pass
+# keeps its hands off. Before this, a fixer reusing the worktree of a shipped PR had
+# its first uncommitted edit committed under the old message and pushed to the PR.
+SHIPPED_FILE = Path("logs") / "ship-intent.shipped.md"
+REFUSED_FILE = fix_reports.REFUSED_FILE
 
 # The pre-push hook the pass skips. CI runs the same gate on the PR and the pass reads
 # its artifact, so running it here would only make the push take minutes for a verdict
@@ -80,6 +97,9 @@ class Intent:
     # intent nothing mentions is work that sits unstaged on `master` until a person
     # happens to look, which is how the first ledger sweep's carameli fix was found.
     blocked: str = ""
+    # The checkout's default branch: what the PR opens against, and what decided
+    # `blocked`. Read once per checkout by `find_intents`.
+    base: str = ""
 
     @property
     def digest(self) -> str:
@@ -150,37 +170,40 @@ def write_state(tree: Path, state: dict) -> None:
 def find_intents(root: Path, projects: list[str], git_for=sweep.git_for) -> list[Intent]:
     """Every worktree of every registered checkout that carries an intent file.
 
-    Through `git worktree list`, so a box, a `--worktree` checkout and the static
-    checkout on a task branch are all found the same way. A tree on a branch a PR
-    cannot be opened from (`ship.is_shippable`) is returned `blocked` with the reason,
-    for the record, rather than shipped somewhere surprising or silently passed over.
+    Through `git worktree list` (`fix_reports.agent_trees`), so a box, a `--worktree`
+    checkout and the static checkout on a task branch are all found the same way. A
+    tree on a branch a PR cannot be opened from (`ship.is_shippable`) is returned
+    `blocked` with the reason, for the record, rather than shipped somewhere
+    surprising or silently passed over.
     """
     found: list[Intent] = []
-    for project in projects:
-        project_dir = root / project
-        if not project_dir.is_dir():
+    defaults: dict[str, str] = {}
+    for project, tree, branch in fix_reports.agent_trees(root, projects, git_for):
+        intent_path = tree / INTENT_FILE
+        if not branch or not intent_path.is_file():
             continue
-        git = git_for(project_dir)
-        listed = git("worktree", "list", "--porcelain")
-        if listed.returncode != 0:
-            continue
-        default = _default_branch(git)
-        for path, branch in aw.parse_worktree_list(listed.stdout):
-            tree = Path(path)
-            intent_path = tree / INTENT_FILE
-            if not branch or not intent_path.is_file():
-                continue
-            shippable, why = ship.is_shippable(branch, default)
-            subject, body = parse_intent(intent_path.read_text(encoding="utf-8", errors="replace"))
-            if subject:
-                found.append(Intent(project, tree, branch, subject, body, "" if shippable else why))
+        if project not in defaults:
+            defaults[project] = tb.detect_default_branch(git_for(root / project), fallback="main")
+        base = defaults[project]
+        shippable, why = ship.is_shippable(branch, base)
+        subject, body = parse_intent(intent_path.read_text(encoding="utf-8", errors="replace"))
+        if subject:
+            found.append(
+                Intent(project, tree, branch, subject, body, "" if shippable else why, base)
+            )
     return found
 
 
-def _default_branch(git) -> str:
-    head = git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
-    name = (head.stdout or "").strip().rsplit("/", 1)[-1] if head.returncode == 0 else ""
-    return name or "main"
+def set_aside(tree: Path, target: Path) -> Path | None:
+    """Move the tree's intent to `target` (`SHIPPED_FILE` or `REFUSED_FILE`), replacing
+    an earlier one there. None when the tree carries no intent."""
+    source = tree / INTENT_FILE
+    if not source.is_file():
+        return None
+    destination = tree / target
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source.replace(destination)
+    return destination
 
 
 # --- shipping one --------------------------------------------------------------------
@@ -262,6 +285,7 @@ def ship_one(
     write_state(
         tree, {"stage": SHIPPED, "sha": sha, "url": url, "when": when, "intent": intent.digest}
     )
+    set_aside(tree, SHIPPED_FILE)
     return Outcome(intent, SHIPPED, url, url)
 
 
@@ -294,4 +318,5 @@ def refusal_failure(outcome: Outcome, base: str) -> fix_plan.Failure:
         reason=f"commit stage refused at {step}",
         signature=sig,
         evidence=str(where),
+        tree=str(intent.tree),
     )

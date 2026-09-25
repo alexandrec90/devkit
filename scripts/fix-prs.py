@@ -49,7 +49,6 @@ Every function that decides something is pure and tested in `tests/test_fix_prs.
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
 import subprocess
 import sys
 from pathlib import Path
@@ -60,8 +59,10 @@ import agent_models
 import agent_tabs
 import agent_worktrees as aw
 import devkit_project
+import fix_ledger
 import fix_plan
 import fix_prompts
+import fix_reports
 import gate_evidence
 import sweep
 import task_branch as tb
@@ -171,14 +172,14 @@ def cut_tree(project_dir: Path, branch: str, runner=subprocess.run) -> Path | No
     return path
 
 
-def fix_branch(decision: fix_plan.Decision, now: _dt.datetime | None = None) -> str:
+def fix_branch(decision: fix_plan.Decision, now=None) -> str:
     """The fresh branch a fix with no branch of its own starts on.
 
     Under `tb.BRANCH_PREFIX` rather than the automation namespace: a person clicked,
     and the PR the ship skill opens from it is one they asked for. The date suffix is
-    `worktree.plan_new`'s convention, so the branch reads beside every other agent cut.
+    `tb.branch_name`'s, so the branch reads beside every other agent cut; the counter
+    against the checkout's own branches is `cut_fresh_tree`'s.
     """
-    stamp = (now or _dt.datetime.now(_dt.UTC)).strftime("%m%d")
     first = decision.failures[0]
     if decision.action == fix_plan.UPSTREAM:
         fallback = first.workflow or "vendored"
@@ -186,7 +187,7 @@ def fix_branch(decision: fix_plan.Decision, now: _dt.datetime | None = None) -> 
         topic = f"fix {tb.slugify(test, max_len=24)}"
     else:
         topic = f"fix {first.workflow or 'nightly'}"
-    return f"{tb.BRANCH_PREFIX}{tb.slugify(topic)}-{stamp}"
+    return tb.branch_name(tb.slugify(topic), set(), today=now)
 
 
 def cut_fresh_tree(
@@ -295,10 +296,35 @@ def run(
 # --- the planned path ---------------------------------------------------------------
 
 
+def refresh_head(tree: Path, branch: str, git_for=sweep.git_for) -> str:
+    """Bring a reused tree's branch to origin's; what stopped it, or "" when nothing.
+
+    The pass updates a behind PR through GitHub, so origin's head carries the base and
+    the prompt says so; a local branch checked out before that does not, and a push
+    from it is refused. A tree with edits is a session still working, and stays as is.
+    """
+    git = git_for(tree)
+    git("fetch", "--quiet", "origin", branch)
+    status = git("status", "--porcelain")
+    if (status.stdout or "").strip():
+        return "left as is: the tree has uncommitted changes"
+    if git("merge", "--ff-only", f"origin/{branch}").returncode != 0:
+        return f"left as is: {branch} has diverged from origin/{branch}"
+    return ""
+
+
 def dispatch_pr(
-    failure: fix_plan.Failure, root: Path, launch: agent_models.Launch, runner=subprocess.run
+    failure: fix_plan.Failure,
+    root: Path,
+    launch: agent_models.Launch,
+    runner=subprocess.run,
+    key: str = "",
 ) -> int:
-    """A planned PR: its own head branch, the gate's logs beside it, the plan's prompt."""
+    """A planned PR: its own head branch, the gate's logs beside it, the plan's prompt.
+
+    `key` is the ledger key the pass records this under; stamped into the worktree
+    (`fix_reports.stamp`) so a blocked report from it can be matched back.
+    """
     project_dir = root / failure.project
     name = f"#{failure.number}" if failure.number else failure.head
     print(f"{failure.project} {name} ({failure.reason}) on {failure.head}")
@@ -310,14 +336,22 @@ def dispatch_pr(
     if tree is None:
         print(f"  no worktree for {failure.head}; nothing opened", file=sys.stderr)
         return EXIT_FAILED
+    if failure.kind == fix_plan.PR and (stale := refresh_head(tree, failure.head)):
+        print(f"  {stale}")
     gate_evidence.place(failure, tree)
+    if key:
+        fix_reports.stamp(tree, key, fix_plan.describe(failure))
     print(f"  worktree {tree}")
     prompt = tab_safe(fix_prompts.pr_prompt(failure))
     return open_session(launch, tree, failure.head, prompt, f"{failure.project} {name}", runner)
 
 
 def dispatch_fresh(
-    decision: fix_plan.Decision, root: Path, launch: agent_models.Launch, runner=subprocess.run
+    decision: fix_plan.Decision,
+    root: Path,
+    launch: agent_models.Launch,
+    runner=subprocess.run,
+    key: str = "",
 ) -> int:
     """A nightly, or a vendored failure shared across consumers: a fresh branch."""
     first = decision.failures[0]
@@ -336,6 +370,8 @@ def dispatch_fresh(
     for failure in decision.failures:
         # One directory per failure: a devkit session can hold two of one project's.
         gate_evidence.place(failure, tree, gate_evidence.evidence_slot(failure) if upstream else "")
+    if key:
+        fix_reports.stamp(tree, key, decision.note)
     print(f"  worktree {tree} on {branch}")
     if upstream:
         prompt, title = fix_prompts.upstream_prompt(decision.failures, branch), f"devkit {branch}"
@@ -361,27 +397,28 @@ def run_plan(
     root = workspace.parent
     found = menu.scan(workspace)
     failures = gate_evidence.collect(workspace, found)
-    latest = gate_evidence.latest_tag(root / DEVKIT)
-    decisions = fix_plan.plan(failures, latest, adoption_prs.adoption_prefixes())
-    ledger_path = worktree.boxes_root(root) / fix_plan.LEDGER_NAME
-    ledger = fix_plan.read_ledger(ledger_path)
-    print(fix_plan.render(decisions, ledger))
+    newest = gate_evidence.newest_release(root / DEVKIT)
+    decisions = fix_plan.plan(failures, newest, adoption_prs.adoption_prefixes())
+    ledger_path = worktree.boxes_root(root) / fix_ledger.LEDGER_NAME
+    ledger = fix_ledger.read_ledger(ledger_path)
+    print(fix_ledger.render(decisions, ledger))
     if dry_run:
         return EXIT_OK
     worst = EXIT_OK
     for decision in decisions:
-        if decision.action == fix_plan.SKIP:
+        if decision.action in (fix_plan.SKIP, fix_plan.HOLD):
             continue
-        if not redo and fix_plan.already_sent(decision, ledger):
+        if not redo and fix_ledger.already_sent(decision, ledger):
             continue
         first = decision.failures[0]
+        key = fix_ledger.decision_key(decision)
         on_branch = first.kind in (fix_plan.PR, fix_plan.COMMIT)
         if decision.action in (fix_plan.DISPATCH, fix_plan.RESOLVE) and on_branch:
-            code = dispatch_pr(first, root, launch, runner)
+            code = dispatch_pr(first, root, launch, runner, key)
         else:
-            code = dispatch_fresh(decision, root, launch, runner)
+            code = dispatch_fresh(decision, root, launch, runner, key)
         if code == EXIT_OK:
-            fix_plan.record(ledger_path, fix_plan.decision_key(decision), decision.note)
+            fix_ledger.record(ledger_path, key, decision.note)
         worst = max(worst, code)
     return worst
 

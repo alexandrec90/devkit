@@ -553,37 +553,59 @@ workspace file is switched on (`scripts/install-fix-pass-task.py` registers it, 
 off), or by hand through the *Agent: Fix What Is Red* task, which passes `dispatch`
 explicitly and asks only which agent. One pass, in order:
 
+The rule behind the order: anything a script can do, no session does. A fixer is sent at
+the one part that needs a change to the code, told to fix that and stop, and ends the
+way every session ends — with an intent. Merging the base in, committing, pushing,
+opening the PR, reading the gate, updating a branch, merging an adoption: one command
+each, run here.
+
 1. **Ship every intent.** Run the tree's commit-stage fixers, commit with the message,
    push with the push gate skipped, open the PR *without* the `automerge` label (a
    green one waits for a person; the label is for adoptions, Dependabot and the Codex
    mirror, whose gate is the whole review), record the outcome in `logs/ship-state.json`
-   beside the intent. A dirty tree with no intent is a
-   session still working and is never touched; a refused commit is a failure like any
-   other, with the pre-commit output as its evidence.
-2. **Collect everything red** — refused commits, red PRs, open scheduled-failure issues,
+   beside the intent, and set the intent aside as `logs/ship-intent.shipped.md`. A dirty
+   tree with no intent is a session still working — a fixer's, too — and is never
+   touched; a refused commit is a failure like any other, with the pre-commit output as
+   its evidence.
+2. **Merge green adoption PRs**, and nothing else. Every other green PR waits for you.
+   Before the red is read, so a release whose adoptions just went green stops holding
+   the projects on this pass.
+3. **Collect everything red** — refused commits, red PRs, open scheduled-failure issues,
    and every default branch whose own gate is red — with what each gate actually said
    (`scripts/gate_evidence.py`), and classify each as harness, project or unknown
-   (`scripts/fix_cycle.py`).
-3. **Harness first.** While anything harness-shaped is red — a vendored test, a
-   signature shared across consumers, devkit's own default branch, an open backlog on
-   the harness-defect ledger (`scripts/harness_triage.py`, the `/triage-harness`
-   sweep's reader), a release still being adopted — one devkit session gets the whole
-   set and every project fixer is held, and the record says so. A harness PR that is
-   merely behind its base or conflicted is the exception: an update is a GitHub call and
-   a resolver needs the PR's own head branch, so each goes as itself, ahead of the
-   devkit session, rather than into a fresh branch that could never land on it.
-4. **Then projects**, conflicts first, each under the dispatch ledger and a daily cap.
-5. **Merge green adoption PRs**, and nothing else. Every other green PR waits for you.
+   (`scripts/fix_cycle.py`). A checkout on `devkit.onHold` is not read, and the record
+   says so.
+4. **Read what fixers reported.** A session that could not finish wrote
+   `logs/fix-blocked.md` in its worktree instead of an intent; the pass marks its
+   ledger entry, so no second session is spent on it, and the reason is on the record
+   as "needs a human".
+5. **Harness first.** While anything harness-shaped is red — a vendored test, a
+   signature shared across consumers, devkit's own default branch, a release still
+   being adopted — one devkit session gets the whole set and every project fixer is
+   held, and the record says so. The harness-defect
+   ledger's open backlog (`scripts/harness_triage.py`, the `/triage-harness` sweep's
+   reader) rides in that session, and gets one of its own when nothing else is red,
+   but holds nobody. A harness PR that is merely behind its base or conflicted is the
+   exception: an update is a GitHub call and a resolver needs the PR's own head branch,
+   so each goes as itself, ahead of the devkit session, rather than into a fresh branch
+   that could never land on it.
+6. **Then projects**, conflicts first, each under the dispatch ledger and a daily cap.
 
 `--mode plan` writes the whole plan to `logs/fix-pass.log` and does nothing, which is
 what the scheduled job does while the switch says `plan`. What each dispatch looks like
 (`scripts/fix_plan.py`):
 
-- **A red PR** gets a worktree on its own head branch — upstream set, so a bare push
-  lands on the PR — with the gate's logs under `logs/gate/` and a prompt naming the
-  failing tests. Same tier as the rows above, so *Agent: Delete Worktrees* lists what it
-  left behind; an existing Claude or Codex worktree, or a live devkit box on the PR
-  branch, is reused.
+- **A red PR** gets a worktree on its own head branch with the gate's logs under
+  `logs/gate/` and a prompt naming the failing tests; the fixer fixes, writes its
+  intent, and the next pass commits and pushes to the PR. Same tier as the rows above,
+  so *Agent: Delete Worktrees* lists what it left behind; an existing Claude or Codex
+  worktree, or a live devkit box on the PR branch, is reused. The pass stamps the
+  worktree with the ledger key (`logs/fix-dispatch.json`), which is how a blocked
+  report finds its entry.
+- **A PR against a red default branch** is held, out loud, for the base's fixer: it
+  inherits the base's failure, and one pass once sent a base and two of its PRs three
+  sessions in one second for one cause. Once the fix lands it reads as behind and gets
+  the free update below.
 - **One vendored test failing in two or more consumers** is one devkit defect, and gets
   **one** session in devkit, on a fresh branch, with every consumer's logs beside it and
   the affected PRs named. This is the shape a devkit release fans out into, and the one
@@ -608,7 +630,11 @@ what the scheduled job does while the switch says `plan`. What each dispatch loo
 A ledger under the workspace's `.worktrees/` records every dispatch against the commit it
 was observed on, so a second pass sends nothing at a failure an agent is already on, and
 `fix_cycle.PER_TARGET_PER_DAY` and `PER_DAY` cap what a day can spend; past the cap a
-target reads "needs a human". A scheduled pass always uses `claude-bg`.
+target reads "needs a human". Branch updates are recorded but never counted, a dispatch
+with no evidence gets one slot rather than two, and an entry older than a day
+(`fix_ledger.RESEND_AFTER`) no longer blocks one re-send (`MAX_SENDS`) — a session that
+died leaves nothing else — unless the session reported itself blocked, which never
+expires. A scheduled pass always uses `claude-bg`.
 
 ```bash
 python scripts/fix-pass.py --mode plan                        # the whole pass, nothing done
