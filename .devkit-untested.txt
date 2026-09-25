@@ -80,13 +80,11 @@ scripts/reclaim.py::top_memory_holders
 scripts/reclaim.py::username
 scripts/release-pipeline.py::dispatch_tag_workflow
 scripts/release-pipeline.py::download_failing_tests
-scripts/release-pipeline.py::existing_tags
 scripts/release-pipeline.py::main_fallback
 scripts/release-pipeline.py::newest_workflow_run
 scripts/release-pipeline.py::open_release_pr
 scripts/release-pipeline.py::parse_version
 scripts/release-pipeline.py::pr_rollup
-scripts/release.py::existing_tags
 scripts/release.py::main_fallback
 scripts/report-workflow-failure.py::api_workflow_states
 scripts/report-workflow-failure.py::apply

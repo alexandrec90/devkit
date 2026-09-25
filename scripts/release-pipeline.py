@@ -465,10 +465,8 @@ def _gh_json(args: Sequence[str], cwd: Path) -> object | None:
 def existing_tags(devkit: Path) -> list[str]:
     """Every tag in `devkit`; raises `RuntimeError` with git's words when git cannot say.
 
-    Never [] for a failure. An empty list is `next_version`'s cue for the *first*
-    release, so a git refusal read as "no tags" plans v0.1.0 over a repo at v0.9.1 --
-    which the 2026-09-25 scheduled run did, against a checkout git refused for dubious
-    ownership, and reported as "no release tag exists yet".
+    Never [] for a failure: that is `next_version`'s cue for a *first* release, and on
+    2026-09-25 a checkout refused for dubious ownership planned v0.1.0 over v0.9.1.
     """
     result = _run(["git", "-C", str(devkit), "tag", "--list"])
     if result.returncode != 0:
@@ -476,6 +474,17 @@ def existing_tags(devkit: Path) -> list[str]:
             (result.stderr or result.stdout).strip() or f"git exit {result.returncode}"
         )
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def tag_missing(devkit: Path, version: str) -> str:
+    """Why `version` is not in `devkit` after a fetch, or "" when it is there."""
+    _run(["git", "-C", str(devkit), "fetch", "--tags", "--quiet", "origin"])
+    try:
+        if version in existing_tags(devkit):
+            return ""
+    except RuntimeError as exc:
+        return f"{version} was pushed by {RELEASE_WORKFLOW} but its tags are unreadable here: {exc}"
+    return f"{RELEASE_WORKFLOW} reported success but {version} is not here after a fetch"
 
 
 def upgrade_module():
@@ -786,15 +795,8 @@ def run_pipeline(
             f"`gh run view {run_id} --log-failed` has the reason."
         )
 
-    _run(["git", "-C", str(devkit), "fetch", "--tags", "--quiet", "origin"])
-    try:
-        fetched = existing_tags(devkit)
-    except RuntimeError as exc:
-        return _stop(
-            f"{version} was pushed by {RELEASE_WORKFLOW} but its tags are unreadable here: {exc}"
-        )
-    if version not in fetched:
-        return _stop(f"{RELEASE_WORKFLOW} reported success but {version} is not here after a fetch")
+    if missing := tag_missing(devkit, version):
+        return _stop(missing)
     _say(f"{version} is tagged.")
 
     if not adopt:
