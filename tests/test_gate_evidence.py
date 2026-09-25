@@ -117,13 +117,71 @@ def test_the_download_lands_under_dest_and_the_logs_are_read_back(tmp_path):
         (target / "test-failures.log").write_text(SUMMARY, encoding="utf-8")
         return subprocess.CompletedProcess(["gh", *args], 0, "", "")
 
-    texts = ev.download_logs(gh, "7", dest)
-    assert texts == [SUMMARY]
+    assert ev.run_evidence(gh, "7", dest) == ([SUMMARY], []), "named, so no jobs asked for"
     assert not (dest / "stale.log").exists(), "an earlier run's logs must not survive"
 
 
-def test_a_download_that_fails_reads_nothing(tmp_path):
-    assert ev.download_logs(table({}), "7", tmp_path / "e") == []
+def test_a_download_that_fails_reads_nothing_and_asks_for_the_jobs(tmp_path):
+    jobs = [{"name": "Tests", "conclusion": "failure", "steps": []}]
+    gh = table({("run", "view", "7"): {"jobs": jobs}})
+    assert ev.run_evidence(gh, "7", tmp_path / "e") == ([], jobs)
+
+
+JUNIT = (
+    '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest">'
+    '<testcase classname="scripts.hooks.tests.test_contract" name="test_drop">'
+    '<failure message="KeyError">boom</failure></testcase>'
+    '<testcase classname="tests.test_unit.TestShape" name="test_p[a-b]">'
+    '<error message="x">x</error></testcase>'
+    "</testsuite></testsuites>"
+)
+
+
+def artifact_gh(files: dict[str, str], jobs: list[dict] | None = None):
+    """A `gh` whose run downloads `files` (relative path -> text) and views `jobs`."""
+
+    def gh(*args):
+        if args[:2] == ("run", "list"):
+            return subprocess.CompletedProcess(
+                args, 0, json.dumps([{"databaseId": 7, "headSha": "sha1"}]), ""
+            )
+        if args[:2] == ("run", "download"):
+            for rel, text in files.items():
+                target = Path(args[-1]) / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:2] == ("run", "view"):
+            return subprocess.CompletedProcess(args, 0, json.dumps({"jobs": jobs or []}), "")
+        raise AssertionError(f"unexpected {args}")
+
+    return gh
+
+
+def test_an_empty_log_beside_a_junit_report_is_signed_by_the_report(monkeypatch, tmp_path):
+    """carameli #389: an empty `lint-errors.log` and three failures in `junit-hooks.xml`
+    read as "no artifact and no failed step named", so the fixer went out blind."""
+    gh = artifact_gh({"lint-errors/lint-errors.log": "", "test-results/junit-hooks.xml": JUNIT})
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+    failure = ev.read_pr(tmp_path, ev.pr_failure("carameli", pr()), tmp_path / "ev")
+    assert failure.signature == (
+        "scripts/hooks/tests/test_contract.py::test_drop",
+        "tests/test_unit.py::TestShape::test_p[a-b]",
+    )
+
+
+def test_an_artifact_that_names_nothing_still_asks_for_the_failed_steps(monkeypatch, tmp_path):
+    jobs = [
+        {
+            "name": "Backend",
+            "conclusion": "failure",
+            "steps": [{"name": "Tests", "conclusion": "failure"}],
+        }
+    ]
+    gh = artifact_gh({"lint-errors/lint-errors.log": ""}, jobs)
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+    failure = ev.read_pr(tmp_path, ev.pr_failure("carameli", pr()), tmp_path / "ev")
+    assert failure.signature == ("Backend / Tests",)
 
 
 # --- scheduled failures ----------------------------------------------------------------

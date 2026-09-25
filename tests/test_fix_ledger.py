@@ -100,14 +100,56 @@ def test_a_corrupt_ledger_is_empty_rather_than_a_traceback(tmp_path):
     assert fix_ledger.read_ledger(path) == {}
 
 
-def test_a_dispatch_older_than_a_day_is_sent_again_under_the_caps(tmp_path):
+def test_the_problem_key_is_the_decision_key_without_its_commit():
+    at_a = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(sha="a1"),))
+    at_b = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(sha="b2"),))
+    other = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(sha="b2", signature=("t::u",)),))
+    assert fix_ledger.decision_key(at_a) != fix_ledger.decision_key(at_b)
+    assert fix_ledger.problem_key(at_a) == fix_ledger.problem_key(at_b)
+    assert fix_ledger.problem_key(at_a) != fix_ledger.problem_key(other)
+    key = fix_ledger.decision_key(at_a)
+    assert fix_ledger.problem_of(key, {}) == fix_ledger.problem_key(at_a), "derived when unrecorded"
+    assert fix_ledger.problem_of("upstream:2:abc", {}) == "", "a group cannot be derived"
+    group = (failure(project="a", sha="1"), failure(project="b", sha="2"))
+    moved = (failure(project="a", sha="3"), failure(project="b", sha="2"))
+    assert fix_ledger.problem_key(
+        fix_plan.Decision(fix_plan.UPSTREAM, "n", group)
+    ) == fix_ledger.problem_key(fix_plan.Decision(fix_plan.UPSTREAM, "n", moved))
+
+
+def test_attempts_count_every_commit_of_one_problem(tmp_path):
+    path = tmp_path / "dispatch.json"
+    for sha in ("a1", "b2"):
+        decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(sha=sha),))
+        fix_ledger.record(
+            path, fix_ledger.decision_key(decision), "n", NOW, fix_ledger.problem_key(decision)
+        )
+    ledger = fix_ledger.read_ledger(path)
+    later = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(sha="c3"),))
+    assert fix_ledger.attempts(later, ledger) == 2
+    unrelated = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=9),))
+    assert fix_ledger.attempts(unrelated, ledger) == 0
+
+
+def test_a_blocked_report_stands_after_the_sha_moves(tmp_path):
+    """The blocker a fixer named does not go away because somebody pushed."""
+    path = tmp_path / "dispatch.json"
+    first = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(sha="a1"),))
+    key = fix_ledger.decision_key(first)
+    fix_ledger.record(path, key, "n", NOW, fix_ledger.problem_key(first))
+    fix_ledger.mark_blocked(path, key, "needs a database")
+    moved = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(sha="b2"),))
+    assert fix_ledger.blocked_reason(moved, fix_ledger.read_ledger(path)) == "needs a database"
+
+
+def test_a_dispatch_older_than_the_resend_window_is_sent_again(tmp_path):
     """A background session that died on a permission prompt left a ledger entry that
     blocked its key forever, and the record said "already dispatched" for a week."""
     path = tmp_path / "dispatch.json"
     decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
     fix_ledger.record(path, fix_ledger.decision_key(decision), "n", NOW)
     ledger = fix_ledger.read_ledger(path)
-    assert fix_ledger.already_sent(decision, ledger, NOW + _dt.timedelta(hours=23))
+    assert fix_ledger.already_sent(decision, ledger, NOW + _dt.timedelta(hours=5))
     assert fix_ledger.already_sent(decision, ledger, NOW + fix_ledger.RESEND_AFTER) == ""
     assert fix_ledger.already_sent(decision, ledger), "with no clock, the entry stands"
 
