@@ -573,8 +573,9 @@ each, run here.
 3. **Collect everything red** — refused commits, red PRs, open scheduled-failure issues,
    and every default branch whose own gate is red — with what each gate actually said
    (`scripts/gate_evidence.py`), and classify each as harness, project or unknown
-   (`scripts/fix_cycle.py`). A checkout on `devkit.onHold` is not read, and the record
-   says so.
+   (`scripts/fix_cycle.py`). Every registered checkout is read, `devkit.onHold` included:
+   a PR that exists is work in flight. A default branch with no verdict at its tip gets
+   its gate re-run.
 4. **Read what fixers reported.** A session that could not finish wrote
    `logs/fix-blocked.md` in its worktree instead of an intent; the pass marks its
    ledger entry, so no second session is spent on it, and the reason is on the record

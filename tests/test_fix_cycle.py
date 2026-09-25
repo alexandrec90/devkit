@@ -396,6 +396,49 @@ def test_a_dispatch_with_no_evidence_gets_one_session_a_day_not_two():
     assert fix_cycle.within_caps(decision(fix_plan.DISPATCH, failure()), ledger, NOW) == (True, "")
 
 
+def _conflict(sha: str) -> fix_plan.Decision:
+    return decision(
+        fix_plan.RESOLVE,
+        failure(project="devkit", number=390, sha=sha, signature=(fix_plan.CONFLICT,)),
+    )
+
+
+def test_a_conflict_back_at_a_new_head_gets_its_resolver_again():
+    """devkit #390: the resolver pushed its merge, main moved within the hour, and the
+    new conflict read "needs a human" -- so the harness stayed red and every project
+    PR stayed held behind it. The head moving is what shows the first one took."""
+    first = fix_ledger.decision_key(_conflict("143b"))
+    ledger = {first: {"when": NOW.isoformat(), "what": "merge conflict"}}
+    assert fix_cycle.within_caps(_conflict("62a5"), ledger, NOW) == (True, "")
+    second = fix_ledger.decision_key(_conflict("62a5"))
+    ledger[second] = {"when": NOW.isoformat(), "what": "merge conflict"}
+    ok, why = fix_cycle.within_caps(_conflict("77ff"), ledger, NOW)
+    assert not ok and f"{fix_cycle.PER_TARGET_PER_DAY} sessions today" in why, (
+        "the per-target cap still bounds a conflict that keeps coming back"
+    )
+
+
+def test_a_conflict_whose_head_did_not_move_keeps_its_one_blind_slot():
+    same = fix_ledger.decision_key(_conflict("143b"))
+    # Older than a day would be a re-send; today at the same commit is the session
+    # that did nothing, re-keyed by a different signature digest.
+    ledger = {same.replace(":resolve", "x:resolve"): {"when": NOW.isoformat(), "what": "n"}}
+    ok, why = fix_cycle.within_caps(_conflict("143b"), ledger, NOW)
+    assert not ok and "no evidence" in why
+
+
+def test_moved_on_ignores_updates_other_days_and_folded_keys():
+    key = fix_ledger.decision_key(_conflict("62a5"))
+    yesterday = (NOW - _dt.timedelta(days=1)).isoformat()
+    assert not fix_cycle.moved_on(key, {}, NOW), "nothing sent today is not movement"
+    assert not fix_cycle.moved_on(key, {"pr:devkit:390:143b:d:resolve": {"when": yesterday}}, NOW)
+    assert not fix_cycle.moved_on(
+        key, {"pr:devkit:390:143b:d:update": {"when": NOW.isoformat()}}, NOW
+    )
+    assert fix_cycle.moved_on(key, {"pr:devkit:390:143b:d:resolve": {"when": NOW.isoformat()}}, NOW)
+    assert not fix_cycle.moved_on("upstream:2:abcd", {}, NOW)
+
+
 def test_an_adoption_pr_is_classified_by_what_fails_and_its_own_release_never_holds_it():
     """An adoption red for a project-shaped reason -- the upgrade broke the project's
     own lint -- was held because the release was still being adopted, and the release
@@ -460,16 +503,14 @@ def test_a_decision_is_blind_when_no_failure_under_it_names_anything():
     assert not fix_cycle.is_blind(mixed), "one failure with evidence is enough to start from"
 
 
-def test_the_record_names_the_projects_on_hold_and_the_blocked_reports():
+def test_the_record_names_the_regated_branches_and_the_blocked_reports():
     account = fix_cycle.Account(
         fix_cycle.PLAN,
         fix_cycle.harness_state({}, True, []),
-        on_hold=("data-lake", "ibkr_trader"),
         blocked=("carameli agent/x -- needs a database the runner lacks",),
+        regated=("devkit main -- no verdict at the tip; gate re-run",),
     )
     lines = fix_cycle.render(account).splitlines()
-    assert lines[1] == (
-        "on hold  data-lake, ibkr_trader -- nothing red is read there (devkit.onHold)"
-    )
+    assert lines[1] == "regate   devkit main -- no verdict at the tip; gate re-run"
     assert lines[2] == "harness  clean"
     assert lines[3] == "blocked  carameli agent/x -- needs a database the runner lacks"

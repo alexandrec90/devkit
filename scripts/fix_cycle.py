@@ -47,11 +47,8 @@ HARNESS = "harness"
 PROJECT = "project"
 UNKNOWN = "unknown"
 
-# The switch, under `"settings"` in the workspace file beside `devkit.onHold`.
+# The switch, under `"settings"` in the workspace file.
 SETTING = "devkit.fixPass"
-# The pause list beside it, spelled here only for the record line; `sweep.on_hold`
-# reads it.
-SETTING_ON_HOLD = "devkit.onHold"
 OFF = "off"
 PLAN = "plan"
 DISPATCH = "dispatch"
@@ -319,6 +316,27 @@ def is_blind(decision: fix_plan.Decision) -> bool:
     )
 
 
+def moved_on(key: str, ledger: dict[str, dict], now: _dt.datetime) -> bool:
+    """Every session this target had today was sent at a commit other than `key`'s.
+
+    The head moved under each of them, so each did something. A folded upstream key
+    names no one commit and never counts as moved.
+    """
+    parts = key.split(":")
+    if parts[0] == fix_plan.UPSTREAM or len(parts) < 4:
+        return False
+    target, day = target_of(key), now.date().isoformat()
+    today = [
+        other.split(":")
+        for other, entry in ledger.items()
+        if not other.endswith(f":{fix_plan.UPDATE}")
+        and target_of(other) == target
+        and isinstance(entry, dict)
+        and str(entry.get("when", "")).startswith(day)
+    ]
+    return bool(today) and all(len(p) >= 4 and p[3] != parts[3] for p in today)
+
+
 def within_caps(
     decision: fix_plan.Decision,
     ledger: dict[str, dict],
@@ -330,15 +348,22 @@ def within_caps(
 
     An update is free and always fits. A blind dispatch -- nothing to name -- gets one
     slot rather than two: the second slot is the retry after a fix that did not take,
-    and a session that starts from nothing cannot be told from one that did.
+    and a session that starts from nothing cannot be told from one that did. Except a
+    conflict whose head has moved since (`moved_on`): a resolver pushes only a merge
+    that resolved, so a new conflict at a new commit is the base moving again, not a
+    fix that did not take. devkit #390's resolver pushed its merge, main moved within
+    the hour, and the fresh conflict read "needs a human" when it needed the resolver.
+    The per-target cap still bounds it.
     """
     if decision.action == fix_plan.UPDATE:
         return True, ""
     counts = sent_today(ledger, now)
     if sum(counts.values()) >= per_day:
         return False, f"the pass has sent {per_day} sessions today; the rest wait for tomorrow"
-    target = target_of(fix_ledger.decision_key(decision))
-    if is_blind(decision) and counts.get(target, 0) >= 1:
+    key = fix_ledger.decision_key(decision)
+    target = target_of(key)
+    rebased = decision.action == fix_plan.RESOLVE and moved_on(key, ledger, now)
+    if is_blind(decision) and counts.get(target, 0) >= 1 and not rebased:
         return False, f"{target} has had its one session today with no evidence -- needs a human"
     if counts.get(target, 0) >= per_target:
         return False, f"{target} has had {per_target} sessions today -- needs a human"
@@ -364,12 +389,11 @@ class Account:
     # commit's red. In the record because a pass that holds everything behind one of
     # these has to say which one, or "harness RED" reads as a defect nobody can find.
     skipped: tuple[fix_plan.Decision, ...] = ()
-    # Checkouts the workspace file pauses (`devkit.onHold`): intents there still ship,
-    # nothing red there is read, and the record says so rather than reading as green.
-    on_hold: tuple[str, ...] = ()
     # What a dispatched session reported it could not do, one line each: the one
     # channel back from a fixer, and what "needs a human" is about.
     blocked: tuple[str, ...] = ()
+    # Default branches with no verdict at the tip, whose gate the pass re-ran.
+    regated: tuple[str, ...] = ()
 
 
 def _names(decision: fix_plan.Decision) -> str:
@@ -381,9 +405,7 @@ def render(account: Account) -> str:
     harness = account.harness
     lines = [f"fix-pass: mode={account.mode}"]
     lines += [f"shipped  {line}" for line in account.shipped]
-    if account.on_hold:
-        names = ", ".join(account.on_hold)
-        lines.append(f"on hold  {names} -- nothing red is read there ({SETTING_ON_HOLD})")
+    lines += [f"regate   {line}" for line in account.regated]
     lines.append(
         "harness  clean" if harness.clean else "harness  RED -- " + "; ".join(harness.reasons)
     )

@@ -356,6 +356,23 @@ def read_default_branch(
     return False, replace(failure, signature=sig, evidence=str(where) if texts else "")
 
 
+def regate(project_dir: Path) -> tuple[bool, str]:
+    """Run the gate on the checkout's default branch: `(dispatched, what for the record)`.
+
+    For a branch whose verdict could not be read. The usual cause is a merge by the
+    auto-merge workflow: a push made with `GITHUB_TOKEN` raises no `push` event, so
+    nothing gates the new tip, and devkit's unreadable main held every project PR on
+    every pass after. A `workflow_dispatch` is the one event that token may raise, and
+    the run it starts is on the branch, so the next pass reads it like any other.
+    """
+    base = tb.detect_default_branch(sweep.git_for(project_dir), fallback="main")
+    done = sweep.gh_for(project_dir)("workflow", "run", GATE_WORKFLOW, "--ref", base)
+    if getattr(done, "returncode", 1) != 0:
+        why = (getattr(done, "stderr", "") or getattr(done, "stdout", "") or "").strip()
+        return False, f"{base} -- FAILED to re-run the gate: {why.splitlines()[-1] if why else '?'}"
+    return True, f"{base} -- no verdict at the tip; gate re-run"
+
+
 def collect_default_branches(
     workspace: Path, projects: list[str]
 ) -> dict[str, tuple[bool | str | None, fix_plan.Failure | None]]:
