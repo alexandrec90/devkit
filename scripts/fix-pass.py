@@ -60,7 +60,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -237,9 +236,8 @@ def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
             "--json",
             "number,headRefName,isDraft,labels,mergeable,statusCheckRollup",
         )
-        try:
-            rows = json.loads(listed.stdout or "[]") if listed.returncode == 0 else []
-        except ValueError:
+        rows = gate_evidence.gh_json(listed)
+        if not isinstance(rows, list):
             rows = []
         for row in fix_cycle.green_adoptions(rows, prefixes, sweep.AUTOMERGE_LABEL):
             ok, message = worktree.merge_pr(gh, int(row.get("number", 0)))

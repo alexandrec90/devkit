@@ -82,6 +82,16 @@ def test_a_gh_that_cannot_list_runs_is_no_run():
     assert ev.gate_run(table({("run", "list"): "not json"}), "agent/x", "sha") == {}
 
 
+def test_gh_json_is_the_parsed_stdout_and_none_for_any_failure_shape():
+    """`fix-pass.py` lists adoption PRs through it too, so its failure shapes are shared."""
+    ok = subprocess.CompletedProcess([], 0, stdout='[{"number": 1}]')
+    assert ev.gh_json(ok) == [{"number": 1}]
+    assert ev.gh_json(subprocess.CompletedProcess([], 1, stdout="[]")) is None
+    assert ev.gh_json(subprocess.CompletedProcess([], 0, stdout="not json")) is None
+    assert ev.gh_json(subprocess.CompletedProcess([], 0, stdout="")) is None
+    assert ev.gh_json(object()) is None
+
+
 def test_the_jobs_come_with_their_steps():
     jobs = [
         {

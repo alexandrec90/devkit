@@ -67,7 +67,7 @@ ISSUE_LIMIT = 50
 Gh = Callable[..., object]
 
 
-def _json(result: object) -> object:
+def gh_json(result: object) -> object:
     """The parsed stdout of a `gh --json` call, or None for any failure shape."""
     code = getattr(result, "returncode", 1)
     if code != 0:
@@ -83,7 +83,7 @@ def _json(result: object) -> object:
 
 def gate_run(gh: Gh, head: str, sha: str) -> dict:
     """The gate run at `sha` on `head`, or the newest on `head` when `sha` is unknown."""
-    listed = _json(
+    listed = gh_json(
         gh(
             "run",
             "list",
@@ -108,7 +108,7 @@ def gate_run(gh: Gh, head: str, sha: str) -> dict:
 
 def run_jobs(gh: Gh, run_id: str) -> list[dict]:
     """The run's jobs with their steps, for the coarse signature."""
-    viewed = _json(gh("run", "view", str(run_id), "--json", RUN_VIEW_FIELDS))
+    viewed = gh_json(gh("run", "view", str(run_id), "--json", RUN_VIEW_FIELDS))
     if not isinstance(viewed, dict):
         return []
     jobs = viewed.get("jobs", [])
@@ -151,7 +151,7 @@ def run_id_from_body(body: str) -> str:
 
 def nightly_issues(gh: Gh) -> list[dict]:
     """The open tracker issues in one checkout: the reporter's title shape only."""
-    listed = _json(
+    listed = gh_json(
         gh("issue", "list", "--state", "open", "--limit", str(ISSUE_LIMIT), "--json", ISSUE_FIELDS)
     )
     if not isinstance(listed, list):
@@ -176,7 +176,7 @@ def newest_release(devkit: Path) -> str:
 
 def default_branch_runs(gh: Gh, base: str) -> list[dict]:
     """The newest gate runs on `base`, newest first; empty when `gh` cannot say."""
-    listed = _json(
+    listed = gh_json(
         gh(
             "run",
             "list",
