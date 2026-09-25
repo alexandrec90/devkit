@@ -160,7 +160,10 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
         one.branch,
         "main",
     )
-    assert plan.pr_labels == (ship_intent.sweep.AUTOMERGE_LABEL,)
+    # A shipped PR is a prompt-driven change: the vendored auto-merge workflow lands any
+    # labelled PR once the gate passes, so the label would make CI the only reviewer.
+    assert ship_intent.sweep.AUTOMERGE_LABEL not in plan.pr_labels
+    assert plan.pr_labels == ()
     state = ship_intent.read_state(one.tree)
     assert state["stage"] == ship_intent.SHIPPED
     assert state["intent"] == one.digest and state["sha"] == "abc123"

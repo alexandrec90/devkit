@@ -57,7 +57,8 @@ what the hook runs and CI does not, are both held to a written reason by
   it off the source with `ast.literal_eval` in every consumer.
 - **Vendoring a generator does not vendor its output.** `.codex/hooks.json` is written by
   `sync-codex-hooks.py` from the project's own `.claude/settings.json`, so the script is
-  in `MANIFEST` and the file it produces cannot be. **Anything generated from a vendored
+  in `MANIFEST` and the file it produces cannot be. No agent hook is wired, so today that
+  output is `{"hooks": {}}` — but it is still generated and still checked. **Anything generated from a vendored
   script needs a check that regenerates it and compares**, running in the consumer's own
   gate where no `$DEVKIT_DIR` exists — `sync_devkit.codex_hooks_stale` is that check.
   Regenerating on `--pull` is not enough alone: a project only pulls when asked to.
@@ -68,8 +69,8 @@ what the hook runs and CI does not, are both held to a written reason by
 `templates/` are linted by the `ruff.toml` that ships *alongside* them into each generated
 project — which carries `scripts/**` allowances devkit's own config does not apply at
 those paths. So `templates/` is excluded from ruff (`force-exclude = true`, so the
-exclusion holds for the explicitly-named paths that `lint-fix.py` and `lint-all.py
---changed` pass), from mypy, and from `lint-all.py`'s `--changed` scope.
+exclusion holds for the explicitly-named paths that `lint-all.py --changed` and
+pre-commit pass), from mypy, and from `lint-all.py`'s `--changed` scope.
 `scripts/notify.py` and `scripts/notify-wrap.py` are **byte-identical copies** of the
 files under `templates/core/scripts/`, and a test enforces that.
 
@@ -85,10 +86,10 @@ writing a fourth one.
 
 ## A path a vendored script hard-codes is a promise
 
-`stop.py` resolves its dispatch targets by path, spawns them with both streams on
-`DEVNULL`, and never reads the exit code, so a target that is not there is the quietest
-failure in the harness — state finalization simply stops happening, in every consumer,
-with nothing red anywhere. Either the file is in the `MANIFEST`, or the dispatcher treats
+`stop.py` (vendored, though no agent hook runs it today) resolves its dispatch targets
+by path, spawns them with both streams on `DEVNULL`, and never reads the exit code, so a
+target that is not there is the quietest failure it has — the step simply does not
+happen, with nothing red anywhere. Either the file is in the `MANIFEST`, or the dispatcher treats
 its absence as a documented skip; `tests/test_dispatch_coherence.py` enforces the choice
 and requires a written reason for each exception.
 
@@ -139,12 +140,11 @@ state a checkout can only reach by surviving the work done in it. A box cut fres
   lives under the box, never one whose command line merely names it: an agent's own shell
   names it too, and killing the session that asked for the reap is worse than the husk.
 - **A box is never registered in the workspace file.** That would put it in `sweep.py`'s
-  scope and give its lifecycle two owners; `workspace-status.py` reports boxes at session
-  start instead.
-- **The guard is the one caller that skips provisioning.** A worktree checks out tracked
-  files only, and a PreToolUse hook that takes minutes is one the agent experiences as a
-  hang — so the guard passes `provision=False` and puts the command in its message
-  instead. The ladder detects the dependency model but cannot detect the interpreter, so
+  scope and give its lifecycle two owners; `workspace-status.py` reports boxes instead.
+- **`worktree-guard.py` is the one caller that skips provisioning.** It was built as a
+  PreToolUse hook (unwired now, like every agent hook), where minutes read as a hang — so
+  it passes `provision=False` and puts the command in its message instead. The ladder
+  detects the dependency model but cannot detect the interpreter, so
   `[python] version` in `.devkit.toml` is the seam; `uv venv --python` fetches a version
   the machine lacks, which `python -m venv` cannot.
 

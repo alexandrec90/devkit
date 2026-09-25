@@ -28,8 +28,7 @@ hoisting — write the seam.
 
 The lint actions do not only report: `lint-all.py` runs `ruff check --fix`, `ruff format`
 and, where a project ships it, a detect-secrets baseline. Those writes land in the static
-checkout on its home branch — the one write `worktree-guard.py` would have routed into a
-box had an agent made it — so nobody authored them, nobody committed them, and they
+checkout on its home branch — so nobody authored them, nobody committed them, and they
 surface days later as a `needs-branch` verdict that reads like abandoned human work.
 
 So an `Action` marked `autofix=True` is followed by `sweep.py --branch` and `--ship` for
@@ -248,7 +247,7 @@ never renders.
   `test_every_extension_a_picker_needs_is_a_workspace_recommendation` maps each input's
   command to its provider and turns red until the entry exists, and
   `scripts/vscode_extensions.py` reads the same list so `toolchain_lines` reports a missing
-  one at session start beside a missing `uv`, with the `code --install-extension` line. A
+  one in the `workspace-status.py` report beside a missing `uv`, with the `code --install-extension` line. A
   command id whose provider is not in `PICKER_EXTENSIONS` fails rather than passing — a
   picker nobody wrote a provider down for is the one nobody will list as a prerequisite
   either. **A recommendation is checked, never installed**: VS Code offers it once, so a

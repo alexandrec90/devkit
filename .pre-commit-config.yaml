@@ -15,8 +15,7 @@
 # became a red PR: nothing between a commit and the runner ever ran mypy or a test.
 #
 # Install once per clone: `pre-commit install`. `default_install_hook_types` makes that
-# one command wire both stages. `.claude/hooks/session-start.sh` runs it automatically
-# when this file is present, and the global dispatcher (`scripts/git_policy.py`) runs
+# one command wire both stages. The global dispatcher (`scripts/git_policy.py`) runs
 # both stages itself on a machine where it is installed.
 default_install_hook_types: [pre-commit, pre-push]
 # Without this, a hook that names no stage runs at every installed one — so the fixers
@@ -60,8 +59,8 @@ repos:
 
       - id: ruff-check
         name: ruff (fix)
-        # The same fixers `lint-fix.py` applies on every agent edit, so a human commit
-        # and an agent commit converge on the same formatting rather than fighting.
+        # The same fixers `lint-fix.py` applies (no agent hook runs it today), so a
+        # human commit and an agent commit converge on the same formatting.
         #
         # Spawned through `run_ruff.py` rather than as a bare `ruff`: the entry resolved
         # against PATH, and an agent's shell is never an activated one, so `git commit`

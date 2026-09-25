@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -96,6 +97,29 @@ SCHEDULED_AGENT = "claude-bg"
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
+
+# Every CLI the pass spawns before it can say anything. A missing one surfaced as a bare
+# `FileNotFoundError: [WinError 2]` from deep inside `gate_evidence`, naming no program:
+# on a fresh machine `gh` had been installed after VS Code started, and a task inherits
+# the PATH VS Code launched with. Each is probed by running it, because found is not
+# enough: on Windows `python3` is often only the Store alias, which exits 9009 -- and
+# every git hook and pre-commit script entry runs through it, so a pass on such a machine
+# dies twice, as a refused commit and as a worktree it cannot cut.
+REQUIRED_TOOLS = {"git": ("--version",), "gh": ("--version",), "python3": ("-c", "")}
+
+
+def runs(argv: list[str]) -> bool:
+    try:
+        probe = subprocess.run(
+            argv, capture_output=True, check=False, creationflags=sweep.NO_WINDOW
+        )
+    except OSError:
+        return False
+    return probe.returncode == 0
+
+
+def missing_tools() -> list[str]:
+    return [tool for tool, args in REQUIRED_TOOLS.items() if not runs([tool, *args])]
 
 
 def write_artifact(text: str, root: Path | None = None) -> Path:
@@ -405,6 +429,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.scheduled:
         mode = fix_cycle.mode_from_workspace(text)
     launch = agent_models.Launch.parse(agent, args.model, args.effort)
+    if mode != fix_cycle.OFF and (missing := missing_tools()):
+        why = (
+            f"not usable from this PATH: {', '.join(missing)} -- install it (scripts/bootstrap-machine.ps1 "
+            f"-Yes does), then fully restart VS Code: a task inherits the PATH VS Code "
+            f"started with"
+        )
+        print(f"fix-pass: {why}", file=sys.stderr)
+        write_artifact(f"fix-pass: FAILED -- {why}")
+        return EXIT_USAGE
     try:
         return run(workspace, mode, launch)
     except (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError) as exc:

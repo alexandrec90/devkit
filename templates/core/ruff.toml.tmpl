@@ -17,7 +17,7 @@ force-exclude = true
 #   T20  stray print() calls
 #
 # They were also nearly free to violate already: `ruff check --fix` rewrites all of
-# them silently in the lint-fix PostToolUse hook, in pre-commit, and in lint-all.py.
+# them silently in pre-commit and in lint-all.py.
 # What enforcing them bought was churn in every diff, not a bug caught.
 select = ["E", "F", "B", "ASYNC", "S", "RUF"]
 

@@ -13,10 +13,11 @@ it does today. This tier carries only what neither of those can.
 | --- | --- |
 | [`.claude/rules/engineering.md`](.claude/rules/engineering.md) | baseline policy: testing, scripts, lint, the vendored harness |
 | [`.claude/rules/authoring.md`](.claude/rules/authoring.md) | writing rules, skills and instruction files |
+| [`.claude/rules/session-scope.md`](.claude/rules/session-scope.md) | what a session leaves to the fix pass: commit, push, PR, the full suite |
 | [`.claude/rules/vscode-tasks.md`](.claude/rules/vscode-tasks.md) | the workspace task block and its dispatcher |
 | [`scripts/CLAUDE.md`](scripts/CLAUDE.md) | vendoring, the two channels, boxes, scheduled jobs, loading a module by path |
 
-The first two are vendored *out* of here, so **point at them, never restate them**:
+The first three are vendored *out* of here, so **point at them, never restate them**:
 `scripts/hooks/tests/test_repo_contract.py` fails a `CLAUDE.md` that paraphrases their
 clauses, because a second copy is not drift-checked.
 
@@ -38,9 +39,9 @@ half — every cited path exists, and instruction prose pins no version — acro
 
 Read the interpreter version and the dev tools off [`pyproject.toml`](pyproject.toml).
 What is not readable there is that the empty runtime dependency list is a **constraint,
-not a state**: the vendored hooks run before a virtualenv exists, in a repo devkit does
-not control, so an import of anything installed breaks provisioning on exactly the
-sessions the harness exists to set up. The same contract is why there is no stack here —
+not a state**: the vendored scripts and the git and pre-commit hooks run before a
+virtualenv exists, in a repo devkit does not control, so an import of anything installed
+breaks them on exactly the fresh clones they exist to guard. The same contract is why there is no stack here —
 no database, no frontend, no compose file — which is what lets CI run with no service
 containers and why `.devkit.toml` turns both of those tiers off.
 

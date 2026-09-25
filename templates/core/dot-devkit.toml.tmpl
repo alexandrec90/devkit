@@ -26,9 +26,8 @@ unit_tests = "{{ unit_tests }}"
 [python]
 version = "{{ python_version }}"
 
-# The PreToolUse Bash output cap. `enforce-capped-bash.py` blocks an uncapped Bash
-# call and quotes `max_bytes` in the reason; `invoke-capped.py` applies it. One
-# field feeds both, so the number the agent is told to use is the number it gets.
+# The Bash output cap `invoke-capped.py` applies. `enforce-capped-bash.py` (vendored,
+# not wired as a hook) quotes the same `max_bytes`, so one field feeds both.
 #
 # `head_bytes` is the share of the cap given to the START of the output; the rest
 # goes to the tail. Both windows are kept because the useful parts of a long
@@ -133,7 +132,7 @@ redis_env = "REDIS_URL"
 [db.test_env]
 {{/postgres}}
 {{^postgres}}
-# No DB tier: the Stop hook runs lint + the script tests only. Turn this on by
+# No DB tier: the gate runs lint + the script tests only. Turn this on by
 # setting `enabled = true` under a [db] table once a compose DB service exists.
 [db]
 enabled = false

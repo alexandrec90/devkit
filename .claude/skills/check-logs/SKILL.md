@@ -7,8 +7,8 @@ disable-model-invocation: true
 # Check the automated processes
 
 > Depends on Windows Task Scheduler (`schtasks`) and a devkit checkout on this machine.
-> Every shell example below is issued bare, in either harness: none of them is on the
-> Bash blocklist in `.claude/rules/engineering.md`, and a wrapper here buys no bound.
+> Every shell example below is issued bare, in either harness: no hook gates a Bash call
+> (`.claude/rules/engineering.md`), and a wrapper here buys no bound.
 
 Answer in this order. It is not a preference: each step decides whether the next one's
 evidence means anything.
@@ -79,7 +79,7 @@ those, not a directory listing.
 | missing file | not a diagnosis. Go back to step 2 |
 
 A missing artifact and a job that never ran are the same empty result, which is why the
-session-start line names the absence rather than pointing at the path.
+`workspace-status.py` line names the absence rather than pointing at the path.
 
 ## 5. Verify a wrapper without running the job
 
@@ -124,27 +124,23 @@ checkouts synced. Two readings that are easy to get backwards:
 legacy unsharded `harness-events.log` — is the reap ledger's pattern applied to the rest
 of the harness: one line per event, ISO stamp then tab-separated `key=value`,
 append-only. Grep them together (`logs/harness-events*.log`); `harness_triage.py` already
-reads the union. Every guard decision names the box and branch it routed to,
-under one of two event names that are worth keeping apart: `guard-route` is the ordinary
-case, where the edit was re-aimed at the box and the agent paid nothing, while
-`guard-block` is a call the guard could not re-aim and refused instead -- a failed tool
-call, and the one of the pair worth looking at. Every capped-Bash and lint-fix block
-records the command or finding
-(`capped-bash-block`, `lint-fix-block`, written by the *vendored* copies through
-`$DEVKIT_DIR`, so consumer sessions land here too), and two event names mean someone
-should look rather than "the harness worked":
+reads the union.
+
+No agent hook is wired any more, so the hook events -- `guard-route`, `guard-block`,
+`guard-spawn-failed`, `capped-bash-block`, `lint-fix-block` -- are history: rows from
+when the guard and the capped-Bash and lint-fix hooks ran, and nothing new writes them.
+Two event names mean someone should look rather than "the harness worked":
 
 - `agent-report` -- an agent judged something a harness defect and filed it with
   `scripts/hooks/report-harness-defect.py`. The `version=` field says whether its
   vendored copy was current; a stale one may already be fixed upstream.
-- `guard-spawn-failed` -- an edit was blocked and the box it should have been routed
-  to could not be cut. The session that hit it was left with a failure message and no
-  box, so the `detail=` field is the start of a real diagnosis.
+- `guard-spawn-failed` -- an old row, from when a blocked edit could not be cut the box
+  it should have been routed to. The `detail=` field is the start of a diagnosis.
 
 Those two are a **backlog**, and this skill's job stops at noticing it: read it with
 `python scripts/harness_triage.py`, and work it with the `triage-harness` skill, which
 owns verifying a report against current code and recording what retired it. The
-session-start line counts what that tool calls open — an event with no `triage-resolved`
+`workspace-status.py` line counts what that tool calls open — an event with no `triage-resolved`
 naming it, at any age. It counted a seven-day window until 2026-08-24, so an item left
 the line by ageing out rather than by being dealt with; do not reintroduce a date filter
 here.

@@ -213,12 +213,9 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/tests/test_ship.py",
     "scripts/hooks/session-sync.py",
     "scripts/hooks/tests/test_session_sync.py",
-    # `branch-per-task.py` and `branch-on-write.py` were here. They cut a task branch
-    # *inside* the checkout the session was in, which is the one thing that made a
-    # checkout outlive its task -- and every state `sweep.py` hunts for follows from
-    # that. `worktree-guard.py` now routes the same edit into an ephemeral box instead,
-    # so the branch is cut somewhere disposable. See `RETIRED_HOOKS` below: `--pull`
-    # deletes these files, so it also has to drop the settings entries pointing at them.
+    # `branch-per-task.py` and `branch-on-write.py` were here: a branch cut *inside* the
+    # session's checkout is what made a checkout outlive its task. `worktree-guard.py` cuts
+    # it in a disposable box now; `RETIRED_HOOKS` below deletes both and their settings.
     ".claude/hooks/session-start.sh",
     "scripts/hooks/tests/test_session_start.py",
     # What a fresh worktree lacks and the command that installs it: the one ladder
@@ -242,6 +239,9 @@ MANIFEST: tuple[str, ...] = (
     # first CI run.
     ".claude/rules/engineering.md",
     ".claude/rules/authoring.md",
+    # What a coding session leaves to the fix pass (commit, push, PR, the full suite),
+    # and the fixer sessions exempt from that.
+    ".claude/rules/session-scope.md",
     # The reference half of the policy above. Vendored because the pointers into it are:
     # an unvendored target would leave every consumer's engineering.md citing a path that
     # does not exist there. It sits *outside* `.claude/rules/` on purpose -- every `.md`
@@ -998,8 +998,8 @@ def retired_present(root: Path) -> list[str]:
 
 
 # The settings file is the project's own (never vendored — see CLAUDE.md), which is
-# exactly why `--pull` has to touch it: the pull deletes a retired hook script and wires
-# a newly delivered one, and both of those are edits to a file no MANIFEST covers. That
+# exactly why `--pull` has to touch it: the pull unwires every agent hook, an edit to a
+# file no MANIFEST covers. That
 # tier lives in `project_settings.py` — a different contract from copying, and this
 # module was past every structural limit it holds other files to. Spelled out here
 # rather than read from there because this module must load before that file exists
@@ -1031,9 +1031,8 @@ def retired_hook_paths(retired: tuple[str, ...] | None = None) -> tuple[str, ...
 def settings_pass(root: Path, retired: tuple[str, ...] | None = None) -> list[str]:
     """The pull's pass over this project's settings file; one note per change made.
 
-    Unwires the hooks this pull's deletions left dangling, and wires the cross-checkout
-    edit guard when nothing runs it. `project_settings.settings_pass` owns both, and
-    the notes it returns are already worded for the report below.
+    Unwires every agent hook the settings still carry. `project_settings.settings_pass`
+    owns that, and the notes it returns are already worded for the report below.
     """
     try:
         import project_settings
@@ -1045,10 +1044,8 @@ def settings_pass(root: Path, retired: tuple[str, ...] | None = None) -> list[st
 def local_faults(root: Path) -> tuple[list[tuple[str, str]], str]:
     """`(faults, summary)` for what `--check` finds outside the MANIFEST.
 
-    Neither the settings file nor the generated Codex mirror is ever compared against
-    upstream, so neither is drift -- but an unwired edit guard is the one harness fault
-    with no symptom at all, and a check that stayed quiet about it is how five
-    checkouts spent a release routing agent edits onto their home branches.
+    The generated Codex mirror is never compared against upstream, so it is not drift --
+    but Codex reads it rather than the settings it came from, so a stale one is reported.
 
     Returns the summary already worded, so `main` neither grows a branch per fault nor
     words it there; both are what pushed that function past its limits.
