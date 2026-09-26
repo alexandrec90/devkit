@@ -113,7 +113,7 @@ def world(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(fix_pass, "pending_adoptions", lambda root, projects, tag: table["pending"])
     monkeypatch.setattr(
-        fix_pass.fix_backlog, "ledger_failure", lambda devkit_dir, root: table["backlog"]
+        fix_pass.fix_red.fix_backlog, "ledger_failure", lambda devkit_dir, root: table["backlog"]
     )
     monkeypatch.setattr(
         fix_pass,
@@ -258,9 +258,50 @@ def test_collect_red_gathers_prs_default_branches_and_the_backlog_with_devkits_v
     world["failures"] = [failure(number=2)]
     world["branches"] = {"devkit": (False, red_main()), "carameli": (True, None)}
     world["backlog"] = backlog
-    failures, green = fix_pass.collect_red(world["workspace"], ["devkit", "carameli"], [])
+    failures, green, unread = fix_pass.fix_red.collect_red(
+        world["workspace"], ["devkit", "carameli"], []
+    )
     assert [f.kind for f in failures] == [fix_plan.PR, fix_plan.BRANCH, fix_plan.LEDGER]
-    assert green is False
+    assert green is False and unread == []
+
+
+def test_an_unreadable_devkit_main_is_re_gated_and_holds_nothing_meanwhile(world, monkeypatch):
+    """What left six PRs stale: every merge to devkit main was the auto-merge workflow's,
+    whose push raises no event, so no gate ever ran at the tip. The harness read RED on
+    "could not be read" on every pass, forever, and held every project PR behind it."""
+    regated = []
+    monkeypatch.setattr(
+        fix_pass.fix_red,
+        "regate",
+        lambda project_dir: regated.append(project_dir.name) or (True, "main -- gate re-run"),
+    )
+    world["failures"] = [failure(number=2)]
+    world["branches"] = {"devkit": (None, None), "carameli": (None, None)}
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == 0
+    assert regated == ["devkit", "carameli"]
+    text = artifact(world)
+    assert "regate   devkit main -- gate re-run" in text
+    assert "harness  clean" in text and "could not be read" not in text
+    assert world["dispatched"] == [(fix_plan.DISPATCH, "claude")], "carameli #2 is not held"
+
+
+def test_a_regate_that_failed_leaves_the_harness_unreadable(world, monkeypatch):
+    monkeypatch.setattr(
+        fix_pass.fix_red, "regate", lambda _d: (False, "main -- FAILED to re-run the gate: x")
+    )
+    world["failures"] = [failure(number=2)]
+    world["branches"]["devkit"] = (None, None)
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == 0
+    text = artifact(world)
+    assert "regate   devkit main -- FAILED" in text and "could not be read" in text
+    assert "held     carameli #2" in text
+
+
+def test_plan_mode_only_says_it_would_re_gate(world, monkeypatch):
+    monkeypatch.setattr(fix_pass.fix_red, "regate", lambda _d: pytest.fail("plan re-gated"))
+    world["branches"]["devkit"] = (None, None)
+    fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude", NOW)
+    assert "regate   devkit -- would re-run the gate" in artifact(world)
 
 
 def test_the_ledgers_open_backlog_rides_in_the_devkit_session(world):
@@ -604,9 +645,10 @@ def test_green_adoptions_are_merged_before_the_red_is_read(world):
     ]
 
 
-def test_a_project_on_hold_still_ships_its_intent_but_is_not_read(world, monkeypatch):
-    """`devkit.onHold` was honoured by the upgrade sweep only; the pass scanned and sent
-    sessions at paused checkouts."""
+def test_a_project_on_hold_is_read_and_fixed_like_any_other(world, monkeypatch):
+    """The pass once skipped `devkit.onHold` checkouts, and three "unwire the agent
+    hooks" PRs sat red in them indefinitely: a PR that exists is work in flight, and
+    nothing but the pass would ever move it."""
     world["workspace"].write_text(
         '{"folders": [{"path": "devkit"}, {"path": "carameli"}, {"path": "paused"}], '
         '"settings": {"devkit.onHold": ["paused"]}}',
@@ -622,10 +664,10 @@ def test_a_project_on_hold_still_ships_its_intent_but_is_not_read(world, monkeyp
     fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
     assert seen == [["devkit", "carameli", "paused"]]
     assert world["order"] == [
-        ("merge", ["carameli", "devkit"]),
-        ("collect", ["carameli", "devkit"]),
+        ("merge", ["carameli", "devkit", "paused"]),
+        ("collect", ["carameli", "devkit", "paused"]),
     ]
-    assert "on hold  paused -- nothing red is read there (devkit.onHold)" in artifact(world)
+    assert "on hold" not in artifact(world)
 
 
 def test_a_blocked_report_marks_the_ledger_and_no_second_session_goes(world):

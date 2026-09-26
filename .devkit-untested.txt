@@ -106,7 +106,6 @@ scripts/ship.py::backoff_delays
 scripts/ship.py::current_branch
 scripts/sweep.py::anchor_path
 scripts/sweep.py::common_dir
-scripts/sweep.py::gh_for
 scripts/sweep.py::is_retired
 scripts/sweep.py::is_task_branch
 scripts/sweep.py::read_anchor
