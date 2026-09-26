@@ -80,7 +80,7 @@ for _path in (REPO_ROOT / "scripts", REPO_ROOT / "scripts" / "hooks"):
         sys.path.insert(0, str(_path))
 
 # Every import below the bootstrap is E402 by construction — that is the whole design of
-# this file, stated once here rather than restated on each line. A per-line `# noqa: E402`
+# this file, stated once here rather than restated on each line. A per-line E402 suppression
 # said nothing a reader could act on and grew by one whenever a module was added; the
 # claim is a property of the file, so it is written as one. Scoped to E402 alone, so any
 # other finding in here still fails.

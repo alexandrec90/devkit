@@ -9,6 +9,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_plan
 import fix_prompts
+from support import REPO_ROOT, load_script
 
 
 def failure(**fields) -> fix_plan.Failure:
@@ -73,6 +74,84 @@ def test_the_upstream_prompt_names_every_project_and_pr_and_ends_in_the_ship_ski
     assert "carameli #412 u/412" in text and "roguelike #16 u/16" in text
     assert "not in each consumer" in text
     assert "ship skill" in text and "agent/fix-x-0918" in text
+
+
+def test_the_upstream_prompt_sends_a_pr_red_on_its_own_diff_to_that_pr():
+    """devkit #387's upstream session found the cause was the PR's own diff and could
+    only stop: nothing on a fresh branch off a green default lands on the PR."""
+    text = fix_prompts.upstream_prompt((failure(),), "agent/fix")
+    assert fix_prompts.OWN_DIFF in text
+    assert "ship it with the ship skill from that worktree" in text
+    assert text.index(fix_prompts.OWN_DIFF) < text.index(fix_prompts.STOP)
+
+
+def every_prompt() -> list[str]:
+    """One of each shape of prompt a fresh session can be sent with."""
+    return [
+        fix_prompts.pr_prompt(failure()),
+        fix_prompts.pr_prompt(failure(signature=(fix_plan.CONFLICT,))),
+        fix_prompts.pr_prompt(failure(kind=fix_plan.COMMIT, number=0, signature=("x refused",))),
+        fix_prompts.upstream_prompt((failure(), red_main()), "agent/fix"),
+        fix_prompts.branch_prompt(red_main(), "agent/fix"),
+        fix_prompts.nightly_prompt(failure(kind=fix_plan.NIGHTLY, number=3), "agent/fix"),
+    ]
+
+
+def test_every_prompt_ends_on_the_one_narrow_exit():
+    """A fresh session read "if it cannot be fixed, stop" as leave for any obstacle:
+    devkit #387's stopped with the fix one worktree away. Every prompt now ends on the
+    same exit, which names the three blockers that justify stopping and the obstacles
+    that do not -- so a new prompt cannot quietly bring back a wider one."""
+    for text in every_prompt():
+        assert text.endswith(fix_prompts.STOP)
+        assert text.count(fix_prompts.STOP) == 1
+
+
+def test_every_prompt_opens_by_declaring_the_fixer_role():
+    """The vendored rules are written for project sessions, and a fixer is told apart
+    from one by this sentence alone -- the launcher's declaration, never an inference
+    from what the prompt happens to name."""
+    for text in every_prompt():
+        assert text.startswith(fix_prompts.ROLE)
+        assert text.count(fix_prompts.ROLE) == 1
+
+
+def test_the_role_points_at_a_fixer_file_every_consumer_receives():
+    """PR fixers run in consumer checkouts too, so the file has to be vendored; and the
+    override is spelled in the sentence itself for a consumer that has not pulled it."""
+    rel = ".claude/fixer.md"
+    assert rel in fix_prompts.ROLE
+    assert (REPO_ROOT / rel).is_file()
+    sync = load_script("scripts/sync-devkit.py")
+    assert rel in sync.MANIFEST
+    for overridden in ("the harness is not your job", "and stop"):
+        assert overridden in fix_prompts.ROLE
+    # A fixer ships an intent like any session; the pass commits and pushes (FINISH).
+    assert "commit" not in fix_prompts.ROLE and "push" not in fix_prompts.ROLE
+    assert not set("\"'`") & set(fix_prompts.ROLE)
+
+
+def test_no_prompt_offers_the_open_exit():
+    """The phrasing that let any obstacle count as a blocker, anywhere in the module."""
+    source = Path(fix_prompts.__file__).read_text(encoding="utf-8")
+    code = source.split("STOP = (", 1)[1]
+    assert "what is in the way" not in code
+    for text in every_prompt():
+        assert "cannot be fixed" not in text and "cannot be done" not in text
+
+
+def test_the_exit_names_its_blockers_what_is_not_one_and_asks_for_evidence():
+    for expected in (
+        "three blockers only",
+        "quote the exact command",
+        "only a person has",
+        "outside this repository",
+        "adding a worktree on another branch",
+        "what you tried first",
+    ):
+        assert expected in fix_prompts.STOP
+    # It crosses a wt command line with every other sentence here.
+    assert not set("\"'`") & set(fix_prompts.STOP)
 
 
 def test_the_nightly_prompt_names_the_workflow_the_issue_and_the_fresh_branch():
@@ -147,17 +226,6 @@ def test_the_resolver_leaves_the_merge_for_the_pass_to_commit():
     text = fix_prompts.pr_prompt(failure(signature=(fix_plan.CONFLICT,)))
     assert "leave the merge uncommitted" in text and "hooks running" in text
     assert "--no-verify" not in text
-
-
-def every_prompt() -> list[str]:
-    return [
-        fix_prompts.pr_prompt(failure()),
-        fix_prompts.pr_prompt(failure(signature=(fix_plan.CONFLICT,))),
-        fix_prompts.pr_prompt(failure(kind=fix_plan.COMMIT, number=0, signature=("x refused",))),
-        fix_prompts.upstream_prompt((failure(), red_main()), "agent/fix"),
-        fix_prompts.branch_prompt(red_main(), "agent/fix"),
-        fix_prompts.nightly_prompt(failure(kind=fix_plan.NIGHTLY, number=3), "agent/fix"),
-    ]
 
 
 def test_every_prompt_ends_at_the_ship_skill_or_the_blocked_file_and_never_at_a_push():
