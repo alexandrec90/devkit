@@ -176,6 +176,91 @@ def test_a_checkout_git_cannot_list_is_passed_over(tmp_path):
     )
 
 
+def _one_tree_on(tmp_path, branch):
+    """A carameli worktree on `branch` carrying an intent, and the `git_for` that lists it."""
+    tree = tmp_path / "carameli" / ".claude" / "worktrees" / "hand"
+    (tree / "logs").mkdir(parents=True)
+    (tree / ship_intent.INTENT_FILE).write_text("Resolve it\n", encoding="utf-8")
+    listing = f"worktree {tree.as_posix()}\nHEAD 1\nbranch refs/heads/{branch}\n"
+
+    def git_for(_project_dir):
+        def git(*args):
+            if args[:2] == ("worktree", "list"):
+                return subprocess.CompletedProcess(args, 0, listing, "")
+            return subprocess.CompletedProcess(args, 0, "refs/remotes/origin/main\n", "")
+
+        return git
+
+    return git_for
+
+
+def _gh_listing(code, out, asked):
+    def gh_for(_project_dir):
+        def gh(*args):
+            asked.append(args)
+            return subprocess.CompletedProcess(args, code, out, "")
+
+        return gh
+
+    return gh_for
+
+
+def test_a_hand_named_branch_that_heads_an_open_pr_is_shippable(tmp_path):
+    """devkit #390: opened by hand from `flag-wired-agent-hooks`, so a resolver sent at
+    it worked on that branch and its intent was refused on every pass -- the PR could
+    only stay conflicted. The PR already exists; pushing to it is the fixer's whole job."""
+    git_for = _one_tree_on(tmp_path, "flag-wired-agent-hooks")
+    asked: list = []
+    found = ship_intent.find_intents(
+        tmp_path, ["carameli"], git_for, _gh_listing(0, '[{"number": 390}]', asked)
+    )
+    assert [(i.branch, i.blocked) for i in found] == [("flag-wired-agent-hooks", "")]
+    assert asked == [
+        ("pr", "list", "--head", "flag-wired-agent-hooks", "--state", "open", "--json", "number")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("code", "out"), [(0, "[]"), (1, ""), (0, "not json")], ids=["no-pr", "gh-failed", "garbage"]
+)
+def test_a_hand_named_branch_with_no_open_pr_stays_blocked(tmp_path, code, out):
+    git_for = _one_tree_on(tmp_path, "flag-wired-agent-hooks")
+    found = ship_intent.find_intents(tmp_path, ["carameli"], git_for, _gh_listing(code, out, []))
+    assert [i.blocked for i in found] == [
+        ship_intent.ship.is_shippable("flag-wired-agent-hooks", "main")[1]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("code", "out", "open_pr"),
+    [
+        (0, '[{"number": 390}]', True),
+        (0, "[]", False),
+        (0, "", False),
+        (0, "{}", False),
+        (1, '[{"number": 390}]', False),
+        (0, "not json", False),
+    ],
+    ids=["open", "none", "empty", "not-a-list", "gh-failed", "garbage"],
+)
+def test_has_open_pr_is_false_whenever_gh_cannot_say_yes(code, out, open_pr):
+    asked: list = []
+    gh = _gh_listing(code, out, asked)(None)
+    assert ship_intent.has_open_pr(gh, "flag-wired-agent-hooks") is open_pr
+    assert asked == [
+        ("pr", "list", "--head", "flag-wired-agent-hooks", "--state", "open", "--json", "number")
+    ]
+
+
+def test_the_default_branch_stays_blocked_without_asking_about_prs(tmp_path):
+    git_for = _one_tree_on(tmp_path, "main")
+    asked: list = []
+    found = ship_intent.find_intents(
+        tmp_path, ["carameli"], git_for, _gh_listing(0, '[{"number": 1}]', asked)
+    )
+    assert found[0].blocked and asked == []
+
+
 # --- shipping one --------------------------------------------------------------------
 
 

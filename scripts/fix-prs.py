@@ -47,8 +47,6 @@ Every function that decides something is pure and tested in `tests/test_fix_prs.
 `tests/test_gate_evidence.py`); the ones that spawn take a runner.
 """
 
-from __future__ import annotations
-
 import argparse
 import subprocess
 import sys

@@ -20,6 +20,7 @@ from pathlib import Path
 
 import agent_worktrees as aw
 import project_python
+import stray_worktree as stray
 import sweep
 import worktree
 
@@ -47,10 +48,7 @@ def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
                 and Path(held).resolve() == worktree.box_path(root, box.name).resolve()
             ):
                 return Path(held), ""
-        return None, (
-            f"{branch} is already checked out at {held}, which is not in "
-            f"{aw.TIER_SUMMARY} or a matching live devkit box -- finish the PR from there"
-        )
+        return None, stray.refusal(project_dir, held, branch)
     return Path(held), ""
 
 

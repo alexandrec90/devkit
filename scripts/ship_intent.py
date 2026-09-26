@@ -167,7 +167,21 @@ def write_state(tree: Path, state: dict) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def find_intents(root: Path, projects: list[str], git_for=sweep.git_for) -> list[Intent]:
+def has_open_pr(gh, branch: str) -> bool:
+    """Whether `branch` is already the head of an open PR; False when `gh` cannot say."""
+    listed = gh("pr", "list", "--head", branch, "--state", "open", "--json", "number")
+    if getattr(listed, "returncode", 1) != 0:
+        return False
+    try:
+        rows = json.loads(listed.stdout or "[]")
+    except ValueError:
+        return False
+    return isinstance(rows, list) and bool(rows)
+
+
+def find_intents(
+    root: Path, projects: list[str], git_for=sweep.git_for, gh_for=sweep.gh_for
+) -> list[Intent]:
     """Every worktree of every registered checkout that carries an intent file.
 
     Through `git worktree list` (`fix_reports.agent_trees`), so a box, a `--worktree`
@@ -176,6 +190,11 @@ def find_intents(root: Path, projects: list[str], git_for=sweep.git_for) -> list
     `blocked` with the reason, for the record, rather than shipped somewhere
     surprising or silently passed over. A `spent` intent is not returned at all, and
     is judged before the branch: which branch a shipped message sits on says nothing.
+
+    A branch that already heads an open PR is shippable whatever it is called: the rule
+    is about where a *new* PR opens, and that PR is open. devkit #390 was opened by hand
+    from `flag-wired-agent-hooks`; a resolver sent at it works on that branch, and its
+    intent was refused on every pass, so the PR could only stay conflicted.
     """
     found: list[Intent] = []
     defaults: dict[str, str] = {}
@@ -190,6 +209,8 @@ def find_intents(root: Path, projects: list[str], git_for=sweep.git_for) -> list
             defaults[project] = tb.detect_default_branch(git_for(root / project), fallback="main")
         base = defaults[project]
         shippable, why = ship.is_shippable(branch, base)
+        if not shippable and branch != base and has_open_pr(gh_for(root / project), branch):
+            shippable, why = True, ""
         found.append(Intent(project, tree, branch, subject, body, "" if shippable else why, base))
     return found
 

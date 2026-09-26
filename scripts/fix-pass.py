@@ -17,14 +17,16 @@ on a verdict a fresh pass reads in a call.
 2. **Merge green adoptions**, and nothing else. Every other green PR waits for a
    person. Before the red is read, so a release whose adoptions just went green stops
    holding the projects on this pass rather than the next.
-3. **Collect everything red.** Refused commits, red PRs, open scheduled-failure issues
+3. **Collect everything red** (`fix_red.py`). Refused commits, red PRs, open scheduled-failure issues
    and every default branch whose own gate is red, each with the gate's own artifact
    (`gate_evidence.py`), plus the harness-defect ledger's open backlog
    (`harness_triage.py`) as one failure with its groups as evidence; planned by
    `fix_plan.py` and classified by `fix_cycle.py`. A release commit's red -- the
    newest-tag test, until the tag exists -- is skipped out loud, and reads as green once
-   the tag points at it. A PR behind a red base is held for the base's fixer. A
-   checkout on `devkit.onHold` is not read, and the record says so.
+   the tag points at it. A PR behind a red base is held for the base's fixer. Every
+   registered checkout is read, `devkit.onHold` included. A default branch with no
+   verdict at its tip gets its gate re-run: a merge by the auto-merge workflow starts
+   no run, and an unreadable devkit held everything.
 4. **Read what fixers reported.** A session that could not finish wrote
    `logs/fix-blocked.md` in its worktree (`fix_reports.py`); the pass marks its ledger
    entry blocked, so no second session is spent, and puts the reason on the record.
@@ -74,10 +76,10 @@ import adoption_prs
 import agent_models
 import broken_pr_menu as menu
 import devkit_project
-import fix_backlog
 import fix_cycle
 import fix_ledger
 import fix_plan
+import fix_red
 import fix_reports
 import gate_evidence
 import ship_intent
@@ -217,27 +219,6 @@ def pending_adoptions(root: Path, projects: list[str], tag: str) -> list[str]:
     ]
 
 
-def collect_red(
-    workspace: Path, projects: list[str], refused: list[fix_plan.Failure]
-) -> tuple[list[fix_plan.Failure], bool | str | None]:
-    """Step 3. Everything red, and devkit's default-branch verdict (None: unreadable).
-
-    Each default branch's own gate is read beside the PRs: a red one is a failure to
-    send a session at (devkit's is the harness itself), not only a reason to hold. The
-    harness-defect ledger's open backlog rides along as one failure of its own.
-    """
-    found = menu.scan(workspace, projects)
-    branches = gate_evidence.collect_default_branches(workspace, projects)
-    failures = refused + gate_evidence.collect(workspace, found)
-    failures += [failure for _, failure in branches.values() if failure]
-    devkit_dir = workspace.parent / fix_cycle.DEVKIT
-    if devkit_dir.is_dir():
-        backlog = fix_backlog.ledger_failure(devkit_dir, gate_evidence.evidence_root(workspace))
-        failures += [backlog] if backlog else []
-    green, _ = branches.get(fix_cycle.DEVKIT, (None, None))
-    return failures, green
-
-
 def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
     """Step 2. The one merge the pass makes; `(lines for the record)`."""
     merged: list[str] = []
@@ -372,23 +353,23 @@ def run(
         return EXIT_OK
     root = workspace.parent
     text = workspace.read_text(encoding="utf-8")
+    # Every registered checkout, `devkit.onHold` or not. The pass once skipped paused
+    # ones, and their PRs sat red for good: a PR that exists is work in flight whatever
+    # the setting says, and the pass is the last thing that would ever move it.
     projects = devkit_project.known_projects(text)
-    # A paused checkout (`devkit.onHold`) gets no scheduled work: an intent left there
-    # is a person's explicit act and still ships, but nothing red there is read, or the
-    # pass spends sessions on a project nobody is moving.
-    paused = sorted(name for name in sweep.on_hold(text) if name in projects)
-    active = [name for name in projects if name not in paused]
     ledger_path = worktree.boxes_root(root) / fix_ledger.LEDGER_NAME
     prefixes = adoption_prs.adoption_prefixes()
 
     shipped, refused, ship_failed = ship_intents(root, projects, mode)
-    merged = merge_green_adoptions(root, active) if mode == fix_cycle.DISPATCH else []
-    failures, green = collect_red(workspace, active, refused)
+    merged = merge_green_adoptions(root, projects) if mode == fix_cycle.DISPATCH else []
+    failures, green, unread = fix_red.collect_red(workspace, projects, refused)
+    regated, rerun = fix_red.regate_unread(root, unread, mode)
+    green = fix_plan.RUNNING if fix_cycle.DEVKIT in rerun else green
     blocked = record_blocked(root, projects, ledger_path)
     newest = gate_evidence.newest_release(root / fix_cycle.DEVKIT)
     decisions = fix_plan.plan(failures, newest, prefixes)
     classes = fix_cycle.classify_all(failures)
-    harness = fix_cycle.harness_state(classes, green, pending_adoptions(root, active, newest))
+    harness = fix_cycle.harness_state(classes, green, pending_adoptions(root, projects, newest))
     go, held = fix_cycle.phase(decisions, classes, harness, prefixes)
     skipped = [d for d in decisions if d.action == fix_plan.SKIP]
 
@@ -405,8 +386,8 @@ def run(
         tuple(sent),
         tuple(merged),
         tuple(skipped),
-        tuple(paused),
         tuple(blocked),
+        tuple(regated),
     )
     text = fix_cycle.render(account)
     print(text)
