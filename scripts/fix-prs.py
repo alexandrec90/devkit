@@ -46,8 +46,6 @@ Every function that decides something is pure and tested in `tests/test_fix_prs.
 `tests/test_gate_evidence.py`); the ones that spawn take a runner.
 """
 
-from __future__ import annotations
-
 import argparse
 import subprocess
 import sys
@@ -64,6 +62,7 @@ import fix_plan
 import fix_prompts
 import fix_reports
 import gate_evidence
+import stray_worktree as stray
 import sweep
 import task_branch as tb
 import task_input
@@ -137,10 +136,7 @@ def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
                 and Path(held).resolve() == worktree.box_path(root, box.name).resolve()
             ):
                 return Path(held), ""
-        return None, (
-            f"{branch} is already checked out at {held}, which is not in "
-            f"{aw.TIER_SUMMARY} or a matching live devkit box -- finish the PR from there"
-        )
+        return None, stray.refusal(project_dir, held, branch)
     return Path(held), ""
 
 
