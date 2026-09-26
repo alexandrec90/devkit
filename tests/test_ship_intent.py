@@ -245,13 +245,50 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
         one.branch,
         "main",
     )
-    # A shipped PR is a prompt-driven change: the vendored auto-merge workflow lands any
-    # labelled PR once the gate passes, so the label would make CI the only reviewer.
-    assert ship_intent.sweep.AUTOMERGE_LABEL not in plan.pr_labels
+    # A feature session's PR is a prompt-driven change: the vendored auto-merge workflow
+    # lands any labelled PR once the gate passes, so the label would make CI the only
+    # reviewer.
     assert plan.pr_labels == ()
     state = ship_intent.read_state(one.tree)
     assert state["stage"] == ship_intent.SHIPPED
     assert state["intent"] == one.digest and state["sha"] == "abc123"
+
+
+def shipped_labels(tmp_path, monkeypatch, *stamps: bool | None) -> tuple[str, ...]:
+    """The labels `ship_one` asks for after the tree was stamped once per `stamps`."""
+    one = intent(tmp_path)
+    for owns in stamps:
+        ship_intent.fix_reports.stamp(one.tree, "k", "what", NOW, owns_branch=owns)
+    plans = []
+    monkeypatch.setattr(
+        ship_intent.sweep, "ensure_pr", lambda gh, plan: plans.append(plan) or ("u", True, "")
+    )
+    assert ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW).stage == "shipped"
+    return plans[0].pr_labels
+
+
+def test_a_pr_from_a_branch_the_pass_cut_for_a_fixer_is_labelled_automerge(tmp_path, monkeypatch):
+    """The pass decided on that work itself, so its green gate is the whole review."""
+    assert shipped_labels(tmp_path, monkeypatch, True) == (ship_intent.sweep.AUTOMERGE_LABEL,)
+
+
+def test_a_fixer_sent_back_at_its_own_branch_keeps_the_label(tmp_path, monkeypatch):
+    """A fixer's PR that went red, or whose commit was refused, is re-stamped with no
+    say about the branch; it is still the pass's own."""
+    assert shipped_labels(tmp_path, monkeypatch, True, None) == (ship_intent.sweep.AUTOMERGE_LABEL,)
+
+
+def test_a_fixer_sent_at_a_feature_sessions_branch_leaves_it_unlabelled(tmp_path, monkeypatch):
+    """Fixing the gate on a feature PR does not make the feature routine: the person
+    who asked for it still merges it."""
+    assert shipped_labels(tmp_path, monkeypatch, None) == ()
+    assert shipped_labels(tmp_path, monkeypatch, False, None) == ()
+
+
+def test_a_stamp_from_before_the_field_existed_reads_as_a_feature_branch(tmp_path):
+    (tmp_path / ship_intent.fix_reports.STAMP_FILE).parent.mkdir(parents=True)
+    (tmp_path / ship_intent.fix_reports.STAMP_FILE).write_text('{"key": "k"}', encoding="utf-8")
+    assert ship_intent.pr_labels(tmp_path) == ()
 
 
 def test_the_commit_half_names_the_step_that_refused(tmp_path):

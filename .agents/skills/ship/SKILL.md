@@ -23,18 +23,17 @@ recover is *why* the change was made, so that is the only thing it is asked for.
      write it for the reader who did not watch the work.
 3. Report the subject and stop.
 
-`logs/` is ignored in every project, so the file cannot be committed by accident. If
-you change the code again after writing it, rewrite the file last: the pass ships
-whatever the file says when it runs, and remembers the words it shipped, so an edited
-file is shipped again and an unchanged one is not.
+`logs/` is ignored in every project, so the file cannot be committed by accident. Once
+shipped, the pass moves it to `logs/ship-intent.shipped.md`; to ship again, write a
+fresh one, last.
 
 ## What happens next, and why none of it is your turn
 
 The fix pass (`scripts/fix-pass.py`, scheduled every half hour, or the *Agent: Fix What
 Is Red* task by hand) finds the intent, runs the commit-stage fixers, commits with your
-message, pushes with the push gate skipped, opens the PR *without* the `automerge` label
--- a green one waits for a person, because the label would let the vendored auto-merge
-workflow land it unreviewed -- and records the outcome beside the intent in
+message, pushes with the push gate skipped, opens the PR -- *without* the `automerge`
+label when the branch is a feature session's, so a green one waits for a person, and
+with it when the pass cut the branch for a fixer -- and records the outcome beside the intent in
 `logs/ship-state.json`. CI runs the gate.
 If it is red, the pass downloads the artifact and sends a fresh session at it with the
 failing tests named; if the commit stage refused the change, the pass sends one at this

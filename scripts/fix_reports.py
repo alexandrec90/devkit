@@ -54,18 +54,31 @@ class Blocked:
     reason: str
 
 
-def stamp(tree: Path, key: str, what: str, now: _dt.datetime | None = None) -> Path:
+def stamp(
+    tree: Path,
+    key: str,
+    what: str,
+    now: _dt.datetime | None = None,
+    owns_branch: bool | None = None,
+) -> Path:
     """Mark the tree with the key this dispatch is recorded under.
 
     A report left by an earlier session in the same tree is cleared with it: read
     against the new key, it would mark this dispatch blocked before its session had
     started, and a blocked entry never expires.
+
+    `owns_branch` says the pass cut the branch for this fixer, so the PR shipped from it
+    is the pass's own and carries `automerge` (`fixer_owns_branch`). None keeps what an
+    earlier stamp said: a fixer sent back at a fixer's red PR or refused commit is still
+    on the pass's branch, and one sent at a feature session's is still on the feature's.
     """
     when = (now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds")
     path = tree / STAMP_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     (tree / BLOCKED_FILE).unlink(missing_ok=True)
-    payload = {"key": key, "what": what, "when": when}
+    if owns_branch is None:
+        owns_branch = fixer_owns_branch(tree)
+    payload = {"key": key, "what": what, "when": when, "owns_branch": owns_branch}
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
 
@@ -76,6 +89,15 @@ def read_stamp(tree: Path) -> dict:
     except (OSError, ValueError):
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def fixer_owns_branch(tree: Path) -> bool:
+    """Whether the tree's branch was cut by the pass for a fixer; False when unstamped.
+
+    Only `True` counts: a stamp from before the field existed, or a hand-picked tree,
+    reads as a feature session's branch, which is the side that waits for a person.
+    """
+    return read_stamp(tree).get("owns_branch") is True
 
 
 def blocked_reason(tree: Path) -> str:

@@ -413,3 +413,69 @@ def test_main_provisions_the_tree_alongside_naming_its_stack(tmp_path, monkeypat
     assert "COMPOSE_PROJECT_NAME=carameli-wt" in out
     assert ".venv provisioned" in out
     assert len(run.calls) == 1
+
+
+# --- a tree cut `--no-checkout`: what `claude --worktree` does ------------------
+# git skips `post-checkout` for a no-checkout add, so every Claude worktree started with
+# no `.venv`. The `git reset --hard` that fills the tree fires `post-index-change 1 0`.
+
+
+def test_a_working_tree_update_in_a_tree_with_no_venv_is_this_hooks_business(tmp_path):
+    assert wt_env.is_unprovisioned_tree_update(["1", "0"], tmp_path) is True
+    assert wt_env.is_unprovisioned_tree_update(["0", "0"], tmp_path) is False, "a `git add`"
+    assert wt_env.is_unprovisioned_tree_update([], tmp_path) is False
+    (tmp_path / ".venv").mkdir()
+    assert wt_env.is_unprovisioned_tree_update(["1", "0"], tmp_path) is False, (
+        "a provisioned tree pays one stat and nothing else"
+    )
+
+
+def test_a_no_checkout_worktree_filled_by_a_reset_is_provisioned(tmp_path, monkeypatch, capsys):
+    """End to end against the real sequence, with the hook installed as the dispatcher
+    in `scripts/git-hooks/` would be, so what is asserted is that git calls it at all."""
+    checkout = _repo(tmp_path / "carameli")
+    (checkout / "uv.lock").write_text("", encoding="utf-8")
+    _git(checkout, "add", "-A")
+    _git(checkout, "commit", "-qm", "lock")
+    (checkout / ".venv").mkdir()
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    fired = hooks / "fired.txt"
+    (hooks / "post-index-change").write_text(
+        f'#!/bin/sh\necho "$1 $(pwd)" >> "{fired.as_posix()}"\n', encoding="utf-8"
+    )
+    (hooks / "post-index-change").chmod(0o755)
+    (hooks / "post-checkout").write_text(
+        f'#!/bin/sh\necho "post-checkout" >> "{fired.as_posix()}"\n', encoding="utf-8"
+    )
+    (hooks / "post-checkout").chmod(0o755)
+    tree = tmp_path / "wt"
+    hooked = ("-c", f"core.hooksPath={hooks.as_posix()}")
+    subprocess.run(
+        ["git", "-C", str(checkout), *hooked, "worktree", "add", "--no-checkout", "-q", str(tree)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(tree), *hooked, "reset", "--hard", "-q"], check=True)
+    lines = fired.read_text(encoding="utf-8").splitlines()
+    assert "post-checkout" not in lines, "git skips it for a no-checkout add: the gap itself"
+    assert [line.split(" ", 1)[0] for line in lines] == ["1"]
+
+    monkeypatch.setattr(wt_env.shutil, "which", lambda name: "uv")
+    run = _Run()
+    assert wt_env.index_change_main(["1", "0"], root=tree, runner=run, environ={}) == 0
+    assert ".venv provisioned" in capsys.readouterr().out
+    assert [argv[:2] for argv, _ in run.calls] == [["uv", "sync"]]
+
+
+def test_the_index_change_hook_leaves_a_provisioned_tree_and_the_checkout_alone(tmp_path):
+    checkout = _repo(tmp_path / "carameli", compose=False)
+    (checkout / "uv.lock").write_text("", encoding="utf-8")
+    (checkout / ".venv").mkdir()
+    run = _Run()
+    assert wt_env.index_change_main(["1", "0"], root=checkout, runner=run, environ={}) == 0
+    tree = _worktree(checkout, tmp_path / "wt")
+    (tree / ".venv").mkdir()
+    assert wt_env.index_change_main(["1", "0"], root=tree, runner=run, environ={}) == 0
+    assert wt_env.index_change_main(["0", "0"], root=tmp_path / "nowhere") == 0
+    assert run.calls == []
