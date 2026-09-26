@@ -177,6 +177,27 @@ def test_a_hand_named_branch_with_no_open_pr_stays_blocked(tmp_path, code, out):
     ]
 
 
+@pytest.mark.parametrize(
+    ("code", "out", "open_pr"),
+    [
+        (0, '[{"number": 390}]', True),
+        (0, "[]", False),
+        (0, "", False),
+        (0, "{}", False),
+        (1, '[{"number": 390}]', False),
+        (0, "not json", False),
+    ],
+    ids=["open", "none", "empty", "not-a-list", "gh-failed", "garbage"],
+)
+def test_has_open_pr_is_false_whenever_gh_cannot_say_yes(code, out, open_pr):
+    asked: list = []
+    gh = _gh_listing(code, out, asked)(None)
+    assert ship_intent.has_open_pr(gh, "flag-wired-agent-hooks") is open_pr
+    assert asked == [
+        ("pr", "list", "--head", "flag-wired-agent-hooks", "--state", "open", "--json", "number")
+    ]
+
+
 def test_the_default_branch_stays_blocked_without_asking_about_prs(tmp_path):
     git_for = _one_tree_on(tmp_path, "main")
     asked: list = []

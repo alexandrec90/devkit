@@ -575,7 +575,8 @@ each, run here.
    (`scripts/gate_evidence.py`), and classify each as harness, project or unknown
    (`scripts/fix_cycle.py`). Every registered checkout is read, `devkit.onHold` included:
    a PR that exists is work in flight. A default branch with no verdict at its tip gets
-   its gate re-run.
+   its gate re-run (`scripts/fix_red.py`, which owns this step): a merge made by the
+   auto-merge workflow raises no push event, so no gate ever runs there on its own.
 4. **Read what fixers reported.** A session that could not finish wrote
    `logs/fix-blocked.md` in its worktree instead of an intent; the pass marks its
    ledger entry, so no second session is spent on it, and the reason is on the record
@@ -632,7 +633,10 @@ A ledger under the workspace's `.worktrees/` records every dispatch against the 
 was observed on, so a second pass sends nothing at a failure an agent is already on. The
 retry policy is per *problem* — the same failures on the same PR, at any commit: after
 `fix_ledger.ATTEMPTS` sessions left it unchanged it reads "needs a human", and one whose
-failures changed is progress and goes again. A problem with no evidence gets one session.
+failures changed is progress and goes again. A problem with no evidence gets one session
+— except a conflict whose head has moved since every earlier resolver was sent
+(`fix_ledger.moved_on`): a resolver pushes only a merge that resolved, so a new conflict
+at a new commit is the base moving again, not a fix that did not take.
 `fix_cycle.PER_TARGET_PER_DAY` and `PER_DAY` are only fuses behind that, for a pass whose
 reading has gone wrong. Branch updates are recorded but never counted, and an entry older
 than `fix_ledger.RESEND_AFTER` no longer blocks one re-send — a session that died leaves

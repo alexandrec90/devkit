@@ -113,7 +113,7 @@ def world(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(fix_pass, "pending_adoptions", lambda root, projects, tag: table["pending"])
     monkeypatch.setattr(
-        fix_pass.fix_backlog, "ledger_failure", lambda devkit_dir, root: table["backlog"]
+        fix_pass.fix_red.fix_backlog, "ledger_failure", lambda devkit_dir, root: table["backlog"]
     )
     monkeypatch.setattr(
         fix_pass,
@@ -258,7 +258,9 @@ def test_collect_red_gathers_prs_default_branches_and_the_backlog_with_devkits_v
     world["failures"] = [failure(number=2)]
     world["branches"] = {"devkit": (False, red_main()), "carameli": (True, None)}
     world["backlog"] = backlog
-    failures, green, unread = fix_pass.collect_red(world["workspace"], ["devkit", "carameli"], [])
+    failures, green, unread = fix_pass.fix_red.collect_red(
+        world["workspace"], ["devkit", "carameli"], []
+    )
     assert [f.kind for f in failures] == [fix_plan.PR, fix_plan.BRANCH, fix_plan.LEDGER]
     assert green is False and unread == []
 
@@ -269,7 +271,7 @@ def test_an_unreadable_devkit_main_is_re_gated_and_holds_nothing_meanwhile(world
     "could not be read" on every pass, forever, and held every project PR behind it."""
     regated = []
     monkeypatch.setattr(
-        fix_pass.gate_evidence,
+        fix_pass.fix_red,
         "regate",
         lambda project_dir: regated.append(project_dir.name) or (True, "main -- gate re-run"),
     )
@@ -285,7 +287,7 @@ def test_an_unreadable_devkit_main_is_re_gated_and_holds_nothing_meanwhile(world
 
 def test_a_regate_that_failed_leaves_the_harness_unreadable(world, monkeypatch):
     monkeypatch.setattr(
-        fix_pass.gate_evidence, "regate", lambda _d: (False, "main -- FAILED to re-run the gate: x")
+        fix_pass.fix_red, "regate", lambda _d: (False, "main -- FAILED to re-run the gate: x")
     )
     world["failures"] = [failure(number=2)]
     world["branches"]["devkit"] = (None, None)
@@ -296,7 +298,7 @@ def test_a_regate_that_failed_leaves_the_harness_unreadable(world, monkeypatch):
 
 
 def test_plan_mode_only_says_it_would_re_gate(world, monkeypatch):
-    monkeypatch.setattr(fix_pass.gate_evidence, "regate", lambda _d: pytest.fail("plan re-gated"))
+    monkeypatch.setattr(fix_pass.fix_red, "regate", lambda _d: pytest.fail("plan re-gated"))
     world["branches"]["devkit"] = (None, None)
     fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude", NOW)
     assert "regate   devkit -- would re-run the gate" in artifact(world)

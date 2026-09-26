@@ -334,26 +334,6 @@ def is_blind(decision: fix_plan.Decision) -> bool:
     )
 
 
-def moved_on(decision: fix_plan.Decision, ledger: dict[str, dict]) -> bool:
-    """Every session this problem has had was sent at a commit other than its head now.
-
-    The head moved under each of them, so each did something. Counted over the life of
-    the ledger, like `fix_ledger.attempts`, not over a day: a conflict resolved
-    yesterday and back today is the base moving again. A folded upstream key names no
-    one commit and never counts as moved.
-    """
-    parts = fix_ledger.decision_key(decision).split(":")
-    if parts[0] == fix_plan.UPSTREAM or len(parts) < 4:
-        return False
-    problem = fix_ledger.problem_key(decision)
-    shas = [
-        other.split(":")[3]
-        for other, entry in ledger.items()
-        if fix_ledger.problem_of(other, entry) == problem and len(other.split(":")) >= 4
-    ]
-    return bool(shas) and parts[3] not in shas
-
-
 def within_caps(
     decision: fix_plan.Decision,
     ledger: dict[str, dict],
@@ -366,7 +346,7 @@ def within_caps(
     An update is free and always goes. Otherwise the question is whether sessions have
     already failed at this same problem: `fix_ledger.ATTEMPTS` of them (one, for a
     blind problem, which cannot show progress) and it needs a person. Except a conflict
-    whose head has moved since (`moved_on`): a resolver pushes only a merge that
+    whose head has moved since (`fix_ledger.moved_on`): a resolver pushes only a merge that
     resolved, so a new conflict at a new commit is the base moving again, not a fix
     that did not take. devkit #390's resolver pushed its merge, main moved within the
     hour, and the fresh conflict read "needs a human" when it needed the resolver.
@@ -377,7 +357,7 @@ def within_caps(
         return True, ""
     made = fix_ledger.attempts(decision, ledger)
     limit = fix_ledger.BLIND_ATTEMPTS if is_blind(decision) else fix_ledger.ATTEMPTS
-    rebased = decision.action == fix_plan.RESOLVE and moved_on(decision, ledger)
+    rebased = decision.action == fix_plan.RESOLVE and fix_ledger.moved_on(decision, ledger)
     if made >= limit and not rebased:
         unchanged = "with no evidence to tell progress by" if is_blind(decision) else "unchanged"
         return False, f"{made} session(s) sent and it is still red {unchanged} -- needs a human"

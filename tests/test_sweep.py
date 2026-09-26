@@ -2047,3 +2047,21 @@ def test_shared_remotes_are_called_out():
         sweep.Result(State(name="devkit", remote_url="https://x/devkit.git"), sweep.CLEAN, "", []),
     ]
     assert sweep.dedupe_note(results) == {url: ["carameli", "carameli-b"]}
+
+
+def test_gh_for_runs_gh_in_the_checkout_without_raising_or_a_window(monkeypatch, tmp_path):
+    """`gh` has no `-C`, so the binding is the working directory; a refusal is returned,
+    never raised, because every caller reads `returncode` itself."""
+    seen: list = []
+
+    def run(argv, **kwargs):
+        seen.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 1, "", "no")
+
+    monkeypatch.setattr(sweep.subprocess, "run", run)
+    done = sweep.gh_for(tmp_path)("pr", "list")
+    assert done.returncode == 1
+    [(argv, kwargs)] = seen
+    assert argv == ["gh", "pr", "list"]
+    assert kwargs["cwd"] == str(tmp_path) and kwargs["check"] is False
+    assert kwargs["creationflags"] == sweep.NO_WINDOW

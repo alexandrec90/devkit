@@ -139,11 +139,11 @@ MANIFEST: tuple[str, ...] = (
     # Config loader (the per-project seam) + the Stop dispatcher it drives.
     "scripts/hooks/harness_config.py",
     "scripts/hooks/tests/test_harness_config.py",
-    # The untested-symbol ratchet: gates *this* project's public callables against
-    # its own `.devkit-untested.txt`, which is deliberately not vendored -- the debt
-    # list is a fact about one repo. Scope comes from `[test_contract]` in the
-    # manifest, so the scanner never names a path. `--pull` seeds the baseline, which
-    # is what keeps adoption from turning a consumer's PR gate red.
+    # The untested-symbol ratchet, against the project's own (unvendored) debt list;
+    # `--pull` seeds it so adoption cannot redden a gate. It imports `code_text.py`, so
+    # the two arrive in one `--pull` or the gate dies of an `ImportError`.
+    "scripts/hooks/code_text.py",
+    "scripts/hooks/tests/test_code_text.py",
     "scripts/hooks/untested_symbols.py",
     "scripts/hooks/tests/test_untested_symbols.py",
     # The structural ratchet: size, complexity, fan-out, cycles, boundaries and

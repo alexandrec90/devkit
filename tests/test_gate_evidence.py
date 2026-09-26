@@ -501,36 +501,6 @@ def test_a_run_that_is_not_at_the_branch_tip_is_no_verdict(monkeypatch, tmp_path
     assert ev.read_default_branch("carameli", tmp_path, tmp_path / "ev") == (None, None)
 
 
-def _regate_world(monkeypatch, code: int, err: str = "") -> list:
-    asked: list = []
-
-    def gh(*args):
-        asked.append(args)
-        return subprocess.CompletedProcess(args, code, "", err)
-
-    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
-    monkeypatch.setattr(ev.sweep, "git_for", lambda _p: lambda *a: None)
-    monkeypatch.setattr(ev.tb, "detect_default_branch", lambda _git, fallback="main": "master")
-    return asked
-
-
-def test_regate_dispatches_the_gate_on_the_default_branch(monkeypatch, tmp_path):
-    """devkit main at a merge the auto-merge workflow made: `GITHUB_TOKEN` raises no push
-    event, so no gate ran at the tip and every pass held every project PR behind it."""
-    asked = _regate_world(monkeypatch, 0)
-    ok, line = ev.regate(tmp_path)
-    assert ok and line.startswith("master -- ")
-    assert asked == [("workflow", "run", ev.GATE_WORKFLOW, "--ref", "master")]
-
-
-def test_a_regate_gh_refuses_is_said_with_its_last_line(monkeypatch, tmp_path):
-    _regate_world(monkeypatch, 1, "warn\nHTTP 422: Workflow does not have 'workflow_dispatch'\n")
-    ok, line = ev.regate(tmp_path)
-    assert not ok and line.endswith("HTTP 422: Workflow does not have 'workflow_dispatch'")
-    _regate_world(monkeypatch, 1)
-    assert ev.regate(tmp_path) == (False, "master -- FAILED to re-run the gate: ?")
-
-
 def test_reading_a_pr_marks_it_behind_unless_it_conflicts(monkeypatch, tmp_path):
     monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: table({}))
     monkeypatch.setattr(ev.sweep, "git_for", lambda _p: lambda *a: None)

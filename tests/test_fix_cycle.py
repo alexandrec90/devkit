@@ -451,19 +451,19 @@ def test_a_conflict_whose_head_did_not_move_keeps_its_one_blind_slot():
 def test_moved_on_counts_every_day_but_only_this_problem():
     now = _conflict("62a5")
     yesterday = (NOW - _dt.timedelta(days=1)).isoformat()
-    assert not fix_cycle.moved_on(now, {}), "nothing sent is not movement"
+    assert not fix_ledger.moved_on(now, {}), "nothing sent is not movement"
     earlier = fix_ledger.decision_key(_conflict("143b"))
-    assert fix_cycle.moved_on(now, {earlier: {"when": yesterday, "what": "n"}}), (
+    assert fix_ledger.moved_on(now, {earlier: {"when": yesterday, "what": "n"}}), (
         "a conflict resolved yesterday and back today is the base moving"
     )
     update = earlier.replace(":resolve", ":update")
-    assert not fix_cycle.moved_on(now, {update: {"when": NOW.isoformat(), "what": "n"}})
+    assert not fix_ledger.moved_on(now, {update: {"when": NOW.isoformat(), "what": "n"}})
     folded = decision(
         fix_plan.RESOLVE,
         failure(project="devkit", number=390, sha="62a5", signature=(fix_plan.CONFLICT,)),
         failure(project="devkit", number=391, sha="62a5", signature=(fix_plan.CONFLICT,)),
     )
-    assert not fix_cycle.moved_on(folded, {earlier: {"when": NOW.isoformat(), "what": "n"}})
+    assert not fix_ledger.moved_on(folded, {earlier: {"when": NOW.isoformat(), "what": "n"}})
 
 
 def test_an_adoption_pr_is_classified_by_what_fails_and_its_own_release_never_holds_it():
