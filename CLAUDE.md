@@ -14,7 +14,7 @@ it does today. This tier carries only what neither of those can.
 | [`.claude/rules/engineering.md`](.claude/rules/engineering.md) | baseline policy: testing, scripts, lint, the vendored harness |
 | [`.claude/rules/authoring.md`](.claude/rules/authoring.md) | writing rules, skills and instruction files |
 | [`.claude/rules/session-scope.md`](.claude/rules/session-scope.md) | what a session leaves to the fix pass: commit, push, PR, the full suite |
-| [`.claude/fixer.md`](.claude/fixer.md) | a session the fix pass dispatched, where it differs from the rules above; loaded only by one |
+| [`.claude/fixer.md`](.claude/fixer.md) | a fix-pass session, where it differs from the rules above |
 | [`.claude/rules/vscode-tasks.md`](.claude/rules/vscode-tasks.md) | the workspace task block and its dispatcher |
 | [`scripts/CLAUDE.md`](scripts/CLAUDE.md) | vendoring, the two channels, boxes, scheduled jobs, loading a module by path |
 

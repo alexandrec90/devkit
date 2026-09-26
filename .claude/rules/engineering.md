@@ -225,9 +225,8 @@ devkit clone are in [`.claude/engineering-evidence.md`](../engineering-evidence.
 
 ## Guardrail: the harness is not your job
 
-**This section is for project sessions.** A fixer, which is a session the fix pass
-dispatched and whose prompt says so, follows [`.claude/fixer.md`](../fixer.md) where
-the two differ.
+**This section is for project sessions.** A fixer follows
+[`.claude/fixer.md`](../fixer.md) where the two differ.
 
 A session in a project makes the change the user asked for and nothing else. It does not
 maintain the harness, does not fix a gate, and does not file its defects: the scheduled
