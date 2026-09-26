@@ -672,7 +672,9 @@ def test_the_push_stage_says_it_will_be_quiet_before_it_goes_quiet(tmp_path, mon
     hook's own output until that hook exits -- so the minutes in between are silent, and
     that silence is what was read as a hang. The notice has to precede the wait, and the
     commit stage must not get it: those hooks are sub-second."""
-    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    (tmp_path / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n      - id: devkit-push-gate\n", encoding="utf-8"
+    )
     monkeypatch.setattr(
         git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
     )
@@ -691,6 +693,26 @@ def test_the_push_stage_says_it_will_be_quiet_before_it_goes_quiet(tmp_path, mon
     quiet = FakeRunner({("pre-commit-test", *commit_args): completed(["pre-commit-test"])})
     git_policy.framework._run_pre_commit_framework(tmp_path, quiet)
     assert capsys.readouterr().out == ""
+
+
+def test_a_push_stage_without_the_gate_does_not_claim_lint_and_tests(tmp_path, monkeypatch, capsys):
+    """carameli's push stage ran five fast hooks while the notice promised the PR gate's
+    lint and tests, so a green push read as a green gate."""
+    (tmp_path / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n      - id: detect-secrets\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+    )
+    publishing = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n"
+    args = ("run", "--hook-stage", "pre-push", "--all-files")
+    runner = FakeRunner({("pre-commit-test", *args): completed(["pre-commit-test"])})
+    git_policy.framework._run_pre_commit_framework(
+        tmp_path, runner, stage="pre-push", raw_updates=publishing
+    )
+    out = capsys.readouterr().out
+    assert "wires no devkit-push-gate" in out
+    assert "(lint, tests)" not in out and "SKIP=devkit-push-gate" not in out
 
 
 def test_a_streamed_run_leaves_the_childs_output_on_the_inherited_handles(tmp_path, capfd):
@@ -1145,3 +1167,10 @@ def test_the_dispatcher_relays_hook_output_through_emit():
             'errors="replace" and must go through emit() so a narrow console cannot '
             "turn a hook's output into a failed hook"
         )
+
+
+def test_push_stage_notice_reads_the_config_and_an_absent_one_claims_no_gate(tmp_path):
+    notice = git_policy.framework.push_stage_notice
+    assert notice(tmp_path) == git_policy.framework.PUSH_STAGE_NOTICE_NO_GATE
+    (tmp_path / ".pre-commit-config.yaml").write_text("- id: devkit-push-gate\n", "utf-8")
+    assert notice(tmp_path) == git_policy.framework.PUSH_STAGE_NOTICE

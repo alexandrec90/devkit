@@ -13,6 +13,7 @@ back to stranding work — just faster than before.
 
 from __future__ import annotations
 
+import argparse
 import datetime as _dt
 import json
 import os
@@ -2920,6 +2921,35 @@ def test_reap_refuses_an_argument_pair_it_cannot_honour(workspace):
 
 def test_provisioning_an_unknown_box_is_an_error_not_a_no_op(workspace):
     assert worktree.main(["provision", "demo--ghost-0806", "--workspace", str(workspace)]) == 2
+
+
+def test_provision_acts_by_default_and_plans_only_on_dry_run(workspace, monkeypatch, capsys):
+    """A session told to "run the provisioning command" ran `provision <tree>`, read a
+    plan, and went on with no `.venv`. Provisioning only installs into a tree that asked
+    for it, so the bare verb acts; the destructive verbs keep planning first."""
+    root = workspace.parent
+    (root / "demo" / ".git").mkdir(parents=True)
+    step = worktree.ProvisionStep(label="uv sync", argv=("uv", "sync"))
+    monkeypatch.setattr(worktree, "plan_provision", lambda path: (step,))
+    ran: list[Path] = []
+    monkeypatch.setattr(
+        worktree, "run_provision", lambda path, steps: (ran.append(path), (True, []))[1]
+    )
+
+    assert worktree.main(["provision", "demo", "--workspace", str(workspace)]) == 0
+    assert ran == [root / "demo"] and "Provisioned demo" in capsys.readouterr().out
+
+    assert worktree.main(["provision", "demo", "--dry-run", "--workspace", str(workspace)]) == 0
+    assert ran == [root / "demo"] and "Dry run" in capsys.readouterr().out
+    assert worktree.main(["provision", "demo", "--yes", "--workspace", str(workspace)]) == 0
+    assert len(ran) == 2
+
+
+def test_the_verbs_that_change_the_workspace_still_plan_by_default():
+    parser = argparse.ArgumentParser()
+    worktree.add_common_args(parser)
+    assert parser.parse_args([]).dry_run is True
+    assert parser.parse_args(["--yes"]).dry_run is False
 
 
 def test_provision_resolves_a_static_checkout_as_well_as_a_box(workspace):

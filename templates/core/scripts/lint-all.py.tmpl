@@ -42,7 +42,12 @@ MYPY_SCOPE = ["{{ app_dir }}", "{{ tests_dir }}"]
 # because `scripts/**` ignores E501, and `ruff format` does not read per-file-ignores
 # — so it reflowed a long line in `harness_config.py` and the next step saw drift.
 # Broader than MYPY_SCOPE's inverse: `task_branch.py` is vendored too.
-NO_FIX_SCOPE = ["scripts/hooks", "scripts/sync-devkit.py", "scripts/task_branch.py"]
+NO_FIX_SCOPE = [
+    "scripts/hooks",
+    "scripts/sync-devkit.py",
+    "scripts/devkit_manifest.py",
+    "scripts/task_branch.py",
+]
 
 # dotenv-linter v4 takes a subcommand; a bare file list is rejected as an
 # unrecognised one, which reaches the artifact as a usage error no source edit can
