@@ -89,8 +89,10 @@ Finally, read each `filed` line once more: a finding the devkit session cannot a
 
 Before re-running, run what the PR gate will run on what you changed: ruff and mypy,
 `scripts/hooks/structure_check.py`, `scripts/hooks/untested_symbols.py`, the tests of
-every module you touched, and the contract tests that read every module
-(`tests/test_test_contract.py`, `tests/test_doc_claims.py`). A red gate on this branch
+every module you touched, the contract tests that read every module
+(`tests/test_test_contract.py`, `tests/test_doc_claims.py`), and
+`scripts/posix-rehearsal.py` -- the gate runs on Linux, where a Windows path in a test
+reads differently. A red gate on this branch
 costs the next iteration a fixer and a round trip -- the first supervision paid that
 twice. Then run step 2 again. Stop when an iteration comes back with **no violation,
 no unfiled friction and no noisy finding** -- or after three rounds, in which case the

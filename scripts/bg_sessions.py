@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Callable, Iterable
-from pathlib import Path
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -52,7 +51,9 @@ def finished_in(rows: Iterable[dict], trees: Iterable[str]) -> list[dict]:
 
 
 def _key(path: str) -> str:
-    return str(Path(path)).rstrip("\\/").lower() if path else ""
+    """A path as text that compares equal across slashes and case, on any OS: `claude`
+    reports Windows paths, and on the Linux gate `Path` keeps a backslash as a letter."""
+    return path.replace("\\", "/").rstrip("/").lower()
 
 
 def stop_finished(trees: Iterable[str], runner: Runner) -> list[str]:

@@ -242,6 +242,37 @@ def already_shipped(intent: Intent, state: dict, porcelain: str) -> bool:
     return state.get("stage") == SHIPPED and not porcelain.strip()
 
 
+def _settled(intent: Intent, porcelain: str) -> Outcome | None:
+    """This pass's answer when nothing needs doing: shipped already, or refused again."""
+    state = read_state(intent.tree)
+    if already_shipped(intent, state, porcelain):
+        # Consumed, as a fresh ship's intent is: left in place it was re-read and
+        # re-reported by every pass -- ten from before the pass set intents aside.
+        set_aside(intent.tree, SHIPPED_FILE)
+        return Outcome(intent, SKIPPED, "already shipped at this intent; set aside")
+    return still_refused(intent, state, porcelain)
+
+
+def still_refused(intent: Intent, state: dict, porcelain: str) -> Outcome | None:
+    """The last refusal again, when neither the words nor the tree have moved since it.
+
+    A refusal held behind a red harness was re-run through the whole commit stage on
+    every pass of the third supervised run, to the same answer each time. Nothing that
+    could change the answer has changed, so the stored one stands, and it is still a
+    failure the plan can place (`refusal_failure` reads the same state).
+    """
+    if state.get("stage") != REFUSED or state.get("intent") != intent.digest:
+        return None
+    if state.get("tree") != _digest(porcelain):
+        return None
+    detail = f"{state.get('step', 'commit')}: {str(state.get('output', '')).strip()[-400:]}"
+    return Outcome(intent, REFUSED, detail)
+
+
+def _digest(porcelain: str) -> str:
+    return hashlib.sha256(porcelain.encode("utf-8", "replace")).hexdigest()[:12]
+
+
 def is_spent(intent: Intent, runner: Runner = run_quiet) -> bool:
     """`already_shipped`, asked of the tree itself: what a `plan` pass reads, so it says
     what a `dispatch` would do rather than "would ship" over work that merged."""
@@ -275,17 +306,14 @@ def ship_one(
     tree = intent.tree
     when = (now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds")
     status = runner(["git", "status", "--porcelain"], cwd=tree)
-    if already_shipped(intent, read_state(tree), status.stdout or ""):
-        # Consumed, as a fresh ship's intent is: left in place it was re-read and
-        # re-reported by every pass -- ten from before the pass set intents aside.
-        set_aside(tree, SHIPPED_FILE)
-        return Outcome(intent, SKIPPED, "already shipped at this intent; set aside")
-
+    if settled := _settled(intent, status.stdout or ""):
+        return settled
     if (status.stdout or "").strip():
         step, output = commit_intent(intent, python, runner)
         if step:
+            after = runner(["git", "status", "--porcelain"], cwd=tree).stdout or ""
             record = {"stage": REFUSED, "step": step, "output": output, "when": when}
-            write_state(tree, {**record, "intent": intent.digest})
+            write_state(tree, {**record, "intent": intent.digest, "tree": _digest(after)})
             return Outcome(intent, REFUSED, f"{step}: {output.strip()[-400:]}")
 
     env = dict(os.environ)

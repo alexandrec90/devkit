@@ -517,3 +517,36 @@ def test_a_refusal_is_named_by_the_line_that_says_why():
     assert ship_intent.refusal_line("a\nlast words\n") == "last words"
     assert ship_intent.refusal_line("") == ""
     assert len(ship_intent.refusal_line("x Failed " + "y" * 500)) == 160
+
+
+def test_a_refusal_nothing_has_changed_since_is_not_run_again(tmp_path):
+    """The third supervised run re-ran carameli's whole commit stage on every pass for a
+    refusal held behind a red harness, to the same answer each time."""
+    one = intent(tmp_path)
+    ship_intent.write_state(
+        one.tree,
+        {
+            "stage": ship_intent.REFUSED,
+            "step": "fixers",
+            "output": "Detect secrets....Failed",
+            "intent": one.digest,
+            "tree": ship_intent._digest(" M a.py\n"),
+        },
+    )
+    run = Runner(porcelain=" M a.py\n")
+    outcome = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert (
+        outcome.stage == ship_intent.REFUSED
+        and outcome.detail == "fixers: Detect secrets....Failed"
+    )
+    assert run.verbs() == ["git status"], "no fixers, no commit: the stored refusal stands"
+    moved = Runner(porcelain=" M a.py\n M b.py\n")
+    assert ship_intent.still_refused(one, ship_intent.read_state(one.tree), " M b.py\n") is None
+    ship_intent.ship_one(one, "py", "main", moved, gh_ok, NOW)
+    assert "git commit" in moved.verbs() or "scripts/ship.py" in " ".join(moved.verbs()), (
+        "an edit is a new try"
+    )
+    reworded = intent(tmp_path, body="Other words.")
+    assert (
+        ship_intent.still_refused(reworded, ship_intent.read_state(one.tree), " M a.py\n") is None
+    )
