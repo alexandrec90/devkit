@@ -297,10 +297,14 @@ lacks, each only when its conditions hold:
 
 - writes the worktree its own `COMPOSE_PROJECT_NAME` into a gitignored `.env`, so a
   worktree named after its repo cannot adopt the checkout's containers and volumes;
-- runs `uv sync` so the tree has its own `.venv` before a session's first turn, rather
-  than borrowing the checkout's interpreter for every test run. Only for a uv-locked
-  project whose checkout already has a `.venv` — the on-disk fact that says the machine's
-  uv cache is warm, so the sync is seconds inside the `worktree add` rather than minutes.
+- runs the project's provisioner — the manifest's `install_command` when it is one plain
+  command, else `uv sync` — so the tree has its own `.venv` before a session's first
+  turn, rather than borrowing the checkout's interpreter for every test run. Only when
+  the checkout already has a `.venv` — the on-disk fact that says the machine's cache is
+  warm, so it is seconds inside the `worktree add` rather than minutes. A failure, a
+  missing `uv`, or a command that needs a shell is written to the tree's
+  `logs/friction.md`, which the fix pass files, since `claude --worktree` hides the
+  hook's output.
   A cold checkout gets nothing and `ship.py --preflight` still names the command;
   `DEVKIT_SKIP_WORKTREE_PROVISION=1` skips it for a `git worktree add` that wants a bare
   tree.

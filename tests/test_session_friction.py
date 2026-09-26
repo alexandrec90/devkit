@@ -306,6 +306,30 @@ def test_a_dispatched_session_asking_a_question_is_friction_and_an_interactive_o
     assert classes([user("help me design this"), ask]) == []
 
 
+def say(text: str) -> dict:
+    return {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}
+
+
+def test_a_dispatched_session_ending_on_a_decision_for_someone_else_is_friction():
+    """The ledger sweep's last words were "The last group needs your decision." -- nobody
+    was there, and it had already marked the option it would pick as recommended. Only
+    the final message counts: mid-session, "should I check X? yes" is thinking aloud."""
+    opening = user("Sweep the ledger. ... the fix pass commits, pushes, opens or updates the PR")
+    for ending in (
+        "Four groups are retired. The last group needs your decision.",
+        "Both work. Do you want me to pin it by rev?",
+        "Let me know which option you prefer.",
+    ):
+        assert classes([opening, say(ending)]) == ["handed-back"], ending
+    decided = say("I pinned data-lake by rev: it keeps worktrees independent.")
+    assert classes([opening, say("Should I read the tests first? Yes."), decided]) == []
+    assert classes([user("help me choose"), say("Do you want option 1?")]) == []
+    working = [opening, say("Should I pin it? I will."), call("uv lock", "1")]
+    assert classes(working) == [], "a harvest mid-session: it went on working"
+    asked = [opening, say("This needs your decision."), _tool("AskUserQuestion", "2")]
+    assert classes(asked) == ["asked-user", "handed-back"]
+
+
 def test_the_same_test_run_three_times_with_no_edit_between_is_a_rerun():
     run = "python -m pytest tests/test_x.py tests/test_y.py -q"
     rows = [call(f"{run} | tail -{n}", str(n)) for n in (3, 5, 9)]

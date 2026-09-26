@@ -83,7 +83,11 @@ test built from the transcript's own lines, or -- when no pattern could see it -
 the prompt or the evidence that caused it.
 
 Finally, read each `filed` line once more: a finding the devkit session cannot act on
-(vague, duplicated, mis-grouped) is itself a defect in how it was filed.
+(vague, duplicated, mis-grouped) is itself a defect in how it was filed. And read what
+each session *fixed*: a repair to one tree, box or run whose cause is left standing (a
+`uv sync` by hand where the provisioner should have run) is a fix that will recur --
+fix the cause yourself. A `RECURRED` group in `logs/harness-triage.log` is one that
+already did.
 
 ## 4. Repeat until an iteration is clean
 
@@ -125,6 +129,13 @@ sessions still alive, `docker stats` for stacks) rather than lowering the floor.
 This session is held to the same contract. Any turn *you* lost to the harness -- a
 refusal, a missing tool, a wrong instruction in this file -- goes in
 `logs/friction.md` before you ship, and a wrong instruction here is fixed here.
+
+**Decide, as a fixer must.** A finding that comes back as a choice -- a stuck session's
+question, a design fork in a project -- is yours to settle: the option you would
+recommend is the decision, so carry it out and say why in the intent. Ending a report on
+"your call" is the same lost turn the `handed-back` detector files against a fixer; a
+supervisor once relayed a fixer's three-option question and recommended one, and the
+answer was to have done it.
 
 ## Reporting
 

@@ -430,6 +430,44 @@ def test_the_rendering_names_an_id_and_the_command_that_retires_it():
     assert "--resolve-like" in text
 
 
+def test_a_defect_back_after_a_resolution_is_marked_as_a_fix_that_did_not_hold():
+    """A missing `.venv` kept coming back: each session provisioned its own tree by hand
+    and the group was retired, so every recurrence read as new. A group whose signature
+    was resolved before now says so, with what that fix was, so the next one goes to the
+    cause instead of repeating the instance."""
+    first = _line("session-friction", stamp=_STAMPS[0], detail="No module named pytest")
+    fixed = _line(
+        "triage-resolved",
+        stamp="2026-08-24T13:00:00+00:00",
+        ref=triage.item_id(first),
+        note="ran uv sync in the tree",
+    )
+    again = _line(
+        "session-friction", stamp="2026-08-25T09:00:00+00:00", detail="No module named pytest"
+    )
+    history = triage.read_items("\n".join((first, fixed, again)))
+    text = triage.render(triage.open_items(history), history)
+    assert "  RECURRED after 1 resolution -- last: ran uv sync in the tree" in text
+    assert "fix the cause" in text
+    assert "RECURRED" not in triage.render(triage.open_items(history)), "no history, no claim"
+    fresh = triage.read_items(_line("session-friction", detail="something new"))
+    assert "RECURRED" not in triage.render(triage.open_items(fresh), fresh)
+
+
+def test_past_fixes_counts_only_resolutions_still_standing():
+    """A resolution the pass reopened (its branch never merged) was no fix at all."""
+    first = _line("agent-report", stamp=_STAMPS[0], message="m")
+    ref = triage.item_id(first)
+    held = _line("triage-resolved", stamp=_STAMPS[1], ref=ref, note="fixed the hook")
+    undone = _line("triage-reopened", stamp="2026-08-24T12:00:03+00:00", ref=ref, note="no merge")
+    signature = triage.read_items(first)[0].signature
+    assert triage.past_fixes(triage.read_items(first + "\n" + held)) == {
+        signature: ["fixed the hook"]
+    }
+    assert triage.past_fixes(triage.read_items("\n".join((first, held, undone)))) == {}
+    assert triage.past_fixes([]) == {}
+
+
 def test_a_group_reports_its_count_and_every_id(tmp_path):
     a = _line("agent-report", stamp=_STAMPS[0], message="same")
     b = _line("agent-report", stamp=_STAMPS[1], message="same")

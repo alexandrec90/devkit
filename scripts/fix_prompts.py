@@ -31,11 +31,20 @@ FINISH = (
     "runs -- python scripts/hooks/structure_check.py and python scripts/hooks/untested_symbols.py "
     "-- in every tree you changed, then ship it with the ship skill and stop: the fix pass "
     "commits, pushes, opens or updates the PR and reads what the gate says. Nobody is "
-    "watching this session, so never ask a question: decide, or write "
-    f"{BLOCKED_FILE.as_posix()} saying what is in the way, in a sentence or two, and stop. "
+    "watching this session, so never ask a question and never end on one: a choice "
+    "between approaches is yours -- the option you would recommend is the decision, so do "
+    "it and give the reason and the alternatives in the intent. Only what needs something "
+    "outside the repository -- a credential, admin rights, a paid service -- goes in "
+    f"{BLOCKED_FILE.as_posix()}, in a sentence or two, and then stop. "
+    "Fix causes, not instances: whatever cost you turns is fixed where it comes from, so "
+    "the next session cannot hit it -- a tree with no .venv means the provisioner that "
+    "should have run is what gets fixed, with a test -- and a repair to this tree alone "
+    "is a workaround. "
     f"Either way, if the harness cost you turns -- a refusal, a missing tool, evidence "
     f"that was wrong or absent, an instruction that sent you the wrong way -- put one line "
-    f"per thing in {FRICTION_FILE.as_posix()}: the pass files each for the devkit session."
+    f"per thing in {FRICTION_FILE.as_posix()}: the pass files each for the devkit session, "
+    f"which fixes it at the cause, and a cause that lives outside this repository is "
+    f"fixed there, not worked around here."
 )
 
 # What the devkit session is told about the harness-defect ledger, when the backlog is

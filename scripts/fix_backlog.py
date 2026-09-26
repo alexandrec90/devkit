@@ -32,7 +32,8 @@ import task_branch as tb
 
 def ledger_failure(devkit_dir: Path, root: Path) -> fix_plan.Failure | None:
     """The open backlog as a `LEDGER` failure with its groups as evidence; None when empty."""
-    items = triage.open_items(triage.load(devkit_dir))
+    history = triage.load(devkit_dir)
+    items = triage.open_items(history)
     if not items:
         return None
     grouped = triage.groups(items)
@@ -55,5 +56,5 @@ def ledger_failure(devkit_dir: Path, root: Path) -> fix_plan.Failure | None:
     where = root / gate_evidence.evidence_slot(failure)
     shutil.rmtree(where, ignore_errors=True)
     where.mkdir(parents=True, exist_ok=True)
-    (where / triage.ARTIFACT.name).write_text(triage.render(items), encoding="utf-8")
+    (where / triage.ARTIFACT.name).write_text(triage.render(items, history), encoding="utf-8")
     return replace(failure, evidence=str(where))

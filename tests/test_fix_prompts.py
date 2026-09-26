@@ -10,6 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_plan
 import fix_prompts
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def failure(**fields) -> fix_plan.Failure:
     base: dict[str, Any] = {
@@ -225,6 +227,24 @@ def test_every_prompt_names_the_ratchets_and_forbids_a_question():
     for text in every_prompt():
         assert "structure_check.py" in text and "untested_symbols.py" in text
         assert "never ask a question" in text
+        # A fixer ended on a question whose "(Recommended)" option was the answer.
+        assert "the option you would recommend is the decision" in text
+        assert "outside the repository" in text, "the one kind of blocker there is"
+        # A missing .venv came back session after session, each fixing only its own tree.
+        assert "Fix causes, not instances" in text and "the provisioner" in text
+
+
+def test_the_skill_the_ledger_sweep_follows_never_sends_it_to_the_user():
+    """`LEDGER_STEPS` sends the devkit session to this skill, which told it to ask the user
+    about "a fix needing a decision only the user can make" -- and it did, with nobody
+    there. It now says to decide, and why."""
+    skill = (REPO_ROOT / ".claude" / "skills" / "triage-harness" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "triage-harness/SKILL.md" in fix_prompts.LEDGER_STEPS
+    assert "Decide everything, and never ask" in skill
+    assert "Ask it, get the answer" not in skill and "stay the user's call" not in skill
+    assert "Fix the cause, never the instance" in skill and "RECURRED" in skill
 
 
 def test_the_devkit_session_marks_a_sibling_tree_it_cuts_as_fixer_work():

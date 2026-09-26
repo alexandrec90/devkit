@@ -124,6 +124,15 @@ FRUSTRATION = re.compile(
     re.I,
 )
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# A dispatched session's last words handing a choice to someone who is not there. The
+# ledger sweep ended "the last group needs your decision" with its pick marked
+# "(Recommended)" -- a recommendation is the decision, so this is always a lost session.
+HANDED_BACK = re.compile(
+    r"\bneeds? your (?:decision|call|input|approval|go-ahead)\b|\byour call\b|\bup to you\b|"
+    r"\b(?:let me know|tell me) (?:which|if|whether|how)\b|\b(?:do|would) you (?:want|like|prefer)\b|"
+    r"\b(?:should|shall) I\b|\bwant me to\b",
+    re.I,
+)
 
 
 # --- the detectors ------------------------------------------------------------------------
@@ -206,6 +215,7 @@ class _Session:
     # Commands run since the last edit, by what runs before any pipe: the same run again
     # with only its `| tail` changed read nothing new -- five times in one session.
     unchanged: dict[str, int] = field(default_factory=dict)
+    last_said: Event | None = None  # the agent's latest text: how the session ended
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -220,6 +230,8 @@ class _Session:
 
     def call(self, event: Event) -> None:
         self.calls[event.call_id] = event.command
+        if event.tool != "AskUserQuestion":
+            self.last_said = None  # it went on working: that text was not how it ended
         for cls, what in _command_classes(event.command):
             self.note(cls, what, event)
         if event.tool == "AskUserQuestion" and self.dispatched:
@@ -231,6 +243,15 @@ class _Session:
         elif TEST_RUN.search(event.command):
             # Only a test run: reading `git status` thrice between edits is not waste.
             self._rerun(event)
+
+    def say(self, event: Event) -> None:
+        self.last_said = event
+
+    def ending(self) -> None:
+        """Judge the last thing the agent said, once the session's events are read."""
+        said = self.last_said
+        if self.dispatched and said and HANDED_BACK.search(said.text):
+            self.note("handed-back", "a dispatched session ended on a decision for nobody", said)
 
     def _rerun(self, event: Event) -> None:
         key = normalize(event.command.split("|", 1)[0])[:SNIPPET]
@@ -253,7 +274,7 @@ class _Session:
 def detect(events: Iterable[Event]) -> list[tuple[str, str, Event]]:
     """`(class, what, event)` for every friction in one session's events, each once."""
     session = _Session()
-    handlers = {"user": session.user, "call": session.call}
+    handlers = {"user": session.user, "call": session.call, "say": session.say}
     for event in events:
         if event.kind == "result":
             if event.error:
@@ -263,6 +284,7 @@ def detect(events: Iterable[Event]) -> list[tuple[str, str, Event]]:
     for what, runs in session.failures.items():
         if len(runs) >= REPEATS:
             session.note("repeat-failure", f"x{len(runs)} {what}", runs[-1])
+    session.ending()
     return [(cls, what, event) for (cls, what), event in session.found.items()]
 
 
