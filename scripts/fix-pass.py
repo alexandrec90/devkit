@@ -13,7 +13,7 @@ which survives this file crashing). Two rules hold it together:
   (`fix_findings.py`), which the devkit session this same pass sends takes over.
 
 1. **Ship every intent** (`ship_intent.py`); a refused commit is a failure like any other.
-2. **Merge green adoptions** (only those: every other green PR waits for a person).
+2. **Merge green adoptions**, then start any release `main` owes (`fix_release.py`).
 3. **Read back** (`fix_loop.py`): blocked reports, friction files, dead sessions,
    transcripts, resolutions that did not hold, waits that have gone stale -- filed now,
    so the backlog read next already carries them.
@@ -41,7 +41,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
-import adoption_prs
 import agent_models
 import broken_pr_menu as menu
 import devkit_project
@@ -49,11 +48,11 @@ import fix_cycle
 import fix_ledger
 import fix_loop
 import fix_plan
+import fix_release
 import fix_red
 import fix_send
 import gate_evidence
 import ship_intent
-import sweep
 import worktree
 from _loader import load_by_path
 
@@ -77,8 +76,6 @@ HISTORY = Path("logs") / "fix-pass.history.jsonl"
 # A week of half-hourly passes.
 HISTORY_KEEP = 336
 SCHEDULED_AGENT = "claude-bg"
-# What `merge_green_adoptions` reads of each open PR to judge it green.
-ADOPTION_FIELDS = "number,headRefName,isDraft,labels,mergeable,statusCheckRollup"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -176,51 +173,24 @@ def ship_intents(
     return lines, refused, failed
 
 
-def pending_adoptions(root: Path, projects: list[str], tag: str) -> list[str]:
-    """Projects with the newest release still up for adoption -- the harness mid-flight."""
-    if not tag:
-        return []
-    return [
-        name
-        for name in projects
-        if name != fix_cycle.DEVKIT
-        and (root / name).is_dir()
-        and adoption_prs.open_adoption_pr(root / name, tag)
-    ]
+def _ship_and_merge(
+    root: Path, projects: list[str], mode: str, journal: Journal
+) -> tuple[list[str], list[fix_plan.Failure], bool, list[str]]:
+    """Steps 1 and 2, each isolated: `(shipped lines, refusals, ship failed, merged)`."""
+    shipped, refused, failed = journal.step(
+        "ship", ship_intents, root, projects, mode, journal, default=([], [], True)
+    )
+    if mode != fix_cycle.DISPATCH:
+        return shipped, refused, failed, []
+    merged = journal.step("merge", fix_release.merge_green_adoptions, root, projects, default=[])
+    return shipped, refused, failed, merged
 
 
-def merge_green_adoptions(
-    root: Path, projects: list[str], journal: Journal | None = None
-) -> list[str]:
-    """Step 2. The one merge the pass makes; `(lines for the record)`."""
-    merged: list[str] = []
-    prefixes = adoption_prs.adoption_prefixes()
-    for name in projects:
-        project_dir = root / name
-        if name == fix_cycle.DEVKIT or not project_dir.is_dir():
-            continue
-        gh = sweep.gh_for(project_dir)
-        listed = gh("pr", "list", "--state", "open", "--limit", "50", "--json", ADOPTION_FIELDS)
-        rows = gate_evidence.gh_json(listed)
-        if not isinstance(rows, list):
-            rows = []
-        for row in adoption_prs.green_adoptions(rows, prefixes, sweep.AUTOMERGE_LABEL):
-            ok, message = worktree.merge_pr(gh, int(row.get("number", 0)))
-            merged.append(
-                f"{name} #{row.get('number')} -- {message if ok else 'FAILED: ' + message}"
-            )
-            if not ok:
-                fix_loop.fix_findings.file(
-                    journal, "merge-failed", name, f"#{row.get('number')}: {message[:200]}"
-                )
-    return merged
-
-
-def _file_failed_regates(regated: list[str], journal: Journal) -> None:
-    """A gate the pass could not re-run is a finding against that checkout."""
-    for line in regated:
+def _file_failures(lines: list[str], kind: str, journal: Journal) -> None:
+    """A failed regate or merge in the record is a finding against that checkout."""
+    for line in lines:
         if "FAILED" in line:
-            fix_loop.fix_findings.file(journal, "regate-failed", line.split(" ", 1)[0], line)
+            fix_loop.fix_findings.file(journal, kind, line.split(" ", 1)[0], line)
 
 
 def decide(
@@ -268,23 +238,17 @@ def run(
     ctx = fix_loop.Context(root, projects, devkit_dir, ledger_path, REPO_ROOT / HISTORY, mode, now)
     errors = (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError)
     journal = Journal(devkit_dir, errors=fix_loop.fix_findings.STEP_ERRORS + errors)
-    prefixes = adoption_prs.adoption_prefixes()
+    prefixes = fix_release.adoption_prefixes()
     step = journal.step
 
-    shipped, refused, ship_failed = step(
-        "ship", ship_intents, root, projects, mode, journal, default=([], [], True)
-    )
-    merged = (
-        step("merge", merge_green_adoptions, root, projects, journal, default=[])
-        if mode == fix_cycle.DISPATCH
-        else []
-    )
+    shipped, refused, ship_failed, merged = _ship_and_merge(root, projects, mode, journal)
     closed = step("read-back", fix_loop.close, ctx, journal, default=fix_loop.Closed())
     failures, green, unread = step(
         "collect", fix_red.collect_red, workspace, projects, refused, default=([], None, [])
     )
     regated, rerun = step("regate", fix_red.regate_unread, root, unread, mode, default=([], set()))
-    _file_failed_regates(regated, journal)
+    _file_failures(regated, "regate-failed", journal)
+    _file_failures(merged, "merge-failed", journal)
     green = fix_plan.RUNNING if fix_cycle.DEVKIT in rerun else green
     # Filed before the backlog is read, and the backlog read on its own: whatever broke
     # above -- the collect step included -- reaches the devkit session this same pass.
@@ -292,7 +256,11 @@ def run(
     backlog = step("backlog", fix_red.backlog_failure, workspace, default=None)
     failures += [backlog] if backlog else []
     newest = step("newest-release", gate_evidence.newest_release, devkit_dir, default="")
-    adopting = step("adoptions", pending_adoptions, root, projects, newest, default=[])
+    dispatching = mode == fix_cycle.DISPATCH
+    release = step(
+        "release", fix_release.cut_release, workspace, newest, green, dispatching, now, default=""
+    )
+    adopting = step("adoptions", fix_release.pending_adoptions, root, projects, newest, default=[])
     fallback = fix_cycle.only_the_harness(backlog)
     harness, go, held, skipped = step(
         "plan", decide, failures, green, newest, adopting, prefixes, default=fallback
@@ -315,6 +283,7 @@ def run(
         tuple(merged),
         tuple(skipped),
         tuple(closed.lines),
+        release,
         tuple(regated),
         tuple(filed),
         fix_loop.backlog(ctx),

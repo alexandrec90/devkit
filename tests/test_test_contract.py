@@ -59,6 +59,12 @@ COVERED_BY: dict[str, tuple[str, str]] = {
         "tests/test_precommit_hooks.py",
         "same module as its two siblings, for the same reason",
     ),
+    "devkit_manifest.py": (
+        "scripts/hooks/tests/test_sync_devkit.py",
+        "data only: the path lists cut out of sync-devkit.py, which re-exports them, so "
+        "what can go wrong with a list is what the tool does with it -- tested there, and "
+        "vendored with it, where a devkit-only test module would not follow",
+    ),
     "notify-wrap.py": (
         "tests/test_self_hosting.py",
         "the wrapper's one behaviour is that it propagates the wrapped exit code, and "

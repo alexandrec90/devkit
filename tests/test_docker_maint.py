@@ -321,7 +321,7 @@ def test_the_prune_never_removes_containers_or_volumes(monkeypatch, tmp_path):
     # instead of shelling out to PowerShell against this machine's real disk.
     monkeypatch.setattr(docker_maint.Path, "home", staticmethod(lambda: tmp_path))
 
-    assert docker_maint.generic_prune() == 0
+    assert docker_maint.generic_prune(elevated=lambda: True) == 0
     assert calls, "the prune ran nothing at all"
 
     for argv in calls:
@@ -334,6 +334,54 @@ def test_the_prune_never_removes_containers_or_volumes(monkeypatch, tmp_path):
     # And it still reclaims: the two lines that are where the GB actually are.
     assert ["docker", "image", "prune", "-af"] in calls
     assert ["docker", "builder", "prune", "-af"] in calls
+
+
+def _pruner(monkeypatch, tmp_path, optimize_exit: int = 0):
+    """A prune whose engine answers, over a tmp home holding a VHDX; returns the log."""
+    log: list[str] = []
+
+    def run(cmd, **_kw):
+        log.append(" ".join(cmd))
+        return optimize_exit
+
+    monkeypatch.setattr(docker_maint, "run", run)
+    monkeypatch.setattr(docker_maint, "docker_info_ok", lambda *_a, **_kw: True)
+    monkeypatch.setattr(docker_maint, "stop_docker", lambda: log.append("STOP"))
+    monkeypatch.setattr(docker_maint, "start_docker", lambda: log.append("START"))
+    monkeypatch.setattr(docker_maint, "poll_engine", lambda *_a, **_kw: True)
+    disk = tmp_path / "AppData/Local/Docker/wsl/disk/docker_data.vhdx"
+    disk.parent.mkdir(parents=True)
+    disk.write_bytes(b"")
+    monkeypatch.setattr(docker_maint.Path, "home", staticmethod(lambda: tmp_path))
+    return log
+
+
+def test_an_unelevated_prune_says_it_did_not_compact_and_never_stops_docker(
+    monkeypatch, tmp_path, capsys
+):
+    """The ledger report: the scheduled task runs unelevated, so `sc start` failed with
+    exit 5, Optimize-VHD refused, every container had been stopped for nothing -- and the
+    run printed PRUNE COMPLETE with exit 0."""
+    log = _pruner(monkeypatch, tmp_path)
+    assert docker_maint.generic_prune(elevated=lambda: False) == 0
+    out = capsys.readouterr().out
+    assert "NOT COMPACTED" in out and "PRUNE COMPLETE" not in out
+    assert "STOP" not in log and not any("Optimize-VHD" in line for line in log)
+    assert "docker image prune -af" in log
+
+
+def test_a_compaction_that_fails_is_not_reported_as_complete(monkeypatch, tmp_path, capsys):
+    _pruner(monkeypatch, tmp_path, optimize_exit=1)
+    assert docker_maint.generic_prune(elevated=lambda: True) == 1
+    out = capsys.readouterr().out
+    assert "NOT COMPACTED" in out and "PRUNE COMPLETE" not in out
+
+
+def test_an_elevated_prune_that_compacts_is_complete(monkeypatch, tmp_path, capsys):
+    log = _pruner(monkeypatch, tmp_path)
+    assert docker_maint.generic_prune(elevated=lambda: True) == 0
+    assert "PRUNE COMPLETE" in capsys.readouterr().out
+    assert log.index("STOP") < log.index("START")
 
 
 def test_the_flag_reaches_the_generic_prune(monkeypatch):

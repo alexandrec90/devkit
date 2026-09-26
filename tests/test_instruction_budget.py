@@ -140,8 +140,18 @@ def test_the_background_pipeline_warning_names_the_masked_task_status():
     assert "background task's completion status" in rule
 
 
-def test_manifest_paths_is_empty_when_sync_devkit_is_missing(tmp_path: Path):
+def test_manifest_paths_is_empty_when_devkit_manifest_is_missing(tmp_path: Path):
     assert budget.manifest_paths(tmp_path) == frozenset()
+
+
+def test_manifest_paths_reads_the_list_where_it_lives_now(tmp_path: Path):
+    """The MANIFEST left `sync-devkit.py` for `devkit_manifest.py`; a reader still
+    parsing the tool would find nothing vendored and report every file as editable."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "devkit_manifest.py").write_text(
+        'MANIFEST = (\n    ".claude/rules/x.md",\n)\n', encoding="utf-8"
+    )
+    assert budget.manifest_paths(tmp_path) == {".claude/rules/x.md"}
 
 
 # --- the memory slug ----------------------------------------------------------

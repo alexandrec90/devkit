@@ -32,9 +32,9 @@ what the hook runs and CI does not, are both held to a written reason by
 
 ## Vendoring rules
 
-- `MANIFEST` in `scripts/sync-devkit.py` is the shared set, and every entry ships with its
-  test. Vendored files are compared **byte-for-byte**, so formatting counts — CI runs
-  `ruff format --check .` because an unformatted MANIFEST file gets reformatted downstream
+- `MANIFEST` in `scripts/devkit_manifest.py` (re-exported by `sync-devkit.py`) is the
+  shared set, and every entry ships with its test. Vendored files are compared
+  **byte-for-byte**, so formatting counts — CI runs `ruff format --check .` because an unformatted MANIFEST file gets reformatted downstream
   on first edit, and the consumer's `--check` then reports drift it did not cause.
 - **Never vendored**, because each project's copy differs: `.devkit.toml`,
   `.claude/settings.json`, `scripts/lint-all.py`, `scripts/run-tests.py`. They live in
@@ -130,10 +130,11 @@ state a checkout can only reach by surviving the work done in it. A box cut fres
   `origin/<default>` commits (`head_tree_landed`), and the merged PR's `headRefOid`. Every
   unknown reads as *not landed*, and all of it is refused while the box is dirty: a landed
   tree says where the committed work is and nothing about the edits on top of it.
-- **`reap` is the one place in the workspace that passes `-v` to `compose down`,** scoped
-  with `-p <box>` so it cannot widen to the source project. `docker-maint.py` must never
-  do it — its target is a static checkout whose volumes hold a dev database costing hours
-  to re-ingest.
+- **Only a reaper passes `-v` to `compose down`,** scoped with `-p` to the tree's own
+  project so it cannot widen to the source project: `reap` for a box, and
+  `session_trees.py` for a merged `.claude/worktrees` tree, which refuses a name equal to
+  the checkout's. `docker-maint.py` must never do it — its target is a static checkout
+  whose volumes hold a dev database costing hours to re-ingest.
 - **The teardown has a host half.** A vite server's mapped `.node` binding makes Windows
   refuse the delete, leaving a **husk** — a directory with no `.git` — that no later pass
   can clear. `box_teardown.py` evicts a process whose **executable or a loaded module**

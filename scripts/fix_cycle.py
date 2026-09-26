@@ -338,6 +338,9 @@ class Account:
     skipped: tuple[fix_plan.Decision, ...] = ()
     # What a dispatched session reported it could not do, one line each.
     blocked: tuple[str, ...] = ()
+    # `fix_release.cut_release`'s one line: a release started, would start, or why not.
+    # Empty when main carries nothing a tag owes a consumer.
+    release: str = ""
     # Default branches with no verdict at the tip, whose gate the pass re-ran.
     regated: tuple[str, ...] = ()
     # What this pass filed on the harness-defect ledger, and how much is open there:
@@ -376,6 +379,7 @@ def render(account: Account) -> str:
     lines += [f"filed    {line}" for line in account.filed]
     lines += [f"stopped  {line}" for line in account.stopped]
     lines.append(f"ledger   {account.backlog} open on the harness-defect ledger")
+    lines += [f"release  {account.release}"] if account.release else []
     return "\n".join(lines)
 
 
@@ -396,5 +400,6 @@ def history_line(account: Account, now: _dt.datetime) -> str:
             "skipped": {_names(d): d.note for d in account.skipped},
             "filed": len(account.filed),
             "backlog": account.backlog,
+            "release": account.release,
         }
     )
