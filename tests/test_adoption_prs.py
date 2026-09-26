@@ -174,3 +174,55 @@ def test_a_close_gh_refused_is_not_reported_as_closed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(adoption_prs.sweep, "gh_for", lambda _p: gh)
     assert adoption_prs.close_superseded(tmp_path, "v0.11.21") == []
+
+
+def test_only_a_green_labelled_adoption_is_mergeable_unattended():
+    rows = [
+        {
+            "number": 1,
+            "headRefName": "agent/auto/devkit-upgrade-v0-11-22-0919",
+            "labels": [{"name": "automerge"}],
+            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+            "mergeable": "MERGEABLE",
+        },
+        {
+            "number": 2,
+            "headRefName": "agent/auto/devkit-upgrade-v0-11-22-0919",
+            "labels": [],
+            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+        },
+        {
+            "number": 3,
+            "headRefName": "agent/auto/devkit-upgrade-v0-11-22-0919",
+            "labels": [{"name": "automerge"}],
+            "statusCheckRollup": [{"conclusion": "FAILURE"}],
+        },
+        {
+            "number": 4,
+            "headRefName": "agent/auto/devkit-upgrade-v0-11-22-0919",
+            "labels": [{"name": "automerge"}],
+            "statusCheckRollup": [],
+        },
+        {
+            "number": 5,
+            "headRefName": "agent/auto/devkit-upgrade-v0-11-22-0919",
+            "labels": [{"name": "automerge"}],
+            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+            "mergeable": "CONFLICTING",
+        },
+        {
+            "number": 6,
+            "headRefName": "agent/feature-0919",
+            "labels": [{"name": "automerge"}],
+            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+        },
+        {
+            "number": 7,
+            "headRefName": "agent/auto/devkit-upgrade-v0-11-22-0919",
+            "labels": [{"name": "automerge"}],
+            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+            "isDraft": True,
+        },
+    ]
+    prefixes = ("agent/auto/devkit-upgrade-", "agent/devkit-upgrade-")
+    assert [r["number"] for r in adoption_prs.green_adoptions(rows, prefixes, "automerge")] == [1]

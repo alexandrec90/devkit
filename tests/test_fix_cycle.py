@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -140,7 +141,7 @@ def test_the_harness_is_clean_only_when_nothing_harness_shaped_is_red():
     unread = fix_cycle.harness_state({}, None, [])
     assert not unread.clean and "could not be read" in unread.reasons[0]
     adopting = fix_cycle.harness_state({}, True, ["roguelike", "carameli"])
-    assert not adopting.clean and "carameli, roguelike" in adopting.reasons[0]
+    assert adopting.clean and adopting.adopting == ("carameli", "roguelike")
 
 
 def test_while_the_harness_is_red_one_devkit_session_goes_and_every_project_fixer_is_held():
@@ -282,20 +283,65 @@ def test_the_target_is_the_pr_the_branch_or_devkit():
     assert fix_cycle.target_of("pr:carameli:412:abc:deadbeef:resolve") == "pr:carameli:412"
 
 
-def test_a_target_past_its_daily_count_needs_a_human():
+def test_a_target_past_its_daily_fuse_waits():
     one = decision(fix_plan.DISPATCH, failure())
-    key = fix_ledger.decision_key(one)
     today = NOW.isoformat()
     ledger = {
-        key + "1": {"when": today, "what": "n"},
-        "pr:carameli:412:other:digest": {"when": today, "what": "n"},
+        f"pr:carameli:412:sha{i}:digest{i}": {"when": today, "what": "n"}
+        for i in range(fix_cycle.PER_TARGET_PER_DAY)
     }
     ok, why = fix_cycle.within_caps(one, ledger, NOW)
-    assert not ok and "needs a human" in why
+    assert not ok and why.startswith("fuse:")
     assert fix_cycle.within_caps(decision(fix_plan.DISPATCH, failure(number=9)), ledger, NOW) == (
         True,
         "",
     )
+
+
+def ledger_after(*sent: fix_plan.Decision) -> dict[str, dict]:
+    """The ledger `fix-pass.send_all` leaves after dispatching each of `sent` once."""
+    return {
+        fix_ledger.decision_key(d): {
+            "when": NOW.isoformat(),
+            "what": "n",
+            "sent": 1,
+            "problem": fix_ledger.problem_key(d),
+        }
+        for d in sent
+    }
+
+
+def test_the_same_failure_after_two_fixers_needs_a_human_at_any_commit():
+    """The retry is for a fix that did not take; a third fixer at the same failure is
+    the loop. The sha moving is not progress: every fixer's push moves it."""
+    first = decision(fix_plan.DISPATCH, failure(sha="a1"))
+    second = decision(fix_plan.DISPATCH, failure(sha="b2"))
+    third = decision(fix_plan.DISPATCH, failure(sha="c3"))
+    assert fix_cycle.within_caps(second, ledger_after(first), NOW) == (True, "")
+    ok, why = fix_cycle.within_caps(third, ledger_after(first, second), NOW)
+    assert not ok and "2 session(s) sent" in why and "unchanged" in why
+
+
+def test_a_changed_failure_is_progress_and_goes():
+    first = decision(
+        fix_plan.DISPATCH, failure(sha="a1", signature=("tests/a.py::t", "tests/b.py::t"))
+    )
+    second = decision(
+        fix_plan.DISPATCH, failure(sha="b2", signature=("tests/a.py::t", "tests/b.py::t"))
+    )
+    narrower = decision(fix_plan.DISPATCH, failure(sha="c3", signature=("tests/b.py::t",)))
+    assert fix_cycle.within_caps(narrower, ledger_after(first, second), NOW) == (True, "")
+
+
+def test_legacy_entries_count_against_their_problem():
+    """Entries written before `problem` was kept are derived from their key."""
+    first = decision(fix_plan.DISPATCH, failure(sha="a1"))
+    second = decision(fix_plan.DISPATCH, failure(sha="b2"))
+    legacy = {
+        fix_ledger.decision_key(d): {"when": NOW.isoformat(), "what": "n"} for d in (first, second)
+    }
+    ok, _why = fix_cycle.within_caps(decision(fix_plan.DISPATCH, failure(sha="c3")), legacy, NOW)
+    assert not ok
 
 
 def test_yesterdays_dispatches_do_not_count():
@@ -305,13 +351,13 @@ def test_yesterdays_dispatches_do_not_count():
     assert fix_cycle.within_caps(one, ledger, NOW) == (True, "")
 
 
-def test_the_pass_as_a_whole_has_a_daily_budget():
+def test_the_pass_as_a_whole_has_a_daily_fuse():
     one = decision(fix_plan.DISPATCH, failure(number=99))
     ledger = {
         f"pr:p{i}:{i}:s:d": {"when": NOW.isoformat(), "what": "n"} for i in range(fix_cycle.PER_DAY)
     }
     ok, why = fix_cycle.within_caps(one, ledger, NOW)
-    assert not ok and "today" in why
+    assert not ok and why.startswith("fuse:") and "today" in why
 
 
 # --- the account and the merge --------------------------------------------------------
@@ -344,58 +390,6 @@ def test_the_record_says_what_shipped_what_went_what_was_held_and_why():
     assert lines[6].startswith("sent     devkit #9")
 
 
-def test_only_a_green_labelled_adoption_is_mergeable_unattended():
-    rows = [
-        {
-            "number": 1,
-            "headRefName": "agent/auto/devkit-upgrade-v0-11-22-0919",
-            "labels": [{"name": "automerge"}],
-            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-            "mergeable": "MERGEABLE",
-        },
-        {
-            "number": 2,
-            "headRefName": "agent/auto/devkit-upgrade-v0-11-22-0919",
-            "labels": [],
-            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-        },
-        {
-            "number": 3,
-            "headRefName": "agent/auto/devkit-upgrade-v0-11-22-0919",
-            "labels": [{"name": "automerge"}],
-            "statusCheckRollup": [{"conclusion": "FAILURE"}],
-        },
-        {
-            "number": 4,
-            "headRefName": "agent/auto/devkit-upgrade-v0-11-22-0919",
-            "labels": [{"name": "automerge"}],
-            "statusCheckRollup": [],
-        },
-        {
-            "number": 5,
-            "headRefName": "agent/auto/devkit-upgrade-v0-11-22-0919",
-            "labels": [{"name": "automerge"}],
-            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-            "mergeable": "CONFLICTING",
-        },
-        {
-            "number": 6,
-            "headRefName": "agent/feature-0919",
-            "labels": [{"name": "automerge"}],
-            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-        },
-        {
-            "number": 7,
-            "headRefName": "agent/auto/devkit-upgrade-v0-11-22-0919",
-            "labels": [{"name": "automerge"}],
-            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-            "isDraft": True,
-        },
-    ]
-    prefixes = ("agent/auto/devkit-upgrade-", "agent/devkit-upgrade-")
-    assert [r["number"] for r in fix_cycle.green_adoptions(rows, prefixes, "automerge")] == [1]
-
-
 # --- the budget leaks, and what closes them ------------------------------------------
 
 
@@ -410,13 +404,14 @@ def test_an_update_never_draws_on_the_session_budget():
     assert fix_cycle.within_caps(update, full, NOW) == (True, "")
 
 
-def test_a_dispatch_with_no_evidence_gets_one_session_a_day_not_two():
+def test_a_problem_with_no_evidence_gets_one_session_not_two():
     """A session sent at "no artifact and no failed step named" is pure discovery, the
-    most expensive kind; the retry a second slot exists for is a fix that did not take,
-    which a blind session cannot be told from."""
-    blind = decision(fix_plan.DISPATCH, failure(signature=()))
-    ledger = {"pr:carameli:412:other:digest": {"when": NOW.isoformat(), "what": "n"}}
-    ok, why = fix_cycle.within_caps(blind, ledger, NOW)
+    most expensive kind; the retry a second one exists for is a fix that did not take,
+    which a blind problem cannot be told from. Evidence turning up is a new problem."""
+    blind = decision(fix_plan.DISPATCH, failure(sha="a1", signature=()))
+    ledger = ledger_after(blind)
+    again = decision(fix_plan.DISPATCH, failure(sha="b2", signature=()))
+    ok, why = fix_cycle.within_caps(again, ledger, NOW)
     assert not ok and "no evidence" in why and "needs a human" in why
     assert fix_cycle.within_caps(decision(fix_plan.DISPATCH, failure()), ledger, NOW) == (True, "")
 
@@ -432,36 +427,43 @@ def test_a_conflict_back_at_a_new_head_gets_its_resolver_again():
     """devkit #390: the resolver pushed its merge, main moved within the hour, and the
     new conflict read "needs a human" -- so the harness stayed red and every project
     PR stayed held behind it. The head moving is what shows the first one took."""
-    first = fix_ledger.decision_key(_conflict("143b"))
-    ledger = {first: {"when": NOW.isoformat(), "what": "merge conflict"}}
-    assert fix_cycle.within_caps(_conflict("62a5"), ledger, NOW) == (True, "")
-    second = fix_ledger.decision_key(_conflict("62a5"))
-    ledger[second] = {"when": NOW.isoformat(), "what": "merge conflict"}
-    ok, why = fix_cycle.within_caps(_conflict("77ff"), ledger, NOW)
-    assert not ok and f"{fix_cycle.PER_TARGET_PER_DAY} sessions today" in why, (
-        "the per-target cap still bounds a conflict that keeps coming back"
+    shas = [f"{i}a5" for i in range(fix_cycle.PER_TARGET_PER_DAY + 1)]
+    ledger = ledger_after(_conflict(shas[0]))
+    for sha in shas[1:-1]:
+        assert fix_cycle.within_caps(_conflict(sha), ledger, NOW) == (True, "")
+        ledger.update(ledger_after(_conflict(sha)))
+    ok, why = fix_cycle.within_caps(_conflict(shas[-1]), ledger, NOW)
+    assert not ok and why.startswith("fuse:"), (
+        "the per-target fuse still bounds a conflict that keeps coming back"
     )
 
 
 def test_a_conflict_whose_head_did_not_move_keeps_its_one_blind_slot():
-    same = fix_ledger.decision_key(_conflict("143b"))
-    # Older than a day would be a re-send; today at the same commit is the session
-    # that did nothing, re-keyed by a different signature digest.
-    ledger = {same.replace(":resolve", "x:resolve"): {"when": NOW.isoformat(), "what": "n"}}
+    ledger = ledger_after(_conflict("143b"))
     ok, why = fix_cycle.within_caps(_conflict("143b"), ledger, NOW)
     assert not ok and "no evidence" in why
+    # One resolver at the head now did nothing, whatever an earlier one did.
+    ledger.update(ledger_after(_conflict("62a5")))
+    ok, why = fix_cycle.within_caps(_conflict("62a5"), ledger, NOW)
+    assert not ok and "needs a human" in why
 
 
-def test_moved_on_ignores_updates_other_days_and_folded_keys():
-    key = fix_ledger.decision_key(_conflict("62a5"))
+def test_moved_on_counts_every_day_but_only_this_problem():
+    now = _conflict("62a5")
     yesterday = (NOW - _dt.timedelta(days=1)).isoformat()
-    assert not fix_cycle.moved_on(key, {}, NOW), "nothing sent today is not movement"
-    assert not fix_cycle.moved_on(key, {"pr:devkit:390:143b:d:resolve": {"when": yesterday}}, NOW)
-    assert not fix_cycle.moved_on(
-        key, {"pr:devkit:390:143b:d:update": {"when": NOW.isoformat()}}, NOW
+    assert not fix_cycle.moved_on(now, {}), "nothing sent is not movement"
+    earlier = fix_ledger.decision_key(_conflict("143b"))
+    assert fix_cycle.moved_on(now, {earlier: {"when": yesterday, "what": "n"}}), (
+        "a conflict resolved yesterday and back today is the base moving"
     )
-    assert fix_cycle.moved_on(key, {"pr:devkit:390:143b:d:resolve": {"when": NOW.isoformat()}}, NOW)
-    assert not fix_cycle.moved_on("upstream:2:abcd", {}, NOW)
+    update = earlier.replace(":resolve", ":update")
+    assert not fix_cycle.moved_on(now, {update: {"when": NOW.isoformat(), "what": "n"}})
+    folded = decision(
+        fix_plan.RESOLVE,
+        failure(project="devkit", number=390, sha="62a5", signature=(fix_plan.CONFLICT,)),
+        failure(project="devkit", number=391, sha="62a5", signature=(fix_plan.CONFLICT,)),
+    )
+    assert not fix_cycle.moved_on(folded, {earlier: {"when": NOW.isoformat(), "what": "n"}})
 
 
 def test_an_adoption_pr_is_classified_by_what_fails_and_its_own_release_never_holds_it():
@@ -481,15 +483,76 @@ def test_an_adoption_pr_is_classified_by_what_fails_and_its_own_release_never_ho
     assert classes[fix_ledger.failure_key(vendored.failures[0])] == fix_cycle.HARNESS
 
     adopting = fix_cycle.harness_state({}, True, ["carameli"])
-    assert not adopting.clean and adopting.only_adopting
+    assert adopting.clean and adopting.adopting == ("carameli",)
     go, held = fix_cycle.phase([own, other], classes, adopting, prefixes)
     assert go == [own] and [d for d, _why in held] == [other]
+    assert held[0][1] == "held until the newest release is adopted in carameli"
 
     red_too = fix_cycle.harness_state(classes, True, ["carameli"])
-    assert not red_too.only_adopting
     go, held = fix_cycle.phase([own, vendored, other], classes, red_too, prefixes)
     assert [d.action for d in go] == [fix_plan.UPSTREAM]
     assert [d for d, _why in held] == [own, other]
+
+
+def test_an_open_adoption_holds_only_its_own_projects_prs():
+    """carameli #389 sat red for a day and held sports_betting, ibkr_trader, data-lake and
+    devkit's own PRs with it, though no carameli adoption can fix any of them."""
+    prefixes = ("agent/auto/devkit-upgrade-",)
+    carameli = decision(fix_plan.DISPATCH, failure(number=390))
+    elsewhere = decision(
+        fix_plan.DISPATCH,
+        failure(project="sports_betting", number=45, signature=("tests/test_s.py::t",)),
+    )
+    own_pr = decision(
+        fix_plan.DISPATCH, failure(project="devkit", number=394, signature=("tests/test_d.py::t",))
+    )
+    listed = [*carameli.failures, *elsewhere.failures, *own_pr.failures]
+    classes = fix_cycle.classify_all(listed)
+    harness = fix_cycle.harness_state(classes, True, ["carameli"])
+    go, held = fix_cycle.phase([carameli, elsewhere, own_pr], classes, harness, prefixes)
+    assert go == [elsewhere, own_pr]
+    assert [d for d, _why in held] == [carameli]
+
+
+def test_a_devkit_pr_is_never_held_behind_the_harness():
+    """A devkit PR is red on its own diff, and is often the harness fix in flight: held
+    until the harness is clean, it is the one thing that could make it clean."""
+    own_pr = decision(
+        fix_plan.DISPATCH, failure(project="devkit", number=394, signature=("tests/test_d.py::t",))
+    )
+    project = decision(fix_plan.DISPATCH, failure(number=3))
+    classes = fix_cycle.classify_all([*own_pr.failures, *project.failures])
+    red = fix_cycle.harness_state({"k": fix_cycle.HARNESS}, True, [])
+    go, held = fix_cycle.phase([own_pr, project], classes, red)
+    assert go == [own_pr] and [d for d, _why in held] == [project]
+
+
+def test_a_devkit_pr_is_one_whose_every_failure_is_a_devkit_pr():
+    assert fix_cycle.is_devkit_pr(decision(fix_plan.DISPATCH, failure(project="devkit")))
+    assert not fix_cycle.is_devkit_pr(decision(fix_plan.DISPATCH, failure()))
+    main = failure(project="devkit", kind=fix_plan.BRANCH, number=0)
+    assert not fix_cycle.is_devkit_pr(decision(fix_plan.DISPATCH, main)), "main is the harness"
+
+
+def test_the_history_line_says_why_nothing_went():
+    capped = (decision(fix_plan.DISPATCH, failure()), "2 session(s) sent -- needs a human")
+    account = fix_cycle.Account(
+        fix_cycle.DISPATCH,
+        fix_cycle.harness_state({"k": fix_cycle.HARNESS}, True, ["carameli"]),
+        capped=(capped,),
+    )
+    line = json.loads(fix_cycle.history_line(account, NOW))
+    assert line["when"] == NOW.isoformat(timespec="seconds")
+    assert line["harness"] == ["1 harness failure(s) open"]
+    assert line["adopting"] == ["carameli"] and line["sent"] == []
+    assert line["capped"] == ["carameli #412 -- 2 session(s) sent -- needs a human"]
+
+
+def test_the_record_names_the_adoptions_still_open():
+    harness = fix_cycle.harness_state({}, True, ["carameli"])
+    text = fix_cycle.render(fix_cycle.Account(fix_cycle.DISPATCH, harness))
+    assert "harness  clean" in text
+    assert "adopting carameli -- the newest release" in text
 
 
 def test_the_ledger_backlog_rides_along_without_holding_anyone():
@@ -518,6 +581,14 @@ def test_a_held_decision_is_held_with_its_own_note_clean_or_not():
     red = fix_cycle.harness_state({"k": fix_cycle.HARNESS}, True, [])
     go, held = fix_cycle.phase([held_one], {}, red)
     assert go == [] and held == [(held_one, "held: origin/main is red in carameli")]
+
+
+def test_a_projects_own_test_under_scripts_hooks_is_the_projects():
+    own = failure(
+        project="carameli",
+        signature=("scripts/hooks/tests/test_codex_hooks_contract.py::test_drop",),
+    )
+    assert fix_cycle.classify(own, set()) == fix_cycle.PROJECT
 
 
 def test_a_decision_is_blind_when_no_failure_under_it_names_anything():

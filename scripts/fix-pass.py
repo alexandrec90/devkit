@@ -31,15 +31,19 @@ on a verdict a fresh pass reads in a call.
    `logs/fix-blocked.md` in its worktree (`fix_reports.py`); the pass marks its ledger
    entry blocked, so no second session is spent, and puts the reason on the record.
 5. **Harness first.** While anything harness-shaped is red -- a vendored test, a shared
-   signature, devkit's own gate, a release mid-adoption -- one devkit session gets the
-   whole set and every project fixer is held, out loud. A harness PR that is behind or
-   conflicted goes as itself first: neither is work a fresh branch can do
-   (`fix_cycle.BRANCH_SHAPED`).
-6. **Then projects**, conflicts first, each under the ledger and the daily caps. A
-   ledger entry older than a day no longer stops one re-send (`fix_ledger.RESEND_AFTER`,
-   `MAX_SENDS`): a session that died leaves nothing else, and the caps bound the retry.
-   An adoption PR red on its own project's account goes while its release is the only
-   hold: that hold is the PR itself.
+   signature, devkit's own gate -- one devkit session gets the whole set and every
+   project fixer is held, out loud; devkit's own PRs are not, since one may be the fix.
+   A harness PR that is behind or conflicted goes as itself first: neither is work a
+   fresh branch can do (`fix_cycle.BRANCH_SHAPED`).
+6. **Then projects**, conflicts first. A project whose adoption of the newest release
+   is still open sends the adoption and holds its other PRs; every other project is
+   untouched by it. Each dispatch goes unless `fix_ledger.ATTEMPTS` sessions already
+   left the same failure unchanged -- a changed one is progress -- or a fuse trips. A
+   ledger entry older than `fix_ledger.RESEND_AFTER` no longer stops one re-send: a
+   session that died leaves nothing else.
+
+Each pass also appends one line to `logs/fix-pass.history.jsonl`, since the record is
+overwritten: "most passes spawn nothing" was otherwise a claim no file could check.
 
 Every dispatch is `fix-prs.py`'s: the worktree on the PR's branch, the evidence under
 `logs/gate/`, the prompt naming the failing ids. This file only decides what to hand it.
@@ -93,6 +97,9 @@ fix_prs = load_by_path("fix_prs", REPO_ROOT / "scripts" / "fix-prs.py")
 push_gate = load_by_path("run_push_gate", REPO_ROOT / "scripts" / "precommit" / "run_push_gate.py")
 
 ARTIFACT = Path("logs") / "fix-pass.log"
+HISTORY = Path("logs") / "fix-pass.history.jsonl"
+# A week of half-hourly passes.
+HISTORY_KEEP = 336
 SCHEDULED_AGENT = "claude-bg"
 
 EXIT_OK = 0
@@ -127,6 +134,20 @@ def write_artifact(text: str, root: Path | None = None) -> Path:
     path = (root or REPO_ROOT) / ARTIFACT
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text.rstrip() + "\n", encoding="utf-8")
+    return path
+
+
+def append_history(account: fix_cycle.Account, now: _dt.datetime, root: Path | None = None) -> Path:
+    """`fix_cycle.history_line` appended, kept to the last `HISTORY_KEEP`. The record
+    says what the newest pass did; this says whether passes are working at all."""
+    path = (root or REPO_ROOT) / HISTORY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = fix_cycle.history_line(account, now)
+    try:
+        kept = path.read_text(encoding="utf-8").splitlines()[-(HISTORY_KEEP - 1) :]
+    except OSError:
+        kept = []
+    path.write_text("\n".join([*kept, line]) + "\n", encoding="utf-8")
     return path
 
 
@@ -263,7 +284,7 @@ def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
         rows = gate_evidence.gh_json(listed)
         if not isinstance(rows, list):
             rows = []
-        for row in fix_cycle.green_adoptions(rows, prefixes, sweep.AUTOMERGE_LABEL):
+        for row in adoption_prs.green_adoptions(rows, prefixes, sweep.AUTOMERGE_LABEL):
             ok, message = worktree.merge_pr(gh, int(row.get("number", 0)))
             merged.append(
                 f"{name} #{row.get('number')} -- {message if ok else 'FAILED: ' + message}"
@@ -341,7 +362,13 @@ def send_all(
             sent.append(f"{names} -- {would or f'would send ({decision.action})'}")
             continue
         if dispatch(decision, root, launch) == EXIT_OK:
-            fix_ledger.record(ledger_path, fix_ledger.decision_key(decision), decision.note, now)
+            fix_ledger.record(
+                ledger_path,
+                fix_ledger.decision_key(decision),
+                decision.note,
+                now,
+                problem=fix_ledger.problem_key(decision),
+            )
             ledger = fix_ledger.read_ledger(ledger_path)
             sent.append(f"{names} -- {decision.action}")
         else:
@@ -392,23 +419,23 @@ def run(
     sent, capped, worst = send_all(go, ledger_path, root, mode, launch, now)
     worst = max(worst, EXIT_FAILED if ship_failed else EXIT_OK)
 
-    text = fix_cycle.render(
-        fix_cycle.Account(
-            mode,
-            harness,
-            tuple(shipped),
-            tuple(go),
-            tuple(held),
-            tuple(capped),
-            tuple(sent),
-            tuple(merged),
-            tuple(skipped),
-            tuple(blocked),
-            tuple(regated),
-        )
+    account = fix_cycle.Account(
+        mode,
+        harness,
+        tuple(shipped),
+        tuple(go),
+        tuple(held),
+        tuple(capped),
+        tuple(sent),
+        tuple(merged),
+        tuple(skipped),
+        tuple(blocked),
+        tuple(regated),
     )
+    text = fix_cycle.render(account)
     print(text)
     print(f"fix-pass: record at {write_artifact(text)}")
+    append_history(account, now)
     return worst
 
 

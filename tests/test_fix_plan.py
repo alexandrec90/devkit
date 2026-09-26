@@ -112,9 +112,33 @@ def test_the_artifact_wins_over_the_steps_and_a_conflict_comes_first():
 
 
 def test_a_signature_is_vendored_only_when_every_id_is():
-    assert fix_plan.is_vendored(("scripts/hooks/tests/test_a.py::t",))
-    assert not fix_plan.is_vendored(("scripts/hooks/tests/test_a.py::t", "tests/test_b.py::u"))
+    assert fix_plan.is_vendored(("scripts/hooks/tests/test_untested_symbols.py::t",))
+    assert not fix_plan.is_vendored(
+        ("scripts/hooks/tests/test_untested_symbols.py::t", "tests/test_b.py::u")
+    )
     assert not fix_plan.is_vendored(())
+
+
+def test_a_projects_own_test_beside_the_vendored_ones_is_not_vendored():
+    """carameli keeps `test_codex_hooks_contract.py` in `scripts/hooks/tests/`, outside the
+    MANIFEST. Red on an adoption, it is carameli's to fix on the adoption branch."""
+    own = "scripts/hooks/tests/test_codex_hooks_contract.py::test_drop"
+    assert not fix_plan.is_vendored((own,))
+    assert not fix_plan.in_vendored_tier(f"lint {fix_plan.entry_path(own)}", ("scripts/hooks/",))
+    assert fix_plan.in_vendored_tier("lint scripts/hooks/stop.py", ("scripts/hooks/",))
+    assert fix_plan.in_vendored_tier(".pre-commit-config.yaml", (".pre-commit-config.yaml",))
+
+
+def test_the_vendored_paths_are_sync_devkits_manifest():
+    known = fix_plan.vendored_paths()
+    assert known is not None
+    assert "scripts/hooks/tests/test_untested_symbols.py" in known
+    assert "scripts/hooks/tests/test_codex_hooks_contract.py" not in known
+
+
+def test_an_unreadable_manifest_falls_back_to_the_directory(monkeypatch):
+    monkeypatch.setattr(fix_plan, "vendored_paths", lambda: None)
+    assert fix_plan.is_vendored(("scripts/hooks/tests/test_codex_hooks_contract.py::t",))
 
 
 # --- the two shapes that never get an agent -------------------------------------------

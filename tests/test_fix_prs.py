@@ -1020,7 +1020,7 @@ def test_a_refused_commit_is_titled_by_its_branch(monkeypatch, root):
 
 
 def test_an_upstream_group_and_a_nightly_go_through_the_fresh_branch_path(monkeypatch, root):
-    vendored = ("scripts/hooks/tests/test_a.py::t",)
+    vendored = ("scripts/hooks/tests/test_untested_symbols.py::t",)
     sent = planned(
         monkeypatch,
         root,

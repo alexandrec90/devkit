@@ -14,14 +14,15 @@ unattended. Three rules, each pure and tested in `tests/test_fix_cycle.py`:
   devkit session at a project bug.
 - **Hold every project fixer while the harness is red.** Nearly every red PR of the last
   month was a devkit fan-out, and a project fixer sent at one fixes a symptom eight
-  times. So while any harness failure exists, or devkit's own default branch is red, or a
-  release is still being adopted, the pass sends **one** devkit session at the whole
-  harness set and holds the rest, saying so loudly -- a quiet pass has to read as
-  "everything is blocked", never as "nothing to do".
-- **Cap it.** The ledger stops a second dispatch at the same commit; this stops a
-  third at a new one. A target (a PR, a branch, devkit) gets at most `PER_TARGET_PER_DAY`
-  sessions a day, and the pass as a whole at most `PER_DAY`, the harness phase drawing
-  first. Past the cap a target reads "needs a human" and is left alone.
+  times. So while any harness failure exists, or devkit's own default branch is red,
+  the pass sends **one** devkit session at the whole harness set and holds the rest,
+  saying so loudly -- a quiet pass has to read as "everything is blocked", never as
+  "nothing to do". devkit's own PRs are not held: one may be the fix. A release still
+  being adopted holds only that project's other PRs, behind its adoption.
+- **Stop what makes no progress.** The ledger stops a second dispatch at the same
+  commit; `fix_ledger.ATTEMPTS` stops a third at an unchanged failure, whatever commit
+  it is at. A failure that changed is progress and goes. `PER_TARGET_PER_DAY` and
+  `PER_DAY` are fuses behind that, for a pass whose reading has gone wrong.
 
 The switch is the workspace file: `"devkit.fixPass"` under `settings`, `off` (the
 default), `plan` (write what would happen, do nothing) or `dispatch`. The scheduled job
@@ -90,21 +91,24 @@ HARNESS_REFUSALS = (
 # on the PR. A harness PR in either shape goes as itself, before the folded session.
 BRANCH_SHAPED = (fix_plan.UPDATE, fix_plan.RESOLVE)
 
-# The budget. Two a day per target because the second is the retry after a fix that
-# did not take; the third is the loop nobody asked for.
-PER_TARGET_PER_DAY = 2
-PER_DAY = 8
+# The fuses. The retry policy is `fix_ledger.ATTEMPTS` -- per problem, spent only by a
+# fixer that left the same failure behind -- and these are only what stops a pass
+# whose reading has gone wrong: a signature that changes on every run reads as
+# progress forever, and nothing else would notice. Set above what a working day
+# needs, so a fuse that trips is a defect to read about in the record, not a budget.
+PER_TARGET_PER_DAY = 4
+PER_DAY = 24
 
 
 @dataclass(frozen=True)
 class Harness:
     clean: bool
     reasons: tuple[str, ...]
-    # The one reason is a release still being adopted: nothing of the harness is red,
-    # the consumers just have not merged it yet. An adoption PR's own project-shaped
-    # failure goes through that hold, because it *is* the adoption -- held, it was red
-    # because it was held and held because it was red.
-    only_adopting: bool = False
+    # Projects whose adoption of the newest release is still open. Not a harness
+    # reason: it holds that project's other PRs, which the adoption may fix, and nobody
+    # else's. As a fleet-wide hold, one red carameli adoption (#389) held every PR in
+    # every consumer and devkit's own for a day, behind a fixer rationed to one a day.
+    adopting: tuple[str, ...] = ()
 
 
 # --- the switch -----------------------------------------------------------------------
@@ -160,7 +164,7 @@ def classify(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> str:
         return PROJECT if ids else UNKNOWN
     if _harness_shaped(failure, shared):
         return HARNESS
-    if ids and all(entry.removeprefix("lint ").startswith(HARNESS_PATHS) for entry in ids):
+    if ids and all(fix_plan.in_vendored_tier(entry, HARNESS_PATHS) for entry in ids):
         return HARNESS
     if failure.kind == fix_plan.COMMIT and any(
         marker in " ".join(ids).lower() for marker in HARNESS_REFUSALS
@@ -182,7 +186,7 @@ def classify_all(failures: Iterable[fix_plan.Failure]) -> dict[str, str]:
 def harness_state(
     classes: dict[str, str], devkit_green: bool | str | None, pending_adoptions: Iterable[str]
 ) -> Harness:
-    """Clean only when nothing harness-shaped is red and no release is mid-adoption.
+    """Clean only when nothing harness-shaped is red; the adoptions still open ride along.
 
     `devkit_green` is None when the gate's verdict could not be read, which counts as
     not clean: an unreadable harness is not one to send project fixers behind. It is
@@ -206,10 +210,7 @@ def harness_state(
         reasons.append("devkit's default-branch gate could not be read")
     elif devkit_green is False:
         reasons.append("devkit's default-branch gate is red")
-    pending = sorted(set(pending_adoptions))
-    if pending:
-        reasons.append(f"the newest release is still being adopted in {', '.join(pending)}")
-    return Harness(not reasons, tuple(reasons), bool(pending) and len(reasons) == 1)
+    return Harness(not reasons, tuple(reasons), tuple(sorted(set(pending_adoptions))))
 
 
 def decision_class(decision: fix_plan.Decision, classes: dict[str, str]) -> str:
@@ -231,28 +232,37 @@ def phase(
     Skips are never in either list; a `HOLD` the plan made -- a PR behind a red base --
     is held with the plan's own note, clean or not. While the harness is red, every
     *foldable* harness decision becomes one devkit session and every project one is
-    held, except an adoption PR's own project-shaped failure when the release it
-    adopts is the only reason (`Harness.only_adopting`): that hold is the PR itself.
-    Once clean, updates go first (free, and they may turn the PR green by themselves),
-    then conflicts: a conflicted PR's gate cannot run, so nothing else about it is
-    knowable. That same order holds for the branch-shaped decisions the fold cannot
-    take.
+    held -- except a devkit PR, which is red on its own diff and may be the harness
+    fix itself: held behind the harness, the fix is what never lands. A project with
+    its adoption still open holds its other PRs behind that adoption, which goes.
+    Updates go first (free, and they may turn the PR green by themselves), then
+    conflicts: a conflicted PR's gate cannot run, so nothing else about it is knowable.
+    That same order holds for the branch-shaped decisions the fold cannot take.
     """
     planned_holds = [(d, d.note) for d in decisions if d.action == fix_plan.HOLD]
     live = [d for d in decisions if d.action not in (fix_plan.SKIP, fix_plan.HOLD)]
     harness_ones = [d for d in live if decision_class(d, classes) == HARNESS]
     project_ones = [d for d in live if decision_class(d, classes) != HARNESS]
     go = _harness_first(harness_ones)
-    if not harness.clean:
-        adopting = [
-            d for d in project_ones if harness.only_adopting and fix_plan.is_adoption(d, prefixes)
-        ]
-        why = "held until the harness is clean: " + "; ".join(harness.reasons)
-        held = [(d, why) for d in project_ones if d not in adopting]
-        return go + sorted(adopting, key=lambda d: RANK.get(d.action, 2)), held + planned_holds
-    # Clean, so what is harness-shaped here is the ledger backlog and nothing else:
-    # still one folded devkit session, still first, and nobody held behind it.
-    return go + sorted(project_ones, key=lambda d: RANK.get(d.action, 2)), planned_holds
+    held: list[tuple[fix_plan.Decision, str]] = []
+    sent: list[fix_plan.Decision] = []
+    red = "held until the harness is clean: " + "; ".join(harness.reasons)
+    for d in project_ones:
+        adopting = sorted({f.project for f in d.failures} & set(harness.adopting))
+        if is_devkit_pr(d):
+            sent.append(d)
+        elif not harness.clean:
+            held.append((d, red))
+        elif adopting and not fix_plan.is_adoption(d, prefixes):
+            held.append((d, f"held until the newest release is adopted in {', '.join(adopting)}"))
+        else:
+            sent.append(d)
+    return go + sorted(sent, key=lambda d: RANK.get(d.action, 2)), held + planned_holds
+
+
+def is_devkit_pr(decision: fix_plan.Decision) -> bool:
+    """Every failure under it is one of devkit's own PRs."""
+    return all(f.project == DEVKIT and f.kind == fix_plan.PR for f in decision.failures)
 
 
 # The order within a phase: updates first (free), then conflicts (nothing else about
@@ -324,25 +334,24 @@ def is_blind(decision: fix_plan.Decision) -> bool:
     )
 
 
-def moved_on(key: str, ledger: dict[str, dict], now: _dt.datetime) -> bool:
-    """Every session this target had today was sent at a commit other than `key`'s.
+def moved_on(decision: fix_plan.Decision, ledger: dict[str, dict]) -> bool:
+    """Every session this problem has had was sent at a commit other than its head now.
 
-    The head moved under each of them, so each did something. A folded upstream key
-    names no one commit and never counts as moved.
+    The head moved under each of them, so each did something. Counted over the life of
+    the ledger, like `fix_ledger.attempts`, not over a day: a conflict resolved
+    yesterday and back today is the base moving again. A folded upstream key names no
+    one commit and never counts as moved.
     """
-    parts = key.split(":")
+    parts = fix_ledger.decision_key(decision).split(":")
     if parts[0] == fix_plan.UPSTREAM or len(parts) < 4:
         return False
-    target, day = target_of(key), now.date().isoformat()
-    today = [
-        other.split(":")
+    problem = fix_ledger.problem_key(decision)
+    shas = [
+        other.split(":")[3]
         for other, entry in ledger.items()
-        if not other.endswith(f":{fix_plan.UPDATE}")
-        and target_of(other) == target
-        and isinstance(entry, dict)
-        and str(entry.get("when", "")).startswith(day)
+        if fix_ledger.problem_of(other, entry) == problem and len(other.split(":")) >= 4
     ]
-    return bool(today) and all(len(p) >= 4 and p[3] != parts[3] for p in today)
+    return bool(shas) and parts[3] not in shas
 
 
 def within_caps(
@@ -352,29 +361,32 @@ def within_caps(
     per_target: int = PER_TARGET_PER_DAY,
     per_day: int = PER_DAY,
 ) -> tuple[bool, str]:
-    """Whether this dispatch fits today's budget, and why not when it does not.
+    """Whether this dispatch may go, and why not when it may not.
 
-    An update is free and always fits. A blind dispatch -- nothing to name -- gets one
-    slot rather than two: the second slot is the retry after a fix that did not take,
-    and a session that starts from nothing cannot be told from one that did. Except a
-    conflict whose head has moved since (`moved_on`): a resolver pushes only a merge
-    that resolved, so a new conflict at a new commit is the base moving again, not a
-    fix that did not take. devkit #390's resolver pushed its merge, main moved within
-    the hour, and the fresh conflict read "needs a human" when it needed the resolver.
-    The per-target cap still bounds it.
+    An update is free and always goes. Otherwise the question is whether sessions have
+    already failed at this same problem: `fix_ledger.ATTEMPTS` of them (one, for a
+    blind problem, which cannot show progress) and it needs a person. Except a conflict
+    whose head has moved since (`moved_on`): a resolver pushes only a merge that
+    resolved, so a new conflict at a new commit is the base moving again, not a fix
+    that did not take. devkit #390's resolver pushed its merge, main moved within the
+    hour, and the fresh conflict read "needs a human" when it needed the resolver.
+    Past that, the fuses -- which a working pass never reaches, and which still bound
+    a conflict that keeps coming back.
     """
     if decision.action == fix_plan.UPDATE:
         return True, ""
+    made = fix_ledger.attempts(decision, ledger)
+    limit = fix_ledger.BLIND_ATTEMPTS if is_blind(decision) else fix_ledger.ATTEMPTS
+    rebased = decision.action == fix_plan.RESOLVE and moved_on(decision, ledger)
+    if made >= limit and not rebased:
+        unchanged = "with no evidence to tell progress by" if is_blind(decision) else "unchanged"
+        return False, f"{made} session(s) sent and it is still red {unchanged} -- needs a human"
     counts = sent_today(ledger, now)
     if sum(counts.values()) >= per_day:
-        return False, f"the pass has sent {per_day} sessions today; the rest wait for tomorrow"
-    key = fix_ledger.decision_key(decision)
-    target = target_of(key)
-    rebased = decision.action == fix_plan.RESOLVE and moved_on(key, ledger, now)
-    if is_blind(decision) and counts.get(target, 0) >= 1 and not rebased:
-        return False, f"{target} has had its one session today with no evidence -- needs a human"
+        return False, f"fuse: the pass has sent {per_day} sessions today -- read the record"
+    target = target_of(fix_ledger.decision_key(decision))
     if counts.get(target, 0) >= per_target:
-        return False, f"{target} has had {per_target} sessions today -- needs a human"
+        return False, f"fuse: {target} has had {per_target} sessions today -- read the record"
     return True, ""
 
 
@@ -417,6 +429,11 @@ def render(account: Account) -> str:
     lines.append(
         "harness  clean" if harness.clean else "harness  RED -- " + "; ".join(harness.reasons)
     )
+    if harness.adopting:
+        lines.append(
+            f"adopting {', '.join(harness.adopting)} -- the newest release; "
+            "each one's other PRs wait for its adoption"
+        )
     lines += [f"blocked  {line}" for line in account.blocked]
     lines += [f"{d.action:8} {_names(d)} -- {d.note}" for d in account.go]
     lines += [f"held     {_names(d)} -- {why}" for d, why in account.held]
@@ -427,37 +444,17 @@ def render(account: Account) -> str:
     return "\n".join(lines)
 
 
-# --- green adoptions, the one thing the pass merges ---------------------------------------
-
-
-GREEN = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
-
-
-def _gate_green(row: dict) -> bool:
-    rollup = row.get("statusCheckRollup") or []
-    if not isinstance(rollup, list) or not rollup:
-        return False
-    verdicts = {str(node.get("conclusion") or node.get("state") or "").upper() for node in rollup}
-    return verdicts <= GREEN and str(row.get("mergeable", "")).upper() != "CONFLICTING"
-
-
-def green_adoptions(rows: Iterable[dict], prefixes: tuple[str, ...], label: str) -> list[dict]:
-    """Open adoption PRs whose gate passed and that carry the label: mergeable unattended.
-
-    An adoption is upstream churn whose green gate is the whole review, and letting
-    those land is what keeps a release's fan-out from piling up in the queue. Nothing
-    else is merged by the pass; every other green PR waits for a person.
-    """
-    return [
-        row
-        for row in rows
-        if isinstance(row, dict)
-        and not row.get("isDraft")
-        and str(row.get("headRefName", "")).startswith(prefixes)
-        and label
-        in {
-            str(entry.get("name", "")) if isinstance(entry, dict) else str(entry)
-            for entry in row.get("labels", []) or []
+def history_line(account: Account, now: _dt.datetime) -> str:
+    """One pass as one JSON line: what went, and why nothing did when nothing did."""
+    harness = account.harness
+    return json.dumps(
+        {
+            "when": now.isoformat(timespec="seconds"),
+            "mode": account.mode,
+            "harness": "clean" if harness.clean else list(harness.reasons),
+            "adopting": list(harness.adopting),
+            "sent": list(account.sent),
+            "held": len(account.held),
+            "capped": [f"{_names(d)} -- {why}" for d, why in account.capped],
         }
-        and _gate_green(row)
-    ]
+    )
