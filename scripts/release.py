@@ -288,7 +288,16 @@ def _git(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def existing_tags() -> set[str]:
+    """Every local tag; raises `RuntimeError` with git's words when git cannot say.
+
+    An empty set here would pass both plans' "that tag already exists" refusal, so an
+    unreadable checkout must not be read as one with no tags.
+    """
     result = _git("tag", "--list")
+    if result.returncode != 0:
+        raise RuntimeError(
+            (result.stderr or result.stdout).strip() or f"git exit {result.returncode}"
+        )
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
@@ -325,16 +334,24 @@ def main(argv: list[str] | None = None) -> int:
     apply_mode.add_argument("--yes", dest="dry_run", action="store_false")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
+    # Phase 2's `main_fallback` fetches first, so the tags are read after it: a tag
+    # pushed since the last fetch has to be seen by the "already exists" refusal.
+    landed = main_fallback() if args.tag else ""
+    try:
+        tags = existing_tags()
+    except RuntimeError as exc:
+        print(f"release: could not read devkit's tags: {exc}", file=sys.stderr)
+        return 2
+
     if args.tag:
-        landed = main_fallback()
-        steps, refusal = tag_plan(args.version, landed, existing_tags())
+        steps, refusal = tag_plan(args.version, landed, tags)
     else:
         source = NEW_PROJECT.read_text(encoding="utf-8")
         updated, previous = bump_fallback(source, args.version)
         if previous is None:
             print(f"release: no {FALLBACK_CONST} in {NEW_PROJECT.name}", file=sys.stderr)
             return 2
-        steps, refusal = prepare_plan(args.version, previous, existing_tags())
+        steps, refusal = prepare_plan(args.version, previous, tags)
 
     if refusal:
         print(f"release: {refusal}", file=sys.stderr)

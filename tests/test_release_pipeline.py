@@ -16,6 +16,8 @@ import inspect
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from support import REPO_ROOT, load_script
 
 rp = load_script("scripts/release-pipeline.py")
@@ -354,6 +356,57 @@ def test_the_run_never_spells_the_scope_a_second_time():
         if "upgrade-project.py" in s
     )
     assert rp.adoption_scope(["carameli"]) in step
+
+
+def test_an_unreadable_tag_list_raises_rather_than_reading_as_none(tmp_path):
+    """[] is `next_version`'s cue for a first release, so a git failure must not be it."""
+    with pytest.raises(RuntimeError, match="fatal:"):
+        rp.existing_tags(tmp_path / "no-such-directory")
+
+
+def test_a_devkit_git_refuses_plans_no_first_release(tmp_path, capsys, monkeypatch):
+    """The 2026-09-25 regression: the scheduled run met a checkout git refused for
+    dubious ownership, read the refused `git tag --list` as no tags, and planned v0.1.0
+    for a repo at v0.9.1 -- stopped only because the next git call failed too. It has
+    to stop at the read, with git's words, before any plan is printed."""
+    refusal = "fatal: detected dubious ownership in repository"
+
+    def run(cmd, *_args, **_kwargs):
+        # `gh --version` passes; every git call is refused, as it was that night.
+        if cmd[0] == "git":
+            return subprocess.CompletedProcess(cmd, 128, stdout="", stderr=refusal)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(rp, "_run", run)
+    code = rp.main(["--if-needed", "--yes", "--devkit", str(tmp_path)])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert f"could not read devkit's tags: {refusal}" in err
+    assert "v0.1.0" not in out + err
+    assert "no release tag exists yet" not in out + err
+
+
+@pytest.mark.parametrize(
+    ("code", "stdout", "stderr", "expected"),
+    [
+        (0, "v1.0.0\nv0.9.0\n", "", ""),
+        (0, "v0.9.0\n", "", "reported success but v1.0.0 is not here after a fetch"),
+        (128, "", "fatal: dubious ownership", "unreadable here: fatal: dubious ownership"),
+    ],
+)
+def test_a_pushed_tag_is_confirmed_only_when_git_can_see_it(
+    monkeypatch, code, stdout, stderr, expected
+):
+    """A tag list git refused is not "the tag is missing": the push may well have landed."""
+
+    def run(cmd, *_args, **_kwargs):
+        if cmd[-2:] == ["tag", "--list"]:
+            return subprocess.CompletedProcess(cmd, code, stdout=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")  # the fetch
+
+    monkeypatch.setattr(rp, "_run", run)
+    missing = rp.tag_missing(Path("devkit"), "v1.0.0")
+    assert (expected in missing) if expected else missing == ""
 
 
 def test_backing_out_of_the_consumer_checklist_cuts_no_release(capsys):

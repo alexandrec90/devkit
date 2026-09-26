@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import broken_pr_menu as menu
 import fix_plan
+import junit_report
 import sweep
 import task_branch as tb
 from _loader import load_by_path
@@ -67,7 +68,7 @@ ISSUE_LIMIT = 50
 Gh = Callable[..., object]
 
 
-def _json(result: object) -> object:
+def gh_json(result: object) -> object:
     """The parsed stdout of a `gh --json` call, or None for any failure shape."""
     code = getattr(result, "returncode", 1)
     if code != 0:
@@ -83,7 +84,7 @@ def _json(result: object) -> object:
 
 def gate_run(gh: Gh, head: str, sha: str) -> dict:
     """The gate run at `sha` on `head`, or the newest on `head` when `sha` is unknown."""
-    listed = _json(
+    listed = gh_json(
         gh(
             "run",
             "list",
@@ -108,31 +109,28 @@ def gate_run(gh: Gh, head: str, sha: str) -> dict:
 
 def run_jobs(gh: Gh, run_id: str) -> list[dict]:
     """The run's jobs with their steps, for the coarse signature."""
-    viewed = _json(gh("run", "view", str(run_id), "--json", RUN_VIEW_FIELDS))
+    viewed = gh_json(gh("run", "view", str(run_id), "--json", RUN_VIEW_FIELDS))
     if not isinstance(viewed, dict):
         return []
     jobs = viewed.get("jobs", [])
     return [job for job in jobs if isinstance(job, dict)] if isinstance(jobs, list) else []
 
 
-def download_logs(gh: Gh, run_id: str, dest: Path) -> list[str]:
-    """Every `.log` the run uploaded, downloaded under `dest`, as text.
+def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]]:
+    """`(artifact texts, jobs)`: the run's artifacts downloaded under `dest` and read by
+    `junit_report`, and its jobs whenever those texts name nothing.
 
     `dest` is emptied first: an earlier download of a different run in the same slot
-    would otherwise hand the plan a signature from the wrong commit.
+    would otherwise hand the plan a signature from the wrong commit. The jobs are asked
+    for not merely when nothing came down: an artifact that downloads and says nothing
+    -- an empty lint log on a run whose tests failed -- used to stop the failed step
+    names being asked for, and the failure went out blind.
     """
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     done = gh("run", "download", str(run_id), "-D", str(dest))
-    if getattr(done, "returncode", 1) != 0:
-        return []
-    texts = []
-    for log in sorted(dest.rglob("*.log")):
-        try:
-            texts.append(log.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            continue
-    return texts
+    texts = junit_report.read_artifacts(dest) if getattr(done, "returncode", 1) == 0 else []
+    return texts, [] if fix_plan.signature_from_logs(texts) else run_jobs(gh, run_id)
 
 
 # --- scheduled failures ----------------------------------------------------------------
@@ -151,7 +149,7 @@ def run_id_from_body(body: str) -> str:
 
 def nightly_issues(gh: Gh) -> list[dict]:
     """The open tracker issues in one checkout: the reporter's title shape only."""
-    listed = _json(
+    listed = gh_json(
         gh("issue", "list", "--state", "open", "--limit", str(ISSUE_LIMIT), "--json", ISSUE_FIELDS)
     )
     if not isinstance(listed, list):
@@ -174,22 +172,9 @@ def newest_release(devkit: Path) -> str:
     return next((line.strip() for line in tags.stdout.splitlines() if line.strip()), "")
 
 
-def latest_tag(devkit: Path) -> str:
-    """The same, slugified the way branch names are, for the superseded rule.
-
-    Empty when there is no tag to read, which the plan reads as "call nothing superseded".
-    """
-    newest = newest_release(devkit)
-    return tb.slugify(newest) if newest else ""
-
-
-def default_branch_run(gh: Gh, base: str) -> dict:
-    """The newest *completed* gate run on `base`; `{}` when there is none to read.
-
-    Completed, not newest: the run for the push that just landed is the one still in
-    progress, and its absence of a verdict says nothing about the branch.
-    """
-    listed = _json(
+def default_branch_runs(gh: Gh, base: str) -> list[dict]:
+    """The newest gate runs on `base`, newest first; empty when `gh` cannot say."""
+    listed = gh_json(
         gh(
             "run",
             "list",
@@ -204,11 +189,53 @@ def default_branch_run(gh: Gh, base: str) -> dict:
         )
     )
     if not isinstance(listed, list):
-        return {}
-    for run in listed:
-        if isinstance(run, dict) and str(run.get("status", "")) == "completed":
-            return run
-    return {}
+        return []
+    return [run for run in listed if isinstance(run, dict)]
+
+
+# Conclusions that are not verdicts: the run said nothing about the commit. Anything
+# else that is not `success` is red.
+NO_VERDICT = frozenset({"cancelled", "skipped", "action_required", ""})
+
+
+def _tip_verdict(runs: list[dict], tip: str) -> tuple[bool | str | None, dict]:
+    """What the gate says about `tip`: `(verdict, the red run)`.
+
+    `RUNNING` when the newest run is at the tip and unfinished. Otherwise the newest
+    *completed* run decides -- the run for the push that just landed is the one still
+    in progress, and its absence of a verdict says nothing about the branch -- and only
+    when it is at the tip: a verdict about another commit is no verdict. `True` on
+    success, `None` on a conclusion that judged nothing, else `False` with the run.
+    """
+    newest = runs[0]
+    if str(newest.get("headSha", "")) == tip and str(newest.get("status", "")) != "completed":
+        return fix_plan.RUNNING, {}
+    run = next((r for r in runs if str(r.get("status", "")) == "completed"), {})
+    if not run or str(run.get("headSha", "")) != tip:
+        return None, {}
+    conclusion = str(run.get("conclusion", "")).lower()
+    if conclusion == "success":
+        return True, {}
+    return (None, {}) if conclusion in NO_VERDICT else (False, run)
+
+
+def run_ids_from_rollup(rollup: object) -> tuple[str, ...]:
+    """The runs behind a PR's failing checks, off `statusCheckRollup`, deduped in order.
+
+    A check run's `detailsUrl` (a status context's `targetUrl`) names the run and the
+    job; the run is what `gh run download` and `gh run view` take.
+    """
+    found: list[str] = []
+    for node in rollup if isinstance(rollup, list) else []:
+        if not isinstance(node, dict):
+            continue
+        verdict = str(node.get("conclusion") or node.get("state") or "").upper()
+        if verdict not in ("FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE"):
+            continue
+        hit = RUN_URL.search(str(node.get("detailsUrl") or node.get("targetUrl") or ""))
+        if hit and hit.group(1) not in found:
+            found.append(hit.group(1))
+    return tuple(found)
 
 
 # --- collecting everything red ------------------------------------------------------------
@@ -241,26 +268,39 @@ def pr_failure(project: str, pr: dict) -> fix_plan.Failure:
         base=str(pr.get("baseRefName", "") or "main"),
         sha=str(pr.get("headRefOid", "")),
         reason=menu.broken_reason(pr),
+        check_runs=run_ids_from_rollup(pr.get("statusCheckRollup")),
     )
 
 
 def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_plan.Failure:
-    """The PR's gate at its head sha: run, jobs, artifacts, into a signature."""
+    """The PR's gate at its head sha: run, jobs, artifacts, into a signature.
+
+    The gate workflow's run at the sha first; failing that, the runs the rollup names
+    behind the failing checks. Three of nine ledger entries once read "no artifact and
+    no failed step named" because the failing check belonged to another workflow, and
+    each got a session sent blind at a run the rollup had the id of.
+    """
     gh = sweep.gh_for(project_dir)
     conflicted = fix_plan.CONFLICT in failure.reason
     behind = not conflicted and is_behind(sweep.git_for(project_dir), failure.base, failure.sha)
     run = gate_run(gh, failure.head, failure.sha)
-    run_id = str(run.get("databaseId", "") or "")
-    if not run_id:
+    gate_id = str(run.get("databaseId", "") or "")
+    run_ids = [gate_id] if gate_id else list(failure.check_runs)
+    if not run_ids:
         return replace(failure, signature=fix_plan.signature(conflicted, [], []), behind=behind)
     where = root / evidence_slot(failure)
-    texts = download_logs(gh, run_id, where)
-    jobs = run_jobs(gh, run_id) if not texts else []
+    texts: list[str] = []
+    jobs: list[dict] = []
+    for run_id in run_ids:
+        dest = where / run_id if len(run_ids) > 1 else where
+        found, failed_jobs = run_evidence(gh, run_id, dest)
+        texts += found
+        jobs += failed_jobs
     sig = fix_plan.signature(conflicted, texts, jobs)
     return replace(
         failure,
         signature=sig,
-        run_id=run_id,
+        run_id=run_ids[0],
         evidence=str(where) if texts else "",
         behind=behind,
     )
@@ -268,29 +308,31 @@ def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_pla
 
 def read_default_branch(
     project: str, project_dir: Path, root: Path
-) -> tuple[bool | None, fix_plan.Failure | None]:
+) -> tuple[bool | str | None, fix_plan.Failure | None]:
     """`(green, failure)` for the project's own default branch.
 
     `green` is None when the gate's verdict could not be read -- including when the
-    newest completed run is not at the branch's tip. carameli's gate has no `push`
-    trigger, so its "newest run on master" was a May run four months behind the tip,
-    and a session was spent proving it stale; a verdict that is not about the current
-    commit is no verdict. A red run whose only failure is the newest-tag test is a
-    release commit's: green once the tag points at that commit (the release workflow
-    accepted it, and the test passes on the next push), and a failure the plan skips
-    out loud while the tag does not exist yet.
+    newest completed run is not at the branch's tip, and when the run there was
+    cancelled rather than judged. carameli's gate has no `push` trigger, so its "newest
+    run on master" was a May run four months behind the tip, and a session was spent
+    proving it stale; a verdict that is not about the current commit is no verdict. It
+    is `fix_plan.RUNNING` when the run at the tip has not finished: the pass after every
+    merge to devkit main used to read that as unreadable and hold every project fixer.
+    A red run whose only failure is the newest-tag test is a release commit's: green
+    once the tag points at that commit (the release workflow accepted it, and the test
+    passes on the next push), and a failure the plan skips out loud while the tag does
+    not exist yet.
     """
     gh = sweep.gh_for(project_dir)
     git = sweep.git_for(project_dir)
     base = tb.detect_default_branch(git, fallback="main")
-    run = default_branch_run(gh, base)
-    if not run:
+    runs = default_branch_runs(gh, base)
+    tip = branch_tip(git, base) if runs else ""
+    if not tip:
         return None, None
-    tip = branch_tip(git, base)
-    if not tip or str(run.get("headSha", "")) != tip:
-        return None, None
-    if str(run.get("conclusion", "")) == "success":
-        return True, None
+    verdict, run = _tip_verdict(runs, tip)
+    if verdict is not False:
+        return verdict, None
     run_id = str(run.get("databaseId", "") or "")
     failure = fix_plan.Failure(
         kind=fix_plan.BRANCH,
@@ -304,8 +346,7 @@ def read_default_branch(
         workflow=str(run.get("workflowName") or GATE_WORKFLOW),
     )
     where = root / evidence_slot(failure)
-    texts = download_logs(gh, run_id, where) if run_id else []
-    jobs = run_jobs(gh, run_id) if run_id and not texts else []
+    texts, jobs = run_evidence(gh, run_id, where) if run_id else ([], [])
     sig = fix_plan.signature(False, texts, jobs)
     if fix_plan.is_release_red(sig) and is_tagged(git, failure.sha):
         return True, None
@@ -314,7 +355,7 @@ def read_default_branch(
 
 def collect_default_branches(
     workspace: Path, projects: list[str]
-) -> dict[str, tuple[bool | None, fix_plan.Failure | None]]:
+) -> dict[str, tuple[bool | str | None, fix_plan.Failure | None]]:
     """Every checkout's default branch, read the same way a PR's gate is."""
     root = evidence_root(workspace)
     verdicts = {}
@@ -346,8 +387,7 @@ def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_
     if not run_id:
         return failure
     where = root / evidence_slot(failure)
-    texts = download_logs(gh, run_id, where)
-    jobs = run_jobs(gh, run_id) if not texts else []
+    texts, jobs = run_evidence(gh, run_id, where)
     sig = fix_plan.signature(False, texts, jobs)
     return replace(failure, signature=sig, run_id=run_id, evidence=str(where) if texts else "")
 

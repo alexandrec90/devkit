@@ -2585,7 +2585,7 @@
 		// Projects nothing should be in flight for. `upgrade-project.py --all` passes over
 		// them and `worktree.py` reports any box cut for one as stranded at any age
 		// (`sweep.on_hold`). Naming a project explicitly on the command line still works.
-		"devkit.onHold": ["ibkr_trader", "data-lake", "sports_betting"],
+		"devkit.onHold": [],
 
 		// Projects that get a standing `claude remote-control` server, so a session on
 		// this machine is reachable from the phone. `devkit-rc-servers` restarts any that

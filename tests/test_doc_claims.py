@@ -367,6 +367,12 @@ ALLOWED_MISSING = {
     "read and consumed by the fix pass; under the ignored `logs/`, so never in the repo",
     "logs/ship-state.json": "the fix pass's record beside that intent, under the same "
     "ignored `logs/`",
+    "logs/ship-intent.shipped.md": "where the pass sets a shipped intent aside, under the "
+    "same ignored `logs/`",
+    "logs/fix-blocked.md": "written by a fixer into its own worktree when it cannot "
+    "finish; read by the fix pass; under the ignored `logs/`",
+    "logs/fix-dispatch.json": "the fix pass's stamp in a worktree it opened a session in, "
+    "under the ignored `logs/`",
     "check-lock-markers.py": "a project-owned Stop tier devkit has no lockfiles for; "
     "its absence is an explicit skip, documented in test_repo_contract.py",
     "test_codex_hooks_contract.py": "carameli's, cited as the coupling the vendored "
