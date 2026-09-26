@@ -30,8 +30,9 @@ wrong version for the project's pin, are examples. It does not mention the probl
 passing, write `logs/fix-blocked.md` over it, or leave it for the next session. The next
 session is on the same machine and would hit the same wall.
 
-1. Run the project's provisioning command — the one its preflight or the SessionStart
-   report names.
+1. Run the project's provisioning command — the one its preflight names, or devkit's
+   `python "$DEVKIT_DIR/scripts/worktree.py" provision <this tree> --yes` (without
+   `--yes` it only prints the plan).
 2. If that command cannot close the gap, and it is the project's own script, extend it
    so it can. Put that in the same change, with tests, and say why in the intent. The
    pattern is `uv venv --python`: fetch the pinned version into a per-user cache rather

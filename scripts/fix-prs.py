@@ -36,10 +36,9 @@ started in and hands back nothing to attach to. Which model and effort a mode op
 rides along in the same `agent_models.Launch`, and is the picker's answer, never this
 module's guess.
 
-**Click-only, by decision.** Nothing schedules this. A session is paid for, and a
-dispatch loop that spent one in the background on a failure nobody was going to look
-at is the outcome the ledger and the plan exist to avoid; the scheduled tier merges
-green PRs and reaps boxes, and stops there.
+**The CLI is the click; the pass is the schedule.** Run bare, this is the hand-driven
+plan-and-send. `fix-pass.py` calls `dispatch_pr` and `dispatch_fresh` on its schedule,
+under `fix_budget.py` rather than this file's `--redo`.
 
 Every function that decides something is pure and tested in `tests/test_fix_prs.py`
 (with the plan's own in `tests/test_fix_plan.py` and the evidence's in
@@ -315,11 +314,12 @@ def dispatch_pr(
     launch: agent_models.Launch,
     runner=subprocess.run,
     key: str = "",
+    problem: str = "",
 ) -> int:
     """A planned PR: its own head branch, the gate's logs beside it, the plan's prompt.
 
-    `key` is the ledger key the pass records this under; stamped into the worktree
-    (`fix_reports.stamp`) so a blocked report from it can be matched back.
+    `key` and `problem` are what the pass records this under; stamped into the worktree
+    (`fix_reports.stamp`) so a report or a dead session there can be matched back.
     """
     project_dir = root / failure.project
     name = f"#{failure.number}" if failure.number else failure.head
@@ -336,7 +336,8 @@ def dispatch_pr(
         print(f"  {stale}")
     gate_evidence.place(failure, tree)
     if key:
-        fix_reports.stamp(tree, key, fix_plan.describe(failure))
+        what = fix_plan.describe(failure)
+        fix_reports.stamp(tree, key, what, problem=problem, agent=launch.agent)
     print(f"  worktree {tree}")
     prompt = tab_safe(fix_prompts.pr_prompt(failure))
     return open_session(launch, tree, failure.head, prompt, f"{failure.project} {name}", runner)
@@ -348,6 +349,7 @@ def dispatch_fresh(
     launch: agent_models.Launch,
     runner=subprocess.run,
     key: str = "",
+    problem: str = "",
 ) -> int:
     """A nightly, or a vendored failure shared across consumers: a fresh branch."""
     first = decision.failures[0]
@@ -367,7 +369,7 @@ def dispatch_fresh(
         # One directory per failure: a devkit session can hold two of one project's.
         gate_evidence.place(failure, tree, gate_evidence.evidence_slot(failure) if upstream else "")
     if key:
-        fix_reports.stamp(tree, key, decision.note)
+        fix_reports.stamp(tree, key, decision.note, problem=problem, agent=launch.agent)
     print(f"  worktree {tree} on {branch}")
     if upstream:
         prompt, title = fix_prompts.upstream_prompt(decision.failures, branch), f"devkit {branch}"

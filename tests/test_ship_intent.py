@@ -308,6 +308,21 @@ def test_an_intent_already_shipped_with_a_clean_tree_is_not_shipped_twice(tmp_pa
     assert again.verbs() == ["git status"]
 
 
+def test_an_intent_left_over_from_a_ship_is_set_aside_and_said_once(tmp_path, monkeypatch):
+    """The first supervised pass found ten: intents whose PRs had merged, from before the
+    pass consumed what it shipped, re-read and re-reported on every pass -- and a `plan`
+    pass called each "would ship". Set aside, the next pass never sees them."""
+    one = intent(tmp_path)
+    ship_intent.write_state(one.tree, {"stage": ship_intent.SHIPPED, "intent": one.digest})
+    (one.tree / ship_intent.INTENT_FILE).write_text("S\n", encoding="utf-8")
+    assert ship_intent.is_spent(one, Runner(porcelain=""))
+    assert not ship_intent.is_spent(one, Runner(porcelain=" M a.py\n")), "edits since are new work"
+    outcome = ship_intent.ship_one(one, "py", "main", Runner(porcelain=""), gh_ok, NOW)
+    assert outcome.stage == ship_intent.SKIPPED and "set aside" in outcome.detail
+    assert not (one.tree / ship_intent.INTENT_FILE).exists()
+    assert (one.tree / ship_intent.SHIPPED_FILE).read_text(encoding="utf-8") == "S\n"
+
+
 def test_a_rewritten_intent_on_a_clean_shipped_tree_is_nothing_to_ship(tmp_path, monkeypatch):
     """New words with no changed file have no commit to carry them. The first pass after
     #375 merged found exactly this -- the message edited after the ship, the tree clean --

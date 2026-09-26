@@ -10,17 +10,17 @@ a new key when it is still red. The user chose click-only over a scheduled dispa
 precisely because a session costs real money and a loop that spent one silently would
 be the worst outcome here.
 
-Two things an entry can say beyond "sent": that it is old enough to look at again
-(`RESEND_AFTER`, because a session that died leaves nothing but its entry -- once,
-`MAX_SENDS`, because a second death is a pattern and not an accident), and that the
-session reported itself blocked (`mark_blocked`, which never expires, because the
-session did report and what it reported needs a person).
+Three things an entry can say beyond "sent": that it is old enough to look at again
+(`RESEND_AFTER`, because a session that died can leave nothing but its entry), that the
+pass found its session dead (`mark_dead`, which frees it at once), and that the session
+reported itself blocked (`mark_blocked`).
 
 And one thing the entries say together: how many sessions one *problem* has had
-(`problem_key`, the key less its commit). That is the retry policy -- a failure that
-survives `ATTEMPTS` fixers unchanged needs a person, one that changed is progress --
-and it replaced a per-target daily cap that could not tell a fixer making progress
-from one failing the same way twice, so it rationed both.
+(`problem_key`, the key less its commit). A failure that survives `ATTEMPTS` fixers
+unchanged is escalated -- a finding on the harness-defect ledger, which the devkit
+session takes over (`fix_budget.budget`) -- never parked for a person. Every reader here
+takes a `since`: the stamp that escalation was resolved at. Entries before it are
+history, so a problem whose escalation is closed gets fresh fixers.
 
 Stdlib plus `fix_plan`. Tested in `tests/test_fix_ledger.py`.
 """
@@ -63,11 +63,6 @@ ATTEMPTS = 2
 # A problem with no evidence cannot show progress: its one session is all it gets.
 BLIND_ATTEMPTS = 1
 
-# How many sessions one key gets in its life: the dispatch and one re-send. The entry
-# counts them, so a failure whose session dies every day does not buy a session every
-# day; past this it reads "needs a human" until the failure moves to a new sha.
-MAX_SENDS = 2
-
 
 # --- the keys -------------------------------------------------------------------------
 
@@ -95,7 +90,7 @@ def decision_key(decision: fix_plan.Decision) -> str:
     got wrong becomes unrepeatable. devkit #381 was recorded at its head sha as an
     upstream session; nobody was going to push to a conflicted PR, so without the
     action in the key the corrected pass would read its own bad dispatch as reason
-    enough never to send the resolver. `fix_cycle.target_of` reads the first three
+    enough never to send the resolver. `fix_budget.target_of` reads the first three
     fields, so the suffix leaves the daily budget per PR exactly where it was.
     """
     keys = sorted(failure_key(f) for f in decision.failures)
@@ -178,39 +173,84 @@ def mark_blocked(path: Path, key: str, reason: str) -> bool:
     Only an entry the ledger already has -- a stamp naming a key no dispatch made is
     noise, not a report. Returns whether one was marked.
     """
+    return _mark(path, key, "blocked", reason)
+
+
+def mark_dead(path: Path, key: str, reason: str) -> bool:
+    """The session sent under `key` ended without an outcome, or never started.
+
+    Frees the key for a re-send on the next pass rather than after `RESEND_AFTER`; the
+    re-send still counts against the problem's `ATTEMPTS`. Returns whether one was marked.
+    """
+    return _mark(path, key, "dead", reason)
+
+
+def _mark(path: Path, key: str, field: str, reason: str) -> bool:
     ledger = read_ledger(path)
     entry = ledger.get(key)
-    if not isinstance(entry, dict):
+    if not isinstance(entry, dict) or entry.get(field):
         return False
-    entry["blocked"] = reason.strip()
+    entry[field] = reason.strip()
     _write(path, ledger)
     return True
+
+
+def _since(entry: object, since: str) -> bool:
+    """The entry was written after `since` (ISO); every entry is, when `since` is empty."""
+    if not since:
+        return True
+    when = str(entry.get("when", "")) if isinstance(entry, dict) else ""
+    try:
+        return _dt.datetime.fromisoformat(when) > _dt.datetime.fromisoformat(since)
+    except ValueError:
+        return when > since
 
 
 # --- what the ledger says about a decision ---------------------------------------------
 
 
-def blocked_reason(decision: fix_plan.Decision, ledger: dict[str, dict]) -> str:
+def blocked_reason(decision: fix_plan.Decision, ledger: dict[str, dict], since: str = "") -> str:
     """What a session sent at this decision -- or at the same problem on an earlier
-    commit -- said was in the way, or "" when nothing.
+    commit, after `since` -- said was in the way, or "" when nothing.
 
     The problem half is what keeps a report standing after an unrelated push: the
-    blocker a fixer named does not go away because the sha moved.
+    blocker a fixer named does not go away because the sha moved. It goes away when the
+    finding it was escalated as is resolved, which is the `since` the caller passes.
     """
     entry = ledger.get(decision_key(decision))
-    if isinstance(entry, dict) and entry.get("blocked"):
+    if isinstance(entry, dict) and entry.get("blocked") and _since(entry, since):
         return str(entry["blocked"])
     problem = problem_key(decision)
     for key, other in ledger.items():
-        if isinstance(other, dict) and other.get("blocked") and problem_of(key, other) == problem:
+        if (
+            isinstance(other, dict)
+            and other.get("blocked")
+            and problem_of(key, other) == problem
+            and _since(other, since)
+        ):
             return str(other["blocked"])
     return ""
 
 
-def attempts(decision: fix_plan.Decision, ledger: dict[str, dict]) -> int:
-    """Sessions already sent at this decision's problem, at any commit."""
+def attempts(decision: fix_plan.Decision, ledger: dict[str, dict], since: str = "") -> int:
+    """Sessions sent at this decision's problem, at any commit, after `since`."""
     problem = problem_key(decision)
-    return sum(sends(entry) for key, entry in ledger.items() if problem_of(key, entry) == problem)
+    return sum(
+        sends(entry)
+        for key, entry in ledger.items()
+        if problem_of(key, entry) == problem and _since(entry, since)
+    )
+
+
+def last_sent(decision: fix_plan.Decision, ledger: dict[str, dict]) -> str:
+    """The newest `when` any entry of this problem carries, ISO; "" when none."""
+    problem = problem_key(decision)
+    stamps = (
+        str(entry.get("when", ""))
+        for key, entry in ledger.items()
+        if isinstance(entry, dict) and problem_of(key, entry) == problem
+    )
+    return max(stamps, default="")
 
 
 def moved_on(decision: fix_plan.Decision, ledger: dict[str, dict]) -> bool:
@@ -234,23 +274,27 @@ def moved_on(decision: fix_plan.Decision, ledger: dict[str, dict]) -> bool:
 
 
 def already_sent(
-    decision: fix_plan.Decision, ledger: dict[str, dict], now: _dt.datetime | None = None
+    decision: fix_plan.Decision,
+    ledger: dict[str, dict],
+    now: _dt.datetime | None = None,
+    since: str = "",
 ) -> str:
     """When this exact dispatch was already made, or "" when it is new.
 
-    With a clock, an entry older than `RESEND_AFTER` no longer counts unless the session
-    reported itself blocked or the key has had its `MAX_SENDS`: a session that died
-    left nothing else, and one re-send bounds what that can cost. Without one, every
-    entry stands -- the click-only caller's `--redo` is the override there.
+    With a clock, an entry older than `RESEND_AFTER` no longer counts, and one the pass
+    found dead counts not at all: a session that died left nothing else. How often that
+    may happen is `ATTEMPTS`' business, not this function's. An entry from before
+    `since` is history. Without a clock every entry stands -- the click-only caller's
+    `--redo` is the override there.
     """
     entry = ledger.get(decision_key(decision))
-    if not isinstance(entry, dict):
+    if not isinstance(entry, dict) or not _since(entry, since):
         return ""
     when = str(entry.get("when", "?"))
-    if sends(entry) >= MAX_SENDS:
-        return f"{when}, its {sends(entry)} sessions spent -- needs a human"
     if now is None or entry.get("blocked"):
         return when
+    if entry.get("dead"):
+        return ""
     try:
         sent_at = _dt.datetime.fromisoformat(when)
     except ValueError:

@@ -627,3 +627,38 @@ def test_the_same_job_failing_nightly_stays_one_open_defect():
 
     assert len(items) == 2
     assert len({item.signature for item in items}) == 1
+
+
+# --- a resolution that did not hold -------------------------------------------------------
+
+
+def test_a_later_reopening_undoes_a_resolution_and_a_later_resolution_redoes_it():
+    """`fix_verify` reopens a group whose fix never merged. Stamp order decides, not
+    file order: shards are unioned, and the verdicts may sit in two machines' files."""
+    report = _line("agent-report", message="one")
+    ref = triage.item_id(report)
+    resolved = _line("triage-resolved", stamp="2026-08-25T00:00:00+00:00", ref=ref, note="fixed")
+    reopened = _line(
+        triage.REOPENED_EVENT, stamp="2026-08-26T00:00:00+00:00", ref=ref, note="closed unmerged"
+    )
+    again = _line(
+        "triage-resolved", stamp="2026-08-27T00:00:00+00:00", ref=ref, note="fixed for real"
+    )
+    assert triage.open_items(triage.read_items("\n".join([report, resolved]))) == []
+    [back] = triage.open_items(triage.read_items("\n".join([reopened, report, resolved])))
+    assert back.id == ref
+    assert (
+        triage.open_items(triage.read_items("\n".join([report, resolved, reopened, again]))) == []
+    )
+    assert triage.verdicts(triage.read_items(reopened))[ref][0] == triage.REOPENED_EVENT
+
+
+def test_reopen_appends_one_event_per_id(tmp_path):
+    report = _line("agent-report", message="one")
+    _ledger(tmp_path, report)
+    ref = triage.item_id(report)
+    triage.resolve([ref], "fixed on agent/x", root=tmp_path)
+    assert triage.open_items(triage.load(tmp_path)) == []
+    assert triage.reopen([ref], "no PR was ever opened from agent/x", root=tmp_path) == [ref]
+    [back] = triage.open_items(triage.load(tmp_path))
+    assert back.id == ref

@@ -21,12 +21,14 @@ recover is *why* the change was made, so that is the only thing it is asked for.
    - a body explaining *why*, in Markdown. Name identifiers in backticks. This body is
      the PR description and the only changelog a consumer of this repository gets, so
      write it for the reader who did not watch the work.
-3. Report the subject and stop.
+3. If the harness cost you turns -- a refusal, a missing tool, an instruction that sent
+   you the wrong way -- write one line per thing to `logs/friction.md`. The pass files
+   each on the harness-defect ledger, where the devkit session fixes it.
+4. Report the subject and stop.
 
-`logs/` is ignored in every project, so the file cannot be committed by accident. If
-you change the code again after writing it, rewrite the file last: the pass ships
-whatever the file says when it runs, and remembers the words it shipped, so an edited
-file is shipped again and an unchanged one is not.
+`logs/` is ignored in every project, so the file cannot be committed by accident. Once
+shipped, the pass moves it to `logs/ship-intent.shipped.md`; to ship again, write a
+fresh one, last.
 
 ## What happens next, and why none of it is your turn
 
@@ -51,5 +53,6 @@ a single call.
 `worktree.py reconcile` owns that and waits for the PR to actually merge.
 
 **Never work around a refusal.** If something in the harness blocked a correct edit or
-command, say so in your report with the exact command and stop. The pass records
-refusals on the ledger itself; filing them is not a project session's job.
+command, say so in your report with the exact command, put it in `logs/friction.md`,
+and stop. The pass also reads every session's transcript for refusals and files them
+itself (`scripts/session_friction.py` in devkit).

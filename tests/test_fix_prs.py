@@ -1017,11 +1017,15 @@ def test_a_dispatch_stamps_the_worktree_with_the_key_it_is_recorded_under(monkey
     monkeypatch.setattr(fix_prs.tb, "detect_default_branch", lambda _git: "main")
     monkeypatch.setattr(fix_prs, "cut_fresh_tree", lambda *a: (fresh, "agent/fix"))
     decision = fix_plan.Decision(fix_plan.UPSTREAM, "one vendored failure", (failure(),))
-    assert fix_prs.dispatch_fresh(decision, root, claude, None, "upstream:1:k") == 0
+    assert fix_prs.dispatch_fresh(decision, root, claude, None, "upstream:1:k", "upstream:p") == 0
+    # The problem and the agent too: the pass matches a dead or blocked session back to
+    # the problem it answers, and reads a transcript only for a CLI that leaves one.
     assert fix_prs.fix_reports.read_stamp(fresh) == {
         "key": "upstream:1:k",
         "what": "one vendored failure",
         "when": fix_prs.fix_reports.read_stamp(fresh)["when"],
+        "problem": "upstream:p",
+        "agent": "claude",
     }
     unstamped = root / "carameli" / ".claude" / "worktrees" / "u"
     unstamped.mkdir(parents=True)

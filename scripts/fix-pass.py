@@ -1,72 +1,41 @@
 #!/usr/bin/env python3
-"""The fix pass: ship what sessions finished, then send fixers at what is red, in order.
+"""The fix pass: ship what sessions finished, send fixers at what is red, file the rest.
 
-One pass, whether a click or the scheduler started it. The rule behind the order:
-**anything a script can do, no session does.** A session is sent only at the part
-that needs a change to the code, told to fix that and stop, and every step around it
--- merging the base, committing, pushing, opening the PR, reading the gate, updating a
-branch, merging an adoption -- is one command here. The pass is iterative on purpose;
-a session that waits on a gate or pushes its own branch spends a conversation's tail
-on a verdict a fresh pass reads in a call.
+One pass, whether a click or the scheduler started it (through `fix-pass-watchdog.py`,
+which survives this file crashing). Two rules hold it together:
 
-1. **Ship every intent.** A session that is done leaves `logs/ship-intent.md` in its
-   worktree and nothing else (`ship_intent.py`). The pass runs the fixers, commits with
-   that message, pushes with the push gate skipped, opens the PR with the label and
-   records the outcome. A refused commit becomes a failure like any other. Fixers end
-   the same way, so this is also how their work leaves the worktree.
-2. **Merge green adoptions**, and nothing else. Every other green PR waits for a
-   person. Before the red is read, so a release whose adoptions just went green stops
-   holding the projects on this pass rather than the next.
-3. **Collect everything red** (`fix_red.py`). Refused commits, red PRs, open scheduled-failure issues
-   and every default branch whose own gate is red, each with the gate's own artifact
-   (`gate_evidence.py`), plus the harness-defect ledger's open backlog
-   (`harness_triage.py`) as one failure with its groups as evidence; planned by
-   `fix_plan.py` and classified by `fix_cycle.py`. A release commit's red -- the
-   newest-tag test, until the tag exists -- is skipped out loud, and reads as green once
-   the tag points at it. A PR behind a red base is held for the base's fixer. Every
-   registered checkout is read, `devkit.onHold` included. A default branch with no
-   verdict at its tip gets its gate re-run: a merge by the auto-merge workflow starts
-   no run, and an unreadable devkit held everything.
-4. **Read what fixers reported.** A session that could not finish wrote
-   `logs/fix-blocked.md` in its worktree (`fix_reports.py`); the pass marks its ledger
-   entry blocked, so no second session is spent, and puts the reason on the record.
-5. **Harness first.** While anything harness-shaped is red -- a vendored test, a shared
-   signature, devkit's own gate -- one devkit session gets the whole set and every
-   project fixer is held, out loud; devkit's own PRs are not, since one may be the fix.
-   A harness PR that is behind or conflicted goes as itself first: neither is work a
-   fresh branch can do (`fix_cycle.BRANCH_SHAPED`).
-6. **Then projects**, conflicts first. A project whose adoption of the newest release
-   is still open sends the adoption and holds its other PRs; every other project is
-   untouched by it. Each dispatch goes unless `fix_ledger.ATTEMPTS` sessions already
-   left the same failure unchanged -- a changed one is progress -- or a fuse trips. A
-   ledger entry older than `fix_ledger.RESEND_AFTER` no longer stops one re-send: a
-   session that died leaves nothing else.
+- **Anything a script can do, no session does.** A session is sent only at the part
+  that needs a change to the code, told to fix that and stop; merging the base,
+  committing, pushing, opening the PR, reading the gate and updating a branch are each
+  one command here.
+- **Every observation ends green, in flight, or filed.** There is no "needs a human":
+  what the pass cannot turn green becomes a finding on the harness-defect ledger
+  (`fix_findings.py`), which the devkit session this same pass sends takes over.
 
-Each pass also appends one line to `logs/fix-pass.history.jsonl`, since the record is
-overwritten: "most passes spawn nothing" was otherwise a claim no file could check.
+1. **Ship every intent** (`ship_intent.py`); a refused commit is a failure like any other.
+2. **Merge green adoptions** (only those: every other green PR waits for a person).
+3. **Read back** (`fix_loop.py`): blocked reports, friction files, dead sessions,
+   transcripts, resolutions that did not hold, waits that have gone stale -- filed now,
+   so the backlog read next already carries them.
+4. **Collect everything red** (`fix_red.py`), the harness-defect backlog included,
+   plan it (`fix_plan.py`) and classify it (`fix_cycle.py`).
+5. **Harness first**: while anything harness-shaped is red, one devkit session gets
+   all of it and project fixers are held, out loud. Only one at a time.
+6. **Then projects**, conflicts first, each under `fix_budget.budget`: the ledger, the
+   escalation ladder and the fuses.
 
-Every dispatch is `fix-prs.py`'s: the worktree on the PR's branch, the evidence under
-`logs/gate/`, the prompt naming the failing ids. This file only decides what to hand it.
+Every pass appends a line to `logs/fix-pass.history.jsonl`, which `fix_stall` reads.
+`"devkit.fixPass"` in the workspace file is `off` (the default), `plan` (write it all,
+do nothing) or `dispatch`. Scheduled runs use `claude-bg`. The record is
+`logs/fix-pass.log`, overwritten per pass.
 
-**The switch.** `"devkit.fixPass"` in the workspace file's `settings` is `off` (the
-default), `plan` or `dispatch`; the scheduled job (`install-fix-pass-task.py`) reads it
-every half hour and the VS Code task passes `--mode dispatch` by hand. `off` writes one
-line to the artifact and exits; `plan` writes the whole plan and sends nothing; the
-wiring is complete either way, so turning it on is one setting rather than a change.
-
-Scheduled runs use `claude-bg`: a tab is a window, and the scheduler has no desktop to
-put one on. The artifact is `logs/fix-pass.log` in the devkit checkout, overwritten per
-pass, per the failure-artifact rule in `.claude/rules/engineering.md`.
-
-Every decision is pure and lives in the modules above; what is here is the wiring, and
-`tests/test_fix_pass.py` drives it with every subprocess replaced.
+`tests/test_fix_pass.py` drives the wiring with every subprocess replaced.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
-import subprocess
 import sys
 from pathlib import Path
 
@@ -76,11 +45,12 @@ import adoption_prs
 import agent_models
 import broken_pr_menu as menu
 import devkit_project
+import fix_budget
 import fix_cycle
 import fix_ledger
+import fix_loop
 import fix_plan
 import fix_red
-import fix_reports
 import gate_evidence
 import ship_intent
 import sweep
@@ -96,34 +66,34 @@ fix_prs = load_by_path("fix_prs", REPO_ROOT / "scripts" / "fix-prs.py")
 # the tree has none, so `ship.py --fix` runs with the project's own pre-commit.
 push_gate = load_by_path("run_push_gate", REPO_ROOT / "scripts" / "precommit" / "run_push_gate.py")
 
+Finding = fix_loop.Finding
+Journal = fix_loop.fix_findings.Journal
+
 ARTIFACT = Path("logs") / "fix-pass.log"
 HISTORY = Path("logs") / "fix-pass.history.jsonl"
 # A week of half-hourly passes.
 HISTORY_KEEP = 336
 SCHEDULED_AGENT = "claude-bg"
+# What `merge_green_adoptions` reads of each open PR to judge it green.
+ADOPTION_FIELDS = "number,headRefName,isDraft,labels,mergeable,statusCheckRollup"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
 
-# Every CLI the pass spawns before it can say anything. A missing one surfaced as a bare
-# `FileNotFoundError: [WinError 2]` from deep inside `gate_evidence`, naming no program:
-# on a fresh machine `gh` had been installed after VS Code started, and a task inherits
-# the PATH VS Code launched with. Each is probed by running it, because found is not
-# enough: on Windows `python3` is often only the Store alias, which exits 9009 -- and
-# every git hook and pre-commit script entry runs through it, so a pass on such a machine
-# dies twice, as a refused commit and as a worktree it cannot cut.
-REQUIRED_TOOLS = {"git": ("--version",), "gh": ("--version",), "python3": ("-c", "")}
+# Every CLI the pass spawns before it can say anything, probed by running it: found is
+# not enough. On Windows `python3` is often only the Store alias, which exits 9009, and
+# every git hook runs through it. `gh auth status` rather than `--version`: a `gh`
+# whose token expired answers every read with nothing, which reads as nothing red.
+REQUIRED_TOOLS = {"git": ("--version",), "gh": ("auth", "status"), "python3": ("-c", "")}
 
 
 def runs(argv: list[str]) -> bool:
+    """Whether `argv` runs and exits 0, through the pass's own window-less runner."""
     try:
-        probe = subprocess.run(
-            argv, capture_output=True, check=False, creationflags=sweep.NO_WINDOW
-        )
+        return ship_intent.run_quiet(argv).returncode == 0
     except OSError:
         return False
-    return probe.returncode == 0
 
 
 def missing_tools() -> list[str]:
@@ -139,7 +109,7 @@ def write_artifact(text: str, root: Path | None = None) -> Path:
 
 def append_history(account: fix_cycle.Account, now: _dt.datetime, root: Path | None = None) -> Path:
     """`fix_cycle.history_line` appended, kept to the last `HISTORY_KEEP`. The record
-    says what the newest pass did; this says whether passes are working at all."""
+    says what the newest pass did; this says how long anything has been waiting."""
     path = (root or REPO_ROOT) / HISTORY
     path.parent.mkdir(parents=True, exist_ok=True)
     line = fix_cycle.history_line(account, now)
@@ -155,13 +125,13 @@ def append_history(account: fix_cycle.Account, now: _dt.datetime, root: Path | N
 
 
 def ship_intents(
-    root: Path, projects: list[str], mode: str
+    root: Path, projects: list[str], mode: str, journal: Journal | None = None
 ) -> tuple[list[str], list[fix_plan.Failure], bool]:
     """Step 1. `(lines for the record, refused commits as failures, any ship failed)`.
 
-    The third is a push or a PR that failed and will be retried next pass: not a
-    failure to send anyone at, but the pass's exit code, so the task that ran it shows
-    red rather than green over a branch that did not go out.
+    A push or a PR that failed is retried next pass and filed now; the third element
+    turns the task red rather than green over a branch that did not go out. An intent
+    where no PR can be opened from is filed for the devkit session to move.
     """
     lines: list[str] = []
     refused: list[fix_plan.Failure] = []
@@ -169,41 +139,43 @@ def ship_intents(
     for intent in ship_intent.find_intents(root, projects):
         where = f"{intent.project} {intent.branch}"
         if intent.blocked:
-            # Work a session left where no PR can be opened from: said, never shipped.
-            lines.append(
-                f"{where} -- NOT shipped: {intent.blocked}; move the work to a task branch "
-                f"(agent-worktree.py new) and leave the intent there"
+            lines.append(f"{where} -- NOT shipped: {intent.blocked}")
+            _file(
+                journal,
+                "intent-unshippable",
+                intent.project,
+                f"{where}: {intent.blocked}",
+                str(intent.tree),
             )
             continue
         if mode != fix_cycle.DISPATCH:
-            lines.append(f"{where} -- would ship: {intent.subject}")
+            spent = ship_intent.is_spent(intent)
+            lines.append(
+                f"{where} -- {'would set aside, already shipped' if spent else 'would ship'}: {intent.subject}"
+            )
             continue
         base = intent.base or "main"
-        python = push_gate.interpreter(intent.tree)
-        outcome = ship_intent.ship_one(intent, python, base)
+        outcome = ship_intent.ship_one(intent, push_gate.interpreter(intent.tree), base)
         lines.append(f"{where} -- {outcome.stage}: {outcome.detail}")
         if outcome.stage == ship_intent.REFUSED:
             refused.append(ship_intent.refusal_failure(outcome, base))
-        failed = failed or outcome.stage == ship_intent.FAILED
+        if outcome.stage == ship_intent.FAILED:
+            failed = True
+            _file(
+                journal,
+                "ship-failed",
+                intent.project,
+                f"{where}: {outcome.detail[:200]}",
+                str(intent.tree),
+            )
     return lines, refused, failed
 
 
-def record_blocked(root: Path, projects: list[str], ledger_path: Path) -> list[str]:
-    """Step 4. What fixers reported they could not do; `(lines for the record)`.
-
-    A report from a stamped worktree marks its ledger entry, which is what stops the
-    next pass sending a second session at the same failure. One from a tree with no
-    stamp -- a hand-picked session, a tree cut some other way -- is said and nothing
-    else, since there is no entry to mark.
-    """
-    lines: list[str] = []
-    for report in fix_reports.find_blocked(root, projects):
-        marked = bool(report.key) and fix_ledger.mark_blocked(
-            ledger_path, report.key, report.reason
-        )
-        tail = "" if marked else " (no dispatch on the ledger to mark; read the tree)"
-        lines.append(f"{report.project} {report.branch} -- {report.reason}{tail}")
-    return lines
+def _file(
+    journal: Journal | None, kind: str, project: str, detail: str, evidence: str = ""
+) -> None:
+    if journal is not None:
+        journal.add(Finding(kind, project, detail, evidence=evidence))
 
 
 def pending_adoptions(root: Path, projects: list[str], tag: str) -> list[str]:
@@ -219,7 +191,9 @@ def pending_adoptions(root: Path, projects: list[str], tag: str) -> list[str]:
     ]
 
 
-def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
+def merge_green_adoptions(
+    root: Path, projects: list[str], journal: Journal | None = None
+) -> list[str]:
     """Step 2. The one merge the pass makes; `(lines for the record)`."""
     merged: list[str] = []
     prefixes = adoption_prs.adoption_prefixes()
@@ -228,16 +202,7 @@ def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
         if name == fix_cycle.DEVKIT or not project_dir.is_dir():
             continue
         gh = sweep.gh_for(project_dir)
-        listed = gh(
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--limit",
-            "50",
-            "--json",
-            "number,headRefName,isDraft,labels,mergeable,statusCheckRollup",
-        )
+        listed = gh("pr", "list", "--state", "open", "--limit", "50", "--json", ADOPTION_FIELDS)
         rows = gate_evidence.gh_json(listed)
         if not isinstance(rows, list):
             rows = []
@@ -246,6 +211,8 @@ def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
             merged.append(
                 f"{name} #{row.get('number')} -- {message if ok else 'FAILED: ' + message}"
             )
+            if not ok:
+                _file(journal, "merge-failed", name, f"#{row.get('number')}: {message[:200]}")
     return merged
 
 
@@ -267,71 +234,114 @@ def update_branch(failure: fix_plan.Failure, root: Path) -> int:
     return EXIT_OK
 
 
-def dispatch(decision: fix_plan.Decision, root: Path, launch: agent_models.Launch) -> int:
+def dispatch(
+    decision: fix_plan.Decision, root: Path, launch: agent_models.Launch, problem: str = ""
+) -> int:
     first = decision.failures[0]
     if decision.action == fix_plan.UPDATE:
         return update_branch(first, root)
     key = fix_ledger.decision_key(decision)
     on_branch = first.kind in (fix_plan.PR, fix_plan.COMMIT)
     if decision.action in (fix_plan.DISPATCH, fix_plan.RESOLVE) and on_branch:
-        code = fix_prs.dispatch_pr(first, root, launch, ship_intent.run_quiet, key)
+        code = fix_prs.dispatch_pr(first, root, launch, ship_intent.run_quiet, key, problem)
         if code == EXIT_OK and first.kind == fix_plan.COMMIT and first.tree:
             # The refused intent is the fixer's to earn again: with it gone, the tree
             # is a session still working until the fixer ships, and the next pass does
             # not re-run the commit stage over its half-made edits.
             ship_intent.set_aside(Path(first.tree), ship_intent.REFUSED_FILE)
         return code
-    return fix_prs.dispatch_fresh(decision, root, launch, ship_intent.run_quiet, key)
+    return fix_prs.dispatch_fresh(decision, root, launch, ship_intent.run_quiet, key, problem)
 
 
 def send_all(
     go: list[fix_plan.Decision],
-    ledger_path: Path,
-    root: Path,
-    mode: str,
+    ctx: fix_loop.Context,
     launch: agent_models.Launch,
-    now: _dt.datetime,
+    journal: Journal | None = None,
+    closed: fix_loop.Closed | None = None,
+    items: list | None = None,
 ) -> tuple[list[str], list[tuple[fix_plan.Decision, str]], int]:
-    """Steps 3 and 4: what the phase let through, each under the ledger and the caps.
+    """Steps 5 and 6: what the phase let through, each under `fix_budget.budget`.
 
-    `(sent lines, capped decisions with why, worst exit code)`. The ledger is written
-    only for a dispatch that opened; one that failed to is not something the next pass
-    should be told already happened.
+    `(sent lines, waiting decisions with why, worst exit code)`. The ledger is written
+    only for a dispatch that opened. `items` is the harness-defect ledger, for what
+    became of each problem's escalation; `closed` says which devkit session is still
+    working, which holds another, and which tree each problem's fixer worked in, which
+    is what an escalation names.
     """
-    ledger = fix_ledger.read_ledger(ledger_path)
+    closed = closed or fix_loop.Closed()
+    ledger = fix_ledger.read_ledger(ctx.ledger_path)
     sent: list[str] = []
     capped: list[tuple[fix_plan.Decision, str]] = []
     worst = EXIT_OK
     for decision in go:
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
-        if reason := fix_ledger.blocked_reason(decision, ledger):
-            capped.append((decision, f"needs a human: {reason}"))
-            continue
-        if when := fix_ledger.already_sent(decision, ledger, now):
-            capped.append((decision, f"already dispatched at {when}"))
-            continue
-        ok, why = fix_cycle.within_caps(decision, ledger, now)
-        if not ok:
-            capped.append((decision, why))
-            continue
-        if mode != fix_cycle.DISPATCH:
-            would = "would update the branch" if decision.action == fix_plan.UPDATE else None
-            sent.append(f"{names} -- {would or f'would send ({decision.action})'}")
-            continue
-        if dispatch(decision, root, launch) == EXIT_OK:
-            fix_ledger.record(
-                ledger_path,
-                fix_ledger.decision_key(decision),
-                decision.note,
-                now,
-                problem=fix_ledger.problem_key(decision),
+        if closed.harness_busy and decision.action == fix_plan.UPSTREAM:
+            capped.append(
+                (decision, f"held until the devkit session in {closed.harness_busy} finishes")
             )
-            ledger = fix_ledger.read_ledger(ledger_path)
-            sent.append(f"{names} -- {decision.action}")
-        else:
-            sent.append(f"{names} -- FAILED to open a session")
-            worst = EXIT_FAILED
+            continue
+        problem = fix_ledger.problem_key(decision)
+        escalated = fix_loop.fix_findings.escalation(problem, items or [])
+        verdict = fix_budget.budget(decision, ledger, ctx.now, escalated)
+        if verdict.finding and journal is not None:
+            journal.add(verdict.finding.at(closed.trees.get(problem, "")))
+        if not verdict.go:
+            capped.append((decision, verdict.why))
+            continue
+        line, code = _send_one(decision, ctx, launch, verdict.effort, journal)
+        sent.append(f"{names} -- {line}")
+        worst = max(worst, code)
+        ledger = fix_ledger.read_ledger(ctx.ledger_path)
     return sent, capped, worst
+
+
+def _send_one(
+    decision: fix_plan.Decision,
+    ctx: fix_loop.Context,
+    launch: agent_models.Launch,
+    effort: str,
+    journal: Journal | None,
+) -> tuple[str, int]:
+    """Dispatch one decision the budget let through; `(record line, exit code)`.
+
+    The ledger is written only for a dispatch that opened; one that did not is filed.
+    """
+    if not ctx.writes:
+        would = "would update the branch" if decision.action == fix_plan.UPDATE else None
+        return would or f"would send ({decision.action})", EXIT_OK
+    how = agent_models.Launch(launch.agent, launch.model, effort) if effort else launch
+    problem = fix_ledger.problem_key(decision)
+    if dispatch(decision, ctx.root, how, problem) != EXIT_OK:
+        first = decision.failures[0]
+        names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
+        _file(
+            journal, f"{decision.action}-failed", first.project, f"{names}: {decision.note[:160]}"
+        )
+        return f"FAILED to {decision.action}", EXIT_FAILED
+    key = fix_ledger.decision_key(decision)
+    fix_ledger.record(ctx.ledger_path, key, decision.note, ctx.now, problem=problem)
+    return decision.action + (f" at effort {effort}" if effort else ""), EXIT_OK
+
+
+def decide(
+    failures: list[fix_plan.Failure],
+    green: bool | str | None,
+    newest: str,
+    adopting: list[str],
+    prefixes: tuple[str, ...],
+) -> tuple[
+    fix_cycle.Harness,
+    list[fix_plan.Decision],
+    list[tuple[fix_plan.Decision, str]],
+    list[fix_plan.Decision],
+]:
+    """Steps 4-6's decisions: `(harness, go, held, skipped)`, pure over what was read."""
+    decisions = fix_plan.plan(failures, newest, prefixes)
+    classes = fix_cycle.classify_all(failures)
+    harness = fix_cycle.harness_state(classes, green, adopting)
+    go, held = fix_cycle.phase(decisions, classes, harness, prefixes)
+    return harness, go, held, [d for d in decisions if d.action == fix_plan.SKIP]
 
 
 # --- the pass -----------------------------------------------------------------------------
@@ -346,36 +356,57 @@ def run(
     now = now or _dt.datetime.now(_dt.UTC)
     if mode == fix_cycle.OFF:
         # A switched-off fire did nothing, so it says so only where nothing else has:
-        # every half hour it would otherwise erase the record a manual pass just wrote,
-        # which is the one thing worth reading during the manual week.
+        # every half hour it would otherwise erase the record a manual pass just wrote.
         if not (REPO_ROOT / ARTIFACT).is_file():
             write_artifact(f"fix-pass: mode=off -- set {fix_cycle.SETTING} to plan or dispatch")
         return EXIT_OK
     root = workspace.parent
-    text = workspace.read_text(encoding="utf-8")
-    # Every registered checkout, `devkit.onHold` or not. The pass once skipped paused
-    # ones, and their PRs sat red for good: a PR that exists is work in flight whatever
-    # the setting says, and the pass is the last thing that would ever move it.
-    projects = devkit_project.known_projects(text)
+    # Every registered checkout, `devkit.onHold` or not: a PR that exists is work in
+    # flight whatever the setting says, and the pass is the last thing that would move it.
+    projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
     ledger_path = worktree.boxes_root(root) / fix_ledger.LEDGER_NAME
+    devkit_dir = root / fix_cycle.DEVKIT
+    ctx = fix_loop.Context(root, projects, devkit_dir, ledger_path, REPO_ROOT / HISTORY, mode, now)
+    errors = (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError)
+    journal = Journal(devkit_dir, errors=fix_loop.fix_findings.STEP_ERRORS + errors)
     prefixes = adoption_prs.adoption_prefixes()
+    step = journal.step
 
-    shipped, refused, ship_failed = ship_intents(root, projects, mode)
-    merged = merge_green_adoptions(root, projects) if mode == fix_cycle.DISPATCH else []
-    failures, green, unread = fix_red.collect_red(workspace, projects, refused)
-    regated, rerun = fix_red.regate_unread(root, unread, mode)
+    shipped, refused, ship_failed = step(
+        "ship", ship_intents, root, projects, mode, journal, default=([], [], True)
+    )
+    merged = (
+        step("merge", merge_green_adoptions, root, projects, journal, default=[])
+        if mode == fix_cycle.DISPATCH
+        else []
+    )
+    closed = step("read-back", fix_loop.close, ctx, journal, default=fix_loop.Closed())
+    failures, green, unread = step(
+        "collect", fix_red.collect_red, workspace, projects, refused, default=([], None, [])
+    )
+    regated, rerun = step("regate", fix_red.regate_unread, root, unread, mode, default=([], set()))
+    for line in regated:
+        if "FAILED" in line:
+            _file(journal, "regate-failed", line.split(" ", 1)[0], line)
     green = fix_plan.RUNNING if fix_cycle.DEVKIT in rerun else green
-    blocked = record_blocked(root, projects, ledger_path)
-    newest = gate_evidence.newest_release(root / fix_cycle.DEVKIT)
-    decisions = fix_plan.plan(failures, newest, prefixes)
-    classes = fix_cycle.classify_all(failures)
-    harness = fix_cycle.harness_state(classes, green, pending_adoptions(root, projects, newest))
-    go, held = fix_cycle.phase(decisions, classes, harness, prefixes)
-    skipped = [d for d in decisions if d.action == fix_plan.SKIP]
+    # Filed before the backlog is read, and the backlog read on its own: whatever broke
+    # above -- the collect step included -- reaches the devkit session this same pass.
+    filed = fix_loop.record(ctx, journal)
+    backlog = step("backlog", fix_red.backlog_failure, workspace, default=None)
+    failures += [backlog] if backlog else []
+    newest = step("newest-release", gate_evidence.newest_release, devkit_dir, default="")
+    adopting = step("adoptions", pending_adoptions, root, projects, newest, default=[])
+    fallback = fix_cycle.only_the_harness(backlog)
+    harness, go, held, skipped = step(
+        "plan", decide, failures, green, newest, adopting, prefixes, default=fallback
+    )
 
-    sent, capped, worst = send_all(go, ledger_path, root, mode, launch, now)
-    worst = max(worst, EXIT_FAILED if ship_failed else EXIT_OK)
-
+    items = fix_loop.triage.load(devkit_dir)
+    sent, capped, worst = step(
+        "send", send_all, go, ctx, launch, journal, closed, items, default=([], [], EXIT_FAILED)
+    )
+    filed += fix_loop.record(ctx, journal)
+    failed_steps = ship_failed or bool(journal.crashed)
     account = fix_cycle.Account(
         mode,
         harness,
@@ -386,14 +417,16 @@ def run(
         tuple(sent),
         tuple(merged),
         tuple(skipped),
-        tuple(blocked),
+        tuple(closed.lines),
         tuple(regated),
+        tuple(filed),
+        fix_loop.backlog(ctx),
     )
     text = fix_cycle.render(account)
     print(text)
     print(f"fix-pass: record at {write_artifact(text)}")
     append_history(account, now)
-    return worst
+    return max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -418,7 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
     # Carried, never interpreted: the pair reaches `fix-prs.open_session` unchanged. A
     # scheduled pass passes neither and so opens at whatever the CLI is configured with,
-    # which is the only defensible default for a run nobody is at the keyboard for.
+    # except where `fix_budget.budget` climbs the ladder.
     agent_models.add_arguments(parser)
     return parser
 
@@ -437,9 +470,9 @@ def main(argv: list[str] | None = None) -> int:
     launch = agent_models.Launch.parse(agent, args.model, args.effort)
     if mode != fix_cycle.OFF and (missing := missing_tools()):
         why = (
-            f"not usable from this PATH: {', '.join(missing)} -- install it (scripts/bootstrap-machine.ps1 "
-            f"-Yes does), then fully restart VS Code: a task inherits the PATH VS Code "
-            f"started with"
+            f"not usable from this PATH: {', '.join(missing)} -- install it, or `gh auth "
+            f"login` (scripts/bootstrap-machine.ps1 -Yes does both), then fully restart VS "
+            f"Code: a task inherits the PATH VS Code started with"
         )
         print(f"fix-pass: {why}", file=sys.stderr)
         write_artifact(f"fix-pass: FAILED -- {why}")
@@ -452,7 +485,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
     except Exception as exc:
         # A crash is the one outcome the record must not miss: the first real dispatch
-        # died on a TypeError, and the artifact still described the previous pass.
+        # died on a TypeError, and the artifact still described the previous pass. The
+        # watchdog reads the exit and the traceback and files both.
         write_artifact(f"fix-pass: CRASHED -- {type(exc).__name__}: {exc}")
         raise
 

@@ -371,6 +371,8 @@ ALLOWED_MISSING = {
     "same ignored `logs/`",
     "logs/fix-blocked.md": "written by a fixer into its own worktree when it cannot "
     "finish; read by the fix pass; under the ignored `logs/`",
+    "logs/friction.md": "written by any session into its own worktree, one line per thing "
+    "the harness cost it; filed and set aside by the fix pass; under the ignored `logs/`",
     "logs/fix-dispatch.json": "the fix pass's stamp in a worktree it opened a session in, "
     "under the ignored `logs/`",
     "check-lock-markers.py": "a project-owned Stop tier devkit has no lockfiles for; "

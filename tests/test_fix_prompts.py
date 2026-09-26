@@ -193,3 +193,22 @@ def test_the_upstream_prompt_reads_each_failure_with_what_its_gate_said():
     assert "devkit origin/main -- PR Gate workflow failing on origin/main: tests/t.py::a" in text
     assert "carameli #412 -- 1 check failing: scripts/hooks/tests/" in text
     assert "one directory per failure" in text and "devkit origin/main u/run" in text
+
+
+def test_every_prompt_names_the_friction_channel_the_pass_files_from():
+    """The engineering rule told sessions to report what the harness did to them, and
+    the report went into a chat nothing read. Each line of `logs/friction.md` is filed
+    on the harness-defect ledger instead, so every prompt has to say the file exists."""
+    for text in every_prompt():
+        assert "logs/friction.md" in text and "the pass files each for the devkit session" in text
+
+
+def test_the_devkit_session_is_told_to_take_over_an_escalated_problem():
+    """What replaced "needs a human": the devkit session fixes what failed the fixers and
+    the problem itself, and names its branch so a resolution can be checked."""
+    for kind in ("fixers-exhausted", "blind-evidence", "fixer-blocked"):
+        assert kind in fix_prompts.LEDGER_STEPS
+    assert "--pr BRANCH" in fix_prompts.LEDGER_STEPS
+    assert "`" not in fix_prompts.LEDGER_STEPS and '"' not in fix_prompts.LEDGER_STEPS, (
+        "it crosses a wt command line"
+    )

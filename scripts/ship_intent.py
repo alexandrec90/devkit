@@ -241,6 +241,13 @@ def already_shipped(intent: Intent, state: dict, porcelain: str) -> bool:
     return state.get("stage") == SHIPPED and not porcelain.strip()
 
 
+def is_spent(intent: Intent, runner: Runner = run_quiet) -> bool:
+    """`already_shipped`, asked of the tree itself: what a `plan` pass reads, so it says
+    what a `dispatch` would do rather than "would ship" over work that merged."""
+    status = runner(["git", "status", "--porcelain"], cwd=intent.tree)
+    return already_shipped(intent, read_state(intent.tree), status.stdout or "")
+
+
 def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str]:
     """Fixers, add, commit: `("", "")` when it went through, else `(step, output)`."""
     fixed = runner([python, "scripts/ship.py", "--fix"], cwd=intent.tree)
@@ -268,7 +275,10 @@ def ship_one(
     when = (now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds")
     status = runner(["git", "status", "--porcelain"], cwd=tree)
     if already_shipped(intent, read_state(tree), status.stdout or ""):
-        return Outcome(intent, SKIPPED, "already shipped at this intent")
+        # Consumed, as a fresh ship's intent is: left in place it was re-read and
+        # re-reported by every pass -- ten from before the pass set intents aside.
+        set_aside(tree, SHIPPED_FILE)
+        return Outcome(intent, SKIPPED, "already shipped at this intent; set aside")
 
     if (status.stdout or "").strip():
         step, output = commit_intent(intent, python, runner)

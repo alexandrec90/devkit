@@ -87,6 +87,14 @@ Three event names reach it, and they want different treatment:
 | `agent-report` | an agent's *judgment* — a false-positive block, an instruction that dead-ended | the `command=` field: re-run it against today's code |
 | `guard-spawn-failed` | an edit was blocked and no box could be cut for it | the `detail=` field: it carries the exception |
 | `codex-translation-gap` | a hook's answer did not survive Codex's schema — a member refused or stripped | the `detail=` field: it names the members |
+| `fix-pass-finding` | something the fix pass could not turn green: a step that raised, a push that failed, a dead fixer, a wait past a day | the `evidence=` field: a traceback file, a transcript, a tree |
+| `session-friction` | turns a session lost to the harness, read out of its transcript or its `logs/friction.md` | the `evidence=` field: `transcript#L<line>` |
+
+A `fix-pass-finding` whose detail starts `fixers-exhausted`, `blind-evidence` or
+`fixer-blocked` is a problem fixers could not move, and it is yours now: fix what in the
+harness failed them, and fix the problem itself in the tree its evidence names, with an
+intent there. A `session-friction` group whose detector was wrong is fixed in
+`scripts/session_friction.py`, not only retired.
 
 No agent hook is wired any more, so the last two are old rows only: nothing new writes
 them. Everything else on the ledger — `guard-route`, `guard-block`, `capped-bash-block`,
@@ -199,9 +207,9 @@ literal ids when a group needs splitting.
 - Ids are content-addressed, not line numbers — a resolution written today still names
   its event after a thousand appends.
 
-Resolve **after** the fix is in your intent, not before, and name the branch when there
-is no PR number yet: the fix pass opens the PR from the intent, and a note naming a PR
-that does not exist is the one claim on this ledger nothing can check.
+Resolve **after** the fix is in your intent, not before, and pass the branch as `--pr`
+when there is no PR number yet. The fix pass checks it (`scripts/fix_verify.py`): a
+group whose PR closes unmerged, or whose branch never becomes a PR, is reopened.
 
 ## Reporting
 

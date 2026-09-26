@@ -41,7 +41,9 @@ package = false
 # every consuming project and runs as its own step (in CI and as its own VS Code task), so keeping it out of `testpaths` is what makes the two trees
 # separately runnable. This mirrors the `testpaths` every generated project gets.
 testpaths = ["tests"]
-addopts = '-q -m "not paid"'
+# No `-q` here: an agent adds its own, and `-qq` drops the "N passed" line -- sessions ran
+# the suite again and again looking for a verdict that was never printed.
+addopts = '-m "not paid"'
 markers = [
   "claude_live: paid opt-in smoke tests that launch an authenticated Claude Code CLI session",
   "codex_live: paid opt-in smoke tests that launch an authenticated Codex CLI session",

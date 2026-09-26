@@ -1,0 +1,92 @@
+---
+name: supervise-fix-pass
+description: Run the fix pass for a few iterations and audit it against its contract -- nothing left for a person, no friction or wasted turn that is not fixed or filed -- fixing what it finds in devkit as it goes.
+disable-model-invocation: true
+argument-hint: 'Optional: how many iterations (default 3), or "plan" to rehearse only'
+---
+
+# Supervise the fix pass
+
+> Depends on `gh` being authenticated and `claude` on PATH: the pass dispatches real
+> sessions and pushes real branches.
+
+Devkit-only, like `/triage-harness`. The fix pass (`scripts/fix-pass.py`) holds one
+contract: **every observation ends green, in flight, or filed** on the harness-defect
+ledger -- nothing ends at a person, and no friction or wasted agent turn goes unrecorded.
+This skill is how that contract is checked against the real machine, and how the pass is
+repaired when it breaks it. You are the harness's own supervisor: **every defect you find
+is yours to fix in this worktree, now**, with a regression test. Filing is only for what
+needs something outside the repository.
+
+`scripts/fix-pass-supervise.py` does the mechanical half -- runs the iterations, waits
+for dispatched sessions, checks the record and the ledgers, measures each session -- so
+this session spends its turns on judgement, not on waiting or on commands a script runs.
+
+## 1. Rehearse before anything is sent
+
+```bash
+python scripts/fix-pass-supervise.py --mode plan --iterations 1
+```
+
+Read `logs/fix-pass-supervise.log`, then the `record` in `logs/fix-pass-supervise.json`.
+A `plan` pass does nothing, so this is where a dispatch that would do harm is caught.
+Before step 2, answer each of these from the record, and fix the pass for any "yes":
+
+- Would it **ship an intent whose work already landed** (its PR merged, its branch gone
+  from origin)? Shipping that recreates a deleted branch or opens an empty PR.
+- Would it **send a session at something already fixed**, superseded, or in flight?
+- Is anything **held or skipped without a reason a script is tracking**?
+- Is any **filed** line noise -- a detector that fired on text rather than on an event?
+  Fix the detector in `scripts/session_friction.py`; a noisy finding costs the devkit
+  session a verification every time it recurs.
+
+## 2. Run the iterations, without watching them
+
+```bash
+python scripts/fix-pass-supervise.py --iterations 3      # run_in_background: true
+```
+
+Start it in the background and wait for its completion notice. **Do not poll it, tail
+it or sleep on it**: it waits for every dispatched session itself, and each check you
+make while it runs is a turn spent on a verdict the report gives in one read. It runs
+from this worktree, so a fix you made in step 1 is live on the first iteration.
+
+## 3. Audit what came back
+
+The script exits 1 when any iteration broke the contract. For every `VIOLATION`:
+
+1. **Reproduce it from the report** -- the record line, the transcript path, the finding.
+2. **Fix the cause in devkit** -- the pass, a prompt, a detector, a vendored script --
+   with a test that fails without the fix. A violation is a pass defect by definition.
+3. Only when the fix needs something outside the repository (a credential, admin
+   rights, a paid service), file it: `python scripts/hooks/report-harness-defect.py`.
+
+Then read what the script cannot judge. For **each dispatched session** in the report,
+read its transcript (the `transcript` field) end to end, and list every turn it lost:
+a wrong path, missing evidence, an instruction that misled it, a check it could not
+run, a question it had to answer that the prompt should have. Compare that list with
+the session's `friction` and with the iteration's `filed` lines. **Every loss the
+detectors missed is a detector gap**: add the pattern to `session_friction.py` with a
+test built from the transcript's own lines, or -- when no pattern could see it -- fix
+the prompt or the evidence that caused it.
+
+Finally, read each `filed` line once more: a finding the devkit session cannot act on
+(vague, duplicated, mis-grouped) is itself a defect in how it was filed.
+
+## 4. Repeat until an iteration is clean
+
+After fixing, run step 2 again. Stop when an iteration comes back with **no violation,
+no unfiled friction and no noisy finding** -- or after three rounds, in which case the
+report's headline is what is still breaking and why.
+
+## 5. Your own turns
+
+This session is held to the same contract. Any turn *you* lost to the harness -- a
+refusal, a missing tool, a wrong instruction in this file -- goes in
+`logs/friction.md` before you ship, and a wrong instruction here is fixed here.
+
+## Reporting
+
+Ship with the ship skill. In the reply, give per iteration: what the pass shipped,
+sent and filed; each violation and what fixed it; each session's cost (calls, failed
+calls) and the friction found in it; and what, if anything, is still open.

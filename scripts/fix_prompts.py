@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fix_plan import COMMIT, CONFLICT, EVIDENCE_DIR, LEDGER, Failure, describe, name_of
-from fix_reports import BLOCKED_FILE, REFUSED_FILE
+from fix_reports import BLOCKED_FILE, FRICTION_FILE, REFUSED_FILE
 
 # How every prompt ends. The ship skill is the finish line and the blocked file is the
 # only other way out; both are files, so the pass reads the outcome without a session.
@@ -30,7 +30,10 @@ FINISH = (
     "When it is done, run the targeted tests and the linter, then ship it with the ship "
     "skill and stop: the fix pass commits, pushes, opens or updates the PR and reads "
     "what the gate says. If it cannot be done, write "
-    f"{BLOCKED_FILE.as_posix()} saying what is in the way, in a sentence or two, and stop."
+    f"{BLOCKED_FILE.as_posix()} saying what is in the way, in a sentence or two, and stop. "
+    f"Either way, if the harness cost you turns -- a refusal, a missing tool, evidence "
+    f"that was wrong or absent, an instruction that sent you the wrong way -- put one line "
+    f"per thing in {FRICTION_FILE.as_posix()}: the pass files each for the devkit session."
 )
 
 # What the devkit session is told about the harness-defect ledger, when the backlog is
@@ -39,8 +42,11 @@ LEDGER_STEPS = (
     " The ledger groups are in that directory's harness-triage.log: work them as "
     ".claude/skills/triage-harness/SKILL.md says -- verify each against current code "
     "before believing it, fix what is real, and retire each group with "
-    "python scripts/harness_triage.py --resolve-like ID --note WHAT-FIXED-IT once the "
-    "fix is in your intent."
+    "python scripts/harness_triage.py --resolve-like ID --note WHAT-FIXED-IT --pr BRANCH "
+    "once the fix is in your intent; the pass reopens a group whose branch never merges. "
+    "A fixers-exhausted, blind-evidence or fixer-blocked group is a problem fixers could "
+    "not move: fix what in the harness failed them, and fix the problem itself in the "
+    "tree its evidence names, leaving an intent there too."
 )
 
 
