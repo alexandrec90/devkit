@@ -555,6 +555,17 @@ def test_the_record_names_the_adoptions_still_open():
     assert "adopting carameli -- the newest release" in text
 
 
+def test_the_record_and_the_history_carry_the_release_line_only_when_there_is_one():
+    harness = fix_cycle.harness_state({}, True, [])
+    quiet = fix_cycle.Account(fix_cycle.DISPATCH, harness)
+    assert "release" not in fix_cycle.render(quiet)
+    assert json.loads(fix_cycle.history_line(quiet, NOW))["release"] == ""
+
+    started = fix_cycle.Account(fix_cycle.DISPATCH, harness, release="started -- 5 change(s)")
+    assert fix_cycle.render(started).splitlines()[-1] == "release  started -- 5 change(s)"
+    assert json.loads(fix_cycle.history_line(started, NOW))["release"] == "started -- 5 change(s)"
+
+
 def test_the_ledger_backlog_rides_along_without_holding_anyone():
     """One unresolved hook event anywhere held every project fixer; the backlog goes to
     the devkit session when one is sent and is not by itself a reason to send one."""

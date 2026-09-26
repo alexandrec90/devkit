@@ -341,6 +341,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/fix-prs.py": "the worktree cut and the session the pass opens; spawns only through the runner it is handed",
     "scripts/gate_evidence.py": "the gh the pass reads every gate through",
     "scripts/broken_pr_menu.py": "the gh the pass scans every checkout through",
+    "scripts/fix_release.py": "the release pipeline the pass starts detached when main owes a tag",
     "scripts/log-wrap.py": "the wrapper four of those jobs are launched through",
     # reached from `workspace-status.py --notify`, which is the one script that imports
     # it rather than being wrapped in `notify-wrap.py`; see that flag's docstring.

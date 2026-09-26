@@ -392,6 +392,9 @@ class Account:
     # What a dispatched session reported it could not do, one line each: the one
     # channel back from a fixer, and what "needs a human" is about.
     blocked: tuple[str, ...] = ()
+    # `fix_release.cut_release`'s one line: a release started, would start, or why not.
+    # Empty when main carries nothing a tag owes a consumer.
+    release: str = ""
     # Default branches with no verdict at the tip, whose gate the pass re-ran.
     regated: tuple[str, ...] = ()
 
@@ -421,6 +424,7 @@ def render(account: Account) -> str:
     lines += [f"skip     {_names(d)} -- {d.note}" for d in account.skipped]
     lines += [f"sent     {line}" for line in account.sent]
     lines += [f"merged   {line}" for line in account.merged]
+    lines += [f"release  {account.release}"] if account.release else []
     return "\n".join(lines)
 
 
@@ -436,5 +440,6 @@ def history_line(account: Account, now: _dt.datetime) -> str:
             "sent": list(account.sent),
             "held": len(account.held),
             "capped": [f"{_names(d)} -- {why}" for d, why in account.capped],
+            "release": account.release,
         }
     )
