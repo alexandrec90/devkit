@@ -59,13 +59,16 @@ Three deferrals that read as prudence and are not:
 | "this is project X's file, not devkit's" | Then fix it in project X's checkout. The ownership check routes the change; it does not excuse it. |
 
 The only thing that ever stays the user's call is §3's two irreversibles: **discarding work
-that exists only in a box**, and **cutting a release**. Ask about those; decide everything
-else.
+that exists only in a box**, and **cutting a release**. Decide everything else.
 
-If a group is genuinely beyond one session — a fix needing a decision only the user can
-make, or an outage you cannot reproduce — that is a question for the user **in the turn
-you find it**, not a line in a closing report. Ask it, get the answer, fix it. A sweep
-ends with the backlog empty.
+**A group that reads as needing the user's decision is still yours to decide.** Pick the
+option you would have recommended, make it, and say in the intent that it was a choice
+and what the alternatives were: the PR is where the user overrules it, at the cost of one
+review instead of one more sweep. A session the fix pass dispatched has nobody to ask —
+its question sits unanswered until the fuse spends the day (the 2026-09-26 run lost a
+session that way to an `AskUserQuestion` about ibkr's data-lake path). In a session a
+person is watching, ask **in the turn you find it**, never in a closing report. Either
+way a sweep ends with the backlog empty.
 
 > Every command below is issued bare. A wrapper here buys no second bound.
 
@@ -181,6 +184,14 @@ intent's body which sibling intents the sweep left, and the fix pass opens each 
 Nothing about the ledger being devkit's makes a carameli file unfixable from a devkit
 session.
 
+**A fix that belongs on another open PR goes into that PR's tree only once nobody is in
+it.** A transcript under `~/.claude/projects/<the tree's slug>/` written in the last 90
+minutes (`fix_reports.active_transcript`) is a session still working there, and editing
+under it races that session's own ship — the first supervised run edited #404's tree
+twenty seconds after its fixer shipped. With a live session, put the fix on your own
+branch instead and name the PR in the intent. With none, finish the tree: stage what the
+refusal needs and leave its intent where it is, so the next pass ships it.
+
 Two things stay the user's call, because both are irreversible and neither is yours to
 assume: **discarding work that exists only in a box**, and **a fix that has to be
 released** rather than merged (a vendored-tier change reaches consumers only through
@@ -220,5 +231,5 @@ to make visible.
 
 **End by re-running `python scripts/harness_triage.py` and quoting the count.** The sweep
 is finished when it prints zero open, and a non-zero count is the report's headline, not a
-footnote: say which group, and what you need from the user to close it. "Left open with a
-reason" is not an outcome this skill has.
+footnote: say which group, and why it is not closed. "Left open with a reason" is not an
+outcome this skill has.

@@ -94,7 +94,10 @@ jobs:
           name: lint-errors
           path: logs/lint-errors.log
       - name: Hook-script tests (vendored tier)
-        run: uv run python -m pytest scripts/hooks/tests/ -q
+        # A junit file, because this step fails before `run-tests.py` writes
+        # `logs/test-failures.log`: without it a red vendored suite uploads nothing the
+        # fix pass can read, and its failing ids come out of `gh run view --log-failed`.
+        run: uv run python -m pytest scripts/hooks/tests/ -q --junit-xml=logs/junit-hooks.xml
       - name: devkit tests (generator, ports, renderer)
         # Via the wrapper, for the same dogfooding reason as the lint step: this is
         # what `run-tests.py` is for, and a broken wrapper should fail devkit's own CI
@@ -105,7 +108,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: test-failures
-          path: logs/test-failures.log
+          path: |
+            logs/test-failures.log
+            logs/junit-hooks.xml
 
   pre-commit:
     name: Pre-commit gate (the channel devkit publishes)

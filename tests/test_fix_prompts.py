@@ -185,6 +185,18 @@ def test_the_upstream_prompt_sends_the_session_at_the_ledger_only_when_the_backl
     assert "resolve-like" not in without
 
 
+def test_the_skill_the_ledger_prompt_names_never_tells_a_dispatched_session_to_ask():
+    """Every prompt says nobody is watching, "never ask a question: decide"; the skill it
+    sends the devkit session to said "Ask it, get the answer, fix it", and on 2026-09-26
+    a dispatched session followed the skill into an `AskUserQuestion` nobody answered."""
+    skill = (
+        Path(__file__).resolve().parents[1] / ".claude" / "skills" / "triage-harness" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert "Ask it, get the answer" not in skill
+    assert "is still yours to decide" in skill and "dispatched has nobody to ask" in skill
+    assert "never ask a question: decide" in fix_prompts.upstream_prompt((failure(),), "a/b")
+
+
 def test_the_upstream_prompt_reads_each_failure_with_what_its_gate_said():
     """devkit's own red main beside a consumer's shared vendored failure: one session,
     and each named the way the record names it, with its own reason."""

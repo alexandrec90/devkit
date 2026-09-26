@@ -355,8 +355,7 @@ def dispatch_fresh(
     first = decision.failures[0]
     upstream = decision.action == fix_plan.UPSTREAM
     project = DEVKIT if upstream else first.project
-    project_dir = root / project
-    if not project_dir.is_dir():
+    if not (project_dir := root / project).is_dir():
         print(f"  no checkout {project!r} in {root}; nothing opened", file=sys.stderr)
         return EXIT_FAILED
     base = tb.detect_default_branch(sweep.git_for(project_dir)) if upstream else first.base
@@ -374,7 +373,8 @@ def dispatch_fresh(
         (tree / fix_reports.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
     print(f"  worktree {tree} on {branch}")
     if upstream:
-        prompt, title = fix_prompts.upstream_prompt(decision.failures, branch), f"devkit {branch}"
+        failures = fix_prompts.with_trees(decision.failures, root, sweep.git_for)
+        prompt, title = fix_prompts.upstream_prompt(failures, branch), f"devkit {branch}"
     elif first.kind == fix_plan.BRANCH:
         prompt, title = fix_prompts.branch_prompt(first, branch), f"{project} {first.base}"
     else:

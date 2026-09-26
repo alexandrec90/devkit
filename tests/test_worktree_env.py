@@ -413,3 +413,91 @@ def test_main_provisions_the_tree_alongside_naming_its_stack(tmp_path, monkeypat
     assert "COMPOSE_PROJECT_NAME=carameli-wt" in out
     assert ".venv provisioned" in out
     assert len(run.calls) == 1
+
+
+# --- the sibling a path source names -------------------------------------------
+
+
+def _with_sibling_source(tmp_path: Path, sibling: bool = True) -> tuple[Path, Path, Path]:
+    """ibkr_trader's shape: a checkout whose `pyproject.toml` builds `../data-lake`, the
+    sibling repo beside it, and a Claude worktree two levels down where `..` is not it."""
+    lake = _repo(tmp_path / "data-lake", compose=False) if sibling else tmp_path / "data-lake"
+    checkout = _repo(tmp_path / "ibkr", compose=False)
+    (checkout / "pyproject.toml").write_text(
+        '[tool.uv.sources]\ndata-lake = { path = "../data-lake", editable = true }\n'
+        'other = { index = "pypi" }\n',
+        encoding="utf-8",
+    )
+    _git(checkout, "add", "-A")
+    _git(checkout, "commit", "-qm", "path source")
+    tree = _worktree(checkout, checkout / ".claude" / "worktrees" / "task")
+    return lake, checkout, tree
+
+
+def _hookless(argv, **kwargs):
+    """The nested `worktree add`, kept off this machine's installed hooks."""
+    return subprocess.run([argv[0], "-c", "core.hooksPath=.nohooks", *argv[1:]], **kwargs)
+
+
+def test_path_sources_are_the_ones_that_climb_out_of_the_tree(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.uv.sources]\n"
+        'a = { path = "../a" }\n'
+        "b = [{ path = '..\\b', marker = \"sys_platform == 'win32'\" }, { index = \"x\" }]\n"
+        'inside = { path = "libs/c" }\n'
+        'git = { git = "https://example.invalid/r" }\n',
+        encoding="utf-8",
+    )
+    assert wt_env.path_sources(tmp_path) == ["../a", r"..\b"]
+    (tmp_path / "pyproject.toml").write_text("not = [toml", encoding="utf-8")
+    assert wt_env.path_sources(tmp_path) == []
+    assert wt_env.path_sources(tmp_path / "missing") == []
+
+
+def test_a_missing_sibling_is_cut_as_a_detached_tree_of_the_repo_beside_the_checkout(tmp_path):
+    """8a26c739: every ibkr worktree failed `uv sync` on `Distribution not found at
+    .claude/worktrees/data-lake`, and nothing created it."""
+    lake, checkout, tree = _with_sibling_source(tmp_path)
+    seen: list[dict] = []
+
+    def run(argv, **kwargs):
+        seen.append(kwargs["env"])
+        return _hookless(argv, **kwargs)
+
+    [line] = wt_env.link_path_sources(tree, checkout, runner=run, environ={"PATH": ""})
+    target = checkout / ".claude" / "worktrees" / "data-lake"
+    assert (target / ".gitignore").is_file() and "detached data-lake at HEAD" in line
+    head = _git(target, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    assert head == "HEAD", "detached, so no branch of the sibling is held by it"
+    assert _git(lake, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "main"
+    # The nested `worktree add` fires this hook again; it must not sync the sibling too.
+    assert seen[0][wt_env.SKIP_PROVISION_VAR] == "1"
+    # A second worktree of the tier resolves the same `..`: nothing more to cut.
+    assert wt_env.link_path_sources(tree, checkout, runner=run) == []
+
+
+def test_no_sibling_repo_beside_the_checkout_means_nothing_is_cut(tmp_path):
+    _lake, checkout, tree = _with_sibling_source(tmp_path, sibling=False)
+
+    def never(argv, **kwargs):
+        raise AssertionError("cut a sibling from nothing")
+
+    assert wt_env.link_path_sources(tree, checkout, runner=never) == []
+
+
+def test_a_refused_cut_is_named_and_never_raised(tmp_path):
+    _lake, checkout, tree = _with_sibling_source(tmp_path)
+
+    def refused(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 128, "", "fatal: 'x' is a missing but locked worktree"
+        )
+
+    [line] = wt_env.link_path_sources(tree, checkout, runner=refused)
+    assert "could not cut" in line and "locked worktree" in line
+
+    def gone(argv, **kwargs):
+        raise FileNotFoundError("git")
+
+    [line] = wt_env.link_path_sources(tree, checkout, runner=gone)
+    assert "could not cut" in line
