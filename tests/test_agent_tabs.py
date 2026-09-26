@@ -213,6 +213,15 @@ def test_a_background_session_may_not_ask_and_the_flag_cannot_swallow_the_prompt
     assert argv.index("--bg") < at
 
 
+def test_a_background_session_loads_no_mcp_server():
+    """Each fixer started the user's MCP servers -- chrome-devtools-mcp was three node
+    processes, ~260 MB, in a ~700 MB session -- and nine concurrent fixers ran the
+    machine out of memory. A fixer uses `gh` and the file tools; it drives no browser."""
+    argv = tabs.background_argv("claude", CLAUDE, "fix it")
+    assert "--strict-mcp-config" in argv and "--mcp-config" not in argv
+    assert argv.index("--strict-mcp-config") < argv.index("--")
+
+
 def test_the_background_launch_runs_the_resolved_exe_in_the_box(monkeypatch, tmp_path):
     seen = {}
 

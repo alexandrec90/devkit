@@ -143,7 +143,9 @@ def _judge_session(
     if state in (fix_reports.DONE, *fix_reports.DEAD):
         closed.finished.append(str(tree.path))
     live = fix_reports.active_transcript(tree.path, ctx.now)
-    if live and tree.branch and not (state == fix_reports.WORKING and str(live) == transcript):
+    # The stamped session is never "another" one, whatever its state: a finished fixer's
+    # own transcript held six branches while this very pass shipped their intents.
+    if live and tree.branch and str(live) != transcript:
         closed.busy[(tree.project, tree.branch)] = str(tree.path)
     if state in fix_reports.DEAD:
         # No key: a dead session is re-sent at once, not parked behind the finding.

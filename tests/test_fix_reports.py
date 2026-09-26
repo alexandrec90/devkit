@@ -166,7 +166,9 @@ def test_the_stamped_session_is_told_from_another_session_in_the_same_tree(tmp_p
     folder.mkdir(parents=True)
     resident = folder / "resident.jsonl"
     resident.write_text(
-        f'{{"timestamp": "{(now - _dt.timedelta(days=1)).isoformat()}"}}\n', encoding="utf-8"
+        f'{{"timestamp": "{(now - _dt.timedelta(days=1)).isoformat()}"}}\n'
+        f'{{"timestamp": "{(now - _dt.timedelta(minutes=5)).isoformat()}"}}\n',
+        encoding="utf-8",
     )
     fixer = folder / "fixer.jsonl"
     fixer.write_text(
@@ -185,6 +187,36 @@ def test_the_stamped_session_is_told_from_another_session_in_the_same_tree(tmp_p
     assert fix_reports.active_transcript(tree, now, projects) == resident
     assert fix_reports.active_transcript(tree, now + _dt.timedelta(hours=3), projects) is None
     assert fix_reports.started_at(tmp_path / "missing.jsonl") is None
+
+
+def test_bookkeeping_appended_after_a_session_ended_is_not_the_session_speaking(tmp_path):
+    """`claude stop` appends `last-prompt`/`cost-state` rows to a finished session's file,
+    which refreshed its mtime and held its tree as "a session is working in" for another
+    90 minutes. Activity is the last record that carries a `timestamp`."""
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(hours=4))
+    log = _transcript(projects, tree, _dt.timedelta(hours=2), now)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write('{"type": "last-prompt", "sessionId": "s"}\n{"type": "cost-state"}\n')
+    assert fix_reports.last_spoke(log) == now - _dt.timedelta(hours=2)
+    assert fix_reports.active_transcript(tree, now, projects) is None
+    assert fix_reports.session_state(tree, now, projects) == (fix_reports.NO_OUTCOME, str(log))
+
+
+def test_the_last_record_is_found_past_a_line_split_by_the_read_window(tmp_path, monkeypatch):
+    now = _dt.datetime.now(_dt.UTC)
+    path = tmp_path / "s.jsonl"
+    path.write_text(
+        f'{{"type": "user", "timestamp": "{now.isoformat()}", "pad": "{"x" * 400}"}}\n'
+        '{"type": "last-prompt"}\nnot json\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fix_reports, "TAIL_BYTES", 100)
+    assert fix_reports.last_spoke(path) is not None, "falls back to the file's mtime"
+    monkeypatch.setattr(fix_reports, "TAIL_BYTES", 10_000)
+    assert fix_reports.last_spoke(path) == now
+    assert fix_reports.last_spoke(tmp_path / "missing.jsonl") is None
 
 
 def test_a_session_judged_once_or_one_that_leaves_no_transcript_is_not_judged(tmp_path):

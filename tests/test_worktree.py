@@ -1712,15 +1712,24 @@ def test_the_npm_program_name_follows_the_platform():
     and argv resolution does not consult PATHEXT. The step then dies with WinError 2,
     which `run_provision` downgrades to a `[warn]`, so the box comes out announcing
     itself provisioned with no `node_modules` and no frontend linter in it."""
-    assert worktree.npm_executable(windows=True) == "npm.cmd"
+    assert worktree.npm_executable(windows=True, which=lambda _n: None) == "npm.cmd"
     assert worktree.npm_executable(windows=False) == "npm"
+
+
+def test_the_windows_npm_is_whichever_program_path_resolves():
+    """An nvm install ships `npm.exe` and no `npm.cmd`, so the hard-coded shim name failed
+    every frontend provision on the supervising machine with WinError 2."""
+    nvm = r"C:\Users\a\AppData\Local\nvm\.nodejs\npm.exe"
+    assert worktree.npm_executable(windows=True, which=lambda _n: nvm) == "npm.exe"
+    shim = r"C:\Program Files\nodejs\npm.CMD"
+    assert worktree.npm_executable(windows=True, which=lambda _n: shim) == "npm.CMD"
 
 
 def test_the_frontend_step_is_runnable_on_windows():
     """The reversion check for the above: with a bare `npm` this is what shipped, and
     every Windows box silently lost eslint, tsc, stylelint and markdownlint."""
     steps = worktree.provision_steps({"uv.lock"}, frontend_dir="frontend", windows=True)
-    assert steps[-1].argv[0] == "npm.cmd"
+    assert steps[-1].argv[0] == worktree.npm_executable(windows=True) != "npm"
 
 
 def test_a_project_with_no_frontend_tier_runs_no_npm():

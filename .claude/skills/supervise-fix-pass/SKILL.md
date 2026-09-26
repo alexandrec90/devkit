@@ -114,6 +114,12 @@ for before running again: the same problem re-sent at a changing signature, a fi
 looping on a check it cannot pass, a backlog refilling as fast as it drains. A spend
 problem is fixed in the pass like any other defect -- not by adding a cap back.
 
+Memory is the one limit the machine sets regardless: `fix_send` holds a session the
+free memory cannot take (`held for memory` in the record), and the next pass sends it.
+A background fixer loads no MCP server for the same reason. Holds on every iteration
+mean something else is eating the memory -- find it (`claude agents` for finished
+sessions still alive, `docker stats` for stacks) rather than lowering the floor.
+
 ## 5. Your own turns
 
 This session is held to the same contract. Any turn *you* lost to the harness -- a

@@ -57,6 +57,10 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 MODE = re.compile(r'"devkit\.fixPass"\s*:\s*"(\w+)"')
 RESCUE_PREFIX = "agent/fix-pass-rescue"
 INTENT = Path("logs") / "ship-intent.md"
+# `fix_reports.ORIGIN_FILE`, spelled here because this file imports nothing the pass
+# does: the mark that makes a tree's PR fixer work, which merges itself once green.
+ORIGIN_FILE = Path("logs") / "fix-origin"
+AUTOMERGE_LABEL = "automerge"  # sweep.AUTOMERGE_LABEL
 
 # How the pass reports on the world, as opposed to failing itself.
 REPORTED = (0, 1)
@@ -137,12 +141,19 @@ def console_python() -> str:
 
 
 def run_pass(argv: list[str], timeout: _dt.timedelta = TIMEOUT) -> tuple[int | None, str]:
-    """`(exit code or None on timeout, combined output)`."""
+    """`(exit code or None on timeout, combined output)`.
+
+    The pass runs in UTF-8 mode: dozens of its runners use `text=True` with no encoding,
+    and on a cp1252 console a child's `”` killed their reader thread and lost output.
+    """
     try:
         done = subprocess.run(
             [console_python(), str(PASS), *argv],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "PYTHONUTF8": "1"},
             check=False,
             timeout=timeout.total_seconds(),
             creationflags=NO_WINDOW,
@@ -159,6 +170,15 @@ def _text(stream: str | bytes | None) -> str:
     return stream or ""
 
 
+THREAD_TRACE = re.compile(
+    r"^Exception in thread [^\n]*\nTraceback \(most recent call last\):\n(?:[ \t][^\n]*\n)*(\S[^\n]*)",
+    re.MULTILINE,
+)
+# What a session is sent at: the pass stopped. A refusal needs something outside the
+# repository and a thread error left the pass running, so both are only filed.
+RESCUED = ("pass-crashed", "pass-hung")
+
+
 def judge(code: int | None, output: str) -> tuple[str, str]:
     """`(kind, detail)` when the pass itself failed; `("", "")` when it reported."""
     if code is None:
@@ -166,8 +186,11 @@ def judge(code: int | None, output: str) -> tuple[str, str]:
             "pass-hung",
             f"the fix pass ran past {int(TIMEOUT.total_seconds() // 60)} minutes and was stopped",
         )
-    if code in REPORTED and "Traceback (most recent call last)" not in output:
-        return "", ""
+    threads = THREAD_TRACE.findall(output)
+    if code in REPORTED and "Traceback (most recent call last)" not in THREAD_TRACE.sub("", output):
+        # A background thread's traceback -- a reader thread that could not decode a
+        # child's output -- lost output but did not stop the pass: filed, not rescued.
+        return ("pass-thread-error", threads[0].strip()[:240]) if threads else ("", "")
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     last = lines[-1] if lines else f"exit {code}"
     kind = "pass-refused" if code == 2 and "Traceback" not in output else "pass-crashed"
@@ -215,6 +238,17 @@ def rescue_prompt(kind: str, detail: str, branch: str) -> str:
     )
 
 
+def home(root: Path) -> Path:
+    """The main checkout `root` belongs to: where a rescue tree is cut and looked for.
+    Run from a linked worktree -- the supervisor's -- the rescue landed inside it."""
+    try:
+        found = git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    except OSError:
+        return root
+    common = Path(found.stdout.strip())
+    return common.parent if found.returncode == 0 and common.is_absolute() else root
+
+
 def rescue(root: Path, kind: str, detail: str, output: str, now: _dt.datetime) -> str:
     """Cut a fresh devkit worktree and send one background session at the pass; what happened."""
     claude = shutil.which("claude")
@@ -230,11 +264,24 @@ def rescue(root: Path, kind: str, detail: str, output: str, now: _dt.datetime) -
         return f"no rescue: could not cut {branch}: {added.stderr.strip()[-200:]}"
     (tree / FAILURE_LOG).parent.mkdir(parents=True, exist_ok=True)
     (tree / FAILURE_LOG).write_text(output, encoding="utf-8")
+    (tree / ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
     done = subprocess.run(
-        [claude, "--bg", rescue_prompt(kind, detail, branch)],
+        # As `agent_tabs.background_argv` launches: no question nobody will answer, no
+        # MCP server, and `--` so the variadic flag cannot swallow the prompt.
+        [
+            claude,
+            "--bg",
+            "--strict-mcp-config",
+            "--disallowedTools",
+            "AskUserQuestion",
+            "--",
+            rescue_prompt(kind, detail, branch),
+        ],
         cwd=tree,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
         creationflags=NO_WINDOW,
     )
@@ -278,6 +325,8 @@ def ship_rescues(root: Path) -> list[str]:
                 subject,
                 "--body-file",
                 str(INTENT),
+                "--label",
+                AUTOMERGE_LABEL,
             ]
             made = subprocess.run(
                 pr, cwd=tree, capture_output=True, text=True, check=False, creationflags=NO_WINDOW
@@ -319,20 +368,16 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
         fresh = file_once(state, sig, kind, detail, evidence, now)
         notes.append(f"watchdog: the pass failed ({kind}): {detail}")
         if mode == "dispatch":
-            notes += ship_rescues(REPO_ROOT)
-            # A refusal is the preflight naming something outside the repository -- a
-            # missing CLI, an expired `gh` login -- which no session can repair.
-            if fresh and kind != "pass-refused":
-                notes.append(f"watchdog: {rescue(REPO_ROOT, kind, detail, output, now)}")
+            notes += ship_rescues(home(REPO_ROOT))
+            if fresh and kind in RESCUED:
+                notes.append(f"watchdog: {rescue(home(REPO_ROOT), kind, detail, output, now)}")
     if state_path:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps(state, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     if notes:
         _append_record("\n".join(notes))
         print("\n".join(notes))
-    if kind:
-        return 2
-    return code if code is not None else 2
+    return code if code in REPORTED and kind not in RESCUED else 2
 
 
 def _keep(output: str) -> Path:

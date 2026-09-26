@@ -234,11 +234,27 @@ def test_a_tree_another_session_is_live_in_is_busy_and_the_pass_own_session_is_n
     assert closed.busy == {}, "the stamped session working in its own tree is in flight, not busy"
     resident = fix_reports.transcript_dir(path) / "resident.jsonl"
     resident.write_text(
-        f'{{"timestamp": "{(NOW - _dt.timedelta(days=1)).isoformat()}"}}\n', encoding="utf-8"
+        f'{{"timestamp": "{(NOW - _dt.timedelta(days=1)).isoformat()}"}}\n'
+        f'{{"timestamp": "{(NOW - _dt.timedelta(minutes=2)).isoformat()}"}}\n',
+        encoding="utf-8",
     )
-    os.utime(resident, (NOW.timestamp(), NOW.timestamp()))
     closed, _ = close(ctx)
     assert closed.busy == {("carameli", "agent/x-0919"): str(path)}
+
+
+def test_the_pass_own_session_that_finished_does_not_hold_its_tree(ctx, monkeypatch):
+    """Round four's rehearsal held six branches as "a session is working in" -- each by
+    the very fixer whose intent this same pass was shipping. The stamped session is never
+    another session, working or done."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=40),
+        transcript_age=_dt.timedelta(minutes=5),
+    )
+    (path / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
+    closed, _ = close(ctx)
+    assert closed.finished == [str(path)] and closed.busy == {}
 
 
 def test_a_finished_or_dead_sessions_idle_process_is_stopped_and_a_working_one_is_not(

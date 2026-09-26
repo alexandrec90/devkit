@@ -46,6 +46,34 @@ def test_a_crash_is_named_by_its_last_line():
     assert watchdog.judge(1, TRACE)[1] == "TypeError: run() got an unexpected keyword 'x'"
 
 
+THREAD_TRACE = (
+    "fix-pass: record at logs/fix-pass.log\n"
+    "Exception in thread Thread-555 (_readerthread):\n"
+    "Traceback (most recent call last):\n"
+    '  File "subprocess.py", line 1599, in _readerthread\n'
+    "UnicodeDecodeError: 'charmap' codec can't decode byte 0x9d in position 4001\n"
+    "  provisioning C:/w/.worktrees/roguelike failed: npm ci could not run\n"
+)
+
+
+def test_a_background_threads_traceback_in_a_pass_that_reported_is_not_a_crash():
+    """Round four: a reader thread failed to decode a child's output, its traceback
+    landed mid-record, and the watchdog sent a rescue at a pass that had finished. It is
+    a defect to file -- output was lost -- but the pass did not crash."""
+    kind, detail = watchdog.judge(0, THREAD_TRACE)
+    assert kind == "pass-thread-error"
+    assert detail == "UnicodeDecodeError: 'charmap' codec can't decode byte 0x9d in position 4001"
+    assert watchdog.judge(1, THREAD_TRACE + TRACE)[0] == "pass-crashed", "a crash after it"
+    assert watchdog.judge(2, THREAD_TRACE)[0] == "pass-crashed", "the pass did not report"
+
+
+def test_a_thread_error_is_filed_and_sent_no_rescue(watched):
+    watched["outcome"] = (0, THREAD_TRACE)
+    assert watchdog.watch(watched["argv"], NOW) == 0, "the pass itself reported"
+    assert watched["rescues"] == []
+    assert [f.detail.split(":")[0] for f in findings(watched["devkit"])] == ["pass-thread-error"]
+
+
 def test_a_failure_signature_ignores_numbers_and_quoted_names_but_not_the_commit():
     one = watchdog.signature("pass-crashed", "KeyError: 'head' at line 12", "abc")
     assert one == watchdog.signature("pass-crashed", "KeyError: 'base' at line 40", "abc")
@@ -205,8 +233,37 @@ def test_a_rescue_cuts_a_fresh_tree_and_sends_one_background_session(tmp_path, m
     ) in gits
     [(argv, cwd)] = spawned
     assert argv[:2] == ["claude", "--bg"] and cwd == tree
-    assert "fix pass itself is failing (pass-crashed): TypeError: x" in argv[2]
+    assert "fix pass itself is failing (pass-crashed): TypeError: x" in argv[-1]
     assert (tree / watchdog.FAILURE_LOG).read_text(encoding="utf-8") == TRACE
+    # Launched like every other background session (`agent_tabs.background_argv`), which
+    # this stdlib-only file may not import: it may not ask, loads no MCP server, and the
+    # variadic flag cannot swallow the prompt.
+    assert "--strict-mcp-config" in argv and argv[-2] == "--"
+    assert argv[argv.index("--disallowedTools") + 1] == "AskUserQuestion"
+    assert (tree / watchdog.ORIGIN_FILE).is_file(), "fixer work: its PR merges once green"
+
+
+def test_a_rescue_is_cut_beside_the_main_checkout_not_inside_a_linked_worktree(tmp_path):
+    """Run from the supervisor's worktree, the watchdog cut its rescue tree *inside*
+    that worktree, where the pass then found and shipped it as a devkit branch."""
+    main = tmp_path / "devkit"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(main)], check=True)
+    subprocess.run(
+        ["git", "-C", str(main), "commit", "-q", "--allow-empty", "-m", "x"],
+        check=True,
+        env={
+            **__import__("os").environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        },
+    )
+    linked = main / ".claude" / "worktrees" / "supervisor"
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(linked)], check=True)
+    assert watchdog.home(linked).resolve() == main.resolve()
+    assert watchdog.home(main).resolve() == main.resolve()
+    assert watchdog.home(tmp_path / "not-a-repo") == tmp_path / "not-a-repo"
 
 
 def test_a_rescue_intent_is_shipped_by_the_watchdog_while_the_pass_cannot(tmp_path, monkeypatch):
@@ -231,6 +288,7 @@ def test_a_rescue_intent_is_shipped_by_the_watchdog_while_the_pass_cannot(tmp_pa
     assert watchdog.ship_rescues(tmp_path) == ["agent/fix-pass-rescue-0926-1200: shipped"]
     assert steps == ["rev-parse", "add", "commit", "push"]
     assert made[0][:3] == ["gh", "pr", "create"] and "Stop the pass crashing on x" in made[0]
+    assert made[0][made[0].index("--label") + 1] == "automerge", "fixer PRs merge themselves"
     assert (tree / "logs" / "ship-intent.shipped.md").exists() and not (
         tree / watchdog.INTENT
     ).exists()
@@ -318,6 +376,24 @@ def test_the_pass_is_run_and_a_hang_is_cut_off(tmp_path, monkeypatch):
     assert code is None
 
 
+def test_the_pass_runs_in_utf8_mode_so_no_runner_decodes_with_the_console_page(
+    tmp_path, monkeypatch
+):
+    """Dozens of the pass's runners use `text=True` with no encoding; on a cp1252 console
+    a child's `\u201d` (0x9d in UTF-8) killed their reader thread twice in one evening.
+    UTF-8 mode fixes every one at the process that starts them all."""
+    script = tmp_path / "pass.py"
+    script.write_text(
+        "import subprocess, sys\n"
+        "out = subprocess.run([sys.executable, '-c', \"import sys; sys.stdout.buffer.write("
+        "'\\u201d'.encode())\"], capture_output=True, text=True).stdout\n"
+        "print(sys.flags.utf8_mode, ascii(out))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(watchdog, "PASS", script)
+    assert watchdog.run_pass([]) == (0, "1 '\\u201d'\n")
+
+
 def test_a_signature_is_filed_once_and_the_state_survives_corruption(tmp_path, monkeypatch):
     monkeypatch.setattr(watchdog, "REPO_ROOT", tmp_path)
     state = watchdog.load_state(tmp_path / "missing.json")
@@ -343,3 +419,11 @@ def test_the_rescue_prompt_names_the_failure_the_log_and_the_one_way_out():
     assert "(pass-hung): ran past 25 minutes" in text
     assert "logs/fix-pass.watchdog.log" in text and "agent/fix-pass-rescue-x" in text
     assert "regression test" in text and "ship skill" in text
+
+
+def test_the_marks_spelled_here_are_the_ones_the_pass_reads():
+    """Stdlib-only, so it cannot import them; this is what keeps the copies equal."""
+    fix_reports = load_script("scripts/fix_reports.py")
+    sweep = load_script("scripts/sweep.py")
+    assert watchdog.ORIGIN_FILE == fix_reports.ORIGIN_FILE
+    assert watchdog.AUTOMERGE_LABEL == sweep.AUTOMERGE_LABEL

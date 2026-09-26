@@ -80,7 +80,7 @@ import sys
 import time
 from collections.abc import Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
@@ -1099,22 +1099,14 @@ def venv_python(windows: bool) -> str:
     return ".venv/Scripts/python.exe" if windows else ".venv/bin/python"
 
 
-def npm_executable(windows: bool) -> str:
-    """npm's program name on this platform.
-
-    On Windows npm ships as `npm.cmd`, a batch shim; there is no `npm.exe`. These steps
-    run as argv with no shell — deliberately, so the ladder can be asserted — and argv
-    resolution does not consult PATHEXT, so a bare `npm` raises `[WinError 2] The system
-    cannot find the file specified`.
-
-    That failure was *silent in effect*: `run_provision` reports a step it could not
-    start as a `[warn]` and keeps the box, so every Windows box came out with no
-    `node_modules` while still announcing itself provisioned. Every frontend check —
-    eslint, tsc, stylelint, markdownlint — was then unrunnable in a box, so `/ship`'s
-    changed-scope lint gate could not catch a frontend or Markdown defect locally and
-    left it to CI.
-    """
-    return "npm.cmd" if windows else "npm"
+def npm_executable(windows: bool, which: Callable[[str], str | None] = shutil.which) -> str:
+    """npm's program name, with its Windows extension: whichever PATH resolves (the
+    installer's `npm.cmd` shim, nvm's `npm.exe`), else `npm.cmd`. Steps run as argv with
+    no shell, which does not consult PATHEXT, so a bare `npm` -- or the shim's name on
+    an nvm machine -- is `[WinError 2]`, which `run_provision` downgrades to a `[warn]`:
+    the box announced itself provisioned with no `node_modules` and no frontend linter."""
+    found = PureWindowsPath(which("npm") or "").name if windows else "npm"
+    return found if not windows or found.lower().endswith((".exe", ".cmd", ".bat")) else "npm.cmd"
 
 
 def venv_step(python_version: str = "") -> ProvisionStep:
@@ -2778,6 +2770,8 @@ def run_provision(
                     cwd=str(path),
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout,
                     check=False,
                     creationflags=sweep.NO_WINDOW,
@@ -2788,6 +2782,8 @@ def run_provision(
                     cwd=str(path),
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout,
                     check=False,
                     creationflags=sweep.NO_WINDOW,

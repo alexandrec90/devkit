@@ -191,11 +191,39 @@ def _mtime(path: Path) -> _dt.datetime | None:
         return None
 
 
+def last_spoke(path: Path) -> _dt.datetime | None:
+    """When a transcript's session last did anything: its last record with a `timestamp`.
+
+    Not the file's mtime -- `claude stop` appends `last-prompt` and `cost-state` rows,
+    which carry none, to a session that has already ended, and the mtime then held its
+    tree as busy for `QUIET_AFTER`. Only the file's tail is read; a tail holding no dated
+    record (one enormous last line) falls back to the mtime, which errs towards busy.
+    """
+    try:
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - TAIL_BYTES))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            record = json.loads(line)
+            when = _dt.datetime.fromisoformat(str(record["timestamp"]).replace("Z", "+00:00"))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if when.tzinfo:
+            return when
+    return _mtime(path)
+
+
+TAIL_BYTES = 256 * 1024
+
+
 def newest_transcript(tree: Path, projects_root: Path | None = None) -> Path | None:
     dated = [
         (when, path)
         for path in transcript_dir(tree, projects_root).glob("*.jsonl")
-        if (when := _mtime(path))
+        if (when := last_spoke(path))
     ]
     return max(dated)[1] if dated else None
 
@@ -240,7 +268,7 @@ def active_transcript(
 ) -> Path | None:
     """A transcript in `tree` written within `QUIET_AFTER`: someone is working there now."""
     newest = newest_transcript(tree, projects_root)
-    touched = _mtime(newest) if newest else None
+    touched = last_spoke(newest) if newest else None
     return newest if touched and now - touched <= QUIET_AFTER else None
 
 
@@ -275,7 +303,7 @@ def session_state(
     transcript = session_transcript(tree, sent, projects_root)
     if any((_mtime(tree / name) or sent) > sent for name in OUTCOME_FILES):
         return DONE, str(transcript or "")
-    touched = _mtime(transcript) if transcript else None
+    touched = last_spoke(transcript) if transcript else None
     if touched is None or touched < sent:
         return (NEVER_STARTED, "") if now - sent > START_GRACE else (WORKING, "")
     if now - touched > QUIET_AFTER:

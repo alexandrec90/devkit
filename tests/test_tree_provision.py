@@ -28,6 +28,28 @@ def test_provisioning_runs_the_one_verb_with_yes_and_reports_a_failure(tmp_path,
     assert tree_provision.argv(tmp_path)[-1] == "--yes"
 
 
+def test_the_childs_output_is_read_as_utf8_and_a_failure_is_left_as_the_trees_friction(
+    tmp_path,
+):
+    """cp1252 could not decode a byte of `uv`'s output: the reader thread's traceback
+    landed in the pass's output and the watchdog sent a rescue at a pass that had
+    finished. And a failure only printed reached no ledger; the tree's friction file is
+    what the next pass files."""
+    kwargs = {}
+
+    def runner(argv, **given):
+        kwargs.update(given)
+        return subprocess.CompletedProcess(argv, 1, "", "npm ci (frontend) could not run")
+
+    assert tree_provision.provision(tmp_path, runner) is False
+    assert kwargs["encoding"] == "utf-8" and kwargs["errors"] == "replace"
+    friction = (tmp_path / "logs" / "friction.md").read_text(encoding="utf-8")
+    assert friction.startswith("- provisioning this tree failed before the session opened: ")
+    assert "npm ci (frontend) could not run" in friction
+    assert tree_provision.provision(tmp_path, runner) is False
+    assert (tmp_path / "logs" / "friction.md").read_text(encoding="utf-8").count("- ") == 2
+
+
 def test_a_background_session_is_opened_only_in_a_provisioned_tree(monkeypatch, tmp_path):
     """`agent_tabs.launch_background` is the one place the pass opens a session, so it
     provisions first -- with the same runner, before the session's own spawn."""

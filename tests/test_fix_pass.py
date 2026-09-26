@@ -81,7 +81,9 @@ def world(tmp_path, monkeypatch):
         "order": [],
         "release": "",
         "releases": [],
+        "memory": None,
     }
+    monkeypatch.setattr(fix_pass.fix_send.host_memory, "available_mb", lambda: table["memory"])
     monkeypatch.setattr(
         fix_pass.devkit_project, "known_projects", lambda _t: ["devkit", "carameli"]
     )
@@ -459,6 +461,30 @@ def test_send_all_records_only_what_opened_and_caps_the_rest(world, tmp_path):
         sent == []
         and [why for _, why in capped]
         == ["already dispatched at " + NOW.isoformat(timespec="seconds")] * 2
+    )
+
+
+def test_a_session_the_machine_has_no_memory_for_is_held_for_the_next_pass(world, tmp_path):
+    """Round four sent nine fixers at once and Claude Code killed the supervisor for low
+    memory. The probe is read once, so each session sent this pass is charged against
+    it -- a just-started session has not grown into its memory yet. An update opens no
+    session and is never held; the held ones wait, unrecorded, for the next pass."""
+    send = fix_pass.fix_send
+    world["memory"] = send.MEMORY_FLOOR_MB + send.SESSION_MB * 3 // 2
+    go = [
+        fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=1),)),
+        fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=2),)),
+        fix_plan.Decision(fix_plan.UPDATE, "n", (failure(number=3, behind=True),)),
+    ]
+    ctx = _ctx(tmp_path)
+    sent, capped, _ = send.send_all(go, ctx, "claude")
+    assert sent == ["carameli #1 -- dispatch", "carameli #3 -- update"]
+    [(held, why)] = capped
+    assert held.failures[0].number == 2 and why.startswith(send.HELD_FOR_MEMORY)
+    assert len(fix_ledger.read_ledger(ctx.ledger_path)) == 2, "#2 is free to go next pass"
+    world["memory"] = None
+    assert send.send_all(go[1:2], ctx, "claude")[0] == ["carameli #2 -- dispatch"], (
+        "a probe that cannot read the machine holds nothing"
     )
 
 

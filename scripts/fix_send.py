@@ -22,6 +22,7 @@ import fix_findings
 import fix_ledger
 import fix_loop
 import fix_plan
+import host_memory
 import ship_intent
 import sweep
 from _loader import load_by_path
@@ -36,6 +37,12 @@ Journal = fix_findings.Journal
 
 EXIT_OK = 0
 EXIT_FAILED = 1
+
+# A background fixer measured ~450 MB (the session and its pty host) once it loads no
+# MCP server; the floor leaves the person at the machine room for their own work.
+SESSION_MB = 500
+MEMORY_FLOOR_MB = 2048
+HELD_FOR_MEMORY = "held for memory"
 
 
 def update_branch(failure: fix_plan.Failure, root: Path) -> int:
@@ -96,6 +103,7 @@ def send_all(
     sent: list[str] = []
     capped: list[tuple[fix_plan.Decision, str]] = []
     worst = EXIT_OK
+    room = host_memory.available_mb()
     for decision in go:
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
         if why := _occupied(decision, closed):
@@ -106,14 +114,31 @@ def send_all(
         verdict = fix_budget.budget(decision, ledger, ctx.now, escalated)
         if verdict.finding and journal is not None:
             journal.add(verdict.finding.at(closed.trees.get(problem, "")))
-        if not verdict.go:
-            capped.append((decision, verdict.why))
+        why = verdict.why if not verdict.go else _no_memory(decision, room)
+        if why:
+            capped.append((decision, why))
             continue
+        if room is not None and decision.action != fix_plan.UPDATE:
+            room -= SESSION_MB
         line, code = _send_one(decision, ctx, launch, verdict.effort, journal)
         sent.append(f"{names} -- {line}")
         worst = max(worst, code)
         ledger = fix_ledger.read_ledger(ctx.ledger_path)
     return sent, capped, worst
+
+
+def _no_memory(decision: fix_plan.Decision, room: int | None) -> str:
+    """Why the machine cannot take this session now, or "". Not a cap on sessions --
+    the pass has none -- but the one limit the machine sets regardless: round four sent
+    nine at once and Claude Code killed the supervisor for low memory. A held decision
+    is not recorded, so the next pass sends it; one held too long is a stale wait."""
+    if room is None or decision.action == fix_plan.UPDATE:
+        return ""
+    if room - SESSION_MB >= MEMORY_FLOOR_MB:
+        return ""
+    return (
+        f"{HELD_FOR_MEMORY}: {room} MB free, a session needs {SESSION_MB} above {MEMORY_FLOOR_MB}"
+    )
 
 
 def _occupied(decision: fix_plan.Decision, closed: fix_loop.Closed) -> str:
