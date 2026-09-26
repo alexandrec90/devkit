@@ -2,9 +2,10 @@
 """A worktree that holds a PR's head branch and belongs to no tier `fix-prs.py` reuses.
 
 Git permits one worktree per branch, so a tree like that blocks every fixer sent at the
-PR. `fix-prs.existing_tree` decides whether the holder is reusable; this module answers
+PR. `fix_trees.existing_tree` decides whether the holder is reusable; this module answers
 what happens when it is not: release it if it holds no work, otherwise refuse and name
-the directory. Split out of `fix-prs.py`, which is at its structure limits and whose own
+the directory. Split out of `fix-prs.py`'s worktree half, which is `fix_trees.py` now,
+for the reason that split was made: `fix-prs.py` is at its structure limits and its own
 subject is launching sessions.
 """
 

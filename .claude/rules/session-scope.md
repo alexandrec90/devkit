@@ -40,6 +40,14 @@ session is on the same machine and would hit the same wall.
    a credential, a paid service. Write that in `logs/fix-blocked.md` and lead the report
    with it rather than burying it under the results.
 
+**Closing the gap for this tree is half the fix; the other half is why it was open.**
+Having provisioned it, find out what cut or opened this checkout without provisioning it —
+a worktree tool, a dispatcher, a template — and fix that too, in the same change. Saying
+in the report that "the worktree had no virtualenv" is the mention in passing this
+section forbids: the next checkout that tool cuts arrives just as empty. Only when that
+tool is outside the repository, or vendored, does it become a report instead of an edit.
+A fixer's "nothing else about the PR" scopes the *change under review*, not this.
+
 Never "fix" it by hand-installing one binary, or by upgrading the machine's
 system-wide runtime. That fixes this turn and leaves the next checkout just as broken.
 A provisioning *script* that is vendored from devkit is still a harness defect under

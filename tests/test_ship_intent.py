@@ -112,6 +112,60 @@ def test_intents_are_found_across_every_worktree_of_every_checkout(tmp_path, mon
     )
 
 
+def listing_git(tree: Path, branch: str):
+    listing = f"worktree {tree.as_posix()}\nHEAD 2\nbranch refs/heads/{branch}\n"
+
+    def git_for(_project_dir):
+        return lambda *args: subprocess.CompletedProcess(
+            args,
+            0,
+            listing if args[:2] == ("worktree", "list") else "refs/remotes/origin/main\n",
+            "",
+        )
+
+    return git_for
+
+
+def test_an_intent_that_already_shipped_is_not_reported_from_a_hand_named_branch(tmp_path):
+    """The reported case: PR #386 shipped from a tree before `set_aside` existed, so its
+    intent stayed; a session then cut `flag-wired-agent-hooks` in that tree, and every
+    pass reported the merged change as NOT shipped, telling a person to move it."""
+    (tmp_path / "carameli").mkdir()
+    one = intent(tmp_path)
+    ship_intent.write_state(
+        one.tree, {"stage": ship_intent.SHIPPED, "intent": one.digest, "url": "u"}
+    )
+    git_for = listing_git(one.tree, "flag-wired-agent-hooks")
+    assert ship_intent.find_intents(tmp_path, ["carameli"], git_for) == []
+
+
+def test_an_edited_or_unshipped_intent_is_still_found(tmp_path):
+    """Spent means these words shipped. New words in the same tree are a new intent, and
+    a refusal on record is a failure still to dispatch."""
+    (tmp_path / "carameli").mkdir()
+    one = intent(tmp_path, body="Edited after the ship.")
+    git_for = listing_git(one.tree, "flag-wired-agent-hooks")
+    for state in (
+        {"stage": ship_intent.SHIPPED, "intent": "a88840a33784"},
+        {"stage": ship_intent.REFUSED, "intent": one.digest},
+    ):
+        ship_intent.write_state(one.tree, state)
+        found = ship_intent.find_intents(tmp_path, ["carameli"], git_for)
+        assert [i.subject for i in found] == [one.subject]
+        assert "not a namespaced task branch" in found[0].blocked
+
+
+def test_spent_needs_a_shipped_stage_and_the_same_words(tmp_path):
+    """Unlike `already_shipped`, the words decide: an edited message is a new intent, and
+    a dirty tree does not revive words that already shipped."""
+    one = intent(tmp_path)
+    assert ship_intent.spent(one, {"stage": ship_intent.SHIPPED, "intent": one.digest})
+    assert not ship_intent.spent(one, {"stage": ship_intent.SHIPPED, "intent": "x"})
+    assert not ship_intent.spent(one, {"stage": ship_intent.REFUSED, "intent": one.digest})
+    assert not ship_intent.spent(one, {"stage": ship_intent.FAILED, "intent": one.digest})
+    assert not ship_intent.spent(one, {})
+
+
 def test_a_checkout_git_cannot_list_is_passed_over(tmp_path):
     (tmp_path / "carameli").mkdir()
     assert (

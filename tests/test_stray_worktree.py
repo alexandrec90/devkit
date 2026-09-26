@@ -1,6 +1,6 @@
 """`scripts/stray_worktree.py`: releasing a tree that holds a PR branch and no work.
 
-The path through `fix-prs.existing_tree` is in `tests/test_fix_prs.py`; what is here is
+The path through `fix_trees.existing_tree` is in `tests/test_fix_prs.py`; what is here is
 the two guards that never ask git at all, and the refusal's own wording.
 """
 

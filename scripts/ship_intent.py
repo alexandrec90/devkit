@@ -188,7 +188,8 @@ def find_intents(
     checkout and the static checkout on a task branch are all found the same way. A
     tree on a branch a PR cannot be opened from (`ship.is_shippable`) is returned
     `blocked` with the reason, for the record, rather than shipped somewhere
-    surprising or silently passed over.
+    surprising or silently passed over. A `spent` intent is not returned at all, and
+    is judged before the branch: which branch a shipped message sits on says nothing.
 
     A branch that already heads an open PR is shippable whatever it is called: the rule
     is about where a *new* PR opens, and that PR is open. devkit #390 was opened by hand
@@ -201,17 +202,16 @@ def find_intents(
         intent_path = tree / INTENT_FILE
         if not branch or not intent_path.is_file():
             continue
+        subject, body = parse_intent(intent_path.read_text(encoding="utf-8", errors="replace"))
+        if not subject or spent(Intent(project, tree, branch, subject, body), read_state(tree)):
+            continue
         if project not in defaults:
             defaults[project] = tb.detect_default_branch(git_for(root / project), fallback="main")
         base = defaults[project]
         shippable, why = ship.is_shippable(branch, base)
         if not shippable and branch != base and has_open_pr(gh_for(root / project), branch):
             shippable, why = True, ""
-        subject, body = parse_intent(intent_path.read_text(encoding="utf-8", errors="replace"))
-        if subject:
-            found.append(
-                Intent(project, tree, branch, subject, body, "" if shippable else why, base)
-            )
+        found.append(Intent(project, tree, branch, subject, body, "" if shippable else why, base))
     return found
 
 
@@ -239,6 +239,19 @@ def already_shipped(intent: Intent, state: dict, porcelain: str) -> bool:
     still recorded, for the record's own sake -- what the tree *was* shipped as.
     """
     return state.get("stage") == SHIPPED and not porcelain.strip()
+
+
+def spent(intent: Intent, state: dict) -> bool:
+    """The state file says these very words already shipped from this tree.
+
+    An intent that outlived its ship -- written before `set_aside` existed, or left
+    behind by one that could not move it -- is not work. Read as work it was reported
+    `blocked` once someone cut a hand-named branch in the same tree, telling a person
+    to move a change that had merged the day before; with edits on top it would be
+    committed under the old message. The words are compared here, unlike in
+    `already_shipped`: an edited message is a new intent and gets the ordinary path.
+    """
+    return state.get("stage") == SHIPPED and state.get("intent") == intent.digest
 
 
 def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str]:

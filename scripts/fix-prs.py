@@ -27,6 +27,7 @@ them. Existing Claude and Codex worktrees are reused, as are live devkit boxes w
 project, branch and path match the PR's checkout and head. Upgrade PRs already have
 such boxes; refusing them prevents the task from fixing those PRs. Reuse leaves the
 box's lease and lifecycle with `worktree.py`. This task creates no boxes or port leases.
+Finding, cutting and provisioning that tree is `scripts/fix_trees.py`;
 `scripts/agent_worktrees.py` owns `holder`, `tree_name` and the `add` argv.
 
 **Three agent modes.** `claude` and `codex` each open a Windows Terminal tab, the one
@@ -55,14 +56,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import adoption_prs
 import agent_models
 import agent_tabs
-import agent_worktrees as aw
 import devkit_project
 import fix_ledger
 import fix_plan
 import fix_prompts
 import fix_reports
+from fix_trees import cut_fresh_tree, cut_tree, existing_tree, provision_tree
 import gate_evidence
-import stray_worktree as stray
 import sweep
 import task_branch as tb
 import task_input
@@ -110,64 +110,6 @@ def tab_safe(text: str) -> str:
     return " ".join(str(text).split())
 
 
-# --- the worktree -----------------------------------------------------------------
-
-
-def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
-    """Return a reusable tree, an unheld branch `(None, "")`, or `(None, refusal)`.
-
-    Git permits only one worktree per branch. Reuse agent worktrees and matching live
-    boxes; name the directory for other holders rather than attempting another cut.
-    """
-    listed = sweep.git_for(project_dir)("worktree", "list", "--porcelain")
-    if listed.returncode != 0:
-        return None, f"git could not list the worktrees of {project_dir}"
-    held, nested = aw.holder(project_dir, listed.stdout, branch)
-    if not held:
-        return None, ""
-    if not nested:
-        # Upgrade PRs already have a box on their head branch. Reuse it just as
-        # agent-box attach does, without creating a tree or changing its lease.
-        root = project_dir.parent
-        for box in worktree.live_boxes(root).values():
-            if (
-                box.project == project_dir.name
-                and box.branch == branch
-                and Path(held).resolve() == worktree.box_path(root, box.name).resolve()
-            ):
-                return Path(held), ""
-        return None, stray.refusal(project_dir, held, branch)
-    return Path(held), ""
-
-
-def cut_tree(project_dir: Path, branch: str, runner=subprocess.run) -> Path | None:
-    """Cut a default-tier worktree on the PR's own head branch. None when git refused.
-
-    The fetch first is `agent-worktree.create`'s and for its reason: a checkout that has
-    not fetched is however stale it last was, and here that decides the question below
-    it -- whether `origin/<branch>` exists at all is what tells a branch this machine has
-    never seen from a PR whose head this checkout simply has not heard about yet.
-    """
-    git = sweep.git_for(project_dir)
-    runner(["git", "-C", str(project_dir), "fetch", "--quiet", "origin"], check=False)
-    local = git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0
-    remote = git("rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}").returncode
-    if not local and remote != 0:
-        print(f"  origin has no branch {branch} in {project_dir.name}", file=sys.stderr)
-        return None
-    root = aw.default_root(project_dir)
-    taken = [entry.name for entry in root.iterdir()] if root.is_dir() else []
-    path = root / aw.tree_name(branch, taken)
-    argv = ["git", "-C", str(project_dir), *aw.add_steps(branch, str(path), local)]
-    if runner(argv, check=False).returncode != 0:
-        return None
-    # Nothing is written to make this appear in the delete dropdown, because that menu
-    # has no file behind it: `agent-worktree.py rows` scans `git worktree list
-    # --porcelain` when the picker opens, and `aw.nested` selects exactly the directory
-    # cut above. The worktree you just cut is in the list because it exists.
-    return path
-
-
 def fix_branch(decision: fix_plan.Decision, now=None) -> str:
     """The fresh branch a fix with no branch of its own starts on.
 
@@ -184,32 +126,6 @@ def fix_branch(decision: fix_plan.Decision, now=None) -> str:
     else:
         topic = f"fix {first.workflow or 'nightly'}"
     return tb.branch_name(tb.slugify(topic), set(), today=now)
-
-
-def cut_fresh_tree(
-    project_dir: Path, branch: str, base: str, runner=subprocess.run
-) -> tuple[Path | None, str]:
-    """Cut a default-tier worktree on a new `branch` off `origin/<base>`.
-
-    The branch is renamed with a counter when the checkout already has one of that
-    name: two clicks on two different nightlies of one project on one day want two
-    branches, and git would otherwise refuse the second with the first's name.
-    """
-    git = sweep.git_for(project_dir)
-    runner(["git", "-C", str(project_dir), "fetch", "--quiet", "origin"], check=False)
-    name, counter = branch, 2
-    while git("rev-parse", "--verify", "--quiet", f"refs/heads/{name}").returncode == 0:
-        name, counter = f"{branch}-{counter}", counter + 1
-    root = aw.default_root(project_dir)
-    taken = [entry.name for entry in root.iterdir()] if root.is_dir() else []
-    path = root / aw.tree_name(name, taken)
-    # `--no-track`, as `create` is: the upstream belongs to the first push, not to the
-    # default branch the worktree was cut from, which is where a bare push would land.
-    add = ("worktree", "add", "--no-track", "-b", name, str(path), f"origin/{base}")
-    argv = ["git", "-C", str(project_dir), *add]
-    if runner(argv, check=False).returncode != 0:
-        return None, name
-    return path, name
 
 
 # --- opening the session ----------------------------------------------------------
@@ -334,6 +250,8 @@ def dispatch_pr(
         return EXIT_FAILED
     if failure.kind == fix_plan.PR and (stale := refresh_head(tree, failure.head)):
         print(f"  {stale}")
+    for note in provision_tree(tree):
+        print(f"  {note}")
     gate_evidence.place(failure, tree)
     if key:
         fix_reports.stamp(tree, key, fix_plan.describe(failure))
@@ -363,6 +281,8 @@ def dispatch_fresh(
     if tree is None:
         print(f"  could not cut {branch} off origin/{base}; nothing opened", file=sys.stderr)
         return EXIT_FAILED
+    for note in provision_tree(tree):
+        print(f"  {note}")
     for failure in decision.failures:
         # One directory per failure: a devkit session can hold two of one project's.
         gate_evidence.place(failure, tree, gate_evidence.evidence_slot(failure) if upstream else "")
