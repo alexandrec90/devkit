@@ -19,11 +19,11 @@ tier and remove from every tier; `create` only ever writes to the default one, b
 second convention for where `codex --worktree` puts things would be worse than the
 built-in.
 
-**`fix-prs.py` reads from here too, and is not a fourth menu.** It cuts a worktree in
-this tier for the PR it was sent at, which is `holder`, `tree_name` and `add_steps` --
-where a worktree for a branch goes, and what git is asked to do when the branch already
-exists. A private copy of those three in that module would be a second answer to a
-question the machine may only have one answer to.
+**`fix-prs.py` reads from here too, and is not a fourth menu.** Its `fix_trees.py` cuts
+a worktree in this tier for the PR it was sent at, which is `holder`, `tree_name` and
+`add_steps` -- where a worktree for a branch goes, and what git is asked to do when the
+branch already exists. A private copy of those three in that module would be a second
+answer to a question the machine may only have one answer to.
 
 Every function here is pure and tested in `tests/test_agent_worktrees.py`. `env` rides
 through the two that ask which tier a path is in, because one tier's location is read
@@ -64,7 +64,7 @@ BASE_LIMIT = 10
 # Where a NEW worktree for a checkout is cut, and the directories one can be FOUND in --
 # both off the tier list, so neither `create`'s destination nor a refusal's wording can
 # fall behind a tier that gets added. Aliased rather than wrapped: `agent-worktree.py`
-# and `fix-prs.py` both import this module and neither should import a second one to ask
+# and `fix_trees.py` both import this module and neither should import a second one to ask
 # where the machine puts a worktree.
 default_root = wt.default_root
 TIER_SUMMARY = " or ".join(

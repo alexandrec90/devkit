@@ -29,8 +29,10 @@ from support import REPO_ROOT, load_script
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import agent_models
+import agent_worktrees as aw
 import fix_ledger
 import fix_plan
+import fix_trees
 
 # `support.load_script` rather than `_loader.load_by_path`: the latter overwrites
 # `sys.modules[name]`, so reaching a module that way would hand this process a second
@@ -88,7 +90,7 @@ def no_evidence_fetch(monkeypatch):
 
 
 # Kept before the fixture below replaces it, so its own tests reach the real one.
-real_provision_tree = fix_prs.provision_tree
+real_provision_tree = fix_trees.provision_tree
 
 
 @pytest.fixture(autouse=True)
@@ -164,7 +166,7 @@ def test_a_worktree_already_on_that_branch_is_reused_rather_than_cut(monkeypatch
     again would fail on the very thing that means "ready"."""
     held = f"{(tmp_path / 'carameli').as_posix()}/.claude/worktrees/x"
     checkout = checkout_listing(monkeypatch, tmp_path, (held, "agent/x"))
-    assert fix_prs.existing_tree(checkout, "agent/x") == (Path(held), "")
+    assert fix_trees.existing_tree(checkout, "agent/x") == (Path(held), "")
 
 
 @pytest.mark.parametrize("location", ["carameli", "manual", ".worktrees/carameli--x"])
@@ -175,10 +177,10 @@ def test_a_branch_held_outside_the_tier_is_refused_with_the_directory_named(
     held = (tmp_path / location).as_posix()
     checkout = checkout_listing(monkeypatch, tmp_path, (held, "agent/x"))
     monkeypatch.setattr(fix_prs.worktree, "live_boxes", lambda root: {})
-    tree, refused = fix_prs.existing_tree(checkout, "agent/x")
+    tree, refused = fix_trees.existing_tree(checkout, "agent/x")
     assert tree is None
     assert held in refused
-    assert fix_prs.aw.TIER_SUMMARY in refused
+    assert aw.TIER_SUMMARY in refused
 
 
 def test_a_codex_worktree_on_that_branch_is_reused_too(monkeypatch, tmp_path):
@@ -189,7 +191,7 @@ def test_a_codex_worktree_on_that_branch_is_reused_too(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEX_HOME", str(home))
     held = f"{home.as_posix()}/worktrees/2e51/carameli"
     checkout = checkout_listing(monkeypatch, tmp_path, (held, "agent/x"))
-    assert fix_prs.existing_tree(checkout, "agent/x") == (Path(held), "")
+    assert fix_trees.existing_tree(checkout, "agent/x") == (Path(held), "")
 
 
 @pytest.mark.parametrize("agent", ["codex", "claude", "claude-bg"])
@@ -229,7 +231,7 @@ def test_a_box_must_match_the_checkout_branch_and_worktree(monkeypatch, tmp_path
         "live_boxes",
         lambda root: {} if mismatch == "missing" else {box.name: box},
     )
-    tree, refused = fix_prs.existing_tree(checkout, "agent/x")
+    tree, refused = fix_trees.existing_tree(checkout, "agent/x")
     assert tree is None
     assert held.as_posix() in refused
 
@@ -238,7 +240,7 @@ def test_a_branch_nothing_holds_is_neither_a_tree_nor_a_refusal(monkeypatch, tmp
     """The two empties are the case `cut_tree` exists for, and the launch path branches
     on the difference between them."""
     checkout = checkout_listing(monkeypatch, tmp_path, (str(tmp_path / "carameli"), "main"))
-    assert fix_prs.existing_tree(checkout, "agent/x") == (None, "")
+    assert fix_trees.existing_tree(checkout, "agent/x") == (None, "")
 
 
 def test_git_that_cannot_list_the_worktrees_is_a_refusal_not_a_free_cut(monkeypatch, tmp_path):
@@ -247,7 +249,7 @@ def test_git_that_cannot_list_the_worktrees_is_a_refusal_not_a_free_cut(monkeypa
     checkout = tmp_path / "carameli"
     checkout.mkdir(exist_ok=True)
     monkeypatch.setattr(fix_prs.sweep, "git_for", lambda _path: fake_git({}))
-    tree, refused = fix_prs.existing_tree(checkout, "agent/x")
+    tree, refused = fix_trees.existing_tree(checkout, "agent/x")
     assert tree is None
     assert refused
 
@@ -270,7 +272,7 @@ def cut_with(monkeypatch, tmp_path, *, local: bool, remote: bool = True):
         ),
     )
     run = FakeRun()
-    return fix_prs.cut_tree(checkout, "agent/x", run), run
+    return fix_trees.cut_tree(checkout, "agent/x", run), run
 
 
 def test_a_worktree_is_cut_in_the_tier_tracking_the_prs_own_remote_branch(monkeypatch, tmp_path):
@@ -322,7 +324,7 @@ def test_cutting_one_lands_where_the_delete_dropdown_scans(monkeypatch, tmp_path
     _fetch, add = run.git_args()
     assert add[:2] == ["worktree", "add"]
     porcelain = f"worktree {path.as_posix()}\nbranch refs/heads/agent/x\n"
-    assert fix_prs.aw.nested(checkout, porcelain) == [(path.name, path.as_posix(), "agent/x")]
+    assert aw.nested(checkout, porcelain) == [(path.name, path.as_posix(), "agent/x")]
 
 
 def test_a_git_refusal_yields_no_worktree_rather_than_a_path(monkeypatch, tmp_path):
@@ -342,7 +344,7 @@ def test_a_git_refusal_yields_no_worktree_rather_than_a_path(monkeypatch, tmp_pa
         code = 0 if "fetch" in [str(a) for a in argv] else 128
         return subprocess.CompletedProcess(argv, code, "", "already exists")
 
-    assert fix_prs.cut_tree(checkout, "agent/x", runner) is None
+    assert fix_trees.cut_tree(checkout, "agent/x", runner) is None
 
 
 # --- provisioning the tree ------------------------------------------------------------
@@ -433,7 +435,7 @@ def fresh_with(monkeypatch, tmp_path, taken: tuple[str, ...] = ()):
         ),
     )
     run = FakeRun()
-    return fix_prs.cut_fresh_tree(checkout, "agent/fix-nightly-0918", "main", run), run
+    return fix_trees.cut_fresh_tree(checkout, "agent/fix-nightly-0918", "main", run), run
 
 
 def test_a_fresh_branch_is_cut_off_the_default_branch_after_a_fetch(monkeypatch, tmp_path):
@@ -463,7 +465,10 @@ def test_a_git_refusal_on_a_fresh_branch_names_the_branch(monkeypatch, tmp_path)
         code = 0 if "fetch" in [str(a) for a in argv] else 128
         return subprocess.CompletedProcess(argv, code, "", "nope")
 
-    assert fix_prs.cut_fresh_tree(checkout, "agent/fix-x", "main", runner) == (None, "agent/fix-x")
+    assert fix_trees.cut_fresh_tree(checkout, "agent/fix-x", "main", runner) == (
+        None,
+        "agent/fix-x",
+    )
 
 
 # --- opening the session ----------------------------------------------------------
