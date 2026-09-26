@@ -138,14 +138,17 @@ jobs:
         run: uv run python scripts/run-tests.py
       - name: Harness hook tests
         # Separate from the application suite: pytest's testpaths excludes these,
-        # and they are stdlib-only by contract.
-        run: uv run python -m pytest scripts/hooks/tests/ -q
+        # and they are stdlib-only by contract. The JUnit report is their failure
+        # artifact: without it a red vendored suite uploads nothing the fix pass can read.
+        run: uv run python -m pytest scripts/hooks/tests/ -q --junit-xml=logs/junit-hooks.xml
       - name: Upload test artifact
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: test-failures
-          path: logs/test-failures.log
+          path: |
+            logs/test-failures.log
+            logs/junit-hooks.xml
 
   devkit-drift:
     name: Vendored harness drift

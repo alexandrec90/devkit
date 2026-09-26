@@ -341,6 +341,20 @@ def test_the_push_gate_and_the_vendored_suite_are_full_suites():
     ]
     assert classes([call("python -m pytest scripts/hooks/tests -q", "1")]) == ["full-suite"]
     assert classes([call("python -m pytest scripts/hooks/tests/test_ship.py", "1")]) == []
+    assert classes([call("pre-commit run devkit-push-gate --hook-stage pre-push", "1")]) == [
+        "full-suite"
+    ]
+
+
+def test_a_command_that_only_names_the_push_gate_is_not_a_full_suite():
+    """Ledger 30d0035d: a grep whose file list named `run_push_gate.py` was filed as a
+    session running the whole gate."""
+    grep = (
+        'grep -n "instruction-budget" scripts/devkit_manifest.py '
+        "scripts/precommit/run_push_gate.py tests/test_gate_parity.py | head"
+    )
+    assert classes([call(grep, "1")]) == []
+    assert classes([call("sed -n 1,40p scripts/precommit/run_push_gate.py", "1")]) == []
 
 
 def test_render_is_a_transcript_as_lines_an_audit_can_read(tmp_path):

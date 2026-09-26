@@ -87,7 +87,15 @@ COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     # The push gate is the PR gate's whole suite, run locally: the gate's job, not a session's.
-    ("full-suite", re.compile(r"\brun_push_gate\.py\b")),
+    # In command position, so a grep or sed that merely names the file is not it (30d0035d).
+    (
+        "full-suite",
+        re.compile(
+            r"(?:^|&&?|\|\|?|;)\s*(?:&\s*)?(?:\S*python\S*\s+)?\S*run_push_gate\.py\b|"
+            r"\bpre-commit\s+run\b[^\n]*(?:devkit-push-gate|--hook-stage[\s=]+pre-push)",
+            re.M,
+        ),
+    ),
 )
 
 # The opening message of a session the fix pass dispatched: every prompt's finish line.

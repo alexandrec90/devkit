@@ -5686,10 +5686,9 @@ def provision_target(root: Path, name: str) -> tuple[str, Path]:
     box = boxes.get(name)
     if box is not None:
         return box.name, box_path(root, box.name)
-    candidate = Path(name)
-    path = candidate if candidate.is_absolute() else root / name
-    if (path / ".git").exists():
-        return path.name, path
+    for path in ((Path.cwd() / name).resolve(), root / name):  # cwd first: `provision .`
+        if (path / ".git").exists():
+            return path.name, path
     known = ", ".join(sorted(boxes)) or "(none)"
     raise WorktreeError(f"no live box or checkout called {name!r}; live boxes: {known}")
 

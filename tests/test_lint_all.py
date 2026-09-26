@@ -217,6 +217,22 @@ def test_a_missing_linter_is_a_note_and_never_an_artifact_entry():
     assert lint_all.run_tool("dotenv-linter", absent, "hint") == ""
 
 
+COLOURED_FAILURE = [
+    sys.executable,
+    "-c",
+    "import sys; print('\\x1b[1m\\x1b[91mB023\\x1b[0m a.py:1:1'); sys.exit(1)",
+]
+
+
+def test_a_finding_reaches_the_artifact_without_colour_codes():
+    """Claude Code runs every tool under `FORCE_COLOR=3`, which ruff and mypy obey even
+    into a pipe, so `logs/lint-errors.log` -- a file agents grep -- carried escape codes
+    around every rule and path."""
+    section = lint_all.run_tool("ruff", COLOURED_FAILURE, "hint")
+    assert "\x1b" not in section
+    assert "B023 a.py:1:1" in section
+
+
 def test_no_skipped_required_tool_means_no_complaint():
     lint_all._SKIPPED.clear()
     assert lint_all.not_clean_reason() == ""

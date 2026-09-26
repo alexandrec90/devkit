@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -139,6 +140,11 @@ def _missing_module(cmd: list[str]) -> bool:
         return True
 
 
+# An agent's shell sets `FORCE_COLOR` (Claude Code: 3), which ruff and mypy obey even
+# into a pipe, so a finding would reach the artifact wrapped in escape codes.
+ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
 def run_tool(name: str, cmd: list[str], fix_hint: str) -> str:
     """Run one linter; return its artifact section, or "" when it passed or was absent.
 
@@ -157,7 +163,7 @@ def run_tool(name: str, cmd: list[str], fix_hint: str) -> str:
     if result.returncode == 0:
         print(f"  {name}: ok")
         return ""
-    body = (result.stdout + result.stderr).strip()
+    body = ANSI.sub("", result.stdout + result.stderr).strip()
     print(f"  {name}: FAILED")
     return f"# {name}\n# fix: {fix_hint}\n{body}\n\n"
 

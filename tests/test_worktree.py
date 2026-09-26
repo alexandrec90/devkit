@@ -2972,6 +2972,23 @@ def test_a_box_wins_the_name_over_a_checkout_that_shares_it(workspace):
     assert worktree.provision_target(root, "demo")[1] == worktree.box_path(root, "demo")
 
 
+def test_a_relative_path_is_read_from_where_the_session_stands(workspace, monkeypatch):
+    """3f318a38: session-scope.md said `provision <this tree> --yes`, and `.` -- the most
+    natural spelling of "this tree" -- was joined to the workspace root, which is no
+    checkout, and refused."""
+    root = workspace.parent
+    tree = root / "devkit" / ".claude" / "worktrees" / "fix-0926"
+    (tree / ".git").mkdir(parents=True)
+    monkeypatch.chdir(tree)
+    assert worktree.provision_target(root, ".") == ("fix-0926", tree.resolve())
+    monkeypatch.chdir(tree.parent)
+    assert worktree.provision_target(root, "fix-0926") == ("fix-0926", tree.resolve())
+    (root / "demo" / ".git").mkdir(parents=True)
+    assert worktree.provision_target(root, "demo") == ("demo", root / "demo"), (
+        "a checkout named from anywhere still resolves under the workspace"
+    )
+
+
 def test_a_directory_with_no_repository_in_it_is_refused(workspace):
     """A mistyped box name would otherwise read as "some empty folder", and the install
     ladder would run its whole length in a tree with nothing to install."""

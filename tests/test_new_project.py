@@ -791,6 +791,10 @@ def test_a_linter_that_is_not_installed_is_skipped_not_reported(tmp_path):
     # the FileNotFoundError path rather than being pre-emptively skipped.
     assert not lint_all._missing_module([sys.executable, "-m", "json", "."])
     assert not lint_all._missing_module(["ruff", "check", "."])
+    # A finding printed in colour (an agent's `FORCE_COLOR`) reaches the artifact plain.
+    coloured = [sys.executable, "-c", "print('\\x1b[91mE1\\x1b[0m a.py'); raise SystemExit(1)"]
+    section = lint_all.run_tool("ruff", coloured, "hint")
+    assert "\x1b" not in section and "E1 a.py" in section
 
 
 def test_generated_lint_runner_covers_the_env_file_and_pre_commit_covers_the_workflows(
@@ -1252,6 +1256,24 @@ def test_generated_gate_does_not_burn_minutes_on_superseded_commits(tmp_path):
     assert parsed["concurrency"]["cancel-in-progress"] == (
         "${{ github.event_name == 'pull_request' }}"
     )
+
+
+def test_generated_gate_uploads_what_a_red_vendored_suite_wrote(tmp_path):
+    """A red `scripts/hooks/tests/` step wrote nothing under `logs/`, so the failure
+    upload carried only the application suite's log: the fix pass reported "No artifact
+    came down from the run" and its session dug the ids out of `gh run view --log-failed`
+    (ibkr_trader, ledger `33adbbc3`). `gate_evidence` reads JUnit reports it downloads."""
+    yaml = pytest.importorskip("yaml")
+    parsed = yaml.safe_load(
+        (generate(tmp_path, {}) / ".github" / "workflows" / "pr-gate.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    steps = [s for job in parsed["jobs"].values() for s in job.get("steps", [])]
+    [hooks] = [s for s in steps if "scripts/hooks/tests/" in str(s.get("run", ""))]
+    assert "--junit-xml=logs/junit-hooks.xml" in hooks["run"]
+    uploads = [s for s in steps if str(s.get("uses", "")).startswith("actions/upload-artifact")]
+    assert any("logs/junit-hooks.xml" in str(s["with"]["path"]) for s in uploads)
 
 
 def test_generated_gate_is_least_privilege_and_re_runnable(tmp_path):
