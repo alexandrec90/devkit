@@ -417,3 +417,23 @@ def test_the_held_note_names_the_base_and_the_project():
     note = fix_plan.held_note(failure(project="roguelike", base="master"))
     assert note.startswith("held: origin/master is red in roguelike")
     assert note.endswith("re-read once it is green")
+
+
+def test_a_job_log_line_is_read_past_its_prefix_and_colour():
+    """`gh run view --log-failed` prefixes every line with `job<TAB>step<TAB>timestamp`,
+    and every pattern here is anchored at the line start."""
+    log = (
+        "Tests\tpytest\t2026-09-19T10:00:00.1Z FAILED tests/test_a.py::test_b - boom\n"
+        "Web\tvitest\t2026-09-19T10:00:00.1Z \x1b[31m FAIL \x1b[39m src/a.test.ts > s > c\n"
+        " FAIL  src/b.spec.jsx\n"
+    )
+    assert fix_plan.signature_from_logs([log]) == (
+        "src/a.test.ts > s > c",
+        "src/b.spec.jsx",
+        "tests/test_a.py::test_b",
+    )
+
+
+def test_a_vitest_entry_names_its_file():
+    assert fix_plan.entry_path("src/a.test.ts > suite > case") == "src/a.test.ts"
+    assert fix_plan.entry_path("tests/test_a.py::test_b") == "tests/test_a.py"

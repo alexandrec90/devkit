@@ -39,19 +39,24 @@ def collect_red(
 
     Each default branch's own gate is read beside the PRs: a red one is a failure to
     send a session at (devkit's is the harness itself), not only a reason to hold. The
-    harness-defect ledger's open backlog rides along as one failure of its own.
+    harness-defect backlog is `backlog_failure`'s, read separately so that a crash here
+    is still something the devkit session is sent at.
     """
     found = menu.scan(workspace, projects)
     branches = gate_evidence.collect_default_branches(workspace, projects)
     failures = refused + gate_evidence.collect(workspace, found)
     failures += [failure for _, failure in branches.values() if failure]
-    devkit_dir = workspace.parent / fix_cycle.DEVKIT
-    if devkit_dir.is_dir():
-        backlog = fix_backlog.ledger_failure(devkit_dir, gate_evidence.evidence_root(workspace))
-        failures += [backlog] if backlog else []
     green, _ = branches.get(fix_cycle.DEVKIT, (None, None))
     unread = [name for name, (verdict, _) in branches.items() if verdict is None]
     return failures, green, unread
+
+
+def backlog_failure(workspace: Path) -> fix_plan.Failure | None:
+    """The harness-defect ledger's open backlog as one failure; None when it is empty."""
+    devkit_dir = workspace.parent / fix_cycle.DEVKIT
+    if not devkit_dir.is_dir():
+        return None
+    return fix_backlog.ledger_failure(devkit_dir, gate_evidence.evidence_root(workspace))
 
 
 def regate(project_dir: Path) -> tuple[bool, str]:

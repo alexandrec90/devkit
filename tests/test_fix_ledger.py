@@ -154,9 +154,10 @@ def test_a_dispatch_older_than_the_resend_window_is_sent_again(tmp_path):
     assert fix_ledger.already_sent(decision, ledger), "with no clock, the entry stands"
 
 
-def test_a_key_is_resent_once_and_then_needs_a_human(tmp_path):
-    """The entry counts its sessions: a failure whose session dies every day would
-    otherwise buy a new one every day, under the daily caps but with no end."""
+def test_a_resent_key_counts_its_sessions_against_the_problem(tmp_path):
+    """The entry counts its sessions, and they count toward `ATTEMPTS`: a failure whose
+    session dies every day buys at most that many before it is escalated -- never a
+    "needs a human" at the key, which is what this used to answer."""
     path = tmp_path / "dispatch.json"
     decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
     key = fix_ledger.decision_key(decision)
@@ -166,15 +167,43 @@ def test_a_key_is_resent_once_and_then_needs_a_human(tmp_path):
     assert fix_ledger.already_sent(decision, fix_ledger.read_ledger(path), later) == ""
     fix_ledger.record(path, key, "n", later)
     ledger = fix_ledger.read_ledger(path)
-    assert ledger[key]["sent"] == fix_ledger.MAX_SENDS
-    spent = fix_ledger.already_sent(decision, ledger, later + 2 * fix_ledger.RESEND_AFTER)
-    assert spent.startswith(later.isoformat(timespec="seconds")) and "needs a human" in spent
-    assert "needs a human" in fix_ledger.already_sent(decision, ledger), "with no clock too"
+    assert fix_ledger.attempts(decision, ledger) == 2 == fix_ledger.ATTEMPTS
+    assert fix_ledger.last_sent(decision, ledger) == later.isoformat(timespec="seconds")
     assert fix_ledger.sends({"when": "2026-09-01"}) == 1, "an entry from before the count"
     assert fix_ledger.sends({"sent": "junk"}) == 1 and fix_ledger.sends(None) == 0
 
 
-def test_a_blocked_dispatch_is_remembered_with_its_reason_and_never_resent(tmp_path):
+def test_a_dead_session_frees_its_key_at_once_and_is_marked_once(tmp_path):
+    path = tmp_path / "dispatch.json"
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
+    key = fix_ledger.decision_key(decision)
+    fix_ledger.record(path, key, "n", NOW)
+    assert fix_ledger.already_sent(decision, fix_ledger.read_ledger(path), NOW)
+    assert fix_ledger.mark_dead(path, key, "never started")
+    assert not fix_ledger.mark_dead(path, key, "never started"), "one verdict per dispatch"
+    assert fix_ledger.already_sent(decision, fix_ledger.read_ledger(path), NOW) == ""
+
+
+def test_since_makes_everything_before_a_resolved_escalation_history(tmp_path):
+    """Once the devkit session resolves what a problem was escalated as, the problem
+    starts over: its sessions, its block and its in-flight entry are all before it."""
+    path = tmp_path / "dispatch.json"
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
+    key = fix_ledger.decision_key(decision)
+    fix_ledger.record(path, key, "n", NOW)
+    fix_ledger.mark_blocked(path, key, "no database")
+    ledger = fix_ledger.read_ledger(path)
+    resolved = (NOW + _dt.timedelta(hours=1)).isoformat(timespec="seconds")
+    assert fix_ledger.attempts(decision, ledger) == 1
+    assert fix_ledger.attempts(decision, ledger, resolved) == 0
+    assert fix_ledger.blocked_reason(decision, ledger) == "no database"
+    assert fix_ledger.blocked_reason(decision, ledger, resolved) == ""
+    assert fix_ledger.already_sent(decision, ledger, NOW, resolved) == ""
+    before = (NOW - _dt.timedelta(hours=1)).isoformat(timespec="seconds")
+    assert fix_ledger.attempts(decision, ledger, before) == 1, "only what came before it"
+
+
+def test_a_blocked_dispatch_is_remembered_with_its_reason_until_its_escalation_resolves(tmp_path):
     path = tmp_path / "dispatch.json"
     decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
     key = fix_ledger.decision_key(decision)

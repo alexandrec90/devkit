@@ -47,7 +47,7 @@ where = ["{{ src_root }}"]
 # `testpaths` is what keeps `scripts/hooks/tests/` out of the application suite —
 # those are the vendored harness's own stdlib-only tests and run separately.
 testpaths = ["{{ tests_dir }}"]
-addopts = "-q"
+# No `-q` in `addopts`: an agent adds its own, and `-qq` drops the "N passed" line.
 
 [tool.mypy]
 python_version = "{{ python_version }}"

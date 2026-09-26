@@ -126,7 +126,8 @@ def test_reconcile_writes_the_file_its_installer_advertises():
 def test_the_fix_pass_writes_the_file_its_installer_advertises():
     installer = load_script("scripts/install-fix-pass-task.py")
     runner = load_script("scripts/fix-pass.py")
-    assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
+    watchdog = load_script("scripts/fix-pass-watchdog.py")
+    assert installer.ARTIFACT == runner.ARTIFACT.as_posix() == watchdog.ARTIFACT.as_posix()
 
 
 def test_the_release_pass_writes_the_file_its_installer_advertises():
@@ -331,16 +332,19 @@ UNATTENDED: dict[str, str] = {
     "scripts/rc_machine.py": "the tasklist, taskkill and server launch that pass makes",
     "scripts/reap-stale.py": "devkit-reap-stale runs it every 15 minutes",
     "scripts/reap_machine.py": "the process listing, tasklist and taskkill that pass makes",
+    "scripts/session_trees.py": "the git, gh and compose down that pass makes per session tree",
     "scripts/tray.py": "devkit-tray runs it from logon until logoff",
     "scripts/tray_state.py": "the tray asks it what to draw, on every poll",
     "scripts/schedule_health.py": "the schtasks the tray spawns every poll, and the status pass",
     "scripts/workspace-status.py": "devkit-workspace-status runs it daily, and it spawns git",
     "scripts/installers.py": "devkit-installers runs it daily and at logon; it spawns every installer",
-    "scripts/fix-pass.py": "devkit-fix-pass runs it every half hour, behind the workspace switch",
+    "scripts/fix-pass-watchdog.py": "devkit-fix-pass runs it every half hour; it spawns the pass",
+    "scripts/fix-pass.py": "the watchdog spawns it every half hour, behind the workspace switch",
     "scripts/ship_intent.py": "the fixers, commit and push the pass makes per intent, and the runner it hands fix-prs.py",
     "scripts/fix-prs.py": "the worktree cut and the session the pass opens; spawns only through the runner it is handed",
     "scripts/gate_evidence.py": "the gh the pass reads every gate through",
     "scripts/broken_pr_menu.py": "the gh the pass scans every checkout through",
+    "scripts/fix_release.py": "the release pipeline the pass starts detached when main owes a tag",
     "scripts/log-wrap.py": "the wrapper four of those jobs are launched through",
     # reached from `workspace-status.py --notify`, which is the one script that imports
     # it rather than being wrapped in `notify-wrap.py`; see that flag's docstring.

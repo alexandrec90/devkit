@@ -32,9 +32,9 @@ what the hook runs and CI does not, are both held to a written reason by
 
 ## Vendoring rules
 
-- `MANIFEST` in `scripts/sync-devkit.py` is the shared set, and every entry ships with its
-  test. Vendored files are compared **byte-for-byte**, so formatting counts — CI runs
-  `ruff format --check .` because an unformatted MANIFEST file gets reformatted downstream
+- `MANIFEST` in `scripts/devkit_manifest.py` (re-exported by `sync-devkit.py`) is the
+  shared set, and every entry ships with its test. Vendored files are compared
+  **byte-for-byte**, so formatting counts — CI runs `ruff format --check .` because an unformatted MANIFEST file gets reformatted downstream
   on first edit, and the consumer's `--check` then reports drift it did not cause.
 - **Never vendored**, because each project's copy differs: `.devkit.toml`,
   `.claude/settings.json`, `scripts/lint-all.py`, `scripts/run-tests.py`. They live in
@@ -130,10 +130,11 @@ state a checkout can only reach by surviving the work done in it. A box cut fres
   `origin/<default>` commits (`head_tree_landed`), and the merged PR's `headRefOid`. Every
   unknown reads as *not landed*, and all of it is refused while the box is dirty: a landed
   tree says where the committed work is and nothing about the edits on top of it.
-- **`reap` is the one place in the workspace that passes `-v` to `compose down`,** scoped
-  with `-p <box>` so it cannot widen to the source project. `docker-maint.py` must never
-  do it — its target is a static checkout whose volumes hold a dev database costing hours
-  to re-ingest.
+- **Only a reaper passes `-v` to `compose down`,** scoped with `-p` to the tree's own
+  project so it cannot widen to the source project: `reap` for a box, and
+  `session_trees.py` for a merged `.claude/worktrees` tree, which refuses a name equal to
+  the checkout's. `docker-maint.py` must never do it — its target is a static checkout
+  whose volumes hold a dev database costing hours to re-ingest.
 - **The teardown has a host half.** A vite server's mapped `.node` binding makes Windows
   refuse the delete, leaving a **husk** — a directory with no `.git` — that no later pass
   can clear. `box_teardown.py` evicts a process whose **executable or a loaded module**
@@ -202,3 +203,11 @@ deliberately is not**, since one defect hit on two machines is one defect. The f
 harness-shaped, and the `/triage-harness` skill is the same sweep run by hand; both are
 devkit-only on purpose: every defect on this ledger is a defect in devkit, whatever
 project the session that hit it was scoped to.
+
+**The ledger is also the fix pass's own sink** (`fix_findings.py`): every outcome it cannot
+turn green -- a step that raised, a fixer that died or gave up, transcript friction, a
+stale wait -- is a `fix-pass-finding` or `session-friction` there, and nothing it does
+ends at a person. Two consequences for a change here: a finding is filed only when no
+open one shares its signature, so the detail must be stable across recurrences (lead with
+the kind, keep shas and counts out); and a resolution is held to its `pr=`
+(`fix_verify.py` reopens what never merged), so "resolved" means landed.
