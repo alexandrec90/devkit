@@ -70,6 +70,16 @@ COVERED_BY: dict[str, tuple[str, str]] = {
         "the wrapper's one behaviour is that it propagates the wrapped exit code, and "
         "that is asserted beside the check that it stays byte-identical to the template",
     ),
+    "fix_send.py": (
+        "tests/test_fix_pass.py",
+        "the dispatch half was split out of fix-pass.py at its file_lines ceiling, and "
+        "is asserted through the pass that calls it, as it was before the split",
+    ),
+    "session_transcripts.py": (
+        "tests/test_session_friction.py",
+        "the transcript reader was split out of session_friction.py, and its events, "
+        "cursors and discovery are asserted through the detectors that consume them",
+    ),
 }
 
 

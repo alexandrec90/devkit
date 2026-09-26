@@ -44,6 +44,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_models
+import tree_provision
 import wt_profile
 
 # Resolved by the second insert above; `scripts/precommit/` is not a package. Used for the
@@ -180,8 +181,14 @@ def background_argv(exe: str, launch: agent_models.Launch, prompt: str) -> list[
     the prompt anyway -- the two modes must hand the agent the same words, or a report
     about one says nothing about the other. The model flags come from the same `Launch`
     for that same reason: the two must differ in where you read them and nowhere else.
+
+    One difference is deliberate: nobody watches a background session, so it may not
+    ask. A fixer in the first supervised run called `AskUserQuestion` and sat there. The
+    flag is variadic and takes every argument that follows as a tool name -- placed
+    before `--bg` it still swallowed the prompt, and two devkit sessions opened with
+    nothing to do -- so `--` ends the options before the prompt.
     """
-    return [exe, "--bg", *launch.flags(), prompt]
+    return [exe, "--bg", *launch.flags(), "--disallowedTools", "AskUserQuestion", "--", prompt]
 
 
 def launch_background(
@@ -202,6 +209,8 @@ def launch_background(
     env = dict(os.environ)
     if hooks_off:
         env[harness_switch.HOOKS_OFF_ENV] = harness_switch.HOOKS_OFF_VALUE
+    # A background session is the pass's, and nobody is there to bootstrap its tree.
+    tree_provision.provision(tree, runner)
     done = runner(
         background_argv(exe, launch, prompt), cwd=str(tree), capture_output=True, text=True, env=env
     )

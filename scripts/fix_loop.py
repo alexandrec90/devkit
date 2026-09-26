@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""The half of the fix pass that makes it self-correcting: read back, then file.
+
+`fix-pass.py` ships intents and sends fixers at what is red. This is everything that
+tells it whether any of that worked, and turns every "no" into a finding on the
+harness-defect ledger, where the devkit session picks it up on the next pass:
+
+- **What each worktree says.** A fixer's blocked report is marked on the dispatch
+  ledger and filed with its problem as the key, which parks that problem until the
+  devkit session resolves it (`fix_budget.budget`). Each line of any session's
+  `logs/friction.md` is filed as friction. A dispatched session that never started,
+  or went quiet without an intent or a report, frees its dispatch for an immediate
+  re-send and is filed, so *why* sessions die gets fixed too.
+- **What every transcript says** (`session_friction.py`): the turns the harness cost
+  sessions nobody dispatched, which is most of them.
+- **Whether resolutions held** (`fix_verify.py`): a group retired against a fix that
+  never merged is reopened.
+- **What has sat too long** (`fix_stall.py`): a hold, a cap or a skip past a day.
+
+Outside `dispatch` mode nothing is written -- not the ledger, not a tree, not the
+harvest cursor -- and what would be filed is only listed.
+
+Tested in `tests/test_fix_loop.py`, and through the pass in `tests/test_fix_pass.py`.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import sys
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bg_sessions
+import fix_cycle
+import fix_findings
+import fix_ledger
+import fix_plan
+import fix_reports
+import fix_stall
+import fix_verify
+import ship_intent
+import harness_triage as triage
+import session_friction
+import sweep
+
+Finding = fix_findings.Finding
+
+
+@dataclass(frozen=True)
+class Context:
+    root: Path  # the workspace root: every checkout is a child
+    projects: list[str]
+    devkit_dir: Path  # where the harness-defect ledger lives
+    ledger_path: Path  # the dispatch ledger
+    history_path: Path
+    mode: str
+    now: _dt.datetime
+
+    @property
+    def writes(self) -> bool:
+        return self.mode == fix_cycle.DISPATCH
+
+
+@dataclass
+class Closed:
+    """What reading back found that the rest of the pass needs."""
+
+    lines: list[str] = field(default_factory=list)  # for the record, `blocked` rows
+    # A devkit session still working the harness, by tree: a second one is held, since
+    # two sessions at one backlog was a waste the ledger alone could not see.
+    harness_busy: str = ""
+    # problem -> the tree its latest fixer worked in, which is where an escalation of
+    # that problem sends the devkit session to take it over.
+    trees: dict[str, str] = field(default_factory=dict)
+    # (project, branch) -> a tree some session other than the pass's is working in. A
+    # fixer is never sent in beside it: the first supervised run sent one into the tree
+    # an interactive session was editing, which only went well because it sat idle.
+    busy: dict[tuple[str, str], str] = field(default_factory=dict)
+    # Trees whose stamped session is done or dead, and the idle sessions stopped in them.
+    finished: list[str] = field(default_factory=list)
+    stopped: list[str] = field(default_factory=list)
+
+
+def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
+    """Every read-back step, each isolated: one that raises is a finding, not a stop."""
+    closed = Closed()
+    trees = journal.step("trees", fix_reports.read_trees, ctx.root, ctx.projects, default=[])
+    for tree in trees:
+        journal.step("tree", _one_tree, ctx, tree, journal, closed)
+    cursor = ctx.ledger_path.parent / session_friction.CURSOR_NAME
+    journal.add(*journal.step("harvest", _harvest, ctx, cursor, default=[]))
+    if ctx.writes:
+        closed.lines += journal.step("verify", _verify, ctx, default=[])
+        runner = ship_intent.run_quiet
+        closed.stopped = journal.step(
+            "stop", bg_sessions.stop_finished, closed.finished, runner, default=[]
+        )
+    history = fix_stall.read_history(ctx.history_path)
+    journal.add(*journal.step("stall", fix_stall.stalled, history, ctx.now, default=[]))
+    return closed
+
+
+def _one_tree(
+    ctx: Context, tree: fix_reports.Tree, journal: fix_findings.Journal, closed: Closed
+) -> None:
+    where = f"{tree.project} {tree.branch or tree.path.name}"
+    problem = str(tree.stamp.get("problem", ""))
+    key = str(tree.stamp.get("key", ""))
+    if problem:
+        closed.trees[problem] = str(tree.path)
+    # Judged before anything is filed away: a filed report is still the session's outcome.
+    _judge_session(ctx, tree, where, journal, closed)
+    if reason := fix_reports.blocked_reason(tree.path):
+        journal.add(
+            Finding(
+                "fixer-blocked",
+                tree.project,
+                f"{where}: {reason}",
+                key=problem,
+                evidence=str(tree.path),
+            )
+        )
+        closed.lines.append(f"{where} -- {reason}")
+        if ctx.writes:
+            fix_ledger.mark_blocked(ctx.ledger_path, key, reason)
+            fix_reports.file_away(tree.path, fix_reports.BLOCKED_FILE)
+    for line in tree.friction:
+        evidence = str(tree.path / fix_reports.FRICTION_FILE)
+        journal.add(
+            Finding("reported", tree.project, line, evidence=evidence, event=fix_findings.FRICTION)
+        )
+    if tree.friction and ctx.writes:
+        fix_reports.file_away(tree.path, fix_reports.FRICTION_FILE)
+
+
+def _judge_session(
+    ctx: Context, tree: fix_reports.Tree, where: str, journal: fix_findings.Journal, closed: Closed
+) -> None:
+    key = str(tree.stamp.get("key", ""))
+    state, transcript = fix_reports.session_state(tree.path, ctx.now)
+    if state in (fix_reports.DONE, *fix_reports.DEAD):
+        closed.finished.append(str(tree.path))
+    live = fix_reports.active_transcript(tree.path, ctx.now)
+    if live and tree.branch and not (state == fix_reports.WORKING and str(live) == transcript):
+        closed.busy[(tree.project, tree.branch)] = str(tree.path)
+    if state in fix_reports.DEAD:
+        # No key: a dead session is re-sent at once, not parked behind the finding.
+        detail = f"{where}: the dispatched session {state}"
+        journal.add(
+            Finding("fixer-no-outcome", tree.project, detail, evidence=transcript or str(tree.path))
+        )
+        if ctx.writes:
+            fix_ledger.mark_dead(ctx.ledger_path, key, state)
+            fix_reports.note_on_stamp(tree.path, "dead", state)
+    elif state == fix_reports.WORKING and key.startswith(f"{fix_plan.UPSTREAM}:"):
+        closed.harness_busy = str(tree.path)
+
+
+def _harvest(ctx: Context, cursor: Path) -> list[Finding]:
+    if ctx.writes:
+        return session_friction.harvest(ctx.root, cursor, ctx.now)
+    with tempfile.TemporaryDirectory() as scratch:
+        # A plan pass must not move the cursor; it reads the same window a fresh one would.
+        return session_friction.harvest(ctx.root, Path(scratch) / cursor.name, ctx.now)
+
+
+def _verify(ctx: Context) -> list[str]:
+    items = triage.load(ctx.devkit_dir)
+    lookup = fix_verify.gh_lookup(ctx.root, ctx.projects, sweep.gh_for)
+    cache = ctx.ledger_path.parent / fix_verify.CACHE_NAME
+    lines = []
+    for ref, why in fix_verify.verify(items, lookup, cache, ctx.now):
+        triage.reopen([ref], why, root=ctx.devkit_dir)
+        lines.append(f"reopened [{ref}] -- {why}")
+    return lines
+
+
+def record(ctx: Context, journal: fix_findings.Journal) -> list[str]:
+    """File what the journal holds, once; lines for the record either way.
+
+    Emptied as it goes, so the pass can call this after reading back -- putting this
+    pass's findings in front of the devkit session this same pass -- and again at the
+    end for what dispatching found.
+    """
+    found, journal.findings = journal.findings, []
+    items = triage.load(ctx.devkit_dir)
+    if ctx.writes:
+        written = fix_findings.record_all(found, items, ctx.devkit_dir)
+        return [f"{f.project} {f.headline[:160]}" for f in written]
+    return [f"would file: {f.project} {f.headline[:160]}" for f in fix_findings.fresh(found, items)]
+
+
+def backlog(ctx: Context) -> int:
+    """How much is open on the harness-defect ledger, for the record's last line."""
+    return len(triage.open_items(triage.load(ctx.devkit_dir)))

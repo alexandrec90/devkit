@@ -186,6 +186,18 @@ def test_pytest_scope_keeps_the_vendored_tier_separate():
     assert testpaths == ["tests"], f"testpaths is {testpaths!r}"
 
 
+def test_pytest_is_never_quiet_by_default_here_or_in_a_generated_project():
+    """An agent adds its own `-q`; on top of one in `addopts` that is `-qq`, which drops
+    the "N passed" line. Sessions re-ran the whole suite hunting for a verdict pytest
+    had been told not to print."""
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "-q" not in data["tool"]["pytest"]["ini_options"]["addopts"].split()
+    template = (REPO_ROOT / "templates" / "core" / "pyproject.toml.tmpl").read_text(
+        encoding="utf-8"
+    )
+    assert not re.search(r"^addopts\s*=.*-q\b", template, re.M)
+
+
 def test_tests_reading_the_live_workspace_are_marked_to_skip_without_it():
     """The registry sits *beside* the checkout, so CI never has it.
 

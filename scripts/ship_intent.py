@@ -9,9 +9,10 @@ a diff can be read by anyone, and the message is the one changelog consumers get
 
 The fix pass (`scripts/fix-pass.py`) does the rest, here: run the commit-stage fixers
 through the tree's own `ship.py --fix`, commit with the message, push with the push gate
-skipped -- CI judges, and the pass reads its artifact -- open the PR *without* the
-`automerge` label, so a green one still waits for a person, and record the outcome in
-`logs/ship-state.json` beside the intent. A refused commit is
+skipped -- CI judges, and the pass reads its artifact -- open the PR, labelled
+`automerge` only when the fix pass cut the tree (`labels_for`): a fixer's PR merges
+once green, a person's waits for them. The outcome is recorded in `logs/ship-state.json`
+beside the intent. A refused commit is
 recorded too, with the pre-commit output as evidence, so the pass can tell it from a
 session still working: no intent file means hands off, an intent with a refusal means a
 dispatchable failure, an intent already shipped at this tree's state means nothing to do.
@@ -39,6 +40,7 @@ import datetime as _dt
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -241,6 +243,57 @@ def already_shipped(intent: Intent, state: dict, porcelain: str) -> bool:
     return state.get("stage") == SHIPPED and not porcelain.strip()
 
 
+def _settled(intent: Intent, porcelain: str) -> Outcome | None:
+    """This pass's answer when nothing needs doing: shipped already, or refused again."""
+    state = read_state(intent.tree)
+    if already_shipped(intent, state, porcelain):
+        # Consumed, as a fresh ship's intent is: left in place it was re-read and
+        # re-reported by every pass -- ten from before the pass set intents aside.
+        set_aside(intent.tree, SHIPPED_FILE)
+        return Outcome(intent, SKIPPED, "already shipped at this intent; set aside")
+    return still_refused(intent, state, porcelain)
+
+
+def labels_for(tree: Path) -> tuple[str, ...]:
+    """`automerge` for work the fix pass started, nothing for a person's.
+
+    `automerge` is an authorization the vendored `dependabot-automerge.yml` honours on
+    any PR once its gate passes, so it goes only where the pass itself is the author: a
+    tree it cut for a fixer (`fix_reports.ORIGIN_FILE`), or one a fixer cut and marked
+    the same way. A fixer committing to a person's PR works in that person's tree, which
+    carries no mark, so their PR still waits for them -- and `ensure_pr` labelling a
+    reused PR too is why the mark is the tree's origin, not the dispatch stamp.
+    """
+    return (sweep.AUTOMERGE_LABEL,) if (tree / fix_reports.ORIGIN_FILE).is_file() else ()
+
+
+def still_refused(intent: Intent, state: dict, porcelain: str) -> Outcome | None:
+    """The last refusal again, when neither the words nor the tree have moved since it.
+
+    A refusal held behind a red harness was re-run through the whole commit stage on
+    every pass of the third supervised run, to the same answer each time. Nothing that
+    could change the answer has changed, so the stored one stands, and it is still a
+    failure the plan can place (`refusal_failure` reads the same state).
+    """
+    if state.get("stage") != REFUSED or state.get("intent") != intent.digest:
+        return None
+    if state.get("tree") != _digest(porcelain):
+        return None
+    detail = f"{state.get('step', 'commit')}: {str(state.get('output', '')).strip()[-400:]}"
+    return Outcome(intent, REFUSED, detail)
+
+
+def _digest(porcelain: str) -> str:
+    return hashlib.sha256(porcelain.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def is_spent(intent: Intent, runner: Runner = run_quiet) -> bool:
+    """`already_shipped`, asked of the tree itself: what a `plan` pass reads, so it says
+    what a `dispatch` would do rather than "would ship" over work that merged."""
+    status = runner(["git", "status", "--porcelain"], cwd=intent.tree)
+    return already_shipped(intent, read_state(intent.tree), status.stdout or "")
+
+
 def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str]:
     """Fixers, add, commit: `("", "")` when it went through, else `(step, output)`."""
     fixed = runner([python, "scripts/ship.py", "--fix"], cwd=intent.tree)
@@ -267,14 +320,14 @@ def ship_one(
     tree = intent.tree
     when = (now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds")
     status = runner(["git", "status", "--porcelain"], cwd=tree)
-    if already_shipped(intent, read_state(tree), status.stdout or ""):
-        return Outcome(intent, SKIPPED, "already shipped at this intent")
-
+    if settled := _settled(intent, status.stdout or ""):
+        return settled
     if (status.stdout or "").strip():
         step, output = commit_intent(intent, python, runner)
         if step:
+            after = runner(["git", "status", "--porcelain"], cwd=tree).stdout or ""
             record = {"stage": REFUSED, "step": step, "output": output, "when": when}
-            write_state(tree, {**record, "intent": intent.digest})
+            write_state(tree, {**record, "intent": intent.digest, "tree": _digest(after)})
             return Outcome(intent, REFUSED, f"{step}: {output.strip()[-400:]}")
 
     env = dict(os.environ)
@@ -284,12 +337,6 @@ def ship_one(
         detail = (pushed.stderr or pushed.stdout or "").strip()[-400:]
         return Outcome(intent, FAILED, f"push: {detail}")
 
-    # Deliberately unlabelled. `automerge` is an authorization the vendored
-    # `dependabot-automerge.yml` honours on ANY PR once the gate passes, with no branch
-    # or author filter, so applying it here would land every prompt-driven change the
-    # moment CI went green. The label is for routine churn whose green gate is the whole
-    # review -- adoptions, Dependabot, the Codex mirror -- and a person applies it to a
-    # shipped PR by hand when they decide it is one of those.
     url, _created, error = sweep.ensure_pr(
         gh_for(tree),
         sweep.Plan(
@@ -297,6 +344,7 @@ def ship_one(
             pr_body=intent.body or intent.subject,
             pr_head=intent.branch,
             pr_base=base,
+            pr_labels=labels_for(tree),
         ),
     )
     if error:
@@ -313,6 +361,23 @@ def ship_one(
 # --- a refusal as a failure the plan can place ---------------------------------------
 
 
+REFUSAL_LINE = re.compile(r"Failed\b|refus|\berror\b|not a namespaced|conflict string", re.I)
+
+
+def refusal_line(output: str) -> str:
+    """The line of a refused commit's output that says why, cut to one record line.
+
+    "fixers refused" was the whole signature when no test id or lint line matched, and a
+    session had to open `ship-state.json` to learn the branch name was the objection.
+    """
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    why = next((line for line in lines if REFUSAL_LINE.search(line)), lines[-1] if lines else "")
+    # It becomes part of a signature, which must not change between two refusals of the
+    # same kind -- or every retry reads as progress and `fix_ledger.ATTEMPTS` never trips.
+    why = re.sub(r"\d+", "N", re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", why))
+    return " ".join(why.split())[:160]
+
+
 def refusal_failure(outcome: Outcome, base: str) -> fix_plan.Failure:
     """The refused commit in the plan's own terms, its output placed as evidence.
 
@@ -326,7 +391,7 @@ def refusal_failure(outcome: Outcome, base: str) -> fix_plan.Failure:
     where.mkdir(parents=True, exist_ok=True)
     (where / "pre-commit.log").write_text(output, encoding="utf-8")
     step = str(state.get("step", "commit"))
-    sig = fix_plan.signature_from_logs([output]) or (f"{step} refused",)
+    sig = fix_plan.signature_from_logs([output]) or (f"{step} refused: {refusal_line(output)}",)
     return fix_plan.Failure(
         kind=fix_plan.COMMIT,
         project=intent.project,

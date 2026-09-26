@@ -560,9 +560,9 @@ opening the PR, reading the gate, updating a branch, merging an adoption: one co
 each, run here.
 
 1. **Ship every intent.** Run the tree's commit-stage fixers, commit with the message,
-   push with the push gate skipped, open the PR *without* the `automerge` label (a
-   green one waits for a person; the label is for adoptions, Dependabot and the Codex
-   mirror, whose gate is the whole review), record the outcome in `logs/ship-state.json`
+   push with the push gate skipped, open the PR -- labelled `automerge` when the pass cut
+   the tree for a fixer, so a fixer's PR merges once green while a person's waits for
+   them (`ship_intent.labels_for`) -- record the outcome in `logs/ship-state.json`
    beside the intent, and set the intent aside as `logs/ship-intent.shipped.md`. A dirty
    tree with no intent is a session still working — a fixer's, too — and is never
    touched; a refused commit is a failure like any other, with the pre-commit output as
@@ -577,10 +577,13 @@ each, run here.
    a PR that exists is work in flight. A default branch with no verdict at its tip gets
    its gate re-run (`scripts/fix_red.py`, which owns this step): a merge made by the
    auto-merge workflow raises no push event, so no gate ever runs there on its own.
-4. **Read what fixers reported.** A session that could not finish wrote
-   `logs/fix-blocked.md` in its worktree instead of an intent; the pass marks its
-   ledger entry, so no second session is spent on it, and the reason is on the record
-   as "needs a human".
+4. **Read back, and file every "no"** (`scripts/fix_loop.py`). A fixer's
+   `logs/fix-blocked.md`, any session's `logs/friction.md`, a dispatched session that
+   died, the turns every transcript shows the harness wasting
+   (`scripts/session_friction.py`), a ledger resolution whose fix never merged
+   (`scripts/fix_verify.py`) and any wait past a day (`scripts/fix_stall.py`) become
+   findings on the harness-defect ledger, filed before the backlog is read so the
+   devkit session gets them the same pass. Nothing ends as "needs a human".
 5. **Harness first.** While anything harness-shaped is red — a vendored test, a
    signature shared across consumers, devkit's own default branch, a release still
    being adopted — one devkit session gets the whole set and every project fixer is
@@ -632,17 +635,25 @@ what the scheduled job does while the switch says `plan`. What each dispatch loo
 A ledger under the workspace's `.worktrees/` records every dispatch against the commit it
 was observed on, so a second pass sends nothing at a failure an agent is already on. The
 retry policy is per *problem* — the same failures on the same PR, at any commit: after
-`fix_ledger.ATTEMPTS` sessions left it unchanged it reads "needs a human", and one whose
-failures changed is progress and goes again. A problem with no evidence gets one session
+`fix_ledger.ATTEMPTS` sessions left it unchanged it is escalated to the devkit session as
+a finding (`scripts/fix_budget.py`), and gets fresh fixers once that finding is resolved;
+one whose failures changed is progress and goes again. The devkit session has nothing
+above it, so its own exhaustion backs off to at most a retry every eight hours, at top
+effort. A problem with no evidence gets one session
 — except a conflict whose head has moved since every earlier resolver was sent
 (`fix_ledger.moved_on`): a resolver pushes only a merge that resolved, so a new conflict
 at a new commit is the base moving again, not a fix that did not take.
-`fix_cycle.PER_TARGET_PER_DAY` and `PER_DAY` are only fuses behind that, for a pass whose
-reading has gone wrong. Branch updates are recorded but never counted, and an entry older
-than `fix_ledger.RESEND_AFTER` no longer blocks one re-send — a session that died leaves
-nothing else — unless the session reported itself blocked, which never expires. An open
-adoption holds only its own project's other PRs. Every pass appends a line to
+There is no daily cap on sessions; `/supervise-fix-pass`'s spend watch is what catches a
+pass spending on something that is not moving. A dispatched session found dead frees its entry at once; an
+entry older than `fix_ledger.RESEND_AFTER` frees it regardless. An open adoption holds
+only its own project's other PRs. Every pass appends a line to
 `logs/fix-pass.history.jsonl`. A scheduled pass always uses `claude-bg`.
+
+The scheduled task runs the pass through `scripts/fix-pass-watchdog.py`, which shares no
+code with it: it fast-forwards the checkout the pass runs from, so a merged fix to the
+pass takes effect, and when the pass itself crashes or hangs it files that and sends one
+devkit session at the pass. That session's intent is shipped by the watchdog if the pass
+still cannot run.
 
 ```bash
 python scripts/fix-pass.py --mode plan                        # the whole pass, nothing done

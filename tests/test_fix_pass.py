@@ -74,7 +74,10 @@ def world(tmp_path, monkeypatch):
         "dispatched": [],
         "merged": [],
         "shipped": [],
-        "blocked": [],
+        "trees": [],
+        "spent": [],
+        "friction": [],
+        "reopen": [],
         "order": [],
         "release": "",
         "releases": [],
@@ -86,6 +89,9 @@ def world(tmp_path, monkeypatch):
         fix_pass.ship_intent, "find_intents", lambda root, projects: table["intents"]
     )
     monkeypatch.setattr(fix_pass.push_gate, "interpreter", lambda tree: "py")
+    monkeypatch.setattr(
+        fix_pass.ship_intent, "is_spent", lambda intent: intent.branch in table["spent"]
+    )
     monkeypatch.setattr(
         fix_pass.ship_intent,
         "ship_one",
@@ -104,9 +110,13 @@ def world(tmp_path, monkeypatch):
             table["order"].append(("collect", sorted(found))) or list(table["failures"])
         ),
     )
-    monkeypatch.setattr(
-        fix_pass.fix_reports, "find_blocked", lambda root, projects: list(table["blocked"])
-    )
+    # The read-back: the trees, the transcripts and the resolutions are all the machine's
+    # own, so each is a table entry here. The harness-defect ledger is real, under tmp.
+    loop = fix_pass.fix_loop
+    monkeypatch.setattr(loop.fix_reports, "read_trees", lambda root, projects: list(table["trees"]))
+    monkeypatch.setattr(loop.session_friction, "harvest", lambda *a, **k: list(table["friction"]))
+    monkeypatch.setattr(loop.fix_verify, "verify", lambda *a, **k: list(table["reopen"]))
+    monkeypatch.setattr(loop.bg_sessions, "stop_finished", lambda trees, runner: [])
     monkeypatch.setattr(fix_pass.gate_evidence, "newest_release", lambda _d: "v0.11.22")
     monkeypatch.setattr(
         fix_pass.gate_evidence,
@@ -127,18 +137,16 @@ def world(tmp_path, monkeypatch):
         fix_pass.fix_red.fix_backlog, "ledger_failure", lambda devkit_dir, root: table["backlog"]
     )
     monkeypatch.setattr(
-        fix_pass,
+        fix_pass.fix_send,
         "dispatch",
-        lambda decision, root, agent, options=None: (
-            table["dispatched"].append((decision.action, agent))
-            or table.update(opened=options)
-            or 0
+        lambda decision, root, agent, problem="": (
+            table["dispatched"].append((decision.action, agent)) or 0
         ),
     )
     monkeypatch.setattr(
         fix_pass.fix_release,
         "merge_green_adoptions",
-        lambda root, projects: (
+        lambda root, projects, journal=None: (
             table["order"].append(("merge", sorted(projects))) or table["merged"]
         ),
     )
@@ -169,10 +177,17 @@ def test_a_switched_off_fire_leaves_a_manual_passs_record_alone(world):
 
 def test_plan_writes_the_whole_plan_and_sends_nothing(world):
     world["failures"] = [failure()]
-    world["intents"] = [ship_intent.Intent("carameli", Path("t"), "agent/i-0919", "S", "B")]
+    world["intents"] = [
+        ship_intent.Intent("carameli", Path("t"), "agent/i-0919", "S", "B"),
+        ship_intent.Intent("carameli", Path("u"), "agent/old-0919", "Old", "B"),
+    ]
+    world["spent"] = ["agent/old-0919"]
     assert fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW) == 0
     text = artifact(world)
-    assert "would ship: S" in text
+    assert "agent/i-0919 -- would ship: S" in text
+    assert "agent/old-0919 -- would set aside, already shipped: Old" in text, (
+        "a plan says what a dispatch would do, not 'would ship' over merged work"
+    )
     assert "would send (dispatch)" in text
     assert world["dispatched"] == [] and world["shipped"] == []
 
@@ -264,7 +279,9 @@ def test_an_untagged_release_commits_red_main_holds_everything_and_sends_nobody(
     assert "skip     devkit origin/main -- red by construction" in text
 
 
-def test_collect_red_gathers_prs_default_branches_and_the_backlog_with_devkits_verdict(world):
+def test_collect_red_gathers_prs_and_default_branches_and_the_backlog_is_read_apart(world):
+    """The backlog is read on its own: a collect step that raises must still leave the
+    devkit session something to be sent at, since the crash is on that backlog."""
     backlog = failure(kind=fix_plan.LEDGER, project="devkit", number=0, head="")
     world["failures"] = [failure(number=2)]
     world["branches"] = {"devkit": (False, red_main()), "carameli": (True, None)}
@@ -272,8 +289,9 @@ def test_collect_red_gathers_prs_default_branches_and_the_backlog_with_devkits_v
     failures, green, unread = fix_pass.fix_red.collect_red(
         world["workspace"], ["devkit", "carameli"], []
     )
-    assert [f.kind for f in failures] == [fix_plan.PR, fix_plan.BRANCH, fix_plan.LEDGER]
+    assert [f.kind for f in failures] == [fix_plan.PR, fix_plan.BRANCH]
     assert green is False and unread == []
+    assert fix_pass.fix_red.backlog_failure(world["workspace"]) == backlog
 
 
 def test_an_unreadable_devkit_main_is_re_gated_and_holds_nothing_meanwhile(world, monkeypatch):
@@ -365,9 +383,9 @@ def test_a_refused_commit_is_a_failure_the_pass_sends_at_the_same_worktree(
     assert "carameli agent/i-0919 -- dispatch" in artifact(world)
 
 
-def test_a_session_that_failed_to_open_is_the_exit_code_and_not_recorded(world, monkeypatch):
+def test_a_session_that_failed_to_open_is_the_exit_code_not_recorded_and_filed(world, monkeypatch):
     world["failures"] = [failure()]
-    monkeypatch.setattr(fix_pass, "dispatch", lambda *a, **k: 1)
+    monkeypatch.setattr(fix_pass.fix_send, "dispatch", lambda *a, **k: 1)
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 1
     assert (
         fix_ledger.read_ledger(
@@ -375,7 +393,9 @@ def test_a_session_that_failed_to_open_is_the_exit_code_and_not_recorded(world, 
         )
         == {}
     )
-    assert "FAILED to open" in artifact(world)
+    text = artifact(world)
+    assert "FAILED to dispatch" in text
+    assert "filed    carameli dispatch-failed: carameli #412" in text
 
 
 def test_an_update_is_one_gh_call_and_no_session(monkeypatch, tmp_path):
@@ -389,17 +409,19 @@ def test_an_update_is_one_gh_call_and_no_session(monkeypatch, tmp_path):
 
         return gh
 
-    monkeypatch.setattr(fix_pass.sweep, "gh_for", gh_for)
+    monkeypatch.setattr(fix_pass.fix_send.sweep, "gh_for", gh_for)
     monkeypatch.setattr(fix_pass.fix_prs, "dispatch_pr", lambda *a: pytest.fail("no session"))
     monkeypatch.setattr(fix_pass.fix_prs, "dispatch_fresh", lambda *a: pytest.fail("no session"))
     behind = failure(number=379, behind=True)
     assert (
-        fix_pass.dispatch(fix_plan.Decision(fix_plan.UPDATE, "n", (behind,)), tmp_path, "claude")
+        fix_pass.fix_send.dispatch(
+            fix_plan.Decision(fix_plan.UPDATE, "n", (behind,)), tmp_path, "claude"
+        )
         == 0
     )
     assert calls == [("carameli", ("pr", "update-branch", "379"))]
     stuck = failure(number=381, behind=True)
-    assert fix_pass.update_branch(stuck, tmp_path) == fix_pass.EXIT_FAILED, (
+    assert fix_pass.fix_send.update_branch(stuck, tmp_path) == fix_pass.EXIT_FAILED, (
         "GitHub refuses to update a conflicted branch; the next pass reads it as a conflict"
     )
 
@@ -410,25 +432,46 @@ def test_plan_mode_says_an_update_would_be_an_update(world):
     assert "carameli #412 -- would update the branch" in artifact(world)
 
 
+def _ctx(tmp_path, mode=fix_cycle.DISPATCH, now=NOW):
+    return fix_pass.fix_loop.Context(
+        tmp_path,
+        ["devkit", "carameli"],
+        tmp_path / "devkit",
+        tmp_path / "dispatch.json",
+        tmp_path / "history.jsonl",
+        mode,
+        now,
+    )
+
+
 def test_send_all_records_only_what_opened_and_caps_the_rest(world, tmp_path):
-    ledger_path = tmp_path / "dispatch.json"
+    ctx = _ctx(tmp_path)
     go = [
         fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=1),)),
         fix_plan.Decision(fix_plan.UPDATE, "n", (failure(number=2, behind=True),)),
     ]
-    sent, capped, worst = fix_pass.send_all(
-        go, ledger_path, tmp_path, fix_cycle.DISPATCH, "claude", NOW
-    )
+    sent, capped, worst = fix_pass.fix_send.send_all(go, ctx, "claude")
     assert worst == 0 and capped == []
     assert sent == ["carameli #1 -- dispatch", "carameli #2 -- update"]
-    assert len(fix_ledger.read_ledger(ledger_path)) == 2
-    sent, capped, worst = fix_pass.send_all(
-        go, ledger_path, tmp_path, fix_cycle.DISPATCH, "claude", NOW
-    )
+    assert len(fix_ledger.read_ledger(ctx.ledger_path)) == 2
+    sent, capped, worst = fix_pass.fix_send.send_all(go, ctx, "claude")
     assert (
         sent == []
         and [why for _, why in capped]
         == ["already dispatched at " + NOW.isoformat(timespec="seconds")] * 2
+    )
+
+
+def test_a_second_devkit_session_waits_for_the_one_still_working(world, tmp_path):
+    """Two sessions at one backlog was a waste the dispatch ledger could not see: its
+    key changes the moment a new finding lands, while the first session is mid-sweep."""
+    upstream = fix_plan.Decision(fix_plan.UPSTREAM, "n", (failure(project="devkit"),))
+    busy = fix_pass.fix_loop.Closed(harness_busy="C:/ws/devkit/.claude/worktrees/fix-x")
+    sent, capped, _ = fix_pass.fix_send.send_all([upstream], _ctx(tmp_path), "claude", closed=busy)
+    assert sent == [] and world["dispatched"] == []
+    assert (
+        capped[0][1]
+        == "held until the devkit session in C:/ws/devkit/.claude/worktrees/fix-x finishes"
     )
 
 
@@ -437,23 +480,25 @@ def test_dispatch_routes_a_branch_to_the_pr_path_and_the_rest_to_a_fresh_one(mon
     monkeypatch.setattr(
         fix_pass.fix_prs,
         "dispatch_pr",
-        lambda f, root, agent, runner, key: seen.append(("pr", runner)) or 0,
+        lambda f, root, agent, runner, key, problem: seen.append(("pr", runner)) or 0,
     )
     monkeypatch.setattr(
         fix_pass.fix_prs,
         "dispatch_fresh",
-        lambda d, root, agent, runner, key: seen.append(("fresh", runner)) or 0,
+        lambda d, root, agent, runner, key, problem: seen.append(("fresh", runner)) or 0,
     )
-    fix_pass.dispatch(fix_plan.Decision(fix_plan.RESOLVE, "n", (failure(),)), tmp_path, "claude-bg")
-    fix_pass.dispatch(
+    fix_pass.fix_send.dispatch(
+        fix_plan.Decision(fix_plan.RESOLVE, "n", (failure(),)), tmp_path, "claude-bg"
+    )
+    fix_pass.fix_send.dispatch(
         fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(kind=fix_plan.COMMIT),)),
         tmp_path,
         "claude-bg",
     )
-    fix_pass.dispatch(
+    fix_pass.fix_send.dispatch(
         fix_plan.Decision(fix_plan.UPSTREAM, "n", (failure(),)), tmp_path, "claude-bg"
     )
-    fix_pass.dispatch(
+    fix_pass.fix_send.dispatch(
         fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(kind=fix_plan.NIGHTLY),)),
         tmp_path,
         "claude-bg",
@@ -545,7 +590,7 @@ def test_missing_tools_counts_a_store_alias_and_a_missing_binary_alike(monkeypat
             raise FileNotFoundError("gh")
         return subprocess.CompletedProcess(argv, 9009 if argv[0] == "python3" else 0)
 
-    monkeypatch.setattr(fix_pass.subprocess, "run", fake)
+    monkeypatch.setattr(fix_pass.ship_intent.subprocess, "run", fake)
     assert MISSING_TOOLS() == ["gh", "python3"]
     assert ["python3", "-c", ""] in spawned and ["git", "--version"] in spawned
 
@@ -553,7 +598,7 @@ def test_missing_tools_counts_a_store_alias_and_a_missing_binary_alike(monkeypat
 def test_runs_is_the_exit_code_and_an_unspawnable_binary_is_false(monkeypatch):
     for code, expected in ((0, True), (9009, False)):
         monkeypatch.setattr(
-            fix_pass.subprocess,
+            fix_pass.ship_intent.subprocess,
             "run",
             lambda argv, _c=code, **_k: subprocess.CompletedProcess(argv, _c),
         )
@@ -562,13 +607,15 @@ def test_runs_is_the_exit_code_and_an_unspawnable_binary_is_false(monkeypatch):
     def missing(*_a, **_k):
         raise FileNotFoundError("gh")
 
-    monkeypatch.setattr(fix_pass.subprocess, "run", missing)
+    monkeypatch.setattr(fix_pass.ship_intent.subprocess, "run", missing)
     assert fix_pass.runs(["gh", "--version"]) is False
 
 
 def test_missing_tools_is_empty_when_every_tool_runs(monkeypatch):
     monkeypatch.setattr(
-        fix_pass.subprocess, "run", lambda argv, **_k: subprocess.CompletedProcess(argv, 0)
+        fix_pass.ship_intent.subprocess,
+        "run",
+        lambda argv, **_k: subprocess.CompletedProcess(argv, 0),
     )
     assert MISSING_TOOLS() == []
 
@@ -600,10 +647,19 @@ def test_a_blocked_intent_is_said_and_never_shipped_in_any_mode(monkeypatch, tmp
     monkeypatch.setattr(
         fix_pass.ship_intent, "ship_one", lambda *a: pytest.fail("a blocked intent never ships")
     )
-    lines, refused, failed = fix_pass.ship_intents(tmp_path, ["carameli"], fix_cycle.DISPATCH)
+    journal = fix_pass.Journal(tmp_path)
+    lines, refused, failed = fix_pass.ship_intents(
+        tmp_path, ["carameli"], fix_cycle.DISPATCH, journal
+    )
     assert refused == [] and len(lines) == 1 and not failed
     assert lines[0].startswith("carameli master -- NOT shipped: master is the default branch")
-    assert "agent-worktree.py new" in lines[0]
+    # Filed, so the devkit session moves the work to a branch -- not left for a person.
+    [found] = journal.findings
+    assert (found.kind, found.project, found.evidence) == (
+        "intent-unshippable",
+        "carameli",
+        str(tmp_path),
+    )
 
 
 def test_ship_intents_in_plan_mode_only_says_what_it_would_do(monkeypatch, tmp_path):
@@ -654,28 +710,48 @@ def test_a_project_on_hold_is_read_and_fixed_like_any_other(world, monkeypatch):
     assert "on hold" not in artifact(world)
 
 
-def test_a_blocked_report_marks_the_ledger_and_no_second_session_goes(world):
-    """The one channel back from a fixer: what it could not do is on the record as
-    "needs a human", and the pass stops spending sessions on it -- for good, not for a
-    day, because the session did report."""
+def _blocked_tree(world, tmp_path, reason: str) -> Path:
+    """A fixer's tree, stamped the way `fix-prs` stamps it, holding a blocked report."""
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
+    tree = tmp_path / "carameli" / ".claude" / "worktrees" / "x"
+    (tree / "logs").mkdir(parents=True, exist_ok=True)
+    reports = fix_pass.fix_loop.fix_reports
+    reports.stamp(
+        tree, fix_ledger.decision_key(decision), "n", NOW, problem=fix_ledger.problem_key(decision)
+    )
+    (tree / reports.BLOCKED_FILE).write_text(reason, encoding="utf-8")
+    world["trees"] = [reports.Tree("carameli", tree, "agent/x-0919", reports.read_stamp(tree), ())]
+    return tree
+
+
+def _open_findings(tmp_path):
+    triage = fix_pass.fix_loop.triage
+    return triage.open_items(triage.load(tmp_path / "devkit"))
+
+
+def test_a_blocked_report_is_escalated_and_fresh_fixers_follow_its_resolution(world, tmp_path):
+    """A blocked fixer used to park its problem as "needs a human" forever. Now it is a
+    finding the devkit session takes over, and once that is resolved the problem gets
+    fresh fixers -- no person anywhere in the loop."""
     world["failures"] = [failure()]
     fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
-    key = fix_ledger.decision_key(fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),)))
-    world["blocked"] = [
-        fix_pass.fix_reports.Blocked("carameli", Path("t"), "agent/x-0919", key, "needs a database")
-    ]
-    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW + _dt.timedelta(days=30))
+    tree = _blocked_tree(world, tmp_path, "needs a database")
+    later = NOW + _dt.timedelta(days=30)
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", later)
     assert len(world["dispatched"]) == 1
     text = artifact(world)
     assert "blocked  carameli agent/x-0919 -- needs a database" in text
-    assert "capped   carameli #412 -- needs a human: needs a database" in text
-    world["blocked"] = [
-        fix_pass.fix_reports.Blocked("carameli", Path("t"), "agent/y", "", "hand-picked tree")
-    ]
-    fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude", NOW)
-    assert "blocked  carameli agent/y -- hand-picked tree (no dispatch on the ledger" in artifact(
-        world
-    )
+    assert "filed    carameli fixer-blocked: carameli agent/x-0919: needs a database" in text
+    assert "capped   carameli #412 -- escalated: the devkit session has it" in text
+    assert "needs a human" not in text
+    assert not (tree / "logs" / "fix-blocked.md").exists(), "filed away, so read once"
+
+    [finding] = _open_findings(tmp_path)
+    triage = fix_pass.fix_loop.triage
+    triage.resolve([finding.id], "the fixture now makes its database", root=tmp_path / "devkit")
+    world["trees"] = []
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", later + _dt.timedelta(hours=1))
+    assert len(world["dispatched"]) == 2, "resolved, the problem starts over"
 
 
 def test_a_dispatch_past_the_resend_window_is_sent_again(world):
@@ -689,17 +765,85 @@ def test_a_dispatch_past_the_resend_window_is_sent_again(world):
     assert len(world["dispatched"]) == 2
 
 
-def test_fixers_go_while_the_failure_moves_and_stop_when_it_does_not(world):
+def test_fixers_go_while_the_failure_moves_and_escalate_when_it_does_not(world, tmp_path):
     """The retry policy end to end: a fixer pushes (new sha) and the same test is still
-    red -- one more; again -- a person. A fixer that changed what fails made progress."""
+    red -- one more; again -- the devkit session, filed with the problem as its key. A
+    fixer that changed what fails made progress, and goes."""
     for sha in ("a1", "b2", "c3"):
         world["failures"] = [failure(sha=sha)]
         fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
     assert len(world["dispatched"]) == 2
-    assert "2 session(s) sent and it is still red unchanged -- needs a human" in artifact(world)
+    text = artifact(world)
+    assert "escalated to the devkit session: 2 fixer session(s) left it red and unchanged" in text
+    assert "filed    carameli fixers-exhausted: carameli #412" in text
+    problem = fix_ledger.problem_key(fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),)))
+    assert [i.fields.get("key") for i in _open_findings(tmp_path)] == [problem]
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
+    assert "escalated: the devkit session has it" in artifact(world)
+    assert len(_open_findings(tmp_path)) == 1, "filed once, not once per pass"
     world["failures"] = [failure(sha="d4", signature=("tests/test_other.py::t",))]
     fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
     assert len(world["dispatched"]) == 3
+
+
+def test_a_step_that_raises_is_filed_and_the_devkit_session_still_goes(
+    world, monkeypatch, tmp_path
+):
+    """The crash that stops every later step is the one a self-correcting loop cannot
+    report. Collecting the red raises here, and the devkit session still goes -- at the
+    backlog that now carries the crash."""
+    world["backlog"] = failure(
+        kind=fix_plan.LEDGER, project="devkit", number=0, head="", signature=("x",)
+    )
+
+    def boom(*_a, **_k):
+        raise RuntimeError("gh answered garbage")
+
+    monkeypatch.setattr(fix_pass.fix_red, "collect_red", boom)
+    assert (
+        fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == fix_pass.EXIT_FAILED
+    )
+    assert world["dispatched"] == [(fix_plan.UPSTREAM, "claude")]
+    text = artifact(world)
+    assert "filed    devkit pass-step-crashed: fix-pass step 'collect' raised RuntimeError" in text
+    [found] = _open_findings(tmp_path)
+    assert Path(found.fields["evidence"]).read_text(encoding="utf-8").startswith("Traceback")
+
+
+def test_a_plan_that_raises_sends_only_the_devkit_session(world, monkeypatch):
+    world["failures"] = [failure(number=2)]
+    world["backlog"] = failure(
+        kind=fix_plan.LEDGER, project="devkit", number=0, head="", signature=("x",)
+    )
+    monkeypatch.setattr(fix_pass.fix_plan, "plan", lambda *a: [][1])
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
+    assert world["dispatched"] == [(fix_plan.UPSTREAM, "claude")]
+    assert "the plan step raised; only the devkit session goes" in artifact(world)
+
+
+def test_plan_mode_says_what_it_would_file_and_files_nothing(world, tmp_path):
+    world["friction"] = [
+        fix_pass.Finding(
+            "poll", "carameli", "sleep N", event=fix_pass.fix_loop.fix_findings.FRICTION
+        )
+    ]
+    fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude", NOW)
+    text = artifact(world)
+    assert "filed    would file: carameli poll: sleep N" in text
+    assert "ledger   0 open on the harness-defect ledger" in text
+    assert _open_findings(tmp_path) == []
+
+
+def test_friction_is_filed_once_while_it_stays_open(world, tmp_path):
+    world["friction"] = [
+        fix_pass.Finding(
+            "poll", "carameli", "sleep N", event=fix_pass.fix_loop.fix_findings.FRICTION
+        )
+    ]
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW)
+    assert len(_open_findings(tmp_path)) == 1
+    assert "ledger   1 open on the harness-defect ledger" in artifact(world)
 
 
 def test_every_pass_leaves_a_line_in_the_history(world):
@@ -766,23 +910,6 @@ def test_an_open_adoption_goes_and_holds_only_its_own_projects_other_prs(world):
     assert "held     carameli #8 -- held until the newest release is adopted in carameli" in text
 
 
-def test_record_blocked_marks_only_a_stamped_report(monkeypatch, tmp_path):
-    ledger_path = tmp_path / "dispatch.json"
-    fix_ledger.record(ledger_path, "pr:carameli:412:abc:d:dispatch", "n", NOW)
-    reports = [
-        fix_pass.fix_reports.Blocked(
-            "carameli", Path("t"), "agent/x", "pr:carameli:412:abc:d:dispatch", "no db"
-        ),
-        fix_pass.fix_reports.Blocked("carameli", Path("u"), "agent/y", "", "by hand"),
-    ]
-    monkeypatch.setattr(fix_pass.fix_reports, "find_blocked", lambda root, projects: reports)
-    lines = fix_pass.record_blocked(tmp_path, ["carameli"], ledger_path)
-    assert lines[0] == "carameli agent/x -- no db"
-    assert lines[1].startswith("carameli agent/y -- by hand (no dispatch on the ledger")
-    ledger = fix_ledger.read_ledger(ledger_path)
-    assert ledger["pr:carameli:412:abc:d:dispatch"]["blocked"] == "no db" and len(ledger) == 1
-
-
 def test_a_failed_ship_is_the_exit_code(world, monkeypatch):
     one = ship_intent.Intent("carameli", Path("t"), "agent/i-0919", "S", "B")
     world["intents"] = [one]
@@ -795,6 +922,7 @@ def test_a_failed_ship_is_the_exit_code(world, monkeypatch):
         fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == fix_pass.EXIT_FAILED
     )
     assert "shipped  carameli agent/i-0919 -- failed: push: no" in artifact(world)
+    assert "filed    carameli ship-failed: carameli agent/i-0919: push: no" in artifact(world)
 
 
 def test_dispatching_a_refused_commit_sets_its_intent_aside(monkeypatch, tmp_path):
@@ -813,14 +941,55 @@ def test_dispatching_a_refused_commit_sets_its_intent_aside(monkeypatch, tmp_pat
     )
     keys = []
     monkeypatch.setattr(
-        fix_pass.fix_prs, "dispatch_pr", lambda f, root, agent, runner, key: keys.append(key) or 0
+        fix_pass.fix_prs,
+        "dispatch_pr",
+        lambda f, root, agent, runner, key, problem: keys.append(key) or 0,
     )
     decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (refused,))
-    assert fix_pass.dispatch(decision, tmp_path, "claude") == 0
+    assert fix_pass.fix_send.dispatch(decision, tmp_path, "claude") == 0
     assert keys == [fix_ledger.decision_key(decision)]
     assert not (tree / ship_intent.INTENT_FILE).exists()
     assert (tree / ship_intent.REFUSED_FILE).read_text(encoding="utf-8") == "S\n\nB\n"
     (tree / ship_intent.INTENT_FILE).write_text("S\n", encoding="utf-8")
     monkeypatch.setattr(fix_pass.fix_prs, "dispatch_pr", lambda *a: 1)
-    assert fix_pass.dispatch(decision, tmp_path, "claude") == 1
+    assert fix_pass.fix_send.dispatch(decision, tmp_path, "claude") == 1
     assert (tree / ship_intent.INTENT_FILE).exists(), "a session that did not open leaves it"
+
+
+def test_decide_is_the_plan_the_classes_and_the_phase_over_what_was_read():
+    harness, go, held, skipped = fix_pass.decide([failure(number=2)], True, "v0.11.22", [], ())
+    assert harness.clean and [d.action for d in go] == [fix_plan.DISPATCH]
+    assert held == [] and skipped == []
+
+
+def test_a_session_working_in_a_branch_tree_holds_a_fixer_for_that_branch(world, tmp_path):
+    """The first supervised run sent a fixer into the worktree an interactive session was
+    in. A live session there is a wait, and the record says whose."""
+    busy = fix_pass.fix_loop.Closed(busy={("carameli", "agent/x-0919"): "C:/t/x"})
+    sent, capped, _ = fix_pass.fix_send.send_all(
+        [fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))],
+        _ctx(tmp_path),
+        "claude",
+        closed=busy,
+    )
+    assert sent == [] and capped[0][1] == "a session is working in C:/t/x"
+    other = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(head="agent/y"),))
+    assert fix_pass.fix_send.send_all([other], _ctx(tmp_path), "claude", closed=busy)[0]
+
+
+def test_a_refused_ships_detail_is_one_record_line(world, monkeypatch):
+    one = ship_intent.Intent("carameli", Path("t"), "agent/i-0919", "S", "B")
+    world["intents"] = [one]
+    detail = "fixers: check yaml...Passed\nDetect secrets....Failed\n\n- hook id: detect-secrets\n"
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda i, p, b: ship_intent.Outcome(i, ship_intent.REFUSED, detail),
+    )
+    monkeypatch.setattr(
+        fix_pass.ship_intent, "refusal_failure", lambda o, b: failure(kind=fix_plan.COMMIT)
+    )
+    lines, _, _ = fix_pass.ship_intents(Path("r"), ["carameli"], fix_cycle.DISPATCH)
+    assert lines == [
+        "carameli agent/i-0919 -- refused: fixers: check yaml...Passed Detect secrets....Failed - hook id: detect-secrets"
+    ]

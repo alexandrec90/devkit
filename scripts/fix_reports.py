@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""The one channel back from a fixer: the stamp a dispatch leaves, the report it may write.
+"""The channels back from a session: the stamp a dispatch leaves, and what came of it.
 
 The fix pass learned a session's outcome only from the gate. A fixer that stopped with
 "cannot be done", or a background session that died on a permission prompt, left a
 ledger entry and nothing else, and the record read "already dispatched" for as long as
-the entry stood. Two files under the worktree's ignored `logs/` close that:
+the entry stood. Files under the worktree's ignored `logs/` close that:
 
 - `logs/fix-dispatch.json`, written by the pass when it opens a session in a worktree:
-  the ledger key the dispatch was recorded under, so a report from that tree can be
-  matched back to the decision it answers, whatever branch the tree is on.
+  the ledger key and problem the dispatch was recorded under, so anything from that
+  tree can be matched back to the decision it answers, whatever branch the tree is on.
 - `logs/fix-blocked.md`, written by the fixer instead of an intent when it cannot
-  finish: what is in the way, in its own words. The pass reads it, marks the ledger
-  entry blocked (`fix_ledger.mark_blocked`) so no second session is spent, and puts the
-  reason on the record where a person reads it.
+  finish. The pass marks the ledger entry blocked and escalates it as a finding
+  (`fix_budget.budget`), then files the report away so it is read once.
+- `logs/friction.md`, which any session may write: one line per thing the harness cost
+  it turns. The pass files each line on the harness-defect ledger.
+- No outcome at all: a stamped tree with no intent, no report and a transcript gone
+  quiet (`session_state`) is a session that died, which frees its dispatch at once.
 
 `agent_trees` is the walk both this and `ship_intent.find_intents` make: every
 worktree of every registered checkout, through `git worktree list`, so a box, a
@@ -24,6 +27,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import re
 import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -35,39 +39,73 @@ import sweep
 
 STAMP_FILE = Path("logs") / "fix-dispatch.json"
 BLOCKED_FILE = Path("logs") / "fix-blocked.md"
+FRICTION_FILE = Path("logs") / "friction.md"
+# The mark of a tree the fix pass cut for a fixer, which makes its PR merge itself once
+# green (`ship_intent.labels_for`). Only what the pass authored carries it.
+ORIGIN_FILE = Path("logs") / "fix-origin"
 # The message a refused intent was being shipped with, set aside by the pass at
 # dispatch (`ship_intent.set_aside`) where the fixer it sent can reuse it.
 REFUSED_FILE = Path("logs") / "ship-intent.refused.md"
+# What a session leaves when it is done one way or another. The intent names are
+# `ship_intent`'s; spelled here because that module imports this one.
+OUTCOME_FILES = (
+    Path("logs") / "ship-intent.md",
+    Path("logs") / "ship-intent.shipped.md",
+    Path("logs") / "ship-state.json",
+    BLOCKED_FILE,
+    Path("logs") / "fix-blocked.filed.md",  # the report once the pass has read it
+)
 
 # How much of a report reaches the record: one line's worth, not the essay.
 REASON_LIMIT = 400
 
+# A dispatched session with no transcript this long after its stamp never started; one
+# whose transcript has been quiet this long, with nothing left behind, has ended. Both
+# well past a permission prompt a person might still answer in a tab.
+START_GRACE = _dt.timedelta(minutes=30)
+QUIET_AFTER = _dt.timedelta(minutes=90)
+CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+
 GitFor = Callable[[Path], Callable[..., object]]
 
 
-@dataclass(frozen=True)
-class Blocked:
-    project: str
-    tree: Path
-    branch: str
-    key: str  # the stamp's ledger key, or "" when the tree carries no stamp
-    reason: str
-
-
-def stamp(tree: Path, key: str, what: str, now: _dt.datetime | None = None) -> Path:
+def stamp(
+    tree: Path,
+    key: str,
+    what: str,
+    now: _dt.datetime | None = None,
+    problem: str = "",
+    agent: str = "claude",
+) -> Path:
     """Mark the tree with the key this dispatch is recorded under.
 
     A report left by an earlier session in the same tree is cleared with it: read
     against the new key, it would mark this dispatch blocked before its session had
-    started, and a blocked entry never expires.
+    started.
     """
     when = (now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds")
     path = tree / STAMP_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     (tree / BLOCKED_FILE).unlink(missing_ok=True)
-    payload = {"key": key, "what": what, "when": when}
+    payload = {"key": key, "what": what, "when": when, "problem": problem, "agent": agent}
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def note_on_stamp(tree: Path, field: str, value: str) -> None:
+    """Add `field` to the tree's stamp, so a verdict about this dispatch is reached once."""
+    payload = read_stamp(tree)
+    if payload:
+        payload[field] = value
+        text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        (tree / STAMP_FILE).write_text(text, encoding="utf-8")
+
+
+def file_away(tree: Path, relative: Path) -> None:
+    """`logs/x.md` -> `logs/x.filed.md`: read once, kept for whoever looks at the tree."""
+    source = tree / relative
+    if source.is_file():
+        source.replace(source.with_name(f"{source.stem}.filed{source.suffix}"))
 
 
 def read_stamp(tree: Path) -> dict:
@@ -107,12 +145,139 @@ def agent_trees(
             yield project, Path(path), branch
 
 
-def find_blocked(root: Path, projects: list[str], git_for: GitFor = sweep.git_for) -> list[Blocked]:
-    """Every worktree carrying a blocked report, with the key it was dispatched under."""
-    found: list[Blocked] = []
-    for project, tree, branch in agent_trees(root, projects, git_for):
-        reason = blocked_reason(tree)
-        if reason:
-            key = str(read_stamp(tree).get("key", ""))
-            found.append(Blocked(project, tree, branch, key, reason))
-    return found
+# --- what the trees say beyond a report ---------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Tree:
+    """One agent worktree and what it carries for the pass."""
+
+    project: str
+    path: Path
+    branch: str
+    stamp: dict
+    friction: tuple[str, ...]
+
+
+def friction_lines(tree: Path) -> tuple[str, ...]:
+    """The tree's `logs/friction.md`, one entry per line: headings and blanks dropped,
+    list markers stripped."""
+    try:
+        text = (tree / FRICTION_FILE).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ()
+    kept = (line.strip() for line in text.splitlines())
+    lines = (line.lstrip("-*0123456789. ").strip() for line in kept if not line.startswith("#"))
+    return tuple(line[:REASON_LIMIT] for line in lines if line)
+
+
+def read_trees(root: Path, projects: list[str], git_for: GitFor = sweep.git_for) -> list[Tree]:
+    """Every agent worktree with its stamp and friction, walked once for the whole pass."""
+    return [
+        Tree(project, tree, branch, read_stamp(tree), friction_lines(tree))
+        for project, tree, branch in agent_trees(root, projects, git_for)
+    ]
+
+
+def transcript_dir(tree: Path, projects_root: Path | None = None) -> Path:
+    """Where Claude Code keeps the transcripts of sessions started in `tree`."""
+    return (projects_root or CLAUDE_PROJECTS) / re.sub(r"[^A-Za-z0-9]", "-", str(tree))
+
+
+def _mtime(path: Path) -> _dt.datetime | None:
+    try:
+        return _dt.datetime.fromtimestamp(path.stat().st_mtime, _dt.UTC)
+    except OSError:
+        return None
+
+
+def newest_transcript(tree: Path, projects_root: Path | None = None) -> Path | None:
+    dated = [
+        (when, path)
+        for path in transcript_dir(tree, projects_root).glob("*.jsonl")
+        if (when := _mtime(path))
+    ]
+    return max(dated)[1] if dated else None
+
+
+def started_at(path: Path) -> _dt.datetime | None:
+    """When a transcript's session began: its first record's own `timestamp`.
+
+    Not the file's mtime -- every session in a tree appends to its own file, so the
+    newest file is whoever spoke last, which in the first supervised run was the
+    interactive session sharing the tree rather than the fixer the pass had stamped.
+    """
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for _, line in zip(range(50), handle, strict=False):
+                stamp = _TIMESTAMP.search(line)
+                if stamp:
+                    return _dt.datetime.fromisoformat(stamp.group(1).replace("Z", "+00:00"))
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+_TIMESTAMP = re.compile(r'^\{.*?"timestamp":\s*"([0-9T:.+\-Z]+)"')
+# A session starts a beat after the pass stamps its tree; a clock this far off still counts.
+STAMP_SKEW = _dt.timedelta(seconds=5)
+
+
+def session_transcript(
+    tree: Path, since: _dt.datetime, projects_root: Path | None = None
+) -> Path | None:
+    """The first transcript started in `tree` at or after `since`: the dispatched session's."""
+    started = [
+        (when, path)
+        for path in transcript_dir(tree, projects_root).glob("*.jsonl")
+        if (when := started_at(path)) and when >= since - STAMP_SKEW
+    ]
+    return min(started)[1] if started else None
+
+
+def active_transcript(
+    tree: Path, now: _dt.datetime, projects_root: Path | None = None
+) -> Path | None:
+    """A transcript in `tree` written within `QUIET_AFTER`: someone is working there now."""
+    newest = newest_transcript(tree, projects_root)
+    touched = _mtime(newest) if newest else None
+    return newest if touched and now - touched <= QUIET_AFTER else None
+
+
+WORKING = "working"
+DONE = "done"
+NEVER_STARTED = "never started"
+NO_OUTCOME = "ended without an outcome"
+DEAD = (NEVER_STARTED, NO_OUTCOME)
+
+
+def session_state(
+    tree: Path, now: _dt.datetime, projects_root: Path | None = None
+) -> tuple[str, str]:
+    """`(state, transcript)` of the session the tree's stamp sent.
+
+    `DONE` once it left an intent or a report, `WORKING` while its transcript moves (or
+    it is still inside `START_GRACE`), one of `DEAD` otherwise. `""` for a tree with no
+    stamp, one already judged dead, or a session this cannot see -- only Claude Code
+    keeps a transcript here, and a Codex tab is watched by the person who opened it.
+    """
+    payload = read_stamp(tree)
+    if (
+        not payload
+        or payload.get("dead")
+        or not str(payload.get("agent", "claude")).startswith("claude")
+    ):
+        return "", ""
+    try:
+        sent = _dt.datetime.fromisoformat(str(payload.get("when", "")))
+    except ValueError:
+        return "", ""
+    transcript = session_transcript(tree, sent, projects_root)
+    if any((_mtime(tree / name) or sent) > sent for name in OUTCOME_FILES):
+        return DONE, str(transcript or "")
+    touched = _mtime(transcript) if transcript else None
+    if touched is None or touched < sent:
+        return (NEVER_STARTED, "") if now - sent > START_GRACE else (WORKING, "")
+    if now - touched > QUIET_AFTER:
+        return NO_OUTCOME, str(transcript)
+    return WORKING, str(transcript)

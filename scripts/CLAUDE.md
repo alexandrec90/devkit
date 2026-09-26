@@ -203,3 +203,11 @@ deliberately is not**, since one defect hit on two machines is one defect. The f
 harness-shaped, and the `/triage-harness` skill is the same sweep run by hand; both are
 devkit-only on purpose: every defect on this ledger is a defect in devkit, whatever
 project the session that hit it was scoped to.
+
+**The ledger is also the fix pass's own sink** (`fix_findings.py`): every outcome it cannot
+turn green -- a step that raised, a fixer that died or gave up, transcript friction, a
+stale wait -- is a `fix-pass-finding` or `session-friction` there, and nothing it does
+ends at a person. Two consequences for a change here: a finding is filed only when no
+open one shares its signature, so the detail must be stable across recurrences (lead with
+the kind, keep shas and counts out); and a resolution is held to its `pr=`
+(`fix_verify.py` reopens what never merged), so "resolved" means landed.
