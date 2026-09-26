@@ -669,6 +669,29 @@ def test_a_failed_push_takes_its_branch_with_it(tmp_path):
     assert not rel.local_branch_exists(devkit, "release/v0.0.2", _git_run)
 
 
+def test_a_push_the_gate_refused_says_what_the_gate_said(tmp_path):
+    """pre-commit prints a hook's findings on stdout, and git's own line on stderr is
+    only "failed to push some refs" -- which was the whole of the v0.11.26 report, with
+    the failing test named nowhere and the worktree holding its artifact deleted."""
+    devkit, _, _ = _a_devkit_with_origin(tmp_path)
+
+    def refusing_push(cmd):
+        if "push" in cmd:
+            return subprocess.CompletedProcess(
+                cmd,
+                1,
+                stdout="push-gate: tests failed (exit 1)\nFAILED tests/test_x.py::t\n",
+                stderr="error: failed to push some refs to 'origin'\n",
+            )
+        return _git_run(cmd)
+
+    ok, detail = rel.prepare(devkit, "v0.0.2", refusing_push, lambda _n: None)
+
+    assert not ok
+    assert "FAILED tests/test_x.py::t" in detail
+    assert "failed to push some refs" in detail
+
+
 def test_a_prepare_that_pushed_keeps_the_branch_the_pr_is_opened_from(tmp_path):
     """The other half of the same `finally`: `gh pr create --head` resolves the local
     ref, so a successful run must not clean it up."""
