@@ -1299,6 +1299,7 @@ def test_a_missing_console_twin_falls_back_rather_than_raising(tmp_path, monkeyp
 
 SCANNER = "scripts/hooks/untested_symbols.py"
 CONFIG_MODULE = "scripts/hooks/harness_config.py"
+CODE_TEXT = "scripts/hooks/code_text.py"  # the scanner imports it
 
 
 def _ratchet_project(root: Path, source: str = "def alpha():\n    pass\n") -> Path:
@@ -1308,7 +1309,7 @@ def _ratchet_project(root: Path, source: str = "def alpha():\n    pass\n") -> Pa
     a Windows console is not UTF-8, so `_seed` would hand the subprocess a file its own
     interpreter cannot parse — a failure that reads as the seeder being broken.
     """
-    for rel in (SCANNER, CONFIG_MODULE):
+    for rel in (SCANNER, CONFIG_MODULE, CODE_TEXT):
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text((sh.REPO_ROOT / rel).read_text(encoding="utf-8"), encoding="utf-8")

@@ -23,10 +23,9 @@ recover is *why* the change was made, so that is the only thing it is asked for.
      write it for the reader who did not watch the work.
 3. Report the subject and stop.
 
-`logs/` is ignored in every project, so the file cannot be committed by accident. If
-you change the code again after writing it, rewrite the file last: the pass ships
-whatever the file says when it runs, and remembers the words it shipped, so an edited
-file is shipped again and an unchanged one is not.
+`logs/` is ignored in every project, so the file cannot be committed by accident. Once
+shipped, the pass moves it to `logs/ship-intent.shipped.md`; to ship again, write a
+fresh one, last.
 
 ## What happens next, and why none of it is your turn
 

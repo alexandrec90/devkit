@@ -51,7 +51,7 @@ def red_main(**fields) -> fix_plan.Failure:
 
 def test_the_pr_prompt_names_the_pr_the_fault_the_ids_the_logs_and_the_finish_line():
     text = fix_prompts.pr_prompt(failure(evidence="C:/ev/carameli-pr-412"))
-    assert "fix pass reads it" in text
+    assert "ship skill" in text
     for expected in (
         "#412",
         "carameli",
@@ -81,20 +81,19 @@ def test_the_upstream_prompt_sends_a_pr_red_on_its_own_diff_to_that_pr():
     only stop: nothing on a fresh branch off a green default lands on the PR."""
     text = fix_prompts.upstream_prompt((failure(),), "agent/fix")
     assert fix_prompts.OWN_DIFF in text
-    assert "push to the PR" in text
+    assert "ship it with the ship skill from that worktree" in text
     assert text.index(fix_prompts.OWN_DIFF) < text.index(fix_prompts.STOP)
 
 
 def every_prompt() -> list[str]:
     """One of each shape of prompt a fresh session can be sent with."""
-    nightly = failure(kind=fix_plan.NIGHTLY, workflow="Nightly", number=7, url="u/7")
     return [
         fix_prompts.pr_prompt(failure()),
         fix_prompts.pr_prompt(failure(signature=(fix_plan.CONFLICT,))),
-        fix_prompts.pr_prompt(failure(kind=fix_plan.COMMIT, signature=("commit refused",))),
-        fix_prompts.upstream_prompt((failure(),), "agent/fix"),
+        fix_prompts.pr_prompt(failure(kind=fix_plan.COMMIT, number=0, signature=("x refused",))),
+        fix_prompts.upstream_prompt((failure(), red_main()), "agent/fix"),
         fix_prompts.branch_prompt(red_main(), "agent/fix"),
-        fix_prompts.nightly_prompt(nightly, "agent/fix"),
+        fix_prompts.nightly_prompt(failure(kind=fix_plan.NIGHTLY, number=3), "agent/fix"),
     ]
 
 
@@ -125,8 +124,10 @@ def test_the_role_points_at_a_fixer_file_every_consumer_receives():
     assert (REPO_ROOT / rel).is_file()
     sync = load_script("scripts/sync-devkit.py")
     assert rel in sync.MANIFEST
-    for overridden in ("the harness is not your job", "never commit or push", "and stop"):
+    for overridden in ("the harness is not your job", "and stop"):
         assert overridden in fix_prompts.ROLE
+    # A fixer ships an intent like any session; the pass commits and pushes (FINISH).
+    assert "commit" not in fix_prompts.ROLE and "push" not in fix_prompts.ROLE
     assert not set("\"'`") & set(fix_prompts.ROLE)
 
 
@@ -177,7 +178,7 @@ def test_a_refused_commit_gets_the_prompt_for_its_own_worktree():
     refused = failure(kind=fix_plan.COMMIT, number=0, signature=("commit refused: secrets",))
     text = fix_prompts.pr_prompt(refused)
     assert "The commit stage refused the change on agent/auto/devkit-upgrade-v0-11-21-0917" in text
-    assert "logs/ship-intent.md" in text and "fix pass commits" in text
+    assert "logs/ship-intent.refused.md" in text and "fix pass commits" in text
 
 
 def test_the_upstream_prompt_names_every_id_across_the_group():
@@ -218,11 +219,25 @@ def test_a_prompt_says_when_no_artifact_came_down_instead_of_naming_an_empty_dir
     assert "read the run at its URL" in fix_prompts.upstream_prompt((none,), "agent/fix")
 
 
-def test_the_resolver_is_told_to_keep_the_hooks_on():
+def test_the_resolver_leaves_the_merge_for_the_pass_to_commit():
     """The first resolver the pass sent used --no-verify on its merge commit and flagged
-    it itself; the prompt now says so before it can happen."""
+    it itself. Now it commits nothing: the pass concludes the merge with the hooks
+    running, which is the same protection with no prompt sentence to forget."""
     text = fix_prompts.pr_prompt(failure(signature=(fix_plan.CONFLICT,)))
-    assert "never --no-verify" in text
+    assert "leave the merge uncommitted" in text and "hooks running" in text
+    assert "--no-verify" not in text
+
+
+def test_every_prompt_ends_at_the_ship_skill_or_the_blocked_file_and_never_at_a_push():
+    """A fixer fixes and stops. Merging the base in, pushing, opening the PR and reading
+    the gate are one command each, and the pass runs them; a session's turn spent on
+    any of them is the expensive way to run a command. The PR prompt used to say "merge
+    origin/main in ... push" and the resolver used to commit and push itself."""
+    for text in every_prompt():
+        assert "ship skill" in text and "logs/fix-blocked.md" in text
+        assert "the fix pass commits, pushes, opens or updates the PR" in text
+        assert "git push" not in text and "Merge origin/main in, fix" not in text
+        assert "bare git push" not in text
 
 
 def test_the_upstream_prompt_sends_the_session_at_the_ledger_only_when_the_backlog_is_in_it():

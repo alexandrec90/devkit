@@ -1046,18 +1046,13 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     root = args.workspace.parent
-    tag = latest_tag(args.devkit)
-    if not tag:
-        # Reported once for the run, not once per project: with --all it is the same
-        # fact about devkit every time, and repeating it reads as four problems.
-        return stopped(1, f"upgrade: {NO_TAG}")
+    tag, tags, refusal = devkit_releases(args.devkit)
+    if refusal:
+        return stopped(*refusal)
 
     # One lookup for the whole run: every project adopts the same release, and this is
     # what the per-project stamps are measured against.
     tag_commit = commit_for(args.devkit, tag)
-    # The whole tag set, for the projects that are *ahead* of this checkout rather than
-    # behind it. Read once here; `upgrade_one` cannot, since it only has the box.
-    tags = release_tags(args.devkit)
     # The global git policy runtime is pinned to a release too, and goes stale on the
     # same event this run reacts to. Unattended passes only, and from the tag -- the
     # two guards are `policy_runtime`'s, with the reasons.
@@ -1129,11 +1124,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def release_tags(devkit: Path) -> list[str]:
-    """Every devkit release tag, newest first; [] when there are none to read.
+    """Every devkit release tag, newest first; [] when the checkout has none.
 
     Split out from `latest_tag` because the *set* answers a second question the pick
     cannot: whether the release a project already vendored exists in this checkout at
     all. See `unreleased_adoption`.
+
+    Raises `RuntimeError` with git's own words rather than answering [] when git could
+    not look: on 2026-09-25 a checkout refused for dubious ownership was reported as
+    "devkit has no release tags" at v0.9.1, hiding git's `safe.directory` advice.
     """
     result = subprocess.run(
         ["git", "-C", str(devkit), "tag", "--list", "--sort=-v:refname"],
@@ -1143,7 +1142,9 @@ def release_tags(devkit: Path) -> list[str]:
         creationflags=sweep.NO_WINDOW,
     )
     if result.returncode != 0:
-        return []
+        raise RuntimeError(
+            (result.stderr or result.stdout).strip() or f"git exit {result.returncode}"
+        )
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
@@ -1154,10 +1155,32 @@ def latest_tag(devkit: Path) -> str | None:
     release, and the devkit checkout is normally sitting on a working branch. Keying
     off HEAD made this refuse with "HEAD is not tagged" almost every time it ran,
     which is noise rather than signal -- and this is meant to be safe to run on a
-    schedule to prove nothing is stale.
+    schedule to prove nothing is stale. Raises as `release_tags` does.
     """
     tags = release_tags(devkit)
     return tags[0] if tags else None
+
+
+def devkit_releases(devkit: Path) -> tuple[str, list[str], tuple[int, str] | None]:
+    """The release this run adopts, the whole tag set, and a refusal for `stopped`.
+
+    The set is for the projects *ahead* of this checkout; `upgrade_one` cannot read it,
+    since it only has the box. Exit 2 when git cannot read the tags -- nothing is known
+    about devkit's releases, and git's own message is the remedy -- and 1 when there
+    are none, said once for the run: with --all it is the same fact every time. The
+    first read already stops a checkout git refuses, so the set may degrade to [],
+    which `unreleased_adoption` reads as "cannot tell" rather than "ahead".
+    """
+    try:
+        tag = latest_tag(devkit)
+    except RuntimeError as exc:
+        return "", [], (2, f"upgrade: could not read devkit's release tags: {exc}")
+    if not tag:
+        return "", [], (1, f"upgrade: {NO_TAG}")
+    try:
+        return tag, release_tags(devkit), None
+    except RuntimeError:
+        return tag, [], None
 
 
 if __name__ == "__main__":

@@ -94,7 +94,7 @@ def test_intents_are_found_across_every_worktree_of_every_checkout(tmp_path, mon
                 mine = listing if project_dir.name == "carameli" else ""
                 return subprocess.CompletedProcess(args, 0, mine, "")
             if args[0] == "symbolic-ref":
-                return subprocess.CompletedProcess(args, 0, "origin/main\n", "")
+                return subprocess.CompletedProcess(args, 0, "refs/remotes/origin/main\n", "")
             return subprocess.CompletedProcess(args, 1, "", "")
 
         return git
@@ -104,6 +104,7 @@ def test_intents_are_found_across_every_worktree_of_every_checkout(tmp_path, mon
         ("carameli", "main", "Never", True),
         ("carameli", "agent/labels-0919", "Teach the sweep about labels", False),
     ]
+    assert {i.base for i in found} == {"main"}, "the base the PR opens against rides along"
     assert found[0].blocked == ship_intent.ship.is_shippable("main", "main")[1], (
         "an intent on the default branch is reported with the shippable rule's own "
         "reason, never silently passed over: the first ledger sweep left a carameli fix "
@@ -119,6 +120,91 @@ def test_a_checkout_git_cannot_list_is_passed_over(tmp_path):
         )
         == []
     )
+
+
+def _one_tree_on(tmp_path, branch):
+    """A carameli worktree on `branch` carrying an intent, and the `git_for` that lists it."""
+    tree = tmp_path / "carameli" / ".claude" / "worktrees" / "hand"
+    (tree / "logs").mkdir(parents=True)
+    (tree / ship_intent.INTENT_FILE).write_text("Resolve it\n", encoding="utf-8")
+    listing = f"worktree {tree.as_posix()}\nHEAD 1\nbranch refs/heads/{branch}\n"
+
+    def git_for(_project_dir):
+        def git(*args):
+            if args[:2] == ("worktree", "list"):
+                return subprocess.CompletedProcess(args, 0, listing, "")
+            return subprocess.CompletedProcess(args, 0, "refs/remotes/origin/main\n", "")
+
+        return git
+
+    return git_for
+
+
+def _gh_listing(code, out, asked):
+    def gh_for(_project_dir):
+        def gh(*args):
+            asked.append(args)
+            return subprocess.CompletedProcess(args, code, out, "")
+
+        return gh
+
+    return gh_for
+
+
+def test_a_hand_named_branch_that_heads_an_open_pr_is_shippable(tmp_path):
+    """devkit #390: opened by hand from `flag-wired-agent-hooks`, so a resolver sent at
+    it worked on that branch and its intent was refused on every pass -- the PR could
+    only stay conflicted. The PR already exists; pushing to it is the fixer's whole job."""
+    git_for = _one_tree_on(tmp_path, "flag-wired-agent-hooks")
+    asked: list = []
+    found = ship_intent.find_intents(
+        tmp_path, ["carameli"], git_for, _gh_listing(0, '[{"number": 390}]', asked)
+    )
+    assert [(i.branch, i.blocked) for i in found] == [("flag-wired-agent-hooks", "")]
+    assert asked == [
+        ("pr", "list", "--head", "flag-wired-agent-hooks", "--state", "open", "--json", "number")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("code", "out"), [(0, "[]"), (1, ""), (0, "not json")], ids=["no-pr", "gh-failed", "garbage"]
+)
+def test_a_hand_named_branch_with_no_open_pr_stays_blocked(tmp_path, code, out):
+    git_for = _one_tree_on(tmp_path, "flag-wired-agent-hooks")
+    found = ship_intent.find_intents(tmp_path, ["carameli"], git_for, _gh_listing(code, out, []))
+    assert [i.blocked for i in found] == [
+        ship_intent.ship.is_shippable("flag-wired-agent-hooks", "main")[1]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("code", "out", "open_pr"),
+    [
+        (0, '[{"number": 390}]', True),
+        (0, "[]", False),
+        (0, "", False),
+        (0, "{}", False),
+        (1, '[{"number": 390}]', False),
+        (0, "not json", False),
+    ],
+    ids=["open", "none", "empty", "not-a-list", "gh-failed", "garbage"],
+)
+def test_has_open_pr_is_false_whenever_gh_cannot_say_yes(code, out, open_pr):
+    asked: list = []
+    gh = _gh_listing(code, out, asked)(None)
+    assert ship_intent.has_open_pr(gh, "flag-wired-agent-hooks") is open_pr
+    assert asked == [
+        ("pr", "list", "--head", "flag-wired-agent-hooks", "--state", "open", "--json", "number")
+    ]
+
+
+def test_the_default_branch_stays_blocked_without_asking_about_prs(tmp_path):
+    git_for = _one_tree_on(tmp_path, "main")
+    asked: list = []
+    found = ship_intent.find_intents(
+        tmp_path, ["carameli"], git_for, _gh_listing(0, '[{"number": 1}]', asked)
+    )
+    assert found[0].blocked and asked == []
 
 
 # --- shipping one --------------------------------------------------------------------
@@ -332,3 +418,66 @@ def test_a_refusal_with_no_test_ids_is_signed_by_its_step(tmp_path):
 @pytest.mark.parametrize("branch,shippable", [("agent/x-0919", True), ("main", False)])
 def test_only_a_task_branch_is_shippable(branch, shippable):
     assert ship_intent.ship.is_shippable(branch, "main")[0] is shippable
+
+
+# --- the intent is consumed, so "no intent" means "hands off" everywhere ---------------
+
+
+def test_a_shipped_intent_is_set_aside_so_a_fixer_in_the_same_tree_is_never_shipped_under(
+    tmp_path, monkeypatch
+):
+    """A fixer sent at a PR reuses the worktree that still held the shipped intent;
+    its first uncommitted edit made the tree dirty, and the next pass committed the
+    half-done work under the old message and pushed it to the PR."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    assert (
+        ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW).stage == ship_intent.SHIPPED
+    )
+    assert not (one.tree / ship_intent.INTENT_FILE).exists()
+    kept = (one.tree / ship_intent.SHIPPED_FILE).read_text(encoding="utf-8")
+    assert kept.startswith("Teach the sweep about labels")
+    # The fixer is now editing: a dirty tree with no intent is a session still working.
+    dirty = Runner(porcelain=" M a.py\n")
+    listing = f"worktree {one.tree.as_posix()}\nHEAD 2\nbranch refs/heads/{one.branch}\n"
+    (tmp_path / "carameli").mkdir(exist_ok=True)
+
+    def git_for(_project_dir):
+        return lambda *args: subprocess.CompletedProcess(
+            args, 0, listing if args[:2] == ("worktree", "list") else "origin/main\n", ""
+        )
+
+    assert ship_intent.find_intents(tmp_path, ["carameli"], git_for) == []
+    assert dirty.calls == []
+
+
+def test_a_failed_push_keeps_the_intent_for_the_next_pass(tmp_path, monkeypatch):
+    one = intent(tmp_path)
+    run = Runner({"git push": (1, "", "rejected")})
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.FAILED
+    assert (one.tree / ship_intent.INTENT_FILE).exists()
+
+
+def test_set_aside_moves_the_intent_and_says_whether_there_was_one(tmp_path):
+    one = intent(tmp_path)
+    assert (
+        ship_intent.set_aside(one.tree, ship_intent.REFUSED_FILE)
+        == one.tree / ship_intent.REFUSED_FILE
+    )
+    assert not (one.tree / ship_intent.INTENT_FILE).exists()
+    assert (one.tree / ship_intent.REFUSED_FILE).read_text(encoding="utf-8").startswith("Teach")
+    assert ship_intent.set_aside(one.tree, ship_intent.REFUSED_FILE) is None
+    two = intent(tmp_path, subject="Again")
+    assert ship_intent.set_aside(two.tree, ship_intent.REFUSED_FILE) is not None, (
+        "a second set-aside replaces the first: the newest refused message is the one worth keeping"
+    )
+    assert (two.tree / ship_intent.REFUSED_FILE).read_text(encoding="utf-8").startswith("Again")
+
+
+def test_a_refusal_names_the_worktree_the_fixer_opens_in(tmp_path):
+    one = intent(tmp_path)
+    ship_intent.write_state(
+        one.tree, {"stage": ship_intent.REFUSED, "step": "commit", "output": ""}
+    )
+    failure = ship_intent.refusal_failure(ship_intent.Outcome(one, ship_intent.REFUSED), "main")
+    assert Path(failure.tree) == one.tree

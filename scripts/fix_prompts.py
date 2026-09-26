@@ -4,9 +4,13 @@
 Split out of `fix_plan.py`, which decides *what* gets a session; this is the words.
 Every prompt names the failure the way the record does (`fix_plan.name_of`), the
 evidence directory, the branch the worktree is on and the finish line -- which is the
-ship skill, that is, `logs/ship-intent.md`, never a push. The conflict prompt names no
-failure on purpose: the gate cannot have run against an unmergeable head, and a
-resolver told "also fix the tests" fixes the wrong thing.
+ship skill, that is, `logs/ship-intent.md`, never a commit or a push. A fixer fixes
+and stops; everything a script can do -- merging the base in, committing, pushing,
+opening or updating the PR, reading the gate -- the pass does, because a session's
+turn spent on any of it is the expensive way to run a command. What a fixer cannot do
+it says in `logs/fix-blocked.md` (`fix_reports.BLOCKED_FILE`), the one channel back.
+The conflict prompt names no failure on purpose: the gate cannot have run against an
+unmergeable head, and a resolver told "also fix the tests" fixes the wrong thing.
 
 Stdlib only, no `gh`. Tested in `tests/test_fix_prompts.py`.
 """
@@ -18,6 +22,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fix_plan import COMMIT, CONFLICT, EVIDENCE_DIR, LEDGER, Failure, describe, name_of
+from fix_reports import BLOCKED_FILE, REFUSED_FILE
+
+# How every prompt's body ends. The ship skill is the finish line and the blocked file
+# is the only other way out, for the blockers `STOP` names right after it; both are
+# files, so the pass reads the outcome without a session.
+FINISH = (
+    "When it is done, run the targeted tests and the linter, then ship it with the ship "
+    "skill and stop: the fix pass commits, pushes, opens or updates the PR and reads "
+    "what the gate says. If one of the blockers below stands in the way, write "
+    f"{BLOCKED_FILE.as_posix()} naming it, in a sentence or two, and stop."
+)
 
 # What the devkit session is told about the harness-defect ledger, when the backlog is
 # among its failures. No quotes or backticks: the sentence crosses a `wt` command line.
@@ -40,7 +55,8 @@ STOP = (
     "fix that must land outside this repository. An obstacle a session can clear itself "
     "is not one of them: adding a worktree on another branch, fetching or merging a ref, "
     "reproducing the failure, reading code outside the diff, reshaping code to fit a "
-    "limit. If you stop, name which of the three it is and what you tried first."
+    f"limit. If you write {BLOCKED_FILE.as_posix()}, name which of the three it is and "
+    "what you tried first."
 )
 
 # Every prompt's first sentence: the role, declared by the one thing that starts a
@@ -52,8 +68,8 @@ STOP = (
 ROLE = (
     "You are a fixer session, dispatched by the fix pass. Read .claude/fixer.md first if "
     "this checkout has it: where it or this prompt differs from a rule written for "
-    "project sessions -- the harness is not your job, never commit or push, report a "
-    "dead end and stop -- this prompt and that file win."
+    "project sessions -- the harness is not your job, report a dead end and stop -- "
+    "this prompt and that file win."
 )
 
 
@@ -85,33 +101,29 @@ def pr_prompt(failure: Failure) -> str:
     and only the middle differs. The conflict prompt names no failure on purpose: the
     gate cannot have run, and a resolver told "also fix the tests" fixes the wrong thing.
     """
-    vcs = "git"
     if CONFLICT in failure.signature:
         return _framed(
             f"PR #{failure.number} in {failure.project} has a merge conflict with "
             f"origin/{failure.base}. This worktree is checked out on its head branch "
-            f"{failure.head} with its upstream set, so a bare {vcs} push lands on the PR. "
-            f"Merge origin/{failure.base} in, resolve the conflicts so that both sides' "
-            "intent survives, commit with the hooks running as they are (never "
-            "--no-verify), push, and stop: the gate runs on the push, and whatever it "
-            "says is the next pass's business, not this session's."
+            f"{failure.head}. Merge origin/{failure.base} in and resolve the conflicts so "
+            "that both sides' intent survives, and leave the merge uncommitted: the fix "
+            "pass concludes it with the hooks running, and whatever the gate says after "
+            f"that is the next pass's business, not this session's. {FINISH}"
         )
     if failure.kind == COMMIT:
         return _framed(
             f"The commit stage refused the change on {failure.head} in {failure.project}: "
             f"{_ids(failure.signature)}. The pre-commit output is in {EVIDENCE_DIR}/ in this "
-            "worktree, which is the worktree the change was made in. Fix what it reports, "
-            "rewrite logs/ship-intent.md only if the message no longer fits, and stop: the "
-            "fix pass commits, pushes and opens the PR."
+            "worktree, which is the worktree the change was made in, and the message it "
+            f"was being shipped with is in {REFUSED_FILE.as_posix()} -- reuse it when it "
+            f"still fits. Fix what the output reports. {FINISH}"
         )
     return _framed(
-        f"PR #{failure.number} in {failure.project} is stuck: {failure.reason}. "
-        f"Failing: {_ids(failure.signature)}. {_logs(failure)} "
-        f"This worktree is checked out on the PR head branch {failure.head} with its "
-        f"upstream set, so a bare {vcs} push lands on the PR. "
-        f"Merge origin/{failure.base} in, fix what the gate is failing on, run the "
-        "targeted tests and the linter, push, and stop: the gate runs on the push and the "
-        "fix pass reads it."
+        f"PR #{failure.number} in {failure.project} against origin/{failure.base} is stuck: "
+        f"{failure.reason}. Failing: {_ids(failure.signature)}. {_logs(failure)} "
+        f"This worktree is checked out on the PR head branch {failure.head}, already up "
+        "to date with its base. Fix what the gate is failing on, and nothing else about "
+        f"the PR. {FINISH}"
     )
 
 
@@ -135,20 +147,20 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
         "worktree, one directory per failure that uploaded any; for the rest, read the "
         "run at its URL."
         + (LEDGER_STEPS if any(f.kind == LEDGER for f in ordered) else "")
-        + f" This worktree is on the fresh branch {branch} off the default branch; when "
-        "the fix is green, ship it with the ship skill and say which of these it "
-        f"unblocks: {urls}. {OWN_DIFF}"
+        + f" This worktree is on the fresh branch {branch} off the default branch. Say in "
+        f"the intent which of these the fix unblocks: {urls}. {OWN_DIFF} {FINISH}"
     )
 
 
 # The upstream session's way out when a red PR's cause is its own diff: the default
 # branch is green, so nothing on a fresh branch off it can land on the PR. devkit #387
-# stopped here with the fix in plain view. `fix_cycle.own_branch` routes that shape to
-# the PR's branch first; this is what a session does when it arrives anyway.
+# stopped here with the fix in plain view. `fix_cycle.classify` routes a devkit PR to
+# its own branch first; this is what a session does when one arrives anyway. The pass
+# ships an intent from any worktree (`ship_intent.find_intents`), so it pushes this too.
 OWN_DIFF = (
     "A PR whose failure does not reproduce here is red on its own diff: fetch its head, "
-    "add a worktree on it, merge the default branch in, fix it there, run the targeted "
-    "tests and the linter, push to the PR, and name it in your report."
+    "add a worktree on it, fix it there and ship it with the ship skill from that "
+    "worktree, and name it in the intent here."
 )
 
 
@@ -159,8 +171,8 @@ def branch_prompt(failure: Failure, branch: str) -> str:
         f"origin/{failure.base} itself, at {failure.sha[:12] or 'its head'} ({failure.url}). "
         f"Failing: {_ids(failure.signature)}. {_logs(failure)} "
         f"This worktree is on the fresh branch {branch} off origin/{failure.base}, "
-        "so the failure reproduces here. Fix it, run the targeted tests and the linter, "
-        "and ship it with the ship skill; every PR against this base is red until it lands."
+        "so the failure reproduces here. Fix it; every PR against this base is red until "
+        f"the fix lands. {FINISH}"
     )
 
 
@@ -171,6 +183,6 @@ def nightly_prompt(failure: Failure, branch: str) -> str:
         f"origin/{failure.base}; issue #{failure.number} ({failure.url}) tracks it. "
         f"Failing: {_ids(failure.signature)}. {_logs(failure)} "
         f"This worktree is on the fresh branch {branch} off "
-        f"origin/{failure.base}. Fix it, run the targeted tests and the linter, and ship "
-        "it with the ship skill; the issue closes itself when the workflow next passes."
+        f"origin/{failure.base}. Fix it; the issue closes itself when the workflow next "
+        f"passes. {FINISH}"
     )
