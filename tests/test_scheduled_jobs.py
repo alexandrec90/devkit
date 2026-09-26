@@ -331,6 +331,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/rc_machine.py": "the tasklist, taskkill and server launch that pass makes",
     "scripts/reap-stale.py": "devkit-reap-stale runs it every 15 minutes",
     "scripts/reap_machine.py": "the process listing, tasklist and taskkill that pass makes",
+    "scripts/session_trees.py": "the git, gh and compose down that pass makes per session tree",
     "scripts/tray.py": "devkit-tray runs it from logon until logoff",
     "scripts/tray_state.py": "the tray asks it what to draw, on every poll",
     "scripts/schedule_health.py": "the schtasks the tray spawns every poll, and the status pass",

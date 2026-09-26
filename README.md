@@ -1024,7 +1024,13 @@ does not own, once nothing active is under it; a dev server whose ancestry reach
 living editor, terminal or agent. Interactive sessions carry no `--sdk-url` and are never
 candidates; anything whose activity cannot be read is kept. `status` prints every finding
 with its verdict and touches nothing; `maintain` acts, and appends each process it stopped
-to `logs/reap-stale.history.log`, which is never rewritten. The settings sit beside
+to `logs/reap-stale.history.log`, which is never rewritten.
+
+The same pass reaps a session worktree (`.claude/worktrees/<name>`, and Codex's) whose PR
+merged at the tree's `HEAD`, once it is clean and no transcript has moved in it for
+twelve hours, taking down the compose project it named in its `.env` with it
+(`scripts/session_trees.py`). `worktree.py reconcile` covers only the box tier, and a fixer's
+stack otherwise outlived its PR by days. The settings sit beside
 `devkit.remoteControl`:
 
 ```jsonc
@@ -1387,7 +1393,9 @@ webhook rules stay where they are.
 
 > **Adopting this in an existing project takes two `--pull` runs.** The tool iterates the
 > `MANIFEST` it was imported with, so the first pull installs the new `sync-devkit.py`
-> and the second copies new entries and removes reviewed retired paths. Retirement never
+> and the second copies new entries and removes reviewed retired paths. The list itself
+> is `scripts/devkit_manifest.py`; a second pull that finds it missing reads it from
+> `--src` / `$DEVKIT_DIR`, and refuses to run without one rather than on an empty list. Retirement never
 > deletes project-owned siblings such as `state.json` or `known-fixes.md`.
 
 Each pull also writes `DEVKIT_FILES.json`, a path-to-hash receipt for the files it

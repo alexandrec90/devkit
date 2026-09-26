@@ -123,6 +123,29 @@ PUSH_STAGE_NOTICE = (
     "  pre-commit holds each hook's output until it exits, so expect a quiet wait.",
     "  Deliberate WIP push: SKIP=devkit-push-gate git push",
 )
+# The notice for a project whose config does not wire `devkit-push-gate`. The one above
+# promised lint and tests in carameli, whose push stage ran five fast hooks and neither,
+# so a green push read as a green PR gate.
+PUSH_STAGE_NOTICE_NO_GATE = (
+    "[devkit] pre-push: running this project's pre-push hooks over the whole tree.",
+    "  Its .pre-commit-config.yaml wires no devkit-push-gate, so the PR gate's lint and",
+    "  tests are not among them: a push that passes here can still go red in CI.",
+)
+PUSH_GATE_ID = "devkit-push-gate"
+
+
+def push_stage_notice(root: Path) -> tuple[str, ...]:
+    """What to print before the push stage: the gate's notice only where the gate is wired.
+
+    A substring test over the config rather than a YAML parse -- stdlib only, and the id
+    is distinctive enough that a comment naming it is the only false reading, which errs
+    toward the longer notice.
+    """
+    try:
+        text = (root / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return PUSH_STAGE_NOTICE_NO_GATE
+    return PUSH_STAGE_NOTICE if PUSH_GATE_ID in text else PUSH_STAGE_NOTICE_NO_GATE
 
 
 def _push_publishes_nothing(raw_updates: str) -> bool:
@@ -171,7 +194,7 @@ def _run_pre_commit_framework(
         # result. This is the only notice that can be printed before that wait begins,
         # and the wait is what gets misread: a push that is working looks exactly like a
         # push that is wedged, and the answer to the second one is another push.
-        for line in PUSH_STAGE_NOTICE:
+        for line in push_stage_notice(root):
             emit(line)
     # `stream=True`: relay the framework's output as it is produced rather than after it
     # finishes. Nothing here parses it -- only the exit code is read -- and the push stage

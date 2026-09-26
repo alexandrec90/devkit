@@ -504,12 +504,12 @@ def vendor_harness(plan: Plan, dry_run: bool) -> None:
     reimplementing the copy — so the generator can never disagree with the tool that
     drift-checks the result.
     """
-    bootstrap = plan.root / "scripts" / "sync-devkit.py"
-    if not dry_run:
-        bootstrap.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(DEVKIT_ROOT / "scripts" / "sync-devkit.py", bootstrap)
-    else:
-        print("  write   scripts/sync-devkit.py    (bootstrap copy)")
+    for name in ("sync-devkit.py", "devkit_manifest.py"):  # the tool, and the list it reads
+        if not dry_run:
+            (plan.root / "scripts").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(DEVKIT_ROOT / "scripts" / name, plan.root / "scripts" / name)
+        else:
+            print(f"  write   scripts/{name}    (bootstrap copy)")
     run(
         [
             sys.executable,
