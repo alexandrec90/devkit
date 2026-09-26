@@ -160,6 +160,40 @@ def test_off_neither_updates_nor_judges_beyond_the_exit(watched, tmp_path):
     assert watched["updates"] == 0
 
 
+def test_a_pass_whose_code_moved_is_updated_and_run_once_more(watched, monkeypatch):
+    """carameli #395 was misrouted by a pass that started 21s before the routing fix
+    merged. The pass now holds its sessions and exits STALE; the rerun routes them."""
+    outcomes = [(watchdog.STALE, "held     carameli #395\n"), (0, "sent     carameli #395\n")]
+    timeouts: list = []
+
+    def run(argv, timeout=watchdog.TIMEOUT):
+        timeouts.append(timeout)
+        return outcomes.pop(0)
+
+    monkeypatch.setattr(watchdog, "run_pass", run)
+    assert watchdog.watch(watched["argv"], NOW) == 0
+    assert watched["updates"] == 2 and outcomes == []
+    assert timeouts[1] <= watchdog.TIMEOUT, "the rerun spends what is left, never a fresh 25 min"
+    assert findings(watched["devkit"]) == [], "a stale pass is the pass reporting, not failing"
+    record = (watched["devkit"] / watchdog.ARTIFACT).read_text(encoding="utf-8")
+    assert "the pass's code moved under it -- self-update current; ran it again" in record
+
+
+def test_a_stale_pass_is_not_rerun_past_the_fires_budget_or_off_its_branch(watched, monkeypatch):
+    runs: list = []
+    first = (watchdog.STALE, "held\n")
+    monkeypatch.setattr(watchdog, "run_pass", lambda *a: runs.append(a) or first)
+    monkeypatch.setattr(watchdog, "MIN_RERUN", watchdog.TIMEOUT * 2)
+    notes: list[str] = []
+    assert watchdog.run_current([], "dispatch", notes) == first and len(runs) == 1
+    assert "the next fire routes" in notes[0] and watched["updates"] == 0
+    monkeypatch.setattr(watchdog, "MIN_RERUN", _dt.timedelta(0))
+    monkeypatch.setattr(watchdog, "self_update", lambda root: (False, "on agent/x, not main"))
+    assert watchdog.run_current([], "dispatch", notes) == first and len(runs) == 2
+    assert notes[1].endswith("self-update on agent/x, not main; not rerun")
+    assert watchdog.run_current([], "off", notes) == first and len(notes) == 2
+
+
 def test_a_checkout_that_cannot_be_kept_current_is_filed(watched, monkeypatch):
     monkeypatch.setattr(
         watchdog, "self_update", lambda root: (False, "the checkout is on agent/x, not main")

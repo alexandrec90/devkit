@@ -249,8 +249,11 @@ def render(items: list[Item]) -> str:
         if seen_on:
             lines.append(f"  host   {' '.join(seen_on)}")
         lines.append(f"  detail {head.detail}")
-        if head.fields.get("version", "").strip(" -"):
-            lines.append(f"  version {head.fields['version']}")
+        # Where the skill's §1 table says diagnosis starts. Left out, a sweep greps the
+        # raw ledger for a transcript line the grouped report had already read past.
+        for name in ("command", "evidence", "version"):
+            if head.fields.get(name, "").strip(" -"):
+                lines.append(f"  {name:<6} {head.fields[name]}")
         if len(bucket) > 1:
             lines.append(f"  ids    {' '.join(i.id for i in bucket)}")
         lines.append("")
