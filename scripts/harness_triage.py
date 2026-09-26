@@ -54,6 +54,11 @@ TRIAGE_EVENTS = (
     # how long it has been going -- which is how the nightly release failed three times
     # unnoticed. Here it is append-only and open until something resolves it.
     "scheduled-job-failed",
+    # The fix pass's own dead ends -- a step that crashed, a push that keeps failing, a
+    # problem fixers could not move -- and the friction it reads out of session
+    # transcripts. Both are `fix_findings.py`'s; here because this list is the backlog.
+    "fix-pass-finding",
+    "session-friction",
 )
 RESOLVED_EVENT = "triage-resolved"
 
