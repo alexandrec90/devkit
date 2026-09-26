@@ -109,6 +109,21 @@ TEST_RUN = re.compile(
     r"uv\s+run\s+pytest|pytest)(?=\s|$)(?P<rest>[^|;&>\n]*)",
     re.M,
 )
+# A command that changes what the next test run sees without touching a file: a service
+# started, dependencies installed, a database created, the branch moved. A run after one
+# of these reads something new, so it is not a rerun (eda7aed7: a carameli session
+# started its db, then brought compose up, between three runs of one test file).
+ENVIRONMENT_CHANGE = re.compile(
+    r"(?:^|&&?|\|\|?|;)\s*(?:"
+    r"docker\s+(?:compose\s+)?(?:up|start|restart|run|build|create)\b|"
+    r"(?:npm|pnpm|yarn)\s+(?:ci|install|i)\b|"
+    r"(?:\S*python\S*\s+-m\s+)?pip\s+install\b|uv\s+(?:sync|pip|venv|lock)\b|"
+    r"psql\b|createdb\b|\S*python\S*\s+\S*(?:bootstrap|worktree)\.py\b|"
+    r"git\s+(?:checkout|switch|merge|pull|reset|rebase|cherry-pick|apply|stash)\b|"
+    r"sed\s+-i\b"
+    r")",
+    re.M,
+)
 NARROWING_FLAGS = frozenset(
     {"--changed", "--target", "-k", "--lf", "--last-failed", "--help", "-h"}
     | {"--co", "--collect-only", "--version", "--sf"}
@@ -233,7 +248,7 @@ class _Session:
             self.note(
                 "asked-user", "a dispatched session asked a question nobody would answer", event
             )
-        if event.tool in EDIT_TOOLS:
+        if event.tool in EDIT_TOOLS or ENVIRONMENT_CHANGE.search(event.command):
             self.unchanged.clear()
         elif TEST_RUN.search(event.command):
             # Only a test run: reading `git status` thrice between edits is not waste.
