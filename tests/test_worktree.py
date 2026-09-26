@@ -1708,19 +1708,30 @@ def test_the_frontend_toolchain_is_installed_alongside_the_python_one():
 
 
 def test_the_npm_program_name_follows_the_platform():
-    """A bare `npm` is unrunnable as argv on Windows -- npm is `npm.cmd`, a batch shim,
-    and argv resolution does not consult PATHEXT. The step then dies with WinError 2,
-    which `run_provision` downgrades to a `[warn]`, so the box comes out announcing
-    itself provisioned with no `node_modules` and no frontend linter in it."""
-    assert worktree.npm_executable(windows=True) == "npm.cmd"
-    assert worktree.npm_executable(windows=False) == "npm"
+    """A bare `npm` is unrunnable as argv on Windows -- argv resolution does not consult
+    PATHEXT. The step then dies with WinError 2, which `run_provision` downgrades to a
+    `[warn]`, so the box comes out announcing itself provisioned with no `node_modules`
+    and no frontend linter in it."""
+    assert worktree.npm_executable(windows=True, which=lambda _name: None) == "npm.cmd"
+    assert worktree.npm_executable(windows=False, which=lambda _name: None) == "npm"
 
 
-def test_the_frontend_step_is_runnable_on_windows():
+def test_windows_npm_is_whatever_resolves_on_path_exe_included():
+    """This machine's nvm ships `npm.exe` and no `npm.cmd`, so the hard-coded `npm.cmd`
+    died with the very WinError 2 it was written to cure (a carameli box, 2026-09-26)."""
+    exe = "C:/nvm/.nodejs/npm.exe"
+    assert worktree.npm_executable(windows=True, which=lambda _name: exe) == exe
+    cmd = "C:/Program Files/nodejs/npm.CMD"
+    assert worktree.npm_executable(windows=True, which=lambda _name: cmd) == cmd
+
+
+def test_the_frontend_step_is_runnable_on_windows(monkeypatch):
     """The reversion check for the above: with a bare `npm` this is what shipped, and
     every Windows box silently lost eslint, tsc, stylelint and markdownlint."""
+    exe = "C:/nvm/.nodejs/npm.exe"
+    monkeypatch.setattr(worktree.shutil, "which", lambda _name: exe)
     steps = worktree.provision_steps({"uv.lock"}, frontend_dir="frontend", windows=True)
-    assert steps[-1].argv[0] == "npm.cmd"
+    assert steps[-1].argv[0] == exe
 
 
 def test_a_project_with_no_frontend_tier_runs_no_npm():

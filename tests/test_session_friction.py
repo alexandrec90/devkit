@@ -315,6 +315,26 @@ def test_the_same_test_run_three_times_with_no_edit_between_is_a_rerun():
     assert classes([call("git status", str(n)) for n in range(4)]) == [], "reading is not a rerun"
 
 
+def test_a_rerun_after_changing_the_environment_is_not_a_rerun():
+    """eda7aed7: the carameli session started its db between the first and second run and
+    brought compose up before the third. Each run read something new; the friction was the
+    missing database, which the session reported itself."""
+    run = ".venv/Scripts/python scripts/run-tests.py tests/unit/test_pointers.py"
+    rows = [
+        call(f"{run} 2>&1 | tail -25", "1"),
+        call("docker start carameli-db-1 carameli-redis-1 2>&1", "2"),
+        call(f"{run} 2>&1 | tail -12; head -c 2000 logs/test-failures.log", "3"),
+        call("docker stop carameli-db-1; docker compose up -d db redis 2>&1 | tail -8", "4"),
+        call(f"{run} 2>&1 | tail -8; head -c 3000 logs/test-failures.log", "5"),
+    ]
+    assert classes(rows) == []
+    for change in ("npm ci --prefix frontend", "uv sync", 'psql -c "CREATE DATABASE x"'):
+        rows = [call(run, "1"), call(change, "2"), call(run, "3"), call(run, "4")]
+        assert classes(rows) == [], change
+    rows = [call(run, "1"), call("docker ps -a", "2"), call(run, "3"), call(run, "4")]
+    assert classes(rows) == ["rerun-unchanged"], "looking at docker changes nothing"
+
+
 def test_a_patch_script_failing_its_own_assert_is_friction():
     out = 'Traceback (most recent call last):\n  File "<stdin>", line 96, in <module>\nAssertionError: t1'
     assert classes([call("python - <<'EOF'", "1"), result(out, "1")]) == ["patch-failed"]

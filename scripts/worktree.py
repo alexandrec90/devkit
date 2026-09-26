@@ -1099,22 +1099,21 @@ def venv_python(windows: bool) -> str:
     return ".venv/Scripts/python.exe" if windows else ".venv/bin/python"
 
 
-def npm_executable(windows: bool) -> str:
-    """npm's program name on this platform.
+def npm_executable(windows: bool, which: Callable[[str], str | None] | None = None) -> str:
+    """npm's program for an argv step on this platform: a path on Windows when one resolves.
 
-    On Windows npm ships as `npm.cmd`, a batch shim; there is no `npm.exe`. These steps
-    run as argv with no shell — deliberately, so the ladder can be asserted — and argv
-    resolution does not consult PATHEXT, so a bare `npm` raises `[WinError 2] The system
-    cannot find the file specified`.
+    These steps run as argv with no shell, and argv resolution does not consult PATHEXT,
+    so a bare `npm` raises `[WinError 2]` on Windows; `shutil.which` does consult it. The
+    name was hard-coded to `npm.cmd` once, and an nvm layout that ships `npm.exe` and no
+    `.cmd` died with the same WinError 2 (roguelike and carameli boxes, 2026-09-26).
+    `npm.cmd` stays only as the fallback when nothing resolves.
 
-    That failure was *silent in effect*: `run_provision` reports a step it could not
-    start as a `[warn]` and keeps the box, so every Windows box came out with no
-    `node_modules` while still announcing itself provisioned. Every frontend check —
-    eslint, tsc, stylelint, markdownlint — was then unrunnable in a box, so `/ship`'s
-    changed-scope lint gate could not catch a frontend or Markdown defect locally and
-    left it to CI.
+    That failure is *silent in effect*: `run_provision` reports a step it could not start
+    as a `[warn]` and keeps the box, so the box comes out with no `node_modules` while
+    still announcing itself provisioned, and every frontend check -- eslint, tsc,
+    stylelint, markdownlint -- is unrunnable in it.
     """
-    return "npm.cmd" if windows else "npm"
+    return ((which or shutil.which)("npm") or "npm.cmd") if windows else "npm"
 
 
 def venv_step(python_version: str = "") -> ProvisionStep:
