@@ -171,6 +171,84 @@ def test_a_branch_held_outside_the_tier_is_refused_with_the_directory_named(
     assert fix_prs.aw.TIER_SUMMARY in refused
 
 
+def stray_listing(monkeypatch, tmp_path, stray: dict[tuple[str, ...], tuple[int, str]]):
+    """A checkout whose `agent/x` is held by a scratchpad tree answering from `stray`.
+
+    Returns `(checkout, held, calls)`: `calls` is every `(dir, argv)` git was asked.
+    """
+    checkout = tmp_path / "carameli"
+    checkout.mkdir(exist_ok=True)
+    held = tmp_path / "scratchpad" / "unwire-carameli"
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    answers = {
+        checkout.name: {
+            ("worktree", "list", "--porcelain"): (0, listing((held.as_posix(), "agent/x"))),
+            ("worktree", "remove", str(held)): (0, ""),
+        },
+        held.name: stray,
+    }
+
+    def git_for(path):
+        inner = fake_git(answers.get(Path(path).name, {}))
+
+        def git(*args):
+            calls.append((Path(path).name, args))
+            return inner(*args)
+
+        return git
+
+    monkeypatch.setattr(fix_prs.sweep, "git_for", git_for)
+    monkeypatch.setattr(fix_prs.worktree, "live_boxes", lambda root: {})
+    return checkout, held, calls
+
+
+CLEAN_AND_PUSHED = {
+    ("status", "--porcelain"): (0, ""),
+    ("rev-list", "--count", "agent/x@{u}..agent/x"): (0, "0\n"),
+}
+
+
+def test_a_clean_pushed_stray_tree_is_released_so_the_fixer_can_cut_its_own(monkeypatch, tmp_path):
+    """A session's scratchpad tree outlives it and holds the PR branch; with nothing in it
+    the remote lacks, refusing every later fixer on the directory alone left the PR red."""
+    checkout, held, calls = stray_listing(monkeypatch, tmp_path, CLEAN_AND_PUSHED)
+    assert fix_prs.existing_tree(checkout, "agent/x") == (None, "")
+    assert ("carameli", ("worktree", "remove", str(held))) in calls
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {("status", "--porcelain"): (0, " M app.py\n")},
+        {("status", "--porcelain"): (1, "")},
+        {("rev-list", "--count", "agent/x@{u}..agent/x"): (0, "2\n")},
+        {("rev-list", "--count", "agent/x@{u}..agent/x"): (128, "")},
+    ],
+    ids=["dirty", "status-unreadable", "unpushed", "no-upstream"],
+)
+def test_a_stray_tree_with_work_or_an_unknown_is_refused_not_removed(monkeypatch, tmp_path, change):
+    checkout, held, calls = stray_listing(monkeypatch, tmp_path, {**CLEAN_AND_PUSHED, **change})
+    tree, refused = fix_prs.existing_tree(checkout, "agent/x")
+    assert tree is None
+    assert held.as_posix() in refused
+    assert not [args for _, args in calls if args[:2] == ("worktree", "remove")]
+
+
+def test_a_stray_tree_git_will_not_remove_stays_a_refusal(monkeypatch, tmp_path):
+    """No `--force`: a directory a live process sits in is Windows' refusal, and it stands."""
+    checkout, held, _calls = stray_listing(monkeypatch, tmp_path, CLEAN_AND_PUSHED)
+    real = fix_prs.sweep.git_for
+
+    def failing_remove(path):
+        git = real(path)
+        return lambda *a: fake_git({})(*a) if a[:2] == ("worktree", "remove") else git(*a)
+
+    monkeypatch.setattr(fix_prs.sweep, "git_for", failing_remove)
+    tree, refused = fix_prs.existing_tree(checkout, "agent/x")
+    assert tree is None
+    assert held.as_posix() in refused
+
+
 def test_a_codex_worktree_on_that_branch_is_reused_too(monkeypatch, tmp_path):
     """The reuse rule is about who cut the tree, not about where it sits. A Codex
     worktree of this checkout is as adoptable as a Claude one -- and refusing it would
@@ -785,7 +863,7 @@ def test_a_nightly_decision_opens_in_its_own_project_off_its_default_branch(monk
     assert cut == [
         (
             root / "carameli",
-            "agent/fix-nightly-" + _dt.datetime.now(_dt.UTC).strftime("%m%d"),
+            "agent/fix-nightly-" + _dt.date.today().strftime("%m%d"),
             "master",
         )
     ]
