@@ -107,6 +107,14 @@ FAILED_LINE = re.compile(r"^FAILED (\S+)")
 # ruff (`path:1:2: E501 ...`) and mypy (`path:1: error: ...`) both start with the file
 # and a line; the file is the stable part.
 LINT_LINE = re.compile(r"^(\S+?\.\w+):\d+(?::\d+)?: (?:error|[A-Z]{1,4}\d{3,4})\b")
+# vitest and jest: ` FAIL  src/a.test.ts > suite > case`, or the file alone when it
+# failed to load. The id keeps vitest's ` > ` path, which is as stable as pytest's `::`.
+JS_FAIL_LINE = re.compile(r"^\s*FAIL\s+(\S+\.(?:test|spec)\.[cm]?[jt]sx?(?: > .+)?)\s*$")
+# What `gh run view --log-failed` puts before each line -- `job<TAB>step<TAB>timestamp ` --
+# and the colour codes a runner leaves in. Stripped before the patterns above are tried,
+# since every one of them is anchored at the line's start.
+LOG_PREFIX = re.compile(r"^[^\t]*\t[^\t]*\t\d{4}-\d\d-\d\dT[\d:.]+Z ?")
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 @dataclass(frozen=True)
@@ -147,14 +155,20 @@ class Decision:
 
 def signature_from_logs(texts: Iterable[str]) -> tuple[str, ...]:
     """The failing test ids and lint findings across every artifact, sorted, deduped."""
-    found: set[str] = set()
-    for text in texts:
-        for line in str(text).splitlines():
-            if failed := FAILED_LINE.match(line):
-                found.add(failed.group(1))
-            elif lint := LINT_LINE.match(line):
-                found.add(f"lint {lint.group(1)}")
+    found = {entry for text in texts for line in str(text).splitlines() if (entry := _entry(line))}
     return tuple(sorted(found))
+
+
+def _entry(raw: str) -> str:
+    """The signature entry one log line names, past a job log's prefix; "" for none."""
+    line = ANSI.sub("", LOG_PREFIX.sub("", raw))
+    if failed := FAILED_LINE.match(line):
+        return failed.group(1)
+    if js := JS_FAIL_LINE.match(line):
+        return js.group(1).strip()
+    if lint := LINT_LINE.match(line):
+        return f"lint {lint.group(1)}"
+    return ""
 
 
 def signature_from_jobs(jobs: Iterable[dict]) -> tuple[str, ...]:
@@ -208,8 +222,9 @@ def vendored_paths() -> frozenset[str] | None:
 
 
 def entry_path(entry: str) -> str:
-    """The file a signature entry names: `lint a.py` and `a.py::test_b` are both `a.py`."""
-    return entry.removeprefix("lint ").split("::", 1)[0]
+    """The file a signature entry names: `lint a.py`, `a.py::test_b` and `a.test.ts > b`
+    name `a.py`, `a.py` and `a.test.ts`."""
+    return entry.removeprefix("lint ").split("::", 1)[0].split(" > ", 1)[0]
 
 
 def in_vendored_tier(entry: str, prefixes: tuple[str, ...] = (VENDORED_TESTS,)) -> bool:

@@ -299,9 +299,8 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
         one.branch,
         "main",
     )
-    # A shipped PR is a prompt-driven change: the vendored auto-merge workflow lands any
-    # labelled PR once the gate passes, so the label would make CI the only reviewer.
-    assert ship_intent.sweep.AUTOMERGE_LABEL not in plan.pr_labels
+    # A person's tree carries no fix-pass origin mark, so its PR waits for them: the
+    # vendored auto-merge workflow lands any labelled PR once the gate passes.
     assert plan.pr_labels == ()
     state = ship_intent.read_state(one.tree)
     assert state["stage"] == ship_intent.SHIPPED
@@ -360,6 +359,21 @@ def test_an_intent_already_shipped_with_a_clean_tree_is_not_shipped_twice(tmp_pa
     again = Runner(porcelain="")
     assert ship_intent.ship_one(one, "py", "main", again, gh_ok, NOW).stage == ship_intent.SKIPPED
     assert again.verbs() == ["git status"]
+
+
+def test_an_intent_left_over_from_a_ship_is_set_aside_and_said_once(tmp_path, monkeypatch):
+    """The first supervised pass found ten: intents whose PRs had merged, from before the
+    pass consumed what it shipped, re-read and re-reported on every pass -- and a `plan`
+    pass called each "would ship". Set aside, the next pass never sees them."""
+    one = intent(tmp_path)
+    ship_intent.write_state(one.tree, {"stage": ship_intent.SHIPPED, "intent": one.digest})
+    (one.tree / ship_intent.INTENT_FILE).write_text("S\n", encoding="utf-8")
+    assert ship_intent.is_spent(one, Runner(porcelain=""))
+    assert not ship_intent.is_spent(one, Runner(porcelain=" M a.py\n")), "edits since are new work"
+    outcome = ship_intent.ship_one(one, "py", "main", Runner(porcelain=""), gh_ok, NOW)
+    assert outcome.stage == ship_intent.SKIPPED and "set aside" in outcome.detail
+    assert not (one.tree / ship_intent.INTENT_FILE).exists()
+    assert (one.tree / ship_intent.SHIPPED_FILE).read_text(encoding="utf-8") == "S\n"
 
 
 def test_a_rewritten_intent_on_a_clean_shipped_tree_is_nothing_to_ship(tmp_path, monkeypatch):
@@ -466,7 +480,16 @@ def test_a_refusal_with_no_test_ids_is_signed_by_its_step(tmp_path):
         one.tree, {"stage": ship_intent.REFUSED, "step": "fixers", "output": "Executable not found"}
     )
     failure = ship_intent.refusal_failure(ship_intent.Outcome(one, ship_intent.REFUSED), "main")
-    assert failure.signature == ("fixers refused",)
+    assert failure.signature == ("fixers refused: Executable not found",), (
+        "the why is part of it: bare 'fixers refused' hid the cause, and no toolchain "
+        "marker in fix_cycle.HARNESS_REFUSALS could ever match it"
+    )
+
+
+def test_a_refusal_signature_is_stable_across_two_refusals_of_one_kind():
+    one = ship_intent.refusal_line("hook failed at line 412 in deadbeef1234: Failed")
+    two = ship_intent.refusal_line("hook failed at line 97 in 0123abcd9876: Failed")
+    assert one == two
 
 
 @pytest.mark.parametrize("branch,shippable", [("agent/x-0919", True), ("main", False)])
@@ -535,3 +558,66 @@ def test_a_refusal_names_the_worktree_the_fixer_opens_in(tmp_path):
     )
     failure = ship_intent.refusal_failure(ship_intent.Outcome(one, ship_intent.REFUSED), "main")
     assert Path(failure.tree) == one.tree
+
+
+def test_a_refusal_is_named_by_the_line_that_says_why():
+    """ "fixers refused" was the whole signature, and a session had to open
+    `ship-state.json` to learn the branch name was the objection."""
+    output = "check yaml....Passed\nship: 'flag-x' is not a namespaced task branch; refusing to ship it.\n"
+    assert ship_intent.refusal_line(output).startswith(
+        "ship: 'flag-x' is not a namespaced task branch"
+    )
+    assert ship_intent.refusal_line("a\nlast words\n") == "last words"
+    assert ship_intent.refusal_line("") == ""
+    assert len(ship_intent.refusal_line("x Failed " + "y" * 500)) == 160
+
+
+def test_a_refusal_nothing_has_changed_since_is_not_run_again(tmp_path):
+    """The third supervised run re-ran carameli's whole commit stage on every pass for a
+    refusal held behind a red harness, to the same answer each time."""
+    one = intent(tmp_path)
+    ship_intent.write_state(
+        one.tree,
+        {
+            "stage": ship_intent.REFUSED,
+            "step": "fixers",
+            "output": "Detect secrets....Failed",
+            "intent": one.digest,
+            "tree": ship_intent._digest(" M a.py\n"),
+        },
+    )
+    run = Runner(porcelain=" M a.py\n")
+    outcome = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert (
+        outcome.stage == ship_intent.REFUSED
+        and outcome.detail == "fixers: Detect secrets....Failed"
+    )
+    assert run.verbs() == ["git status"], "no fixers, no commit: the stored refusal stands"
+    moved = Runner(porcelain=" M a.py\n M b.py\n")
+    assert ship_intent.still_refused(one, ship_intent.read_state(one.tree), " M b.py\n") is None
+    ship_intent.ship_one(one, "py", "main", moved, gh_ok, NOW)
+    assert "git commit" in moved.verbs() or "scripts/ship.py" in " ".join(moved.verbs()), (
+        "an edit is a new try"
+    )
+    reworded = intent(tmp_path, body="Other words.")
+    assert (
+        ship_intent.still_refused(reworded, ship_intent.read_state(one.tree), " M a.py\n") is None
+    )
+
+
+def test_a_pr_from_a_tree_the_pass_cut_merges_itself_and_a_persons_waits(tmp_path, monkeypatch):
+    """Fixer PRs merge once green; only a person's PR waits for a person. The mark is the
+    tree's origin, not the dispatch stamp: a fixer sent to repair a person's PR stamps
+    that person's tree, and `ensure_pr` labels a reused PR too."""
+    plans = []
+    monkeypatch.setattr(
+        ship_intent.sweep, "ensure_pr", lambda gh, plan: plans.append(plan) or ("u", True, "")
+    )
+    fixer = intent(tmp_path / "fixer")
+    (fixer.tree / ship_intent.fix_reports.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
+    ship_intent.ship_one(fixer, "py", "main", Runner(), gh_ok, NOW)
+    person = intent(tmp_path / "person")
+    ship_intent.fix_reports.stamp(person.tree, "pr:devkit:404:a:d:dispatch", "n", NOW)
+    ship_intent.ship_one(person, "py", "main", Runner(), gh_ok, NOW)
+    assert [p.pr_labels for p in plans] == [(ship_intent.sweep.AUTOMERGE_LABEL,), ()]
+    assert ship_intent.labels_for(person.tree) == ()

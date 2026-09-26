@@ -31,6 +31,12 @@ carries something a consumer cannot otherwise reach.** That is the intended path
 `scripts/install-release-schedule.py` registers it; `logs/scheduled-devkit-release.log`
 is its account of every night, including the quiet ones.
 
+**The fix pass starts the same run between nights** (`scripts/fix_release.py`), once
+devkit's own `main` is green and no release PR is already up, so a merged vendored fix
+does not wait for 02:00 while consumers stay red on it. It never waits for the run;
+the `release` line in `logs/fix-pass.log` says what it did, and
+`logs/fix-pass-devkit-release.log` is the run's own record.
+
 The predicate is `release_pipeline.release_needed`: the diff from the newest tag to
 `origin/main`, restricted to the two tiers a consumer actually receives — the vendored
 `MANIFEST` and the published pre-commit channel (`.pre-commit-hooks.yaml`,

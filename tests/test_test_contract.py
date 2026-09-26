@@ -59,6 +59,12 @@ COVERED_BY: dict[str, tuple[str, str]] = {
         "tests/test_precommit_hooks.py",
         "same module as its two siblings, for the same reason",
     ),
+    "devkit_manifest.py": (
+        "scripts/hooks/tests/test_sync_devkit.py",
+        "data only: the path lists cut out of sync-devkit.py, which re-exports them, so "
+        "what can go wrong with a list is what the tool does with it -- tested there, and "
+        "vendored with it, where a devkit-only test module would not follow",
+    ),
     "fix_trees.py": (
         "tests/test_fix_prs.py",
         "split out of fix-prs.py along a section header; its tests drive the same fake "
@@ -68,6 +74,16 @@ COVERED_BY: dict[str, tuple[str, str]] = {
         "tests/test_self_hosting.py",
         "the wrapper's one behaviour is that it propagates the wrapped exit code, and "
         "that is asserted beside the check that it stays byte-identical to the template",
+    ),
+    "fix_send.py": (
+        "tests/test_fix_pass.py",
+        "the dispatch half was split out of fix-pass.py at its file_lines ceiling, and "
+        "is asserted through the pass that calls it, as it was before the split",
+    ),
+    "session_transcripts.py": (
+        "tests/test_session_friction.py",
+        "the transcript reader was split out of session_friction.py, and its events, "
+        "cursors and discovery are asserted through the detectors that consume them",
     ),
 }
 

@@ -8,7 +8,7 @@ for thousands of times, and a paragraph nobody reads costs exactly as much as on
 saves the session an hour.
 
 devkit already retired one attempt at this (`.claude/skills/audit-claude-md/SKILL.md`,
-in `sync-devkit.py`'s `_RETIRED_CLAUDE_PATHS`). It failed because it was a checklist
+in `devkit_manifest.py`'s `_RETIRED_CLAUDE_PATHS`). It failed because it was a checklist
 with no measurement: it asked whether a file was "under 200 lines", told the agent to
 "highlight at least 3 lines that can be pruned", and had no idea which files a session
 actually loads. A quota produces cuts whether or not any are warranted, and a line
@@ -17,7 +17,7 @@ tier**, because the tier is the whole decision â€” see `TIERS`.
 
 It reads. It never edits: the judgment about which paragraph is inert lives in the
 `prune-instructions` skill, and the one about which file may be edited at all lives in
-`sync-devkit.py`'s `MANIFEST` (a vendored file edited in a consumer is drift, not a
+`devkit_manifest.py`'s `MANIFEST` (a vendored file edited in a consumer is drift, not a
 cleanup). `vendored` on each `Doc` carries that answer to the caller.
 """
 
@@ -160,7 +160,7 @@ def sections(text: str) -> list[tuple[str, int]]:
 
 
 def manifest_paths(devkit_root: Path) -> frozenset[str]:
-    """The vendored set, read from `sync-devkit.py` rather than restated.
+    """The vendored set, read from `devkit_manifest.py` rather than restated.
 
     A vendored file is byte-compared against upstream, so editing one in a consuming
     project is reported as drift by that project's PR gate â€” the cleanup would land as
@@ -168,7 +168,7 @@ def manifest_paths(devkit_root: Path) -> frozenset[str]:
     which fails toward reporting nothing as vendored; the caller decides what that is
     worth, and `--check` treats an empty set as a reason to say so.
     """
-    source = devkit_root / "scripts" / "sync-devkit.py"
+    source = devkit_root / "scripts" / "devkit_manifest.py"
     try:
         text = source.read_text(encoding="utf-8")
     except OSError:

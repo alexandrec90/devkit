@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Install the recurring `fix-pass.py --scheduled` run as a Windows Scheduled Task.
 
+The task runs it through `fix-pass-watchdog.py`, which keeps the checkout current and
+repairs the pass when the pass itself cannot run; see that file.
+
 The fix pass is the half of shipping that no session does any more: it commits and
 pushes what a session left an intent for, opens the PR, reads what every gate said, and
 sends fixers -- harness first, then projects -- under a ledger and a daily cap. All of
@@ -66,7 +69,8 @@ WINDOWS = os.name == "nt"
 
 
 def pass_script(root: Path = REPO_ROOT) -> Path:
-    return root / "scripts" / "fix-pass.py"
+    """What the task runs: the watchdog, which runs the pass and outlives it failing."""
+    return root / "scripts" / "fix-pass-watchdog.py"
 
 
 windowless = devkit_schtasks.windowless

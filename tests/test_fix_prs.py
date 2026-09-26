@@ -930,8 +930,8 @@ def test_a_nightly_decision_opens_in_its_own_project_off_its_default_branch(monk
     assert cut == [
         (
             root / "carameli",
-            # The local date, as `tb.branch_name` reads it: UTC's is a day ahead every
-            # evening west of Greenwich, and this failed on exactly those evenings.
+            # Local, as `task_branch.branch_name` dates it: a UTC date here failed
+            # every push gate west of Greenwich for the hours after UTC midnight.
             "agent/fix-nightly-" + _dt.date.today().strftime("%m%d"),
             "master",
         )
@@ -1086,11 +1086,15 @@ def test_a_dispatch_stamps_the_worktree_with_the_key_it_is_recorded_under(monkey
     monkeypatch.setattr(fix_prs.tb, "detect_default_branch", lambda _git: "main")
     monkeypatch.setattr(fix_prs, "cut_fresh_tree", lambda *a: (fresh, "agent/fix"))
     decision = fix_plan.Decision(fix_plan.UPSTREAM, "one vendored failure", (failure(),))
-    assert fix_prs.dispatch_fresh(decision, root, claude, None, "upstream:1:k") == 0
+    assert fix_prs.dispatch_fresh(decision, root, claude, None, "upstream:1:k", "upstream:p") == 0
+    # The problem and the agent too: the pass matches a dead or blocked session back to
+    # the problem it answers, and reads a transcript only for a CLI that leaves one.
     assert fix_prs.fix_reports.read_stamp(fresh) == {
         "key": "upstream:1:k",
         "what": "one vendored failure",
         "when": fix_prs.fix_reports.read_stamp(fresh)["when"],
+        "problem": "upstream:p",
+        "agent": "claude",
     }
     unstamped = root / "carameli" / ".claude" / "worktrees" / "u"
     unstamped.mkdir(parents=True)
@@ -1368,3 +1372,24 @@ def test_the_parser_defaults_to_a_watchable_tab_and_offers_only_the_known_modes(
     )
     action = next(a for a in parser._actions if a.dest == "agent")
     assert sorted(action.choices) == sorted(fix_prs.AGENT_MODES)
+
+
+def test_a_tree_the_pass_cuts_is_marked_fixer_work_and_a_persons_tree_is_not(monkeypatch, root):
+    """What makes a fixer's PR merge itself: `dispatch_fresh` cut the tree. A fixer sent
+    onto a person's PR works in their tree and leaves no mark there."""
+    monkeypatch.setattr(fix_prs, "refresh_head", lambda *a: "")
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    capture_sessions(monkeypatch)
+    claude = agent_models.Launch("claude")
+    fresh = root / "devkit" / ".claude" / "worktrees" / "f"
+    fresh.mkdir(parents=True)
+    monkeypatch.setattr(fix_prs.tb, "detect_default_branch", lambda _git: "main")
+    monkeypatch.setattr(fix_prs, "cut_fresh_tree", lambda *a: (fresh, "agent/fix"))
+    decision = fix_plan.Decision(fix_plan.UPSTREAM, "n", (failure(),))
+    assert fix_prs.dispatch_fresh(decision, root, claude, None, "upstream:1:k", "p") == 0
+    assert (fresh / fix_prs.fix_reports.ORIGIN_FILE).is_file()
+    persons = root / "carameli" / ".claude" / "worktrees" / "p"
+    persons.mkdir(parents=True)
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (persons, ""))
+    assert fix_prs.dispatch_pr(failure(), root, claude, None, "pr:carameli:412:k", "p") == 0
+    assert not (persons / fix_prs.fix_reports.ORIGIN_FILE).exists()
