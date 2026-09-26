@@ -260,9 +260,12 @@ def shipped_labels(tmp_path, monkeypatch, *stamps: bool | None) -> tuple[str, ..
     for owns in stamps:
         ship_intent.fix_reports.stamp(one.tree, "k", "what", NOW, owns_branch=owns)
     plans = []
-    monkeypatch.setattr(
-        ship_intent.sweep, "ensure_pr", lambda gh, plan: plans.append(plan) or ("u", True, "")
-    )
+
+    def ensure_pr(gh, plan):
+        plans.append(plan)
+        return "u", True, ""
+
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", ensure_pr)
     assert ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW).stage == "shipped"
     return plans[0].pr_labels
 
