@@ -38,11 +38,9 @@ Running tests is optional, and the full suite is not yours to run — see
 `.claude/rules/session-scope.md`. The gate runs once, in CI, on the PR the fix pass opens
 for you; a red gate comes back as a fresh session with the failing tests named.
 
-**When you run them, run them in the project's environment, never the machine's
-`python`** — `uv run pytest <path>` where the project has a `uv.lock`. The machine
-interpreter is kept bare on purpose, because the hook scripts must survive one, so
-`python -m pytest` there fails with `No module named pytest`. The dev tools are the
-project's dev group, not a global install.
+**Run them in the project's environment, never the machine's `python`** — `uv run
+pytest <path>` where there is a `uv.lock`. The machine interpreter is bare on purpose, so
+`python -m pytest` there fails with `No module named pytest`.
 
 Instruction files — `CLAUDE.md`, `.claude/rules/*`, `.claude/skills/*` — are under this
 same mandate. See `.claude/rules/authoring.md`.
