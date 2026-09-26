@@ -2757,13 +2757,10 @@ def run_provision(
 ) -> tuple[bool, list[str]]:
     """Run the install ladder in the box. `(ok, notes)`; stops at the first failure.
 
-    Not fatal to the box. A box that exists but has no toolchain is still where the work
-    belongs — the edit has somewhere to land and the branch is cut — so a failed install
-    is reported and the box is kept. Deleting it would send the agent back to editing the
-    static checkout, which is the outcome this whole tier exists to prevent.
-
-    The timeout is generous because a cold `uv sync` on a large project is genuinely slow;
-    the guard hook never reaches this path (see `apply_new`'s `provision` argument).
+    Not fatal to the box: one with no toolchain is still where the work belongs, and
+    deleting it would send the agent back to the static checkout. But a failed step is
+    reported as FAILED, never a `[warn]`: that is what hid a dead `npm ci` for weeks.
+    The timeout is generous because a cold `uv sync` on a large project is slow.
     """
     notes: list[str] = []
     for step in steps:
@@ -2792,14 +2789,14 @@ def run_provision(
                     creationflags=sweep.NO_WINDOW,
                 )
         except subprocess.TimeoutExpired:
-            notes.append(f"[warn] provision: {step.label} timed out after {timeout:g}s")
+            notes.append(f"FAILED provision: {step.label} timed out after {timeout:g}s")
             return False, notes
         except OSError as exc:
-            notes.append(f"[warn] provision: {step.label} could not run ({exc})")
+            notes.append(f"FAILED provision: {step.label} could not run ({exc})")
             return False, notes
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-            notes.append(f"[warn] provision: {step.label} failed: {detail[-1] if detail else ''}")
+            notes.append(f"FAILED provision: {step.label} failed: {detail[-1] if detail else ''}")
             return False, notes
         notes.append(f"provisioned: {step.label}")
     return True, notes
@@ -5479,14 +5476,16 @@ def reap_argument_faults(box: str, every: bool, force: bool) -> list[str]:
 
 
 def render_provision(
-    box: str, steps: tuple[ProvisionStep, ...], applied: bool, notes: list[str]
+    box: str, steps: tuple[ProvisionStep, ...], applied: bool, notes: list[str], ok: bool = True
 ) -> str:
     if not steps:
         return (
             f"{box}: nothing to install — no uv.lock, requirements-dev.txt or pyproject.toml, "
             f"and no [python] install_command in .devkit.toml"
         )
-    lines = [f"{'Provisioned' if applied else 'Would provision'} {box}"]
+    # A headline of "Provisioned" over a failed step hid a dead `npm ci` for weeks.
+    verb = ("Provisioned" if ok else "FAILED to provision") if applied else "Would provision"
+    lines = [f"{verb} {box}"]
     for n, step in enumerate(steps, 1):
         lines.append(f"    {n}. {step.shell_command or ' '.join(step.argv)}")
     lines.extend(f"  {note}" for note in notes)
@@ -5707,7 +5706,7 @@ def _run_provision(args: argparse.Namespace) -> int:
         }
         print(json.dumps(payload, indent=2))
     else:
-        print(render_provision(name, steps, applied=not args.dry_run, notes=notes))
+        print(render_provision(name, steps, applied=not args.dry_run, notes=notes, ok=ok))
     return 0 if ok else 1
 
 

@@ -2956,6 +2956,37 @@ def test_provision_acts_by_default_and_plans_only_on_dry_run(workspace, monkeypa
     assert len(ran) == 2
 
 
+def test_a_failed_provision_does_not_print_provisioned(workspace, monkeypatch, capsys):
+    """carameli #395's tree: `npm ci` died with `[WinError 2]`, the command exited 1, and
+    the headline still read "Provisioned" -- which is what hid a dead step for weeks."""
+    root = workspace.parent
+    (root / "demo" / ".git").mkdir(parents=True)
+    step = worktree.ProvisionStep(label="npm ci (frontend)", argv=("npm", "ci"))
+    monkeypatch.setattr(worktree, "plan_provision", lambda path: (step,))
+    note = "FAILED provision: npm ci (frontend) could not run ([WinError 2])"
+    monkeypatch.setattr(worktree, "run_provision", lambda path, steps: (False, [note]))
+
+    assert worktree.main(["provision", "demo", "--workspace", str(workspace)]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("FAILED to provision demo")
+    assert "Provisioned" not in out and "[WinError 2]" in out
+
+
+def test_a_failed_install_step_says_failed_not_warn(tmp_path, monkeypatch):
+    """A box is kept when its install fails, but the note is what `new` prints under a
+    "Created" headline -- as a `[warn]` it read as optional and nobody acted on it."""
+
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    ok, notes = worktree.run_provision(tmp_path, (worktree.ProvisionStep("npm ci", ("npm", "ci")),))
+    assert ok is False
+    assert notes[0].startswith("FAILED provision: npm ci") and "[warn]" not in notes[0]
+    rendered = worktree.render_provision("demo", (worktree.ProvisionStep("x", ("x",)),), True, [])
+    assert rendered.startswith("Provisioned demo")
+
+
 def test_the_verbs_that_change_the_workspace_still_plan_by_default():
     parser = argparse.ArgumentParser()
     worktree.add_common_args(parser)
