@@ -14,7 +14,9 @@ vendored everywhere and change least.
    checkout is fast-forwarded to `origin/<default>` -- only when it is on that branch,
    clean, and not a linked worktree. When it cannot be, that is filed: the pass is
    running stale code, and nothing else would say so.
-2. **Run it**, with a timeout below the task's own interval.
+2. **Run it**, with a timeout below the task's own interval -- and once more, current
+   again, when it exits `STALE`: a merge to its `scripts/` landed after step 1, so it
+   held every session rather than route them with the code it started on.
 3. **Judge it.** Exit 0 and 1 are the pass reporting on the world. Anything else -- a
    traceback, a timeout, a preflight refusal -- is the pass itself failing, filed as a
    `fix-pass-finding` with the output kept beside the ledger.
@@ -38,6 +40,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
@@ -53,6 +56,7 @@ STATE_NAME = "fix-pass-watchdog.json"
 EVENT = "fix-pass-finding"
 # Under the task's half-hour interval, so two passes never overlap.
 TIMEOUT = _dt.timedelta(minutes=25)
+MIN_RERUN = _dt.timedelta(minutes=5)
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 MODE = re.compile(r'"devkit\.fixPass"\s*:\s*"(\w+)"')
 RESCUE_PREFIX = "agent/fix-pass-rescue"
@@ -62,8 +66,11 @@ INTENT = Path("logs") / "ship-intent.md"
 ORIGIN_FILE = Path("logs") / "fix-origin"
 AUTOMERGE_LABEL = "automerge"  # sweep.AUTOMERGE_LABEL
 
+# `fix_send.EXIT_STALE`, spelled here because this file imports nothing the pass does:
+# the pass's code moved on `origin` after step 1, so it sent no one and wants a rerun.
+STALE = 75
 # How the pass reports on the world, as opposed to failing itself.
-REPORTED = (0, 1)
+REPORTED = (0, 1, STALE)
 
 
 def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -161,6 +168,26 @@ def run_pass(argv: list[str], timeout: _dt.timedelta = TIMEOUT) -> tuple[int | N
     except subprocess.TimeoutExpired as exc:
         return None, _text(exc.stdout) + _text(exc.stderr)
     return done.returncode, (done.stdout or "") + (done.stderr or "")
+
+
+def run_current(argv: list[str], mode: str, notes: list[str]) -> tuple[int | None, str]:
+    """Run the pass, and once more on the new code when it exits `STALE`.
+
+    Only inside what is left of this fire's budget, so two passes still never overlap:
+    short of `MIN_RERUN`, the first run's record stands and the next fire routes it.
+    """
+    started = time.monotonic()
+    code, output = run_pass(argv)
+    if code != STALE or mode == "off":
+        return code, output
+    left = TIMEOUT - _dt.timedelta(seconds=time.monotonic() - started)
+    moved = "watchdog: the pass's code moved under it --"
+    if left < MIN_RERUN:
+        notes.append(f"{moved} {int(left.total_seconds() // 60)} min left; the next fire routes")
+        return code, output
+    ok, what = self_update(REPO_ROOT)
+    notes.append(f"{moved} self-update {what}; {'ran it again' if ok else 'not rerun'}")
+    return run_pass(argv, left) if ok else (code, output)
 
 
 def _text(stream: str | bytes | None) -> str:
@@ -358,11 +385,11 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
             file_once(
                 state, signature("pass-stale", what, head), "pass-stale", what, str(REPO_ROOT), now
             )
-    code, output = run_pass(argv)
+    code, output = run_current(argv, mode, notes)
     sys.stdout.write(output)
     kind, detail = judge(code, output)
     if kind:
-        evidence = str(_keep(output))
+        evidence = str(_write(FAILURE_LOG, output))
         head = git(REPO_ROOT, "rev-parse", "HEAD").stdout.strip()
         sig = signature(kind, detail, head)
         fresh = file_once(state, sig, kind, detail, evidence, now)
@@ -375,24 +402,19 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps(state, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     if notes:
-        _append_record("\n".join(notes))
+        _write(ARTIFACT, "\n".join(notes).rstrip() + "\n", "a")
         print("\n".join(notes))
     return code if code in REPORTED and kind not in RESCUED else 2
 
 
-def _keep(output: str) -> Path:
-    path = REPO_ROOT / FAILURE_LOG
+def _write(relative: Path, text: str, mode: str = "w") -> Path:
+    """Write the failed pass's output, or (`mode="a"`) add the watchdog's lines to the
+    pass's record, which the pass rewrote this run."""
+    path = REPO_ROOT / relative
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(output, encoding="utf-8")
+    with path.open(mode, encoding="utf-8") as handle:
+        handle.write(text)
     return path
-
-
-def _append_record(text: str) -> None:
-    """Add the watchdog's lines to the pass's record, which the pass rewrote this run."""
-    path = REPO_ROOT / ARTIFACT
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(text.rstrip() + "\n")
 
 
 def main(argv: list[str] | None = None) -> int:

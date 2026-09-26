@@ -207,7 +207,7 @@ def decide(
 ]:
     """Steps 4-6's decisions: `(harness, go, held, skipped)`, pure over what was read."""
     decisions = fix_plan.plan(failures, newest, prefixes)
-    classes = fix_cycle.classify_all(failures)
+    classes = fix_cycle.classify_all(failures, prefixes)
     harness = fix_cycle.harness_state(classes, green, adopting)
     go, held = fix_cycle.phase(decisions, classes, harness, prefixes)
     return harness, go, held, [d for d in decisions if d.action == fix_plan.SKIP]
@@ -266,6 +266,8 @@ def run(
         "plan", decide, failures, green, newest, adopting, prefixes, default=fallback
     )
 
+    # Nothing routes with code a merge replaced mid-pass; the watchdog reruns it current.
+    go, held, moved = step("current", fix_send.hold_if_moved, go, held, ctx, default=(go, held, ""))
     items = fix_loop.triage.load(devkit_dir)
     sent, capped, worst = step(
         "send", send_all, go, ctx, launch, journal, closed, items, default=([], [], EXIT_FAILED)
@@ -293,7 +295,7 @@ def run(
     print(text)
     print(f"fix-pass: record at {write_artifact(text)}")
     append_history(account, now)
-    return max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
+    return fix_send.EXIT_STALE if moved else max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
 
 
 def build_parser() -> argparse.ArgumentParser:

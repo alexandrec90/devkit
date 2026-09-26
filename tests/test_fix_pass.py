@@ -82,8 +82,10 @@ def world(tmp_path, monkeypatch):
         "release": "",
         "releases": [],
         "memory": None,
+        "moved": "",
     }
     monkeypatch.setattr(fix_pass.fix_send.host_memory, "available_mb", lambda: table["memory"])
+    monkeypatch.setattr(fix_pass.fix_send, "code_moved", lambda root: table["moved"])
     monkeypatch.setattr(
         fix_pass.devkit_project, "known_projects", lambda _t: ["devkit", "carameli"]
     )
@@ -210,6 +212,100 @@ def test_dispatch_ships_intents_sends_fixers_records_them_and_merges_adoptions(w
     text = artifact(world)
     assert "sent     carameli #412 -- dispatch" in text
     assert "merged   carameli #9" in text
+
+
+def test_a_pass_whose_code_moved_under_it_sends_no_one_and_asks_to_be_rerun(world):
+    """carameli #395 went to a devkit session because #407, which reroutes it, merged
+    21s after the watchdog fast-forwarded the checkout: the pass routed with old code."""
+    world["failures"] = [failure()]
+    world["moved"] = "be69035aa..6276e81bb"
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 75
+    assert world["dispatched"] == []
+    assert "held     carameli #412 -- devkit's scripts/ moved be69035aa..6276e81bb" in artifact(
+        world
+    )
+
+
+def test_plan_mode_never_asks_whether_the_code_moved(world, monkeypatch):
+    monkeypatch.setattr(fix_pass.fix_send, "code_moved", lambda root: pytest.fail("fetched"))
+    world["failures"] = [failure()]
+    assert fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW) == 0
+
+
+def test_hold_if_moved_holds_every_decision_behind_the_range(monkeypatch, tmp_path):
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
+    earlier = (decision, "already held")
+    monkeypatch.setattr(fix_pass.fix_send, "code_moved", lambda root: "")
+    ctx = _ctx(tmp_path)
+    assert fix_pass.fix_send.hold_if_moved([decision], [earlier], ctx) == (
+        [decision],
+        [earlier],
+        "",
+    )
+    monkeypatch.setattr(fix_pass.fix_send, "code_moved", lambda root: "aaa..bbb")
+    go, held, moved = fix_pass.fix_send.hold_if_moved([decision], [earlier], ctx)
+    assert go == [] and moved == "aaa..bbb"
+    assert held == [earlier, (decision, "devkit's scripts/ moved aaa..bbb mid-pass; rerun")]
+
+
+def _git(cwd: Path, *args: str) -> str:
+    done = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
+    return done.stdout.strip()
+
+
+@pytest.fixture
+def static(tmp_path):
+    """A static checkout on `main`, its origin, and an author who pushes to it."""
+    origin, author, static = tmp_path / "origin.git", tmp_path / "author", tmp_path / "devkit"
+    _git(tmp_path, "init", "--bare", "-b", "main", str(origin))
+    _git(tmp_path, "clone", str(origin), str(author))
+    for key, value in (("user.email", "t@t"), ("user.name", "t"), ("commit.gpgsign", "false")):
+        _git(author, "config", key, value)
+    _git(author, "config", "core.hooksPath", str(tmp_path / "no-hooks"))
+    (author / "scripts").mkdir()
+    (author / "scripts" / "route.py").write_text("OLD = 1\n", encoding="utf-8")
+    _git(author, "add", ".")
+    _git(author, "commit", "-m", "one")
+    _git(author, "push", "origin", "main")
+    _git(tmp_path, "clone", str(origin), str(static))
+    _git(static, "remote", "set-head", "origin", "main")
+    return author, static
+
+
+def _push(author: Path, path: str) -> None:
+    (author / path).parent.mkdir(parents=True, exist_ok=True)
+    (author / path).write_text("NEW = 2\n", encoding="utf-8")
+    _git(author, "add", ".")
+    _git(author, "commit", "-m", f"change {path}")
+    _git(author, "push", "origin", "main")
+
+
+def test_code_moved_names_the_range_only_when_scripts_changed_upstream(static):
+    author, checkout = static
+    assert fix_pass.fix_send.code_moved(checkout) == "", "current"
+    _push(author, "README.md")
+    assert fix_pass.fix_send.code_moved(checkout) == "", "a docs-only merge routes nothing"
+    _push(author, "scripts/route.py")
+    old = _git(checkout, "rev-parse", "HEAD")[:9]
+    new = _git(author, "rev-parse", "HEAD")[:9]
+    assert fix_pass.fix_send.code_moved(checkout) == f"{old}..{new}"
+
+
+def test_code_moved_leaves_a_branch_of_its_own_and_a_linked_worktree_alone(static, tmp_path):
+    author, checkout = static
+    _push(author, "scripts/route.py")
+    for key, value in (("user.email", "t@t"), ("user.name", "t"), ("commit.gpgsign", "false")):
+        _git(checkout, "config", key, value)
+    _git(checkout, "config", "core.hooksPath", str(tmp_path / "no-hooks"))
+    (checkout / "local.txt").write_text("x\n", encoding="utf-8")
+    _git(checkout, "add", ".")
+    _git(checkout, "commit", "-m", "local work")
+    assert fix_pass.fix_send.code_moved(checkout) == "", "not an ancestor: someone's branch"
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    assert fix_pass.fix_send.code_moved(linked) == ""
+    assert fix_pass.fix_send.code_moved(tmp_path / "missing") == "", "a git failure is no move"
 
 
 def test_a_second_pass_sends_nothing_at_the_same_failure(world):
@@ -986,6 +1082,19 @@ def test_decide_is_the_plan_the_classes_and_the_phase_over_what_was_read():
     harness, go, held, skipped = fix_pass.decide([failure(number=2)], True, "v0.11.22", [], ())
     assert harness.clean and [d.action for d in go] == [fix_plan.DISPATCH]
     assert held == [] and skipped == []
+
+
+def test_decide_hands_the_adoption_prefixes_to_the_classes():
+    """A ratchet red on an adoption may be the ratchet itself moving, which is devkit's
+    (the v0.11.21 fan-out). Classed without the prefixes it read as the PR's own ratchet,
+    and the harness stayed clean while the adoption waited on a fixer that cannot help."""
+    ratchet = (
+        "scripts/hooks/tests/test_structure_check.py::test_nothing_is_new_or_worse_than_the_baseline",
+    )
+    red = failure(head="agent/auto/devkit-upgrade-v0-11-25-0926", signature=ratchet)
+    prefixes = ("agent/auto/devkit-upgrade-", "agent/devkit-upgrade-")
+    harness, _, _, _ = fix_pass.decide([red], True, "v0.11.25", [], prefixes)
+    assert not harness.clean and harness.reasons == ("1 harness failure(s) open",)
 
 
 def test_a_session_working_in_a_branch_tree_holds_a_fixer_for_that_branch(world, tmp_path):

@@ -608,6 +608,18 @@ def test_the_rendering_names_the_runtime():
     assert "[codex]" in text
 
 
+def test_the_rendering_carries_the_fields_diagnosis_starts_from():
+    """The 0926-8 sweep read four session-friction groups with no `evidence=` shown and
+    grepped the raw ledger for the transcript line each one named."""
+    rows = [
+        _line("session-friction", detail="d", evidence="t.jsonl#L5312"),
+        _line("agent-report", detail="e", command="git -C x status", version="abc"),
+    ]
+    text = triage.render(triage.open_items(triage.read_items("\n".join(rows))))
+    assert "  evidence t.jsonl#L5312" in text
+    assert "  command git -C x status" in text and "  version abc" in text
+
+
 def test_the_artifact_is_the_whole_backlog_even_under_a_filter(tmp_path, monkeypatch):
     """A filtered artifact would read as 'this is everything' while hiding a runtime."""
     _ledger(

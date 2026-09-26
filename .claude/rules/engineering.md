@@ -90,10 +90,9 @@ statement, not a workaround.
 **The last row is the one that wastes turns.** Inside a statement the parser could not
 reduce to a simple list, the guard tests the *whole line* for `git` as an unanchored
 substring, so `.gitignore`, `github.com`, `digit` and `legitimate` each read as "names
-git" — rename the variable or split the statement, because no spelling of the real
-command will satisfy it. A heredoc and a `$HOME` argument are **not** triggers on their
-own; put a file write through the Write or Edit tool regardless, which sidesteps the
-parse entirely. The reproductions are in
+git" — rename or split it; no spelling of the real command passes. A heredoc and a
+`$HOME` argument are **not** triggers alone, but write files with Write or Edit anyway:
+the Bash tool collapses `\\` to `\`, quoted heredocs included. The reproductions are in
 [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
 ## Waiting on a CI gate: one blocking call, not a poll loop

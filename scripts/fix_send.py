@@ -37,6 +37,52 @@ Journal = fix_findings.Journal
 
 EXIT_OK = 0
 EXIT_FAILED = 1
+# EX_TEMPFAIL: the pass's own code moved under it, so it sent no one. The watchdog
+# fast-forwards and runs it again; any other caller simply runs it again.
+EXIT_STALE = 75
+
+
+def code_moved(root: Path) -> str:
+    """`old..new` when `origin/<default>` changed `scripts/` since this checkout's HEAD.
+
+    The watchdog fast-forwards the checkout once, before the pass; anything merged after
+    that routes with the code the pass started on. carameli #395 reached a devkit session
+    that way, 21s before #407 -- the routing fix that would have sent it to carameli --
+    merged. Only a checkout the watchdog would have updated is judged: a linked worktree,
+    a branch with commits of its own and any git failure read as not moved.
+    """
+    if (root / ".git").is_file():
+        return ""
+    git = sweep.git_for(root)
+    head = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip()
+    base = head.removeprefix("origin/") or "main"
+    if git("fetch", "--quiet", "origin", base).returncode != 0:
+        return ""
+    old, new = (git("rev-parse", ref).stdout.strip() for ref in ("HEAD", f"origin/{base}"))
+    if not old or not new or old == new:
+        return ""
+    if git("merge-base", "--is-ancestor", old, new).returncode != 0:
+        return ""
+    changed = git("diff", "--name-only", old, new, "--", "scripts/")
+    return f"{old[:9]}..{new[:9]}" if changed.returncode == 0 and changed.stdout.strip() else ""
+
+
+def hold_if_moved(
+    go: list[fix_plan.Decision], held: list[tuple[fix_plan.Decision, str]], ctx: fix_loop.Context
+) -> tuple[list[fix_plan.Decision], list[tuple[fix_plan.Decision, str]], str]:
+    """`(go, held, moved)`: every decision held when `code_moved`, none when not.
+
+    Only a dispatching pass asks; a plan fetches nothing and routes nobody.
+    """
+    moved = code_moved(REPO_ROOT) if ctx.writes else ""
+    if not moved:
+        return go, held, ""
+    return (
+        [],
+        [*held, *((d, f"devkit's scripts/ moved {moved} mid-pass; rerun") for d in go)],
+        moved,
+    )
+
 
 # A background fixer measured ~450 MB (the session and its pty host) once it loads no
 # MCP server; the floor leaves the person at the machine room for their own work.
