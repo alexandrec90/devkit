@@ -375,6 +375,8 @@ ALLOWED_MISSING = {
     "the harness cost it; filed and set aside by the fix pass; under the ignored `logs/`",
     "logs/fix-dispatch.json": "the fix pass's stamp in a worktree it opened a session in, "
     "under the ignored `logs/`",
+    "logs/fix-pass-supervise.json": "the report `scripts/fix-pass-supervise.py` writes "
+    "each run, read by the /supervise-fix-pass skill; under the ignored `logs/`",
     "check-lock-markers.py": "a project-owned Stop tier devkit has no lockfiles for; "
     "its absence is an explicit skip, documented in test_repo_contract.py",
     "test_codex_hooks_contract.py": "carameli's, cited as the coupling the vendored "

@@ -96,6 +96,9 @@ NARROWING_FLAGS = frozenset(
     | {"--co", "--collect-only", "--version", "--sf"}
 )
 SUITE_ROOTS = frozenset({"tests", "tests/", ".", "./"})
+# `$p`, `${files[@]}`, `$env:T`, `%TARGET%`: an argument the shell fills in, which the
+# detector cannot see, so it is read as narrowing rather than as naming nothing.
+SHELL_VARIABLE = re.compile(r"\$\{?[A-Za-z_]|%[A-Za-z_]\w*%")
 
 # The user telling a session it went wrong -- the most expensive friction there is, and
 # the one no tool result carries. Skipped on a session's opening message, which is the
@@ -138,6 +141,8 @@ def full_suite(rest: str) -> bool:
         if word.startswith("-") or word in SUITE_ROOTS:
             continue
         if "/" in word or "\\" in word or "::" in word or word.endswith(".py"):
+            return False
+        if SHELL_VARIABLE.search(word):
             return False
     return True
 

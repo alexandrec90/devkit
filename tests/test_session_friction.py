@@ -253,6 +253,15 @@ def test_full_suite_reads_arguments_not_substrings():
     assert not sf.full_suite(" tests\\test_x.py::t")
 
 
+def test_a_shell_variable_argument_is_not_the_full_suite():
+    """`pytest -q -p no:cacheprovider $p`, with `$p` one test file, was filed as a
+    full-suite run (ledger `72f8865b`). A variable names something the detector cannot
+    see, so it reads as narrowed rather than as naming nothing."""
+    for rest in (" -q -p no:cacheprovider $p", ' "${files[@]}"', " %TARGET%", " $env:T"):
+        assert not sf.full_suite(rest), rest
+    assert sf.full_suite(" -q -p no:cacheprovider")
+
+
 def test_session_findings_are_nothing_outside_the_workspace(tmp_path):
     chunk = st.Chunk(((1, call("sleep 99", "1")),), 0, 1)
     assert sf.session_findings(tmp_path / "s.jsonl", chunk, "", tmp_path) == []

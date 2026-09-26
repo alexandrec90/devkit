@@ -64,6 +64,11 @@ COVERED_BY: dict[str, tuple[str, str]] = {
         "the wrapper's one behaviour is that it propagates the wrapped exit code, and "
         "that is asserted beside the check that it stays byte-identical to the template",
     ),
+    "session_transcripts.py": (
+        "tests/test_session_friction.py",
+        "the transcript reader was split out of session_friction.py, and its events, "
+        "cursors and discovery are asserted through the detectors that consume them",
+    ),
 }
 
 
