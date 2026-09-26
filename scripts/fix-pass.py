@@ -207,7 +207,7 @@ def decide(
 ]:
     """Steps 4-6's decisions: `(harness, go, held, skipped)`, pure over what was read."""
     decisions = fix_plan.plan(failures, newest, prefixes)
-    classes = fix_cycle.classify_all(failures)
+    classes = fix_cycle.classify_all(failures, prefixes)
     harness = fix_cycle.harness_state(classes, green, adopting)
     go, held = fix_cycle.phase(decisions, classes, harness, prefixes)
     return harness, go, held, [d for d in decisions if d.action == fix_plan.SKIP]

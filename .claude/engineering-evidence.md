@@ -224,3 +224,13 @@ The vendored suite clears the variable in an autouse fixture, on the same reason
 the ledger fixture beside it: the switch lives in the environment of every agent session
 on a machine where it is set, so a suite that inherits it is one whose end-to-end hook
 tests pass by agreeing that nothing happened.
+
+## The Bash tool collapses a doubled backslash: why file writes go through Write or Edit
+
+Not the guard, and not devkit: Claude Code's Bash tool delivers a doubled backslash as a
+single one, inside `<<'EOF'` as well as in a single-quoted argument, so a Python patch
+script written that way arrives with its escapes changed. Its `assert old in text` fails,
+or worse, the replacement writes a different regex than the one reviewed. On 2026-09-26
+alone five sessions filed it (ledger `f5f07c62`, `c979d748`, `f0997a7c`, `b957e0cf`, and
+the session that retired those), each after the rule already said "use Write or Edit"
+without saying why. What devkit owns is putting the reason where the instruction is read.

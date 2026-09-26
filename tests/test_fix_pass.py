@@ -962,6 +962,19 @@ def test_decide_is_the_plan_the_classes_and_the_phase_over_what_was_read():
     assert held == [] and skipped == []
 
 
+def test_decide_hands_the_adoption_prefixes_to_the_classes():
+    """A ratchet red on an adoption may be the ratchet itself moving, which is devkit's
+    (the v0.11.21 fan-out). Classed without the prefixes it read as the PR's own ratchet,
+    and the harness stayed clean while the adoption waited on a fixer that cannot help."""
+    ratchet = (
+        "scripts/hooks/tests/test_structure_check.py::test_nothing_is_new_or_worse_than_the_baseline",
+    )
+    red = failure(head="agent/auto/devkit-upgrade-v0-11-25-0926", signature=ratchet)
+    prefixes = ("agent/auto/devkit-upgrade-", "agent/devkit-upgrade-")
+    harness, _, _, _ = fix_pass.decide([red], True, "v0.11.25", [], prefixes)
+    assert not harness.clean and harness.reasons == ("1 harness failure(s) open",)
+
+
 def test_a_session_working_in_a_branch_tree_holds_a_fixer_for_that_branch(world, tmp_path):
     """The first supervised run sent a fixer into the worktree an interactive session was
     in. A live session there is a wait, and the record says whose."""
