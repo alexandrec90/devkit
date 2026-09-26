@@ -6,11 +6,13 @@ import datetime as _dt
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from support import REPO_ROOT, load_script
 
 supervise = load_script("scripts/fix-pass-supervise.py")
 fix_reports = supervise.fix_reports
+# Their classes are invisible to mypy (loaded by path), so helpers returning one say Any.
 
 NOW = _dt.datetime(2026, 9, 26, 12, 0, tzinfo=_dt.UTC)
 
@@ -100,7 +102,7 @@ def test_a_session_is_measured_from_its_transcript(tmp_path):
     assert supervise.measure(None) == (0, 0, [])
 
 
-def _tree(tmp_path: Path, sent: _dt.datetime) -> "fix_reports.Tree":
+def _tree(tmp_path: Path, sent: _dt.datetime) -> Any:
     path = tmp_path / "t"
     (path / "logs").mkdir(parents=True, exist_ok=True)
     fix_reports.stamp(path, "pr:carameli:1:a:d:dispatch", "n", sent)
@@ -138,7 +140,7 @@ def test_only_this_iterations_dispatches_are_waited_on(tmp_path, monkeypatch):
 # --- across iterations, and the report ------------------------------------------------------
 
 
-def _iteration(number: int, backlog: int) -> "supervise.Iteration":
+def _iteration(number: int, backlog: int) -> Any:
     return supervise.Iteration(number, NOW.isoformat(), 0, "", backlog=backlog)
 
 
