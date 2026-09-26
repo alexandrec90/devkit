@@ -46,8 +46,6 @@ Every function that decides something is pure and tested in `tests/test_fix_prs.
 `tests/test_gate_evidence.py`); the ones that spawn take a runner.
 """
 
-from __future__ import annotations
-
 import argparse
 import subprocess
 import sys
@@ -64,13 +62,11 @@ import fix_plan
 import fix_prompts
 import fix_reports
 import gate_evidence
+import stray_worktree as stray
 import sweep
 import task_branch as tb
 import task_input
 import worktree
-
-sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
-import worktree_tiers as wt
 
 # Qualified rather than imported name by name, and that is the load-bearing part: the
 # menu's functions call each other through their own module globals, so a `from` import
@@ -140,41 +136,8 @@ def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
                 and Path(held).resolve() == worktree.box_path(root, box.name).resolve()
             ):
                 return Path(held), ""
-        if release_stray(project_dir, Path(held), branch):
-            return None, ""
-        return None, (
-            f"{branch} is already checked out at {held}, which is not in "
-            f"{aw.TIER_SUMMARY} or a matching live devkit box -- finish the PR from there"
-        )
+        return None, stray.refusal(project_dir, held, branch)
     return Path(held), ""
-
-
-def release_stray(project_dir: Path, held: Path, branch: str) -> bool:
-    """Remove a stray worktree that holds `branch` and nothing else. True once it is gone.
-
-    A session that pushed a PR from a tree in its own scratchpad leaves the branch held
-    there after it ends, and every later fixer for that PR was refused on the directory
-    alone -- three at once on one pass. A tree that is clean and whose branch has no
-    commit its upstream lacks holds no work, so it is released and the fixer cuts its own.
-
-    Never the checkout itself, never a box (its lease and reaper would leak), never a tree
-    whose upstream cannot be read, and never with `--force`: git's own refusal of a dirty
-    tree, or Windows' of a directory a live process sits in, stands as the refusal.
-    """
-    if wt.same_dir(held, project_dir) or held.parent.name == wt.BOXES_DIR_NAME:
-        return False
-    inner = sweep.git_for(held)
-    status = inner("status", "--porcelain")
-    if status.returncode != 0 or (status.stdout or "").strip():
-        return False
-    ahead = inner("rev-list", "--count", f"{branch}@{{u}}..{branch}")
-    if ahead.returncode != 0 or (ahead.stdout or "").strip() != "0":
-        return False
-    removed = sweep.git_for(project_dir)("worktree", "remove", str(held))
-    if removed.returncode != 0:
-        return False
-    print(f"  released {held}: clean and pushed, so nothing held {branch} but the directory")
-    return True
 
 
 def cut_tree(project_dir: Path, branch: str, runner=subprocess.run) -> Path | None:
