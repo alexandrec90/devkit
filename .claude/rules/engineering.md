@@ -236,6 +236,7 @@ reject, and once by hiding the defect from the pass that would have fixed it eve
 **Never silently work around a bad instruction or a refusal.** If a skill, a rule, a
 `CLAUDE.md`, a hook or a vendored script sent you into a dead end — blocked a correct
 command, refused an edit it should have allowed, crashed, reported success while doing
-nothing — say so in your report with the file or the exact command, and stop there. A
-workaround fixes your turn and leaves the next agent at the same wall; a report is what
-the devkit session works from.
+nothing — say so in your report with the file or the exact command, write the same
+line to `logs/friction.md`, and stop there. The pass files each line on the ledger, and
+reads your transcript for what you did not write. A workaround fixes your turn and leaves
+the next agent at the same wall; a filed line is what the devkit session works from.

@@ -19,10 +19,12 @@ unattended. Three rules, each pure and tested in `tests/test_fix_cycle.py`:
   saying so loudly -- a quiet pass has to read as "everything is blocked", never as
   "nothing to do". devkit's own PRs are not held: one may be the fix. A release still
   being adopted holds only that project's other PRs, behind its adoption.
-- **Stop what makes no progress.** The ledger stops a second dispatch at the same
-  commit; `fix_ledger.ATTEMPTS` stops a third at an unchanged failure, whatever commit
-  it is at. A failure that changed is progress and goes. `PER_TARGET_PER_DAY` and
-  `PER_DAY` are fuses behind that, for a pass whose reading has gone wrong.
+- **Escalate what makes no progress; never park it.** The ledger stops a second
+  dispatch at the same commit. A failure `fix_ledger.ATTEMPTS` fixers left unchanged
+  is filed on the harness-defect ledger (`fix_budget.py`), where the devkit session takes it
+  over, and gets fresh fixers once that is resolved. The devkit session, with nothing
+  above it, backs off instead. No daily fuse caps any of it: the supervisor's spend
+  watch does that job, with a person reading it.
 
 The switch is the workspace file: `"devkit.fixPass"` under `settings`, `off` (the
 default), `plan` (write what would happen, do nothing) or `dispatch`. The scheduled job
@@ -69,6 +71,21 @@ HARNESS_PATHS = (
     ".claude/skills/",
 )
 
+# The exception to `fix_plan.VENDORED_TESTS` being devkit's: vendored tests that judge
+# the checkout they run in, each comparing the project's own code with a baseline the
+# project owns. They sit here, beside the classifier they steer. The file is
+# byte-identical everywhere and what it measures is not, so one red in one project on
+# an ordinary PR is that PR's growth -- carameli #395 grew its own `scripts/lint-all.py`
+# past its recorded ceiling. The same one red across consumers is still devkit's: the
+# v0.11.21 adoption was red in eight repos because the untested-symbols rule changed.
+RATCHETS = frozenset(
+    {
+        f"{fix_plan.VENDORED_TESTS}test_structure_check.py::test_nothing_is_new_or_worse_than_the_baseline",
+        f"{fix_plan.VENDORED_TESTS}test_structure_check.py::test_the_baseline_holds_only_what_the_code_still_earns",
+        f"{fix_plan.VENDORED_TESTS}test_untested_symbols.py::test_every_public_symbol_is_named_by_a_test",
+    }
+)
+
 # What a commit refused by the toolchain rather than by the change says. Every one of
 # these has happened: the fixer's interpreter missing from a fresh worktree, pre-commit
 # itself absent, a third-party hook's environment failing to build.
@@ -90,14 +107,6 @@ HARNESS_REFUSALS = (
 # "in the vendored file, the test, or the template" on a branch that could never land
 # on the PR. A harness PR in either shape goes as itself, before the folded session.
 BRANCH_SHAPED = (fix_plan.UPDATE, fix_plan.RESOLVE)
-
-# The fuses. The retry policy is `fix_ledger.ATTEMPTS` -- per problem, spent only by a
-# fixer that left the same failure behind -- and these are only what stops a pass
-# whose reading has gone wrong: a signature that changes on every run reads as
-# progress forever, and nothing else would notice. Set above what a working day
-# needs, so a fuse that trips is a defect to read about in the record, not a budget.
-PER_TARGET_PER_DAY = 4
-PER_DAY = 24
 
 
 @dataclass(frozen=True)
@@ -154,6 +163,24 @@ def _harness_shaped(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> 
     )
 
 
+def is_own_ratchet(
+    failure: fix_plan.Failure, shared: set[tuple[str, ...]], prefixes: Iterable[str]
+) -> bool:
+    """Red only on a ratchet, in one project, on a change that adopts nothing.
+
+    Then the ratchet measured that change's own code against the project's own baseline
+    (carameli #395), and the fix is on its head. Shared -- `shared` is the signatures seen
+    in two or more projects -- or on an adoption, the ratchet itself may be what moved,
+    as in the v0.11.21 fan-out, and that is devkit's.
+    """
+    return (
+        bool(failure.signature)
+        and all(entry in RATCHETS for entry in failure.signature)
+        and failure.signature not in shared
+        and not fix_plan.adoption_tag(failure.head, tuple(prefixes))
+    )
+
+
 def classify(
     failure: fix_plan.Failure, shared: set[tuple[str, ...]], prefixes: Iterable[str] = ()
 ) -> str:
@@ -162,10 +189,13 @@ def classify(
     # before it gets here. Its vendored tests judge its own code -- the ratchets above
     # all -- so the fix lands on its head branch, never in the upstream session, whose
     # fresh branch off main has nothing to fix and cannot reach the PR (devkit #393, #394).
-    if failure.project == DEVKIT and failure.kind == fix_plan.PR:
+    # A devkit commit the commit stage refused is the same shape: the fix is in the tree
+    # the refusal happened in, which the first supervised run's upstream session spent
+    # seven calls repairing from outside after the refusal was folded into it.
+    if failure.project == DEVKIT and failure.kind in (fix_plan.PR, fix_plan.COMMIT):
         return PROJECT if ids else UNKNOWN
     # Before `_harness_shaped` and `HARNESS_PATHS`, each of which would claim it (#395).
-    if fix_plan.is_own_ratchet(failure, shared, prefixes):
+    if is_own_ratchet(failure, shared, prefixes):
         return PROJECT
     if _harness_shaped(failure, shared):
         return HARNESS
@@ -270,8 +300,10 @@ def phase(
 
 
 def is_devkit_pr(decision: fix_plan.Decision) -> bool:
-    """Every failure under it is one of devkit's own PRs."""
-    return all(f.project == DEVKIT and f.kind == fix_plan.PR for f in decision.failures)
+    """Every failure under it is one of devkit's own branches: a PR, or a refused commit."""
+    return all(
+        f.project == DEVKIT and f.kind in (fix_plan.PR, fix_plan.COMMIT) for f in decision.failures
+    )
 
 
 # The order within a phase: updates first (free), then conflicts (nothing else about
@@ -289,6 +321,27 @@ def _harness_first(harness_ones: list[fix_plan.Decision]) -> list[fix_plan.Decis
     return go
 
 
+def only_the_harness(
+    backlog: fix_plan.Failure | None,
+) -> tuple[Harness, list[fix_plan.Decision], list, list]:
+    """What the pass sends when planning itself raised: the backlog, and nothing else.
+
+    The crash is on that backlog by then, so the devkit session is what fixes the plan.
+    Everything else waits a pass rather than going out on a plan nobody could make.
+    """
+    harness = Harness(False, ("the plan step raised; only the devkit session goes",))
+    go = (
+        [
+            fold_harness(
+                [fix_plan.Decision(fix_plan.DISPATCH, fix_plan.describe(backlog), (backlog,))]
+            )
+        ]
+        if backlog
+        else []
+    )
+    return harness, go, [], []
+
+
 def fold_harness(decisions: list[fix_plan.Decision]) -> fix_plan.Decision:
     """One devkit session for every foldable harness failure this pass found.
 
@@ -304,79 +357,6 @@ def fold_harness(decisions: list[fix_plan.Decision]) -> fix_plan.Decision:
         "one devkit session for all of it",
         failures,
     )
-
-
-# --- the caps -------------------------------------------------------------------------
-
-
-def target_of(key: str) -> str:
-    """The PR, branch or checkout a ledger key names: the first three fields."""
-    parts = key.split(":")
-    if parts[0] == fix_plan.UPSTREAM:
-        return DEVKIT
-    return ":".join(parts[:3])
-
-
-def sent_today(ledger: dict[str, dict], now: _dt.datetime) -> dict[str, int]:
-    """Sessions per target on `now`'s date, from the ledger's own timestamps.
-
-    An `UPDATE` is recorded for idempotence but is one `gh` call and no session, so it
-    is not counted: after a release merge, a handful of behind PRs once spent the whole
-    day's budget on free branch updates and the real fixers waited for tomorrow.
-    """
-    counts: dict[str, int] = {}
-    day = now.date().isoformat()
-    for key, entry in ledger.items():
-        if key.endswith(f":{fix_plan.UPDATE}"):
-            continue
-        if isinstance(entry, dict) and str(entry.get("when", "")).startswith(day):
-            target = target_of(key)
-            counts[target] = counts.get(target, 0) + 1
-    return counts
-
-
-def is_blind(decision: fix_plan.Decision) -> bool:
-    """No failure under it has any evidence: no test id, no lint line, no failed step."""
-    return all(
-        not [entry for entry in f.signature if entry != fix_plan.CONFLICT]
-        for f in decision.failures
-    )
-
-
-def within_caps(
-    decision: fix_plan.Decision,
-    ledger: dict[str, dict],
-    now: _dt.datetime,
-    per_target: int = PER_TARGET_PER_DAY,
-    per_day: int = PER_DAY,
-) -> tuple[bool, str]:
-    """Whether this dispatch may go, and why not when it may not.
-
-    An update is free and always goes. Otherwise the question is whether sessions have
-    already failed at this same problem: `fix_ledger.ATTEMPTS` of them (one, for a
-    blind problem, which cannot show progress) and it needs a person. Except a conflict
-    whose head has moved since (`fix_ledger.moved_on`): a resolver pushes only a merge that
-    resolved, so a new conflict at a new commit is the base moving again, not a fix
-    that did not take. devkit #390's resolver pushed its merge, main moved within the
-    hour, and the fresh conflict read "needs a human" when it needed the resolver.
-    Past that, the fuses -- which a working pass never reaches, and which still bound
-    a conflict that keeps coming back.
-    """
-    if decision.action == fix_plan.UPDATE:
-        return True, ""
-    made = fix_ledger.attempts(decision, ledger)
-    limit = fix_ledger.BLIND_ATTEMPTS if is_blind(decision) else fix_ledger.ATTEMPTS
-    rebased = decision.action == fix_plan.RESOLVE and fix_ledger.moved_on(decision, ledger)
-    if made >= limit and not rebased:
-        unchanged = "with no evidence to tell progress by" if is_blind(decision) else "unchanged"
-        return False, f"{made} session(s) sent and it is still red {unchanged} -- needs a human"
-    counts = sent_today(ledger, now)
-    if sum(counts.values()) >= per_day:
-        return False, f"fuse: the pass has sent {per_day} sessions today -- read the record"
-    target = target_of(fix_ledger.decision_key(decision))
-    if counts.get(target, 0) >= per_target:
-        return False, f"fuse: {target} has had {per_target} sessions today -- read the record"
-    return True, ""
 
 
 # --- the account ------------------------------------------------------------------------
@@ -398,11 +378,19 @@ class Account:
     # commit's red. In the record because a pass that holds everything behind one of
     # these has to say which one, or "harness RED" reads as a defect nobody can find.
     skipped: tuple[fix_plan.Decision, ...] = ()
-    # What a dispatched session reported it could not do, one line each: the one
-    # channel back from a fixer, and what "needs a human" is about.
+    # What a dispatched session reported it could not do, one line each.
     blocked: tuple[str, ...] = ()
+    # `fix_release.cut_release`'s one line: a release started, would start, or why not.
+    # Empty when main carries nothing a tag owes a consumer.
+    release: str = ""
     # Default branches with no verdict at the tip, whose gate the pass re-ran.
     regated: tuple[str, ...] = ()
+    # What this pass filed on the harness-defect ledger, and how much is open there:
+    # the loop's own state, so a record that sends nothing still says what is owed.
+    filed: tuple[str, ...] = ()
+    backlog: int = 0
+    # Finished fixers' idle processes the pass stopped (`bg_sessions.py`).
+    stopped: tuple[str, ...] = ()
 
 
 def _names(decision: fix_plan.Decision) -> str:
@@ -430,6 +418,10 @@ def render(account: Account) -> str:
     lines += [f"skip     {_names(d)} -- {d.note}" for d in account.skipped]
     lines += [f"sent     {line}" for line in account.sent]
     lines += [f"merged   {line}" for line in account.merged]
+    lines += [f"filed    {line}" for line in account.filed]
+    lines += [f"stopped  {line}" for line in account.stopped]
+    lines.append(f"ledger   {account.backlog} open on the harness-defect ledger")
+    lines += [f"release  {account.release}"] if account.release else []
     return "\n".join(lines)
 
 
@@ -445,5 +437,11 @@ def history_line(account: Account, now: _dt.datetime) -> str:
             "sent": list(account.sent),
             "held": len(account.held),
             "capped": [f"{_names(d)} -- {why}" for d, why in account.capped],
+            # By name, so `fix_stall` can tell how long each has sat, and why.
+            "waiting": {_names(d): why for d, why in (*account.held, *account.capped)},
+            "skipped": {_names(d): d.note for d in account.skipped},
+            "filed": len(account.filed),
+            "backlog": account.backlog,
+            "release": account.release,
         }
     )

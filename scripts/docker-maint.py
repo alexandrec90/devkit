@@ -70,6 +70,9 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import docker_vhdx
+
 MODES = ("up", "down", "stop-idle", "restart-engine", "fix", "prune")
 
 # Windows only. The scheduled prune reaches this script under `pythonw.exe`, which has no
@@ -464,7 +467,9 @@ def prune_verdict(running: int, free: float, floor: float = PRESSURE_FREE_GB) ->
     )
 
 
-def generic_prune(idle_only: bool = False) -> int:
+def generic_prune(
+    idle_only: bool = False, elevated: Callable[[], bool] = docker_vhdx.is_elevated
+) -> int:
     """Reclaim image/build-cache space, then hand the freed space back to Windows.
 
     No --volumes and no `docker volume prune`, ever: named volumes are where dev
@@ -519,30 +524,19 @@ def generic_prune(idle_only: bool = False) -> int:
     run(["docker", "image", "prune", "-af"], timeout=600)
     run(["docker", "builder", "prune", "-af"], timeout=600)
 
-    print("\n  Stopping Docker for exclusive VHDX access ...")
-    stop_docker()
-
-    vhdx = Path.home() / "AppData/Local/Docker/wsl/disk/docker_data.vhdx"
-    if not vhdx.is_file():  # older layouts kept it under wsl/data
-        vhdx = Path.home() / "AppData/Local/Docker/wsl/data/ext4.vhdx"
-    if vhdx.is_file():
-        print(f"  Compacting {vhdx}")
-        code = run(
-            ["powershell", "-NoProfile", "-Command", f"Optimize-VHD -Path '{vhdx}' -Mode Full"],
-            timeout=900,
-        )
-        if code:
-            print("  [warn] Optimize-VHD failed -- it needs an ELEVATED shell and Hyper-V tools.")
-            print("         The prune above still freed space inside the VM.")
-    else:
-        print("  [skip] No Docker WSL VHDX found at the expected paths.")
-
-    start_docker()
-    if poll_engine(timeout=COLD_POLL_TIMEOUT):
-        print(banner("PRUNE COMPLETE -- ENGINE READY"))
+    # Unelevated -- as the scheduled task always is -- nothing below can compact, so
+    # stopping every container would buy nothing (`docker_vhdx` has the history).
+    if not elevated():
+        print(banner("PRUNED INSIDE THE VM -- NOT COMPACTED (not elevated)"))
         return 0
-    print(banner("PRUNE DONE, BUT ENGINE DID NOT COME BACK"))
-    return 1
+    compacted = docker_vhdx.compact(run, stop_docker)
+    start_docker()
+    if not poll_engine(timeout=COLD_POLL_TIMEOUT):
+        print(banner("PRUNE DONE, BUT ENGINE DID NOT COME BACK"))
+        return 1
+    failed = compacted == "failed"
+    print(banner(f"{'PRUNED, NOT COMPACTED' if failed else 'PRUNE COMPLETE'} -- ENGINE READY"))
+    return 1 if failed else 0
 
 
 # --- stop-idle: the unattended stack half -------------------------------------

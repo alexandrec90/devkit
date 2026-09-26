@@ -197,7 +197,20 @@ def test_the_hooks_off_prefix_survives_a_prompt(monkeypatch):
 def test_the_background_argv_passes_the_prompt_as_one_argument():
     """No shell in this mode, so no quoting -- and the words handed over are the same
     ones the tab mode hands over."""
-    assert tabs.background_argv("claude", CLAUDE, "do a; b") == ["claude", "--bg", "do a; b"]
+    argv = tabs.background_argv("claude", CLAUDE, "do a; b")
+    assert argv[-1] == "do a; b" and argv.count("do a; b") == 1
+
+
+def test_a_background_session_may_not_ask_and_the_flag_cannot_swallow_the_prompt():
+    """Nobody watches it: a fixer that asked sat there. `--disallowedTools` is variadic
+    and takes every argument after it -- ordering alone did not stop it: placed before
+    `--bg` it swallowed the prompt, and the job's `respawnFlags` showed the prompt as a
+    tool name. Only `--` ends it, and the prompt must be the one argument after that."""
+    argv = tabs.background_argv("claude", CLAUDE, "fix it")
+    at = argv.index("--disallowedTools")
+    assert argv[at + 1] == "AskUserQuestion"
+    assert argv[-2:] == ["--", "fix it"] and argv.count("--") == 1
+    assert argv.index("--bg") < at
 
 
 def test_the_background_launch_runs_the_resolved_exe_in_the_box(monkeypatch, tmp_path):
@@ -214,7 +227,7 @@ def test_the_background_launch_runs_the_resolved_exe_in_the_box(monkeypatch, tmp
     monkeypatch.setattr(tabs.shutil, "which", lambda _cli: resolved)
     code = tabs.launch_background(CLAUDE, tmp_path, "fix #412", False, runner)
     assert code == tabs.EXIT_OK
-    assert seen["argv"] == [resolved, "--bg", "fix #412"]
+    assert seen["argv"][:2] == [resolved, "--bg"] and seen["argv"][-2:] == ["--", "fix #412"]
     assert seen["kwargs"]["cwd"] == str(tmp_path)
     assert tabs.harness_switch.HOOKS_OFF_ENV not in seen["kwargs"]["env"]
 

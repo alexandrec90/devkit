@@ -136,7 +136,6 @@ scripts/worktree-guard.py::route_out_lines
 scripts/worktree-guard.py::route_to_own_box
 scripts/worktree-guard.py::tool_input
 scripts/worktree.py::Reconciliation
-scripts/worktree.py::add_common_args
 scripts/worktree.py::branch_is_merged
 scripts/worktree.py::compose_down
 scripts/worktree.py::has_stack

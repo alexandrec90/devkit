@@ -90,20 +90,6 @@ RUNNING = "running"
 # devkit defect by construction, because the file is byte-identical everywhere.
 VENDORED_TESTS = "scripts/hooks/tests/"
 
-# The exception to that: vendored tests that judge the checkout they run in, each
-# comparing the project's own code with a baseline the project owns. The file is
-# byte-identical everywhere and what it measures is not, so one red in one project on
-# an ordinary PR is that PR's growth -- carameli #395 grew its own `scripts/lint-all.py`
-# past its recorded ceiling. The same one red across consumers is still devkit's: the
-# v0.11.21 adoption was red in eight repos because the untested-symbols rule changed.
-RATCHETS = frozenset(
-    {
-        f"{VENDORED_TESTS}test_structure_check.py::test_nothing_is_new_or_worse_than_the_baseline",
-        f"{VENDORED_TESTS}test_structure_check.py::test_the_baseline_holds_only_what_the_code_still_earns",
-        f"{VENDORED_TESTS}test_untested_symbols.py::test_every_public_symbol_is_named_by_a_test",
-    }
-)
-
 # `release.py`'s branch namespace. The PR gate on one of these is red by design.
 RELEASE_PREFIX = "release/"
 
@@ -121,6 +107,14 @@ FAILED_LINE = re.compile(r"^FAILED (\S+)")
 # ruff (`path:1:2: E501 ...`) and mypy (`path:1: error: ...`) both start with the file
 # and a line; the file is the stable part.
 LINT_LINE = re.compile(r"^(\S+?\.\w+):\d+(?::\d+)?: (?:error|[A-Z]{1,4}\d{3,4})\b")
+# vitest and jest: ` FAIL  src/a.test.ts > suite > case`, or the file alone when it
+# failed to load. The id keeps vitest's ` > ` path, which is as stable as pytest's `::`.
+JS_FAIL_LINE = re.compile(r"^\s*FAIL\s+(\S+\.(?:test|spec)\.[cm]?[jt]sx?(?: > .+)?)\s*$")
+# What `gh run view --log-failed` puts before each line -- `job<TAB>step<TAB>timestamp ` --
+# and the colour codes a runner leaves in. Stripped before the patterns above are tried,
+# since every one of them is anchored at the line's start.
+LOG_PREFIX = re.compile(r"^[^\t]*\t[^\t]*\t\d{4}-\d\d-\d\dT[\d:.]+Z ?")
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 @dataclass(frozen=True)
@@ -161,14 +155,20 @@ class Decision:
 
 def signature_from_logs(texts: Iterable[str]) -> tuple[str, ...]:
     """The failing test ids and lint findings across every artifact, sorted, deduped."""
-    found: set[str] = set()
-    for text in texts:
-        for line in str(text).splitlines():
-            if failed := FAILED_LINE.match(line):
-                found.add(failed.group(1))
-            elif lint := LINT_LINE.match(line):
-                found.add(f"lint {lint.group(1)}")
+    found = {entry for text in texts for line in str(text).splitlines() if (entry := _entry(line))}
     return tuple(sorted(found))
+
+
+def _entry(raw: str) -> str:
+    """The signature entry one log line names, past a job log's prefix; "" for none."""
+    line = ANSI.sub("", LOG_PREFIX.sub("", raw))
+    if failed := FAILED_LINE.match(line):
+        return failed.group(1)
+    if js := JS_FAIL_LINE.match(line):
+        return js.group(1).strip()
+    if lint := LINT_LINE.match(line):
+        return f"lint {lint.group(1)}"
+    return ""
 
 
 def signature_from_jobs(jobs: Iterable[dict]) -> tuple[str, ...]:
@@ -222,8 +222,9 @@ def vendored_paths() -> frozenset[str] | None:
 
 
 def entry_path(entry: str) -> str:
-    """The file a signature entry names: `lint a.py` and `a.py::test_b` are both `a.py`."""
-    return entry.removeprefix("lint ").split("::", 1)[0]
+    """The file a signature entry names: `lint a.py`, `a.py::test_b` and `a.test.ts > b`
+    name `a.py`, `a.py` and `a.test.ts`."""
+    return entry.removeprefix("lint ").split("::", 1)[0].split(" > ", 1)[0]
 
 
 def in_vendored_tier(entry: str, prefixes: tuple[str, ...] = (VENDORED_TESTS,)) -> bool:
@@ -240,22 +241,6 @@ def in_vendored_tier(entry: str, prefixes: tuple[str, ...] = (VENDORED_TESTS,)) 
         return False
     known = vendored_paths()
     return known is None or path in known or path in prefixes
-
-
-def is_own_ratchet(failure: Failure, shared: set[tuple[str, ...]], prefixes: Iterable[str]) -> bool:
-    """Red only on a ratchet, in one project, on a change that adopts nothing.
-
-    Then the ratchet measured that change's own code against the project's own baseline
-    (carameli #395), and the fix is on its head. Shared -- `shared` is the signatures seen
-    in two or more projects -- or on an adoption, the ratchet itself may be what moved,
-    as in the v0.11.21 fan-out, and that is devkit's.
-    """
-    return (
-        bool(failure.signature)
-        and all(entry in RATCHETS for entry in failure.signature)
-        and failure.signature not in shared
-        and not adoption_tag(failure.head, tuple(prefixes))
-    )
 
 
 def is_vendored(sig: tuple[str, ...]) -> bool:
