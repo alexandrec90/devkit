@@ -138,6 +138,9 @@ def test_off_windows_it_says_so_and_exits_clean(monkeypatch, capsys):
     assert "Windows-only" in capsys.readouterr().out
 
 
-def test_the_script_it_names_is_the_pass():
-    assert installer.pass_script().name == "fix-pass.py"
+def test_the_script_it_names_is_the_watchdog_over_the_pass():
+    """The watchdog runs the pass; registered bare, a pass that could not import would
+    file nothing and send no one, and nothing would ever repair it."""
+    assert installer.pass_script().name == "fix-pass-watchdog.py"
+    assert installer.pass_script().is_file()
     assert installer.query_argv("devkit-fix-pass")[:2] == ["schtasks", "/Query"]

@@ -54,8 +54,17 @@ TRIAGE_EVENTS = (
     # how long it has been going -- which is how the nightly release failed three times
     # unnoticed. Here it is append-only and open until something resolves it.
     "scheduled-job-failed",
+    # The fix pass's own dead ends -- a step that crashed, a push that keeps failing, a
+    # problem fixers could not move -- and the friction it reads out of session
+    # transcripts. Both are `fix_findings.py`'s; here because this list is the backlog.
+    "fix-pass-finding",
+    "session-friction",
 )
 RESOLVED_EVENT = "triage-resolved"
+# A resolution whose fix never landed -- its PR closed unmerged, or no PR ever opened
+# from the branch it names -- is undone by one of these (`fix_verify.py`). Append-only
+# like everything else: the later of the two verdicts on a ref is the one that stands.
+REOPENED_EVENT = "triage-reopened"
 
 # The field each event name carries its human-readable substance in, in preference
 # order. A signature groups by it, so `--resolve-like` can retire one recurrence of a
@@ -174,13 +183,25 @@ def read_items(text: str) -> list[Item]:
     return [item for item in (parse_line(line) for line in text.splitlines()) if item]
 
 
+def verdicts(items: list[Item]) -> dict[str, tuple[str, str]]:
+    """`ref -> (event, stamp)` of the latest resolution or reopening naming each ref.
+
+    By stamp, not file order: shards are unioned, and a reopening written on one
+    machine must undo a resolution written on the other.
+    """
+    latest: dict[str, tuple[str, str]] = {}
+    for item in items:
+        ref = item.fields.get("ref", "")
+        if item.event not in (RESOLVED_EVENT, REOPENED_EVENT) or not ref:
+            continue
+        if ref not in latest or item.stamp >= latest[ref][1]:
+            latest[ref] = (item.event, item.stamp)
+    return latest
+
+
 def resolved_refs(items: list[Item]) -> set[str]:
-    """Every item id some `triage-resolved` event names."""
-    return {
-        item.fields["ref"]
-        for item in items
-        if item.event == RESOLVED_EVENT and item.fields.get("ref")
-    }
+    """Every item id whose latest verdict is a `triage-resolved`."""
+    return {ref for ref, (event, _) in verdicts(items).items() if event == RESOLVED_EVENT}
 
 
 def open_items(items: list[Item], events: tuple[str, ...] = TRIAGE_EVENTS) -> list[Item]:
@@ -302,6 +323,16 @@ def resolve(ids: list[str], note: str, pr: str = "", root: Path | None = None) -
         )
         written.append(one)
     return written
+
+
+def reopen(ids: list[str], note: str, root: Path | None = None) -> list[str]:
+    """Record one `triage-reopened` per id: its resolution did not hold. Returns the ids."""
+    ledger = ledger_file(root)
+    for one in ids:
+        harness_events.record(
+            REOPENED_EVENT, (("ref", one), ("note", note)), root=ledger.parent.parent
+        )
+    return list(ids)
 
 
 def expand_like(ids: list[str], items: list[Item]) -> list[str]:

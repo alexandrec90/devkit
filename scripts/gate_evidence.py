@@ -59,6 +59,8 @@ RUN_URL = re.compile(r"/actions/runs/(\d+)")
 
 RUN_LIST_FIELDS = "databaseId,headSha,conclusion,status,url,workflowName"
 RUN_VIEW_FIELDS = "jobs,conclusion,headSha,url"
+# Where `run_evidence` saves the failed jobs' log, beside whatever artifacts came down.
+FAILED_LOG = "failed-jobs.log"
 ISSUE_FIELDS = "number,title,body,url"
 
 # How many recent runs of the gate to look through for the one at the PR's head sha.
@@ -130,6 +132,15 @@ def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]
     dest.mkdir(parents=True, exist_ok=True)
     done = gh("run", "download", str(run_id), "-D", str(dest))
     texts = junit_report.read_artifacts(dest) if getattr(done, "returncode", 1) == 0 else []
+    if not fix_plan.signature_from_logs(texts):
+        # A job that uploads nothing (carameli's frontend unit tests) left the fixer with
+        # `job / step` and no test id, digging through `--log-failed` itself; read it once
+        # here, and keep it beside the artifacts for the fixer.
+        log = gh("run", "view", str(run_id), "--log-failed")
+        text = str(getattr(log, "stdout", "") or "") if getattr(log, "returncode", 1) == 0 else ""
+        if text.strip():
+            (dest / FAILED_LOG).write_text(text, encoding="utf-8")
+            texts.append(text)
     return texts, [] if fix_plan.signature_from_logs(texts) else run_jobs(gh, run_id)
 
 

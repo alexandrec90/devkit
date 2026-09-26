@@ -264,7 +264,10 @@ def prepare(
             ):
                 result = run(["git", "-C", str(path), *step])
                 if result.returncode != 0:
-                    return False, f"`git {' '.join(step)}`: {(result.stderr or '').strip()}"
+                    # Both streams: a pre-push hook's findings arrive on stdout, and
+                    # git's stderr alone is "failed to push some refs".
+                    said = "\n".join(s.strip() for s in (result.stdout, result.stderr) if s)
+                    return False, f"`git {' '.join(step)}`: {said.strip()}"
             pushed = True
         finally:
             run(["git", "-C", str(devkit), "worktree", "remove", "--force", str(path)])

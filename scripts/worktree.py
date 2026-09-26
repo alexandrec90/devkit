@@ -57,8 +57,8 @@ Modes:
                   its remotes. `--no-checkouts` turns that half off; the reason
                   both tiers ride one schedule is in `sync_checkouts`.
 
-`new`, `reap` and `reconcile` print their plan and change nothing unless `--yes` is
-passed, the same contract `sweep.py`'s mutating modes keep.
+`new`, `reap` and `reconcile` plan and change nothing without `--yes`, the contract
+`sweep.py`'s mutating modes keep; `provision` only installs, so it acts by default.
 
 The decision logic is pure and stdlib-only: every planner turns a `Box` plus a
 `sweep.State` into argv and nothing else, so the destructive steps are asserted in
@@ -5580,8 +5580,9 @@ def render_reap(plan: ReapPlan, applied: bool, notes: list[str]) -> str:
 # --- entrypoint -------------------------------------------------------------
 
 
-def add_common_args(parser: argparse.ArgumentParser) -> None:
+def add_common_args(parser: argparse.ArgumentParser, dry_run: bool = True) -> None:
     """The flags every mode takes, added to each SUBparser rather than the top level.
+    `dry_run=False` is `provision`'s: it only installs, and a plan left sessions no .venv.
 
     Deliberately not shared through `parents=`, and deliberately not on the top-level
     parser. argparse only accepts a top-level option *before* the subcommand, so
@@ -5601,8 +5602,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         "--dry-run",
         dest="dry_run",
         action="store_true",
-        default=True,
-        help="print what this would do and change nothing (the default)",
+        default=dry_run,
+        help="print what this would do and change nothing (the default but for provision)",
     )
     apply_mode.add_argument("--yes", dest="dry_run", action="store_false", help="actually run it")
     fetch_mode = parser.add_mutually_exclusive_group()
@@ -5697,10 +5698,7 @@ def _run_provision(args: argparse.Namespace) -> int:
     root = args.workspace.parent
     name, path = provision_target(root, args.box)
     steps = plan_provision(path)
-    notes: list[str] = []
-    ok = True
-    if steps and not args.dry_run:
-        ok, notes = run_provision(path, steps)
+    ok, notes = run_provision(path, steps) if steps and not args.dry_run else (True, [])
     if args.json:
         payload = {
             "box": name,
@@ -5905,7 +5903,7 @@ def main(argv: list[str] | None = None) -> int:
 
     provision = sub.add_parser("provision", help="install a box, checkout or worktree's toolchain")
     provision.add_argument("box", metavar="box|path", help=PROVISION_TARGET_HELP)
-    add_common_args(provision)
+    add_common_args(provision, dry_run=False)
 
     takeover = sub.add_parser(
         "claim", help="re-lease a box to another session (a sanctioned takeover)"
