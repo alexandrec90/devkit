@@ -14,7 +14,7 @@ dependencies = []
 # extra: extras belong to a *distribution*, and devkit is not one (see [tool.uv] below).
 # `uv sync --all-groups` — what `.claude/hooks/session-start.sh` runs — installs this.
 dev = [
-  "ruff>=0.16.7",
+  "ruff>=0.16.8",
   "mypy>=2.3.1",
   "pytest>=8.3",
   # The push gate runs pytest three times -- the suite, the vendored hook tier, and the
