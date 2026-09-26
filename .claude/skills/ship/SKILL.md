@@ -31,9 +31,9 @@ fresh one, last.
 
 The fix pass (`scripts/fix-pass.py`, scheduled every half hour, or the *Agent: Fix What
 Is Red* task by hand) finds the intent, runs the commit-stage fixers, commits with your
-message, pushes with the push gate skipped, opens the PR *without* the `automerge` label
--- a green one waits for a person, because the label would let the vendored auto-merge
-workflow land it unreviewed -- and records the outcome beside the intent in
+message, pushes with the push gate skipped, opens the PR -- *without* the `automerge`
+label when the branch is a feature session's, so a green one waits for a person, and
+with it when the pass cut the branch for a fixer -- and records the outcome beside the intent in
 `logs/ship-state.json`. CI runs the gate.
 If it is red, the pass downloads the artifact and sends a fresh session at it with the
 failing tests named; if the commit stage refused the change, the pass sends one at this

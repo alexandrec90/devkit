@@ -2622,7 +2622,8 @@
 		// to that installer's `--check` and `--yes` alike.
 		"devkit.installers": {
 			// No `--merge`: the fix pass merges green ADOPTION PRs itself and nothing else,
-			// so every other green PR waits for a person. Reconcile keeps reaping.
+			// so every other green PR is the auto-merge workflow's (a fixer's carries the
+			// label) or a person's. Reconcile keeps reaping.
 			"install-reconcile-task.py": []
 		},
 		// The fix pass's switch (`fix_cycle.SETTING`): `off` writes one line and exits,

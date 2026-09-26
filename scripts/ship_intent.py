@@ -9,9 +9,10 @@ a diff can be read by anyone, and the message is the one changelog consumers get
 
 The fix pass (`scripts/fix-pass.py`) does the rest, here: run the commit-stage fixers
 through the tree's own `ship.py --fix`, commit with the message, push with the push gate
-skipped -- CI judges, and the pass reads its artifact -- open the PR *without* the
-`automerge` label, so a green one still waits for a person, and record the outcome in
-`logs/ship-state.json` beside the intent. A refused commit is
+skipped -- CI judges, and the pass reads its artifact -- open the PR, and record the
+outcome in `logs/ship-state.json` beside the intent. A PR from a branch the pass cut for
+a fixer carries the `automerge` label; one from a feature session's branch does not, so
+a green one waits for a person (`pr_labels`). A refused commit is
 recorded too, with the pre-commit output as evidence, so the pass can tell it from a
 session still working: no intent file means hands off, an intent with a refusal means a
 dispatchable failure, an intent already shipped at this tree's state means nothing to do.
@@ -234,6 +235,20 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
     return "", ""
 
 
+def pr_labels(tree: Path) -> tuple[str, ...]:
+    """`automerge` for a branch the pass cut for a fixer, nothing for a feature session's.
+
+    The label is an authorization the vendored `dependabot-automerge.yml` honours on ANY
+    PR once the gate passes, with no branch or author filter. A fixer's PR -- a red
+    default branch, a nightly, a vendored failure sent to devkit -- is work the pass
+    itself decided on, and its green gate is the whole review. A feature session's PR is
+    a prompt-driven change a person asked for, so it waits for that person -- including
+    when a fixer was sent back at it for a red gate or a refused commit, since the
+    branch stays the feature's (`fix_reports.stamp` keeps `owns_branch` across stamps).
+    """
+    return (sweep.AUTOMERGE_LABEL,) if fix_reports.fixer_owns_branch(tree) else ()
+
+
 def ship_one(
     intent: Intent,
     python: str,
@@ -263,12 +278,6 @@ def ship_one(
         detail = (pushed.stderr or pushed.stdout or "").strip()[-400:]
         return Outcome(intent, FAILED, f"push: {detail}")
 
-    # Deliberately unlabelled. `automerge` is an authorization the vendored
-    # `dependabot-automerge.yml` honours on ANY PR once the gate passes, with no branch
-    # or author filter, so applying it here would land every prompt-driven change the
-    # moment CI went green. The label is for routine churn whose green gate is the whole
-    # review -- adoptions, Dependabot, the Codex mirror -- and a person applies it to a
-    # shipped PR by hand when they decide it is one of those.
     url, _created, error = sweep.ensure_pr(
         gh_for(tree),
         sweep.Plan(
@@ -276,6 +285,7 @@ def ship_one(
             pr_body=intent.body or intent.subject,
             pr_head=intent.branch,
             pr_base=base,
+            pr_labels=pr_labels(tree),
         ),
     )
     if error:

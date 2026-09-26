@@ -200,7 +200,8 @@ def green_adoptions(rows: Iterable[dict], prefixes: tuple[str, ...], label: str)
 
     An adoption is upstream churn whose green gate is the whole review, and letting
     those land is what keeps a release's fan-out from piling up in the queue. Nothing
-    else is merged by the pass; every other green PR waits for a person.
+    else is merged by the pass; every other green PR is the auto-merge workflow's when
+    labelled (a fixer's, `ship_intent.pr_labels`) and a person's otherwise.
     """
     return [
         row

@@ -371,7 +371,7 @@ def dispatch_fresh(
         # One directory per failure: a devkit session can hold two of one project's.
         gate_evidence.place(failure, tree, gate_evidence.evidence_slot(failure) if upstream else "")
     if key:
-        fix_reports.stamp(tree, key, decision.note)
+        fix_reports.stamp(tree, key, decision.note, owns_branch=True)
     print(f"  worktree {tree} on {branch}")
     if upstream:
         prompt, title = fix_prompts.upstream_prompt(decision.failures, branch), f"devkit {branch}"

@@ -292,7 +292,10 @@ the release this was written for.
 The global `post-checkout` hook (`scripts/worktree_env.py`) fires once, in the new tree,
 whenever one is created — `git worktree add`, whoever ran it, which is the one seam that
 reaches `claude --worktree`, `codex --worktree` and a person at a prompt alike, with no
-agent hook involved. It does two things a linked worktree otherwise
+agent hook involved. `claude --worktree` cuts with `--no-checkout`, which git exempts from
+`post-checkout`, so the same set-up also runs from the global `post-index-change` hook on
+the `git reset --hard` that fills the tree, for as long as the tree has no `.venv`. It
+does two things a linked worktree otherwise
 lacks, each only when its conditions hold:
 
 - writes the worktree its own `COMPOSE_PROJECT_NAME` into a gitignored `.env`, so a
@@ -560,9 +563,10 @@ opening the PR, reading the gate, updating a branch, merging an adoption: one co
 each, run here.
 
 1. **Ship every intent.** Run the tree's commit-stage fixers, commit with the message,
-   push with the push gate skipped, open the PR *without* the `automerge` label (a
-   green one waits for a person; the label is for adoptions, Dependabot and the Codex
-   mirror, whose gate is the whole review), record the outcome in `logs/ship-state.json`
+   push with the push gate skipped, open the PR — with the `automerge` label when the
+   pass cut the branch for a fixer, whose gate is the whole review, and without it on a
+   feature session's branch, even after a fixer was sent back at it, so a green one waits
+   for a person — record the outcome in `logs/ship-state.json`
    beside the intent, and set the intent aside as `logs/ship-intent.shipped.md`. A dirty
    tree with no intent is a session still working — a fixer's, too — and is never
    touched; a refused commit is a failure like any other, with the pre-commit output as

@@ -20,9 +20,22 @@ def test_the_stamp_round_trips_and_a_missing_or_corrupt_one_reads_as_empty(tmp_p
         "key": "pr:carameli:412:abc:d:dispatch",
         "what": "1 check failing",
         "when": "2026-09-19T09:00:00+00:00",
+        "owns_branch": False,
     }
     (tmp_path / fix_reports.STAMP_FILE).write_text("{not json", encoding="utf-8")
     assert fix_reports.read_stamp(tmp_path) == {}
+
+
+def test_a_restamp_keeps_whose_branch_it_is_unless_told(tmp_path):
+    """A fixer sent back at a fixer's branch is still on the pass's branch; one sent at a
+    feature session's is still on the feature's. Only the dispatch that cut it says so."""
+    assert fix_reports.fixer_owns_branch(tmp_path) is False
+    fix_reports.stamp(tmp_path, "a", "n", NOW, owns_branch=True)
+    fix_reports.stamp(tmp_path, "b", "n", NOW)
+    assert fix_reports.fixer_owns_branch(tmp_path) is True
+    fix_reports.stamp(tmp_path, "c", "n", NOW, owns_branch=False)
+    fix_reports.stamp(tmp_path, "d", "n", NOW)
+    assert fix_reports.fixer_owns_branch(tmp_path) is False
 
 
 def test_a_new_stamp_clears_the_report_an_earlier_session_left_in_the_tree(tmp_path):

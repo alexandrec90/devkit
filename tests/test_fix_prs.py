@@ -785,7 +785,9 @@ def test_a_nightly_decision_opens_in_its_own_project_off_its_default_branch(monk
     assert cut == [
         (
             root / "carameli",
-            "agent/fix-nightly-" + _dt.datetime.now(_dt.UTC).strftime("%m%d"),
+            # `tb.branch_name`'s date is the local one: the UTC date differs for hours
+            # of every day east or west of Greenwich, and this test went red in them.
+            "agent/fix-nightly-" + _dt.date.today().strftime("%m%d"),
             "master",
         )
     ]
@@ -934,6 +936,7 @@ def test_a_dispatch_stamps_the_worktree_with_the_key_it_is_recorded_under(monkey
     claude = agent_models.Launch("claude")
     assert fix_prs.dispatch_pr(failure(), root, claude, None, "pr:carameli:412:k") == 0
     assert fix_prs.fix_reports.read_stamp(tree)["key"] == "pr:carameli:412:k"
+    assert not fix_prs.fix_reports.fixer_owns_branch(tree), "a PR's branch is its author's"
     fresh = root / "devkit" / ".claude" / "worktrees" / "f"
     fresh.mkdir(parents=True)
     monkeypatch.setattr(fix_prs.tb, "detect_default_branch", lambda _git: "main")
@@ -944,6 +947,7 @@ def test_a_dispatch_stamps_the_worktree_with_the_key_it_is_recorded_under(monkey
         "key": "upstream:1:k",
         "what": "one vendored failure",
         "when": fix_prs.fix_reports.read_stamp(fresh)["when"],
+        "owns_branch": True,
     }
     unstamped = root / "carameli" / ".claude" / "worktrees" / "u"
     unstamped.mkdir(parents=True)

@@ -384,7 +384,7 @@ def test_in_ref_separates_a_missing_path_from_an_unreadable_one(tmp_path):
 def test_every_hook_in_the_map_gets_the_executable_bit(tmp_path):
     """git skips a hook it cannot execute WITHOUT SAYING SO, so the set that gets chmod
     is derived from the map rather than listed beside it."""
-    assert installer.HOOK_NAMES == {"pre-commit", "pre-push", "post-checkout"}
+    assert installer.HOOK_NAMES == {"pre-commit", "pre-push", "post-checkout", "post-index-change"}
     for source, destination in installer.RUNTIME_FILES.items():
         assert (destination in installer.HOOK_NAMES) == source.startswith("scripts/git-hooks/")
 
