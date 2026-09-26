@@ -17,6 +17,7 @@ import fix_plan
 
 NOW = _dt.datetime(2026, 9, 19, 9, 0, tzinfo=_dt.UTC)
 VENDORED = ("scripts/hooks/tests/test_untested_symbols.py::test_x",)
+PREFIXES = ("agent/auto/devkit-upgrade-", "agent/devkit-upgrade-")
 
 
 def failure(**fields) -> fix_plan.Failure:
@@ -91,6 +92,38 @@ def test_a_devkit_pr_red_on_its_own_diff_is_fixed_on_its_own_branch():
         go, held = fix_cycle.phase([decision(fix_plan.DISPATCH, red)], classes, harness)
         assert harness.clean and held == []
         assert [(d.action, d.failures) for d in go] == [(fix_plan.DISPATCH, (red,))]
+
+
+RATCHET = (
+    "scripts/hooks/tests/test_structure_check.py::test_nothing_is_new_or_worse_than_the_baseline",
+)
+
+
+def test_a_consumer_pr_red_only_on_a_ratchet_is_fixed_on_its_own_branch():
+    """carameli #395 grew its own `scripts/lint-all.py` past the ceiling its baseline
+    records, and the vendored structure check said so. Classed as the harness, it went
+    to a devkit session on a fresh branch off main -- nothing there to fix, and no way to
+    reach the PR -- and stayed red. The test file is vendored; what it judges is not."""
+    red = failure(head="agent/secrets-baseline-lf-0926", signature=RATCHET)
+    assert fix_cycle.classify(red, set(), PREFIXES) == fix_cycle.PROJECT
+    classes = fix_cycle.classify_all([red], PREFIXES)
+    harness = fix_cycle.harness_state(classes, True, [])
+    go, held = fix_cycle.phase([decision(fix_plan.DISPATCH, red)], classes, harness)
+    assert harness.clean and held == []
+    assert [(d.action, d.failures) for d in go] == [(fix_plan.DISPATCH, (red,))]
+
+
+def test_a_ratchet_shared_adopted_or_beside_a_vendored_test_is_still_the_harness():
+    """The v0.11.21 adoption was red in eight repos on the untested-symbols ratchet
+    because the rule itself changed: across consumers, or on an adoption, what moved may
+    be the ratchet, and that is devkit's."""
+    both = [failure(signature=RATCHET), failure(project="ibkr_trader", number=7, signature=RATCHET)]
+    shared = fix_cycle.shared_signatures(both)
+    assert all(fix_cycle.classify(f, shared, PREFIXES) == fix_cycle.HARNESS for f in both)
+    adopting = failure(head="agent/auto/devkit-upgrade-v0-11-25-0926", signature=RATCHET)
+    assert fix_cycle.classify(adopting, set(), PREFIXES) == fix_cycle.HARNESS
+    mixed = failure(signature=(*RATCHET, *VENDORED))
+    assert fix_cycle.classify(mixed, set(), PREFIXES) == fix_cycle.HARNESS
 
 
 def test_a_signature_shared_by_two_projects_is_the_harness():

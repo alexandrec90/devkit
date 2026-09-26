@@ -368,7 +368,7 @@ def run(
     blocked = record_blocked(root, projects, ledger_path)
     newest = gate_evidence.newest_release(root / fix_cycle.DEVKIT)
     decisions = fix_plan.plan(failures, newest, prefixes)
-    classes = fix_cycle.classify_all(failures)
+    classes = fix_cycle.classify_all(failures, prefixes)
     harness = fix_cycle.harness_state(classes, green, pending_adoptions(root, projects, newest))
     go, held = fix_cycle.phase(decisions, classes, harness, prefixes)
     skipped = [d for d in decisions if d.action == fix_plan.SKIP]

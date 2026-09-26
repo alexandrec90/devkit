@@ -90,6 +90,20 @@ RUNNING = "running"
 # devkit defect by construction, because the file is byte-identical everywhere.
 VENDORED_TESTS = "scripts/hooks/tests/"
 
+# The exception to that: vendored tests that judge the checkout they run in, each
+# comparing the project's own code with a baseline the project owns. The file is
+# byte-identical everywhere and what it measures is not, so one red in one project on
+# an ordinary PR is that PR's growth -- carameli #395 grew its own `scripts/lint-all.py`
+# past its recorded ceiling. The same one red across consumers is still devkit's: the
+# v0.11.21 adoption was red in eight repos because the untested-symbols rule changed.
+RATCHETS = frozenset(
+    {
+        f"{VENDORED_TESTS}test_structure_check.py::test_nothing_is_new_or_worse_than_the_baseline",
+        f"{VENDORED_TESTS}test_structure_check.py::test_the_baseline_holds_only_what_the_code_still_earns",
+        f"{VENDORED_TESTS}test_untested_symbols.py::test_every_public_symbol_is_named_by_a_test",
+    }
+)
+
 # `release.py`'s branch namespace. The PR gate on one of these is red by design.
 RELEASE_PREFIX = "release/"
 
@@ -226,6 +240,22 @@ def in_vendored_tier(entry: str, prefixes: tuple[str, ...] = (VENDORED_TESTS,)) 
         return False
     known = vendored_paths()
     return known is None or path in known or path in prefixes
+
+
+def is_own_ratchet(failure: Failure, shared: set[tuple[str, ...]], prefixes: Iterable[str]) -> bool:
+    """Red only on a ratchet, in one project, on a change that adopts nothing.
+
+    Then the ratchet measured that change's own code against the project's own baseline
+    (carameli #395), and the fix is on its head. Shared -- `shared` is the signatures seen
+    in two or more projects -- or on an adoption, the ratchet itself may be what moved,
+    as in the v0.11.21 fan-out, and that is devkit's.
+    """
+    return (
+        bool(failure.signature)
+        and all(entry in RATCHETS for entry in failure.signature)
+        and failure.signature not in shared
+        and not adoption_tag(failure.head, tuple(prefixes))
+    )
 
 
 def is_vendored(sig: tuple[str, ...]) -> bool:

@@ -9,7 +9,7 @@ unattended. Three rules, each pure and tested in `tests/test_fix_cycle.py`:
   -- a vendored test, a lint finding in a vendored path, a signature shared by two or
   more projects, a commit refused by the toolchain rather than by the change, or
   anything in devkit -- `PROJECT` when the evidence points at the project's own code,
-  and `UNKNOWN` when there is no evidence to point anywhere. Unknown goes to the project
+  a vendored ratchet red on one project's ordinary PR included, and `UNKNOWN` when there is no evidence to point anywhere. Unknown goes to the project
   bucket, where the fixer will say "upstream" and stop; guessing the other way sends a
   devkit session at a project bug.
 - **Hold every project fixer while the harness is red.** Nearly every red PR of the last
@@ -154,7 +154,9 @@ def _harness_shaped(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> 
     )
 
 
-def classify(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> str:
+def classify(
+    failure: fix_plan.Failure, shared: set[tuple[str, ...]], prefixes: Iterable[str] = ()
+) -> str:
     ids = [entry for entry in failure.signature if entry != fix_plan.CONFLICT]
     # A devkit PR is red on its own diff: one against a red main is held by the plan
     # before it gets here. Its vendored tests judge its own code -- the ratchets above
@@ -162,6 +164,9 @@ def classify(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> str:
     # fresh branch off main has nothing to fix and cannot reach the PR (devkit #393, #394).
     if failure.project == DEVKIT and failure.kind == fix_plan.PR:
         return PROJECT if ids else UNKNOWN
+    # Before `_harness_shaped` and `HARNESS_PATHS`, each of which would claim it (#395).
+    if fix_plan.is_own_ratchet(failure, shared, prefixes):
+        return PROJECT
     if _harness_shaped(failure, shared):
         return HARNESS
     if ids and all(fix_plan.in_vendored_tier(entry, HARNESS_PATHS) for entry in ids):
@@ -173,11 +178,15 @@ def classify(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> str:
     return PROJECT if ids else UNKNOWN
 
 
-def classify_all(failures: Iterable[fix_plan.Failure]) -> dict[str, str]:
-    """Class per failure, keyed the way the ledger keys them."""
+def classify_all(
+    failures: Iterable[fix_plan.Failure], prefixes: Iterable[str] = ()
+) -> dict[str, str]:
+    """Class per failure, keyed the way the ledger keys them. `prefixes` are the
+    adoption branch stems (`adoption_prs.adoption_prefixes`)."""
     listed = list(failures)
     shared = shared_signatures(listed)
-    return {fix_ledger.failure_key(f): classify(f, shared) for f in listed}
+    named = tuple(prefixes)
+    return {fix_ledger.failure_key(f): classify(f, shared, named) for f in listed}
 
 
 # --- the phase gate -------------------------------------------------------------------

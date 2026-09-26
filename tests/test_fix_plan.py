@@ -195,6 +195,28 @@ def test_the_same_vendored_failure_in_one_project_is_that_projects_own():
     assert actions(decisions) == [(fix_plan.DISPATCH, ["carameli#412"])]
 
 
+def test_a_ratchet_is_the_projects_own_only_alone_and_off_an_adoption():
+    own = failure(head="agent/secrets-baseline-lf-0926", signature=VENDORED_SIG)
+    assert fix_plan.is_own_ratchet(own, set(), PREFIXES)
+    assert not fix_plan.is_own_ratchet(own, {VENDORED_SIG}, PREFIXES)
+    assert not fix_plan.is_own_ratchet(failure(signature=VENDORED_SIG), set(), PREFIXES)
+    assert not fix_plan.is_own_ratchet(failure(signature=("tests/t.py::a",)), set(), PREFIXES)
+    for sig in ((), (*VENDORED_SIG, "tests/t.py::a"), ("scripts/hooks/tests/test_ship.py::t",)):
+        mixed = failure(head="agent/secrets-baseline-lf-0926", signature=sig)
+        assert not fix_plan.is_own_ratchet(mixed, set(), PREFIXES)
+    # Still vendored: across consumers it stays one devkit decision (the v0.11.21 fan-out).
+    assert fix_plan.is_vendored(VENDORED_SIG)
+
+
+def test_every_ratchet_names_a_live_vendored_test():
+    """A renamed ratchet would silently send its failures back to the devkit session."""
+    root = Path(__file__).resolve().parents[1]
+    for entry in fix_plan.RATCHETS:
+        path, _, name = entry.partition("::")
+        assert path in (fix_plan.vendored_paths() or ()), entry
+        assert f"\ndef {name}(" in (root / path).read_text(encoding="utf-8"), entry
+
+
 def test_a_shared_signature_that_is_not_vendored_is_still_one_per_project():
     """Two projects failing their own `tests/` on the same id are two projects."""
     red = [
