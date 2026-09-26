@@ -89,6 +89,12 @@ HARNESS_REFUSALS = (
 # on the PR. A harness PR in either shape goes as itself, before the folded session.
 BRANCH_SHAPED = (fix_plan.UPDATE, fix_plan.RESOLVE)
 
+# The same hole in a quieter shape: a red devkit PR while devkit's default branch is
+# green. Only the PR's own diff can be the cause, so a fresh branch off that green
+# default does not even reproduce it. devkit #387 took sync-devkit.py past its
+# recorded `file_lines` and its upstream session could only stop: the baseline must
+# stay tight, so no change to the default can pre-grant a PR room. See `own_branch`.
+
 # The budget. Two a day per target because the second is the retry after a fix that
 # did not take; the third is the loop nobody asked for.
 PER_TARGET_PER_DAY = 2
@@ -99,6 +105,7 @@ PER_DAY = 8
 class Harness:
     clean: bool
     reasons: tuple[str, ...]
+    devkit_green: bool | None = None
 
 
 # --- the switch -----------------------------------------------------------------------
@@ -180,7 +187,7 @@ def harness_state(
     pending = sorted(set(pending_adoptions))
     if pending:
         reasons.append(f"the newest release is still being adopted in {', '.join(pending)}")
-    return Harness(not reasons, tuple(reasons))
+    return Harness(not reasons, tuple(reasons), devkit_green)
 
 
 def decision_class(decision: fix_plan.Decision, classes: dict[str, str]) -> str:
@@ -200,7 +207,7 @@ def phase(
     decision becomes one devkit session and every project one is held. Once clean,
     updates go first (free, and they may turn the PR green by themselves), then
     conflicts: a conflicted PR's gate cannot run, so nothing else about it is knowable.
-    That same order holds for the branch-shaped decisions the fold cannot take.
+    That same order holds for the decisions the fold cannot take (`own_branch`).
     """
     live = [d for d in decisions if d.action != fix_plan.SKIP]
     harness_ones = [d for d in live if decision_class(d, classes) == HARNESS]
@@ -209,9 +216,10 @@ def phase(
     if not harness.clean:
         why = "held until the harness is clean: " + "; ".join(harness.reasons)
         go = sorted(
-            (d for d in harness_ones if d.action in BRANCH_SHAPED), key=lambda d: rank[d.action]
+            (d for d in harness_ones if own_branch(d, harness)),
+            key=lambda d: rank.get(d.action, 2),
         )
-        foldable = [d for d in harness_ones if d.action not in BRANCH_SHAPED]
+        foldable = [d for d in harness_ones if not own_branch(d, harness)]
         if foldable:
             go.append(fold_harness(foldable))
         return go, [(d, why) for d in project_ones]
@@ -219,10 +227,22 @@ def phase(
     return harness_ones + ordered, []
 
 
+def own_branch(decision: fix_plan.Decision, harness: Harness) -> bool:
+    """The decision needs the PR's own head branch, so the fold must not take it:
+    anything `BRANCH_SHAPED`, or a devkit PR dispatch while devkit's default is green."""
+    if decision.action in BRANCH_SHAPED:
+        return True
+    return (
+        decision.action == fix_plan.DISPATCH
+        and harness.devkit_green is True
+        and all(f.project == DEVKIT and f.kind == fix_plan.PR for f in decision.failures)
+    )
+
+
 def fold_harness(decisions: list[fix_plan.Decision]) -> fix_plan.Decision:
     """One devkit session for every foldable harness failure this pass found.
 
-    Never called with a `BRANCH_SHAPED` decision: see the constant.
+    Never called with a decision `own_branch` claims: see that and `BRANCH_SHAPED`.
     """
     if len(decisions) == 1 and decisions[0].action == fix_plan.UPSTREAM:
         return decisions[0]

@@ -17,8 +17,8 @@ One pass, whether a click or the scheduler started it:
 3. **Harness first.** While anything harness-shaped is red -- a vendored test, a shared
    signature, devkit's own gate, a release mid-adoption -- one devkit session gets the
    whole set and every project fixer is held, out loud. A harness PR that is behind or
-   conflicted goes as itself first: neither is work a fresh branch can do
-   (`fix_cycle.BRANCH_SHAPED`).
+   conflicted goes as itself first, and so does a red devkit PR while devkit's default
+   is green: none is work a fresh branch can do (`fix_cycle.own_branch`).
 4. **Then projects**, conflicts first, each under the ledger and the daily caps.
 5. **Merge green adoptions**, and nothing else. Every other green PR waits for a person.
 

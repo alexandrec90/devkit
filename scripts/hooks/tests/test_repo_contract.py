@@ -852,7 +852,6 @@ def test_skill_script_dependencies_exist():
             )
 
 
-@consumes_harness
 def test_vendored_policy_is_present():
     """The rule every project's CLAUDE.md defers to has to actually be there.
 
@@ -864,7 +863,6 @@ def test_vendored_policy_is_present():
     )
 
 
-@consumes_harness
 def test_the_guardrail_keeps_the_harness_off_the_sessions_plate():
     """A project session makes the change it was asked for; the harness is the pass's.
 
@@ -892,7 +890,39 @@ def test_the_guardrail_keeps_the_harness_off_the_sessions_plate():
     )
 
 
-@consumes_harness
+FIXER_FILE = ".claude/fixer.md"
+
+# The project-session instructions a fixer must be told how to read, each with the
+# words that name it in the fixer file's override table.
+FIXER_OVERRIDES = (
+    "the harness is not your job",
+    "never silently work around a refusal",
+    "session-scope.md",
+    "the change the user asked for and nothing else",
+)
+
+
+def test_a_fixer_has_its_own_instructions_and_project_sessions_do_not_load_them():
+    """Fixers and project sessions need different instructions, and the rules are
+    written for project sessions: a guardrail that says report a dead end and stop was
+    read by a fixer as licence to stop at the failure it was sent to fix.
+
+    So a fixer -- declared as one by the first sentence of the fix pass's prompt --
+    reads its own file, kept outside `.claude/rules/` so no project session loads it,
+    and each project-session rule that would steer it wrong points there.
+    """
+    fixer = REPO_ROOT / FIXER_FILE
+    assert fixer.is_file(), f"{FIXER_FILE} is missing -- run `python scripts/sync-devkit.py --pull`"
+    assert not FIXER_FILE.startswith(".claude/rules/"), "a file under rules/ loads everywhere"
+    text = " ".join(fixer.read_text(encoding="utf-8").split()).lower()
+    for clause in FIXER_OVERRIDES:
+        assert clause.lower() in text, f"{FIXER_FILE} no longer answers {clause!r}"
+    for rule in (VENDORED_POLICY, ".claude/rules/session-scope.md"):
+        assert "../fixer.md" in (REPO_ROOT / rule).read_text(encoding="utf-8"), (
+            f"{rule} addresses project sessions and no longer points a fixer at {FIXER_FILE}"
+        )
+
+
 def test_claude_md_defers_to_the_vendored_policy_rather_than_restating_it():
     """A CLAUDE.md that restates vendored policy has forked it.
 
@@ -913,7 +943,6 @@ def test_claude_md_defers_to_the_vendored_policy_rather_than_restating_it():
             )
 
 
-@consumes_harness
 def test_vendored_skills_are_not_locally_edited():
     """Vendored skills carry no project's default branch, paths, or service names.
 

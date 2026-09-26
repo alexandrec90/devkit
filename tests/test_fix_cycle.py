@@ -136,7 +136,28 @@ def test_while_the_harness_is_red_one_devkit_session_goes_and_every_project_fixe
 
 
 def test_several_harness_decisions_fold_into_one_session():
-    devkit_pr = failure(project="devkit", number=9)
+    devkit_main = failure(kind=fix_plan.BRANCH, project="devkit", number=0, head="")
+    shared = [failure(project="a", number=1), failure(project="b", number=2)]
+    decisions = [
+        decision(fix_plan.DISPATCH, devkit_main),
+        decision(fix_plan.DISPATCH, shared[0]),
+        decision(fix_plan.DISPATCH, shared[1]),
+    ]
+    classes = fix_cycle.classify_all([devkit_main, *shared])
+    go, held = fix_cycle.phase(decisions, classes, fix_cycle.harness_state(classes, False, []))
+    assert len(go) == 1 and go[0].action == fix_plan.UPSTREAM
+    assert sorted(f.project for f in go[0].failures) == ["a", "b", "devkit"]
+    assert "3 checkout(s)" in go[0].note
+    assert held == []
+
+
+def test_a_red_devkit_pr_on_a_green_default_goes_to_its_own_branch():
+    """devkit #387 added a MANIFEST entry that took sync-devkit.py past its recorded
+    `file_lines`, with devkit's own default branch green. The fold sent it upstream: a
+    fresh branch off that green default, where the failure does not reproduce and
+    nothing can land on the PR -- and the structure baseline must stay tight, so no
+    change there could pre-grant the room either. Only the PR's own diff can fix it."""
+    devkit_pr = failure(project="devkit", number=387)
     shared = [failure(project="a", number=1), failure(project="b", number=2)]
     decisions = [
         decision(fix_plan.DISPATCH, devkit_pr),
@@ -145,10 +166,34 @@ def test_several_harness_decisions_fold_into_one_session():
     ]
     classes = fix_cycle.classify_all([devkit_pr, *shared])
     go, held = fix_cycle.phase(decisions, classes, fix_cycle.harness_state(classes, True, []))
-    assert len(go) == 1 and go[0].action == fix_plan.UPSTREAM
-    assert sorted(f.project for f in go[0].failures) == ["a", "b", "devkit"]
-    assert "3 checkout(s)" in go[0].note
+    assert [d.action for d in go] == [fix_plan.DISPATCH, fix_plan.UPSTREAM]
+    assert go[0].failures == (devkit_pr,)
+    assert sorted(f.project for f in go[1].failures) == ["a", "b"]
     assert held == []
+
+
+def test_own_branch_claims_only_what_needs_the_prs_head():
+    green = fix_cycle.harness_state({}, True, [])
+    devkit_pr = failure(project="devkit", number=387)
+    assert fix_cycle.own_branch(decision(fix_plan.DISPATCH, devkit_pr), green)
+    assert fix_cycle.own_branch(decision(fix_plan.RESOLVE, failure()), green)
+    assert not fix_cycle.own_branch(decision(fix_plan.DISPATCH, failure()), green)
+    devkit_main = failure(kind=fix_plan.BRANCH, project="devkit")
+    assert not fix_cycle.own_branch(decision(fix_plan.DISPATCH, devkit_main), green)
+    assert not fix_cycle.own_branch(decision(fix_plan.UPSTREAM, devkit_pr), green)
+
+
+def test_a_red_devkit_pr_folds_while_devkit_itself_is_red_or_unread():
+    """Then the PR's red may be the default branch's, and one fix there covers both."""
+    devkit_pr = failure(project="devkit", number=387)
+    classes = fix_cycle.classify_all([devkit_pr])
+    for green in (False, None):
+        go, _ = fix_cycle.phase(
+            [decision(fix_plan.DISPATCH, devkit_pr)],
+            classes,
+            fix_cycle.harness_state(classes, green, []),
+        )
+        assert [d.action for d in go] == [fix_plan.UPSTREAM]
 
 
 def test_a_conflicted_harness_pr_gets_its_resolver_rather_than_the_devkit_session():
@@ -177,7 +222,7 @@ def test_a_behind_harness_pr_is_updated_rather_than_folded():
         classes,
         fix_cycle.harness_state(classes, True, []),
     )
-    assert [d.action for d in go] == [fix_plan.UPDATE, fix_plan.UPSTREAM]
+    assert [d.action for d in go] == [fix_plan.UPDATE, fix_plan.DISPATCH]
     assert go[1].failures == (red,)
     assert held == []
 
