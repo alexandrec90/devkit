@@ -785,7 +785,9 @@ def test_a_nightly_decision_opens_in_its_own_project_off_its_default_branch(monk
     assert cut == [
         (
             root / "carameli",
-            "agent/fix-nightly-" + _dt.datetime.now(_dt.UTC).strftime("%m%d"),
+            # Local, as `task_branch.branch_name` dates it: a UTC date here failed
+            # every push gate west of Greenwich for the hours after UTC midnight.
+            "agent/fix-nightly-" + _dt.date.today().strftime("%m%d"),
             "master",
         )
     ]

@@ -76,6 +76,8 @@ def world(tmp_path, monkeypatch):
         "shipped": [],
         "blocked": [],
         "order": [],
+        "release": "",
+        "releases": [],
     }
     monkeypatch.setattr(
         fix_pass.devkit_project, "known_projects", lambda _t: ["devkit", "carameli"]
@@ -111,7 +113,16 @@ def world(tmp_path, monkeypatch):
         "collect_default_branches",
         lambda _ws, _projects: dict(table["branches"]),
     )
-    monkeypatch.setattr(fix_pass, "pending_adoptions", lambda root, projects, tag: table["pending"])
+    monkeypatch.setattr(
+        fix_pass.fix_release, "pending_adoptions", lambda root, projects, tag: table["pending"]
+    )
+    monkeypatch.setattr(
+        fix_pass.fix_release,
+        "cut_release",
+        lambda ws, tag, green, dispatching, now: (
+            table["releases"].append((tag, green, dispatching)) or table["release"]
+        ),
+    )
     monkeypatch.setattr(
         fix_pass.fix_backlog, "ledger_failure", lambda devkit_dir, root: table["backlog"]
     )
@@ -125,7 +136,7 @@ def world(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        fix_pass,
+        fix_pass.fix_release,
         "merge_green_adoptions",
         lambda root, projects: (
             table["order"].append(("merge", sorted(projects))) or table["merged"]
@@ -412,42 +423,15 @@ def test_dispatch_routes_a_branch_to_the_pr_path_and_the_rest_to_a_fresh_one(mon
     )
 
 
-def test_pending_adoptions_names_the_consumers_still_adopting(monkeypatch, tmp_path):
-    for name in ("devkit", "carameli", "roguelike"):
-        (tmp_path / name).mkdir()
-    monkeypatch.setattr(
-        fix_pass.adoption_prs,
-        "open_adoption_pr",
-        lambda d, tag: "#1 u" if d.name == "roguelike" else "",
-    )
-    assert fix_pass.pending_adoptions(
-        tmp_path, ["devkit", "carameli", "roguelike"], "v0.11.22"
-    ) == ["roguelike"]
-    assert fix_pass.pending_adoptions(tmp_path, ["carameli"], "") == []
-
-
-def test_green_adoptions_are_merged_through_the_reconcile_merge(monkeypatch, tmp_path):
-    (tmp_path / "carameli").mkdir()
-    rows = [
-        {
-            "number": 5,
-            "headRefName": "agent/auto/devkit-upgrade-v0-11-22-0919",
-            "labels": [{"name": "automerge"}],
-            "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-            "mergeable": "MERGEABLE",
-        }
-    ]
-    monkeypatch.setattr(
-        fix_pass.sweep,
-        "gh_for",
-        lambda d: lambda *a: type("R", (), {"returncode": 0, "stdout": json.dumps(rows)})(),
-    )
-    merged = []
-    monkeypatch.setattr(
-        fix_pass.worktree, "merge_pr", lambda gh, n: merged.append(n) or (True, f"merged PR #{n}")
-    )
-    lines = fix_pass.merge_green_adoptions(tmp_path, ["devkit", "carameli"])
-    assert merged == [5] and lines == ["carameli #5 -- merged PR #5"]
+def test_the_release_step_reads_devkits_verdict_and_lands_on_the_record(world):
+    """Handed devkit's own default-branch verdict, which decides whether a start can
+    succeed, and whether this pass dispatches -- `plan` only says it would."""
+    world["branches"]["devkit"] = ("running", None)
+    world["release"] = "started -- 1 change(s) v0.11.22 cannot deliver: x"
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
+    fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW)
+    assert world["releases"] == [("v0.11.22", "running", True), ("v0.11.22", "running", False)]
+    assert "release  started -- 1 change(s)" in artifact(world)
 
 
 def test_the_cli_reads_the_switch_from_the_workspace_and_forces_the_background_agent_when_scheduled(

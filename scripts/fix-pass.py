@@ -16,7 +16,10 @@ on a verdict a fresh pass reads in a call.
    the same way, so this is also how their work leaves the worktree.
 2. **Merge green adoptions**, and nothing else. Every other green PR waits for a
    person. Before the red is read, so a release whose adoptions just went green stops
-   holding the projects on this pass rather than the next.
+   holding the projects on this pass rather than the next. Then, once devkit's own
+   verdict is read, **start the release `main` owes** -- vendored changes no tag carries
+   -- detached, and never awaited (`fix_release.py`): a consumer red that only a tag can
+   clear is not a session's to fix.
 3. **Collect everything red.** Refused commits, red PRs, open scheduled-failure issues
    and every default branch whose own gate is red, each with the gate's own artifact
    (`gate_evidence.py`), plus the harness-defect ledger's open backlog
@@ -70,7 +73,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
-import adoption_prs
 import agent_models
 import broken_pr_menu as menu
 import devkit_project
@@ -78,6 +80,7 @@ import fix_backlog
 import fix_cycle
 import fix_ledger
 import fix_plan
+import fix_release
 import fix_reports
 import gate_evidence
 import ship_intent
@@ -204,19 +207,6 @@ def record_blocked(root: Path, projects: list[str], ledger_path: Path) -> list[s
     return lines
 
 
-def pending_adoptions(root: Path, projects: list[str], tag: str) -> list[str]:
-    """Projects with the newest release still up for adoption -- the harness mid-flight."""
-    if not tag:
-        return []
-    return [
-        name
-        for name in projects
-        if name != fix_cycle.DEVKIT
-        and (root / name).is_dir()
-        and adoption_prs.open_adoption_pr(root / name, tag)
-    ]
-
-
 def collect_red(
     workspace: Path, projects: list[str], refused: list[fix_plan.Failure]
 ) -> tuple[list[fix_plan.Failure], bool | str | None]:
@@ -236,36 +226,6 @@ def collect_red(
         failures += [backlog] if backlog else []
     green, _ = branches.get(fix_cycle.DEVKIT, (None, None))
     return failures, green
-
-
-def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
-    """Step 2. The one merge the pass makes; `(lines for the record)`."""
-    merged: list[str] = []
-    prefixes = adoption_prs.adoption_prefixes()
-    for name in projects:
-        project_dir = root / name
-        if name == fix_cycle.DEVKIT or not project_dir.is_dir():
-            continue
-        gh = sweep.gh_for(project_dir)
-        listed = gh(
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--limit",
-            "50",
-            "--json",
-            "number,headRefName,isDraft,labels,mergeable,statusCheckRollup",
-        )
-        rows = gate_evidence.gh_json(listed)
-        if not isinstance(rows, list):
-            rows = []
-        for row in adoption_prs.green_adoptions(rows, prefixes, sweep.AUTOMERGE_LABEL):
-            ok, message = worktree.merge_pr(gh, int(row.get("number", 0)))
-            merged.append(
-                f"{name} #{row.get('number')} -- {message if ok else 'FAILED: ' + message}"
-            )
-    return merged
 
 
 def update_branch(failure: fix_plan.Failure, root: Path) -> int:
@@ -379,16 +339,19 @@ def run(
     paused = sorted(name for name in sweep.on_hold(text) if name in projects)
     active = [name for name in projects if name not in paused]
     ledger_path = worktree.boxes_root(root) / fix_ledger.LEDGER_NAME
-    prefixes = adoption_prs.adoption_prefixes()
+    prefixes = fix_release.adoption_prefixes()
+    dispatching = mode == fix_cycle.DISPATCH
 
     shipped, refused, ship_failed = ship_intents(root, projects, mode)
-    merged = merge_green_adoptions(root, active) if mode == fix_cycle.DISPATCH else []
+    merged = fix_release.merge_green_adoptions(root, active) if dispatching else []
     failures, green = collect_red(workspace, active, refused)
     blocked = record_blocked(root, projects, ledger_path)
     newest = gate_evidence.newest_release(root / fix_cycle.DEVKIT)
+    release = fix_release.cut_release(workspace, newest, green, dispatching, now)
     decisions = fix_plan.plan(failures, newest, prefixes)
     classes = fix_cycle.classify_all(failures)
-    harness = fix_cycle.harness_state(classes, green, pending_adoptions(root, active, newest))
+    adopting = fix_release.pending_adoptions(root, active, newest)
+    harness = fix_cycle.harness_state(classes, green, adopting)
     go, held = fix_cycle.phase(decisions, classes, harness, prefixes)
     skipped = [d for d in decisions if d.action == fix_plan.SKIP]
 
@@ -407,6 +370,7 @@ def run(
         tuple(skipped),
         tuple(paused),
         tuple(blocked),
+        release,
     )
     text = fix_cycle.render(account)
     print(text)
