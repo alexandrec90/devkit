@@ -606,6 +606,22 @@ def test_a_failed_scheduled_job_is_a_triage_event():
     assert len(triage.open_items(items)) == 1
 
 
+def test_a_session_friction_row_is_open_and_resolve_like_reaches_it(tmp_path, monkeypatch):
+    """The fix pass files `session-friction` and `fix-pass-finding` rows on this machine's
+    ledger. With neither event in `TRIAGE_EVENTS`, main printed "nothing open" over a
+    backlog the pass had just sent a session to work, and `--resolve-like` retired
+    nothing (`resolved 0 item(s)`) -- ledger groups 027445d7 and 2a88da15, filed twice."""
+    first = _line("session-friction", project="devkit", detail="reported: X")
+    again = _line("session-friction", project="devkit", detail="reported: X", stamp=_STAMPS[1])
+    finding = _line("fix-pass-finding", project="devkit", detail="push keeps failing")
+    monkeypatch.setenv("DEVKIT_DIR", str(_ledger(tmp_path, first, again, finding)))
+    monkeypatch.setattr(triage, "REPO_ROOT", tmp_path)
+
+    assert len(triage.open_items(triage.load(tmp_path))) == 3
+    assert triage.main(["--resolve-like", triage.item_id(first), "--note", "fixed"]) == 0
+    assert [i.event for i in triage.open_items(triage.load(tmp_path))] == ["fix-pass-finding"]
+
+
 def test_the_same_job_failing_nightly_stays_one_open_defect():
     """Three bad nights are one thing to fix. The exit code and artifact path are kept
     off the signature so a job whose failure mode shifts does not fork into two items
