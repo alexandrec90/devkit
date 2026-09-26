@@ -8,8 +8,8 @@ installs the toolchain into whichever came back without one. Where a worktree fo
 branch goes and what git is asked to do are `scripts/agent_worktrees.py`'s; a matching
 live box is `worktree.py`'s, reused and never leased from here.
 
-Every function here is tested in `tests/test_fix_prs.py`, through the names that module
-imports; the two that cut take a runner.
+Every function here is tested in `tests/test_fix_prs.py` (see `COVERED_BY` in
+`tests/test_test_contract.py`); the two that cut take a runner.
 """
 
 from __future__ import annotations
@@ -19,10 +19,15 @@ import sys
 from pathlib import Path
 
 import agent_worktrees as aw
-import project_python
 import stray_worktree as stray
 import sweep
 import worktree
+
+# `project_python.VENV_DIR`, spelled out rather than imported: the fix pass is a
+# scheduled job, and importing that module puts its spawns -- `re_exec` streams, so it
+# cannot take `NO_WINDOW` -- in the set `tests/test_scheduled_jobs.py` checks, for a
+# string. `worktree.plan_provision` writes the same literal.
+VENV_DIR = ".venv"
 
 
 def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
@@ -93,7 +98,7 @@ def provision_tree(
     a session still working, and a warm `uv sync` there buys nothing. A failed install
     is a note, not a refusal -- the fixer is told to close that gap itself.
     """
-    if (tree / project_python.VENV_DIR).is_dir():
+    if (tree / VENV_DIR).is_dir():
         return []
     steps = plan(tree)
     if not steps:

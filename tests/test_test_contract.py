@@ -59,6 +59,11 @@ COVERED_BY: dict[str, tuple[str, str]] = {
         "tests/test_precommit_hooks.py",
         "same module as its two siblings, for the same reason",
     ),
+    "fix_trees.py": (
+        "tests/test_fix_prs.py",
+        "split out of fix-prs.py along a section header; its tests drive the same fake "
+        "git listings and runners as the dispatch tests that assert the order it is called in",
+    ),
     "notify-wrap.py": (
         "tests/test_self_hosting.py",
         "the wrapper's one behaviour is that it propagates the wrapped exit code, and "

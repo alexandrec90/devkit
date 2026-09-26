@@ -32,23 +32,18 @@ session is on the same machine and would hit the same wall.
 
 1. Run the project's provisioning command — the one its preflight or the SessionStart
    report names.
-2. If that command cannot close the gap, and it is the project's own script, extend it
-   so it can. Put that in the same change, with tests, and say why in the intent. The
-   pattern is `uv venv --python`: fetch the pinned version into a per-user cache rather
-   than depending on what the machine has installed.
+2. If that command cannot close the gap and is the project's own script, extend it, with
+   tests, in the same change. The pattern is `uv venv --python`: fetch the pinned
+   version into a per-user cache rather than rely on what the machine has.
 3. Only a gap that needs something outside the repository is a blocker: admin rights,
    a credential, a paid service. Write that in `logs/fix-blocked.md` and lead the report
    with it rather than burying it under the results.
 
-**Closing the gap for this tree is half the fix; the other half is why it was open.**
-Having provisioned it, find out what cut or opened this checkout without provisioning it —
-a worktree tool, a dispatcher, a template — and fix that too, in the same change. Saying
-in the report that "the worktree had no virtualenv" is the mention in passing this
-section forbids: the next checkout that tool cuts arrives just as empty. Only when that
-tool is outside the repository, or vendored, does it become a report instead of an edit.
+**Then fix why it was open:** whatever cut this checkout unprovisioned — a worktree
+tool, a dispatcher, a template — gets fixed in the same change, or the next tree it cuts
+arrives just as empty. A tool outside the repo is a report instead, and so is a tool or
+provisioning script vendored from devkit: a harness defect under `engineering.md`.
 A fixer's "nothing else about the PR" scopes the *change under review*, not this.
 
 Never "fix" it by hand-installing one binary, or by upgrading the machine's
 system-wide runtime. That fixes this turn and leaves the next checkout just as broken.
-A provisioning *script* that is vendored from devkit is still a harness defect under
-`engineering.md` and is reported, not edited.
