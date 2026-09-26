@@ -9,9 +9,10 @@ a diff can be read by anyone, and the message is the one changelog consumers get
 
 The fix pass (`scripts/fix-pass.py`) does the rest, here: run the commit-stage fixers
 through the tree's own `ship.py --fix`, commit with the message, push with the push gate
-skipped -- CI judges, and the pass reads its artifact -- open the PR *without* the
-`automerge` label, so a green one still waits for a person, and record the outcome in
-`logs/ship-state.json` beside the intent. A refused commit is
+skipped -- CI judges, and the pass reads its artifact -- open the PR, labelled
+`automerge` only when the fix pass cut the tree (`labels_for`): a fixer's PR merges
+once green, a person's waits for them. The outcome is recorded in `logs/ship-state.json`
+beside the intent. A refused commit is
 recorded too, with the pre-commit output as evidence, so the pass can tell it from a
 session still working: no intent file means hands off, an intent with a refusal means a
 dispatchable failure, an intent already shipped at this tree's state means nothing to do.
@@ -253,6 +254,19 @@ def _settled(intent: Intent, porcelain: str) -> Outcome | None:
     return still_refused(intent, state, porcelain)
 
 
+def labels_for(tree: Path) -> tuple[str, ...]:
+    """`automerge` for work the fix pass started, nothing for a person's.
+
+    `automerge` is an authorization the vendored `dependabot-automerge.yml` honours on
+    any PR once its gate passes, so it goes only where the pass itself is the author: a
+    tree it cut for a fixer (`fix_reports.ORIGIN_FILE`), or one a fixer cut and marked
+    the same way. A fixer committing to a person's PR works in that person's tree, which
+    carries no mark, so their PR still waits for them -- and `ensure_pr` labelling a
+    reused PR too is why the mark is the tree's origin, not the dispatch stamp.
+    """
+    return (sweep.AUTOMERGE_LABEL,) if (tree / fix_reports.ORIGIN_FILE).is_file() else ()
+
+
 def still_refused(intent: Intent, state: dict, porcelain: str) -> Outcome | None:
     """The last refusal again, when neither the words nor the tree have moved since it.
 
@@ -323,12 +337,6 @@ def ship_one(
         detail = (pushed.stderr or pushed.stdout or "").strip()[-400:]
         return Outcome(intent, FAILED, f"push: {detail}")
 
-    # Deliberately unlabelled. `automerge` is an authorization the vendored
-    # `dependabot-automerge.yml` honours on ANY PR once the gate passes, with no branch
-    # or author filter, so applying it here would land every prompt-driven change the
-    # moment CI went green. The label is for routine churn whose green gate is the whole
-    # review -- adoptions, Dependabot, the Codex mirror -- and a person applies it to a
-    # shipped PR by hand when they decide it is one of those.
     url, _created, error = sweep.ensure_pr(
         gh_for(tree),
         sweep.Plan(
@@ -336,6 +344,7 @@ def ship_one(
             pr_body=intent.body or intent.subject,
             pr_head=intent.branch,
             pr_base=base,
+            pr_labels=labels_for(tree),
         ),
     )
     if error:

@@ -225,3 +225,10 @@ def test_every_prompt_names_the_ratchets_and_forbids_a_question():
     for text in every_prompt():
         assert "structure_check.py" in text and "untested_symbols.py" in text
         assert "never ask a question" in text
+
+
+def test_the_devkit_session_marks_a_sibling_tree_it_cuts_as_fixer_work():
+    assert (
+        "logs/fix-origin" in fix_prompts.LEDGER_STEPS
+        and "merges once green" in fix_prompts.LEDGER_STEPS
+    )

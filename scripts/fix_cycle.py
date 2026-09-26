@@ -23,8 +23,8 @@ unattended. Three rules, each pure and tested in `tests/test_fix_cycle.py`:
   dispatch at the same commit. A failure `fix_ledger.ATTEMPTS` fixers left unchanged
   is filed on the harness-defect ledger (`fix_budget.py`), where the devkit session takes it
   over, and gets fresh fixers once that is resolved. The devkit session, with nothing
-  above it, backs off instead. `PER_TARGET_PER_DAY` and `PER_DAY` are fuses behind
-  that, and a fuse that trips files itself.
+  above it, backs off instead. No daily fuse caps any of it: the supervisor's spend
+  watch does that job, with a person reading it.
 
 The switch is the workspace file: `"devkit.fixPass"` under `settings`, `off` (the
 default), `plan` (write what would happen, do nothing) or `dispatch`. The scheduled job

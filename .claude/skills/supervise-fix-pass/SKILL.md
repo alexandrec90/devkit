@@ -98,6 +98,22 @@ twice. Then run step 2 again. Stop when an iteration comes back with **no violat
 no unfiled friction and no noisy finding** -- or after three rounds, in which case the
 report's headline is what is still breaking and why.
 
+## Merging, and watching spend
+
+**You may merge.** A fixer's PR merges itself once green (`automerge`, from a tree the
+pass cut). Your own supervision branch, and a fixer PR the loop is waiting on, you merge
+yourself once its gate is green: `gh pr merge <n> --squash --delete-branch`. Resolve its
+conflicts with `origin/main` yourself when it has any -- you are the one who knows what
+it changes. A PR from a person's own session is theirs: never merge it.
+
+**The pass has no daily cap on sessions; you are the cap.** The report's `spend:`
+violations are the signal -- an iteration sending more than `SPEND_SESSIONS`, a session
+past `SPEND_CALLS` calls or `SPEND_TOKENS` output tokens -- and the run brakes itself
+past `--brake-tokens` in total. On any of those, stop and find out what is being paid
+for before running again: the same problem re-sent at a changing signature, a fixer
+looping on a check it cannot pass, a backlog refilling as fast as it drains. A spend
+problem is fixed in the pass like any other defect -- not by adding a cap back.
+
 ## 5. Your own turns
 
 This session is held to the same contract. Any turn *you* lost to the harness -- a

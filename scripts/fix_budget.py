@@ -5,9 +5,13 @@
 There is no "needs a human" answer anywhere in it. A problem the ledger shows fixers
 could not move is escalated -- a finding on the harness-defect ledger, which the devkit
 session takes over -- and gets fresh fixers once that finding is resolved. The devkit
-session has nothing above it, so its own exhaustion backs off instead of stopping. The
-fuses are what stops a pass whose reading has gone wrong, and a fuse that trips files
-itself as a defect in the pass.
+session has nothing above it, so its own exhaustion backs off instead of stopping.
+
+There are no daily fuses. They were a cap on sessions per day, set for a pass nobody was
+watching; the first supervised run showed what one costs -- two dead launches spent the
+devkit target's four and held a 21-item backlog for the rest of the day. What stops a
+pass that reads wrong now is the supervisor's spend watch (`fix-pass-supervise.py`)
+and a person reading it, not a count that also stops a pass that reads right.
 
 Tested in `tests/test_fix_budget.py`.
 """
@@ -26,42 +30,8 @@ import fix_plan
 
 DEVKIT = "devkit"
 
-# The fuses. The retry policy is `fix_ledger.ATTEMPTS` -- per problem, spent only by a
-# fixer that left the same failure behind -- and these are only what stops a pass
-# whose reading has gone wrong: a signature that changes on every run reads as
-# progress forever, and nothing else would notice. Set above what a working day
-# needs, so a fuse that trips is a defect to read about in the record, not a budget.
-PER_TARGET_PER_DAY = 4
-PER_DAY = 24
-
 
 # --- the budget -------------------------------------------------------------------------
-
-
-def target_of(key: str) -> str:
-    """The PR, branch or checkout a ledger key names: the first three fields."""
-    parts = key.split(":")
-    if parts[0] == fix_plan.UPSTREAM:
-        return DEVKIT
-    return ":".join(parts[:3])
-
-
-def sent_today(ledger: dict[str, dict], now: _dt.datetime) -> dict[str, int]:
-    """Sessions per target on `now`'s date, from the ledger's own timestamps.
-
-    An `UPDATE` is recorded for idempotence but is one `gh` call and no session, so it
-    is not counted: after a release merge, a handful of behind PRs once spent the whole
-    day's budget on free branch updates and the real fixers waited for tomorrow.
-    """
-    counts: dict[str, int] = {}
-    day = now.date().isoformat()
-    for key, entry in ledger.items():
-        if key.endswith(f":{fix_plan.UPDATE}"):
-            continue
-        if isinstance(entry, dict) and str(entry.get("when", "")).startswith(day):
-            target = target_of(key)
-            counts[target] = counts.get(target, 0) + 1
-    return counts
 
 
 def is_blind(decision: fix_plan.Decision) -> bool:
@@ -89,10 +59,10 @@ class Budget:
 # goes at `TOP_EFFORT`. A harness change it merges in between is a changed backlog, so a
 # new problem with a fresh budget, not a retry.
 BACKOFF = (
-    _dt.timedelta(days=1),
-    _dt.timedelta(days=2),
-    _dt.timedelta(days=4),
-    _dt.timedelta(days=7),
+    _dt.timedelta(hours=1),
+    _dt.timedelta(hours=2),
+    _dt.timedelta(hours=4),
+    _dt.timedelta(hours=8),
 )
 TOP_EFFORT = "max"
 
@@ -102,8 +72,6 @@ def budget(
     ledger: dict[str, dict],
     now: _dt.datetime,
     escalated: fix_findings.Escalation = fix_findings.NOT_ESCALATED,
-    per_target: int = PER_TARGET_PER_DAY,
-    per_day: int = PER_DAY,
 ) -> Budget:
     """Whether this dispatch goes now; when it does not, why, and whether to file that.
 
@@ -115,8 +83,7 @@ def budget(
     evidence to tell progress by -- is escalated too, except a conflict whose head has
     moved since (`fix_ledger.moved_on`): a resolver pushes only a merge that resolved,
     so a new conflict at a new commit is the base moving again (devkit #390). The
-    devkit session's own exhaustion backs off instead (`BACKOFF`). A fuse that trips is
-    a pass reading wrong, and files itself.
+    devkit session's own exhaustion backs off instead (`BACKOFF`).
     """
     if decision.action == fix_plan.UPDATE:
         # Free, so never rationed -- but made once per head, like everything else.
@@ -136,7 +103,7 @@ def budget(
         if decision.action == fix_plan.UPSTREAM:
             return _back_off(decision, ledger, now, made - limit)
         return _exhausted(decision, made)
-    return _fuses(decision, ledger, now, per_target, per_day)
+    return Budget(True)
 
 
 def _exhausted(decision: fix_plan.Decision, made: int) -> Budget:
@@ -177,28 +144,6 @@ def _back_off(
             False, f"backing off: retried at {TOP_EFFORT} effort after {due:%Y-%m-%d %H:%M}"
         )
     return Budget(True, effort=TOP_EFFORT)
-
-
-def _fuses(
-    decision: fix_plan.Decision,
-    ledger: dict[str, dict],
-    now: _dt.datetime,
-    per_target: int,
-    per_day: int,
-) -> Budget:
-    counts = sent_today(ledger, now)
-    target = target_of(fix_ledger.decision_key(decision))
-    if sum(counts.values()) >= per_day:
-        why = f"the pass has sent {per_day} sessions today"
-    elif counts.get(target, 0) >= per_target:
-        why = f"{target} has had {per_target} sessions today"
-    else:
-        return Budget(True)
-    # A fuse only trips when the pass is reading something wrong -- a signature that
-    # changes every run reads as progress forever. That is a defect in the pass, so it
-    # is filed against devkit rather than left for someone to notice in the record.
-    finding = fix_findings.Finding("fuse-tripped", DEVKIT, f"{why} (sessions per day is a fuse)")
-    return Budget(False, f"fuse: {why}", finding)
 
 
 def _names(decision: fix_plan.Decision) -> str:

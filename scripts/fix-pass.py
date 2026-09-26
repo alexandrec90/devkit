@@ -22,7 +22,7 @@ which survives this file crashing). Two rules hold it together:
 5. **Harness first**: while anything harness-shaped is red, one devkit session gets
    all of it and project fixers are held, out loud. Only one at a time.
 6. **Then projects**, conflicts first, each under `fix_budget.budget`: the ledger, the
-   escalation ladder and the fuses.
+   escalation ladder.
 
 Every pass appends a line to `logs/fix-pass.history.jsonl`, which `fix_stall` reads.
 `"devkit.fixPass"` in the workspace file is `off` (the default), `plan` (write it all,

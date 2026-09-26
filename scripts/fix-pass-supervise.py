@@ -11,7 +11,7 @@ What is checked, per iteration (`check_record`, `check_sessions`, `check_progres
 - **The record names no person as the next step** -- no "needs a human", no "read the
   record", no bare `FAILED` that nothing filed.
 - **Every waiting decision waits on something tracked**: already dispatched, escalated,
-  backing off, a working devkit session, a fuse that filed itself.
+  backing off, a working devkit session, a live session in the tree.
 - **The pass itself ran**: no crash, no hang, no refusal from the watchdog.
 - **Every dispatched session ended with an outcome** -- an intent or a blocked report --
   and what it spent getting there: tool calls, failed calls, and the friction the
@@ -35,7 +35,7 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -65,6 +65,14 @@ SETTLE = _dt.timedelta(minutes=75)
 MIN_GAP = _dt.timedelta(minutes=12)
 POLL = 60
 
+# The spend watch. Above what the first supervised runs needed -- the busiest fixer made
+# 207 calls, the busiest iteration sent 7 sessions -- so crossing one is worth a look.
+SPEND_SESSIONS = 8
+SPEND_CALLS = 300
+SPEND_TOKENS = 120_000
+# The brake: output tokens across the whole run past which no further iteration starts.
+BRAKE_TOKENS = 1_000_000
+
 # A person named as the next step, in any wording the pass has ever used.
 PERSON = re.compile(r"needs a human|read the record|waits? for (?:a person|you)\b|by hand", re.I)
 # Why a decision may wait: each names what it waits on, which something tracks.
@@ -74,7 +82,6 @@ TRACKED_WAITS = (
     "backing off",
     "held until the devkit session",
     "a session is working in",
-    "fuse:",
 )
 # Record lines that are a failure, and the finding kind that must be open for each.
 FAILURE_KINDS = (
@@ -99,6 +106,7 @@ class Session:
     failed_calls: int = 0
     friction: list[str] = field(default_factory=list)
     readable: str = ""  # `session_transcripts.render` of it, for the transcript audit
+    tokens: int = 0  # output tokens, once per API response: what a session actually costs
 
 
 @dataclass
@@ -156,6 +164,22 @@ def check_sessions(sessions: list[Session]) -> list[str]:
     return found
 
 
+def check_spend(sessions: list[Session]) -> list[str]:
+    """What only a spend watch would catch: an iteration that sends more than a pass
+    should, or a session that costs more than any fixer so far has needed. There are no
+    daily fuses in the pass; this is what stands in for them, with someone reading it."""
+    found = []
+    if len(sessions) > SPEND_SESSIONS:
+        found.append(f"spend: {len(sessions)} sessions in one iteration (watch: {SPEND_SESSIONS})")
+    for session in sessions:
+        where = f"{session.project} {Path(session.tree).name}"
+        if session.calls > SPEND_CALLS or session.tokens > SPEND_TOKENS:
+            found.append(
+                f"spend: {where} made {session.calls} calls, {session.tokens} output tokens"
+            )
+    return found
+
+
 def check_progress(iterations: list[Iteration]) -> list[str]:
     """What only shows across iterations: a backlog that grew on every one of three.
 
@@ -171,16 +195,35 @@ def check_progress(iterations: list[Iteration]) -> list[str]:
 # --- the sessions -------------------------------------------------------------------------
 
 
-def measure(transcript: Path | None) -> tuple[int, int, list[str]]:
-    """`(tool calls, failed calls, friction the detectors see)` in one transcript."""
+def measure(transcript: Path | None) -> tuple[int, int, list[str], int]:
+    """`(tool calls, failed calls, friction the detectors see, output tokens)`."""
     if transcript is None or not transcript.is_file():
-        return 0, 0, []
+        return 0, 0, [], 0
     chunk = st.read_new(transcript, 0, 0)
     events = st.events(transcript, chunk.rows)
     calls = sum(1 for e in events if e.kind == "call")
     failed = sum(1 for e in events if e.kind == "result" and e.error)
     friction = [f"{cls}: {what}" for cls, what, _ in session_friction.detect(events)]
-    return calls, failed, friction
+    return calls, failed, friction, output_tokens(row for _, row in chunk.rows)
+
+
+def output_tokens(rows: Iterable[dict]) -> int:
+    """Output tokens across a transcript, counted once per API response.
+
+    Claude Code writes one record per content block and repeats the response's `usage`
+    on each, so summing records multiplies a batched turn -- the reason
+    `token-audit.py` keys on the message id, as this does.
+    """
+    seen: dict[str, int] = {}
+    for row in rows:
+        message = row.get("message")
+        message = message if isinstance(message, dict) else {}
+        usage = message.get("usage")
+        tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
+        key = str(row.get("requestId") or message.get("id") or "")
+        if key and isinstance(tokens, int):
+            seen[key] = tokens
+    return sum(seen.values())
 
 
 def dispatched_since(
@@ -222,7 +265,7 @@ def settle(
     for tree in trees:
         state, transcript = states[tree.path]
         path = Path(transcript) if transcript else None
-        calls, failed, friction = measure(path)
+        calls, failed, friction, tokens = measure(path)
         what = str(tree.stamp.get("what", ""))
         sessions.append(
             Session(
@@ -235,6 +278,7 @@ def settle(
                 failed,
                 friction,
                 _render(path, out, tree.path),
+                tokens,
             )
         )
     return sessions
@@ -289,6 +333,7 @@ def iterate(
         out = REPO_ROOT / READABLE / f"iteration-{number}"
         iteration.sessions = settle(trees, started + SETTLE, clock, out=out)
         iteration.violations += check_sessions(iteration.sessions)
+        iteration.violations += check_spend(iteration.sessions)
     return iteration
 
 
@@ -303,7 +348,8 @@ def write_report(iterations: list[Iteration], root: Path | None = None) -> Path:
             f"iteration {i.number} at {i.started}: exit {i.exit}, backlog {i.backlog}, filed {len(i.filed)}"
         )
         lines += [
-            f"  session {s.state:24} {s.calls:3} calls {s.failed_calls:2} failed  {s.tree}"
+            f"  session {s.state:24} {s.calls:3} calls {s.failed_calls:2} failed "
+            f"{s.tokens:>7} out  {s.tree}"
             for s in i.sessions
         ]
         lines += [f"  VIOLATION {v}" for v in i.violations]
@@ -323,6 +369,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--min-gap", type=float, default=MIN_GAP.total_seconds() / 60, help="minutes"
     )
+    parser.add_argument(
+        "--brake-tokens", type=int, default=BRAKE_TOKENS, help="stop starting iterations past this"
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     iterations: list[Iteration] = []
     for number in range(1, args.iterations + 1):
@@ -334,6 +383,12 @@ def main(argv: list[str] | None = None) -> int:
             f"iteration {number}: exit {iteration.exit}, {len(iteration.violations)} violation(s)",
             flush=True,
         )
+        if (spent := sum(s.tokens for i in iterations for s in i.sessions)) > args.brake_tokens:
+            iteration.violations.append(
+                f"spend: the run's sessions wrote {spent} output tokens; braked"
+            )
+            write_report(iterations)
+            break
         if number < args.iterations:
             gap = _dt.timedelta(minutes=args.min_gap) - (
                 utc_now() - _dt.datetime.fromisoformat(iteration.started)

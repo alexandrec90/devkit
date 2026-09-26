@@ -245,9 +245,8 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
         one.branch,
         "main",
     )
-    # A shipped PR is a prompt-driven change: the vendored auto-merge workflow lands any
-    # labelled PR once the gate passes, so the label would make CI the only reviewer.
-    assert ship_intent.sweep.AUTOMERGE_LABEL not in plan.pr_labels
+    # A person's tree carries no fix-pass origin mark, so its PR waits for them: the
+    # vendored auto-merge workflow lands any labelled PR once the gate passes.
     assert plan.pr_labels == ()
     state = ship_intent.read_state(one.tree)
     assert state["stage"] == ship_intent.SHIPPED
@@ -550,3 +549,21 @@ def test_a_refusal_nothing_has_changed_since_is_not_run_again(tmp_path):
     assert (
         ship_intent.still_refused(reworded, ship_intent.read_state(one.tree), " M a.py\n") is None
     )
+
+
+def test_a_pr_from_a_tree_the_pass_cut_merges_itself_and_a_persons_waits(tmp_path, monkeypatch):
+    """Fixer PRs merge once green; only a person's PR waits for a person. The mark is the
+    tree's origin, not the dispatch stamp: a fixer sent to repair a person's PR stamps
+    that person's tree, and `ensure_pr` labels a reused PR too."""
+    plans = []
+    monkeypatch.setattr(
+        ship_intent.sweep, "ensure_pr", lambda gh, plan: plans.append(plan) or ("u", True, "")
+    )
+    fixer = intent(tmp_path / "fixer")
+    (fixer.tree / ship_intent.fix_reports.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
+    ship_intent.ship_one(fixer, "py", "main", Runner(), gh_ok, NOW)
+    person = intent(tmp_path / "person")
+    ship_intent.fix_reports.stamp(person.tree, "pr:devkit:404:a:d:dispatch", "n", NOW)
+    ship_intent.ship_one(person, "py", "main", Runner(), gh_ok, NOW)
+    assert [p.pr_labels for p in plans] == [(ship_intent.sweep.AUTOMERGE_LABEL,), ()]
+    assert ship_intent.labels_for(person.tree) == ()

@@ -48,7 +48,8 @@ LEDGER_STEPS = (
     "once the fix is in your intent; the pass reopens a group whose branch never merges. "
     "A fixers-exhausted, blind-evidence or fixer-blocked group is a problem fixers could "
     "not move: fix what in the harness failed them, and fix the problem itself in the "
-    "tree its evidence names, leaving an intent there too."
+    "tree its evidence names, leaving an intent there too. A tree you cut yourself for "
+    "this work gets a copy of this tree's logs/fix-origin, so its PR merges once green."
 )
 
 

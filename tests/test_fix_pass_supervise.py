@@ -99,8 +99,8 @@ def test_a_session_is_measured_from_its_transcript(tmp_path):
     path = tmp_path / "s.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     poll = supervise.session_friction.COMMAND_DETAIL["poll"]
-    assert supervise.measure(path) == (1, 1, [f"poll: {poll}"])
-    assert supervise.measure(None) == (0, 0, [])
+    assert supervise.measure(path) == (1, 1, [f"poll: {poll}"], 0)
+    assert supervise.measure(None) == (0, 0, [], 0)
 
 
 def _tree(tmp_path: Path, sent: _dt.datetime) -> Any:
@@ -261,3 +261,59 @@ def test_a_settled_sessions_transcript_is_rendered_for_the_audit(tmp_path, monke
     )
     [session] = supervise.settle([tree], NOW, lambda: NOW, lambda _s: None, out=tmp_path / "out")
     assert Path(session.readable).read_text(encoding="utf-8") == "L1 USER: go\n"
+
+
+# --- the spend watch, which stands in for the daily fuses ---------------------------------
+
+
+def test_output_tokens_are_counted_once_per_response():
+    """One record per content block, each repeating the response's usage."""
+    usage = {"output_tokens": 500}
+    rows = [
+        {"type": "assistant", "requestId": "r1", "message": {"id": "m1", "usage": usage}},
+        {"type": "assistant", "requestId": "r1", "message": {"id": "m1", "usage": usage}},
+        {
+            "type": "assistant",
+            "requestId": "r2",
+            "message": {"id": "m2", "usage": {"output_tokens": 70}},
+        },
+        {"type": "user", "message": {"content": "hi"}},
+        {"type": "assistant", "message": {"usage": "junk"}},
+    ]
+    assert supervise.output_tokens(rows) == 570
+
+
+def test_a_session_or_an_iteration_past_the_watch_is_a_violation():
+    lean = supervise.Session("devkit", "C:/t/a", "n", fix_reports.DONE, calls=40, tokens=9000)
+    heavy = supervise.Session("devkit", "C:/t/b", "n", fix_reports.DONE, calls=40, tokens=500_000)
+    assert supervise.check_spend([lean]) == []
+    assert supervise.check_spend([heavy]) == ["spend: devkit b made 40 calls, 500000 output tokens"]
+    many = [lean] * (supervise.SPEND_SESSIONS + 1)
+    assert supervise.check_spend(many)[0].startswith(
+        f"spend: {supervise.SPEND_SESSIONS + 1} sessions"
+    )
+
+
+def test_the_brake_stops_the_run_past_its_token_total(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    runs = []
+
+    def costly(ws, number, mode, clock):
+        runs.append(number)
+        session = supervise.Session("devkit", "C:/t", "n", fix_reports.DONE, tokens=600)
+        return supervise.Iteration(number, clock().isoformat(), 0, "", sessions=[session])
+
+    monkeypatch.setattr(supervise, "iterate", costly)
+    monkeypatch.setattr(supervise, "REPO_ROOT", tmp_path)
+    argv = [
+        "--iterations",
+        "5",
+        "--min-gap",
+        "0",
+        "--brake-tokens",
+        "1000",
+        "--workspace",
+        str(workspace),
+    ]
+    assert supervise.main(argv) == supervise.EXIT_VIOLATED
+    assert runs == [1, 2], "the second iteration crossed 1000 and nothing after it started"

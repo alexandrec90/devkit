@@ -560,9 +560,9 @@ opening the PR, reading the gate, updating a branch, merging an adoption: one co
 each, run here.
 
 1. **Ship every intent.** Run the tree's commit-stage fixers, commit with the message,
-   push with the push gate skipped, open the PR *without* the `automerge` label (a
-   green one waits for a person; the label is for adoptions, Dependabot and the Codex
-   mirror, whose gate is the whole review), record the outcome in `logs/ship-state.json`
+   push with the push gate skipped, open the PR -- labelled `automerge` when the pass cut
+   the tree for a fixer, so a fixer's PR merges once green while a person's waits for
+   them (`ship_intent.labels_for`) -- record the outcome in `logs/ship-state.json`
    beside the intent, and set the intent aside as `logs/ship-intent.shipped.md`. A dirty
    tree with no intent is a session still working — a fixer's, too — and is never
    touched; a refused commit is a failure like any other, with the pre-commit output as
@@ -638,13 +638,13 @@ retry policy is per *problem* — the same failures on the same PR, at any commi
 `fix_ledger.ATTEMPTS` sessions left it unchanged it is escalated to the devkit session as
 a finding (`scripts/fix_budget.py`), and gets fresh fixers once that finding is resolved;
 one whose failures changed is progress and goes again. The devkit session has nothing
-above it, so its own exhaustion backs off to at most a retry a week, at top effort. A problem with no evidence gets one session
+above it, so its own exhaustion backs off to at most a retry every eight hours, at top
+effort. A problem with no evidence gets one session
 — except a conflict whose head has moved since every earlier resolver was sent
 (`fix_ledger.moved_on`): a resolver pushes only a merge that resolved, so a new conflict
 at a new commit is the base moving again, not a fix that did not take.
-`fix_budget.PER_TARGET_PER_DAY` and `PER_DAY` are only fuses behind that, for a pass
-whose reading has gone wrong, and one that trips files itself. Branch updates are
-recorded but never counted. A dispatched session found dead frees its entry at once; an
+There is no daily cap on sessions; `/supervise-fix-pass`'s spend watch is what catches a
+pass spending on something that is not moving. A dispatched session found dead frees its entry at once; an
 entry older than `fix_ledger.RESEND_AFTER` frees it regardless. An open adoption holds
 only its own project's other PRs. Every pass appends a line to
 `logs/fix-pass.history.jsonl`. A scheduled pass always uses `claude-bg`.

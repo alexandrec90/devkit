@@ -90,7 +90,7 @@ def decision_key(decision: fix_plan.Decision) -> str:
     got wrong becomes unrepeatable. devkit #381 was recorded at its head sha as an
     upstream session; nobody was going to push to a conflicted PR, so without the
     action in the key the corrected pass would read its own bad dispatch as reason
-    enough never to send the resolver. `fix_budget.target_of` reads the first three
+    enough never to send the resolver. Anything that reads a target reads the first three
     fields, so the suffix leaves the daily budget per PR exactly where it was.
     """
     keys = sorted(failure_key(f) for f in decision.failures)

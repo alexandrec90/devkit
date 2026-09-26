@@ -62,26 +62,6 @@ def go(verdict: fix_budget.Budget) -> bool:
 # --- the counting ------------------------------------------------------------------------
 
 
-def test_sent_today_counts_per_target_on_the_ledgers_own_dates():
-    ledger = {
-        "pr:a:1:s:d": {"when": NOW.isoformat()},
-        "pr:a:1:t:e": {"when": NOW.isoformat()},
-        "upstream:2:d": {"when": NOW.isoformat()},
-        "pr:b:2:s:d": {"when": "2020-01-01T00:00:00+00:00"},
-        "junk": "not an entry",
-    }
-    assert fix_budget.sent_today(ledger, NOW) == {"pr:a:1": 2, "devkit": 1}
-
-
-def test_the_target_is_the_pr_the_branch_or_devkit():
-    assert fix_budget.target_of("pr:carameli:412:abc:deadbeef") == "pr:carameli:412"
-    assert fix_budget.target_of("commit:carameli:0:abc:deadbeef") == "commit:carameli:0"
-    assert fix_budget.target_of("upstream:3:deadbeef") == fix_budget.DEVKIT
-    # The action the key ends in is a suffix, so two dispatches about one PR still
-    # draw on the same target's daily budget.
-    assert fix_budget.target_of("pr:carameli:412:abc:deadbeef:resolve") == "pr:carameli:412"
-
-
 def test_a_decision_is_blind_when_no_failure_under_it_names_anything():
     assert fix_budget.is_blind(decision(fix_plan.DISPATCH, failure(signature=())))
     assert fix_budget.is_blind(decision(fix_plan.RESOLVE, failure(signature=(fix_plan.CONFLICT,))))
@@ -90,49 +70,7 @@ def test_a_decision_is_blind_when_no_failure_under_it_names_anything():
     assert not fix_budget.is_blind(mixed), "one failure with evidence is enough to start from"
 
 
-# --- the fuses, which file themselves ----------------------------------------------------
-
-
-def test_a_target_past_its_daily_fuse_waits_and_files_the_pass_as_the_defect():
-    one = decision(fix_plan.DISPATCH, failure())
-    ledger = {
-        f"pr:carameli:412:sha{i}:digest{i}": {"when": NOW.isoformat(), "what": "n"}
-        for i in range(fix_budget.PER_TARGET_PER_DAY)
-    }
-    verdict = fix_budget.budget(one, ledger, NOW)
-    assert not verdict.go and verdict.why.startswith("fuse:")
-    assert verdict.finding and verdict.finding.kind == "fuse-tripped"
-    assert verdict.finding.project == "devkit", "a fuse trips when the pass reads wrong"
-    assert go(fix_budget.budget(decision(fix_plan.DISPATCH, failure(number=9)), ledger, NOW))
-
-
-def test_the_pass_as_a_whole_has_a_daily_fuse():
-    one = decision(fix_plan.DISPATCH, failure(number=99))
-    ledger = {
-        f"pr:p{i}:{i}:s:d": {"when": NOW.isoformat(), "what": "n"}
-        for i in range(fix_budget.PER_DAY)
-    }
-    verdict = fix_budget.budget(one, ledger, NOW)
-    assert not verdict.go and verdict.why.startswith("fuse:") and "today" in verdict.why
-
-
-def test_yesterdays_dispatches_do_not_count():
-    yesterday = (NOW - _dt.timedelta(days=1)).isoformat()
-    ledger = {f"k{i}": {"when": yesterday, "what": "n"} for i in range(10)}
-    assert go(fix_budget.budget(decision(fix_plan.DISPATCH, failure()), ledger, NOW))
-
-
-def test_an_update_never_draws_on_the_session_budget_but_goes_once_per_head():
-    """After a release merge, a handful of behind PRs burnt the daily slots on free
-    `gh pr update-branch` calls and the real fixers read "sent 8 sessions today"."""
-    today = NOW.isoformat()
-    ledger = {f"pr:p{i}:{i}:s:d:update": {"when": today, "what": "n"} for i in range(10)}
-    assert fix_budget.sent_today(ledger, NOW) == {}
-    update = decision(fix_plan.UPDATE, failure(number=99, behind=True))
-    full = {f"pr:p{i}:{i}:s:d": {"when": today, "what": "n"} for i in range(fix_budget.PER_DAY)}
-    assert go(fix_budget.budget(update, full, NOW))
-    again = fix_budget.budget(update, ledger_after(update), NOW)
-    assert not again.go and again.why.startswith("already dispatched at")
+# --- no daily caps ----------------------------------------------------
 
 
 # --- the ladder ---------------------------------------------------------------------------
@@ -220,13 +158,16 @@ def test_the_devkit_session_backs_off_at_the_top_of_the_ladder_and_never_stops()
     upstream = decision(fix_plan.UPSTREAM, failure(project="devkit"))
     ledger = ledger_after(upstream)
     ledger[fix_ledger.decision_key(upstream)]["sent"] = fix_ledger.ATTEMPTS
-    soon = fix_budget.budget(upstream, ledger, NOW + fix_ledger.RESEND_AFTER)
+    # The same problem at a new commit: not "already dispatched", so the ladder decides.
+    again = decision(fix_plan.UPSTREAM, failure(project="devkit", sha="new"))
+    soon = fix_budget.budget(again, ledger, NOW + _dt.timedelta(minutes=30))
     assert not soon.go and soon.why.startswith("backing off") and soon.finding is None
-    due = fix_budget.budget(upstream, ledger, NOW + fix_budget.BACKOFF[0])
+    due = fix_budget.budget(again, ledger, NOW + fix_budget.BACKOFF[0])
     assert due.go and due.effort == fix_budget.TOP_EFFORT
     ledger[fix_ledger.decision_key(upstream)]["sent"] = fix_ledger.ATTEMPTS + 10
-    far = fix_budget.budget(upstream, ledger, NOW + fix_budget.BACKOFF[-1])
+    far = fix_budget.budget(again, ledger, NOW + fix_budget.BACKOFF[-1])
     assert far.go, "the longest wait is a cap, not an end"
+    assert fix_budget.BACKOFF[-1] <= _dt.timedelta(hours=8), "hours, not days"
 
 
 # --- conflicts ----------------------------------------------------------------------------
@@ -239,21 +180,34 @@ def _conflict(sha: str) -> fix_plan.Decision:
     )
 
 
-def test_a_conflict_back_at_a_new_head_gets_its_resolver_again():
-    """devkit #390: the resolver pushed its merge, main moved within the hour, and the
-    new conflict read "needs a human". The head moving is what shows the first one took."""
-    shas = [f"{i}a5" for i in range(fix_budget.PER_TARGET_PER_DAY + 1)]
-    ledger = ledger_after(_conflict(shas[0]))
-    for sha in shas[1:-1]:
-        assert go(fix_budget.budget(_conflict(sha), ledger, NOW))
-        ledger.update(ledger_after(_conflict(sha)))
-    verdict = fix_budget.budget(_conflict(shas[-1]), ledger, NOW)
-    assert not verdict.go and verdict.why.startswith("fuse:"), (
-        "the per-target fuse still bounds a conflict that keeps coming back"
-    )
-
-
 def test_a_conflict_whose_head_did_not_move_is_escalated_after_its_one_blind_slot():
     ledger = ledger_after(_conflict("143b"))
     verdict = fix_budget.budget(_conflict("143b"), ledger, NOW + fix_ledger.RESEND_AFTER)
     assert not verdict.go and verdict.finding and verdict.finding.kind == "blind-evidence"
+
+
+def test_no_daily_count_stops_a_problem_that_has_budget_left():
+    """The daily fuses are gone: two dead launches once spent a target's four and held
+    a 21-item backlog for a day. Fifty sessions today elsewhere do not stop a new one."""
+    today = NOW.isoformat()
+    busy = {f"pr:carameli:{i}:s:d{i}": {"when": today, "what": "n"} for i in range(50)}
+    assert go(fix_budget.budget(decision(fix_plan.DISPATCH, failure(number=412)), busy, NOW))
+    assert not hasattr(fix_budget, "PER_DAY") and not hasattr(fix_budget, "PER_TARGET_PER_DAY")
+
+
+def test_an_update_goes_once_per_head():
+    update = decision(fix_plan.UPDATE, failure(number=99, behind=True))
+    assert go(fix_budget.budget(update, {}, NOW))
+    again = fix_budget.budget(update, ledger_after(update), NOW)
+    assert not again.go and again.why.startswith("already dispatched at")
+
+
+def test_a_conflict_back_at_a_new_head_gets_its_resolver_again_however_often():
+    """devkit #390: the resolver pushed its merge, main moved within the hour, and the
+    new conflict read "needs a human". The head moving is what shows the one before took,
+    so each new head gets a resolver -- there is no daily count to run out."""
+    shas = [f"{i}a5" for i in range(6)]
+    ledger = ledger_after(_conflict(shas[0]))
+    for sha in shas[1:]:
+        assert go(fix_budget.budget(_conflict(sha), ledger, NOW))
+        ledger.update(ledger_after(_conflict(sha)))

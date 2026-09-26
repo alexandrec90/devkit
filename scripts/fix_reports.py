@@ -40,6 +40,9 @@ import sweep
 STAMP_FILE = Path("logs") / "fix-dispatch.json"
 BLOCKED_FILE = Path("logs") / "fix-blocked.md"
 FRICTION_FILE = Path("logs") / "friction.md"
+# The mark of a tree the fix pass cut for a fixer, which makes its PR merge itself once
+# green (`ship_intent.labels_for`). Only what the pass authored carries it.
+ORIGIN_FILE = Path("logs") / "fix-origin"
 # The message a refused intent was being shipped with, set aside by the pass at
 # dispatch (`ship_intent.set_aside`) where the fixer it sent can reuse it.
 REFUSED_FILE = Path("logs") / "ship-intent.refused.md"

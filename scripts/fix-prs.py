@@ -370,6 +370,8 @@ def dispatch_fresh(
         gate_evidence.place(failure, tree, gate_evidence.evidence_slot(failure) if upstream else "")
     if key:
         fix_reports.stamp(tree, key, decision.note, problem=problem, agent=launch.agent)
+        # A tree the pass cut is fixer work from the start: its PR merges itself.
+        (tree / fix_reports.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
     print(f"  worktree {tree} on {branch}")
     if upstream:
         prompt, title = fix_prompts.upstream_prompt(decision.failures, branch), f"devkit {branch}"
