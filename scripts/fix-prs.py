@@ -64,6 +64,7 @@ import fix_plan
 import fix_prompts
 import fix_reports
 import gate_evidence
+import project_python
 import sweep
 import task_branch as tb
 import task_input
@@ -170,6 +171,28 @@ def cut_tree(project_dir: Path, branch: str, runner=subprocess.run) -> Path | No
     # --porcelain` when the picker opens, and `aw.nested` selects exactly the directory
     # cut above. The worktree you just cut is in the list because it exists.
     return path
+
+
+def provision_tree(
+    tree: Path, plan=worktree.plan_provision, run=worktree.run_provision
+) -> list[str]:
+    """Install the toolchain into a tree that has no `.venv`; the notes to print.
+
+    A linked worktree checks out tracked files only, and neither `git worktree add` nor
+    `claude --worktree` -- which cut most of the trees `existing_tree` reuses -- installs
+    anything. So every fixer opened in a checkout that could not run its own tests or
+    linter, and spent its first turns on `uv sync` before it could verify the fix it
+    was sent for. A tree that already has a `.venv` is left alone: a reused one may hold
+    a session still working, and a warm `uv sync` there buys nothing. A failed install
+    is a note, not a refusal -- the fixer is told to close that gap itself.
+    """
+    if (tree / project_python.VENV_DIR).is_dir():
+        return []
+    steps = plan(tree)
+    if not steps:
+        return []
+    _, notes = run(tree, steps)
+    return notes
 
 
 def fix_branch(decision: fix_plan.Decision, now=None) -> str:
@@ -338,6 +361,8 @@ def dispatch_pr(
         return EXIT_FAILED
     if failure.kind == fix_plan.PR and (stale := refresh_head(tree, failure.head)):
         print(f"  {stale}")
+    for note in provision_tree(tree):
+        print(f"  {note}")
     gate_evidence.place(failure, tree)
     if key:
         fix_reports.stamp(tree, key, fix_plan.describe(failure))
@@ -367,6 +392,8 @@ def dispatch_fresh(
     if tree is None:
         print(f"  could not cut {branch} off origin/{base}; nothing opened", file=sys.stderr)
         return EXIT_FAILED
+    for note in provision_tree(tree):
+        print(f"  {note}")
     for failure in decision.failures:
         # One directory per failure: a devkit session can hold two of one project's.
         gate_evidence.place(failure, tree, gate_evidence.evidence_slot(failure) if upstream else "")

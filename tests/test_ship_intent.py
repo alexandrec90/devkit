@@ -155,6 +155,17 @@ def test_an_edited_or_unshipped_intent_is_still_found(tmp_path):
         assert "not a namespaced task branch" in found[0].blocked
 
 
+def test_spent_needs_a_shipped_stage_and_the_same_words(tmp_path):
+    """Unlike `already_shipped`, the words decide: an edited message is a new intent, and
+    a dirty tree does not revive words that already shipped."""
+    one = intent(tmp_path)
+    assert ship_intent.spent(one, {"stage": ship_intent.SHIPPED, "intent": one.digest})
+    assert not ship_intent.spent(one, {"stage": ship_intent.SHIPPED, "intent": "x"})
+    assert not ship_intent.spent(one, {"stage": ship_intent.REFUSED, "intent": one.digest})
+    assert not ship_intent.spent(one, {"stage": ship_intent.FAILED, "intent": one.digest})
+    assert not ship_intent.spent(one, {})
+
+
 def test_a_checkout_git_cannot_list_is_passed_over(tmp_path):
     (tmp_path / "carameli").mkdir()
     assert (

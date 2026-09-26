@@ -87,6 +87,16 @@ def no_evidence_fetch(monkeypatch):
     monkeypatch.setattr(evidence, "read_pr", lambda _dir, found, _root: found)
 
 
+# Kept before the fixture below replaces it, so its own tests reach the real one.
+real_provision_tree = fix_prs.provision_tree
+
+
+@pytest.fixture(autouse=True)
+def no_provisioning(monkeypatch):
+    """Provisioning is a `uv sync`; the dispatch tests here assert what opens, not that."""
+    monkeypatch.setattr(fix_prs, "provision_tree", lambda _tree: [])
+
+
 # --- what the agent is told -------------------------------------------------------
 
 
@@ -333,6 +343,58 @@ def test_a_git_refusal_yields_no_worktree_rather_than_a_path(monkeypatch, tmp_pa
         return subprocess.CompletedProcess(argv, code, "", "already exists")
 
     assert fix_prs.cut_tree(checkout, "agent/x", runner) is None
+
+
+# --- provisioning the tree ------------------------------------------------------------
+
+
+def test_a_tree_with_no_venv_is_provisioned_and_its_notes_returned(tmp_path):
+    """PR #398's fixer opened in a reused `claude --worktree` tree with no `.venv`, and
+    could run neither the targeted tests nor the linter it was told to run."""
+    ran = []
+    notes = real_provision_tree(
+        tmp_path,
+        plan=lambda tree: ("uv sync",),
+        run=lambda tree, steps: ran.append((tree, steps)) or (True, ["provisioned: uv"]),
+    )
+    assert ran == [(tmp_path, ("uv sync",))]
+    assert notes == ["provisioned: uv"]
+
+
+def test_a_tree_that_has_a_venv_is_left_alone(tmp_path):
+    """A reused tree may hold a session still working; nothing is reinstalled under it."""
+    (tmp_path / ".venv").mkdir()
+    assert real_provision_tree(tmp_path, plan=lambda t: pytest.fail("must not plan")) == []
+
+
+def test_a_project_with_nothing_to_install_runs_nothing(tmp_path):
+    assert real_provision_tree(tmp_path, plan=lambda t: (), run=lambda *a: pytest.fail("ran")) == []
+
+
+def test_a_failed_install_is_a_note_not_a_refusal(tmp_path):
+    notes = real_provision_tree(
+        tmp_path, plan=lambda t: ("uv sync",), run=lambda *a: (False, ["[warn] provision: x"])
+    )
+    assert notes == ["[warn] provision: x"]
+
+
+def test_both_dispatch_paths_provision_the_tree_before_the_session_opens(monkeypatch, root):
+    tree = root / "carameli" / ".claude" / "worktrees" / "x"
+    order = []
+    monkeypatch.setattr(fix_prs, "provision_tree", lambda t: order.append(("provision", t)) or [])
+    monkeypatch.setattr(
+        fix_prs,
+        "open_session",
+        lambda launch, t, *a, **k: order.append(("open", t)) or 0,
+    )
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (tree, ""))
+    monkeypatch.setattr(fix_prs, "refresh_head", lambda *a: "")
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
+    monkeypatch.setattr(fix_prs, "cut_fresh_tree", lambda *a: (tree, "agent/fix-nightly"))
+    nightly = fix_plan.Decision(fix_plan.DISPATCH, "a nightly", (failure(kind=fix_plan.NIGHTLY),))
+    assert fix_prs.dispatch_fresh(nightly, root, agent_models.Launch("claude")) == 0
+    assert order == [("provision", tree), ("open", tree)] * 2
 
 
 # --- a fresh branch, for a failure that has none ---------------------------------------
@@ -785,7 +847,9 @@ def test_a_nightly_decision_opens_in_its_own_project_off_its_default_branch(monk
     assert cut == [
         (
             root / "carameli",
-            "agent/fix-nightly-" + _dt.datetime.now(_dt.UTC).strftime("%m%d"),
+            # The local date, as `tb.branch_name` reads it: UTC's is a day ahead every
+            # evening west of Greenwich, and this failed on exactly those evenings.
+            "agent/fix-nightly-" + _dt.date.today().strftime("%m%d"),
             "master",
         )
     ]
