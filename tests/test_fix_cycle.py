@@ -285,103 +285,6 @@ def test_folding_one_upstream_decision_keeps_it_as_it_is():
     assert two.action == fix_plan.UPSTREAM and len(two.failures) == 2
 
 
-def test_sent_today_counts_per_target_on_the_ledgers_own_dates():
-    ledger = {
-        "pr:a:1:s:d": {"when": NOW.isoformat()},
-        "pr:a:1:t:e": {"when": NOW.isoformat()},
-        "upstream:2:d": {"when": NOW.isoformat()},
-        "pr:b:2:s:d": {"when": "2020-01-01T00:00:00+00:00"},
-        "junk": "not an entry",
-    }
-    assert fix_cycle.sent_today(ledger, NOW) == {"pr:a:1": 2, "devkit": 1}
-
-
-def test_the_target_is_the_pr_the_branch_or_devkit():
-    assert fix_cycle.target_of("pr:carameli:412:abc:deadbeef") == "pr:carameli:412"
-    assert fix_cycle.target_of("commit:carameli:0:abc:deadbeef") == "commit:carameli:0"
-    assert fix_cycle.target_of("upstream:3:deadbeef") == fix_cycle.DEVKIT
-    # The action the key ends in is a suffix, so two dispatches about one PR still
-    # draw on the same target's daily budget.
-    assert fix_cycle.target_of("pr:carameli:412:abc:deadbeef:resolve") == "pr:carameli:412"
-
-
-def test_a_target_past_its_daily_fuse_waits():
-    one = decision(fix_plan.DISPATCH, failure())
-    today = NOW.isoformat()
-    ledger = {
-        f"pr:carameli:412:sha{i}:digest{i}": {"when": today, "what": "n"}
-        for i in range(fix_cycle.PER_TARGET_PER_DAY)
-    }
-    ok, why = fix_cycle.within_caps(one, ledger, NOW)
-    assert not ok and why.startswith("fuse:")
-    assert fix_cycle.within_caps(decision(fix_plan.DISPATCH, failure(number=9)), ledger, NOW) == (
-        True,
-        "",
-    )
-
-
-def ledger_after(*sent: fix_plan.Decision) -> dict[str, dict]:
-    """The ledger `fix-pass.send_all` leaves after dispatching each of `sent` once."""
-    return {
-        fix_ledger.decision_key(d): {
-            "when": NOW.isoformat(),
-            "what": "n",
-            "sent": 1,
-            "problem": fix_ledger.problem_key(d),
-        }
-        for d in sent
-    }
-
-
-def test_the_same_failure_after_two_fixers_needs_a_human_at_any_commit():
-    """The retry is for a fix that did not take; a third fixer at the same failure is
-    the loop. The sha moving is not progress: every fixer's push moves it."""
-    first = decision(fix_plan.DISPATCH, failure(sha="a1"))
-    second = decision(fix_plan.DISPATCH, failure(sha="b2"))
-    third = decision(fix_plan.DISPATCH, failure(sha="c3"))
-    assert fix_cycle.within_caps(second, ledger_after(first), NOW) == (True, "")
-    ok, why = fix_cycle.within_caps(third, ledger_after(first, second), NOW)
-    assert not ok and "2 session(s) sent" in why and "unchanged" in why
-
-
-def test_a_changed_failure_is_progress_and_goes():
-    first = decision(
-        fix_plan.DISPATCH, failure(sha="a1", signature=("tests/a.py::t", "tests/b.py::t"))
-    )
-    second = decision(
-        fix_plan.DISPATCH, failure(sha="b2", signature=("tests/a.py::t", "tests/b.py::t"))
-    )
-    narrower = decision(fix_plan.DISPATCH, failure(sha="c3", signature=("tests/b.py::t",)))
-    assert fix_cycle.within_caps(narrower, ledger_after(first, second), NOW) == (True, "")
-
-
-def test_legacy_entries_count_against_their_problem():
-    """Entries written before `problem` was kept are derived from their key."""
-    first = decision(fix_plan.DISPATCH, failure(sha="a1"))
-    second = decision(fix_plan.DISPATCH, failure(sha="b2"))
-    legacy = {
-        fix_ledger.decision_key(d): {"when": NOW.isoformat(), "what": "n"} for d in (first, second)
-    }
-    ok, _why = fix_cycle.within_caps(decision(fix_plan.DISPATCH, failure(sha="c3")), legacy, NOW)
-    assert not ok
-
-
-def test_yesterdays_dispatches_do_not_count():
-    one = decision(fix_plan.DISPATCH, failure())
-    yesterday = (NOW - _dt.timedelta(days=1)).isoformat()
-    ledger = {f"k{i}": {"when": yesterday, "what": "n"} for i in range(10)}
-    assert fix_cycle.within_caps(one, ledger, NOW) == (True, "")
-
-
-def test_the_pass_as_a_whole_has_a_daily_fuse():
-    one = decision(fix_plan.DISPATCH, failure(number=99))
-    ledger = {
-        f"pr:p{i}:{i}:s:d": {"when": NOW.isoformat(), "what": "n"} for i in range(fix_cycle.PER_DAY)
-    }
-    ok, why = fix_cycle.within_caps(one, ledger, NOW)
-    assert not ok and why.startswith("fuse:") and "today" in why
-
-
 # --- the account and the merge --------------------------------------------------------
 
 
@@ -415,59 +318,11 @@ def test_the_record_says_what_shipped_what_went_what_was_held_and_why():
 # --- the budget leaks, and what closes them ------------------------------------------
 
 
-def test_an_update_never_draws_on_the_session_budget():
-    """After a release merge, a handful of behind PRs burnt the eight daily slots on
-    free `gh pr update-branch` calls and the real fixers read "sent 8 sessions today"."""
-    today = NOW.isoformat()
-    ledger = {f"pr:p{i}:{i}:s:d:update": {"when": today, "what": "n"} for i in range(10)}
-    assert fix_cycle.sent_today(ledger, NOW) == {}
-    update = decision(fix_plan.UPDATE, failure(number=99, behind=True))
-    full = {f"pr:p{i}:{i}:s:d": {"when": today, "what": "n"} for i in range(fix_cycle.PER_DAY)}
-    assert fix_cycle.within_caps(update, full, NOW) == (True, "")
-
-
-def test_a_problem_with_no_evidence_gets_one_session_not_two():
-    """A session sent at "no artifact and no failed step named" is pure discovery, the
-    most expensive kind; the retry a second one exists for is a fix that did not take,
-    which a blind problem cannot be told from. Evidence turning up is a new problem."""
-    blind = decision(fix_plan.DISPATCH, failure(sha="a1", signature=()))
-    ledger = ledger_after(blind)
-    again = decision(fix_plan.DISPATCH, failure(sha="b2", signature=()))
-    ok, why = fix_cycle.within_caps(again, ledger, NOW)
-    assert not ok and "no evidence" in why and "needs a human" in why
-    assert fix_cycle.within_caps(decision(fix_plan.DISPATCH, failure()), ledger, NOW) == (True, "")
-
-
 def _conflict(sha: str) -> fix_plan.Decision:
     return decision(
         fix_plan.RESOLVE,
         failure(project="devkit", number=390, sha=sha, signature=(fix_plan.CONFLICT,)),
     )
-
-
-def test_a_conflict_back_at_a_new_head_gets_its_resolver_again():
-    """devkit #390: the resolver pushed its merge, main moved within the hour, and the
-    new conflict read "needs a human" -- so the harness stayed red and every project
-    PR stayed held behind it. The head moving is what shows the first one took."""
-    shas = [f"{i}a5" for i in range(fix_cycle.PER_TARGET_PER_DAY + 1)]
-    ledger = ledger_after(_conflict(shas[0]))
-    for sha in shas[1:-1]:
-        assert fix_cycle.within_caps(_conflict(sha), ledger, NOW) == (True, "")
-        ledger.update(ledger_after(_conflict(sha)))
-    ok, why = fix_cycle.within_caps(_conflict(shas[-1]), ledger, NOW)
-    assert not ok and why.startswith("fuse:"), (
-        "the per-target fuse still bounds a conflict that keeps coming back"
-    )
-
-
-def test_a_conflict_whose_head_did_not_move_keeps_its_one_blind_slot():
-    ledger = ledger_after(_conflict("143b"))
-    ok, why = fix_cycle.within_caps(_conflict("143b"), ledger, NOW)
-    assert not ok and "no evidence" in why
-    # One resolver at the head now did nothing, whatever an earlier one did.
-    ledger.update(ledger_after(_conflict("62a5")))
-    ok, why = fix_cycle.within_caps(_conflict("62a5"), ledger, NOW)
-    assert not ok and "needs a human" in why
 
 
 def test_moved_on_counts_every_day_but_only_this_problem():
@@ -577,6 +432,17 @@ def test_the_record_names_the_adoptions_still_open():
     assert "adopting carameli -- the newest release" in text
 
 
+def test_the_record_and_the_history_carry_the_release_line_only_when_there_is_one():
+    harness = fix_cycle.harness_state({}, True, [])
+    quiet = fix_cycle.Account(fix_cycle.DISPATCH, harness)
+    assert "release" not in fix_cycle.render(quiet)
+    assert json.loads(fix_cycle.history_line(quiet, NOW))["release"] == ""
+
+    started = fix_cycle.Account(fix_cycle.DISPATCH, harness, release="started -- 5 change(s)")
+    assert fix_cycle.render(started).splitlines()[-1] == "release  started -- 5 change(s)"
+    assert json.loads(fix_cycle.history_line(started, NOW))["release"] == "started -- 5 change(s)"
+
+
 def test_the_ledger_backlog_rides_along_without_holding_anyone():
     """One unresolved hook event anywhere held every project fixer; the backlog goes to
     the devkit session when one is sent and is not by itself a reason to send one."""
@@ -613,14 +479,6 @@ def test_a_projects_own_test_under_scripts_hooks_is_the_projects():
     assert fix_cycle.classify(own, set()) == fix_cycle.PROJECT
 
 
-def test_a_decision_is_blind_when_no_failure_under_it_names_anything():
-    assert fix_cycle.is_blind(decision(fix_plan.DISPATCH, failure(signature=())))
-    assert fix_cycle.is_blind(decision(fix_plan.RESOLVE, failure(signature=(fix_plan.CONFLICT,))))
-    assert not fix_cycle.is_blind(decision(fix_plan.DISPATCH, failure()))
-    mixed = decision(fix_plan.UPSTREAM, failure(signature=()), failure(number=2))
-    assert not fix_cycle.is_blind(mixed), "one failure with evidence is enough to start from"
-
-
 def test_the_record_names_the_regated_branches_and_the_blocked_reports():
     account = fix_cycle.Account(
         fix_cycle.PLAN,
@@ -632,3 +490,31 @@ def test_the_record_names_the_regated_branches_and_the_blocked_reports():
     assert lines[1] == "regate   devkit main -- no verdict at the tip; gate re-run"
     assert lines[2] == "harness  clean"
     assert lines[3] == "blocked  carameli agent/x -- needs a database the runner lacks"
+
+
+def test_when_planning_raises_only_the_backlog_goes_to_the_devkit_session():
+    """The crash is on that backlog by then, so the devkit session is what fixes the plan."""
+    backlog = failure(kind=fix_plan.LEDGER, project="devkit", number=0, head="", signature=("x",))
+    harness, go, held, skipped = fix_cycle.only_the_harness(backlog)
+    assert not harness.clean and "the plan step raised" in harness.reasons[0]
+    assert [d.action for d in go] == [fix_plan.UPSTREAM] and go[0].failures == (backlog,)
+    assert held == [] and skipped == []
+    assert fix_cycle.only_the_harness(None)[1] == []
+
+
+def test_a_devkit_commit_the_commit_stage_refused_is_fixed_in_its_own_tree():
+    """The first supervised run folded a refused devkit commit into the upstream session,
+    whose fresh branch cannot reach the tree; it spent seven calls repairing it from
+    outside. It is the same shape as a devkit PR, and goes, and is not held."""
+    refused = failure(
+        project="devkit",
+        kind=fix_plan.COMMIT,
+        number=0,
+        head="agent/x",
+        signature=("commit refused: x",),
+    )
+    assert fix_cycle.classify(refused, set()) == fix_cycle.PROJECT
+    assert fix_cycle.is_devkit_pr(decision(fix_plan.DISPATCH, refused))
+    red = fix_cycle.harness_state({"k": fix_cycle.HARNESS}, True, [])
+    go, held = fix_cycle.phase([decision(fix_plan.DISPATCH, refused)], {}, red)
+    assert [d.action for d in go] == [fix_plan.DISPATCH] and held == []

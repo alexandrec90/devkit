@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Reap what agent sessions leave behind: idle phone sessions, stray servers, orphaned
-dev servers.
+dev servers, and session worktrees whose PR has merged.
 
 The job this exists because of, from a 16 GB desktop on 2026-09-07: seven agents were
 working and the machine was paging. Eleven of the twenty-one gigabytes the agents owned
@@ -8,7 +8,9 @@ were not theirs -- five Remote Control sessions nobody had touched since breakfa
 `remote-control` servers where three were configured, and four `vite` servers from
 agent runs two days earlier. Nothing on the machine had the job of noticing any of it.
 `reap_machine` names the three kinds and the test each one gets; this is the pass that
-applies them, and the only one of the two the scheduler names.
+applies them, and the only one of the two the scheduler names. `session_trees` owns the
+fourth kind, a `.claude/worktrees` tree -- and the stack it started -- left standing
+after its PR merged.
 
 **Read-only by default, and the record outlives the pass.** `status` reports every
 finding with its verdict and touches nothing; `reap` and `maintain` act. The artifact
@@ -47,6 +49,7 @@ import devkit_jsonc
 import rc_config
 import rc_machine
 import reap_machine
+import session_trees
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -372,11 +375,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     findings = assess(plan)
     if not findings:
         report.say("nothing left behind")
-    if args.mode == "status":
+    apply = args.mode != "status"
+    if not apply:
         describe(findings, report)
-        return finish(0)
-    stopped = act(plan, findings, report, reap_machine.stop_tree, root / HISTORY, now)
-    report.say(f"stopped {stopped} process tree(s)")
+    else:
+        stopped = act(plan, findings, report, reap_machine.stop_tree, root / HISTORY, now)
+        report.say(f"stopped {stopped} process tree(s)")
+    if workspace and Path(workspace).is_file():
+        report.failures += session_trees.sweep_workspace(Path(workspace), apply, report.say)
     return finish(2 if report.failures else 0)
 
 

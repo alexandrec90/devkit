@@ -123,8 +123,38 @@ def test_the_download_lands_under_dest_and_the_logs_are_read_back(tmp_path):
 
 def test_a_download_that_fails_reads_nothing_and_asks_for_the_jobs(tmp_path):
     jobs = [{"name": "Tests", "conclusion": "failure", "steps": []}]
-    gh = table({("run", "view", "7"): {"jobs": jobs}})
+    gh = table({("run", "view", "7"): {"jobs": jobs}, ("run", "view", "7", "--log-failed"): ""})
     assert ev.run_evidence(gh, "7", tmp_path / "e") == ([], jobs)
+
+
+# The ledger report: carameli's frontend unit tests upload no artifact, so the fixer got
+# `Frontend / Unit tests` and no test id, and dug through `--log-failed` itself.
+FAILED_JOB_LOG = (
+    "Frontend\tUnit tests\t2026-09-19T10:00:00.1234567Z \x1b[31m FAIL \x1b[39m "
+    "src/Panel.test.tsx > Panel > hides on delete\n"
+    "Frontend\tUnit tests\t2026-09-19T10:00:01.0000000Z Tests  1 failed | 40 passed\n"
+)
+
+
+def test_an_artifact_less_run_is_read_from_its_failed_log_and_the_log_is_kept(tmp_path):
+    jobs = [{"name": "Frontend", "conclusion": "failure", "steps": []}]
+    gh = table(
+        {("run", "view", "7"): {"jobs": jobs}, ("run", "view", "7", "--log-failed"): FAILED_JOB_LOG}
+    )
+    texts, asked = ev.run_evidence(gh, "7", tmp_path / "e")
+    assert fix_plan.signature_from_logs(texts) == ("src/Panel.test.tsx > Panel > hides on delete",)
+    assert asked == [], "named by the log, so no coarse job names"
+    saved = tmp_path / "e" / ev.FAILED_LOG
+    assert saved.read_text(encoding="utf-8") == FAILED_JOB_LOG
+
+
+def test_a_log_that_names_nothing_still_falls_back_to_the_jobs(tmp_path):
+    jobs = [{"name": "Frontend", "conclusion": "failure", "steps": []}]
+    gh = table(
+        {("run", "view", "7"): {"jobs": jobs}, ("run", "view", "7", "--log-failed"): "x\ty\tz\n"}
+    )
+    texts, asked = ev.run_evidence(gh, "7", tmp_path / "e")
+    assert asked == jobs and fix_plan.signature(False, texts, asked) == ("Frontend",)
 
 
 JUNIT = (
@@ -292,6 +322,7 @@ def test_without_an_artifact_the_steps_are_asked_for(monkeypatch, tmp_path):
         {
             ("run", "list"): [{"databaseId": 7, "headSha": "sha1"}],
             ("run", "view"): {"jobs": [{"name": "Drift", "conclusion": "failure", "steps": []}]},
+            ("run", "view", "7", "--log-failed"): "",
         }
     )
     monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
@@ -604,3 +635,8 @@ def test_a_failing_check_from_another_workflow_is_its_own_evidence(monkeypatch, 
     assert downloaded == ["91"]
     assert failure.run_id == "91" and failure.signature == ("tests/test_x.py::test_y",)
     assert Path(failure.evidence) == tmp_path / "ev" / "carameli-pr-412"
+
+
+def test_no_failed_log_saves_nothing(tmp_path):
+    ev.run_evidence(table({}), "7", tmp_path / "e")
+    assert not (tmp_path / "e" / ev.FAILED_LOG).exists()

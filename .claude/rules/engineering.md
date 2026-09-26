@@ -225,20 +225,20 @@ devkit clone are in [`.claude/engineering-evidence.md`](../engineering-evidence.
 
 ## Guardrail: the harness is not your job
 
-**This section is for project sessions.** A fixer follows
-[`.claude/fixer.md`](../fixer.md) where the two differ.
+**For project sessions:** a fixer follows [`.claude/fixer.md`](../fixer.md) where the
+two differ.
 
 A session in a project makes the change the user asked for and nothing else. It does not
 maintain the harness, does not fix a gate, and does not file its defects: the scheduled
 fix pass (`scripts/fix-pass.py` in devkit) reads every gate, records every refusal on the
 machine's ledger itself, and sends a devkit session at the harness before any project
-session at a project. That ordering is the whole design, and a project session that
-"just fixes" a vendored file breaks it twice — once by editing what the drift gate will
-reject, and once by hiding the defect from the pass that would have fixed it everywhere.
+session at a project. A project session that "just fixes" a vendored file breaks that
+ordering twice: the drift gate rejects the edit, and the defect is hidden from the pass
+that would have fixed it everywhere.
 
 **Never silently work around a bad instruction or a refusal.** If a skill, a rule, a
 `CLAUDE.md`, a hook or a vendored script sent you into a dead end — blocked a correct
 command, refused an edit it should have allowed, crashed, reported success while doing
-nothing — say so in your report with the file or the exact command, and stop there. A
-workaround fixes your turn and leaves the next agent at the same wall; a report is what
-the devkit session works from.
+nothing — say so in your report with the file or the exact command, write the same
+line to `logs/friction.md`, and stop there: the pass files each line, and reads your
+transcript for the rest. A workaround leaves the next agent at the same wall.

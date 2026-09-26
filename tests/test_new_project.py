@@ -1706,7 +1706,29 @@ def test_manifest_paths_are_read_from_the_sync_tool():
     # Read from sync-devkit.py rather than duplicated, so the two cannot disagree.
     manifest = new_project._read_manifest_paths(REPO_ROOT)
     assert "scripts/sync-devkit.py" in manifest
+    assert "scripts/devkit_manifest.py" in manifest
     assert "scripts/hooks/harness_config.py" in manifest
+
+
+def test_the_bootstrap_places_the_tool_and_the_list_it_reads(tmp_path, monkeypatch, capsys):
+    """`sync-devkit.py` refuses to run without `devkit_manifest.py` rather than pull on
+    an empty list, so both are in the new root before the pull that vendors the rest."""
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    scripts_at_pull: list[set[str]] = []
+
+    def record(cmd, cwd, dry_run, check=True):
+        if not dry_run:
+            scripts_at_pull.append({p.name for p in (cwd / "scripts").iterdir()})
+        return 0
+
+    monkeypatch.setattr(new_project, "run", record)
+    new_project.vendor_harness(the_plan, dry_run=False)
+    assert {"sync-devkit.py", "devkit_manifest.py"} <= scripts_at_pull[0]
+
+    new_project.vendor_harness(
+        new_project.plan(make_args(parent=str(tmp_path / "d")), registry()), dry_run=True
+    )
+    assert "scripts/devkit_manifest.py    (bootstrap copy)" in capsys.readouterr().out
 
 
 def test_harness_comparison_returns_none_for_an_unknown_ref():
