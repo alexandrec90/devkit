@@ -28,6 +28,9 @@ def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(fix_reports, "CLAUDE_PROJECTS", tmp_path / "projects")
     monkeypatch.setattr(fix_loop.session_friction, "harvest", lambda *a, **k: [])
     monkeypatch.setattr(fix_loop.fix_verify, "verify", lambda *a, **k: [])
+    monkeypatch.setattr(
+        fix_loop.bg_sessions, "stop_finished", lambda trees, runner: [f"x in {t}" for t in trees]
+    )
     return fix_loop.Context(
         tmp_path,
         ["devkit", "carameli"],
@@ -236,3 +239,20 @@ def test_a_tree_another_session_is_live_in_is_busy_and_the_pass_own_session_is_n
     os.utime(resident, (NOW.timestamp(), NOW.timestamp()))
     closed, _ = close(ctx)
     assert closed.busy == {("carameli", "agent/x-0919"): str(path)}
+
+
+def test_a_finished_or_dead_sessions_idle_process_is_stopped_and_a_working_one_is_not(
+    ctx, monkeypatch
+):
+    """Fourteen finished fixers were still alive after two supervised runs."""
+    path = tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=2))  # never started
+    closed, _ = close(ctx)
+    assert closed.finished == [str(path)] and closed.stopped == [f"x in {path}"]
+    tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=20),
+        transcript_age=_dt.timedelta(minutes=5),
+    )
+    closed, _ = close(ctx)
+    assert closed.finished == [] and closed.stopped == []

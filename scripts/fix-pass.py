@@ -216,6 +216,13 @@ def merge_green_adoptions(
     return merged
 
 
+def _file_failed_regates(regated: list[str], journal: Journal) -> None:
+    """A gate the pass could not re-run is a finding against that checkout."""
+    for line in regated:
+        if "FAILED" in line:
+            fix_loop.fix_findings.file(journal, "regate-failed", line.split(" ", 1)[0], line)
+
+
 def decide(
     failures: list[fix_plan.Failure],
     green: bool | str | None,
@@ -277,9 +284,7 @@ def run(
         "collect", fix_red.collect_red, workspace, projects, refused, default=([], None, [])
     )
     regated, rerun = step("regate", fix_red.regate_unread, root, unread, mode, default=([], set()))
-    for line in regated:
-        if "FAILED" in line:
-            fix_loop.fix_findings.file(journal, "regate-failed", line.split(" ", 1)[0], line)
+    _file_failed_regates(regated, journal)
     green = fix_plan.RUNNING if fix_cycle.DEVKIT in rerun else green
     # Filed before the backlog is read, and the backlog read on its own: whatever broke
     # above -- the collect step included -- reaches the devkit session this same pass.
@@ -313,6 +318,7 @@ def run(
         tuple(regated),
         tuple(filed),
         fix_loop.backlog(ctx),
+        tuple(closed.stopped),
     )
     text = fix_cycle.render(account)
     print(text)

@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bg_sessions
 import fix_cycle
 import fix_findings
 import fix_ledger
@@ -39,6 +40,7 @@ import fix_plan
 import fix_reports
 import fix_stall
 import fix_verify
+import ship_intent
 import harness_triage as triage
 import session_friction
 import sweep
@@ -76,6 +78,9 @@ class Closed:
     # fixer is never sent in beside it: the first supervised run sent one into the tree
     # an interactive session was editing, which only went well because it sat idle.
     busy: dict[tuple[str, str], str] = field(default_factory=dict)
+    # Trees whose stamped session is done or dead, and the idle sessions stopped in them.
+    finished: list[str] = field(default_factory=list)
+    stopped: list[str] = field(default_factory=list)
 
 
 def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
@@ -88,6 +93,10 @@ def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
     journal.add(*journal.step("harvest", _harvest, ctx, cursor, default=[]))
     if ctx.writes:
         closed.lines += journal.step("verify", _verify, ctx, default=[])
+        runner = ship_intent.run_quiet
+        closed.stopped = journal.step(
+            "stop", bg_sessions.stop_finished, closed.finished, runner, default=[]
+        )
     history = fix_stall.read_history(ctx.history_path)
     journal.add(*journal.step("stall", fix_stall.stalled, history, ctx.now, default=[]))
     return closed
@@ -131,6 +140,8 @@ def _judge_session(
 ) -> None:
     key = str(tree.stamp.get("key", ""))
     state, transcript = fix_reports.session_state(tree.path, ctx.now)
+    if state in (fix_reports.DONE, *fix_reports.DEAD):
+        closed.finished.append(str(tree.path))
     live = fix_reports.active_transcript(tree.path, ctx.now)
     if live and tree.branch and not (state == fix_reports.WORKING and str(live) == transcript):
         closed.busy[(tree.project, tree.branch)] = str(tree.path)

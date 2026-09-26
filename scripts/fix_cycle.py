@@ -344,6 +344,8 @@ class Account:
     # the loop's own state, so a record that sends nothing still says what is owed.
     filed: tuple[str, ...] = ()
     backlog: int = 0
+    # Finished fixers' idle processes the pass stopped (`bg_sessions.py`).
+    stopped: tuple[str, ...] = ()
 
 
 def _names(decision: fix_plan.Decision) -> str:
@@ -372,6 +374,7 @@ def render(account: Account) -> str:
     lines += [f"sent     {line}" for line in account.sent]
     lines += [f"merged   {line}" for line in account.merged]
     lines += [f"filed    {line}" for line in account.filed]
+    lines += [f"stopped  {line}" for line in account.stopped]
     lines.append(f"ledger   {account.backlog} open on the harness-defect ledger")
     return "\n".join(lines)
 

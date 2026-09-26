@@ -184,9 +184,11 @@ def background_argv(exe: str, launch: agent_models.Launch, prompt: str) -> list[
 
     One difference is deliberate: nobody watches a background session, so it may not
     ask. A fixer in the first supervised run called `AskUserQuestion` and sat there. The
-    flag leads because it is variadic -- after `--bg` it would take the prompt as a tool.
+    flag is variadic and takes every argument that follows as a tool name -- placed
+    before `--bg` it still swallowed the prompt, and two devkit sessions opened with
+    nothing to do -- so `--` ends the options before the prompt.
     """
-    return [exe, "--disallowedTools", "AskUserQuestion", "--bg", *launch.flags(), prompt]
+    return [exe, "--bg", *launch.flags(), "--disallowedTools", "AskUserQuestion", "--", prompt]
 
 
 def launch_background(
