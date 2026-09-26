@@ -213,6 +213,26 @@ def attempts(decision: fix_plan.Decision, ledger: dict[str, dict]) -> int:
     return sum(sends(entry) for key, entry in ledger.items() if problem_of(key, entry) == problem)
 
 
+def moved_on(decision: fix_plan.Decision, ledger: dict[str, dict]) -> bool:
+    """Every session this problem has had was sent at a commit other than its head now.
+
+    The head moved under each of them, so each did something. Counted over the life of
+    the ledger, like `attempts`, not over a day: a conflict resolved yesterday and back
+    today is the base moving again. A folded upstream key names no one commit and never
+    counts as moved.
+    """
+    parts = decision_key(decision).split(":")
+    if parts[0] == fix_plan.UPSTREAM or len(parts) < 4:
+        return False
+    problem = problem_key(decision)
+    shas = [
+        other.split(":")[3]
+        for other, entry in ledger.items()
+        if problem_of(other, entry) == problem and len(other.split(":")) >= 4
+    ]
+    return bool(shas) and parts[3] not in shas
+
+
 def already_sent(
     decision: fix_plan.Decision, ledger: dict[str, dict], now: _dt.datetime | None = None
 ) -> str:

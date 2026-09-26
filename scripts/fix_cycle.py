@@ -48,11 +48,8 @@ HARNESS = "harness"
 PROJECT = "project"
 UNKNOWN = "unknown"
 
-# The switch, under `"settings"` in the workspace file beside `devkit.onHold`.
+# The switch, under `"settings"` in the workspace file.
 SETTING = "devkit.fixPass"
-# The pause list beside it, spelled here only for the record line; `sweep.on_hold`
-# reads it.
-SETTING_ON_HOLD = "devkit.onHold"
 OFF = "off"
 PLAN = "plan"
 DISPATCH = "dispatch"
@@ -348,14 +345,20 @@ def within_caps(
 
     An update is free and always goes. Otherwise the question is whether sessions have
     already failed at this same problem: `fix_ledger.ATTEMPTS` of them (one, for a
-    blind problem, which cannot show progress) and it needs a person. Past that, the
-    fuses -- which a working pass never reaches.
+    blind problem, which cannot show progress) and it needs a person. Except a conflict
+    whose head has moved since (`fix_ledger.moved_on`): a resolver pushes only a merge that
+    resolved, so a new conflict at a new commit is the base moving again, not a fix
+    that did not take. devkit #390's resolver pushed its merge, main moved within the
+    hour, and the fresh conflict read "needs a human" when it needed the resolver.
+    Past that, the fuses -- which a working pass never reaches, and which still bound
+    a conflict that keeps coming back.
     """
     if decision.action == fix_plan.UPDATE:
         return True, ""
     made = fix_ledger.attempts(decision, ledger)
     limit = fix_ledger.BLIND_ATTEMPTS if is_blind(decision) else fix_ledger.ATTEMPTS
-    if made >= limit:
+    rebased = decision.action == fix_plan.RESOLVE and fix_ledger.moved_on(decision, ledger)
+    if made >= limit and not rebased:
         unchanged = "with no evidence to tell progress by" if is_blind(decision) else "unchanged"
         return False, f"{made} session(s) sent and it is still red {unchanged} -- needs a human"
     counts = sent_today(ledger, now)
@@ -386,15 +389,14 @@ class Account:
     # commit's red. In the record because a pass that holds everything behind one of
     # these has to say which one, or "harness RED" reads as a defect nobody can find.
     skipped: tuple[fix_plan.Decision, ...] = ()
-    # Checkouts the workspace file pauses (`devkit.onHold`): intents there still ship,
-    # nothing red there is read, and the record says so rather than reading as green.
-    on_hold: tuple[str, ...] = ()
     # What a dispatched session reported it could not do, one line each: the one
     # channel back from a fixer, and what "needs a human" is about.
     blocked: tuple[str, ...] = ()
     # `fix_release.cut_release`'s one line: a release started, would start, or why not.
     # Empty when main carries nothing a tag owes a consumer.
     release: str = ""
+    # Default branches with no verdict at the tip, whose gate the pass re-ran.
+    regated: tuple[str, ...] = ()
 
 
 def _names(decision: fix_plan.Decision) -> str:
@@ -406,9 +408,7 @@ def render(account: Account) -> str:
     harness = account.harness
     lines = [f"fix-pass: mode={account.mode}"]
     lines += [f"shipped  {line}" for line in account.shipped]
-    if account.on_hold:
-        names = ", ".join(account.on_hold)
-        lines.append(f"on hold  {names} -- nothing red is read there ({SETTING_ON_HOLD})")
+    lines += [f"regate   {line}" for line in account.regated]
     lines.append(
         "harness  clean" if harness.clean else "harness  RED -- " + "; ".join(harness.reasons)
     )
