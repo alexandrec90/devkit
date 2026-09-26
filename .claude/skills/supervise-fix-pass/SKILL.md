@@ -46,10 +46,19 @@ Before step 2, answer each of these from the record, and fix the pass for any "y
 python scripts/fix-pass-supervise.py --iterations 3      # run_in_background: true
 ```
 
-Start it in the background and wait for its completion notice. **Do not poll it, tail
-it or sleep on it**: it waits for every dispatched session itself, and each check you
-make while it runs is a turn spent on a verdict the report gives in one read. It runs
-from this worktree, so a fix you made in step 1 is live on the first iteration.
+Start it in the background and wait for its completion notice -- expect hours, since
+each iteration waits for its sessions. **Do not poll it, tail it or sleep on it**: each
+check you make while it runs is a turn spent on a verdict the report gives in one read.
+
+It runs from this worktree, so your fixes are live on the next iteration -- and the
+sessions it sends cut their branches from `main`, which has none of them yet. Until this
+branch merges, expect them to report that `main`'s tools disagree with the evidence the
+pass gave them (a finding kind `main`'s `harness_triage.py` does not know, say). That is
+skew, not a defect to fix twice; getting the branch merged is the fix.
+
+The pass ships this worktree's own intent like any other, and sends fixers at its PR.
+A live session in a branch's tree holds fixers for that branch, so while you work here
+its fixes wait for you -- that is the pass keeping two sessions out of one tree.
 
 ## 3. Audit what came back
 
@@ -62,7 +71,10 @@ The script exits 1 when any iteration broke the contract. For every `VIOLATION`:
    rights, a paid service), file it: `python scripts/hooks/report-harness-defect.py`.
 
 Then read what the script cannot judge. For **each dispatched session** in the report,
-read its transcript (the `transcript` field) end to end, and list every turn it lost:
+read its transcript end to end -- the `readable` field is it rendered as audit lines
+under `logs/fix-pass-supervise/`; hand batches of them to parallel subagents when they
+run past a few hundred KB, each told the iteration's `filed` lines so it reports only
+what was missed -- and list every turn it lost:
 a wrong path, missing evidence, an instruction that misled it, a check it could not
 run, a question it had to answer that the prompt should have. Compare that list with
 the session's `friction` and with the iteration's `filed` lines. **Every loss the
@@ -75,7 +87,12 @@ Finally, read each `filed` line once more: a finding the devkit session cannot a
 
 ## 4. Repeat until an iteration is clean
 
-After fixing, run step 2 again. Stop when an iteration comes back with **no violation,
+Before re-running, run what the PR gate will run on what you changed: ruff and mypy,
+`scripts/hooks/structure_check.py`, `scripts/hooks/untested_symbols.py`, the tests of
+every module you touched, and the contract tests that read every module
+(`tests/test_test_contract.py`, `tests/test_doc_claims.py`). A red gate on this branch
+costs the next iteration a fixer and a round trip -- the first supervision paid that
+twice. Then run step 2 again. Stop when an iteration comes back with **no violation,
 no unfiled friction and no noisy finding** -- or after three rounds, in which case the
 report's headline is what is still breaking and why.
 

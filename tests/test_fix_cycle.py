@@ -467,3 +467,21 @@ def test_when_planning_raises_only_the_backlog_goes_to_the_devkit_session():
     assert [d.action for d in go] == [fix_plan.UPSTREAM] and go[0].failures == (backlog,)
     assert held == [] and skipped == []
     assert fix_cycle.only_the_harness(None)[1] == []
+
+
+def test_a_devkit_commit_the_commit_stage_refused_is_fixed_in_its_own_tree():
+    """The first supervised run folded a refused devkit commit into the upstream session,
+    whose fresh branch cannot reach the tree; it spent seven calls repairing it from
+    outside. It is the same shape as a devkit PR, and goes, and is not held."""
+    refused = failure(
+        project="devkit",
+        kind=fix_plan.COMMIT,
+        number=0,
+        head="agent/x",
+        signature=("commit refused: x",),
+    )
+    assert fix_cycle.classify(refused, set()) == fix_cycle.PROJECT
+    assert fix_cycle.is_devkit_pr(decision(fix_plan.DISPATCH, refused))
+    red = fix_cycle.harness_state({"k": fix_cycle.HARNESS}, True, [])
+    go, held = fix_cycle.phase([decision(fix_plan.DISPATCH, refused)], {}, red)
+    assert [d.action for d in go] == [fix_plan.DISPATCH] and held == []

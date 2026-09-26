@@ -212,3 +212,16 @@ def test_the_devkit_session_is_told_to_take_over_an_escalated_problem():
     assert "`" not in fix_prompts.LEDGER_STEPS and '"' not in fix_prompts.LEDGER_STEPS, (
         "it crosses a wt command line"
     )
+
+
+def test_the_resolver_checks_every_file_for_a_conflict_marker():
+    """A resolver grepped only `*.py` and left a marker in `.claude/rules/session-scope.md`;
+    the commit stage refused it a pass later."""
+    text = fix_prompts.pr_prompt(failure(signature=(fix_plan.CONFLICT,)))
+    assert "git diff --check" in text and "not only the code" in text
+
+
+def test_every_prompt_names_the_ratchets_and_forbids_a_question():
+    for text in every_prompt():
+        assert "structure_check.py" in text and "untested_symbols.py" in text
+        assert "never ask a question" in text

@@ -53,6 +53,7 @@ WATCHDOG = REPO_ROOT / "scripts" / "fix-pass-watchdog.py"
 RECORD = REPO_ROOT / "logs" / "fix-pass.log"
 REPORT = Path("logs") / "fix-pass-supervise.json"
 LOG = Path("logs") / "fix-pass-supervise.log"
+READABLE = Path("logs") / "fix-pass-supervise"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 EXIT_CLEAN = 0
@@ -72,6 +73,7 @@ TRACKED_WAITS = (
     "escalated",
     "backing off",
     "held until the devkit session",
+    "a session is working in",
     "fuse:",
 )
 # Record lines that are a failure, and the finding kind that must be open for each.
@@ -96,6 +98,7 @@ class Session:
     calls: int = 0
     failed_calls: int = 0
     friction: list[str] = field(default_factory=list)
+    readable: str = ""  # `session_transcripts.render` of it, for the transcript audit
 
 
 @dataclass
@@ -200,20 +203,25 @@ def settle(
     until: _dt.datetime,
     clock: Callable[[], _dt.datetime],
     sleep: Callable[[float], None] = time.sleep,
+    out: Path | None = None,
 ) -> list[Session]:
-    """Wait until every tree's session is done or dead, or `until`; what each ended as."""
+    """Wait until no tree's session is still working, or `until`; what each ended as.
+
+    Only `WORKING` holds the wait: a session this cannot see (`""`, a Codex tab) would
+    otherwise hold every iteration for the whole `SETTLE`. Each session's transcript is
+    the one its stamp started -- never the tree's newest, which in the first supervised
+    run was the interactive session sharing the tree. Rendered into `out` for reading.
+    """
     while True:
         now = clock()
         states = {t.path: fix_reports.session_state(t.path, now) for t in trees}
-        if now >= until or all(
-            state not in ("", fix_reports.WORKING) for state, _ in states.values()
-        ):
+        if now >= until or all(state != fix_reports.WORKING for state, _ in states.values()):
             break
         sleep(POLL)
     sessions = []
     for tree in trees:
         state, transcript = states[tree.path]
-        path = Path(transcript) if transcript else fix_reports.newest_transcript(tree.path)
+        path = Path(transcript) if transcript else None
         calls, failed, friction = measure(path)
         what = str(tree.stamp.get("what", ""))
         sessions.append(
@@ -226,9 +234,20 @@ def settle(
                 calls,
                 failed,
                 friction,
+                _render(path, out, tree.path),
             )
         )
     return sessions
+
+
+def _render(transcript: Path | None, out: Path | None, tree: Path) -> str:
+    """Write a session's transcript as readable lines under `out`; the path, or ""."""
+    if transcript is None or out is None or not transcript.is_file():
+        return ""
+    out.mkdir(parents=True, exist_ok=True)
+    target = out / f"{tree.name}-{transcript.stem[:8]}.txt"
+    target.write_text(st.render(transcript), encoding="utf-8")
+    return str(target)
 
 
 # --- the loop -----------------------------------------------------------------------------
@@ -267,7 +286,8 @@ def iterate(
     if mode == "dispatch":
         projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
         trees = dispatched_since(root, projects, started)
-        iteration.sessions = settle(trees, started + SETTLE, clock)
+        out = REPO_ROOT / READABLE / f"iteration-{number}"
+        iteration.sessions = settle(trees, started + SETTLE, clock, out=out)
         iteration.violations += check_sessions(iteration.sessions)
     return iteration
 

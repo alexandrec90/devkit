@@ -125,7 +125,7 @@ def world(tmp_path, monkeypatch):
         fix_pass.fix_red.fix_backlog, "ledger_failure", lambda devkit_dir, root: table["backlog"]
     )
     monkeypatch.setattr(
-        fix_pass,
+        fix_pass.fix_send,
         "dispatch",
         lambda decision, root, agent, problem="": (
             table["dispatched"].append((decision.action, agent)) or 0
@@ -373,7 +373,7 @@ def test_a_refused_commit_is_a_failure_the_pass_sends_at_the_same_worktree(
 
 def test_a_session_that_failed_to_open_is_the_exit_code_not_recorded_and_filed(world, monkeypatch):
     world["failures"] = [failure()]
-    monkeypatch.setattr(fix_pass, "dispatch", lambda *a, **k: 1)
+    monkeypatch.setattr(fix_pass.fix_send, "dispatch", lambda *a, **k: 1)
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 1
     assert (
         fix_ledger.read_ledger(
@@ -402,12 +402,14 @@ def test_an_update_is_one_gh_call_and_no_session(monkeypatch, tmp_path):
     monkeypatch.setattr(fix_pass.fix_prs, "dispatch_fresh", lambda *a: pytest.fail("no session"))
     behind = failure(number=379, behind=True)
     assert (
-        fix_pass.dispatch(fix_plan.Decision(fix_plan.UPDATE, "n", (behind,)), tmp_path, "claude")
+        fix_pass.fix_send.dispatch(
+            fix_plan.Decision(fix_plan.UPDATE, "n", (behind,)), tmp_path, "claude"
+        )
         == 0
     )
     assert calls == [("carameli", ("pr", "update-branch", "379"))]
     stuck = failure(number=381, behind=True)
-    assert fix_pass.update_branch(stuck, tmp_path) == fix_pass.EXIT_FAILED, (
+    assert fix_pass.fix_send.update_branch(stuck, tmp_path) == fix_pass.EXIT_FAILED, (
         "GitHub refuses to update a conflicted branch; the next pass reads it as a conflict"
     )
 
@@ -436,11 +438,11 @@ def test_send_all_records_only_what_opened_and_caps_the_rest(world, tmp_path):
         fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=1),)),
         fix_plan.Decision(fix_plan.UPDATE, "n", (failure(number=2, behind=True),)),
     ]
-    sent, capped, worst = fix_pass.send_all(go, ctx, "claude")
+    sent, capped, worst = fix_pass.fix_send.send_all(go, ctx, "claude")
     assert worst == 0 and capped == []
     assert sent == ["carameli #1 -- dispatch", "carameli #2 -- update"]
     assert len(fix_ledger.read_ledger(ctx.ledger_path)) == 2
-    sent, capped, worst = fix_pass.send_all(go, ctx, "claude")
+    sent, capped, worst = fix_pass.fix_send.send_all(go, ctx, "claude")
     assert (
         sent == []
         and [why for _, why in capped]
@@ -453,7 +455,7 @@ def test_a_second_devkit_session_waits_for_the_one_still_working(world, tmp_path
     key changes the moment a new finding lands, while the first session is mid-sweep."""
     upstream = fix_plan.Decision(fix_plan.UPSTREAM, "n", (failure(project="devkit"),))
     busy = fix_pass.fix_loop.Closed(harness_busy="C:/ws/devkit/.claude/worktrees/fix-x")
-    sent, capped, _ = fix_pass.send_all([upstream], _ctx(tmp_path), "claude", closed=busy)
+    sent, capped, _ = fix_pass.fix_send.send_all([upstream], _ctx(tmp_path), "claude", closed=busy)
     assert sent == [] and world["dispatched"] == []
     assert (
         capped[0][1]
@@ -473,16 +475,18 @@ def test_dispatch_routes_a_branch_to_the_pr_path_and_the_rest_to_a_fresh_one(mon
         "dispatch_fresh",
         lambda d, root, agent, runner, key, problem: seen.append(("fresh", runner)) or 0,
     )
-    fix_pass.dispatch(fix_plan.Decision(fix_plan.RESOLVE, "n", (failure(),)), tmp_path, "claude-bg")
-    fix_pass.dispatch(
+    fix_pass.fix_send.dispatch(
+        fix_plan.Decision(fix_plan.RESOLVE, "n", (failure(),)), tmp_path, "claude-bg"
+    )
+    fix_pass.fix_send.dispatch(
         fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(kind=fix_plan.COMMIT),)),
         tmp_path,
         "claude-bg",
     )
-    fix_pass.dispatch(
+    fix_pass.fix_send.dispatch(
         fix_plan.Decision(fix_plan.UPSTREAM, "n", (failure(),)), tmp_path, "claude-bg"
     )
-    fix_pass.dispatch(
+    fix_pass.fix_send.dispatch(
         fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(kind=fix_plan.NIGHTLY),)),
         tmp_path,
         "claude-bg",
@@ -957,13 +961,13 @@ def test_dispatching_a_refused_commit_sets_its_intent_aside(monkeypatch, tmp_pat
         lambda f, root, agent, runner, key, problem: keys.append(key) or 0,
     )
     decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (refused,))
-    assert fix_pass.dispatch(decision, tmp_path, "claude") == 0
+    assert fix_pass.fix_send.dispatch(decision, tmp_path, "claude") == 0
     assert keys == [fix_ledger.decision_key(decision)]
     assert not (tree / ship_intent.INTENT_FILE).exists()
     assert (tree / ship_intent.REFUSED_FILE).read_text(encoding="utf-8") == "S\n\nB\n"
     (tree / ship_intent.INTENT_FILE).write_text("S\n", encoding="utf-8")
     monkeypatch.setattr(fix_pass.fix_prs, "dispatch_pr", lambda *a: 1)
-    assert fix_pass.dispatch(decision, tmp_path, "claude") == 1
+    assert fix_pass.fix_send.dispatch(decision, tmp_path, "claude") == 1
     assert (tree / ship_intent.INTENT_FILE).exists(), "a session that did not open leaves it"
 
 
@@ -971,3 +975,36 @@ def test_decide_is_the_plan_the_classes_and_the_phase_over_what_was_read():
     harness, go, held, skipped = fix_pass.decide([failure(number=2)], True, "v0.11.22", [], ())
     assert harness.clean and [d.action for d in go] == [fix_plan.DISPATCH]
     assert held == [] and skipped == []
+
+
+def test_a_session_working_in_a_branch_tree_holds_a_fixer_for_that_branch(world, tmp_path):
+    """The first supervised run sent a fixer into the worktree an interactive session was
+    in. A live session there is a wait, and the record says whose."""
+    busy = fix_pass.fix_loop.Closed(busy={("carameli", "agent/x-0919"): "C:/t/x"})
+    sent, capped, _ = fix_pass.fix_send.send_all(
+        [fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))],
+        _ctx(tmp_path),
+        "claude",
+        closed=busy,
+    )
+    assert sent == [] and capped[0][1] == "a session is working in C:/t/x"
+    other = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(head="agent/y"),))
+    assert fix_pass.fix_send.send_all([other], _ctx(tmp_path), "claude", closed=busy)[0]
+
+
+def test_a_refused_ships_detail_is_one_record_line(world, monkeypatch):
+    one = ship_intent.Intent("carameli", Path("t"), "agent/i-0919", "S", "B")
+    world["intents"] = [one]
+    detail = "fixers: check yaml...Passed\nDetect secrets....Failed\n\n- hook id: detect-secrets\n"
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda i, p, b: ship_intent.Outcome(i, ship_intent.REFUSED, detail),
+    )
+    monkeypatch.setattr(
+        fix_pass.ship_intent, "refusal_failure", lambda o, b: failure(kind=fix_plan.COMMIT)
+    )
+    lines, _, _ = fix_pass.ship_intents(Path("r"), ["carameli"], fix_cycle.DISPATCH)
+    assert lines == [
+        "carameli agent/i-0919 -- refused: fixers: check yaml...Passed Detect secrets....Failed - hook id: detect-secrets"
+    ]

@@ -45,12 +45,12 @@ import adoption_prs
 import agent_models
 import broken_pr_menu as menu
 import devkit_project
-import fix_budget
 import fix_cycle
 import fix_ledger
 import fix_loop
 import fix_plan
 import fix_red
+import fix_send
 import gate_evidence
 import ship_intent
 import sweep
@@ -59,9 +59,12 @@ from _loader import load_by_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# The dispatch half, loaded by path because the file is hyphenated. Its runner is
-# replaced with the window-less one below, so a scheduled pass opens nothing visible.
-fix_prs = load_by_path("fix_prs", REPO_ROOT / "scripts" / "fix-prs.py")
+# The dispatch half lives in `fix_send.py`; these names are what the pass and its tests
+# reach it by, and `fix_prs` is the same module object `fix_send` loaded.
+fix_prs = fix_send.fix_prs
+send_all = fix_send.send_all
+dispatch = fix_send.dispatch
+update_branch = fix_send.update_branch
 # The interpreter resolver the push gate uses: the tree's venv, or the checkout's when
 # the tree has none, so `ship.py --fix` runs with the project's own pre-commit.
 push_gate = load_by_path("run_push_gate", REPO_ROOT / "scripts" / "precommit" / "run_push_gate.py")
@@ -140,7 +143,7 @@ def ship_intents(
         where = f"{intent.project} {intent.branch}"
         if intent.blocked:
             lines.append(f"{where} -- NOT shipped: {intent.blocked}")
-            _file(
+            fix_loop.fix_findings.file(
                 journal,
                 "intent-unshippable",
                 intent.project,
@@ -156,12 +159,14 @@ def ship_intents(
             continue
         base = intent.base or "main"
         outcome = ship_intent.ship_one(intent, push_gate.interpreter(intent.tree), base)
-        lines.append(f"{where} -- {outcome.stage}: {outcome.detail}")
+        # One line: a refusal's detail is hook output, and its newlines broke the record
+        # into rows no reader of it could attribute. The tail says why; the rest is evidence.
+        lines.append(f"{where} -- {outcome.stage}: {' '.join(outcome.detail.split())[-240:]}")
         if outcome.stage == ship_intent.REFUSED:
             refused.append(ship_intent.refusal_failure(outcome, base))
         if outcome.stage == ship_intent.FAILED:
             failed = True
-            _file(
+            fix_loop.fix_findings.file(
                 journal,
                 "ship-failed",
                 intent.project,
@@ -169,13 +174,6 @@ def ship_intents(
                 str(intent.tree),
             )
     return lines, refused, failed
-
-
-def _file(
-    journal: Journal | None, kind: str, project: str, detail: str, evidence: str = ""
-) -> None:
-    if journal is not None:
-        journal.add(Finding(kind, project, detail, evidence=evidence))
 
 
 def pending_adoptions(root: Path, projects: list[str], tag: str) -> list[str]:
@@ -212,116 +210,10 @@ def merge_green_adoptions(
                 f"{name} #{row.get('number')} -- {message if ok else 'FAILED: ' + message}"
             )
             if not ok:
-                _file(journal, "merge-failed", name, f"#{row.get('number')}: {message[:200]}")
+                fix_loop.fix_findings.file(
+                    journal, "merge-failed", name, f"#{row.get('number')}: {message[:200]}"
+                )
     return merged
-
-
-def update_branch(failure: fix_plan.Failure, root: Path) -> int:
-    """An `UPDATE`: merge the base into the PR on GitHub, so its gate re-runs as-is now.
-
-    No session and no worktree. A PR that comes back green is done; one still red at
-    the new sha is a new ledger key and gets its session next pass; one GitHub cannot
-    update (a conflict) reads `CONFLICTING` next pass and goes to the resolver.
-    """
-    done = sweep.gh_for(root / failure.project)("pr", "update-branch", str(failure.number))
-    if done.returncode != 0:
-        why = (done.stderr or done.stdout or "").strip().splitlines()
-        print(
-            f"  {failure.project} #{failure.number}: update-branch failed: {why[-1] if why else '?'}"
-        )
-        return EXIT_FAILED
-    print(f"  {failure.project} #{failure.number}: branch updated; the gate re-runs")
-    return EXIT_OK
-
-
-def dispatch(
-    decision: fix_plan.Decision, root: Path, launch: agent_models.Launch, problem: str = ""
-) -> int:
-    first = decision.failures[0]
-    if decision.action == fix_plan.UPDATE:
-        return update_branch(first, root)
-    key = fix_ledger.decision_key(decision)
-    on_branch = first.kind in (fix_plan.PR, fix_plan.COMMIT)
-    if decision.action in (fix_plan.DISPATCH, fix_plan.RESOLVE) and on_branch:
-        code = fix_prs.dispatch_pr(first, root, launch, ship_intent.run_quiet, key, problem)
-        if code == EXIT_OK and first.kind == fix_plan.COMMIT and first.tree:
-            # The refused intent is the fixer's to earn again: with it gone, the tree
-            # is a session still working until the fixer ships, and the next pass does
-            # not re-run the commit stage over its half-made edits.
-            ship_intent.set_aside(Path(first.tree), ship_intent.REFUSED_FILE)
-        return code
-    return fix_prs.dispatch_fresh(decision, root, launch, ship_intent.run_quiet, key, problem)
-
-
-def send_all(
-    go: list[fix_plan.Decision],
-    ctx: fix_loop.Context,
-    launch: agent_models.Launch,
-    journal: Journal | None = None,
-    closed: fix_loop.Closed | None = None,
-    items: list | None = None,
-) -> tuple[list[str], list[tuple[fix_plan.Decision, str]], int]:
-    """Steps 5 and 6: what the phase let through, each under `fix_budget.budget`.
-
-    `(sent lines, waiting decisions with why, worst exit code)`. The ledger is written
-    only for a dispatch that opened. `items` is the harness-defect ledger, for what
-    became of each problem's escalation; `closed` says which devkit session is still
-    working, which holds another, and which tree each problem's fixer worked in, which
-    is what an escalation names.
-    """
-    closed = closed or fix_loop.Closed()
-    ledger = fix_ledger.read_ledger(ctx.ledger_path)
-    sent: list[str] = []
-    capped: list[tuple[fix_plan.Decision, str]] = []
-    worst = EXIT_OK
-    for decision in go:
-        names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
-        if closed.harness_busy and decision.action == fix_plan.UPSTREAM:
-            capped.append(
-                (decision, f"held until the devkit session in {closed.harness_busy} finishes")
-            )
-            continue
-        problem = fix_ledger.problem_key(decision)
-        escalated = fix_loop.fix_findings.escalation(problem, items or [])
-        verdict = fix_budget.budget(decision, ledger, ctx.now, escalated)
-        if verdict.finding and journal is not None:
-            journal.add(verdict.finding.at(closed.trees.get(problem, "")))
-        if not verdict.go:
-            capped.append((decision, verdict.why))
-            continue
-        line, code = _send_one(decision, ctx, launch, verdict.effort, journal)
-        sent.append(f"{names} -- {line}")
-        worst = max(worst, code)
-        ledger = fix_ledger.read_ledger(ctx.ledger_path)
-    return sent, capped, worst
-
-
-def _send_one(
-    decision: fix_plan.Decision,
-    ctx: fix_loop.Context,
-    launch: agent_models.Launch,
-    effort: str,
-    journal: Journal | None,
-) -> tuple[str, int]:
-    """Dispatch one decision the budget let through; `(record line, exit code)`.
-
-    The ledger is written only for a dispatch that opened; one that did not is filed.
-    """
-    if not ctx.writes:
-        would = "would update the branch" if decision.action == fix_plan.UPDATE else None
-        return would or f"would send ({decision.action})", EXIT_OK
-    how = agent_models.Launch(launch.agent, launch.model, effort) if effort else launch
-    problem = fix_ledger.problem_key(decision)
-    if dispatch(decision, ctx.root, how, problem) != EXIT_OK:
-        first = decision.failures[0]
-        names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
-        _file(
-            journal, f"{decision.action}-failed", first.project, f"{names}: {decision.note[:160]}"
-        )
-        return f"FAILED to {decision.action}", EXIT_FAILED
-    key = fix_ledger.decision_key(decision)
-    fix_ledger.record(ctx.ledger_path, key, decision.note, ctx.now, problem=problem)
-    return decision.action + (f" at effort {effort}" if effort else ""), EXIT_OK
 
 
 def decide(
@@ -387,7 +279,7 @@ def run(
     regated, rerun = step("regate", fix_red.regate_unread, root, unread, mode, default=([], set()))
     for line in regated:
         if "FAILED" in line:
-            _file(journal, "regate-failed", line.split(" ", 1)[0], line)
+            fix_loop.fix_findings.file(journal, "regate-failed", line.split(" ", 1)[0], line)
     green = fix_plan.RUNNING if fix_cycle.DEVKIT in rerun else green
     # Filed before the backlog is read, and the backlog read on its own: whatever broke
     # above -- the collect step included -- reaches the devkit session this same pass.

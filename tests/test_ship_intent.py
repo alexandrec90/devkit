@@ -427,7 +427,16 @@ def test_a_refusal_with_no_test_ids_is_signed_by_its_step(tmp_path):
         one.tree, {"stage": ship_intent.REFUSED, "step": "fixers", "output": "Executable not found"}
     )
     failure = ship_intent.refusal_failure(ship_intent.Outcome(one, ship_intent.REFUSED), "main")
-    assert failure.signature == ("fixers refused",)
+    assert failure.signature == ("fixers refused: Executable not found",), (
+        "the why is part of it: bare 'fixers refused' hid the cause, and no toolchain "
+        "marker in fix_cycle.HARNESS_REFUSALS could ever match it"
+    )
+
+
+def test_a_refusal_signature_is_stable_across_two_refusals_of_one_kind():
+    one = ship_intent.refusal_line("hook failed at line 412 in deadbeef1234: Failed")
+    two = ship_intent.refusal_line("hook failed at line 97 in 0123abcd9876: Failed")
+    assert one == two
 
 
 @pytest.mark.parametrize("branch,shippable", [("agent/x-0919", True), ("main", False)])
@@ -496,3 +505,15 @@ def test_a_refusal_names_the_worktree_the_fixer_opens_in(tmp_path):
     )
     failure = ship_intent.refusal_failure(ship_intent.Outcome(one, ship_intent.REFUSED), "main")
     assert Path(failure.tree) == one.tree
+
+
+def test_a_refusal_is_named_by_the_line_that_says_why():
+    """ "fixers refused" was the whole signature, and a session had to open
+    `ship-state.json` to learn the branch name was the objection."""
+    output = "check yaml....Passed\nship: 'flag-x' is not a namespaced task branch; refusing to ship it.\n"
+    assert ship_intent.refusal_line(output).startswith(
+        "ship: 'flag-x' is not a namespaced task branch"
+    )
+    assert ship_intent.refusal_line("a\nlast words\n") == "last words"
+    assert ship_intent.refusal_line("") == ""
+    assert len(ship_intent.refusal_line("x Failed " + "y" * 500)) == 160

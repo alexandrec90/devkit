@@ -130,6 +130,12 @@ def record_all(
     return written
 
 
+def file(journal: Journal | None, kind: str, project: str, detail: str, evidence: str = "") -> None:
+    """Add one finding to `journal`, when the caller has one to add it to."""
+    if journal is not None:
+        journal.add(Finding(kind, project, detail, evidence=evidence))
+
+
 def evidence_file(text: str, devkit_dir: Path, stem: str) -> str:
     """Keep a long piece of evidence beside the ledger; its path, or "" if unwritable."""
     digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:10]

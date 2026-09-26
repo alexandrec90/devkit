@@ -139,3 +139,12 @@ def test_evidence_is_kept_by_content_and_an_unwritable_place_is_no_evidence(tmp_
 def test_fresh_keeps_order_and_drops_duplicates_within_a_batch():
     a, b = finding(detail="a"), finding(detail="b")
     assert fix_findings.fresh([a, b, a], []) == [a, b]
+
+
+def test_file_adds_to_a_journal_and_is_a_no_op_without_one(tmp_path):
+    journal = fix_findings.Journal(tmp_path)
+    fix_findings.file(journal, "merge-failed", "carameli", "#5: conflict", "u")
+    assert journal.findings == [
+        fix_findings.Finding("merge-failed", "carameli", "#5: conflict", evidence="u")
+    ]
+    fix_findings.file(None, "merge-failed", "carameli", "#5: conflict")

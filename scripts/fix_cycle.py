@@ -154,7 +154,10 @@ def classify(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> str:
     # before it gets here. Its vendored tests judge its own code -- the ratchets above
     # all -- so the fix lands on its head branch, never in the upstream session, whose
     # fresh branch off main has nothing to fix and cannot reach the PR (devkit #393, #394).
-    if failure.project == DEVKIT and failure.kind == fix_plan.PR:
+    # A devkit commit the commit stage refused is the same shape: the fix is in the tree
+    # the refusal happened in, which the first supervised run's upstream session spent
+    # seven calls repairing from outside after the refusal was folded into it.
+    if failure.project == DEVKIT and failure.kind in (fix_plan.PR, fix_plan.COMMIT):
         return PROJECT if ids else UNKNOWN
     if _harness_shaped(failure, shared):
         return HARNESS
@@ -255,8 +258,10 @@ def phase(
 
 
 def is_devkit_pr(decision: fix_plan.Decision) -> bool:
-    """Every failure under it is one of devkit's own PRs."""
-    return all(f.project == DEVKIT and f.kind == fix_plan.PR for f in decision.failures)
+    """Every failure under it is one of devkit's own branches: a PR, or a refused commit."""
+    return all(
+        f.project == DEVKIT and f.kind in (fix_plan.PR, fix_plan.COMMIT) for f in decision.failures
+    )
 
 
 # The order within a phase: updates first (free), then conflicts (nothing else about

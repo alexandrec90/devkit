@@ -65,10 +65,15 @@ RESULT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(
             r"No module named|ModuleNotFoundError|is not recognized as an internal or external|"
             r"command not found|Python was not found|exit code 9009|"
-            r"No such file or directory[^\n]{0,80}\.venv",
+            r"No such file or directory[^\n]{0,80}\.venv|"
+            # Git Bash converting a revision path: `ambiguous argument 'origin\master;x'`.
+            r"ambiguous argument '[^'\n]*\\[^'\n]*'",
             re.I,
         ),
     ),
+    # A session's own patch script refusing its own edit -- the Bash tool had dropped a
+    # backslash on the way in, three times in the first supervised run.
+    ("patch-failed", re.compile(r'File "<stdin>", line \d+[\s\S]{0,600}?AssertionError')),
 )
 
 # Commands that are friction whatever they return.
@@ -82,7 +87,13 @@ COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"(?:^|&&|\|\||;)\s*(?:sleep\s+\d{2,}\b|until\b[^\n]*;\s*do\b[^\n]*\bsleep\b)", re.M
         ),
     ),
+    # The push gate is the PR gate's whole suite, run locally: the gate's job, not a session's.
+    ("full-suite", re.compile(r"\brun_push_gate\.py\b")),
 )
+
+# The opening message of a session the fix pass dispatched: every prompt's finish line.
+DISPATCHED = "the fix pass commits, pushes"
+EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"})
 
 # A test run in command position -- not `pytest` inside a heredoc's source -- whose
 # arguments name nothing narrower than the suite: where a targeted run was asked for.
@@ -95,7 +106,10 @@ NARROWING_FLAGS = frozenset(
     {"--changed", "--target", "-k", "--lf", "--last-failed", "--help", "-h"}
     | {"--co", "--collect-only", "--version", "--sf"}
 )
-SUITE_ROOTS = frozenset({"tests", "tests/", ".", "./"})
+# Roots that are a whole suite: devkit's own, and the vendored tier every project runs.
+SUITE_ROOTS = frozenset(
+    {"tests", "tests/", ".", "./", "scripts/hooks/tests", "scripts/hooks/tests/"}
+)
 # `$p`, `${files[@]}`, `$env:T`, `%TARGET%`: an argument the shell fills in, which the
 # detector cannot see, so it is read as narrowing rather than as naming nothing.
 SHELL_VARIABLE = re.compile(r"\$\{?[A-Za-z_]|%[A-Za-z_]\w*%")
@@ -147,13 +161,22 @@ def full_suite(rest: str) -> bool:
     return True
 
 
+# What a command-shaped class is filed as. Stable on purpose: the ledger groups by the
+# detail, and 33 full-suite runs spelled 33 ways were 33 groups for one habit. The
+# command itself rides in the finding's `command` field.
+COMMAND_DETAIL = {
+    "full-suite": "a session ran a whole test suite where a targeted run was asked for",
+    "poll": "a session waited in a sleep or until loop",
+    "no-verify": "a session committed with --no-verify",
+}
+
+
 def _command_classes(command: str) -> Iterator[tuple[str, str]]:
     for cls, pattern in COMMAND_PATTERNS:
         if pattern.search(command):
-            yield cls, _snippet(command, pattern)
-    for run in TEST_RUN.finditer(command):
-        if full_suite(run.group("rest") or ""):
-            yield "full-suite", normalize(run.group(0).strip(" ;&|"))[:SNIPPET]
+            yield cls, COMMAND_DETAIL[cls]
+    if any(full_suite(run.group("rest") or "") for run in TEST_RUN.finditer(command)):
+        yield "full-suite", COMMAND_DETAIL["full-suite"]
 
 
 def _result_class(text: str) -> tuple[str, str]:
@@ -179,6 +202,10 @@ class _Session:
     calls: dict[str, str] = field(default_factory=dict)
     failures: dict[str, list[Event]] = field(default_factory=dict)
     spoken: int = 0
+    dispatched: bool = False  # the fix pass sent it, so nobody is there to answer
+    # Commands run since the last edit, by what runs before any pipe: the same run again
+    # with only its `| tail` changed read nothing new -- five times in one session.
+    unchanged: dict[str, int] = field(default_factory=dict)
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -186,6 +213,8 @@ class _Session:
             self.found.setdefault((cls, what), event)
 
     def user(self, event: Event) -> None:
+        if self.spoken == 0:
+            self.dispatched = DISPATCHED in event.text
         self.note("user-frustration", _complaint(event, self.spoken), event)
         self.spoken += 1
 
@@ -193,6 +222,23 @@ class _Session:
         self.calls[event.call_id] = event.command
         for cls, what in _command_classes(event.command):
             self.note(cls, what, event)
+        if event.tool == "AskUserQuestion" and self.dispatched:
+            self.note(
+                "asked-user", "a dispatched session asked a question nobody would answer", event
+            )
+        if event.tool in EDIT_TOOLS:
+            self.unchanged.clear()
+        elif TEST_RUN.search(event.command):
+            # Only a test run: reading `git status` thrice between edits is not waste.
+            self._rerun(event)
+
+    def _rerun(self, event: Event) -> None:
+        key = normalize(event.command.split("|", 1)[0])[:SNIPPET]
+        self.unchanged[key] = self.unchanged.get(key, 0) + 1
+        if self.unchanged[key] == REPEATS:
+            self.note(
+                "rerun-unchanged", "a session re-ran the same tests with no edit between", event
+            )
 
     def failed(self, event: Event) -> None:
         """A failed call only: a file that merely quotes an error is not one."""

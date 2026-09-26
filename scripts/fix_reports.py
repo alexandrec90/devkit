@@ -197,6 +197,50 @@ def newest_transcript(tree: Path, projects_root: Path | None = None) -> Path | N
     return max(dated)[1] if dated else None
 
 
+def started_at(path: Path) -> _dt.datetime | None:
+    """When a transcript's session began: its first record's own `timestamp`.
+
+    Not the file's mtime -- every session in a tree appends to its own file, so the
+    newest file is whoever spoke last, which in the first supervised run was the
+    interactive session sharing the tree rather than the fixer the pass had stamped.
+    """
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for _, line in zip(range(50), handle, strict=False):
+                stamp = _TIMESTAMP.search(line)
+                if stamp:
+                    return _dt.datetime.fromisoformat(stamp.group(1).replace("Z", "+00:00"))
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+_TIMESTAMP = re.compile(r'^\{.*?"timestamp":\s*"([0-9T:.+\-Z]+)"')
+# A session starts a beat after the pass stamps its tree; a clock this far off still counts.
+STAMP_SKEW = _dt.timedelta(seconds=5)
+
+
+def session_transcript(
+    tree: Path, since: _dt.datetime, projects_root: Path | None = None
+) -> Path | None:
+    """The first transcript started in `tree` at or after `since`: the dispatched session's."""
+    started = [
+        (when, path)
+        for path in transcript_dir(tree, projects_root).glob("*.jsonl")
+        if (when := started_at(path)) and when >= since - STAMP_SKEW
+    ]
+    return min(started)[1] if started else None
+
+
+def active_transcript(
+    tree: Path, now: _dt.datetime, projects_root: Path | None = None
+) -> Path | None:
+    """A transcript in `tree` written within `QUIET_AFTER`: someone is working there now."""
+    newest = newest_transcript(tree, projects_root)
+    touched = _mtime(newest) if newest else None
+    return newest if touched and now - touched <= QUIET_AFTER else None
+
+
 WORKING = "working"
 DONE = "done"
 NEVER_STARTED = "never started"
@@ -225,9 +269,9 @@ def session_state(
         sent = _dt.datetime.fromisoformat(str(payload.get("when", "")))
     except ValueError:
         return "", ""
+    transcript = session_transcript(tree, sent, projects_root)
     if any((_mtime(tree / name) or sent) > sent for name in OUTCOME_FILES):
-        return DONE, ""
-    transcript = newest_transcript(tree, projects_root)
+        return DONE, str(transcript or "")
     touched = _mtime(transcript) if transcript else None
     if touched is None or touched < sent:
         return (NEVER_STARTED, "") if now - sent > START_GRACE else (WORKING, "")

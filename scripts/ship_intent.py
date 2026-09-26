@@ -39,6 +39,7 @@ import datetime as _dt
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -323,6 +324,23 @@ def ship_one(
 # --- a refusal as a failure the plan can place ---------------------------------------
 
 
+REFUSAL_LINE = re.compile(r"Failed\b|refus|\berror\b|not a namespaced|conflict string", re.I)
+
+
+def refusal_line(output: str) -> str:
+    """The line of a refused commit's output that says why, cut to one record line.
+
+    "fixers refused" was the whole signature when no test id or lint line matched, and a
+    session had to open `ship-state.json` to learn the branch name was the objection.
+    """
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    why = next((line for line in lines if REFUSAL_LINE.search(line)), lines[-1] if lines else "")
+    # It becomes part of a signature, which must not change between two refusals of the
+    # same kind -- or every retry reads as progress and `fix_ledger.ATTEMPTS` never trips.
+    why = re.sub(r"\d+", "N", re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", why))
+    return " ".join(why.split())[:160]
+
+
 def refusal_failure(outcome: Outcome, base: str) -> fix_plan.Failure:
     """The refused commit in the plan's own terms, its output placed as evidence.
 
@@ -336,7 +354,7 @@ def refusal_failure(outcome: Outcome, base: str) -> fix_plan.Failure:
     where.mkdir(parents=True, exist_ok=True)
     (where / "pre-commit.log").write_text(output, encoding="utf-8")
     step = str(state.get("step", "commit"))
-    sig = fix_plan.signature_from_logs([output]) or (f"{step} refused",)
+    sig = fix_plan.signature_from_logs([output]) or (f"{step} refused: {refusal_line(output)}",)
     return fix_plan.Failure(
         kind=fix_plan.COMMIT,
         project=intent.project,

@@ -32,12 +32,13 @@ CODEX_PREFIX = "rollout-"
 class Event:
     """One thing a session did or was told, reduced to what the detectors read."""
 
-    kind: str  # "user", "call" or "result"
+    kind: str  # "user", "say" (the agent's own text), "call" or "result"
     line: int
     text: str = ""
     command: str = ""
     error: bool = False
     call_id: str = ""
+    tool: str = ""  # a call's tool name: `Bash`, `Edit`, `AskUserQuestion`, `shell`
 
 
 @dataclass(frozen=True)
@@ -69,17 +70,26 @@ def claude_events(row: dict, line: int) -> Iterator[Event]:
     message = _dict(row.get("message"))
     # A compaction summary and a harness-injected row are typed `user` but are not the user.
     spoken = row.get("type") == "user" and not (row.get("isMeta") or row.get("isCompactSummary"))
+    speaker = "user" if spoken else "say" if row.get("type") == "assistant" else ""
     for block in _blocks(message.get("content")):
-        kind = block.get("type")
-        if spoken and kind == "text":
-            yield Event("user", line, str(block.get("text", "")))
-        elif kind == "tool_use":
-            command = str(_dict(block.get("input")).get("command", ""))
-            yield Event("call", line, command=command, call_id=str(block.get("id", "")))
-        elif kind == "tool_result":
-            error = bool(block.get("is_error"))
-            call_id = str(block.get("tool_use_id", ""))
-            yield Event("result", line, _text(block.get("content")), error=error, call_id=call_id)
+        if event := _claude_block(block, speaker, line):
+            yield event
+
+
+def _claude_block(block: dict, speaker: str, line: int) -> Event | None:
+    """One content block as an event: text by whoever `speaker` is, a call, a result."""
+    kind = block.get("type")
+    if kind == "text":
+        return Event(speaker, line, str(block.get("text", ""))) if speaker else None
+    if kind == "tool_use":
+        command = str(_dict(block.get("input")).get("command", ""))
+        tool = str(block.get("name", ""))
+        return Event("call", line, command=command, call_id=str(block.get("id", "")), tool=tool)
+    if kind == "tool_result":
+        error = bool(block.get("is_error"))
+        call_id = str(block.get("tool_use_id", ""))
+        return Event("result", line, _text(block.get("content")), error=error, call_id=call_id)
+    return None
 
 
 def codex_events(row: dict, line: int) -> Iterator[Event]:
@@ -95,7 +105,9 @@ def codex_events(row: dict, line: int) -> Iterator[Event]:
             args = {}
         command = _dict(args).get("command", "")
         command = " ".join(command) if isinstance(command, list) else str(command)
-        yield Event("call", line, command=command, call_id=call_id)
+        yield Event(
+            "call", line, command=command, call_id=call_id, tool=str(payload.get("name", ""))
+        )
     elif kind == "function_call_output":
         text = _text(payload.get("output"))
         failed = bool(re.search(r"exit code:?\s*[1-9]", text[:200], re.I))
@@ -160,3 +172,26 @@ def read_new(path: Path, offset: int, line: int) -> Chunk:
         if isinstance(row, dict):
             rows.append((number, row))
     return Chunk(tuple(rows), offset + len(complete), line + complete.count(b"\n"))
+
+
+# How much of each event a rendering keeps: an audit reads for what a session did and
+# where it lost turns, and a failure's text is where the loss usually is.
+RENDER_LIMITS = {"user": 3000, "say": 1500, "call": 400, "result": 300, "error": 1200}
+
+
+def render(path: Path) -> str:
+    """One transcript as lines a reader can audit: what was said, run, and refused.
+
+    What `/supervise-fix-pass` hands its transcript audit, so no supervisor writes its
+    own condenser first -- the first one did.
+    """
+    lines = []
+    for event in events(path, read_new(path, 0, 0).rows):
+        kind = "error" if event.kind == "result" and event.error else event.kind
+        body = event.command if event.kind == "call" else event.text
+        body = " ".join(body.split())
+        limit = RENDER_LIMITS[kind]
+        cut = body if len(body) <= limit else f"{body[:limit]} ...[+{len(body) - limit}]"
+        tool = f" {event.tool}" if event.tool else ""
+        lines.append(f"L{event.line} {kind.upper()}{tool}: {cut}")
+    return "\n".join(lines) + "\n"

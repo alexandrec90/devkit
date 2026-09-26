@@ -72,6 +72,10 @@ class Closed:
     # problem -> the tree its latest fixer worked in, which is where an escalation of
     # that problem sends the devkit session to take it over.
     trees: dict[str, str] = field(default_factory=dict)
+    # (project, branch) -> a tree some session other than the pass's is working in. A
+    # fixer is never sent in beside it: the first supervised run sent one into the tree
+    # an interactive session was editing, which only went well because it sat idle.
+    busy: dict[tuple[str, str], str] = field(default_factory=dict)
 
 
 def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
@@ -127,6 +131,9 @@ def _judge_session(
 ) -> None:
     key = str(tree.stamp.get("key", ""))
     state, transcript = fix_reports.session_state(tree.path, ctx.now)
+    live = fix_reports.active_transcript(tree.path, ctx.now)
+    if live and tree.branch and not (state == fix_reports.WORKING and str(live) == transcript):
+        closed.busy[(tree.project, tree.branch)] = str(tree.path)
     if state in fix_reports.DEAD:
         # No key: a dead session is re-sent at once, not parked behind the finding.
         detail = f"{where}: the dispatched session {state}"

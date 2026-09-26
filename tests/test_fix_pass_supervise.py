@@ -98,7 +98,8 @@ def test_a_session_is_measured_from_its_transcript(tmp_path):
     ]
     path = tmp_path / "s.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
-    assert supervise.measure(path) == (1, 1, ["poll: sleep N"])
+    poll = supervise.session_friction.COMMAND_DETAIL["poll"]
+    assert supervise.measure(path) == (1, 1, [f"poll: {poll}"])
     assert supervise.measure(None) == (0, 0, [])
 
 
@@ -238,3 +239,25 @@ def test_the_pass_is_run_through_the_watchdog(tmp_path, monkeypatch):
     code, output = supervise.run_pass(tmp_path / "w", "plan")
     assert code == 0 and output.startswith("--mode plan --workspace")
     assert supervise.utc_now().tzinfo is not None
+
+
+def test_a_session_this_cannot_see_does_not_hold_the_wait(tmp_path):
+    """A stamp for a Codex tab reads `""`: waiting on it held a whole `SETTLE`."""
+    path = tmp_path / "t"
+    (path / "logs").mkdir(parents=True)
+    fix_reports.stamp(path, "k", "n", NOW, agent="codex")
+    tree = fix_reports.Tree("carameli", path, "agent/x", fix_reports.read_stamp(path), ())
+    naps = []
+    [session] = supervise.settle([tree], NOW + _dt.timedelta(hours=1), lambda: NOW, naps.append)
+    assert naps == [] and session.state == "unknown" and session.readable == ""
+
+
+def test_a_settled_sessions_transcript_is_rendered_for_the_audit(tmp_path, monkeypatch):
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text('{"type": "user", "message": {"content": "go"}}\n', encoding="utf-8")
+    tree = _tree(tmp_path, NOW)
+    monkeypatch.setattr(
+        supervise.fix_reports, "session_state", lambda p, now: (fix_reports.DONE, str(transcript))
+    )
+    [session] = supervise.settle([tree], NOW, lambda: NOW, lambda _s: None, out=tmp_path / "out")
+    assert Path(session.readable).read_text(encoding="utf-8") == "L1 USER: go\n"

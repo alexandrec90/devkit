@@ -123,7 +123,8 @@ def _transcript(projects: Path, tree: Path, age: _dt.timedelta, now: _dt.datetim
 
     path = fix_reports.transcript_dir(tree, projects) / "s.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{}\n", encoding="utf-8")
+    began = (now - age).isoformat()
+    path.write_text(f'{{"type": "user", "timestamp": "{began}"}}\n', encoding="utf-8")
     when = (now - age).timestamp()
     os.utime(path, (when, when))
     return path
@@ -148,10 +149,42 @@ def test_a_session_is_working_done_or_dead(tmp_path):
     log = _transcript(projects, tree, _dt.timedelta(minutes=5), now)
     assert fix_reports.session_state(tree, now, projects) == (fix_reports.WORKING, str(log))
     tree = _stamped(tmp_path / "t", now - _dt.timedelta(hours=4))
-    _transcript(projects, tree, _dt.timedelta(hours=2), now)
+    log = _transcript(projects, tree, _dt.timedelta(hours=2), now)
     assert fix_reports.session_state(tree, now, projects)[0] == fix_reports.NO_OUTCOME
     (tree / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
-    assert fix_reports.session_state(tree, now, projects) == (fix_reports.DONE, "")
+    assert fix_reports.session_state(tree, now, projects) == (fix_reports.DONE, str(log))
+
+
+def test_the_stamped_session_is_told_from_another_session_in_the_same_tree(tmp_path):
+    """The first supervised run sent a fixer into a worktree an interactive session also
+    lived in, and judged the fixer by the interactive session's transcript -- the newest
+    file there. The dispatched session is the first one to start after the stamp."""
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(hours=2))
+    folder = fix_reports.transcript_dir(tree, projects)
+    folder.mkdir(parents=True)
+    resident = folder / "resident.jsonl"
+    resident.write_text(
+        f'{{"timestamp": "{(now - _dt.timedelta(days=1)).isoformat()}"}}\n', encoding="utf-8"
+    )
+    fixer = folder / "fixer.jsonl"
+    fixer.write_text(
+        '{"type": "file-history-snapshot"}\n'
+        f'{{"type": "user", "timestamp": "{(now - _dt.timedelta(hours=2)).isoformat()}"}}\n',
+        encoding="utf-8",
+    )
+    import os
+
+    old = (now - _dt.timedelta(hours=2)).timestamp()
+    os.utime(fixer, (old, old))
+    sent = now - _dt.timedelta(hours=2)
+    assert fix_reports.session_transcript(tree, sent, projects) == fixer
+    assert fix_reports.newest_transcript(tree, projects) == resident, "the resident spoke last"
+    assert fix_reports.session_state(tree, now, projects) == (fix_reports.NO_OUTCOME, str(fixer))
+    assert fix_reports.active_transcript(tree, now, projects) == resident
+    assert fix_reports.active_transcript(tree, now + _dt.timedelta(hours=3), projects) is None
+    assert fix_reports.started_at(tmp_path / "missing.jsonl") is None
 
 
 def test_a_session_judged_once_or_one_that_leaves_no_transcript_is_not_judged(tmp_path):

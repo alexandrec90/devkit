@@ -51,7 +51,9 @@ def tree(ctx, monkeypatch, *, key=KEY, sent=NOW, blocked="", friction="", transc
     if transcript_age is not None:
         log = fix_reports.transcript_dir(path) / "s.jsonl"
         log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text("{}\n", encoding="utf-8")
+        log.write_text(
+            f'{{"timestamp": "{(NOW - transcript_age).isoformat()}"}}\n', encoding="utf-8"
+        )
         stamp = (NOW - transcript_age).timestamp()
         os.utime(log, (stamp, stamp))
     one = fix_reports.Tree(
@@ -214,3 +216,23 @@ def test_the_files_sessions_are_told_to_write_are_the_files_the_pass_reads():
     for doc in (".claude/skills/ship/SKILL.md", ".claude/rules/engineering.md"):
         assert channel in (root / doc).read_text(encoding="utf-8"), doc
     assert channel in fix_loop.fix_findings.__doc__ or channel in fix_reports.__doc__
+
+
+def test_a_tree_another_session_is_live_in_is_busy_and_the_pass_own_session_is_not(
+    ctx, monkeypatch
+):
+    path = tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=20),
+        transcript_age=_dt.timedelta(minutes=10),
+    )
+    closed, _ = close(ctx)
+    assert closed.busy == {}, "the stamped session working in its own tree is in flight, not busy"
+    resident = fix_reports.transcript_dir(path) / "resident.jsonl"
+    resident.write_text(
+        f'{{"timestamp": "{(NOW - _dt.timedelta(days=1)).isoformat()}"}}\n', encoding="utf-8"
+    )
+    os.utime(resident, (NOW.timestamp(), NOW.timestamp()))
+    closed, _ = close(ctx)
+    assert closed.busy == {("carameli", "agent/x-0919"): str(path)}

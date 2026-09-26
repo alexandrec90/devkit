@@ -63,8 +63,11 @@ def test_a_missing_module_is_friction_only_when_the_call_failed():
 
 
 def test_a_failing_test_is_the_work_and_not_friction():
-    rows = [call("python -m pytest tests/test_x.py", str(i)) for i in range(4)]
-    rows += [result("1 failed", str(i)) for i in range(4)]
+    """Red, edit, red, edit: each failure followed a change, so none was a wasted retry."""
+    rows = []
+    for i in range(4):
+        rows += [call("python -m pytest tests/test_x.py", str(i)), result("1 failed", str(i))]
+        rows.append(_tool("Edit", f"e{i}", file_path="x.py"))
     assert classes(rows) == []
 
 
@@ -98,7 +101,6 @@ def test_the_full_suite_is_friction_and_a_targeted_run_is_not():
     assert classes([call("python -m pytest tests -q -n auto", "1")]) == ["full-suite"]
     for narrowed in (
         "python -m pytest tests/test_x.py -q",
-        "python -m pytest scripts/hooks/tests -q",
         "python -m pytest -k fix_pass",
         "python scripts/run-tests.py --changed",
         "python -m pytest --collect-only",
@@ -287,3 +289,69 @@ def test_events_reads_each_format_with_its_own_reader(tmp_path):
     codex_rows = ((1, {"type": "event_msg", "payload": {"type": "user_message", "message": "hi"}}),)
     assert st.events(tmp_path / "a.jsonl", claude_rows) == [st.Event("user", 1, "hi")]
     assert st.events(tmp_path / "rollout-a.jsonl", codex_rows) == [st.Event("user", 1, "hi")]
+
+
+# --- what the first supervised run's audit found the detectors missing -------------------
+
+
+def _tool(name: str, call_id: str, **input_) -> dict:
+    block = {"type": "tool_use", "id": call_id, "name": name, "input": input_}
+    return {"type": "assistant", "message": {"content": [block]}}
+
+
+def test_a_dispatched_session_asking_a_question_is_friction_and_an_interactive_one_is_not():
+    dispatched = user("PR #4 is stuck. ... the fix pass commits, pushes, opens or updates the PR")
+    ask = _tool("AskUserQuestion", "1", questions=[])
+    assert classes([dispatched, ask]) == ["asked-user"]
+    assert classes([user("help me design this"), ask]) == []
+
+
+def test_the_same_test_run_three_times_with_no_edit_between_is_a_rerun():
+    run = "python -m pytest tests/test_x.py tests/test_y.py -q"
+    rows = [call(f"{run} | tail -{n}", str(n)) for n in (3, 5, 9)]
+    assert classes(rows) == ["rerun-unchanged"]
+    edited = [call(run, "1"), call(run, "2"), _tool("Edit", "e", file_path="a.py"), call(run, "3")]
+    assert classes(edited) == [], "red, fix, green is the work"
+    assert classes([call("git status", str(n)) for n in range(4)]) == [], "reading is not a rerun"
+
+
+def test_a_patch_script_failing_its_own_assert_is_friction():
+    out = 'Traceback (most recent call last):\n  File "<stdin>", line 96, in <module>\nAssertionError: t1'
+    assert classes([call("python - <<'EOF'", "1"), result(out, "1")]) == ["patch-failed"]
+
+
+def test_a_mangled_revision_path_is_an_environment_problem():
+    out = "fatal: ambiguous argument 'origin\\master;.devkit.toml': unknown revision"
+    assert classes([call("git show origin/master:.devkit.toml", "1"), result(out, "1")]) == [
+        "environment"
+    ]
+
+
+def test_the_push_gate_and_the_vendored_suite_are_full_suites():
+    assert classes([call(".venv/Scripts/python.exe scripts/precommit/run_push_gate.py", "1")]) == [
+        "full-suite"
+    ]
+    assert classes([call("python -m pytest scripts/hooks/tests -q", "1")]) == ["full-suite"]
+    assert classes([call("python -m pytest scripts/hooks/tests/test_ship.py", "1")]) == []
+
+
+def test_render_is_a_transcript_as_lines_an_audit_can_read(tmp_path):
+    rows = [
+        user("fix the gate"),
+        {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Reading the log."}]},
+        },
+        _tool("Bash", "1", command="python -m pytest tests/test_x.py"),
+        result("E   assert 1 == 2", "1"),
+    ]
+    path = transcript(tmp_path / "s.jsonl", rows, str(tmp_path))
+    lines = st.render(path).splitlines()
+    assert lines == [
+        "L1 USER: fix the gate",
+        "L2 SAY: Reading the log.",
+        "L3 CALL Bash: python -m pytest tests/test_x.py",
+        "L4 ERROR: E assert 1 == 2",
+    ]
+    long = transcript(tmp_path / "l.jsonl", [user("x" * 5000)], str(tmp_path))
+    assert st.render(long).rstrip().endswith("...[+2000]")

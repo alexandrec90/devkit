@@ -197,7 +197,17 @@ def test_the_hooks_off_prefix_survives_a_prompt(monkeypatch):
 def test_the_background_argv_passes_the_prompt_as_one_argument():
     """No shell in this mode, so no quoting -- and the words handed over are the same
     ones the tab mode hands over."""
-    assert tabs.background_argv("claude", CLAUDE, "do a; b") == ["claude", "--bg", "do a; b"]
+    argv = tabs.background_argv("claude", CLAUDE, "do a; b")
+    assert argv[-1] == "do a; b" and argv.count("do a; b") == 1
+
+
+def test_a_background_session_may_not_ask_and_the_flag_cannot_swallow_the_prompt():
+    """Nobody watches it: a fixer that asked sat there. `--disallowedTools` is variadic,
+    so it must come before `--bg` and before anything positional."""
+    argv = tabs.background_argv("claude", CLAUDE, "fix it")
+    at = argv.index("--disallowedTools")
+    assert argv[at + 1] == "AskUserQuestion" and argv[at + 2].startswith("--")
+    assert at < argv.index("--bg") < argv.index("fix it")
 
 
 def test_the_background_launch_runs_the_resolved_exe_in_the_box(monkeypatch, tmp_path):
@@ -214,7 +224,7 @@ def test_the_background_launch_runs_the_resolved_exe_in_the_box(monkeypatch, tmp
     monkeypatch.setattr(tabs.shutil, "which", lambda _cli: resolved)
     code = tabs.launch_background(CLAUDE, tmp_path, "fix #412", False, runner)
     assert code == tabs.EXIT_OK
-    assert seen["argv"] == [resolved, "--bg", "fix #412"]
+    assert seen["argv"][0] == resolved and seen["argv"][-2:] == ["--bg", "fix #412"]
     assert seen["kwargs"]["cwd"] == str(tmp_path)
     assert tabs.harness_switch.HOOKS_OFF_ENV not in seen["kwargs"]["env"]
 
