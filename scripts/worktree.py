@@ -1099,22 +1099,21 @@ def venv_python(windows: bool) -> str:
     return ".venv/Scripts/python.exe" if windows else ".venv/bin/python"
 
 
-def npm_executable(windows: bool) -> str:
-    """npm's program name on this platform.
+def npm_executable(windows: bool, which: Callable[[str], str | None] | None = None) -> str:
+    """npm's program for an argv step on this platform: a path on Windows when one resolves.
 
-    On Windows npm ships as `npm.cmd`, a batch shim; there is no `npm.exe`. These steps
-    run as argv with no shell — deliberately, so the ladder can be asserted — and argv
-    resolution does not consult PATHEXT, so a bare `npm` raises `[WinError 2] The system
-    cannot find the file specified`.
+    These steps run as argv with no shell, and argv resolution does not consult PATHEXT,
+    so a bare `npm` raises `[WinError 2]` on Windows; `shutil.which` does consult it. The
+    name was hard-coded to `npm.cmd` once, and an nvm layout that ships `npm.exe` and no
+    `.cmd` died with the same WinError 2 (roguelike and carameli boxes, 2026-09-26).
+    `npm.cmd` stays only as the fallback when nothing resolves.
 
-    That failure was *silent in effect*: `run_provision` reports a step it could not
-    start as a `[warn]` and keeps the box, so every Windows box came out with no
-    `node_modules` while still announcing itself provisioned. Every frontend check —
-    eslint, tsc, stylelint, markdownlint — was then unrunnable in a box, so `/ship`'s
-    changed-scope lint gate could not catch a frontend or Markdown defect locally and
-    left it to CI.
+    That failure is *silent in effect*: `run_provision` reports a step it could not start
+    as a `[warn]` and keeps the box, so the box comes out with no `node_modules` while
+    still announcing itself provisioned, and every frontend check -- eslint, tsc,
+    stylelint, markdownlint -- is unrunnable in it.
     """
-    return "npm.cmd" if windows else "npm"
+    return ((which or shutil.which)("npm") or "npm.cmd") if windows else "npm"
 
 
 def venv_step(python_version: str = "") -> ProvisionStep:
@@ -2758,13 +2757,10 @@ def run_provision(
 ) -> tuple[bool, list[str]]:
     """Run the install ladder in the box. `(ok, notes)`; stops at the first failure.
 
-    Not fatal to the box. A box that exists but has no toolchain is still where the work
-    belongs — the edit has somewhere to land and the branch is cut — so a failed install
-    is reported and the box is kept. Deleting it would send the agent back to editing the
-    static checkout, which is the outcome this whole tier exists to prevent.
-
-    The timeout is generous because a cold `uv sync` on a large project is genuinely slow;
-    the guard hook never reaches this path (see `apply_new`'s `provision` argument).
+    Not fatal to the box: one with no toolchain is still where the work belongs, and
+    deleting it would send the agent back to the static checkout. But a failed step is
+    reported as FAILED, never a `[warn]`: that is what hid a dead `npm ci` for weeks.
+    The timeout is generous because a cold `uv sync` on a large project is slow.
     """
     notes: list[str] = []
     for step in steps:
@@ -2793,14 +2789,14 @@ def run_provision(
                     creationflags=sweep.NO_WINDOW,
                 )
         except subprocess.TimeoutExpired:
-            notes.append(f"[warn] provision: {step.label} timed out after {timeout:g}s")
+            notes.append(f"FAILED provision: {step.label} timed out after {timeout:g}s")
             return False, notes
         except OSError as exc:
-            notes.append(f"[warn] provision: {step.label} could not run ({exc})")
+            notes.append(f"FAILED provision: {step.label} could not run ({exc})")
             return False, notes
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-            notes.append(f"[warn] provision: {step.label} failed: {detail[-1] if detail else ''}")
+            notes.append(f"FAILED provision: {step.label} failed: {detail[-1] if detail else ''}")
             return False, notes
         notes.append(f"provisioned: {step.label}")
     return True, notes
@@ -5480,14 +5476,16 @@ def reap_argument_faults(box: str, every: bool, force: bool) -> list[str]:
 
 
 def render_provision(
-    box: str, steps: tuple[ProvisionStep, ...], applied: bool, notes: list[str]
+    box: str, steps: tuple[ProvisionStep, ...], applied: bool, notes: list[str], ok: bool = True
 ) -> str:
     if not steps:
         return (
             f"{box}: nothing to install — no uv.lock, requirements-dev.txt or pyproject.toml, "
             f"and no [python] install_command in .devkit.toml"
         )
-    lines = [f"{'Provisioned' if applied else 'Would provision'} {box}"]
+    # A headline of "Provisioned" over a failed step hid a dead `npm ci` for weeks.
+    verb = ("Provisioned" if ok else "FAILED to provision") if applied else "Would provision"
+    lines = [f"{verb} {box}"]
     for n, step in enumerate(steps, 1):
         lines.append(f"    {n}. {step.shell_command or ' '.join(step.argv)}")
     lines.extend(f"  {note}" for note in notes)
@@ -5708,7 +5706,7 @@ def _run_provision(args: argparse.Namespace) -> int:
         }
         print(json.dumps(payload, indent=2))
     else:
-        print(render_provision(name, steps, applied=not args.dry_run, notes=notes))
+        print(render_provision(name, steps, applied=not args.dry_run, notes=notes, ok=ok))
     return 0 if ok else 1
 
 

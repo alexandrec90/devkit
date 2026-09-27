@@ -266,6 +266,8 @@ def run(
         "plan", decide, failures, green, newest, adopting, prefixes, default=fallback
     )
 
+    # Nothing routes with code a merge replaced mid-pass; the watchdog reruns it current.
+    go, held, moved = step("current", fix_send.hold_if_moved, go, held, ctx, default=(go, held, ""))
     items = fix_loop.triage.load(devkit_dir)
     sent, capped, worst = step(
         "send", send_all, go, ctx, launch, journal, closed, items, default=([], [], EXIT_FAILED)
@@ -293,7 +295,7 @@ def run(
     print(text)
     print(f"fix-pass: record at {write_artifact(text)}")
     append_history(account, now)
-    return max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
+    return fix_send.EXIT_STALE if moved else max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
 
 
 def build_parser() -> argparse.ArgumentParser:

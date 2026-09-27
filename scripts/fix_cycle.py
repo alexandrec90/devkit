@@ -188,7 +188,7 @@ def classify(
     # A devkit PR is red on its own diff: one against a red main is held by the plan
     # before it gets here. Its vendored tests judge its own code -- the ratchets above
     # all -- so the fix lands on its head branch, never in the upstream session, whose
-    # fresh branch off main has nothing to fix and cannot reach the PR (devkit #393, #394).
+    # fresh branch off main has nothing to fix and cannot reach the PR (devkit #387, #393, #394).
     # A devkit commit the commit stage refused is the same shape: the fix is in the tree
     # the refusal happened in, which the first supervised run's upstream session spent
     # seven calls repairing from outside after the refusal was folded into it.

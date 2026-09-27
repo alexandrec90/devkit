@@ -1708,19 +1708,30 @@ def test_the_frontend_toolchain_is_installed_alongside_the_python_one():
 
 
 def test_the_npm_program_name_follows_the_platform():
-    """A bare `npm` is unrunnable as argv on Windows -- npm is `npm.cmd`, a batch shim,
-    and argv resolution does not consult PATHEXT. The step then dies with WinError 2,
-    which `run_provision` downgrades to a `[warn]`, so the box comes out announcing
-    itself provisioned with no `node_modules` and no frontend linter in it."""
-    assert worktree.npm_executable(windows=True) == "npm.cmd"
-    assert worktree.npm_executable(windows=False) == "npm"
+    """A bare `npm` is unrunnable as argv on Windows -- argv resolution does not consult
+    PATHEXT. The step then dies with WinError 2, which `run_provision` downgrades to a
+    `[warn]`, so the box comes out announcing itself provisioned with no `node_modules`
+    and no frontend linter in it."""
+    assert worktree.npm_executable(windows=True, which=lambda _name: None) == "npm.cmd"
+    assert worktree.npm_executable(windows=False, which=lambda _name: None) == "npm"
 
 
-def test_the_frontend_step_is_runnable_on_windows():
+def test_windows_npm_is_whatever_resolves_on_path_exe_included():
+    """This machine's nvm ships `npm.exe` and no `npm.cmd`, so the hard-coded `npm.cmd`
+    died with the very WinError 2 it was written to cure (a carameli box, 2026-09-26)."""
+    exe = "C:/nvm/.nodejs/npm.exe"
+    assert worktree.npm_executable(windows=True, which=lambda _name: exe) == exe
+    cmd = "C:/Program Files/nodejs/npm.CMD"
+    assert worktree.npm_executable(windows=True, which=lambda _name: cmd) == cmd
+
+
+def test_the_frontend_step_is_runnable_on_windows(monkeypatch):
     """The reversion check for the above: with a bare `npm` this is what shipped, and
     every Windows box silently lost eslint, tsc, stylelint and markdownlint."""
+    exe = "C:/nvm/.nodejs/npm.exe"
+    monkeypatch.setattr(worktree.shutil, "which", lambda _name: exe)
     steps = worktree.provision_steps({"uv.lock"}, frontend_dir="frontend", windows=True)
-    assert steps[-1].argv[0] == "npm.cmd"
+    assert steps[-1].argv[0] == exe
 
 
 def test_a_project_with_no_frontend_tier_runs_no_npm():
@@ -2943,6 +2954,37 @@ def test_provision_acts_by_default_and_plans_only_on_dry_run(workspace, monkeypa
     assert ran == [root / "demo"] and "Dry run" in capsys.readouterr().out
     assert worktree.main(["provision", "demo", "--yes", "--workspace", str(workspace)]) == 0
     assert len(ran) == 2
+
+
+def test_a_failed_provision_does_not_print_provisioned(workspace, monkeypatch, capsys):
+    """carameli #395's tree: `npm ci` died with `[WinError 2]`, the command exited 1, and
+    the headline still read "Provisioned" -- which is what hid a dead step for weeks."""
+    root = workspace.parent
+    (root / "demo" / ".git").mkdir(parents=True)
+    step = worktree.ProvisionStep(label="npm ci (frontend)", argv=("npm", "ci"))
+    monkeypatch.setattr(worktree, "plan_provision", lambda path: (step,))
+    note = "FAILED provision: npm ci (frontend) could not run ([WinError 2])"
+    monkeypatch.setattr(worktree, "run_provision", lambda path, steps: (False, [note]))
+
+    assert worktree.main(["provision", "demo", "--workspace", str(workspace)]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("FAILED to provision demo")
+    assert "Provisioned" not in out and "[WinError 2]" in out
+
+
+def test_a_failed_install_step_says_failed_not_warn(tmp_path, monkeypatch):
+    """A box is kept when its install fails, but the note is what `new` prints under a
+    "Created" headline -- as a `[warn]` it read as optional and nobody acted on it."""
+
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    ok, notes = worktree.run_provision(tmp_path, (worktree.ProvisionStep("npm ci", ("npm", "ci")),))
+    assert ok is False
+    assert notes[0].startswith("FAILED provision: npm ci") and "[warn]" not in notes[0]
+    rendered = worktree.render_provision("demo", (worktree.ProvisionStep("x", ("x",)),), True, [])
+    assert rendered.startswith("Provisioned demo")
 
 
 def test_the_verbs_that_change_the_workspace_still_plan_by_default():

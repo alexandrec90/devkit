@@ -34,13 +34,22 @@ own and every test run in it borrows the checkout's (`project_python.borrowed_fr
 says so on every re-exec). The edit-time and session-start agent hooks that used to
 close that gap are exactly the ones an operator switches off with `DEVKIT_HOOKS_OFF`,
 and `worktree.py provision <path>` is a verb somebody has to remember. This hook fires
-before the session's first turn, whoever cut the tree, so it runs the `uv sync` that
-`scripts/hooks/toolchain.py` would name -- under three conditions that keep it seconds
-rather than minutes: the project is uv-locked, `uv` is on `PATH`, and the checkout it
-was cut from already has a `.venv`, which is the one on-disk fact that says this machine
-provisions this project and its uv cache is warm. A cold checkout gets nothing and
+before the session's first turn, whoever cut the tree, so it runs the project's own
+provisioner -- the manifest's `install_command` when it is one plain command, else the
+`uv sync` that `scripts/hooks/toolchain.py` would name -- when the checkout it was cut
+from already has a `.venv`, which is the one on-disk fact that says this machine
+provisions this project and its cache is warm. A cold checkout gets nothing and
 `ship.py --preflight` still names the command; `DEVKIT_SKIP_WORKTREE_PROVISION=1`
-skips the step for a `git worktree add` that wants a bare tree.
+skips the step for a `git worktree add` that wants a bare tree. Anything else that
+leaves a tree unprovisioned -- a failure, a missing `uv`, a command that needs a shell --
+goes in the tree's `logs/friction.md` as well as the hook's output, which `claude
+--worktree` swallows: the fix pass files it, so it is fixed at the cause.
+
+**`post-checkout` alone never reached `claude --worktree`.** It cuts with
+`--no-checkout` and fills the tree with `git reset --hard`, and git skips `post-checkout`
+for a no-checkout add. So the same set-up also answers `post-index-change`
+(`index_change_main`), gated on a working-tree update in a tree with no `.venv` yet.
+
 
 Every decision here is a pure function; `main` is the only part that touches git or the
 disk. Tested in `tests/test_worktree_env.py`.
@@ -278,18 +287,53 @@ class Toolchain:
     def command(self) -> tuple[str, ...]:
         """The argv to run, or () when this tree is not one to provision here.
 
-        Only the uv-locked model, deliberately. The other ladders in
-        `toolchain.python_fix` are two commands joined by a shell `&&`, and a manifest
-        `install_command` is a shell string by contract; a post-checkout hook that ran
-        either would be a shell in the middle of somebody's `git worktree add`. Those
-        projects keep the box tier's provisioner, which runs them through one.
+        The manifest's `install_command` when it is one plain command, else the
+        uv-locked model's `uv sync`. A shell is never run in the middle of somebody's
+        `git worktree add`: an `install_command` with shell syntax, and the other
+        ladders in `toolchain.python_fix` (two commands joined by `&&`), are left to the
+        box tier's provisioner. Refusing *every* manifest command as "a shell string" left
+        each carameli worktree with no `.venv`, though its `python scripts/bootstrap.py`
+        needs no shell at all.
         """
-        if not self.locked or self.own_venv or not self.checkout_venv or not self.uv:
+        if self.own_venv or not self.checkout_venv:
             return ()
         if self.install_command:
+            return plain_argv(self.install_command)
+        if not self.locked or not self.uv:
             return ()
         pin = ("--python", self.python_version) if self.python_version else ()
         return (self.uv, *UV_SYNC[1:], *pin)
+
+    def gap(self) -> str:
+        """Why a tree that should be provisioned here is not, or "" when leaving it is
+        right: already provisioned, a cold checkout, or nothing to install."""
+        if self.own_venv or not self.checkout_venv:
+            return ""
+        if self.install_command and not plain_argv(self.install_command):
+            return (
+                f"the manifest install_command `{self.install_command}` needs a shell, which "
+                "the hook does not run inside `git worktree add` -- make it one plain command"
+            )
+        if not self.install_command and self.locked and not self.uv:
+            return "uv is not on PATH, so the hook could not run `uv sync`"
+        return ""
+
+
+# What makes a manifest command need a shell. Without any of these it is argv already.
+SHELL_SYNTAX = frozenset("&|;<>$`'\"*?()\\%^\n")
+# Spellings of "the interpreter": this hook's own is certain to exist, unlike whatever
+# `python` resolves to in the environment git was started from.
+PYTHON_NAMES = frozenset({"python", "python3", "py"})
+
+
+def plain_argv(command: str) -> tuple[str, ...]:
+    """`command` as argv when it needs no shell; () when it does."""
+    if not command.strip() or SHELL_SYNTAX & set(command):
+        return ()
+    words = command.split()
+    if words[0].lower() in PYTHON_NAMES:
+        words[0] = sys.executable
+    return tuple(words)
 
 
 def manifest_python(here: Path) -> tuple[str, str]:
@@ -346,12 +390,14 @@ def provision(
     env = os.environ if environ is None else environ
     if env.get(SKIP_PROVISION_VAR):
         return ""
-    command = Toolchain.observe(here, checkout, uv=uv).command()
+    tool = Toolchain.observe(here, checkout, uv=uv)
+    command = tool.command()
     if not command:
-        return ""
-    # Spelled with the bare `uv` rather than the resolved executable: the line is a
-    # command to paste, and `C:\...\Scripts\uv.EXE sync` is not one anybody types.
-    spelled = " ".join((UV_SYNC[0], *command[1:]))
+        gap = tool.gap()
+        return _trouble(here, f"devkit: {gap}") if gap else ""
+    # Spelled as typed rather than resolved: the line is a command to paste, and
+    # `C:\...\Scripts\uv.EXE sync` is not one anybody types.
+    spelled = tool.install_command or " ".join((UV_SYNC[0], *command[1:]))
     started = time.monotonic()
     try:
         done = runner(
@@ -365,14 +411,52 @@ def provision(
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return f"devkit: `{spelled}` did not finish in {PROVISION_TIMEOUT}s; run it here by hand"
+        return _trouble(
+            here, f"devkit: `{spelled}` did not finish in {PROVISION_TIMEOUT}s; run it here by hand"
+        )
     except (OSError, subprocess.SubprocessError) as exc:
-        return f"devkit: could not run `{spelled}` ({exc}); run it here by hand"
+        return _trouble(here, f"devkit: could not run `{spelled}` ({exc}); run it here by hand")
     if done.returncode != 0:
         tail = " | ".join((done.stderr or "").strip().splitlines()[-3:])
-        return f"devkit: `{spelled}` failed ({tail}); run it here by hand"
+        return _trouble(here, f"devkit: `{spelled}` failed ({tail}); run it here by hand")
     elapsed = time.monotonic() - started
     return f"devkit: {VENV_DIR} provisioned by `{spelled}` in {elapsed:.0f}s (this worktree's own)"
+
+
+# `fix_reports.FRICTION_FILE`: the fix pass files each line of it on the harness-defect
+# ledger. Spelled here because this hook is installed alone, with nothing to import.
+FRICTION_FILE = Path("logs") / "friction.md"
+
+
+def _trouble(here: Path, line: str) -> str:
+    """Leave `line` in the tree's friction file as well as printing it: `claude
+    --worktree` swallows a hook's output, so a tree came up with no `.venv` and nothing
+    anywhere said why. `logs/` is ignored in every project. Never raises."""
+    what = line.removeprefix("devkit: ")
+    try:
+        path = here / FRICTION_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(f"- devkit's worktree hook left this worktree unprovisioned: {what}\n")
+    except OSError:
+        pass
+    return line
+
+
+def is_unprovisioned_tree_update(args: list[str], here: Path) -> bool:
+    """Whether this `post-index-change` call is a tree update in a tree with no `.venv`.
+
+    `claude --worktree` cuts its tree with `git worktree add --no-checkout` and fills it
+    with `git reset --hard`, and git runs `post-checkout` after a `worktree add` *unless*
+    `--no-checkout` was given -- so the hook above never saw a single Claude worktree.
+    The reset does fire `post-index-change`, with `1` as its first argument because it
+    updated the working tree; `git add` and every other index-only write pass `0`.
+
+    Nothing here says the tree is new, so the tree's own missing `.venv` stands in: it is
+    one `stat`, taken before any git spawn, so the hook costs nothing in a provisioned
+    tree and runs `provision` at most until one exists.
+    """
+    return bool(args) and args[0].strip() == BRANCH_CHECKOUT and not (here / VENV_DIR).is_dir()
 
 
 def main(
@@ -386,7 +470,27 @@ def main(
     args = sys.argv[1:] if argv is None else argv
     if len(args) < 3 or not is_fresh_checkout(args[0], args[2]):
         return 0
+    return _set_up(Path.cwd() if root is None else root, runner, environ)
+
+
+def index_change_main(
+    argv: list[str] | None = None,
+    root: Path | None = None,
+    runner=subprocess.run,
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """The `post-index-change` hook: the same set-up, for a tree cut `--no-checkout`.
+
+    Always exits 0: git ignores this hook's status too.
+    """
+    args = sys.argv[1:] if argv is None else argv
     here = Path.cwd() if root is None else root
+    if not is_unprovisioned_tree_update(args, here):
+        return 0
+    return _set_up(here, runner, environ)
+
+
+def _set_up(here: Path, runner, environ: Mapping[str, str] | None) -> int:
     checkout = checkout_of(here)
     if checkout is None:
         return 0

@@ -17,9 +17,9 @@ Running the tests for what you touched is optional.
 The scheduled fix pass commits, pushes, opens the PR and runs the full gate in CI; a red
 gate comes back to a fresh session with the failures named.
 
-**Fixer sessions are exempt.** A session the fix pass dispatched — its opening prompt
-names a failing PR, a refused commit or a merge conflict — follows that prompt, including
-where it says to commit, push or run the tests.
+**Fixer sessions are exempt.** A fixer, a session the fix pass dispatched as its
+prompt's first sentence says, follows that prompt and [`.claude/fixer.md`](../fixer.md),
+including where they say to run the tests.
 
 ## An environment that cannot run the checks is part of the fix
 

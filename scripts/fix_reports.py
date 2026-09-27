@@ -43,6 +43,7 @@ FRICTION_FILE = Path("logs") / "friction.md"
 # The mark of a tree the fix pass cut for a fixer, which makes its PR merge itself once
 # green (`ship_intent.labels_for`). Only what the pass authored carries it.
 ORIGIN_FILE = Path("logs") / "fix-origin"
+CHECKOUT = Path(__file__).resolve().parents[1]
 # The message a refused intent was being shipped with, set aside by the pass at
 # dispatch (`ship_intent.set_aside`) where the fixer it sent can reuse it.
 REFUSED_FILE = Path("logs") / "ship-intent.refused.md"
@@ -101,11 +102,41 @@ def note_on_stamp(tree: Path, field: str, value: str) -> None:
         (tree / STAMP_FILE).write_text(text, encoding="utf-8")
 
 
+def inherit_origin(tree: Path, home: Path | None = None) -> bool:
+    """Copy `home`'s `ORIGIN_FILE` -- by default this script's own checkout, a fixer's
+    tree when a fix-pass session runs its copy -- into `tree`; whether it had one.
+
+    A fix-pass session that cuts a sibling tree -- a devkit sweep fixing a carameli file
+    -- is doing fixer work there too, so that PR should merge itself once green. The
+    sweep's prompt said to copy the mark and one did not, so carameli #395 waited on a
+    person. `agent-worktree.py new` calls this, so nobody has to remember it.
+    """
+    mark = (home or CHECKOUT) / ORIGIN_FILE
+    if not mark.is_file():
+        return False
+    target = tree / ORIGIN_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(mark.read_text(encoding="utf-8"), encoding="utf-8")
+    return True
+
+
+def filed(relative: Path) -> Path:
+    """Where `file_away` keeps `relative`: what a finding's evidence names."""
+    return relative.with_name(f"{relative.stem}.filed{relative.suffix}")
+
+
 def file_away(tree: Path, relative: Path) -> None:
-    """`logs/x.md` -> `logs/x.filed.md`: read once, kept for whoever looks at the tree."""
+    """`logs/x.md` onto the end of `logs/x.filed.md`: read once, kept for whoever looks.
+
+    Appended, not replaced: every finding filed from an earlier copy names this file as
+    its evidence, and a replace would take those lines away from under it.
+    """
     source = tree / relative
-    if source.is_file():
-        source.replace(source.with_name(f"{source.stem}.filed{source.suffix}"))
+    if not source.is_file():
+        return
+    with (tree / filed(relative)).open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(source.read_text(encoding="utf-8").rstrip("\n") + "\n")
+    source.unlink()
 
 
 def read_stamp(tree: Path) -> dict:
@@ -191,11 +222,39 @@ def _mtime(path: Path) -> _dt.datetime | None:
         return None
 
 
+def last_spoke(path: Path) -> _dt.datetime | None:
+    """When a transcript's session last did anything: its last record with a `timestamp`.
+
+    Not the file's mtime -- `claude stop` appends `last-prompt` and `cost-state` rows,
+    which carry none, to a session that has already ended, and the mtime then held its
+    tree as busy for `QUIET_AFTER`. Only the file's tail is read; a tail holding no dated
+    record (one enormous last line) falls back to the mtime, which errs towards busy.
+    """
+    try:
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - TAIL_BYTES))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            record = json.loads(line)
+            when = _dt.datetime.fromisoformat(str(record["timestamp"]).replace("Z", "+00:00"))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if when.tzinfo:
+            return when
+    return _mtime(path)
+
+
+TAIL_BYTES = 256 * 1024
+
+
 def newest_transcript(tree: Path, projects_root: Path | None = None) -> Path | None:
     dated = [
         (when, path)
         for path in transcript_dir(tree, projects_root).glob("*.jsonl")
-        if (when := _mtime(path))
+        if (when := last_spoke(path))
     ]
     return max(dated)[1] if dated else None
 
@@ -240,7 +299,7 @@ def active_transcript(
 ) -> Path | None:
     """A transcript in `tree` written within `QUIET_AFTER`: someone is working there now."""
     newest = newest_transcript(tree, projects_root)
-    touched = _mtime(newest) if newest else None
+    touched = last_spoke(newest) if newest else None
     return newest if touched and now - touched <= QUIET_AFTER else None
 
 
@@ -275,7 +334,7 @@ def session_state(
     transcript = session_transcript(tree, sent, projects_root)
     if any((_mtime(tree / name) or sent) > sent for name in OUTCOME_FILES):
         return DONE, str(transcript or "")
-    touched = _mtime(transcript) if transcript else None
+    touched = last_spoke(transcript) if transcript else None
     if touched is None or touched < sent:
         return (NEVER_STARTED, "") if now - sent > START_GRACE else (WORKING, "")
     if now - touched > QUIET_AFTER:

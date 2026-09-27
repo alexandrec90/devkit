@@ -50,6 +50,7 @@ RUNTIME_FILES = {
     "scripts/git-hooks/pre-commit": "pre-commit",
     "scripts/git-hooks/pre-push": "pre-push",
     "scripts/git-hooks/post-checkout": "post-checkout",
+    "scripts/git-hooks/post-index-change": "post-index-change",
 }
 # The destinations that between them have to yield an importable `devkit_git_policy`.
 # Derived from the map so a future layout change cannot forget it.

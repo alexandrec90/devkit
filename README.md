@@ -292,15 +292,22 @@ the release this was written for.
 The global `post-checkout` hook (`scripts/worktree_env.py`) fires once, in the new tree,
 whenever one is created — `git worktree add`, whoever ran it, which is the one seam that
 reaches `claude --worktree`, `codex --worktree` and a person at a prompt alike, with no
-agent hook involved. It does two things a linked worktree otherwise
+agent hook involved. `claude --worktree` cuts with `--no-checkout`, which git exempts from
+`post-checkout`, so the same set-up also runs from the global `post-index-change` hook on
+the `git reset --hard` that fills the tree, for as long as the tree has no `.venv`. It
+does two things a linked worktree otherwise
 lacks, each only when its conditions hold:
 
 - writes the worktree its own `COMPOSE_PROJECT_NAME` into a gitignored `.env`, so a
   worktree named after its repo cannot adopt the checkout's containers and volumes;
-- runs `uv sync` so the tree has its own `.venv` before a session's first turn, rather
-  than borrowing the checkout's interpreter for every test run. Only for a uv-locked
-  project whose checkout already has a `.venv` — the on-disk fact that says the machine's
-  uv cache is warm, so the sync is seconds inside the `worktree add` rather than minutes.
+- runs the project's provisioner — the manifest's `install_command` when it is one plain
+  command, else `uv sync` — so the tree has its own `.venv` before a session's first
+  turn, rather than borrowing the checkout's interpreter for every test run. Only when
+  the checkout already has a `.venv` — the on-disk fact that says the machine's cache is
+  warm, so it is seconds inside the `worktree add` rather than minutes. A failure, a
+  missing `uv`, or a command that needs a shell is written to the tree's
+  `logs/friction.md`, which the fix pass files, since `claude --worktree` hides the
+  hook's output.
   A cold checkout gets nothing and `ship.py --preflight` still names the command;
   `DEVKIT_SKIP_WORKTREE_PROVISION=1` skips it for a `git worktree add` that wants a bare
   tree.
@@ -562,8 +569,8 @@ each, run here.
 1. **Ship every intent.** Run the tree's commit-stage fixers, commit with the message,
    push with the push gate skipped, open the PR -- labelled `automerge` when the pass cut
    the tree for a fixer, so a fixer's PR merges once green while a person's waits for
-   them (`ship_intent.labels_for`) -- record the outcome in `logs/ship-state.json`
-   beside the intent, and set the intent aside as `logs/ship-intent.shipped.md`. A dirty
+   them even after a fixer was sent to repair it (`ship_intent.labels_for`) -- record
+   the outcome in `logs/ship-state.json` beside the intent, and set the intent aside as `logs/ship-intent.shipped.md`. A dirty
    tree with no intent is a session still working — a fixer's, too — and is never
    touched; a refused commit is a failure like any other, with the pre-commit output as
    its evidence.

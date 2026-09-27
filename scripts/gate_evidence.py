@@ -132,6 +132,7 @@ def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]
     dest.mkdir(parents=True, exist_ok=True)
     done = gh("run", "download", str(run_id), "-D", str(dest))
     texts = junit_report.read_artifacts(dest) if getattr(done, "returncode", 1) == 0 else []
+    junit_report.write_readable(dest)  # what the prompt tells the fixer to read first
     if not fix_plan.signature_from_logs(texts):
         # A job that uploads nothing (carameli's frontend unit tests) left the fixer with
         # `job / step` and no test id, digging through `--log-failed` itself; read it once

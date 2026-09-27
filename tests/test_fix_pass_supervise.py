@@ -44,6 +44,14 @@ def test_a_person_named_as_the_next_step_is_a_violation_in_any_wording():
         assert any("a person is named" in v for v in supervise.check_record(line, 0, set())), line
 
 
+def test_a_hold_for_memory_is_a_wait_the_pass_tracks():
+    """The pass re-sends it next pass, and a hold that lasts is a stale wait it files."""
+    fix_send = load_script("scripts/fix_send.py")
+    why = fix_send._no_memory(fix_send.fix_plan.Decision(fix_send.fix_plan.DISPATCH, "n", ()), 100)
+    assert why.startswith(fix_send.HELD_FOR_MEMORY)
+    assert supervise.check_record(f"capped   carameli #1 -- {why}", 0, set()) == []
+
+
 def test_a_wait_must_name_what_it_waits_on():
     [found] = supervise.check_record("capped   carameli #1 -- because", 0, set())
     assert found.startswith("a wait nothing tracks")
@@ -234,10 +242,14 @@ def test_main_runs_each_iteration_and_exits_on_whether_any_broke_the_contract(
 
 def test_the_pass_is_run_through_the_watchdog(tmp_path, monkeypatch):
     script = tmp_path / "watchdog.py"
-    script.write_text("import sys\nprint(' '.join(sys.argv[1:]))\n", encoding="utf-8")
+    script.write_text(
+        "import sys\nprint(' '.join(sys.argv[1:]), sys.flags.utf8_mode, '\\u201d')\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(supervise, "WATCHDOG", script)
     code, output = supervise.run_pass(tmp_path / "w", "plan")
     assert code == 0 and output.startswith("--mode plan --workspace")
+    assert output.rstrip().endswith(" 1 \u201d"), "UTF-8 end to end, as the pass runs"
     assert supervise.utc_now().tzinfo is not None
 
 

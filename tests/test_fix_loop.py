@@ -106,6 +106,27 @@ def test_each_friction_line_is_filed_and_the_file_read_once(ctx, monkeypatch):
     assert (path / "logs" / "friction.filed.md").exists() and not (
         path / fix_reports.FRICTION_FILE
     ).exists()
+    # The evidence named the file the pass had just renamed, so every friction row
+    # pointed at nothing and a sweep spent a call finding that out.
+    for finding in reported:
+        assert Path(finding.evidence).is_file(), finding.evidence
+        assert finding.detail in Path(finding.evidence).read_text(encoding="utf-8")
+
+
+def test_a_second_filing_keeps_the_lines_the_first_findings_point_at(ctx, monkeypatch):
+    path = tree(ctx, monkeypatch, friction="- first\n")
+    close(ctx)
+    (path / fix_reports.FRICTION_FILE).write_text("- second\n", encoding="utf-8")
+    monkeypatch.setattr(
+        fix_loop.fix_reports,
+        "read_trees",
+        lambda root, projects: [
+            fix_reports.Tree("carameli", path, "agent/x-0919", {}, ("second",))
+        ],
+    )
+    close(ctx)
+    filed = (path / "logs" / "friction.filed.md").read_text(encoding="utf-8")
+    assert "first" in filed and "second" in filed
 
 
 def test_a_session_that_never_started_frees_its_key_and_is_filed_once(ctx, monkeypatch):
@@ -234,11 +255,27 @@ def test_a_tree_another_session_is_live_in_is_busy_and_the_pass_own_session_is_n
     assert closed.busy == {}, "the stamped session working in its own tree is in flight, not busy"
     resident = fix_reports.transcript_dir(path) / "resident.jsonl"
     resident.write_text(
-        f'{{"timestamp": "{(NOW - _dt.timedelta(days=1)).isoformat()}"}}\n', encoding="utf-8"
+        f'{{"timestamp": "{(NOW - _dt.timedelta(days=1)).isoformat()}"}}\n'
+        f'{{"timestamp": "{(NOW - _dt.timedelta(minutes=2)).isoformat()}"}}\n',
+        encoding="utf-8",
     )
-    os.utime(resident, (NOW.timestamp(), NOW.timestamp()))
     closed, _ = close(ctx)
     assert closed.busy == {("carameli", "agent/x-0919"): str(path)}
+
+
+def test_the_pass_own_session_that_finished_does_not_hold_its_tree(ctx, monkeypatch):
+    """Round four's rehearsal held six branches as "a session is working in" -- each by
+    the very fixer whose intent this same pass was shipping. The stamped session is never
+    another session, working or done."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=40),
+        transcript_age=_dt.timedelta(minutes=5),
+    )
+    (path / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
+    closed, _ = close(ctx)
+    assert closed.finished == [str(path)] and closed.busy == {}
 
 
 def test_a_finished_or_dead_sessions_idle_process_is_stopped_and_a_working_one_is_not(
