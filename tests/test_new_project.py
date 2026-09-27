@@ -898,8 +898,10 @@ def test_a_generated_project_satisfies_the_vendored_ci_contract(tmp_path):
 
     contract = "scripts/hooks/tests/test_ci_workflow_contract.py"
     assert (the_plan.root / contract).exists(), f"{contract} was not vendored"
+    # A temp root inside this test's own: under the machine-wide one, another session's
+    # run holding `pytest-current` fails this green run at pytest's exit (97d20f01).
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", contract, "-q"],
+        [sys.executable, "-m", "pytest", contract, "-q", f"--basetemp={tmp_path / 'basetemp'}"],
         cwd=the_plan.root,
         capture_output=True,
         text=True,
