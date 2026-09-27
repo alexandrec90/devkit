@@ -75,6 +75,11 @@ RESULT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("patch-failed", re.compile(r'File "<stdin>", line \d+[\s\S]{0,600}?AssertionError')),
 )
 
+# An odd count of any of these before a match on its line means the match is quoted.
+QUOTE_MARKS = ("'", '"', "`")
+# So is a match a failed assertion reports: pytest echoing a test's expected text.
+ASSERTION = re.compile(r"\bassert\b|AssertionError")
+
 # Commands that are friction whatever they return.
 COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("no-verify", re.compile(r"\bgit\b[^\n]*--no-verify")),
@@ -250,11 +255,21 @@ def _command_classes(command: str) -> Iterator[tuple[str, str]]:
         yield "full-suite", COMMAND_DETAIL["full-suite"]
 
 
+def _quoted(text: str, at: int) -> bool:
+    """The match at `at` sits inside a string its line opened: a regex's source, a diff
+    of the rule's prose, pytest echoing an assertion's operands. That quotes an error
+    rather than having one -- seven groups in the first supervised rehearsal."""
+    line = text[text.rfind("\n", 0, at) + 1 : at]
+    return any(line.count(mark) % 2 for mark in QUOTE_MARKS) or bool(ASSERTION.search(line))
+
+
 def _result_class(text: str) -> tuple[str, str]:
     """The class and snippet a failed call's output files under; `("", "")` for none."""
+    text = ANSI.sub("", text)
     for cls, pattern in RESULT_PATTERNS:
-        if pattern.search(text):
-            return cls, _snippet(text, pattern)
+        for found in pattern.finditer(text):
+            if not _quoted(text, found.start()):
+                return cls, normalize(text[found.start() : found.start() + SNIPPET])
     return "", ""
 
 
