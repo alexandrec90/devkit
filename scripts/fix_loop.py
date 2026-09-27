@@ -143,8 +143,17 @@ def _one_tree(
     kept = fix_reports.filed(fix_reports.FRICTION_FILE) if ctx.writes else fix_reports.FRICTION_FILE
     for line in tree.friction:
         evidence = str(tree.path / kept)
+        # A line its session fixed here is settled by this branch, not a new job for a fixer.
+        settles = tree.branch if tree.branch and fix_reports.fixed_here(line) else ""
         journal.add(
-            Finding("reported", tree.project, line, evidence=evidence, event=fix_findings.FRICTION)
+            Finding(
+                "reported",
+                tree.project,
+                line,
+                evidence=evidence,
+                event=fix_findings.FRICTION,
+                settles_with=settles,
+            )
         )
     if tree.friction and ctx.writes:
         fix_reports.file_away(tree.path, fix_reports.FRICTION_FILE)

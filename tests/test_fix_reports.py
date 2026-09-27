@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_reports
 
@@ -295,6 +297,21 @@ def test_a_line_about_claude_codes_worktree_guard_is_not_filed(tmp_path):
     assert fix_reports.friction_lines(tmp_path) == (
         "`harness_triage.py --resolve-like` crashed on a group with no host",
     )
+
+
+@pytest.mark.parametrize(
+    ("line", "fixed"),
+    [
+        ("evidence rewritten; fixed on this branch (`fix_findings.kept`)", True),
+        ("the prompt was wrong -- Fixed in this tree", True),
+        ("refusal lost, fixed it on this branch", True),
+        ("no .venv", False),
+        ("fixed on main by #420, but the prompt still named the old flag", False),
+        ("this branch could not be fixed", False),
+    ],
+)
+def test_a_line_saying_its_session_fixed_it_here_is_told_apart(line, fixed):
+    assert fix_reports.fixed_here(line) is fixed
 
 
 def test_the_newest_transcript_is_the_latest_written(tmp_path):
