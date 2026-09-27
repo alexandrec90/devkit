@@ -408,6 +408,13 @@ def sweep_targets(temp: Path, user: str) -> list[SweepTarget]:
             "one tree per run, kept for post-mortem and never collected",
         ),
         SweepTarget(
+            "pytest run roots",
+            temp / "pytest-runs",
+            "what a run killed before its cleanup left; `devkit_temproot` removes the rest",
+            # Age-gated because a live run's `tmp_path` is under here, in use.
+            min_age_days=DEFAULT_MIN_AGE_DAYS,
+        ),
+        SweepTarget(
             "node compile cache",
             temp / "node-compile-cache",
             "V8 compile cache; rebuilt on next run",

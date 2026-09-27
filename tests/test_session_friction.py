@@ -742,3 +742,43 @@ def test_only_a_task_branch_can_settle_a_complaint(code, out, branch):
         raise FileNotFoundError("git")
 
     assert sf.task_branch("C:/t", runner=missing) == ""
+
+
+def test_git_printing_a_file_that_quotes_an_error_is_not_friction():
+    """83496ae4 was a `git diff` of `tests/test_session_friction.py`, whose fixtures spell
+    "No module named" inside escaped quotes; a quote count can be taught escapes, but not
+    prose that names an error with no quotes at all. Git's output is the repository's text
+    plus git's own `fatal:`/`error:` lines, and only those report the environment --
+    whether the call exited 0 or not."""
+    diff = (
+        "git diff origin/main...origin/x -- tests/test_session_friction.py; "
+        'git diff origin/main...origin/x -- scripts/session_friction.py > "$T/sf.patch"'
+    )
+    quoted = (
+        "@@ -153,6 +153,58 @@\n"
+        '+    both = "x.md:3: prints \\"No module named x\\"\\nModuleNotFoundError: No module '
+        "named 'y'\"\n"
+        "+A bare run there fails with No module named pytest, so use the venv.\n"
+    )
+    for error in (False, True):
+        assert classes([call(diff, "1"), result(quoted, "1", error=error)]) == [], error
+    fatal = quoted + "fatal: ambiguous argument 'origin\\main;x': unknown revision\n"
+    assert classes([call(diff, "2"), result(fatal, "2", error=False)]) == ["environment"]
+    # A test run in the same call is read whole: its output is not the repository's text.
+    both = call(diff + "; python -m pytest tests/test_x.py | tail -3", "3")
+    assert classes([both, result("E   ModuleNotFoundError: No module named 'y'", "3")]) == [
+        "environment"
+    ]
+
+
+def test_only_git_printing_the_repository_is_read_for_its_diagnostics_alone():
+    """A hook's output comes through `git commit`, and its "No module named" is real."""
+    assert sf.git_reads_only("git diff a b | head -40 && git log -3\ngit --no-pager show x > f")
+    assert not sf.git_reads_only("git diff a; python -m pytest t.py")
+    assert not sf.git_reads_only("git commit -m x")
+    assert not sf.git_reads_only("")
+    said = "+ x = 'No module named y'\nfatal: bad revision 'z'\nwarning: LF will be replaced"
+    assert sf.environment_text("git diff", said) == (
+        "fatal: bad revision 'z'\nwarning: LF will be replaced"
+    )
+    assert sf.environment_text("pytest t.py", said) == said

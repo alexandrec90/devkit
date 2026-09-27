@@ -16,7 +16,7 @@ dependencies = []
 dev = [
   "ruff>=0.16.8",
   "mypy>=2.3.1",
-  # 9.1: it applies `pythonpath` before loading `addopts`' `-p pytest_temproot`.
+  # 9.1: it applies `pythonpath` before loading `addopts`' `-p devkit_temproot`.
   "pytest>=9.1",
   # The push gate runs pytest three times -- the suite, the vendored hook tier, and the
   # suite again under `posix-rehearsal.py`'s faked platform -- which was fifteen minutes
@@ -44,10 +44,11 @@ package = false
 testpaths = ["tests"]
 # No `-q` here: an agent adds its own, and `-qq` drops the "N passed" line -- sessions ran
 # the suite again and again looking for a verdict that was never printed.
-addopts = '-m "not paid" -p pytest_temproot'
-# What makes `-p pytest_temproot` importable: pytest applies this before it loads a `-p`
-# plugin, which is also why the floor above is 9.1. `tests/pytest_temproot.py` says why.
-pythonpath = ["tests"]
+addopts = '-m "not paid" -p devkit_temproot'
+# The vendored plugin that gives each run a temp root of its own; `-p` above loads it.
+# What makes it importable: pytest applies this before it loads a `-p` plugin, which is
+# also why the floor above is 9.1.
+pythonpath = ["scripts/pytest-plugins"]
 markers = [
   "claude_live: paid opt-in smoke tests that launch an authenticated Claude Code CLI session",
   "codex_live: paid opt-in smoke tests that launch an authenticated Codex CLI session",

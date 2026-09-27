@@ -143,6 +143,14 @@ READS_HARNESS_TEXT = re.compile(
 )
 # A command whose output is read for an environment failure even when it exited 0.
 SEES_ENVIRONMENT = re.compile(r"(?:^|[;&|]\s*)(?:\S*python\S*\s+-m\s+pytest|pytest|git)\b", re.M)
+# The statements of a command line; within one, only what leads its pipeline prints.
+STATEMENT = re.compile(r"&&|\|\||[;\n]")
+# Git's own voice. Everything else these subcommands print is the repository's text -- a
+# diff, a blob, a log -- which quotes an error as readily as a test fixture does
+# (83496ae4). Not `commit` or `push`: what they print besides is a hook's, and a hook's
+# "No module named" is the environment.
+GIT_DIAGNOSTIC = re.compile(r"^(?:fatal|error|warning): .*$", re.M)
+GIT_READERS = frozenset({"diff", "show", "log", "blame", "grep", "cat-file", "format-patch"})
 
 # The opening message of a session the fix pass dispatched: every prompt's finish line.
 DISPATCHED = "the fix pass commits, pushes"
@@ -295,6 +303,23 @@ def _complaint(event: Event, spoken_before: int) -> str:
     return _snippet(event.text, FRUSTRATION) if FRUSTRATION.search(event.text) else ""
 
 
+def git_reads_only(command: str) -> bool:
+    """Every statement in `command` is git printing the repository's text."""
+    statements = [part.split("|", 1)[0].split() for part in STATEMENT.split(command)]
+    statements = [words for words in statements if words]
+    return bool(statements) and all(
+        words[0] == "git"
+        and next((w for w in words[1:] if not w.startswith("-")), "") in GIT_READERS
+        for words in statements
+    )
+
+
+def environment_text(command: str, text: str) -> str:
+    """The part of a call's output that can report the environment: git's diagnostics
+    alone when git only printed the repository's own text."""
+    return "\n".join(GIT_DIAGNOSTIC.findall(text)) if git_reads_only(command) else text
+
+
 @dataclass
 class _Session:
     """What `detect` accumulates over one session's events."""
@@ -363,7 +388,7 @@ class _Session:
         command = self.calls.get(event.call_id, "")
         if not SEES_ENVIRONMENT.search(command) or READS_HARNESS_TEXT.search(command):
             return
-        cls, what = _result_class(event.text)
+        cls, what = _result_class(environment_text(command, event.text))
         if cls == "environment":
             self.note(cls, what, replace(event, command=command))
 
@@ -372,7 +397,10 @@ class _Session:
         command = self.calls.get(event.call_id, "")
         event = replace(event, command=command)
         if not READS_HARNESS_TEXT.search(command):
-            self.note(*_result_class(event.text), event)
+            cls, what = _result_class(event.text)
+            if cls == "environment":
+                cls, what = _result_class(environment_text(command, event.text))
+            self.note(cls, what, event)
         # A test run failing again is the work of fixing it, not a wasted retry.
         if command and not TEST_RUN.search(command):
             self.failures.setdefault(normalize(command)[:SNIPPET], []).append(event)
