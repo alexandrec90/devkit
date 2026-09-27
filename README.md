@@ -1038,8 +1038,9 @@ desk while seven agents paged.
 `scripts/reap-stale.py` is the pass that notices, and `devkit-reap-stale` runs it at
 `rc-servers`' interval. Three findings, three tests: a spawned session whose transcript
 has not moved for `sessionIdleMinutes` (default two hours); a named server the state file
-does not own, once nothing active is under it; a dev server whose ancestry reaches no
-living editor, terminal or agent. Interactive sessions carry no `--sdk-url` and are never
+does not own, once nothing active is under it; a dev server -- or a `python -m pytest`
+left by a shell call cut off mid-run -- whose ancestry reaches no living editor, terminal
+or agent. Interactive sessions carry no `--sdk-url` and are never
 candidates; anything whose activity cannot be read is kept. `status` prints every finding
 with its verdict and touches nothing; `maintain` acts, and appends each process it stopped
 to `logs/reap-stale.history.log`, which is never rewritten.

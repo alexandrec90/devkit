@@ -308,6 +308,7 @@ def test_a_rescue_cuts_a_fresh_tree_and_sends_one_background_session(tmp_path, m
     # variadic flag cannot swallow the prompt.
     assert "--strict-mcp-config" in argv and argv[-2] == "--"
     assert argv[argv.index("--disallowedTools") + 1] == "AskUserQuestion"
+    assert argv[argv.index("--name") + 1] == f"{tmp_path.name}/fix-pass-rescue-0926-1200"
     assert (tree / watchdog.ORIGIN_FILE).is_file(), "fixer work: its PR merges once green"
 
 

@@ -325,6 +325,53 @@ def test_the_default_pattern_leaves_other_node_processes_alone(cmdline):
     assert reap_machine.dev_servers([P(1, 999, "node", cmdline)]) == []
 
 
+PYTHON = r'"C:\p\.venv\Scripts\python.exe"'
+
+
+@pytest.mark.parametrize(
+    ("image", "cmdline"),
+    [
+        ("python", f"{PYTHON} -m pytest tests/test_a.py -q"),
+        ("python", "python -m pytest"),
+        ("py", "py -3 -m pytest -x"),
+        ("pytest", r'"C:\p\.venv\Scripts\pytest.exe" tests'),
+        ("pytest", "pytest -q"),
+    ],
+)
+def test_an_ownerless_pytest_is_reaped_like_a_dev_server(image, cmdline):
+    """58c73e03: a PowerShell tool call cut off mid-run left `python -m pytest` alive
+    with no owner, holding pytest's temp root and failing every other run's teardown
+    with WinError 5 -- and the orphan rule named node images only."""
+    row = P(1, 999, image, cmdline)
+    assert reap_machine.dev_servers([row]) == [row]
+
+
+def test_a_pytest_under_a_live_session_is_owned_and_its_workers_are_not_listed():
+    """The run a session is waiting on is not a leftover; an orphaned run is returned at
+    its top only, since `taskkill /T` takes its xdist workers with it."""
+    table = [
+        *TABLE,
+        P(90, 12, "python", f"{PYTHON} -m pytest -n 4"),
+        P(91, 997, "python", f"{PYTHON} -m pytest -n 4"),
+        P(92, 91, "python", f"{PYTHON} -m pytest -n 4"),
+    ]
+    pids = [row.pid for row in reap_machine.dev_servers(table)]
+    assert 90 not in pids and 92 not in pids and 91 in pids
+
+
+@pytest.mark.parametrize(
+    "cmdline",
+    [
+        r'python scripts\harness_triage.py --note "pytest held the temp root"',
+        "python -m pytest_cov_report",
+        r'"C:\p\.venv\Scripts\python.exe" scripts\run-tests.py',
+        "python -c 'import pytest'",
+    ],
+)
+def test_a_python_command_line_that_merely_names_pytest_is_not_a_run(cmdline):
+    assert reap_machine.dev_servers([P(1, 999, "python", cmdline)]) == []
+
+
 def test_the_pattern_is_a_parameter():
     custom = [P(1, 999, "node", "node my-server.js")]
     assert reap_machine.dev_servers(custom, pattern=r"my-server") == custom

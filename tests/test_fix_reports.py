@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -66,6 +67,31 @@ def test_a_launch_record_reads_back_as_one_line_and_its_absence_as_nothing(tmp_p
     assert fix_reports.launch_line(tmp_path) == "launcher exited 2: error: unknown option --bg x"
     (tmp_path / fix_reports.LAUNCH_FILE).write_text("[", encoding="utf-8")
     assert fix_reports.launch_line(tmp_path) == ""
+
+
+BANNER = (
+    "backgrounded · d55ca143\n  claude agents             list sessions\n"
+    "  claude attach d55ca143    open in this terminal\n"
+)
+
+
+def test_a_launch_record_keeps_the_session_id_the_launcher_printed(tmp_path):
+    """f1826e43: nothing mapped a tree to its background session, so a sweep messaged
+    two sessions to reach one. The id `claude attach` takes is now in the tree's record."""
+    done = subprocess.CompletedProcess(["claude"], 0, BANNER, "Starting background service\n")
+    fix_reports.record_launch(tmp_path, ["claude", "--bg", "--", "p"], done)
+    record = json.loads((tmp_path / fix_reports.LAUNCH_FILE).read_text(encoding="utf-8"))
+    assert record["session"] == "d55ca143"
+
+
+@pytest.mark.parametrize("stdout", ["", "session abc123", "error: backgrounded nothing\n"])
+def test_a_launch_that_printed_no_banner_records_no_session(tmp_path, stdout):
+    assert fix_reports.launched_session(stdout) == ""
+    fix_reports.record_launch(
+        tmp_path, ["claude", "--"], subprocess.CompletedProcess([], 1, stdout)
+    )
+    record = json.loads((tmp_path / fix_reports.LAUNCH_FILE).read_text(encoding="utf-8"))
+    assert "session" not in record
 
 
 def test_a_blocked_report_is_its_first_lines_trimmed_and_absent_is_empty(tmp_path):

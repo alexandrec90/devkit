@@ -25,6 +25,11 @@ different owner of record:
   parent that does not. `is_hosted` asks the only question that separates that from a
   server a person started: does the chain reach something a person is sitting in front
   of?
+- **An orphaned test run** -- `python -m pytest`, the same shape by a different road: a
+  shell tool call cut off mid-run takes its shell down and leaves the interpreter under
+  it running. Harmless in memory, not in effect: two such held pytest's shared temp root
+  and failed every other run's teardown with `WinError 5`. It is matched as a dev server
+  is, image first, so one classification and one setting cover both.
 
 **Unknown is busy**, as in `rc_machine`: a table that cannot be read is `None` and the
 pass reaps nothing; a transcript store that cannot be read makes every session active;
@@ -82,12 +87,17 @@ HOSTS = frozenset(
 # Only these images are ever a dev-server candidate. The pattern below is matched
 # against a command line, and a command line is also where an editor names the file it
 # has open -- `Code.exe ... vite.config.ts` would match `vite` -- so the image is checked
-# first and the pattern second.
-DEV_SERVER_NAMES = frozenset({"node", "npm", "npx", "bun", "deno"})
+# first and the pattern second. The Python images are here for pytest alone, and the
+# pattern names it only as `-m pytest` or as the `pytest` launcher itself: a Python
+# command line is where a script's arguments go, and `--note "pytest ..."` is not a run.
+DEV_SERVER_NAMES = frozenset(
+    {"node", "npm", "npx", "bun", "deno", "python", "python3", "pythonw", "py", "pytest"}
+)
 
 DEV_SERVER_PATTERN = (
     r"\bvite\b|\bvitest\b|\bwebpack\b|\bnext(\.js)?\"?\s+dev\b"
     r"|\bnpm(-cli\.js|\.exe|\.cmd)?\"?\s+run\s+dev\b"
+    r"|(^|\s)-m\s+pytest\b|(^\"?|[\\/])pytest(\.exe)?\"?(\s|$)"
 )
 
 # Seconds between the polite `taskkill` and the `/F`. Shorter than `rc_machine`'s: a
