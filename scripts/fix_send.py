@@ -42,15 +42,30 @@ EXIT_FAILED = 1
 # fast-forwards and runs it again; any other caller simply runs it again.
 EXIT_STALE = 75
 
+# The commit each checkout's code was loaded from, pinned by `pin_loaded` as a pass
+# starts. The reconcile job fast-forwards the static checkout every 15 minutes, so a HEAD
+# read mid-pass can already be the new code while the modules in memory are the old:
+# 0b9c6b88 crashed in `send` 39s after one, on the very bug that fast-forward had brought
+# #416's fix for, and `code_moved` read HEAD == origin as "current".
+LOADED_FROM: dict[str, str] = {}
+
+
+def pin_loaded(root: Path) -> None:
+    """Record `root`'s HEAD as the commit this process's modules came from."""
+    head = sweep.git_for(root)("rev-parse", "HEAD")
+    if head.returncode == 0 and head.stdout.strip():
+        LOADED_FROM[str(root)] = head.stdout.strip()
+
 
 def code_moved(root: Path) -> str:
-    """`old..new` when `origin/<default>` changed `scripts/` since this checkout's HEAD.
+    """`old..new` when `origin/<default>` changed `scripts/` since the code was loaded.
 
     The watchdog fast-forwards the checkout once, before the pass; anything merged after
     that routes with the code the pass started on. carameli #395 reached a devkit session
     that way, 21s before #407 -- the routing fix that would have sent it to carameli --
-    merged. Only a checkout the watchdog would have updated is judged: a linked worktree,
-    a branch with commits of its own and any git failure read as not moved.
+    merged. `old` is the pinned commit (`LOADED_FROM`), else HEAD. Only a checkout the
+    watchdog would have updated is judged: a linked worktree, a branch with commits of
+    its own and any git failure read as not moved.
     """
     if (root / ".git").is_file():
         return ""
@@ -59,7 +74,8 @@ def code_moved(root: Path) -> str:
     base = head.removeprefix("origin/") or "main"
     if git("fetch", "--quiet", "origin", base).returncode != 0:
         return ""
-    old, new = (git("rev-parse", ref).stdout.strip() for ref in ("HEAD", f"origin/{base}"))
+    loaded = LOADED_FROM.get(str(root)) or git("rev-parse", "HEAD").stdout.strip()
+    old, new = loaded, git("rev-parse", f"origin/{base}").stdout.strip()
     if not old or not new or old == new:
         return ""
     if git("merge-base", "--is-ancestor", old, new).returncode != 0:

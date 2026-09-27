@@ -68,6 +68,20 @@ def test_an_upstream_decision_is_one_key_for_the_group():
     assert fix_ledger.decision_key(repushed) != key
 
 
+def test_a_ledger_sweep_is_upstream_as_much_as_a_folded_group():
+    """A sweep of the ledger alone is one failure sent upstream, keyed
+    `ledger:...:upstream`; a prefix test read it as no devkit session, and 0926-16, -17
+    and -18 were each sent while the one before was still working."""
+    sweep = fix_plan.Decision(
+        fix_plan.UPSTREAM, "n", (failure(kind=fix_plan.LEDGER, project="devkit", number=0),)
+    )
+    assert fix_ledger.is_upstream(fix_ledger.decision_key(sweep))
+    assert fix_ledger.is_upstream("ledger:devkit:0:895d547878e6:6f7d5e150831:upstream")
+    assert fix_ledger.is_upstream("upstream:2:abc")
+    assert not fix_ledger.is_upstream("pr:devkit:422:acd85b:c2eb1e:resolve")
+    assert not fix_ledger.is_upstream("")
+
+
 def test_a_single_decision_is_keyed_as_its_failure_under_the_action_taken():
     """The action is in the key because the pass's decision can change while the failure
     does not: devkit #381 was dispatched at its head sha under the wrong action, and the

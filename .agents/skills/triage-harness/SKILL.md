@@ -114,7 +114,8 @@ isolates that, so a name like this on the open list means an *older* copy is doi
 group with the project they were cut from. Do not filter on the raw field.
 
 **A group can span machines**, and the `host` line names the ones it was seen on. The
-backlog is the union of every `harness-events-<host>.log` in the checkout's `logs/`, so on
+backlog is the union of every `harness-events-<host>.log` in the devkit checkout's `logs/`
+(`$DEVKIT_DIR/logs`, not a worktree's own, which holds none), so on
 a machine whose ledger is pooled you are triaging both. Two consequences: a group seen on
 one host only is a lead worth following — a path, a shell, a scheduler that differs — and a
 `--resolve-like` retires **every** machine's copy in one note, which is the point. A
@@ -160,7 +161,9 @@ cannot produce it again — not when this one tree, box or run is repaired. A mi
 the durable fix was in what provisions every tree (`scripts/worktree_env.py`, the git
 `post-checkout` hook). Ask of each group *what should have prevented this, and why did
 it not* — then fix that, and test it. A group marked `RECURRED` in the triage log was
-retired before by a fix that did not hold: its last note is what not to repeat. The only
+retired before by a fix that did not hold: its last note is what not to repeat. One
+marked `PENDING on <pr>` is the reverse: its fix is written and not merged yet, so the
+pass sends no session at it -- retire any new rows against that same `--pr`. The only
 mechanism ruled out is a coding-agent hook; a test, a git hook, a CI check, a scheduled
 job or a provisioner all are fair game.
 

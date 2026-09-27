@@ -11,9 +11,11 @@ pure and are driven directly.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
+import pytest
 from support import load_script
 
 tabs = load_script("scripts/agent_tabs.py")
@@ -21,6 +23,12 @@ agent_models = load_script("scripts/agent_models.py")
 
 CLAUDE = agent_models.Launch("claude")
 CODEX = agent_models.Launch("codex")
+
+
+@pytest.fixture(autouse=True)
+def _not_elevated(monkeypatch):
+    """A fixer runs these elevated on some machines; the launch under test is not."""
+    monkeypatch.setattr(tabs, "is_elevated", lambda: False)
 
 
 class FakeRunner:
@@ -201,6 +209,18 @@ def test_the_background_argv_passes_the_prompt_as_one_argument():
     assert argv[-1] == "do a; b" and argv.count("do a; b") == 1
 
 
+def test_a_background_session_is_told_at_system_level_to_write_files_with_the_tools():
+    """Bypass-permissions mode's own system prompt tells a session to prefer heredocs and
+    `sed` for file changes, and it outranked the user-turn prompt's ban: five fixers in
+    two supervised rounds wrote through a heredoc anyway. The rule rides at that level,
+    before the variadic `--disallowedTools` so that flag cannot swallow it."""
+    argv = tabs.background_argv("claude", CLAUDE, "fix it")
+    at = argv.index("--append-system-prompt")
+    assert argv[at + 1] == tabs.FILE_WRITES
+    assert "Write and Edit" in tabs.FILE_WRITES and "heredoc" in tabs.FILE_WRITES
+    assert at < argv.index("--disallowedTools")
+
+
 def test_a_background_session_may_not_ask_and_the_flag_cannot_swallow_the_prompt():
     """Nobody watches it: a fixer that asked sat there. `--disallowedTools` is variadic
     and takes every argument after it -- ordering alone did not stop it: placed before
@@ -271,6 +291,94 @@ def test_a_background_session_that_failed_to_start_is_a_failure(monkeypatch, tmp
 
     monkeypatch.setattr(tabs.shutil, "which", lambda _cli: "claude")
     assert tabs.launch_background(CLAUDE, tmp_path, "p", False, runner) == tabs.EXIT_FAILED
+
+
+UNREACHABLE = (
+    "Starting background service…\nCouldn't reach the background service (background "
+    "service did not become reachable within 45s) — run 'claude daemon status'\n"
+)
+
+
+@pytest.mark.parametrize(
+    "answers,code,calls",
+    [
+        ([(1, "", UNREACHABLE), (0, "session s-1 started", "")], tabs.EXIT_OK, 2),
+        ([(1, "", UNREACHABLE), (1, "", UNREACHABLE)], tabs.EXIT_FAILED, 2),
+        ([(1, "", "no credit"), (0, "session s-1 started", "")], tabs.EXIT_FAILED, 1),
+    ],
+    ids=["started-on-the-second-try", "never-up", "other-failure-not-retried"],
+)
+def test_a_background_service_that_was_not_up_yet_gets_one_more_launch(
+    monkeypatch, tmp_path, answers, code, calls
+):
+    """416563f4: the pass's first launch timed out waiting for the service it was
+    starting, and the session was filed dead; the re-send eight seconds later found the
+    service up. Only that failure is retried -- one that may have started a session
+    would start two."""
+    monkeypatch.setattr(tabs.shutil, "which", lambda _cli: "claude")
+    monkeypatch.setattr(tabs.tree_provision, "provision", lambda *_a: True)
+    queue, seen = iter(answers), []
+
+    def runner(argv, **_kwargs):
+        seen.append(argv)
+        answer_code, out, err = next(queue)
+        return subprocess.CompletedProcess(argv, answer_code, out, err)
+
+    assert tabs.launch_background(CLAUDE, tmp_path, "p", False, runner) == code
+    assert len(seen) == calls
+
+
+def test_only_a_failed_launch_that_names_the_service_reads_as_unreachable():
+    assert tabs.service_unreachable(subprocess.CompletedProcess([], 1, "", UNREACHABLE))
+    assert not tabs.service_unreachable(subprocess.CompletedProcess([], 0, UNREACHABLE, ""))
+    assert not tabs.service_unreachable(subprocess.CompletedProcess([], 1, "", "no credit"))
+
+
+def test_an_elevated_process_launches_nothing_and_says_why(monkeypatch, tmp_path):
+    """416563f4, 91f95793: a service started elevated is one the scheduled pass cannot
+    reach, so every launch it made failed until that service exited. Refused, nothing is
+    spawned -- not even the tree's provisioning -- and the record the pass files a
+    never-started session by names the elevation."""
+
+    def explode(*_a, **_k):
+        raise AssertionError("nothing should be spawned")
+
+    monkeypatch.setattr(tabs.shutil, "which", lambda _cli: "claude")
+    monkeypatch.setattr(tabs, "is_elevated", lambda: True)
+    monkeypatch.setattr(tabs.sys, "stderr", None)
+    assert tabs.launch_background(CLAUDE, tmp_path, "p", False, explode) == tabs.EXIT_FAILED
+    assert "elevated" in tabs.fix_reports.launch_line(tmp_path)
+
+
+def test_elevation_is_a_windows_question(monkeypatch):
+    monkeypatch.undo()
+    monkeypatch.setattr(tabs.os, "name", "posix")
+    assert tabs.is_elevated() is False
+
+
+def test_every_background_launch_leaves_what_the_launcher_was_given_and_said(monkeypatch, tmp_path):
+    """3728bf21: a session that never started left nothing but its tree, so a sweep
+    grepped transcripts to learn the launcher had swallowed the prompt. The argv -- the
+    prompt as its length, since it is the stamp's business -- and the launcher's own
+    answer are kept in the tree, whether it exited 0 or not."""
+    record = tmp_path / tabs.fix_reports.LAUNCH_FILE
+    monkeypatch.setattr(tabs.shutil, "which", lambda _cli: "claude")
+    monkeypatch.setattr(tabs.tree_provision, "provision", lambda *_a: True)
+    answers = iter([(0, "session s-1 started", ""), (1, "", "no credit")])
+
+    def runner(argv, **_kwargs):
+        code, out, err = next(answers)
+        return subprocess.CompletedProcess(argv, code, out, err)
+
+    # c47026f9: the scheduled pass runs under `pythonw.exe`, whose `sys.stdout` is None, and
+    # `sys.stdout.write` raised after the session had launched -- a crash for a success.
+    monkeypatch.setattr(tabs.sys, "stdout", None)
+    monkeypatch.setattr(tabs.sys, "stderr", None)
+    for code in (tabs.EXIT_OK, tabs.EXIT_FAILED):
+        assert tabs.launch_background(CLAUDE, tmp_path, "fix #412 now", False, runner) == code
+        kept = json.loads(record.read_text(encoding="utf-8"))
+        assert kept["argv"][:2] == ["claude", "--bg"] and kept["argv"][-1] == "<prompt: 12 chars>"
+    assert (kept["returncode"], kept["stderr"]) == (1, "no credit")
 
 
 # --- the two halves the resume task shares ------------------------------------------

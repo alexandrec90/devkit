@@ -29,12 +29,43 @@ MISSING_TOOLS = fix_pass.missing_tools  # the real preflight, before `tools_on_p
 
 NOW = _dt.datetime(2026, 9, 19, 9, 0, tzinfo=_dt.UTC)
 VENDORED = ("scripts/hooks/tests/test_untested_symbols.py::t",)
+# Kept before `no_session_busy` stubs it, for the one test that drives it.
+FIXERS_WORKING = fix_pass.fix_loop.fixers_working
 
 
 @pytest.fixture(autouse=True)
 def tools_on_path(monkeypatch):
     """Every CLI the preflight asks for is present unless a test says otherwise."""
     monkeypatch.setattr(fix_pass, "missing_tools", lambda: [])
+
+
+@pytest.fixture(autouse=True)
+def no_session_busy(monkeypatch):
+    """No session on this machine is working in a tree unless a test says one is."""
+    monkeypatch.setattr(fix_pass.fix_loop, "fixers_working", frozenset)
+
+
+def test_an_intent_whose_fixer_is_still_busy_waits_for_it(monkeypatch, tmp_path):
+    """The pass shipped 0926-19's intent at 04:09 while that session was still fixing a
+    group filed after it wrote the intent, and #422's while its sweep kept editing --
+    whose later edits the resolver then found unstaged."""
+    busy = tmp_path / "busy"
+    trees = [ship_intent.Intent("devkit", busy, "agent/b", "S", "B")]
+    trees.append(ship_intent.Intent("devkit", tmp_path / "idle", "agent/i", "S", "B"))
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: trees)
+    shipped = []
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda i, p, b: shipped.append(i.branch) or ship_intent.Outcome(i, "shipped", "u"),
+    )
+    listed = [{"kind": "background", "status": "busy", "cwd": str(busy)}]
+    listed.append({"kind": "interactive", "status": "busy", "cwd": str(tmp_path / "idle")})
+    monkeypatch.setattr(fix_pass.fix_loop.bg_sessions, "listed", lambda runner: listed)
+    monkeypatch.setattr(fix_pass.fix_loop, "fixers_working", FIXERS_WORKING)
+    lines, _, _ = fix_pass.ship_intents(tmp_path, ["devkit"], fix_cycle.DISPATCH)
+    assert shipped == ["agent/i"], "an interactive supervisor's own tree still ships"
+    assert lines[0] == "devkit agent/b -- held: its session is still working in the tree"
 
 
 def failure(**fields) -> fix_plan.Failure:
@@ -83,7 +114,15 @@ def world(tmp_path, monkeypatch):
         "releases": [],
         "memory": None,
         "moved": "",
+        "installers": [],
+        "installers_code": 0,
     }
+    # The machine's real scheduler is never touched: `maintain` re-registers tasks.
+    monkeypatch.setattr(
+        fix_pass.installers,
+        "main",
+        lambda argv: table["installers"].append(list(argv)) or table["installers_code"],
+    )
     monkeypatch.setattr(fix_pass.fix_send.host_memory, "available_mb", lambda: table["memory"])
     monkeypatch.setattr(fix_pass.fix_send, "code_moved", lambda root: table["moved"])
     monkeypatch.setattr(
@@ -121,6 +160,8 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(loop.session_friction, "harvest", lambda *a, **k: list(table["friction"]))
     monkeypatch.setattr(loop.fix_verify, "verify", lambda *a, **k: list(table["reopen"]))
     monkeypatch.setattr(loop.bg_sessions, "stop_finished", lambda trees, runner: [])
+    monkeypatch.setattr(loop, "working_dirs", frozenset)
+    monkeypatch.setattr(loop.friction_pending, "detector_fixes", lambda gh, git: [])
     monkeypatch.setattr(fix_pass.gate_evidence, "newest_release", lambda _d: "v0.11.22")
     monkeypatch.setattr(
         fix_pass.gate_evidence,
@@ -138,7 +179,9 @@ def world(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        fix_pass.fix_red.fix_backlog, "ledger_failure", lambda devkit_dir, root: table["backlog"]
+        fix_pass.fix_red.fix_backlog,
+        "ledger_failure",
+        lambda devkit_dir, root, in_flight=None: table["backlog"],
     )
     monkeypatch.setattr(
         fix_pass.fix_send,
@@ -212,6 +255,38 @@ def test_dispatch_ships_intents_sends_fixers_records_them_and_merges_adoptions(w
     text = artifact(world)
     assert "sent     carameli #412 -- dispatch" in text
     assert "merged   carameli #9" in text
+
+
+def test_a_dispatching_pass_brings_every_installer_current_and_a_plan_does_not(world):
+    """990856e5: #404 moved the scheduled pass behind its watchdog, and the task went on
+    running the pass bare until `installers.py maintain`'s next daily fire. The pass
+    merges such changes and fires half-hourly, so a dispatching one applies them; a plan
+    writes nothing, the scheduler included."""
+    assert fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW) == 0
+    assert world["installers"] == []
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
+    assert world["installers"] == [["maintain", "--workspace", str(world["workspace"])]]
+
+
+def test_a_failed_installer_is_filed_for_the_devkit_session(world, monkeypatch, tmp_path):
+    """55655d1a: the finding cites a copy of `installers.log`, not the file itself --
+    every later `installers.py` run rewrites that, and the evidence went with it."""
+    monkeypatch.setattr(fix_pass.installers.sweep, "source_checkout", lambda root: tmp_path)
+    artifact = tmp_path / "logs" / "installers.log"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("install-x.py: failed -- Access is denied\n", encoding="utf-8")
+    world["installers_code"] = 2
+    journal = fix_pass.Journal(tmp_path)
+    assert fix_pass.refresh_installers(world["workspace"], journal) == 2
+    (finding,) = journal.findings
+    assert finding.kind == "installer-failed" and finding.project == "devkit"
+    kept = Path(finding.evidence)
+    assert kept != artifact and kept.parent == tmp_path / "logs" / "findings"
+    artifact.write_text("rewritten by the next run\n", encoding="utf-8")
+    assert "Access is denied" in kept.read_text(encoding="utf-8")
+    world["installers_code"] = 1  # stale, and repaired: nothing to file
+    assert fix_pass.refresh_installers(world["workspace"], journal) == 1
+    assert len(journal.findings) == 1
 
 
 def test_a_pass_whose_code_moved_under_it_sends_no_one_and_asks_to_be_rerun(world):
@@ -288,6 +363,20 @@ def test_code_moved_names_the_range_only_when_scripts_changed_upstream(static):
     _push(author, "scripts/route.py")
     old = _git(checkout, "rev-parse", "HEAD")[:9]
     new = _git(author, "rev-parse", "HEAD")[:9]
+    assert fix_pass.fix_send.code_moved(checkout) == f"{old}..{new}"
+
+
+def test_code_moved_sees_a_fast_forward_made_under_a_running_pass(static, monkeypatch):
+    """0b9c6b88: the reconcile job fast-forwarded the static checkout 39s before `send`,
+    so HEAD equalled origin while the modules in memory were the pre-#416 ones, and the
+    pass crashed on the bug the fast-forward had just brought the fix for."""
+    monkeypatch.setattr(fix_pass.fix_send, "LOADED_FROM", {})
+    author, checkout = static
+    fix_pass.fix_send.pin_loaded(checkout)
+    old = _git(checkout, "rev-parse", "HEAD")[:9]
+    _push(author, "scripts/route.py")
+    _git(checkout, "pull", "--ff-only", "--quiet")  # what reconcile does every 15 minutes
+    new = _git(checkout, "rev-parse", "HEAD")[:9]
     assert fix_pass.fix_send.code_moved(checkout) == f"{old}..{new}"
 
 
@@ -1012,6 +1101,15 @@ def test_append_history_starts_the_file_and_appends_to_it(tmp_path):
     fix_pass.append_history(account, NOW, tmp_path)
     lines = path.read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["mode"] for line in lines] == [fix_cycle.PLAN] * 2
+
+
+def test_publish_prints_writes_the_record_and_adds_a_history_line(tmp_path, capsys):
+    account = fix_cycle.Account(fix_cycle.PLAN, fix_cycle.harness_state({}, True, []))
+    path = fix_pass.publish(account, NOW, tmp_path)
+    assert path == tmp_path / fix_pass.ARTIFACT
+    assert path.read_text(encoding="utf-8").strip() == fix_cycle.render(account).strip()
+    assert f"fix-pass: record at {path}" in capsys.readouterr().out
+    assert len((tmp_path / fix_pass.HISTORY).read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_a_pr_behind_a_red_base_waits_for_the_bases_fixer(world):

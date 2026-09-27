@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_plan
 import fix_prompts
+import fix_reports
 from support import REPO_ROOT, load_script
 
 
@@ -182,11 +184,49 @@ def test_a_conflicted_pr_gets_the_resolver_prompt_which_names_no_failure():
     assert "next pass" in text
 
 
+def test_a_pr_prompt_says_when_its_tree_holds_what_an_earlier_session_left():
+    """#422's resolver was sent into a tree with 21 files unstaged from an earlier
+    session and told nothing of it (f7167792); the pass knew, and only printed it."""
+    left = "the tree has uncommitted changes"
+    for red in (failure(), failure(signature=(fix_plan.CONFLICT,))):
+        text = fix_prompts.pr_prompt(red, "", left)
+        assert left in text and "git status" in text and "earlier session" in text
+        assert f"git log origin/{red.head}..HEAD" in text
+        assert "already up to date" not in text
+    assert "earlier session" not in fix_prompts.pr_prompt(failure())
+    assert "already up to date with its base" in fix_prompts.pr_prompt(failure())
+
+
 def test_a_refused_commit_gets_the_prompt_for_its_own_worktree():
     refused = failure(kind=fix_plan.COMMIT, number=0, signature=("commit refused: secrets",))
     text = fix_prompts.pr_prompt(refused)
     assert "The commit stage refused the change on agent/auto/devkit-upgrade-v0-11-21-0917" in text
     assert "logs/ship-intent.refused.md" in text and "fix pass commits" in text
+
+
+def test_a_pr_prompt_quotes_a_refusal_already_standing_in_its_tree(tmp_path):
+    """d609d34d: carameli #395's real blocker was an earlier fixer's intent the commit
+    stage had refused (detect-secrets, `.secrets.baseline` unstaged), recorded in the
+    tree's `ship-state.json`, while the prompt named only the red check -- five calls to
+    find. The fixer's own work ships through that same stage, so the prompt says so."""
+    state = tmp_path / "logs" / "ship-state.json"
+    state.parent.mkdir()
+    output = "detect-secrets.......Failed\n- hook id: detect-secrets\n.secrets.baseline unstaged\n"
+    state.write_text(
+        json.dumps({"stage": "refused", "step": "commit", "output": output}), encoding="utf-8"
+    )
+    refusal = fix_prompts.standing_refusal(tmp_path)
+    assert refusal.startswith("commit: ") and "detect-secrets" in refusal
+    for red in (failure(), failure(signature=(fix_plan.CONFLICT,))):
+        text = fix_prompts.pr_prompt(red, refusal)
+        assert "refused" in text and ".secrets.baseline unstaged" in text
+    assert "ship-state" not in fix_prompts.pr_prompt(failure())
+    # A shipped state, no state, or an unreadable one: nothing to quote.
+    state.write_text(json.dumps({"stage": "shipped"}), encoding="utf-8")
+    assert fix_prompts.standing_refusal(tmp_path) == ""
+    state.write_text("{", encoding="utf-8")
+    assert fix_prompts.standing_refusal(tmp_path) == ""
+    assert fix_prompts.standing_refusal(tmp_path / "nowhere") == ""
 
 
 def test_the_upstream_prompt_names_every_id_across_the_group():
@@ -261,6 +301,22 @@ def test_the_upstream_prompt_sends_the_session_at_the_ledger_only_when_the_backl
     assert "resolve-like" not in without
 
 
+def test_the_upstream_prompt_names_the_triage_log_at_the_path_it_is_placed():
+    """ "in that directory's harness-triage.log" read as `logs/gate/`, which holds one
+    directory per failure: both ledger sessions of the second supervised run opened the
+    wrong path first. The log is placed under the failure's own evidence slot."""
+    backlog = red_main(
+        kind=fix_plan.LEDGER,
+        workflow="harness ledger",
+        signature=("agent-report devkit [a] x2",),
+        # Built, not spelled: a `C:\` literal is one file name on the Linux gate.
+        evidence=str(Path("ws") / ".worktrees" / "gate" / "devkit-ledger-main"),
+    )
+    text = fix_prompts.upstream_prompt((backlog, failure()), "agent/fix")
+    assert "logs/gate/devkit-ledger-main/harness-triage.log" in text
+    assert "that directory" not in text
+
+
 def test_the_upstream_prompt_reads_each_failure_with_what_its_gate_said():
     """devkit's own red main beside a consumer's shared vendored failure: one session,
     and each named the way the record names it, with its own reason."""
@@ -277,6 +333,15 @@ def test_every_prompt_names_the_friction_channel_the_pass_files_from():
     on the harness-defect ledger instead, so every prompt has to say the file exists."""
     for text in every_prompt():
         assert "logs/friction.md" in text and "the pass files each for the devkit session" in text
+
+
+def test_every_prompt_gives_the_spelling_that_files_a_line_settled_by_its_branch():
+    """407df645, 6a3312bf, a8142f2a: a fixer that fixed its own friction left it open,
+    and the next pass sent a second fixer at it. The spelling is what the pass matches."""
+    spelling = "fixed on this branch"
+    assert fix_reports.fixed_here(f"the evidence was rewritten; {spelling}")
+    for text in every_prompt():
+        assert spelling in text
 
 
 def test_the_devkit_session_is_told_to_take_over_an_escalated_problem():
@@ -300,6 +365,9 @@ def test_the_resolver_checks_every_file_for_a_conflict_marker():
 def test_every_prompt_names_the_ratchets_and_forbids_a_question():
     for text in every_prompt():
         assert "structure_check.py" in text and "untested_symbols.py" in text
+        # A resolver took main's wording in a rule, ran the two ratchets it was named,
+        # and left #398 13 tokens over the hot-tier ceiling: a third session to fix it.
+        assert "python scripts/hot-budget.py" in text
         assert "never ask a question" in text
         # A fixer ended on a question whose "(Recommended)" option was the answer.
         assert "the option you would recommend is the decision" in text
@@ -310,16 +378,29 @@ def test_every_prompt_names_the_ratchets_and_forbids_a_question():
         assert "Fix causes, not instances" in text and "the provisioner" in text
         # A rule file said it and three sessions still lost turns: the prompt says it too.
         assert "never a shell heredoc" in text
+        # b935e421: a fixer moving a class to the end of a file reached for `cat >>`.
+        assert "An append is an Edit" in text
 
 
-def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linux():
+def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linux(tmp_path):
     """Two sweeps hand-parsed junit XML, and one shipped a Linux-only fix it could not
     check here and said nothing about it."""
-    with_evidence = fix_prompts.pr_prompt(failure(evidence="C:/ev/carameli-pr-412"))
+    (tmp_path / "failures.txt").write_text("FAILED x\n", encoding="utf-8")
+    with_evidence = fix_prompts.pr_prompt(failure(evidence=str(tmp_path)))
     assert "failures.txt" in with_evidence and "ran on Linux" in with_evidence
     assert "ran on Linux" in fix_prompts.pr_prompt(failure(evidence=""))
     assert ".venv interpreter" in fix_prompts.FINISH
     assert "--pr" in fix_prompts.LEDGER_STEPS and "any repository" in fix_prompts.LEDGER_STEPS
+
+
+def test_a_prompt_names_the_log_that_came_down_when_no_junit_report_failed(tmp_path):
+    """8f622cc6: devkit's suite reports only in `test-failures.log`, and a fixer told to
+    read `failures.txt` first went looking for a file nothing had written."""
+    (tmp_path / "test-failures").mkdir()
+    (tmp_path / "test-failures" / "test-failures.log").write_text("FAILED", encoding="utf-8")
+    text = fix_prompts.pr_prompt(failure(evidence=str(tmp_path)))
+    assert "test-failures/test-failures.log there first" in text
+    assert "failures.txt (" not in text
 
 
 def test_the_skill_the_ledger_sweep_follows_never_sends_it_to_the_user():

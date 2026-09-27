@@ -88,6 +88,14 @@ def test_the_pytest_tree_is_named_for_the_current_user(tmp_path):
     assert any(t.path.name == "pytest-of-alex" for t in targets)
 
 
+def test_the_per_run_pytest_roots_are_swept_only_once_no_run_can_be_using_them(tmp_path):
+    """`devkit_temproot` removes each run's root; one killed first leaves it behind, and a
+    run still going has its `tmp_path` under the same parent."""
+    [runs] = [t for t in reclaim.sweep_targets(tmp_path, "alex") if t.path.name == "pytest-runs"]
+    assert runs.path == tmp_path / "pytest-runs"
+    assert runs.min_age_days >= 1
+
+
 def test_dir_size_sums_a_tree(tmp_path):
     (tmp_path / "a").mkdir()
     (tmp_path / "a" / "one.bin").write_bytes(b"x" * 100)

@@ -43,6 +43,11 @@ MANIFEST: tuple[str, ...] = (
     # subprocess over JSON stdin, and asserts the exit codes Claude Code acts on.
     # Also has no script of its own -- it reads that repo's `.claude/settings.json`.
     "scripts/hooks/tests/test_hook_execution_contract.py",
+    # A temp root per pytest run, loaded by `-p` from the project's `pyproject.toml`
+    # (the repo contract holds it there): the shared `pytest-of-<user>` failed green
+    # runs in teardown whenever another run held its link.
+    "scripts/pytest-plugins/devkit_temproot.py",
+    "scripts/hooks/tests/test_devkit_temproot.py",
     # Config loader (the per-project seam) + the Stop dispatcher it drives.
     "scripts/hooks/harness_config.py",
     "scripts/hooks/tests/test_harness_config.py",

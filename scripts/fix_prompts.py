@@ -25,15 +25,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_worktrees as aw
 from fix_plan import COMMIT, CONFLICT, EVIDENCE_DIR, LEDGER, PR, Failure, describe, name_of
 from fix_reports import BLOCKED_FILE, FRICTION_FILE, REFUSED_FILE
+from harness_triage import ARTIFACT as _TRIAGE_ARTIFACT
 from junit_report import READABLE
+from ship_intent import INTENT_FILE, REFUSAL_LINE, REFUSED, STATE_FILE, read_state
 
 # How every prompt's body ends. The ship skill is the finish line and the blocked file
 # is the only other way out, for the blockers `STOP` names right after it; both are
 # files, so the pass reads the outcome without a session.
 FINISH = (
     "When it is done, run the targeted tests with this tree's own .venv interpreter, the "
-    "linter and the two ratchets the gate "
-    "runs -- python scripts/hooks/structure_check.py and python scripts/hooks/untested_symbols.py "
+    "linter and the ratchets the gate "
+    "runs -- python scripts/hooks/structure_check.py, python scripts/hooks/untested_symbols.py "
+    "and, where the tree has it, python scripts/hot-budget.py for the instruction files "
     "-- in every tree you changed, then ship it with the ship skill and stop: the fix pass "
     "commits, pushes, opens or updates the PR and reads what the gate says. Nobody is "
     "watching this session, so never ask a question and never end on one: a choice "
@@ -46,19 +49,21 @@ FINISH = (
     "should have run is what gets fixed, with a test -- and a repair to this tree alone "
     "is a workaround. Write and edit files with the Write and Edit tools, never a shell "
     "heredoc or a patch script run through Bash: the Bash tool collapses backslashes in "
-    "them, and the damage costs a test run to find. "
+    "them, and the damage costs a test run to find. An append is an Edit that replaces "
+    "the file's last lines with themselves plus the new text. "
     f"Either way, if the harness cost you turns -- a refusal, a missing tool, evidence "
     f"that was wrong or absent, an instruction that sent you the wrong way -- put one line "
     f"per thing in {FRICTION_FILE.as_posix()}: the pass files each for the devkit session, "
     f"which fixes it at the cause, and a cause that lives outside this repository is "
-    f"fixed there, not worked around here."
+    f"fixed there, not worked around here. End a line whose cause you fixed yourself "
+    f"with fixed on this branch: the pass then files it as settled by this branch, not "
+    f"as a new job for a fixer."
 )
 
 # What the devkit session is told about the harness-defect ledger, when the backlog is
 # among its failures. No quotes or backticks: the sentence crosses a `wt` command line.
 LEDGER_STEPS = (
-    " The ledger groups are in that directory's harness-triage.log: work them as "
-    ".claude/skills/triage-harness/SKILL.md says -- verify each against current code "
+    " Work them as .claude/skills/triage-harness/SKILL.md says -- verify each against current code "
     "before believing it, fix what is real, and retire each group with "
     "python scripts/harness_triage.py --resolve-like ID --note WHAT-FIXED-IT --pr BRANCH "
     "once the fix is in your intent; the pass reopens a group whose branch never merges. "
@@ -119,11 +124,22 @@ def _logs(failure: Failure) -> str:
     if failure.evidence:
         return (
             f"The gate's own logs are in {EVIDENCE_DIR}/ in this worktree -- read "
-            f"{READABLE} there first when it exists (each failing test with its message "
-            f"and traceback), then the .log files. {LINUX}"
+            f"{_first_read(Path(failure.evidence))} there first. {LINUX}"
         )
     where = failure.url or "the run"
     return f"No artifact came down from the run; read it at {where} first. {LINUX}"
+
+
+def _first_read(evidence: Path) -> str:
+    """`READABLE` when a junit report named a failure, else the `.log` files that came down.
+
+    8f622cc6: devkit's own suite reports only in `test-failures.log`, so a prompt naming
+    `READABLE` unconditionally sent a fixer after a file that was never written.
+    """
+    if (evidence / READABLE).is_file():
+        return f"{READABLE} (each failing test with its message and traceback), then the .log files"
+    logs = sorted(p.relative_to(evidence).as_posix() for p in evidence.rglob("*.log"))
+    return ", ".join(logs) if logs else "whatever is there"
 
 
 # The gate runs on Linux and a fixer on this machine: one shipped a fix whose only real
@@ -134,22 +150,52 @@ LINUX = (
 )
 
 
-def pr_prompt(failure: Failure) -> str:
+def standing_refusal(tree: Path) -> str:
+    """The tree's last commit refusal as `step: why`, or "" when its last ship went through.
+
+    carameli #395's fixer was told only the red check, while the tree's
+    `ship-state.json` held the real blocker -- an earlier intent the commit stage had
+    refused -- and five calls went on finding it (d609d34d).
+    """
+    state = read_state(tree)
+    if state.get("stage") != REFUSED:
+        return ""
+    lines = [line.strip() for line in str(state.get("output", "")).splitlines() if line.strip()]
+    # The line that names the check, then the output's last words, which say why.
+    first = [line for line in lines if REFUSAL_LINE.search(line)][:1]
+    return f"{state.get('step', 'commit')}: {' | '.join(dict.fromkeys(first + lines[-2:]))[:400]}"
+
+
+def _refused_too(refusal: str) -> str:
+    if not refusal:
+        return ""
+    return (
+        f" This tree also holds an intent ({INTENT_FILE.as_posix()}) the commit stage "
+        f"refused, recorded in {STATE_FILE.as_posix()} -- {refusal}. Your work ships "
+        "through that same stage, so clear that refusal as part of this fix."
+    )
+
+
+def pr_prompt(failure: Failure, refusal: str = "", left: str = "") -> str:
     """One branch, in its own worktree: a conflict to resolve, a refused commit, or a red PR.
 
     Three shapes, one function, because the worktree and the finish line are the same
     and only the middle differs. The conflict prompt names no failure on purpose: the
     gate cannot have run, and a resolver told "also fix the tests" fixes the wrong thing.
+    `refusal` is the tree's `standing_refusal`, which the commit shape already is, and
+    `left` is why the tree was not brought to origin's head (`fix-prs.refresh_head`).
     """
     if CONFLICT in failure.signature:
         return _framed(
             f"PR #{failure.number} in {failure.project} has a merge conflict with "
             f"origin/{failure.base}. This worktree is checked out on its head branch "
-            f"{failure.head}. Merge origin/{failure.base} in and resolve the conflicts so "
+            f"{failure.head}.{_left_as_is(left, failure.head)} Merge origin/{failure.base} in and resolve "
+            "the conflicts so "
             "that both sides' intent survives -- git diff --check must find no conflict "
             "marker in any file, not only the code -- and leave the merge uncommitted: the fix "
             "pass concludes it with the hooks running, and whatever the gate says after "
-            f"that is the next pass's business, not this session's. {FINISH}"
+            f"that is the next pass's business, not this session's.{_refused_too(refusal)} "
+            f"{FINISH}"
         )
     if failure.kind == COMMIT:
         return _framed(
@@ -162,9 +208,39 @@ def pr_prompt(failure: Failure) -> str:
     return _framed(
         f"PR #{failure.number} in {failure.project} against origin/{failure.base} is stuck: "
         f"{failure.reason}. Failing: {_ids(failure.signature)}. {_logs(failure)} "
-        f"This worktree is checked out on the PR head branch {failure.head}, already up "
-        "to date with its base. Fix what the gate is failing on, and nothing else about "
-        f"the PR. {FINISH}"
+        f"This worktree is checked out on the PR head branch {failure.head}"
+        + (f".{_left_as_is(left, failure.head)}" if left else ", already up to date with its base.")
+        + " Fix what the gate is failing on, and nothing else about "
+        f"the PR.{_refused_too(refusal)} {FINISH}"
+    )
+
+
+TRIAGE_LOG = _TRIAGE_ARTIFACT.name
+
+
+def _ledger_log(failure: Failure) -> str:
+    """Where the backlog's groups are in the tree: its evidence is placed under the slot
+    its directory is named for. "In that directory's" read as `logs/gate/` itself, and
+    both ledger sessions of one supervised run opened that first."""
+    slot = Path(failure.evidence).name if failure.evidence else ""
+    where = f"{EVIDENCE_DIR}/{slot}/" if slot else f"{EVIDENCE_DIR}/*/"
+    return f" The ledger groups are in {where}{TRIAGE_LOG} in this worktree."
+
+
+def _left_as_is(left: str, head: str) -> str:
+    """What a reused tree holds that the session did not put there, or "".
+
+    #422's resolver was sent into a tree holding an earlier session's half-done merge --
+    21 files unstaged, no MERGE_HEAD -- and was told nothing about it (f7167792).
+    """
+    if not left:
+        return ""
+    return (
+        f" The pass did not bring it to origin's head -- {left} -- so run git status and "
+        f"git log origin/{head}..HEAD first: what origin does not have was left by an "
+        "earlier session, not by you. Read it before "
+        "anything else, keep what serves this fix, and restore only what you have read "
+        "and judged wrong."
     )
 
 
@@ -187,7 +263,7 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
         f"each consumer. Each failure's gate logs are under {EVIDENCE_DIR}/ in this "
         "worktree, one directory per failure that uploaded any; for the rest, read the "
         "run at its URL."
-        + (LEDGER_STEPS if any(f.kind == LEDGER for f in ordered) else "")
+        + "".join(_ledger_log(f) + LEDGER_STEPS for f in ordered if f.kind == LEDGER)
         + f" This worktree is on the fresh branch {branch} off the default branch. Say in "
         f"the intent which of these the fix unblocks: {urls}. {OWN_DIFF} {FINISH}"
     )

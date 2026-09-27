@@ -1229,6 +1229,35 @@ def _no_worktree(_devkit, _tag):
     yield None
 
 
+def test_the_tag_source_is_a_bare_tree_whose_cleanup_cannot_fail_the_pass(tmp_path, monkeypatch):
+    """d47965d9: the worktree hook gave the throwaway tag tree a `.venv` -- a `uv sync`
+    per adoption pass, for a tree that is only read -- and a `.pyd` in it still held
+    open made the temp directory's cleanup raise, which exited the whole pass 1 after
+    v0.11.27 was already released. The hook's own opt-out keeps the tree bare, and a
+    directory that will not delete is left in %TEMP% rather than failing every project."""
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    made: dict = {}
+    real = up.tempfile.TemporaryDirectory
+
+    def recording(**kwargs):
+        made.update(kwargs)
+        return real(dir=tmp_path, prefix=kwargs.get("prefix"))
+
+    monkeypatch.setattr(up.subprocess, "run", fake_run)
+    monkeypatch.setattr(up.tempfile, "TemporaryDirectory", recording)
+    with up.source_at_tag(tmp_path, "v0.11.27") as path:
+        assert path.name == "v0.11.27"
+    add, remove = calls
+    assert add[0][3:5] == ["worktree", "add"] and remove[0][3:5] == ["worktree", "remove"]
+    assert add[1]["env"][up.SKIP_PROVISION_VAR] == "1"
+    assert made["ignore_cleanup_errors"] is True
+
+
 # --- the pull is self-modifying ----------------------------------------------
 #
 # `scripts/sync-devkit.py` is itself a MANIFEST entry, so one pass runs the *old*
@@ -1304,9 +1333,34 @@ def test_a_puller_that_never_settles_is_reported_rather_than_looped(tmp_path):
 
 
 def test_a_project_with_no_vendored_puller_reads_as_empty(tmp_path):
-    """`sync_script_bytes` is a comparison, not an assertion: an absent file is a
+    """`puller_bytes` is a comparison, not an assertion: an absent file is a
     value, so a project that has never vendored does not crash the fixpoint."""
-    assert up.sync_script_bytes(tmp_path) == b""
+    assert up.puller_bytes(tmp_path) == up.puller_bytes(tmp_path / "other")
+
+
+def test_a_release_that_grew_only_the_manifest_module_is_pulled_twice(tmp_path):
+    """c45826ad: v0.11.28 added `.claude/fixer.md` to `devkit_manifest.py` and left
+    `sync-devkit.py` byte-identical, so one pull ran the old list and every adoption
+    stopped on `DRIFT .claude/fixer.md`."""
+    project = vendored(tmp_path, "from devkit_manifest import MANIFEST")
+    (project / "scripts" / "devkit_manifest.py").write_text("MANIFEST = old", encoding="utf-8")
+    calls: list[int] = []
+
+    def pull(root, _source):
+        calls.append(1)
+        (root / "scripts" / "devkit_manifest.py").write_text("MANIFEST = new", encoding="utf-8")
+        return subprocess.CompletedProcess(["pull"], 0, stdout="pulled", stderr="")
+
+    runs, divergence = up.pull_to_fixpoint(project, tmp_path / "src", pull=pull)
+    assert (len(runs), divergence) == (2, "")
+
+
+def test_the_puller_is_every_file_the_pull_runs_its_list_from():
+    """`sync-devkit.py` imports its `MANIFEST` by that module name; the fixpoint must
+    watch the same file, or a list-only release is pulled once."""
+    source = (REPO_ROOT / up.SYNC_SCRIPT).read_text(encoding="utf-8")
+    assert "import devkit_manifest as _lists" in source
+    assert "scripts/devkit_manifest.py" in up.PULLER and up.SYNC_SCRIPT in up.PULLER
 
 
 # --- the drift check runs here, not at commit time ---------------------------

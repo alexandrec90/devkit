@@ -35,6 +35,7 @@ The argv builders are pure; `open_agent` takes a runner. Tested in
 
 from __future__ import annotations
 
+import ctypes
 import os
 import shutil
 import subprocess
@@ -44,6 +45,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_models
+import fix_reports
 import tree_provision
 import wt_profile
 
@@ -173,6 +175,17 @@ def open_agent(
     return EXIT_OK if done.returncode == 0 else EXIT_FAILED
 
 
+# Appended to a background session's system prompt. Bypass-permissions mode's own system
+# text tells a session to prefer heredocs and `sed` for file changes, and it outranked
+# the user-turn prompt's ban: five fixers in two supervised rounds wrote through one.
+FILE_WRITES = (
+    "Create and change files only with the Write and Edit tools -- never a shell heredoc, "
+    "sed -i, or a script run through Bash that writes a file. The Bash tool collapses "
+    "backslashes in the text it is handed, and the damage costs a test run to find. This "
+    "overrides any other guidance to make file changes through the shell."
+)
+
+
 def background_argv(exe: str, launch: agent_models.Launch, prompt: str) -> list[str]:
     """`claude --bg <prompt>`, as an argv rather than a command line.
 
@@ -196,12 +209,55 @@ def background_argv(exe: str, launch: agent_models.Launch, prompt: str) -> list[
         exe,
         "--bg",
         *launch.flags(),
+        "--append-system-prompt",
+        FILE_WRITES,
         "--strict-mcp-config",
         "--disallowedTools",
         "AskUserQuestion",
         "--",
         prompt,
     ]
+
+
+# What `claude --bg` says when its background service did not come up in time: the one
+# failure known to have started no session, so the one worth a second try. The first
+# launch of a pass starts the service, and 416563f4's fixer died on exactly that while
+# the re-send eight seconds later found it up. Any other failure is not retried -- a
+# launcher that failed after starting a session would start a second one.
+SERVICE_UNREACHABLE = "Couldn't reach the background service"
+LAUNCH_ATTEMPTS = 2
+
+
+def service_unreachable(done: object) -> bool:
+    said = f"{getattr(done, 'stdout', '') or ''}{getattr(done, 'stderr', '') or ''}"
+    return getattr(done, "returncode", 0) != 0 and SERVICE_UNREACHABLE in said
+
+
+# Why a background launch is refused from an elevated process. `claude --bg` starts its
+# background service on demand, as whoever asked, and one started elevated owns a control
+# pipe no ordinary process can open: the scheduled pass, which runs with the user's
+# ordinary token, then fails every launch with `SERVICE_UNREACHABLE` until that service
+# idles out, and cannot list the sessions it holds (416563f4, 91f95793 -- reproduced
+# from a Medium-integrity task: `control.sock: unreachable`). Its fixers run elevated
+# too, and an installer `--yes` from one left three jobs Administrators' (5282d37c).
+# Refused, the launch leaves this record and the scheduled pass re-sends it.
+ELEVATED = (
+    "refusing to launch a background session from an elevated process: its background "
+    "service would run elevated, and the scheduled fix pass could not reach it until it "
+    "exited. Run this from a shell that is not elevated; the next scheduled pass re-sends it."
+)
+
+
+def is_elevated() -> bool:
+    """Whether this process holds an elevated administrator token; False off Windows.
+
+    `windll` through `sys.modules`, for the mypy reason `scripts/tray.py` gives."""
+    if os.name != "nt":
+        return False
+    try:
+        return bool(sys.modules[ctypes.__name__].windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        return False
 
 
 def launch_background(
@@ -219,22 +275,32 @@ def launch_background(
     if not exe:
         print(f"agent-tabs: {cli} is not on PATH; run this yourself:\n  cd {tree}\n  {cli} --bg")
         return EXIT_FAILED
+    argv = background_argv(exe, launch, prompt)
+    if is_elevated():
+        fix_reports.record_launch(tree, argv, subprocess.CompletedProcess(argv, 1, "", ELEVATED))
+        print(f"agent-tabs: {ELEVATED}", file=sys.stderr)
+        return EXIT_FAILED
     env = dict(os.environ)
     if hooks_off:
         env[harness_switch.HOOKS_OFF_ENV] = harness_switch.HOOKS_OFF_VALUE
     # A background session is the pass's, and nobody is there to bootstrap its tree.
     tree_provision.provision(tree, runner)
-    done = runner(
-        background_argv(exe, launch, prompt),
-        cwd=str(tree),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
-    )
-    sys.stdout.write(done.stdout or "")
-    sys.stderr.write(done.stderr or "")
+    for _attempt in range(LAUNCH_ATTEMPTS):
+        done = runner(
+            argv,
+            cwd=str(tree),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+        if not service_unreachable(done):
+            break
+    fix_reports.record_launch(tree, argv, done)  # a "never started" finding's evidence
+    # `print`, not `.write`: under `pythonw.exe` both streams are None (c47026f9).
+    print(done.stdout or "", end="")
+    print(done.stderr or "", end="", file=sys.stderr)
     if done.returncode != 0:
         return EXIT_FAILED
     print("  read it back with `claude agents`, `claude logs <id>`, `claude attach <id>`")

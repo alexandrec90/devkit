@@ -9,7 +9,9 @@ intent or a report, `fix_reports.session_state`), so it stops it: `claude stop` 
 the conversation, and `claude attach <id>` reopens it.
 
 Only a background session that is idle, in a tree whose stamped session is finished or
-dead, is stopped -- never an interactive one, and never one still working.
+dead, is stopped -- never an interactive one, and never one still working. The same
+listing says which trees a session is busy in (`working`), which the pass holds a
+dispatch off.
 
 Tested in `tests/test_bg_sessions.py`.
 """
@@ -48,6 +50,25 @@ def finished_in(rows: Iterable[dict], trees: Iterable[str]) -> list[dict]:
         and row.get("status") == "idle"
         and _key(str(row.get("cwd", ""))) in wanted
     ]
+
+
+def working(rows: Iterable[dict], kinds: tuple[str, ...] = ()) -> frozenset[str]:
+    """The directories a session of `kinds` (empty: any) is busy in right now.
+
+    What a transcript's age cannot say: a fixer that left its intent reads as finished,
+    and one kept editing after it. The pass sent #422's resolver into that tree while
+    its own sweep was still mid-merge there, and the two raced one checkout (d821bd8f).
+    """
+    return frozenset(
+        _key(str(row.get("cwd", "")))
+        for row in rows
+        if row.get("status") == "busy" and (not kinds or row.get("kind") in kinds)
+    )
+
+
+def busy_in(dirs: frozenset[str], tree: object) -> bool:
+    """Whether `tree` is one of the directories `working` returned."""
+    return _key(str(tree)) in dirs
 
 
 def _key(path: str) -> str:

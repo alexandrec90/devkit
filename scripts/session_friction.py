@@ -75,15 +75,27 @@ RESULT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("patch-failed", re.compile(r'File "<stdin>", line \d+[\s\S]{0,600}?AssertionError')),
 )
 
+# An odd count of any of these before a match on its line means the match is quoted.
+QUOTE_MARKS = ("'", '"', "`")
+# A backslash-escaped character, which opens and closes nothing: the `\"` inside a test's
+# string literal is still inside it (83496ae4, a diff of this detector's own tests).
+ESCAPED = re.compile(r"\\.")
+# So is a match a failed assertion reports: pytest echoing a test's expected text.
+ASSERTION = re.compile(r"\bassert\b|AssertionError")
+
 # Commands that are friction whatever they return.
 COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("no-verify", re.compile(r"\bgit\b[^\n]*--no-verify")),
     # In command position, so a heredoc's text is not a poll; and not `gh pr checks
     # --watch`, which `.claude/rules/engineering.md` prescribes as the one blocking wait.
+    # Nor one settle right before that same `--watch`, which returns at once when a push
+    # has no checks yet: one call, not a loop (44a5ff19).
     (
         "poll",
         re.compile(
-            r"(?:^|&&|\|\||;)\s*(?:sleep\s+\d{2,}\b|until\b[^\n]*;\s*do\b[^\n]*\bsleep\b)", re.M
+            r"(?:^|&&|\|\||;)\s*(?:sleep\s+\d{2,}\b(?![^\n]*\bgh\s+pr\s+checks\b[^\n]*--watch)|"
+            r"until\b[^\n]*;\s*do\b[^\n]*\bsleep\b)",
+            re.M,
         ),
     ),
     # The push gate is the PR gate's whole suite, run locally: the gate's job, not a session's.
@@ -98,7 +110,12 @@ COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     # A file written or patched through a shell heredoc: Claude Code's Bash tool collapses
     # backslashes in one. Retired three times as "use Write/Edit" and back each time,
-    # since only the sessions that noticed the damage reported it -- so every write is.
+    # since only the sessions that noticed the damage reported it -- so every write that
+    # *can* be damaged is, noticed or not: `damageable_heredoc` holds it to a body with a
+    # doubled backslash, the one spelling the tool collapses. One without is delivered
+    # intact -- no backslash at all (b935e421) or only single ones, like the `\n` in an
+    # f-string (46a1578d) -- and filing it left a sweep nothing to retire it with but
+    # "no defect".
     (
         "heredoc-write",
         re.compile(
@@ -108,6 +125,16 @@ COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
 )
+# A heredoc's body: from the line after `<<TAG` to the line that is only `TAG`, or to the
+# end of an unterminated one.
+HEREDOC_BODY = re.compile(
+    r"<<-?\s*(['\"]?)(?P<tag>\w+)\1[^\n]*\n(?P<body>[\s\S]*?)(?:^[ \t]*(?P=tag)[ \t]*$|\Z)",
+    re.M,
+)
+# A byte dump in command position: a heredoc read back this way in the same command is a
+# measurement of what the Bash tool does to one, not a file the work depends on
+# (ccde706b, the probe that established the doubled-backslash rule above).
+BYTE_DUMP = re.compile(r"(?:^|[;&|]\s*)(?:od|xxd|hexdump|Format-Hex)\b", re.M)
 
 # A command reading back text the harness wrote, which quotes the very patterns above:
 # the triage log, the ledger, a transcript, a friction file. Its output is never friction.
@@ -116,6 +143,14 @@ READS_HARNESS_TEXT = re.compile(
 )
 # A command whose output is read for an environment failure even when it exited 0.
 SEES_ENVIRONMENT = re.compile(r"(?:^|[;&|]\s*)(?:\S*python\S*\s+-m\s+pytest|pytest|git)\b", re.M)
+# The statements of a command line; within one, only what leads its pipeline prints.
+STATEMENT = re.compile(r"&&|\|\||[;\n]")
+# Git's own voice. Everything else these subcommands print is the repository's text -- a
+# diff, a blob, a log -- which quotes an error as readily as a test fixture does
+# (83496ae4). Not `commit` or `push`: what they print besides is a hook's, and a hook's
+# "No module named" is the environment.
+GIT_DIAGNOSTIC = re.compile(r"^(?:fatal|error|warning): .*$", re.M)
+GIT_READERS = frozenset({"diff", "show", "log", "blame", "grep", "cat-file", "format-patch"})
 
 # The opening message of a session the fix pass dispatched: every prompt's finish line.
 DISPATCHED = "the fix pass commits, pushes"
@@ -151,9 +186,9 @@ NARROWING_FLAGS = frozenset(
 SUITE_ROOTS = frozenset(
     {"tests", "tests/", ".", "./", "scripts/hooks/tests", "scripts/hooks/tests/"}
 )
-# `$p`, `${files[@]}`, `$env:T`, `%TARGET%`: an argument the shell fills in, which the
-# detector cannot see, so it is read as narrowing rather than as naming nothing.
-SHELL_VARIABLE = re.compile(r"\$\{?[A-Za-z_]|%[A-Za-z_]\w*%")
+# `$p`, `${files[@]}`, `$env:T`, `%TARGET%`, PowerShell's splat `@t`: an argument the
+# shell fills in, which the detector cannot see, so it reads as narrowing, not as nothing.
+SHELL_VARIABLE = re.compile(r"\$\{?[A-Za-z_]|%[A-Za-z_]\w*%|^@[A-Za-z_]\w*$")
 
 # The user telling a session it went wrong -- the most expensive friction there is, and
 # the one no tool result carries. Skipped on a session's opening message, which is the
@@ -222,19 +257,42 @@ COMMAND_DETAIL = {
 }
 
 
+def damageable_heredoc(command: str) -> bool:
+    """A heredoc body in `command` carries a doubled backslash: the one thing the Bash
+    tool alters. It collapses each `\\\\` to `\\` and leaves a lone `\\n`, `\\t` or `\\s` as
+    written, which a write through the tool on 2026-09-26 confirmed byte for byte.
+
+    Not when the same command dumps the bytes back: that is the probe that confirmed it."""
+    if BYTE_DUMP.search(command):
+        return False
+    return any("\\\\" in found.group("body") for found in HEREDOC_BODY.finditer(command))
+
+
 def _command_classes(command: str) -> Iterator[tuple[str, str]]:
     for cls, pattern in COMMAND_PATTERNS:
+        if cls == "heredoc-write" and not damageable_heredoc(command):
+            continue
         if pattern.search(command):
             yield cls, COMMAND_DETAIL[cls]
     if any(full_suite(run.group("rest") or "") for run in TEST_RUN.finditer(command)):
         yield "full-suite", COMMAND_DETAIL["full-suite"]
 
 
+def _quoted(text: str, at: int) -> bool:
+    """The match at `at` sits inside a string its line opened: a regex's source, a diff
+    of the rule's prose, pytest echoing an assertion's operands. That quotes an error
+    rather than having one -- seven groups in the first supervised rehearsal."""
+    line = ESCAPED.sub("", text[text.rfind("\n", 0, at) + 1 : at])
+    return any(line.count(mark) % 2 for mark in QUOTE_MARKS) or bool(ASSERTION.search(line))
+
+
 def _result_class(text: str) -> tuple[str, str]:
     """The class and snippet a failed call's output files under; `("", "")` for none."""
+    text = ANSI.sub("", text)
     for cls, pattern in RESULT_PATTERNS:
-        if pattern.search(text):
-            return cls, _snippet(text, pattern)
+        for found in pattern.finditer(text):
+            if not _quoted(text, found.start()):
+                return cls, normalize(text[found.start() : found.start() + SNIPPET])
     return "", ""
 
 
@@ -243,6 +301,23 @@ def _complaint(event: Event, spoken_before: int) -> str:
     if spoken_before == 0 or event.text.lstrip().startswith("<"):
         return ""
     return _snippet(event.text, FRUSTRATION) if FRUSTRATION.search(event.text) else ""
+
+
+def git_reads_only(command: str) -> bool:
+    """Every statement in `command` is git printing the repository's text."""
+    statements = [part.split("|", 1)[0].split() for part in STATEMENT.split(command)]
+    statements = [words for words in statements if words]
+    return bool(statements) and all(
+        words[0] == "git"
+        and next((w for w in words[1:] if not w.startswith("-")), "") in GIT_READERS
+        for words in statements
+    )
+
+
+def environment_text(command: str, text: str) -> str:
+    """The part of a call's output that can report the environment: git's diagnostics
+    alone when git only printed the repository's own text."""
+    return "\n".join(GIT_DIAGNOSTIC.findall(text)) if git_reads_only(command) else text
 
 
 @dataclass
@@ -258,11 +333,15 @@ class _Session:
     # with only its `| tail` changed read nothing new -- five times in one session.
     unchanged: dict[str, int] = field(default_factory=dict)
     last_said: Event | None = None  # the agent's latest text: how the session ended
+    # line -> every class noted there: what `outdated` re-judges a filed row by, since
+    # `found` keeps only each class's first event.
+    at: dict[int, set[str]] = field(default_factory=dict)
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
         if cls and what:
             self.found.setdefault((cls, what), event)
+            self.at.setdefault(event.line, set()).add(cls)
 
     def user(self, event: Event) -> None:
         if self.spoken == 0:
@@ -309,7 +388,7 @@ class _Session:
         command = self.calls.get(event.call_id, "")
         if not SEES_ENVIRONMENT.search(command) or READS_HARNESS_TEXT.search(command):
             return
-        cls, what = _result_class(event.text)
+        cls, what = _result_class(environment_text(command, event.text))
         if cls == "environment":
             self.note(cls, what, replace(event, command=command))
 
@@ -318,14 +397,17 @@ class _Session:
         command = self.calls.get(event.call_id, "")
         event = replace(event, command=command)
         if not READS_HARNESS_TEXT.search(command):
-            self.note(*_result_class(event.text), event)
+            cls, what = _result_class(event.text)
+            if cls == "environment":
+                cls, what = _result_class(environment_text(command, event.text))
+            self.note(cls, what, event)
         # A test run failing again is the work of fixing it, not a wasted retry.
         if command and not TEST_RUN.search(command):
             self.failures.setdefault(normalize(command)[:SNIPPET], []).append(event)
 
 
-def detect(events: Iterable[Event]) -> list[tuple[str, str, Event]]:
-    """`(class, what, event)` for every friction in one session's events, each once."""
+def _read(events: Iterable[Event]) -> _Session:
+    """Every event through the per-event detectors, in order."""
     session = _Session()
     handlers = {"user": session.user, "call": session.call, "say": session.say}
     for event in events:
@@ -333,6 +415,12 @@ def detect(events: Iterable[Event]) -> list[tuple[str, str, Event]]:
             (session.failed if event.error else session.succeeded)(event)
         elif event.kind in handlers:
             handlers[event.kind](event)
+    return session
+
+
+def detect(events: Iterable[Event]) -> list[tuple[str, str, Event]]:
+    """`(class, what, event)` for every friction in one session's events, each once."""
+    session = _read(events)
     for what, runs in session.failures.items():
         if len(runs) >= REPEATS:
             session.note("repeat-failure", f"x{len(runs)} {what}", runs[-1])
@@ -410,6 +498,63 @@ def _under(cwd: str, root: Path) -> bool:
     except (ValueError, OSError):
         return False
     return True
+
+
+# --- re-judging what was filed ------------------------------------------------------------
+
+# The classes a whole session decides -- a repeat, a rerun, how it ended, who was there to
+# answer. Every other class is one event's alone, so today's detectors can re-judge it.
+WHOLE_SESSION = frozenset(
+    {"repeat-failure", "rerun-unchanged", "handed-back", "asked-user", "user-frustration"}
+)
+
+
+def outdated(items: Iterable[fix_findings.triage.Item]) -> list[tuple[str, str]]:
+    """`(id, why)` of every friction row today's detectors would no longer file.
+
+    A detector fixed on the default branch left its rows open, and a sweep spent ~13 calls
+    re-proving them (d677ea57). Each per-event row is re-read at its own transcript line;
+    it counts as outdated only when that line still holds the call the row names -- a
+    transcript first read from its end numbers from there -- so a transcript gone, a line
+    moved or a whole-session class is left open rather than guessed at.
+    """
+    sessions: dict[str, tuple[_Session, dict[int, set[str]]] | None] = {}
+    found = []
+    for item in items:
+        cls = item.detail.split(":", 1)[0]
+        path, _, line = item.fields.get("evidence", "").rpartition("#L")
+        if item.event != fix_findings.FRICTION or cls in WHOLE_SESSION or not line.isdigit():
+            continue
+        if path not in sessions:
+            sessions[path] = _whole(Path(path))
+        read = sessions[path]
+        if read is None:
+            continue
+        session, commands = read
+        if item.fields.get("command", "") not in commands.get(int(line), set()):
+            continue
+        if cls not in session.at.get(int(line), set()):
+            found.append(
+                (item.id, f"{cls} no longer fires on {path}#L{line} with today's detectors")
+            )
+    return found
+
+
+def _whole(path: Path) -> tuple[_Session, dict[int, set[str]]] | None:
+    """A transcript read whole: its detectors' verdicts, and each line's command as the
+    ledger kept it (`""` for none). None when it is gone."""
+    if not path.is_file():
+        return None
+    events = st.events(path, st.read_new(path, 0, 0).rows)
+    calls: dict[str, str] = {}
+    commands: dict[int, set[str]] = {}
+    for event in events:
+        if event.kind == "call":
+            calls[event.call_id] = event.command
+        command = calls.get(event.call_id, "") if event.kind in ("call", "result") else ""
+        kept = harness_events.clean(command[:300], harness_events.limit_for("command"))
+        commands.setdefault(event.line, set()).add(kept if command else "")
+    return _read(events), commands
 
 
 def _load_cursor(path: Path) -> dict[str, dict]:

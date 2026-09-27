@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_reports
 
@@ -49,9 +51,21 @@ def test_a_new_stamp_clears_the_report_an_earlier_session_left_in_the_tree(tmp_p
     its session had started -- and a blocked entry never expires."""
     (tmp_path / "logs").mkdir()
     (tmp_path / fix_reports.BLOCKED_FILE).write_text("needs a database\n", encoding="utf-8")
+    # An earlier launch's record too: a tab dispatch writes none, and must not inherit it.
+    (tmp_path / fix_reports.LAUNCH_FILE).write_text("{}", encoding="utf-8")
     fix_reports.stamp(tmp_path, "pr:carameli:412:new:d:dispatch", "n", NOW)
     assert fix_reports.blocked_reason(tmp_path) == ""
+    assert not (tmp_path / fix_reports.LAUNCH_FILE).exists()
     assert fix_reports.read_stamp(tmp_path)["key"] == "pr:carameli:412:new:d:dispatch"
+
+
+def test_a_launch_record_reads_back_as_one_line_and_its_absence_as_nothing(tmp_path):
+    assert fix_reports.launch_line(tmp_path) == ""
+    done = subprocess.CompletedProcess(["claude"], 2, "", "error: unknown option\n  --bg x\n")
+    fix_reports.record_launch(tmp_path, ["claude", "--bg", "--", "the prompt"], done)
+    assert fix_reports.launch_line(tmp_path) == "launcher exited 2: error: unknown option --bg x"
+    (tmp_path / fix_reports.LAUNCH_FILE).write_text("[", encoding="utf-8")
+    assert fix_reports.launch_line(tmp_path) == ""
 
 
 def test_a_blocked_report_is_its_first_lines_trimmed_and_absent_is_empty(tmp_path):
@@ -252,6 +266,52 @@ def test_friction_lines_drop_markup_and_blanks_and_filing_away_reads_them_once(t
     assert fix_reports.friction_lines(tmp_path) == ()
     assert (tmp_path / "logs" / "friction.filed.md").exists()
     fix_reports.file_away(tmp_path, fix_reports.FRICTION_FILE)  # nothing there: no error
+
+
+def test_a_line_the_tree_already_had_filed_is_not_read_again(tmp_path):
+    """a174d816: the session wrote its friction file whole after the pass had filed the
+    first copy away, so the same line came back, was filed a second time, and reopened a
+    group already retired with its fix as a recurrence. A new line beside it still reads."""
+    (tmp_path / "logs").mkdir()
+    friction = tmp_path / fix_reports.FRICTION_FILE
+    friction.write_text("- no .venv in the tree\n", encoding="utf-8")
+    fix_reports.file_away(tmp_path, fix_reports.FRICTION_FILE)
+    friction.write_text("- no .venv in the tree\n- the rehearsal exited 1\n", encoding="utf-8")
+    assert fix_reports.friction_lines(tmp_path) == ("the rehearsal exited 1",)
+    friction.write_text("* no .venv in the tree\n", encoding="utf-8")  # markup aside, same
+    assert fix_reports.friction_lines(tmp_path) == ()
+
+
+def test_a_line_about_claude_codes_worktree_guard_is_not_filed(tmp_path):
+    """ced1c085: the guard is Claude Code's, `.claude/rules/engineering.md` already says
+    so and names the spellings that pass it, and `session_friction` never files its
+    refusals -- but written into a friction file, one still became a group to retire."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(
+        "- a compound Bash line was refused by Claude Code's worktree isolation guard as "
+        '"names git in a form too complex to verify"; PowerShell ran it\n'
+        "- the command cannot be shown not to be git\n"
+        "- `harness_triage.py --resolve-like` crashed on a group with no host\n",
+        encoding="utf-8",
+    )
+    assert fix_reports.friction_lines(tmp_path) == (
+        "`harness_triage.py --resolve-like` crashed on a group with no host",
+    )
+
+
+@pytest.mark.parametrize(
+    ("line", "fixed"),
+    [
+        ("evidence rewritten; fixed on this branch (`fix_findings.kept`)", True),
+        ("the prompt was wrong -- Fixed in this tree", True),
+        ("refusal lost, fixed it on this branch", True),
+        ("no .venv", False),
+        ("fixed on main by #420, but the prompt still named the old flag", False),
+        ("this branch could not be fixed", False),
+    ],
+)
+def test_a_line_saying_its_session_fixed_it_here_is_told_apart(line, fixed):
+    assert fix_reports.fixed_here(line) is fixed
 
 
 def test_the_newest_transcript_is_the_latest_written(tmp_path):

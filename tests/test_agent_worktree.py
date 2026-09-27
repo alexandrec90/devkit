@@ -262,12 +262,14 @@ def test_a_new_worktree_is_cut_no_track_off_origin_after_a_fetch(workspace, monk
 
     fetch, add = run.git_args()
     assert fetch == ["fetch", "--quiet", "origin"]
-    assert add[:4] == ["worktree", "add", "--no-track", "-b"]
-    assert add[4].startswith("agent/voicemail-")  # the date suffix is today's
-    assert add[6] == "origin/main"
-    assert Path(add[5]).parts[-3:] == (".claude", "worktrees", add[4].partition("/")[2])
+    # `--quiet` (80a224ea): without it git's `Updating files: NN%` checkout progress is
+    # most of what the verb prints, and a session then greps it out of every call.
+    assert add[:5] == ["worktree", "add", "--quiet", "--no-track", "-b"]
+    assert add[5].startswith("agent/voicemail-")  # the date suffix is today's
+    assert add[7] == "origin/main"
+    assert Path(add[6]).parts[-3:] == (".claude", "worktrees", add[5].partition("/")[2])
     assert opened["agent"] == "codex"
-    assert opened["branch"] == add[4]
+    assert opened["branch"] == add[5]
 
 
 def test_the_model_pick_reaches_the_tab_and_no_pick_reaches_it_as_nothing(workspace, monkeypatch):
@@ -305,21 +307,21 @@ def test_a_tree_cut_from_fixer_work_is_fixer_work_too(workspace, monkeypatch, tm
     monkeypatch.setattr(agent_worktree.fix_reports, "CHECKOUT", fixer)
     run = FakeRun()
     agent_worktree.create("devkit", workspace, "sibling", "main", NONE, run)
-    cut = Path(run.git_args()[1][5])
+    cut = Path(run.git_args()[1][6])
     assert (cut / agent_worktree.fix_reports.ORIGIN_FILE).read_text(
         encoding="utf-8"
     ) == "fix-pass\n"
     monkeypatch.setattr(agent_worktree.fix_reports, "CHECKOUT", tmp_path / "persons-tree")
     run = FakeRun()
     agent_worktree.create("devkit", workspace, "mine", "main", NONE, run)
-    assert not (Path(run.git_args()[1][5]) / agent_worktree.fix_reports.ORIGIN_FILE).exists()
+    assert not (Path(run.git_args()[1][6]) / agent_worktree.fix_reports.ORIGIN_FILE).exists()
 
 
 def test_a_blank_topic_names_the_branch_after_the_checkout(workspace, monkeypatch):
     monkeypatch.setattr(agent_worktree.agent_tabs, "open_agent", lambda *a, **k: 0)
     run = FakeRun()
     agent_worktree.create("devkit", workspace, "", "main", NONE, run)
-    assert run.git_args()[1][4].startswith("agent/devkit-")
+    assert run.git_args()[1][5].startswith("agent/devkit-")
 
 
 def test_a_base_origin_does_not_have_is_refused_before_anything_is_cut(workspace, monkeypatch):

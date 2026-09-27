@@ -23,6 +23,8 @@ which survives this file crashing). Two rules hold it together:
    all of it and project fixers are held, out loud. Only one at a time.
 6. **Then projects**, conflicts first, each under `fix_budget.budget`: the ledger, the
    escalation ladder.
+7. **Installers current** (`installers.py maintain`), on a dispatching pass, so a
+   merged change to what a job registers is live within a pass, not a day.
 
 Every pass appends a line to `logs/fix-pass.history.jsonl`, which `fix_stall` reads.
 `"devkit.fixPass"` in the workspace file is `off` (the default), `plan` (write it all,
@@ -52,6 +54,7 @@ import fix_release
 import fix_red
 import fix_send
 import gate_evidence
+import installers
 import ship_intent
 import worktree
 from _loader import load_by_path
@@ -131,13 +134,18 @@ def ship_intents(
 
     A push or a PR that failed is retried next pass and filed now; the third element
     turns the task red rather than green over a branch that did not go out. An intent
-    where no PR can be opened from is filed for the devkit session to move.
+    where no PR can be opened from is filed for the devkit session to move. An intent
+    whose fixer is still busy in its tree waits (`fix_loop.fixers_working`).
     """
     lines: list[str] = []
     refused: list[fix_plan.Failure] = []
     failed = False
+    busy = fix_loop.fixers_working() if mode == fix_cycle.DISPATCH else frozenset()
     for intent in ship_intent.find_intents(root, projects):
         where = f"{intent.project} {intent.branch}"
+        if fix_loop.bg_sessions.busy_in(busy, intent.tree):
+            lines.append(f"{where} -- held: its session is still working in the tree")
+            continue
         if intent.blocked:
             lines.append(f"{where} -- NOT shipped: {intent.blocked}")
             fix_loop.fix_findings.file(
@@ -171,6 +179,30 @@ def ship_intents(
                 str(intent.tree),
             )
     return lines, refused, failed
+
+
+def refresh_installers(workspace: Path, journal: Journal | None = None) -> int:
+    """`installers.py maintain`, in-process: every installer's `--check`, `--yes` where
+    stale. Its exit code; a failed installer is filed, with that job's artifact.
+
+    That job fires once a day, and a change to what an installer registers is live only
+    once it has: #404 moved the scheduled pass behind its watchdog, and the task kept
+    running the pass bare, with nothing to catch its crashes, until the next morning's
+    fire (990856e5). The pass is what merges such a change and fires every half hour,
+    so a dispatching one applies it. After the send, so a re-registration of the pass's
+    own task cannot come between a decision and its dispatch.
+    """
+    code = installers.main(["maintain", "--workspace", str(workspace)])
+    if code == 2 and journal is not None:
+        artifact = installers.sweep.source_checkout(REPO_ROOT) / installers.ARTIFACT
+        fix_loop.fix_findings.file(
+            journal,
+            "installer-failed",
+            fix_cycle.DEVKIT,
+            "installer-failed: an installer's --check or --yes failed under the fix pass",
+            fix_loop.fix_findings.kept(artifact, journal.devkit_dir, "installers"),
+        )
+    return code
 
 
 def _ship_and_merge(
@@ -253,7 +285,8 @@ def run(
     # Filed before the backlog is read, and the backlog read on its own: whatever broke
     # above -- the collect step included -- reaches the devkit session this same pass.
     filed = fix_loop.record(ctx, journal)
-    backlog = step("backlog", fix_red.backlog_failure, workspace, default=None)
+    closed.lines += step("pending", fix_loop.recheck_open, ctx, default=[])
+    backlog = step("backlog", fix_red.backlog_failure, workspace, closed.in_flight, default=None)
     failures += [backlog] if backlog else []
     newest = step("newest-release", gate_evidence.newest_release, devkit_dir, default="")
     dispatching = mode == fix_cycle.DISPATCH
@@ -272,6 +305,8 @@ def run(
     sent, capped, worst = step(
         "send", send_all, go, ctx, launch, journal, closed, items, default=([], [], EXIT_FAILED)
     )
+    if dispatching:
+        step("installers", refresh_installers, workspace, journal, default=2)
     filed += fix_loop.record(ctx, journal)
     failed_steps = ship_failed or bool(journal.crashed)
     account = fix_cycle.Account(
@@ -291,11 +326,19 @@ def run(
         fix_loop.backlog(ctx),
         tuple(closed.stopped),
     )
+    publish(account, now)
+    return fix_send.EXIT_STALE if moved else max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
+
+
+def publish(account: fix_cycle.Account, now: _dt.datetime, root: Path | None = None) -> Path:
+    """The pass's account rendered, printed, written as the record and added to the
+    history; the record's path."""
     text = fix_cycle.render(account)
     print(text)
-    print(f"fix-pass: record at {write_artifact(text)}")
-    append_history(account, now)
-    return fix_send.EXIT_STALE if moved else max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
+    path = write_artifact(text, root)
+    print(f"fix-pass: record at {path}")
+    append_history(account, now, root)
+    return path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -326,6 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    fix_send.pin_loaded(REPO_ROOT)  # before anything can fast-forward the checkout
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     workspace = args.workspace.resolve()
     if not workspace.is_file():

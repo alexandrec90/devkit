@@ -15,7 +15,9 @@ to do" is the same bug with a different filename.
 
 from __future__ import annotations
 
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from support import load_script
@@ -143,3 +145,20 @@ def test_the_runner_uses_this_interpreter(vendored, monkeypatch):
     assert seen["cmd"][0] == sys.executable
     assert seen["cmd"][1:3] == ["-m", "pytest"]
     assert seen["cwd"] == vendored.resolve()
+
+
+def test_the_run_gets_a_temp_root_of_its_own_and_leaves_none(vendored, monkeypatch):
+    """97d20f01: under the machine-wide `pytest-of-<user>`, another session's run holding
+    its `pytest-current` link made pytest's exit-time cleanup raise access-denied, so a
+    green suite exited 1 with no failed test to name."""
+    seen: list[Path] = []
+
+    def fake_run(cmd, **_kwargs):
+        (flag,) = [a for a in cmd if a.startswith("--basetemp=")]
+        seen.append(Path(flag.split("=", 1)[1]))
+        assert seen[-1].is_dir()
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(hook_tests.subprocess, "run", fake_run)
+    assert hook_tests.main(["--root", str(vendored)]) == 0
+    assert len(seen) == 1 and not seen[0].exists()

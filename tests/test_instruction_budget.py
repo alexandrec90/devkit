@@ -24,8 +24,10 @@ budget = load_script("scripts/instruction-budget.py")
 hot_budget = load_script("scripts/hot-budget.py")
 
 
-# The measured hot total, rounded up to the next hundred; the number itself is
-# `hot_budget.HOT_CEILING`, which `scripts/hot-budget.py` checks at commit time.
+# The measured hot total plus about a sentence; the number itself is
+# `hot_budget.HOT_CEILING`, which `scripts/hot-budget.py` checks at commit time. Not
+# "rounded up to the next hundred": a total of 5788 under 5800 left 12 tok, and #390,
+# #398 and #405 each needed a fixer for a line that tipped it (0ababedf).
 # `.claude/rules/engineering.md` says coverage floors are ratchets and must never be
 # raised to make a change pass; the same applies here. **This number only goes down.**
 # Lower it after a pruning pass; if a change genuinely needs more hot prose, move
@@ -428,6 +430,17 @@ def test_the_hot_budget_stays_under_its_ceiling():
     hot = sorted((d for d in docs if d.tier == "hot"), key=lambda d: -d.tokens)
     assert total <= HOT_CEILING, (
         f"always-loaded instruction tier is {total} tok, ceiling is {HOT_CEILING}. "
-        "Move a section to a lazy tier rather than raising the ceiling. Largest: "
+        "Move a section to a lazy tier rather than raising the ceiling; "
+        "python scripts/hot-budget.py re-measures it. Largest: "
         + ", ".join(f"{d.rel} ({d.tokens})" for d in hot[:3])
+    )
+
+
+def test_a_pruning_pass_lowers_the_ceiling():
+    """The ratchet's other half. Headroom past a paragraph is a prune nobody banked, and
+    the next addition spends it without moving anything down a tier."""
+    total = budget.hot_total(budget.discover(REPO_ROOT, budget.manifest_paths(REPO_ROOT)))
+    assert HOT_CEILING - total < 100, (
+        f"always-loaded instruction tier is {total} tok under a ceiling of {HOT_CEILING}. "
+        f"Lower `HOT_CEILING` in scripts/hot-budget.py to about {total + 50}."
     )

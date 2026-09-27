@@ -248,7 +248,8 @@ def dispatch_pr(
     if tree is None:
         print(f"  no worktree for {failure.head}; nothing opened", file=sys.stderr)
         return EXIT_FAILED
-    if failure.kind == fix_plan.PR and (stale := refresh_head(tree, failure.head)):
+    stale = refresh_head(tree, failure.head) if failure.kind == fix_plan.PR else ""
+    if stale:
         print(f"  {stale}")
     for note in provision_tree(tree):
         print(f"  {note}")
@@ -257,7 +258,8 @@ def dispatch_pr(
         what = fix_plan.describe(failure)
         fix_reports.stamp(tree, key, what, problem=problem, agent=launch.agent)
     print(f"  worktree {tree}")
-    prompt = tab_safe(fix_prompts.pr_prompt(failure))
+    refusal = fix_prompts.standing_refusal(tree)
+    prompt = tab_safe(fix_prompts.pr_prompt(failure, refusal, stale.removeprefix("left as is: ")))
     return open_session(launch, tree, failure.head, prompt, f"{failure.project} {name}", runner)
 
 

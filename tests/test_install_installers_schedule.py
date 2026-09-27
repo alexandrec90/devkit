@@ -36,7 +36,9 @@ def schedule(at: str = "08:45") -> object:
 
 def test_the_command_names_the_mode_that_acts():
     """`status` is read-only by design; a task that lost the word would fire daily and
-    register nothing while `schtasks` reported success."""
+    register nothing while `schtasks` reported success. No `--running-under`: the task
+    that flag handed itself off from was refused for being an elevated shell's, not for
+    being the task running (5282d37c)."""
     assert schedule().command == [
         r"C:\py\pythonw.exe",
         r"C:\ws\devkit\scripts\installers.py",

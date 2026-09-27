@@ -240,21 +240,9 @@ def create(
     branch = tb.branch_name(tb.slugify(slug or project), existing)
     name = branch.partition("/")[2]
     path = aw.default_root(source) / name
-    done = runner(
-        [
-            "git",
-            "-C",
-            str(source),
-            "worktree",
-            "add",
-            "--no-track",
-            "-b",
-            branch,
-            str(path),
-            f"origin/{ref}",
-        ],
-        check=False,
-    )
+    # `--quiet`: git's checkout progress was most of what this printed (80a224ea).
+    cut = ("worktree", "add", "--quiet", "--no-track", "-b", branch, str(path), f"origin/{ref}")
+    done = runner(["git", "-C", str(source), *cut], check=False)
     if done.returncode != 0:
         print("agent-worktree: the worktree was not cut; nothing to open", file=sys.stderr)
         return EXIT_FAILED

@@ -35,6 +35,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -59,9 +60,9 @@ Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 def _run_tests_module(path: Path | None = None):
     """`scripts/run-tests.py`, loaded by path because its name is not an identifier.
 
-    Imported for `filter_output` and `cap_failure_blocks` alone. Those are pure and are
-    already the format every failure artifact in this repo uses; a second implementation
-    would drift from it the first time either was tuned.
+    Imported for `with_basetemp`, `filter_output` and `cap_failure_blocks` alone. Those
+    are pure and are already how every suite runner here spawns pytest and shapes its
+    artifact; a second implementation would drift from it the first time one was tuned.
     """
     path = REPO_ROOT / "scripts" / "run-tests.py" if path is None else path
     spec = importlib.util.spec_from_file_location("devkit_run_tests", path)
@@ -193,13 +194,26 @@ def main(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
 
     cmd = command()
     print(f"posix-rehearsal: {' '.join(cmd[2:])}", flush=True)
-    result = runner(
-        cmd,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        env=environment(),
+    # What a run killed mid-suite leaves (4c396283): a tool call cut off at its timeout
+    # exited 1 with no artifact, which read as a failure nobody could find.
+    ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+    ARTIFACT.write_text(
+        "# source: scripts/posix-rehearsal.py\n# the run did not finish: pytest was killed "
+        "before it returned -- a tool call's timeout, most likely. The whole suite takes "
+        "minutes; give the call a longer timeout, or leave it to the gate.\n",
+        encoding="utf-8",
     )
+    # A temp root of this run's own, as `run-tests.py` gives its suite: the shared one
+    # failed a green rehearsal at pytest's exit whenever another session's run held its
+    # `pytest-current` link (97d20f01).
+    with tempfile.TemporaryDirectory(prefix="pytest-", ignore_cleanup_errors=True) as basetemp:
+        result = runner(
+            _run_tests_module().with_basetemp(cmd, basetemp),
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=environment(),
+        )
     raw = (result.stdout or "") + (result.stderr or "")
 
     # `LEDGER` passed rather than defaulted: a default argument binds at definition time,
@@ -213,7 +227,6 @@ def main(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     # explained by a node id.
     started = result.returncode in (0, PYTEST_NO_TESTS_COLLECTED) or failed_tests(raw)
 
-    ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
     if started and not unexpected and not fixed:
         ARTIFACT.write_text("", encoding="utf-8")
         print(f"posix-rehearsal: passed (artifact cleared: {_display(ARTIFACT)})")

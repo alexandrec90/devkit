@@ -218,7 +218,8 @@ def test_the_task_file_is_removed_even_when_registration_fails(tmp_path, monkeyp
     seen: list[Path] = []
 
     def runner(argv):
-        seen.append(Path(argv[argv.index("/XML") + 1]))
+        if "/XML" in argv:
+            seen.append(Path(argv[argv.index("/XML") + 1]))
         return subprocess.CompletedProcess(list(argv), 1, "", "denied")
 
     monkeypatch.setattr(schtasks.tempfile, "gettempdir", lambda: str(tmp_path))
@@ -454,6 +455,163 @@ def test_run_check_names_every_reason_at_once():
     code, message = schtasks.run_check("devkit-x", document(), _answering(0, other))
     assert code == schtasks.CHECK_STALE
     assert "pythonw.exe" in message and "--all" in message and "disabled" in message
+
+
+# --- who may replace a task ---------------------------------------------------------
+#
+# 5282d37c: three jobs were registered by an elevated fixer session, which made them
+# Administrators' with the user left read access, and every `--yes` either scheduled job
+# made on them after that answered `Access is denied`.
+
+SID = "S-1-5-21-1-2-3-1001"
+
+
+def whoami_then(query_code: int, query_out: str, calls: list | None = None):
+    """A runner answering `whoami` with `SID` and anything else with the query's answer."""
+
+    def run(argv):
+        if calls is not None:
+            calls.append(list(argv))
+        if list(argv) == list(schtasks.WHOAMI_ARGV):
+            return subprocess.CompletedProcess(list(argv), 0, f'"pc\\me","{SID}"\r\n', "")
+        return subprocess.CompletedProcess(list(argv), query_code, query_out, "")
+
+    return run
+
+
+def test_the_user_s_sid_is_read_off_whoami():
+    assert schtasks.user_sid(whoami_then(0, "")) == SID
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        subprocess.CompletedProcess([], 1, "", "ERROR"),
+        subprocess.CompletedProcess([], 0, "not csv", ""),
+        subprocess.CompletedProcess([], 0, '"pc\\me","not-a-sid"', ""),
+    ],
+    ids=["failed", "not-csv", "not-a-sid"],
+)
+def test_a_sid_that_cannot_be_read_is_none(answer):
+    """No SID registers the document as it was before the descriptor existed, rather
+    than failing an install over a lookup."""
+    assert schtasks.user_sid(lambda argv: answer) == ""
+
+
+def test_a_missing_whoami_is_no_sid():
+    def run(argv):
+        raise FileNotFoundError(argv[0])
+
+    assert schtasks.user_sid(run) == ""
+
+
+def test_the_descriptor_gives_the_user_full_access_beside_system_and_administrators():
+    assert schtasks.security_descriptor(SID) == f"D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;FA;;;{SID})"
+
+
+def test_a_secured_document_carries_the_descriptor_in_its_registration_info():
+    secured = schtasks.secured(document(), SID)
+    info = secured.split("<RegistrationInfo>")[1].split("</RegistrationInfo>")[0]
+    assert f"<SecurityDescriptor>{schtasks.security_descriptor(SID)}</SecurityDescriptor>" in info
+    parsed = schtasks.parse_task(secured)
+    assert parsed is not None and parsed.security == schtasks.security_descriptor(SID)
+
+
+def test_securing_needs_a_sid_and_happens_once():
+    assert schtasks.secured(document(), "") == document()
+    once = schtasks.secured(document(), SID)
+    assert schtasks.secured(once, "S-1-5-9") == once
+    assert schtasks.secured("<Task/>", SID) == "<Task/>"
+
+
+def test_an_unsecured_registration_is_drift_and_says_how_to_clear_it():
+    expected = schtasks.parse_task(schtasks.secured(document(), SID))
+    (reason,) = schtasks.drift(schtasks.parse_task(document()), expected)
+    assert "elevated" in reason and schtasks.security_descriptor(SID) in reason
+    assert schtasks.drift(expected, expected) == []
+
+
+def test_run_check_reads_a_task_registered_without_the_descriptor_as_stale():
+    """The existing Administrators' task is named, instead of refusing every repair in
+    silence; one registered by this module is current."""
+    code, message = schtasks.run_check("devkit-x", document(), whoami_then(0, document()))
+    assert code == schtasks.CHECK_STALE and "elevated" in message
+    held = schtasks.secured(document(), SID)
+    assert schtasks.run_check("devkit-x", document(), whoami_then(0, held))[0] == (
+        schtasks.CHECK_CURRENT
+    )
+
+
+def test_a_registration_is_secured_for_the_user_registering_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(schtasks.tempfile, "gettempdir", lambda: str(tmp_path))
+    registered: list[str] = []
+    calls: list[list[str]] = []
+    base = whoami_then(0, "SUCCESS", calls)
+
+    def run(argv):
+        if argv[:2] == ["schtasks", "/Create"]:
+            registered.append(Path(argv[argv.index("/XML") + 1]).read_text(encoding="utf-16"))
+        return base(argv)
+
+    ok, _message = schtasks.register("devkit-x", document(), run)
+    assert ok and calls[0] == list(schtasks.WHOAMI_ARGV)
+    assert registered == [schtasks.secured(document(), SID)]
+
+
+class Held:
+    """A scheduler holding `held` for the task, answering a delete with `delete_code` and
+    a create with `create_code`."""
+
+    def __init__(self, held: str, delete_code: int = 0, create_code: int = 0):
+        self.held, self.delete_code, self.create_code = held, delete_code, create_code
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv):
+        argv = list(argv)
+        self.calls.append(argv)
+        if argv == list(schtasks.WHOAMI_ARGV):
+            return subprocess.CompletedProcess(argv, 0, f'"pc\\me","{SID}"', "")
+        if argv[:2] == ["schtasks", "/Query"]:
+            return subprocess.CompletedProcess(argv, 0 if self.held else 1, self.held, "")
+        if argv[:2] == ["schtasks", "/Delete"]:
+            return subprocess.CompletedProcess(argv, self.delete_code, "", "ERROR: denied")
+        return subprocess.CompletedProcess(argv, self.create_code, "SUCCESS", "ERROR: denied")
+
+    def verbs(self) -> list[str]:
+        return [argv[1] if argv[0] == "schtasks" else argv[0] for argv in self.calls]
+
+
+def test_a_task_registered_without_the_descriptor_is_recreated_not_overwritten(
+    tmp_path, monkeypatch
+):
+    """`/F` over an existing task keeps the access it was created with, so overwriting an
+    Administrators' task with a secured document leaves it Administrators' -- and the
+    check, reading the descriptor in the document, would call it current. Probed: only a
+    delete and a fresh create change who may write it."""
+    monkeypatch.setattr(schtasks.tempfile, "gettempdir", lambda: str(tmp_path))
+    scheduler = Held(document())
+    assert schtasks.register("devkit-x", document(), scheduler)[0] is True
+    assert scheduler.verbs() == ["whoami", "/Query", "/Delete", "/Create"]
+    assert schtasks.delete_argv("devkit-x") == ["schtasks", "/Delete", "/TN", "devkit-x", "/F"]
+
+
+def test_a_secured_or_absent_task_is_registered_in_place(tmp_path, monkeypatch):
+    monkeypatch.setattr(schtasks.tempfile, "gettempdir", lambda: str(tmp_path))
+    for held in (schtasks.secured(document(), SID), ""):
+        scheduler = Held(held)
+        assert schtasks.register("devkit-x", document(), scheduler)[0] is True
+        assert scheduler.verbs() == ["whoami", "/Query", "/Create"]
+
+
+def test_a_locked_task_says_the_elevated_shell_is_what_can_clear_it(tmp_path, monkeypatch):
+    """The ordinary job's view of 5282d37c: it may neither delete nor overwrite the task,
+    and the message says what can, rather than a bare `Access is denied`."""
+    monkeypatch.setattr(schtasks.tempfile, "gettempdir", lambda: str(tmp_path))
+    scheduler = Held(document(), delete_code=1, create_code=1)
+    ok, message = schtasks.register("devkit-x", document(), scheduler)
+    assert ok is False and "denied" in message and "elevated" in message
+    refused = Held(schtasks.secured(document(), SID), create_code=1)
+    assert "elevated" not in schtasks.register("devkit-x", document(), refused)[1]
 
 
 def test_run_check_leaves_alone_a_document_it_cannot_read():

@@ -11,6 +11,7 @@ import datetime as _dt
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,11 @@ def test_the_prescribed_wait_and_a_sleep_in_source_text_are_not_polls():
     assert classes([call("gh pr checks 5 --watch --fail-fast", "1")]) == []
     heredoc = 'cat >> t.py <<\'EOF\'\n    chunk = call("sleep 99", "1")\nEOF'
     assert "poll" not in classes([call(heredoc, "1")])
+    # 44a5ff19: one settle so the checks exist before that same blocking wait is a single
+    # call, not a loop -- `--watch` right after a push reports no checks and returns.
+    settle = "sleep 20; gh pr checks 411 --watch --fail-fast > logs/c.out 2>&1; tail -8 logs/c.out"
+    assert classes([call(settle, "1")]) == []
+    assert classes([call("sleep 120 && gh pr checks 5", "1")]) == ["poll"], "no --watch"
 
 
 def test_a_complaint_is_filed_whole_with_the_tree_it_was_said_in(tmp_path):
@@ -147,6 +153,58 @@ def test_an_environment_failure_is_seen_through_a_pipe_that_hid_its_exit_code():
     assert classes([grep, result("x.py:1: No module named", "3", error=False)]) == []
 
 
+def test_an_error_quoted_inside_a_string_on_its_line_is_not_friction():
+    """The first supervised rehearsal would have filed seven groups from text that quoted
+    an error: a `git diff` of the rule's prose, pytest echoing an assertion's operands,
+    and the detector's own regex source. Each match sat after an opening quote on its
+    line, or in an assertion's report; a real error's line is neither."""
+    quoted = (
+        (
+            "git diff origin/main...HEAD -- x.md",
+            "+`python -m pytest` there fails with `No module named pytest`. The",
+        ),
+        (
+            "python -m pytest tests/x.py -q",
+            "E       assert \"ambiguous argument 'origin\\\\main;.devkit.toml'\" in '---'",
+        ),
+        (
+            "python -m pytest tests/x.py -q",
+            "E   AssertionError: backslashes: [\"ambiguous argument 'origin\\\\main;x'\"]",
+        ),
+        (
+            "git diff scripts/session_friction.py",
+            '66:            r"No module named|ModuleNotFoundError|"',
+        ),
+        # The supervisor's own red run, its assertion echoing the test's expected text.
+        (
+            "python -m pytest tests/x.py -q",
+            "E           AssertionError: 'pytest' is not recognized as an internal or external",
+        ),
+    )
+    for command, line in quoted:
+        assert classes([call(command, "1"), result(line, "1")]) == [], line
+    real = (
+        ("python -m pytest tests/x.py", "C:\\py\\python.exe: No module named pytest"),
+        (
+            "python -m pytest tests/x.py",
+            "ImportError: Error importing plugin \"randomly\": No module named 'randomly'",
+        ),
+        ("pytest tests/x.py", "'pytest' is not recognized as an internal or external command,"),
+        ("git show origin/main:x", "fatal: ambiguous argument 'origin\\main;x': unknown revision"),
+    )
+    for command, line in real:
+        assert classes([call(command, "1"), result(line, "1")]) == ["environment"], line
+    # A quoted mention earlier in the output does not hide the real error after it.
+    both = "x.md:3: prints \"No module named x\"\nModuleNotFoundError: No module named 'y'"
+    events = [
+        e
+        for n, r in enumerate([call("pytest tests/x.py", "1"), result(both, "1")], 1)
+        for e in st.claude_events(r, n)
+    ]
+    [(_, what, _)] = sf.detect(events)
+    assert what == "ModuleNotFoundError: No module named 'y'"
+
+
 def test_the_rule_names_the_spelling_that_avoids_the_error_the_detector_files():
     """A sweep documented the Git Bash `rev:path` rewrite only in the evidence file, and
     the next session paid for it again. The rule every session reads names the spelling,
@@ -163,22 +221,83 @@ def test_a_file_written_through_a_shell_heredoc_is_friction():
     """Claude Code's Bash tool collapses backslashes in a heredoc, so a file written or
     patched through one comes out mangled. Three sessions lost turns to it on one day,
     each retired by pointing at the rule that says to use Write/Edit -- and it recurred,
-    because only the sessions that noticed reported it. Every such write is filed now."""
+    because only the sessions that noticed reported it. Every write that can be damaged
+    is filed now, whether anyone noticed or not."""
     for command in (
-        "cat > tests/test_x.py <<'EOF'\nassert r'\\b'\nEOF",
-        'cat >> t.py <<"EOF"\nx = 1\nEOF',
-        "tee scripts/a.py <<EOF\nprint(1)\nEOF",
+        "cat > tests/test_x.py <<'EOF'\nassert '\\\\b'\nEOF",
+        'cat >> t.py <<"EOF"\nx = "a\\\\b"\nEOF',
+        "tee scripts/a.py <<EOF\nprint('\\\\n')\nEOF",
         "python - <<'EOF'\nfrom pathlib import Path\np = Path('a.py')\n"
-        "p.write_text(p.read_text().replace('a', 'b'))\nEOF",
-        "python3 - <<'PY'\nopen('x.txt', 'w').write('y')\nPY",
+        "p.write_text(p.read_text().replace('\\\\d', 'b'))\nEOF",
+        "python3 - <<'PY'\nopen('x.txt', 'w').write('y\\\\\\n')\nPY",
+        "cat > x.py <<'EOF'\n'\\\\s'",  # unterminated: the body runs to the end
     ):
         assert classes([call(command, "1")]) == ["heredoc-write"], command
     for harmless in (
         "python - <<'EOF'\nimport json; print(json.load(open('a.json')))\nEOF",
-        "git commit -F - <<'EOF'\nsubject\nEOF",
+        "git commit -F - <<'EOF'\nsubject\\n\nEOF",
         "grep -c '<<' scripts/x.py",
     ):
         assert classes([call(harmless, "1")]) == [], harmless
+
+
+def test_a_heredoc_with_no_backslash_in_its_body_is_not_friction():
+    """b935e421 recurred on a `cat >>` whose body had no backslash, so nothing could be
+    collapsed and the file was verified intact: a sweep could only retire it as "no
+    defect", and the next such write reopened it. A backslash after the terminator -- a
+    Windows path in the command that follows -- is not in the body."""
+    b935e421 = (
+        "cat >> scripts/hooks/tests/test_report_harness_defect.py <<'EOF'\n\n\n"
+        "class TestAbsoluteEvidence:\n"
+        "    def test_relative_path_joins_the_base(self, tmp_path):\n"
+        '        assert report.absolute_evidence("a/b.txt", tmp_path) == '
+        'str(tmp_path / "a" / "b.txt")\n'
+        "EOF\ntail -25 scripts/hooks/tests/test_report_harness_defect.py; "
+        ".venv\\Scripts\\python.exe -m pytest -q scripts/hooks/tests/test_report_harness_defect.py"
+    )
+    assert classes([call(b935e421, "1")]) == []
+    assert not sf.damageable_heredoc(b935e421)
+    assert sf.damageable_heredoc("cat <<-EOF > a.py\n\tx = '\\\\t'\n\tEOF")
+    assert not sf.damageable_heredoc("echo 'a\\\\b' > x.txt")  # no heredoc at all
+
+
+def test_a_heredoc_dumped_back_byte_for_byte_is_a_probe_not_a_write():
+    """ccde706b: the session that established the doubled-backslash rule wrote both
+    spellings to a scratch file and read them back with `od -c`, in one call. That is a
+    measurement of the tool, and filing it reopened the group its own finding retired."""
+    ccde706b = (
+        "cat > \"C:/Users/alexa/.claude/jobs/c9e3f0fa/tmp/bs.txt\" <<'EOF'\n"
+        "one:\\n\ntwo:\\\\n\nEOF\n"
+        'od -c "C:/Users/alexa/.claude/jobs/c9e3f0fa/tmp/bs.txt"'
+    )
+    assert classes([call(ccde706b, "1")]) == []
+    for dump in ("xxd x.txt", "hexdump -C x.txt", "Format-Hex x.txt"):
+        assert not sf.damageable_heredoc(ccde706b.rsplit("\n", 1)[0] + "\n" + dump), dump
+    # The same write with nothing reading it back is still the damage it always was,
+    # and a word that only starts like a dump is not one.
+    assert classes([call(ccde706b.rsplit("\n", 1)[0], "1")]) == ["heredoc-write"]
+    assert sf.damageable_heredoc(ccde706b.rsplit("\n", 1)[0] + "\nodd -c x")
+
+
+def test_a_heredoc_with_only_single_backslashes_is_not_friction():
+    """46a1578d recurred on a `cat >` whose body's only backslashes were the `\\n` in
+    f-strings. The Bash tool collapses a doubled backslash and nothing else: written
+    through it, `a\\nb`, `r'\\s'`, `\\'`, `\\$` and a trailing `\\` all came out byte for
+    byte, while `a\\\\b` came out `a\\b` and three in a row came out two."""
+    a46a1578d = (
+        "cd \"C:/Users/alexa/scratchpad\" && cat > dump.py <<'EOF'\n"
+        "import json,sys\n"
+        "for i,l in enumerate(lines,1):\n"
+        '    if isinstance(c,str): print(f"=== L{i} STR\\n{c[:6000]}"); continue\n'
+        "EOF\n"
+        'python dump.py "C:/x.jsonl" 6,30 > b.txt; wc -c b.txt'
+    )
+    assert classes([call(a46a1578d, "1")]) == []
+    assert not sf.damageable_heredoc(a46a1578d)
+    for single in ("r'\\s'", "'\\t'", "\\'x\\'", "\\$HOME", "end\\"):
+        assert not sf.damageable_heredoc(f"cat > a.py <<'EOF'\n{single}\nEOF"), single
+    for doubled in ("a\\\\b", "a\\\\\\b", "'\\\\\\\\'"):
+        assert sf.damageable_heredoc(f"cat > a.py <<'EOF'\n{doubled}\nEOF"), doubled
 
 
 def test_the_full_suite_is_friction_and_a_targeted_run_is_not():
@@ -294,6 +413,48 @@ def test_the_harvest_files_each_friction_once_and_moves_the_cursor(tmp_path):
     assert more.kind == "no-verify" and more.evidence.endswith("#L3")
 
 
+def _rows(findings) -> list:
+    """Findings as the ledger rows `record_all` would write, parsed back."""
+    events = sf.fix_findings.harness_events
+    lines = [events.event_line(NOW.isoformat(), f.event, f.fields()) for f in findings]
+    return sf.fix_findings.triage.read_items("\n".join(lines))
+
+
+def test_a_row_todays_detectors_no_longer_file_is_outdated(tmp_path, monkeypatch):
+    """d677ea57: #412 fixed detectors whose rows stayed open, and a sweep spent ~13 calls
+    re-proving them. A per-event row is re-judged against its own transcript line with
+    the detectors as they are now; one they no longer file is outdated."""
+    missing = "ModuleNotFoundError: No module named 'yaml'"
+    session = transcript(
+        tmp_path / "s.jsonl",
+        [user("go"), call("sleep 300", "1"), call("python -m x", "2"), result(missing, "2")],
+        str(tmp_path / "ws" / "devkit"),
+    )
+    rows = _rows(sf.session_findings(session, st.read_new(session, 0, 0), str(tmp_path), tmp_path))
+    assert sorted(r.detail.split(":")[0] for r in rows) == ["environment", "poll"]
+    assert sf.outdated(rows) == [], "both still fire"
+    # Standing in for a detector a fix removed, as #410 removed `isolation-guard`.
+    kept = tuple(p for p in sf.RESULT_PATTERNS if p[0] != "environment")
+    monkeypatch.setattr(sf, "RESULT_PATTERNS", kept)
+    [(ref, why)] = sf.outdated(rows)
+    env = next(r for r in rows if r.detail.startswith("environment"))
+    assert ref == env.id and "no longer" in why and f"{session}#L4" in why
+
+
+def test_a_row_that_cannot_be_rejudged_is_never_called_outdated(tmp_path, monkeypatch):
+    """Retiring is the one direction that must never guess: a transcript gone, a line
+    that is no longer the event the row names (a transcript first read from its end
+    numbers from there), and a class the whole session decides all stay open."""
+    session = transcript(tmp_path / "s.jsonl", [user("go"), call("sleep 300", "1")], "c")
+    [row] = _rows(sf.session_findings(session, st.read_new(session, 0, 0), str(tmp_path), tmp_path))
+    monkeypatch.setattr(sf, "COMMAND_PATTERNS", ())
+    assert [ref for ref, _ in sf.outdated([row])] == [row.id], "the premise: it would retire"
+    moved = replace(row, fields={**row.fields, "command": "something else"})
+    gone = replace(row, fields={**row.fields, "evidence": f"{tmp_path / 'gone.jsonl'}#L2"})
+    whole = replace(row, fields={**row.fields, "detail": "repeat-failure: x3 gh"})
+    assert sf.outdated([moved, gone, whole]) == []
+
+
 def test_a_transcript_first_seen_old_is_not_read_back(tmp_path):
     """Adopting the harvest must not file a month of history in one pass."""
     old = transcript(
@@ -348,6 +509,9 @@ def test_a_shell_variable_argument_is_not_the_full_suite():
     for rest in (" -q -p no:cacheprovider $p", ' "${files[@]}"', " %TARGET%", " $env:T"):
         assert not sf.full_suite(rest), rest
     assert sf.full_suite(" -q -p no:cacheprovider")
+    # ed03763b: PowerShell's splat, `pytest -q @t` with `$t` an array of seven files.
+    assert not sf.full_suite(" -q -p no:cacheprovider @t 2")
+    assert sf.full_suite(" -q -p no:cacheprovider @"), "a bare @ names nothing"
 
 
 def test_session_findings_are_nothing_outside_the_workspace(tmp_path):
@@ -457,6 +621,43 @@ def test_a_mangled_revision_path_is_an_environment_problem():
     ]
 
 
+def test_a_commit_message_that_quotes_errors_is_not_an_environment_failure():
+    """fc786188: a fixer ran `git show --stat` on the commit that taught this detector
+    about quoted errors, and the harvest -- still on the old detector -- filed the
+    message's own examples as an environment group. `git` output is read even on exit 0,
+    so every quoted example in a message has to be seen as quoted."""
+    command = (
+        "git branch -a --contains 21631ef | head; git show --stat 21631ef | head -30; "
+        "gh pr list --state all --head agent/supervise-fix-pass-0926 --json number,state,title"
+    )
+    out = (
+        "commit 21631efe96a4e91818873bf2ac2df1665156f429\n"
+        "Author: t <t@example.invalid>\n\n"
+        "    ## Friction detector: an error quoted on its line is not one\n"
+        "    \n"
+        "    - a `git diff` of the engineering rule's prose (`` `No module named pytest` ``);\n"
+        "    - pytest echoing an assertion's operands (`E  assert \"ambiguous argument ...\" in '...'`);\n"
+        "    - `python.exe: No module named pytest`\n"
+        "    - `fatal: ambiguous argument 'origin\\main;...'`\n"
+        "    - `'pytest' is not recognized ...`\n"
+    )
+    assert classes([call(command, "1"), result(out, "1", error=False)]) == []
+
+
+def test_an_escaped_quote_does_not_close_the_string_an_error_is_quoted_in():
+    """83496ae4: a `git diff` of this file's own tests, where the error sits after a `\\"`
+    inside a string literal -- counted as a closing quote, it read as unquoted."""
+    line = (
+        '+    both = "x.md:3: prints \\"No module named x\\"\\n'
+        "ModuleNotFoundError: No module named 'y'\""
+    )
+    command = "git diff origin/main...origin/worktree-hazy-wibbling-pearl -- tests/x.py"
+    assert classes([call(command, "1"), result(line, "1", error=False)]) == []
+    # A real error on a line that merely has an escape before it still files.
+    real = "C:\\py\\python.exe: No module named pytest"
+    assert classes([call("python -m pytest tests/x.py", "1"), result(real, "1")]) == ["environment"]
+
+
 def test_the_push_gate_and_the_vendored_suite_are_full_suites():
     assert classes([call(".venv/Scripts/python.exe scripts/precommit/run_push_gate.py", "1")]) == [
         "full-suite"
@@ -541,3 +742,43 @@ def test_only_a_task_branch_can_settle_a_complaint(code, out, branch):
         raise FileNotFoundError("git")
 
     assert sf.task_branch("C:/t", runner=missing) == ""
+
+
+def test_git_printing_a_file_that_quotes_an_error_is_not_friction():
+    """83496ae4 was a `git diff` of `tests/test_session_friction.py`, whose fixtures spell
+    "No module named" inside escaped quotes; a quote count can be taught escapes, but not
+    prose that names an error with no quotes at all. Git's output is the repository's text
+    plus git's own `fatal:`/`error:` lines, and only those report the environment --
+    whether the call exited 0 or not."""
+    diff = (
+        "git diff origin/main...origin/x -- tests/test_session_friction.py; "
+        'git diff origin/main...origin/x -- scripts/session_friction.py > "$T/sf.patch"'
+    )
+    quoted = (
+        "@@ -153,6 +153,58 @@\n"
+        '+    both = "x.md:3: prints \\"No module named x\\"\\nModuleNotFoundError: No module '
+        "named 'y'\"\n"
+        "+A bare run there fails with No module named pytest, so use the venv.\n"
+    )
+    for error in (False, True):
+        assert classes([call(diff, "1"), result(quoted, "1", error=error)]) == [], error
+    fatal = quoted + "fatal: ambiguous argument 'origin\\main;x': unknown revision\n"
+    assert classes([call(diff, "2"), result(fatal, "2", error=False)]) == ["environment"]
+    # A test run in the same call is read whole: its output is not the repository's text.
+    both = call(diff + "; python -m pytest tests/test_x.py | tail -3", "3")
+    assert classes([both, result("E   ModuleNotFoundError: No module named 'y'", "3")]) == [
+        "environment"
+    ]
+
+
+def test_only_git_printing_the_repository_is_read_for_its_diagnostics_alone():
+    """A hook's output comes through `git commit`, and its "No module named" is real."""
+    assert sf.git_reads_only("git diff a b | head -40 && git log -3\ngit --no-pager show x > f")
+    assert not sf.git_reads_only("git diff a; python -m pytest t.py")
+    assert not sf.git_reads_only("git commit -m x")
+    assert not sf.git_reads_only("")
+    said = "+ x = 'No module named y'\nfatal: bad revision 'z'\nwarning: LF will be replaced"
+    assert sf.environment_text("git diff", said) == (
+        "fatal: bad revision 'z'\nwarning: LF will be replaced"
+    )
+    assert sf.environment_text("pytest t.py", said) == said

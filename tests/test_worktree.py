@@ -2003,6 +2003,21 @@ def test_provisioning_stops_at_the_first_failure(tmp_path, monkeypatch):
     assert any("no interpreter" in note for note in notes)
 
 
+def test_the_ladder_marks_a_tree_provisioned_only_when_every_step_succeeded(tmp_path, monkeypatch):
+    """c1391297: the one mark `worktree_env` judges a tree by, kept by both installers --
+    a failure takes back a mark an earlier success left, or the half-built `.venv` it
+    leaves reads as provisioned to the worktree hook forever."""
+    (tmp_path / ".venv").mkdir()
+    mark = tmp_path / worktree.worktree_env.PROVISIONED
+    step = (worktree.ProvisionStep("uv sync", ("uv", "sync")),)
+    monkeypatch.setattr(worktree.subprocess, "run", lambda *a, **k: _completed())
+    assert worktree.run_provision(tmp_path, step)[0] is True
+    assert mark.is_file()
+    monkeypatch.setattr(worktree.subprocess, "run", lambda *a, **k: _completed(returncode=1))
+    assert worktree.run_provision(tmp_path, step)[0] is False
+    assert not mark.exists()
+
+
 def test_a_timed_out_install_is_reported_rather_than_raised(tmp_path, monkeypatch):
     def fake_run(*args, **kwargs):
         raise worktree.subprocess.TimeoutExpired(cmd="uv", timeout=900)

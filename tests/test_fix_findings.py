@@ -136,6 +136,20 @@ def test_evidence_is_kept_by_content_and_an_unwritable_place_is_no_evidence(tmp_
     assert fix_findings.evidence_file("x", tmp_path / "file", "s") == ""
 
 
+def test_a_rewritten_artifact_is_cited_by_a_copy_that_outlives_it(tmp_path):
+    """55655d1a: a finding that cited `logs/installers.log` cited a file the next run
+    rewrote. The copy is what it names; an artifact that cannot be read is cited as it
+    is, and so is one whose copy cannot be written."""
+    artifact = tmp_path / "installers.log"
+    artifact.write_text("install-x.py: failed\n", encoding="utf-8")
+    kept = fix_findings.kept(artifact, tmp_path, "installers")
+    artifact.write_text("current\n", encoding="utf-8")
+    assert Path(kept).read_text(encoding="utf-8") == "install-x.py: failed\n"
+    assert fix_findings.kept(tmp_path / "gone.log", tmp_path, "x") == str(tmp_path / "gone.log")
+    (tmp_path / "file").write_text("", encoding="utf-8")
+    assert fix_findings.kept(artifact, tmp_path / "file", "x") == str(artifact)
+
+
 def test_fresh_keeps_order_and_drops_duplicates_within_a_batch():
     a, b = finding(detail="a"), finding(detail="b")
     assert fix_findings.fresh([a, b, a], []) == [a, b]

@@ -468,6 +468,29 @@ def test_past_fixes_counts_only_resolutions_still_standing():
     assert triage.past_fixes([]) == {}
 
 
+def test_a_group_whose_fix_is_still_in_flight_is_pending_not_recurred():
+    """d677ea57: #410 removes the isolation-guard detector, and until it merges the
+    detector keeps filing rows -- which read as "RECURRED ... that fix did not hold", so
+    each sweep re-proved a group whose fix was one open PR away. A resolution naming a
+    PR that has not landed (`fix_verify.in_flight`) makes the group pending instead."""
+    first = _line("session-friction", stamp=_STAMPS[0], detail="isolation-guard: x")
+    ref = triage.item_id(first)
+    held = _line("triage-resolved", stamp=_STAMPS[1], ref=ref, pr="410", note="#410 drops it")
+    again = _line(
+        "session-friction", stamp="2026-08-25T09:00:00+00:00", detail="isolation-guard: x"
+    )
+    other = _line("agent-report", stamp=_STAMPS[1], message="unrelated")
+    history = triage.read_items("\n".join((first, held, again, other)))
+    signature = triage.read_items(again)[0].signature
+    assert triage.pending_groups(history, {ref: "410"}) == {signature: "410"}
+    assert triage.pending_groups(history, {}) == {}, "landed: a real recurrence"
+    text = triage.render(triage.open_items(history), history, {signature: "410"})
+    assert "PENDING on 410" in text and "RECURRED" not in text
+    # A later resolution that landed outranks an older one still in flight.
+    later = _line("triage-resolved", stamp="2026-08-24T12:00:05+00:00", ref=ref, note="n")
+    assert triage.pending_groups(triage.read_items("\n".join((first, held, later))), {}) == {}
+
+
 def test_a_group_reports_its_count_and_every_id(tmp_path):
     a = _line("agent-report", stamp=_STAMPS[0], message="same")
     b = _line("agent-report", stamp=_STAMPS[1], message="same")
@@ -618,6 +641,14 @@ def test_the_rendering_carries_the_fields_diagnosis_starts_from():
     text = triage.render(triage.open_items(triage.read_items("\n".join(rows))))
     assert "  evidence t.jsonl#L5312" in text
     assert "  command git -C x status" in text and "  version abc" in text
+
+
+def test_the_rendering_names_the_tree_a_report_was_filed_from():
+    """Five agent-reports cited `logs/fix-pass-supervise/...` relative to a worktree the
+    group never showed, and each cited line cost the sweep a search."""
+    row = _line("agent-report", message="m", cwd="C:/w/.claude/worktrees/t", command="logs/x")
+    text = triage.render(triage.open_items(triage.read_items(row)))
+    assert "  cwd    C:/w/.claude/worktrees/t" in text
 
 
 def test_the_artifact_is_the_whole_backlog_even_under_a_filter(tmp_path, monkeypatch):

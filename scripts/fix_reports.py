@@ -38,6 +38,9 @@ import agent_worktrees as aw
 import sweep
 
 STAMP_FILE = Path("logs") / "fix-dispatch.json"
+# What a background launch was given and answered (`record_launch`): the evidence of a
+# session that never started, which otherwise lived only in the pass's own output.
+LAUNCH_FILE = Path("logs") / "fix-launch.json"
 BLOCKED_FILE = Path("logs") / "fix-blocked.md"
 FRICTION_FILE = Path("logs") / "friction.md"
 # The mark of a tree the fix pass cut for a fixer, which makes its PR merge itself once
@@ -59,6 +62,13 @@ OUTCOME_FILES = (
 
 # How much of a report reaches the record: one line's worth, not the essay.
 REASON_LIMIT = 400
+
+# The refusals of Claude Code's `claude --worktree` isolation guard, in its own words.
+CLAUDE_CODE_GUARD = re.compile(
+    r"too complex to verify|stays? inside the worktree|cannot be shown not to be git|"
+    r"isolated in the worktree|worktree isolation guard",
+    re.I,
+)
 
 # A dispatched session with no transcript this long after its stamp never started; one
 # whose transcript has been quiet this long, with nothing left behind, has ended. Both
@@ -88,6 +98,7 @@ def stamp(
     path = tree / STAMP_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     (tree / BLOCKED_FILE).unlink(missing_ok=True)
+    (tree / LAUNCH_FILE).unlink(missing_ok=True)
     payload = {"key": key, "what": what, "when": when, "problem": problem, "agent": agent}
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
@@ -137,6 +148,35 @@ def file_away(tree: Path, relative: Path) -> None:
     with (tree / filed(relative)).open("a", encoding="utf-8", newline="\n") as handle:
         handle.write(source.read_text(encoding="utf-8").rstrip("\n") + "\n")
     source.unlink()
+
+
+def record_launch(tree: Path, argv: list[str], done: object) -> None:
+    """Keep what a background launch was given and what it answered, for `launch_line`.
+
+    A session that never started was filed with its tree alone, and a sweep grepped
+    transcripts for nine calls to learn the launcher had swallowed its prompt (3728bf21).
+    The prompt, the last argument, is kept as its length: its words are the stamp's.
+    """
+    shown = [*argv[:-1], f"<prompt: {len(argv[-1])} chars>"] if argv else []
+    tail = {
+        name: str(getattr(done, name, "") or "")[-REASON_LIMIT:] for name in ("stdout", "stderr")
+    }
+    payload = {"argv": shown, "returncode": getattr(done, "returncode", None), **tail}
+    path = tree / LAUNCH_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def launch_line(tree: Path) -> str:
+    """The launch record as one line of a finding's detail; "" when there is none."""
+    try:
+        record = json.loads((tree / LAUNCH_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(record, dict):
+        return ""
+    said = " ".join(str(record.get("stderr") or record.get("stdout") or "").split())
+    return f"launcher exited {record.get('returncode')}" + (f": {said[-160:]}" if said else "")
 
 
 def read_stamp(tree: Path) -> dict:
@@ -190,16 +230,52 @@ class Tree:
     friction: tuple[str, ...]
 
 
-def friction_lines(tree: Path) -> tuple[str, ...]:
-    """The tree's `logs/friction.md`, one entry per line: headings and blanks dropped,
-    list markers stripped."""
+def _entries(path: Path) -> tuple[str, ...]:
+    """A friction file's entries, one per line: headings and blanks dropped, list
+    markers stripped; empty when there is no file."""
     try:
-        text = (tree / FRICTION_FILE).read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ()
     kept = (line.strip() for line in text.splitlines())
     lines = (line.lstrip("-*0123456789. ").strip() for line in kept if not line.startswith("#"))
     return tuple(line[:REASON_LIMIT] for line in lines if line)
+
+
+def friction_lines(tree: Path) -> tuple[str, ...]:
+    """The tree's `logs/friction.md` entries this tree has not already had filed, less
+    any about Claude Code's own worktree guard.
+
+    A session writes the file whole, and once the pass has filed it away the next write
+    carries the old lines again: a174d816's line was filed twice from one tree, and the
+    second filing reopened a group already retired with its fix as a recurrence.
+
+    The guard is not devkit's (`.claude/rules/engineering.md` says so, and carries the
+    spellings that pass it), which is why `session_friction` never files its refusals
+    from a transcript. Written into a friction file, one still became a group a sweep
+    could retire only with that same note (ced1c085).
+    """
+    seen = set(_entries(tree / filed(FRICTION_FILE)))
+    return tuple(
+        line
+        for line in _entries(tree / FRICTION_FILE)
+        if line not in seen and not CLAUDE_CODE_GUARD.search(line)
+    )
+
+
+# How a session says it fixed what a friction line reports, in the tree that wrote it:
+# the spelling `fix_prompts.FINISH` and the ship skill ask for, and its near variants.
+FIXED_HERE = re.compile(r"\bfixed (?:it )?(?:on|in) this (?:branch|tree)\b", re.I)
+
+
+def fixed_here(line: str) -> bool:
+    """Whether a friction line says its own session fixed it on the tree's branch.
+
+    Such a line is filed settled by that branch (`Finding.settles_with`) rather than open:
+    three of 0927-3's lines said so, were filed open, and sent a second fixer at fixes
+    already in review on #429. `fix_verify` reopens the row if the branch never merges.
+    """
+    return bool(FIXED_HERE.search(line))
 
 
 def read_trees(root: Path, projects: list[str], git_for: GitFor = sweep.git_for) -> list[Tree]:

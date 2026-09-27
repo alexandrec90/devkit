@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,6 +32,8 @@ def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fix_loop.bg_sessions, "stop_finished", lambda trees, runner: [f"x in {t}" for t in trees]
     )
+    monkeypatch.setattr(fix_loop, "working_dirs", frozenset)
+    monkeypatch.setattr(fix_loop.friction_pending, "detector_fixes", lambda gh, git: [])
     return fix_loop.Context(
         tmp_path,
         ["devkit", "carameli"],
@@ -113,6 +116,27 @@ def test_each_friction_line_is_filed_and_the_file_read_once(ctx, monkeypatch):
         assert finding.detail in Path(finding.evidence).read_text(encoding="utf-8")
 
 
+def test_a_line_its_session_fixed_on_this_branch_is_filed_settled_by_that_branch(ctx, monkeypatch):
+    """407df645, 6a3312bf, a8142f2a: a fixer's friction lines each said "fixed on this
+    branch", were filed open, and sent a second fixer at three fixes already in review."""
+    fixed = "evidence rewritten before it was read; fixed on this branch (`fix_findings.kept`)"
+    tree(ctx, monkeypatch, friction=f"- {fixed}\n- no .venv\n")
+    _, journal = close(ctx)
+    settles = {f.detail: f.settles_with for f in journal.findings if f.kind == "reported"}
+    assert settles == {fixed: "agent/x-0919", "no .venv": ""}
+    fix_loop.record(ctx, journal)
+    [still_open] = triage.open_items(triage.load(ctx.devkit_dir))
+    assert still_open.detail == "reported: no .venv", "only what nobody fixed stays open"
+
+
+def test_a_detached_tree_settles_nothing_it_has_no_branch_to_merge(ctx, monkeypatch):
+    path = tree(ctx, monkeypatch)
+    one = fix_reports.Tree("carameli", path, "", {}, ("x; fixed on this branch",))
+    monkeypatch.setattr(fix_loop.fix_reports, "read_trees", lambda root, projects: [one])
+    _, journal = close(ctx)
+    assert [f.settles_with for f in journal.findings if f.kind == "reported"] == [""]
+
+
 def test_a_second_filing_keeps_the_lines_the_first_findings_point_at(ctx, monkeypatch):
     path = tree(ctx, monkeypatch, friction="- first\n")
     close(ctx)
@@ -143,6 +167,18 @@ def test_a_session_that_never_started_frees_its_key_and_is_filed_once(ctx, monke
     assert close(ctx)[1].findings == [], "judged once per dispatch"
 
 
+def test_a_session_that_never_started_cites_what_its_launcher_said(ctx, monkeypatch):
+    """3728bf21: the finding filed the tree alone, so learning that the launcher -- a
+    `--disallowedTools` that swallowed the prompt -- was why took a sweep nine calls of
+    transcript grepping. The launch record is the evidence, and says it in the detail."""
+    path = tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=2))
+    done = subprocess.CompletedProcess(["claude"], 1, "", "no prompt given")
+    fix_reports.record_launch(path, ["claude", "--bg", "--", "fix it all"], done)
+    [found] = close(ctx)[1].findings
+    assert found.evidence == str(path / fix_reports.LAUNCH_FILE)
+    assert "launcher exited 1" in found.detail
+
+
 def test_a_session_gone_quiet_without_an_outcome_is_dead(ctx, monkeypatch):
     tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=5), transcript_age=_dt.timedelta(hours=3))
     _, journal = close(ctx)
@@ -160,6 +196,84 @@ def test_a_working_devkit_session_is_the_harness_busy(ctx, monkeypatch):
     )
     closed, journal = close(ctx)
     assert closed.harness_busy == str(path) and journal.findings == []
+
+
+def test_a_working_sweep_of_the_ledger_alone_is_the_harness_busy(ctx, monkeypatch):
+    """The shape every sweep of 2026-09-26 had: one ledger failure sent upstream. Its key
+    starts `ledger:`, a prefix test for `upstream:` missed it, and the pass sent 0926-16
+    over -15 and 0926-18 over -17 (028731f9, 9cbdc674)."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        key="ledger:devkit:0:a81ffd55430d:f6b83153228a:upstream",
+        sent=NOW - _dt.timedelta(minutes=9),
+        transcript_age=_dt.timedelta(minutes=1),
+    )
+    closed, _ = close(ctx)
+    assert closed.harness_busy == str(path)
+
+
+def test_a_session_still_busy_after_its_intent_holds_its_tree_and_the_harness(ctx, monkeypatch):
+    """#422's own sweep had written its intent and was still mid-merge when the pass sent
+    a resolver into the same tree (d821bd8f). Its transcript is the stamped one, so only
+    the session listing can say it is still at work."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        key="ledger:devkit:0:895d547878e6:6f7d5e150831:upstream",
+        sent=NOW - _dt.timedelta(minutes=30),
+        transcript_age=_dt.timedelta(minutes=1),
+    )
+    (path / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
+    closed, _ = close(ctx)
+    assert closed.busy == {} and closed.harness_busy == "", "idle: finished, holds nothing"
+    listed = [{"kind": "background", "status": "busy", "cwd": str(path)}]
+    monkeypatch.setattr(fix_loop, "working_dirs", lambda: fix_loop.bg_sessions.working(listed))
+    closed, _ = close(ctx)
+    assert closed.busy == {("carameli", "agent/x-0919"): str(path)}
+    assert closed.harness_busy == str(path)
+
+
+def test_the_session_listing_is_read_from_claude_agents(monkeypatch):
+    rows = '[{"kind": "background", "status": "busy", "cwd": "C:\\\\ws\\\\t"}]'
+    seen = []
+
+    def runner(argv, **_kwargs):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, rows, "")
+
+    monkeypatch.setattr(fix_loop.ship_intent, "run_quiet", runner)
+    assert fix_loop.working_dirs() == frozenset({"c:/ws/t"})
+    assert seen == [["claude", "agents", "--json"]]
+
+
+def test_a_row_an_open_prs_detector_no_longer_files_is_resolved_against_that_pr(ctx, monkeypatch):
+    """fc786188 was filed by main's detector while open #420 already stopped it, and a
+    sweep was sent at it (20fe4a86)."""
+    fix_findings.record_all(
+        [fix_findings.Finding("environment", "devkit", "d", event=fix_findings.FRICTION)],
+        [],
+        ctx.devkit_dir,
+    )
+    [row] = triage.open_items(triage.load(ctx.devkit_dir))
+    fix = fix_loop.friction_pending.Fix("420", "worktree-hazy", "src")
+    monkeypatch.setattr(fix_loop.friction_pending, "detector_fixes", lambda gh, git: [fix])
+    monkeypatch.setattr(
+        fix_loop.friction_pending, "outdated_on", lambda f, items: [(i.id, "gone") for i in items]
+    )
+    plan = fix_loop.Context(
+        *[getattr(ctx, n) for n in ("root", "projects", "devkit_dir")],
+        ctx.ledger_path,
+        ctx.history_path,
+        fix_cycle.PLAN,
+        NOW,
+    )
+    assert fix_loop.recheck_open(plan) == [f"would hold [{row.id}] on #420"]
+    assert triage.open_items(triage.load(ctx.devkit_dir)) != []
+    assert fix_loop.recheck_open(ctx) == [f"pending [{row.id}] on #420"]
+    assert triage.open_items(triage.load(ctx.devkit_dir)) == []
+    [resolved] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    assert resolved.fields["pr"] == "420" and "#420 (worktree-hazy)" in resolved.fields["note"]
 
 
 def test_plan_mode_reads_back_and_writes_nothing(ctx, monkeypatch, tmp_path):
@@ -209,6 +323,36 @@ def test_verify_reopens_what_did_not_land(ctx, monkeypatch):
     assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [ref]
 
 
+def test_a_friction_row_todays_detectors_would_not_file_is_retired(ctx, monkeypatch):
+    """d677ea57: once a detector's fix merges, its open rows retire themselves on the next
+    pass, with the reason, instead of waiting for a sweep to re-prove each one."""
+    monkeypatch.setattr(fix_loop.fix_reports, "read_trees", lambda root, projects: [])
+    row = f"{NOW.isoformat()}\tevent=session-friction\tproject=devkit\tdetail=poll: x"
+    (ctx.devkit_dir / "logs").mkdir(parents=True)
+    (ctx.devkit_dir / "logs" / "harness-events.log").write_text(row + "\n", encoding="utf-8")
+    ref = triage.item_id(row)
+    monkeypatch.setattr(fix_loop.session_friction, "outdated", lambda items: [(ref, "gone")])
+    closed, _ = close(ctx)
+    assert f"retired [{ref}] -- gone" in closed.lines
+    assert triage.open_items(triage.load(ctx.devkit_dir)) == []
+
+
+def test_a_fix_not_merged_yet_is_in_flight_off_the_cache_verify_keeps(ctx, monkeypatch):
+    """What the pass hands the backlog step, so a group waiting on a merge sends nothing."""
+    monkeypatch.setattr(fix_loop.fix_reports, "read_trees", lambda root, projects: [])
+    report = f"{NOW.isoformat()}\tevent=agent-report\tproject=devkit\tmessage=x"
+    (ctx.devkit_dir / "logs").mkdir(parents=True)
+    (ctx.devkit_dir / "logs" / "harness-events.log").write_text(report + "\n", encoding="utf-8")
+    ref = triage.item_id(report)
+    triage.resolve([ref], "fixed", pr="410", root=ctx.devkit_dir)
+    assert fix_loop.in_flight(ctx) == {ref: "410"}
+    assert close(ctx)[0].in_flight == {ref: "410"}, "read back for the backlog step"
+    cache = ctx.ledger_path.parent / fix_loop.fix_verify.CACHE_NAME
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(f'["{ref}"]', encoding="utf-8")
+    assert fix_loop.in_flight(ctx) == {}, "merged: settled in the cache"
+
+
 def test_a_step_that_raises_costs_that_step_only(ctx, monkeypatch):
     monkeypatch.setattr(fix_loop.fix_reports, "read_trees", lambda root, projects: [])
 
@@ -240,6 +384,17 @@ def test_the_files_sessions_are_told_to_write_are_the_files_the_pass_reads():
     for doc in (".claude/skills/ship/SKILL.md", ".claude/rules/engineering.md"):
         assert channel in (root / doc).read_text(encoding="utf-8"), doc
     assert channel in fix_loop.fix_findings.__doc__ or channel in fix_reports.__doc__
+
+
+def test_the_ship_skill_adds_to_the_friction_file_rather_than_replacing_it():
+    """ "Write one line per thing" read as the Write tool: a resolver replaced the two lines
+    a live ledger sweep had left in the same tree, which only survived because that
+    sweep noticed and put them back."""
+    root = Path(__file__).resolve().parents[1]
+    skill = " ".join((root / ".claude/skills/ship/SKILL.md").read_text(encoding="utf-8").split())
+    assert "add one line per thing" in skill and "keeping the lines already there" in skill
+    # Every session ships through the skill, not only a fixer the prompt told.
+    assert "`fixed on this branch`" in skill and fix_reports.fixed_here("fixed on this branch")
 
 
 def test_a_tree_another_session_is_live_in_is_busy_and_the_pass_own_session_is_not(
