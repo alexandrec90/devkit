@@ -24,19 +24,31 @@ Pure and stdlib-only; the decisions are importable and tested in
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 # What `prepare` and the branch-lifecycle helpers below spawn through. They take the
 # caller's runner rather than this module's `_git`: their caller is
 # `release-pipeline.py`, which targets a devkit path given on its command line rather
 # than this file's `REPO_ROOT`, and whose single spawn site carries the console
-# discipline the console-less nightly job needs.
-GitRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+# discipline the console-less nightly job needs. Called with the command alone, except
+# for `prepare`'s push, which also passes `env=` (see `push_env`).
+GitRunner = Callable[..., subprocess.CompletedProcess[str]]
+
+# The pre-push hook the release push skips, as `ship_intent.SKIP_PUSH_GATE` does for
+# every other push the fix pass makes. The gate that judges a release is CI's on its
+# PR: `release-pipeline.py` waits for it and merges only when the expected fallback red
+# is its sole failure, with the artifact downloaded. The local run of the same suite
+# added nothing that one does not -- except a way to stop the release with no evidence:
+# v0.11.26 and v0.11.31 were each refused by a local red that reproduced on no rerun of
+# the same commit, and the failing test died with the throwaway worktree.
+SKIP_PUSH_GATE = "devkit-push-gate"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -234,6 +246,67 @@ def discard_stale_branch(devkit: Path, branch: str, run: GitRunner) -> tuple[boo
     return True, f"discarded the stale unpushed {branch} left by an interrupted run{held}"
 
 
+# Where a refused commit's or push's findings survive the worktree that wrote them. A
+# git hook writes its failure artifacts under the *committing tree's* `logs/` -- the
+# throwaway worktree `prepare` deletes in its `finally` -- and says only "details in
+# logs\test-failures.log". So the push gate's refusals were reported with the failing
+# test named nowhere, and three were triaged blind (84ada64c, a8464675, 3355a63a). The
+# push no longer runs that gate (SKIP_PUSH_GATE), but the commit stage and the branch
+# policy still run hooks here, and the next one to refuse should not be blind either.
+# Overwritten per failed prepare, like every other failure artifact.
+SALVAGE_DIR = Path("logs") / "release-prepare"
+
+# Per salvaged artifact, in the detail the pipeline prints. The copy under SALVAGE_DIR
+# is whole; this is what reaches the scheduled job's `.failed.log`, which is the file
+# the ledger row names and the one a fixer is sent to read.
+SALVAGE_EXCERPT_LINES = 60
+
+
+def salvage_artifacts(tree: Path, devkit: Path) -> str:
+    """Copy `tree`'s non-empty `logs/*.log` into `devkit`'s SALVAGE_DIR; say what they hold.
+
+    Answers "" when the tree wrote none. Otherwise, each file's new path followed by
+    its first SALVAGE_EXCERPT_LINES lines, so the reason reaches the report without a
+    second file to find. Best effort: a copy that fails is named, never raised --
+    this runs on the way out of an error it must not replace.
+    """
+    target = devkit / SALVAGE_DIR
+    shutil.rmtree(target, ignore_errors=True)
+    found = sorted(p for p in (tree / "logs").glob("*.log") if p.is_file() and p.stat().st_size)
+    if not found:
+        return ""
+    parts: list[str] = []
+    for source in found:
+        kept = (SALVAGE_DIR / source.name).as_posix()
+        try:
+            text = source.read_text(encoding="utf-8", errors="replace")
+            target.mkdir(parents=True, exist_ok=True)
+            (target / source.name).write_text(text, encoding="utf-8")
+        except OSError as exc:
+            parts.append(f"could not keep {source.name} from the deleted worktree: {exc}")
+            continue
+        lines = text.splitlines()
+        excerpt = "\n".join(lines[:SALVAGE_EXCERPT_LINES])
+        cut = len(lines) - SALVAGE_EXCERPT_LINES
+        more = f"\n... {cut} more line(s) in {kept}" if cut > 0 else ""
+        parts.append(f"kept from the deleted worktree as {kept}:\n{excerpt}{more}")
+    return "\n".join(parts)
+
+
+def push_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """`base` (the process environment by default) with SKIP_PUSH_GATE added to `SKIP`.
+
+    Added, not assigned: `SKIP` is pre-commit's comma-separated list, and one the
+    caller already set names hooks it meant to skip too.
+    """
+    env = dict(os.environ if base is None else base)
+    skipped = [s for s in env.get("SKIP", "").split(",") if s.strip()]
+    if SKIP_PUSH_GATE not in skipped:
+        skipped.append(SKIP_PUSH_GATE)
+    env["SKIP"] = ",".join(skipped)
+    return env
+
+
 def prepare(
     devkit: Path, version: str, run: GitRunner, say: Callable[[str], None]
 ) -> tuple[bool, str]:
@@ -262,12 +335,16 @@ def prepare(
                 ("commit", "-am", f"Release {version}"),
                 ("push", "-u", "origin", branch),
             ):
-                result = run(["git", "-C", str(path), *step])
+                command = ["git", "-C", str(path), *step]
+                result = run(command, env=push_env()) if step[0] == "push" else run(command)
                 if result.returncode != 0:
                     # Both streams: a pre-push hook's findings arrive on stdout, and
                     # git's stderr alone is "failed to push some refs".
                     said = "\n".join(s.strip() for s in (result.stdout, result.stderr) if s)
-                    return False, f"`git {' '.join(step)}`: {said.strip()}"
+                    kept = salvage_artifacts(path, devkit)
+                    return False, f"`git {' '.join(step)}`: {said.strip()}" + (
+                        f"\n{kept}" if kept else ""
+                    )
             pushed = True
         finally:
             run(["git", "-C", str(devkit), "worktree", "remove", "--force", str(path)])

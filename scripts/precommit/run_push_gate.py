@@ -204,6 +204,8 @@ def gate_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
 # catch) still fails with the variable set, on any branch.
 RELEASE_BRANCH_RE = re.compile(r"^release/v\d+\.\d+\.\d+$")
 RELEASE_PREPARE_ENV = "DEVKIT_PUSH_GATE_RELEASE_PREPARE"
+# One of `run-tests.py`'s `FULL_SUITE_ENV`; see `run_gate`.
+PRE_COMMIT_ENV = "PRE_COMMIT"
 FALLBACK_REF_RE = re.compile(r"""^FALLBACK_DEVKIT_REF\s*=\s*["'](v[^"']+)["']""", re.MULTILINE)
 FALLBACK_REF_SOURCE = "scripts/new-project.py"
 
@@ -213,9 +215,10 @@ def detect_release_branch(root: Path) -> str:
 
     Read from `HEAD` rather than from the refs git puts on a pre-push hook's stdin,
     which pre-commit consumes before a hook it runs ever sees it. The release pipeline
-    pushes from a throwaway worktree checked out on the branch it is cutting, so the two
-    agree there; pushing a release branch you are not standing on is the gap, and it
-    costs a red that CI would catch anyway.
+    skips this gate on its own push (`release.SKIP_PUSH_GATE`), so what reaches here is
+    a release branch pushed by hand, from the checkout standing on it; pushing a release
+    branch you are not standing on is the gap, and it costs a red that CI would catch
+    anyway.
 
     `symbolic-ref` rather than `rev-parse --abbrev-ref`, which answers the literal string
     `HEAD` on a detached checkout -- the shape every CI runner is in -- and cannot answer
@@ -341,6 +344,11 @@ def run_gate(
     # and devkit's own suite runs this function, so without the scrub a nested run
     # inherits a marker its own `release_prepare` never asked for.
     env.pop(RELEASE_PREPARE_ENV, None)
+    # pre-commit exports this into the hook, and `run-tests.py` reads it as "run the
+    # whole suite". Called any other way -- reproducing a refused push by hand -- the
+    # gate otherwise ran only the tests for the changed paths and printed "clean", a
+    # different verdict under the same name (it cost the 3355a63a triage its repro).
+    env.setdefault(PRE_COMMIT_ENV, "1")
     if release_prepare is None:
         release_prepare = detect_release_prepare(root)
     if release_prepare:
