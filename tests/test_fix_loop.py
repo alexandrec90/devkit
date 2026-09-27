@@ -129,6 +129,19 @@ def test_a_line_its_session_fixed_on_this_branch_is_filed_settled_by_that_branch
     assert still_open.detail == "reported: no .venv", "only what nobody fixed stays open"
 
 
+def test_a_long_line_keeps_the_fixed_on_this_branch_it_ends_with(ctx, monkeypatch):
+    """2d0bc76f: a 460-character line ended "..., fixed on this branch", the friction reader
+    cut every line to 400 before anything asked, and the group was filed open against a
+    fix already merging on #435. The marker is at the end by the nature of the sentence."""
+    fixed = "the triage CLI counted a pending group open; " + "x" * 400 + ", fixed on this branch"
+    tree(ctx, monkeypatch, friction=f"- {fixed}\n")
+    _, journal = close(ctx)
+    [found] = [f for f in journal.findings if f.kind == "reported"]
+    assert (found.detail, found.settles_with) == (fixed, "agent/x-0919")
+    fix_loop.record(ctx, journal)
+    assert triage.open_items(triage.load(ctx.devkit_dir)) == []
+
+
 def test_a_detached_tree_settles_nothing_it_has_no_branch_to_merge(ctx, monkeypatch):
     path = tree(ctx, monkeypatch)
     one = fix_reports.Tree("carameli", path, "", {}, ("x; fixed on this branch",))
