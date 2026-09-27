@@ -65,6 +65,11 @@ COVERED_BY: dict[str, tuple[str, str]] = {
         "what can go wrong with a list is what the tool does with it -- tested there, and "
         "vendored with it, where a devkit-only test module would not follow",
     ),
+    "fix_trees.py": (
+        "tests/test_fix_prs.py",
+        "split out of fix-prs.py along a section header; its tests drive the same fake "
+        "git listings and runners as the dispatch tests that assert the order it is called in",
+    ),
     "notify-wrap.py": (
         "tests/test_self_hosting.py",
         "the wrapper's one behaviour is that it propagates the wrapped exit code, and "
