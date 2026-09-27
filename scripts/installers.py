@@ -37,9 +37,10 @@ enables nothing. `install-git-policy.py` answers 2 for "nothing installed here" 
 left there on purpose: rewriting global git config on a machine that never opted in is a
 decision, not maintenance.
 
-Read-only by default: `status` runs every `--check` and writes the report; `maintain`
-is what the scheduler runs. The artifact `logs/installers.log` is rewritten every pass,
-on a clean one too, so its mtime says the job is alive.
+Read-only by default: `status` runs every `--check` and writes the report in the
+checkout it runs from; `maintain` is what the scheduler runs. The static checkout's
+`logs/installers.log` is rewritten by every `maintain`, on a clean one too, so its mtime
+says the job is alive -- and by nothing else (`artifact_root`).
 
 **`uninstall` is the way back off a machine**, and it is the mode the workspace's
 *Machine: Scheduled Jobs* task drives. Dry until `--yes`, and safe to run twice: every
@@ -95,7 +96,6 @@ CURRENT = "current"
 STALE = "stale"
 LEFT_ALONE = "left alone"
 REINSTALLED = "reinstalled"
-DEFERRED = "deferred"
 FAILED = "failed"
 REMOVED = "removed"
 WOULD_REMOVE = "would remove"
@@ -260,49 +260,20 @@ def repair(
     return Outcome(script.name, REINSTALLED, last_line(result))
 
 
-def run_task_argv(name: str) -> list[str]:
-    return ["schtasks", "/Run", "/TN", name]
-
-
-def hand_off(stale: Outcome, own_task: str, root: Path, runner: Runner) -> Outcome:
-    """The stale installer whose task is running this pass, left to a pass outside it.
-
-    Windows answers a task that replaces its own registration with `Access is denied`,
-    though it lets that task re-register any other and lets anyone outside re-register
-    it mid-run (086329c7, reproduced with a probe task). So the fix pass's `maintain`
-    can never repair `devkit-fix-pass`, nor the daily job its own. The installers job
-    is the other task: this runs it now, so a merged change to the fix pass's
-    registration lands this pass rather than at tomorrow's fire. When the installers
-    job is the one running, the fix pass repairs it within the half hour.
-    """
-    maintainer = task_name(root / "scripts" / MAINTAINER)
-    why = (
-        f"{stale.detail} Not re-registered from inside `{own_task}`: Windows refuses a "
-        f"task replacing its own registration"
-    )
-    if not maintainer or maintainer == own_task:
-        return Outcome(stale.installer, DEFERRED, f"{why}; a maintain pass outside it does.")
-    result = runner(run_task_argv(maintainer))
-    if result.returncode:
-        return Outcome(
-            stale.installer, STALE, f"{why}, and `{maintainer}` did not run: {last_line(result)}"
-        )
-    return Outcome(stale.installer, DEFERRED, f"{why}; handed to `{maintainer}`.")
-
-
 def reconcile(
     root: Path,
     apply: bool,
     options: dict[str, list[str]],
     runner: Runner | None = None,
     only: Sequence[str] = (),
-    own_task: str = "",
 ) -> list[Outcome]:
     """Every installer's verdict, repaired where `apply` says to and the verdict allows.
 
-    `own_task` is the scheduled task this pass runs inside, whose installer is handed
-    off (`hand_off`) rather than repaired -- after every other repair, so the pass it is
-    handed to never re-registers alongside this one.
+    That includes the task this pass runs inside: a running task re-registers itself
+    like any other, so long as the user may write it. `Access is denied` on one is a
+    task an elevated shell registered (`devkit_schtasks.secured`), not a task replacing
+    itself -- which is what 086329c7 read it as, from probe tasks an elevated session
+    had registered.
 
     Installers run under the console interpreter beside this one, not `sys.executable`:
     under the scheduled job that is `pythonw.exe`, and a console-less child gets a fresh
@@ -319,18 +290,12 @@ def reconcile(
     spawn = runner or run_command
     chosen, missing = select(discover(root), only)
     outcomes = [Outcome(name, FAILED, "no installer of that name here") for name in missing]
-    mine = -1
     for script in chosen:
         extra = options.get(script.name, [])
         outcome = check(script, interpreter, extra, spawn)
         if apply and outcome.verdict == STALE:
-            if own_task and task_name(script) == own_task:
-                mine = len(outcomes)
-            else:
-                outcome = repair(script, interpreter, extra, spawn, outcome)
+            outcome = repair(script, interpreter, extra, spawn, outcome)
         outcomes.append(outcome)
-    if mine >= 0:
-        outcomes[mine] = hand_off(outcomes[mine], own_task, root, spawn)
     return outcomes
 
 
@@ -455,30 +420,37 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--workspace", type=Path, default=None)
-    parser.add_argument(
-        "--running-under",
-        default="",
-        metavar="TASK",
-        help=(
-            "the scheduled task running this pass, which `maintain` hands off rather than "
-            "re-registering: Windows refuses a task replacing itself"
-        ),
-    )
+    # Accepted and ignored: `devkit-installers` was registered passing it (#427), and a
+    # usage error would stop that job before its artifact until the next `maintain`
+    # re-registers it without. Drop it once no registration on a machine names it.
+    parser.add_argument("--running-under", default="", help=argparse.SUPPRESS)
     parser.add_argument(
         "--devkit",
         type=Path,
         default=REPO_ROOT,
         help=(
-            "a devkit checkout; the static checkout it belongs to is what is reconciled "
-            "and where the artifact is written (default: this one)"
+            "a devkit checkout; the static checkout it belongs to is what is reconciled, "
+            "and where `maintain` writes the artifact -- `status` and `uninstall` write "
+            "it in this checkout (default: this one)"
         ),
     )
     return parser.parse_args(sys.argv[1:] if argv is None else argv)
 
 
+def artifact_root(mode: str, devkit: Path, static: Path) -> Path:
+    """Where this run's report goes: the static checkout for `maintain` only.
+
+    That file is the scheduled job's -- its mtime is what says the job is alive, and a
+    fix-pass finding cites what it says. A `status` run from a worktree wrote over it, so
+    a read-only look erased the evidence a finding named (1ef5ea5f) and reset the job's
+    heartbeat without the job having run."""
+    return static if mode == "maintain" else devkit
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    root = sweep.source_checkout(args.devkit.expanduser().resolve())
+    devkit = args.devkit.expanduser().resolve()
+    root = sweep.source_checkout(devkit)
     workspace = args.workspace or sweep.default_workspace(root)
     options = read_options(Path(workspace) if workspace else None)
     only = parse_only(args.only)
@@ -487,11 +459,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # the safe reading of a contradictory instruction is the one that changes nothing.
         outcomes = decommission(root, args.yes and not args.dry_run, options, only=only)
     else:
-        apply = args.mode == "maintain"
-        outcomes = reconcile(root, apply, options, only=only, own_task=args.running_under)
+        outcomes = reconcile(root, args.mode == "maintain", options, only=only)
     orphans = stood_down_without_installer(harness_state.stood_down(), root)
     text = render(outcomes, orphans, _dt.datetime.now(), args.mode)
-    write_artifact(text, root)
+    write_artifact(text, artifact_root(args.mode, devkit, root))
     print(text, end="")
     return exit_code(outcomes)
 

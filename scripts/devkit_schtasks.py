@@ -325,7 +325,7 @@ def write_task_file(xml: str, directory: Path | None = None) -> Path:
 #
 # One implementation, and it compares documents rather than lines: `schtasks /Query /XML`
 # returns the task as it was registered, and `task_xml` is the task as the installer would
-# register it now, so the check is the three fields of that document a re-register would
+# register it now, so the check is the fields of that document a re-register would
 # change. Deliberately including the interpreter, which the old copies excused as noise:
 # `scripts/CLAUDE.md` says the interpreter is part of "which checkout", and the venv
 # trampoline `schedule_health.virtualenv_interpreter` reports is exactly a task whose
@@ -335,14 +335,65 @@ def write_task_file(xml: str, directory: Path | None = None) -> Path:
 
 @dataclass(frozen=True)
 class Registration:
-    """The three fields of a task document a re-register can change."""
+    """The fields of a task document a re-register can change."""
 
     command: str
     arguments: str
     enabled: bool
+    security: str = ""
 
 
-# Three fields out of a document that has exactly one shape -- `task_xml`'s, which is
+# --- who may replace a task --------------------------------------------------------
+#
+# A task document with no `<SecurityDescriptor>` takes its access from the process that
+# registers it, and an **elevated** process makes the task Administrators': the
+# registering user is left read access and nothing more. Every scheduled job here runs
+# with the user's ordinary token, so from then on each `--yes` any of them makes on that
+# task -- the fix pass's `maintain`, the daily installers job -- answers `ERROR: Access is
+# denied.`, whichever task is running (5282d37c, 086329c7). Fixer sessions run elevated on
+# this machine, so one `installers.py maintain` from a fixer was enough to lock three
+# jobs. Reproduced with probe tasks: registered elevated without a descriptor, a
+# non-elevated `/Create /F` is refused; with the one below it succeeds, and a running
+# task re-registers itself. The access is set when the task is *created*: `/F` over an
+# existing task keeps it, which is why `register` recreates one that has no descriptor.
+#
+# So every registration names the registering user in its descriptor, by SID -- the one
+# spelling that survives a renamed account and a localised builtin -- and `run_check`
+# reads a registration without it as stale, which is how an existing Administrators'
+# task gets named rather than refusing every repair in silence.
+WHOAMI_ARGV = ("whoami", "/user", "/fo", "csv", "/nh")
+_SID = re.compile(r'^"[^"]*","(S-1-\d+(?:-\d+)+)"$')
+_REGISTRATION_END = "</RegistrationInfo>"
+
+
+def user_sid(run: Runner) -> str:
+    """The SID of the user this process runs as, or "" when it cannot be read.
+
+    "" registers the document as it is -- the behaviour before the descriptor existed --
+    rather than failing an install over a lookup."""
+    try:
+        result = run(list(WHOAMI_ARGV))
+    except OSError:
+        return ""
+    match = _SID.match((result.stdout or "").strip()) if result.returncode == 0 else None
+    return match.group(1) if match else ""
+
+
+def security_descriptor(sid: str) -> str:
+    """Full access for SYSTEM, Administrators and `sid`: the user whose jobs maintain it."""
+    return f"D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;FA;;;{sid})"
+
+
+def secured(document: str, sid: str) -> str:
+    """`document` with `sid`'s descriptor in its `<RegistrationInfo>`; unchanged without a
+    SID or with a descriptor already there."""
+    if not sid or "<SecurityDescriptor>" in document or _REGISTRATION_END not in document:
+        return document
+    line = f"  <SecurityDescriptor>{security_descriptor(sid)}</SecurityDescriptor>\n  "
+    return document.replace(_REGISTRATION_END, line + _REGISTRATION_END, 1)
+
+
+# A few fields out of a document that has exactly one shape -- `task_xml`'s, which is
 # also what `schtasks /Query /XML` hands back for a task registered from it. A regex over
 # that shape rather than an XML parser, for two reasons that point the same way: the
 # parser refuses the `str` the pipe delivers (a UTF-16 declaration over 8-bit bytes, with
@@ -377,7 +428,10 @@ def parse_task(text: str) -> Registration | None:
     arguments = _field(action.group(1), "Arguments") or ""
     settings = _SETTINGS.search(text)
     enabled = (_field(settings.group(1), "Enabled") if settings else None) or "true"
-    return Registration(command.strip(), arguments.strip(), enabled.strip().lower() == "true")
+    security = (_field(text, "SecurityDescriptor") or "").strip()
+    return Registration(
+        command.strip(), arguments.strip(), enabled.strip().lower() == "true", security
+    )
 
 
 def query_xml_argv(name: str) -> list[str]:
@@ -416,6 +470,12 @@ def drift(registered: Registration | None, expected: Registration) -> list[str]:
             if expected.enabled
             else "is enabled, and it was stood down"
         )
+    if expected.security and registered.security != expected.security:
+        reasons.append(
+            f"is secured `{registered.security or 'by whoever registered it'}`, not "
+            f"`{expected.security}` -- if an elevated shell registered it, only an elevated "
+            "--yes can replace it"
+        )
     return reasons
 
 
@@ -427,8 +487,10 @@ def run_check(name: str, document: str, run: Runner) -> tuple[int, str]:
     read the same string, so an installer cannot pass its own check with one command line
     and register another. `CHECK_LEFT_ALONE` only for a document this module cannot read,
     which is a bug in the caller rather than a state of the machine.
+
+    The document is compared `secured`, as `register` would register it.
     """
-    expected = parse_task(document)
+    expected = parse_task(secured(document, user_sid(run)))
     if expected is None:
         return CHECK_LEFT_ALONE, f"schedule: {name}'s own task document could not be parsed"
     result = run(query_xml_argv(name))
@@ -448,8 +510,16 @@ def register(name: str, xml: str, run: Runner) -> tuple[bool, str]:
     The temporary file is removed on every path including the failing one: it holds a
     full command line, and leaving copies of that in the temp directory is untidy in a
     way that eventually reads as a leak.
+
+    Registered `secured`, so a task an elevated shell registers stays replaceable by the
+    user's own jobs. A task's access is fixed when it is *created* -- `/F` over an
+    existing one keeps the old access whatever the new document says -- so one registered
+    without a descriptor is deleted first (`_clear_unsecured`); that is what lets an
+    elevated `--yes` heal a task an elevated shell locked.
     """
-    path = write_task_file(xml)
+    sid = user_sid(run)
+    locked = bool(sid) and _clear_unsecured(name, run)
+    path = write_task_file(secured(xml, sid))
     try:
         result = run(register_argv(name, path))
     finally:
@@ -458,5 +528,29 @@ def register(name: str, xml: str, run: Runner) -> tuple[bool, str]:
         except OSError:
             pass
     if result.returncode != 0:
-        return False, (result.stderr or result.stdout or "schtasks failed").strip()
+        message = (result.stderr or result.stdout or "schtasks failed").strip()
+        if locked:
+            message += (
+                f" -- {name} predates its security descriptor and this shell may not "
+                "delete it, so an elevated shell registered it: run this --yes once from "
+                "an elevated one"
+            )
+        return False, message
     return True, (result.stdout or f"registered {name}").strip()
+
+
+def delete_argv(name: str) -> list[str]:
+    return ["schtasks", "/Delete", "/TN", name, "/F"]
+
+
+def _clear_unsecured(name: str, run: Runner) -> bool:
+    """Delete `name` if it is registered without a security descriptor; True when that
+    delete was refused.
+
+    A running task survives its own deletion and re-creation (probed), which is what
+    lets the fix pass do this to `devkit-fix-pass` from inside it."""
+    result = run(query_xml_argv(name))
+    held = parse_task(result.stdout or "") if result.returncode == 0 else None
+    if held is None or held.security:
+        return False
+    return run(delete_argv(name)).returncode != 0

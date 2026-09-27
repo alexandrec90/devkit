@@ -265,26 +265,25 @@ def test_a_dispatching_pass_brings_every_installer_current_and_a_plan_does_not(w
     assert fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW) == 0
     assert world["installers"] == []
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
-    assert world["installers"] == [
-        ["maintain", "--workspace", str(world["workspace"]), "--running-under", "devkit-fix-pass"]
-    ]
-
-
-def test_the_pass_names_the_task_it_runs_under_off_its_installer():
-    """086329c7: the pass cannot re-register the task it runs inside, so `maintain` has to
-    know which one that is -- read off the installer rather than copied here."""
-    installer = fix_pass.REPO_ROOT / "scripts" / "install-fix-pass-task.py"
-    assert fix_pass.installers.task_name(installer) == fix_pass.OWN_TASK == "devkit-fix-pass"
+    assert world["installers"] == [["maintain", "--workspace", str(world["workspace"])]]
 
 
 def test_a_failed_installer_is_filed_for_the_devkit_session(world, monkeypatch, tmp_path):
+    """55655d1a: the finding cites a copy of `installers.log`, not the file itself --
+    every later `installers.py` run rewrites that, and the evidence went with it."""
     monkeypatch.setattr(fix_pass.installers.sweep, "source_checkout", lambda root: tmp_path)
+    artifact = tmp_path / "logs" / "installers.log"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("install-x.py: failed -- Access is denied\n", encoding="utf-8")
     world["installers_code"] = 2
     journal = fix_pass.Journal(tmp_path)
     assert fix_pass.refresh_installers(world["workspace"], journal) == 2
     (finding,) = journal.findings
     assert finding.kind == "installer-failed" and finding.project == "devkit"
-    assert finding.evidence == str(tmp_path / "logs" / "installers.log")
+    kept = Path(finding.evidence)
+    assert kept != artifact and kept.parent == tmp_path / "logs" / "findings"
+    artifact.write_text("rewritten by the next run\n", encoding="utf-8")
+    assert "Access is denied" in kept.read_text(encoding="utf-8")
     world["installers_code"] = 1  # stale, and repaired: nothing to file
     assert fix_pass.refresh_installers(world["workspace"], journal) == 1
     assert len(journal.findings) == 1

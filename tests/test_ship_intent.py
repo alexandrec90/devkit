@@ -690,6 +690,18 @@ def test_a_refusal_is_named_by_the_line_that_says_why():
     assert len(ship_intent.refusal_line("x Failed " + "y" * 500)) == 160
 
 
+def test_a_branch_policy_refusal_is_named_by_its_reason_not_its_details_pointer():
+    """b4b33191: the policy says "commit blocked", which matched nothing, so the line
+    kept was the last -- `details: <path>`, a file the next hook run rewrites -- and the
+    ledger never said the branch was retired."""
+    output = (
+        "[devkit branch policy] commit blocked: branch 'agent/x-0926' is permanently "
+        "retired because its PR merged (https://github.com/o/r/pull/426).\n"
+        "[devkit branch policy] details: C:\\r\\.git\\worktrees\\x\\devkit-branch-policy.json\n"
+    )
+    assert "retired" in ship_intent.refusal_line(output)
+
+
 def test_a_refusal_nothing_has_changed_since_is_not_run_again(tmp_path):
     """The third supervised run re-ran carameli's whole commit stage on every pass for a
     refusal held behind a red harness, to the same answer each time."""

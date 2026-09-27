@@ -422,7 +422,11 @@ def ship_one(
 # --- a refusal as a failure the plan can place ---------------------------------------
 
 
-REFUSAL_LINE = re.compile(r"Failed\b|refus|\berror\b|not a namespaced|conflict string", re.I)
+# `blocked` is `git_policy`'s word; without it the line kept was its trailing `details:`
+# pointer, and the ledger never said why (b4b33191).
+REFUSAL_LINE = re.compile(
+    r"Failed\b|refus|\berror\b|\bblocked\b|not a namespaced|conflict string", re.I
+)
 
 
 def refusal_line(output: str) -> str:

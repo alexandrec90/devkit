@@ -232,7 +232,11 @@ def test_the_query_asks_for_the_document(monkeypatch):
         return subprocess.CompletedProcess(list(argv), 0, sched.task_document(a_schedule()), "")
 
     sched.run_check(a_schedule(), runner)
-    assert seen == [sched.devkit_schtasks.query_xml_argv(sched.TASK_NAME)]
+    # Beside `devkit_schtasks.user_sid`'s `whoami`, which the comparison is secured for.
+    assert seen == [
+        list(sched.devkit_schtasks.WHOAMI_ARGV),
+        sched.devkit_schtasks.query_xml_argv(sched.TASK_NAME),
+    ]
 
 
 # --- installing ----------------------------------------------------------------

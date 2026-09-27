@@ -174,6 +174,20 @@ def evidence_file(text: str, devkit_dir: Path, stem: str) -> str:
     return str(path)
 
 
+def kept(artifact: Path, devkit_dir: Path, stem: str) -> str:
+    """A copy of `artifact` kept beside the ledger, for an artifact its job rewrites.
+
+    `logs/installers.log` is rewritten by every `installers.py` run -- each pass, the
+    daily job, any `status` -- so a finding citing it cited a file that was gone within
+    the half hour (55655d1a). The copy is what the finding names; the artifact's own path
+    when it cannot be read or copied, which is no worse than citing it was."""
+    try:
+        text = artifact.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return str(artifact)
+    return evidence_file(text, devkit_dir, stem) or str(artifact)
+
+
 @dataclass
 class Journal:
     """What one pass found, gathered as it goes, and the steps that raised."""

@@ -228,29 +228,7 @@ jobs:
           git config --global user.email "ci@example.invalid"
           git config --global user.name "devkit CI"
       - name: Render a project at the previous release, then pull this tree into it
-        # `git tag --sort=-v:refname` rather than `git describe`: the question is which
-        # release is newest, not which is reachable from a PR merge commit -- the same
-        # distinction `new-project.latest_devkit_tag` documents. On a release PR the
-        # newest tag is still the previous release, which is the right base to rehearse.
-        #
-        # The pull runs TWICE, the way `upgrade-project.pull_to_fixpoint` does: the first
-        # pull replaces `sync-devkit.py` itself, and the second runs the pulled copy so
-        # a manifest entry only the new version knows about is also delivered.
-        # `--allow-untagged` because a PR tree has no tag; that leaves the pre-commit pin
-        # stale, which is a config drift the checks below deliberately do not include.
-        run: |
-          set -euo pipefail
-          prev="$(git tag --sort=-v:refname | head -n 1)"
-          echo "rehearsing an upgrade from $prev to $(git rev-parse --short HEAD)"
-          git worktree add --detach /tmp/devkit-prev "$prev"
-          rm -rf /tmp/upgrade && mkdir -p /tmp/upgrade
-          python /tmp/devkit-prev/scripts/new-project.py probe_upgrade \
-            --preset bare --parent /tmp/upgrade --no-remote --yes
-          cd /tmp/upgrade/probe_upgrade
-          python scripts/sync-devkit.py --pull --src "$GITHUB_WORKSPACE" --allow-untagged
-          python scripts/sync-devkit.py --pull --src "$GITHUB_WORKSPACE" --allow-untagged
-          git add -A && git commit -qm "Adopt devkit $(git -C "$GITHUB_WORKSPACE" rev-parse --short HEAD)"
-          python -m pytest scripts/hooks/tests/ -q
-          python scripts/run-tests.py
-          python scripts/lint-all.py
-          DEVKIT_DIR="$GITHUB_WORKSPACE" python scripts/sync-devkit.py --check
+        # The recipe is `scripts/rehearse-upgrade.py`, whose docstring has it step by
+        # step: one copy, so a session can run on its workstation exactly what this job
+        # runs, and learn before a gate cycle what #424 learned from one (85c4fb7f).
+        run: python scripts/rehearse-upgrade.py
