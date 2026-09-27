@@ -263,6 +263,21 @@ def friction_lines(tree: Path) -> tuple[str, ...]:
     )
 
 
+# How a session says it fixed what a friction line reports, in the tree that wrote it:
+# the spelling `fix_prompts.FINISH` and the ship skill ask for, and its near variants.
+FIXED_HERE = re.compile(r"\bfixed (?:it )?(?:on|in) this (?:branch|tree)\b", re.I)
+
+
+def fixed_here(line: str) -> bool:
+    """Whether a friction line says its own session fixed it on the tree's branch.
+
+    Such a line is filed settled by that branch (`Finding.settles_with`) rather than open:
+    three of 0927-3's lines said so, were filed open, and sent a second fixer at fixes
+    already in review on #429. `fix_verify` reopens the row if the branch never merges.
+    """
+    return bool(FIXED_HERE.search(line))
+
+
 def read_trees(root: Path, projects: list[str], git_for: GitFor = sweep.git_for) -> list[Tree]:
     """Every agent worktree with its stamp and friction, walked once for the whole pass."""
     return [

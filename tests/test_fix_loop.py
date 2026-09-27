@@ -116,6 +116,27 @@ def test_each_friction_line_is_filed_and_the_file_read_once(ctx, monkeypatch):
         assert finding.detail in Path(finding.evidence).read_text(encoding="utf-8")
 
 
+def test_a_line_its_session_fixed_on_this_branch_is_filed_settled_by_that_branch(ctx, monkeypatch):
+    """407df645, 6a3312bf, a8142f2a: a fixer's friction lines each said "fixed on this
+    branch", were filed open, and sent a second fixer at three fixes already in review."""
+    fixed = "evidence rewritten before it was read; fixed on this branch (`fix_findings.kept`)"
+    tree(ctx, monkeypatch, friction=f"- {fixed}\n- no .venv\n")
+    _, journal = close(ctx)
+    settles = {f.detail: f.settles_with for f in journal.findings if f.kind == "reported"}
+    assert settles == {fixed: "agent/x-0919", "no .venv": ""}
+    fix_loop.record(ctx, journal)
+    [still_open] = triage.open_items(triage.load(ctx.devkit_dir))
+    assert still_open.detail == "reported: no .venv", "only what nobody fixed stays open"
+
+
+def test_a_detached_tree_settles_nothing_it_has_no_branch_to_merge(ctx, monkeypatch):
+    path = tree(ctx, monkeypatch)
+    one = fix_reports.Tree("carameli", path, "", {}, ("x; fixed on this branch",))
+    monkeypatch.setattr(fix_loop.fix_reports, "read_trees", lambda root, projects: [one])
+    _, journal = close(ctx)
+    assert [f.settles_with for f in journal.findings if f.kind == "reported"] == [""]
+
+
 def test_a_second_filing_keeps_the_lines_the_first_findings_point_at(ctx, monkeypatch):
     path = tree(ctx, monkeypatch, friction="- first\n")
     close(ctx)
@@ -372,6 +393,8 @@ def test_the_ship_skill_adds_to_the_friction_file_rather_than_replacing_it():
     root = Path(__file__).resolve().parents[1]
     skill = " ".join((root / ".claude/skills/ship/SKILL.md").read_text(encoding="utf-8").split())
     assert "add one line per thing" in skill and "keeping the lines already there" in skill
+    # Every session ships through the skill, not only a fixer the prompt told.
+    assert "`fixed on this branch`" in skill and fix_reports.fixed_here("fixed on this branch")
 
 
 def test_a_tree_another_session_is_live_in_is_busy_and_the_pass_own_session_is_not(

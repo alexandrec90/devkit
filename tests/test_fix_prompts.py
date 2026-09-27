@@ -10,6 +10,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_plan
 import fix_prompts
+import fix_reports
 from support import REPO_ROOT, load_script
 
 
@@ -332,6 +333,15 @@ def test_every_prompt_names_the_friction_channel_the_pass_files_from():
     on the harness-defect ledger instead, so every prompt has to say the file exists."""
     for text in every_prompt():
         assert "logs/friction.md" in text and "the pass files each for the devkit session" in text
+
+
+def test_every_prompt_gives_the_spelling_that_files_a_line_settled_by_its_branch():
+    """407df645, 6a3312bf, a8142f2a: a fixer that fixed its own friction left it open,
+    and the next pass sent a second fixer at it. The spelling is what the pass matches."""
+    spelling = "fixed on this branch"
+    assert fix_reports.fixed_here(f"the evidence was rewritten; {spelling}")
+    for text in every_prompt():
+        assert spelling in text
 
 
 def test_the_devkit_session_is_told_to_take_over_an_escalated_problem():
