@@ -41,6 +41,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bg_sessions
 import devkit_project
 import fix_findings
 import fix_reports
@@ -249,6 +250,7 @@ def settle(
     clock: Callable[[], _dt.datetime],
     sleep: Callable[[float], None] = time.sleep,
     out: Path | None = None,
+    busy: Callable[[], frozenset[str]] = frozenset,
 ) -> list[Session]:
     """Wait until no tree's session is still working, or `until`; what each ended as.
 
@@ -256,11 +258,19 @@ def settle(
     otherwise hold every iteration for the whole `SETTLE`. Each session's transcript is
     the one its stamp started -- never the tree's newest, which in the first supervised
     run was the interactive session sharing the tree. Rendered into `out` for reading.
+
+    `busy` (`bg_sessions.working` in a real run) holds a tree whose session left its
+    intent and kept going: one sweep worked 70 calls past it, and the transcript audited
+    was the half rendered at the intent.
     """
     while True:
         now = clock()
         states = {t.path: fix_reports.session_state(t.path, now) for t in trees}
-        if now >= until or all(state != fix_reports.WORKING for state, _ in states.values()):
+        live = busy() if trees else frozenset()
+        if now >= until or all(
+            state != fix_reports.WORKING and not bg_sessions.busy_in(live, path)
+            for path, (state, _) in states.items()
+        ):
             break
         sleep(POLL)
     sessions = []
@@ -284,6 +294,11 @@ def settle(
             )
         )
     return sessions
+
+
+def live_dirs() -> frozenset[str]:
+    """The directories `claude agents` says a session is busy in right now."""
+    return bg_sessions.working(bg_sessions.listed(subprocess.run))
 
 
 def _render(transcript: Path | None, out: Path | None, tree: Path) -> str:
@@ -340,7 +355,7 @@ def iterate(
         projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
         trees = dispatched_since(root, projects, started)
         out = REPO_ROOT / READABLE / f"iteration-{number}"
-        iteration.sessions = settle(trees, started + SETTLE, clock, out=out)
+        iteration.sessions = settle(trees, started + SETTLE, clock, out=out, busy=live_dirs)
         iteration.violations += check_sessions(iteration.sessions)
         iteration.violations += check_spend(iteration.sessions)
     return iteration

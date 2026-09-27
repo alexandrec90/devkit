@@ -22,7 +22,8 @@ recover is *why* the change was made, so that is the only thing it is asked for.
      the PR description and the only changelog a consumer of this repository gets, so
      write it for the reader who did not watch the work.
 3. If the harness cost you turns -- a refusal, a missing tool, an instruction that sent
-   you the wrong way -- write one line per thing to `logs/friction.md`. The pass files
+   you the wrong way -- add one line per thing to `logs/friction.md`, keeping the lines
+   already there: another session in this tree may have written them. The pass files
    each on the harness-defect ledger, where the devkit session fixes it.
 4. Report the subject and stop.
 

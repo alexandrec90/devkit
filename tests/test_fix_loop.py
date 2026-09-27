@@ -365,6 +365,15 @@ def test_the_files_sessions_are_told_to_write_are_the_files_the_pass_reads():
     assert channel in fix_loop.fix_findings.__doc__ or channel in fix_reports.__doc__
 
 
+def test_the_ship_skill_adds_to_the_friction_file_rather_than_replacing_it():
+    """ "Write one line per thing" read as the Write tool: a resolver replaced the two lines
+    a live ledger sweep had left in the same tree, which only survived because that
+    sweep noticed and put them back."""
+    root = Path(__file__).resolve().parents[1]
+    skill = " ".join((root / ".claude/skills/ship/SKILL.md").read_text(encoding="utf-8").split())
+    assert "add one line per thing" in skill and "keeping the lines already there" in skill
+
+
 def test_a_tree_another_session_is_live_in_is_busy_and_the_pass_own_session_is_not(
     ctx, monkeypatch
 ):

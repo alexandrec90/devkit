@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_worktrees as aw
 from fix_plan import COMMIT, CONFLICT, EVIDENCE_DIR, LEDGER, PR, Failure, describe, name_of
 from fix_reports import BLOCKED_FILE, FRICTION_FILE, REFUSED_FILE
+from harness_triage import ARTIFACT as _TRIAGE_ARTIFACT
 from junit_report import READABLE
 from ship_intent import INTENT_FILE, REFUSAL_LINE, REFUSED, STATE_FILE, read_state
 
@@ -33,8 +34,9 @@ from ship_intent import INTENT_FILE, REFUSAL_LINE, REFUSED, STATE_FILE, read_sta
 # files, so the pass reads the outcome without a session.
 FINISH = (
     "When it is done, run the targeted tests with this tree's own .venv interpreter, the "
-    "linter and the two ratchets the gate "
-    "runs -- python scripts/hooks/structure_check.py and python scripts/hooks/untested_symbols.py "
+    "linter and the ratchets the gate "
+    "runs -- python scripts/hooks/structure_check.py, python scripts/hooks/untested_symbols.py "
+    "and, where the tree has it, python scripts/hot-budget.py for the instruction files "
     "-- in every tree you changed, then ship it with the ship skill and stop: the fix pass "
     "commits, pushes, opens or updates the PR and reads what the gate says. Nobody is "
     "watching this session, so never ask a question and never end on one: a choice "
@@ -59,8 +61,7 @@ FINISH = (
 # What the devkit session is told about the harness-defect ledger, when the backlog is
 # among its failures. No quotes or backticks: the sentence crosses a `wt` command line.
 LEDGER_STEPS = (
-    " The ledger groups are in that directory's harness-triage.log: work them as "
-    ".claude/skills/triage-harness/SKILL.md says -- verify each against current code "
+    " Work them as .claude/skills/triage-harness/SKILL.md says -- verify each against current code "
     "before believing it, fix what is real, and retire each group with "
     "python scripts/harness_triage.py --resolve-like ID --note WHAT-FIXED-IT --pr BRANCH "
     "once the fix is in your intent; the pass reopens a group whose branch never merges. "
@@ -212,6 +213,18 @@ def pr_prompt(failure: Failure, refusal: str = "", left: str = "") -> str:
     )
 
 
+TRIAGE_LOG = _TRIAGE_ARTIFACT.name
+
+
+def _ledger_log(failure: Failure) -> str:
+    """Where the backlog's groups are in the tree: its evidence is placed under the slot
+    its directory is named for. "In that directory's" read as `logs/gate/` itself, and
+    both ledger sessions of one supervised run opened that first."""
+    slot = Path(failure.evidence).name if failure.evidence else ""
+    where = f"{EVIDENCE_DIR}/{slot}/" if slot else f"{EVIDENCE_DIR}/*/"
+    return f" The ledger groups are in {where}{TRIAGE_LOG} in this worktree."
+
+
 def _left_as_is(left: str, head: str) -> str:
     """What a reused tree holds that the session did not put there, or "".
 
@@ -248,7 +261,7 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
         f"each consumer. Each failure's gate logs are under {EVIDENCE_DIR}/ in this "
         "worktree, one directory per failure that uploaded any; for the rest, read the "
         "run at its URL."
-        + (LEDGER_STEPS if any(f.kind == LEDGER for f in ordered) else "")
+        + "".join(_ledger_log(f) + LEDGER_STEPS for f in ordered if f.kind == LEDGER)
         + f" This worktree is on the fresh branch {branch} off the default branch. Say in "
         f"the intent which of these the fix unblocks: {urls}. {OWN_DIFF} {FINISH}"
     )

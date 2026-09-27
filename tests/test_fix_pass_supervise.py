@@ -133,6 +133,32 @@ def test_settle_waits_for_a_working_session_and_stops_at_its_outcome(tmp_path, m
     assert naps == [1] and session.state == fix_reports.DONE
 
 
+def test_settle_holds_a_session_that_left_its_intent_while_it_is_still_busy(tmp_path):
+    """A ledger sweep wrote its intent at 04:09 and worked 70 calls more; the audit read
+    a transcript rendered at the intent and never saw the half with the stranded fix."""
+    now = _dt.datetime.now(_dt.UTC)
+    tree = _tree(tmp_path, now - _dt.timedelta(minutes=5))
+    intent = tree.path / "logs" / "ship-intent.md"
+    intent.write_text("S\n", encoding="utf-8")
+    future = (now + _dt.timedelta(minutes=1)).timestamp()
+    os.utime(intent, (future, future))
+    polls = iter([frozenset({str(tree.path).replace("\\", "/").lower()}), frozenset()])
+    naps = []
+    [session] = supervise.settle(
+        [tree], now + _dt.timedelta(hours=1), lambda: now, naps.append, busy=lambda: next(polls)
+    )
+    assert len(naps) == 1 and session.state == fix_reports.DONE
+
+
+def test_live_dirs_are_the_busy_sessions_claude_agents_lists(monkeypatch):
+    rows = [
+        {"cwd": r"C:\ws\devkit\.claude\worktrees\a", "status": "busy"},
+        {"cwd": r"C:\ws\devkit\.claude\worktrees\b", "status": "idle"},
+    ]
+    monkeypatch.setattr(supervise.bg_sessions, "listed", lambda _runner: rows)
+    assert supervise.live_dirs() == frozenset({"c:/ws/devkit/.claude/worktrees/a"})
+
+
 def test_settle_gives_up_at_its_deadline(tmp_path):
     now = _dt.datetime.now(_dt.UTC)
     tree = _tree(tmp_path, now - _dt.timedelta(minutes=5))
