@@ -153,6 +153,58 @@ def test_an_environment_failure_is_seen_through_a_pipe_that_hid_its_exit_code():
     assert classes([grep, result("x.py:1: No module named", "3", error=False)]) == []
 
 
+def test_an_error_quoted_inside_a_string_on_its_line_is_not_friction():
+    """The first supervised rehearsal would have filed seven groups from text that quoted
+    an error: a `git diff` of the rule's prose, pytest echoing an assertion's operands,
+    and the detector's own regex source. Each match sat after an opening quote on its
+    line, or in an assertion's report; a real error's line is neither."""
+    quoted = (
+        (
+            "git diff origin/main...HEAD -- x.md",
+            "+`python -m pytest` there fails with `No module named pytest`. The",
+        ),
+        (
+            "python -m pytest tests/x.py -q",
+            "E       assert \"ambiguous argument 'origin\\\\main;.devkit.toml'\" in '---'",
+        ),
+        (
+            "python -m pytest tests/x.py -q",
+            "E   AssertionError: backslashes: [\"ambiguous argument 'origin\\\\main;x'\"]",
+        ),
+        (
+            "git diff scripts/session_friction.py",
+            '66:            r"No module named|ModuleNotFoundError|"',
+        ),
+        # The supervisor's own red run, its assertion echoing the test's expected text.
+        (
+            "python -m pytest tests/x.py -q",
+            "E           AssertionError: 'pytest' is not recognized as an internal or external",
+        ),
+    )
+    for command, line in quoted:
+        assert classes([call(command, "1"), result(line, "1")]) == [], line
+    real = (
+        ("python -m pytest tests/x.py", "C:\\py\\python.exe: No module named pytest"),
+        (
+            "python -m pytest tests/x.py",
+            "ImportError: Error importing plugin \"randomly\": No module named 'randomly'",
+        ),
+        ("pytest tests/x.py", "'pytest' is not recognized as an internal or external command,"),
+        ("git show origin/main:x", "fatal: ambiguous argument 'origin\\main;x': unknown revision"),
+    )
+    for command, line in real:
+        assert classes([call(command, "1"), result(line, "1")]) == ["environment"], line
+    # A quoted mention earlier in the output does not hide the real error after it.
+    both = "x.md:3: prints \"No module named x\"\nModuleNotFoundError: No module named 'y'"
+    events = [
+        e
+        for n, r in enumerate([call("pytest tests/x.py", "1"), result(both, "1")], 1)
+        for e in st.claude_events(r, n)
+    ]
+    [(_, what, _)] = sf.detect(events)
+    assert what == "ModuleNotFoundError: No module named 'y'"
+
+
 def test_the_rule_names_the_spelling_that_avoids_the_error_the_detector_files():
     """A sweep documented the Git Bash `rev:path` rewrite only in the evidence file, and
     the next session paid for it again. The rule every session reads names the spelling,

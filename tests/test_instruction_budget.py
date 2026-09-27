@@ -430,7 +430,8 @@ def test_the_hot_budget_stays_under_its_ceiling():
     hot = sorted((d for d in docs if d.tier == "hot"), key=lambda d: -d.tokens)
     assert total <= HOT_CEILING, (
         f"always-loaded instruction tier is {total} tok, ceiling is {HOT_CEILING}. "
-        "Move a section to a lazy tier rather than raising the ceiling. Largest: "
+        "Move a section to a lazy tier rather than raising the ceiling; "
+        "python scripts/hot-budget.py re-measures it. Largest: "
         + ", ".join(f"{d.rel} ({d.tokens})" for d in hot[:3])
     )
 
