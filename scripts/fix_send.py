@@ -11,6 +11,7 @@ Tested through the pass in `tests/test_fix_pass.py`.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ import fix_findings
 import fix_ledger
 import fix_loop
 import fix_plan
+import host_memory
 import ship_intent
 import sweep
 from _loader import load_by_path
@@ -83,6 +85,13 @@ def hold_if_moved(
     )
 
 
+# A background fixer measured ~450 MB (the session and its pty host) once it loads no
+# MCP server; the floor leaves the person at the machine room for their own work.
+SESSION_MB = 500
+MEMORY_FLOOR_MB = 2048
+HELD_FOR_MEMORY = "held for memory"
+
+
 def update_branch(failure: fix_plan.Failure, root: Path) -> int:
     """An `UPDATE`: merge the base into the PR on GitHub, so its gate re-runs as-is now.
 
@@ -90,7 +99,13 @@ def update_branch(failure: fix_plan.Failure, root: Path) -> int:
     the new sha is a new ledger key and gets its session next pass; one GitHub cannot
     update (a conflict) reads `CONFLICTING` next pass and goes to the resolver.
     """
-    done = sweep.gh_for(root / failure.project)("pr", "update-branch", str(failure.number))
+    gh = sweep.gh_for(root / failure.project)
+    done = gh("pr", "update-branch", str(failure.number))
+    if done.returncode != 0 and (state := _state(gh, failure.number)) not in ("", "OPEN"):
+        # Closed or merged since the pass read it: "update-failed #390" was filed 27s
+        # after #390 closed, and a sweep spent two calls finding that out.
+        print(f"  {failure.project} #{failure.number}: {state.lower()} meanwhile; nothing to do")
+        return EXIT_OK
     if done.returncode != 0:
         why = (done.stderr or done.stdout or "").strip().splitlines()
         print(
@@ -99,6 +114,15 @@ def update_branch(failure: fix_plan.Failure, root: Path) -> int:
         return EXIT_FAILED
     print(f"  {failure.project} #{failure.number}: branch updated; the gate re-runs")
     return EXIT_OK
+
+
+def _state(gh, number: int) -> str:
+    """The PR's state (`OPEN`, `CLOSED`, `MERGED`), or "" when it cannot be read."""
+    done = gh("pr", "view", str(number), "--json", "state")
+    try:
+        return str(json.loads(done.stdout or "{}").get("state", "")) if done.returncode == 0 else ""
+    except (ValueError, AttributeError):
+        return ""
 
 
 def dispatch(
@@ -141,6 +165,7 @@ def send_all(
     sent: list[str] = []
     capped: list[tuple[fix_plan.Decision, str]] = []
     worst = EXIT_OK
+    room = host_memory.available_mb()
     for decision in go:
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
         if why := _occupied(decision, closed):
@@ -151,14 +176,31 @@ def send_all(
         verdict = fix_budget.budget(decision, ledger, ctx.now, escalated)
         if verdict.finding and journal is not None:
             journal.add(verdict.finding.at(closed.trees.get(problem, "")))
-        if not verdict.go:
-            capped.append((decision, verdict.why))
+        why = verdict.why if not verdict.go else _no_memory(decision, room)
+        if why:
+            capped.append((decision, why))
             continue
+        if room is not None and decision.action != fix_plan.UPDATE:
+            room -= SESSION_MB
         line, code = _send_one(decision, ctx, launch, verdict.effort, journal)
         sent.append(f"{names} -- {line}")
         worst = max(worst, code)
         ledger = fix_ledger.read_ledger(ctx.ledger_path)
     return sent, capped, worst
+
+
+def _no_memory(decision: fix_plan.Decision, room: int | None) -> str:
+    """Why the machine cannot take this session now, or "". Not a cap on sessions --
+    the pass has none -- but the one limit the machine sets regardless: round four sent
+    nine at once and Claude Code killed the supervisor for low memory. A held decision
+    is not recorded, so the next pass sends it; one held too long is a stale wait."""
+    if room is None or decision.action == fix_plan.UPDATE:
+        return ""
+    if room - SESSION_MB >= MEMORY_FLOOR_MB:
+        return ""
+    return (
+        f"{HELD_FOR_MEMORY}: {room} MB free, a session needs {SESSION_MB} above {MEMORY_FLOOR_MB}"
+    )
 
 
 def _occupied(decision: fix_plan.Decision, closed: fix_loop.Closed) -> str:

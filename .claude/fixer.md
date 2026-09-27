@@ -33,10 +33,14 @@ did not need to:
 - **Does the failure reproduce where you are?** If not, find where it does. A PR that is
   red while its base is green is red on its own diff, so fetch its head, add a worktree
   on it and work there.
-- **Is the obstacle a limit?** A structure finding is fixed in the code: make room by
-  reshaping or trimming what is already there. `scripts/hooks/structure_check.py --record` is the
-  documented exception for growth the change cannot avoid, and it needs the reason
-  written down.
+- **Is the obstacle a choice?** Never a blocker. Two ways to fix it, a design fork, a
+  question for the project's owner: the option you would recommend is the decision. Do
+  it, and put the reason and the alternatives in the intent. A sweep once stopped on a
+  three-option question whose recommended option was already marked.
+- **Is the obstacle a limit?** A module's size never is: `file_lines`, `imports` and
+  `definitions` only warn. A function or class limit is fixed in the code by reshaping
+  what is there; `scripts/hooks/structure_check.py --record` is the documented exception
+  for growth the change cannot avoid, and it needs the reason written down.
 - **Is the obstacle an instruction?** If it is one written for project sessions, the
   table above answers it.
 

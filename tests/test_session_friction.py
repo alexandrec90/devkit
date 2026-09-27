@@ -92,7 +92,85 @@ def test_the_prescribed_wait_and_a_sleep_in_source_text_are_not_polls():
     first live harvest filed both."""
     assert classes([call("gh pr checks 5 --watch --fail-fast", "1")]) == []
     heredoc = 'cat >> t.py <<\'EOF\'\n    chunk = call("sleep 99", "1")\nEOF'
-    assert classes([call(heredoc, "1")]) == []
+    assert "poll" not in classes([call(heredoc, "1")])
+
+
+def test_a_complaint_is_filed_whole_with_the_tree_it_was_said_in(tmp_path):
+    """The detail is a 90-character snippet, so a sweep parsed a 5,672-line transcript to
+    read one complaint -- and then 5 calls to learn the session it was said to had its fix
+    open already. The whole message, and where it was said, ride in `command`."""
+    ask = (
+        "a" * 200 + " it shouldn't just do ad hoc fixes, it should prevent it from happening again"
+    )
+    path = tmp_path / "t.jsonl"
+    rows = [user("start the work"), say("done"), user(ask)]
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    chunk = sf.st.read_new(path, 0, 0)
+    tree = tmp_path / "devkit" / ".claude" / "worktrees" / "twilight"
+    [found] = sf.session_findings(path, chunk, str(tree), tmp_path)
+    assert found.kind == "user-frustration" and len(found.detail) <= sf.SNIPPET
+    assert found.command.startswith(f"said in {tree}: ") and "happening again" in found.command
+
+
+def test_reading_the_harness_own_logs_back_is_not_the_friction_they_quote():
+    """A sweep read `logs/harness-triage.log`, which quotes "session is isolated in the
+    worktree", in a call that failed for another reason -- and the detector filed a fresh
+    isolation-guard group from the quote, which the next sweep spent 3 calls disproving."""
+    for command in (
+        "ls logs/ logs/gate/; cat logs/harness-triage.log",
+        "grep -n isolated ../../logs/harness-events-desktop.log",
+        "python -c \"import json; [print(l) for l in open('x.jsonl')]\"",
+        "cat logs/friction.filed.md",
+    ):
+        rows = [call(command, "1"), result("session is isolated in the worktree ...", "1")]
+        assert classes(rows) == [], command
+
+
+def test_an_environment_failure_is_seen_through_a_pipe_that_hid_its_exit_code():
+    """`python -m pytest ... | tail -3` exits 0 whatever pytest did, so "No module named
+    pytest" went unfiled -- twice in one sweep. A test run or a git call is read for an
+    environment failure whether or not the call failed; anything else is not."""
+    run = call("python -m pytest tests/test_x.py -q | tail -3", "1")
+    assert classes([run, result("No module named pytest", "1", error=False)]) == ["environment"]
+    git = call("git show origin\\master;x", "2")
+    said = "fatal: ambiguous argument 'origin\\master;x': unknown revision"
+    assert classes([git, result(said, "2", error=False)]) == ["environment"]
+    grep = call("grep -rn 'No module named' scripts", "3")
+    assert classes([grep, result("x.py:1: No module named", "3", error=False)]) == []
+
+
+def test_the_rule_names_the_spelling_that_avoids_the_error_the_detector_files():
+    """A sweep documented the Git Bash `rev:path` rewrite only in the evidence file, and
+    the next session paid for it again. The rule every session reads names the spelling,
+    and the error it quotes is the one the detector files."""
+    rule = (Path(__file__).resolve().parents[1] / ".claude" / "rules" / "engineering.md").read_text(
+        encoding="utf-8"
+    )
+    assert "origin/main:./.devkit.toml" in rule and "`ambiguous argument`" in rule
+    # Described there, not quoted: instruction files carry no backslashed paths.
+    assert sf._result_class("ambiguous argument 'origin\\main;.devkit.toml'")[0] == "environment"
+
+
+def test_a_file_written_through_a_shell_heredoc_is_friction():
+    """Claude Code's Bash tool collapses backslashes in a heredoc, so a file written or
+    patched through one comes out mangled. Three sessions lost turns to it on one day,
+    each retired by pointing at the rule that says to use Write/Edit -- and it recurred,
+    because only the sessions that noticed reported it. Every such write is filed now."""
+    for command in (
+        "cat > tests/test_x.py <<'EOF'\nassert r'\\b'\nEOF",
+        'cat >> t.py <<"EOF"\nx = 1\nEOF',
+        "tee scripts/a.py <<EOF\nprint(1)\nEOF",
+        "python - <<'EOF'\nfrom pathlib import Path\np = Path('a.py')\n"
+        "p.write_text(p.read_text().replace('a', 'b'))\nEOF",
+        "python3 - <<'PY'\nopen('x.txt', 'w').write('y')\nPY",
+    ):
+        assert classes([call(command, "1")]) == ["heredoc-write"], command
+    for harmless in (
+        "python - <<'EOF'\nimport json; print(json.load(open('a.json')))\nEOF",
+        "git commit -F - <<'EOF'\nsubject\nEOF",
+        "grep -c '<<' scripts/x.py",
+    ):
+        assert classes([call(harmless, "1")]) == [], harmless
 
 
 def test_the_full_suite_is_friction_and_a_targeted_run_is_not():
@@ -304,6 +382,30 @@ def test_a_dispatched_session_asking_a_question_is_friction_and_an_interactive_o
     ask = _tool("AskUserQuestion", "1", questions=[])
     assert classes([dispatched, ask]) == ["asked-user"]
     assert classes([user("help me design this"), ask]) == []
+
+
+def say(text: str) -> dict:
+    return {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}
+
+
+def test_a_dispatched_session_ending_on_a_decision_for_someone_else_is_friction():
+    """The ledger sweep's last words were "The last group needs your decision." -- nobody
+    was there, and it had already marked the option it would pick as recommended. Only
+    the final message counts: mid-session, "should I check X? yes" is thinking aloud."""
+    opening = user("Sweep the ledger. ... the fix pass commits, pushes, opens or updates the PR")
+    for ending in (
+        "Four groups are retired. The last group needs your decision.",
+        "Both work. Do you want me to pin it by rev?",
+        "Let me know which option you prefer.",
+    ):
+        assert classes([opening, say(ending)]) == ["handed-back"], ending
+    decided = say("I pinned data-lake by rev: it keeps worktrees independent.")
+    assert classes([opening, say("Should I read the tests first? Yes."), decided]) == []
+    assert classes([user("help me choose"), say("Do you want option 1?")]) == []
+    working = [opening, say("Should I pin it? I will."), call("uv lock", "1")]
+    assert classes(working) == [], "a harvest mid-session: it went on working"
+    asked = [opening, say("This needs your decision."), _tool("AskUserQuestion", "2")]
+    assert classes(asked) == ["asked-user", "handed-back"]
 
 
 def test_the_same_test_run_three_times_with_no_edit_between_is_a_rerun():

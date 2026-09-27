@@ -131,6 +131,14 @@ def test_the_role_points_at_a_fixer_file_every_consumer_receives():
     assert not set("\"'`") & set(fix_prompts.ROLE)
 
 
+def test_the_fixer_file_says_a_choice_is_never_a_blocker_and_size_only_warns():
+    """Every fixer reads this before its prompt's exit clause: it must not leave a design
+    fork looking like a stop, nor send a session shaving a module to fit its size."""
+    text = (REPO_ROOT / ".claude" / "fixer.md").read_text(encoding="utf-8")
+    assert "Is the obstacle a choice?** Never a blocker" in text
+    assert "`definitions` only warn" in text
+
+
 def test_no_prompt_offers_the_open_exit():
     """The phrasing that let any obstacle count as a blocker, anywhere in the module."""
     source = Path(fix_prompts.__file__).read_text(encoding="utf-8")
@@ -293,10 +301,43 @@ def test_every_prompt_names_the_ratchets_and_forbids_a_question():
     for text in every_prompt():
         assert "structure_check.py" in text and "untested_symbols.py" in text
         assert "never ask a question" in text
+        # A fixer ended on a question whose "(Recommended)" option was the answer.
+        assert "the option you would recommend is the decision" in text
+        # `STOP` once listed "a decision only a person has" as a blocker; a decision is
+        # never one -- the sweep that stopped on one had its recommendation in hand.
+        assert "never a decision, which is yours" in text and "a decision or" not in text
+        # A missing .venv came back session after session, each fixing only its own tree.
+        assert "Fix causes, not instances" in text and "the provisioner" in text
+        # A rule file said it and three sessions still lost turns: the prompt says it too.
+        assert "never a shell heredoc" in text
 
 
-def test_the_devkit_session_marks_a_sibling_tree_it_cuts_as_fixer_work():
-    assert (
-        "logs/fix-origin" in fix_prompts.LEDGER_STEPS
-        and "merges once green" in fix_prompts.LEDGER_STEPS
+def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linux():
+    """Two sweeps hand-parsed junit XML, and one shipped a Linux-only fix it could not
+    check here and said nothing about it."""
+    with_evidence = fix_prompts.pr_prompt(failure(evidence="C:/ev/carameli-pr-412"))
+    assert "failures.txt" in with_evidence and "ran on Linux" in with_evidence
+    assert "ran on Linux" in fix_prompts.pr_prompt(failure(evidence=""))
+    assert ".venv interpreter" in fix_prompts.FINISH
+    assert "--pr" in fix_prompts.LEDGER_STEPS and "any repository" in fix_prompts.LEDGER_STEPS
+
+
+def test_the_skill_the_ledger_sweep_follows_never_sends_it_to_the_user():
+    """`LEDGER_STEPS` sends the devkit session to this skill, which told it to ask the user
+    about "a fix needing a decision only the user can make" -- and it did, with nobody
+    there. It now says to decide, and why."""
+    skill = (REPO_ROOT / ".claude" / "skills" / "triage-harness" / "SKILL.md").read_text(
+        encoding="utf-8"
     )
+    assert "triage-harness/SKILL.md" in fix_prompts.LEDGER_STEPS
+    assert "Decide everything, and never ask" in skill
+    assert "Ask it, get the answer" not in skill and "stay the user's call" not in skill
+    assert "Fix the cause, never the instance" in skill and "RECURRED" in skill
+
+
+def test_the_devkit_session_cuts_sibling_trees_with_the_verb_that_marks_them():
+    """Told to copy the mark by hand, a sweep did not; the verb now does it
+    (`fix_reports.inherit_origin`), so the prompt names the verb, not the chore."""
+    steps = fix_prompts.LEDGER_STEPS
+    assert "scripts/agent-worktree.py new" in steps and "merges once green" in steps
+    assert "gets a copy" not in steps

@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 import re
 import subprocess
 import sys
@@ -82,6 +83,7 @@ TRACKED_WAITS = (
     "backing off",
     "held until the devkit session",
     "a session is working in",
+    "held for memory",  # fix_send.HELD_FOR_MEMORY
 )
 # Record lines that are a failure, and the finding kind that must be open for each.
 FAILURE_KINDS = (
@@ -300,7 +302,14 @@ def _render(transcript: Path | None, out: Path | None, tree: Path) -> str:
 def run_pass(workspace: Path, mode: str) -> tuple[int | None, str]:
     argv = [sys.executable, str(WATCHDOG), "--mode", mode, "--workspace", str(workspace)]
     done = subprocess.run(
-        argv, capture_output=True, text=True, check=False, creationflags=NO_WINDOW
+        argv,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={**os.environ, "PYTHONUTF8": "1"},  # as the watchdog runs the pass
+        check=False,
+        creationflags=NO_WINDOW,
     )
     return done.returncode, (done.stdout or "") + (done.stderr or "")
 

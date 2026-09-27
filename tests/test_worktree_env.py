@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -273,11 +274,56 @@ def test_the_manifests_python_pin_reaches_the_sync():
         ({"own_venv": True}, "already provisioned"),
         ({"checkout_venv": False}, "a cold checkout: nothing says the uv cache is warm"),
         ({"uv": None}, "no uv on PATH"),
-        ({"install_command": "make dev"}, "a manifest install_command is a shell string"),
+        ({"install_command": "make dev && make db"}, "needs a shell: not run inside worktree add"),
     ],
 )
 def test_every_other_shape_is_left_to_the_provision_verb(overrides, why):
     assert _facts(**overrides).command() == (), why
+
+
+def test_a_plain_install_command_is_run_as_argv_on_this_interpreter():
+    """carameli's is `python scripts/bootstrap.py`: stdlib, idempotent, uv underneath.
+    Refusing every manifest command as "a shell string" left every carameli worktree
+    with no `.venv`. One with no shell syntax needs no shell, so it runs as argv -- on
+    the interpreter running this hook, since that one certainly exists."""
+    facts = _facts(locked=False, install_command="python scripts/bootstrap.py")
+    assert facts.command() == (sys.executable, "scripts/bootstrap.py")
+    assert _facts(locked=False, install_command="npm ci").command() == ("npm", "ci")
+    assert _facts(install_command="python x.py", own_venv=True).command() == ()
+
+
+@pytest.mark.parametrize(
+    "command, argv",
+    [
+        ("python scripts/bootstrap.py", (sys.executable, "scripts/bootstrap.py")),
+        ("uv sync --frozen", ("uv", "sync", "--frozen")),
+        ("make dev && make db", ()),
+        ("npm ci | tee log", ()),
+        ("python scripts\\bootstrap.py", ()),  # a backslash is shell-or-path ambiguity
+        ('python -c "print(1)"', ()),
+        ("   ", ()),
+    ],
+)
+def test_plain_argv_takes_only_what_needs_no_shell(command, argv):
+    assert wt_env.plain_argv(command) == argv
+
+
+@pytest.mark.parametrize(
+    "overrides, gap",
+    [
+        ({"uv": None}, "uv is not on PATH"),
+        ({"locked": False, "install_command": "make dev && make db"}, "needs a shell"),
+        ({"own_venv": True}, ""),
+        ({"checkout_venv": False}, ""),
+        ({"locked": False}, ""),
+        ({}, ""),
+    ],
+)
+def test_a_tree_left_unprovisioned_for_a_fixable_reason_says_so(overrides, gap):
+    """A cold checkout or a project with nothing to install is left alone on purpose;
+    a missing `uv` or a command the hook cannot run is a gap to close, not to skip."""
+    found = _facts(**overrides).gap()
+    assert (gap in found) if gap else found == ""
 
 
 def test_the_facts_are_read_off_disk(tmp_path):
@@ -366,6 +412,33 @@ def test_a_failed_sync_relays_its_tail_and_the_command_to_rerun(tmp_path):
     assert "failed" in line
     assert "error: no index" in line
     assert "uv sync --all-extras --all-groups" in line
+
+
+def test_a_failure_or_a_gap_is_left_as_the_trees_friction_for_the_pass_to_file(tmp_path):
+    """The hook's only report was a line inside `git worktree add`, which `claude
+    --worktree` swallows -- so a tree came up with no `.venv` and nothing anywhere said
+    why. The tree's friction file is what the fix pass files on the ledger."""
+    checkout, tree = _provisionable(tmp_path)
+    wt_env.provision(
+        tree, checkout, runner=_Run(1, stderr="error: no index\n"), environ={}, uv="uv"
+    )
+    friction = (tree / wt_env.FRICTION_FILE).read_text(encoding="utf-8")
+    assert friction.startswith("- devkit's worktree hook left this worktree unprovisioned: ")
+    assert "error: no index" in friction
+    other = _worktree(checkout, tmp_path / "wt2", "topic-2")
+    (other / "uv.lock").write_text("", encoding="utf-8")
+    line = wt_env.provision(other, checkout, runner=_Run(), environ={}, uv="")
+    assert "uv is not on PATH" in line
+    assert "uv is not on PATH" in (other / wt_env.FRICTION_FILE).read_text(encoding="utf-8")
+    fine = _worktree(checkout, tmp_path / "wt3", "topic-3")
+    (fine / "uv.lock").write_text("", encoding="utf-8")
+    wt_env.provision(fine, checkout, runner=_Run(), environ={}, uv="uv")
+    assert not (fine / wt_env.FRICTION_FILE).exists()
+
+
+def test_the_friction_file_is_the_one_the_pass_reads():
+    """Installed alone into `~/.devkit/git-hooks`, the hook cannot import the pass."""
+    assert wt_env.FRICTION_FILE == load_script("scripts/fix_reports.py").FRICTION_FILE
 
 
 def test_a_sync_that_hangs_or_cannot_start_is_named_not_waited_for(tmp_path):

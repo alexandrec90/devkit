@@ -97,7 +97,26 @@ COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.M,
         ),
     ),
+    # A file written or patched through a shell heredoc: Claude Code's Bash tool collapses
+    # backslashes in one. Retired three times as "use Write/Edit" and back each time,
+    # since only the sessions that noticed the damage reported it -- so every write is.
+    (
+        "heredoc-write",
+        re.compile(
+            r"(?:^|[;&|]\s*)(?:cat\s[^\n<]*>|tee\s)[^\n<]*<<|"
+            r"<<-?\s*['\"]?\w+['\"]?\n(?=[\s\S]*?(?:\.write_text\(|\.write\(|open\([^)\n]*,\s*(?:mode\s*=\s*)?['\"][wa]))",
+            re.M,
+        ),
+    ),
 )
+
+# A command reading back text the harness wrote, which quotes the very patterns above:
+# the triage log, the ledger, a transcript, a friction file. Its output is never friction.
+READS_HARNESS_TEXT = re.compile(
+    r"harness-triage\.log|harness-events[^\s'\"]*\.log|\.jsonl\b|friction[^\s'\"/\\]*\.md"
+)
+# A command whose output is read for an environment failure even when it exited 0.
+SEES_ENVIRONMENT = re.compile(r"(?:^|[;&|]\s*)(?:\S*python\S*\s+-m\s+pytest|pytest|git)\b", re.M)
 
 # The opening message of a session the fix pass dispatched: every prompt's finish line.
 DISPATCHED = "the fix pass commits, pushes"
@@ -147,6 +166,15 @@ FRUSTRATION = re.compile(
     re.I,
 )
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# A dispatched session's last words handing a choice to someone who is not there. The
+# ledger sweep ended "the last group needs your decision" with its pick marked
+# "(Recommended)" -- a recommendation is the decision, so this is always a lost session.
+HANDED_BACK = re.compile(
+    r"\bneeds? your (?:decision|call|input|approval|go-ahead)\b|\byour call\b|\bup to you\b|"
+    r"\b(?:let me know|tell me) (?:which|if|whether|how)\b|\b(?:do|would) you (?:want|like|prefer)\b|"
+    r"\b(?:should|shall) I\b|\bwant me to\b",
+    re.I,
+)
 
 
 # --- the detectors ------------------------------------------------------------------------
@@ -191,6 +219,7 @@ COMMAND_DETAIL = {
     "full-suite": "a session ran a whole test suite where a targeted run was asked for",
     "poll": "a session waited in a sleep or until loop",
     "no-verify": "a session committed with --no-verify",
+    "heredoc-write": "a session wrote a file through a shell heredoc, which the Bash tool mangles",
 }
 
 
@@ -229,6 +258,7 @@ class _Session:
     # Commands run since the last edit, by what runs before any pipe: the same run again
     # with only its `| tail` changed read nothing new -- five times in one session.
     unchanged: dict[str, int] = field(default_factory=dict)
+    last_said: Event | None = None  # the agent's latest text: how the session ended
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -243,6 +273,8 @@ class _Session:
 
     def call(self, event: Event) -> None:
         self.calls[event.call_id] = event.command
+        if event.tool != "AskUserQuestion":
+            self.last_said = None  # it went on working: that text was not how it ended
         for cls, what in _command_classes(event.command):
             self.note(cls, what, event)
         if event.tool == "AskUserQuestion" and self.dispatched:
@@ -255,6 +287,15 @@ class _Session:
             # Only a test run: reading `git status` thrice between edits is not waste.
             self._rerun(event)
 
+    def say(self, event: Event) -> None:
+        self.last_said = event
+
+    def ending(self) -> None:
+        """Judge the last thing the agent said, once the session's events are read."""
+        said = self.last_said
+        if self.dispatched and said and HANDED_BACK.search(said.text):
+            self.note("handed-back", "a dispatched session ended on a decision for nobody", said)
+
     def _rerun(self, event: Event) -> None:
         key = normalize(event.command.split("|", 1)[0])[:SNIPPET]
         self.unchanged[key] = self.unchanged.get(key, 0) + 1
@@ -263,11 +304,22 @@ class _Session:
                 "rerun-unchanged", "a session re-ran the same tests with no edit between", event
             )
 
+    def succeeded(self, event: Event) -> None:
+        """A call that exited 0 still failed if it was a test run or a git call reporting
+        a missing environment: `| tail` hides pytest's exit code."""
+        command = self.calls.get(event.call_id, "")
+        if not SEES_ENVIRONMENT.search(command) or READS_HARNESS_TEXT.search(command):
+            return
+        cls, what = _result_class(event.text)
+        if cls == "environment":
+            self.note(cls, what, replace(event, command=command))
+
     def failed(self, event: Event) -> None:
         """A failed call only: a file that merely quotes an error is not one."""
         command = self.calls.get(event.call_id, "")
         event = replace(event, command=command)
-        self.note(*_result_class(event.text), event)
+        if not READS_HARNESS_TEXT.search(command):
+            self.note(*_result_class(event.text), event)
         # A test run failing again is the work of fixing it, not a wasted retry.
         if command and not TEST_RUN.search(command):
             self.failures.setdefault(normalize(command)[:SNIPPET], []).append(event)
@@ -276,16 +328,16 @@ class _Session:
 def detect(events: Iterable[Event]) -> list[tuple[str, str, Event]]:
     """`(class, what, event)` for every friction in one session's events, each once."""
     session = _Session()
-    handlers = {"user": session.user, "call": session.call}
+    handlers = {"user": session.user, "call": session.call, "say": session.say}
     for event in events:
         if event.kind == "result":
-            if event.error:
-                session.failed(event)
+            (session.failed if event.error else session.succeeded)(event)
         elif event.kind in handlers:
             handlers[event.kind](event)
     for what, runs in session.failures.items():
         if len(runs) >= REPEATS:
             session.note("repeat-failure", f"x{len(runs)} {what}", runs[-1])
+    session.ending()
     return [(cls, what, event) for (cls, what), event in session.found.items()]
 
 
@@ -306,12 +358,21 @@ def session_findings(
             project,
             what,
             evidence=f"{path}#L{event.line}",
-            command=event.command[:300],
+            command=_said(cls, event, cwd),
             event=fix_findings.FRICTION,
             agent=agent,
         )
         for cls, what, event in detect(st.events(path, chunk.rows))
     ]
+
+
+def _said(cls: str, event: Event, cwd: str) -> str:
+    """What rides in a finding's `command`: the call, or a complaint whole with the tree
+    it was said in -- the detail is a snippet, and a sweep parsed a 5,672-line transcript
+    to read one, then spent 5 calls learning that session had its fix open already."""
+    if cls != "user-frustration":
+        return event.command[:300]
+    return f"said in {cwd}: {' '.join(ANSI.sub('', event.text).split())[:1500]}"
 
 
 def _under(cwd: str, root: Path) -> bool:

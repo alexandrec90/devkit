@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fix_reports
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -32,12 +33,26 @@ def argv(tree: Path) -> list[str]:
 
 
 def provision(tree: Path, runner=subprocess.run) -> bool:
-    """Whether the tree's toolchain is installed. A failure is printed and the session
-    still goes: it may not need the toolchain, and if it does, its transcript files the
-    friction."""
-    done = runner(argv(tree), check=False, capture_output=True, text=True)
+    """Whether the tree's toolchain is installed. The session still goes on a failure --
+    it may not need the toolchain -- and the failure is left in the tree's friction
+    file, which the next pass files on the ledger: printed alone, it reached nobody.
+
+    Read as UTF-8: the console code page could not decode a byte of `uv`'s output, and
+    the reader thread's traceback in the pass's output read as the pass crashing."""
+    done = runner(
+        argv(tree),
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     if done.returncode != 0:
         tail = " ".join(((done.stderr or "") + (done.stdout or "")).split())[-200:]
         print(f"  provisioning {tree} failed: {tail}", file=sys.stderr)
+        friction = tree / fix_reports.FRICTION_FILE
+        friction.parent.mkdir(parents=True, exist_ok=True)
+        with friction.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(f"- provisioning this tree failed before the session opened: {tail}\n")
         return False
     return True

@@ -235,10 +235,29 @@ def groups(items: list[Item]) -> list[tuple[tuple[str, str, str, str], list[Item
     return sorted(buckets.items(), key=lambda kv: (-len(kv[1]), kv[0]))
 
 
-def render(items: list[Item]) -> str:
-    """The open backlog as text -- the artifact, and what the CLI prints."""
+def past_fixes(history: list[Item]) -> dict[tuple[str, str, str, str], list[str]]:
+    """`signature -> notes` of every resolution still standing on an item of it.
+
+    A group that is open *and* has one of these came back after it was retired: the fix
+    repaired an instance and left the cause. That is the difference between a durable
+    fix and an ad hoc one, and nothing else on the ledger shows it.
+    """
+    by_id = {item.id: item for item in history}
+    standing = resolved_refs(history)
+    notes: dict[tuple[str, str, str, str], list[str]] = {}
+    for item in history:
+        ref = item.fields.get("ref", "")
+        if item.event == RESOLVED_EVENT and ref in standing and ref in by_id:
+            notes.setdefault(by_id[ref].signature, []).append(item.fields.get("note", ""))
+    return notes
+
+
+def render(items: list[Item], history: list[Item] | None = None) -> str:
+    """The open backlog as text -- the artifact, and what the CLI prints. With the whole
+    `history`, a group that recurred after a resolution says so."""
     if not items:
         return "harness-triage: nothing open\n"
+    fixes = past_fixes(history or [])
     lines = ["# source: scripts/harness_triage.py", f"# open: {len(items)}", ""]
     for (event, agent, project, _), bucket in groups(items):
         head = bucket[0]
@@ -256,6 +275,12 @@ def render(items: list[Item]) -> str:
                 lines.append(f"  {name:<6} {head.fields[name]}")
         if len(bucket) > 1:
             lines.append(f"  ids    {' '.join(i.id for i in bucket)}")
+        if before := fixes.get(head.signature):
+            times = f"{len(before)} resolution" + ("s" if len(before) > 1 else "")
+            lines.append(
+                f"  RECURRED after {times} -- last: {before[-1]} -- that fix did not hold; "
+                "fix the cause so it cannot come back"
+            )
         lines.append("")
     lines.append(
         "resolve: python scripts/harness_triage.py --resolve-like <id> --note '<what fixed it>'"
@@ -393,11 +418,11 @@ def main(argv: list[str] | None = None) -> int:
         items = load()
 
     shown = for_agent(items if args.all else open_items(items), args.agent)
-    text = render(shown)
+    text = render(shown, items)
     # The artifact is always the *whole* backlog, whatever the terminal was filtered to:
     # `logs/harness-triage.log` is what the next session reads, and one written under a
     # `--agent` filter would read as "this is everything" while hiding the other runtime.
-    path = write_artifact(render(open_items(items)))
+    path = write_artifact(render(open_items(items), items))
     print(text, end="")
     print(f"harness-triage: {len(open_items(items))} open -- {path}")
     return 0
