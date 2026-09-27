@@ -20,6 +20,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -231,6 +232,18 @@ def test_a_finding_reaches_the_artifact_without_colour_codes():
     section = lint_all.run_tool("ruff", COLOURED_FAILURE, "hint")
     assert "\x1b" not in section
     assert "B023 a.py:1:1" in section
+
+
+def test_a_hung_linter_is_killed_at_the_bound_and_reported():
+    """A project's runner once ran pip-audit for 18 minutes with no bound. A tool that
+    never answers is a failure with a section, not a skip, and never a wait."""
+    hung = [sys.executable, "-c", "import time; time.sleep(120)"]
+    began = time.monotonic()
+    section = lint_all.run_tool("ruff", hung, "hint", timeout=2)
+    assert time.monotonic() - began < 60
+    assert section.startswith("# ruff\n")
+    assert "killed after 2s" in section
+    assert "ruff" not in lint_all._SKIPPED
 
 
 def test_no_skipped_required_tool_means_no_complaint():

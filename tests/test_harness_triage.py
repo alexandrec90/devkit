@@ -7,6 +7,8 @@ of the workspace is writing to concurrently.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from support import load_script
 
 triage = load_script("scripts/harness_triage.py")
@@ -489,6 +491,95 @@ def test_a_group_whose_fix_is_still_in_flight_is_pending_not_recurred():
     # A later resolution that landed outranks an older one still in flight.
     later = _line("triage-resolved", stamp="2026-08-24T12:00:05+00:00", ref=ref, note="n")
     assert triage.pending_groups(triage.read_items("\n".join((first, held, later))), {}) == {}
+
+
+def _in_flight_workspace(tmp_path, *, cache: bool):
+    """A devkit checkout under a workspace whose one group recurred while its fix, a
+    branch with no merge on record, is still in flight."""
+    now = datetime.now(UTC)
+
+    def stamp(hours: int) -> str:
+        return (now - timedelta(hours=hours)).isoformat()
+
+    first = _line("fix-pass-finding", project="devkit", stamp=stamp(5), detail="installer-failed")
+    held = _line(
+        "triage-resolved", stamp=stamp(4), ref=triage.item_id(first), pr="agent/x", note="n"
+    )
+    again = _line("fix-pass-finding", project="devkit", stamp=stamp(1), detail="installer-failed")
+    devkit = _ledger(tmp_path / "devkit", first, held, again)
+    if cache:
+        (tmp_path / ".worktrees").mkdir()
+        (tmp_path / ".worktrees" / "triage-verified.json").write_text("[]", encoding="utf-8")
+    return devkit
+
+
+def test_the_cli_shows_a_group_the_pass_holds_as_pending_not_open(tmp_path, monkeypatch, capsys):
+    """The pass held 06bc9ef3 for its unmerged fix and sent nobody at it, while the CLI
+    -- the count the triage skill ends a sweep on -- printed it as RECURRED and open."""
+    monkeypatch.setenv("DEVKIT_DIR", str(_in_flight_workspace(tmp_path, cache=True)))
+    monkeypatch.setattr(triage, "REPO_ROOT", tmp_path / "devkit")
+    assert triage.main([]) == 0
+    out = capsys.readouterr().out
+    assert "PENDING on agent/x" in out and "RECURRED" not in out
+    assert "0 open, 1 pending an unmerged fix" in out
+    artifact = (tmp_path / "devkit" / triage.ARTIFACT).read_text(encoding="utf-8")
+    assert "PENDING on agent/x" in artifact
+    assert "# open: 0 open, 1 pending an unmerged fix" in artifact
+
+
+def test_the_cli_claims_nothing_pending_without_the_pass_cache(tmp_path, monkeypatch, capsys):
+    """No cache means no settled refs, so a fix that merged would read as pending and
+    hide a true recurrence: absent, the CLI says what it said before."""
+    monkeypatch.setenv("DEVKIT_DIR", str(_in_flight_workspace(tmp_path, cache=False)))
+    monkeypatch.setattr(triage, "REPO_ROOT", tmp_path / "devkit")
+    assert triage.main([]) == 0
+    out = capsys.readouterr().out
+    assert "RECURRED" in out and "1 open --" in out
+
+
+def test_the_verified_cache_sits_in_the_workspace_box_root(tmp_path):
+    shard = tmp_path / "devkit" / "logs" / "harness-events-host.log"
+    assert triage.verified_cache(shard) == tmp_path / ".worktrees" / "triage-verified.json"
+
+
+def test_in_flight_here_claims_nothing_without_a_cache(tmp_path):
+    items = triage.read_items(
+        _line("triage-resolved", stamp=datetime.now(UTC).isoformat(), ref="r", pr="12", note="n")
+    )
+    now = datetime.now(UTC)
+    assert triage.in_flight_here(items, tmp_path / "absent.json", now) == {}
+    cache = tmp_path / "triage-verified.json"
+    cache.write_text("[]", encoding="utf-8")
+    assert triage.in_flight_here(items, cache, now) == {"r": "12"}
+    cache.write_text('["r"]', encoding="utf-8")
+    assert triage.in_flight_here(items, cache, now) == {}, "settled: it merged"
+
+
+def test_load_settled_reads_a_list_and_nothing_else(tmp_path):
+    path = tmp_path / "cache.json"
+    assert triage.load_settled(path) == set()
+    path.write_text('["a", "b"]', encoding="utf-8")
+    assert triage.load_settled(path) == {"a", "b"}
+    path.write_text('{"a": 1}', encoding="utf-8")
+    assert triage.load_settled(path) == set()
+    path.write_text("not json", encoding="utf-8")
+    assert triage.load_settled(path) == set()
+
+
+def test_within_measures_from_the_stamp_and_rejects_a_bad_one():
+    now = datetime(2026, 9, 27, tzinfo=UTC)
+    day = timedelta(days=1)
+    assert triage.within("2026-09-26T12:00:00+00:00", now, day)
+    assert not triage.within("2026-09-20T00:00:00+00:00", now, day)
+    assert not triage.within("not a stamp", now, day)
+
+
+def test_the_count_line_splits_pending_from_open():
+    a, b = triage.read_items(
+        "\n".join((_line("agent-report", message="a"), _line("agent-report", message="b")))
+    )
+    assert triage.count_line([a, b], {}) == "2 open"
+    assert triage.count_line([a, b], {a.signature: "9"}) == "1 open, 1 pending an unmerged fix"
 
 
 def test_a_group_reports_its_count_and_every_id(tmp_path):

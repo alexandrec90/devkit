@@ -21,79 +21,34 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
-import re
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness_triage as triage
 
-WINDOW = _dt.timedelta(days=14)
+# What a resolution in flight *is* lives in `harness_triage`, below this module, because
+# the triage CLI shows those groups as pending too and importing this module from there
+# would be a cycle. Re-exported so every caller keeps one place to reach it by.
+WINDOW = triage.VERIFY_WINDOW
+CACHE_NAME = triage.VERIFIED_CACHE_NAME
+Resolution = triage.Resolution
+target = triage.target
+recent = triage.recent
+in_flight = triage.in_flight
+_within = triage.within
+_load = triage.load_settled
+
 UNLANDED_AFTER = _dt.timedelta(days=2)
-CACHE_NAME = "triage-verified.json"
 
 LANDED = "MERGED"
 CLOSED = "CLOSED"
 OPEN = "OPEN"
 
-PR_URL = re.compile(r"github\.com/[^/\s]+/(?P<repo>[^/\s]+)/pull/(?P<number>\d+)")
-PR_NUMBER = re.compile(r"^#?(?P<number>\d+)$")
-BRANCH = re.compile(r"^[\w.-]+(?:/[\w.-]+)+$")
-
 # `(where, what)` -> the states of every PR it matches: `where` a project name or "" for
 # every project, `what` a number or a head branch. The IO half, injected.
 Lookup = Callable[[str, str], list[str]]
-
-
-@dataclass(frozen=True)
-class Resolution:
-    ref: str
-    stamp: str
-    pr: str
-    note: str
-
-
-def target(pr: str) -> tuple[str, str]:
-    """`(project, number-or-branch)` a resolution's `pr=` names; `("", "")` for none.
-
-    A bare number is a devkit PR, the ledger being devkit's. A URL names its repo. A
-    value shaped like a branch (`agent/fix-x-0919`) is looked up in every project.
-    """
-    text = pr.strip().rstrip(".,;")
-    if found := PR_URL.search(text):
-        return found["repo"], found["number"]
-    if found := PR_NUMBER.match(text):
-        return "devkit", found["number"]
-    if BRANCH.match(text):
-        return "", text
-    return "", ""
-
-
-def recent(
-    items: list[triage.Item], now: _dt.datetime, window: _dt.timedelta = WINDOW
-) -> list[Resolution]:
-    """Resolutions that still stand, from inside `window`, that name something to check."""
-    standing = triage.verdicts(items)
-    found = []
-    for item in items:
-        ref = item.fields.get("ref", "")
-        if item.event != triage.RESOLVED_EVENT or standing.get(ref) != (item.event, item.stamp):
-            continue
-        if not target(item.fields.get("pr", ""))[1] or not _within(item.stamp, now, window):
-            continue
-        found.append(
-            Resolution(ref, item.stamp, item.fields.get("pr", ""), item.fields.get("note", ""))
-        )
-    return found
-
-
-def _within(stamp: str, now: _dt.datetime, window: _dt.timedelta) -> bool:
-    try:
-        return now - _dt.datetime.fromisoformat(stamp) <= window
-    except ValueError:
-        return False
 
 
 def judge(resolution: Resolution, states: list[str], now: _dt.datetime) -> str:
@@ -130,23 +85,6 @@ def verify(
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(sorted(settled)) + "\n", encoding="utf-8")
     return reopen
-
-
-def in_flight(items: list[triage.Item], cache_path: Path, now: _dt.datetime) -> dict[str, str]:
-    """`ref -> pr` of every resolution whose fix has not landed: standing, recent, naming
-    a PR or branch, and not settled. `verify` reopens the closed and the never-opened, so
-    after it runs what is left here is open or still inside its grace -- in flight, and
-    what `harness_triage.pending_groups` keeps from being dispatched as a recurrence."""
-    settled = _load(cache_path)
-    return {r.ref: r.pr for r in recent(items, now) if r.ref not in settled}
-
-
-def _load(path: Path) -> set[str]:
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return set()
-    return {str(ref) for ref in loaded} if isinstance(loaded, list) else set()
 
 
 def gh_lookup(root: Path, projects: list[str], gh_for) -> Lookup:

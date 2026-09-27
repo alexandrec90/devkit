@@ -33,7 +33,10 @@ Tested in `tests/test_harness_triage.py`.
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import hashlib
+import json
+import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -274,6 +277,109 @@ def pending_groups(
     return {sig: in_flight[ref] for sig, (_, ref) in latest.items() if ref in in_flight}
 
 
+# --- fixes in flight ------------------------------------------------------------------
+#
+# What `fix_verify.py` holds a resolution to, kept here rather than there because the CLI
+# below shows those groups as pending too, and `fix_verify` imports this module.
+
+# How far back a resolution is still checked against the fix it names.
+VERIFY_WINDOW = _dt.timedelta(days=14)
+# `fix_verify`'s settled refs, beside the pass's dispatch ledger (`fix-pass.py`).
+VERIFIED_CACHE_NAME = "triage-verified.json"
+
+PR_URL = re.compile(r"github\.com/[^/\s]+/(?P<repo>[^/\s]+)/pull/(?P<number>\d+)")
+PR_NUMBER = re.compile(r"^#?(?P<number>\d+)$")
+BRANCH = re.compile(r"^[\w.-]+(?:/[\w.-]+)+$")
+
+
+@dataclass(frozen=True)
+class Resolution:
+    ref: str
+    stamp: str
+    pr: str
+    note: str
+
+
+def target(pr: str) -> tuple[str, str]:
+    """`(project, number-or-branch)` a resolution's `pr=` names; `("", "")` for none.
+
+    A bare number is a devkit PR, the ledger being devkit's. A URL names its repo. A
+    value shaped like a branch (`agent/fix-x-0919`) is looked up in every project.
+    """
+    text = pr.strip().rstrip(".,;")
+    if found := PR_URL.search(text):
+        return found["repo"], found["number"]
+    if found := PR_NUMBER.match(text):
+        return "devkit", found["number"]
+    if BRANCH.match(text):
+        return "", text
+    return "", ""
+
+
+def recent(
+    items: list[Item], now: _dt.datetime, window: _dt.timedelta = VERIFY_WINDOW
+) -> list[Resolution]:
+    """Resolutions that still stand, from inside `window`, that name something to check."""
+    standing = verdicts(items)
+    found = []
+    for item in items:
+        ref = item.fields.get("ref", "")
+        if item.event != RESOLVED_EVENT or standing.get(ref) != (item.event, item.stamp):
+            continue
+        if not target(item.fields.get("pr", ""))[1] or not within(item.stamp, now, window):
+            continue
+        found.append(
+            Resolution(ref, item.stamp, item.fields.get("pr", ""), item.fields.get("note", ""))
+        )
+    return found
+
+
+def within(stamp: str, now: _dt.datetime, window: _dt.timedelta) -> bool:
+    try:
+        return now - _dt.datetime.fromisoformat(stamp) <= window
+    except ValueError:
+        return False
+
+
+def load_settled(path: Path) -> set[str]:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {str(ref) for ref in loaded} if isinstance(loaded, list) else set()
+
+
+def in_flight(items: list[Item], cache_path: Path, now: _dt.datetime) -> dict[str, str]:
+    """`ref -> pr` of every resolution whose fix has not landed: standing, recent, naming
+    a PR or branch, and not settled. `fix_verify.verify` reopens the closed and the
+    never-opened, so after it runs what is left here is open or still inside its grace --
+    in flight, and what `pending_groups` keeps from being dispatched as a recurrence."""
+    settled = load_settled(cache_path)
+    return {r.ref: r.pr for r in recent(items, now) if r.ref not in settled}
+
+
+def verified_cache(ledger: Path) -> Path:
+    """Where the fix pass keeps its settled refs, for the ledger shard at `ledger`:
+    beside its dispatch ledger, in the workspace's box root (`fix-pass.py`)."""
+    import worktree_tiers  # the hooks dir, put on the path at the top of this module
+
+    workspace = ledger.parent.parent.parent  # <workspace>/devkit/logs/<shard>
+    return workspace / worktree_tiers.BOXES_DIR_NAME / VERIFIED_CACHE_NAME
+
+
+def in_flight_here(items: list[Item], cache: Path, now: _dt.datetime) -> dict[str, str]:
+    """`in_flight` as the fix pass computes it, or nothing without its cache.
+
+    The CLI used to render with no `pending` at all, so a group the pass was holding for
+    an unmerged fix (and so never sent) printed as `RECURRED ... that fix did not hold`
+    and counted as open: a sweep ending on `harness_triage.py`, as the skill says to, read
+    a live defect that the pass had deliberately left to its PR. A missing cache claims
+    nothing, because with no settled refs a fix that *had* merged would read as pending
+    and hide a real recurrence.
+    """
+    return in_flight(items, cache, now) if cache.is_file() else {}
+
+
 def render(
     items: list[Item],
     history: list[Item] | None = None,
@@ -286,7 +392,7 @@ def render(
         return "harness-triage: nothing open\n"
     fixes = past_fixes(history or [])
     pending = pending or {}
-    lines = ["# source: scripts/harness_triage.py", f"# open: {len(items)}", ""]
+    lines = ["# source: scripts/harness_triage.py", f"# open: {count_line(items, pending)}", ""]
     for (event, agent, project, _), bucket in groups(items):
         head = bucket[0]
         seen = f" (x{len(bucket)}, since {bucket[-1].stamp})" if len(bucket) > 1 else ""
@@ -452,14 +558,24 @@ def main(argv: list[str] | None = None) -> int:
         items = load()
 
     shown = for_agent(items if args.all else open_items(items), args.agent)
-    text = render(shown, items)
+    now = _dt.datetime.now(_dt.UTC)
+    pending = pending_groups(items, in_flight_here(items, verified_cache(ledger_file()), now))
+    text = render(shown, items, pending)
     # The artifact is always the *whole* backlog, whatever the terminal was filtered to:
     # `logs/harness-triage.log` is what the next session reads, and one written under a
     # `--agent` filter would read as "this is everything" while hiding the other runtime.
-    path = write_artifact(render(open_items(items), items))
+    path = write_artifact(render(open_items(items), items, pending))
     print(text, end="")
-    print(f"harness-triage: {len(open_items(items))} open -- {path}")
+    print(f"harness-triage: {count_line(open_items(items), pending)} -- {path}")
     return 0
+
+
+def count_line(items: list[Item], pending: Mapping[tuple[str, str, str, str], str]) -> str:
+    """`N open`, plus how many more wait on a fix's merge -- the pass's own split
+    (`fix_backlog.ledger_failure`), so a sweep ends at the number the pass acts on."""
+    held = sum(1 for i in items if i.signature in pending)
+    live = f"{len(items) - held} open"
+    return f"{live}, {held} pending an unmerged fix" if held else live
 
 
 if __name__ == "__main__":
