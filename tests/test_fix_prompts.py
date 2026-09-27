@@ -325,11 +325,14 @@ def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linu
 def test_the_skill_the_ledger_sweep_follows_never_sends_it_to_the_user():
     """`LEDGER_STEPS` sends the devkit session to this skill, which told it to ask the user
     about "a fix needing a decision only the user can make" -- and it did, with nobody
-    there. It now says to decide, and why."""
+    there. It now says to decide, and why. On 2026-09-26 a dispatched session followed the
+    skill's "Ask it, get the answer, fix it" into an `AskUserQuestion` nobody answered,
+    while the prompt that sent it said never to ask."""
     skill = (REPO_ROOT / ".claude" / "skills" / "triage-harness" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     assert "triage-harness/SKILL.md" in fix_prompts.LEDGER_STEPS
+    assert "never ask a question" in fix_prompts.upstream_prompt((failure(),), "a/b")
     assert "Decide everything, and never ask" in skill
     assert "Ask it, get the answer" not in skill and "stay the user's call" not in skill
     assert "Fix the cause, never the instance" in skill and "RECURRED" in skill

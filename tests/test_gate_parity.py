@@ -290,3 +290,14 @@ def test_ci_never_claims_a_release_prepare():
         f"{PR_GATE.name} sets {gate.RELEASE_PREPARE_ENV}, which would make the "
         "release PR green and defeat the expected-red check that gates every release"
     )
+
+
+def test_a_red_vendored_suite_in_devkits_own_gate_uploads_what_failed():
+    """245a2eb9: the hook-script step fails before `run-tests.py` ever writes
+    `logs/test-failures.log`, so devkit's gate uploaded nothing for it, and #407's
+    fixer read the failing ids out of `gh run view --log-failed`. The generated gate
+    was fixed first; this is devkit's own."""
+    gate = PR_GATE.read_text(encoding="utf-8")
+    assert "pytest scripts/hooks/tests/ -q --junit-xml=logs/junit-hooks.xml" in gate
+    upload = gate.split("name: test-failures", 1)[1].split("\n\n", 1)[0]
+    assert "logs/junit-hooks.xml" in upload and "logs/test-failures.log" in upload

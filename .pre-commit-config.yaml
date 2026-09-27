@@ -81,6 +81,15 @@ repos:
         types_or: [python, pyi]
         require_serial: true
 
+      - id: instruction-budget
+        name: instruction budget (hot tier)
+        # The ratchet `tests/test_instruction_budget.py` holds, a 0.3 s read of a few
+        # Markdown files: first met in CI, it cost #390, #398 and #405 a fixer each.
+        entry: scripts/hot-budget.py
+        language: script
+        files: \.md$
+        pass_filenames: false
+
       # `--force-exclude` on both: pre-commit passes explicit filenames, and ruff applies
       # `exclude` to those only when told to. Without it, staging a change to
       # `templates/core/scripts/notify.py` gets that file reformatted under devkit's

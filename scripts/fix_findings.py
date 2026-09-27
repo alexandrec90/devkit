@@ -74,6 +74,9 @@ class Finding:
     command: str = ""
     event: str = FINDING
     agent: str = ""  # the runtime a harvested transcript ran under; "" for the pass
+    # A branch whose merge settles it: the finding is filed already resolved against it,
+    # and `fix_verify` reopens it if that branch never lands. Not a ledger field.
+    settles_with: str = ""
 
     @property
     def headline(self) -> str:
@@ -127,7 +130,30 @@ def record_all(
     written = fresh(findings, items)
     for finding in written:
         harness_events.record(finding.event, finding.fields(), root=devkit_dir)
+    settle(written, devkit_dir)
     return written
+
+
+def settle(written: list[Finding], devkit_dir: Path) -> list[str]:
+    """Resolve each just-filed finding that names a branch, against that branch.
+
+    A user correcting a session is filed as friction, and in the first supervised run
+    seven of eight such rows had been fixed by the very session corrected, on the branch
+    it then shipped. Resolved-pending-merge rather than dropped: `fix_verify` reopens the
+    row if the branch never becomes a merged PR, so the ones nobody fixed come back.
+    """
+    pending = [f for f in written if f.settles_with]
+    if not pending:
+        return []
+    open_now = triage.open_items(triage.load(devkit_dir), (FINDING, FRICTION))
+    refs: list[str] = []
+    for finding in pending:
+        sig = signature(finding)
+        ids = [item.id for item in open_now if item.signature == sig]
+        if ids:
+            note = f"the session this was said to went on to ship {finding.settles_with}"
+            refs += triage.resolve(ids[:1], note, pr=finding.settles_with, root=devkit_dir)
+    return refs
 
 
 def file(journal: Journal | None, kind: str, project: str, detail: str, evidence: str = "") -> None:

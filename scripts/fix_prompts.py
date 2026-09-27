@@ -18,10 +18,12 @@ Stdlib only, no `gh`. Tested in `tests/test_fix_prompts.py`.
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fix_plan import COMMIT, CONFLICT, EVIDENCE_DIR, LEDGER, Failure, describe, name_of
+import agent_worktrees as aw
+from fix_plan import COMMIT, CONFLICT, EVIDENCE_DIR, LEDGER, PR, Failure, describe, name_of
 from fix_reports import BLOCKED_FILE, FRICTION_FILE, REFUSED_FILE
 from junit_report import READABLE
 
@@ -177,7 +179,7 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
     ordered = sorted(failures, key=lambda f: (f.project, f.kind, f.number))
     projects = sorted({f.project for f in ordered})
     rows = "; ".join(f"{f.project} {name_of(f)} -- {describe(f)}" for f in ordered)
-    urls = ", ".join(f"{f.project} {name_of(f)} {f.url}".rstrip() for f in ordered)
+    urls = ", ".join(f"{f.project} {name_of(f)} {f.url}".rstrip() + _held(f) for f in ordered)
     return _framed(
         f"The harness is red in {len(projects)} checkout(s) ({', '.join(projects)}): "
         f"{rows}. The fix belongs here in devkit, once -- in the vendored file, the "
@@ -189,6 +191,34 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
         + f" This worktree is on the fresh branch {branch} off the default branch. Say in "
         f"the intent which of these the fix unblocks: {urls}. {OWN_DIFF} {FINISH}"
     )
+
+
+def with_trees(failures: tuple[Failure, ...], root: Path, git_for) -> tuple[Failure, ...]:
+    """Each PR failure with the worktree holding its head, where one does.
+
+    `Failure.tree` was a refused commit's alone; a consumer PR folded into the upstream
+    session was named by URL only, so the session searched the project for the tree its
+    fix belonged in. Anything git cannot list leaves the failure as it was.
+    """
+    found: list[Failure] = []
+    for failure in failures:
+        project_dir = root / failure.project
+        if failure.kind == PR and failure.head and not failure.tree and project_dir.is_dir():
+            listed = git_for(project_dir)("worktree", "list", "--porcelain")
+            ok = listed.returncode == 0
+            held = aw.holder(project_dir, listed.stdout, failure.head)[0] if ok else ""
+            if held:
+                failure = replace(failure, tree=str(held))
+        found.append(failure)
+    return tuple(found)
+
+
+def _held(failure: Failure) -> str:
+    """Where a PR's head is checked out, when the pass found it: a session sent at a
+    consumer PR by URL alone spent turns searching the project's worktrees for it."""
+    if failure.kind != PR or not failure.tree:
+        return ""
+    return f" (its head is checked out in {failure.tree})"
 
 
 # The upstream session's way out when a red PR's cause is its own diff: the default

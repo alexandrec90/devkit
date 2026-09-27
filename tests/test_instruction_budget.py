@@ -21,9 +21,11 @@ import pytest
 from support import REPO_ROOT, load_script
 
 budget = load_script("scripts/instruction-budget.py")
+hot_budget = load_script("scripts/hot-budget.py")
 
 
-# The measured hot total, rounded up to the next hundred.
+# The measured hot total, rounded up to the next hundred; the number itself is
+# `hot_budget.HOT_CEILING`, which `scripts/hot-budget.py` checks at commit time.
 # `.claude/rules/engineering.md` says coverage floors are ratchets and must never be
 # raised to make a change pass; the same applies here. **This number only goes down.**
 # Lower it after a pruning pass; if a change genuinely needs more hot prose, move
@@ -38,7 +40,7 @@ budget = load_script("scripts/instruction-budget.py")
 # stopped the nightly release, which is the backstop working: GitHub Free cannot require
 # a PR to be current before merging (see `scripts/git_policy.py`), so nothing else here
 # would have caught it.
-HOT_CEILING = 5800
+HOT_CEILING = hot_budget.HOT_CEILING
 
 
 # --- the estimate -------------------------------------------------------------

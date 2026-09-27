@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import session_friction as sf
@@ -48,9 +51,14 @@ def classes(rows: list[dict]) -> list[str]:
 # --- the detectors ------------------------------------------------------------------------
 
 
-def test_a_guard_refusal_is_friction():
-    refusal = "This session is isolated in the worktree C:\\ws\\x\\.claude\\worktrees\\a, but..."
-    assert classes([call("git -C .. status", "1"), result(refusal, "1")]) == ["isolation-guard"]
+def test_claude_codes_isolation_guard_is_not_filed_on_devkits_ledger():
+    """ea2e8832: engineering.md says devkit cannot change what that guard accepts, so a
+    group for it could only ever be retired with the same note, and then refiled."""
+    for refusal in (
+        "This session is isolated in the worktree C:\\ws\\x\\.claude\\worktrees\\a, but...",
+        "The command is too complex to verify that it stays inside the worktree",
+    ):
+        assert classes([call("git -C .. status", "1"), result(refusal, "1")]) == []
 
 
 def test_a_missing_module_is_friction_only_when_the_call_failed():
@@ -491,3 +499,45 @@ def test_render_is_a_transcript_as_lines_an_audit_can_read(tmp_path):
     ]
     long = transcript(tmp_path / "l.jsonl", [user("x" * 5000)], str(tmp_path))
     assert st.render(long).rstrip().endswith("...[+2000]")
+
+
+def test_a_complaint_carries_the_task_branch_its_session_shipped_on(tmp_path):
+    """4806bd8d: seven of eight complaint rows were fixed by the corrected session
+    itself; the branch lets the ledger settle them when it merges."""
+    rows = (
+        (1, user("fix the flaky test")),
+        (2, user("why did you run the whole suite again?")),
+        (3, call("sleep 99", "1")),
+    )
+    chunk = st.Chunk(rows, 0, 3)
+    asked: list[str] = []
+
+    def branch_of(cwd):
+        asked.append(cwd)
+        return "agent/flaky-0926"
+
+    cwd = str(tmp_path / "carameli")
+    found = sf.session_findings(tmp_path / "s.jsonl", chunk, cwd, tmp_path, branch_of)
+    settles = {f.kind: f.settles_with for f in found}
+    assert settles == {"user-frustration": "agent/flaky-0926", "poll": ""}
+    assert asked == [cwd]
+    quiet = st.Chunk(((1, call("sleep 99", "1")),), 0, 1)
+    sf.session_findings(tmp_path / "s.jsonl", quiet, cwd, tmp_path, branch_of)
+    assert asked == [cwd], "no complaint, no git call"
+
+
+@pytest.mark.parametrize(
+    "code, out, branch",
+    [(0, "agent/x-0926\n", "agent/x-0926"), (0, "main\n", ""), (0, "\n", ""), (128, "", "")],
+    ids=["task", "default", "detached", "gone"],
+)
+def test_only_a_task_branch_can_settle_a_complaint(code, out, branch):
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, code, out, "")
+
+    assert sf.task_branch("C:/t", runner=run) == branch
+
+    def missing(argv, **kwargs):
+        raise FileNotFoundError("git")
+
+    assert sf.task_branch("C:/t", runner=missing) == ""
