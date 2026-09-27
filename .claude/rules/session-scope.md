@@ -25,9 +25,9 @@ including where they say to run the tests.
 
 Every session — fixer or not — that finds the linter or the tests unable to *start*
 fixes that in the same session. A missing `.venv` or `node_modules`, or a runtime off the
-project's pin, for example. It does not mention the problem in
-passing, write `logs/fix-blocked.md` over it, or leave it: the next session, on the same
-machine, would hit the same wall.
+project's pin, for example. It does not mention the problem in passing, write
+`logs/fix-blocked.md` over it, or leave it: the next session, on the same machine, would
+hit the same wall.
 
 1. Run the project's provisioning command — the one its preflight names, or devkit's
    `python "$DEVKIT_DIR/scripts/worktree.py" provision .` from the tree (it installs;
@@ -41,9 +41,8 @@ machine, would hit the same wall.
 
 **Then fix why it was open:** whatever cut this checkout unprovisioned — a worktree
 tool, a dispatcher, a template — gets fixed in the same change, or the next tree it cuts
-arrives just as empty. A tool outside the repo is a report instead, and so is a tool or
-provisioning script vendored from devkit: a harness defect under `engineering.md`.
-A fixer's "nothing else about the PR" scopes the *change under review*, not this.
+arrives just as empty. A tool outside the repo, or one vendored from devkit (a harness
+defect under `engineering.md`), is reported instead. A fixer's "nothing else about the PR" scopes the *change under review*, not this.
 
 Never "fix" it by hand-installing one binary, or by upgrading the machine's
 system-wide runtime. That fixes this turn, not the next checkout.
