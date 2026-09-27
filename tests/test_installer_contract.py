@@ -124,7 +124,7 @@ def test_every_installer_parses_the_shared_verbs(name, module, argv):
     module.build_parser().parse_args(argv)
 
 
-def _never_spawn(argv):
+def _never_spawn(argv, **_kwargs):
     raise AssertionError(f"--check reached the scheduler directly: {argv}")
 
 
@@ -162,13 +162,18 @@ def test_every_job_is_registrable_without_elevation(name, module, monkeypatch):
     user (probed: `ERROR: Access is denied.`). The three jobs carrying one failed every
     scheduled repair, and one repair deleted two of them for good (9385b3d7). Read off the
     document each installer's own `--check` hands the shared check, as `register` would
-    register it."""
+    register it.
+
+    The stub answers *not* current: on "current" `install-tray` goes on to ask the real
+    scheduler when its resident process started, and CI's Linux runner has no `schtasks`
+    (the job went red on exactly that). Any spawn at all fails here on every OS."""
     monkeypatch.setattr(module, "WINDOWS", True)
+    monkeypatch.setattr(module.subprocess, "run", _never_spawn)
     seen: dict[str, str] = {}
 
     def run_check(task_name, document, run):
         seen["document"] = document
-        return 0, "current"
+        return 1, "not current"
 
     monkeypatch.setattr(module.devkit_schtasks, "run_check", run_check)
     kwargs = (
