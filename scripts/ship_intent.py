@@ -15,7 +15,8 @@ once green, a person's waits for them. The outcome is recorded in `logs/ship-sta
 beside the intent. A refused commit is
 recorded too, with the pre-commit output as evidence, so the pass can tell it from a
 session still working: no intent file means hands off, an intent with a refusal means a
-dispatchable failure, an intent already shipped at this tree's state means nothing to do.
+dispatchable failure, an intent already shipped at this tree's state means nothing to do,
+and so does one over a tree with nothing changed or committed (`commits_ahead`).
 
 **The intent is consumed.** Once shipped it becomes `logs/ship-intent.shipped.md`; once
 a fixer is sent at a refusal it becomes `logs/ship-intent.refused.md` (the pass does
@@ -83,6 +84,7 @@ SKIPPED = "skipped"  # shipped already at this intent, or not a shippable branch
 REFUSED = "refused"  # the commit stage said no; a failure the pass can dispatch
 FAILED = "failed"  # the push or the PR failed; try again next pass
 SHIPPED = "shipped"
+EMPTY = "empty"  # nothing changed and nothing committed: the work was all on the ledger
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -243,14 +245,21 @@ def already_shipped(intent: Intent, state: dict, porcelain: str) -> bool:
     return state.get("stage") == SHIPPED and not porcelain.strip()
 
 
-def _settled(intent: Intent, porcelain: str) -> Outcome | None:
-    """This pass's answer when nothing needs doing: shipped already, or refused again."""
+def _settled(
+    intent: Intent, porcelain: str, base: str, runner: Runner, when: str
+) -> Outcome | None:
+    """This pass's answer when nothing needs doing: shipped already, nothing to ship,
+    or refused again."""
     state = read_state(intent.tree)
     if already_shipped(intent, state, porcelain):
         # Consumed, as a fresh ship's intent is: left in place it was re-read and
         # re-reported by every pass -- ten from before the pass set intents aside.
         set_aside(intent.tree, SHIPPED_FILE)
         return Outcome(intent, SKIPPED, "already shipped at this intent; set aside")
+    if not porcelain.strip() and commits_ahead(intent.tree, base, runner) == 0:
+        write_state(intent.tree, {"stage": EMPTY, "when": when, "intent": intent.digest})
+        set_aside(intent.tree, SHIPPED_FILE)
+        return Outcome(intent, EMPTY, "nothing changed or committed: no PR to open; set aside")
     return still_refused(intent, state, porcelain)
 
 
@@ -369,6 +378,23 @@ def _commit_carrying(intent: Intent, python: str, runner: Runner) -> tuple[Inten
     return intent, step, output
 
 
+def commits_ahead(tree: Path, base: str, runner: Runner) -> int | None:
+    """Commits on the tree's HEAD that `origin/<base>` lacks; None when git cannot say.
+
+    Zero over a clean tree is a session whose fix was all ledger -- a group resolved
+    against another branch's PR -- with nothing to push. Shipped anyway, it pushed an
+    empty branch and `gh pr create` refused it ("No commits between"): a `ship-failed`
+    on every pass, and a fixer left to pick between that and a false `fix-blocked.md`.
+    """
+    counted = runner(["git", "rev-list", "--count", f"origin/{base}..HEAD"], cwd=tree)
+    if counted.returncode != 0:
+        return None
+    try:
+        return int((counted.stdout or "").strip())
+    except ValueError:
+        return None
+
+
 def ship_one(
     intent: Intent,
     python: str,
@@ -381,7 +407,7 @@ def ship_one(
     tree = intent.tree
     when = (now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds")
     status = runner(["git", "status", "--porcelain"], cwd=tree)
-    if settled := _settled(intent, status.stdout or ""):
+    if settled := _settled(intent, status.stdout or "", base, runner, when):
         return settled
     if (status.stdout or "").strip():
         intent, step, output = _commit_carrying(intent, python, runner)

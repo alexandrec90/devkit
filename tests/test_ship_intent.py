@@ -518,6 +518,47 @@ def test_a_clean_tree_whose_last_ship_failed_still_pushes(tmp_path, monkeypatch)
     assert "git commit" not in run.verbs() and "git push" in run.verbs()
 
 
+def test_a_clean_tree_with_nothing_committed_opens_no_pr_and_sets_the_intent_aside(
+    tmp_path, monkeypatch
+):
+    """The regression: a fixer whose whole fix was a ledger resolution against another
+    branch's PR (0927-5) had a clean tree level with `origin/main`. Its intent pushed an
+    empty branch and `gh pr create` refused it, as a `ship-failed` on every pass."""
+    plans = capture_plans(monkeypatch)
+    one = intent(tmp_path)
+    run = Runner({"git rev-list": (0, "0\n", "")}, porcelain="")
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.EMPTY and plans == []
+    assert run.verbs() == ["git status", "git rev-list"]
+    assert run.calls[1][0] == ["git", "rev-list", "--count", "origin/main..HEAD"]
+    assert not (one.tree / ship_intent.INTENT_FILE).exists()
+    assert (one.tree / ship_intent.SHIPPED_FILE).is_file(), "the session's outcome, kept"
+    state = ship_intent.read_state(one.tree)
+    assert state["stage"] == ship_intent.EMPTY and state["intent"] == one.digest
+
+
+@pytest.mark.parametrize(
+    ("answer", "ahead"),
+    [
+        ((0, "3\n", ""), 3),
+        ((0, "0\n", ""), 0),
+        ((128, "", "bad revision"), None),
+        ((0, "", ""), None),
+    ],
+)
+def test_commits_ahead_is_none_whenever_git_cannot_say(tmp_path, answer, ahead):
+    """Unknown is not zero: a tree with no `origin/<base>` still ships as before."""
+    assert ship_intent.commits_ahead(tmp_path, "main", Runner({"git rev-list": answer})) == ahead
+
+
+def test_a_clean_tree_git_cannot_count_still_pushes(tmp_path, monkeypatch):
+    plans = capture_plans(monkeypatch)
+    one = intent(tmp_path)
+    run = Runner({"git rev-list": (128, "", "unknown revision")}, porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert "git push" in run.verbs() and len(plans) == 1
+
+
 def test_already_shipped_needs_a_clean_tree_and_not_the_same_words(tmp_path):
     """A message edited after the ship with nothing else changed has no commit to carry
     it: the first pass after a merge would otherwise push nothing and ask for a second
