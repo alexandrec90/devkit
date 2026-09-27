@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import sys
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -215,8 +216,12 @@ def _harvest(ctx: Context, cursor: Path) -> list[Finding]:
     if ctx.writes:
         return session_friction.harvest(ctx.root, cursor, ctx.now)
     with tempfile.TemporaryDirectory() as scratch:
-        # A plan pass must not move the cursor; it reads the same window a fresh one would.
-        return session_friction.harvest(ctx.root, Path(scratch) / cursor.name, ctx.now)
+        # A plan pass must not move the cursor, so it reads from a copy of it: from an
+        # empty one, every rehearsal listed three days already filed as "would file".
+        copy = Path(scratch) / cursor.name
+        if cursor.is_file():
+            shutil.copyfile(cursor, copy)
+        return session_friction.harvest(ctx.root, copy, ctx.now)
 
 
 def _verify(ctx: Context) -> list[str]:

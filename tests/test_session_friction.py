@@ -502,6 +502,18 @@ def test_full_suite_reads_arguments_not_substrings():
     assert not sf.full_suite(" tests\\test_x.py::t")
 
 
+def test_a_suite_root_named_beside_a_file_is_still_the_whole_suite():
+    """pytest runs the union of its arguments: 0926-18 ran `pytest scripts/hooks/tests
+    tests/test_temproot_wiring.py` twice, 1,388 tests and two minutes each, and the file
+    named beside the root read as a targeted run."""
+    ran = " scripts/hooks/tests tests/test_temproot_wiring.py -q -p no:cacheprovider 2"
+    assert sf.full_suite(ran)
+    assert sf.full_suite(" scripts\\hooks\\tests\\ tests/test_x.py"), "a backslash spelling"
+    assert not sf.full_suite(" scripts/hooks/tests -k temproot"), "a selector still narrows"
+    command = f".venv\\Scripts\\python -m pytest{ran}>&1 | Select-Object -Last 3"
+    assert classes([call(command, "1")]) == ["full-suite"]
+
+
 def test_a_shell_variable_argument_is_not_the_full_suite():
     """`pytest -q -p no:cacheprovider $p`, with `$p` one test file, was filed as a
     full-suite run (ledger `72f8865b`). A variable names something the detector cannot
