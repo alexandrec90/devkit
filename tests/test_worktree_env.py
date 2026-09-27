@@ -8,6 +8,7 @@ is the thing under test, and a stub would only assert that the stub works.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -464,14 +465,20 @@ def test_a_missing_sibling_is_cut_as_a_detached_tree_of_the_repo_beside_the_chec
         seen.append(kwargs["env"])
         return _hookless(argv, **kwargs)
 
-    [line] = wt_env.link_path_sources(tree, checkout, runner=run, environ={"PATH": ""})
+    # The caller's real environment, minus the opt-out: on POSIX `subprocess` finds `git`
+    # through the *child's* PATH, so a stub environment cuts nothing on Linux while
+    # Windows, which searches the parent's, passes it.
+    caller = {k: v for k, v in os.environ.items() if k != wt_env.SKIP_PROVISION_VAR}
+    [line] = wt_env.link_path_sources(tree, checkout, runner=run, environ=caller)
     target = checkout / ".claude" / "worktrees" / "data-lake"
-    assert (target / ".gitignore").is_file() and "detached data-lake at HEAD" in line
+    assert (target / ".gitignore").is_file(), line
+    assert "detached data-lake at HEAD" in line
     head = _git(target, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     assert head == "HEAD", "detached, so no branch of the sibling is held by it"
     assert _git(lake, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "main"
     # The nested `worktree add` fires this hook again; it must not sync the sibling too.
     assert seen[0][wt_env.SKIP_PROVISION_VAR] == "1"
+    assert wt_env.SKIP_PROVISION_VAR not in caller, "set on a copy, not the caller's mapping"
     # A second worktree of the tier resolves the same `..`: nothing more to cut.
     assert wt_env.link_path_sources(tree, checkout, runner=run) == []
 
