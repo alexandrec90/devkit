@@ -362,6 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    fix_send.pin_loaded(REPO_ROOT)  # before anything can fast-forward the checkout
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     workspace = args.workspace.resolve()
     if not workspace.is_file():
