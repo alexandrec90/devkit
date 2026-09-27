@@ -83,11 +83,17 @@ test built from the transcript's own lines, or -- when no pattern could see it -
 the prompt or the evidence that caused it.
 
 Finally, read each `filed` line once more: a finding the devkit session cannot act on
-(vague, duplicated, mis-grouped) is itself a defect in how it was filed.
+(vague, duplicated, mis-grouped) is itself a defect in how it was filed. And read what
+each session *fixed*: a repair to one tree, box or run whose cause is left standing (a
+`uv sync` by hand where the provisioner should have run) is a fix that will recur --
+fix the cause yourself. A `RECURRED` group in `logs/harness-triage.log` is one that
+already did.
 
 ## 4. Repeat until an iteration is clean
 
-Before re-running, run what the PR gate will run on what you changed: ruff and mypy,
+Before re-running, run what the PR gate will run on what you changed -- this checklist is
+the supervisor's alone: a fixer that reads this file runs only its targeted tests and
+the two ratchets, since `scripts/posix-rehearsal.py` is the whole suite -- ruff and mypy,
 `scripts/hooks/structure_check.py`, `scripts/hooks/untested_symbols.py`, the tests of
 every module you touched, the contract tests that read every module
 (`tests/test_test_contract.py`, `tests/test_doc_claims.py`), and
@@ -114,11 +120,24 @@ for before running again: the same problem re-sent at a changing signature, a fi
 looping on a check it cannot pass, a backlog refilling as fast as it drains. A spend
 problem is fixed in the pass like any other defect -- not by adding a cap back.
 
+Memory is the one limit the machine sets regardless: `fix_send` holds a session the
+free memory cannot take (`held for memory` in the record), and the next pass sends it.
+A background fixer loads no MCP server for the same reason. Holds on every iteration
+mean something else is eating the memory -- find it (`claude agents` for finished
+sessions still alive, `docker stats` for stacks) rather than lowering the floor.
+
 ## 5. Your own turns
 
 This session is held to the same contract. Any turn *you* lost to the harness -- a
 refusal, a missing tool, a wrong instruction in this file -- goes in
 `logs/friction.md` before you ship, and a wrong instruction here is fixed here.
+
+**Decide, as a fixer must.** A finding that comes back as a choice -- a stuck session's
+question, a design fork in a project -- is yours to settle: the option you would
+recommend is the decision, so carry it out and say why in the intent. Ending a report on
+"your call" is the same lost turn the `handed-back` detector files against a fixer; a
+supervisor once relayed a fixer's three-option question and recommended one, and the
+answer was to have done it.
 
 ## Reporting
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -274,11 +275,56 @@ def test_the_manifests_python_pin_reaches_the_sync():
         ({"own_venv": True}, "already provisioned"),
         ({"checkout_venv": False}, "a cold checkout: nothing says the uv cache is warm"),
         ({"uv": None}, "no uv on PATH"),
-        ({"install_command": "make dev"}, "a manifest install_command is a shell string"),
+        ({"install_command": "make dev && make db"}, "needs a shell: not run inside worktree add"),
     ],
 )
 def test_every_other_shape_is_left_to_the_provision_verb(overrides, why):
     assert _facts(**overrides).command() == (), why
+
+
+def test_a_plain_install_command_is_run_as_argv_on_this_interpreter():
+    """carameli's is `python scripts/bootstrap.py`: stdlib, idempotent, uv underneath.
+    Refusing every manifest command as "a shell string" left every carameli worktree
+    with no `.venv`. One with no shell syntax needs no shell, so it runs as argv -- on
+    the interpreter running this hook, since that one certainly exists."""
+    facts = _facts(locked=False, install_command="python scripts/bootstrap.py")
+    assert facts.command() == (sys.executable, "scripts/bootstrap.py")
+    assert _facts(locked=False, install_command="npm ci").command() == ("npm", "ci")
+    assert _facts(install_command="python x.py", own_venv=True).command() == ()
+
+
+@pytest.mark.parametrize(
+    "command, argv",
+    [
+        ("python scripts/bootstrap.py", (sys.executable, "scripts/bootstrap.py")),
+        ("uv sync --frozen", ("uv", "sync", "--frozen")),
+        ("make dev && make db", ()),
+        ("npm ci | tee log", ()),
+        ("python scripts\\bootstrap.py", ()),  # a backslash is shell-or-path ambiguity
+        ('python -c "print(1)"', ()),
+        ("   ", ()),
+    ],
+)
+def test_plain_argv_takes_only_what_needs_no_shell(command, argv):
+    assert wt_env.plain_argv(command) == argv
+
+
+@pytest.mark.parametrize(
+    "overrides, gap",
+    [
+        ({"uv": None}, "uv is not on PATH"),
+        ({"locked": False, "install_command": "make dev && make db"}, "needs a shell"),
+        ({"own_venv": True}, ""),
+        ({"checkout_venv": False}, ""),
+        ({"locked": False}, ""),
+        ({}, ""),
+    ],
+)
+def test_a_tree_left_unprovisioned_for_a_fixable_reason_says_so(overrides, gap):
+    """A cold checkout or a project with nothing to install is left alone on purpose;
+    a missing `uv` or a command the hook cannot run is a gap to close, not to skip."""
+    found = _facts(**overrides).gap()
+    assert (gap in found) if gap else found == ""
 
 
 def test_the_facts_are_read_off_disk(tmp_path):
@@ -367,6 +413,33 @@ def test_a_failed_sync_relays_its_tail_and_the_command_to_rerun(tmp_path):
     assert "failed" in line
     assert "error: no index" in line
     assert "uv sync --all-extras --all-groups" in line
+
+
+def test_a_failure_or_a_gap_is_left_as_the_trees_friction_for_the_pass_to_file(tmp_path):
+    """The hook's only report was a line inside `git worktree add`, which `claude
+    --worktree` swallows -- so a tree came up with no `.venv` and nothing anywhere said
+    why. The tree's friction file is what the fix pass files on the ledger."""
+    checkout, tree = _provisionable(tmp_path)
+    wt_env.provision(
+        tree, checkout, runner=_Run(1, stderr="error: no index\n"), environ={}, uv="uv"
+    )
+    friction = (tree / wt_env.FRICTION_FILE).read_text(encoding="utf-8")
+    assert friction.startswith("- devkit's worktree hook left this worktree unprovisioned: ")
+    assert "error: no index" in friction
+    other = _worktree(checkout, tmp_path / "wt2", "topic-2")
+    (other / "uv.lock").write_text("", encoding="utf-8")
+    line = wt_env.provision(other, checkout, runner=_Run(), environ={}, uv="")
+    assert "uv is not on PATH" in line
+    assert "uv is not on PATH" in (other / wt_env.FRICTION_FILE).read_text(encoding="utf-8")
+    fine = _worktree(checkout, tmp_path / "wt3", "topic-3")
+    (fine / "uv.lock").write_text("", encoding="utf-8")
+    wt_env.provision(fine, checkout, runner=_Run(), environ={}, uv="uv")
+    assert not (fine / wt_env.FRICTION_FILE).exists()
+
+
+def test_the_friction_file_is_the_one_the_pass_reads():
+    """Installed alone into `~/.devkit/git-hooks`, the hook cannot import the pass."""
+    assert wt_env.FRICTION_FILE == load_script("scripts/fix_reports.py").FRICTION_FILE
 
 
 def test_a_sync_that_hangs_or_cannot_start_is_named_not_waited_for(tmp_path):
@@ -508,3 +581,69 @@ def test_a_refused_cut_is_named_and_never_raised(tmp_path):
 
     [line] = wt_env.link_path_sources(tree, checkout, runner=gone)
     assert "could not cut" in line
+
+
+# --- a tree cut `--no-checkout`: what `claude --worktree` does ------------------
+# git skips `post-checkout` for a no-checkout add, so every Claude worktree started with
+# no `.venv`. The `git reset --hard` that fills the tree fires `post-index-change 1 0`.
+
+
+def test_a_working_tree_update_in_a_tree_with_no_venv_is_this_hooks_business(tmp_path):
+    assert wt_env.is_unprovisioned_tree_update(["1", "0"], tmp_path) is True
+    assert wt_env.is_unprovisioned_tree_update(["0", "0"], tmp_path) is False, "a `git add`"
+    assert wt_env.is_unprovisioned_tree_update([], tmp_path) is False
+    (tmp_path / ".venv").mkdir()
+    assert wt_env.is_unprovisioned_tree_update(["1", "0"], tmp_path) is False, (
+        "a provisioned tree pays one stat and nothing else"
+    )
+
+
+def test_a_no_checkout_worktree_filled_by_a_reset_is_provisioned(tmp_path, monkeypatch, capsys):
+    """End to end against the real sequence, with the hook installed as the dispatcher
+    in `scripts/git-hooks/` would be, so what is asserted is that git calls it at all."""
+    checkout = _repo(tmp_path / "carameli")
+    (checkout / "uv.lock").write_text("", encoding="utf-8")
+    _git(checkout, "add", "-A")
+    _git(checkout, "commit", "-qm", "lock")
+    (checkout / ".venv").mkdir()
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    fired = hooks / "fired.txt"
+    (hooks / "post-index-change").write_text(
+        f'#!/bin/sh\necho "$1 $(pwd)" >> "{fired.as_posix()}"\n', encoding="utf-8"
+    )
+    (hooks / "post-index-change").chmod(0o755)
+    (hooks / "post-checkout").write_text(
+        f'#!/bin/sh\necho "post-checkout" >> "{fired.as_posix()}"\n', encoding="utf-8"
+    )
+    (hooks / "post-checkout").chmod(0o755)
+    tree = tmp_path / "wt"
+    hooked = ("-c", f"core.hooksPath={hooks.as_posix()}")
+    subprocess.run(
+        ["git", "-C", str(checkout), *hooked, "worktree", "add", "--no-checkout", "-q", str(tree)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(tree), *hooked, "reset", "--hard", "-q"], check=True)
+    lines = fired.read_text(encoding="utf-8").splitlines()
+    assert "post-checkout" not in lines, "git skips it for a no-checkout add: the gap itself"
+    assert [line.split(" ", 1)[0] for line in lines] == ["1"]
+
+    monkeypatch.setattr(wt_env.shutil, "which", lambda name: "uv")
+    run = _Run()
+    assert wt_env.index_change_main(["1", "0"], root=tree, runner=run, environ={}) == 0
+    assert ".venv provisioned" in capsys.readouterr().out
+    assert [argv[:2] for argv, _ in run.calls] == [["uv", "sync"]]
+
+
+def test_the_index_change_hook_leaves_a_provisioned_tree_and_the_checkout_alone(tmp_path):
+    checkout = _repo(tmp_path / "carameli", compose=False)
+    (checkout / "uv.lock").write_text("", encoding="utf-8")
+    (checkout / ".venv").mkdir()
+    run = _Run()
+    assert wt_env.index_change_main(["1", "0"], root=checkout, runner=run, environ={}) == 0
+    tree = _worktree(checkout, tmp_path / "wt")
+    (tree / ".venv").mkdir()
+    assert wt_env.index_change_main(["1", "0"], root=tree, runner=run, environ={}) == 0
+    assert wt_env.index_change_main(["0", "0"], root=tmp_path / "nowhere") == 0
+    assert run.calls == []

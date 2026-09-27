@@ -126,8 +126,11 @@ def _one_tree(
         if ctx.writes:
             fix_ledger.mark_blocked(ctx.ledger_path, key, reason)
             fix_reports.file_away(tree.path, fix_reports.BLOCKED_FILE)
+    # Where the lines will be once filed away below: naming the file about to be renamed
+    # gave every friction row a dead path.
+    kept = fix_reports.filed(fix_reports.FRICTION_FILE) if ctx.writes else fix_reports.FRICTION_FILE
     for line in tree.friction:
-        evidence = str(tree.path / fix_reports.FRICTION_FILE)
+        evidence = str(tree.path / kept)
         journal.add(
             Finding("reported", tree.project, line, evidence=evidence, event=fix_findings.FRICTION)
         )
@@ -143,7 +146,9 @@ def _judge_session(
     if state in (fix_reports.DONE, *fix_reports.DEAD):
         closed.finished.append(str(tree.path))
     live = fix_reports.active_transcript(tree.path, ctx.now)
-    if live and tree.branch and not (state == fix_reports.WORKING and str(live) == transcript):
+    # The stamped session is never "another" one, whatever its state: a finished fixer's
+    # own transcript held six branches while this very pass shipped their intents.
+    if live and tree.branch and str(live) != transcript:
         closed.busy[(tree.project, tree.branch)] = str(tree.path)
     if state in fix_reports.DEAD:
         # No key: a dead session is re-sent at once, not parked behind the finding.

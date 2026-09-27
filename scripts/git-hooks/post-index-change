@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Devkit global post-index-change dispatcher.
+
+`claude --worktree` cuts its tree with `git worktree add --no-checkout` and fills it with
+`git reset --hard`, so `post-checkout` never fires there; the reset fires this. See
+`devkit_worktree_env.index_change_main` for the gate that keeps it free in every tree
+that already has its `.venv`.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import devkit_worktree_env
+
+if __name__ == "__main__":
+    sys.exit(devkit_worktree_env.index_change_main())

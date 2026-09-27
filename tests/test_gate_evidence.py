@@ -121,6 +121,24 @@ def test_the_download_lands_under_dest_and_the_logs_are_read_back(tmp_path):
     assert not (dest / "stale.log").exists(), "an earlier run's logs must not survive"
 
 
+def test_a_junit_report_in_the_download_is_also_written_out_readable(tmp_path):
+    """So a fixer reads `failures.txt`, not a one-line XML file it greps into a wall."""
+    junit = (
+        '<testsuite><testcase classname="tests.test_a" name="test_b">'
+        '<failure message="assert 1 == 2">trace</failure></testcase></testsuite>'
+    )
+
+    def gh(*args):
+        (Path(args[args.index("-D") + 1]) / "junit.xml").write_text(junit, encoding="utf-8")
+        return subprocess.CompletedProcess(["gh", *args], 0, "", "")
+
+    dest = tmp_path / "e"
+    ev.run_evidence(gh, "7", dest)
+    assert "FAILED tests/test_a.py::test_b" in (dest / ev.junit_report.READABLE).read_text(
+        encoding="utf-8"
+    )
+
+
 def test_a_download_that_fails_reads_nothing_and_asks_for_the_jobs(tmp_path):
     jobs = [{"name": "Tests", "conclusion": "failure", "steps": []}]
     gh = table({("run", "view", "7"): {"jobs": jobs}, ("run", "view", "7", "--log-failed"): ""})

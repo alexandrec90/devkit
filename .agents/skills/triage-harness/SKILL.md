@@ -58,14 +58,15 @@ Three deferrals that read as prudence and are not:
 | "this is a refactor, not a defect" | A structural ceiling raised three times **is** a defect report — `.claude/rules/engineering.md` says so — and the report has already done the measuring. Cut it. |
 | "this is project X's file, not devkit's" | Then fix it in project X's checkout. The ownership check routes the change; it does not excuse it. |
 
-The only thing that ever stays the user's call is §3's two irreversibles: **discarding work
-that exists only in a box**, and **cutting a release**. Ask about those; decide everything
-else.
-
-If a group is genuinely beyond one session — a fix needing a decision only the user can
-make, or an outage you cannot reproduce — that is a question for the user **in the turn
-you find it**, not a line in a closing report. Ask it, get the answer, fix it. A sweep
-ends with the backlog empty.
+**Decide everything, and never ask.** The fix pass sends this sweep with nobody watching,
+so a question is a session that stops. A choice between approaches is yours: if you would
+recommend an option, that option is the decision -- do it, and put the reason and the
+alternatives in the intent, where the PR carries them to whoever reads it. A sweep ended
+once on a three-option question with a "(Recommended)" option in it; that label was the
+answer it asked for. The one thing never done is **discarding work that exists only in a
+box** (§3): leave that box and say so. Only a gap outside the repository -- a credential,
+admin rights, a paid service -- goes in `logs/fix-blocked.md`. A sweep ends with the
+backlog empty.
 
 > Every command below is issued bare. A wrapper here buys no second bound.
 
@@ -153,6 +154,16 @@ The execution default applies unchanged: what is worth naming is worth doing. Fi
 live groups, with a test each per `.claude/rules/engineering.md` — for a false-positive
 block, the regression test is the exact command the report named.
 
+**Fix the cause, never the instance.** A group is retired when the thing that produced it
+cannot produce it again — not when this one tree, box or run is repaired. A missing
+`.venv` came back for weeks because each fix ran `uv sync` in the tree that reported it;
+the durable fix was in what provisions every tree (`scripts/worktree_env.py`, the git
+`post-checkout` hook). Ask of each group *what should have prevented this, and why did
+it not* — then fix that, and test it. A group marked `RECURRED` in the triage log was
+retired before by a fix that did not hold: its last note is what not to repeat. The only
+mechanism ruled out is a coding-agent hook; a test, a git hook, a CI check, a scheduled
+job or a provisioner all are fair game.
+
 **This skill is the last safety net.** Nothing else reads this ledger: not CI, not a
 scheduled job, not a person. In a repo where every file was written by an agent and prose
 has no compiler, the backlog is the only place a defect nobody had time for is written
@@ -181,12 +192,21 @@ intent's body which sibling intents the sweep left, and the fix pass opens each 
 Nothing about the ledger being devkit's makes a carameli file unfixable from a devkit
 session.
 
-Two things stay the user's call, because both are irreversible and neither is yours to
-assume: **discarding work that exists only in a box**, and **a fix that has to be
-released** rather than merged (a vendored-tier change reaches consumers only through
-`sync-devkit.py --pull` against a tag — say so in the PR, and see `RELEASING.md`). Neither
-is a reason to leave the group open: make the change, and say in the report that a release
-is what carries it.
+**A fix that belongs on another open PR goes into that PR's tree only once nobody is in
+it.** A transcript under `~/.claude/projects/<the tree's slug>/` whose last timestamped
+record is within `fix_reports.QUIET_AFTER` (`fix_reports.active_transcript`) is a session
+still working there, and editing under it races that session's own ship — the first
+supervised run edited #404's tree twenty seconds after its fixer shipped. With a live
+session, put the fix on your own branch instead and name the PR in the intent. With none,
+finish the tree: stage what the refusal needs and leave its intent where it is, so the
+next pass ships it.
+
+Discarding work that exists only in a box is never done here: it is irreversible, so
+the box is left and named in the report. A fix that has to be **released** rather than
+merged (a vendored-tier change reaches consumers only through `sync-devkit.py --pull`
+against a tag) is not a reason to leave the group open either: make the change and say in
+the PR that a release carries it -- the fix pass cuts an owed release itself
+(`RELEASING.md`).
 
 ## 4. Record what retired it — this is the step that makes the list shrink
 
@@ -220,5 +240,5 @@ to make visible.
 
 **End by re-running `python scripts/harness_triage.py` and quoting the count.** The sweep
 is finished when it prints zero open, and a non-zero count is the report's headline, not a
-footnote: say which group, and what you need from the user to close it. "Left open with a
-reason" is not an outcome this skill has.
+footnote: say which group, and why it is not closed. "Left open with a reason" is not an
+outcome this skill has.

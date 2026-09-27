@@ -187,8 +187,21 @@ def background_argv(exe: str, launch: agent_models.Launch, prompt: str) -> list[
     flag is variadic and takes every argument that follows as a tool name -- placed
     before `--bg` it still swallowed the prompt, and two devkit sessions opened with
     nothing to do -- so `--` ends the options before the prompt.
+
+    Nor does it load the user's MCP servers (`--strict-mcp-config` with no config): a
+    browser server was ~260 MB of each ~700 MB fixer, which drives no browser, and nine
+    of them at once ran the machine out of memory.
     """
-    return [exe, "--bg", *launch.flags(), "--disallowedTools", "AskUserQuestion", "--", prompt]
+    return [
+        exe,
+        "--bg",
+        *launch.flags(),
+        "--strict-mcp-config",
+        "--disallowedTools",
+        "AskUserQuestion",
+        "--",
+        prompt,
+    ]
 
 
 def launch_background(
@@ -212,7 +225,13 @@ def launch_background(
     # A background session is the pass's, and nobody is there to bootstrap its tree.
     tree_provision.provision(tree, runner)
     done = runner(
-        background_argv(exe, launch, prompt), cwd=str(tree), capture_output=True, text=True, env=env
+        background_argv(exe, launch, prompt),
+        cwd=str(tree),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
     )
     sys.stdout.write(done.stdout or "")
     sys.stderr.write(done.stderr or "")

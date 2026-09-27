@@ -48,6 +48,49 @@ def failed_lines(text: str) -> list[str]:
     return lines
 
 
+# What `write_readable` leaves beside the XML, and how much of each failure's body it keeps.
+READABLE = "failures.txt"
+BODY_LINES = 40
+TAG = re.compile(r"<[^>]+>")
+MESSAGE = re.compile(r'<(?:failure|error)\b[^>]*\bmessage="([^"]*)"')
+
+
+def readable(text: str) -> list[str]:
+    """Each failed testcase as its id, its message, and the head of its traceback.
+
+    The report is one line of XML, so reading it raw cost a fixer a 301.9 KB `grep`
+    result, and two sweeps wrote a parser by hand. This is that parser, run once.
+    """
+    blocks = []
+    for case in CASE.finditer(str(text)):
+        body = case.group("body") or ""
+        if "<failure" not in body and "<error" not in body:
+            continue
+        attrs = {key: html.unescape(value) for key, value in ATTR.findall(case.group("attrs"))}
+        found = MESSAGE.search(body)
+        lines = html.unescape(TAG.sub("", body)).strip().splitlines()[:BODY_LINES]
+        head = f"FAILED {test_id(attrs.get('classname', ''), attrs.get('name', '?'))}"
+        message = [f"  {html.unescape(found.group(1))}"] if found else []
+        blocks.append("\n".join([head, *message, *(f"  {line}" for line in lines)]))
+    return blocks
+
+
+def write_readable(dest: Path) -> Path | None:
+    """Write every junit report's failures under `dest` to `dest/READABLE`; its path, or
+    None when no report names a failure."""
+    blocks = []
+    for report in sorted(dest.rglob("*.xml")):
+        try:
+            blocks += readable(report.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    if not blocks:
+        return None
+    path = dest / READABLE
+    path.write_text("\n\n".join(blocks) + "\n", encoding="utf-8", newline="\n")
+    return path
+
+
 def read_artifacts(dest: Path) -> list[str]:
     """Every `.log` under `dest` as text, then each junit report's failures as lines."""
     texts = []

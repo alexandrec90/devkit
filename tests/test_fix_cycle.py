@@ -233,6 +233,28 @@ def test_several_harness_decisions_fold_into_one_session():
     assert held == []
 
 
+def test_a_red_devkit_pr_on_a_green_default_goes_to_its_own_branch():
+    """devkit #387 added a MANIFEST entry that took sync-devkit.py past its recorded
+    `file_lines`, with devkit's own default branch green. The fold sent it upstream: a
+    fresh branch off that green default, where the failure does not reproduce and
+    nothing can land on the PR -- and the structure baseline must stay tight, so no
+    change there could pre-grant the room either. Only the PR's own diff can fix it,
+    so it goes as itself beside the folded session, not inside it."""
+    devkit_pr = failure(project="devkit", number=387)
+    shared = [failure(project="a", number=1), failure(project="b", number=2)]
+    decisions = [
+        decision(fix_plan.DISPATCH, devkit_pr),
+        decision(fix_plan.DISPATCH, shared[0]),
+        decision(fix_plan.DISPATCH, shared[1]),
+    ]
+    classes = fix_cycle.classify_all([devkit_pr, *shared])
+    go, held = fix_cycle.phase(decisions, classes, fix_cycle.harness_state(classes, True, []))
+    assert [d.action for d in go] == [fix_plan.UPSTREAM, fix_plan.DISPATCH]
+    assert sorted(f.project for f in go[0].failures) == ["a", "b"]
+    assert go[1].failures == (devkit_pr,)
+    assert held == []
+
+
 def test_a_conflicted_harness_pr_gets_its_resolver_rather_than_the_devkit_session():
     """devkit #381 was a conflict, and the fold sent an upstream session at it: a fresh
     branch off the default, told to fix the harness, with no way to land on the PR at

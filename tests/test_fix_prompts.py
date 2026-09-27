@@ -9,6 +9,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_plan
 import fix_prompts
+from support import REPO_ROOT, load_script
 
 
 def failure(**fields) -> fix_plan.Failure:
@@ -73,6 +74,92 @@ def test_the_upstream_prompt_names_every_project_and_pr_and_ends_in_the_ship_ski
     assert "carameli #412 u/412" in text and "roguelike #16 u/16" in text
     assert "not in each consumer" in text
     assert "ship skill" in text and "agent/fix-x-0918" in text
+
+
+def test_the_upstream_prompt_sends_a_pr_red_on_its_own_diff_to_that_pr():
+    """devkit #387's upstream session found the cause was the PR's own diff and could
+    only stop: nothing on a fresh branch off a green default lands on the PR."""
+    text = fix_prompts.upstream_prompt((failure(),), "agent/fix")
+    assert fix_prompts.OWN_DIFF in text
+    assert "ship it with the ship skill from that worktree" in text
+    assert text.index(fix_prompts.OWN_DIFF) < text.index(fix_prompts.STOP)
+
+
+def every_prompt() -> list[str]:
+    """One of each shape of prompt a fresh session can be sent with."""
+    return [
+        fix_prompts.pr_prompt(failure()),
+        fix_prompts.pr_prompt(failure(signature=(fix_plan.CONFLICT,))),
+        fix_prompts.pr_prompt(failure(kind=fix_plan.COMMIT, number=0, signature=("x refused",))),
+        fix_prompts.upstream_prompt((failure(), red_main()), "agent/fix"),
+        fix_prompts.branch_prompt(red_main(), "agent/fix"),
+        fix_prompts.nightly_prompt(failure(kind=fix_plan.NIGHTLY, number=3), "agent/fix"),
+    ]
+
+
+def test_every_prompt_ends_on_the_one_narrow_exit():
+    """A fresh session read "if it cannot be fixed, stop" as leave for any obstacle:
+    devkit #387's stopped with the fix one worktree away. Every prompt now ends on the
+    same exit, which names the three blockers that justify stopping and the obstacles
+    that do not -- so a new prompt cannot quietly bring back a wider one."""
+    for text in every_prompt():
+        assert text.endswith(fix_prompts.STOP)
+        assert text.count(fix_prompts.STOP) == 1
+
+
+def test_every_prompt_opens_by_declaring_the_fixer_role():
+    """The vendored rules are written for project sessions, and a fixer is told apart
+    from one by this sentence alone -- the launcher's declaration, never an inference
+    from what the prompt happens to name."""
+    for text in every_prompt():
+        assert text.startswith(fix_prompts.ROLE)
+        assert text.count(fix_prompts.ROLE) == 1
+
+
+def test_the_role_points_at_a_fixer_file_every_consumer_receives():
+    """PR fixers run in consumer checkouts too, so the file has to be vendored; and the
+    override is spelled in the sentence itself for a consumer that has not pulled it."""
+    rel = ".claude/fixer.md"
+    assert rel in fix_prompts.ROLE
+    assert (REPO_ROOT / rel).is_file()
+    sync = load_script("scripts/sync-devkit.py")
+    assert rel in sync.MANIFEST
+    for overridden in ("the harness is not your job", "and stop"):
+        assert overridden in fix_prompts.ROLE
+    # A fixer ships an intent like any session; the pass commits and pushes (FINISH).
+    assert "commit" not in fix_prompts.ROLE and "push" not in fix_prompts.ROLE
+    assert not set("\"'`") & set(fix_prompts.ROLE)
+
+
+def test_the_fixer_file_says_a_choice_is_never_a_blocker_and_size_only_warns():
+    """Every fixer reads this before its prompt's exit clause: it must not leave a design
+    fork looking like a stop, nor send a session shaving a module to fit its size."""
+    text = (REPO_ROOT / ".claude" / "fixer.md").read_text(encoding="utf-8")
+    assert "Is the obstacle a choice?** Never a blocker" in text
+    assert "`definitions` only warn" in text
+
+
+def test_no_prompt_offers_the_open_exit():
+    """The phrasing that let any obstacle count as a blocker, anywhere in the module."""
+    source = Path(fix_prompts.__file__).read_text(encoding="utf-8")
+    code = source.split("STOP = (", 1)[1]
+    assert "what is in the way" not in code
+    for text in every_prompt():
+        assert "cannot be fixed" not in text and "cannot be done" not in text
+
+
+def test_the_exit_names_its_blockers_what_is_not_one_and_asks_for_evidence():
+    for expected in (
+        "three blockers only",
+        "quote the exact command",
+        "only a person has",
+        "outside this repository",
+        "adding a worktree on another branch",
+        "what you tried first",
+    ):
+        assert expected in fix_prompts.STOP
+    # It crosses a wt command line with every other sentence here.
+    assert not set("\"'`") & set(fix_prompts.STOP)
 
 
 def test_the_nightly_prompt_names_the_workflow_the_issue_and_the_fresh_branch():
@@ -149,17 +236,6 @@ def test_the_resolver_leaves_the_merge_for_the_pass_to_commit():
     assert "--no-verify" not in text
 
 
-def every_prompt() -> list[str]:
-    return [
-        fix_prompts.pr_prompt(failure()),
-        fix_prompts.pr_prompt(failure(signature=(fix_plan.CONFLICT,))),
-        fix_prompts.pr_prompt(failure(kind=fix_plan.COMMIT, number=0, signature=("x refused",))),
-        fix_prompts.upstream_prompt((failure(), red_main()), "agent/fix"),
-        fix_prompts.branch_prompt(red_main(), "agent/fix"),
-        fix_prompts.nightly_prompt(failure(kind=fix_plan.NIGHTLY, number=3), "agent/fix"),
-    ]
-
-
 def test_every_prompt_ends_at_the_ship_skill_or_the_blocked_file_and_never_at_a_push():
     """A fixer fixes and stops. Merging the base in, pushing, opening the PR and reading
     the gate are one command each, and the pass runs them; a session's turn spent on
@@ -183,18 +259,6 @@ def test_the_upstream_prompt_sends_the_session_at_the_ledger_only_when_the_backl
     assert fix_prompts.LEDGER_STEPS in with_it
     without = fix_prompts.upstream_prompt((failure(),), "agent/fix")
     assert "resolve-like" not in without
-
-
-def test_the_skill_the_ledger_prompt_names_never_tells_a_dispatched_session_to_ask():
-    """Every prompt says nobody is watching, "never ask a question: decide"; the skill it
-    sends the devkit session to said "Ask it, get the answer, fix it", and on 2026-09-26
-    a dispatched session followed the skill into an `AskUserQuestion` nobody answered."""
-    skill = (
-        Path(__file__).resolve().parents[1] / ".claude" / "skills" / "triage-harness" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-    assert "Ask it, get the answer" not in skill
-    assert "is still yours to decide" in skill and "dispatched has nobody to ask" in skill
-    assert "never ask a question: decide" in fix_prompts.upstream_prompt((failure(),), "a/b")
 
 
 def test_the_upstream_prompt_reads_each_failure_with_what_its_gate_said():
@@ -237,10 +301,46 @@ def test_every_prompt_names_the_ratchets_and_forbids_a_question():
     for text in every_prompt():
         assert "structure_check.py" in text and "untested_symbols.py" in text
         assert "never ask a question" in text
+        # A fixer ended on a question whose "(Recommended)" option was the answer.
+        assert "the option you would recommend is the decision" in text
+        # `STOP` once listed "a decision only a person has" as a blocker; a decision is
+        # never one -- the sweep that stopped on one had its recommendation in hand.
+        assert "never a decision, which is yours" in text and "a decision or" not in text
+        # A missing .venv came back session after session, each fixing only its own tree.
+        assert "Fix causes, not instances" in text and "the provisioner" in text
+        # A rule file said it and three sessions still lost turns: the prompt says it too.
+        assert "never a shell heredoc" in text
 
 
-def test_the_devkit_session_marks_a_sibling_tree_it_cuts_as_fixer_work():
-    assert (
-        "logs/fix-origin" in fix_prompts.LEDGER_STEPS
-        and "merges once green" in fix_prompts.LEDGER_STEPS
+def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linux():
+    """Two sweeps hand-parsed junit XML, and one shipped a Linux-only fix it could not
+    check here and said nothing about it."""
+    with_evidence = fix_prompts.pr_prompt(failure(evidence="C:/ev/carameli-pr-412"))
+    assert "failures.txt" in with_evidence and "ran on Linux" in with_evidence
+    assert "ran on Linux" in fix_prompts.pr_prompt(failure(evidence=""))
+    assert ".venv interpreter" in fix_prompts.FINISH
+    assert "--pr" in fix_prompts.LEDGER_STEPS and "any repository" in fix_prompts.LEDGER_STEPS
+
+
+def test_the_skill_the_ledger_sweep_follows_never_sends_it_to_the_user():
+    """`LEDGER_STEPS` sends the devkit session to this skill, which told it to ask the user
+    about "a fix needing a decision only the user can make" -- and it did, with nobody
+    there. It now says to decide, and why. On 2026-09-26 a dispatched session followed the
+    skill's "Ask it, get the answer, fix it" into an `AskUserQuestion` nobody answered,
+    while the prompt that sent it said never to ask."""
+    skill = (REPO_ROOT / ".claude" / "skills" / "triage-harness" / "SKILL.md").read_text(
+        encoding="utf-8"
     )
+    assert "triage-harness/SKILL.md" in fix_prompts.LEDGER_STEPS
+    assert "never ask a question" in fix_prompts.upstream_prompt((failure(),), "a/b")
+    assert "Decide everything, and never ask" in skill
+    assert "Ask it, get the answer" not in skill and "stay the user's call" not in skill
+    assert "Fix the cause, never the instance" in skill and "RECURRED" in skill
+
+
+def test_the_devkit_session_cuts_sibling_trees_with_the_verb_that_marks_them():
+    """Told to copy the mark by hand, a sweep did not; the verb now does it
+    (`fix_reports.inherit_origin`), so the prompt names the verb, not the chore."""
+    steps = fix_prompts.LEDGER_STEPS
+    assert "scripts/agent-worktree.py new" in steps and "merges once green" in steps
+    assert "gets a copy" not in steps

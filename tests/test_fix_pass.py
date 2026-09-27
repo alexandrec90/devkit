@@ -81,7 +81,11 @@ def world(tmp_path, monkeypatch):
         "order": [],
         "release": "",
         "releases": [],
+        "memory": None,
+        "moved": "",
     }
+    monkeypatch.setattr(fix_pass.fix_send.host_memory, "available_mb", lambda: table["memory"])
+    monkeypatch.setattr(fix_pass.fix_send, "code_moved", lambda root: table["moved"])
     monkeypatch.setattr(
         fix_pass.devkit_project, "known_projects", lambda _t: ["devkit", "carameli"]
     )
@@ -208,6 +212,100 @@ def test_dispatch_ships_intents_sends_fixers_records_them_and_merges_adoptions(w
     text = artifact(world)
     assert "sent     carameli #412 -- dispatch" in text
     assert "merged   carameli #9" in text
+
+
+def test_a_pass_whose_code_moved_under_it_sends_no_one_and_asks_to_be_rerun(world):
+    """carameli #395 went to a devkit session because #407, which reroutes it, merged
+    21s after the watchdog fast-forwarded the checkout: the pass routed with old code."""
+    world["failures"] = [failure()]
+    world["moved"] = "be69035aa..6276e81bb"
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 75
+    assert world["dispatched"] == []
+    assert "held     carameli #412 -- devkit's scripts/ moved be69035aa..6276e81bb" in artifact(
+        world
+    )
+
+
+def test_plan_mode_never_asks_whether_the_code_moved(world, monkeypatch):
+    monkeypatch.setattr(fix_pass.fix_send, "code_moved", lambda root: pytest.fail("fetched"))
+    world["failures"] = [failure()]
+    assert fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW) == 0
+
+
+def test_hold_if_moved_holds_every_decision_behind_the_range(monkeypatch, tmp_path):
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
+    earlier = (decision, "already held")
+    monkeypatch.setattr(fix_pass.fix_send, "code_moved", lambda root: "")
+    ctx = _ctx(tmp_path)
+    assert fix_pass.fix_send.hold_if_moved([decision], [earlier], ctx) == (
+        [decision],
+        [earlier],
+        "",
+    )
+    monkeypatch.setattr(fix_pass.fix_send, "code_moved", lambda root: "aaa..bbb")
+    go, held, moved = fix_pass.fix_send.hold_if_moved([decision], [earlier], ctx)
+    assert go == [] and moved == "aaa..bbb"
+    assert held == [earlier, (decision, "devkit's scripts/ moved aaa..bbb mid-pass; rerun")]
+
+
+def _git(cwd: Path, *args: str) -> str:
+    done = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
+    return done.stdout.strip()
+
+
+@pytest.fixture
+def static(tmp_path):
+    """A static checkout on `main`, its origin, and an author who pushes to it."""
+    origin, author, static = tmp_path / "origin.git", tmp_path / "author", tmp_path / "devkit"
+    _git(tmp_path, "init", "--bare", "-b", "main", str(origin))
+    _git(tmp_path, "clone", str(origin), str(author))
+    for key, value in (("user.email", "t@t"), ("user.name", "t"), ("commit.gpgsign", "false")):
+        _git(author, "config", key, value)
+    _git(author, "config", "core.hooksPath", str(tmp_path / "no-hooks"))
+    (author / "scripts").mkdir()
+    (author / "scripts" / "route.py").write_text("OLD = 1\n", encoding="utf-8")
+    _git(author, "add", ".")
+    _git(author, "commit", "-m", "one")
+    _git(author, "push", "origin", "main")
+    _git(tmp_path, "clone", str(origin), str(static))
+    _git(static, "remote", "set-head", "origin", "main")
+    return author, static
+
+
+def _push(author: Path, path: str) -> None:
+    (author / path).parent.mkdir(parents=True, exist_ok=True)
+    (author / path).write_text("NEW = 2\n", encoding="utf-8")
+    _git(author, "add", ".")
+    _git(author, "commit", "-m", f"change {path}")
+    _git(author, "push", "origin", "main")
+
+
+def test_code_moved_names_the_range_only_when_scripts_changed_upstream(static):
+    author, checkout = static
+    assert fix_pass.fix_send.code_moved(checkout) == "", "current"
+    _push(author, "README.md")
+    assert fix_pass.fix_send.code_moved(checkout) == "", "a docs-only merge routes nothing"
+    _push(author, "scripts/route.py")
+    old = _git(checkout, "rev-parse", "HEAD")[:9]
+    new = _git(author, "rev-parse", "HEAD")[:9]
+    assert fix_pass.fix_send.code_moved(checkout) == f"{old}..{new}"
+
+
+def test_code_moved_leaves_a_branch_of_its_own_and_a_linked_worktree_alone(static, tmp_path):
+    author, checkout = static
+    _push(author, "scripts/route.py")
+    for key, value in (("user.email", "t@t"), ("user.name", "t"), ("commit.gpgsign", "false")):
+        _git(checkout, "config", key, value)
+    _git(checkout, "config", "core.hooksPath", str(tmp_path / "no-hooks"))
+    (checkout / "local.txt").write_text("x\n", encoding="utf-8")
+    _git(checkout, "add", ".")
+    _git(checkout, "commit", "-m", "local work")
+    assert fix_pass.fix_send.code_moved(checkout) == "", "not an ancestor: someone's branch"
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    assert fix_pass.fix_send.code_moved(linked) == ""
+    assert fix_pass.fix_send.code_moved(tmp_path / "missing") == "", "a git failure is no move"
 
 
 def test_a_second_pass_sends_nothing_at_the_same_failure(world):
@@ -426,6 +524,22 @@ def test_an_update_is_one_gh_call_and_no_session(monkeypatch, tmp_path):
     )
 
 
+def test_an_update_that_fails_because_the_pr_just_closed_is_not_a_failure(monkeypatch, tmp_path):
+    """The pass filed "update-failed #390" 27 seconds after #390 closed, and a sweep spent
+    2 calls finding that out. A failed update re-reads the PR before anything is filed."""
+
+    def gh_for(_project_dir):
+        def gh(*args):
+            if args[:2] == ("pr", "view"):
+                return subprocess.CompletedProcess(args, 0, '{"state": "MERGED"}', "")
+            return subprocess.CompletedProcess(args, 1, "", "GraphQL: not open")
+
+        return gh
+
+    monkeypatch.setattr(fix_pass.fix_send.sweep, "gh_for", gh_for)
+    assert fix_pass.fix_send.update_branch(failure(number=390, behind=True), tmp_path) == 0
+
+
 def test_plan_mode_says_an_update_would_be_an_update(world):
     world["failures"] = [failure(behind=True)]
     fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW)
@@ -459,6 +573,30 @@ def test_send_all_records_only_what_opened_and_caps_the_rest(world, tmp_path):
         sent == []
         and [why for _, why in capped]
         == ["already dispatched at " + NOW.isoformat(timespec="seconds")] * 2
+    )
+
+
+def test_a_session_the_machine_has_no_memory_for_is_held_for_the_next_pass(world, tmp_path):
+    """Round four sent nine fixers at once and Claude Code killed the supervisor for low
+    memory. The probe is read once, so each session sent this pass is charged against
+    it -- a just-started session has not grown into its memory yet. An update opens no
+    session and is never held; the held ones wait, unrecorded, for the next pass."""
+    send = fix_pass.fix_send
+    world["memory"] = send.MEMORY_FLOOR_MB + send.SESSION_MB * 3 // 2
+    go = [
+        fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=1),)),
+        fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=2),)),
+        fix_plan.Decision(fix_plan.UPDATE, "n", (failure(number=3, behind=True),)),
+    ]
+    ctx = _ctx(tmp_path)
+    sent, capped, _ = send.send_all(go, ctx, "claude")
+    assert sent == ["carameli #1 -- dispatch", "carameli #3 -- update"]
+    [(held, why)] = capped
+    assert held.failures[0].number == 2 and why.startswith(send.HELD_FOR_MEMORY)
+    assert len(fix_ledger.read_ledger(ctx.ledger_path)) == 2, "#2 is free to go next pass"
+    world["memory"] = None
+    assert send.send_all(go[1:2], ctx, "claude")[0] == ["carameli #2 -- dispatch"], (
+        "a probe that cannot read the machine holds nothing"
     )
 
 
