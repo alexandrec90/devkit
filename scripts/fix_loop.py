@@ -14,7 +14,8 @@ harness-defect ledger, where the devkit session picks it up on the next pass:
 - **What every transcript says** (`session_friction.py`): the turns the harness cost
   sessions nobody dispatched, which is most of them.
 - **Whether resolutions held** (`fix_verify.py`): a group retired against a fix that
-  never merged is reopened, and one whose fix is still in flight sends no session.
+  never merged is reopened, and one whose fix is still in flight sends no session; once
+  it merges, the rows filed while it waited are retired against it, not re-sent.
 - **Whether what was filed still stands** (`session_friction.outdated`): a friction row
   the detectors on the default branch no longer file is retired, with that reason, and
   one an open PR's detector no longer files is resolved against that PR
@@ -222,10 +223,14 @@ def _verify(ctx: Context) -> list[str]:
     items = triage.load(ctx.devkit_dir)
     lookup = fix_verify.gh_lookup(ctx.root, ctx.projects, sweep.gh_for)
     cache = ctx.ledger_path.parent / fix_verify.CACHE_NAME
+    outcome = fix_verify.verify(items, lookup, cache, ctx.now)
     lines = []
-    for ref, why in fix_verify.verify(items, lookup, cache, ctx.now):
+    for ref, why in outcome.reopen:
         triage.reopen([ref], why, root=ctx.devkit_dir)
         lines.append(f"reopened [{ref}] -- {why}")
+    for ref, note, pr in outcome.covered:
+        triage.resolve([ref], note, pr=pr, root=ctx.devkit_dir)
+        lines.append(f"retired [{ref}] -- {note}")
     return lines
 
 
