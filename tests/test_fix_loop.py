@@ -32,6 +32,8 @@ def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fix_loop.bg_sessions, "stop_finished", lambda trees, runner: [f"x in {t}" for t in trees]
     )
+    monkeypatch.setattr(fix_loop, "working_dirs", frozenset)
+    monkeypatch.setattr(fix_loop.friction_pending, "detector_fixes", lambda gh, git: [])
     return fix_loop.Context(
         tmp_path,
         ["devkit", "carameli"],
@@ -173,6 +175,84 @@ def test_a_working_devkit_session_is_the_harness_busy(ctx, monkeypatch):
     )
     closed, journal = close(ctx)
     assert closed.harness_busy == str(path) and journal.findings == []
+
+
+def test_a_working_sweep_of_the_ledger_alone_is_the_harness_busy(ctx, monkeypatch):
+    """The shape every sweep of 2026-09-26 had: one ledger failure sent upstream. Its key
+    starts `ledger:`, a prefix test for `upstream:` missed it, and the pass sent 0926-16
+    over -15 and 0926-18 over -17 (028731f9, 9cbdc674)."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        key="ledger:devkit:0:a81ffd55430d:f6b83153228a:upstream",
+        sent=NOW - _dt.timedelta(minutes=9),
+        transcript_age=_dt.timedelta(minutes=1),
+    )
+    closed, _ = close(ctx)
+    assert closed.harness_busy == str(path)
+
+
+def test_a_session_still_busy_after_its_intent_holds_its_tree_and_the_harness(ctx, monkeypatch):
+    """#422's own sweep had written its intent and was still mid-merge when the pass sent
+    a resolver into the same tree (d821bd8f). Its transcript is the stamped one, so only
+    the session listing can say it is still at work."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        key="ledger:devkit:0:895d547878e6:6f7d5e150831:upstream",
+        sent=NOW - _dt.timedelta(minutes=30),
+        transcript_age=_dt.timedelta(minutes=1),
+    )
+    (path / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
+    closed, _ = close(ctx)
+    assert closed.busy == {} and closed.harness_busy == "", "idle: finished, holds nothing"
+    listed = [{"kind": "background", "status": "busy", "cwd": str(path)}]
+    monkeypatch.setattr(fix_loop, "working_dirs", lambda: fix_loop.bg_sessions.working(listed))
+    closed, _ = close(ctx)
+    assert closed.busy == {("carameli", "agent/x-0919"): str(path)}
+    assert closed.harness_busy == str(path)
+
+
+def test_the_session_listing_is_read_from_claude_agents(monkeypatch):
+    rows = '[{"kind": "background", "status": "busy", "cwd": "C:\\\\ws\\\\t"}]'
+    seen = []
+
+    def runner(argv, **_kwargs):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, rows, "")
+
+    monkeypatch.setattr(fix_loop.ship_intent, "run_quiet", runner)
+    assert fix_loop.working_dirs() == frozenset({"c:/ws/t"})
+    assert seen == [["claude", "agents", "--json"]]
+
+
+def test_a_row_an_open_prs_detector_no_longer_files_is_resolved_against_that_pr(ctx, monkeypatch):
+    """fc786188 was filed by main's detector while open #420 already stopped it, and a
+    sweep was sent at it (20fe4a86)."""
+    fix_findings.record_all(
+        [fix_findings.Finding("environment", "devkit", "d", event=fix_findings.FRICTION)],
+        [],
+        ctx.devkit_dir,
+    )
+    [row] = triage.open_items(triage.load(ctx.devkit_dir))
+    fix = fix_loop.friction_pending.Fix("420", "worktree-hazy", "src")
+    monkeypatch.setattr(fix_loop.friction_pending, "detector_fixes", lambda gh, git: [fix])
+    monkeypatch.setattr(
+        fix_loop.friction_pending, "outdated_on", lambda f, items: [(i.id, "gone") for i in items]
+    )
+    plan = fix_loop.Context(
+        *[getattr(ctx, n) for n in ("root", "projects", "devkit_dir")],
+        ctx.ledger_path,
+        ctx.history_path,
+        fix_cycle.PLAN,
+        NOW,
+    )
+    assert fix_loop.recheck_open(plan) == [f"would hold [{row.id}] on #420"]
+    assert triage.open_items(triage.load(ctx.devkit_dir)) != []
+    assert fix_loop.recheck_open(ctx) == [f"pending [{row.id}] on #420"]
+    assert triage.open_items(triage.load(ctx.devkit_dir)) == []
+    [resolved] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    assert resolved.fields["pr"] == "420" and "#420 (worktree-hazy)" in resolved.fields["note"]
 
 
 def test_plan_mode_reads_back_and_writes_nothing(ctx, monkeypatch, tmp_path):

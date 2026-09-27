@@ -129,6 +129,8 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(loop.session_friction, "harvest", lambda *a, **k: list(table["friction"]))
     monkeypatch.setattr(loop.fix_verify, "verify", lambda *a, **k: list(table["reopen"]))
     monkeypatch.setattr(loop.bg_sessions, "stop_finished", lambda trees, runner: [])
+    monkeypatch.setattr(loop, "working_dirs", frozenset)
+    monkeypatch.setattr(loop.friction_pending, "detector_fixes", lambda gh, git: [])
     monkeypatch.setattr(fix_pass.gate_evidence, "newest_release", lambda _d: "v0.11.22")
     monkeypatch.setattr(
         fix_pass.gate_evidence,
@@ -232,7 +234,16 @@ def test_a_dispatching_pass_brings_every_installer_current_and_a_plan_does_not(w
     assert fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW) == 0
     assert world["installers"] == []
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
-    assert world["installers"] == [["maintain", "--workspace", str(world["workspace"])]]
+    assert world["installers"] == [
+        ["maintain", "--workspace", str(world["workspace"]), "--running-under", "devkit-fix-pass"]
+    ]
+
+
+def test_the_pass_names_the_task_it_runs_under_off_its_installer():
+    """086329c7: the pass cannot re-register the task it runs inside, so `maintain` has to
+    know which one that is -- read off the installer rather than copied here."""
+    installer = fix_pass.REPO_ROOT / "scripts" / "install-fix-pass-task.py"
+    assert fix_pass.installers.task_name(installer) == fix_pass.OWN_TASK == "devkit-fix-pass"
 
 
 def test_a_failed_installer_is_filed_for_the_devkit_session(world, monkeypatch, tmp_path):
