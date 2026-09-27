@@ -146,6 +146,14 @@ def test_a_pass_that_reports_is_passed_through_untouched(watched):
     assert watched["updates"] == 1, "kept current before every pass"
 
 
+def test_a_console_less_watchdog_passes_the_output_on_without_a_stream(watched, monkeypatch):
+    """The task runs this under `pythonw.exe`, where both streams are None: a
+    `sys.stdout.write` here moved the c47026f9 crash from the pass into the watchdog."""
+    monkeypatch.setattr(watchdog.sys, "stdout", None)
+    monkeypatch.setattr(watchdog.sys, "stderr", None)
+    assert watchdog.watch(watched["argv"], NOW) == 0
+
+
 def test_a_crash_is_filed_and_repaired_once_per_signature(watched):
     watched["outcome"] = (1, TRACE)
     assert watchdog.watch(watched["argv"], NOW) == 2

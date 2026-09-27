@@ -8,7 +8,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import fix_findings
 import fix_reports
+import harness_triage
 
 NOW = _dt.datetime(2026, 9, 19, 9, 0, tzinfo=_dt.UTC)
 
@@ -264,6 +266,26 @@ def test_friction_lines_drop_markup_and_blanks_and_filing_away_reads_them_once(t
     assert fix_reports.friction_lines(tmp_path) == ()
     assert (tmp_path / "logs" / "friction.filed.md").exists()
     fix_reports.file_away(tmp_path, fix_reports.FRICTION_FILE)  # nothing there: no error
+
+
+def test_a_line_the_tree_already_had_filed_is_a_restatement_not_a_recurrence(tmp_path):
+    """97d20f01 and a174d816: a supervising session rewrote its friction file whole, and
+    the two reports the pass had already filed -- one with a new tail -- went back on the
+    ledger as RECURRED against fixes that had held."""
+    (tmp_path / "logs").mkdir()
+    head = "devkit supervise-fix-pass: `python scripts/posix-rehearsal.py > file 2>&1` exited 1"
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(f"- {head}; no artifact\n", encoding="utf-8")
+    fix_reports.file_away(tmp_path, fix_reports.FRICTION_FILE)
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(
+        f"- {head}; 4c396283 since writes one\n- the scheduled task is stale\n", encoding="utf-8"
+    )
+    assert fix_reports.friction_lines(tmp_path) == ("the scheduled task is stale",)
+
+
+def test_the_restatement_width_is_what_the_ledger_groups_a_friction_line_by():
+    finding = fix_findings.Finding("reported", "devkit", "x")
+    prefix = len(finding.headline) - len("x")
+    assert fix_reports.RESTATED_WIDTH == harness_triage.SIGNATURE_WIDTH - prefix
 
 
 def test_the_newest_transcript_is_the_latest_written(tmp_path):

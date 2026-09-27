@@ -52,6 +52,7 @@ import fix_release
 import fix_red
 import fix_send
 import gate_evidence
+import installers
 import ship_intent
 import worktree
 from _loader import load_by_path
@@ -76,6 +77,8 @@ HISTORY = Path("logs") / "fix-pass.history.jsonl"
 # A week of half-hourly passes.
 HISTORY_KEEP = 336
 SCHEDULED_AGENT = "claude-bg"
+# The installer that registers the job running this file; `installers.select` spelling.
+OWN_INSTALLER = "fix-pass-task"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -98,6 +101,36 @@ def runs(argv: list[str]) -> bool:
 
 def missing_tools() -> list[str]:
     return [tool for tool, args in REQUIRED_TOOLS.items() if not runs([tool, *args])]
+
+
+def keep_own_task_current(workspace: Path, mode: str, runner=None) -> str:
+    """`install-fix-pass-task.py --check`, then `--yes` if a dispatching pass finds it stale.
+
+    `installers.py` does this for every job, once a day, so a change to how this job is
+    registered reached the machine up to a day late: after #404 moved the task onto the
+    watchdog, it kept running this file bare under `pythonw.exe` -- no self-update, and
+    a None stdout -- and crashed on every dispatch (990856e5). This pass fires every half
+    hour, from whichever registration the machine has, so it reconciles its own. A
+    failure is filed, since under `pythonw.exe` the line returned reaches no one.
+    """
+    try:
+        outcome = installers.reconcile(
+            installers.sweep.source_checkout(REPO_ROOT),
+            mode == fix_cycle.DISPATCH,
+            installers.read_options(workspace),
+            runner,
+            only=(OWN_INSTALLER,),
+        )[0]
+    except (OSError, ValueError) as exc:
+        outcome = installers.Outcome(
+            OWN_INSTALLER, installers.FAILED, f"{type(exc).__name__}: {exc}"
+        )
+    line = f"own task: {outcome.verdict} -- {outcome.detail}"
+    if outcome.verdict == installers.FAILED:
+        devkit_dir = workspace.parent / fix_cycle.DEVKIT
+        found = Finding("own-task-failed", fix_cycle.DEVKIT, line)
+        fix_loop.fix_findings.record_all([found], fix_loop.triage.load(devkit_dir), devkit_dir)
+    return line
 
 
 def write_artifact(text: str, root: Path | None = None) -> Path:
@@ -326,6 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    fix_send.pin_loaded(REPO_ROOT)  # before anything can fast-forward the checkout
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     workspace = args.workspace.resolve()
     if not workspace.is_file():
@@ -346,6 +380,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"fix-pass: {why}", file=sys.stderr)
         write_artifact(f"fix-pass: FAILED -- {why}")
         return EXIT_USAGE
+    if args.scheduled and mode != fix_cycle.OFF:
+        print(f"fix-pass: {keep_own_task_current(workspace, mode)}")
     try:
         return run(workspace, mode, launch)
     except (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError) as exc:

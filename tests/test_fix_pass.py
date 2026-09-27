@@ -293,6 +293,20 @@ def test_code_moved_names_the_range_only_when_scripts_changed_upstream(static):
     assert fix_pass.fix_send.code_moved(checkout) == f"{old}..{new}"
 
 
+def test_code_moved_sees_a_fast_forward_made_under_a_running_pass(static, monkeypatch):
+    """0b9c6b88: the reconcile job fast-forwarded the static checkout 39s before `send`,
+    so HEAD equalled origin while the modules in memory were the pre-#416 ones, and the
+    pass crashed on the bug the fast-forward had just brought the fix for."""
+    monkeypatch.setattr(fix_pass.fix_send, "LOADED_FROM", {})
+    author, checkout = static
+    fix_pass.fix_send.pin_loaded(checkout)
+    old = _git(checkout, "rev-parse", "HEAD")[:9]
+    _push(author, "scripts/route.py")
+    _git(checkout, "pull", "--ff-only", "--quiet")  # what reconcile does every 15 minutes
+    new = _git(checkout, "rev-parse", "HEAD")[:9]
+    assert fix_pass.fix_send.code_moved(checkout) == f"{old}..{new}"
+
+
 def test_code_moved_leaves_a_branch_of_its_own_and_a_linked_worktree_alone(static, tmp_path):
     author, checkout = static
     _push(author, "scripts/route.py")
@@ -669,7 +683,12 @@ def test_the_cli_reads_the_switch_from_the_workspace_and_forces_the_background_a
     monkeypatch.setattr(
         fix_pass, "run", lambda ws, mode, launch, **k: seen.append((mode, launch.agent)) or 0
     )
+    own: list = []
+    monkeypatch.setattr(
+        fix_pass, "keep_own_task_current", lambda ws, mode: own.append(mode) or "own task: current"
+    )
     assert fix_pass.main(["--scheduled", "--agent", "codex", "--workspace", str(workspace)]) == 0
+    assert own == [fix_cycle.PLAN], "only a scheduled pass asks about its own registration"
     assert (
         fix_pass.main(["--mode", "dispatch", "--agent", "codex", "--workspace", str(workspace)])
         == 0
@@ -680,6 +699,46 @@ def test_the_cli_reads_the_switch_from_the_workspace_and_forces_the_background_a
         (fix_cycle.DISPATCH, "codex"),
         (fix_cycle.PLAN, "claude-bg"),
     ]
+
+
+def _installer(codes: dict[str, int], seen: list):
+    """A runner answering `install-fix-pass-task.py` by mode: `--check` then `--yes`."""
+
+    def run(argv):
+        seen.append(argv[2])
+        return subprocess.CompletedProcess(argv, codes[argv[2]], "", f"said {argv[2]}")
+
+    return run
+
+
+def test_a_dispatching_pass_re_registers_its_own_stale_task(tmp_path):
+    """990856e5: after #404 the task still ran this file bare under pythonw.exe, because
+    only the daily `installers.py` re-registers, and every dispatch in between crashed."""
+    seen: list = []
+    workspace = tmp_path / "w.code-workspace"
+    stale = _installer({"--check": 1, "--yes": 0}, seen)
+    line = fix_pass.keep_own_task_current(workspace, fix_cycle.DISPATCH, stale)
+    assert seen == ["--check", "--yes"] and line == "own task: reinstalled -- said --yes"
+    seen.clear()
+    line = fix_pass.keep_own_task_current(workspace, fix_cycle.PLAN, stale)
+    assert seen == ["--check"] and line == "own task: stale -- said --check", "plan changes nothing"
+    seen.clear()
+    current = _installer({"--check": 0}, seen)
+    assert fix_pass.keep_own_task_current(workspace, fix_cycle.DISPATCH, current) == (
+        "own task: current -- said --check"
+    )
+    assert seen == ["--check"]
+
+
+def test_an_own_task_that_cannot_be_registered_is_filed(tmp_path):
+    """Under pythonw.exe the printed line reaches no one, so a failure goes on the ledger."""
+    workspace = tmp_path / "w.code-workspace"
+    refused = _installer({"--check": 1, "--yes": 1}, [])
+    line = fix_pass.keep_own_task_current(workspace, fix_cycle.DISPATCH, refused)
+    assert line.startswith("own task: failed -- --yes exited 1")
+    triage = fix_pass.fix_loop.triage
+    [found] = triage.open_items(triage.load(tmp_path / "devkit"))
+    assert found.detail.startswith("own-task-failed: own task: failed")
 
 
 def test_the_parser_defaults_to_the_background_agent_and_no_mode():

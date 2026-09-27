@@ -166,19 +166,19 @@ def test_the_rule_names_the_spelling_that_avoids_the_error_the_detector_files():
 
 
 def test_a_file_written_through_a_shell_heredoc_is_friction():
-    """Claude Code's Bash tool collapses backslashes in a heredoc, so a file written or
-    patched through one comes out mangled. Three sessions lost turns to it on one day,
-    each retired by pointing at the rule that says to use Write/Edit -- and it recurred,
-    because only the sessions that noticed reported it. Every write that can be damaged
-    is filed now, whether anyone noticed or not."""
+    """Claude Code's Bash tool collapses a doubled backslash in a heredoc, so a file
+    written or patched through one comes out mangled. Three sessions lost turns to it on
+    one day, each retired by pointing at the rule that says to use Write/Edit -- and it
+    recurred, because only the sessions that noticed reported it. Every write that can be
+    damaged is filed now, whether anyone noticed or not."""
     for command in (
-        "cat > tests/test_x.py <<'EOF'\nassert r'\\b'\nEOF",
+        "cat > tests/test_x.py <<'EOF'\nassert r'\\\\b'\nEOF",
         'cat >> t.py <<"EOF"\nx = "a\\\\b"\nEOF',
-        "tee scripts/a.py <<EOF\nprint('\\n')\nEOF",
+        "tee scripts/a.py <<EOF\nprint('\\\\n')\nEOF",
         "python - <<'EOF'\nfrom pathlib import Path\np = Path('a.py')\n"
         "p.write_text(p.read_text().replace('\\\\d', 'b'))\nEOF",
-        "python3 - <<'PY'\nopen('x.txt', 'w').write('y\\n')\nPY",
-        "cat > x.py <<'EOF'\nr'\\s'",  # unterminated: the body runs to the end
+        "python3 - <<'PY'\nopen('x.txt', 'w').write('y\\\\n')\nPY",
+        "cat > x.py <<'EOF'\nr'\\\\s'",  # unterminated: the body runs to the end
     ):
         assert classes([call(command, "1")]) == ["heredoc-write"], command
     for harmless in (
@@ -187,6 +187,20 @@ def test_a_file_written_through_a_shell_heredoc_is_friction():
         "grep -c '<<' scripts/x.py",
     ):
         assert classes([call(harmless, "1")]) == [], harmless
+
+
+def test_a_heredoc_whose_backslashes_are_all_single_is_not_friction():
+    """46a1578d: a `cat > dump.py` whose only backslashes were the `\\n` in its f-strings.
+    Written through the Bash tool, `one:\\n` arrived as those five characters and
+    `two:\\\\n` arrived as `two:\\n` -- only the doubled one is collapsed."""
+    dump = (
+        "cd scratchpad && cat > dump.py <<'EOF'\nimport json,sys\n"
+        "for i,l in enumerate(open(sys.argv[1]),1):\n"
+        '    print(f"=== L{i} TEXT\\n{l[:6000]}")\nEOF\npython dump.py t.jsonl 6 > b.txt'
+    )
+    assert classes([call(dump, "1")]) == []
+    assert not sf.damageable_heredoc(dump)
+    assert not sf.damageable_heredoc("tee a.py <<EOF\nprint('\\n')\nEOF")
 
 
 def test_a_heredoc_with_no_backslash_in_its_body_is_not_friction():
@@ -205,7 +219,7 @@ def test_a_heredoc_with_no_backslash_in_its_body_is_not_friction():
     )
     assert classes([call(b935e421, "1")]) == []
     assert not sf.damageable_heredoc(b935e421)
-    assert sf.damageable_heredoc("cat <<-EOF > a.py\n\tx = '\\t'\n\tEOF")
+    assert sf.damageable_heredoc("cat <<-EOF > a.py\n\tx = '\\\\t'\n\tEOF")
     assert not sf.damageable_heredoc("echo 'a\\b' > x.txt")  # no heredoc at all
 
 

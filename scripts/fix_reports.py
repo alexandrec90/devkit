@@ -62,6 +62,9 @@ OUTCOME_FILES = (
 
 # How much of a report reaches the record: one line's worth, not the essay.
 REASON_LIMIT = 400
+# How much of a friction line the ledger groups by: `harness_triage.SIGNATURE_WIDTH` of
+# the `reported: <line>` detail it is filed under. Spelled here, and held to that by a test.
+RESTATED_WIDTH = 80 - len("reported: ")
 
 # A dispatched session with no transcript this long after its stamp never started; one
 # whose transcript has been quiet this long, with nothing left behind, has ended. Both
@@ -223,16 +226,31 @@ class Tree:
     friction: tuple[str, ...]
 
 
-def friction_lines(tree: Path) -> tuple[str, ...]:
-    """The tree's `logs/friction.md`, one entry per line: headings and blanks dropped,
-    list markers stripped."""
+def _entries(path: Path) -> tuple[str, ...]:
+    """A friction file, one entry per line: headings and blanks dropped, list markers
+    stripped."""
     try:
-        text = (tree / FRICTION_FILE).read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ()
     kept = (line.strip() for line in text.splitlines())
     lines = (line.lstrip("-*0123456789. ").strip() for line in kept if not line.startswith("#"))
     return tuple(line[:REASON_LIMIT] for line in lines if line)
+
+
+def friction_lines(tree: Path) -> tuple[str, ...]:
+    """The tree's `logs/friction.md`, less what this tree has already had filed.
+
+    A session that rewrites its file whole re-sends every line the pass already filed
+    away, and a row that lands in a group resolved since reads as "RECURRED" -- 97d20f01
+    and a174d816 were one supervising session restating two reports it had already filed.
+    So a line is a restatement when it shares its first `RESTATED_WIDTH` characters,
+    which is all of it the ledger groups by, with a line in `logs/friction.filed.md`.
+    """
+    said = {line[:RESTATED_WIDTH] for line in _entries(tree / filed(FRICTION_FILE))}
+    return tuple(
+        line for line in _entries(tree / FRICTION_FILE) if line[:RESTATED_WIDTH] not in said
+    )
 
 
 def read_trees(root: Path, projects: list[str], git_for: GitFor = sweep.git_for) -> list[Tree]:
