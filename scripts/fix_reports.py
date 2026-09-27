@@ -238,14 +238,19 @@ class Tree:
 
 def _entries(path: Path) -> tuple[str, ...]:
     """A friction file's entries, one per line: headings and blanks dropped, list
-    markers stripped; empty when there is no file."""
+    markers stripped; empty when there is no file.
+
+    Whole, never cut to `REASON_LIMIT`: a line ends with what fixed it and the
+    `fixed on this branch` that settles it (`fixed_here`), so a cut dropped exactly that
+    half -- 2d0bc76f was filed open against a fix already merging on #435. The ledger's
+    own `harness_events.FIELD_LIMITS` is the ceiling on what reaches the file."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ()
     kept = (line.strip() for line in text.splitlines())
     lines = (line.lstrip("-*0123456789. ").strip() for line in kept if not line.startswith("#"))
-    return tuple(line[:REASON_LIMIT] for line in lines if line)
+    return tuple(line for line in lines if line)
 
 
 def friction_lines(tree: Path) -> tuple[str, ...]:
