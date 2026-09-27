@@ -70,14 +70,19 @@ def test_configure_leaves_a_run_that_already_has_a_root_alone(tmp_path, monkeypa
 
 def test_a_run_loading_it_by_p_keeps_its_tmp_path_out_of_the_shared_root(tmp_path):
     """The whole path, as a project's `addopts` spells it: `-p` finds the module on the
-    ini `pythonpath`, and `tmp_path` lands under the run's own root."""
-    (tmp_path / "pyproject.toml").write_text(
+    ini `pythonpath`, `tmp_path` lands under the run's own root, and the run never makes
+    the shared `pytest-of-<user>` whose teardown walk is what crashed (97d20f01)."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
         "[tool.pytest.ini_options]\n"
         f'pythonpath = ["{(REPO_ROOT / "scripts" / "pytest-plugins").as_posix()}"]\n'
         'addopts = "-p devkit_temproot"\n',
         encoding="utf-8",
     )
-    (tmp_path / "test_where.py").write_text(
+    (project / "test_where.py").write_text(
         "import os\n"
         "def test_where(tmp_path):\n"
         "    root = os.environ['PYTEST_DEBUG_TEMPROOT']\n"
@@ -86,12 +91,15 @@ def test_a_run_loading_it_by_p_keeps_its_tmp_path_out_of_the_shared_root(tmp_pat
         encoding="utf-8",
     )
     env = {k: v for k, v in os.environ.items() if k not in (plugin.ENV, "PYTEST_ADDOPTS")}
+    env.update({"TMP": str(shared), "TEMP": str(shared), "TMPDIR": str(shared)})
     run = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(tmp_path)],
-        cwd=tmp_path,
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(project)],
+        cwd=project,
         capture_output=True,
         text=True,
         env=env,
         check=False,
     )
     assert run.returncode == 0, run.stdout + run.stderr
+    assert [p.name for p in shared.iterdir()] == [plugin.PARENT], "the shared root is untouched"
+    assert list((shared / plugin.PARENT).iterdir()) == [], "the run removed its own root"

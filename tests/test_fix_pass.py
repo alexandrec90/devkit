@@ -325,6 +325,20 @@ def test_code_moved_names_the_range_only_when_scripts_changed_upstream(static):
     assert fix_pass.fix_send.code_moved(checkout) == f"{old}..{new}"
 
 
+def test_code_moved_sees_a_fast_forward_made_under_a_running_pass(static, monkeypatch):
+    """0b9c6b88: the reconcile job fast-forwarded the static checkout 39s before `send`,
+    so HEAD equalled origin while the modules in memory were the pre-#416 ones, and the
+    pass crashed on the bug the fast-forward had just brought the fix for."""
+    monkeypatch.setattr(fix_pass.fix_send, "LOADED_FROM", {})
+    author, checkout = static
+    fix_pass.fix_send.pin_loaded(checkout)
+    old = _git(checkout, "rev-parse", "HEAD")[:9]
+    _push(author, "scripts/route.py")
+    _git(checkout, "pull", "--ff-only", "--quiet")  # what reconcile does every 15 minutes
+    new = _git(checkout, "rev-parse", "HEAD")[:9]
+    assert fix_pass.fix_send.code_moved(checkout) == f"{old}..{new}"
+
+
 def test_code_moved_leaves_a_branch_of_its_own_and_a_linked_worktree_alone(static, tmp_path):
     author, checkout = static
     _push(author, "scripts/route.py")
