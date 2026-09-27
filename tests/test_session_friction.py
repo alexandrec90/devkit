@@ -261,6 +261,24 @@ def test_a_heredoc_with_no_backslash_in_its_body_is_not_friction():
     assert not sf.damageable_heredoc("echo 'a\\\\b' > x.txt")  # no heredoc at all
 
 
+def test_a_heredoc_dumped_back_byte_for_byte_is_a_probe_not_a_write():
+    """ccde706b: the session that established the doubled-backslash rule wrote both
+    spellings to a scratch file and read them back with `od -c`, in one call. That is a
+    measurement of the tool, and filing it reopened the group its own finding retired."""
+    ccde706b = (
+        "cat > \"C:/Users/alexa/.claude/jobs/c9e3f0fa/tmp/bs.txt\" <<'EOF'\n"
+        "one:\\n\ntwo:\\\\n\nEOF\n"
+        'od -c "C:/Users/alexa/.claude/jobs/c9e3f0fa/tmp/bs.txt"'
+    )
+    assert classes([call(ccde706b, "1")]) == []
+    for dump in ("xxd x.txt", "hexdump -C x.txt", "Format-Hex x.txt"):
+        assert not sf.damageable_heredoc(ccde706b.rsplit("\n", 1)[0] + "\n" + dump), dump
+    # The same write with nothing reading it back is still the damage it always was,
+    # and a word that only starts like a dump is not one.
+    assert classes([call(ccde706b.rsplit("\n", 1)[0], "1")]) == ["heredoc-write"]
+    assert sf.damageable_heredoc(ccde706b.rsplit("\n", 1)[0] + "\nodd -c x")
+
+
 def test_a_heredoc_with_only_single_backslashes_is_not_friction():
     """46a1578d recurred on a `cat >` whose body's only backslashes were the `\\n` in
     f-strings. The Bash tool collapses a doubled backslash and nothing else: written
@@ -624,6 +642,20 @@ def test_a_commit_message_that_quotes_errors_is_not_an_environment_failure():
         "    - `'pytest' is not recognized ...`\n"
     )
     assert classes([call(command, "1"), result(out, "1", error=False)]) == []
+
+
+def test_an_escaped_quote_does_not_close_the_string_an_error_is_quoted_in():
+    """83496ae4: a `git diff` of this file's own tests, where the error sits after a `\\"`
+    inside a string literal -- counted as a closing quote, it read as unquoted."""
+    line = (
+        '+    both = "x.md:3: prints \\"No module named x\\"\\n'
+        "ModuleNotFoundError: No module named 'y'\""
+    )
+    command = "git diff origin/main...origin/worktree-hazy-wibbling-pearl -- tests/x.py"
+    assert classes([call(command, "1"), result(line, "1", error=False)]) == []
+    # A real error on a line that merely has an escape before it still files.
+    real = "C:\\py\\python.exe: No module named pytest"
+    assert classes([call("python -m pytest tests/x.py", "1"), result(real, "1")]) == ["environment"]
 
 
 def test_the_push_gate_and_the_vendored_suite_are_full_suites():
