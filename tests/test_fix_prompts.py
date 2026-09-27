@@ -314,14 +314,25 @@ def test_every_prompt_names_the_ratchets_and_forbids_a_question():
         assert "An append is an Edit" in text
 
 
-def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linux():
+def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linux(tmp_path):
     """Two sweeps hand-parsed junit XML, and one shipped a Linux-only fix it could not
     check here and said nothing about it."""
-    with_evidence = fix_prompts.pr_prompt(failure(evidence="C:/ev/carameli-pr-412"))
+    (tmp_path / "failures.txt").write_text("FAILED x\n", encoding="utf-8")
+    with_evidence = fix_prompts.pr_prompt(failure(evidence=str(tmp_path)))
     assert "failures.txt" in with_evidence and "ran on Linux" in with_evidence
     assert "ran on Linux" in fix_prompts.pr_prompt(failure(evidence=""))
     assert ".venv interpreter" in fix_prompts.FINISH
     assert "--pr" in fix_prompts.LEDGER_STEPS and "any repository" in fix_prompts.LEDGER_STEPS
+
+
+def test_a_prompt_names_the_log_that_came_down_when_no_junit_report_failed(tmp_path):
+    """8f622cc6: devkit's suite reports only in `test-failures.log`, and a fixer told to
+    read `failures.txt` first went looking for a file nothing had written."""
+    (tmp_path / "test-failures").mkdir()
+    (tmp_path / "test-failures" / "test-failures.log").write_text("FAILED", encoding="utf-8")
+    text = fix_prompts.pr_prompt(failure(evidence=str(tmp_path)))
+    assert "test-failures/test-failures.log there first" in text
+    assert "failures.txt (" not in text
 
 
 def test_the_skill_the_ledger_sweep_follows_never_sends_it_to_the_user():

@@ -78,6 +78,29 @@ billed input tokens, ~2.5% of all spend, at an average context of 117k tokens pe
 Polls land at the *end* of a session, where context is largest, so they are the most
 expensive place a call can go — one late poll cost more than five whole sessions did.
 
+### Reading "no checks reported": ask `mergeStateStatus` once
+
+`gh pr view <N> --json mergeStateStatus,statusCheckRollup`, once, after a push:
+
+| What you see | What it is | What to do |
+| --- | --- | --- |
+| `CONFLICTING` | no merge ref to build against, so the gate never will run | merge `origin/<default>` and push |
+| `BLOCKED`/`CLEAN` | the run exists | `--watch` is right |
+| `UNKNOWN` | the ordinary answer in the seconds after a push | says nothing either way; ask again |
+| `UNSTABLE` **with an empty rollup** | a run exists that the PR cannot show you | `gh run list --branch <head> --event workflow_dispatch` |
+
+That last row is the one that reads as the first and is its opposite. **A push made with
+`GITHUB_TOKEN` raises no `pull_request` event**, so a workflow that commits to a PR branch
+— a lock repair, a generated-file sync — leaves the only gate evidence on a run it
+dispatched itself, and a `workflow_dispatch` run is not in the PR's check rollup. The PR
+reads exactly like one whose gate has not started. carameli #347 sat four days that way
+while its dispatched gate had *failed*, on a real test, with the fix a one-line command.
+`UNSTABLE` is the tell: a gate that has not started yet cannot make a PR unstable.
+
+Moved here from `engineering.md` on 2026-09-26: the always-loaded tier had 12 tokens of
+headroom, and this table is read only by a session waiting on a gate, which
+`session-scope.md` keeps project sessions from doing at all.
+
 ### devkit#180: "no checks reported" was a gate that would never start
 
 GitHub builds a `pull_request` run against the *merge* ref, and a PR that has gone
