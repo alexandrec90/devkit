@@ -588,12 +588,23 @@ def run_pull(project: Path, devkit: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def sync_script_bytes(project: Path) -> bytes:
-    """The project's vendored copy of the puller, or b"" when it has none."""
-    try:
-        return (project / SYNC_SCRIPT).read_bytes()
-    except OSError:
-        return b""
+# The puller is the script and the module its list is read from: `sync-devkit.py`
+# imports `MANIFEST` from `devkit_manifest.py`, so a release that only grows the list
+# changes the one file and not the other. v0.11.28 added `.claude/fixer.md` that way,
+# the fixpoint read an unchanged script and stopped after one pull, and all three
+# adoptions stopped on `DRIFT .claude/fixer.md` (c45826ad).
+PULLER = (SYNC_SCRIPT, "scripts/devkit_manifest.py")
+
+
+def puller_bytes(project: Path) -> bytes:
+    """The project's vendored puller, every file of it; an absent one reads as b""."""
+    parts = []
+    for name in PULLER:
+        try:
+            parts.append((project / name).read_bytes())
+        except OSError:
+            parts.append(b"")
+    return b"\0".join(parts)
 
 
 def pull_to_fixpoint(
@@ -625,12 +636,12 @@ def pull_to_fixpoint(
     runner = pull or run_pull
     runs: list[subprocess.CompletedProcess[str]] = []
     for _ in range(passes):
-        before = sync_script_bytes(project)
+        before = puller_bytes(project)
         result = runner(project, source)
         runs.append(result)
         # A refused pull is the caller's to report; re-running it would only refuse
         # again, and the second refusal is not new information.
-        if result.returncode != 0 or sync_script_bytes(project) == before:
+        if result.returncode != 0 or puller_bytes(project) == before:
             return runs, ""
     return runs, (
         f"{SYNC_SCRIPT} still changed after {passes} pulls -- devkit and this "

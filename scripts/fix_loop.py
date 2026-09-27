@@ -185,6 +185,17 @@ def working_dirs() -> frozenset[str]:
     return bg_sessions.working(bg_sessions.listed(ship_intent.run_quiet))
 
 
+def fixers_working() -> frozenset[str]:
+    """Where a background session is busy: a fixer that wrote its intent and kept going.
+
+    Shipping under it committed a tree mid-edit twice -- #422's sweep, whose later edits
+    were left unstaged for the resolver to find, and 0926-19, whose second fix needed a
+    second commit. Background only: the supervisor that runs the pass by hand is an
+    interactive session, busy by definition, and ships its own tree through it.
+    """
+    return bg_sessions.working(bg_sessions.listed(ship_intent.run_quiet), ("background",))
+
+
 def _harvest(ctx: Context, cursor: Path) -> list[Finding]:
     if ctx.writes:
         return session_friction.harvest(ctx.root, cursor, ctx.now)

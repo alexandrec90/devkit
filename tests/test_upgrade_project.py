@@ -1333,9 +1333,34 @@ def test_a_puller_that_never_settles_is_reported_rather_than_looped(tmp_path):
 
 
 def test_a_project_with_no_vendored_puller_reads_as_empty(tmp_path):
-    """`sync_script_bytes` is a comparison, not an assertion: an absent file is a
+    """`puller_bytes` is a comparison, not an assertion: an absent file is a
     value, so a project that has never vendored does not crash the fixpoint."""
-    assert up.sync_script_bytes(tmp_path) == b""
+    assert up.puller_bytes(tmp_path) == up.puller_bytes(tmp_path / "other")
+
+
+def test_a_release_that_grew_only_the_manifest_module_is_pulled_twice(tmp_path):
+    """c45826ad: v0.11.28 added `.claude/fixer.md` to `devkit_manifest.py` and left
+    `sync-devkit.py` byte-identical, so one pull ran the old list and every adoption
+    stopped on `DRIFT .claude/fixer.md`."""
+    project = vendored(tmp_path, "from devkit_manifest import MANIFEST")
+    (project / "scripts" / "devkit_manifest.py").write_text("MANIFEST = old", encoding="utf-8")
+    calls: list[int] = []
+
+    def pull(root, _source):
+        calls.append(1)
+        (root / "scripts" / "devkit_manifest.py").write_text("MANIFEST = new", encoding="utf-8")
+        return subprocess.CompletedProcess(["pull"], 0, stdout="pulled", stderr="")
+
+    runs, divergence = up.pull_to_fixpoint(project, tmp_path / "src", pull=pull)
+    assert (len(runs), divergence) == (2, "")
+
+
+def test_the_puller_is_every_file_the_pull_runs_its_list_from():
+    """`sync-devkit.py` imports its `MANIFEST` by that module name; the fixpoint must
+    watch the same file, or a list-only release is pulled once."""
+    source = (REPO_ROOT / up.SYNC_SCRIPT).read_text(encoding="utf-8")
+    assert "import devkit_manifest as _lists" in source
+    assert "scripts/devkit_manifest.py" in up.PULLER and up.SYNC_SCRIPT in up.PULLER
 
 
 # --- the drift check runs here, not at commit time ---------------------------
