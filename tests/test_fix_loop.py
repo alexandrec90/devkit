@@ -45,7 +45,17 @@ def ctx(tmp_path, monkeypatch):
     )
 
 
-def tree(ctx, monkeypatch, *, key=KEY, sent=NOW, blocked="", friction="", transcript_age=None):
+def tree(
+    ctx,
+    monkeypatch,
+    *,
+    key=KEY,
+    sent=NOW,
+    blocked="",
+    friction="",
+    transcript_age=None,
+    branch="agent/x-0919",
+):
     """One stamped fixer tree, as `read_trees` would return it."""
     path = ctx.root / "carameli" / ".claude" / "worktrees" / "x"
     (path / "logs").mkdir(parents=True, exist_ok=True)
@@ -65,7 +75,7 @@ def tree(ctx, monkeypatch, *, key=KEY, sent=NOW, blocked="", friction="", transc
     one = fix_reports.Tree(
         "carameli",
         path,
-        "agent/x-0919",
+        branch,
         fix_reports.read_stamp(path),
         fix_reports.friction_lines(path),
     )
@@ -177,6 +187,21 @@ def test_a_session_that_never_started_cites_what_its_launcher_said(ctx, monkeypa
     [found] = close(ctx)[1].findings
     assert found.evidence == str(path / fix_reports.LAUNCH_FILE)
     assert "launcher exited 1" in found.detail
+
+
+def test_one_launcher_failure_is_one_detail_whichever_branch_it_hit(ctx, monkeypatch):
+    """1e5e57f4 and seven more: one unreachable service failed eight hourly re-sends, and
+    each finding named its own fresh branch, so the ledger held eight groups for one
+    defect. The branch is in the evidence; the detail is what the launcher said."""
+    details = []
+    for branch in ("agent/fix-0927-6", "agent/fix-0927-7"):
+        path = tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=2), branch=branch)
+        done = subprocess.CompletedProcess(["claude"], 1, "", "service unreachable")
+        fix_reports.record_launch(path, ["claude", "--bg", "--", "fix it all"], done)
+        [found] = close(ctx)[1].findings
+        details.append(found.detail)
+        assert branch not in found.detail
+    assert details[0] == details[1]
 
 
 def test_a_session_gone_quiet_without_an_outcome_is_dead(ctx, monkeypatch):

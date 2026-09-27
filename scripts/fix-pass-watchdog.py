@@ -110,6 +110,31 @@ def default_branch(root: Path) -> str:
 # --- 1. current ---------------------------------------------------------------------------
 
 
+FETCH_ATTEMPTS = 2
+FETCH_PAUSE_SECONDS = 5.0
+_SHA = re.compile(r"\b[0-9a-f]{7,40}\b")
+
+
+def fetch(root: Path, base: str) -> str:
+    """Fetch `origin/<base>`, once more after a pause; "" on success, else why not.
+
+    Every fixer tree shares this checkout's refs, and a fixer fetching at the same moment
+    holds `refs/remotes/origin/<base>`'s lock: at 06:00 on 2026-09-27, with #430 merged a
+    minute before and a fixer mid-verification, the watchdog's fetch failed and was filed
+    as a stale pass with no reason on record (7599a153). The reason is git's own last
+    line, shas masked, so one cause is one ledger detail."""
+    said = ""
+    for attempt in range(FETCH_ATTEMPTS):
+        if attempt:
+            time.sleep(FETCH_PAUSE_SECONDS)
+        done = git(root, "fetch", "--quiet", "origin", base)
+        if done.returncode == 0:
+            return ""
+        lines = (done.stderr or "").strip().splitlines()
+        said = _SHA.sub("<sha>", lines[-1].strip()) if lines else f"git exited {done.returncode}"
+    return said
+
+
 def self_update(root: Path) -> tuple[bool, str]:
     """Fast-forward the checkout the pass runs from; `(ok, what happened)`.
 
@@ -124,8 +149,8 @@ def self_update(root: Path) -> tuple[bool, str]:
         return False, f"the checkout the pass runs from is on {branch or '?'}, not {base}"
     if git(root, "status", "--porcelain", "--untracked-files=no").stdout.strip():
         return False, "the checkout the pass runs from has uncommitted changes"
-    if git(root, "fetch", "--quiet", "origin", base).returncode != 0:
-        return False, f"could not fetch origin/{base}"
+    if failed := fetch(root, base):
+        return False, f"could not fetch origin/{base} -- {failed}"
     before = git(root, "rev-parse", "HEAD").stdout.strip()
     if git(root, "merge", "--ff-only", "--quiet", f"origin/{base}").returncode != 0:
         return False, f"{base} has diverged from origin/{base}"
@@ -276,11 +301,30 @@ def home(root: Path) -> Path:
     return common.parent if found.returncode == 0 and common.is_absolute() else root
 
 
+def is_elevated() -> bool:
+    """`agent_tabs.is_elevated`, spelled here because this file imports nothing the pass
+    does; False off Windows."""
+    if sys.platform != "win32":  # also what tells mypy `windll` exists below
+        return False
+    import ctypes
+
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        return False
+
+
 def rescue(root: Path, kind: str, detail: str, output: str, now: _dt.datetime) -> str:
-    """Cut a fresh devkit worktree and send one background session at the pass; what happened."""
+    """Cut a fresh devkit worktree and send one background session at the pass; what happened.
+
+    Refused from an elevated process, for `agent_tabs.ELEVATED`'s reason: the service a
+    `claude --bg` starts runs as whoever asked, and one started elevated shuts every
+    scheduled launch out until it exits -- eight hours, the one time it was measured."""
     claude = shutil.which("claude")
     if not claude:
         return "no rescue: claude is not on PATH"
+    if is_elevated():
+        return "no rescue: this process is elevated; run the watchdog from a shell that is not"
     base = default_branch(root)
     stamp = now.strftime("%m%d-%H%M")
     branch = f"{RESCUE_PREFIX}-{stamp}"

@@ -233,11 +233,14 @@ def test_reading_the_plan_from_a_box_is_still_allowed(tmp_path, capsys):
     assert "Nothing was registered" in capsys.readouterr().out
 
 
-def test_the_document_also_fires_after_a_reboot():
+def test_the_document_also_fires_at_logon_after_a_reboot():
     """A reboot kills every server, and the next repetition can be a full interval away.
-    Fifteen minutes of an unreachable phone is the failure this job exists to prevent."""
+    Fifteen minutes of an unreachable phone is the failure this job exists to prevent.
+    At logon, not boot: a boot trigger is refused to the non-elevated `--yes` that keeps
+    the job current, and one repair deleted the task for good that way (9385b3d7)."""
     xml = installer.task_document(schedule())
-    assert "<BootTrigger>" in xml and "<TimeTrigger>" in xml
+    assert "<LogonTrigger>" in xml and "<TimeTrigger>" in xml
+    assert "<BootTrigger>" not in xml
     assert xml.count("<Triggers>") == 1
 
 

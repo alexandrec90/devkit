@@ -62,6 +62,8 @@ OUTCOME_FILES = (
 
 # How much of a report reaches the record: one line's worth, not the essay.
 REASON_LIMIT = 400
+# A launch's diagnosis is a status page, not a line: `claude daemon status` is ~800 chars.
+DIAGNOSIS_LIMIT = 2000
 
 # The refusals of Claude Code's `claude --worktree` isolation guard, in its own words.
 CLAUDE_CODE_GUARD = re.compile(
@@ -150,18 +152,22 @@ def file_away(tree: Path, relative: Path) -> None:
     source.unlink()
 
 
-def record_launch(tree: Path, argv: list[str], done: object) -> None:
+def record_launch(tree: Path, argv: list[str], done: object, diagnosis: str = "") -> None:
     """Keep what a background launch was given and what it answered, for `launch_line`.
 
     A session that never started was filed with its tree alone, and a sweep grepped
     transcripts for nine calls to learn the launcher had swallowed its prompt (3728bf21).
     The prompt, the last argument, is kept as its length: its words are the stamp's.
+    `diagnosis` -- what the launcher's service said of itself -- is evidence only, kept
+    out of `launch_line` so the finding's detail stays the same across recurrences.
     """
     shown = [*argv[:-1], f"<prompt: {len(argv[-1])} chars>"] if argv else []
     tail = {
         name: str(getattr(done, name, "") or "")[-REASON_LIMIT:] for name in ("stdout", "stderr")
     }
     payload = {"argv": shown, "returncode": getattr(done, "returncode", None), **tail}
+    if diagnosis:
+        payload["diagnosis"] = diagnosis[-DIAGNOSIS_LIMIT:]
     path = tree / LAUNCH_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

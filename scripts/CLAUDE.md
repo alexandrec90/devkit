@@ -156,7 +156,7 @@ document and registers it with `/XML`. **The three settings that decide whether 
 scheduled job on a laptop runs at all have no `schtasks.exe` flags**, so a task created
 with them silently skips every fire on battery, dies when you unplug, and never catches up
 a fire it slept through. None of that reports anything: a job that does not run writes no
-log. Three things a change must keep:
+log. Four things a change must keep:
 
 - **`<Settings>` is a schema sequence, not a set.** Reordering it is rejected at
   registration time, on the installing machine, where no unit test can reach it.
@@ -165,6 +165,10 @@ log. Three things a change must keep:
 - **The interpreter is part of "which checkout".** Use `interpreter(root)`, not
   `sys.executable` — a box's `.venv` is deleted when its PR merges, so an installer run
   from a box would register the exact failure it was the escape from.
+- **No trigger only an administrator may register.** The scheduled `--yes` runs
+  unelevated, and the scheduler refuses it a `BootTrigger` or a `LogonTrigger` naming no
+  user; `devkit_schtasks.secured` names the user, and
+  `tests/test_installer_contract.py` fails a document that would need elevation.
 
 Every installer declares `TASK_NAME` and `ARTIFACT`, because `pythonw.exe` sends stdout
 nowhere and a job leaves exactly what it writes itself;

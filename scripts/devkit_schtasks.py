@@ -167,41 +167,23 @@ def daily_trigger(at: str, start_date: str = "2020-01-01") -> str:
     )
 
 
-def boot_trigger(delay: str = "PT1M") -> str:
-    """A trigger that fires once, shortly after the machine starts.
-
-    A repeating `TimeTrigger` already survives a reboot -- Task Scheduler restores the
-    repetition, and `StartWhenAvailable` catches up a fire the machine slept through --
-    so this is not what makes a job come back. What it fixes is the *gap*: after a
-    restart the next repetition can be a full interval away, and for a job whose subject
-    is "a process that should be running", fifteen minutes of not running is the whole
-    failure it exists to prevent.
-
-    The delay is not decoration. At the instant a boot trigger would otherwise fire,
-    the network stack is often not up, mapped drives are not mounted, and a job that
-    probes either gets a wrong answer rather than a late one.
-
-    Combine with another trigger by concatenating: `<Triggers>` holds an unordered
-    choice, so `repeating_trigger(15) + boot_trigger()` is one valid document.
-    """
-    return (
-        "    <BootTrigger>\n"
-        f"      <Delay>{escape(delay)}</Delay>\n"
-        "      <Enabled>true</Enabled>\n"
-        "    </BootTrigger>\n"
-    )
-
-
 def logon_trigger(delay: str = "PT30S") -> str:
     """A trigger that fires when the user logs on.
 
     For the jobs whose subject is a *desktop* rather than the machine -- anything that
-    puts a window or a tray icon in front of someone. A `BootTrigger` runs before there
-    is a session to draw into; this one runs when there is.
+    puts a window or a tray icon in front of someone -- and for closing the gap after a
+    restart: the next repetition of a repeating job can be a full interval away, and every
+    job here runs with the interactive token, so logon is the first moment it could run.
 
-    No `<UserId>`, for `task_xml`'s reason: naming a principal means naming a user id,
-    and every spelling of that is a way to fail on someone else's machine. Without one
-    the trigger belongs to whoever registered the task.
+    Combine with another trigger by concatenating: `<Triggers>` holds an unordered
+    choice, so `repeating_trigger(15) + logon_trigger()` is one valid document.
+
+    No `<UserId>` here, and none is optional: `secured` adds the registering user's SID.
+    A logon trigger with no user fires on *anyone's* logon, and only an administrator may
+    register one -- a non-elevated `/Create` answers `ERROR: Access is denied.` (probed;
+    so does a `BootTrigger`, which is why there is no builder for one). The three jobs
+    that carried such a trigger could only ever be registered elevated, and every
+    scheduled repair of them failed (9385b3d7).
     """
     return (
         "    <LogonTrigger>\n"
@@ -385,12 +367,28 @@ def security_descriptor(sid: str) -> str:
 
 
 def secured(document: str, sid: str) -> str:
-    """`document` with `sid`'s descriptor in its `<RegistrationInfo>`; unchanged without a
-    SID or with a descriptor already there."""
-    if not sid or "<SecurityDescriptor>" in document or _REGISTRATION_END not in document:
+    """`document` as `sid` may register it: its descriptor in `<RegistrationInfo>`, and
+    every logon trigger scoped to its logon (`logon_trigger` says why). Unchanged without
+    a SID; each part is added once."""
+    if not sid:
+        return document
+    document = _LOGON.sub(lambda match: _for_user(match.group(0), sid), document)
+    if "<SecurityDescriptor>" in document or _REGISTRATION_END not in document:
         return document
     line = f"  <SecurityDescriptor>{security_descriptor(sid)}</SecurityDescriptor>\n  "
     return document.replace(_REGISTRATION_END, line + _REGISTRATION_END, 1)
+
+
+_LOGON = re.compile(r"<LogonTrigger>.*?</LogonTrigger>", re.S)
+
+
+def _for_user(trigger: str, sid: str) -> str:
+    """One `<LogonTrigger>` with `<UserId>` before its `<Enabled>`, the order probed to
+    register; unchanged when it names a user already."""
+    if "<UserId>" in trigger:
+        return trigger
+    anchor = "<Enabled>" if "<Enabled>" in trigger else "</LogonTrigger>"
+    return trigger.replace(anchor, f"<UserId>{sid}</UserId>\n      {anchor}", 1)
 
 
 # A few fields out of a document that has exactly one shape -- `task_xml`'s, which is

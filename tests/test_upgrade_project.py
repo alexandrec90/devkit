@@ -610,6 +610,23 @@ def test_the_commit_and_push_happen_in_the_box(tmp_path, monkeypatch):
     assert ("push", "-u", "origin", "claude/devkit-upgrade-0812") in run.git.calls
 
 
+def test_the_temp_root_plugin_is_wired_in_the_box_before_the_commit(tmp_path, monkeypatch):
+    """7f011bf8: the pull vendored `devkit_temproot`, and no consumer loaded it -- the
+    files that load it are the project's own, and no pull touches them. The adoption box
+    is where it gets wired, so the adoption PR's gate is what judges the wiring."""
+    run = BoxRun(tmp_path, monkeypatch)
+    wired: list[Path] = []
+
+    def wire(box):
+        wired.append(box)
+        assert ("add", "-A") not in run.git.calls, "wired after staging: the commit lacks it"
+        return up.temproot_wiring.WIRED
+
+    monkeypatch.setattr(up.temproot_wiring, "wire", wire)
+    assert run.run(tmp_path).code == 0
+    assert wired == [run.box]
+
+
 def test_the_upgrade_pr_is_labelled_automerge(tmp_path, monkeypatch):
     """An upgrade PR is a vendored copy of an already-released tag, so a green gate
     is the whole review; the label is what lets `reconcile --merge` and the vendored
@@ -675,6 +692,13 @@ def test_a_dry_run_cuts_no_box(tmp_path, monkeypatch, capsys):
     assert up.upgrade_one("data-lake", tmp_path / "checkout", "v0.8.0").code == 0
     assert run.spawned == []
     assert "worktree.py new" in capsys.readouterr().out
+
+
+def test_the_plan_names_every_step_in_order_including_the_plugin_wiring():
+    lines = up.plan_lines("data-lake", "", "v0.8.0", "main")
+    assert lines[0] == "upgrade: data-lake (unstamped) -> v0.8.0"
+    assert [line.split(".")[0].strip() for line in lines[1:]] == [str(n) for n in range(1, 8)]
+    assert "temp-root plugin" in lines[3] and "--pull" in lines[2] and "git add" in lines[4]
 
 
 # --- what gets committed -----------------------------------------------------

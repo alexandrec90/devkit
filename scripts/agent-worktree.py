@@ -21,8 +21,9 @@ Claude session spawns, so the delete verb can see those too.
 **This is not the box tier and must not become it.** `worktree.py` cuts a box at
 `<workspace>/.worktrees/`, leases it a port and a `COMPOSE_PROJECT_NAME`, provisions its
 toolchain and reaps it on a schedule; `agent-box.py spawn` is still the verb for a
-session that runs a compose stack. What is here is a plain git worktree: no lease, no
-provisioning and no reaper.
+session that runs a compose stack. What is here is a plain git worktree: no lease and no
+reaper. Its toolchain is the git hook's (`worktree_env`), and `worktree.py provision`'s
+where the hook left it unprovisioned.
 
 **Port selection belongs to the project's dev server.** New frontend projects receive
 `templates/features/frontend/frontend/src/worktreePort.ts`; its docstring owns the wiring
@@ -71,7 +72,9 @@ import picker_scan
 import sweep
 import task_branch as tb
 import task_input
+import tree_provision
 import worktree
+import worktree_env
 
 # How many checkouts `scan` reads at once. A worktree scan is three `git` calls per
 # checkout and one more per worktree found, which is seconds in a row; the picker runs
@@ -248,6 +251,12 @@ def create(
         return EXIT_FAILED
     print(f"{branch} off origin/{ref}\n  {path}")
     fix_reports.inherit_origin(path)  # fixer work when cut by a fixer: it merges once green
+    # The git hook provisions a tree only when its checkout has a `.venv`, which keeps an
+    # unused project's `worktree add` fast. A tree cut here is one somebody works in, so
+    # a cold checkout's is provisioned too: a fixer's social-scraper tree came up with no
+    # `.venv` and no line saying why, and no test could run in it.
+    if not (path / worktree_env.PROVISIONED).is_file():
+        tree_provision.provision(path, runner)
     return agent_tabs.open_agent(launch, path, branch, runner)
 
 

@@ -156,6 +156,32 @@ def test_check_reaches_the_shared_check_with_its_own_document(name, module, monk
 
 
 @pytest.mark.parametrize(("name", "module"), JOBS, ids=JOB_IDS)
+def test_every_job_is_registrable_without_elevation(name, module, monkeypatch):
+    """Every job is kept current by a non-elevated `--yes`, and the scheduler refuses a
+    non-administrator two trigger shapes: a `BootTrigger`, and a `LogonTrigger` naming no
+    user (probed: `ERROR: Access is denied.`). The three jobs carrying one failed every
+    scheduled repair, and one repair deleted two of them for good (9385b3d7). Read off the
+    document each installer's own `--check` hands the shared check, as `register` would
+    register it."""
+    monkeypatch.setattr(module, "WINDOWS", True)
+    seen: dict[str, str] = {}
+
+    def run_check(task_name, document, run):
+        seen["document"] = document
+        return 0, "current"
+
+    monkeypatch.setattr(module.devkit_schtasks, "run_check", run_check)
+    kwargs = (
+        {"runner": _never_spawn} if "runner" in inspect.signature(module.main).parameters else {}
+    )
+    module.main(["--check"], **kwargs)
+    registered = module.devkit_schtasks.secured(seen["document"], "S-1-5-21-1-2-3-1001")
+    assert "<BootTrigger>" not in registered, name
+    for trigger in re.findall(r"<LogonTrigger>.*?</LogonTrigger>", registered, re.S):
+        assert "<UserId>" in trigger, name
+
+
+@pytest.mark.parametrize(("name", "module"), JOBS, ids=JOB_IDS)
 def test_every_job_declares_its_group(name, module):
     assert getattr(module, "GROUP", None) in GROUPS, (
         f"{name}: GROUP must be one of {sorted(GROUPS)}"

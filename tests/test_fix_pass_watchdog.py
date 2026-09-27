@@ -246,7 +246,29 @@ def test_a_checkout_that_cannot_be_kept_current_is_filed(watched, monkeypatch):
 # --- repair -------------------------------------------------------------------------------
 
 
+def test_an_elevated_watchdog_sends_no_rescue(tmp_path, monkeypatch):
+    """The service a `claude --bg` starts runs as whoever asked; started elevated, it
+    shut every scheduled launch out for eight hours on 2026-09-27. `agent_tabs` refuses
+    that launch, and this was the one `--bg` in devkit that did not."""
+
+    def explode(*_a, **_k):
+        raise AssertionError("nothing should be cut or spawned")
+
+    monkeypatch.setattr(watchdog.shutil, "which", lambda _c: "claude")
+    monkeypatch.setattr(watchdog, "is_elevated", lambda: True)
+    monkeypatch.setattr(watchdog, "git", explode)
+    monkeypatch.setattr(watchdog.subprocess, "run", explode)
+    note = watchdog.rescue(tmp_path, "pass-crashed", "x", "out", NOW)
+    assert note.startswith("no rescue:") and "elevated" in note
+
+
+def test_elevation_is_a_windows_question(monkeypatch):
+    monkeypatch.setattr(watchdog.sys, "platform", "linux")
+    assert watchdog.is_elevated() is False
+
+
 def test_a_rescue_cuts_a_fresh_tree_and_sends_one_background_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "is_elevated", lambda: False)
     monkeypatch.setattr(watchdog.shutil, "which", lambda _c: None)
     assert (
         watchdog.rescue(tmp_path, "pass-crashed", "x", "out", NOW)
@@ -403,6 +425,53 @@ def test_a_checkout_on_another_branch_is_left_and_said(checkout):
     _git(checkout, "switch", "-c", "agent/x")
     ok, what = watchdog.self_update(checkout)
     assert not ok and what == "the checkout the pass runs from is on agent/x, not main"
+
+
+def test_a_fetch_that_fails_once_is_tried_again(checkout, monkeypatch):
+    """7599a153: a fixer fetching into the same refs at the same moment failed the
+    watchdog's fetch once, and it was filed as a stale pass. A second try after a pause
+    finds the lock released."""
+    monkeypatch.setattr(watchdog, "FETCH_PAUSE_SECONDS", 0)
+    real, fetches = watchdog.git, []
+
+    def flaky(root, *args):
+        if args[0] == "fetch":
+            fetches.append(args)
+            if len(fetches) == 1:
+                lock = "error: cannot lock ref 'refs/remotes/origin/main': is at 1a2b3c4d5e6f7a8b"
+                return subprocess.CompletedProcess(args, 1, "", lock + "\n")
+        return real(root, *args)
+
+    monkeypatch.setattr(watchdog, "git", flaky)
+    ok, what = watchdog.self_update(checkout)
+    assert ok and what.startswith("updated") and len(fetches) == 2
+
+
+def test_a_fetch_that_keeps_failing_says_why_without_its_shas(checkout, monkeypatch):
+    """The detail is the ledger's signature, so git's reason is kept and its shas are not."""
+    monkeypatch.setattr(watchdog, "FETCH_PAUSE_SECONDS", 0)
+    real = watchdog.git
+
+    def locked(root, *args):
+        if args[0] == "fetch":
+            said = "fatal: x\nerror: cannot lock ref 'refs/remotes/origin/main': is at 1a2b3c4d5e\n"
+            return subprocess.CompletedProcess(args, 1, "", said)
+        return real(root, *args)
+
+    monkeypatch.setattr(watchdog, "git", locked)
+    assert watchdog.self_update(checkout) == (
+        False,
+        "could not fetch origin/main -- error: cannot lock ref "
+        "'refs/remotes/origin/main': is at <sha>",
+    )
+
+
+def test_a_fetch_that_says_nothing_is_named_by_its_exit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        watchdog, "git", lambda root, *a: subprocess.CompletedProcess(a, 128, "", "")
+    )
+    monkeypatch.setattr(watchdog, "FETCH_PAUSE_SECONDS", 0)
+    assert watchdog.fetch(tmp_path, "main") == "git exited 128"
 
 
 def test_a_linked_worktree_is_someone_running_by_hand_and_left_alone(tmp_path):

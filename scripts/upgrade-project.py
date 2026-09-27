@@ -92,6 +92,7 @@ from adoption_prs import (
 import sweep
 import task_branch as tb
 import task_input
+import temproot_wiring
 import worktree
 from worktree_env import SKIP_PROVISION_VAR
 
@@ -704,6 +705,22 @@ def verify_pull(project: Path, source: Path) -> subprocess.CompletedProcess[str]
     )
 
 
+def plan_lines(name: str, previous: str, tag: str, default_branch: str) -> list[str]:
+    """What `upgrade_one` will do, printed first on every run and all a dry run does."""
+    return [
+        f"upgrade: {name} {previous or '(unstamped)'} -> {tag}",
+        f"  1. worktree.py new {name} --slug {upgrade_slug(tag)!r} --auto"
+        f" (fresh off origin/{default_branch})",
+        f"  2. {SYNC_SCRIPT} --pull --src <devkit worktree at {tag}>  [in the box]",
+        f"  3. load the vendored temp-root plugin from the project's own pytest config"
+        f" ({temproot_wiring.__name__}.wire)",
+        f"  4. git add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths",
+        f"  5. git commit -m {commit_message(tag, '<n>')!r}",
+        "  6. git push -u origin, then gh pr create",
+        "  7. leave the box; `worktree.py reconcile` reaps it when the PR merges",
+    ]
+
+
 @dataclass(frozen=True)
 class Outcome:
     """One checkout's exit code, and the text `logs/upgrade.log` records for it.
@@ -759,16 +776,7 @@ def upgrade_one(
     default_branch = tb.detect_default_branch(git, fallback="")
     previous = version_on(git, default_branch)
 
-    print(f"upgrade: {name} {previous or '(unstamped)'} -> {tag}")
-    print(
-        f"  1. worktree.py new {name} --slug {upgrade_slug(tag)!r} --auto"
-        f" (fresh off origin/{default_branch})"
-    )
-    print(f"  2. {SYNC_SCRIPT} --pull --src <devkit worktree at {tag}>  [in the box]")
-    print(f"  3. git add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths")
-    print(f"  4. git commit -m {commit_message(tag, '<n>')!r}")
-    print("  5. git push -u origin, then gh pr create")
-    print("  6. leave the box; `worktree.py reconcile` reaps it when the PR merges")
+    print("\n".join(plan_lines(name, previous, tag, default_branch)))
     if source is None or workspace is None:
         return Outcome(name, 0)
 
@@ -815,6 +823,10 @@ def upgrade_one(
             checked.stdout,
             checked.stderr,
         )
+
+    # The plugin the pull vendored loads only from files the project owns, which no pull
+    # touches (7f011bf8). Anything short of a whole wiring leaves the tree as it was.
+    print(f"upgrade: {name} -- temp-root plugin: {temproot_wiring.wire(box)}")
 
     changed = changed_paths(box_git)
     if not changed:

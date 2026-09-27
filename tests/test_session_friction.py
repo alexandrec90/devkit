@@ -782,3 +782,18 @@ def test_only_git_printing_the_repository_is_read_for_its_diagnostics_alone():
         "fatal: bad revision 'z'\nwarning: LF will be replaced"
     )
     assert sf.environment_text("pytest t.py", said) == said
+
+
+def test_a_cd_before_git_printing_the_repository_prints_nothing_of_its_own():
+    """72e04231: `cd <tree> && git diff | head` of carameli's `pytest.ini`, whose comment
+    counts "55 ModuleNotFoundError errors", was filed as the environment, because the `cd`
+    made the line more than git reading."""
+    command = (
+        'cd /c/x/roguelike/.claude/worktrees/t && git diff --text | cat -A | grep -v "^ " | '
+        "head -40; cd /c/x/carameli/.claude/worktrees/t && git diff | head -30"
+    )
+    assert sf.git_reads_only(command)
+    diff = "+# breaks collection of that suite with 55 ModuleNotFoundError errors.\n"
+    assert classes([call(command, "1"), result(diff, "1", error=False)]) == []
+    assert not sf.git_reads_only("cd /c/x")
+    assert not sf.git_reads_only("cd /c/x && python -m pytest t.py")

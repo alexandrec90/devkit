@@ -317,6 +317,46 @@ def test_a_tree_cut_from_fixer_work_is_fixer_work_too(workspace, monkeypatch, tm
     assert not (Path(run.git_args()[1][6]) / agent_worktree.fix_reports.ORIGIN_FILE).exists()
 
 
+def test_a_tree_the_hook_left_unprovisioned_is_provisioned_before_the_agent_opens(
+    workspace, monkeypatch
+):
+    """The git hook skips a tree whose checkout has no `.venv`, which is right for an
+    unused project's `worktree add` and wrong for a tree cut to work in: a fixer's
+    social-scraper tree came up with no `.venv` and nothing saying why."""
+    order: list[str] = []
+    monkeypatch.setattr(
+        agent_worktree.agent_tabs, "open_agent", lambda *a, **k: order.append("open") or 0
+    )
+    monkeypatch.setattr(
+        agent_worktree.tree_provision, "provision", lambda tree, runner: order.append("provision")
+    )
+    run = FakeRun()
+    agent_worktree.create("devkit", workspace, "cold", "main", NONE, run)
+    assert order == ["provision", "open"]
+
+
+def test_a_tree_the_hook_provisioned_is_not_provisioned_twice(workspace, monkeypatch, tmp_path):
+    monkeypatch.setattr(agent_worktree.agent_tabs, "open_agent", lambda *a, **k: 0)
+    monkeypatch.setattr(
+        agent_worktree.tree_provision,
+        "provision",
+        lambda tree, runner: pytest.fail("the hook already provisioned this tree"),
+    )
+
+    class HookRun(FakeRun):
+        """`git worktree add` whose post-checkout hook provisioned the tree."""
+
+        def __call__(self, argv, **kwargs):
+            done = super().__call__(argv, **kwargs)
+            if "worktree" in argv:
+                mark = Path(argv[-2]) / agent_worktree.worktree_env.PROVISIONED
+                mark.parent.mkdir(parents=True, exist_ok=True)
+                mark.write_text("", encoding="utf-8")
+            return done
+
+    agent_worktree.create("devkit", workspace, "warm", "main", NONE, HookRun())
+
+
 def test_a_blank_topic_names_the_branch_after_the_checkout(workspace, monkeypatch):
     monkeypatch.setattr(agent_worktree.agent_tabs, "open_agent", lambda *a, **k: 0)
     run = FakeRun()
