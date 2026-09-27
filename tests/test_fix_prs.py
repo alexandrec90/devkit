@@ -1090,6 +1090,18 @@ def test_a_planned_pr_is_refreshed_before_its_fixer_opens_and_a_refused_commit_i
     assert "stale" in capsys.readouterr().out
 
 
+def test_a_tree_left_as_is_is_named_in_its_fixers_prompt(monkeypatch, root):
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (root / "carameli" / "t", ""))
+    monkeypatch.setattr(
+        fix_prs, "refresh_head", lambda *a: "left as is: the tree has uncommitted changes"
+    )
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    opened = capture_sessions(monkeypatch)
+    assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
+    expected = fix_prs.fix_prompts.pr_prompt(failure(), "", "the tree has uncommitted changes")
+    assert opened[0]["prompt"] == fix_prs.tab_safe(expected)
+
+
 def test_a_refused_commit_is_titled_by_its_branch(monkeypatch, root):
     monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (root / "carameli" / "t", ""))
     monkeypatch.setattr(fix_prs, "refresh_head", lambda *a: "")

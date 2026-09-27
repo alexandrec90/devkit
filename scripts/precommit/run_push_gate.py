@@ -52,6 +52,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -353,7 +354,13 @@ def run_gate(
             print(f"push-gate: {step.name}: no {step.requires} in this project -- skipped")
             continue
         print(f"push-gate: {step.name}: {' '.join(command[1:])}", flush=True)
-        result = runner(command, cwd=root, check=False, env=env)
+        # The one bare pytest here gets a temp root of its own, as `run-tests.py` gives
+        # its suite: under the machine-wide one, another session's run holding its
+        # `pytest-current` link failed a green suite at pytest's exit (97d20f01).
+        with tempfile.TemporaryDirectory(prefix="pytest-", ignore_cleanup_errors=True) as tmp:
+            if step.name == PYTEST_STEP:
+                command = [*command, f"--basetemp={tmp}"]
+            result = runner(command, cwd=root, check=False, env=env)
         if result.returncode:
             print(
                 f"push-gate: {step.name} failed (exit {result.returncode}). Fix it from the "

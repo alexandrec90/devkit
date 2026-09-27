@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # Relative to the target checkout, never to devkit. Both are `MANIFEST` paths, so
@@ -79,7 +80,13 @@ def main(argv: list[str] | None = None) -> int:
 
     cmd = [sys.executable, "-m", "pytest", HOOK_TESTS.as_posix(), "-q", "--tb=short"]
     print(f"hook-tests: {' '.join(cmd[2:])}")
-    result = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+    # A temp root of this run's own, as `run-tests.py` gives its suite: under the
+    # machine-wide one, another session's run holding its `pytest-current` link failed a
+    # green suite at pytest's exit (97d20f01).
+    with tempfile.TemporaryDirectory(prefix="pytest-", ignore_cleanup_errors=True) as tmp:
+        result = subprocess.run(
+            [*cmd, f"--basetemp={tmp}"], cwd=root, capture_output=True, text=True
+        )
 
     artifact = root / ARTIFACT
     artifact.parent.mkdir(parents=True, exist_ok=True)

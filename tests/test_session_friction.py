@@ -224,13 +224,13 @@ def test_a_file_written_through_a_shell_heredoc_is_friction():
     because only the sessions that noticed reported it. Every write that can be damaged
     is filed now, whether anyone noticed or not."""
     for command in (
-        "cat > tests/test_x.py <<'EOF'\nassert r'\\b'\nEOF",
+        "cat > tests/test_x.py <<'EOF'\nassert '\\\\b'\nEOF",
         'cat >> t.py <<"EOF"\nx = "a\\\\b"\nEOF',
-        "tee scripts/a.py <<EOF\nprint('\\n')\nEOF",
+        "tee scripts/a.py <<EOF\nprint('\\\\n')\nEOF",
         "python - <<'EOF'\nfrom pathlib import Path\np = Path('a.py')\n"
         "p.write_text(p.read_text().replace('\\\\d', 'b'))\nEOF",
-        "python3 - <<'PY'\nopen('x.txt', 'w').write('y\\n')\nPY",
-        "cat > x.py <<'EOF'\nr'\\s'",  # unterminated: the body runs to the end
+        "python3 - <<'PY'\nopen('x.txt', 'w').write('y\\\\\\n')\nPY",
+        "cat > x.py <<'EOF'\n'\\\\s'",  # unterminated: the body runs to the end
     ):
         assert classes([call(command, "1")]) == ["heredoc-write"], command
     for harmless in (
@@ -257,8 +257,47 @@ def test_a_heredoc_with_no_backslash_in_its_body_is_not_friction():
     )
     assert classes([call(b935e421, "1")]) == []
     assert not sf.damageable_heredoc(b935e421)
-    assert sf.damageable_heredoc("cat <<-EOF > a.py\n\tx = '\\t'\n\tEOF")
-    assert not sf.damageable_heredoc("echo 'a\\b' > x.txt")  # no heredoc at all
+    assert sf.damageable_heredoc("cat <<-EOF > a.py\n\tx = '\\\\t'\n\tEOF")
+    assert not sf.damageable_heredoc("echo 'a\\\\b' > x.txt")  # no heredoc at all
+
+
+def test_a_heredoc_dumped_back_byte_for_byte_is_a_probe_not_a_write():
+    """ccde706b: the session that established the doubled-backslash rule wrote both
+    spellings to a scratch file and read them back with `od -c`, in one call. That is a
+    measurement of the tool, and filing it reopened the group its own finding retired."""
+    ccde706b = (
+        "cat > \"C:/Users/alexa/.claude/jobs/c9e3f0fa/tmp/bs.txt\" <<'EOF'\n"
+        "one:\\n\ntwo:\\\\n\nEOF\n"
+        'od -c "C:/Users/alexa/.claude/jobs/c9e3f0fa/tmp/bs.txt"'
+    )
+    assert classes([call(ccde706b, "1")]) == []
+    for dump in ("xxd x.txt", "hexdump -C x.txt", "Format-Hex x.txt"):
+        assert not sf.damageable_heredoc(ccde706b.rsplit("\n", 1)[0] + "\n" + dump), dump
+    # The same write with nothing reading it back is still the damage it always was,
+    # and a word that only starts like a dump is not one.
+    assert classes([call(ccde706b.rsplit("\n", 1)[0], "1")]) == ["heredoc-write"]
+    assert sf.damageable_heredoc(ccde706b.rsplit("\n", 1)[0] + "\nodd -c x")
+
+
+def test_a_heredoc_with_only_single_backslashes_is_not_friction():
+    """46a1578d recurred on a `cat >` whose body's only backslashes were the `\\n` in
+    f-strings. The Bash tool collapses a doubled backslash and nothing else: written
+    through it, `a\\nb`, `r'\\s'`, `\\'`, `\\$` and a trailing `\\` all came out byte for
+    byte, while `a\\\\b` came out `a\\b` and three in a row came out two."""
+    a46a1578d = (
+        "cd \"C:/Users/alexa/scratchpad\" && cat > dump.py <<'EOF'\n"
+        "import json,sys\n"
+        "for i,l in enumerate(lines,1):\n"
+        '    if isinstance(c,str): print(f"=== L{i} STR\\n{c[:6000]}"); continue\n'
+        "EOF\n"
+        'python dump.py "C:/x.jsonl" 6,30 > b.txt; wc -c b.txt'
+    )
+    assert classes([call(a46a1578d, "1")]) == []
+    assert not sf.damageable_heredoc(a46a1578d)
+    for single in ("r'\\s'", "'\\t'", "\\'x\\'", "\\$HOME", "end\\"):
+        assert not sf.damageable_heredoc(f"cat > a.py <<'EOF'\n{single}\nEOF"), single
+    for doubled in ("a\\\\b", "a\\\\\\b", "'\\\\\\\\'"):
+        assert sf.damageable_heredoc(f"cat > a.py <<'EOF'\n{doubled}\nEOF"), doubled
 
 
 def test_the_full_suite_is_friction_and_a_targeted_run_is_not():
@@ -580,6 +619,43 @@ def test_a_mangled_revision_path_is_an_environment_problem():
     assert classes([call("git show origin/master:.devkit.toml", "1"), result(out, "1")]) == [
         "environment"
     ]
+
+
+def test_a_commit_message_that_quotes_errors_is_not_an_environment_failure():
+    """fc786188: a fixer ran `git show --stat` on the commit that taught this detector
+    about quoted errors, and the harvest -- still on the old detector -- filed the
+    message's own examples as an environment group. `git` output is read even on exit 0,
+    so every quoted example in a message has to be seen as quoted."""
+    command = (
+        "git branch -a --contains 21631ef | head; git show --stat 21631ef | head -30; "
+        "gh pr list --state all --head agent/supervise-fix-pass-0926 --json number,state,title"
+    )
+    out = (
+        "commit 21631efe96a4e91818873bf2ac2df1665156f429\n"
+        "Author: t <t@example.invalid>\n\n"
+        "    ## Friction detector: an error quoted on its line is not one\n"
+        "    \n"
+        "    - a `git diff` of the engineering rule's prose (`` `No module named pytest` ``);\n"
+        "    - pytest echoing an assertion's operands (`E  assert \"ambiguous argument ...\" in '...'`);\n"
+        "    - `python.exe: No module named pytest`\n"
+        "    - `fatal: ambiguous argument 'origin\\main;...'`\n"
+        "    - `'pytest' is not recognized ...`\n"
+    )
+    assert classes([call(command, "1"), result(out, "1", error=False)]) == []
+
+
+def test_an_escaped_quote_does_not_close_the_string_an_error_is_quoted_in():
+    """83496ae4: a `git diff` of this file's own tests, where the error sits after a `\\"`
+    inside a string literal -- counted as a closing quote, it read as unquoted."""
+    line = (
+        '+    both = "x.md:3: prints \\"No module named x\\"\\n'
+        "ModuleNotFoundError: No module named 'y'\""
+    )
+    command = "git diff origin/main...origin/worktree-hazy-wibbling-pearl -- tests/x.py"
+    assert classes([call(command, "1"), result(line, "1", error=False)]) == []
+    # A real error on a line that merely has an escape before it still files.
+    real = "C:\\py\\python.exe: No module named pytest"
+    assert classes([call("python -m pytest tests/x.py", "1"), result(real, "1")]) == ["environment"]
 
 
 def test_the_push_gate_and_the_vendored_suite_are_full_suites():

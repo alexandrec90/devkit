@@ -83,7 +83,15 @@ def world(tmp_path, monkeypatch):
         "releases": [],
         "memory": None,
         "moved": "",
+        "installers": [],
+        "installers_code": 0,
     }
+    # The machine's real scheduler is never touched: `maintain` re-registers tasks.
+    monkeypatch.setattr(
+        fix_pass.installers,
+        "main",
+        lambda argv: table["installers"].append(list(argv)) or table["installers_code"],
+    )
     monkeypatch.setattr(fix_pass.fix_send.host_memory, "available_mb", lambda: table["memory"])
     monkeypatch.setattr(fix_pass.fix_send, "code_moved", lambda root: table["moved"])
     monkeypatch.setattr(
@@ -121,6 +129,8 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(loop.session_friction, "harvest", lambda *a, **k: list(table["friction"]))
     monkeypatch.setattr(loop.fix_verify, "verify", lambda *a, **k: list(table["reopen"]))
     monkeypatch.setattr(loop.bg_sessions, "stop_finished", lambda trees, runner: [])
+    monkeypatch.setattr(loop, "working_dirs", frozenset)
+    monkeypatch.setattr(loop.friction_pending, "detector_fixes", lambda gh, git: [])
     monkeypatch.setattr(fix_pass.gate_evidence, "newest_release", lambda _d: "v0.11.22")
     monkeypatch.setattr(
         fix_pass.gate_evidence,
@@ -216,6 +226,30 @@ def test_dispatch_ships_intents_sends_fixers_records_them_and_merges_adoptions(w
     assert "merged   carameli #9" in text
 
 
+def test_a_dispatching_pass_brings_every_installer_current_and_a_plan_does_not(world):
+    """990856e5: #404 moved the scheduled pass behind its watchdog, and the task went on
+    running the pass bare until `installers.py maintain`'s next daily fire. The pass
+    merges such changes and fires half-hourly, so a dispatching one applies them; a plan
+    writes nothing, the scheduler included."""
+    assert fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW) == 0
+    assert world["installers"] == []
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
+    assert world["installers"] == [["maintain", "--workspace", str(world["workspace"])]]
+
+
+def test_a_failed_installer_is_filed_for_the_devkit_session(world, monkeypatch, tmp_path):
+    monkeypatch.setattr(fix_pass.installers.sweep, "source_checkout", lambda root: tmp_path)
+    world["installers_code"] = 2
+    journal = fix_pass.Journal(tmp_path)
+    assert fix_pass.refresh_installers(world["workspace"], journal) == 2
+    (finding,) = journal.findings
+    assert finding.kind == "installer-failed" and finding.project == "devkit"
+    assert finding.evidence == str(tmp_path / "logs" / "installers.log")
+    world["installers_code"] = 1  # stale, and repaired: nothing to file
+    assert fix_pass.refresh_installers(world["workspace"], journal) == 1
+    assert len(journal.findings) == 1
+
+
 def test_a_pass_whose_code_moved_under_it_sends_no_one_and_asks_to_be_rerun(world):
     """carameli #395 went to a devkit session because #407, which reroutes it, merged
     21s after the watchdog fast-forwarded the checkout: the pass routed with old code."""
@@ -290,6 +324,20 @@ def test_code_moved_names_the_range_only_when_scripts_changed_upstream(static):
     _push(author, "scripts/route.py")
     old = _git(checkout, "rev-parse", "HEAD")[:9]
     new = _git(author, "rev-parse", "HEAD")[:9]
+    assert fix_pass.fix_send.code_moved(checkout) == f"{old}..{new}"
+
+
+def test_code_moved_sees_a_fast_forward_made_under_a_running_pass(static, monkeypatch):
+    """0b9c6b88: the reconcile job fast-forwarded the static checkout 39s before `send`,
+    so HEAD equalled origin while the modules in memory were the pre-#416 ones, and the
+    pass crashed on the bug the fast-forward had just brought the fix for."""
+    monkeypatch.setattr(fix_pass.fix_send, "LOADED_FROM", {})
+    author, checkout = static
+    fix_pass.fix_send.pin_loaded(checkout)
+    old = _git(checkout, "rev-parse", "HEAD")[:9]
+    _push(author, "scripts/route.py")
+    _git(checkout, "pull", "--ff-only", "--quiet")  # what reconcile does every 15 minutes
+    new = _git(checkout, "rev-parse", "HEAD")[:9]
     assert fix_pass.fix_send.code_moved(checkout) == f"{old}..{new}"
 
 
@@ -1014,6 +1062,15 @@ def test_append_history_starts_the_file_and_appends_to_it(tmp_path):
     fix_pass.append_history(account, NOW, tmp_path)
     lines = path.read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["mode"] for line in lines] == [fix_cycle.PLAN] * 2
+
+
+def test_publish_prints_writes_the_record_and_adds_a_history_line(tmp_path, capsys):
+    account = fix_cycle.Account(fix_cycle.PLAN, fix_cycle.harness_state({}, True, []))
+    path = fix_pass.publish(account, NOW, tmp_path)
+    assert path == tmp_path / fix_pass.ARTIFACT
+    assert path.read_text(encoding="utf-8").strip() == fix_cycle.render(account).strip()
+    assert f"fix-pass: record at {path}" in capsys.readouterr().out
+    assert len((tmp_path / fix_pass.HISTORY).read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_a_pr_behind_a_red_base_waits_for_the_bases_fixer(world):

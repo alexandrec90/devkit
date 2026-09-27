@@ -174,19 +174,21 @@ def _refused_too(refusal: str) -> str:
     )
 
 
-def pr_prompt(failure: Failure, refusal: str = "") -> str:
+def pr_prompt(failure: Failure, refusal: str = "", left: str = "") -> str:
     """One branch, in its own worktree: a conflict to resolve, a refused commit, or a red PR.
 
     Three shapes, one function, because the worktree and the finish line are the same
     and only the middle differs. The conflict prompt names no failure on purpose: the
     gate cannot have run, and a resolver told "also fix the tests" fixes the wrong thing.
-    `refusal` is the tree's `standing_refusal`, which the commit shape already is.
+    `refusal` is the tree's `standing_refusal`, which the commit shape already is, and
+    `left` is why the tree was not brought to origin's head (`fix-prs.refresh_head`).
     """
     if CONFLICT in failure.signature:
         return _framed(
             f"PR #{failure.number} in {failure.project} has a merge conflict with "
             f"origin/{failure.base}. This worktree is checked out on its head branch "
-            f"{failure.head}. Merge origin/{failure.base} in and resolve the conflicts so "
+            f"{failure.head}.{_left_as_is(left, failure.head)} Merge origin/{failure.base} in and resolve "
+            "the conflicts so "
             "that both sides' intent survives -- git diff --check must find no conflict "
             "marker in any file, not only the code -- and leave the merge uncommitted: the fix "
             "pass concludes it with the hooks running, and whatever the gate says after "
@@ -204,8 +206,9 @@ def pr_prompt(failure: Failure, refusal: str = "") -> str:
     return _framed(
         f"PR #{failure.number} in {failure.project} against origin/{failure.base} is stuck: "
         f"{failure.reason}. Failing: {_ids(failure.signature)}. {_logs(failure)} "
-        f"This worktree is checked out on the PR head branch {failure.head}, already up "
-        "to date with its base. Fix what the gate is failing on, and nothing else about "
+        f"This worktree is checked out on the PR head branch {failure.head}"
+        + (f".{_left_as_is(left, failure.head)}" if left else ", already up to date with its base.")
+        + " Fix what the gate is failing on, and nothing else about "
         f"the PR.{_refused_too(refusal)} {FINISH}"
     )
 
@@ -220,6 +223,23 @@ def _ledger_log(failure: Failure) -> str:
     slot = Path(failure.evidence).name if failure.evidence else ""
     where = f"{EVIDENCE_DIR}/{slot}/" if slot else f"{EVIDENCE_DIR}/*/"
     return f" The ledger groups are in {where}{TRIAGE_LOG} in this worktree."
+
+
+def _left_as_is(left: str, head: str) -> str:
+    """What a reused tree holds that the session did not put there, or "".
+
+    #422's resolver was sent into a tree holding an earlier session's half-done merge --
+    21 files unstaged, no MERGE_HEAD -- and was told nothing about it (f7167792).
+    """
+    if not left:
+        return ""
+    return (
+        f" The pass did not bring it to origin's head -- {left} -- so run git status and "
+        f"git log origin/{head}..HEAD first: what origin does not have was left by an "
+        "earlier session, not by you. Read it before "
+        "anything else, keep what serves this fix, and restore only what you have read "
+        "and judged wrong."
+    )
 
 
 def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:

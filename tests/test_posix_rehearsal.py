@@ -285,6 +285,27 @@ def test_a_pass_clears_the_artifact(tmp_path, monkeypatch, capsys):
     assert "passed" in capsys.readouterr().out
 
 
+def test_the_rehearsal_runs_under_a_temp_root_of_its_own(tmp_path, monkeypatch):
+    """97d20f01, reproduced 2026-09-26 from the PowerShell tool and the Bash tool alike:
+    every test passed, then pytest's exit-time cleanup stat'ed the machine-wide
+    `pytest-of-<user>/pytest-current` another session's run was holding, raised
+    access-denied, and exited 1 with no failed test -- which this reads as a run that
+    never started. A `--basetemp` only this run knows cannot be contended."""
+    monkeypatch.setattr(rehearsal, "ARTIFACT", tmp_path / "posix-rehearsal.log")
+    argvs: list[list[str]] = []
+
+    def run(argv, **_k):
+        argvs.append(list(argv))
+        flag = next(a for a in argv if a.startswith("--basetemp="))
+        assert Path(flag.split("=", 1)[1]).is_dir()
+        return _completed(0)
+
+    assert rehearsal.main([], runner=run) == 0
+    (argv,) = argvs
+    assert argv[1:5] == ["-m", "pytest", argv[3], "-p"] and argv[3].startswith("--basetemp=")
+    assert not Path(argv[3].split("=", 1)[1]).exists()
+
+
 def test_a_run_killed_before_pytest_returned_still_leaves_an_artifact(tmp_path, monkeypatch):
     """4c396283: run from the PowerShell tool the call was cut off mid-suite, and the
     session found an exit 1, its command line and no `logs/posix-rehearsal.log` at all --
@@ -431,8 +452,20 @@ def _rehearse(tmp_path: Path, test_body: str) -> subprocess.CompletedProcess[str
     (tmp_path / "test_subject.py").write_text(test_body, encoding="utf-8")
     env = rehearsal.environment()
     env["PYTHONPATH"] = f"{tmp_path}{os.pathsep}{env['PYTHONPATH']}"
+    # A temp root inside this test's own, never the machine-wide one (97d20f01).
+    basetemp = f"--basetemp={tmp_path / 'basetemp'}"
     return subprocess.run(
-        [sys.executable, "-m", "pytest", "-p", plugin.__name__, "-q", "-p", "no:cacheprovider"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            plugin.__name__,
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            basetemp,
+        ],
         cwd=tmp_path,
         capture_output=True,
         text=True,
