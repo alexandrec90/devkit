@@ -51,6 +51,15 @@ def runner_for(rows, stops: list, listing_code: int = 0):
     return runner
 
 
+def test_a_tree_is_working_while_any_session_in_it_is_busy_whatever_its_kind():
+    rows = [*ROWS, {"kind": "interactive", "status": "busy", "cwd": "C:\\ws\\carameli"}]
+    dirs = bg_sessions.working(rows)
+    assert bg_sessions.busy_in(dirs, "c:/WS/devkit/.claude/worktrees/x/")
+    assert bg_sessions.busy_in(dirs, Path("C:/ws/carameli"))
+    assert not bg_sessions.busy_in(dirs, "C:/ws/carameli/.claude/worktrees/y")
+    assert bg_sessions.working([]) == frozenset()
+
+
 def test_only_idle_background_sessions_in_finished_trees_are_stopped():
     """Never an interactive session, never one still busy, never one in a tree whose
     stamped session is still working."""

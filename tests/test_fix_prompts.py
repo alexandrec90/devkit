@@ -183,6 +183,19 @@ def test_a_conflicted_pr_gets_the_resolver_prompt_which_names_no_failure():
     assert "next pass" in text
 
 
+def test_a_pr_prompt_says_when_its_tree_holds_what_an_earlier_session_left():
+    """#422's resolver was sent into a tree with 21 files unstaged from an earlier
+    session and told nothing of it (f7167792); the pass knew, and only printed it."""
+    left = "the tree has uncommitted changes"
+    for red in (failure(), failure(signature=(fix_plan.CONFLICT,))):
+        text = fix_prompts.pr_prompt(red, "", left)
+        assert left in text and "git status" in text and "earlier session" in text
+        assert f"git log origin/{red.head}..HEAD" in text
+        assert "already up to date" not in text
+    assert "earlier session" not in fix_prompts.pr_prompt(failure())
+    assert "already up to date with its base" in fix_prompts.pr_prompt(failure())
+
+
 def test_a_refused_commit_gets_the_prompt_for_its_own_worktree():
     refused = failure(kind=fix_plan.COMMIT, number=0, signature=("commit refused: secrets",))
     text = fix_prompts.pr_prompt(refused)

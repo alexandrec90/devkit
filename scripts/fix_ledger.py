@@ -79,6 +79,13 @@ def key_kind(key: str) -> str:
     return key.split(":", 1)[0]
 
 
+def is_upstream(key: str) -> bool:
+    """Whether a key records a devkit session: a folded group (`upstream:<n>:<digest>`),
+    or one failure sent upstream (`<failure key>:upstream`) -- which is what a sweep of
+    the ledger alone is, and the shape a prefix test missed, so three sweeps ran at once."""
+    return key_kind(key) == fix_plan.UPSTREAM or key.endswith(f":{fix_plan.UPSTREAM}")
+
+
 def decision_key(decision: fix_plan.Decision) -> str:
     """An upstream decision is one dispatch for the whole group, so one key.
 
