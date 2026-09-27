@@ -44,6 +44,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_models
+import fix_reports
 import tree_provision
 import wt_profile
 
@@ -224,8 +225,9 @@ def launch_background(
         env[harness_switch.HOOKS_OFF_ENV] = harness_switch.HOOKS_OFF_VALUE
     # A background session is the pass's, and nobody is there to bootstrap its tree.
     tree_provision.provision(tree, runner)
+    argv = background_argv(exe, launch, prompt)
     done = runner(
-        background_argv(exe, launch, prompt),
+        argv,
         cwd=str(tree),
         capture_output=True,
         text=True,
@@ -233,8 +235,10 @@ def launch_background(
         errors="replace",
         env=env,
     )
-    sys.stdout.write(done.stdout or "")
-    sys.stderr.write(done.stderr or "")
+    fix_reports.record_launch(tree, argv, done)  # a "never started" finding's evidence
+    # `print`, not `.write`: under `pythonw.exe` both streams are None (c47026f9).
+    print(done.stdout or "", end="")
+    print(done.stderr or "", end="", file=sys.stderr)
     if done.returncode != 0:
         return EXIT_FAILED
     print("  read it back with `claude agents`, `claude logs <id>`, `claude attach <id>`")

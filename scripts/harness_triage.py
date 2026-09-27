@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -252,12 +253,39 @@ def past_fixes(history: list[Item]) -> dict[tuple[str, str, str, str], list[str]
     return notes
 
 
-def render(items: list[Item], history: list[Item] | None = None) -> str:
+def pending_groups(
+    history: list[Item], in_flight: Mapping[str, str]
+) -> dict[tuple[str, str, str, str], str]:
+    """`signature -> pr` of each group whose latest standing resolution is a fix that has
+    not landed yet (`in_flight`, `ref -> pr`, is `fix_verify.in_flight`'s).
+
+    Rows after such a resolution are the defect still happening on the default branch
+    while its fix waits: not a recurrence, and nothing a sweep can do but re-prove it
+    (d677ea57). The fix pass reopens the resolution if that PR closes unmerged.
+    """
+    by_id = {item.id: item for item in history}
+    latest: dict[tuple[str, str, str, str], tuple[str, str]] = {}  # signature -> (stamp, ref)
+    for ref, (event, stamp) in verdicts(history).items():
+        if event != RESOLVED_EVENT or ref not in by_id:
+            continue
+        sig = by_id[ref].signature
+        if sig not in latest or stamp >= latest[sig][0]:
+            latest[sig] = (stamp, ref)
+    return {sig: in_flight[ref] for sig, (_, ref) in latest.items() if ref in in_flight}
+
+
+def render(
+    items: list[Item],
+    history: list[Item] | None = None,
+    pending: Mapping[tuple[str, str, str, str], str] | None = None,
+) -> str:
     """The open backlog as text -- the artifact, and what the CLI prints. With the whole
-    `history`, a group that recurred after a resolution says so."""
+    `history`, a group that recurred after a resolution says so; one in `pending`
+    (`pending_groups`) says its fix is in flight instead."""
     if not items:
         return "harness-triage: nothing open\n"
     fixes = past_fixes(history or [])
+    pending = pending or {}
     lines = ["# source: scripts/harness_triage.py", f"# open: {len(items)}", ""]
     for (event, agent, project, _), bucket in groups(items):
         head = bucket[0]
@@ -275,7 +303,12 @@ def render(items: list[Item], history: list[Item] | None = None) -> str:
                 lines.append(f"  {name:<6} {head.fields[name]}")
         if len(bucket) > 1:
             lines.append(f"  ids    {' '.join(i.id for i in bucket)}")
-        if before := fixes.get(head.signature):
+        if waiting := pending.get(head.signature):
+            lines.append(
+                f"  PENDING on {waiting} -- its fix has not merged yet, so these rows are the "
+                "defect still on the default branch: nothing to do until it lands"
+            )
+        elif before := fixes.get(head.signature):
             times = f"{len(before)} resolution" + ("s" if len(before) > 1 else "")
             lines.append(
                 f"  RECURRED after {times} -- last: {before[-1]} -- that fix did not hold; "

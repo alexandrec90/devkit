@@ -14,7 +14,9 @@ harness-defect ledger, where the devkit session picks it up on the next pass:
 - **What every transcript says** (`session_friction.py`): the turns the harness cost
   sessions nobody dispatched, which is most of them.
 - **Whether resolutions held** (`fix_verify.py`): a group retired against a fix that
-  never merged is reopened.
+  never merged is reopened, and one whose fix is still in flight sends no session.
+- **Whether what was filed still stands** (`session_friction.outdated`): a friction row
+  the detectors on the default branch no longer file is retired, with that reason.
 - **What has sat too long** (`fix_stall.py`): a hold, a cap or a skip past a day.
 
 Outside `dispatch` mode nothing is written -- not the ledger, not a tree, not the
@@ -81,6 +83,9 @@ class Closed:
     # Trees whose stamped session is done or dead, and the idle sessions stopped in them.
     finished: list[str] = field(default_factory=list)
     stopped: list[str] = field(default_factory=list)
+    # ref -> pr of each resolution whose fix has not merged (`in_flight`): the backlog
+    # step sends no session at a group waiting on one.
+    in_flight: dict[str, str] = field(default_factory=dict)
 
 
 def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
@@ -93,10 +98,12 @@ def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
     journal.add(*journal.step("harvest", _harvest, ctx, cursor, default=[]))
     if ctx.writes:
         closed.lines += journal.step("verify", _verify, ctx, default=[])
+        closed.lines += journal.step("recheck", _recheck, ctx, default=[])
         runner = ship_intent.run_quiet
         closed.stopped = journal.step(
             "stop", bg_sessions.stop_finished, closed.finished, runner, default=[]
         )
+    closed.in_flight = journal.step("in-flight", in_flight, ctx, default={})
     history = fix_stall.read_history(ctx.history_path)
     journal.add(*journal.step("stall", fix_stall.stalled, history, ctx.now, default=[]))
     return closed
@@ -151,11 +158,14 @@ def _judge_session(
     if live and tree.branch and str(live) != transcript:
         closed.busy[(tree.project, tree.branch)] = str(tree.path)
     if state in fix_reports.DEAD:
-        # No key: a dead session is re-sent at once, not parked behind the finding.
-        detail = f"{where}: the dispatched session {state}"
-        journal.add(
-            Finding("fixer-no-outcome", tree.project, detail, evidence=transcript or str(tree.path))
+        # No key: a dead session is re-sent at once, not parked behind the finding. One
+        # that never started is cited by what its launcher said, when it left a record.
+        launched = fix_reports.launch_line(tree.path) if not transcript else ""
+        detail = f"{where}: the dispatched session {state}" + (
+            f" -- {launched}" if launched else ""
         )
+        cited = str(tree.path / fix_reports.LAUNCH_FILE) if launched else str(tree.path)
+        journal.add(Finding("fixer-no-outcome", tree.project, detail, evidence=transcript or cited))
         if ctx.writes:
             fix_ledger.mark_dead(ctx.ledger_path, key, state)
             fix_reports.note_on_stamp(tree.path, "dead", state)
@@ -180,6 +190,22 @@ def _verify(ctx: Context) -> list[str]:
         triage.reopen([ref], why, root=ctx.devkit_dir)
         lines.append(f"reopened [{ref}] -- {why}")
     return lines
+
+
+def _recheck(ctx: Context) -> list[str]:
+    """Retire every open friction row today's detectors no longer file (`outdated`)."""
+    items = triage.open_items(triage.load(ctx.devkit_dir))
+    lines = []
+    for ref, why in session_friction.outdated(items):
+        triage.resolve([ref], why, root=ctx.devkit_dir)
+        lines.append(f"retired [{ref}] -- {why}")
+    return lines
+
+
+def in_flight(ctx: Context) -> dict[str, str]:
+    """`fix_verify.in_flight` over the ledger and the cache `_verify` just refreshed."""
+    cache = ctx.ledger_path.parent / fix_verify.CACHE_NAME
+    return fix_verify.in_flight(triage.load(ctx.devkit_dir), cache, ctx.now)
 
 
 def record(ctx: Context, journal: fix_findings.Journal) -> list[str]:

@@ -132,6 +132,15 @@ def verify(
     return reopen
 
 
+def in_flight(items: list[triage.Item], cache_path: Path, now: _dt.datetime) -> dict[str, str]:
+    """`ref -> pr` of every resolution whose fix has not landed: standing, recent, naming
+    a PR or branch, and not settled. `verify` reopens the closed and the never-opened, so
+    after it runs what is left here is open or still inside its grace -- in flight, and
+    what `harness_triage.pending_groups` keeps from being dispatched as a recurrence."""
+    settled = _load(cache_path)
+    return {r.ref: r.pr for r in recent(items, now) if r.ref not in settled}
+
+
 def _load(path: Path) -> set[str]:
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))

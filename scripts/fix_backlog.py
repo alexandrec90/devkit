@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import sys
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -30,18 +31,27 @@ import sweep
 import task_branch as tb
 
 
-def ledger_failure(devkit_dir: Path, root: Path) -> fix_plan.Failure | None:
-    """The open backlog as a `LEDGER` failure with its groups as evidence; None when empty."""
+def ledger_failure(
+    devkit_dir: Path, root: Path, in_flight: Mapping[str, str] | None = None
+) -> fix_plan.Failure | None:
+    """The open backlog as a `LEDGER` failure with its groups as evidence; None when empty.
+
+    A group whose fix is still in flight (`in_flight`, `fix_verify.in_flight`'s) is shown
+    as pending and sends nothing: its new rows are the defect waiting on a merge, and
+    each one used to change the sha and send a session to re-prove it (d677ea57).
+    """
     history = triage.load(devkit_dir)
     items = triage.open_items(history)
-    if not items:
+    pending = triage.pending_groups(history, in_flight or {})
+    live = [i for i in items if i.signature not in pending]
+    if not live:
         return None
-    grouped = triage.groups(items)
+    grouped = triage.groups(live)
     signature = tuple(
         f"{members[0].event} {members[0].project} [{members[0].id}] x{len(members)}"
         for _, members in grouped
     )
-    ids = hashlib.sha256("\n".join(sorted(i.id for i in items)).encode()).hexdigest()
+    ids = hashlib.sha256("\n".join(sorted(i.id for i in live)).encode()).hexdigest()
     failure = fix_plan.Failure(
         kind=fix_plan.LEDGER,
         project=fix_cycle.DEVKIT,
@@ -56,5 +66,7 @@ def ledger_failure(devkit_dir: Path, root: Path) -> fix_plan.Failure | None:
     where = root / gate_evidence.evidence_slot(failure)
     shutil.rmtree(where, ignore_errors=True)
     where.mkdir(parents=True, exist_ok=True)
-    (where / triage.ARTIFACT.name).write_text(triage.render(items, history), encoding="utf-8")
+    (where / triage.ARTIFACT.name).write_text(
+        triage.render(items, history, pending), encoding="utf-8"
+    )
     return replace(failure, evidence=str(where))

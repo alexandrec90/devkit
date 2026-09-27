@@ -160,7 +160,9 @@ cannot produce it again — not when this one tree, box or run is repaired. A mi
 the durable fix was in what provisions every tree (`scripts/worktree_env.py`, the git
 `post-checkout` hook). Ask of each group *what should have prevented this, and why did
 it not* — then fix that, and test it. A group marked `RECURRED` in the triage log was
-retired before by a fix that did not hold: its last note is what not to repeat. The only
+retired before by a fix that did not hold: its last note is what not to repeat. One
+marked `PENDING on <pr>` is the reverse: its fix is written and not merged yet, so the
+pass sends no session at it -- retire any new rows against that same `--pr`. The only
 mechanism ruled out is a coding-agent hook; a test, a git hook, a CI check, a scheduled
 job or a provisioner all are fair game.
 

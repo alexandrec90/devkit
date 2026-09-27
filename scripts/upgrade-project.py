@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import subprocess
 import sys
 import tempfile
@@ -92,6 +93,7 @@ import sweep
 import task_branch as tb
 import task_input
 import worktree
+from worktree_env import SKIP_PROVISION_VAR
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # devkit's own `scripts/`, resolved from this file rather than from `REPO_ROOT`:
@@ -541,8 +543,12 @@ def source_at_tag(devkit: Path, tag: str):
     `sync-devkit.py --pull` rightly refuses such a source -- its files are at no
     upstream revision while the stamp would claim one. A throwaway worktree at the
     tag is the source a consumer actually wants: exactly the released tree.
+
+    Bare, and let go of on a cleanup error (d47965d9): the worktree hook would `uv sync`
+    a tree that is only read, and a `.pyd` of that `.venv` still held open made the
+    cleanup raise and exit the pass 1 after the release had already been cut.
     """
-    with tempfile.TemporaryDirectory(prefix="devkit-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="devkit-", ignore_cleanup_errors=True) as tmp:
         path = Path(tmp) / tag.replace("/", "-")
         add = subprocess.run(
             ["git", "-C", str(devkit), "worktree", "add", "--detach", str(path), tag],
@@ -550,6 +556,7 @@ def source_at_tag(devkit: Path, tag: str):
             text=True,
             check=False,
             creationflags=sweep.NO_WINDOW,
+            env={**os.environ, SKIP_PROVISION_VAR: "1"},
         )
         if add.returncode != 0:
             raise RuntimeError((add.stderr or add.stdout).strip())

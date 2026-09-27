@@ -48,7 +48,7 @@ goes in the tree's `logs/friction.md` as well as the hook's output, which `claud
 **`post-checkout` alone never reached `claude --worktree`.** It cuts with
 `--no-checkout` and fills the tree with `git reset --hard`, and git skips `post-checkout`
 for a no-checkout add. So the same set-up also answers `post-index-change`
-(`index_change_main`), gated on a working-tree update in a tree with no `.venv` yet.
+(`index_change_main`), gated on a working-tree update in a tree not yet provisioned.
 
 
 Every decision here is a pure function; `main` is the only part that touches git or the
@@ -247,6 +247,11 @@ def name_compose_project(here: Path, checkout: Path) -> str:
 
 LOCKFILE = "uv.lock"
 VENV_DIR = ".venv"
+# What says a tree *is* provisioned. Not `.venv` alone: `uv sync` creates the interpreter
+# before it resolves anything, so a failed one left `.venv/Scripts/python.exe` behind and
+# every later hook read the tree as done (c1391297). Written only after an install that
+# succeeded, cleared before each attempt; `worktree.run_provision` keeps it the same way.
+PROVISIONED = Path(VENV_DIR) / ".devkit-provisioned"
 # The `uv sync` spelling `scripts/hooks/toolchain.py` and `worktree.provision_steps`
 # both use, so the three cannot name different commands.
 UV_SYNC = ("uv", "sync", "--all-extras", "--all-groups")
@@ -277,7 +282,7 @@ class Toolchain:
         install_command, python_version = manifest_python(here)
         return cls(
             locked=(here / LOCKFILE).is_file(),
-            own_venv=(here / VENV_DIR).is_dir(),
+            own_venv=(here / PROVISIONED).is_file(),
             checkout_venv=(checkout / VENV_DIR).is_dir(),
             uv=shutil.which("uv") if uv is None else uv,
             install_command=install_command,
@@ -398,6 +403,7 @@ def provision(
     # Spelled as typed rather than resolved: the line is a command to paste, and
     # `C:\...\Scripts\uv.EXE sync` is not one anybody types.
     spelled = tool.install_command or " ".join((UV_SYNC[0], *command[1:]))
+    mark_provisioned(here, False)
     started = time.monotonic()
     try:
         done = runner(
@@ -420,7 +426,21 @@ def provision(
         tail = " | ".join((done.stderr or "").strip().splitlines()[-3:])
         return _trouble(here, f"devkit: `{spelled}` failed ({tail}); run it here by hand")
     elapsed = time.monotonic() - started
+    mark_provisioned(here, True)
     return f"devkit: {VENV_DIR} provisioned by `{spelled}` in {elapsed:.0f}s (this worktree's own)"
+
+
+def mark_provisioned(here: Path, ok: bool) -> None:
+    """Set or clear `PROVISIONED`. Only inside a `.venv` the install made: creating one to
+    hold the mark would be the empty `.venv` this exists to stop reading as done. Never
+    raises -- a hook that cannot write the mark leaves the tree to be provisioned again."""
+    try:
+        if not ok:
+            (here / PROVISIONED).unlink(missing_ok=True)
+        elif (here / VENV_DIR).is_dir():
+            (here / PROVISIONED).write_text("", encoding="utf-8")
+    except OSError:
+        pass
 
 
 # `fix_reports.FRICTION_FILE`: the fix pass files each line of it on the harness-defect
@@ -452,11 +472,11 @@ def is_unprovisioned_tree_update(args: list[str], here: Path) -> bool:
     The reset does fire `post-index-change`, with `1` as its first argument because it
     updated the working tree; `git add` and every other index-only write pass `0`.
 
-    Nothing here says the tree is new, so the tree's own missing `.venv` stands in: it is
-    one `stat`, taken before any git spawn, so the hook costs nothing in a provisioned
-    tree and runs `provision` at most until one exists.
+    Nothing here says the tree is new, so the tree's own missing `PROVISIONED` mark stands
+    in: it is one `stat`, taken before any git spawn, so the hook costs nothing in a
+    provisioned tree and runs `provision` until one succeeds.
     """
-    return bool(args) and args[0].strip() == BRANCH_CHECKOUT and not (here / VENV_DIR).is_dir()
+    return bool(args) and args[0].strip() == BRANCH_CHECKOUT and not (here / PROVISIONED).is_file()
 
 
 def main(

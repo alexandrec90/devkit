@@ -99,17 +99,15 @@ import git_policy
 import harness_config
 import sweep
 import task_branch as tb
+import worktree_env
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Ephemeral boxes live *beside* the checkouts, never inside one: a worktree nested in
 # a project would show up as untracked files in that project's `git status`, which is
-# the `needs-branch` verdict this whole tier exists to stop manufacturing.
-#
-# The name is not this module's and no longer `sweep`'s either: `worktree_tiers` holds it
-# beside the two agent-CLI tiers, because the modules that needed it are vendored hooks
-# running in checkouts that have neither this file nor `sweep.py`. Re-exported down that
-# chain rather than re-spelled, so callers keep reading `worktree.BOXES_DIR_NAME`.
+# the `needs-branch` verdict this whole tier exists to stop manufacturing. The name is
+# `worktree_tiers`' (vendored hooks need it where this file is absent), re-exported
+# through `sweep` so callers keep reading `worktree.BOXES_DIR_NAME`.
 BOXES_DIR_NAME = sweep.BOXES_DIR_NAME
 LEASE_FILE_NAME = "leases.json"
 
@@ -2759,10 +2757,11 @@ def run_provision(
 
     Not fatal to the box: one with no toolchain is still where the work belongs, and
     deleting it would send the agent back to the static checkout. But a failed step is
-    reported as FAILED, never a `[warn]`: that is what hid a dead `npm ci` for weeks.
-    The timeout is generous because a cold `uv sync` on a large project is slow.
+    reported as FAILED, never a `[warn]`: that is what hid a dead `npm ci` for weeks, and
+    only a clean run keeps `worktree_env.PROVISIONED`. A cold `uv sync` is slow.
     """
     notes: list[str] = []
+    worktree_env.mark_provisioned(path, False)
     for step in steps:
         try:
             if step.shell_command:
@@ -2799,6 +2798,7 @@ def run_provision(
             notes.append(f"FAILED provision: {step.label} failed: {detail[-1] if detail else ''}")
             return False, notes
         notes.append(f"provisioned: {step.label}")
+    worktree_env.mark_provisioned(path, True)
     return True, notes
 
 

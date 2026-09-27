@@ -138,7 +138,9 @@ def world(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        fix_pass.fix_red.fix_backlog, "ledger_failure", lambda devkit_dir, root: table["backlog"]
+        fix_pass.fix_red.fix_backlog,
+        "ledger_failure",
+        lambda devkit_dir, root, in_flight=None: table["backlog"],
     )
     monkeypatch.setattr(
         fix_pass.fix_send,

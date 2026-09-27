@@ -414,6 +414,44 @@ def test_a_failed_sync_relays_its_tail_and_the_command_to_rerun(tmp_path):
     assert "uv sync --all-extras --all-groups" in line
 
 
+class _Syncing(_Run):
+    """A `uv sync` that creates the interpreter before it resolves anything, as the real
+    one does -- so a failure still leaves `.venv/Scripts/python.exe` behind."""
+
+    def __call__(self, argv, **kwargs):
+        (Path(kwargs["cwd"]) / ".venv" / "Scripts").mkdir(parents=True, exist_ok=True)
+        (Path(kwargs["cwd"]) / ".venv" / "Scripts" / "python.exe").write_bytes(b"")
+        return super().__call__(argv, **kwargs)
+
+
+def test_a_venv_a_failed_sync_left_behind_is_not_a_provisioned_tree(tmp_path):
+    """c1391297: judged by `.venv` being there, a failed sync provisioned the tree for
+    good -- every later hook saw `own_venv` and ran nothing, and a sweep ran `uv sync` by
+    hand. Only a provision that succeeded marks the tree, and a retry clears the mark."""
+    checkout, tree = _provisionable(tmp_path)
+    wt_env.provision(tree, checkout, runner=_Syncing(1, "error: no index"), environ={}, uv="uv")
+    assert (tree / ".venv" / "Scripts" / "python.exe").is_file()
+    assert not (tree / wt_env.PROVISIONED).exists()
+    assert wt_env.Toolchain.observe(tree, checkout, uv="uv").own_venv is False
+    assert wt_env.is_unprovisioned_tree_update(["1", "0"], tree) is True
+    retry = _Syncing()
+    assert "provisioned by" in wt_env.provision(tree, checkout, runner=retry, environ={}, uv="uv")
+    assert len(retry.calls) == 1, "the half-built .venv did not stop the retry"
+    assert wt_env.Toolchain.observe(tree, checkout, uv="uv").own_venv is True
+    assert wt_env.is_unprovisioned_tree_update(["1", "0"], tree) is False
+    # A later failure takes the mark back rather than leaving the last success standing.
+    wt_env.mark_provisioned(tree, False)
+    assert not (tree / wt_env.PROVISIONED).exists()
+
+
+def test_a_successful_command_that_made_no_venv_is_not_marked(tmp_path):
+    """The mark lives in `.venv`; creating that directory to hold it would be the empty
+    `.venv` this exists to stop reading as provisioned."""
+    checkout, tree = _provisionable(tmp_path)
+    wt_env.provision(tree, checkout, runner=_Run(), environ={}, uv="uv")
+    assert not (tree / ".venv").exists()
+
+
 def test_a_failure_or_a_gap_is_left_as_the_trees_friction_for_the_pass_to_file(tmp_path):
     """The hook's only report was a line inside `git worktree add`, which `claude
     --worktree` swallows -- so a tree came up with no `.venv` and nothing anywhere said
@@ -498,6 +536,10 @@ def test_a_working_tree_update_in_a_tree_with_no_venv_is_this_hooks_business(tmp
     assert wt_env.is_unprovisioned_tree_update(["0", "0"], tmp_path) is False, "a `git add`"
     assert wt_env.is_unprovisioned_tree_update([], tmp_path) is False
     (tmp_path / ".venv").mkdir()
+    assert wt_env.is_unprovisioned_tree_update(["1", "0"], tmp_path) is True, (
+        "a bare .venv is what a failed sync leaves"
+    )
+    wt_env.mark_provisioned(tmp_path, True)
     assert wt_env.is_unprovisioned_tree_update(["1", "0"], tmp_path) is False, (
         "a provisioned tree pays one stat and nothing else"
     )
@@ -549,6 +591,7 @@ def test_the_index_change_hook_leaves_a_provisioned_tree_and_the_checkout_alone(
     assert wt_env.index_change_main(["1", "0"], root=checkout, runner=run, environ={}) == 0
     tree = _worktree(checkout, tmp_path / "wt")
     (tree / ".venv").mkdir()
+    wt_env.mark_provisioned(tree, True)
     assert wt_env.index_change_main(["1", "0"], root=tree, runner=run, environ={}) == 0
     assert wt_env.index_change_main(["0", "0"], root=tmp_path / "nowhere") == 0
     assert run.calls == []
