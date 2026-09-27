@@ -55,7 +55,9 @@ FINISH = (
     f"that was wrong or absent, an instruction that sent you the wrong way -- put one line "
     f"per thing in {FRICTION_FILE.as_posix()}: the pass files each for the devkit session, "
     f"which fixes it at the cause, and a cause that lives outside this repository is "
-    f"fixed there, not worked around here."
+    f"fixed there, not worked around here. End a line whose cause you fixed yourself "
+    f"with fixed on this branch: the pass then files it as settled by this branch, not "
+    f"as a new job for a fixer."
 )
 
 # What the devkit session is told about the harness-defect ledger, when the backlog is

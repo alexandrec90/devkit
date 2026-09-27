@@ -139,7 +139,8 @@ def settle(written: list[Finding], devkit_dir: Path) -> list[str]:
 
     A user correcting a session is filed as friction, and in the first supervised run
     seven of eight such rows had been fixed by the very session corrected, on the branch
-    it then shipped. Resolved-pending-merge rather than dropped: `fix_verify` reopens the
+    it then shipped; a fixer's own friction line saying "fixed on this branch" is the same
+    case (`fix_reports.fixed_here`). Resolved-pending-merge rather than dropped: `fix_verify` reopens the
     row if the branch never becomes a merged PR, so the ones nobody fixed come back.
     """
     pending = [f for f in written if f.settles_with]
@@ -151,7 +152,7 @@ def settle(written: list[Finding], devkit_dir: Path) -> list[str]:
         sig = signature(finding)
         ids = [item.id for item in open_now if item.signature == sig]
         if ids:
-            note = f"the session this was said to went on to ship {finding.settles_with}"
+            note = f"the session it concerns went on to ship {finding.settles_with}"
             refs += triage.resolve(ids[:1], note, pr=finding.settles_with, root=devkit_dir)
     return refs
 
