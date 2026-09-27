@@ -194,6 +194,15 @@ intent's body which sibling intents the sweep left, and the fix pass opens each 
 Nothing about the ledger being devkit's makes a carameli file unfixable from a devkit
 session.
 
+**A fix that belongs on another open PR goes into that PR's tree only once nobody is in
+it.** A transcript under `~/.claude/projects/<the tree's slug>/` whose last timestamped
+record is within `fix_reports.QUIET_AFTER` (`fix_reports.active_transcript`) is a session
+still working there, and editing under it races that session's own ship — the first
+supervised run edited #404's tree twenty seconds after its fixer shipped. With a live
+session, put the fix on your own branch instead and name the PR in the intent. With none,
+finish the tree: stage what the refusal needs and leave its intent where it is, so the
+next pass ships it.
+
 Discarding work that exists only in a box is never done here: it is irreversible, so
 the box is left and named in the report. A fix that has to be **released** rather than
 merged (a vendored-tier change reaches consumers only through `sync-devkit.py --pull`
@@ -233,5 +242,5 @@ to make visible.
 
 **End by re-running `python scripts/harness_triage.py` and quoting the count.** The sweep
 is finished when it prints zero open, and a non-zero count is the report's headline, not a
-footnote: say which group, and what you need from the user to close it. "Left open with a
-reason" is not an outcome this skill has.
+footnote: say which group, and why it is not closed. "Left open with a reason" is not an
+outcome this skill has.

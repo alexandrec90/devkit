@@ -29,6 +29,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import re
+import subprocess
 import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
@@ -49,15 +50,13 @@ SNIPPET = 90
 
 # Text a failed tool call carries when something outside the work refused or was
 # missing. Each pattern names the class it files under; the first match wins.
+#
+# Claude Code's own worktree isolation guard ("session is isolated in the worktree",
+# "too complex to verify") is deliberately absent. `.claude/rules/engineering.md` says
+# no setting and nothing in devkit changes what it accepts, and already carries the
+# spellings that get past it; filed here, every refusal reopened one group that each
+# sweep could only retire again with that same note.
 RESULT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    (
-        "isolation-guard",
-        re.compile(
-            r"session is isolated in the worktree|too complex to verify|"
-            r"cannot be shown not to be git|names git in a form",
-            re.I,
-        ),
-    ),
     ("blocked-call", re.compile(r"<tool_use_error>Blocked:|requires approval", re.I)),
     ("user-rejected", re.compile(r"doesn't want to proceed with this tool use", re.I)),
     (
@@ -358,14 +357,41 @@ def detect(events: Iterable[Event]) -> list[tuple[str, str, Event]]:
 # --- the harvest --------------------------------------------------------------------------
 
 
+# The classes the corrected session's own shipped branch settles (`Finding.settles_with`).
+SETTLED_BY_THE_SESSION = frozenset({"user-frustration"})
+DEFAULT_BRANCHES = frozenset({"main", "master"})
+
+
+def task_branch(cwd: str, runner=subprocess.run) -> str:
+    """The branch the session's tree is on, when it is a task branch; "" otherwise.
+
+    A default branch, a detached head, a tree already gone: nothing that a merge could
+    settle, so the finding is filed open as before.
+    """
+    try:
+        done = runner(
+            ["git", "-C", cwd, "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    branch = (done.stdout or "").strip() if done.returncode == 0 else ""
+    return "" if branch in DEFAULT_BRANCHES else branch
+
+
 def session_findings(
-    path: Path, chunk: st.Chunk, cwd: str, workspace_root: Path
+    path: Path, chunk: st.Chunk, cwd: str, workspace_root: Path, branch_of=task_branch
 ) -> list[fix_findings.Finding]:
     """What one transcript's new rows show, as findings; none for a session outside the workspace."""
     if not _under(cwd, workspace_root):
         return []
     agent = "codex" if st.is_codex(path) else "claude"
     project = harness_events.project_name(Path(cwd))
+    found = detect(st.events(path, chunk.rows))
+    branch = branch_of(cwd) if any(cls in SETTLED_BY_THE_SESSION for cls, _, _ in found) else ""
     return [
         fix_findings.Finding(
             cls,
@@ -375,8 +401,9 @@ def session_findings(
             command=_said(cls, event, cwd),
             event=fix_findings.FRICTION,
             agent=agent,
+            settles_with=branch if cls in SETTLED_BY_THE_SESSION else "",
         )
-        for cls, what, event in detect(st.events(path, chunk.rows))
+        for cls, what, event in found
     ]
 
 

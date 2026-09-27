@@ -226,13 +226,14 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
     assert out.stage == ship_intent.SHIPPED and out.url == "https://x/pull/7"
     assert run.verbs() == [
         "git status",
+        "git add",
         r"C:\py\python.exe scripts/ship.py",
         "git add",
         "git commit",
         "git push",
         "git rev-parse",
     ]
-    fix, add, commit, push = run.calls[1:5]
+    fix, add, commit, push = run.calls[2:6]
     assert fix[0][1:] == ["scripts/ship.py", "--fix"] and fix[1] == one.tree
     assert add[0] == ["git", "add", "-A"]
     assert commit[0] == ["git", "commit", "-F", str(ship_intent.INTENT_FILE)]
@@ -303,6 +304,65 @@ def test_the_commit_half_names_the_step_that_refused(tmp_path):
         one, "py", Runner({"git add": (1, "", "index locked")})
     )
     assert (step, output) == ("add", "index locked")
+
+
+class _StagedOnlyScanner(Runner):
+    """detect-secrets' commit hook as carameli #395 met it: it refuses to scan while the
+    baseline has unstaged changes, and a scan that moves a flagged line rewrites the
+    baseline -- leaving it unstaged again."""
+
+    def __init__(self, baseline_stale: bool):
+        super().__init__()
+        self.baseline_staged = False
+        self.baseline_stale = baseline_stale
+
+    def __call__(self, argv, cwd, env=None):
+        done = super().__call__(argv, cwd, env)
+        if argv[:3] == ["git", "add", "-A"]:
+            self.baseline_staged = True
+        elif argv[1:] == ["scripts/ship.py", "--fix"]:
+            # ship.py's own two passes, over whatever the index holds when it starts.
+            for _pass in (1, 2):
+                if not self.baseline_staged:
+                    continue
+                if self.baseline_stale:
+                    self.baseline_stale, self.baseline_staged = False, False
+                    continue
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return subprocess.CompletedProcess(argv, 1, "", "Your baseline file is unstaged.")
+        return done
+
+
+def test_the_fixers_run_over_a_staged_tree_so_a_hook_that_needs_its_baseline_staged_can_pass(
+    tmp_path,
+):
+    """carameli #395: `ship.py --fix` over an unstaged tree failed both passes on
+    detect-secrets' "baseline is unstaged", which no code change could answer."""
+    one = intent(tmp_path)
+    run = _StagedOnlyScanner(baseline_stale=False)
+    assert ship_intent.commit_intent(one, "py", run) == ("", "")
+    assert run.verbs() == ["git add", "py scripts/ship.py", "git add", "git commit"]
+
+    # A scan that rewrites the baseline on the first pass fails ship.py's second; one
+    # restage and one more run is what a person committing by hand would do.
+    stale = _StagedOnlyScanner(baseline_stale=True)
+    assert ship_intent.commit_intent(one, "py", stale) == ("", "")
+    assert stale.verbs() == [
+        "git add",
+        "py scripts/ship.py",
+        "git add",
+        "py scripts/ship.py",
+        "git add",
+        "git commit",
+    ]
+
+
+def test_a_finding_that_survives_the_restaged_retry_is_still_a_fixers_refusal(tmp_path):
+    one = intent(tmp_path)
+    run = Runner({"py scripts/ship.py": (1, "", "a real finding")})
+    step, output = ship_intent.commit_intent(one, "py", run)
+    assert (step, output) == ("fixers", "a real finding")
+    assert run.verbs() == ["git add", "py scripts/ship.py", "git add", "py scripts/ship.py"]
 
 
 def test_a_refused_commit_stage_is_recorded_with_its_output_and_nothing_is_pushed(tmp_path):

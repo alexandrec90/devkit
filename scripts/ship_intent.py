@@ -295,10 +295,26 @@ def is_spent(intent: Intent, runner: Runner = run_quiet) -> bool:
 
 
 def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str]:
-    """Fixers, add, commit: `("", "")` when it went through, else `(step, output)`."""
-    fixed = runner([python, "scripts/ship.py", "--fix"], cwd=intent.tree)
-    if fixed.returncode != 0:
-        return "fixers", (fixed.stdout or "") + (fixed.stderr or "")
+    """Add, fixers, add, commit: `("", "")` when it went through, else `(step, output)`.
+
+    The tree is staged before the fixers run, and restaged for one retry when they fail.
+    detect-secrets' commit hook refuses to scan at all while its baseline has unstaged
+    changes, and it is also what rewrites the baseline when a change moves a flagged line
+    -- so over an unstaged tree both of `ship.py --fix`'s passes failed on "baseline is
+    unstaged", a refusal no code change could answer (carameli #395). Staging between
+    runs is what a person committing by hand does; the commit takes all of it anyway.
+    """
+    output = ""
+    for _attempt in (1, 2):
+        added = runner(["git", "add", "-A"], cwd=intent.tree)
+        if added.returncode != 0:
+            return "add", (added.stdout or "") + (added.stderr or "")
+        fixed = runner([python, "scripts/ship.py", "--fix"], cwd=intent.tree)
+        output = (fixed.stdout or "") + (fixed.stderr or "")
+        if fixed.returncode == 0:
+            break
+    else:
+        return "fixers", output
     added = runner(["git", "add", "-A"], cwd=intent.tree)
     if added.returncode != 0:
         return "add", (added.stdout or "") + (added.stderr or "")

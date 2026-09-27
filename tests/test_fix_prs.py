@@ -1326,3 +1326,24 @@ def test_a_tree_the_pass_cuts_is_marked_fixer_work_and_a_persons_tree_is_not(mon
     monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (persons, ""))
     assert fix_prs.dispatch_pr(failure(), root, claude, None, "pr:carameli:412:k", "p") == 0
     assert not (persons / fix_prs.fix_reports.ORIGIN_FILE).exists()
+
+
+def test_a_folded_prs_head_is_named_with_the_tree_holding_it(root):
+    """753e8b25: the upstream prompt named carameli #395 by URL only, and the devkit
+    session searched carameli's worktrees for the tree holding its head."""
+    held = root / "carameli" / ".claude" / "worktrees" / "secrets-baseline-lf"
+    listing = (
+        f"worktree {root / 'carameli'}\nHEAD abc\nbranch refs/heads/master\n\n"
+        f"worktree {held}\nHEAD def\nbranch refs/heads/agent/secrets-baseline-lf-0926\n"
+    )
+    git_for = lambda path: lambda *args: subprocess.CompletedProcess(args, 0, listing, "")
+    pr = failure(project="carameli", number=395, head="agent/secrets-baseline-lf-0926")
+    unheld = failure(project="carameli", number=396, head="agent/nobody-0926")
+    elsewhere = failure(project="ghost", number=1)
+    committed = failure(kind=fix_plan.COMMIT, tree="C:/kept")
+    found = fix_prs.fix_prompts.with_trees((pr, unheld, elsewhere, committed), root, git_for)
+    assert Path(found[0].tree) == held
+    assert found[1:] == (unheld, elsewhere, committed)
+    text = fix_prs.fix_prompts.upstream_prompt(found, "agent/fix")
+    assert f"(its head is checked out in {found[0].tree})" in text
+    assert text.count("its head is checked out") == 1

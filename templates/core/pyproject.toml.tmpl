@@ -53,6 +53,10 @@ testpaths = ["{{ tests_dir }}"]
 python_version = "{{ python_version }}"
 warn_unused_ignores = true
 warn_redundant_casts = true
+# The one note mypy prints for every untyped function it skipped, on a clean run too:
+# 162 of them, 28 KB, opened `logs/lint-errors.log` ahead of the error that failed it.
+# It says nothing a finding needs; `check_untyped_defs` is the setting, not the note.
+disable_error_code = ["annotation-unchecked"]
 # The vendored agent harness is byte-identical upstream code (devkit owns its typing,
 # and `sync-devkit.py --check` fails if this repo edits it). Type-checking it here
 # only produces errors this repo is not allowed to fix.

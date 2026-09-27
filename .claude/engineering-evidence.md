@@ -134,6 +134,22 @@ reading them avoids `$HOME` for the tilde, which is the one spelling that is act
 refused. Nothing gates a sentence like that, which is why it survived until a session
 ran the commands instead of believing it.
 
+## Git Bash rewrites a `rev:path` whose path starts with a dot
+
+Not the guard: the MSYS layer under Git Bash converting what it takes for a POSIX path
+list before `git.exe` sees it. Reproduced in one worktree, 2026-09-26:
+
+```
+git rev-parse origin/main:.devkit.toml    → ambiguous argument 'origin\main;.devkit.toml'
+git rev-parse origin/main:README.md       → the blob
+git rev-parse origin/main:./.devkit.toml  → the blob
+```
+
+Spell the path `./.name`, or issue it through the PowerShell tool, which has no such
+layer. `MSYS_NO_PATHCONV=1` in the agent env was proposed and is not the fix: it also
+stops `$HOME` becoming `C:/Users/…` for a native program, and `$HOME` is the spelling the
+isolation guard above requires.
+
 ## Why capped Bash is a blocklist, not a proof obligation
 
 `enforce-capped-bash.py` is vendored but no longer wired as a hook; this is the record
