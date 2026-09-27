@@ -62,9 +62,13 @@ OUTCOME_FILES = (
 
 # How much of a report reaches the record: one line's worth, not the essay.
 REASON_LIMIT = 400
-# How much of a friction line the ledger groups by: `harness_triage.SIGNATURE_WIDTH` of
-# the `reported: <line>` detail it is filed under. Spelled here, and held to that by a test.
-RESTATED_WIDTH = 80 - len("reported: ")
+
+# The refusals of Claude Code's `claude --worktree` isolation guard, in its own words.
+CLAUDE_CODE_GUARD = re.compile(
+    r"too complex to verify|stays? inside the worktree|cannot be shown not to be git|"
+    r"isolated in the worktree|worktree isolation guard",
+    re.I,
+)
 
 # A dispatched session with no transcript this long after its stamp never started; one
 # whose transcript has been quiet this long, with nothing left behind, has ended. Both
@@ -227,8 +231,8 @@ class Tree:
 
 
 def _entries(path: Path) -> tuple[str, ...]:
-    """A friction file, one entry per line: headings and blanks dropped, list markers
-    stripped."""
+    """A friction file's entries, one per line: headings and blanks dropped, list
+    markers stripped; empty when there is no file."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -239,17 +243,23 @@ def _entries(path: Path) -> tuple[str, ...]:
 
 
 def friction_lines(tree: Path) -> tuple[str, ...]:
-    """The tree's `logs/friction.md`, less what this tree has already had filed.
+    """The tree's `logs/friction.md` entries this tree has not already had filed, less
+    any about Claude Code's own worktree guard.
 
-    A session that rewrites its file whole re-sends every line the pass already filed
-    away, and a row that lands in a group resolved since reads as "RECURRED" -- 97d20f01
-    and a174d816 were one supervising session restating two reports it had already filed.
-    So a line is a restatement when it shares its first `RESTATED_WIDTH` characters,
-    which is all of it the ledger groups by, with a line in `logs/friction.filed.md`.
+    A session writes the file whole, and once the pass has filed it away the next write
+    carries the old lines again: a174d816's line was filed twice from one tree, and the
+    second filing reopened a group already retired with its fix as a recurrence.
+
+    The guard is not devkit's (`.claude/rules/engineering.md` says so, and carries the
+    spellings that pass it), which is why `session_friction` never files its refusals
+    from a transcript. Written into a friction file, one still became a group a sweep
+    could retire only with that same note (ced1c085).
     """
-    said = {line[:RESTATED_WIDTH] for line in _entries(tree / filed(FRICTION_FILE))}
+    seen = set(_entries(tree / filed(FRICTION_FILE)))
     return tuple(
-        line for line in _entries(tree / FRICTION_FILE) if line[:RESTATED_WIDTH] not in said
+        line
+        for line in _entries(tree / FRICTION_FILE)
+        if line not in seen and not CLAUDE_CODE_GUARD.search(line)
     )
 
 

@@ -100,7 +100,36 @@ def test_every_step_runs_when_the_project_has_every_file(tmp_path, monkeypatch):
     monkeypatch.setattr(gate, "parallel_args", lambda _python: [])
     runner = FakeRunner()
     assert gate.run_gate(root, runner) == 0
-    assert [call[1:] for call in runner.calls] == [list(step.argv) for step in gate.STEPS]
+    assert [
+        [arg for arg in call[1:] if not arg.startswith("--basetemp=")] for call in runner.calls
+    ] == [list(step.argv) for step in gate.STEPS]
+
+
+def test_the_bare_pytest_step_gets_a_temp_root_of_its_own(tmp_path, monkeypatch):
+    """97d20f01: under the machine-wide `pytest-of-<user>`, another session's run holding
+    its `pytest-current` link made pytest's exit-time cleanup raise access-denied, and a
+    green suite exited 1. The one pytest this file spawns itself gets a directory no other
+    run knows about, gone once the step returns; the wrappers pass their own."""
+    root = project(
+        tmp_path, "scripts/lint-all.py", "scripts/run-tests.py", "scripts/hooks/tests/test_x.py"
+    )
+    monkeypatch.setattr(gate, "parallel_args", lambda _python: [])
+    seen: dict[str, bool] = {}
+
+    class Recording(FakeRunner):
+        def __call__(self, argv, **kwargs):
+            for arg in argv:
+                if arg.startswith("--basetemp="):
+                    seen[arg] = Path(arg.split("=", 1)[1]).is_dir()
+            return super().__call__(argv, **kwargs)
+
+    runner = Recording()
+    assert gate.run_gate(root, runner) == 0
+    basetemps = {call[1]: [a for a in call if a.startswith("--basetemp=")] for call in runner.calls}
+    assert basetemps["scripts/lint-all.py"] == basetemps["scripts/run-tests.py"] == []
+    (flag,) = basetemps["-m"]
+    assert seen == {flag: True}  # there while pytest ran
+    assert not Path(flag.split("=", 1)[1]).exists()  # and removed after
 
 
 def test_the_first_failure_ends_the_run_with_its_exit_code(tmp_path, capsys):

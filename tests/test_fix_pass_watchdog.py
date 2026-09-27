@@ -146,12 +146,16 @@ def test_a_pass_that_reports_is_passed_through_untouched(watched):
     assert watched["updates"] == 1, "kept current before every pass"
 
 
-def test_a_console_less_watchdog_passes_the_output_on_without_a_stream(watched, monkeypatch):
-    """The task runs this under `pythonw.exe`, where both streams are None: a
-    `sys.stdout.write` here moved the c47026f9 crash from the pass into the watchdog."""
+def test_the_watch_survives_the_none_stdout_pythonw_gives_it(watched, monkeypatch):
+    """The scheduler runs this under `pythonw.exe`, whose `sys.stdout` is None: a
+    `.write` there raised after the pass had run and before its outcome was judged.
+    The fix pass now re-registers its task behind this watchdog within one pass (990856e5),
+    so the watchdog must hold where the pass held (0b9c6b88)."""
     monkeypatch.setattr(watchdog.sys, "stdout", None)
-    monkeypatch.setattr(watchdog.sys, "stderr", None)
-    assert watchdog.watch(watched["argv"], NOW) == 0
+    watched["outcome"] = (1, TRACE)
+    assert watchdog.watch(watched["argv"], NOW) == 2
+    [found] = findings(watched["devkit"])
+    assert found.detail.startswith("pass-crashed: TypeError")
 
 
 def test_a_crash_is_filed_and_repaired_once_per_signature(watched):

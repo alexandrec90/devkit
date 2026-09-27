@@ -8,9 +8,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-import fix_findings
 import fix_reports
-import harness_triage
 
 NOW = _dt.datetime(2026, 9, 19, 9, 0, tzinfo=_dt.UTC)
 
@@ -268,24 +266,35 @@ def test_friction_lines_drop_markup_and_blanks_and_filing_away_reads_them_once(t
     fix_reports.file_away(tmp_path, fix_reports.FRICTION_FILE)  # nothing there: no error
 
 
-def test_a_line_the_tree_already_had_filed_is_a_restatement_not_a_recurrence(tmp_path):
-    """97d20f01 and a174d816: a supervising session rewrote its friction file whole, and
-    the two reports the pass had already filed -- one with a new tail -- went back on the
-    ledger as RECURRED against fixes that had held."""
+def test_a_line_the_tree_already_had_filed_is_not_read_again(tmp_path):
+    """a174d816: the session wrote its friction file whole after the pass had filed the
+    first copy away, so the same line came back, was filed a second time, and reopened a
+    group already retired with its fix as a recurrence. A new line beside it still reads."""
     (tmp_path / "logs").mkdir()
-    head = "devkit supervise-fix-pass: `python scripts/posix-rehearsal.py > file 2>&1` exited 1"
-    (tmp_path / fix_reports.FRICTION_FILE).write_text(f"- {head}; no artifact\n", encoding="utf-8")
+    friction = tmp_path / fix_reports.FRICTION_FILE
+    friction.write_text("- no .venv in the tree\n", encoding="utf-8")
     fix_reports.file_away(tmp_path, fix_reports.FRICTION_FILE)
+    friction.write_text("- no .venv in the tree\n- the rehearsal exited 1\n", encoding="utf-8")
+    assert fix_reports.friction_lines(tmp_path) == ("the rehearsal exited 1",)
+    friction.write_text("* no .venv in the tree\n", encoding="utf-8")  # markup aside, same
+    assert fix_reports.friction_lines(tmp_path) == ()
+
+
+def test_a_line_about_claude_codes_worktree_guard_is_not_filed(tmp_path):
+    """ced1c085: the guard is Claude Code's, `.claude/rules/engineering.md` already says
+    so and names the spellings that pass it, and `session_friction` never files its
+    refusals -- but written into a friction file, one still became a group to retire."""
+    (tmp_path / "logs").mkdir()
     (tmp_path / fix_reports.FRICTION_FILE).write_text(
-        f"- {head}; 4c396283 since writes one\n- the scheduled task is stale\n", encoding="utf-8"
+        "- a compound Bash line was refused by Claude Code's worktree isolation guard as "
+        '"names git in a form too complex to verify"; PowerShell ran it\n'
+        "- the command cannot be shown not to be git\n"
+        "- `harness_triage.py --resolve-like` crashed on a group with no host\n",
+        encoding="utf-8",
     )
-    assert fix_reports.friction_lines(tmp_path) == ("the scheduled task is stale",)
-
-
-def test_the_restatement_width_is_what_the_ledger_groups_a_friction_line_by():
-    finding = fix_findings.Finding("reported", "devkit", "x")
-    prefix = len(finding.headline) - len("x")
-    assert fix_reports.RESTATED_WIDTH == harness_triage.SIGNATURE_WIDTH - prefix
+    assert fix_reports.friction_lines(tmp_path) == (
+        "`harness_triage.py --resolve-like` crashed on a group with no host",
+    )
 
 
 def test_the_newest_transcript_is_the_latest_written(tmp_path):

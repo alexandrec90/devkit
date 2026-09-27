@@ -188,6 +188,38 @@ def test_it_runs_pytest_with_this_interpreter(artifact, monkeypatch):
     assert seen[0][:3] == [run_tests.sys.executable, "-m", "pytest"]
 
 
+def test_with_basetemp_goes_right_after_the_module_and_keeps_the_rest():
+    cmd = ["py", "-m", "pytest", "-q", "tests/test_a.py"]
+    assert run_tests.with_basetemp(cmd, "/t/x") == [
+        "py",
+        "-m",
+        "pytest",
+        "--basetemp=/t/x",
+        "-q",
+        "tests/test_a.py",
+    ]
+    assert cmd == ["py", "-m", "pytest", "-q", "tests/test_a.py"]  # not mutated
+
+
+def test_every_run_gets_a_temp_root_of_its_own_and_leaves_none(artifact, monkeypatch):
+    """97d20f01: under the machine-wide `pytest-of-<user>`, another session's run holding
+    its `pytest-current` link made pytest's exit-time cleanup raise access-denied, so a
+    green suite exited 1 with no failed test to name."""
+    seen: list[Path] = []
+
+    def fake_run(cmd, **_kwargs):
+        (flag,) = [a for a in cmd if a.startswith("--basetemp=")]
+        seen.append(Path(flag.split("=", 1)[1]))
+        assert seen[-1].is_dir()
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(run_tests.subprocess, "run", fake_run)
+    run_tests.main([])
+    run_tests.main([])
+    assert len(set(seen)) == 2
+    assert not any(path.exists() for path in seen)
+
+
 def test_the_suite_is_handed_to_workers_when_xdist_is_installed(artifact, monkeypatch):
     """438s serially on this workstation, 109s across eight workers, and the gate runs
     this on every push.
