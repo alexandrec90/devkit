@@ -333,20 +333,21 @@ def test_a_row_todays_detectors_no_longer_file_is_outdated(tmp_path, monkeypatch
     """d677ea57: #412 fixed detectors whose rows stayed open, and a sweep spent ~13 calls
     re-proving them. A per-event row is re-judged against its own transcript line with
     the detectors as they are now; one they no longer file is outdated."""
-    refusal = "This session is isolated in the worktree C:\\ws\\x\\.claude\\worktrees\\a"
+    missing = "ModuleNotFoundError: No module named 'yaml'"
     session = transcript(
         tmp_path / "s.jsonl",
-        [user("go"), call("sleep 300", "1"), call("git -C .. log", "2"), result(refusal, "2")],
+        [user("go"), call("sleep 300", "1"), call("python -m x", "2"), result(missing, "2")],
         str(tmp_path / "ws" / "devkit"),
     )
     rows = _rows(sf.session_findings(session, st.read_new(session, 0, 0), str(tmp_path), tmp_path))
-    assert sorted(r.detail.split(":")[0] for r in rows) == ["isolation-guard", "poll"]
+    assert sorted(r.detail.split(":")[0] for r in rows) == ["environment", "poll"]
     assert sf.outdated(rows) == [], "both still fire"
-    kept = tuple(p for p in sf.RESULT_PATTERNS if p[0] != "isolation-guard")
+    # Standing in for a detector a fix removed, as #410 removed `isolation-guard`.
+    kept = tuple(p for p in sf.RESULT_PATTERNS if p[0] != "environment")
     monkeypatch.setattr(sf, "RESULT_PATTERNS", kept)
     [(ref, why)] = sf.outdated(rows)
-    guard = next(r for r in rows if r.detail.startswith("isolation-guard"))
-    assert ref == guard.id and "no longer" in why and f"{session}#L4" in why
+    env = next(r for r in rows if r.detail.startswith("environment"))
+    assert ref == env.id and "no longer" in why and f"{session}#L4" in why
 
 
 def test_a_row_that_cannot_be_rejudged_is_never_called_outdated(tmp_path, monkeypatch):

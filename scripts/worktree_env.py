@@ -69,6 +69,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+# `worktree.py` and `upgrade-project.py` import this module, so a scheduled job reaches it
+# and every spawn here is held to `tests/test_scheduled_jobs.py`'s windowless rule. Spelled
+# here, like `console_python`, because the hook is installed alone with nothing to import.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # `post-checkout` is handed `<old-oid> <new-oid> <branch-flag>`. A **fresh** checkout --
 # `git worktree add`, and also `git clone` -- reports an all-zero old OID, which is what
 # separates "this tree was just created" from an ordinary `git checkout <branch>` in a
@@ -177,6 +182,7 @@ def _git(root: Path, *args: str) -> str:
             errors="replace",
             timeout=10,
             check=False,
+            creationflags=NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -198,6 +204,7 @@ def ignores_env(root: Path) -> bool:
                 capture_output=True,
                 timeout=10,
                 check=False,
+                creationflags=NO_WINDOW,
             ).returncode
             == 0
         )
@@ -338,8 +345,19 @@ def plain_argv(command: str) -> tuple[str, ...]:
         return ()
     words = command.split()
     if words[0].lower() in PYTHON_NAMES:
-        words[0] = sys.executable
+        words[0] = console_python()
     return tuple(words)
+
+
+def console_python() -> str:
+    """The console interpreter beside `sys.executable`: `sweep.console_python`, copied
+    because this hook is installed alone. Under `pythonw.exe` a Python child would be
+    console-less, and Windows would give each of *its* children a visible window."""
+    executable = Path(sys.executable)
+    if executable.name.lower() != "pythonw.exe":
+        return sys.executable
+    console = executable.with_name("python.exe")
+    return str(console) if console.exists() else sys.executable
 
 
 def manifest_python(here: Path) -> tuple[str, str]:
