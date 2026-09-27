@@ -230,89 +230,35 @@ def test_an_installer_s_options_reach_both_its_check_and_its_repair(tmp_path):
     assert all(argv[3:] == [] for argv in runner.calls if argv[1].endswith("install-b.py"))
 
 
-class Scheduler(Answers):
-    """`Answers`, plus a `schtasks /Run` that answers `run_code`."""
-
-    def __init__(self, checks, yeses=None, run_code=0):
-        super().__init__(checks, yeses)
-        self.run_code = run_code
-
-    def __call__(self, argv):
-        if argv[:2] == ["schtasks", "/Run"]:
-            self.calls.append(list(argv))
-            return subprocess.CompletedProcess(list(argv), self.run_code, "", "ERROR: disabled\n")
-        return super().__call__(argv)
-
-    def runs(self) -> list[str]:
-        return [argv[-1] for argv in self.calls if argv[:2] == ["schtasks", "/Run"]]
-
-
-def a_machine(tmp_path: Path) -> Path:
-    """The fix pass's installer, the installers job's own, and one other."""
-    return a_checkout(tmp_path, "install-fix-pass.py", installers.MAINTAINER, "install-z.py")
-
-
-def test_the_task_running_the_pass_is_handed_off_not_re_registered(tmp_path):
-    """086329c7: the fix pass runs `maintain` from inside `devkit-fix-pass`, and Windows
-    answers a task replacing its own registration with `Access is denied` -- a task can
-    re-register any other, and anyone outside it can re-register it while it runs. So the
-    stale one is handed to the installers job, a different task, after every repair."""
-    root = a_machine(tmp_path)
-    runner = Scheduler({"install-fix-pass.py": 1, installers.MAINTAINER: 0, "install-z.py": 1})
-    outcomes = installers.reconcile(root, True, {}, runner, own_task="devkit-fix-pass")
-    assert runner.modes_for("install-fix-pass.py") == ["--check"]
-    assert runner.modes_for("install-z.py") == ["--check", "--yes"]
-    assert runner.calls[-1] == ["schtasks", "/Run", "/TN", "devkit-installers-schedule"]
-    (mine,) = [o for o in outcomes if o.installer == "install-fix-pass.py"]
-    assert mine.verdict == installers.DEFERRED
-    assert "install-fix-pass.py said --check" in mine.detail
-    assert "devkit-installers-schedule" in mine.detail
-    assert [o.installer for o in outcomes] == [p.name for p in installers.discover(root)]
+def test_the_task_running_the_pass_is_repaired_like_any_other(tmp_path):
+    """5282d37c: 086329c7 read `Access is denied` as a task refusing to replace itself and
+    handed the fix pass's own installer to the installers job. The refusal was the
+    task's owner -- an elevated shell had registered it -- and the installers job was
+    refused the same way. A running task the user may write re-registers itself, so the
+    pass repairs its own task in place and schedules nothing else to do it."""
+    root = a_checkout(tmp_path, "install-fix-pass.py", installers.MAINTAINER, "install-z.py")
+    runner = Answers({"install-fix-pass.py": 1, installers.MAINTAINER: 1, "install-z.py": 0})
+    outcomes = installers.reconcile(root, True, {}, runner)
+    assert runner.modes_for("install-fix-pass.py") == ["--check", "--yes"]
+    assert runner.modes_for(installers.MAINTAINER) == ["--check", "--yes"]
+    assert all(argv[0] != "schtasks" for argv in runner.calls)
     assert installers.exit_code(outcomes) == 0
 
 
-def test_the_installers_job_leaves_its_own_task_to_a_pass_outside_it(tmp_path):
-    """Handing itself to itself would be the same refusal a run later."""
-    root = a_machine(tmp_path)
-    runner = Scheduler({"install-fix-pass.py": 0, installers.MAINTAINER: 1, "install-z.py": 0})
-    outcomes = installers.reconcile(root, True, {}, runner, own_task="devkit-installers-schedule")
-    assert runner.modes_for(installers.MAINTAINER) == ["--check"] and runner.runs() == []
-    (mine,) = [o for o in outcomes if o.installer == installers.MAINTAINER]
-    assert mine.verdict == installers.DEFERRED and "outside" in mine.detail
+def test_a_task_registered_by_the_retired_hand_off_still_starts(tmp_path, monkeypatch):
+    """`devkit-installers` was registered passing `--running-under` (#427). Refusing the
+    flag would stop that job at argparse, before its artifact, until a `maintain`
+    re-registered it; accepted and ignored, the job runs and repairs itself."""
+    seen = {}
 
+    def reconcile(root, apply, options, runner=None, only=()):
+        seen["apply"] = apply
+        return []
 
-def test_a_hand_off_the_scheduler_refuses_is_still_stale(tmp_path):
-    """A stood-down installers job cannot be run: nothing will repair the task, so the
-    report still counts it and says why."""
-    root = a_machine(tmp_path)
-    runner = Scheduler(
-        {"install-fix-pass.py": 1, installers.MAINTAINER: 0, "install-z.py": 0}, run_code=1
-    )
-    outcomes = installers.reconcile(root, True, {}, runner, own_task="devkit-fix-pass")
-    (mine,) = [o for o in outcomes if o.installer == "install-fix-pass.py"]
-    assert mine.verdict == installers.STALE and "ERROR: disabled" in mine.detail
-    assert installers.exit_code(outcomes) == 1
-
-
-def test_a_current_own_task_and_a_status_pass_hand_nothing_off(tmp_path):
-    root = a_machine(tmp_path)
-    runner = Scheduler({"install-fix-pass.py": 0, installers.MAINTAINER: 0, "install-z.py": 0})
-    installers.reconcile(root, True, {}, runner, own_task="devkit-fix-pass")
-    stale = Scheduler({"install-fix-pass.py": 1, installers.MAINTAINER: 0, "install-z.py": 0})
-    outcomes = installers.reconcile(root, False, {}, stale, own_task="devkit-fix-pass")
-    assert runner.runs() == [] and stale.runs() == []
-    assert outcomes[0].verdict == installers.STALE
-
-
-def test_hand_off_runs_the_installers_job_by_the_name_its_installer_declares(tmp_path):
-    root = a_machine(tmp_path)
-    stale = installers.Outcome("install-fix-pass.py", installers.STALE, "runs `a`, not `b`.")
-    runner = Scheduler({})
-    handed = installers.hand_off(stale, "devkit-fix-pass", root, runner)
-    assert runner.calls == [installers.run_task_argv("devkit-installers-schedule")]
-    assert installers.run_task_argv("x") == ["schtasks", "/Run", "/TN", "x"]
-    assert handed.verdict == installers.DEFERRED
-    assert handed.detail.startswith("runs `a`, not `b`. Not re-registered from inside")
+    monkeypatch.setattr(installers, "reconcile", reconcile)
+    monkeypatch.setattr(installers, "write_artifact", lambda text, root: None)
+    code = installers.main(["maintain", "--devkit", str(tmp_path), "--running-under", "x"])
+    assert code == 0 and seen["apply"] is True
 
 
 def test_a_failed_repair_keeps_the_reason_the_check_gave():
@@ -323,19 +269,6 @@ def test_a_failed_repair_keeps_the_reason_the_check_gave():
     failed = installers.repair(Path("s/install-x.py"), "py", [], runner, stale)
     assert failed.verdict == installers.FAILED
     assert "exited 1" in failed.detail and "runs `a`, not `b`" in failed.detail
-
-
-def test_main_reads_the_task_it_runs_under(tmp_path, monkeypatch):
-    seen = {}
-
-    def reconcile(root, apply, options, runner=None, only=(), own_task=""):
-        seen["own_task"] = own_task
-        return []
-
-    monkeypatch.setattr(installers, "reconcile", reconcile)
-    monkeypatch.setattr(installers, "write_artifact", lambda text, root: None)
-    installers.main(["maintain", "--devkit", str(tmp_path), "--running-under", "devkit-x"])
-    assert seen["own_task"] == "devkit-x"
 
 
 def test_the_interpreter_is_the_console_one_beside_this_process(tmp_path, monkeypatch):
@@ -390,6 +323,22 @@ def test_the_exit_code_ranks_failure_over_pending_over_clean(verdicts, code):
 def test_the_artifact_lands_under_the_checkout(tmp_path):
     installers.write_artifact("# x\n", tmp_path)
     assert (tmp_path / installers.ARTIFACT).read_text(encoding="utf-8") == "# x\n"
+
+
+def test_only_maintain_writes_the_static_checkout_s_artifact(tmp_path, monkeypatch):
+    """1ef5ea5f: a fixer's `status` from its worktree wrote over the static checkout's
+    `installers.log` -- the file a finding cited, and the mtime `schedule_health` reads as
+    the job being alive. Only the job's own mode writes there now."""
+    static, box = tmp_path / "devkit", tmp_path / "box"
+    for mode, expected in (("maintain", static), ("status", box), ("uninstall", box)):
+        assert installers.artifact_root(mode, box, static) == expected
+    written = []
+    monkeypatch.setattr(installers.sweep, "source_checkout", lambda _root: static)
+    monkeypatch.setattr(installers, "reconcile", lambda *a, **k: [])
+    monkeypatch.setattr(installers, "write_artifact", lambda text, root: written.append(root))
+    installers.main(["status", "--devkit", str(box)])
+    installers.main(["maintain", "--devkit", str(box)])
+    assert written == [box.resolve(), static]
 
 
 # --- the CLI ---------------------------------------------------------------------

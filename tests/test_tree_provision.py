@@ -60,6 +60,7 @@ def test_a_background_session_is_opened_only_in_a_provisioned_tree(monkeypatch, 
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(agent_tabs.shutil, "which", lambda _cli: "claude")
+    monkeypatch.setattr(agent_tabs, "is_elevated", lambda: False)
     launch = agent_tabs.agent_models.Launch("claude-bg")
     assert agent_tabs.launch_background(launch, tmp_path, "fix it", False, runner) == 0
     assert spawned[0] == tree_provision.argv(tmp_path) and spawned[1][-1] == "fix it"

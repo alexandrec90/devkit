@@ -86,9 +86,8 @@ class Schedule:
     def command(self) -> list[str]:
         """The argv the scheduler runs. `maintain` is named explicitly: the default mode
         is read-only on purpose, and a task that became a no-op because a default changed
-        is the failure `tests/test_scheduled_jobs.py` is downstream of. `--running-under`
-        because Windows refuses a task re-registering itself (`installers.hand_off`)."""
-        return [self.python, self.script, "maintain", "--running-under", self.name]
+        is the failure `tests/test_scheduled_jobs.py` is downstream of."""
+        return [self.python, self.script, "maintain"]
 
 
 def windowless_python(executable: str = sys.executable) -> str:

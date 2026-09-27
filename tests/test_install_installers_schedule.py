@@ -34,16 +34,15 @@ def schedule(at: str = "08:45") -> object:
 # --- the argv ---------------------------------------------------------------
 
 
-def test_the_command_names_the_mode_that_acts_and_the_task_it_runs_under():
+def test_the_command_names_the_mode_that_acts():
     """`status` is read-only by design; a task that lost the word would fire daily and
-    register nothing while `schtasks` reported success. `--running-under` because Windows
-    refuses a task re-registering itself (086329c7)."""
+    register nothing while `schtasks` reported success. No `--running-under`: the task
+    that flag handed itself off from was refused for being an elevated shell's, not for
+    being the task running (5282d37c)."""
     assert schedule().command == [
         r"C:\py\pythonw.exe",
         r"C:\ws\devkit\scripts\installers.py",
         "maintain",
-        "--running-under",
-        installer.TASK_NAME,
     ]
 
 

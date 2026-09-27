@@ -364,7 +364,8 @@ def test_registering_hands_schtasks_the_document_and_reports_the_time(monkeypatc
 
     ok, message = sched.install(a_schedule(), runner=runner)
     assert ok, message
-    assert seen[0][:4] == ["schtasks", "/Create", "/TN", sched.TASK_NAME]
+    # After `devkit_schtasks.user_sid`'s `whoami`, which secures the document.
+    assert seen[-1][:4] == ["schtasks", "/Create", "/TN", sched.TASK_NAME]
     assert "02:00" in message
 
 
