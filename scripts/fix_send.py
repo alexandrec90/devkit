@@ -11,6 +11,7 @@ Tested through the pass in `tests/test_fix_pass.py`.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -98,7 +99,13 @@ def update_branch(failure: fix_plan.Failure, root: Path) -> int:
     the new sha is a new ledger key and gets its session next pass; one GitHub cannot
     update (a conflict) reads `CONFLICTING` next pass and goes to the resolver.
     """
-    done = sweep.gh_for(root / failure.project)("pr", "update-branch", str(failure.number))
+    gh = sweep.gh_for(root / failure.project)
+    done = gh("pr", "update-branch", str(failure.number))
+    if done.returncode != 0 and (state := _state(gh, failure.number)) not in ("", "OPEN"):
+        # Closed or merged since the pass read it: "update-failed #390" was filed 27s
+        # after #390 closed, and a sweep spent two calls finding that out.
+        print(f"  {failure.project} #{failure.number}: {state.lower()} meanwhile; nothing to do")
+        return EXIT_OK
     if done.returncode != 0:
         why = (done.stderr or done.stdout or "").strip().splitlines()
         print(
@@ -107,6 +114,15 @@ def update_branch(failure: fix_plan.Failure, root: Path) -> int:
         return EXIT_FAILED
     print(f"  {failure.project} #{failure.number}: branch updated; the gate re-runs")
     return EXIT_OK
+
+
+def _state(gh, number: int) -> str:
+    """The PR's state (`OPEN`, `CLOSED`, `MERGED`), or "" when it cannot be read."""
+    done = gh("pr", "view", str(number), "--json", "state")
+    try:
+        return str(json.loads(done.stdout or "{}").get("state", "")) if done.returncode == 0 else ""
+    except (ValueError, AttributeError):
+        return ""
 
 
 def dispatch(

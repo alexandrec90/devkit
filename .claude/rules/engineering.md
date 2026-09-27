@@ -71,14 +71,11 @@ What preemptive wrapping has cost is in
 worktree", "names git in a form too complex to verify", or "cannot be shown not to be
 git", is not a devkit hook** — none is wired. It is Claude Code's own isolation guard
 for a `claude --worktree` session. No setting turns it off and nothing in devkit can
-change what it accepts — report it to Claude Code, not to this harness, where one week's
-backlog once carried three of these filed as guard defects.
+change what it accepts — report it to Claude Code, not to this harness.
 
-It judges the shape of the command line rather than what the command does, and it runs
-**only on the Bash tool**. The same statement issued through the PowerShell tool is never
-parsed, while the working-directory check that holds the session inside its worktree
-applies to both — so on Windows the PowerShell tool is the answer for a compound
-statement, not a workaround.
+It judges the command line's shape, and **only on the Bash tool**: the PowerShell tool is
+never parsed (the check that holds a session inside its worktree still applies), so on
+Windows it is the answer for a compound statement, not a workaround.
 
 | Shape it refuses | What to issue instead |
 | --- | --- |
@@ -94,6 +91,10 @@ git" — rename or split it; no spelling of the real command passes. A heredoc a
 `$HOME` argument are **not** triggers alone, but write files with Write or Edit anyway:
 the Bash tool collapses `\\` to `\`, quoted heredocs included. The reproductions are in
 [`.claude/engineering-evidence.md`](../engineering-evidence.md).
+
+**Git Bash rewrites `rev:path` into a Windows path list** -- git then reports an
+`ambiguous argument` naming a backslashed, semicolon-joined path, exit 0 when piped --
+so spell it `origin/main:./.devkit.toml`.
 
 ## Waiting on a CI gate: one blocking call, not a poll loop
 

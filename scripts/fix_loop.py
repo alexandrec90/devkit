@@ -126,8 +126,11 @@ def _one_tree(
         if ctx.writes:
             fix_ledger.mark_blocked(ctx.ledger_path, key, reason)
             fix_reports.file_away(tree.path, fix_reports.BLOCKED_FILE)
+    # Where the lines will be once filed away below: naming the file about to be renamed
+    # gave every friction row a dead path.
+    kept = fix_reports.filed(fix_reports.FRICTION_FILE) if ctx.writes else fix_reports.FRICTION_FILE
     for line in tree.friction:
-        evidence = str(tree.path / fix_reports.FRICTION_FILE)
+        evidence = str(tree.path / kept)
         journal.add(
             Finding("reported", tree.project, line, evidence=evidence, event=fix_findings.FRICTION)
         )

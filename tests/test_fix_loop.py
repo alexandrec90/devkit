@@ -106,6 +106,27 @@ def test_each_friction_line_is_filed_and_the_file_read_once(ctx, monkeypatch):
     assert (path / "logs" / "friction.filed.md").exists() and not (
         path / fix_reports.FRICTION_FILE
     ).exists()
+    # The evidence named the file the pass had just renamed, so every friction row
+    # pointed at nothing and a sweep spent a call finding that out.
+    for finding in reported:
+        assert Path(finding.evidence).is_file(), finding.evidence
+        assert finding.detail in Path(finding.evidence).read_text(encoding="utf-8")
+
+
+def test_a_second_filing_keeps_the_lines_the_first_findings_point_at(ctx, monkeypatch):
+    path = tree(ctx, monkeypatch, friction="- first\n")
+    close(ctx)
+    (path / fix_reports.FRICTION_FILE).write_text("- second\n", encoding="utf-8")
+    monkeypatch.setattr(
+        fix_loop.fix_reports,
+        "read_trees",
+        lambda root, projects: [
+            fix_reports.Tree("carameli", path, "agent/x-0919", {}, ("second",))
+        ],
+    )
+    close(ctx)
+    filed = (path / "logs" / "friction.filed.md").read_text(encoding="utf-8")
+    assert "first" in filed and "second" in filed
 
 
 def test_a_session_that_never_started_frees_its_key_and_is_filed_once(ctx, monkeypatch):

@@ -232,6 +232,18 @@ def test_every_prompt_names_the_ratchets_and_forbids_a_question():
         assert "outside the repository" in text, "the one kind of blocker there is"
         # A missing .venv came back session after session, each fixing only its own tree.
         assert "Fix causes, not instances" in text and "the provisioner" in text
+        # A rule file said it and three sessions still lost turns: the prompt says it too.
+        assert "never a shell heredoc" in text
+
+
+def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linux():
+    """Two sweeps hand-parsed junit XML, and one shipped a Linux-only fix it could not
+    check here and said nothing about it."""
+    with_evidence = fix_prompts.pr_prompt(failure(evidence="C:/ev/carameli-pr-412"))
+    assert "failures.txt" in with_evidence and "ran on Linux" in with_evidence
+    assert "ran on Linux" in fix_prompts.pr_prompt(failure(evidence=""))
+    assert ".venv interpreter" in fix_prompts.FINISH
+    assert "--pr" in fix_prompts.LEDGER_STEPS and "any repository" in fix_prompts.LEDGER_STEPS
 
 
 def test_the_skill_the_ledger_sweep_follows_never_sends_it_to_the_user():
@@ -247,8 +259,9 @@ def test_the_skill_the_ledger_sweep_follows_never_sends_it_to_the_user():
     assert "Fix the cause, never the instance" in skill and "RECURRED" in skill
 
 
-def test_the_devkit_session_marks_a_sibling_tree_it_cuts_as_fixer_work():
-    assert (
-        "logs/fix-origin" in fix_prompts.LEDGER_STEPS
-        and "merges once green" in fix_prompts.LEDGER_STEPS
-    )
+def test_the_devkit_session_cuts_sibling_trees_with_the_verb_that_marks_them():
+    """Told to copy the mark by hand, a sweep did not; the verb now does it
+    (`fix_reports.inherit_origin`), so the prompt names the verb, not the chore."""
+    steps = fix_prompts.LEDGER_STEPS
+    assert "scripts/agent-worktree.py new" in steps and "merges once green" in steps
+    assert "gets a copy" not in steps

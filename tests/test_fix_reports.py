@@ -252,3 +252,13 @@ def test_the_newest_transcript_is_the_latest_written(tmp_path):
     newer = older.with_name("b.jsonl")
     newer.write_text("{}\n", encoding="utf-8")
     assert fix_reports.newest_transcript(tree, tmp_path / "p") == newer
+
+
+def test_inherit_origin_copies_only_a_mark_that_exists(tmp_path):
+    """What `agent-worktree.py new` calls, so a sibling tree a fixer cuts is fixer work."""
+    home, tree = tmp_path / "home", tmp_path / "tree"
+    assert fix_reports.inherit_origin(tree, home) is False and not tree.exists()
+    (home / "logs").mkdir(parents=True)
+    (home / fix_reports.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
+    assert fix_reports.inherit_origin(tree, home) is True
+    assert (tree / fix_reports.ORIGIN_FILE).read_text(encoding="utf-8") == "fix-pass\n"

@@ -23,11 +23,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fix_plan import COMMIT, CONFLICT, EVIDENCE_DIR, LEDGER, Failure, describe, name_of
 from fix_reports import BLOCKED_FILE, FRICTION_FILE, REFUSED_FILE
+from junit_report import READABLE
 
 # How every prompt ends. The ship skill is the finish line and the blocked file is the
 # only other way out; both are files, so the pass reads the outcome without a session.
 FINISH = (
-    "When it is done, run the targeted tests, the linter and the two ratchets the gate "
+    "When it is done, run the targeted tests with this tree's own .venv interpreter, the "
+    "linter and the two ratchets the gate "
     "runs -- python scripts/hooks/structure_check.py and python scripts/hooks/untested_symbols.py "
     "-- in every tree you changed, then ship it with the ship skill and stop: the fix pass "
     "commits, pushes, opens or updates the PR and reads what the gate says. Nobody is "
@@ -39,7 +41,9 @@ FINISH = (
     "Fix causes, not instances: whatever cost you turns is fixed where it comes from, so "
     "the next session cannot hit it -- a tree with no .venv means the provisioner that "
     "should have run is what gets fixed, with a test -- and a repair to this tree alone "
-    "is a workaround. "
+    "is a workaround. Write and edit files with the Write and Edit tools, never a shell "
+    "heredoc or a patch script run through Bash: the Bash tool collapses backslashes in "
+    "them, and the damage costs a test run to find. "
     f"Either way, if the harness cost you turns -- a refusal, a missing tool, evidence "
     f"that was wrong or absent, an instruction that sent you the wrong way -- put one line "
     f"per thing in {FRICTION_FILE.as_posix()}: the pass files each for the devkit session, "
@@ -57,8 +61,11 @@ LEDGER_STEPS = (
     "once the fix is in your intent; the pass reopens a group whose branch never merges. "
     "A fixers-exhausted, blind-evidence or fixer-blocked group is a problem fixers could "
     "not move: fix what in the harness failed them, and fix the problem itself in the "
-    "tree its evidence names, leaving an intent there too. A tree you cut yourself for "
-    "this work gets a copy of this tree's logs/fix-origin, so its PR merges once green."
+    "tree its evidence names, leaving an intent there too. Cut any tree this work needs "
+    "with python scripts/agent-worktree.py new from this tree: it carries over this "
+    "tree's logs/fix-origin, so that PR merges once green too. Leave its intent in that "
+    "tree's logs/ship-intent.md exactly as here, and pass that tree's branch as --pr -- "
+    "any repository's branch is accepted."
 )
 
 
@@ -73,9 +80,21 @@ def _logs(failure: Failure) -> str:
     directory absent: the run had aged out, or uploaded nothing. Saying so is cheaper.
     """
     if failure.evidence:
-        return f"The gate's own logs are in {EVIDENCE_DIR}/ in this worktree -- read them first."
+        return (
+            f"The gate's own logs are in {EVIDENCE_DIR}/ in this worktree -- read "
+            f"{READABLE} there first when it exists (each failing test with its message "
+            f"and traceback), then the .log files. {LINUX}"
+        )
     where = failure.url or "the run"
-    return f"No artifact came down from the run; read it at {where} first."
+    return f"No artifact came down from the run; read it at {where} first. {LINUX}"
+
+
+# The gate runs on Linux and a fixer on this machine: one shipped a fix whose only real
+# check it could not run, and said nothing, because local green looked like proof.
+LINUX = (
+    "The gate ran on Linux: a failure that does not reproduce here is reasoned from the "
+    "log, and the intent says what was and was not verified on this machine."
+)
 
 
 def pr_prompt(failure: Failure) -> str:

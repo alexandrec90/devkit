@@ -91,7 +91,9 @@ already did.
 
 ## 4. Repeat until an iteration is clean
 
-Before re-running, run what the PR gate will run on what you changed: ruff and mypy,
+Before re-running, run what the PR gate will run on what you changed -- this checklist is
+the supervisor's alone: a fixer that reads this file runs only its targeted tests and
+the two ratchets, since `scripts/posix-rehearsal.py` is the whole suite -- ruff and mypy,
 `scripts/hooks/structure_check.py`, `scripts/hooks/untested_symbols.py`, the tests of
 every module you touched, the contract tests that read every module
 (`tests/test_test_contract.py`, `tests/test_doc_claims.py`), and

@@ -65,6 +65,7 @@ import agent_models
 import agent_tabs
 import agent_worktrees as aw
 import devkit_project
+import fix_reports
 import picker_rows
 import picker_scan
 import sweep
@@ -258,6 +259,7 @@ def create(
         print("agent-worktree: the worktree was not cut; nothing to open", file=sys.stderr)
         return EXIT_FAILED
     print(f"{branch} off origin/{ref}\n  {path}")
+    fix_reports.inherit_origin(path)  # fixer work when cut by a fixer: it merges once green
     return agent_tabs.open_agent(launch, path, branch, runner)
 
 

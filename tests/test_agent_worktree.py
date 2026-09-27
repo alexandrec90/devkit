@@ -293,6 +293,28 @@ def test_the_model_pick_reaches_the_tab_and_no_pick_reaches_it_as_nothing(worksp
     assert opened["launch"].flags() == []
 
 
+def test_a_tree_cut_from_fixer_work_is_fixer_work_too(workspace, monkeypatch, tmp_path):
+    """A devkit ledger sweep cut carameli's secrets-baseline tree with this verb and never
+    copied its `logs/fix-origin`, though its prompt said to -- so carameli #395 opened
+    without `automerge` and waited on a person like a person's PR. The verb inherits the
+    mark from the checkout running it, so no instruction has to be remembered."""
+    monkeypatch.setattr(agent_worktree.agent_tabs, "open_agent", lambda *a, **k: 0)
+    fixer = tmp_path / "fixer-tree"
+    (fixer / "logs").mkdir(parents=True)
+    (fixer / agent_worktree.fix_reports.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
+    monkeypatch.setattr(agent_worktree.fix_reports, "CHECKOUT", fixer)
+    run = FakeRun()
+    agent_worktree.create("devkit", workspace, "sibling", "main", NONE, run)
+    cut = Path(run.git_args()[1][5])
+    assert (cut / agent_worktree.fix_reports.ORIGIN_FILE).read_text(
+        encoding="utf-8"
+    ) == "fix-pass\n"
+    monkeypatch.setattr(agent_worktree.fix_reports, "CHECKOUT", tmp_path / "persons-tree")
+    run = FakeRun()
+    agent_worktree.create("devkit", workspace, "mine", "main", NONE, run)
+    assert not (Path(run.git_args()[1][5]) / agent_worktree.fix_reports.ORIGIN_FILE).exists()
+
+
 def test_a_blank_topic_names_the_branch_after_the_checkout(workspace, monkeypatch):
     monkeypatch.setattr(agent_worktree.agent_tabs, "open_agent", lambda *a, **k: 0)
     run = FakeRun()

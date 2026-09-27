@@ -524,6 +524,22 @@ def test_an_update_is_one_gh_call_and_no_session(monkeypatch, tmp_path):
     )
 
 
+def test_an_update_that_fails_because_the_pr_just_closed_is_not_a_failure(monkeypatch, tmp_path):
+    """The pass filed "update-failed #390" 27 seconds after #390 closed, and a sweep spent
+    2 calls finding that out. A failed update re-reads the PR before anything is filed."""
+
+    def gh_for(_project_dir):
+        def gh(*args):
+            if args[:2] == ("pr", "view"):
+                return subprocess.CompletedProcess(args, 0, '{"state": "MERGED"}', "")
+            return subprocess.CompletedProcess(args, 1, "", "GraphQL: not open")
+
+        return gh
+
+    monkeypatch.setattr(fix_pass.fix_send.sweep, "gh_for", gh_for)
+    assert fix_pass.fix_send.update_branch(failure(number=390, behind=True), tmp_path) == 0
+
+
 def test_plan_mode_says_an_update_would_be_an_update(world):
     world["failures"] = [failure(behind=True)]
     fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW)

@@ -56,3 +56,35 @@ def test_an_empty_log_beside_a_report_still_reads_as_the_reports_failures(tmp_pa
 
 def test_nothing_downloaded_reads_as_nothing(tmp_path):
     assert junit_report.read_artifacts(tmp_path) == []
+
+
+def test_readable_keeps_the_message_and_skips_what_passed():
+    [drop, shape] = junit_report.readable(REPORT)
+    assert drop.splitlines()[:3] == [
+        "FAILED scripts/hooks/tests/test_contract.py::test_drop",
+        "  KeyError",
+        "  boom",
+    ]
+    assert shape.startswith("FAILED tests/test_unit.py::TestShape::test_p[a-b]")
+    assert junit_report.readable("not xml") == []
+
+
+def test_each_failure_is_written_out_readable_beside_the_xml(tmp_path):
+    """The junit report is one line of XML: a fixer's `grep -A40 "<failure"` returned
+    301.9 KB, and two sweeps wrote an XML parser by hand to read their evidence. The
+    failures are written out once, as the fixer would want them, and the prompt names
+    the file."""
+    body = "\n".join(f"line {n} &amp; &lt;x&gt;" for n in range(200))
+    report = REPORT.replace(">boom<", f">{body}<")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "junit-hooks.xml").write_text(report, encoding="utf-8")
+    written = junit_report.write_readable(tmp_path)
+    assert written == tmp_path / junit_report.READABLE
+    text = written.read_text(encoding="utf-8")
+    assert "FAILED scripts/hooks/tests/test_contract.py::test_drop\n  KeyError\n" in text
+    assert "  line 0 & <x>" in text and "line 199" not in text, "a traceback is capped"
+    assert "FAILED tests/test_unit.py::TestShape::test_p[a-b]" in text
+    empty = tmp_path / "none"
+    empty.mkdir()
+    assert junit_report.write_readable(empty) is None
+    assert not (empty / junit_report.READABLE).exists()
