@@ -338,10 +338,13 @@ def rescue(root: Path, kind: str, detail: str, output: str, now: _dt.datetime) -
     (tree / ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
     done = subprocess.run(
         # As `agent_tabs.background_argv` launches: no question nobody will answer, no
-        # MCP server, and `--` so the variadic flag cannot swallow the prompt.
+        # MCP server, `--` so the variadic flag cannot swallow the prompt, and named for
+        # its tree (`agent_tabs.session_name`) so `claude agents` says which one it is.
         [
             claude,
             "--bg",
+            "--name",
+            f"{root.name}/{tree.name}",
             "--strict-mcp-config",
             "--disallowedTools",
             "AskUserQuestion",

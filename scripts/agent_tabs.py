@@ -186,7 +186,23 @@ FILE_WRITES = (
 )
 
 
-def background_argv(exe: str, launch: agent_models.Launch, prompt: str) -> list[str]:
+def session_name(tree: Path) -> str:
+    """What `claude agents` lists a background session as: the tree it was sent into.
+
+    Unnamed, the CLI titles a session from its first words, and every fixer's first
+    words are the same sentence -- one sweep messaged two sessions to reach one, and
+    another spent fifteen calls finding which session owned a PR (f1826e43). A session
+    tree under `<checkout>/.claude/worktrees/` is named with its checkout, so two
+    repositories' `fix-harness-ledger-0927` stay apart; a box's name carries its own.
+    """
+    if tree.parent.name == "worktrees" and tree.parent.parent.name == ".claude":
+        return f"{tree.parents[2].name}/{tree.name}"
+    return tree.name
+
+
+def background_argv(
+    exe: str, launch: agent_models.Launch, prompt: str, name: str = ""
+) -> list[str]:
     """`claude --bg <prompt>`, as an argv rather than a command line.
 
     No shell here, so no quoting: the prompt is one argument. That is the one thing the
@@ -204,11 +220,14 @@ def background_argv(exe: str, launch: agent_models.Launch, prompt: str) -> list[
     Nor does it load the user's MCP servers (`--strict-mcp-config` with no config): a
     browser server was ~260 MB of each ~700 MB fixer, which drives no browser, and nine
     of them at once ran the machine out of memory.
+
+    `name`, when given, is what `claude agents` shows for it (`session_name`).
     """
     return [
         exe,
         "--bg",
         *launch.flags(),
+        *(["--name", name] if name else []),
         "--append-system-prompt",
         FILE_WRITES,
         "--strict-mcp-config",
@@ -298,7 +317,7 @@ def launch_background(
     if not exe:
         print(f"agent-tabs: {cli} is not on PATH; run this yourself:\n  cd {tree}\n  {cli} --bg")
         return EXIT_FAILED
-    argv = background_argv(exe, launch, prompt)
+    argv = background_argv(exe, launch, prompt, session_name(tree))
     if is_elevated():
         fix_reports.record_launch(tree, argv, subprocess.CompletedProcess(argv, 1, "", ELEVATED))
         print(f"agent-tabs: {ELEVATED}", file=sys.stderr)

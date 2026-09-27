@@ -261,6 +261,32 @@ def test_the_background_launch_runs_the_resolved_exe_in_the_box(monkeypatch, tmp
     assert tabs.harness_switch.HOOKS_OFF_ENV not in seen["kwargs"]["env"]
 
 
+def test_a_background_session_is_named_for_the_tree_it_was_sent_into(monkeypatch, tmp_path):
+    """f1826e43: `claude agents` titled every fixer from the same opening sentence, and a
+    sweep messaged two sessions to reach one. The name is the tree, with its checkout."""
+    tree = tmp_path / "devkit" / ".claude" / "worktrees" / "fix-harness-ledger-0927-17"
+    tree.mkdir(parents=True)
+    seen = {}
+
+    def runner(argv, **_kwargs):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(tabs.shutil, "which", lambda _cli: "claude")
+    monkeypatch.setattr(tabs.tree_provision, "provision", lambda *_a: None)
+    tabs.launch_background(CLAUDE, tree, "p", False, runner)
+    argv = seen["argv"]
+    assert argv[argv.index("--name") + 1] == "devkit/fix-harness-ledger-0927-17"
+    assert argv.index("--name") < argv.index("--disallowedTools")
+
+
+def test_a_tree_outside_a_session_tier_is_named_by_itself(tmp_path):
+    assert tabs.session_name(tmp_path / ".worktrees" / "carameli--task-0824") == (
+        "carameli--task-0824"
+    )
+    assert "--name" not in tabs.background_argv("claude", CLAUDE, "p")
+
+
 def test_the_background_launch_carries_the_hooks_switch_as_an_env_var(monkeypatch, tmp_path):
     """There is no shell in this mode, so the `$env:` prefix the tab uses has nowhere to
     go -- the switch has to reach the child through its environment or not at all."""

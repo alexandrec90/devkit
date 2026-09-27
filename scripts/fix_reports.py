@@ -152,6 +152,16 @@ def file_away(tree: Path, relative: Path) -> None:
     source.unlink()
 
 
+# `claude --bg`'s banner: `backgrounded · d55ca143`, then the commands that take the id.
+_BACKGROUNDED = re.compile(r"^backgrounded\W+([0-9a-f]{6,})\b", re.MULTILINE)
+
+
+def launched_session(stdout: str) -> str:
+    """The short session id a background launch printed; "" when it printed none."""
+    match = _BACKGROUNDED.search(stdout)
+    return match.group(1) if match else ""
+
+
 def record_launch(tree: Path, argv: list[str], done: object, diagnosis: str = "") -> None:
     """Keep what a background launch was given and what it answered, for `launch_line`.
 
@@ -160,12 +170,17 @@ def record_launch(tree: Path, argv: list[str], done: object, diagnosis: str = ""
     The prompt, the last argument, is kept as its length: its words are the stamp's.
     `diagnosis` -- what the launcher's service said of itself -- is evidence only, kept
     out of `launch_line` so the finding's detail stays the same across recurrences.
+    `session` is the id `claude agents`, `logs` and `attach` take, lifted out of the
+    launcher's banner so nothing has to parse it again to reach this tree's session.
     """
     shown = [*argv[:-1], f"<prompt: {len(argv[-1])} chars>"] if argv else []
     tail = {
         name: str(getattr(done, name, "") or "")[-REASON_LIMIT:] for name in ("stdout", "stderr")
     }
     payload = {"argv": shown, "returncode": getattr(done, "returncode", None), **tail}
+    session = launched_session(str(getattr(done, "stdout", "") or ""))
+    if session:
+        payload["session"] = session
     if diagnosis:
         payload["diagnosis"] = diagnosis[-DIAGNOSIS_LIMIT:]
     path = tree / LAUNCH_FILE
