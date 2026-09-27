@@ -68,7 +68,10 @@ The script exits 1 when any iteration broke the contract. For every `VIOLATION`:
 2. **Fix the cause in devkit** -- the pass, a prompt, a detector, a vendored script --
    with a test that fails without the fix. A violation is a pass defect by definition.
 3. Only when the fix needs something outside the repository (a credential, admin
-   rights, a paid service), file it: `python scripts/hooks/report-harness-defect.py`.
+   rights, a paid service), file it: `python scripts/hooks/report-harness-defect.py`,
+   with each file that shows it as `--evidence <path>#L<lines>` rather than inside
+   `--command` -- a relative path there names nothing to the sweep reading it from
+   another tree, while `--evidence` is recorded absolute.
 
 Then read what the script cannot judge. For **each dispatched session** in the report,
 read its transcript end to end -- the `readable` field is it rendered as audit lines
