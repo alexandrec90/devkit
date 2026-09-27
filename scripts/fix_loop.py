@@ -176,9 +176,14 @@ def _judge_session(
     if state in fix_reports.DEAD:
         # No key: a dead session is re-sent at once, not parked behind the finding. One
         # that never started is cited by what its launcher said, when it left a record.
+        # A launcher's answer is the signature, and the branch -- new every dispatch --
+        # stays in the evidence: filed under it, one unreachable service was eight open
+        # groups in eight hours, one per hourly re-send (1e5e57f4 and seven more).
         launched = fix_reports.launch_line(tree.path) if not transcript else ""
-        detail = f"{where}: the dispatched session {state}" + (
-            f" -- {launched}" if launched else ""
+        detail = (
+            f"{tree.project}: the dispatched session {state} -- {launched}"
+            if launched
+            else f"{where}: the dispatched session {state}"
         )
         cited = str(tree.path / fix_reports.LAUNCH_FILE) if launched else str(tree.path)
         journal.add(Finding("fixer-no-outcome", tree.project, detail, evidence=transcript or cited))

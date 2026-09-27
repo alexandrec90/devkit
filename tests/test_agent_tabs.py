@@ -320,12 +320,62 @@ def test_a_background_service_that_was_not_up_yet_gets_one_more_launch(
     queue, seen = iter(answers), []
 
     def runner(argv, **_kwargs):
+        if argv[1:] == ["daemon", "status"]:
+            return subprocess.CompletedProcess(argv, 0, "control.sock: unreachable", "")
         seen.append(argv)
         answer_code, out, err = next(queue)
         return subprocess.CompletedProcess(argv, answer_code, out, err)
 
     assert tabs.launch_background(CLAUDE, tmp_path, "p", False, runner) == code
     assert len(seen) == calls
+
+
+DAEMON_STATUS = (
+    "pid:     3760\nuptime:  29226s\ncontrol.sock: unreachable\n"
+    "holding this daemon open:\n  1 bg workers running (daemon waits for them to settle)\n"
+)
+
+
+def test_a_service_that_never_answered_is_diagnosed_in_the_evidence(monkeypatch, tmp_path):
+    """2026-09-27: one service outlived its only fixer by eight hours and eight hourly
+    launches lost to it, each recorded as nothing but "did not become reachable". The
+    status names the holder -- in the record, not in `launch_line`, whose words are the
+    finding's detail and must not change between recurrences."""
+    monkeypatch.setattr(tabs.shutil, "which", lambda _cli: "claude")
+    monkeypatch.setattr(tabs.tree_provision, "provision", lambda *_a: True)
+    monkeypatch.setattr(tabs.sys, "stderr", None)
+
+    def runner(argv, **_kwargs):
+        if argv[1:] == ["daemon", "status"]:
+            return subprocess.CompletedProcess(argv, 0, DAEMON_STATUS, "")
+        return subprocess.CompletedProcess(argv, 1, "", UNREACHABLE)
+
+    assert tabs.launch_background(CLAUDE, tmp_path, "p", False, runner) == tabs.EXIT_FAILED
+    record = json.loads((tmp_path / tabs.fix_reports.LAUNCH_FILE).read_text(encoding="utf-8"))
+    assert "pid:     3760" in record["diagnosis"]
+    assert "3760" not in tabs.fix_reports.launch_line(tmp_path)
+
+
+def test_a_launch_that_started_asks_the_service_nothing(monkeypatch, tmp_path):
+    monkeypatch.setattr(tabs.shutil, "which", lambda _cli: "claude")
+    monkeypatch.setattr(tabs.tree_provision, "provision", lambda *_a: True)
+    seen = []
+
+    def runner(argv, **_kwargs):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "backgrounded", "")
+
+    assert tabs.launch_background(CLAUDE, tmp_path, "p", False, runner) == tabs.EXIT_OK
+    assert not any(argv[1:] == ["daemon", "status"] for argv in seen)
+    record = json.loads((tmp_path / tabs.fix_reports.LAUNCH_FILE).read_text(encoding="utf-8"))
+    assert "diagnosis" not in record
+
+
+def test_a_status_that_cannot_run_is_said_so(tmp_path):
+    def runner(argv, **_kwargs):
+        raise OSError("gone")
+
+    assert "could not run: gone" in tabs.daemon_status("claude", tmp_path, runner)
 
 
 def test_only_a_failed_launch_that_names_the_service_reads_as_unreachable():

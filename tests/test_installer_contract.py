@@ -124,7 +124,7 @@ def test_every_installer_parses_the_shared_verbs(name, module, argv):
     module.build_parser().parse_args(argv)
 
 
-def _never_spawn(argv):
+def _never_spawn(argv, **_kwargs):
     raise AssertionError(f"--check reached the scheduler directly: {argv}")
 
 
@@ -153,6 +153,37 @@ def test_check_reaches_the_shared_check_with_its_own_document(name, module, monk
     assert seen["name"] == module.TASK_NAME
     assert isinstance(seen["document"], str) and "<Task" in seen["document"]
     assert callable(seen["run"])
+
+
+@pytest.mark.parametrize(("name", "module"), JOBS, ids=JOB_IDS)
+def test_every_job_is_registrable_without_elevation(name, module, monkeypatch):
+    """Every job is kept current by a non-elevated `--yes`, and the scheduler refuses a
+    non-administrator two trigger shapes: a `BootTrigger`, and a `LogonTrigger` naming no
+    user (probed: `ERROR: Access is denied.`). The three jobs carrying one failed every
+    scheduled repair, and one repair deleted two of them for good (9385b3d7). Read off the
+    document each installer's own `--check` hands the shared check, as `register` would
+    register it.
+
+    The stub answers *not* current: on "current" `install-tray` goes on to ask the real
+    scheduler when its resident process started, and CI's Linux runner has no `schtasks`
+    (the job went red on exactly that). Any spawn at all fails here on every OS."""
+    monkeypatch.setattr(module, "WINDOWS", True)
+    monkeypatch.setattr(module.subprocess, "run", _never_spawn)
+    seen: dict[str, str] = {}
+
+    def run_check(task_name, document, run):
+        seen["document"] = document
+        return 1, "not current"
+
+    monkeypatch.setattr(module.devkit_schtasks, "run_check", run_check)
+    kwargs = (
+        {"runner": _never_spawn} if "runner" in inspect.signature(module.main).parameters else {}
+    )
+    module.main(["--check"], **kwargs)
+    registered = module.devkit_schtasks.secured(seen["document"], "S-1-5-21-1-2-3-1001")
+    assert "<BootTrigger>" not in registered, name
+    for trigger in re.findall(r"<LogonTrigger>.*?</LogonTrigger>", registered, re.S):
+        assert "<UserId>" in trigger, name
 
 
 @pytest.mark.parametrize(("name", "module"), JOBS, ids=JOB_IDS)

@@ -304,30 +304,50 @@ def test_there_is_no_window_question_to_answer_off_windows(tmp_path):
     assert schtasks.windowless(str(python)) == str(python)
 
 
-def test_a_boot_trigger_waits_before_it_fires():
-    """At the instant a boot trigger would otherwise fire the network stack is often not
-    up, and a job that probes it gets a wrong answer rather than a late one."""
-    trigger = schtasks.boot_trigger()
-    assert "<BootTrigger>" in trigger
-    assert "<Delay>PT1M</Delay>" in trigger
+def test_there_is_no_boot_trigger_to_build():
+    """A non-elevated `/Create` of a `BootTrigger` answers `Access is denied.` (probed), so
+    a job carrying one can be kept current by no scheduled `--yes` -- devkit-rc-servers
+    was deleted by one repair and never re-registered by the next (9385b3d7)."""
+    assert not hasattr(schtasks, "boot_trigger")
 
 
-def test_a_logon_trigger_names_no_principal():
-    """Naming a user id is a way to fail on a renamed account or an unresolved domain;
-    without one the trigger belongs to whoever registered the task."""
+def test_a_logon_trigger_is_built_without_a_user():
+    """The builder stays pure: the SID is the registering process's, and `secured` adds
+    it where `register` and `run_check` both see it."""
     trigger = schtasks.logon_trigger()
     assert "<LogonTrigger>" in trigger
     assert "<UserId>" not in trigger
 
 
+def test_securing_scopes_every_logon_trigger_to_the_user():
+    """An unscoped logon trigger fires on anyone's logon, and only an administrator may
+    register one: `devkit-tray` and `devkit-installers` failed every scheduled `--yes`
+    with `Access is denied.` until a user was named (9385b3d7)."""
+    body = schtasks.task_xml(
+        "py.exe", "--x", schtasks.daily_trigger("08:45") + schtasks.logon_trigger()
+    )
+    trigger = schtasks.secured(body, SID).split("<LogonTrigger>")[1].split("</LogonTrigger>")[0]
+    assert f"<UserId>{SID}</UserId>" in trigger
+    assert trigger.index("<UserId>") < trigger.index("<Enabled>")
+
+
+def test_scoping_a_logon_trigger_happens_once_and_leaves_other_triggers_alone():
+    body = schtasks.task_xml("py.exe", "--x", schtasks.repeating_trigger(15))
+    assert "<UserId>" not in schtasks.secured(body, SID)
+    logon = schtasks.task_xml("py.exe", "--x", schtasks.logon_trigger())
+    once = schtasks.secured(logon, SID)
+    assert schtasks.secured(once, "S-1-5-9").count("<UserId>") == 1
+    assert schtasks.secured(logon, "") == logon
+
+
 def test_two_triggers_concatenate_into_one_valid_document():
     """`<Triggers>` holds an unordered choice, which is what lets a job have both a
-    repetition and a boot trigger without a second task."""
+    repetition and a logon trigger without a second task."""
     body = schtasks.task_xml(
-        "py.exe", "--x", schtasks.repeating_trigger(15) + schtasks.boot_trigger()
+        "py.exe", "--x", schtasks.repeating_trigger(15) + schtasks.logon_trigger()
     )
     assert body.count("<Triggers>") == 1
-    assert "<TimeTrigger>" in body and "<BootTrigger>" in body
+    assert "<TimeTrigger>" in body and "<LogonTrigger>" in body
 
 
 # --- the check every installer answers -------------------------------------------

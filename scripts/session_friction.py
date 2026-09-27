@@ -151,6 +151,8 @@ STATEMENT = re.compile(r"&&|\|\||[;\n]")
 # "No module named" is the environment.
 GIT_DIAGNOSTIC = re.compile(r"^(?:fatal|error|warning): .*$", re.M)
 GIT_READERS = frozenset({"diff", "show", "log", "blame", "grep", "cat-file", "format-patch"})
+# Statements that print nothing of their own, so they leave a git read a git read.
+SILENT = frozenset({"cd", "pushd", "popd"})
 
 # The opening message of a session the fix pass dispatched: every prompt's finish line.
 DISPATCHED = "the fix pass commits, pushes"
@@ -304,9 +306,10 @@ def _complaint(event: Event, spoken_before: int) -> str:
 
 
 def git_reads_only(command: str) -> bool:
-    """Every statement in `command` is git printing the repository's text."""
+    """Every statement in `command` is git printing the repository's text, beside any that
+    print nothing at all: a `cd` into the tree first is still only git talking (72e04231)."""
     statements = [part.split("|", 1)[0].split() for part in STATEMENT.split(command)]
-    statements = [words for words in statements if words]
+    statements = [words for words in statements if words and words[0] not in SILENT]
     return bool(statements) and all(
         words[0] == "git"
         and next((w for w in words[1:] if not w.startswith("-")), "") in GIT_READERS

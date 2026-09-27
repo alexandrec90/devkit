@@ -159,11 +159,14 @@ def task_document(schedule: Schedule) -> str:
     return devkit_schtasks.task_xml(
         program,
         subprocess.list2cmdline(arguments),
-        # Two triggers. The repetition is the job; the boot trigger only closes the gap
+        # Two triggers. The repetition is the job; the logon trigger only closes the gap
         # after a restart, where the servers are certainly down (a reboot kills them) and
         # the next repetition could be a full interval away. Fifteen minutes of an
-        # unreachable phone is exactly the failure this job exists to prevent.
-        devkit_schtasks.repeating_trigger(schedule.every) + devkit_schtasks.boot_trigger(),
+        # unreachable phone is exactly the failure this job exists to prevent. Logon, not
+        # boot: the job runs with the interactive token, so logon is the first moment it
+        # can run, and a boot trigger is refused to the non-elevated `--yes` that keeps
+        # this job current (`devkit_schtasks.logon_trigger`).
+        devkit_schtasks.repeating_trigger(schedule.every) + devkit_schtasks.logon_trigger(),
         time_limit="PT15M",
         # `PureWindowsPath`, not `Path`: the document is Windows by construction, so it
         # has to be split on backslashes whatever host builds it -- see the same line in

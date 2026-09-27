@@ -233,6 +233,29 @@ def service_unreachable(done: object) -> bool:
     return getattr(done, "returncode", 0) != 0 and SERVICE_UNREACHABLE in said
 
 
+def daemon_status(exe: str, tree: Path, runner) -> str:
+    """What `claude daemon status` says, for a launch the service never answered.
+
+    The launcher's own message names no holder. On 2026-09-27 one service, started at
+    05:57 before the elevation refusal below reached the checkout, outlived its only
+    fixer by eight hours -- a finished session keeps it open, and nothing that could not
+    reach it could stop that session -- and eight hourly launches lost the lock race to
+    it with nothing on record but "did not become reachable". The status names the
+    service's pid, its start and the workers holding it open."""
+    try:
+        done = runner(
+            [exe, "daemon", "status"],
+            cwd=str(tree),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as error:
+        return f"claude daemon status could not run: {error}"
+    return f"{done.stdout or ''}{done.stderr or ''}".strip()
+
+
 # Why a background launch is refused from an elevated process. `claude --bg` starts its
 # background service on demand, as whoever asked, and one started elevated owns a control
 # pipe no ordinary process can open: the scheduled pass, which runs with the user's
@@ -297,7 +320,8 @@ def launch_background(
         )
         if not service_unreachable(done):
             break
-    fix_reports.record_launch(tree, argv, done)  # a "never started" finding's evidence
+    diagnosis = daemon_status(exe, tree, runner) if service_unreachable(done) else ""
+    fix_reports.record_launch(tree, argv, done, diagnosis)  # a "never started" finding's evidence
     # `print`, not `.write`: under `pythonw.exe` both streams are None (c47026f9).
     print(done.stdout or "", end="")
     print(done.stderr or "", end="", file=sys.stderr)
