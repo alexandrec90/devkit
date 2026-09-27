@@ -79,6 +79,9 @@ HISTORY = Path("logs") / "fix-pass.history.jsonl"
 # A week of half-hourly passes.
 HISTORY_KEEP = 336
 SCHEDULED_AGENT = "claude-bg"
+# The task the scheduled pass runs inside, read off its installer: `maintain` cannot
+# re-register it from in here (see `installers.hand_off`).
+OWN_TASK = installers.task_name(REPO_ROOT / "scripts" / "install-fix-pass-task.py")
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -186,8 +189,11 @@ def refresh_installers(workspace: Path, journal: Journal | None = None) -> int:
     fire (990856e5). The pass is what merges such a change and fires every half hour,
     so a dispatching one applies it. After the send, so a re-registration of the pass's
     own task cannot come between a decision and its dispatch.
+
+    That task it cannot re-register from inside itself (086329c7), so it is named and
+    handed to the installers job; a manual pass hands it off too, which costs nothing.
     """
-    code = installers.main(["maintain", "--workspace", str(workspace)])
+    code = installers.main(["maintain", "--workspace", str(workspace), "--running-under", OWN_TASK])
     if code == 2:
         fix_loop.fix_findings.file(
             journal,
