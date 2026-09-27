@@ -34,6 +34,16 @@ def test_the_stamp_round_trips_and_a_missing_or_corrupt_one_reads_as_empty(tmp_p
     assert fix_reports.read_stamp(tmp_path) == {}
 
 
+def test_a_restamp_keeps_the_mark_of_a_tree_the_pass_cut(tmp_path):
+    """A fixer sent back at a fixer's branch is still on the pass's branch; one sent at a
+    person's never gains the mark. Only the dispatch that cut the tree writes it."""
+    fix_reports.stamp(tmp_path, "a", "n", NOW)
+    assert not (tmp_path / fix_reports.ORIGIN_FILE).exists()
+    (tmp_path / fix_reports.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
+    fix_reports.stamp(tmp_path, "b", "n", NOW)
+    assert (tmp_path / fix_reports.ORIGIN_FILE).is_file()
+
+
 def test_a_new_stamp_clears_the_report_an_earlier_session_left_in_the_tree(tmp_path):
     """Read against the new key, the old report marked the new dispatch blocked before
     its session had started -- and a blocked entry never expires."""

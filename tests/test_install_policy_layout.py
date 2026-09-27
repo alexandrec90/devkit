@@ -91,7 +91,7 @@ def test_either_layout_satisfies_the_refusal():
 def test_the_hook_names_are_derived_from_the_runtime_map_not_listed_again():
     """Listed twice, a hook added to one and forgotten in the other installs without its
     executable bit -- and git skips a hook it cannot execute without saying so."""
-    assert layout.HOOK_NAMES == {"pre-commit", "pre-push", "post-checkout"}
+    assert layout.HOOK_NAMES == {"pre-commit", "pre-push", "post-checkout", "post-index-change"}
     assert layout.HOOK_NAMES <= set(layout.RUNTIME_FILES.values())
 
 
