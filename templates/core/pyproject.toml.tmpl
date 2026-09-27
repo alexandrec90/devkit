@@ -48,6 +48,10 @@ where = ["{{ src_root }}"]
 # those are the vendored harness's own stdlib-only tests and run separately.
 testpaths = ["{{ tests_dir }}"]
 # No `-q` in `addopts`: an agent adds its own, and `-qq` drops the "N passed" line.
+# `-p devkit_temproot` is the vendored plugin giving each run a temp root of its own, so a
+# run elsewhere on the machine cannot fail this one at exit; `pythonpath` is where it lives.
+addopts = "-p devkit_temproot"
+pythonpath = ["scripts/pytest-plugins"]
 
 [tool.mypy]
 python_version = "{{ python_version }}"
