@@ -35,6 +35,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -59,9 +60,9 @@ Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 def _run_tests_module(path: Path | None = None):
     """`scripts/run-tests.py`, loaded by path because its name is not an identifier.
 
-    Imported for `filter_output` and `cap_failure_blocks` alone. Those are pure and are
-    already the format every failure artifact in this repo uses; a second implementation
-    would drift from it the first time either was tuned.
+    Imported for `with_basetemp`, `filter_output` and `cap_failure_blocks` alone. Those
+    are pure and are already how every suite runner here spawns pytest and shapes its
+    artifact; a second implementation would drift from it the first time one was tuned.
     """
     path = REPO_ROOT / "scripts" / "run-tests.py" if path is None else path
     spec = importlib.util.spec_from_file_location("devkit_run_tests", path)
@@ -202,13 +203,17 @@ def main(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
         "minutes; give the call a longer timeout, or leave it to the gate.\n",
         encoding="utf-8",
     )
-    result = runner(
-        cmd,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        env=environment(),
-    )
+    # A temp root of this run's own, as `run-tests.py` gives its suite: the shared one
+    # failed a green rehearsal at pytest's exit whenever another session's run held its
+    # `pytest-current` link (97d20f01).
+    with tempfile.TemporaryDirectory(prefix="pytest-", ignore_cleanup_errors=True) as basetemp:
+        result = runner(
+            _run_tests_module().with_basetemp(cmd, basetemp),
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=environment(),
+        )
     raw = (result.stdout or "") + (result.stderr or "")
 
     # `LEDGER` passed rather than defaulted: a default argument binds at definition time,

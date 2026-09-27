@@ -386,7 +386,7 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
                 state, signature("pass-stale", what, head), "pass-stale", what, str(REPO_ROOT), now
             )
     code, output = run_current(argv, mode, notes)
-    sys.stdout.write(output)
+    print(output, end="")  # pythonw.exe runs this job with sys.stdout None
     kind, detail = judge(code, output)
     if kind:
         evidence = str(_write(FAILURE_LOG, output))

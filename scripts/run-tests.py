@@ -28,6 +28,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -192,6 +193,19 @@ def _parallel_args() -> list[str]:
     return pytest_parallel.args()
 
 
+def with_basetemp(cmd: list[str], basetemp: str) -> list[str]:
+    """`cmd` given a pytest temp root of its own, right after `-m pytest`.
+
+    Left to itself pytest roots every run on the machine under one `pytest-of-<user>`,
+    and on the way out stats every link there -- `pytest-current` included, which a run
+    in another session is replacing or holding. On Windows that stat is an access-denied
+    error raised after the last test, so a green suite exits 1 with no failed test to
+    name (97d20f01, reproduced 2026-09-26). A directory only this run knows about cannot
+    be contended; the caller creates and removes it.
+    """
+    return [*cmd[:3], f"--basetemp={basetemp}", *cmd[3:]]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--all", action="store_true", help="run the whole suite")
@@ -224,7 +238,9 @@ def main(argv: list[str] | None = None) -> int:
     cmd += targets
 
     print(f"run-tests: {' '.join(cmd[2:])}")
-    result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    with tempfile.TemporaryDirectory(prefix="pytest-", ignore_cleanup_errors=True) as basetemp:
+        run = with_basetemp(cmd, basetemp)
+        result = subprocess.run(run, cwd=REPO_ROOT, capture_output=True, text=True)
     raw = result.stdout + result.stderr
 
     if result.returncode in (0, PYTEST_NO_TESTS_COLLECTED):
