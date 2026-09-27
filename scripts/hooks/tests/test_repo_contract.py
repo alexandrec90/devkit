@@ -35,6 +35,7 @@ import dataclasses
 import inspect
 import json
 from collections.abc import Mapping
+from itertools import pairwise
 import re
 from pathlib import Path
 from typing import Any
@@ -177,7 +178,7 @@ def temproot_gaps(pytest_options: Mapping[str, Any]) -> list[str]:
     words = addopts.split() if isinstance(addopts, str) else [str(w) for w in addopts]
     loaded = any(
         (word == "-p" and after == TEMPROOT_PLUGIN) or word == f"-p{TEMPROOT_PLUGIN}"
-        for word, after in zip(words, [*words[1:], ""], strict=True)
+        for word, after in pairwise([*words, ""])
     )
     paths = pytest_options.get("pythonpath", [])
     paths = [paths] if isinstance(paths, str) else list(paths)
@@ -195,11 +196,40 @@ def temproot_gaps(pytest_options: Mapping[str, Any]) -> list[str]:
         ({"addopts": "-q"}, 2),
         ({"addopts": "-p no:devkit_temproot", "pythonpath": ["scripts/pytest-plugins"]}, 1),
         ({"pythonpath": ["tests"], "addopts": "-p devkit_temproot"}, 1),
+        # The table every project rendered before the plugin existed: no `addopts`.
+        ({"testpaths": ["tests"]}, 2),
+        ({"addopts": []}, 2),
     ],
 )
 def test_temproot_gaps_reads_the_options_not_their_spelling(options, expected):
     gaps = temproot_gaps(options)
     assert gaps == expected if isinstance(expected, list) else len(gaps) == expected
+
+
+def wires_temproot(pytest_options: Mapping[str, Any]) -> bool:
+    """Whether the table has begun wiring the plugin: either half of it is there.
+
+    A project rendered before the plugin existed has neither half, and `--pull` cannot
+    add them, so failing it would redden every consumer's adoption PR -- the class the
+    upgrade rehearsal in devkit's PR gate refuses. Half a wiring is broken on its own
+    terms: `-p` without the path is a `ModuleNotFoundError` at startup, and the path
+    without `-p` loads nothing.
+    """
+    return len(temproot_gaps(pytest_options)) < 2
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        ({"testpaths": ["tests"]}, False),
+        ({"addopts": "-q", "pythonpath": ["tests"]}, False),
+        ({"addopts": "-p devkit_temproot"}, True),
+        ({"pythonpath": ["scripts/pytest-plugins"]}, True),
+        ({"addopts": "-p devkit_temproot", "pythonpath": ["scripts/pytest-plugins"]}, True),
+    ],
+)
+def test_wires_temproot_is_true_once_either_half_is_there(options, expected):
+    assert wires_temproot(options) is expected
 
 
 def pytest_options(pyproject: Path) -> Mapping[str, Any] | None:
@@ -218,12 +248,17 @@ def test_pytest_options_is_none_without_the_table(tmp_path):
     assert pytest_options(tmp_path / "pyproject.toml") is None
 
 
-def test_a_project_that_configures_pytest_gives_each_run_its_own_temp_root():
+def test_a_project_wiring_the_temp_root_plugin_wires_both_halves():
     """The plugin is vendored, and does nothing until the project's own `pyproject.toml`
-    loads it -- a file `--pull` never writes. A project whose pytest config is elsewhere,
-    or that has none, is out of scope rather than guessed at."""
+    loads it -- a file `--pull` never writes. So a project that has not begun wiring it,
+    or keeps its pytest config elsewhere, is out of scope rather than failed: "absent"
+    is no such tier, as for `check-lock-markers.py` above. Once either half is there, the
+    other must be too (`wires_temproot`). devkit and a fresh render carry both halves, so
+    they are held in full here, and devkit's `tests/test_temproot_wiring.py` fails
+    either one that stops loading the plugin at all."""
     options = pytest_options(REPO_ROOT / "pyproject.toml")
-    gaps = [] if options is None else temproot_gaps(options)
+    wired = options is not None and wires_temproot(options)
+    gaps = temproot_gaps(options) if wired else []
     assert not gaps, f"[tool.pytest.ini_options] in pyproject.toml -- {'; '.join(gaps)}"
 
 
