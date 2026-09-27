@@ -16,7 +16,9 @@ harness-defect ledger, where the devkit session picks it up on the next pass:
 - **Whether resolutions held** (`fix_verify.py`): a group retired against a fix that
   never merged is reopened, and one whose fix is still in flight sends no session.
 - **Whether what was filed still stands** (`session_friction.outdated`): a friction row
-  the detectors on the default branch no longer file is retired, with that reason.
+  the detectors on the default branch no longer file is retired, with that reason, and
+  one an open PR's detector no longer files is resolved against that PR
+  (`friction_pending`).
 - **What has sat too long** (`fix_stall.py`): a hold, a cap or a skip past a day.
 
 Outside `dispatch` mode nothing is written -- not the ledger, not a tree, not the
@@ -38,10 +40,10 @@ import bg_sessions
 import fix_cycle
 import fix_findings
 import fix_ledger
-import fix_plan
 import fix_reports
 import fix_stall
 import fix_verify
+import friction_pending
 import ship_intent
 import harness_triage as triage
 import session_friction
@@ -86,11 +88,14 @@ class Closed:
     # ref -> pr of each resolution whose fix has not merged (`in_flight`): the backlog
     # step sends no session at a group waiting on one.
     in_flight: dict[str, str] = field(default_factory=dict)
+    # Directories a session is busy in now (`bg_sessions.working`), stamped one or not.
+    working: frozenset[str] = frozenset()
 
 
 def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
     """Every read-back step, each isolated: one that raises is a finding, not a stop."""
     closed = Closed()
+    closed.working = journal.step("sessions", working_dirs, default=frozenset())
     trees = journal.step("trees", fix_reports.read_trees, ctx.root, ctx.projects, default=[])
     for tree in trees:
         journal.step("tree", _one_tree, ctx, tree, journal, closed)
@@ -153,9 +158,11 @@ def _judge_session(
     if state in (fix_reports.DONE, *fix_reports.DEAD):
         closed.finished.append(str(tree.path))
     live = fix_reports.active_transcript(tree.path, ctx.now)
-    # The stamped session is never "another" one, whatever its state: a finished fixer's
-    # own transcript held six branches while this very pass shipped their intents.
-    if live and tree.branch and str(live) != transcript:
+    # By its transcript, the stamped session is never "another" one: a finished fixer's
+    # own transcript held six branches while this very pass shipped their intents. A
+    # session listed busy in the tree is at work whoever it is, intent or no intent.
+    running = bg_sessions.busy_in(closed.working, tree.path)
+    if tree.branch and (running or (live and str(live) != transcript)):
         closed.busy[(tree.project, tree.branch)] = str(tree.path)
     if state in fix_reports.DEAD:
         # No key: a dead session is re-sent at once, not parked behind the finding. One
@@ -169,8 +176,13 @@ def _judge_session(
         if ctx.writes:
             fix_ledger.mark_dead(ctx.ledger_path, key, state)
             fix_reports.note_on_stamp(tree.path, "dead", state)
-    elif state == fix_reports.WORKING and key.startswith(f"{fix_plan.UPSTREAM}:"):
+    elif (state == fix_reports.WORKING or running) and fix_ledger.is_upstream(key):
         closed.harness_busy = str(tree.path)
+
+
+def working_dirs() -> frozenset[str]:
+    """`bg_sessions.working` over what `claude agents` lists; empty where it cannot."""
+    return bg_sessions.working(bg_sessions.listed(ship_intent.run_quiet))
 
 
 def _harvest(ctx: Context, cursor: Path) -> list[Finding]:
@@ -199,6 +211,24 @@ def _recheck(ctx: Context) -> list[str]:
     for ref, why in session_friction.outdated(items):
         triage.resolve([ref], why, root=ctx.devkit_dir)
         lines.append(f"retired [{ref}] -- {why}")
+    return lines
+
+
+def recheck_open(ctx: Context) -> list[str]:
+    """Retire each open friction row an open PR's detector no longer files, against it.
+
+    Called after `record`, not inside `close`: the rows this pass's harvest filed are the
+    likeliest to be ones a detector fix in review already stops (`friction_pending`).
+    """
+    items = triage.open_items(triage.load(ctx.devkit_dir))
+    fixes = friction_pending.detector_fixes(
+        sweep.gh_for(ctx.devkit_dir), sweep.git_for(ctx.devkit_dir)
+    )
+    lines = []
+    for ref, note, pr in friction_pending.pending(items, fixes):
+        if ctx.writes:
+            triage.resolve([ref], note, pr=pr, root=ctx.devkit_dir)
+        lines.append(f"{'pending' if ctx.writes else 'would hold'} [{ref}] on #{pr}")
     return lines
 
 
