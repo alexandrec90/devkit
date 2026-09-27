@@ -317,6 +317,13 @@ def test_the_upstream_prompt_names_the_triage_log_at_the_path_it_is_placed():
     assert "that directory" not in text
 
 
+def test_a_ledger_sweep_is_scoped_to_the_groups_it_was_sent_with():
+    """0927-3 re-listed the ledger after its nine groups, took on one filed while it ran,
+    and spent 18k output tokens and a 700-test run on it -- 14% of the round's largest
+    session, for work the next pass would have sent a fresh session at anyway."""
+    assert "filed after this session started" in fix_prompts.LEDGER_STEPS
+
+
 def test_the_upstream_prompt_reads_each_failure_with_what_its_gate_said():
     """devkit's own red main beside a consumer's shared vendored failure: one session,
     and each named the way the record names it, with its own reason."""

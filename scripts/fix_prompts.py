@@ -67,6 +67,8 @@ LEDGER_STEPS = (
     "before believing it, fix what is real, and retire each group with "
     "python scripts/harness_triage.py --resolve-like ID --note WHAT-FIXED-IT --pr BRANCH "
     "once the fix is in your intent; the pass reopens a group whose branch never merges. "
+    "Work the groups this prompt names: one filed after this session started is the next "
+    "session's, however the log reads when you look again. "
     "A fixers-exhausted, blind-evidence or fixer-blocked group is a problem fixers could "
     "not move: fix what in the harness failed them, and fix the problem itself in the "
     "tree its evidence names, leaving an intent there too. Cut any tree this work needs "

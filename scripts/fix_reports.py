@@ -167,6 +167,15 @@ def record_launch(tree: Path, argv: list[str], done: object) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def launch_refused(tree: Path) -> bool:
+    """This dispatch's launcher exited non-zero; `stamp` clears an older record."""
+    try:
+        record = json.loads((tree / LAUNCH_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(record, dict) and record.get("returncode") not in (0, None)
+
+
 def launch_line(tree: Path) -> str:
     """The launch record as one line of a finding's detail; "" when there is none."""
     try:
@@ -412,7 +421,10 @@ def session_state(
         return DONE, str(transcript or "")
     touched = last_spoke(transcript) if transcript else None
     if touched is None or touched < sent:
-        return (NEVER_STARTED, "") if now - sent > START_GRACE else (WORKING, "")
+        # The grace is for a session starting, not one its launcher refused: 0927-2's
+        # held every ledger send for two iterations while the backlog grew.
+        refused = launch_refused(tree)
+        return (NEVER_STARTED, "") if refused or now - sent > START_GRACE else (WORKING, "")
     if now - touched > QUIET_AFTER:
         return NO_OUTCOME, str(transcript)
     return WORKING, str(transcript)

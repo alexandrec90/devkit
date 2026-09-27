@@ -161,6 +161,25 @@ def test_the_transcript_dir_is_claude_codes_slug_of_the_tree(tmp_path):
     )
 
 
+def test_a_launch_the_launcher_refused_never_started_without_waiting_out_the_grace(tmp_path):
+    """0927-2's launcher exited 1 ("Couldn't reach the background service"), and the pass
+    held every ledger send behind it as a working devkit session for two iterations while
+    the backlog grew 7 -> 8 -> 9: the grace is for a session starting, not one refused."""
+    now = _dt.datetime.now(_dt.UTC)
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=2))
+    failed = subprocess.CompletedProcess(["claude", "--bg", "p"], 1, "", "Couldn't reach it")
+    assert not fix_reports.launch_refused(tree), "no record yet"
+    fix_reports.record_launch(tree, ["claude", "--bg", "p"], failed)
+    assert fix_reports.launch_refused(tree)
+    assert fix_reports.session_state(tree, now, tmp_path / "projects") == (
+        fix_reports.NEVER_STARTED,
+        "",
+    )
+    started = subprocess.CompletedProcess(["claude", "--bg", "p"], 0, "session abc", "")
+    fix_reports.record_launch(tree, ["claude", "--bg", "p"], started)
+    assert fix_reports.session_state(tree, now, tmp_path / "projects")[0] == fix_reports.WORKING
+
+
 def test_a_session_is_working_done_or_dead(tmp_path):
     now = _dt.datetime.now(_dt.UTC)
     projects = tmp_path / "projects"
