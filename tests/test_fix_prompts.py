@@ -336,6 +336,8 @@ def test_every_prompt_names_the_ratchets_and_forbids_a_question():
         assert "Fix causes, not instances" in text and "the provisioner" in text
         # A rule file said it and three sessions still lost turns: the prompt says it too.
         assert "never a shell heredoc" in text
+        # b935e421: a fixer moving a class to the end of a file reached for `cat >>`.
+        assert "An append is an Edit" in text
 
 
 def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linux():

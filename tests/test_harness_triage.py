@@ -643,6 +643,14 @@ def test_the_rendering_carries_the_fields_diagnosis_starts_from():
     assert "  command git -C x status" in text and "  version abc" in text
 
 
+def test_the_rendering_names_the_tree_a_report_was_filed_from():
+    """Five agent-reports cited `logs/fix-pass-supervise/...` relative to a worktree the
+    group never showed, and each cited line cost the sweep a search."""
+    row = _line("agent-report", message="m", cwd="C:/w/.claude/worktrees/t", command="logs/x")
+    text = triage.render(triage.open_items(triage.read_items(row)))
+    assert "  cwd    C:/w/.claude/worktrees/t" in text
+
+
 def test_the_artifact_is_the_whole_backlog_even_under_a_filter(tmp_path, monkeypatch):
     """A filtered artifact would read as 'this is everything' while hiding a runtime."""
     _ledger(

@@ -298,7 +298,8 @@ def render(
         lines.append(f"  detail {head.detail}")
         # Where the skill's §1 table says diagnosis starts. Left out, a sweep greps the
         # raw ledger for a transcript line the grouped report had already read past.
-        for name in ("command", "evidence", "version"):
+        # `cwd` anchors any relative path an agent-report's message or command cites.
+        for name in ("cwd", "command", "evidence", "version"):
             if head.fields.get(name, "").strip(" -"):
                 lines.append(f"  {name:<6} {head.fields[name]}")
         if len(bucket) > 1:
