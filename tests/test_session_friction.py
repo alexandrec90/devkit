@@ -95,6 +95,52 @@ def test_waiting_loops_and_no_verify_are_friction_whatever_they_return():
     assert classes([call("sleep 2", "1")]) == [], "a short settle is not a poll"
 
 
+def test_claude_codes_sleep_guard_refusal_is_neither_a_block_nor_a_poll():
+    """9854b541 and 363d8be7: one refused `sleep 60; tail` filed twice, once for the
+    command and once for its refusal. Claude Code's own guard refused it and named the
+    right wait in the same message, so it waited for nothing and devkit could change
+    neither side -- a group only ever retired with that note, like the isolation guard."""
+    command = "sleep 60; tail -5 /c/Users/a/.claude/jobs/9631/tmp/gate2.out"
+    refusal = (
+        "<tool_use_error>Blocked: sleep 60 followed by: tail -5 /c/x/gate2.out. To wait "
+        "for a condition, use Monitor with an until-loop</tool_use_error>"
+    )
+    assert classes([call(command, "1"), result(refusal, "1")]) == []
+    assert classes([call(command, "1")]) == ["poll"], "a poll that ran still waited"
+    # A refusal retracts only its own call: a poll that ran first is still filed.
+    ran_then_refused = [call(command, "1"), result("", "1", error=False)]
+    assert classes([*ran_then_refused, call(command, "2"), result(refusal, "2")]) == ["poll"]
+    # The wait that refusal prescribes is not a poll either; the same loop in Bash is.
+    loop = "until [ -s gate2.out ]; do sleep 5; done"
+    assert classes([_tool("Monitor", "1", command=loop)]) == []
+    assert classes([call(loop, "1")]) == ["poll"]
+    # Any other refusal is still a blocked call.
+    other = "<tool_use_error>Blocked: rm -rf / is not allowed</tool_use_error>"
+    assert classes([call("rm -rf /", "1"), result(other, "1")]) == ["blocked-call"]
+
+
+def test_no_verify_in_a_scratch_repository_is_a_fixture_not_a_bypass():
+    """7ce3ea59: a release repro committed its fixture with `--no-verify` in a clone
+    under the job's `tmp/`. Nothing there is gated, so nothing was skipped."""
+    scratch = (
+        "cd /c/Users/a/.claude/jobs/963193fe/tmp/relrepro && git -c user.name=t "
+        '-c user.email=t@t commit -qam "Release v0.11.31" --no-verify && python -c x'
+    )
+    assert classes([call(scratch, "1")]) == []
+    assert classes([call('cd "$TMP/x" && git commit --no-verify -m x', "1")]) == []
+    assert classes([call("git -C /tmp/tmpab12cd commit --no-verify -m x", "1")]) == []
+    assert sf.scratch_only("cd C:\\Users\\a\\AppData\\Local\\Temp\\r && git commit --no-verify")
+    assert not sf.scratch_only("cd /tmp/x && git status"), "no --no-verify, nothing to excuse"
+    # A tree of the session's own is still a bypass, whatever its path reads like.
+    for command in (
+        "git commit --no-verify -m x",
+        "cd scripts && git commit --no-verify -m x",
+        "cd templates && git commit --no-verify -m x",
+        "cd /tmp/x && git status; cd /ws/devkit && git push --no-verify",
+    ):
+        assert classes([call(command, "1")]) == ["no-verify"], command
+
+
 def test_the_prescribed_wait_and_a_sleep_in_source_text_are_not_polls():
     """`gh pr checks --watch` is the one wait the engineering rule prescribes, and a
     test written through a heredoc naming `sleep 99` is text, not a command -- the

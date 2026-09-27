@@ -144,8 +144,15 @@ class Item:
         two together let one fix retire the other's evidence, which is the failure the
         user of this ledger described: a hook reporting an error for Codex says nothing
         about whether Claude has it too.
+
+        A row's `cause` (`log-wrap.py`'s `failure_cause`) is part of its detail here: a
+        scheduled job's message names only the job, so without it every failure of one
+        job was one group and a new cause read `RECURRED` over an unrelated fix (950c4a96).
         """
-        return (self.event, self.agent, self.project, self.detail[:SIGNATURE_WIDTH])
+        detail = self.detail[:SIGNATURE_WIDTH]
+        if cause := self.fields.get("cause", "").strip(" -"):
+            detail = f"{detail} | {cause[:SIGNATURE_WIDTH]}"
+        return (self.event, self.agent, self.project, detail)
 
 
 def item_id(raw: str) -> str:
@@ -405,7 +412,7 @@ def render(
         # Where the skill's §1 table says diagnosis starts. Left out, a sweep greps the
         # raw ledger for a transcript line the grouped report had already read past.
         # `cwd` anchors any relative path an agent-report's message or command cites.
-        for name in ("cwd", "command", "evidence", "version"):
+        for name in ("cause", "cwd", "command", "evidence", "version"):
             if head.fields.get(name, "").strip(" -"):
                 lines.append(f"  {name:<6} {head.fields[name]}")
         if len(bucket) > 1:
