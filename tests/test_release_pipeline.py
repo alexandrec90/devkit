@@ -675,7 +675,7 @@ def test_a_push_the_gate_refused_says_what_the_gate_said(tmp_path):
     the failing test named nowhere and the worktree holding its artifact deleted."""
     devkit, _, _ = _a_devkit_with_origin(tmp_path)
 
-    def refusing_push(cmd):
+    def refusing_push(cmd, env=None):
         if "push" in cmd:
             return subprocess.CompletedProcess(
                 cmd,
@@ -683,13 +683,104 @@ def test_a_push_the_gate_refused_says_what_the_gate_said(tmp_path):
                 stdout="push-gate: tests failed (exit 1)\nFAILED tests/test_x.py::t\n",
                 stderr="error: failed to push some refs to 'origin'\n",
             )
-        return _git_run(cmd)
+        return _git_run(cmd, env)
 
     ok, detail = rel.prepare(devkit, "v0.0.2", refusing_push, lambda _n: None)
 
     assert not ok
     assert "FAILED tests/test_x.py::t" in detail
     assert "failed to push some refs" in detail
+
+
+def test_a_refused_push_keeps_the_gates_artifact_the_worktree_took_with_it(tmp_path):
+    """The rest of the v0.11.26 report, and all of v0.11.31's: the gate's stdout says
+    only "details in logs\\test-failures.log", and that file lived in the throwaway
+    worktree the `finally` deletes -- so the failing test was named nowhere that
+    survived the run, and three recurrences were triaged blind."""
+    devkit, _, _ = _a_devkit_with_origin(tmp_path)
+    (devkit / rel.SALVAGE_DIR).mkdir(parents=True)
+    (devkit / rel.SALVAGE_DIR / "stale.log").write_text("an older run\n", encoding="utf-8")
+
+    def refusing_push(cmd, env=None):
+        if "push" in cmd:
+            logs = Path(cmd[cmd.index("-C") + 1]) / "logs"
+            logs.mkdir(exist_ok=True)
+            (logs / "test-failures.log").write_text(
+                "FAILED tests/test_x.py::test_red - assert 1 == 2\n", encoding="utf-8"
+            )
+            (logs / "lint-errors.log").write_text("", encoding="utf-8")
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="run-tests: FAILED -- details in logs\\test-failures.log\n"
+            )
+        return _git_run(cmd, env)
+
+    ok, detail = rel.prepare(devkit, "v0.0.2", refusing_push, lambda _n: None)
+
+    assert not ok
+    assert "FAILED tests/test_x.py::test_red" in detail
+    assert "logs/release-prepare/test-failures.log" in detail
+    kept = sorted(p.name for p in (devkit / rel.SALVAGE_DIR).iterdir())
+    assert kept == ["test-failures.log"]  # the empty one is no evidence; the stale one is gone
+
+
+def test_salvage_cuts_a_long_artifact_in_the_detail_but_keeps_it_whole(tmp_path):
+    tree, devkit = tmp_path / "tree", tmp_path / "devkit"
+    (tree / "logs").mkdir(parents=True)
+    body = "\n".join(f"line {n}" for n in range(rel.SALVAGE_EXCERPT_LINES + 5))
+    (tree / "logs" / "test-failures.log").write_text(body, encoding="utf-8")
+
+    said = rel.salvage_artifacts(tree, devkit)
+
+    assert f"line {rel.SALVAGE_EXCERPT_LINES - 1}" in said
+    assert f"line {rel.SALVAGE_EXCERPT_LINES}\n" not in said
+    assert "5 more line(s) in logs/release-prepare/test-failures.log" in said
+    kept = (devkit / rel.SALVAGE_DIR / "test-failures.log").read_text(encoding="utf-8")
+    assert kept == body
+
+
+def test_salvage_of_a_tree_that_wrote_nothing_says_nothing(tmp_path):
+    assert rel.salvage_artifacts(tmp_path / "no-such-tree", tmp_path / "devkit") == ""
+
+
+def test_the_release_push_skips_the_local_push_gate_and_only_the_push(tmp_path):
+    """v0.11.26 and v0.11.31 were each stopped by a local red of `devkit-push-gate` that
+    no rerun of the same commit reproduced -- while the pipeline's next step waits for
+    the same suite in CI anyway, with its artifact. The push skips the hook, as every
+    other push the fix pass makes does; the commit keeps its hooks."""
+    devkit, _, _ = _a_devkit_with_origin(tmp_path)
+    seen: dict[str, str | None] = {}
+
+    def recording(cmd, env=None):
+        step = next((s for s in ("commit", "push") if s in cmd), "other")
+        seen.setdefault(step, None if env is None else env.get("SKIP"))
+        return _git_run(cmd, env)
+
+    ok, detail = rel.prepare(devkit, "v0.0.2", recording, lambda _n: None)
+
+    assert ok, detail
+    assert rel.SKIP_PUSH_GATE in (seen["push"] or "").split(",")
+    assert seen["commit"] is None
+
+
+def test_push_env_adds_to_a_skip_list_rather_than_replacing_it():
+    assert rel.push_env({"SKIP": "ruff,mypy", "X": "1"}) == {
+        "SKIP": f"ruff,mypy,{rel.SKIP_PUSH_GATE}",
+        "X": "1",
+    }
+    assert rel.push_env({})["SKIP"] == rel.SKIP_PUSH_GATE
+    assert rel.push_env({"SKIP": rel.SKIP_PUSH_GATE})["SKIP"] == rel.SKIP_PUSH_GATE
+
+
+def test_the_pipelines_runner_hands_env_to_the_child(monkeypatch):
+    """`prepare` reaches git through `_run`; an `env=` it dropped would skip nothing."""
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        rp.subprocess, "run", lambda *a, **kw: calls.append(kw) or subprocess.CompletedProcess(a, 0)
+    )
+
+    rp._run(["git", "status"], env={"SKIP": "x"})
+
+    assert calls[0]["env"] == {"SKIP": "x"}
 
 
 def test_a_prepare_that_pushed_keeps_the_branch_the_pr_is_opened_from(tmp_path):
@@ -836,10 +927,10 @@ def test_the_clear_out_happens_before_the_worktree_is_cut(tmp_path):
     assert "release.prepare(devkit, version, _run, _say)" in inspect.getsource(rp.run_pipeline)
 
 
-def _git_run(cmd):
+def _git_run(cmd, env=None):
     """Stands in for `release-pipeline.py`'s `_run`, which is what `prepare` spawns
     through in production -- the same call without its console-discipline flags."""
-    return subprocess.run(list(cmd), capture_output=True, text=True, check=False)
+    return subprocess.run(list(cmd), capture_output=True, text=True, check=False, env=env)
 
 
 def _a_devkit_with_origin(root):

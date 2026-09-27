@@ -148,6 +148,20 @@ def test_the_first_failure_ends_the_run_with_its_exit_code(tmp_path, capsys):
     assert f"SKIP={gate.HOOK_ID}" in out
 
 
+def test_a_gate_run_outside_pre_commit_still_asks_for_the_whole_suite(tmp_path, monkeypatch):
+    """`run-tests.py` narrows to the changed paths unless `PRE_COMMIT` or `CI` is set,
+    and only pre-commit sets the first. Reproducing a refused release push by calling
+    `run_gate` directly printed "clean" over one test file -- a different verdict under
+    the gate's name."""
+    monkeypatch.delenv(gate.PRE_COMMIT_ENV, raising=False)
+    root = project(tmp_path, "scripts/lint-all.py", "scripts/run-tests.py")
+    runner = FakeRunner()
+
+    assert gate.run_gate(root, runner, release_prepare="") == 0
+
+    assert runner.envs and all(env[gate.PRE_COMMIT_ENV] for env in runner.envs)
+
+
 def test_a_project_without_a_wrapper_skips_that_step_out_loud(tmp_path, capsys):
     """The wrappers are project-owned and a missing one is a documented skip, never a
     refused push -- but a silent skip would be the inert gate engineering.md forbids."""

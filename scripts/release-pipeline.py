@@ -72,7 +72,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -381,7 +381,8 @@ def plan_steps(version: str, adopt: bool, projects: Sequence[str] = ()) -> list[
     steps = [
         f"cut {release.branch_for(version)} from origin/main in a throwaway worktree",
         f"set {release.FALLBACK_CONST} = {version!r} in scripts/new-project.py, and commit it",
-        f"push {release.branch_for(version)} and open its PR against main",
+        f"push {release.branch_for(version)} (SKIP={release.SKIP_PUSH_GATE}: CI is its "
+        "gate) and open its PR against main",
         f"wait for PR Gate, then verify {EXPECTED_RED_TEST} is its only failure",
         "squash-merge the PR",
         f"dispatch {RELEASE_WORKFLOW} phase=tag, which tests the tagged commit then pushes {version}",
@@ -426,7 +427,10 @@ def inherited_streams() -> dict[str, object]:
 
 
 def _run(
-    cmd: Sequence[str], cwd: Path | None = None, capture: bool = True
+    cmd: Sequence[str],
+    cwd: Path | None = None,
+    capture: bool = True,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run `cmd`, capturing by default.
 
@@ -448,6 +452,7 @@ def _run(
         text=True,
         check=False,
         creationflags=NO_WINDOW,
+        env=env,
         **streams,
     )
 
