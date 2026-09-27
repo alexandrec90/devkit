@@ -388,9 +388,9 @@ class _RetiredBranch(Runner):
     """The branch policy refusing every commit on a name whose PR merged, and any names
     that already exist locally or on origin."""
 
-    def __init__(self, retired: set[str], taken: set[str] = frozenset()):
+    def __init__(self, retired: set[str], taken: set[str] | None = None):
         super().__init__()
-        self.retired, self.taken, self.branch = retired, set(taken), "agent/labels-0919"
+        self.retired, self.taken, self.branch = retired, set(taken or ()), "agent/labels-0919"
 
     def __call__(self, argv, cwd, env=None):
         argv = [str(a) for a in argv]
