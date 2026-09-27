@@ -44,6 +44,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -305,6 +306,35 @@ def is_spent(intent: Intent, runner: Runner = run_quiet) -> bool:
     return already_shipped(intent, read_state(intent.tree), status.stdout or "")
 
 
+# What git prints when another process holds one of its lock files: `index.lock` for an
+# add, `HEAD.lock` or a ref's lock for a commit.
+LOCK_HELD = re.compile(r"Unable to create '[^']*\.lock': File exists")
+# Seconds between tries of a git step that met a held lock. Anything that looks at the
+# tree takes `index.lock` for a moment -- an editor's git view, a session's own `git
+# status` -- so the pass's `git add` lost that race once and filed "add refused" over a
+# lock that was gone before the fixer sent at it opened (devkit, 0927-17).
+LOCK_WAITS = (1, 2, 4, 8)
+
+
+def _wait(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def run_git(argv: list[str], tree: Path, runner: Runner) -> subprocess.CompletedProcess[str]:
+    """`runner(argv)`, tried again after each of `LOCK_WAITS` while git says a lock is held.
+
+    A lock still held after the last wait is left to refuse: a stale one needs a person or
+    a fixer to decide it is stale, and fifteen seconds is well past any git call's hold.
+    """
+    done = runner(argv, cwd=tree)
+    for seconds in LOCK_WAITS:
+        if done.returncode == 0 or not LOCK_HELD.search((done.stdout or "") + (done.stderr or "")):
+            break
+        _wait(seconds)
+        done = runner(argv, cwd=tree)
+    return done
+
+
 def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str]:
     """Add, fixers, add, commit: `("", "")` when it went through, else `(step, output)`.
 
@@ -317,7 +347,7 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
     """
     output = ""
     for _attempt in (1, 2):
-        added = runner(["git", "add", "-A"], cwd=intent.tree)
+        added = run_git(["git", "add", "-A"], intent.tree, runner)
         if added.returncode != 0:
             return "add", (added.stdout or "") + (added.stderr or "")
         fixed = runner([python, "scripts/ship.py", "--fix"], cwd=intent.tree)
@@ -326,10 +356,10 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
             break
     else:
         return "fixers", output
-    added = runner(["git", "add", "-A"], cwd=intent.tree)
+    added = run_git(["git", "add", "-A"], intent.tree, runner)
     if added.returncode != 0:
         return "add", (added.stdout or "") + (added.stderr or "")
-    committed = runner(["git", "commit", "-F", str(INTENT_FILE)], cwd=intent.tree)
+    committed = run_git(["git", "commit", "-F", str(INTENT_FILE)], intent.tree, runner)
     if committed.returncode != 0:
         return "commit", (committed.stdout or "") + (committed.stderr or "")
     return "", ""
@@ -338,38 +368,67 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
 # What `git_policy.branch` says when a commit lands on a name whose PR merged; its remedy
 # is one `git switch -c`, which a session was otherwise sent to make.
 RETIRED_MARK = "is permanently retired because its PR merged"
-FREE_NAMES = range(2, 10)
+# How many fresh names one refused commit is carried across. The first nearly always
+# takes; each further refusal is a name whose PR merged and whose refs were deleted since
+# (GitHub's delete-on-merge, a sweep's prune), which no ref listing can show.
+CARRIES = 8
+# `tb.branch_name`'s `-N` collision suffix after its `-<mmdd>` stamp. `N` is short so a
+# slug ending in a number (`agent/pr-1234-0919`) is not read as a stamp plus a suffix.
+_COLLISION_SUFFIX = re.compile(r"(-\d{4})-\d{1,3}$")
+
+
+def branch_stem(branch: str) -> str:
+    """`branch` without its `-N` collision suffix: `agent/x-0927-14` -> `agent/x-0927`, so
+    a carry from a suffixed name counts on from the family, not `agent/x-0927-14-2`."""
+    return _COLLISION_SUFFIX.sub(r"\1", branch)
+
+
+def next_free_name(stem: str, taken: set[str]) -> str:
+    """`<stem>-<n>`, one above the highest `n` in `taken` -- never a gap below it.
+
+    A fixed range of candidates (it was `-2`..`-9`) ran out on a topic the pass had cut
+    sixteen branches for in one day, and the carry gave up with the tree stranded on its
+    retired name (`agent/fix-harness-ledger-0927`). A gap is no better: it is usually a
+    name whose PR merged and whose refs were then deleted, which the policy still refuses,
+    and a reused name is what `fix_verify.relevant` has to guard against.
+    """
+    suffixed = re.compile(re.escape(stem) + r"-(\d+)")
+    used = [1] + [int(m.group(1)) for name in taken if (m := suffixed.fullmatch(name))]
+    return f"{stem}-{max(used) + 1}"
+
+
+def _taken_names(stem: str, runner: Runner, tree: Path) -> set[str]:
+    """Every local and origin branch in `stem`'s family, in two calls however many exist."""
+    local = runner(
+        ["git", "for-each-ref", "--format=%(refname:short)", f"refs/heads/{stem}*"], cwd=tree
+    )
+    remote = runner(["git", "ls-remote", "--heads", "origin", f"{stem}*"], cwd=tree)
+    names = set((local.stdout or "").split())
+    for line in (remote.stdout or "").splitlines():
+        names.add(line.split("\t")[-1].strip().removeprefix("refs/heads/"))
+    return names
 
 
 def _carry_to_free_branch(
     intent: Intent, stem: str, runner: Runner, tried: set[str]
 ) -> Intent | None:
-    """The intent moved onto `<stem>-<n>`, the first name with no local or remote ref and
-    not refused already; None when none is left, or the switch failed."""
+    """The intent moved onto the next `<stem>-<n>` no ref and no refusal has used; None
+    when the switch failed."""
     tried.add(intent.branch)
-    for n in FREE_NAMES:
-        name = f"{stem}-{n}"
-        if name in tried:
-            continue
-        local = runner(
-            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"], cwd=intent.tree
-        )
-        remote = runner(["git", "ls-remote", "--heads", "origin", name], cwd=intent.tree)
-        if local.returncode == 0 or (remote.stdout or "").strip():
-            tried.add(name)
-            continue
-        if runner(["git", "switch", "-c", name], cwd=intent.tree).returncode != 0:
-            return None
-        return replace(intent, branch=name)
-    return None
+    name = next_free_name(stem, _taken_names(stem, runner, intent.tree) | tried)
+    if runner(["git", "switch", "-c", name], cwd=intent.tree).returncode != 0:
+        return None
+    return replace(intent, branch=name)
 
 
 def _commit_carrying(intent: Intent, python: str, runner: Runner) -> tuple[Intent, str, str]:
     """`commit_intent`, moving to a free branch each time the policy refuses a retired
-    name: `(the intent as committed, step, output)`."""
+    name, at most `CARRIES` times: `(the intent as committed, step, output)`."""
     step, output = commit_intent(intent, python, runner)
-    stem, tried = intent.branch, set[str]()
-    while step == "commit" and RETIRED_MARK in output:
+    stem, tried = branch_stem(intent.branch), set[str]()
+    for _ in range(CARRIES):
+        if step != "commit" or RETIRED_MARK not in output:
+            break
         moved = _carry_to_free_branch(intent, stem, runner, tried)
         if moved is None:
             break

@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as _dt
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -306,6 +307,64 @@ def test_the_commit_half_names_the_step_that_refused(tmp_path):
     assert (step, output) == ("add", "index locked")
 
 
+LOCKED = (
+    "fatal: Unable to create 'C:/src/devkit/.git/worktrees/labels/index.lock': File exists.\n\n"
+    "Another git process seems to be running in this repository, or the lock file may be stale\n"
+)
+
+
+class _LockedFor(Runner):
+    """git refusing the first `times` calls of `verb` because another process holds a lock."""
+
+    def __init__(self, verb: str, times: int):
+        super().__init__()
+        self.verb, self.left = verb, times
+
+    def __call__(self, argv, cwd, env=None):
+        done = super().__call__(argv, cwd, env)
+        if " ".join(str(a) for a in argv[:2]) == self.verb and self.left:
+            self.left -= 1
+            return subprocess.CompletedProcess(argv, 128, "", LOCKED)
+        return done
+
+
+@pytest.mark.parametrize("verb", ["git add", "git commit"])
+def test_a_lock_another_git_process_holds_for_a_moment_is_waited_out(tmp_path, monkeypatch, verb):
+    """devkit 0927-17: the pass's `git add` met an `index.lock` something else held for
+    an instant, and filed "add refused" over a lock gone before the fixer opened."""
+    waited: list[float] = []
+    monkeypatch.setattr(ship_intent, "_wait", waited.append)
+    run = _LockedFor(verb, 2)
+    assert ship_intent.commit_intent(intent(tmp_path), "py", run) == ("", "")
+    assert waited == list(ship_intent.LOCK_WAITS[:2])
+    assert run.verbs().count(verb) == (4 if verb == "git add" else 3)
+
+
+def test_a_lock_held_past_every_wait_is_still_refused_with_gits_words(tmp_path, monkeypatch):
+    waited: list[float] = []
+    monkeypatch.setattr(ship_intent, "_wait", waited.append)
+    run = _LockedFor("git add", 99)
+    assert ship_intent.commit_intent(intent(tmp_path), "py", run) == ("add", LOCKED)
+    assert waited == list(ship_intent.LOCK_WAITS)
+    assert run.verbs() == ["git add"] * (len(ship_intent.LOCK_WAITS) + 1)
+
+
+def test_run_git_answers_at_once_when_the_first_try_goes_through(tmp_path, monkeypatch):
+    waited: list[float] = []
+    monkeypatch.setattr(ship_intent, "_wait", waited.append)
+    run = Runner()
+    assert ship_intent.run_git(["git", "add", "-A"], tmp_path, run).returncode == 0
+    assert waited == [] and run.calls == [(["git", "add", "-A"], tmp_path, None)]
+
+
+def test_a_refusal_that_is_not_a_held_lock_is_not_retried(tmp_path, monkeypatch):
+    waited: list[float] = []
+    monkeypatch.setattr(ship_intent, "_wait", waited.append)
+    run = Runner({"git commit": (1, "detect secrets.....Failed", "")})
+    assert ship_intent.commit_intent(intent(tmp_path), "py", run)[0] == "commit"
+    assert waited == [] and run.verbs().count("git commit") == 1
+
+
 class _StagedOnlyScanner(Runner):
     """detect-secrets' commit hook as carameli #395 met it: it refuses to scan while the
     baseline has unstaged changes, and a scan that moves a flagged line rewrites the
@@ -388,19 +447,26 @@ class _RetiredBranch(Runner):
     """The branch policy refusing every commit on a name whose PR merged, and any names
     that already exist locally or on origin."""
 
-    def __init__(self, retired: set[str], taken: set[str] | None = None):
+    def __init__(
+        self, retired: set[str], taken: set[str] | None = None, branch: str = "agent/labels-0919"
+    ):
         super().__init__()
-        self.retired, self.taken, self.branch = retired, set(taken or ()), "agent/labels-0919"
+        self.retired, self.taken, self.branch = retired, set(taken or ()), branch
+
+    def _matching(self, pattern: str) -> list[str]:
+        return sorted(name for name in self.taken if name.startswith(pattern.rstrip("*")))
 
     def __call__(self, argv, cwd, env=None):
         argv = [str(a) for a in argv]
-        if argv[:2] == ["git", "show-ref"]:
+        if argv[:2] == ["git", "for-each-ref"]:
             self.calls.append((argv, Path(cwd), env))
-            return subprocess.CompletedProcess(argv, 0 if argv[-1][11:] in self.taken else 1)
+            names = self._matching(argv[-1].removeprefix("refs/heads/"))
+            return subprocess.CompletedProcess(argv, 0, "".join(f"{n}\n" for n in names), "")
         if argv[:2] == ["git", "ls-remote"]:
             self.calls.append((argv, Path(cwd), env))
+            names = self._matching(argv[-1])
             return subprocess.CompletedProcess(
-                argv, 0, "sha\tref\n" if argv[-1] in self.taken else ""
+                argv, 0, "".join(f"sha\trefs/heads/{n}\n" for n in names), ""
             )
         if argv[:3] == ["git", "switch", "-c"]:
             self.branch = argv[3]
@@ -445,12 +511,58 @@ def test_the_retirement_mark_is_the_branch_policys_own_words():
     assert ship_intent.RETIRED_MARK in policy.read_text(encoding="utf-8")
 
 
-def test_a_retired_branch_with_no_free_name_left_is_still_a_refusal(tmp_path):
+def test_a_topic_past_its_ninth_branch_is_still_carried(tmp_path):
+    """The carry once tried only `-2`..`-9`. The pass cut sixteen
+    `agent/fix-harness-ledger-0927` branches in a day, so a fix on the retired base name
+    found every candidate taken and was refused, and a fixer was sent to type the
+    `git switch -c` the carry exists to make."""
     one = intent(tmp_path)
-    names = {"agent/labels-0919"} | {f"agent/labels-0919-{n}" for n in range(2, 10)}
+    taken = {"agent/labels-0919"} | {f"agent/labels-0919-{n}" for n in range(2, 17)}
+    run = _RetiredBranch(retired={"agent/labels-0919"}, taken=taken)
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.SHIPPED
+    assert ["git", "push", "-u", "origin", "agent/labels-0919-17"] in [
+        argv for argv, _c, _e in run.calls
+    ]
+
+
+def test_a_retired_suffixed_branch_counts_on_from_its_family(tmp_path):
+    """Not `agent/labels-0919-14-2`: a carried name stays in the family `tb.branch_name`
+    numbers, so the next carry and the next person can both find it."""
+    one = replace(intent(tmp_path), branch="agent/labels-0919-14")
+    taken = {"agent/labels-0919", "agent/labels-0919-14"}
+    run = _RetiredBranch(retired={"agent/labels-0919-14"}, taken=taken, branch=one.branch)
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.SHIPPED
+    assert ["git", "switch", "-c", "agent/labels-0919-15"] in [argv for argv, _c, _e in run.calls]
+
+
+def test_a_retired_branch_whose_every_carry_is_retired_too_is_still_a_refusal(tmp_path):
+    """Names whose PR merged and whose refs were deleted show in no listing; the carry
+    walks past them, but a bounded number of times."""
+    one = intent(tmp_path)
+    names = {"agent/labels-0919"} | {f"agent/labels-0919-{n}" for n in range(2, 40)}
     run = _RetiredBranch(retired=names)
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.REFUSED and "git push" not in run.verbs()
+    assert run.verbs().count("git switch") == ship_intent.CARRIES
+
+
+def test_the_next_free_name_is_above_every_used_one_not_in_a_gap():
+    stem = "agent/labels-0919"
+    assert ship_intent.next_free_name(stem, set()) == f"{stem}-2"
+    assert ship_intent.next_free_name(stem, {stem}) == f"{stem}-2"
+    assert ship_intent.next_free_name(stem, {stem, f"{stem}-3", f"{stem}-12"}) == f"{stem}-13"
+    unrelated = {f"{stem}-2x", f"{stem}-rc-9", f"other/{stem}-30", f"{stem}0-50"}
+    assert ship_intent.next_free_name(stem, unrelated) == f"{stem}-2"
+
+
+def test_the_branch_stem_drops_only_the_collision_suffix():
+    assert ship_intent.branch_stem("agent/x-0927-14") == "agent/x-0927"
+    assert ship_intent.branch_stem("agent/x-0927") == "agent/x-0927"
+    assert ship_intent.branch_stem("agent/fix-3") == "agent/fix-3", "no date stamp, no suffix"
+    assert ship_intent.branch_stem("agent/pr-1234-0919") == "agent/pr-1234-0919"
+    assert ship_intent.branch_stem("agent/pr-1234-0919-2") == "agent/pr-1234-0919"
 
 
 def test_a_failed_push_is_a_failure_not_a_refusal_and_leaves_no_refused_state(tmp_path):

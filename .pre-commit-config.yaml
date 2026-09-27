@@ -90,6 +90,16 @@ repos:
         files: \.md$
         pass_filenames: false
 
+      - id: codex-skill-mirror
+        name: mirror .claude/skills/ to .agents/skills/
+        # A fixer: `tests/test_codex_skill_mirror.py` fails a stale mirror, and first met
+        # in CI it cost 716bb80 a stale skill on `main` and #438 a fixer. Rewriting the
+        # mirror fails the commit once; restaged, it passes.
+        entry: scripts/sync-codex-context.py
+        language: script
+        files: ^\.claude/skills/
+        pass_filenames: false
+
       # `--force-exclude` on both: pre-commit passes explicit filenames, and ruff applies
       # `exclude` to those only when told to. Without it, staging a change to
       # `templates/core/scripts/notify.py` gets that file reformatted under devkit's

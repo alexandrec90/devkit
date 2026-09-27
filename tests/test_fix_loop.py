@@ -28,7 +28,9 @@ def ctx(tmp_path, monkeypatch):
     (tmp_path / "devkit").mkdir()
     monkeypatch.setattr(fix_reports, "CLAUDE_PROJECTS", tmp_path / "projects")
     monkeypatch.setattr(fix_loop.session_friction, "harvest", lambda *a, **k: [])
-    monkeypatch.setattr(fix_loop.fix_verify, "verify", lambda *a, **k: [])
+    monkeypatch.setattr(
+        fix_loop.fix_verify, "verify", lambda *a, **k: fix_loop.fix_verify.Outcome()
+    )
     monkeypatch.setattr(
         fix_loop.bg_sessions, "stop_finished", lambda trees, runner: [f"x in {t}" for t in trees]
     )
@@ -355,10 +357,28 @@ def test_verify_reopens_what_did_not_land(ctx, monkeypatch):
     (ctx.devkit_dir / "logs" / "harness-events.log").write_text(report + "\n", encoding="utf-8")
     ref = triage.item_id(report)
     triage.resolve([ref], "fixed", pr="agent/x", root=ctx.devkit_dir)
-    monkeypatch.setattr(fix_loop.fix_verify, "verify", lambda *a, **k: [(ref, "closed unmerged")])
+    outcome = fix_loop.fix_verify.Outcome(reopen=[(ref, "closed unmerged")])
+    monkeypatch.setattr(fix_loop.fix_verify, "verify", lambda *a, **k: outcome)
     closed, _ = close(ctx)
     assert closed.lines == [f"reopened [{ref}] -- closed unmerged"]
     assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [ref]
+
+
+def test_verify_retires_what_was_filed_while_the_merged_fix_waited(ctx, monkeypatch):
+    """7a94f5bc: the rows `fix_verify` covers are resolved against the merged PR, so the
+    backlog step never sees them as a recurrence of the fix that just landed."""
+    monkeypatch.setattr(fix_loop.fix_reports, "read_trees", lambda root, projects: [])
+    row = f"{NOW.isoformat()}\tevent=fix-pass-finding\tproject=devkit\tdetail=x"
+    (ctx.devkit_dir / "logs").mkdir(parents=True)
+    (ctx.devkit_dir / "logs" / "harness-events.log").write_text(row + "\n", encoding="utf-8")
+    ref = triage.item_id(row)
+    outcome = fix_loop.fix_verify.Outcome(covered=[(ref, "filed while #434 waited", "u/434")])
+    monkeypatch.setattr(fix_loop.fix_verify, "verify", lambda *a, **k: outcome)
+    closed, _ = close(ctx)
+    assert f"retired [{ref}] -- filed while #434 waited" in closed.lines
+    assert triage.open_items(triage.load(ctx.devkit_dir)) == []
+    [resolution] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    assert resolution.fields["pr"] == "u/434"
 
 
 def test_a_friction_row_todays_detectors_would_not_file_is_retired(ctx, monkeypatch):

@@ -163,7 +163,8 @@ the durable fix was in what provisions every tree (`scripts/worktree_env.py`, th
 it not* — then fix that, and test it. A group marked `RECURRED` in the triage log was
 retired before by a fix that did not hold: its last note is what not to repeat. One
 marked `PENDING on <pr>` is the reverse: its fix is written and not merged yet, so the
-pass sends no session at it -- retire any new rows against that same `--pr`. The only
+pass sends no session at it, and the pass retires the rows filed while it waited against
+that PR once it merges; only a row filed after the merge reads `RECURRED`. The only
 mechanism ruled out is a coding-agent hook; a test, a git hook, a CI check, a scheduled
 job or a provisioner all are fair game.
 
@@ -232,7 +233,8 @@ literal ids when a group needs splitting.
 
 Resolve **after** the fix is in your intent, not before, and pass the branch as `--pr`
 when there is no PR number yet. The fix pass checks it (`scripts/fix_verify.py`): a
-group whose PR closes unmerged, or whose branch never becomes a PR, is reopened.
+group whose PR closes unmerged, or whose branch never becomes a PR, is reopened. Branch
+names are reused, so a PR merged from yours *before* you resolved does not count.
 
 ## Reporting
 
