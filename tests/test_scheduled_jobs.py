@@ -949,6 +949,65 @@ def test_every_module_a_job_imports_is_checked_or_spawns_nothing():
         )
 
 
+def _is_std_stream(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr in ("stdout", "stderr")
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "sys"
+    )
+
+
+def unguarded_stream_calls(source: str) -> list[int]:
+    """Lines calling a method on `sys.stdout`/`sys.stderr` outside an `if` that tests it."""
+    tree = ast.parse(source)
+    guarded: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and any(_is_std_stream(n) for n in ast.walk(node.test)):
+            guarded.update(id(child) for part in node.body for child in ast.walk(part))
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and _is_std_stream(node.func.value)
+        and id(node) not in guarded
+    ]
+
+
+# A guard the check cannot see because it runs through a name, declared with its reason.
+STREAM_GUARDED_ELSEWHERE: dict[str, str] = {
+    "scripts/git_policy/_core.py": (
+        "fileno() only under `if passthrough`, which is inheritable_streams() -- False "
+        "when either stream is None"
+    ),
+}
+
+
+def test_no_module_a_job_reaches_writes_to_a_stream_pythonw_leaves_none():
+    """`sys.stdout` is None under `pythonw.exe`, so `sys.stdout.write` raises where
+    `print` does nothing. The scheduled pass crashed on every background dispatch that
+    way (`agent_tabs.launch_background`, 2026-09-27), filed as a session that "never
+    started" -- the third module after `log-wrap.py` and `docker-maint.py`."""
+    for rel in sorted(import_closure() | set(UNATTENDED)):
+        lines = unguarded_stream_calls((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        if rel in STREAM_GUARDED_ELSEWHERE:
+            assert lines, f"{rel} is exempt but calls no stream directly any more"
+            continue
+        assert not lines, (
+            f"{rel} calls sys.stdout/sys.stderr directly at {lines}, and a scheduled job "
+            f"reaches it under pythonw.exe, where both are None. Use print(), or test the "
+            f"stream first."
+        )
+
+
+def test_a_stream_call_is_guarded_only_by_an_if_that_tests_the_stream():
+    assert unguarded_stream_calls("import sys\nsys.stdout.write('x')\n") == [2]
+    guarded = "import sys\nif hasattr(sys.stdout, 'reconfigure'):\n    sys.stdout.reconfigure()\n"
+    assert unguarded_stream_calls(guarded) == []
+    assert unguarded_stream_calls("import sys\nprint('x', file=sys.stderr)\n") == []
+
+
 def test_the_import_exemptions_are_not_stale():
     """A module that stopped being imported, or stopped spawning, keeps an exemption
     that reads as a decision someone made about today's code."""

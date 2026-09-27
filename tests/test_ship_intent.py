@@ -384,6 +384,75 @@ def test_a_commit_the_hooks_refuse_is_recorded_at_the_commit_step(tmp_path):
     assert ship_intent.read_state(one.tree)["step"] == "commit"
 
 
+class _RetiredBranch(Runner):
+    """The branch policy refusing every commit on a name whose PR merged, and any names
+    that already exist locally or on origin."""
+
+    def __init__(self, retired: set[str], taken: set[str] | None = None):
+        super().__init__()
+        self.retired, self.taken, self.branch = retired, set(taken or ()), "agent/labels-0919"
+
+    def __call__(self, argv, cwd, env=None):
+        argv = [str(a) for a in argv]
+        if argv[:2] == ["git", "show-ref"]:
+            self.calls.append((argv, Path(cwd), env))
+            return subprocess.CompletedProcess(argv, 0 if argv[-1][11:] in self.taken else 1)
+        if argv[:2] == ["git", "ls-remote"]:
+            self.calls.append((argv, Path(cwd), env))
+            return subprocess.CompletedProcess(
+                argv, 0, "sha\tref\n" if argv[-1] in self.taken else ""
+            )
+        if argv[:3] == ["git", "switch", "-c"]:
+            self.branch = argv[3]
+        if argv[:2] == ["git", "commit"] and self.branch in self.retired:
+            self.calls.append((argv, Path(cwd), env))
+            why = f"[devkit branch policy] commit blocked: branch '{self.branch}' is permanently retired because its PR merged (https://x/pull/426)."
+            return subprocess.CompletedProcess(argv, 1, why, "")
+        return super().__call__(argv, cwd, env)
+
+
+def test_an_intent_on_a_retired_branch_is_carried_to_the_next_free_name(tmp_path):
+    """A ledger sweep's second intent landed after the pass had shipped its first and the
+    PR merged: the policy refused every commit on the retired name, and the fix -- plus
+    the ledger group it was resolved against -- sat stranded in the tree (c45826ad). The
+    policy's own remedy is one `git switch -c`, which the ship step now takes itself."""
+    one = intent(tmp_path)
+    run = _RetiredBranch(retired={"agent/labels-0919"}, taken={"agent/labels-0919-2"})
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.SHIPPED
+    assert ["git", "switch", "-c", "agent/labels-0919-3"] in [argv for argv, _c, _e in run.calls]
+    assert ["git", "push", "-u", "origin", "agent/labels-0919-3"] in [
+        argv for argv, _c, _e in run.calls
+    ]
+
+
+def test_a_stored_retired_branch_refusal_is_tried_again(tmp_path):
+    """The stranded sweep's refusal was recorded before the carry existed; held as "nothing
+    has changed", it would never have been retried, and a fixer would have been sent to
+    type the one `git switch -c` the ship step now makes."""
+    one = intent(tmp_path)
+    why = "[devkit branch policy] commit blocked: branch 'x' " + ship_intent.RETIRED_MARK
+    state = {"stage": ship_intent.REFUSED, "intent": one.digest, "output": why, "step": "commit"}
+    state["tree"] = ship_intent._digest(" M a.py\n")
+    assert ship_intent.still_refused(one, state, " M a.py\n") is None
+    state["output"] = "ruff.....Failed"
+    assert ship_intent.still_refused(one, state, " M a.py\n") is not None
+
+
+def test_the_retirement_mark_is_the_branch_policys_own_words():
+    """Reworded there, the carry above would silently stop firing."""
+    policy = Path(ship_intent.__file__).parent / "git_policy" / "branch.py"
+    assert ship_intent.RETIRED_MARK in policy.read_text(encoding="utf-8")
+
+
+def test_a_retired_branch_with_no_free_name_left_is_still_a_refusal(tmp_path):
+    one = intent(tmp_path)
+    names = {"agent/labels-0919"} | {f"agent/labels-0919-{n}" for n in range(2, 10)}
+    run = _RetiredBranch(retired=names)
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.REFUSED and "git push" not in run.verbs()
+
+
 def test_a_failed_push_is_a_failure_not_a_refusal_and_leaves_no_refused_state(tmp_path):
     one = intent(tmp_path)
     run = Runner({"git push": (1, "", "could not resolve host")})

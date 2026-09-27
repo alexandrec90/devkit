@@ -15,7 +15,7 @@
 # became a red PR: nothing between a commit and the runner ever ran mypy or a test.
 #
 # Install once per clone: `pre-commit install`. `default_install_hook_types` makes that
-# one command wire both stages. The global dispatcher (`scripts/git_policy.py`) runs
+# one command wire both stages. The global dispatcher (`scripts/git_policy/`) runs
 # both stages itself on a machine where it is installed.
 default_install_hook_types: [pre-commit, pre-push]
 # Without this, a hook that names no stage runs at every installed one — so the fixers

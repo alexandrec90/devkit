@@ -44,7 +44,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -279,6 +279,8 @@ def still_refused(intent: Intent, state: dict, porcelain: str) -> Outcome | None
         return None
     if state.get("tree") != _digest(porcelain):
         return None
+    if RETIRED_MARK in str(state.get("output", "")):
+        return None  # the carry to a free branch answers it now; try again
     detail = f"{state.get('step', 'commit')}: {str(state.get('output', '')).strip()[-400:]}"
     return Outcome(intent, REFUSED, detail)
 
@@ -324,6 +326,49 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
     return "", ""
 
 
+# What `git_policy.branch` says when a commit lands on a name whose PR merged; its remedy
+# is one `git switch -c`, which a session was otherwise sent to make.
+RETIRED_MARK = "is permanently retired because its PR merged"
+FREE_NAMES = range(2, 10)
+
+
+def _carry_to_free_branch(
+    intent: Intent, stem: str, runner: Runner, tried: set[str]
+) -> Intent | None:
+    """The intent moved onto `<stem>-<n>`, the first name with no local or remote ref and
+    not refused already; None when none is left, or the switch failed."""
+    tried.add(intent.branch)
+    for n in FREE_NAMES:
+        name = f"{stem}-{n}"
+        if name in tried:
+            continue
+        local = runner(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{name}"], cwd=intent.tree
+        )
+        remote = runner(["git", "ls-remote", "--heads", "origin", name], cwd=intent.tree)
+        if local.returncode == 0 or (remote.stdout or "").strip():
+            tried.add(name)
+            continue
+        if runner(["git", "switch", "-c", name], cwd=intent.tree).returncode != 0:
+            return None
+        return replace(intent, branch=name)
+    return None
+
+
+def _commit_carrying(intent: Intent, python: str, runner: Runner) -> tuple[Intent, str, str]:
+    """`commit_intent`, moving to a free branch each time the policy refuses a retired
+    name: `(the intent as committed, step, output)`."""
+    step, output = commit_intent(intent, python, runner)
+    stem, tried = intent.branch, set[str]()
+    while step == "commit" and RETIRED_MARK in output:
+        moved = _carry_to_free_branch(intent, stem, runner, tried)
+        if moved is None:
+            break
+        intent = moved
+        step, output = commit_intent(intent, python, runner)
+    return intent, step, output
+
+
 def ship_one(
     intent: Intent,
     python: str,
@@ -339,7 +384,7 @@ def ship_one(
     if settled := _settled(intent, status.stdout or ""):
         return settled
     if (status.stdout or "").strip():
-        step, output = commit_intent(intent, python, runner)
+        intent, step, output = _commit_carrying(intent, python, runner)
         if step:
             after = runner(["git", "status", "--porcelain"], cwd=tree).stdout or ""
             record = {"stage": REFUSED, "step": step, "output": output, "when": when}

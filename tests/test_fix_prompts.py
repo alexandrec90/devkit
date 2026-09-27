@@ -300,6 +300,22 @@ def test_the_upstream_prompt_sends_the_session_at_the_ledger_only_when_the_backl
     assert "resolve-like" not in without
 
 
+def test_the_upstream_prompt_names_the_triage_log_at_the_path_it_is_placed():
+    """ "in that directory's harness-triage.log" read as `logs/gate/`, which holds one
+    directory per failure: both ledger sessions of the second supervised run opened the
+    wrong path first. The log is placed under the failure's own evidence slot."""
+    backlog = red_main(
+        kind=fix_plan.LEDGER,
+        workflow="harness ledger",
+        signature=("agent-report devkit [a] x2",),
+        # Built, not spelled: a `C:\` literal is one file name on the Linux gate.
+        evidence=str(Path("ws") / ".worktrees" / "gate" / "devkit-ledger-main"),
+    )
+    text = fix_prompts.upstream_prompt((backlog, failure()), "agent/fix")
+    assert "logs/gate/devkit-ledger-main/harness-triage.log" in text
+    assert "that directory" not in text
+
+
 def test_the_upstream_prompt_reads_each_failure_with_what_its_gate_said():
     """devkit's own red main beside a consumer's shared vendored failure: one session,
     and each named the way the record names it, with its own reason."""
@@ -339,6 +355,9 @@ def test_the_resolver_checks_every_file_for_a_conflict_marker():
 def test_every_prompt_names_the_ratchets_and_forbids_a_question():
     for text in every_prompt():
         assert "structure_check.py" in text and "untested_symbols.py" in text
+        # A resolver took main's wording in a rule, ran the two ratchets it was named,
+        # and left #398 13 tokens over the hot-tier ceiling: a third session to fix it.
+        assert "python scripts/hot-budget.py" in text
         assert "never ask a question" in text
         # A fixer ended on a question whose "(Recommended)" option was the answer.
         assert "the option you would recommend is the decision" in text
