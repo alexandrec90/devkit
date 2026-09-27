@@ -64,6 +64,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -374,6 +375,75 @@ def manifest_python(here: Path) -> tuple[str, str]:
         return "", ""
 
 
+# --- the sibling a path source names ------------------------------------------
+
+PYPROJECT = "pyproject.toml"
+
+
+def path_sources(here: Path) -> list[str]:
+    """The `[tool.uv.sources]` paths that climb out of the tree, as written.
+
+    ibkr_trader's `data-lake = { path = "../data-lake" }` is the case: right from the
+    checkout, where it names the sibling repo, and wrong from every worktree, where it
+    names `.claude/worktrees/data-lake` -- so `uv sync` and every `uv run` fail there
+    with `Distribution not found`. A source may be one table or a list of them (per
+    marker); anything unreadable is no source, never an error inside `worktree add`.
+    """
+    try:
+        data = tomllib.loads((here / PYPROJECT).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    sources = data.get("tool", {}).get("uv", {}).get("sources", {})
+    if not isinstance(sources, dict):
+        return []
+    found: list[str] = []
+    for spec in sources.values():
+        for entry in spec if isinstance(spec, list) else [spec]:
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if isinstance(path, str) and path.replace("\\", "/").startswith("../"):
+                found.append(path)
+    return found
+
+
+def link_path_sources(
+    here: Path,
+    checkout: Path,
+    runner=subprocess.run,
+    environ: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Cut each missing sibling as a detached worktree of the repo the checkout sees there.
+
+    At that repo's `origin/HEAD`, never at its checkout's working state: ibkr's CLAUDE.md
+    records that building against the static data-lake checkout re-resolves `uv.lock`
+    and smuggles its specifier bumps into whatever branch is open. One tree serves every
+    worktree of the tier, since they all resolve the same `..`; a task that edits the
+    sibling cuts its own branch there. The nested `worktree add` skips its own
+    provisioning -- the sibling is built from source by this tree's sync, not its own.
+    One line per sibling cut or refused; nothing for a sibling already there.
+    """
+    env = dict(os.environ if environ is None else environ)
+    env[SKIP_PROVISION_VAR] = "1"
+    lines: list[str] = []
+    for relative in path_sources(here):
+        target = Path(os.path.normpath(here / relative))
+        source = Path(os.path.normpath(checkout / relative))
+        if target.exists() or not (source / ".git").exists():
+            continue
+        ref = _git(source, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") or "HEAD"
+        argv = ["git", "-C", str(source), "worktree", "add", "--detach", str(target), ref]
+        try:
+            done = runner(argv, capture_output=True, text=True, env=env, timeout=60, check=False)
+            failed = done.returncode != 0
+            detail = " | ".join((done.stderr or "").strip().splitlines()[-2:])
+        except (OSError, subprocess.SubprocessError) as exc:
+            failed, detail = True, str(exc)
+        if failed:
+            lines.append(f"devkit: could not cut {target} from {source} ({detail})")
+        else:
+            lines.append(f"devkit: {relative} is {target}, a detached {source.name} at {ref}")
+    return lines
+
+
 def provision(
     here: Path,
     checkout: Path,
@@ -496,6 +566,8 @@ def _set_up(here: Path, runner, environ: Mapping[str, str] | None) -> int:
         return 0
     for line in (
         name_compose_project(here, checkout),
+        # Before the sync, which cannot resolve a path source that is not there yet.
+        *link_path_sources(here, checkout, runner=runner, environ=environ),
         provision(here, checkout, runner=runner, environ=environ),
     ):
         if line:

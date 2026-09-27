@@ -148,3 +148,18 @@ def test_file_adds_to_a_journal_and_is_a_no_op_without_one(tmp_path):
         fix_findings.Finding("merge-failed", "carameli", "#5: conflict", evidence="u")
     ]
     fix_findings.file(None, "merge-failed", "carameli", "#5: conflict")
+
+
+def test_a_finding_that_names_a_branch_is_filed_settled_against_it(tmp_path):
+    """4806bd8d: a complaint the corrected session fixed on its own branch is resolved
+    pending that branch's merge; `fix_verify` reopens it if the branch never lands."""
+    complaint = finding(kind="user-frustration", detail="why did you", settles_with="agent/y-0926")
+    written = fix_findings.record_all([complaint, finding()], [], tmp_path)
+    assert written == [complaint, finding()]
+    items = triage.load(tmp_path)
+    [still_open] = triage.open_items(items)
+    assert still_open.detail == "push-failed: agent/x: rejected"
+    [settled] = [i for i in items if i.event == triage.RESOLVED_EVENT]
+    assert settled.fields["pr"] == "agent/y-0926"
+    assert "went on to ship agent/y-0926" in settled.fields["note"]
+    assert "settles_with" not in dict(complaint.fields()), "not a ledger field"

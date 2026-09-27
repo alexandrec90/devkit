@@ -266,3 +266,12 @@ def test_the_runner_lints_no_workflow_and_names_who_does():
     source = (REPO_ROOT / "scripts" / "lint-all.py").read_text(encoding="utf-8")
     assert "workflow_files" not in source
     assert ".pre-commit-config.yaml" in source
+
+
+@pytest.mark.parametrize("config", ["pyproject.toml", "templates/core/pyproject.toml.tmpl"])
+def test_mypys_unchecked_body_note_is_off_so_the_artifact_opens_on_the_error(config):
+    """fc2ecb0e: a mypy-only red's `logs/lint-errors.log` opened with 162
+    `annotation-unchecked` notes, 28 KB, before the one error a fixer had to read."""
+    text = (REPO_ROOT / config).read_text(encoding="utf-8")
+    mypy = text.split("[tool.mypy]", 1)[1].split("\n[", 1)[0]
+    assert 'disable_error_code = ["annotation-unchecked"]' in mypy

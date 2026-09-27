@@ -63,6 +63,10 @@ python_version = "3.12"
 mypy_path = ["scripts", "scripts/hooks", "scripts/precommit"]
 warn_unused_ignores = true
 warn_redundant_casts = true
+# The one note mypy prints for every untyped function it skipped, on a clean run too:
+# 162 of them, 28 KB, opened `logs/lint-errors.log` ahead of the error that failed it.
+# It says nothing a finding needs; `check_untyped_defs` is the setting, not the note.
+disable_error_code = ["annotation-unchecked"]
 # NB: no `exclude` for `scripts/hooks/`. Every generated project excludes the vendored
 # harness because `sync-devkit.py --check` forbids it from editing those files, so
 # reporting type errors there would hand its agent findings it cannot act on. devkit is
