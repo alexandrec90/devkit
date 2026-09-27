@@ -817,6 +817,31 @@ def test_the_same_job_failing_nightly_stays_one_open_defect():
     assert len({item.signature for item in items}) == 1
 
 
+def test_a_job_failing_for_a_new_cause_is_a_new_group_not_a_recurrence():
+    """950c4a96: keyed on the task alone, a job's new failure read `RECURRED` and quoted
+    an unrelated earlier fix as what not to repeat, which sent the session the wrong way.
+    The `cause` `log-wrap.py` records splits causes; the same cause stays one group."""
+    log_wrap = load_script("scripts/log-wrap.py")
+    message = "unattended task 'Scheduled: Devkit Release' failed"
+    stamps = [f"2026-09-2{day}T06:00:00+00:00" for day in range(4)]
+    old = _line(
+        log_wrap.FAILED_EVENT, stamp=stamps[0], message=message, cause="RuntimeError: diverged"
+    )
+    fixed = _line(
+        "triage-resolved", stamp=stamps[1], ref=triage.item_id(old), note="pull_to_fixpoint"
+    )
+    new = _line(log_wrap.FAILED_EVENT, stamp=stamps[2], message=message, cause="KeyError: 'tag'")
+    again = _line(log_wrap.FAILED_EVENT, stamp=stamps[3], message=message, cause="KeyError: 'tag'")
+    history = triage.read_items("\n".join((old, fixed, new, again)))
+
+    open_now = triage.open_items(history)
+    assert len(open_now) == 2 and len({i.signature for i in open_now}) == 1
+    assert triage.item_id(old) not in {i.id for i in open_now}
+    rendered = triage.render(open_now, history)
+    assert "RECURRED" not in rendered
+    assert "cause  KeyError: 'tag'" in rendered
+
+
 # --- a resolution that did not hold -------------------------------------------------------
 
 

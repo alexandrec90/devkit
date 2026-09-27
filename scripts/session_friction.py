@@ -74,6 +74,12 @@ RESULT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # backslash on the way in, three times in the first supervised run.
     ("patch-failed", re.compile(r'File "<stdin>", line \d+[\s\S]{0,600}?AssertionError')),
 )
+# Claude Code's own refusal of a foreground `sleep`, which names the right wait in the
+# same message. Absent from `blocked-call` for the isolation guard's reason, and it
+# retracts its call's `poll` too: a refused sleep waited for nothing, so the one refusal
+# was filed as two groups neither of which devkit could fix (9854b541, 363d8be7).
+SLEEP_GUARD = re.compile(r"<tool_use_error>Blocked: sleep \d+ followed by")
+WAIT_TOOLS = frozenset({"Monitor"})
 
 # An odd count of any of these before a match on its line means the match is quoted.
 QUOTE_MARKS = ("'", '"', "`")
@@ -84,8 +90,9 @@ ESCAPED = re.compile(r"\\.")
 ASSERTION = re.compile(r"\bassert\b|AssertionError")
 
 # Commands that are friction whatever they return.
+NO_VERIFY = re.compile(r"\bgit\b[^\n]*--no-verify")
 COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("no-verify", re.compile(r"\bgit\b[^\n]*--no-verify")),
+    ("no-verify", NO_VERIFY),
     # In command position, so a heredoc's text is not a poll; and not `gh pr checks
     # --watch`, which `.claude/rules/engineering.md` prescribes as the one blocking wait.
     # Nor one settle right before that same `--watch`, which returns at once when a push
@@ -135,6 +142,13 @@ HEREDOC_BODY = re.compile(
 # measurement of what the Bash tool does to one, not a file the work depends on
 # (ccde706b, the probe that established the doubled-backslash rule above).
 BYTE_DUMP = re.compile(r"(?:^|[;&|]\s*)(?:od|xxd|hexdump|Format-Hex)\b", re.M)
+# A directory that is a scratch repository: a `tmp*` or `temp` segment, or the shell's
+# temp variable. A `--no-verify` there commits a fixture that nothing gates (7ce3ea59, a
+# release repro under the job's `tmp/`); `templates/` is not one.
+SCRATCH_DIR = re.compile(
+    r"(?:^|[\\/])(?:tmp\w*|temp)(?:[\\/]|$)|\$(?:env:)?\{?(?:TMP|TEMP|TMPDIR)\b", re.I
+)
+GIT_C = re.compile(r"\bgit\s(?:[^\n]*?\s)?-C\s+(\S+)")
 
 # A command reading back text the harness wrote, which quotes the very patterns above:
 # the triage log, the ledger, a transcript, a friction file. Its output is never friction.
@@ -270,9 +284,25 @@ def damageable_heredoc(command: str) -> bool:
     return any("\\\\" in found.group("body") for found in HEREDOC_BODY.finditer(command))
 
 
+def scratch_only(command: str) -> bool:
+    """Every `--no-verify` git statement in `command` runs in a scratch repository: after
+    a `cd` into one, or with `git -C` naming one."""
+    where, verdicts = "", []
+    for part in STATEMENT.split(command):
+        words = [word.strip("'\"") for word in part.split()]
+        if words and words[0] in ("cd", "pushd"):
+            where = words[1] if len(words) > 1 else ""
+        elif NO_VERIFY.search(part):
+            target = GIT_C.search(part)
+            verdicts.append(bool(SCRATCH_DIR.search(target[1].strip("'\"") if target else where)))
+    return bool(verdicts) and all(verdicts)
+
+
 def _command_classes(command: str) -> Iterator[tuple[str, str]]:
     for cls, pattern in COMMAND_PATTERNS:
         if cls == "heredoc-write" and not damageable_heredoc(command):
+            continue
+        if cls == "no-verify" and scratch_only(command):
             continue
         if pattern.search(command):
             yield cls, COMMAND_DETAIL[cls]
@@ -346,6 +376,13 @@ class _Session:
             self.found.setdefault((cls, what), event)
             self.at.setdefault(event.line, set()).add(cls)
 
+    def retract(self, cls: str, what: str, call_id: str) -> None:
+        """Drop `(cls, what)` when the call `call_id` is the event it was noted for."""
+        noted = self.found.get((cls, what))
+        if noted is not None and noted.call_id == call_id:
+            del self.found[(cls, what)]
+            self.at.get(noted.line, set()).discard(cls)
+
     def user(self, event: Event) -> None:
         if self.spoken == 0:
             self.dispatched = DISPATCHED in event.text
@@ -357,7 +394,9 @@ class _Session:
         if event.tool != "AskUserQuestion":
             self.last_said = None  # it went on working: that text was not how it ended
         for cls, what in _command_classes(event.command):
-            self.note(cls, what, event)
+            # A `Monitor` until-loop is the wait Claude Code's `SLEEP_GUARD` prescribes.
+            if not (cls == "poll" and event.tool in WAIT_TOOLS):
+                self.note(cls, what, event)
         if event.tool == "AskUserQuestion" and self.dispatched:
             self.note(
                 "asked-user", "a dispatched session asked a question nobody would answer", event
@@ -399,6 +438,9 @@ class _Session:
         """A failed call only: a file that merely quotes an error is not one."""
         command = self.calls.get(event.call_id, "")
         event = replace(event, command=command)
+        if SLEEP_GUARD.search(event.text):
+            self.retract("poll", COMMAND_DETAIL["poll"], event.call_id)
+            return
         if not READS_HARNESS_TEXT.search(command):
             cls, what = _result_class(event.text)
             if cls == "environment":
