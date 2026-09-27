@@ -42,6 +42,12 @@ provisions this project and its uv cache is warm. A cold checkout gets nothing a
 `ship.py --preflight` still names the command; `DEVKIT_SKIP_WORKTREE_PROVISION=1`
 skips the step for a `git worktree add` that wants a bare tree.
 
+**`post-checkout` alone never reached `claude --worktree`.** It cuts with
+`--no-checkout` and fills the tree with `git reset --hard`, and git skips `post-checkout`
+for a no-checkout add. So the same set-up also answers `post-index-change`
+(`index_change_main`), gated on a working-tree update in a tree with no `.venv` yet.
+
+
 Every decision here is a pure function; `main` is the only part that touches git or the
 disk. Tested in `tests/test_worktree_env.py`.
 """
@@ -375,6 +381,22 @@ def provision(
     return f"devkit: {VENV_DIR} provisioned by `{spelled}` in {elapsed:.0f}s (this worktree's own)"
 
 
+def is_unprovisioned_tree_update(args: list[str], here: Path) -> bool:
+    """Whether this `post-index-change` call is a tree update in a tree with no `.venv`.
+
+    `claude --worktree` cuts its tree with `git worktree add --no-checkout` and fills it
+    with `git reset --hard`, and git runs `post-checkout` after a `worktree add` *unless*
+    `--no-checkout` was given -- so the hook above never saw a single Claude worktree.
+    The reset does fire `post-index-change`, with `1` as its first argument because it
+    updated the working tree; `git add` and every other index-only write pass `0`.
+
+    Nothing here says the tree is new, so the tree's own missing `.venv` stands in: it is
+    one `stat`, taken before any git spawn, so the hook costs nothing in a provisioned
+    tree and runs `provision` at most until one exists.
+    """
+    return bool(args) and args[0].strip() == BRANCH_CHECKOUT and not (here / VENV_DIR).is_dir()
+
+
 def main(
     argv: list[str] | None = None,
     root: Path | None = None,
@@ -386,7 +408,27 @@ def main(
     args = sys.argv[1:] if argv is None else argv
     if len(args) < 3 or not is_fresh_checkout(args[0], args[2]):
         return 0
+    return _set_up(Path.cwd() if root is None else root, runner, environ)
+
+
+def index_change_main(
+    argv: list[str] | None = None,
+    root: Path | None = None,
+    runner=subprocess.run,
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """The `post-index-change` hook: the same set-up, for a tree cut `--no-checkout`.
+
+    Always exits 0: git ignores this hook's status too.
+    """
+    args = sys.argv[1:] if argv is None else argv
     here = Path.cwd() if root is None else root
+    if not is_unprovisioned_tree_update(args, here):
+        return 0
+    return _set_up(here, runner, environ)
+
+
+def _set_up(here: Path, runner, environ: Mapping[str, str] | None) -> int:
     checkout = checkout_of(here)
     if checkout is None:
         return 0

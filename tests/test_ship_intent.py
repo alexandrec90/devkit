@@ -253,6 +253,49 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
     assert state["intent"] == one.digest and state["sha"] == "abc123"
 
 
+def capture_plans(monkeypatch) -> list:
+    """Every PR plan `ship_one` hands `sweep.ensure_pr`, in order."""
+    plans = []
+
+    def ensure_pr(gh, plan):
+        plans.append(plan)
+        return "u", True, ""
+
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", ensure_pr)
+    return plans
+
+
+def shipped_labels(tmp_path, monkeypatch, marked: bool, stamps: int) -> tuple[str, ...]:
+    """The labels `ship_one` asks for from a tree the pass did or did not cut, after
+    `stamps` dispatches were recorded in it."""
+    one = intent(tmp_path)
+    if marked:
+        (one.tree / ship_intent.fix_reports.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
+    for n in range(stamps):
+        ship_intent.fix_reports.stamp(one.tree, f"k{n}", "what", NOW)
+    plans = capture_plans(monkeypatch)
+    assert ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW).stage == "shipped"
+    return plans[0].pr_labels
+
+
+def test_a_pr_from_a_branch_the_pass_cut_for_a_fixer_is_labelled_automerge(tmp_path, monkeypatch):
+    """The pass decided on that work itself, so its green gate is the whole review."""
+    assert shipped_labels(tmp_path, monkeypatch, True, 1) == (ship_intent.sweep.AUTOMERGE_LABEL,)
+
+
+def test_a_fixer_sent_back_at_its_own_branch_keeps_the_label(tmp_path, monkeypatch):
+    """A fixer's PR that went red, or whose commit was refused, is re-stamped; it is
+    still the pass's own."""
+    assert shipped_labels(tmp_path, monkeypatch, True, 2) == (ship_intent.sweep.AUTOMERGE_LABEL,)
+
+
+def test_a_fixer_sent_at_a_feature_sessions_branch_leaves_it_unlabelled(tmp_path, monkeypatch):
+    """Fixing the gate on a feature PR does not make the feature routine: the person
+    who asked for it still merges it, however many dispatches were stamped there."""
+    assert shipped_labels(tmp_path / "once", monkeypatch, False, 1) == ()
+    assert shipped_labels(tmp_path / "twice", monkeypatch, False, 2) == ()
+
+
 def test_the_commit_half_names_the_step_that_refused(tmp_path):
     one = intent(tmp_path)
     assert ship_intent.commit_intent(one, "py", Runner()) == ("", "")
@@ -555,11 +598,9 @@ def test_a_pr_from_a_tree_the_pass_cut_merges_itself_and_a_persons_waits(tmp_pat
     """Fixer PRs merge once green; only a person's PR waits for a person. The mark is the
     tree's origin, not the dispatch stamp: a fixer sent to repair a person's PR stamps
     that person's tree, and `ensure_pr` labels a reused PR too."""
-    plans = []
-    monkeypatch.setattr(
-        ship_intent.sweep, "ensure_pr", lambda gh, plan: plans.append(plan) or ("u", True, "")
-    )
+    plans = capture_plans(monkeypatch)
     fixer = intent(tmp_path / "fixer")
+
     (fixer.tree / ship_intent.fix_reports.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
     ship_intent.ship_one(fixer, "py", "main", Runner(), gh_ok, NOW)
     person = intent(tmp_path / "person")
