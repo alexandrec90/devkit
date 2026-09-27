@@ -23,6 +23,8 @@ which survives this file crashing). Two rules hold it together:
    all of it and project fixers are held, out loud. Only one at a time.
 6. **Then projects**, conflicts first, each under `fix_budget.budget`: the ledger, the
    escalation ladder.
+7. **Installers current** (`installers.py maintain`), on a dispatching pass, so a
+   merged change to what a job registers is live within a pass, not a day.
 
 Every pass appends a line to `logs/fix-pass.history.jsonl`, which `fix_stall` reads.
 `"devkit.fixPass"` in the workspace file is `off` (the default), `plan` (write it all,
@@ -52,6 +54,7 @@ import fix_release
 import fix_red
 import fix_send
 import gate_evidence
+import installers
 import ship_intent
 import worktree
 from _loader import load_by_path
@@ -173,6 +176,29 @@ def ship_intents(
     return lines, refused, failed
 
 
+def refresh_installers(workspace: Path, journal: Journal | None = None) -> int:
+    """`installers.py maintain`, in-process: every installer's `--check`, `--yes` where
+    stale. Its exit code; a failed installer is filed, with that job's artifact.
+
+    That job fires once a day, and a change to what an installer registers is live only
+    once it has: #404 moved the scheduled pass behind its watchdog, and the task kept
+    running the pass bare, with nothing to catch its crashes, until the next morning's
+    fire (990856e5). The pass is what merges such a change and fires every half hour,
+    so a dispatching one applies it. After the send, so a re-registration of the pass's
+    own task cannot come between a decision and its dispatch.
+    """
+    code = installers.main(["maintain", "--workspace", str(workspace)])
+    if code == 2:
+        fix_loop.fix_findings.file(
+            journal,
+            "installer-failed",
+            fix_cycle.DEVKIT,
+            "installer-failed: an installer's --check or --yes failed under the fix pass",
+            str(installers.sweep.source_checkout(REPO_ROOT) / installers.ARTIFACT),
+        )
+    return code
+
+
 def _ship_and_merge(
     root: Path, projects: list[str], mode: str, journal: Journal
 ) -> tuple[list[str], list[fix_plan.Failure], bool, list[str]]:
@@ -272,6 +298,8 @@ def run(
     sent, capped, worst = step(
         "send", send_all, go, ctx, launch, journal, closed, items, default=([], [], EXIT_FAILED)
     )
+    if dispatching:
+        step("installers", refresh_installers, workspace, journal, default=2)
     filed += fix_loop.record(ctx, journal)
     failed_steps = ship_failed or bool(journal.crashed)
     account = fix_cycle.Account(
@@ -291,11 +319,19 @@ def run(
         fix_loop.backlog(ctx),
         tuple(closed.stopped),
     )
+    publish(account, now)
+    return fix_send.EXIT_STALE if moved else max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
+
+
+def publish(account: fix_cycle.Account, now: _dt.datetime, root: Path | None = None) -> Path:
+    """The pass's account rendered, printed, written as the record and added to the
+    history; the record's path."""
     text = fix_cycle.render(account)
     print(text)
-    print(f"fix-pass: record at {write_artifact(text)}")
-    append_history(account, now)
-    return fix_send.EXIT_STALE if moved else max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
+    path = write_artifact(text, root)
+    print(f"fix-pass: record at {path}")
+    append_history(account, now, root)
+    return path
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -63,6 +63,13 @@ OUTCOME_FILES = (
 # How much of a report reaches the record: one line's worth, not the essay.
 REASON_LIMIT = 400
 
+# The refusals of Claude Code's `claude --worktree` isolation guard, in its own words.
+CLAUDE_CODE_GUARD = re.compile(
+    r"too complex to verify|stays? inside the worktree|cannot be shown not to be git|"
+    r"isolated in the worktree|worktree isolation guard",
+    re.I,
+)
+
 # A dispatched session with no transcript this long after its stamp never started; one
 # whose transcript has been quiet this long, with nothing left behind, has ended. Both
 # well past a permission prompt a person might still answer in a tab.
@@ -223,16 +230,37 @@ class Tree:
     friction: tuple[str, ...]
 
 
-def friction_lines(tree: Path) -> tuple[str, ...]:
-    """The tree's `logs/friction.md`, one entry per line: headings and blanks dropped,
-    list markers stripped."""
+def _entries(path: Path) -> tuple[str, ...]:
+    """A friction file's entries, one per line: headings and blanks dropped, list
+    markers stripped; empty when there is no file."""
     try:
-        text = (tree / FRICTION_FILE).read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ()
     kept = (line.strip() for line in text.splitlines())
     lines = (line.lstrip("-*0123456789. ").strip() for line in kept if not line.startswith("#"))
     return tuple(line[:REASON_LIMIT] for line in lines if line)
+
+
+def friction_lines(tree: Path) -> tuple[str, ...]:
+    """The tree's `logs/friction.md` entries this tree has not already had filed, less
+    any about Claude Code's own worktree guard.
+
+    A session writes the file whole, and once the pass has filed it away the next write
+    carries the old lines again: a174d816's line was filed twice from one tree, and the
+    second filing reopened a group already retired with its fix as a recurrence.
+
+    The guard is not devkit's (`.claude/rules/engineering.md` says so, and carries the
+    spellings that pass it), which is why `session_friction` never files its refusals
+    from a transcript. Written into a friction file, one still became a group a sweep
+    could retire only with that same note (ced1c085).
+    """
+    seen = set(_entries(tree / filed(FRICTION_FILE)))
+    return tuple(
+        line
+        for line in _entries(tree / FRICTION_FILE)
+        if line not in seen and not CLAUDE_CODE_GUARD.search(line)
+    )
 
 
 def read_trees(root: Path, projects: list[str], git_for: GitFor = sweep.git_for) -> list[Tree]:

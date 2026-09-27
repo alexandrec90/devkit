@@ -172,13 +172,13 @@ def test_a_file_written_through_a_shell_heredoc_is_friction():
     because only the sessions that noticed reported it. Every write that can be damaged
     is filed now, whether anyone noticed or not."""
     for command in (
-        "cat > tests/test_x.py <<'EOF'\nassert r'\\b'\nEOF",
+        "cat > tests/test_x.py <<'EOF'\nassert '\\\\b'\nEOF",
         'cat >> t.py <<"EOF"\nx = "a\\\\b"\nEOF',
-        "tee scripts/a.py <<EOF\nprint('\\n')\nEOF",
+        "tee scripts/a.py <<EOF\nprint('\\\\n')\nEOF",
         "python - <<'EOF'\nfrom pathlib import Path\np = Path('a.py')\n"
         "p.write_text(p.read_text().replace('\\\\d', 'b'))\nEOF",
-        "python3 - <<'PY'\nopen('x.txt', 'w').write('y\\n')\nPY",
-        "cat > x.py <<'EOF'\nr'\\s'",  # unterminated: the body runs to the end
+        "python3 - <<'PY'\nopen('x.txt', 'w').write('y\\\\\\n')\nPY",
+        "cat > x.py <<'EOF'\n'\\\\s'",  # unterminated: the body runs to the end
     ):
         assert classes([call(command, "1")]) == ["heredoc-write"], command
     for harmless in (
@@ -205,8 +205,29 @@ def test_a_heredoc_with_no_backslash_in_its_body_is_not_friction():
     )
     assert classes([call(b935e421, "1")]) == []
     assert not sf.damageable_heredoc(b935e421)
-    assert sf.damageable_heredoc("cat <<-EOF > a.py\n\tx = '\\t'\n\tEOF")
-    assert not sf.damageable_heredoc("echo 'a\\b' > x.txt")  # no heredoc at all
+    assert sf.damageable_heredoc("cat <<-EOF > a.py\n\tx = '\\\\t'\n\tEOF")
+    assert not sf.damageable_heredoc("echo 'a\\\\b' > x.txt")  # no heredoc at all
+
+
+def test_a_heredoc_with_only_single_backslashes_is_not_friction():
+    """46a1578d recurred on a `cat >` whose body's only backslashes were the `\\n` in
+    f-strings. The Bash tool collapses a doubled backslash and nothing else: written
+    through it, `a\\nb`, `r'\\s'`, `\\'`, `\\$` and a trailing `\\` all came out byte for
+    byte, while `a\\\\b` came out `a\\b` and three in a row came out two."""
+    a46a1578d = (
+        "cd \"C:/Users/alexa/scratchpad\" && cat > dump.py <<'EOF'\n"
+        "import json,sys\n"
+        "for i,l in enumerate(lines,1):\n"
+        '    if isinstance(c,str): print(f"=== L{i} STR\\n{c[:6000]}"); continue\n'
+        "EOF\n"
+        'python dump.py "C:/x.jsonl" 6,30 > b.txt; wc -c b.txt'
+    )
+    assert classes([call(a46a1578d, "1")]) == []
+    assert not sf.damageable_heredoc(a46a1578d)
+    for single in ("r'\\s'", "'\\t'", "\\'x\\'", "\\$HOME", "end\\"):
+        assert not sf.damageable_heredoc(f"cat > a.py <<'EOF'\n{single}\nEOF"), single
+    for doubled in ("a\\\\b", "a\\\\\\b", "'\\\\\\\\'"):
+        assert sf.damageable_heredoc(f"cat > a.py <<'EOF'\n{doubled}\nEOF"), doubled
 
 
 def test_the_full_suite_is_friction_and_a_targeted_run_is_not():
