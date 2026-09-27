@@ -52,14 +52,18 @@ def finished_in(rows: Iterable[dict], trees: Iterable[str]) -> list[dict]:
     ]
 
 
-def working(rows: Iterable[dict]) -> frozenset[str]:
-    """The directories some session -- background or interactive -- is busy in right now.
+def working(rows: Iterable[dict], kinds: tuple[str, ...] = ()) -> frozenset[str]:
+    """The directories a session of `kinds` (empty: any) is busy in right now.
 
     What a transcript's age cannot say: a fixer that left its intent reads as finished,
     and one kept editing after it. The pass sent #422's resolver into that tree while
     its own sweep was still mid-merge there, and the two raced one checkout (d821bd8f).
     """
-    return frozenset(_key(str(row.get("cwd", ""))) for row in rows if row.get("status") == "busy")
+    return frozenset(
+        _key(str(row.get("cwd", "")))
+        for row in rows
+        if row.get("status") == "busy" and (not kinds or row.get("kind") in kinds)
+    )
 
 
 def busy_in(dirs: frozenset[str], tree: object) -> bool:

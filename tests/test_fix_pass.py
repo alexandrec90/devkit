@@ -29,12 +29,43 @@ MISSING_TOOLS = fix_pass.missing_tools  # the real preflight, before `tools_on_p
 
 NOW = _dt.datetime(2026, 9, 19, 9, 0, tzinfo=_dt.UTC)
 VENDORED = ("scripts/hooks/tests/test_untested_symbols.py::t",)
+# Kept before `no_session_busy` stubs it, for the one test that drives it.
+FIXERS_WORKING = fix_pass.fix_loop.fixers_working
 
 
 @pytest.fixture(autouse=True)
 def tools_on_path(monkeypatch):
     """Every CLI the preflight asks for is present unless a test says otherwise."""
     monkeypatch.setattr(fix_pass, "missing_tools", lambda: [])
+
+
+@pytest.fixture(autouse=True)
+def no_session_busy(monkeypatch):
+    """No session on this machine is working in a tree unless a test says one is."""
+    monkeypatch.setattr(fix_pass.fix_loop, "fixers_working", frozenset)
+
+
+def test_an_intent_whose_fixer_is_still_busy_waits_for_it(monkeypatch, tmp_path):
+    """The pass shipped 0926-19's intent at 04:09 while that session was still fixing a
+    group filed after it wrote the intent, and #422's while its sweep kept editing --
+    whose later edits the resolver then found unstaged."""
+    busy = tmp_path / "busy"
+    trees = [ship_intent.Intent("devkit", busy, "agent/b", "S", "B")]
+    trees.append(ship_intent.Intent("devkit", tmp_path / "idle", "agent/i", "S", "B"))
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: trees)
+    shipped = []
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda i, p, b: shipped.append(i.branch) or ship_intent.Outcome(i, "shipped", "u"),
+    )
+    listed = [{"kind": "background", "status": "busy", "cwd": str(busy)}]
+    listed.append({"kind": "interactive", "status": "busy", "cwd": str(tmp_path / "idle")})
+    monkeypatch.setattr(fix_pass.fix_loop.bg_sessions, "listed", lambda runner: listed)
+    monkeypatch.setattr(fix_pass.fix_loop, "fixers_working", FIXERS_WORKING)
+    lines, _, _ = fix_pass.ship_intents(tmp_path, ["devkit"], fix_cycle.DISPATCH)
+    assert shipped == ["agent/i"], "an interactive supervisor's own tree still ships"
+    assert lines[0] == "devkit agent/b -- held: its session is still working in the tree"
 
 
 def failure(**fields) -> fix_plan.Failure:
