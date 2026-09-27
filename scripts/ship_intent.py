@@ -44,6 +44,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -305,6 +306,35 @@ def is_spent(intent: Intent, runner: Runner = run_quiet) -> bool:
     return already_shipped(intent, read_state(intent.tree), status.stdout or "")
 
 
+# What git prints when another process holds one of its lock files: `index.lock` for an
+# add, `HEAD.lock` or a ref's lock for a commit.
+LOCK_HELD = re.compile(r"Unable to create '[^']*\.lock': File exists")
+# Seconds between tries of a git step that met a held lock. Anything that looks at the
+# tree takes `index.lock` for a moment -- an editor's git view, a session's own `git
+# status` -- so the pass's `git add` lost that race once and filed "add refused" over a
+# lock that was gone before the fixer sent at it opened (devkit, 0927-17).
+LOCK_WAITS = (1, 2, 4, 8)
+
+
+def _wait(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def run_git(argv: list[str], tree: Path, runner: Runner) -> subprocess.CompletedProcess[str]:
+    """`runner(argv)`, tried again after each of `LOCK_WAITS` while git says a lock is held.
+
+    A lock still held after the last wait is left to refuse: a stale one needs a person or
+    a fixer to decide it is stale, and fifteen seconds is well past any git call's hold.
+    """
+    done = runner(argv, cwd=tree)
+    for seconds in LOCK_WAITS:
+        if done.returncode == 0 or not LOCK_HELD.search((done.stdout or "") + (done.stderr or "")):
+            break
+        _wait(seconds)
+        done = runner(argv, cwd=tree)
+    return done
+
+
 def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str]:
     """Add, fixers, add, commit: `("", "")` when it went through, else `(step, output)`.
 
@@ -317,7 +347,7 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
     """
     output = ""
     for _attempt in (1, 2):
-        added = runner(["git", "add", "-A"], cwd=intent.tree)
+        added = run_git(["git", "add", "-A"], intent.tree, runner)
         if added.returncode != 0:
             return "add", (added.stdout or "") + (added.stderr or "")
         fixed = runner([python, "scripts/ship.py", "--fix"], cwd=intent.tree)
@@ -326,10 +356,10 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
             break
     else:
         return "fixers", output
-    added = runner(["git", "add", "-A"], cwd=intent.tree)
+    added = run_git(["git", "add", "-A"], intent.tree, runner)
     if added.returncode != 0:
         return "add", (added.stdout or "") + (added.stderr or "")
-    committed = runner(["git", "commit", "-F", str(INTENT_FILE)], cwd=intent.tree)
+    committed = run_git(["git", "commit", "-F", str(INTENT_FILE)], intent.tree, runner)
     if committed.returncode != 0:
         return "commit", (committed.stdout or "") + (committed.stderr or "")
     return "", ""

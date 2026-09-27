@@ -158,7 +158,11 @@ def world(tmp_path, monkeypatch):
     loop = fix_pass.fix_loop
     monkeypatch.setattr(loop.fix_reports, "read_trees", lambda root, projects: list(table["trees"]))
     monkeypatch.setattr(loop.session_friction, "harvest", lambda *a, **k: list(table["friction"]))
-    monkeypatch.setattr(loop.fix_verify, "verify", lambda *a, **k: list(table["reopen"]))
+    monkeypatch.setattr(
+        loop.fix_verify,
+        "verify",
+        lambda *a, **k: loop.fix_verify.Outcome(reopen=list(table["reopen"])),
+    )
     monkeypatch.setattr(loop.bg_sessions, "stop_finished", lambda trees, runner: [])
     monkeypatch.setattr(loop, "working_dirs", frozenset)
     monkeypatch.setattr(loop.friction_pending, "detector_fixes", lambda gh, git: [])

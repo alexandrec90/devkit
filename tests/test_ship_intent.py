@@ -307,6 +307,64 @@ def test_the_commit_half_names_the_step_that_refused(tmp_path):
     assert (step, output) == ("add", "index locked")
 
 
+LOCKED = (
+    "fatal: Unable to create 'C:/src/devkit/.git/worktrees/labels/index.lock': File exists.\n\n"
+    "Another git process seems to be running in this repository, or the lock file may be stale\n"
+)
+
+
+class _LockedFor(Runner):
+    """git refusing the first `times` calls of `verb` because another process holds a lock."""
+
+    def __init__(self, verb: str, times: int):
+        super().__init__()
+        self.verb, self.left = verb, times
+
+    def __call__(self, argv, cwd, env=None):
+        done = super().__call__(argv, cwd, env)
+        if " ".join(str(a) for a in argv[:2]) == self.verb and self.left:
+            self.left -= 1
+            return subprocess.CompletedProcess(argv, 128, "", LOCKED)
+        return done
+
+
+@pytest.mark.parametrize("verb", ["git add", "git commit"])
+def test_a_lock_another_git_process_holds_for_a_moment_is_waited_out(tmp_path, monkeypatch, verb):
+    """devkit 0927-17: the pass's `git add` met an `index.lock` something else held for
+    an instant, and filed "add refused" over a lock gone before the fixer opened."""
+    waited: list[float] = []
+    monkeypatch.setattr(ship_intent, "_wait", waited.append)
+    run = _LockedFor(verb, 2)
+    assert ship_intent.commit_intent(intent(tmp_path), "py", run) == ("", "")
+    assert waited == list(ship_intent.LOCK_WAITS[:2])
+    assert run.verbs().count(verb) == (4 if verb == "git add" else 3)
+
+
+def test_a_lock_held_past_every_wait_is_still_refused_with_gits_words(tmp_path, monkeypatch):
+    waited: list[float] = []
+    monkeypatch.setattr(ship_intent, "_wait", waited.append)
+    run = _LockedFor("git add", 99)
+    assert ship_intent.commit_intent(intent(tmp_path), "py", run) == ("add", LOCKED)
+    assert waited == list(ship_intent.LOCK_WAITS)
+    assert run.verbs() == ["git add"] * (len(ship_intent.LOCK_WAITS) + 1)
+
+
+def test_run_git_answers_at_once_when_the_first_try_goes_through(tmp_path, monkeypatch):
+    waited: list[float] = []
+    monkeypatch.setattr(ship_intent, "_wait", waited.append)
+    run = Runner()
+    assert ship_intent.run_git(["git", "add", "-A"], tmp_path, run).returncode == 0
+    assert waited == [] and run.calls == [(["git", "add", "-A"], tmp_path, None)]
+
+
+def test_a_refusal_that_is_not_a_held_lock_is_not_retried(tmp_path, monkeypatch):
+    waited: list[float] = []
+    monkeypatch.setattr(ship_intent, "_wait", waited.append)
+    run = Runner({"git commit": (1, "detect secrets.....Failed", "")})
+    assert ship_intent.commit_intent(intent(tmp_path), "py", run)[0] == "commit"
+    assert waited == [] and run.verbs().count("git commit") == 1
+
+
 class _StagedOnlyScanner(Runner):
     """detect-secrets' commit hook as carameli #395 met it: it refuses to scan while the
     baseline has unstaged changes, and a scan that moves a flagged line rewrites the
