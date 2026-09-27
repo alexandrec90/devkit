@@ -11,6 +11,7 @@ import datetime as _dt
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,11 @@ def test_the_prescribed_wait_and_a_sleep_in_source_text_are_not_polls():
     assert classes([call("gh pr checks 5 --watch --fail-fast", "1")]) == []
     heredoc = 'cat >> t.py <<\'EOF\'\n    chunk = call("sleep 99", "1")\nEOF'
     assert "poll" not in classes([call(heredoc, "1")])
+    # 44a5ff19: one settle so the checks exist before that same blocking wait is a single
+    # call, not a loop -- `--watch` right after a push reports no checks and returns.
+    settle = "sleep 20; gh pr checks 411 --watch --fail-fast > logs/c.out 2>&1; tail -8 logs/c.out"
+    assert classes([call(settle, "1")]) == []
+    assert classes([call("sleep 120 && gh pr checks 5", "1")]) == ["poll"], "no --watch"
 
 
 def test_a_complaint_is_filed_whole_with_the_tree_it_was_said_in(tmp_path):
@@ -316,6 +322,48 @@ def test_the_harvest_files_each_friction_once_and_moves_the_cursor(tmp_path):
     assert more.kind == "no-verify" and more.evidence.endswith("#L3")
 
 
+def _rows(findings) -> list:
+    """Findings as the ledger rows `record_all` would write, parsed back."""
+    events = sf.fix_findings.harness_events
+    lines = [events.event_line(NOW.isoformat(), f.event, f.fields()) for f in findings]
+    return sf.fix_findings.triage.read_items("\n".join(lines))
+
+
+def test_a_row_todays_detectors_no_longer_file_is_outdated(tmp_path, monkeypatch):
+    """d677ea57: #412 fixed detectors whose rows stayed open, and a sweep spent ~13 calls
+    re-proving them. A per-event row is re-judged against its own transcript line with
+    the detectors as they are now; one they no longer file is outdated."""
+    missing = "ModuleNotFoundError: No module named 'yaml'"
+    session = transcript(
+        tmp_path / "s.jsonl",
+        [user("go"), call("sleep 300", "1"), call("python -m x", "2"), result(missing, "2")],
+        str(tmp_path / "ws" / "devkit"),
+    )
+    rows = _rows(sf.session_findings(session, st.read_new(session, 0, 0), str(tmp_path), tmp_path))
+    assert sorted(r.detail.split(":")[0] for r in rows) == ["environment", "poll"]
+    assert sf.outdated(rows) == [], "both still fire"
+    # Standing in for a detector a fix removed, as #410 removed `isolation-guard`.
+    kept = tuple(p for p in sf.RESULT_PATTERNS if p[0] != "environment")
+    monkeypatch.setattr(sf, "RESULT_PATTERNS", kept)
+    [(ref, why)] = sf.outdated(rows)
+    env = next(r for r in rows if r.detail.startswith("environment"))
+    assert ref == env.id and "no longer" in why and f"{session}#L4" in why
+
+
+def test_a_row_that_cannot_be_rejudged_is_never_called_outdated(tmp_path, monkeypatch):
+    """Retiring is the one direction that must never guess: a transcript gone, a line
+    that is no longer the event the row names (a transcript first read from its end
+    numbers from there), and a class the whole session decides all stay open."""
+    session = transcript(tmp_path / "s.jsonl", [user("go"), call("sleep 300", "1")], "c")
+    [row] = _rows(sf.session_findings(session, st.read_new(session, 0, 0), str(tmp_path), tmp_path))
+    monkeypatch.setattr(sf, "COMMAND_PATTERNS", ())
+    assert [ref for ref, _ in sf.outdated([row])] == [row.id], "the premise: it would retire"
+    moved = replace(row, fields={**row.fields, "command": "something else"})
+    gone = replace(row, fields={**row.fields, "evidence": f"{tmp_path / 'gone.jsonl'}#L2"})
+    whole = replace(row, fields={**row.fields, "detail": "repeat-failure: x3 gh"})
+    assert sf.outdated([moved, gone, whole]) == []
+
+
 def test_a_transcript_first_seen_old_is_not_read_back(tmp_path):
     """Adopting the harvest must not file a month of history in one pass."""
     old = transcript(
@@ -370,6 +418,9 @@ def test_a_shell_variable_argument_is_not_the_full_suite():
     for rest in (" -q -p no:cacheprovider $p", ' "${files[@]}"', " %TARGET%", " $env:T"):
         assert not sf.full_suite(rest), rest
     assert sf.full_suite(" -q -p no:cacheprovider")
+    # ed03763b: PowerShell's splat, `pytest -q @t` with `$t` an array of seven files.
+    assert not sf.full_suite(" -q -p no:cacheprovider @t 2")
+    assert sf.full_suite(" -q -p no:cacheprovider @"), "a bare @ names nothing"
 
 
 def test_session_findings_are_nothing_outside_the_workspace(tmp_path):

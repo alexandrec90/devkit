@@ -1229,6 +1229,35 @@ def _no_worktree(_devkit, _tag):
     yield None
 
 
+def test_the_tag_source_is_a_bare_tree_whose_cleanup_cannot_fail_the_pass(tmp_path, monkeypatch):
+    """d47965d9: the worktree hook gave the throwaway tag tree a `.venv` -- a `uv sync`
+    per adoption pass, for a tree that is only read -- and a `.pyd` in it still held
+    open made the temp directory's cleanup raise, which exited the whole pass 1 after
+    v0.11.27 was already released. The hook's own opt-out keeps the tree bare, and a
+    directory that will not delete is left in %TEMP% rather than failing every project."""
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    made: dict = {}
+    real = up.tempfile.TemporaryDirectory
+
+    def recording(**kwargs):
+        made.update(kwargs)
+        return real(dir=tmp_path, prefix=kwargs.get("prefix"))
+
+    monkeypatch.setattr(up.subprocess, "run", fake_run)
+    monkeypatch.setattr(up.tempfile, "TemporaryDirectory", recording)
+    with up.source_at_tag(tmp_path, "v0.11.27") as path:
+        assert path.name == "v0.11.27"
+    add, remove = calls
+    assert add[0][3:5] == ["worktree", "add"] and remove[0][3:5] == ["worktree", "remove"]
+    assert add[1]["env"][up.SKIP_PROVISION_VAR] == "1"
+    assert made["ignore_cleanup_errors"] is True
+
+
 # --- the pull is self-modifying ----------------------------------------------
 #
 # `scripts/sync-devkit.py` is itself a MANIFEST entry, so one pass runs the *old*

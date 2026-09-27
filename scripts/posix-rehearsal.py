@@ -193,6 +193,15 @@ def main(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
 
     cmd = command()
     print(f"posix-rehearsal: {' '.join(cmd[2:])}", flush=True)
+    # What a run killed mid-suite leaves (4c396283): a tool call cut off at its timeout
+    # exited 1 with no artifact, which read as a failure nobody could find.
+    ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+    ARTIFACT.write_text(
+        "# source: scripts/posix-rehearsal.py\n# the run did not finish: pytest was killed "
+        "before it returned -- a tool call's timeout, most likely. The whole suite takes "
+        "minutes; give the call a longer timeout, or leave it to the gate.\n",
+        encoding="utf-8",
+    )
     result = runner(
         cmd,
         cwd=REPO_ROOT,
@@ -213,7 +222,6 @@ def main(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     # explained by a node id.
     started = result.returncode in (0, PYTEST_NO_TESTS_COLLECTED) or failed_tests(raw)
 
-    ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
     if started and not unexpected and not fixed:
         ARTIFACT.write_text("", encoding="utf-8")
         print(f"posix-rehearsal: passed (artifact cleared: {_display(ARTIFACT)})")

@@ -285,6 +285,27 @@ def test_a_pass_clears_the_artifact(tmp_path, monkeypatch, capsys):
     assert "passed" in capsys.readouterr().out
 
 
+def test_a_run_killed_before_pytest_returned_still_leaves_an_artifact(tmp_path, monkeypatch):
+    """4c396283: run from the PowerShell tool the call was cut off mid-suite, and the
+    session found an exit 1, its command line and no `logs/posix-rehearsal.log` at all --
+    nothing said the run was killed rather than failed. The artifact says so from the
+    start, and a finished run overwrites it."""
+    artifact = tmp_path / "posix-rehearsal.log"
+    monkeypatch.setattr(rehearsal, "ARTIFACT", artifact)
+    seen = []
+
+    def killed(*_a, **_k):
+        seen.append(artifact.read_text(encoding="utf-8"))
+        raise KeyboardInterrupt
+
+    try:
+        rehearsal.main([], runner=killed)
+    except KeyboardInterrupt:
+        pass
+    assert "did not finish" in seen[0] and "timeout" in seen[0]
+    assert artifact.read_text(encoding="utf-8") == seen[0], "what a killed run leaves"
+
+
 def test_no_tests_collected_is_not_a_failure_of_this_runner(tmp_path, monkeypatch):
     """Same carve-out as `run-tests.py`: a collection scope that holds nothing is not a
     reason to refuse a push."""

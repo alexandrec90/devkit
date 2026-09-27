@@ -59,3 +59,34 @@ def test_a_retired_group_changes_the_key_and_an_empty_ledger_is_no_failure(monke
     assert fix_backlog.ledger_failure(devkit, tmp_path / "ev") is None
     (tmp_path / "empty").mkdir()
     assert fix_backlog.ledger_failure(tmp_path / "empty", tmp_path / "ev") is None
+
+
+def test_a_group_whose_fix_is_in_flight_is_shown_but_sends_no_session(monkeypatch, tmp_path):
+    """d677ea57: #410's isolation-guard fix sat unmerged while the detector kept filing,
+    and every new row changed the backlog's sha -- a devkit session each time, sent to
+    re-prove a group whose fix was one merge away. Such a group is listed as pending and
+    left out of the dispatch; alone, it is no failure at all."""
+    devkit = tmp_path / "devkit"
+    shard = fix_backlog.triage.ledger_file(devkit)
+    shard.parent.mkdir(parents=True)
+    row = (
+        "\tevent=session-friction\tagent=claude\thost=h\tproject=devkit\tdetail=isolation-guard: x"
+    )
+    first = "2026-09-26T21:00:00+00:00" + row
+    ref = fix_backlog.triage.item_id(first)
+    resolved = f"2026-09-26T21:10:00+00:00\tevent=triage-resolved\tref={ref}\tpr=410\tnote=n"
+    again = "2026-09-26T23:00:00+00:00" + row
+    shard.write_text("\n".join((first, resolved, again)) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        fix_backlog.tb, "detect_default_branch", lambda git, fallback="main": "main"
+    )
+    assert fix_backlog.ledger_failure(devkit, tmp_path / "ev", {ref: "410"}) is None
+    other = "2026-09-26T23:30:00+00:00\tevent=agent-report\tagent=claude\thost=h\tproject=devkit\tmessage=m"
+    with shard.open("a", encoding="utf-8") as handle:
+        handle.write(other + "\n")
+    backlog = fix_backlog.ledger_failure(devkit, tmp_path / "ev", {ref: "410"})
+    assert backlog is not None and len(backlog.signature) == 1
+    assert backlog.signature[0].startswith("agent-report devkit [")
+    log = (Path(backlog.evidence) / "harness-triage.log").read_text(encoding="utf-8")
+    assert "PENDING on 410" in log
+    assert len(fix_backlog.ledger_failure(devkit, tmp_path / "ev").signature) == 2, "landed"

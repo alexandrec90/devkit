@@ -354,6 +354,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/sync-devkit.py": "upgrade-project.py spawns it per project, once per pass",
     "scripts/policy_runtime.py": "upgrade-project.py runs its policy-reinstall rider once per pass",
     "scripts/release.py": "release-pipeline.py imports it for the version and bump helpers",
+    "scripts/worktree_env.py": "worktree.py keeps its provisioned mark; upgrade-project.py its skip var",
     # `_core` and not the package: the split left `run_command` -- and `NO_WINDOW` with
     # it -- in exactly one module, and `branch`, `framework` and `dispatch` reach git
     # only through the injected runner. Naming the one file that spawns is the point of

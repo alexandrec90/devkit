@@ -11,6 +11,7 @@ pure and are driven directly.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -271,6 +272,31 @@ def test_a_background_session_that_failed_to_start_is_a_failure(monkeypatch, tmp
 
     monkeypatch.setattr(tabs.shutil, "which", lambda _cli: "claude")
     assert tabs.launch_background(CLAUDE, tmp_path, "p", False, runner) == tabs.EXIT_FAILED
+
+
+def test_every_background_launch_leaves_what_the_launcher_was_given_and_said(monkeypatch, tmp_path):
+    """3728bf21: a session that never started left nothing but its tree, so a sweep
+    grepped transcripts to learn the launcher had swallowed the prompt. The argv -- the
+    prompt as its length, since it is the stamp's business -- and the launcher's own
+    answer are kept in the tree, whether it exited 0 or not."""
+    record = tmp_path / tabs.fix_reports.LAUNCH_FILE
+    monkeypatch.setattr(tabs.shutil, "which", lambda _cli: "claude")
+    monkeypatch.setattr(tabs.tree_provision, "provision", lambda *_a: True)
+    answers = iter([(0, "session s-1 started", ""), (1, "", "no credit")])
+
+    def runner(argv, **_kwargs):
+        code, out, err = next(answers)
+        return subprocess.CompletedProcess(argv, code, out, err)
+
+    # c47026f9: the scheduled pass runs under `pythonw.exe`, whose `sys.stdout` is None, and
+    # `sys.stdout.write` raised after the session had launched -- a crash for a success.
+    monkeypatch.setattr(tabs.sys, "stdout", None)
+    monkeypatch.setattr(tabs.sys, "stderr", None)
+    for code in (tabs.EXIT_OK, tabs.EXIT_FAILED):
+        assert tabs.launch_background(CLAUDE, tmp_path, "fix #412 now", False, runner) == code
+        kept = json.loads(record.read_text(encoding="utf-8"))
+        assert kept["argv"][:2] == ["claude", "--bg"] and kept["argv"][-1] == "<prompt: 12 chars>"
+    assert (kept["returncode"], kept["stderr"]) == (1, "no credit")
 
 
 # --- the two halves the resume task shares ------------------------------------------

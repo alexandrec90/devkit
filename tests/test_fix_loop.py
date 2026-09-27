@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -143,6 +144,18 @@ def test_a_session_that_never_started_frees_its_key_and_is_filed_once(ctx, monke
     assert close(ctx)[1].findings == [], "judged once per dispatch"
 
 
+def test_a_session_that_never_started_cites_what_its_launcher_said(ctx, monkeypatch):
+    """3728bf21: the finding filed the tree alone, so learning that the launcher -- a
+    `--disallowedTools` that swallowed the prompt -- was why took a sweep nine calls of
+    transcript grepping. The launch record is the evidence, and says it in the detail."""
+    path = tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=2))
+    done = subprocess.CompletedProcess(["claude"], 1, "", "no prompt given")
+    fix_reports.record_launch(path, ["claude", "--bg", "--", "fix it all"], done)
+    [found] = close(ctx)[1].findings
+    assert found.evidence == str(path / fix_reports.LAUNCH_FILE)
+    assert "launcher exited 1" in found.detail
+
+
 def test_a_session_gone_quiet_without_an_outcome_is_dead(ctx, monkeypatch):
     tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=5), transcript_age=_dt.timedelta(hours=3))
     _, journal = close(ctx)
@@ -207,6 +220,36 @@ def test_verify_reopens_what_did_not_land(ctx, monkeypatch):
     closed, _ = close(ctx)
     assert closed.lines == [f"reopened [{ref}] -- closed unmerged"]
     assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [ref]
+
+
+def test_a_friction_row_todays_detectors_would_not_file_is_retired(ctx, monkeypatch):
+    """d677ea57: once a detector's fix merges, its open rows retire themselves on the next
+    pass, with the reason, instead of waiting for a sweep to re-prove each one."""
+    monkeypatch.setattr(fix_loop.fix_reports, "read_trees", lambda root, projects: [])
+    row = f"{NOW.isoformat()}\tevent=session-friction\tproject=devkit\tdetail=poll: x"
+    (ctx.devkit_dir / "logs").mkdir(parents=True)
+    (ctx.devkit_dir / "logs" / "harness-events.log").write_text(row + "\n", encoding="utf-8")
+    ref = triage.item_id(row)
+    monkeypatch.setattr(fix_loop.session_friction, "outdated", lambda items: [(ref, "gone")])
+    closed, _ = close(ctx)
+    assert f"retired [{ref}] -- gone" in closed.lines
+    assert triage.open_items(triage.load(ctx.devkit_dir)) == []
+
+
+def test_a_fix_not_merged_yet_is_in_flight_off_the_cache_verify_keeps(ctx, monkeypatch):
+    """What the pass hands the backlog step, so a group waiting on a merge sends nothing."""
+    monkeypatch.setattr(fix_loop.fix_reports, "read_trees", lambda root, projects: [])
+    report = f"{NOW.isoformat()}\tevent=agent-report\tproject=devkit\tmessage=x"
+    (ctx.devkit_dir / "logs").mkdir(parents=True)
+    (ctx.devkit_dir / "logs" / "harness-events.log").write_text(report + "\n", encoding="utf-8")
+    ref = triage.item_id(report)
+    triage.resolve([ref], "fixed", pr="410", root=ctx.devkit_dir)
+    assert fix_loop.in_flight(ctx) == {ref: "410"}
+    assert close(ctx)[0].in_flight == {ref: "410"}, "read back for the backlog step"
+    cache = ctx.ledger_path.parent / fix_loop.fix_verify.CACHE_NAME
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(f'["{ref}"]', encoding="utf-8")
+    assert fix_loop.in_flight(ctx) == {}, "merged: settled in the cache"
 
 
 def test_a_step_that_raises_costs_that_step_only(ctx, monkeypatch):

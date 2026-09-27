@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -187,6 +188,31 @@ def test_a_refused_commit_gets_the_prompt_for_its_own_worktree():
     text = fix_prompts.pr_prompt(refused)
     assert "The commit stage refused the change on agent/auto/devkit-upgrade-v0-11-21-0917" in text
     assert "logs/ship-intent.refused.md" in text and "fix pass commits" in text
+
+
+def test_a_pr_prompt_quotes_a_refusal_already_standing_in_its_tree(tmp_path):
+    """d609d34d: carameli #395's real blocker was an earlier fixer's intent the commit
+    stage had refused (detect-secrets, `.secrets.baseline` unstaged), recorded in the
+    tree's `ship-state.json`, while the prompt named only the red check -- five calls to
+    find. The fixer's own work ships through that same stage, so the prompt says so."""
+    state = tmp_path / "logs" / "ship-state.json"
+    state.parent.mkdir()
+    output = "detect-secrets.......Failed\n- hook id: detect-secrets\n.secrets.baseline unstaged\n"
+    state.write_text(
+        json.dumps({"stage": "refused", "step": "commit", "output": output}), encoding="utf-8"
+    )
+    refusal = fix_prompts.standing_refusal(tmp_path)
+    assert refusal.startswith("commit: ") and "detect-secrets" in refusal
+    for red in (failure(), failure(signature=(fix_plan.CONFLICT,))):
+        text = fix_prompts.pr_prompt(red, refusal)
+        assert "refused" in text and ".secrets.baseline unstaged" in text
+    assert "ship-state" not in fix_prompts.pr_prompt(failure())
+    # A shipped state, no state, or an unreadable one: nothing to quote.
+    state.write_text(json.dumps({"stage": "shipped"}), encoding="utf-8")
+    assert fix_prompts.standing_refusal(tmp_path) == ""
+    state.write_text("{", encoding="utf-8")
+    assert fix_prompts.standing_refusal(tmp_path) == ""
+    assert fix_prompts.standing_refusal(tmp_path / "nowhere") == ""
 
 
 def test_the_upstream_prompt_names_every_id_across_the_group():

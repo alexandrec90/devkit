@@ -38,6 +38,9 @@ import agent_worktrees as aw
 import sweep
 
 STAMP_FILE = Path("logs") / "fix-dispatch.json"
+# What a background launch was given and answered (`record_launch`): the evidence of a
+# session that never started, which otherwise lived only in the pass's own output.
+LAUNCH_FILE = Path("logs") / "fix-launch.json"
 BLOCKED_FILE = Path("logs") / "fix-blocked.md"
 FRICTION_FILE = Path("logs") / "friction.md"
 # The mark of a tree the fix pass cut for a fixer, which makes its PR merge itself once
@@ -88,6 +91,7 @@ def stamp(
     path = tree / STAMP_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     (tree / BLOCKED_FILE).unlink(missing_ok=True)
+    (tree / LAUNCH_FILE).unlink(missing_ok=True)
     payload = {"key": key, "what": what, "when": when, "problem": problem, "agent": agent}
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
@@ -137,6 +141,35 @@ def file_away(tree: Path, relative: Path) -> None:
     with (tree / filed(relative)).open("a", encoding="utf-8", newline="\n") as handle:
         handle.write(source.read_text(encoding="utf-8").rstrip("\n") + "\n")
     source.unlink()
+
+
+def record_launch(tree: Path, argv: list[str], done: object) -> None:
+    """Keep what a background launch was given and what it answered, for `launch_line`.
+
+    A session that never started was filed with its tree alone, and a sweep grepped
+    transcripts for nine calls to learn the launcher had swallowed its prompt (3728bf21).
+    The prompt, the last argument, is kept as its length: its words are the stamp's.
+    """
+    shown = [*argv[:-1], f"<prompt: {len(argv[-1])} chars>"] if argv else []
+    tail = {
+        name: str(getattr(done, name, "") or "")[-REASON_LIMIT:] for name in ("stdout", "stderr")
+    }
+    payload = {"argv": shown, "returncode": getattr(done, "returncode", None), **tail}
+    path = tree / LAUNCH_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def launch_line(tree: Path) -> str:
+    """The launch record as one line of a finding's detail; "" when there is none."""
+    try:
+        record = json.loads((tree / LAUNCH_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(record, dict):
+        return ""
+    said = " ".join(str(record.get("stderr") or record.get("stdout") or "").split())
+    return f"launcher exited {record.get('returncode')}" + (f": {said[-160:]}" if said else "")
 
 
 def read_stamp(tree: Path) -> dict:

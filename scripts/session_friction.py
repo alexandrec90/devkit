@@ -80,10 +80,14 @@ COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("no-verify", re.compile(r"\bgit\b[^\n]*--no-verify")),
     # In command position, so a heredoc's text is not a poll; and not `gh pr checks
     # --watch`, which `.claude/rules/engineering.md` prescribes as the one blocking wait.
+    # Nor one settle right before that same `--watch`, which returns at once when a push
+    # has no checks yet: one call, not a loop (44a5ff19).
     (
         "poll",
         re.compile(
-            r"(?:^|&&|\|\||;)\s*(?:sleep\s+\d{2,}\b|until\b[^\n]*;\s*do\b[^\n]*\bsleep\b)", re.M
+            r"(?:^|&&|\|\||;)\s*(?:sleep\s+\d{2,}\b(?![^\n]*\bgh\s+pr\s+checks\b[^\n]*--watch)|"
+            r"until\b[^\n]*;\s*do\b[^\n]*\bsleep\b)",
+            re.M,
         ),
     ),
     # The push gate is the PR gate's whole suite, run locally: the gate's job, not a session's.
@@ -160,9 +164,9 @@ NARROWING_FLAGS = frozenset(
 SUITE_ROOTS = frozenset(
     {"tests", "tests/", ".", "./", "scripts/hooks/tests", "scripts/hooks/tests/"}
 )
-# `$p`, `${files[@]}`, `$env:T`, `%TARGET%`: an argument the shell fills in, which the
-# detector cannot see, so it is read as narrowing rather than as naming nothing.
-SHELL_VARIABLE = re.compile(r"\$\{?[A-Za-z_]|%[A-Za-z_]\w*%")
+# `$p`, `${files[@]}`, `$env:T`, `%TARGET%`, PowerShell's splat `@t`: an argument the
+# shell fills in, which the detector cannot see, so it reads as narrowing, not as nothing.
+SHELL_VARIABLE = re.compile(r"\$\{?[A-Za-z_]|%[A-Za-z_]\w*%|^@[A-Za-z_]\w*$")
 
 # The user telling a session it went wrong -- the most expensive friction there is, and
 # the one no tool result carries. Skipped on a session's opening message, which is the
@@ -274,11 +278,15 @@ class _Session:
     # with only its `| tail` changed read nothing new -- five times in one session.
     unchanged: dict[str, int] = field(default_factory=dict)
     last_said: Event | None = None  # the agent's latest text: how the session ended
+    # line -> every class noted there: what `outdated` re-judges a filed row by, since
+    # `found` keeps only each class's first event.
+    at: dict[int, set[str]] = field(default_factory=dict)
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
         if cls and what:
             self.found.setdefault((cls, what), event)
+            self.at.setdefault(event.line, set()).add(cls)
 
     def user(self, event: Event) -> None:
         if self.spoken == 0:
@@ -340,8 +348,8 @@ class _Session:
             self.failures.setdefault(normalize(command)[:SNIPPET], []).append(event)
 
 
-def detect(events: Iterable[Event]) -> list[tuple[str, str, Event]]:
-    """`(class, what, event)` for every friction in one session's events, each once."""
+def _read(events: Iterable[Event]) -> _Session:
+    """Every event through the per-event detectors, in order."""
     session = _Session()
     handlers = {"user": session.user, "call": session.call, "say": session.say}
     for event in events:
@@ -349,6 +357,12 @@ def detect(events: Iterable[Event]) -> list[tuple[str, str, Event]]:
             (session.failed if event.error else session.succeeded)(event)
         elif event.kind in handlers:
             handlers[event.kind](event)
+    return session
+
+
+def detect(events: Iterable[Event]) -> list[tuple[str, str, Event]]:
+    """`(class, what, event)` for every friction in one session's events, each once."""
+    session = _read(events)
     for what, runs in session.failures.items():
         if len(runs) >= REPEATS:
             session.note("repeat-failure", f"x{len(runs)} {what}", runs[-1])
@@ -426,6 +440,63 @@ def _under(cwd: str, root: Path) -> bool:
     except (ValueError, OSError):
         return False
     return True
+
+
+# --- re-judging what was filed ------------------------------------------------------------
+
+# The classes a whole session decides -- a repeat, a rerun, how it ended, who was there to
+# answer. Every other class is one event's alone, so today's detectors can re-judge it.
+WHOLE_SESSION = frozenset(
+    {"repeat-failure", "rerun-unchanged", "handed-back", "asked-user", "user-frustration"}
+)
+
+
+def outdated(items: Iterable[fix_findings.triage.Item]) -> list[tuple[str, str]]:
+    """`(id, why)` of every friction row today's detectors would no longer file.
+
+    A detector fixed on the default branch left its rows open, and a sweep spent ~13 calls
+    re-proving them (d677ea57). Each per-event row is re-read at its own transcript line;
+    it counts as outdated only when that line still holds the call the row names -- a
+    transcript first read from its end numbers from there -- so a transcript gone, a line
+    moved or a whole-session class is left open rather than guessed at.
+    """
+    sessions: dict[str, tuple[_Session, dict[int, set[str]]] | None] = {}
+    found = []
+    for item in items:
+        cls = item.detail.split(":", 1)[0]
+        path, _, line = item.fields.get("evidence", "").rpartition("#L")
+        if item.event != fix_findings.FRICTION or cls in WHOLE_SESSION or not line.isdigit():
+            continue
+        if path not in sessions:
+            sessions[path] = _whole(Path(path))
+        read = sessions[path]
+        if read is None:
+            continue
+        session, commands = read
+        if item.fields.get("command", "") not in commands.get(int(line), set()):
+            continue
+        if cls not in session.at.get(int(line), set()):
+            found.append(
+                (item.id, f"{cls} no longer fires on {path}#L{line} with today's detectors")
+            )
+    return found
+
+
+def _whole(path: Path) -> tuple[_Session, dict[int, set[str]]] | None:
+    """A transcript read whole: its detectors' verdicts, and each line's command as the
+    ledger kept it (`""` for none). None when it is gone."""
+    if not path.is_file():
+        return None
+    events = st.events(path, st.read_new(path, 0, 0).rows)
+    calls: dict[str, str] = {}
+    commands: dict[int, set[str]] = {}
+    for event in events:
+        if event.kind == "call":
+            calls[event.call_id] = event.command
+        command = calls.get(event.call_id, "") if event.kind in ("call", "result") else ""
+        kept = harness_events.clean(command[:300], harness_events.limit_for("command"))
+        commands.setdefault(event.line, set()).add(kept if command else "")
+    return _read(events), commands
 
 
 def _load_cursor(path: Path) -> dict[str, dict]:

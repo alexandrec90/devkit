@@ -253,7 +253,7 @@ def run(
     # Filed before the backlog is read, and the backlog read on its own: whatever broke
     # above -- the collect step included -- reaches the devkit session this same pass.
     filed = fix_loop.record(ctx, journal)
-    backlog = step("backlog", fix_red.backlog_failure, workspace, default=None)
+    backlog = step("backlog", fix_red.backlog_failure, workspace, closed.in_flight, default=None)
     failures += [backlog] if backlog else []
     newest = step("newest-release", gate_evidence.newest_release, devkit_dir, default="")
     dispatching = mode == fix_cycle.DISPATCH

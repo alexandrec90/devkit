@@ -119,7 +119,6 @@ scripts/sync-devkit.py::remove_retired
 scripts/sync-devkit.py::retired_present
 scripts/upgrade-project.py::run_pull
 scripts/upgrade-project.py::run_scoped
-scripts/upgrade-project.py::source_at_tag
 scripts/upgrade-project.py::verify_pull
 scripts/workspace-status.py::behind_line
 scripts/workspace-status.py::schedule_lines

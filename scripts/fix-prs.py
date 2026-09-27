@@ -339,7 +339,7 @@ def dispatch_pr(
         what = fix_plan.describe(failure)
         fix_reports.stamp(tree, key, what, problem=problem, agent=launch.agent)
     print(f"  worktree {tree}")
-    prompt = tab_safe(fix_prompts.pr_prompt(failure))
+    prompt = tab_safe(fix_prompts.pr_prompt(failure, fix_prompts.standing_refusal(tree)))
     return open_session(launch, tree, failure.head, prompt, f"{failure.project} {name}", runner)
 
 

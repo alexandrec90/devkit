@@ -51,12 +51,15 @@ def collect_red(
     return failures, green, unread
 
 
-def backlog_failure(workspace: Path) -> fix_plan.Failure | None:
-    """The harness-defect ledger's open backlog as one failure; None when it is empty."""
+def backlog_failure(
+    workspace: Path, in_flight: dict[str, str] | None = None
+) -> fix_plan.Failure | None:
+    """The harness-defect ledger's open backlog as one failure; None when it is empty.
+    `in_flight` is `fix_loop.in_flight`'s: groups waiting on a merge send nothing."""
     devkit_dir = workspace.parent / fix_cycle.DEVKIT
     if not devkit_dir.is_dir():
         return None
-    return fix_backlog.ledger_failure(devkit_dir, gate_evidence.evidence_root(workspace))
+    return fix_backlog.ledger_failure(devkit_dir, gate_evidence.evidence_root(workspace), in_flight)
 
 
 def regate(project_dir: Path) -> tuple[bool, str]:

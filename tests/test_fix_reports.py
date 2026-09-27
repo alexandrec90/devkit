@@ -49,9 +49,21 @@ def test_a_new_stamp_clears_the_report_an_earlier_session_left_in_the_tree(tmp_p
     its session had started -- and a blocked entry never expires."""
     (tmp_path / "logs").mkdir()
     (tmp_path / fix_reports.BLOCKED_FILE).write_text("needs a database\n", encoding="utf-8")
+    # An earlier launch's record too: a tab dispatch writes none, and must not inherit it.
+    (tmp_path / fix_reports.LAUNCH_FILE).write_text("{}", encoding="utf-8")
     fix_reports.stamp(tmp_path, "pr:carameli:412:new:d:dispatch", "n", NOW)
     assert fix_reports.blocked_reason(tmp_path) == ""
+    assert not (tmp_path / fix_reports.LAUNCH_FILE).exists()
     assert fix_reports.read_stamp(tmp_path)["key"] == "pr:carameli:412:new:d:dispatch"
+
+
+def test_a_launch_record_reads_back_as_one_line_and_its_absence_as_nothing(tmp_path):
+    assert fix_reports.launch_line(tmp_path) == ""
+    done = subprocess.CompletedProcess(["claude"], 2, "", "error: unknown option\n  --bg x\n")
+    fix_reports.record_launch(tmp_path, ["claude", "--bg", "--", "the prompt"], done)
+    assert fix_reports.launch_line(tmp_path) == "launcher exited 2: error: unknown option --bg x"
+    (tmp_path / fix_reports.LAUNCH_FILE).write_text("[", encoding="utf-8")
+    assert fix_reports.launch_line(tmp_path) == ""
 
 
 def test_a_blocked_report_is_its_first_lines_trimmed_and_absent_is_empty(tmp_path):

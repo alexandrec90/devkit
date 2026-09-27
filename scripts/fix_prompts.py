@@ -26,6 +26,7 @@ import agent_worktrees as aw
 from fix_plan import COMMIT, CONFLICT, EVIDENCE_DIR, LEDGER, PR, Failure, describe, name_of
 from fix_reports import BLOCKED_FILE, FRICTION_FILE, REFUSED_FILE
 from junit_report import READABLE
+from ship_intent import INTENT_FILE, REFUSAL_LINE, REFUSED, STATE_FILE, read_state
 
 # How every prompt's body ends. The ship skill is the finish line and the blocked file
 # is the only other way out, for the blockers `STOP` names right after it; both are
@@ -146,12 +147,39 @@ LINUX = (
 )
 
 
-def pr_prompt(failure: Failure) -> str:
+def standing_refusal(tree: Path) -> str:
+    """The tree's last commit refusal as `step: why`, or "" when its last ship went through.
+
+    carameli #395's fixer was told only the red check, while the tree's
+    `ship-state.json` held the real blocker -- an earlier intent the commit stage had
+    refused -- and five calls went on finding it (d609d34d).
+    """
+    state = read_state(tree)
+    if state.get("stage") != REFUSED:
+        return ""
+    lines = [line.strip() for line in str(state.get("output", "")).splitlines() if line.strip()]
+    # The line that names the check, then the output's last words, which say why.
+    first = [line for line in lines if REFUSAL_LINE.search(line)][:1]
+    return f"{state.get('step', 'commit')}: {' | '.join(dict.fromkeys(first + lines[-2:]))[:400]}"
+
+
+def _refused_too(refusal: str) -> str:
+    if not refusal:
+        return ""
+    return (
+        f" This tree also holds an intent ({INTENT_FILE.as_posix()}) the commit stage "
+        f"refused, recorded in {STATE_FILE.as_posix()} -- {refusal}. Your work ships "
+        "through that same stage, so clear that refusal as part of this fix."
+    )
+
+
+def pr_prompt(failure: Failure, refusal: str = "") -> str:
     """One branch, in its own worktree: a conflict to resolve, a refused commit, or a red PR.
 
     Three shapes, one function, because the worktree and the finish line are the same
     and only the middle differs. The conflict prompt names no failure on purpose: the
     gate cannot have run, and a resolver told "also fix the tests" fixes the wrong thing.
+    `refusal` is the tree's `standing_refusal`, which the commit shape already is.
     """
     if CONFLICT in failure.signature:
         return _framed(
@@ -161,7 +189,8 @@ def pr_prompt(failure: Failure) -> str:
             "that both sides' intent survives -- git diff --check must find no conflict "
             "marker in any file, not only the code -- and leave the merge uncommitted: the fix "
             "pass concludes it with the hooks running, and whatever the gate says after "
-            f"that is the next pass's business, not this session's. {FINISH}"
+            f"that is the next pass's business, not this session's.{_refused_too(refusal)} "
+            f"{FINISH}"
         )
     if failure.kind == COMMIT:
         return _framed(
@@ -176,7 +205,7 @@ def pr_prompt(failure: Failure) -> str:
         f"{failure.reason}. Failing: {_ids(failure.signature)}. {_logs(failure)} "
         f"This worktree is checked out on the PR head branch {failure.head}, already up "
         "to date with its base. Fix what the gate is failing on, and nothing else about "
-        f"the PR. {FINISH}"
+        f"the PR.{_refused_too(refusal)} {FINISH}"
     )
 
 
