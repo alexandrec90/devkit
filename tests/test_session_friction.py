@@ -163,22 +163,44 @@ def test_a_file_written_through_a_shell_heredoc_is_friction():
     """Claude Code's Bash tool collapses backslashes in a heredoc, so a file written or
     patched through one comes out mangled. Three sessions lost turns to it on one day,
     each retired by pointing at the rule that says to use Write/Edit -- and it recurred,
-    because only the sessions that noticed reported it. Every such write is filed now."""
+    because only the sessions that noticed reported it. Every write that can be damaged
+    is filed now, whether anyone noticed or not."""
     for command in (
         "cat > tests/test_x.py <<'EOF'\nassert r'\\b'\nEOF",
-        'cat >> t.py <<"EOF"\nx = 1\nEOF',
-        "tee scripts/a.py <<EOF\nprint(1)\nEOF",
+        'cat >> t.py <<"EOF"\nx = "a\\\\b"\nEOF',
+        "tee scripts/a.py <<EOF\nprint('\\n')\nEOF",
         "python - <<'EOF'\nfrom pathlib import Path\np = Path('a.py')\n"
-        "p.write_text(p.read_text().replace('a', 'b'))\nEOF",
-        "python3 - <<'PY'\nopen('x.txt', 'w').write('y')\nPY",
+        "p.write_text(p.read_text().replace('\\\\d', 'b'))\nEOF",
+        "python3 - <<'PY'\nopen('x.txt', 'w').write('y\\n')\nPY",
+        "cat > x.py <<'EOF'\nr'\\s'",  # unterminated: the body runs to the end
     ):
         assert classes([call(command, "1")]) == ["heredoc-write"], command
     for harmless in (
         "python - <<'EOF'\nimport json; print(json.load(open('a.json')))\nEOF",
-        "git commit -F - <<'EOF'\nsubject\nEOF",
+        "git commit -F - <<'EOF'\nsubject\\n\nEOF",
         "grep -c '<<' scripts/x.py",
     ):
         assert classes([call(harmless, "1")]) == [], harmless
+
+
+def test_a_heredoc_with_no_backslash_in_its_body_is_not_friction():
+    """b935e421 recurred on a `cat >>` whose body had no backslash, so nothing could be
+    collapsed and the file was verified intact: a sweep could only retire it as "no
+    defect", and the next such write reopened it. A backslash after the terminator -- a
+    Windows path in the command that follows -- is not in the body."""
+    b935e421 = (
+        "cat >> scripts/hooks/tests/test_report_harness_defect.py <<'EOF'\n\n\n"
+        "class TestAbsoluteEvidence:\n"
+        "    def test_relative_path_joins_the_base(self, tmp_path):\n"
+        '        assert report.absolute_evidence("a/b.txt", tmp_path) == '
+        'str(tmp_path / "a" / "b.txt")\n'
+        "EOF\ntail -25 scripts/hooks/tests/test_report_harness_defect.py; "
+        ".venv\\Scripts\\python.exe -m pytest -q scripts/hooks/tests/test_report_harness_defect.py"
+    )
+    assert classes([call(b935e421, "1")]) == []
+    assert not sf.damageable_heredoc(b935e421)
+    assert sf.damageable_heredoc("cat <<-EOF > a.py\n\tx = '\\t'\n\tEOF")
+    assert not sf.damageable_heredoc("echo 'a\\b' > x.txt")  # no heredoc at all
 
 
 def test_the_full_suite_is_friction_and_a_targeted_run_is_not():

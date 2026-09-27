@@ -98,7 +98,10 @@ COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     # A file written or patched through a shell heredoc: Claude Code's Bash tool collapses
     # backslashes in one. Retired three times as "use Write/Edit" and back each time,
-    # since only the sessions that noticed the damage reported it -- so every write is.
+    # since only the sessions that noticed the damage reported it -- so every write that
+    # *can* be damaged is, noticed or not: `damageable_heredoc` holds it to a body with a
+    # backslash. One without is delivered intact, and filing it (b935e421, a `cat >>`
+    # verified intact) left a sweep nothing to retire it with but "no defect".
     (
         "heredoc-write",
         re.compile(
@@ -107,6 +110,12 @@ COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.M,
         ),
     ),
+)
+# A heredoc's body: from the line after `<<TAG` to the line that is only `TAG`, or to the
+# end of an unterminated one.
+HEREDOC_BODY = re.compile(
+    r"<<-?\s*(['\"]?)(?P<tag>\w+)\1[^\n]*\n(?P<body>[\s\S]*?)(?:^[ \t]*(?P=tag)[ \t]*$|\Z)",
+    re.M,
 )
 
 # A command reading back text the harness wrote, which quotes the very patterns above:
@@ -222,8 +231,15 @@ COMMAND_DETAIL = {
 }
 
 
+def damageable_heredoc(command: str) -> bool:
+    """A heredoc body in `command` carries a backslash: the one thing the Bash tool alters."""
+    return any("\\" in found.group("body") for found in HEREDOC_BODY.finditer(command))
+
+
 def _command_classes(command: str) -> Iterator[tuple[str, str]]:
     for cls, pattern in COMMAND_PATTERNS:
+        if cls == "heredoc-write" and not damageable_heredoc(command):
+            continue
         if pattern.search(command):
             yield cls, COMMAND_DETAIL[cls]
     if any(full_suite(run.group("rest") or "") for run in TEST_RUN.finditer(command)):
