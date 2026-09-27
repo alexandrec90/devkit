@@ -75,6 +75,14 @@ RESULT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("patch-failed", re.compile(r'File "<stdin>", line \d+[\s\S]{0,600}?AssertionError')),
 )
 
+# An odd count of any of these before a match on its line means the match is quoted.
+QUOTE_MARKS = ("'", '"', "`")
+# A backslash-escaped character, which opens and closes nothing: the `\"` inside a test's
+# string literal is still inside it (83496ae4, a diff of this detector's own tests).
+ESCAPED = re.compile(r"\\.")
+# So is a match a failed assertion reports: pytest echoing a test's expected text.
+ASSERTION = re.compile(r"\bassert\b|AssertionError")
+
 # Commands that are friction whatever they return.
 COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("no-verify", re.compile(r"\bgit\b[^\n]*--no-verify")),
@@ -123,6 +131,10 @@ HEREDOC_BODY = re.compile(
     r"<<-?\s*(['\"]?)(?P<tag>\w+)\1[^\n]*\n(?P<body>[\s\S]*?)(?:^[ \t]*(?P=tag)[ \t]*$|\Z)",
     re.M,
 )
+# A byte dump in command position: a heredoc read back this way in the same command is a
+# measurement of what the Bash tool does to one, not a file the work depends on
+# (ccde706b, the probe that established the doubled-backslash rule above).
+BYTE_DUMP = re.compile(r"(?:^|[;&|]\s*)(?:od|xxd|hexdump|Format-Hex)\b", re.M)
 
 # A command reading back text the harness wrote, which quotes the very patterns above:
 # the triage log, the ledger, a transcript, a friction file. Its output is never friction.
@@ -240,7 +252,11 @@ COMMAND_DETAIL = {
 def damageable_heredoc(command: str) -> bool:
     """A heredoc body in `command` carries a doubled backslash: the one thing the Bash
     tool alters. It collapses each `\\\\` to `\\` and leaves a lone `\\n`, `\\t` or `\\s` as
-    written, which a write through the tool on 2026-09-26 confirmed byte for byte."""
+    written, which a write through the tool on 2026-09-26 confirmed byte for byte.
+
+    Not when the same command dumps the bytes back: that is the probe that confirmed it."""
+    if BYTE_DUMP.search(command):
+        return False
     return any("\\\\" in found.group("body") for found in HEREDOC_BODY.finditer(command))
 
 
@@ -254,11 +270,21 @@ def _command_classes(command: str) -> Iterator[tuple[str, str]]:
         yield "full-suite", COMMAND_DETAIL["full-suite"]
 
 
+def _quoted(text: str, at: int) -> bool:
+    """The match at `at` sits inside a string its line opened: a regex's source, a diff
+    of the rule's prose, pytest echoing an assertion's operands. That quotes an error
+    rather than having one -- seven groups in the first supervised rehearsal."""
+    line = ESCAPED.sub("", text[text.rfind("\n", 0, at) + 1 : at])
+    return any(line.count(mark) % 2 for mark in QUOTE_MARKS) or bool(ASSERTION.search(line))
+
+
 def _result_class(text: str) -> tuple[str, str]:
     """The class and snippet a failed call's output files under; `("", "")` for none."""
+    text = ANSI.sub("", text)
     for cls, pattern in RESULT_PATTERNS:
-        if pattern.search(text):
-            return cls, _snippet(text, pattern)
+        for found in pattern.finditer(text):
+            if not _quoted(text, found.start()):
+                return cls, normalize(text[found.start() : found.start() + SNIPPET])
     return "", ""
 
 
