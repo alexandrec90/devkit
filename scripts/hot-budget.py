@@ -20,9 +20,9 @@ from _loader import load_by_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# devkit's hot total, rounded up to the next hundred. It only goes down: the test that
-# reads it says why, and what to do instead of raising it.
-HOT_CEILING = 5800
+# devkit's hot total plus about a sentence (50 tok), never a paragraph (100). It only goes
+# down: the test that reads it says why, and what to do instead of raising it.
+HOT_CEILING = 5550
 
 
 def verdict(docs: list, ceiling: int = HOT_CEILING) -> tuple[int, str]:

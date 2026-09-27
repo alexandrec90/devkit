@@ -120,11 +120,22 @@ def _logs(failure: Failure) -> str:
     if failure.evidence:
         return (
             f"The gate's own logs are in {EVIDENCE_DIR}/ in this worktree -- read "
-            f"{READABLE} there first when it exists (each failing test with its message "
-            f"and traceback), then the .log files. {LINUX}"
+            f"{_first_read(Path(failure.evidence))} there first. {LINUX}"
         )
     where = failure.url or "the run"
     return f"No artifact came down from the run; read it at {where} first. {LINUX}"
+
+
+def _first_read(evidence: Path) -> str:
+    """`READABLE` when a junit report named a failure, else the `.log` files that came down.
+
+    8f622cc6: devkit's own suite reports only in `test-failures.log`, so a prompt naming
+    `READABLE` unconditionally sent a fixer after a file that was never written.
+    """
+    if (evidence / READABLE).is_file():
+        return f"{READABLE} (each failing test with its message and traceback), then the .log files"
+    logs = sorted(p.relative_to(evidence).as_posix() for p in evidence.rglob("*.log"))
+    return ", ".join(logs) if logs else "whatever is there"
 
 
 # The gate runs on Linux and a fixer on this machine: one shipped a fix whose only real
