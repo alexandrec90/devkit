@@ -202,7 +202,7 @@ def test_a_repair_reports_what_the_installer_said_or_that_it_refused():
 def test_status_asks_every_installer_and_repairs_none(tmp_path):
     root = a_checkout(tmp_path, "install-a.py", "install-b.py")
     runner = Answers({"install-a.py": 0, "install-b.py": 1})
-    outcomes = installers.reconcile(root, False, {}, runner, python="py")
+    outcomes = installers.reconcile(root, False, {}, runner)
     assert [o.verdict for o in outcomes] == [installers.CURRENT, installers.STALE]
     assert all(argv[2] == "--check" for argv in runner.calls)
 
@@ -210,7 +210,7 @@ def test_status_asks_every_installer_and_repairs_none(tmp_path):
 def test_maintain_repairs_exactly_the_stale_ones(tmp_path):
     root = a_checkout(tmp_path, "install-a.py", "install-b.py", "install-c.py")
     runner = Answers({"install-a.py": 0, "install-b.py": 1, "install-c.py": 2})
-    outcomes = installers.reconcile(root, True, {}, runner, python="py")
+    outcomes = installers.reconcile(root, True, {}, runner)
     assert [o.verdict for o in outcomes] == [
         installers.CURRENT,
         installers.REINSTALLED,
@@ -224,10 +224,118 @@ def test_maintain_repairs_exactly_the_stale_ones(tmp_path):
 def test_an_installer_s_options_reach_both_its_check_and_its_repair(tmp_path):
     root = a_checkout(tmp_path, "install-a.py", "install-b.py")
     runner = Answers({"install-a.py": 1, "install-b.py": 1})
-    installers.reconcile(root, True, {"install-a.py": ["--merge"]}, runner, python="py")
+    installers.reconcile(root, True, {"install-a.py": ["--merge"]}, runner)
     a_calls = [argv for argv in runner.calls if argv[1].endswith("install-a.py")]
     assert all(argv[3:] == ["--merge"] for argv in a_calls) and len(a_calls) == 2
     assert all(argv[3:] == [] for argv in runner.calls if argv[1].endswith("install-b.py"))
+
+
+class Scheduler(Answers):
+    """`Answers`, plus a `schtasks /Run` that answers `run_code`."""
+
+    def __init__(self, checks, yeses=None, run_code=0):
+        super().__init__(checks, yeses)
+        self.run_code = run_code
+
+    def __call__(self, argv):
+        if argv[:2] == ["schtasks", "/Run"]:
+            self.calls.append(list(argv))
+            return subprocess.CompletedProcess(list(argv), self.run_code, "", "ERROR: disabled\n")
+        return super().__call__(argv)
+
+    def runs(self) -> list[str]:
+        return [argv[-1] for argv in self.calls if argv[:2] == ["schtasks", "/Run"]]
+
+
+def a_machine(tmp_path: Path) -> Path:
+    """The fix pass's installer, the installers job's own, and one other."""
+    return a_checkout(tmp_path, "install-fix-pass.py", installers.MAINTAINER, "install-z.py")
+
+
+def test_the_task_running_the_pass_is_handed_off_not_re_registered(tmp_path):
+    """086329c7: the fix pass runs `maintain` from inside `devkit-fix-pass`, and Windows
+    answers a task replacing its own registration with `Access is denied` -- a task can
+    re-register any other, and anyone outside it can re-register it while it runs. So the
+    stale one is handed to the installers job, a different task, after every repair."""
+    root = a_machine(tmp_path)
+    runner = Scheduler({"install-fix-pass.py": 1, installers.MAINTAINER: 0, "install-z.py": 1})
+    outcomes = installers.reconcile(root, True, {}, runner, own_task="devkit-fix-pass")
+    assert runner.modes_for("install-fix-pass.py") == ["--check"]
+    assert runner.modes_for("install-z.py") == ["--check", "--yes"]
+    assert runner.calls[-1] == ["schtasks", "/Run", "/TN", "devkit-installers-schedule"]
+    (mine,) = [o for o in outcomes if o.installer == "install-fix-pass.py"]
+    assert mine.verdict == installers.DEFERRED
+    assert "install-fix-pass.py said --check" in mine.detail
+    assert "devkit-installers-schedule" in mine.detail
+    assert [o.installer for o in outcomes] == [p.name for p in installers.discover(root)]
+    assert installers.exit_code(outcomes) == 0
+
+
+def test_the_installers_job_leaves_its_own_task_to_a_pass_outside_it(tmp_path):
+    """Handing itself to itself would be the same refusal a run later."""
+    root = a_machine(tmp_path)
+    runner = Scheduler({"install-fix-pass.py": 0, installers.MAINTAINER: 1, "install-z.py": 0})
+    outcomes = installers.reconcile(root, True, {}, runner, own_task="devkit-installers-schedule")
+    assert runner.modes_for(installers.MAINTAINER) == ["--check"] and runner.runs() == []
+    (mine,) = [o for o in outcomes if o.installer == installers.MAINTAINER]
+    assert mine.verdict == installers.DEFERRED and "outside" in mine.detail
+
+
+def test_a_hand_off_the_scheduler_refuses_is_still_stale(tmp_path):
+    """A stood-down installers job cannot be run: nothing will repair the task, so the
+    report still counts it and says why."""
+    root = a_machine(tmp_path)
+    runner = Scheduler(
+        {"install-fix-pass.py": 1, installers.MAINTAINER: 0, "install-z.py": 0}, run_code=1
+    )
+    outcomes = installers.reconcile(root, True, {}, runner, own_task="devkit-fix-pass")
+    (mine,) = [o for o in outcomes if o.installer == "install-fix-pass.py"]
+    assert mine.verdict == installers.STALE and "ERROR: disabled" in mine.detail
+    assert installers.exit_code(outcomes) == 1
+
+
+def test_a_current_own_task_and_a_status_pass_hand_nothing_off(tmp_path):
+    root = a_machine(tmp_path)
+    runner = Scheduler({"install-fix-pass.py": 0, installers.MAINTAINER: 0, "install-z.py": 0})
+    installers.reconcile(root, True, {}, runner, own_task="devkit-fix-pass")
+    stale = Scheduler({"install-fix-pass.py": 1, installers.MAINTAINER: 0, "install-z.py": 0})
+    outcomes = installers.reconcile(root, False, {}, stale, own_task="devkit-fix-pass")
+    assert runner.runs() == [] and stale.runs() == []
+    assert outcomes[0].verdict == installers.STALE
+
+
+def test_hand_off_runs_the_installers_job_by_the_name_its_installer_declares(tmp_path):
+    root = a_machine(tmp_path)
+    stale = installers.Outcome("install-fix-pass.py", installers.STALE, "runs `a`, not `b`.")
+    runner = Scheduler({})
+    handed = installers.hand_off(stale, "devkit-fix-pass", root, runner)
+    assert runner.calls == [installers.run_task_argv("devkit-installers-schedule")]
+    assert installers.run_task_argv("x") == ["schtasks", "/Run", "/TN", "x"]
+    assert handed.verdict == installers.DEFERRED
+    assert handed.detail.startswith("runs `a`, not `b`. Not re-registered from inside")
+
+
+def test_a_failed_repair_keeps_the_reason_the_check_gave():
+    """The 086329c7 artifact said only `Access is denied`; why the task was stale at all
+    had to be reconstructed from the ledger."""
+    stale = installers.Outcome("install-x.py", installers.STALE, "runs `a`, not `b`")
+    runner = Answers({}, {"install-x.py": 1})
+    failed = installers.repair(Path("s/install-x.py"), "py", [], runner, stale)
+    assert failed.verdict == installers.FAILED
+    assert "exited 1" in failed.detail and "runs `a`, not `b`" in failed.detail
+
+
+def test_main_reads_the_task_it_runs_under(tmp_path, monkeypatch):
+    seen = {}
+
+    def reconcile(root, apply, options, runner=None, only=(), own_task=""):
+        seen["own_task"] = own_task
+        return []
+
+    monkeypatch.setattr(installers, "reconcile", reconcile)
+    monkeypatch.setattr(installers, "write_artifact", lambda text, root: None)
+    installers.main(["maintain", "--devkit", str(tmp_path), "--running-under", "devkit-x"])
+    assert seen["own_task"] == "devkit-x"
 
 
 def test_the_interpreter_is_the_console_one_beside_this_process(tmp_path, monkeypatch):
@@ -394,7 +502,7 @@ def test_the_maintainer_comes_off_first(tmp_path):
 def test_uninstall_is_dry_until_yes(tmp_path):
     root = a_checkout(tmp_path, "install-alpha.py")
     runner = Removals()
-    outcomes = installers.decommission(root, False, {}, runner, python="py")
+    outcomes = installers.decommission(root, False, {}, runner)
     assert [o.verdict for o in outcomes] == [installers.WOULD_REMOVE]
     assert runner.calls[0][2:] == ["--uninstall"], "a dry run passed --yes"
 
@@ -402,7 +510,7 @@ def test_uninstall_is_dry_until_yes(tmp_path):
 def test_uninstall_with_yes_confirms_each_installer(tmp_path):
     root = a_checkout(tmp_path, "install-alpha.py", "install-beta.py")
     runner = Removals()
-    outcomes = installers.decommission(root, True, {}, runner, python="py")
+    outcomes = installers.decommission(root, True, {}, runner)
     assert [o.verdict for o in outcomes] == [installers.REMOVED, installers.REMOVED]
     assert all(argv[2:] == ["--uninstall", "--yes"] for argv in runner.calls)
 
@@ -410,7 +518,7 @@ def test_uninstall_with_yes_confirms_each_installer(tmp_path):
 def test_a_failed_removal_is_reported_and_does_not_stop_the_rest(tmp_path):
     root = a_checkout(tmp_path, "install-alpha.py", "install-beta.py")
     runner = Removals({"install-alpha.py": 2})
-    outcomes = installers.decommission(root, True, {}, runner, python="py")
+    outcomes = installers.decommission(root, True, {}, runner)
     assert [o.verdict for o in outcomes] == [installers.FAILED, installers.REMOVED]
     assert installers.exit_code(outcomes) == 2
 
@@ -449,7 +557,7 @@ def test_a_tick_that_matches_nothing_is_reported_rather_than_ignored(tmp_path):
 def test_a_narrowed_status_only_checks_what_was_ticked(tmp_path):
     root = a_checkout(tmp_path, "install-alpha.py", "install-beta.py")
     runner = Answers({"install-alpha.py": 0, "install-beta.py": 0})
-    outcomes = installers.reconcile(root, False, {}, runner, python="py", only=["beta"])
+    outcomes = installers.reconcile(root, False, {}, runner, only=["beta"])
     assert [o.installer for o in outcomes] == ["install-beta.py"]
     assert runner.modes_for("install-alpha.py") == []
 
@@ -459,5 +567,5 @@ def test_uninstall_carries_the_same_per_installer_options_the_check_does(tmp_pat
     uninstall addresses a different task than the install created."""
     root = a_checkout(tmp_path, "install-alpha.py")
     runner = Removals()
-    installers.decommission(root, True, {"install-alpha.py": ["--merge"]}, runner, python="py")
+    installers.decommission(root, True, {"install-alpha.py": ["--merge"]}, runner)
     assert runner.calls[0][2:] == ["--uninstall", "--yes", "--merge"]

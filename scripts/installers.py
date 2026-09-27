@@ -95,6 +95,7 @@ CURRENT = "current"
 STALE = "stale"
 LEFT_ALONE = "left alone"
 REINSTALLED = "reinstalled"
+DEFERRED = "deferred"
 FAILED = "failed"
 REMOVED = "removed"
 WOULD_REMOVE = "would remove"
@@ -243,14 +244,50 @@ def check(script: Path, python: str, options: Sequence[str], runner: Runner) -> 
     return Outcome(script.name, verdict, last_line(result))
 
 
-def repair(script: Path, python: str, options: Sequence[str], runner: Runner) -> Outcome:
-    """One installer's `--yes`. Idempotent by every installer's own contract (`/F`)."""
+def repair(
+    script: Path, python: str, options: Sequence[str], runner: Runner, stale: Outcome | None = None
+) -> Outcome:
+    """One installer's `--yes`. Idempotent by every installer's own contract (`/F`).
+
+    A refusal keeps what `stale` -- the check -- said was wrong, which is the half a
+    reader needs to know whether the refusal matters."""
     result = runner(installer_argv(python, script, "--yes", options))
     if result.returncode:
+        why = f"; the check said: {stale.detail}" if stale else ""
         return Outcome(
-            script.name, FAILED, f"--yes exited {result.returncode}: {last_line(result)}"
+            script.name, FAILED, f"--yes exited {result.returncode}: {last_line(result)}{why}"
         )
     return Outcome(script.name, REINSTALLED, last_line(result))
+
+
+def run_task_argv(name: str) -> list[str]:
+    return ["schtasks", "/Run", "/TN", name]
+
+
+def hand_off(stale: Outcome, own_task: str, root: Path, runner: Runner) -> Outcome:
+    """The stale installer whose task is running this pass, left to a pass outside it.
+
+    Windows answers a task that replaces its own registration with `Access is denied`,
+    though it lets that task re-register any other and lets anyone outside re-register
+    it mid-run (086329c7, reproduced with a probe task). So the fix pass's `maintain`
+    can never repair `devkit-fix-pass`, nor the daily job its own. The installers job
+    is the other task: this runs it now, so a merged change to the fix pass's
+    registration lands this pass rather than at tomorrow's fire. When the installers
+    job is the one running, the fix pass repairs it within the half hour.
+    """
+    maintainer = task_name(root / "scripts" / MAINTAINER)
+    why = (
+        f"{stale.detail} Not re-registered from inside `{own_task}`: Windows refuses a "
+        f"task replacing its own registration"
+    )
+    if not maintainer or maintainer == own_task:
+        return Outcome(stale.installer, DEFERRED, f"{why}; a maintain pass outside it does.")
+    result = runner(run_task_argv(maintainer))
+    if result.returncode:
+        return Outcome(
+            stale.installer, STALE, f"{why}, and `{maintainer}` did not run: {last_line(result)}"
+        )
+    return Outcome(stale.installer, DEFERRED, f"{why}; handed to `{maintainer}`.")
 
 
 def reconcile(
@@ -258,12 +295,16 @@ def reconcile(
     apply: bool,
     options: dict[str, list[str]],
     runner: Runner | None = None,
-    python: str = "",
     only: Sequence[str] = (),
+    own_task: str = "",
 ) -> list[Outcome]:
     """Every installer's verdict, repaired where `apply` says to and the verdict allows.
 
-    `python` defaults to the console interpreter beside this one, not `sys.executable`:
+    `own_task` is the scheduled task this pass runs inside, whose installer is handed
+    off (`hand_off`) rather than repaired -- after every other repair, so the pass it is
+    handed to never re-registers alongside this one.
+
+    Installers run under the console interpreter beside this one, not `sys.executable`:
     under the scheduled job that is `pythonw.exe`, and a console-less child gets a fresh
     visible console for every `schtasks` and `git` an installer runs. `sweep.console_python`
     has the account.
@@ -274,16 +315,22 @@ def reconcile(
     `only` narrows the set to what a checklist ticked; empty is everything, which is what
     the scheduled pass always wants.
     """
-    interpreter = python or sweep.console_python()
+    interpreter = sweep.console_python()
     spawn = runner or run_command
     chosen, missing = select(discover(root), only)
     outcomes = [Outcome(name, FAILED, "no installer of that name here") for name in missing]
+    mine = -1
     for script in chosen:
         extra = options.get(script.name, [])
         outcome = check(script, interpreter, extra, spawn)
         if apply and outcome.verdict == STALE:
-            outcome = repair(script, interpreter, extra, spawn)
+            if own_task and task_name(script) == own_task:
+                mine = len(outcomes)
+            else:
+                outcome = repair(script, interpreter, extra, spawn, outcome)
         outcomes.append(outcome)
+    if mine >= 0:
+        outcomes[mine] = hand_off(outcomes[mine], own_task, root, spawn)
     return outcomes
 
 
@@ -409,6 +456,15 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--workspace", type=Path, default=None)
     parser.add_argument(
+        "--running-under",
+        default="",
+        metavar="TASK",
+        help=(
+            "the scheduled task running this pass, which `maintain` hands off rather than "
+            "re-registering: Windows refuses a task replacing itself"
+        ),
+    )
+    parser.add_argument(
         "--devkit",
         type=Path,
         default=REPO_ROOT,
@@ -431,7 +487,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         # the safe reading of a contradictory instruction is the one that changes nothing.
         outcomes = decommission(root, args.yes and not args.dry_run, options, only=only)
     else:
-        outcomes = reconcile(root, args.mode == "maintain", options, only=only)
+        apply = args.mode == "maintain"
+        outcomes = reconcile(root, apply, options, only=only, own_task=args.running_under)
     orphans = stood_down_without_installer(harness_state.stood_down(), root)
     text = render(outcomes, orphans, _dt.datetime.now(), args.mode)
     write_artifact(text, root)
