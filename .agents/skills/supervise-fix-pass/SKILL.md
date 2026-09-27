@@ -8,7 +8,9 @@ argument-hint: 'Optional: how many iterations (default 3), or "plan" to rehearse
 # Supervise the fix pass
 
 > Depends on `gh` being authenticated and `claude` on PATH: the pass dispatches real
-> sessions and pushes real branches.
+> sessions and pushes real branches. Run it from a shell that is **not elevated**:
+> `agent_tabs.launch_background` refuses to launch from one, because a background service
+> started elevated is unreachable to the scheduled pass until it exits.
 
 Devkit-only, like `/triage-harness`. The fix pass (`scripts/fix-pass.py`) holds one
 contract: **every observation ends green, in flight, or filed** on the harness-defect

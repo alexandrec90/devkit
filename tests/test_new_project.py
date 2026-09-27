@@ -795,6 +795,10 @@ def test_a_linter_that_is_not_installed_is_skipped_not_reported(tmp_path):
     coloured = [sys.executable, "-c", "print('\\x1b[91mE1\\x1b[0m a.py'); raise SystemExit(1)"]
     section = lint_all.run_tool("ruff", coloured, "hint")
     assert "\x1b" not in section and "E1 a.py" in section
+    # A linter that never answers is killed at the bound and reported, never waited on.
+    hung = [sys.executable, "-c", "import time; time.sleep(120)"]
+    section = lint_all.run_tool("mypy", hung, "hint", timeout=2)
+    assert section.startswith("# mypy\n") and "killed after 2s" in section
 
 
 def test_generated_lint_runner_covers_the_env_file_and_pre_commit_covers_the_workflows(

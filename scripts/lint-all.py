@@ -170,24 +170,34 @@ def _missing_module(cmd: list[str]) -> bool:
 # into a pipe, so a finding would reach the artifact wrapped in escape codes.
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
+# Wall-clock bound on one linter, in seconds. See the template's copy for why.
+TOOL_TIMEOUT = 600.0
 
-def run_tool(name: str, cmd: list[str], fix_hint: str) -> str:
+
+def run_tool(name: str, cmd: list[str], fix_hint: str, timeout: float = TOOL_TIMEOUT) -> str:
     """Run one linter; return its artifact section, or "" when it passed or was absent.
 
     A missing tool is NOT a failure. Writing "command not found" into the artifact
     would hand the agent something it cannot fix in the source tree, so it degrades
-    to a terminal note instead.
+    to a terminal note instead. A tool still running after `timeout` seconds IS one: a
+    linter that never answered has not passed, so it gets a section naming the bound.
+    `cmd` is an argv, never a shell line -- with a shell in between, the kill would
+    reach only the shell and the linter would hold the pipe open past the bound.
     """
     if _missing_module(cmd):
         _SKIPPED.append(name)
         print(f"  {name}: not installed — skipped")
         return ""
     try:
-        result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+        result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
         _SKIPPED.append(name)
         print(f"  {name}: not installed — skipped")
         return ""
+    except subprocess.TimeoutExpired:
+        print(f"  {name}: TIMED OUT after {timeout:g}s")
+        hung = f"{name} was killed after {timeout:g}s with no result: the tool hung"
+        return f"# {name}\n# fix: run `{' '.join(cmd)}` by hand to see where\n{hung}\n\n"
     if result.returncode == 0:
         print(f"  {name}: ok")
         return ""
