@@ -24,12 +24,15 @@ recover is *why* the change was made, so that is the only thing it is asked for.
 3. If the harness cost you turns -- a refusal, a missing tool, an instruction that sent
    you the wrong way -- add one line per thing to `logs/friction.md`, keeping the lines
    already there: another session in this tree may have written them. The pass files
-   each on the harness-defect ledger, where the devkit session fixes it.
+   each on the harness-defect ledger, where the devkit session fixes it. End a line whose
+   cause you fixed in this tree with `fixed on this branch`: the pass files it as settled
+   by this branch, and reopens it only if the branch never merges.
 4. Report the subject and stop.
 
 `logs/` is ignored in every project, so the file cannot be committed by accident. Once
 shipped, the pass moves it to `logs/ship-intent.shipped.md`; to ship again, write a
-fresh one, last.
+fresh one, last. A tree with nothing changed -- a fix that was all ledger resolutions --
+ships the same way: the pass sets the intent aside and opens no PR.
 
 ## What happens next, and why none of it is your turn
 
