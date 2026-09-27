@@ -202,6 +202,18 @@ def test_the_background_argv_passes_the_prompt_as_one_argument():
     assert argv[-1] == "do a; b" and argv.count("do a; b") == 1
 
 
+def test_a_background_session_is_told_at_system_level_to_write_files_with_the_tools():
+    """Bypass-permissions mode's own system prompt tells a session to prefer heredocs and
+    `sed` for file changes, and it outranked the user-turn prompt's ban: five fixers in
+    two supervised rounds wrote through a heredoc anyway. The rule rides at that level,
+    before the variadic `--disallowedTools` so that flag cannot swallow it."""
+    argv = tabs.background_argv("claude", CLAUDE, "fix it")
+    at = argv.index("--append-system-prompt")
+    assert argv[at + 1] == tabs.FILE_WRITES
+    assert "Write and Edit" in tabs.FILE_WRITES and "heredoc" in tabs.FILE_WRITES
+    assert at < argv.index("--disallowedTools")
+
+
 def test_a_background_session_may_not_ask_and_the_flag_cannot_swallow_the_prompt():
     """Nobody watches it: a fixer that asked sat there. `--disallowedTools` is variadic
     and takes every argument after it -- ordering alone did not stop it: placed before

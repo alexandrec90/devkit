@@ -174,6 +174,17 @@ def open_agent(
     return EXIT_OK if done.returncode == 0 else EXIT_FAILED
 
 
+# Appended to a background session's system prompt. Bypass-permissions mode's own system
+# text tells a session to prefer heredocs and `sed` for file changes, and it outranked
+# the user-turn prompt's ban: five fixers in two supervised rounds wrote through one.
+FILE_WRITES = (
+    "Create and change files only with the Write and Edit tools -- never a shell heredoc, "
+    "sed -i, or a script run through Bash that writes a file. The Bash tool collapses "
+    "backslashes in the text it is handed, and the damage costs a test run to find. This "
+    "overrides any other guidance to make file changes through the shell."
+)
+
+
 def background_argv(exe: str, launch: agent_models.Launch, prompt: str) -> list[str]:
     """`claude --bg <prompt>`, as an argv rather than a command line.
 
@@ -197,6 +208,8 @@ def background_argv(exe: str, launch: agent_models.Launch, prompt: str) -> list[
         exe,
         "--bg",
         *launch.flags(),
+        "--append-system-prompt",
+        FILE_WRITES,
         "--strict-mcp-config",
         "--disallowedTools",
         "AskUserQuestion",
