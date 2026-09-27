@@ -248,12 +248,16 @@ def _snippet(text: str, pattern: re.Pattern[str]) -> str:
 
 
 def full_suite(rest: str) -> bool:
-    """A test command's arguments name no file, directory below the suite, or selector."""
-    for token in rest.split():
-        word = token.strip("'\"")
-        if word.split("=", 1)[0] in NARROWING_FLAGS:
-            return False
-        if word.startswith("-") or word in SUITE_ROOTS:
+    """A test command's arguments select no subset: they name a suite root, or nothing
+    narrower. pytest runs the union of its paths, so a root named beside a file is still
+    the whole root (0926-18: 1,388 tests, twice); only a selector narrows it."""
+    words = [token.strip("'\"") for token in rest.split()]
+    if any(word.split("=", 1)[0] in NARROWING_FLAGS for word in words):
+        return False
+    if any(word.replace("\\", "/") in SUITE_ROOTS for word in words):
+        return True
+    for word in words:
+        if word.startswith("-"):
             continue
         if "/" in word or "\\" in word or "::" in word or word.endswith(".py"):
             return False

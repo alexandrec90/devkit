@@ -164,6 +164,10 @@ def ship_intents(
             continue
         base = intent.base or "main"
         outcome = ship_intent.ship_one(intent, push_gate.interpreter(intent.tree), base)
+        if outcome.intent.branch != intent.branch:
+            # Carried off a retired name: the record names what went out, or it reads as
+            # a merged branch shipping again.
+            where = f"{intent.project} {outcome.intent.branch} (carried off {intent.branch})"
         # One line: a refusal's detail is hook output, and its newlines broke the record
         # into rows no reader of it could attribute. The tail says why; the rest is evidence.
         lines.append(f"{where} -- {outcome.stage}: {' '.join(outcome.detail.split())[-240:]}")

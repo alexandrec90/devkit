@@ -893,6 +893,23 @@ def test_a_blocked_intent_is_said_and_never_shipped_in_any_mode(monkeypatch, tmp
     )
 
 
+def test_a_carried_intent_is_recorded_under_the_branch_it_went_out_on(monkeypatch, tmp_path):
+    """`ship_one` moves an intent off a retired branch; the record named the retired one,
+    so "shipped devkit agent/fix-harness-ledger-0927" read as a merged branch going out
+    again -- the one thing the supervisor's rehearsal is there to catch."""
+    found = ship_intent.Intent("devkit", tmp_path, "agent/x-0927", "S", "B")
+    moved = ship_intent.Intent("devkit", tmp_path, "agent/x-0927-2", "S", "B")
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: [found])
+    monkeypatch.setattr(fix_pass.fix_loop, "fixers_working", frozenset)
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda *a: ship_intent.Outcome(moved, ship_intent.SHIPPED, "u/pull/9", "u/pull/9"),
+    )
+    [line], _, _ = fix_pass.ship_intents(tmp_path, ["devkit"], fix_cycle.DISPATCH)
+    assert line.startswith("devkit agent/x-0927-2 (carried off agent/x-0927) -- shipped")
+
+
 def test_ship_intents_in_plan_mode_only_says_what_it_would_do(monkeypatch, tmp_path):
     one = ship_intent.Intent("carameli", tmp_path, "agent/i", "S", "B")
     monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: [one])

@@ -434,6 +434,33 @@ def test_a_step_that_raises_costs_that_step_only(ctx, monkeypatch):
     assert journal.crashed == ["harvest"]
 
 
+def test_a_plan_harvest_reads_from_the_real_cursor_and_leaves_it_where_it_was(ctx, monkeypatch):
+    """A plan pass harvested from an empty cursor, so every rehearsal listed the whole
+    three-day window -- 17 "would file" lines, nearly all filed and resolved hours before
+    -- and the supervisor's "is any filed line noise?" had nothing it could read."""
+    cursor = ctx.ledger_path.parent / fix_loop.session_friction.CURSOR_NAME
+    cursor.parent.mkdir(parents=True, exist_ok=True)
+    cursor.write_text('{"t.jsonl": {"offset": 40, "line": 3, "cwd": "x"}}\n', encoding="utf-8")
+    seen = []
+
+    def harvest(root, path, now):
+        seen.append(path.read_text(encoding="utf-8"))
+        path.write_text("{}\n", encoding="utf-8")  # a harvest moves the cursor it is given
+        return []
+
+    monkeypatch.setattr(fix_loop.session_friction, "harvest", harvest)
+    plan = fix_loop.Context(
+        *[getattr(ctx, n) for n in ("root", "projects", "devkit_dir")],
+        ctx.ledger_path,
+        ctx.history_path,
+        fix_cycle.PLAN,
+        NOW,
+    )
+    assert fix_loop._harvest(plan, cursor) == []
+    assert seen == ['{"t.jsonl": {"offset": 40, "line": 3, "cwd": "x"}}\n']
+    assert cursor.read_text(encoding="utf-8").startswith('{"t.jsonl"'), "the cursor did not move"
+
+
 def test_the_files_sessions_are_told_to_write_are_the_files_the_pass_reads():
     """Prose has no compiler: the channel the ship skill, the engineering rule and every
     fixer prompt name must be the path `fix_reports` reads, or the lines go nowhere."""
