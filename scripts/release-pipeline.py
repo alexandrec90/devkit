@@ -38,7 +38,9 @@ What it does, in order:
 6.  squash-merge it
 7.  dispatch `release.yml phase=tag`, which runs the suite against the tagged commit
     before pushing the tag, and wait for it
-8.  fetch the new tag and hand off to `upgrade-project.py`, which opens an adoption PR
+8.  fetch the new tag, re-run the gate on the default branch (the merge's own run
+    predates the tag, so it is red by construction), and hand off to
+    `upgrade-project.py`, which opens an adoption PR
     per consumer and labels each one for auto-merge
 
 Step 8's *scope* is the one thing the click asks that the schedule cannot: `--projects`
@@ -78,6 +80,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gate_evidence
 import release
 import sweep
 import task_branch
@@ -492,6 +495,23 @@ def tag_missing(devkit: Path, version: str) -> str:
     return f"{RELEASE_WORKFLOW} reported success but {version} is not here after a fetch"
 
 
+def regate_default_branch(devkit: Path, branch: str = "") -> str:
+    """Re-run the gate on the default branch now the tag exists; what to say about it.
+
+    The merge's own gate ran before the tag was pushed, so `EXPECTED_RED_TEST` failed
+    there by construction and left the default branch red on GitHub until the next push
+    (v0.11.31). The pass reads that red as green once the commit is tagged; this makes
+    the gate say so too. Not waited on, and a dispatch that fails is said, not fatal:
+    the release is cut either way.
+    """
+    branch = branch or task_branch.detect_default_branch(sweep.git_for(devkit), fallback="main")
+    done = _run(["gh", "workflow", "run", gate_evidence.GATE_WORKFLOW, "--ref", branch], cwd=devkit)
+    if done.returncode != 0:
+        why = " ".join((done.stderr or done.stdout or "").split())
+        return f"could not re-run {gate_evidence.GATE_WORKFLOW} on {branch}: {why}"
+    return f"re-ran {gate_evidence.GATE_WORKFLOW} on {branch}, so its last verdict is on the tag"
+
+
 def upgrade_module():
     """`scripts/upgrade-project.py`, loaded by path.
 
@@ -802,7 +822,7 @@ def run_pipeline(
 
     if missing := tag_missing(devkit, version):
         return _stop(missing)
-    _say(f"{version} is tagged.")
+    _say(f"{version} is tagged; {regate_default_branch(devkit)}.")
 
     if not adopt:
         _say("skipping adoption (--no-adopt); consumers stay on the previous release")

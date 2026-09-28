@@ -409,6 +409,39 @@ def test_a_pushed_tag_is_confirmed_only_when_git_can_see_it(
     assert (expected in missing) if expected else missing == ""
 
 
+def test_the_default_branch_gate_is_run_again_once_the_tag_exists(monkeypatch):
+    """The merge's gate runs before the tag is pushed, so `test_fallback_devkit_ref_tracks
+    _the_newest_tag` fails there by construction: v0.11.31 left main red on GitHub until
+    the next push, and only the pass's release-red exemption read it as green."""
+    calls = []
+
+    def run(cmd, *_args, **_kwargs):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(rp, "_run", run)
+    said = rp.regate_default_branch(Path("devkit"), "main")
+    assert calls == [["gh", "workflow", "run", rp.gate_evidence.GATE_WORKFLOW, "--ref", "main"]]
+    assert "re-ran" in said and "main" in said
+
+
+def test_a_regate_that_cannot_be_dispatched_is_said_and_does_not_fail_the_release(monkeypatch):
+    def run(cmd, *_args, **_kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="HTTP 403: forbidden")
+
+    monkeypatch.setattr(rp, "_run", run)
+    said = rp.regate_default_branch(Path("devkit"), "main")
+    assert "could not re-run" in said and "HTTP 403" in said
+
+
+def test_the_release_regates_right_after_confirming_the_tag():
+    source = Path(rp.__file__).read_text(encoding="utf-8")
+    tagged = source.index("if missing := tag_missing(devkit, version):")
+    assert source.index("regate_default_branch(devkit", tagged) < source.index(
+        "if not adopt:", tagged
+    )
+
+
 def test_backing_out_of_the_consumer_checklist_cuts_no_release(capsys):
     """The other half of the pair in `upgrade-project`: there an escaped picker is a
     graceful no-op, because the picker IS the subject. Here the click is the whole
