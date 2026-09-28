@@ -38,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fix_findings
 import session_transcripts as st
+import sweep
 
 Event = st.Event
 harness_events = fix_findings.harness_events
@@ -533,7 +534,7 @@ SETTLED_BY_THE_SESSION = frozenset({"user-frustration"})
 DEFAULT_BRANCHES = frozenset({"main", "master"})
 
 
-def task_branch(cwd: str, runner=subprocess.run) -> str:
+def task_branch(cwd: str, runner=sweep.run_windowless) -> str:
     """The branch the session's tree is on, when it is a task branch; "" otherwise.
 
     A default branch, a detached head, a tree already gone: nothing that a merge could

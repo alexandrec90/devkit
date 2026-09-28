@@ -1008,6 +1008,71 @@ def test_a_stream_call_is_guarded_only_by_an_if_that_tests_the_stream():
     assert unguarded_stream_calls("import sys\nprint('x', file=sys.stderr)\n") == []
 
 
+# --- a spawn handed over as a value is a spawn ---------------------------------
+#
+# Every scan above finds a spawn by its *call*, `subprocess.run(...)`. The window came
+# back on 2026-09-28 through one that is never called by that name: `temproot_wiring.wire`
+# takes `runner=subprocess.run` and calls `runner([uv, "lock"], ...)`, so the module read
+# as spawning nothing, and `upgrade-project.py` opened a Windows Terminal window per
+# project it wired. Caught by a human again, then reproduced by firing the task under a
+# window watcher. Thirteen other defaults in the same reach had the same shape.
+#
+# A call-site flag cannot fix it either -- `ship_intent.run_quiet`, the runner the fix
+# pass injects, sets `creationflags` itself and would get it twice. So the default is
+# what is held: a job's reach never holds a raw spawn as a value, only
+# `sweep.run_windowless` (or `worktree_env`'s standalone twin), which ORs the flag in.
+
+
+def spawn_references(source: str) -> list[int]:
+    """Lines naming `subprocess.<spawn>` as a value rather than calling it."""
+    tree = ast.parse(source)
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr in SPAWN_ATTRS
+        and _is_subprocess(node.value)
+        and id(node) not in called
+    ]
+
+
+def test_a_spawn_passed_by_reference_is_found():
+    assert spawn_references(
+        "import subprocess\ndef f(runner=subprocess.run):\n    runner([])\n"
+    ) == [2]
+    assert spawn_references("import subprocess\nsubprocess.run([], creationflags=1)\n") == []
+    assert spawn_references("import subprocess\nr = subprocess.Popen\n") == [2]
+
+
+def test_no_module_a_job_reaches_hands_out_a_raw_spawn():
+    for rel in sorted(import_closure() | set(UNATTENDED)):
+        lines = spawn_references((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        assert not lines, (
+            f"{rel} holds subprocess's spawn as a value at {lines} -- a runner default, "
+            f"most likely -- and a scheduled job reaches it, so whatever calls it opens a "
+            f"console window under pythonw.exe. Default to sweep.run_windowless instead."
+        )
+
+
+@pytest.mark.parametrize("module_path", ["scripts/sweep.py", "scripts/worktree_env.py"])
+def test_the_windowless_runner_forces_the_flag_and_keeps_the_callers(module_path, monkeypatch):
+    module = load_script(module_path)
+    seen: dict = {}
+
+    def fake_run(*args, **kwargs):
+        seen.update(kwargs, args=args)
+        return "done"
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "NO_WINDOW", 0x08000000)
+    assert module.run_windowless(["git"], cwd="x") == "done"
+    assert seen == {"args": (["git"],), "cwd": "x", "creationflags": 0x08000000}
+    # A runner handed an explicit flag -- `box_teardown` passes its own -- keeps it.
+    module.run_windowless(["git"], creationflags=0x200)
+    assert seen["creationflags"] == 0x08000200
+
+
 def test_the_import_exemptions_are_not_stale():
     """A module that stopped being imported, or stopped spawning, keeps an exemption
     that reads as a decision someone made about today's code."""

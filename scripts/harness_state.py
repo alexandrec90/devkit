@@ -37,7 +37,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +44,8 @@ from pathlib import Path
 # The directory names a worktree is cut into, so `SKIP_DIRS` below names none of them
 # itself. `worktree_tiers` is stdlib-only, so importing it costs this module nothing.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sweep
 import worktree_tiers
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -244,7 +245,7 @@ def instruction_files(root: Path) -> list[Path]:
     return sorted(set(found))
 
 
-def is_tracked(root: Path, relpath: str, runner=subprocess.run) -> bool:
+def is_tracked(root: Path, relpath: str, runner=sweep.run_windowless) -> bool:
     """Whether git in `root` has this path in its index. False for anything not a repo."""
     try:
         done = runner(
@@ -267,7 +268,7 @@ def skip_worktree_argv(root: Path, relpath: str, skip: bool) -> list[str]:
     return ["git", "-C", str(root), "update-index", flag, "--", relpath]
 
 
-def switch_root(root: Path, ledger: Ledger, runner=subprocess.run) -> list[str]:
+def switch_root(root: Path, ledger: Ledger, runner=sweep.run_windowless) -> list[str]:
     """Move every instruction file under `root` aside. Returns one report line each."""
     lines: list[str] = []
     resolved = root.resolve()
@@ -295,7 +296,9 @@ def switch_root(root: Path, ledger: Ledger, runner=subprocess.run) -> list[str]:
     return lines
 
 
-def restore_root(ledger: Ledger, root: Path | None = None, runner=subprocess.run) -> list[str]:
+def restore_root(
+    ledger: Ledger, root: Path | None = None, runner=sweep.run_windowless
+) -> list[str]:
     """Put back everything the ledger holds, for `root` or for every root.
 
     An entry whose root no longer exists is dropped rather than reported as a failure: a
@@ -314,7 +317,7 @@ def restore_root(ledger: Ledger, root: Path | None = None, runner=subprocess.run
     return lines
 
 
-def _restore_one(entry: StashedFile, runner=subprocess.run) -> str:
+def _restore_one(entry: StashedFile, runner=sweep.run_windowless) -> str:
     """One entry back where it came from, as a report line. Never raises."""
     name = f"{Path(entry.root).name}/{entry.relpath}"
     if not Path(entry.root).is_dir():

@@ -85,7 +85,7 @@ def parse_holders(text: str) -> list[tuple[int, str]]:
     return out
 
 
-def box_holders(path: Path, run=subprocess.run) -> list[tuple[int, str]]:
+def box_holders(path: Path, run=sweep.run_windowless) -> list[tuple[int, str]]:
     """Processes running an executable or module out of `path`. Empty when unaskable.
 
     No `os.name` guard, deliberately: a missing `powershell` raises `FileNotFoundError`
@@ -124,7 +124,7 @@ def box_holders(path: Path, run=subprocess.run) -> list[tuple[int, str]]:
 HOLDER_RELEASE_SECONDS = 2.0
 
 
-def evict_box_holders(path: Path, run=subprocess.run) -> list[str]:
+def evict_box_holders(path: Path, run=sweep.run_windowless) -> list[str]:
     """Kill every process holding an image under `path`. Returns what was killed.
 
     `taskkill /T` because the server is usually a child of an `npm.cmd` wrapper, and
@@ -233,7 +233,9 @@ def remove_tree_longpath(path: Path) -> str:
     return shown if len(failures) <= 3 else f"{shown} (+{len(failures) - 3} more)"
 
 
-def force_remove_box(path: Path, run=subprocess.run, sleep=time.sleep) -> tuple[str, list[str]]:
+def force_remove_box(
+    path: Path, run=sweep.run_windowless, sleep=time.sleep
+) -> tuple[str, list[str]]:
     """Delete the box, evicting whatever still runs out of it if that is what refused.
 
     Returns `(error, notes)` — the error empty on success, the notes already phrased for
