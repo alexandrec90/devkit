@@ -30,6 +30,8 @@ updates:
       interval: weekly
     assignees:
       - alexandrec90
+    # Bump uv.lock, not the pyproject floors: a floor says what the code needs.
+    versioning-strategy: increase-if-necessary
     groups:
       # One PR for the toolchain's minor/patch drift rather than one per package,
       # each costing a full CI run. Majors stay individual so the auto-merge

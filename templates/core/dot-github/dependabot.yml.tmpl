@@ -9,6 +9,11 @@
 # requests no review -- so without an assignee these PRs are reachable only by opening
 # this repository. Assignment is the one qualifier a config file can set that puts them
 # in a view someone already reads.
+#
+# `versioning-strategy` on the Python entry keeps Dependabot to the lock. Without it,
+# a grouped patch bump rewrote a library's `pandas>=2.2` as `pandas>=3.0.6`, and a
+# project depending on that library, whose other dependencies needed `pandas<3`, went
+# red on its own main. A floor says what the code needs; the lock says what was tested.
 version: 2
 updates:
   - package-ecosystem: uv
@@ -17,6 +22,7 @@ updates:
       interval: weekly
     assignees:
       - {{ github_owner }}
+    versioning-strategy: increase-if-necessary
     groups:
       minor-and-patch:
         update-types:
