@@ -572,6 +572,73 @@ def test_a_shell_variable_argument_is_not_the_full_suite():
     assert sf.full_suite(" -q -p no:cacheprovider @"), "a bare @ names nothing"
 
 
+def test_the_first_run_after_a_suite_wide_change_is_the_targeted_one():
+    """77e3c01d, retired four times and back: a fixer restored data-lake's dependency
+    floors, relocked, and ran data-lake's whole suite -- which is every test the change
+    touches (7458ed23 was a pytest config's `addopts`). The exact calls, in order."""
+    tree = "C:\\Users\\alexa\\vs-code\\data-lake\\.claude\\worktrees\\keep-dependency-floors-0928"
+    ran = (
+        "cd /c/Users/alexa/vs-code/data-lake/.claude/worktrees/keep-dependency-floors-0928 && "
+        'git diff --text uv.lock | grep "^[-+]" | grep -v "^[-+][-+]"; '
+        "ls scripts/hooks/tests/test_ci_workflow_contract.py && .venv/Scripts/python.exe -m "
+        "pytest -q -p no:cacheprovider --tb=short 2>&1 | tail -3"
+    )
+    floors = _tool("Edit", "e", file_path=f"{tree}\\pyproject.toml", old_string="a", new_string="b")
+    relock = call(f"cd {tree} && uv lock 2>&1 | tail -3 && git diff --stat", "l")
+    assert classes([floors, relock, call(ran, "1")]) == []
+    assert classes([call("uv lock", "l"), call(ran, "1")]) == [], "a relock alone"
+    for name in ("uv.lock", "conftest.py", "pytest.ini", "requirements-dev.txt", "package.json"):
+        assert classes([_tool("Write", "w", file_path=f"x/{name}"), call(ran, "1")]) == [], name
+    patch = (
+        "apply_patch *** Begin Patch\n*** Update File: pyproject.toml\n@@\n-a\n+b\n*** End Patch"
+    )
+    assert classes([call(patch, "p"), call(ran, "1")]) == [], "a Codex patch of the file"
+
+
+def test_a_suite_wide_change_excuses_one_whole_run_and_nothing_else():
+    """The change is checked by the first run after it; the whole suite again, or after
+    an ordinary edit, is the habit the detector exists for."""
+    whole = ".venv/Scripts/python.exe -m pytest -q"
+    floors = _tool("Edit", "e", file_path="pyproject.toml")
+    assert classes([floors, call(whole, "1"), call(whole, "2")]) == ["full-suite"]
+    targeted = call("python -m pytest tests/test_x.py -q", "t")
+    assert classes([floors, targeted, call(whole, "2")]) == ["full-suite"]
+    for path in ("scripts/x.py", "docs/pyproject.toml.md", "tests/test_uv.lock.py"):
+        assert classes([_tool("Edit", "e", file_path=path), call(whole, "1")]) == ["full-suite"]
+    assert classes([call("uv sync", "s"), call(whole, "1")]) == ["full-suite"], "not a change"
+    gate = call("python scripts/hooks/run_push_gate.py", "g")
+    assert classes([floors, gate]) == ["full-suite"], "the push gate is still the gate's job"
+
+
+def test_an_edit_call_carries_the_file_it_names():
+    for key in ("file_path", "notebook_path"):
+        [event] = st.claude_events(_tool("Edit", "e", **{key: "a/b.py"}), 1)
+        assert event.path == "a/b.py", key
+    [bash] = st.claude_events(call("ls", "1"), 1)
+    assert bash.path == ""
+
+
+def test_changes_the_suite_reads_the_file_edited_and_the_command_run():
+    def edit(path: str) -> st.Event:
+        return st.Event("call", 1, tool="Edit", path=path)
+
+    def run(command: str) -> st.Event:
+        return st.Event("call", 1, command=command, tool="Bash")
+
+    assert sf.changes_the_suite(edit("C:\\t\\pyproject.toml"))
+    assert sf.changes_the_suite(edit("tests/conftest.py"))
+    assert sf.changes_the_suite(edit("frontend/vitest.config.ts"))
+    assert not sf.changes_the_suite(edit("scripts/pyproject_tools.py"))
+    assert not sf.changes_the_suite(edit(""))
+    read = st.Event("call", 1, tool="Read", path="pyproject.toml")
+    assert not sf.changes_the_suite(read), "reading the manifest changes nothing"
+    for command in ("uv lock --upgrade-package x", "cd t && uv add httpx", "npm uninstall y"):
+        assert sf.changes_the_suite(run(command)), command
+    for command in ("uv sync", "uv run pytest", "git diff uv.lock", "echo uv lock"):
+        assert not sf.changes_the_suite(run(command)), command
+    assert sf.changes_the_suite(run("apply_patch *** Begin Patch\n*** Add File: a/uv.lock\n"))
+
+
 def test_session_findings_are_nothing_outside_the_workspace(tmp_path):
     chunk = st.Chunk(((1, call("sleep 99", "1")),), 0, 1)
     assert sf.session_findings(tmp_path / "s.jsonl", chunk, "", tmp_path) == []
@@ -677,6 +744,39 @@ def test_a_mangled_revision_path_is_an_environment_problem():
     assert classes([call("git show origin/master:.devkit.toml", "1"), result(out, "1")]) == [
         "environment"
     ]
+
+
+def test_a_probe_of_git_bashs_path_conversion_is_a_measurement_not_friction():
+    """d71a2caf: the fixer that set `MSYS2_ARG_CONV_EXCL` in the agent env reproduced the
+    rewrite beside the setting that stops it, in one call, and the probe was filed as the
+    defect it was measuring. The exact call and output; a real hit is still filed."""
+    command = (
+        'P=".venv/Scripts/python.exe"; MSYS2_ARG_CONV_EXCL="origin/;upstream/;refs/" $P -c '
+        '"import sys;print(sys.argv[1:])" origin/main:.github/x upstream/main:.github/x '
+        "refs/heads/main:.github/x /c/Users /tmp:/usr feature/x:.github/y; git show "
+        'origin/main:.github/dependabot.yml | head -2; MSYS2_ARG_CONV_EXCL="origin/" git show '
+        'origin/main:.github/dependabot.yml | head -2; grep -n "settings.json" '
+        "scripts/devkit_manifest.py | head"
+    )
+    out = (
+        "['origin/main:.github/x', 'upstream/main:.github/x', 'refs/heads/main:.github/x', "
+        "'C:/Users', 'C:\\\\Users\\\\alexa\\\\AppData\\\\Local\\\\Temp;C:\\\\Program Files\\\\Git\\\\usr', "
+        "'feature\\\\x;.github\\\\y']\n"
+        "fatal: ambiguous argument 'origin\\main;.github\\dependabot.yml': unknown revision or "
+        "path not in the working tree.\n# Dependency updates for devkit itself.\n"
+    )
+    assert classes([call(command, "1"), result(out, "1", error=False)]) == []
+    assert classes([call(command, "1"), result(out, "1")]) == [], "failed or not"
+    for probe in (
+        "MSYS_NO_PATHCONV=1 git show a/b:c",
+        "export MSYS2_ARG_CONV_EXCL='*'; git show a/b:c",
+    ):
+        hit = "fatal: ambiguous argument 'a\\b;c': unknown revision"
+        assert classes([call(probe, "1"), result(hit, "1")]) == [], probe
+    missing = "No module named pytest"
+    assert classes([call(command, "1"), result(missing, "1")]) == ["environment"], (
+        "a probe excuses only the rewrite it measures"
+    )
 
 
 def test_a_commit_message_that_quotes_errors_is_not_an_environment_failure():

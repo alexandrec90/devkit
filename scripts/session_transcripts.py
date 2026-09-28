@@ -39,6 +39,7 @@ class Event:
     error: bool = False
     call_id: str = ""
     tool: str = ""  # a call's tool name: `Bash`, `Edit`, `AskUserQuestion`, `shell`
+    path: str = ""  # the file an edit call names: `Edit`'s `file_path`
 
 
 @dataclass(frozen=True)
@@ -82,9 +83,12 @@ def _claude_block(block: dict, speaker: str, line: int) -> Event | None:
     if kind == "text":
         return Event(speaker, line, str(block.get("text", ""))) if speaker else None
     if kind == "tool_use":
-        command = str(_dict(block.get("input")).get("command", ""))
+        given = _dict(block.get("input"))
+        command = str(given.get("command", ""))
+        path = str(given.get("file_path") or given.get("notebook_path") or "")
         tool = str(block.get("name", ""))
-        return Event("call", line, command=command, call_id=str(block.get("id", "")), tool=tool)
+        call_id = str(block.get("id", ""))
+        return Event("call", line, command=command, call_id=call_id, tool=tool, path=path)
     if kind == "tool_result":
         error = bool(block.get("is_error"))
         call_id = str(block.get("tool_use_id", ""))

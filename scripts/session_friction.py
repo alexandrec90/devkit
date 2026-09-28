@@ -79,6 +79,11 @@ RESULT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # retracts its call's `poll` too: a refused sleep waited for nothing, so the one refusal
 # was filed as two groups neither of which devkit could fix (9854b541, 363d8be7).
 SLEEP_GUARD = re.compile(r"<tool_use_error>Blocked: sleep \d+ followed by")
+# The rewrite a call that sets Git Bash's own conversion switches was measuring, beside the
+# setting that stops it: the probe that put `MSYS2_ARG_CONV_EXCL` in the agent env was
+# filed as the defect it measured (d71a2caf), as `BYTE_DUMP` is for a heredoc's probe.
+REWRITTEN_REV = re.compile(r"^ambiguous argument", re.I)
+PATH_CONVERSION_PROBE = re.compile(r"\bMSYS2_ARG_CONV_EXCL=|\bMSYS_NO_PATHCONV=")
 WAIT_TOOLS = frozenset({"Monitor"})
 
 # An odd count of any of these before a match on its line means the match is quoted.
@@ -205,6 +210,25 @@ SUITE_ROOTS = frozenset(
 # `$p`, `${files[@]}`, `$env:T`, `%TARGET%`, PowerShell's splat `@t`: an argument the
 # shell fills in, which the detector cannot see, so it reads as narrowing, not as nothing.
 SHELL_VARIABLE = re.compile(r"\$\{?[A-Za-z_]|%[A-Za-z_]\w*%|^@[A-Za-z_]\w*$")
+# Files every test in a suite reads: the dependency set, the lock that pins it, the
+# runner's own configuration. The first test run after a change to one is targeted at
+# the whole suite, because the whole suite is what the change touches -- retired as that
+# four times before the detector learned it (7458ed23 a pytest `addopts`, 77e3c01d a
+# library's dependency floors and its relock).
+SUITE_WIDE_FILE = re.compile(
+    r"(?:^|[\\/])(?:pyproject\.toml|uv\.lock|poetry\.lock|setup\.(?:cfg|py)|tox\.ini|"
+    r"pytest\.ini|conftest\.py|requirements[\w.-]*\.txt|package(?:-lock)?\.json|"
+    r"pnpm-lock\.yaml|yarn\.lock|(?:vitest|jest)\.config\.\w+)$"
+)
+# The same change made by a command: a relock, a dependency added or removed. Not
+# `uv sync`, which installs what the lock already said.
+SUITE_WIDE_COMMAND = re.compile(
+    r"(?:^|&&?|\|\|?|;)\s*(?:(?:uv|poetry)\s+(?:lock|add|remove)|"
+    r"(?:npm|pnpm|yarn)\s+(?:add|remove|uninstall))\b",
+    re.M,
+)
+# A file a Codex `apply_patch` names, whose patch rides in the command.
+PATCHED_FILE = re.compile(r"^\*\*\* (?:Update|Add) File: (.+)$", re.M)
 
 # The user telling a session it went wrong -- the most expensive friction there is, and
 # the one no tool result carries. Skipped on a session's opening message, which is the
@@ -302,7 +326,19 @@ def scratch_only(command: str) -> bool:
     return bool(verdicts) and all(verdicts)
 
 
-def _command_classes(command: str) -> Iterator[tuple[str, str]]:
+def changes_the_suite(event: Event) -> bool:
+    """`event` changes what every test reads: it edits a `SUITE_WIDE_FILE`, or relocks.
+    `Read` names a `file_path` too, and reading the lock changes nothing."""
+    edited = event.path if event.tool in EDIT_TOOLS else ""
+    paths = [edited, *(found.strip() for found in PATCHED_FILE.findall(event.command))]
+    return any(SUITE_WIDE_FILE.search(path) for path in paths if path) or bool(
+        SUITE_WIDE_COMMAND.search(event.command)
+    )
+
+
+def _command_classes(command: str, suite_changed: bool = False) -> Iterator[tuple[str, str]]:
+    """What `command` is friction as; a whole-suite test run is not, while `suite_changed`
+    says no run has checked a suite-wide change yet. The push gate still is."""
     for cls, pattern in COMMAND_PATTERNS:
         if cls == "heredoc-write" and not damageable_heredoc(command):
             continue
@@ -310,6 +346,8 @@ def _command_classes(command: str) -> Iterator[tuple[str, str]]:
             continue
         if pattern.search(command):
             yield cls, COMMAND_DETAIL[cls]
+    if suite_changed:
+        return
     if any(full_suite(run.group("rest") or "") for run in TEST_RUN.finditer(command)):
         yield "full-suite", COMMAND_DETAIL["full-suite"]
 
@@ -322,13 +360,15 @@ def _quoted(text: str, at: int) -> bool:
     return any(line.count(mark) % 2 for mark in QUOTE_MARKS) or bool(ASSERTION.search(line))
 
 
-def _result_class(text: str) -> tuple[str, str]:
+def _result_class(text: str, command: str = "") -> tuple[str, str]:
     """The class and snippet a failed call's output files under; `("", "")` for none."""
     text = ANSI.sub("", text)
+    probe = bool(PATH_CONVERSION_PROBE.search(command))
     for cls, pattern in RESULT_PATTERNS:
         for found in pattern.finditer(text):
-            if not _quoted(text, found.start()):
-                return cls, normalize(text[found.start() : found.start() + SNIPPET])
+            if _quoted(text, found.start()) or (probe and REWRITTEN_REV.match(found.group())):
+                continue
+            return cls, normalize(text[found.start() : found.start() + SNIPPET])
     return "", ""
 
 
@@ -373,6 +413,8 @@ class _Session:
     # line -> every class noted there: what `outdated` re-judges a filed row by, since
     # `found` keeps only each class's first event.
     at: dict[int, set[str]] = field(default_factory=dict)
+    # A suite-wide change no test run has checked yet (`changes_the_suite`).
+    suite_changed: bool = False
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -397,10 +439,13 @@ class _Session:
         self.calls[event.call_id] = event.command
         if event.tool != "AskUserQuestion":
             self.last_said = None  # it went on working: that text was not how it ended
-        for cls, what in _command_classes(event.command):
+        self.suite_changed = self.suite_changed or changes_the_suite(event)
+        for cls, what in _command_classes(event.command, self.suite_changed):
             # A `Monitor` until-loop is the wait Claude Code's `SLEEP_GUARD` prescribes.
             if not (cls == "poll" and event.tool in WAIT_TOOLS):
                 self.note(cls, what, event)
+        if TEST_RUN.search(event.command):
+            self.suite_changed = False  # checked: the next whole run is the habit again
         if event.tool == "AskUserQuestion" and self.dispatched:
             self.note(
                 "asked-user", "a dispatched session asked a question nobody would answer", event
@@ -434,7 +479,7 @@ class _Session:
         command = self.calls.get(event.call_id, "")
         if not SEES_ENVIRONMENT.search(command) or READS_HARNESS_TEXT.search(command):
             return
-        cls, what = _result_class(environment_text(command, event.text))
+        cls, what = _result_class(environment_text(command, event.text), command)
         if cls == "environment":
             self.note(cls, what, replace(event, command=command))
 
@@ -446,9 +491,9 @@ class _Session:
             self.retract("poll", COMMAND_DETAIL["poll"], event.call_id)
             return
         if not READS_HARNESS_TEXT.search(command):
-            cls, what = _result_class(event.text)
+            cls, what = _result_class(event.text, command)
             if cls == "environment":
-                cls, what = _result_class(environment_text(command, event.text))
+                cls, what = _result_class(environment_text(command, event.text), command)
             self.note(cls, what, event)
         # A test run failing again is the work of fixing it, not a wasted retry.
         if command and not TEST_RUN.search(command):
