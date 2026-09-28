@@ -15,7 +15,8 @@ So the rehearsal is this script, and the gate job runs it: one recipe, run the s
 in both places.
 
 1. The previous release is the newest tag, not `git describe` -- which release is
-   newest, not which is reachable (`new-project.latest_devkit_tag` has the account).
+   newest, not which is reachable (`new-project.latest_devkit_tag` has the account) --
+   among the tags that do not contain HEAD: on a tagged commit, the newest is this one.
 2. Its generator renders a bare project into a scratch directory, `--no-register`.
 3. `sync-devkit.py --pull` runs twice, as `upgrade-project.pull_to_fixpoint` does: the
    first pull replaces `sync-devkit.py` itself, the second runs the pulled copy.
@@ -81,8 +82,13 @@ def run_command(argv: Sequence[str], **kwargs) -> subprocess.CompletedProcess[st
 
 
 def previous_tag(root: Path, runner: Runner = run_command) -> str:
-    """The newest release tag, or "" when the repository has none."""
-    listed = runner(["git", "tag", "--sort=-v:refname"], cwd=str(root))
+    """The newest release tag that does not contain HEAD, or "" when there is none.
+
+    `--no-contains`: on `main` just after a release, the newest tag *is* this tree, and
+    adopting a tree into a render of itself commits nothing (run 36363149664). A tag that
+    contains HEAD is this release or a later one, never the previous.
+    """
+    listed = runner(["git", "tag", "--sort=-v:refname", "--no-contains", "HEAD"], cwd=str(root))
     lines = (listed.stdout or "").split() if listed.returncode == 0 else []
     return lines[0] if lines else ""
 
