@@ -166,6 +166,67 @@ def test_an_artifact_less_run_is_read_from_its_failed_log_and_the_log_is_kept(tm
     assert saved.read_text(encoding="utf-8") == FAILED_JOB_LOG
 
 
+def still_running(answers: dict[tuple[str, ...], object]) -> Table:
+    """A table whose `--log-failed` refuses, as `gh` does while any job is still going."""
+
+    class Running(Table):
+        def __call__(self, *args: str) -> subprocess.CompletedProcess[str]:
+            if "--log-failed" in args:
+                self.calls.append(args)
+                refusal = "run 7 is still in progress; logs will be available when it is complete"
+                return subprocess.CompletedProcess(["gh", *args], 1, "", refusal)
+            return super().__call__(*args)
+
+    return Running(answers)
+
+
+def test_a_run_still_in_progress_is_read_from_each_failed_jobs_own_log(tmp_path):
+    """11b11cc6: `--log-failed` refused PR #447's run while another job was still going,
+    and the fixer's prompt said no artifact came down. The failed job's own log did."""
+    jobs = [
+        {"databaseId": 108897638606, "name": "Tests", "conclusion": "failure", "steps": []},
+        {"databaseId": 108897638607, "name": "Lint", "conclusion": "", "steps": []},
+    ]
+    endpoint = "repos/{owner}/{repo}/actions/jobs/108897638606/logs"
+    job_log = "2026-09-28T10:00:00.1234567Z \x1b[31mFAILED tests/test_x.py::test_y - boom\n"
+    gh = still_running(
+        {
+            ("run", "view", "7"): {"jobs": jobs},
+            ("api", "--allow-escape-sequences", endpoint): job_log,
+        }
+    )
+    texts, asked = ev.run_evidence(gh, "7", tmp_path / "e")
+    assert fix_plan.signature_from_logs(texts) == ("tests/test_x.py::test_y",)
+    assert asked == []
+    saved = (tmp_path / "e" / ev.FAILED_LOG).read_text(encoding="utf-8")
+    assert saved == f"Tests\t\t{job_log}"
+    assert not any("108897638607" in " ".join(call) for call in gh.calls), "not failed"
+
+
+def test_only_a_failed_job_with_an_id_has_its_log_read():
+    jobs = [
+        {"databaseId": 1, "name": "A\tB", "conclusion": "failure"},
+        {"databaseId": 2, "name": "C", "conclusion": "success"},
+        {"name": "D", "conclusion": "failure"},
+    ]
+    gh = table({("api", "--allow-escape-sequences"): "one\ntwo\n"})
+    assert ev.failed_job_logs(gh, jobs) == "A B\t\tone\nA B\t\ttwo\n", "a tab stays a column"
+    assert [call[-1] for call in gh.calls] == ["repos/{owner}/{repo}/actions/jobs/1/logs"]
+    assert ev.failed_job_logs(table({}), jobs) == "", "a refused fetch is no log"
+
+
+def test_a_job_log_that_names_nothing_hands_back_the_jobs_already_read(tmp_path):
+    jobs = [{"databaseId": 9, "name": "Tests", "conclusion": "timed_out", "steps": []}]
+    gh = still_running(
+        {
+            ("run", "view", "7"): {"jobs": jobs},
+            ("api", "--allow-escape-sequences", "repos/{owner}/{repo}/actions/jobs/9/logs"): "x\n",
+        }
+    )
+    assert ev.run_evidence(gh, "7", tmp_path / "e") == (["Tests\t\tx\n"], jobs)
+    assert sum(call[:2] == ("run", "view") and "--json" in call for call in gh.calls) == 1
+
+
 def test_a_log_that_names_nothing_still_falls_back_to_the_jobs(tmp_path):
     jobs = [{"name": "Frontend", "conclusion": "failure", "steps": []}]
     gh = table(
