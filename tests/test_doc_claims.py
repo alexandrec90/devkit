@@ -361,7 +361,7 @@ def _instruction_files() -> list:
 # the reason it is exempt, and an entry that stops being true fails the last test in
 # this file rather than lingering.
 ALLOWED_MISSING = {
-    "origin/main:./.devkit.toml": "a git revision spec, not a path: engineering.md spells "
+    "feature/x:./.devkit.toml": "a git revision spec, not a path: engineering.md spells "
     "it out because Git Bash rewrites the bare `rev:path` form into a Windows path list",
     ".vscode/tasks.json": "the file devkit does NOT own -- its absence is the rule, and "
     "test_devkit_ships_no_project_level_tasks enforces it",
