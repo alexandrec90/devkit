@@ -594,6 +594,71 @@ def test_a_missing_sibling_is_cut_as_a_detached_tree_of_the_repo_beside_the_chec
     assert wt_env.link_path_sources(tree, checkout, runner=run) == []
 
 
+def test_the_hooks_own_git_dir_does_not_aim_the_sibling_cut_at_the_checkout(tmp_path):
+    """6e056a10: git runs `post-checkout` for `worktree add` with `GIT_DIR` and
+    `GIT_WORK_TREE` naming the new tree, which outrank `-C`, so `../data-lake` was cut
+    as a detached *ibkr_trader* worktree and `uv sync` refused its package name."""
+    lake, checkout, tree = _with_sibling_source(tmp_path)
+    gitdir = _git(tree, "rev-parse", "--path-format=absolute", "--git-dir").stdout.strip()
+    caller = {k: v for k, v in os.environ.items() if k != wt_env.SKIP_PROVISION_VAR}
+    caller.update(GIT_DIR=gitdir, GIT_WORK_TREE=str(tree), GIT_INDEX_FILE=gitdir + "/index")
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless, environ=caller)
+    target = checkout / ".claude" / "worktrees" / "data-lake"
+    common = _git(target, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    assert Path(common.stdout.strip()) == lake / ".git", line
+    assert "GIT_DIR" not in wt_env.git_env(caller) and "GIT_WORK_TREE" not in wt_env.git_env(caller)
+    assert wt_env.git_env({"PATH": "p", "GIT_DIR": "x"})["PATH"] == "p"
+
+
+def _cut_sibling(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    lake, checkout, tree = _with_sibling_source(tmp_path)
+    wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    return lake, checkout, tree, checkout / ".claude" / "worktrees" / "data-lake"
+
+
+def _advance_lake(lake: Path) -> str:
+    (lake / "new.txt").write_text("x\n", encoding="utf-8")
+    _git(lake, "add", "-A")
+    _git(lake, "commit", "-qm", "advance")
+    return _git(lake, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_a_sibling_tree_already_there_is_moved_to_the_ref_it_was_cut_at(tmp_path):
+    """2e681e63: the shared `.claude/worktrees/data-lake` was cut once and never moved,
+    so ibkr's `uv lock --check` read data-lake metadata weeks behind main."""
+    lake, checkout, tree, target = _cut_sibling(tmp_path)
+    new = _advance_lake(lake)
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == new, line
+    assert "moved" in line and new[:7] in line
+    assert wt_env.link_path_sources(tree, checkout, runner=_hookless) == [], "now current"
+    env = wt_env.git_env(os.environ)
+    assert wt_env.advance_sibling(target, lake, "HEAD", env) == ""
+    assert wt_env.advance_sibling(target, lake, "no-such-ref", env) == "", "nothing to move to"
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == new
+
+
+def test_a_sibling_tree_holding_work_is_never_moved(tmp_path):
+    lake, checkout, tree, target = _cut_sibling(tmp_path)
+    old = _git(target, "rev-parse", "HEAD").stdout.strip()
+    _advance_lake(lake)
+    (target / ".gitignore").write_text("edited\n", encoding="utf-8")
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert "local changes" in line
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == old
+    _git(target, "checkout", "-q", "--", ".gitignore")
+    _git(target, "checkout", "-q", "-b", "task")
+    assert wt_env.link_path_sources(tree, checkout, runner=_hookless) == [], "a task's branch"
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == old
+
+
+def test_a_sibling_path_holding_another_repo_is_named_not_moved(tmp_path):
+    _lake, checkout, tree = _with_sibling_source(tmp_path)
+    _repo(checkout / ".claude" / "worktrees" / "data-lake", compose=False)
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert "is not a worktree of" in line
+
+
 def test_no_sibling_repo_beside_the_checkout_means_nothing_is_cut(tmp_path):
     _lake, checkout, tree = _with_sibling_source(tmp_path, sibling=False)
 

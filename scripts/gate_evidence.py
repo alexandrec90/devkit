@@ -59,6 +59,8 @@ RUN_URL = re.compile(r"/actions/runs/(\d+)")
 
 RUN_LIST_FIELDS = "databaseId,headSha,conclusion,status,url,workflowName"
 RUN_VIEW_FIELDS = "jobs,conclusion,headSha,url"
+# The job conclusions whose own log `failed_job_logs` reads.
+FAILED_JOB = frozenset({"failure", "timed_out"})
 # Where `run_evidence` saves the failed jobs' log, beside whatever artifacts came down.
 FAILED_LOG = "failed-jobs.log"
 ISSUE_FIELDS = "number,title,body,url"
@@ -133,16 +135,45 @@ def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]
     done = gh("run", "download", str(run_id), "-D", str(dest))
     texts = junit_report.read_artifacts(dest) if getattr(done, "returncode", 1) == 0 else []
     junit_report.write_readable(dest)  # what the prompt tells the fixer to read first
+    jobs: list[dict] | None = None
     if not fix_plan.signature_from_logs(texts):
         # A job that uploads nothing (carameli's frontend unit tests) left the fixer with
         # `job / step` and no test id, digging through `--log-failed` itself; read it once
         # here, and keep it beside the artifacts for the fixer.
-        log = gh("run", "view", str(run_id), "--log-failed")
-        text = str(getattr(log, "stdout", "") or "") if getattr(log, "returncode", 1) == 0 else ""
+        text = _stdout(gh("run", "view", str(run_id), "--log-failed"))
+        if not text.strip():
+            jobs = run_jobs(gh, run_id)
+            text = failed_job_logs(gh, jobs)
         if text.strip():
             (dest / FAILED_LOG).write_text(text, encoding="utf-8")
             texts.append(text)
-    return texts, [] if fix_plan.signature_from_logs(texts) else run_jobs(gh, run_id)
+    if fix_plan.signature_from_logs(texts):
+        return texts, []
+    return texts, run_jobs(gh, run_id) if jobs is None else jobs
+
+
+def _stdout(result: object) -> str:
+    """A `gh` call's stdout, or "" when it failed."""
+    return str(getattr(result, "stdout", "") or "") if getattr(result, "returncode", 1) == 0 else ""
+
+
+def failed_job_logs(gh: Gh, jobs: list[dict]) -> str:
+    """Each failed job's own log, every line led by `job<TAB><TAB>` as `--log-failed` leads it.
+
+    11b11cc6: `--log-failed` refuses the whole run while any other job in it is still
+    going, so a fixer was sent out with "no artifact came down" and its own first two
+    fetches refused. The per-job endpoint answers once that job is done; `gh api` refuses
+    its runner's colour codes unless told to pass them, and `fix_plan.ANSI` strips them.
+    """
+    logs: list[str] = []
+    for job in jobs:
+        if job.get("conclusion") not in FAILED_JOB or not job.get("databaseId"):
+            continue
+        path = f"repos/{{owner}}/{{repo}}/actions/jobs/{job['databaseId']}/logs"
+        text = _stdout(gh("api", "--allow-escape-sequences", path))
+        name = str(job.get("name", "")).replace("\t", " ")
+        logs.extend(f"{name}\t\t{line}" for line in text.splitlines())
+    return "".join(f"{line}\n" for line in logs)
 
 
 # --- scheduled failures ----------------------------------------------------------------

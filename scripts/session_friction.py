@@ -167,9 +167,12 @@ STATEMENT = re.compile(r"&&|\|\||[;\n]")
 # Git's own voice. Everything else these subcommands print is the repository's text -- a
 # diff, a blob, a log -- which quotes an error as readily as a test fixture does
 # (83496ae4). Not `commit` or `push`: what they print besides is a hook's, and a hook's
-# "No module named" is the environment.
+# "No module named" is the environment. `status` prints only the tree's own paths, and
+# leads the diff a ship step reads (5453c7ae).
 GIT_DIAGNOSTIC = re.compile(r"^(?:fatal|error|warning): .*$", re.M)
-GIT_READERS = frozenset({"diff", "show", "log", "blame", "grep", "cat-file", "format-patch"})
+GIT_READERS = frozenset(
+    {"diff", "show", "log", "blame", "grep", "cat-file", "format-patch", "status"}
+)
 # Statements that print nothing of their own, so they leave a git read a git read.
 SILENT = frozenset({"cd", "pushd", "popd"})
 
