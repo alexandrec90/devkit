@@ -175,6 +175,22 @@ def test_the_nightly_prompt_names_the_workflow_the_issue_and_the_fresh_branch():
     assert "closes itself" in text
 
 
+def test_the_nightly_prompt_names_the_red_runs_commit_beside_the_tip_it_was_cut_from():
+    """41924a97: `failed-jobs.log` named no commit, and a fixer spent a `gh issue view`
+    and a `gh pr list` learning it was older than its tree. c7979142: another slept in a
+    loop waiting for the issue to close, which is the pass's to read."""
+    tip = "b31b60c" + "b" * 33
+    fields = {"kind": fix_plan.NIGHTLY, "workflow": "Nightly", "number": 69, "tip": tip}
+    nightly = failure(**fields, run_id="36410261314", sha="59a4ef5" + "a" * 33)
+    text = fix_prompts.nightly_prompt(nightly, "agent/fix-nightly-0928")
+    assert "run 36410261314 at 59a4ef5aaaaa, which is not the tip" in text
+    assert "whether origin/main already fixes it" in text
+    assert "off origin/main at b31b60cbbbbb" in text
+    assert "do not wait for it" in text
+    at_tip = fix_prompts.nightly_prompt(failure(**fields, sha=tip), "agent/fix-nightly-0928")
+    assert "which is not the tip" not in at_tip and "at b31b60cbbbbb" in at_tip
+
+
 def test_a_conflicted_pr_gets_the_resolver_prompt_which_names_no_failure():
     """The gate cannot have run, and a resolver told "also fix the tests" fixes the
     wrong thing; whatever the gate says after the push is the next pass's business."""

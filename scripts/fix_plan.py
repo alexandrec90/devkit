@@ -23,6 +23,8 @@ shapes `gh` returns, so `tests/test_fix_plan.py` drives every branch without a n
 - **A PR behind its base is updated, not fixed.** Its gate ran against a base that
   has moved, so what it says may already be fixed on the base; the pass updates the
   branch and reads the new run next time. No session is spent on it.
+- **A nightly red before its base's tip is re-run, not fixed**, for the same reason:
+  the pass dispatches the workflow on the tip and reads that run next time.
 - **Three shapes are never dispatched.** A release PR is red by construction
   (`RELEASING.md`: `test_fallback_devkit_ref_tracks_the_newest_tag` fails until the
   tag exists, and `release-pipeline.py` judges exactly that red), so an agent sent at
@@ -79,8 +81,11 @@ DISPATCH = "dispatch"  # one agent, in a worktree on the failure's own branch
 RESOLVE = "resolve"  # the same worktree, a conflict-only prompt, and nothing about the gate
 UPSTREAM = "upstream"  # one agent in devkit, for a signature shared across consumers
 UPDATE = "update"  # no agent: the PR is behind its base, so update it and let the gate re-run
+RERUN = "rerun"  # no agent: a nightly's red run predates the tip, so run it there first
 SKIP = "skip"  # nothing, and the note says why
 HOLD = "hold"  # nothing this pass: its base is red, and the base's fixer goes first
+# The actions that are one GitHub call and no session: free, so never rationed.
+NO_SESSION = (UPDATE, RERUN)
 
 # A default branch's gate verdict beside True and False: a run at the tip that has not
 # finished. Not a hold reason -- the verdict before it stands -- and not "unreadable".
@@ -141,6 +146,12 @@ class Failure:
     check_runs: tuple[str, ...] = ()
     # COMMIT only: the worktree the refused intent sits in, which is where the fixer opens.
     tree: str = ""
+    # NIGHTLY only: origin/<base>'s tip when the evidence was read, which the red run at
+    # `sha` may predate; whether a run of the workflow at that tip is still going; and
+    # the workflow's file when it takes `workflow_dispatch`, so the pass can run it there.
+    tip: str = ""
+    tip_running: bool = False
+    rerun_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -373,6 +384,11 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
     master in). Anything else against a red base is held: every PR against a red base
     inherits its failure, a nightly runs on the same commit, and a resolver is a session
     whose merge the base's fix may move. The base's fixer goes alone.
+
+    A nightly is read at its base's tip, as a PR is at its head: a run of the workflow
+    there that is still going decides, and a red run from before the tip is re-run on it
+    before any session goes. ibkr_trader's Nightly was fixed on main an hour after its
+    run went red, and the fixer sent at that run spent its session finding out (85219e18).
     """
     against_red = failure.kind in (PR, NIGHTLY) and (failure.project, failure.base) in red_bases
     if CONFLICT in failure.signature and not against_red:
@@ -381,7 +397,20 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
         return Decision(UPDATE, f"{describe(failure)}; behind origin/{failure.base}", (failure,))
     if against_red:
         return Decision(HOLD, held_note(failure), (failure,))
+    if failure.kind == NIGHTLY and failure.tip_running:
+        return Decision(HOLD, tip_note(failure, "a run at the tip is in progress"), (failure,))
+    if failure.kind == NIGHTLY and failure.rerun_file and failure.tip not in ("", failure.sha):
+        return Decision(RERUN, tip_note(failure, "re-running it there"), (failure,))
     return None
+
+
+def tip_note(failure: Failure, what: str) -> str:
+    """A nightly whose red run is not at its base's tip, and what the pass does about it."""
+    at = failure.sha[:9] or "an older commit"
+    return (
+        f"{describe(failure)}; its red run is at {at}, origin/{failure.base} at "
+        f"{failure.tip[:9]}: {what}"
+    )
 
 
 def held_note(failure: Failure) -> str:

@@ -75,7 +75,7 @@ def budget(
 ) -> Budget:
     """Whether this dispatch goes now; when it does not, why, and whether to file that.
 
-    There is no "needs a human" answer. An update is free and always goes. A problem
+    There is no "needs a human" answer. An update or a re-run is free and always goes. A problem
     the ledger has escalated waits for the devkit session that has it (`escalated.open`)
     and, once that is resolved, starts over with fresh fixers (`resolved_at` is the
     `since` every ledger read takes). A fixer's blocked report is escalated the same way.
@@ -85,8 +85,8 @@ def budget(
     so a new conflict at a new commit is the base moving again (devkit #390). The
     devkit session's own exhaustion backs off instead (`BACKOFF`).
     """
-    if decision.action == fix_plan.UPDATE:
-        # Free, so never rationed -- but made once per head, like everything else.
+    if decision.action in fix_plan.NO_SESSION:
+        # Free, so never rationed -- but made once per head (or tip), like everything else.
         when = fix_ledger.already_sent(decision, ledger, now)
         return Budget(False, f"already dispatched at {when}") if when else Budget(True)
     if escalated.open:

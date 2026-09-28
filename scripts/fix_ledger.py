@@ -70,7 +70,9 @@ BLIND_ATTEMPTS = 1
 def failure_key(failure: fix_plan.Failure) -> str:
     """What one dispatch is remembered as: the failure, at the commit it was seen on."""
     digest = hashlib.sha256("\n".join(failure.signature).encode("utf-8")).hexdigest()
-    at = failure.sha or failure.run_id or "?"
+    # A nightly is keyed at its base's tip when that is known: a re-run of an old red
+    # run is made once per tip, and made again once the tip moves.
+    at = failure.tip or failure.sha or failure.run_id or "?"
     return f"{failure.kind}:{failure.project}:{failure.number}:{at}:{digest[:KEY_DIGEST]}"
 
 

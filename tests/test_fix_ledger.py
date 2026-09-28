@@ -49,6 +49,17 @@ def test_a_nightly_is_keyed_by_its_run():
     assert fix_ledger.failure_key(nightly).startswith("nightly:carameli:7:4242:")
 
 
+def test_a_nightly_read_at_its_bases_tip_is_keyed_there():
+    """A re-run of an old red run is made once per tip, and again once the tip moves."""
+    fields = {"kind": fix_plan.NIGHTLY, "sha": "old", "run_id": "4242", "number": 7}
+    assert fix_ledger.failure_key(failure(**fields, tip="tip1")).startswith(
+        "nightly:carameli:7:tip1:"
+    )
+    assert fix_ledger.failure_key(failure(**fields, tip="tip2")).startswith(
+        "nightly:carameli:7:tip2:"
+    )
+
+
 def test_a_key_says_which_kind_of_failure_it_names():
     assert fix_ledger.key_kind(fix_ledger.failure_key(failure())) == fix_plan.PR
     assert fix_ledger.key_kind("ledger:devkit:0:abc:def") == fix_plan.LEDGER

@@ -147,6 +147,8 @@ def dispatch(
     first = decision.failures[0]
     if decision.action == fix_plan.UPDATE:
         return update_branch(first, root)
+    if decision.action == fix_plan.RERUN:
+        return fix_prs.rerun_workflow(first, root)
     key = fix_ledger.decision_key(decision)
     on_branch = first.kind in (fix_plan.PR, fix_plan.COMMIT)
     if decision.action in (fix_plan.DISPATCH, fix_plan.RESOLVE) and on_branch:
@@ -196,7 +198,7 @@ def send_all(
         if why:
             capped.append((decision, why))
             continue
-        if room is not None and decision.action != fix_plan.UPDATE:
+        if room is not None and decision.action not in fix_plan.NO_SESSION:
             room -= SESSION_MB
         line, code = _send_one(decision, ctx, launch, verdict.effort, journal)
         sent.append(f"{names} -- {line}")
@@ -210,7 +212,7 @@ def _no_memory(decision: fix_plan.Decision, room: int | None) -> str:
     the pass has none -- but the one limit the machine sets regardless: round four sent
     nine at once and Claude Code killed the supervisor for low memory. A held decision
     is not recorded, so the next pass sends it; one held too long is a stale wait."""
-    if room is None or decision.action == fix_plan.UPDATE:
+    if room is None or decision.action in fix_plan.NO_SESSION:
         return ""
     if room - SESSION_MB >= MEMORY_FLOOR_MB:
         return ""
@@ -245,8 +247,8 @@ def _send_one(
     The ledger is written only for a dispatch that opened; one that did not is filed.
     """
     if not ctx.writes:
-        would = "would update the branch" if decision.action == fix_plan.UPDATE else None
-        return would or f"would send ({decision.action})", EXIT_OK
+        would = {fix_plan.UPDATE: "update the branch", fix_plan.RERUN: "re-run the workflow"}
+        return f"would {would.get(decision.action, f'send ({decision.action})')}", EXIT_OK
     how = agent_models.Launch(launch.agent, launch.model, effort) if effort else launch
     problem = fix_ledger.problem_key(decision)
     if dispatch(decision, ctx.root, how, problem) != EXIT_OK:

@@ -1204,6 +1204,21 @@ def test_an_upstream_group_and_a_nightly_go_through_the_fresh_branch_path(monkey
     assert sorted(sent) == ["dispatch carameli", "upstream carameli,roguelike"]
 
 
+def test_a_nightly_behind_its_tip_is_re_run_by_the_click_too_not_sent_a_session(monkeypatch, root):
+    nightly = failure(
+        kind=fix_plan.NIGHTLY, head="", number=69, sha="old", tip="new", rerun_file="n.yml"
+    )
+    sent = planned(monkeypatch, root, [nightly])
+    monkeypatch.setattr(
+        fix_prs, "rerun_workflow", lambda f, _root: sent.append(f"rerun #{f.number}") or 0
+    )
+    workspace = root / "alex.code-workspace"
+    assert (
+        fix_prs.run_plan(workspace, agent_models.Launch("claude"), dry_run=False, redo=False) == 0
+    )
+    assert sent == ["rerun #69"]
+
+
 def test_a_dispatch_that_failed_to_open_is_not_recorded_and_is_the_exit_code(monkeypatch, root):
     planned(monkeypatch, root, [failure()])
     monkeypatch.setattr(fix_prs, "dispatch_pr", lambda *_a: fix_prs.EXIT_FAILED)

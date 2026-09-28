@@ -324,12 +324,26 @@ def branch_prompt(failure: Failure, branch: str) -> str:
 
 
 def nightly_prompt(failure: Failure, branch: str) -> str:
-    """A scheduled workflow that failed on the default branch: fix on a fresh branch."""
+    """A scheduled workflow that failed on the default branch: fix on a fresh branch.
+
+    It names the commit the red run was on beside the tip the tree was cut from: a
+    fixer read `failed-jobs.log` and spent two `gh` calls learning it was older than its
+    own tree (41924a97). And it says the issue's closing is not the fixer's to wait for:
+    one slept in a loop on it (c7979142).
+    """
+    run = f"run {failure.run_id}" if failure.run_id else "its run"
+    at = f" at {failure.sha[:12]}" if failure.sha else ""
+    tip = failure.tip[:12] if failure.tip else ""
+    older = (
+        f", which is not the tip: check first whether origin/{failure.base} already fixes it"
+        if tip and failure.sha and failure.sha != failure.tip
+        else ""
+    )
     return _framed(
         f"The {failure.workflow} workflow in {failure.project} is failing on "
-        f"origin/{failure.base}; issue #{failure.number} ({failure.url}) tracks it. "
-        f"Failing: {_ids(failure.signature)}. {_logs(failure)} "
-        f"This worktree is on the fresh branch {branch} off "
-        f"origin/{failure.base}. Fix it; the issue closes itself when the workflow next "
-        f"passes. {FINISH}"
+        f"origin/{failure.base}: {run}{at}{older}; issue #{failure.number} "
+        f"({failure.url}) tracks it. Failing: {_ids(failure.signature)}. {_logs(failure)} "
+        f"This worktree is on the fresh branch {branch} off origin/{failure.base}"
+        f"{f' at {tip}' if tip else ''}. Fix it; the issue closes itself when the workflow "
+        f"next passes, which the pass reads, so do not wait for it. {FINISH}"
     )

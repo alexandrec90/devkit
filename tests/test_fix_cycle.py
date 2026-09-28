@@ -286,6 +286,21 @@ def test_a_behind_harness_pr_is_updated_rather_than_folded():
     assert held == []
 
 
+def test_a_harness_nightly_behind_its_tip_is_re_run_rather_than_folded():
+    """A `RERUN` is one `gh workflow run`, not a session: folded into the devkit session
+    it would spend an agent on what the re-run decides for nothing."""
+    nightly = failure(project="devkit", kind=fix_plan.NIGHTLY, number=5, tip="t", sha="s")
+    red = failure(project="a", number=10, signature=VENDORED)
+    classes = fix_cycle.classify_all([nightly, red])
+    go, _ = fix_cycle.phase(
+        [decision(fix_plan.DISPATCH, red), decision(fix_plan.RERUN, nightly)],
+        classes,
+        fix_cycle.harness_state(classes, True, []),
+    )
+    assert [d.action for d in go] == [fix_plan.RERUN, fix_plan.UPSTREAM]
+    assert go[0].failures == (nightly,)
+
+
 def test_once_clean_project_fixers_go_updates_first_then_conflicts():
     """An update is free and may turn the PR green by itself; a conflict's gate cannot
     run at all; a plain red gets its session last."""

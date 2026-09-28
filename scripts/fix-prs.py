@@ -304,6 +304,24 @@ def dispatch_fresh(
     return open_session(launch, tree, branch, tab_safe(prompt), title, runner)
 
 
+def rerun_workflow(failure: fix_plan.Failure, root: Path) -> int:
+    """A `RERUN`: run the nightly's workflow on its base's tip, and open no session.
+
+    That run decides next pass: green, and the reporter closes the tracker issue; red,
+    and it is a failure at the tip with its fixer. The plan makes this only for a
+    workflow that takes `workflow_dispatch`, so a refusal here is worth reporting.
+    """
+    gh = sweep.gh_for(root / failure.project)
+    done = gh("workflow", "run", failure.rerun_file, "--ref", failure.base)
+    name = f"{failure.project} #{failure.number}"
+    if done.returncode != 0:
+        why = (done.stderr or done.stdout or "").strip().splitlines()
+        print(f"  {name}: workflow run failed: {why[-1] if why else '?'}", file=sys.stderr)
+        return EXIT_FAILED
+    print(f"  {name}: {failure.workflow} re-run on origin/{failure.base} at {failure.tip[:9]}")
+    return EXIT_OK
+
+
 def run_plan(
     workspace: Path,
     launch: agent_models.Launch,
@@ -335,7 +353,9 @@ def run_plan(
         first = decision.failures[0]
         key = fix_ledger.decision_key(decision)
         on_branch = first.kind in (fix_plan.PR, fix_plan.COMMIT)
-        if decision.action in (fix_plan.DISPATCH, fix_plan.RESOLVE) and on_branch:
+        if decision.action == fix_plan.RERUN:
+            code = rerun_workflow(first, root)
+        elif decision.action in (fix_plan.DISPATCH, fix_plan.RESOLVE) and on_branch:
             code = dispatch_pr(first, root, launch, runner, key)
         else:
             code = dispatch_fresh(decision, root, launch, runner, key)
