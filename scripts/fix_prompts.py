@@ -31,14 +31,20 @@ from ship_intent import INTENT_FILE, REFUSAL_LINE, REFUSED, STATE_FILE, read_sta
 
 # How every prompt's body ends. The ship skill is the finish line and the blocked file
 # is the only other way out, for the blockers `STOP` names right after it; both are
-# files, so the pass reads the outcome without a session.
+# files, so the pass reads the outcome without a session. Nothing to change is still an
+# intent (`ship_intent.EMPTY`): a fixer whose nightly was green at the tip left neither
+# file, and the pass filed it as a dead session (79ce2440).
 FINISH = (
     "When it is done, run the targeted tests with this tree's own .venv interpreter, the "
     "linter and the ratchets the gate "
     "runs -- python scripts/hooks/structure_check.py, python scripts/hooks/untested_symbols.py "
     "and, where the tree has it, python scripts/hot-budget.py for the instruction files "
     "-- in every tree you changed, then ship it with the ship skill and stop: the fix pass "
-    "commits, pushes, opens or updates the PR and reads what the gate says. Nobody is "
+    "commits, pushes, opens or updates the PR and reads what the gate says. A failure "
+    "already fixed where this tree was cut, with nothing left to change, ships the same "
+    f"way: {INTENT_FILE.as_posix()} saying what fixed it, which the pass sets aside and "
+    "opens no PR for -- a session that ends with neither an intent nor the blocked file "
+    "reads to the pass as one that died. Nobody is "
     "watching this session, so never ask a question and never end on one: a choice "
     "between approaches is yours -- the option you would recommend is the decision, so do "
     "it and give the reason and the alternatives in the intent. Only if one of the "
