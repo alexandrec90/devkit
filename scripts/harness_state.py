@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,11 +45,22 @@ from pathlib import Path
 # The directory names a worktree is cut into, so `SKIP_DIRS` below names none of them
 # itself. `worktree_tiers` is stdlib-only, so importing it costs this module nothing.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import sweep
 import worktree_tiers
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# A scheduled job reaches this module, so its runner defaults are held to
+# `tests/test_scheduled_jobs.py`'s windowless rule. Spelled here rather than imported
+# from `sweep`: the tray holds this module, and every module it imports is one
+# `install-tray.py --check` watches for an edit (`TRAY_MODULES`), so `sweep` and its
+# imports would put the tray out of date on every sweep change.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def run_windowless(*args, **kwargs) -> subprocess.CompletedProcess:
+    """`sweep.run_windowless`, spelled here for the reason `NO_WINDOW` is."""
+    flags = kwargs.pop("creationflags", 0)
+    return subprocess.run(*args, creationflags=flags | NO_WINDOW, **kwargs)
 
 
 def _state_root() -> Path:
@@ -245,7 +257,7 @@ def instruction_files(root: Path) -> list[Path]:
     return sorted(set(found))
 
 
-def is_tracked(root: Path, relpath: str, runner=sweep.run_windowless) -> bool:
+def is_tracked(root: Path, relpath: str, runner=run_windowless) -> bool:
     """Whether git in `root` has this path in its index. False for anything not a repo."""
     try:
         done = runner(
@@ -268,7 +280,7 @@ def skip_worktree_argv(root: Path, relpath: str, skip: bool) -> list[str]:
     return ["git", "-C", str(root), "update-index", flag, "--", relpath]
 
 
-def switch_root(root: Path, ledger: Ledger, runner=sweep.run_windowless) -> list[str]:
+def switch_root(root: Path, ledger: Ledger, runner=run_windowless) -> list[str]:
     """Move every instruction file under `root` aside. Returns one report line each."""
     lines: list[str] = []
     resolved = root.resolve()
@@ -296,9 +308,7 @@ def switch_root(root: Path, ledger: Ledger, runner=sweep.run_windowless) -> list
     return lines
 
 
-def restore_root(
-    ledger: Ledger, root: Path | None = None, runner=sweep.run_windowless
-) -> list[str]:
+def restore_root(ledger: Ledger, root: Path | None = None, runner=run_windowless) -> list[str]:
     """Put back everything the ledger holds, for `root` or for every root.
 
     An entry whose root no longer exists is dropped rather than reported as a failure: a
@@ -317,7 +327,7 @@ def restore_root(
     return lines
 
 
-def _restore_one(entry: StashedFile, runner=sweep.run_windowless) -> str:
+def _restore_one(entry: StashedFile, runner=run_windowless) -> str:
     """One entry back where it came from, as a report line. Never raises."""
     name = f"{Path(entry.root).name}/{entry.relpath}"
     if not Path(entry.root).is_dir():

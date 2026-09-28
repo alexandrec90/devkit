@@ -355,6 +355,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/policy_runtime.py": "upgrade-project.py runs its policy-reinstall rider once per pass",
     "scripts/release.py": "release-pipeline.py imports it for the version and bump helpers",
     "scripts/worktree_env.py": "worktree.py keeps its provisioned mark; upgrade-project.py its skip var",
+    "scripts/harness_state.py": "the git skip-worktree the tray and installers reach through the switch record",
     # `_core` and not the package: the split left `run_command` -- and `NO_WINDOW` with
     # it -- in exactly one module, and `branch`, `framework` and `dispatch` reach git
     # only through the injected runner. Naming the one file that spawns is the point of
@@ -1020,7 +1021,8 @@ def test_a_stream_call_is_guarded_only_by_an_if_that_tests_the_stream():
 # A call-site flag cannot fix it either -- `ship_intent.run_quiet`, the runner the fix
 # pass injects, sets `creationflags` itself and would get it twice. So the default is
 # what is held: a job's reach never holds a raw spawn as a value, only
-# `sweep.run_windowless` (or `worktree_env`'s standalone twin), which ORs the flag in.
+# `sweep.run_windowless` (or the standalone twin in `worktree_env` or `harness_state`),
+# which ORs the flag in.
 
 
 def spawn_references(source: str) -> list[int]:
@@ -1055,7 +1057,9 @@ def test_no_module_a_job_reaches_hands_out_a_raw_spawn():
         )
 
 
-@pytest.mark.parametrize("module_path", ["scripts/sweep.py", "scripts/worktree_env.py"])
+@pytest.mark.parametrize(
+    "module_path", ["scripts/sweep.py", "scripts/worktree_env.py", "scripts/harness_state.py"]
+)
 def test_the_windowless_runner_forces_the_flag_and_keeps_the_callers(module_path, monkeypatch):
     module = load_script(module_path)
     seen: dict = {}

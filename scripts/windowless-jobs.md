@@ -126,8 +126,9 @@ spawning nothing. Thirteen other defaults in the same reach had the shape.
 
 Flagging the call through the runner is not the fix: `ship_intent.run_quiet`, the runner
 the fix pass injects, sets `creationflags` itself and would receive it twice. The
-**default** is what is held — `sweep.run_windowless` (and `worktree_env`'s standalone
-twin), which ORs `NO_WINDOW` into whatever the caller passed — and
+**default** is what is held — `sweep.run_windowless` (and the standalone twins in
+`worktree_env` and `harness_state`, which cannot afford to import `sweep`), which ORs
+`NO_WINDOW` into whatever the caller passed — and
 `test_no_module_a_job_reaches_hands_out_a_raw_spawn` refuses a raw `subprocess` spawn named
 as a value anywhere in the reach.
 
