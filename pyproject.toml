@@ -14,7 +14,7 @@ dependencies = []
 # extra: extras belong to a *distribution*, and devkit is not one (see [tool.uv] below).
 # `uv sync --all-groups` — what `.claude/hooks/session-start.sh` runs — installs this.
 dev = [
-  "ruff>=0.16.8",
+  "ruff>=0.16.9",
   "mypy>=2.3.1",
   # 9.1: it applies `pythonpath` before loading `addopts`' `-p devkit_temproot`.
   "pytest>=9.1",
