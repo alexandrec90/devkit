@@ -106,7 +106,8 @@ HARNESS_REFUSALS = (
 # was a conflict folded this way, and the session it opened was told to fix the harness
 # "in the vendored file, the test, or the template" on a branch that could never land
 # on the PR. A harness PR in either shape goes as itself, before the folded session.
-BRANCH_SHAPED = (fix_plan.UPDATE, fix_plan.RESOLVE)
+# A `RERUN` is a `gh workflow run` call, and goes as itself for the same reason.
+BRANCH_SHAPED = (fix_plan.UPDATE, fix_plan.RERUN, fix_plan.RESOLVE)
 
 
 @dataclass(frozen=True)
@@ -306,9 +307,9 @@ def is_devkit_pr(decision: fix_plan.Decision) -> bool:
     )
 
 
-# The order within a phase: updates first (free), then conflicts (nothing else about
-# the PR is knowable until it is resolved), then the rest.
-RANK = {fix_plan.UPDATE: 0, fix_plan.RESOLVE: 1}
+# The order within a phase: updates and re-runs first (free), then conflicts (nothing
+# else about the PR is knowable until it is resolved), then the rest.
+RANK = {fix_plan.UPDATE: 0, fix_plan.RERUN: 0, fix_plan.RESOLVE: 1}
 
 
 def _harness_first(harness_ones: list[fix_plan.Decision]) -> list[fix_plan.Decision]:

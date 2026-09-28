@@ -399,6 +399,71 @@ def test_a_red_default_branch_holds_its_prs_and_nightlies_and_frees_only_updates
     assert "held     carameli #1 -- held: origin/main" in fix_ledger.render(decisions, {})
 
 
+def _nightly(**fields) -> fix_plan.Failure:
+    base: dict[str, Any] = {
+        "kind": fix_plan.NIGHTLY,
+        "project": "ibkr_trader",
+        "number": 69,
+        "head": "",
+        "workflow": "Nightly",
+        "signature": ("Full suite / Ruff lint",),
+        "sha": "59a4ef5aaaaa",
+        "tip": "b31b60cbbbbb",
+        "rerun_file": "nightly.yml",
+    }
+    return failure(**(base | fields))
+
+
+def test_a_nightly_red_before_its_bases_tip_is_re_run_there_not_fixed():
+    """85219e18: ibkr_trader's Nightly went red at 59a4ef5, main carried the fix an
+    hour later, and the fixer sent at the old run spent its session finding that out."""
+    [decision] = fix_plan.plan([_nightly()], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.RERUN
+    assert decision.note.startswith("Nightly workflow failing on origin/main")
+    assert "its red run is at 59a4ef5aa, origin/main at b31b60cbb: re-running it there" in (
+        decision.note
+    )
+    assert fix_plan.RERUN in fix_plan.NO_SESSION
+
+
+def test_a_nightly_red_at_the_tip_or_unreadable_or_not_dispatchable_gets_its_fixer():
+    """Red at the tip is a failure to fix; with no tip read, or a workflow that takes
+    no `workflow_dispatch`, nothing can be re-run, so the fixer goes as before."""
+    for nightly in (
+        _nightly(sha="b31b60cbbbbb"),
+        _nightly(tip=""),
+        _nightly(rerun_file=""),
+    ):
+        [decision] = fix_plan.plan([nightly], "v0-11-23", PREFIXES)
+        assert decision.action == fix_plan.DISPATCH, nightly
+
+
+def test_the_tip_note_names_both_commits_and_what_the_pass_does():
+    note = fix_plan.tip_note(_nightly(), "re-running it there")
+    assert note.endswith(
+        "its red run is at 59a4ef5aa, origin/main at b31b60cbb: re-running it there"
+    )
+    assert "at an older commit," in fix_plan.tip_note(_nightly(sha=""), "x")
+
+
+def test_a_nightly_with_a_run_going_at_the_tip_waits_for_that_run():
+    [decision] = fix_plan.plan([_nightly(tip_running=True)], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.HOLD
+    assert decision.note.endswith("a run at the tip is in progress")
+
+
+def test_a_nightly_against_a_red_base_is_held_for_the_base_not_re_run():
+    decisions = fix_plan.plan(
+        [red_main(project="ibkr_trader", signature=("tests/t.py::a",)), _nightly()],
+        "v0-11-23",
+        PREFIXES,
+    )
+    assert actions(decisions) == [
+        (fix_plan.HOLD, ["ibkr_trader#69"]),
+        (fix_plan.DISPATCH, ["ibkr_trader#0"]),
+    ]
+
+
 def test_a_release_commits_red_base_holds_nothing():
     """That red is skipped out loud, and a skipped base must not hold the PRs behind it."""
     decisions = fix_plan.plan(

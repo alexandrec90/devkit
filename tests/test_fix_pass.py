@@ -633,6 +633,41 @@ def test_an_update_that_fails_because_the_pr_just_closed_is_not_a_failure(monkey
     assert fix_pass.fix_send.update_branch(failure(number=390, behind=True), tmp_path) == 0
 
 
+def test_a_rerun_is_one_workflow_run_on_the_tip_and_no_session(monkeypatch, tmp_path, capsys):
+    """85219e18: a nightly red before main's tip is run again there, and whatever that
+    run says is the next pass's to read -- no fixer is spent finding the fix merged."""
+    calls = []
+
+    def gh_for(project_dir):
+        def gh(*args):
+            calls.append((project_dir.name, args))
+            code = 0 if args[2] == "nightly.yml" else 1
+            return subprocess.CompletedProcess(args, code, "", "HTTP 422: no dispatch trigger")
+
+        return gh
+
+    monkeypatch.setattr(fix_pass.fix_prs.sweep, "gh_for", gh_for)
+    monkeypatch.setattr(fix_pass.fix_prs, "dispatch_fresh", lambda *a: pytest.fail("no session"))
+    fields = {"kind": fix_plan.NIGHTLY, "project": "ibkr_trader", "number": 69}
+    nightly = failure(
+        **fields, workflow="Nightly", sha="59a4ef5", tip="b31b60c", rerun_file="nightly.yml"
+    )
+    decision = fix_plan.Decision(fix_plan.RERUN, "n", (nightly,))
+    assert fix_pass.fix_send.dispatch(decision, tmp_path, "claude") == 0
+    assert calls == [("ibkr_trader", ("workflow", "run", "nightly.yml", "--ref", "main"))]
+    assert "Nightly re-run on origin/main at b31b60c" in capsys.readouterr().out
+    refused = failure(**fields, rerun_file="other.yml")
+    assert fix_pass.fix_prs.rerun_workflow(refused, tmp_path) == fix_pass.EXIT_FAILED
+    assert "workflow run failed: HTTP 422: no dispatch trigger" in capsys.readouterr().err
+
+
+def test_plan_mode_says_a_rerun_would_be_a_rerun(world, tmp_path):
+    nightly = failure(kind=fix_plan.NIGHTLY, number=69, sha="a", tip="b", rerun_file="n.yml")
+    go = [fix_plan.Decision(fix_plan.RERUN, "n", (nightly,))]
+    sent, _, _ = fix_pass.fix_send.send_all(go, _ctx(tmp_path, fix_cycle.PLAN), "claude")
+    assert sent == ["carameli #69 -- would re-run the workflow"]
+
+
 def test_plan_mode_says_an_update_would_be_an_update(world):
     world["failures"] = [failure(behind=True)]
     fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW)

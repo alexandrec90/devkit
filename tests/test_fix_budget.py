@@ -202,6 +202,20 @@ def test_an_update_goes_once_per_head():
     assert not again.go and again.why.startswith("already dispatched at")
 
 
+def test_a_rerun_goes_once_per_tip_and_never_counts_against_the_fixers():
+    nightly = {"kind": fix_plan.NIGHTLY, "number": 69, "sha": "old", "rerun_file": "n.yml"}
+    rerun = decision(fix_plan.RERUN, failure(**nightly, tip="tip1"))
+    assert go(fix_budget.budget(rerun, {}, NOW))
+    ledger = ledger_after(rerun)
+    again = fix_budget.budget(rerun, ledger, NOW)
+    assert not again.go and again.why.startswith("already dispatched at")
+    assert go(
+        fix_budget.budget(decision(fix_plan.RERUN, failure(**nightly, tip="tip2")), ledger, NOW)
+    )
+    fixer = decision(fix_plan.DISPATCH, failure(**nightly, tip="tip1"))
+    assert fix_ledger.attempts(fixer, ledger, "") == 0
+
+
 def test_a_conflict_back_at_a_new_head_gets_its_resolver_again_however_often():
     """devkit #390: the resolver pushed its merge, main moved within the hour, and the
     new conflict read "needs a human". The head moving is what shows the one before took,

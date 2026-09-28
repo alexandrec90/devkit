@@ -215,8 +215,8 @@ def newest_release(devkit: Path) -> str:
     return next((line.strip() for line in tags.stdout.splitlines() if line.strip()), "")
 
 
-def default_branch_runs(gh: Gh, base: str) -> list[dict]:
-    """The newest gate runs on `base`, newest first; empty when `gh` cannot say."""
+def default_branch_runs(gh: Gh, base: str, workflow: str = GATE_WORKFLOW) -> list[dict]:
+    """The newest runs of `workflow` on `base`, newest first; empty when `gh` cannot say."""
     listed = gh_json(
         gh(
             "run",
@@ -224,7 +224,7 @@ def default_branch_runs(gh: Gh, base: str) -> list[dict]:
             "--branch",
             base,
             "--workflow",
-            GATE_WORKFLOW,
+            workflow,
             "--limit",
             str(RUN_LIMIT),
             "--json",
@@ -411,28 +411,68 @@ def collect_default_branches(
     return verdicts
 
 
-def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_plan.Failure:
-    """One tracker issue: the run it names, read the same way a PR's gate is."""
+def dispatchable_file(project_dir: Path, workflow: str) -> str:
+    """The file of the scheduled workflow titled `workflow` when it takes
+    `workflow_dispatch`, read off the checkout the way the reporter's sweep reads it;
+    "" when none does, which leaves the pass nothing to re-run it with."""
+    directory = project_dir / ".github" / "workflows"
+    for name, title in reporter.scheduled_workflows(directory):
+        text = (directory / name).read_text(encoding="utf-8", errors="replace")
+        if title == workflow and "workflow_dispatch" in reporter.workflow_triggers(text):
+            return name
+    return ""
+
+
+def run_head(gh: Gh, run_id: str) -> str:
+    """The commit a run ran on; "" when `gh` cannot say."""
+    viewed = gh_json(gh("run", "view", str(run_id), "--json", "headSha"))
+    return str(viewed.get("headSha", "") or "") if isinstance(viewed, dict) else ""
+
+
+def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_plan.Failure | None:
+    """One tracker issue, read at its base's tip; None when the workflow is green there.
+
+    The issue names the run that opened it, and a recurrence only comments, so that run
+    can be commits behind the tip -- ibkr_trader's Nightly was fixed on main an hour
+    before its fixer was sent (85219e18). So the workflow's own runs on the base decide,
+    as a default branch's gate does: green at the tip is None (the reporter closes the
+    issue on that run), still going there is `tip_running`, red there is the evidence.
+    With no verdict at the tip, the issue's run is the evidence and `tip` says where the
+    base is, for the plan to re-run it there. `sha` is the evidence's commit, which the
+    prompt names: a fixer could not tell the log was older than its tree (41924a97).
+    """
     gh = sweep.gh_for(project_dir)
     git = sweep.git_for(project_dir)
-    number = int(issue.get("number", 0) or 0)
-    run_id = run_id_from_body(str(issue.get("body", "")))
+    title = str(issue.get("title", ""))
     failure = fix_plan.Failure(
         kind=fix_plan.NIGHTLY,
         project=project,
-        number=number,
-        title=str(issue.get("title", "")),
+        number=int(issue.get("number", 0) or 0),
+        title=title,
         url=str(issue.get("url", "")),
         base=tb.detect_default_branch(git, fallback="main"),
-        run_id=run_id,
-        workflow=workflow_from_title(str(issue.get("title", ""))),
+        workflow=workflow_from_title(title),
     )
-    if not run_id:
-        return failure
+    file = dispatchable_file(project_dir, failure.workflow)
+    runs = default_branch_runs(gh, failure.base, file or failure.workflow)
+    tip = branch_tip(git, failure.base) if runs else ""
+    verdict, red = _tip_verdict(runs, tip) if tip else (None, {})
+    if verdict is True:
+        return None
+    run_id = str(red.get("databaseId", "") or "") or run_id_from_body(str(issue.get("body", "")))
+    failure = replace(
+        failure, tip=tip, tip_running=verdict == fix_plan.RUNNING, rerun_file=file, run_id=run_id
+    )
+    if not run_id or failure.tip_running:
+        return failure  # held until the run at the tip is done, so nothing to download
     where = root / evidence_slot(failure)
     texts, jobs = run_evidence(gh, run_id, where)
-    sig = fix_plan.signature(False, texts, jobs)
-    return replace(failure, signature=sig, run_id=run_id, evidence=str(where) if texts else "")
+    return replace(
+        failure,
+        signature=fix_plan.signature(False, texts, jobs),
+        sha=str(red.get("headSha", "") or "") or run_head(gh, run_id),
+        evidence=str(where) if texts else "",
+    )
 
 
 def collect(workspace: Path, found: dict[str, list[dict]]) -> list[fix_plan.Failure]:
@@ -452,7 +492,8 @@ def collect(workspace: Path, found: dict[str, list[dict]]) -> list[fix_plan.Fail
         for pr in prs:
             failures.append(read_pr(project_dir, pr_failure(project, pr), root))
         for issue in nightly_issues(sweep.gh_for(project_dir)):
-            failures.append(read_issue(project, project_dir, issue, root))
+            if nightly := read_issue(project, project_dir, issue, root):
+                failures.append(nightly)
     return failures
 
 

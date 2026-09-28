@@ -437,6 +437,119 @@ def test_an_issue_becomes_a_nightly_failure_on_the_default_branch(monkeypatch, t
     assert (failure.base, failure.run_id, failure.signature) == ("master", "55", ("Suite",))
 
 
+NIGHTLY_YML = """\
+name: Nightly
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+jobs:
+  suite:
+    name: Full suite
+"""
+
+ISSUE_69 = {
+    "number": 69,
+    "title": "Nightly workflow is failing",
+    "body": "| Run | https://github.com/x/ibkr_trader/actions/runs/55 |",
+    "url": "u/69",
+}
+
+
+def nightly_world(monkeypatch, tmp_path, runs: list[dict], yml: str = NIGHTLY_YML) -> list:
+    """ibkr_trader on 09-28: issue #69 names run 55 at `old`, and main is at `new`."""
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    (tmp_path / ".github" / "workflows" / "nightly.yml").write_text(yml, encoding="utf-8")
+    calls: list[tuple[str, ...]] = []
+
+    def gh(*args):
+        calls.append(args)
+        if args[:2] == ("run", "list"):
+            return subprocess.CompletedProcess(args, 0, json.dumps(runs), "")
+        if args[:2] == ("run", "download"):
+            (Path(args[-1]) / "test-failures.log").write_text(SUMMARY, encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:2] == ("run", "view") and args[-1] == "headSha":
+            return subprocess.CompletedProcess(args, 0, '{"headSha": "old"}', "")
+        return subprocess.CompletedProcess(args, 1, "", "no")
+
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+    monkeypatch.setattr(
+        ev.sweep, "git_for", lambda _p: lambda *a: subprocess.CompletedProcess(a, 0, "new\n", "")
+    )
+    monkeypatch.setattr(ev.tb, "detect_default_branch", lambda _git, fallback="main": "main")
+    return calls
+
+
+def run_at(sha: str, run_id: int = 70, status: str = "completed", conclusion: str = "failure"):
+    return {"databaseId": run_id, "status": status, "conclusion": conclusion, "headSha": sha}
+
+
+def test_a_nightly_red_before_the_tip_is_read_with_the_tip_for_a_re_run(monkeypatch, tmp_path):
+    """85219e18: the issue's run was at 59a4ef5, main at b31b60c already carried the fix."""
+    calls = nightly_world(monkeypatch, tmp_path, [run_at("old")])
+    failure = ev.read_issue("ibkr_trader", tmp_path, ISSUE_69, tmp_path / "ev")
+    assert failure is not None
+    assert (failure.run_id, failure.sha, failure.tip) == ("55", "old", "new")
+    assert (failure.rerun_file, failure.tip_running) == ("nightly.yml", False)
+    assert failure.signature == ("tests/test_x.py::test_y",)
+    assert ("run", "list", "--branch", "main", "--workflow", "nightly.yml") == calls[0][:6]
+    assert fix_plan.plan([failure], "", ())[0].action == fix_plan.RERUN
+
+
+def test_a_nightly_red_at_the_tip_is_read_from_the_run_there(monkeypatch, tmp_path):
+    nightly_world(monkeypatch, tmp_path, [run_at("new", 71), run_at("old")])
+    failure = ev.read_issue("ibkr_trader", tmp_path, ISSUE_69, tmp_path / "ev")
+    assert failure is not None
+    assert (failure.run_id, failure.sha, failure.tip) == ("71", "new", "new")
+    assert fix_plan.plan([failure], "", ())[0].action == fix_plan.DISPATCH
+
+
+def test_a_nightly_green_at_the_tip_is_nothing_to_fix(monkeypatch, tmp_path):
+    """The reporter closes the issue on that run; the pass sends nobody meanwhile."""
+    nightly_world(monkeypatch, tmp_path, [run_at("new", 72, conclusion="success")])
+    assert ev.read_issue("ibkr_trader", tmp_path, ISSUE_69, tmp_path / "ev") is None
+
+
+def test_a_nightly_with_a_run_going_at_the_tip_downloads_nothing(monkeypatch, tmp_path):
+    calls = nightly_world(
+        monkeypatch, tmp_path, [run_at("new", 73, "in_progress", ""), run_at("old")]
+    )
+    failure = ev.read_issue("ibkr_trader", tmp_path, ISSUE_69, tmp_path / "ev")
+    assert failure is not None and failure.tip_running
+    assert not [c for c in calls if c[:2] == ("run", "download")]
+
+
+def test_a_workflow_that_takes_no_dispatch_has_no_file_to_re_run(monkeypatch, tmp_path):
+    nightly_world(monkeypatch, tmp_path, [], NIGHTLY_YML.replace("  workflow_dispatch:\n", ""))
+    assert ev.dispatchable_file(tmp_path, "Nightly") == ""
+    assert ev.dispatchable_file(tmp_path / "absent", "Nightly") == ""
+
+
+def test_the_dispatchable_file_is_the_one_titled_for_the_workflow(tmp_path):
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "nightly.yml").write_text(NIGHTLY_YML, encoding="utf-8")
+    (workflows / "weekly.yml").write_text(NIGHTLY_YML.replace("Nightly", "Weekly"), "utf-8")
+    assert ev.dispatchable_file(tmp_path, "Weekly") == "weekly.yml"
+    assert ev.dispatchable_file(tmp_path, "Nightly") == "nightly.yml"
+    assert ev.dispatchable_file(tmp_path, "Monthly") == ""
+
+
+def test_a_runs_head_is_its_commit_or_nothing():
+    assert ev.run_head(table({("run", "view"): {"headSha": "abc"}}), "5") == "abc"
+    assert ev.run_head(table({}), "5") == ""
+
+
+def test_collect_drops_a_nightly_green_at_the_tip(monkeypatch, tmp_path):
+    workspace = tmp_path / "w" / "alex.code-workspace"
+    workspace.parent.mkdir()
+    monkeypatch.setattr(ev, "read_issue", lambda *a: None)
+    issues = [{"number": 9, "title": "Nightly workflow is failing", "body": "", "url": ""}]
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _d: table({("issue", "list"): issues}))
+    assert ev.collect(workspace, {"carameli": []}) == []
+
+
 def test_collect_reads_every_red_pr_and_every_tracker_issue(monkeypatch, tmp_path):
     workspace = tmp_path / "w" / "alex.code-workspace"
     workspace.parent.mkdir()
