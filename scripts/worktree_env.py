@@ -167,11 +167,12 @@ def has_compose_file(root: Path) -> bool:
     return any((root / name).is_file() for name in COMPOSE_FILES)
 
 
-def _git(root: Path, *args: str) -> str:
+def _git(root: Path, *args: str, env: Mapping[str, str] | None = None, timeout: float = 10) -> str:
     """Run git in `root` and return stripped stdout; "" on any failure.
 
     Never raises and never blocks: a `post-checkout` hook runs inside the command that
     just created somebody's worktree, so the worst this may do is decline to help.
+    `env` is the whole child environment when given; see `git_env` for when it must be.
     """
     try:
         done = subprocess.run(
@@ -180,9 +181,10 @@ def _git(root: Path, *args: str) -> str:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=10,
+            timeout=timeout,
             check=False,
             creationflags=NO_WINDOW,
+            env=None if env is None else dict(env),
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -442,17 +444,24 @@ def link_path_sources(
     worktree of the tier, since they all resolve the same `..`; a task that edits the
     sibling cuts its own branch there. The nested `worktree add` skips its own
     provisioning -- the sibling is built from source by this tree's sync, not its own.
-    One line per sibling cut or refused; nothing for a sibling already there.
+    The sibling repo is fetched first, and a sibling tree already there is moved to that
+    ref by `advance_sibling`: "origin/HEAD" meant the last fetch's, at the first cut's.
+    One line per sibling cut, moved or refused; nothing for one already current.
     """
-    env = dict(os.environ if environ is None else environ)
+    env = git_env(os.environ if environ is None else environ)
     env[SKIP_PROVISION_VAR] = "1"
     lines: list[str] = []
     for relative in path_sources(here):
         target = Path(os.path.normpath(here / relative))
         source = Path(os.path.normpath(checkout / relative))
-        if target.exists() or not (source / ".git").exists():
+        if not (source / ".git").exists():
             continue
-        ref = _git(source, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") or "HEAD"
+        # The remote-tracking ref is only as new as the sibling checkout's last fetch.
+        _git(source, "fetch", "--quiet", "origin", env=env, timeout=60)
+        ref = _git(source, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", env=env) or "HEAD"
+        if target.exists():
+            lines.append(advance_sibling(target, source, ref, env))
+            continue
         argv = ["git", "-C", str(source), "worktree", "add", "--detach", str(target), ref]
         try:
             done = runner(argv, capture_output=True, text=True, env=env, timeout=60, check=False)
@@ -464,7 +473,65 @@ def link_path_sources(
             lines.append(f"devkit: could not cut {target} from {source} ({detail})")
         else:
             lines.append(f"devkit: {relative} is {target}, a detached {source.name} at {ref}")
-    return lines
+    return [line for line in lines if line]
+
+
+def _common_dir(root: Path, env: Mapping[str, str]) -> str:
+    found = _git(root, "rev-parse", "--path-format=absolute", "--git-common-dir", env=env)
+    return os.path.normcase(os.path.normpath(found)) if found else ""
+
+
+def advance_sibling(target: Path, source: Path, ref: str, env: Mapping[str, str]) -> str:
+    """Move the shared sibling tree to `ref`; "" when it is there already or is work.
+
+    2e681e63: the tree was cut once and never moved, so ibkr's `uv lock --check` judged
+    its lock against a data-lake weeks behind main and disagreed with CI. Only the tree
+    `link_path_sources` cuts is moved -- detached, with no tracked change; a branch
+    checked out there is a task's own. One that is not the sibling's at all is named.
+    """
+    if _common_dir(target, env) != _common_dir(source, env):
+        return f"devkit: {target} is not a worktree of {source}; remove it to have it re-cut"
+    if _git(target, "symbolic-ref", "-q", "HEAD", env=env):
+        return ""
+    want = _git(source, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", env=env)
+    have = _git(target, "rev-parse", "HEAD", env=env)
+    if not want or want == have:
+        return ""
+    if _git(target, "status", "--porcelain", "--untracked-files=no", env=env):
+        return f"devkit: {target} has local changes, so it was left at {have[:7]}, not {ref}"
+    _git(target, "checkout", "--quiet", "--detach", want, env=env, timeout=60)
+    if _git(target, "rev-parse", "HEAD", env=env) != want:
+        return f"devkit: could not move {target} from {have[:7]} to {ref}"
+    return f"devkit: {target} moved from {have[:7]} to {ref} ({want[:7]})"
+
+
+# Names git reads before `-C`, so each points a command at a repository other than the
+# one it was aimed at. The fallback when `git rev-parse --local-env-vars` cannot answer.
+GIT_REPO_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX")
+
+
+def git_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """`environ` less every variable that aims git at a repository `-C` did not name.
+
+    6e056a10: git runs `post-checkout` for `worktree add` with `GIT_DIR` and
+    `GIT_WORK_TREE` naming the tree it just cut, and those outrank `-C`, so the nested
+    `git -C <data-lake> worktree add` cut `../data-lake` as another worktree of
+    ibkr_trader, at ibkr's own `origin/HEAD`. The list is git's own answer.
+    """
+    cleaned = {k: v for k, v in environ.items() if k not in GIT_REPO_VARS}
+    try:
+        listed = subprocess.run(
+            ["git", "rev-parse", "--local-env-vars"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            creationflags=NO_WINDOW,
+            env=cleaned,
+        ).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        listed = []
+    return {k: v for k, v in cleaned.items() if k not in listed}
 
 
 def provision(

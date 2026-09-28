@@ -955,3 +955,14 @@ def test_a_cd_before_git_printing_the_repository_prints_nothing_of_its_own():
     assert classes([call(command, "1"), result(diff, "1", error=False)]) == []
     assert not sf.git_reads_only("cd /c/x")
     assert not sf.git_reads_only("cd /c/x && python -m pytest t.py")
+
+
+def test_git_status_before_a_diff_is_still_only_git_reading():
+    """5453c7ae: a ship step's `git status --short; git diff`, whose diff added
+    `except ModuleNotFoundError:`, was filed as the environment: `status` made the line
+    more than git reading, though it prints only the tree's own paths."""
+    command = "git status --short; git diff scripts/sync-devkit.py scripts/devkit_manifest.py"
+    assert sf.git_reads_only(command)
+    diff = " M scripts/sync-devkit.py\n+    except ModuleNotFoundError:\n+        return []\n"
+    assert classes([call(command, "1"), result(diff, "1", error=False)]) == []
+    assert not sf.git_reads_only("git status && python -m pytest t.py")
