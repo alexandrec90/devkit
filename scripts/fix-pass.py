@@ -38,12 +38,14 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_models
+import agent_tabs
 import broken_pr_menu as menu
 import devkit_project
 import fix_cycle
@@ -56,6 +58,7 @@ import fix_send
 import gate_evidence
 import installers
 import ship_intent
+import sweep
 import worktree
 from _loader import load_by_path
 
@@ -372,6 +375,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# The scheduled job that runs this pass: `install-fix-pass-task.py`'s `TASK_NAME`.
+SCHEDULED_TASK = "devkit-fix-pass"
+
+
+def hand_to_scheduled_task() -> int:
+    """Start the scheduled pass now instead of running this one elevated.
+
+    An elevated process may not launch a background session (`agent_tabs.ELEVATED`: its
+    service would lock the scheduled pass out), so a pass run from an elevated VS Code
+    refused every launch and left each to a scheduled pass up to 30 minutes away. The
+    task runs with the user's ordinary token, so starting it is that same pass, now.
+    """
+    done = subprocess.run(
+        ["schtasks", "/Run", "/TN", SCHEDULED_TASK],
+        capture_output=True,
+        text=True,
+        check=False,
+        creationflags=sweep.NO_WINDOW,
+    )
+    if done.returncode != 0:
+        why = " ".join((done.stderr or done.stdout or "").split())
+        print(f"fix-pass: elevated, and could not start {SCHEDULED_TASK}: {why}", file=sys.stderr)
+        return EXIT_USAGE
+    print(
+        f"fix-pass: this shell is elevated, so the pass was handed to the scheduled task "
+        f"{SCHEDULED_TASK}, which runs unelevated; its record lands in {ARTIFACT}"
+    )
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     fix_send.pin_loaded(REPO_ROOT)  # before anything can fast-forward the checkout
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
@@ -384,6 +417,8 @@ def main(argv: list[str] | None = None) -> int:
     agent = SCHEDULED_AGENT if args.scheduled else args.agent
     if args.scheduled:
         mode = fix_cycle.mode_from_workspace(text)
+    if mode == fix_cycle.DISPATCH and not args.scheduled and agent_tabs.is_elevated():
+        return hand_to_scheduled_task()
     launch = agent_models.Launch.parse(agent, args.model, args.effort)
     if mode != fix_cycle.OFF and (missing := missing_tools()):
         why = (

@@ -270,6 +270,53 @@ def test_the_pending_check_closes_the_superseded_ones_first(tmp_path, monkeypatc
     assert "closed #170, superseded by devkit v0.11.21" in capsys.readouterr().out
 
 
+def test_an_older_adoption_box_is_discarded_once_a_newer_release_is_adopted(
+    tmp_path, monkeypatch, capsys
+):
+    """v0.11.27 and v0.11.28 adoptions failed before opening a PR and left a box each in
+    three consumers, 20-28 uncommitted files apiece. `close_superseded` only closes PRs,
+    and reconcile rightly holds a box whose work exists nowhere else -- so reconcile
+    reported all six every 15 minutes, after v0.11.31 had long replaced them."""
+    Box = up.worktree.Box
+    leases = {
+        "carameli--old": Box(
+            "carameli--old", "carameli", "agent/auto/devkit-upgrade-v0-11-28-0927", 9
+        ),
+        "carameli--now": Box(
+            "carameli--now", "carameli", "agent/auto/devkit-upgrade-v0-11-31-0927", 10
+        ),
+        "roguelike--old": Box(
+            "roguelike--old", "roguelike", "agent/auto/devkit-upgrade-v0-11-28-0927", 11
+        ),
+        "carameli--task": Box("carameli--task", "carameli", "agent/voicemail-0927", 12),
+        "carameli--held": Box(
+            "carameli--held", "carameli", "agent/auto/devkit-upgrade-v0-11-27-0926", 13
+        ),
+    }
+    monkeypatch.setattr(up.worktree, "read_leases", lambda _root: leases)
+    planned: list[tuple[str, bool]] = []
+
+    def plan(name, _workspace, force=False, **_kw):
+        planned.append((name, force))
+        refusal = "3 commit(s) not on origin" if name == "carameli--held" else ""
+        return up.worktree.ReapPlan(box=name, refusal=refusal)
+
+    applied: list[str] = []
+    monkeypatch.setattr(up.worktree, "plan_reap", plan)
+    monkeypatch.setattr(
+        up.worktree, "apply_reap", lambda p, _w: applied.append(p.box) or (True, [])
+    )
+    monkeypatch.setattr(up, "close_superseded", lambda _p, _t: [])
+    monkeypatch.setattr(up, "open_adoption_pr", lambda _p, _t: "")
+    workspace = tmp_path / "ws.code-workspace"
+    up.pending_adoption(tmp_path / "carameli", "carameli", "v0.11.31", workspace)
+    assert sorted(planned) == [("carameli--held", True), ("carameli--old", True)]
+    assert applied == ["carameli--old"], "a refused plan is never applied"
+    monkeypatch.setattr(up.worktree, "read_leases", lambda _root: {})
+    assert up.discard_superseded_boxes("carameli", "v0.11.31", workspace) == []
+    assert "discarded carameli--old, superseded by devkit v0.11.31" in capsys.readouterr().out
+
+
 def test_the_commit_names_the_release():
     """Unlike a swept commit, the version really is the description here."""
     assert up.commit_message("v0.5.3", 38) == "Adopt devkit v0.5.3 (38 vendored file(s))"

@@ -85,8 +85,10 @@ from typing import NoReturn
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import policy_runtime
 from adoption_prs import (
+    UPGRADE_SLUG,
     close_superseded,
     open_adoption_pr,
+    upgrade_branch_stem,
     upgrade_slug,
 )
 import sweep
@@ -275,8 +277,9 @@ def _same_path(left: Path, right: Path) -> bool:
         return False
 
 
-def pending_adoption(project: Path, name: str, tag: str) -> str:
-    """`open_adoption_pr`, after closing what `tag` supersedes.
+def pending_adoption(project: Path, name: str, tag: str, workspace: Path | None = None) -> str:
+    """`open_adoption_pr`, after closing what `tag` supersedes -- its PRs, and the boxes
+    of older adoptions that never got one.
 
     One call from `main` rather than two, because `main`'s complexity is at the ceiling
     the structure ratchet records for it and this decision is one the loop there
@@ -285,7 +288,39 @@ def pending_adoption(project: Path, name: str, tag: str) -> str:
     """
     for closed in close_superseded(project, tag):
         print(f"upgrade: {name} -- closed {closed}, superseded by devkit {tag}")
+    for box in discard_superseded_boxes(name, tag, workspace) if workspace else []:
+        print(f"upgrade: {name} -- discarded {box}, superseded by devkit {tag}")
     return open_adoption_pr(project, tag)
+
+
+# Every adoption branch, whatever release it adopted.
+ADOPTION_PREFIX = f"{tb.AUTOMATION_PREFIX}{tb.slugify(UPGRADE_SLUG)}-"
+
+
+def discard_superseded_boxes(name: str, tag: str, workspace: Path) -> list[str]:
+    """Reap `name`'s adoption boxes for releases before `tag`; the names reaped.
+
+    `close_superseded` closes an older adoption's PR and leaves its box to reconcile.
+    One that failed before opening a PR has none to close, and reconcile rightly holds a
+    box whose files exist nowhere else: six such boxes (v0.11.27, v0.11.28) sat reported
+    every 15 minutes after v0.11.31 replaced them. What they hold is pull output the new
+    release regenerates, so it is discarded -- `force` drops uncommitted files only, and
+    a plan `reap` refuses (commits not on origin, a live claim) is left standing.
+    """
+    current = upgrade_branch_stem(tag)
+    gone: list[str] = []
+    for box in worktree.read_leases(workspace.parent).values():
+        if box.project != name or not box.branch.startswith(ADOPTION_PREFIX):
+            continue
+        if box.branch.startswith(current):
+            continue
+        try:
+            plan = worktree.plan_reap(box.name, workspace, force=True)
+            if not plan.refusal and worktree.apply_reap(plan, workspace)[0]:
+                gone.append(box.name)
+        except worktree.WorktreeError:
+            continue  # fails open: the adoption does not wait on an old box
+    return gone
 
 
 def commit_message(tag: str, files: int | str) -> str:
@@ -1126,7 +1161,7 @@ def main(argv: list[str] | None = None) -> int:
         # the answer can differ from the stamp's: the adoption exists, it is just not
         # merged yet. Skipping is right whatever is holding it up -- a red gate, a
         # review, a human -- because a second identical PR fixes none of them.
-        elif pending := pending_adoption(root / name, name, tag):
+        elif pending := pending_adoption(root / name, name, tag, args.workspace):
             print(f"upgrade: {name} -- devkit {tag} is already up for adoption in {pending}.")
         else:
             todo.append(name)

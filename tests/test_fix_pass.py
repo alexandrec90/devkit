@@ -40,6 +40,13 @@ def tools_on_path(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def unelevated(monkeypatch):
+    """This process holds an ordinary token unless a test says otherwise: a suite run
+    from an elevated shell would hand every dispatch here to the real scheduled task."""
+    monkeypatch.setattr(fix_pass.agent_tabs, "is_elevated", lambda: False)
+
+
+@pytest.fixture(autouse=True)
 def no_session_busy(monkeypatch):
     """No session on this machine is working in a tree unless a test says one is."""
     monkeypatch.setattr(fix_pass.fix_loop, "fixers_working", frozenset)
@@ -108,6 +115,7 @@ def world(tmp_path, monkeypatch):
         "trees": [],
         "spent": [],
         "friction": [],
+        "jobs": [],
         "reopen": [],
         "order": [],
         "release": "",
@@ -158,6 +166,7 @@ def world(tmp_path, monkeypatch):
     loop = fix_pass.fix_loop
     monkeypatch.setattr(loop.fix_reports, "read_trees", lambda root, projects: list(table["trees"]))
     monkeypatch.setattr(loop.session_friction, "harvest", lambda *a, **k: list(table["friction"]))
+    monkeypatch.setattr(loop.schedule_health, "query", lambda *a, **k: list(table["jobs"]))
     monkeypatch.setattr(
         loop.fix_verify,
         "verify",
@@ -891,6 +900,49 @@ def test_a_blocked_intent_is_said_and_never_shipped_in_any_mode(monkeypatch, tmp
         "carameli",
         str(tmp_path),
     )
+
+
+def test_an_elevated_dispatch_hands_the_pass_to_the_scheduled_task(world, monkeypatch, capsys):
+    """VS Code ran elevated, so its "Fix What Is Red" pass refused every background
+    launch (an elevated `claude --bg` service locks the scheduled pass out for hours) and
+    left each for a pass up to 30 minutes away. It now starts that pass at once instead:
+    the scheduled task runs with the user's ordinary token."""
+    ran = []
+    monkeypatch.setattr(fix_pass.agent_tabs, "is_elevated", lambda: True)
+    monkeypatch.setattr(fix_pass, "run", lambda *a: pytest.fail("an elevated pass ran in place"))
+    monkeypatch.setattr(
+        fix_pass.subprocess,
+        "run",
+        lambda argv, **k: ran.append(argv) or subprocess.CompletedProcess(argv, 0, "SUCCESS", ""),
+    )
+    workspace = str(world["workspace"])
+    assert fix_pass.main(["--mode", "dispatch", "--workspace", workspace]) == 0
+    assert [argv for argv in ran if argv[0] == "schtasks"] == [
+        ["schtasks", "/Run", "/TN", fix_pass.SCHEDULED_TASK]
+    ]
+    assert "handed to the scheduled task" in capsys.readouterr().out
+    installer = load_script("scripts/install-fix-pass-task.py")
+    assert fix_pass.SCHEDULED_TASK == installer.TASK_NAME
+
+
+def test_a_scheduled_task_that_will_not_start_is_said_not_swallowed(monkeypatch, capsys):
+    monkeypatch.setattr(
+        fix_pass.subprocess,
+        "run",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 1, "", "ERROR: Access is denied."),
+    )
+    assert fix_pass.hand_to_scheduled_task() == fix_pass.EXIT_USAGE
+    assert "could not start devkit-fix-pass: ERROR: Access is denied." in capsys.readouterr().err
+
+
+def test_an_elevated_plan_or_scheduled_pass_still_runs_in_place(world, monkeypatch):
+    monkeypatch.setattr(fix_pass.agent_tabs, "is_elevated", lambda: True)
+    monkeypatch.setattr(fix_pass, "missing_tools", lambda: [])
+    ran = []
+    monkeypatch.setattr(fix_pass, "run", lambda ws, mode, launch: ran.append(mode) or 0)
+    workspace = str(world["workspace"])
+    assert fix_pass.main(["--mode", "plan", "--workspace", workspace]) == 0
+    assert ran == [fix_cycle.PLAN]
 
 
 def test_a_carried_intent_is_recorded_under_the_branch_it_went_out_on(monkeypatch, tmp_path):

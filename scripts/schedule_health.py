@@ -86,6 +86,8 @@ NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # `schtasks` writes this when a task has never run. It is not a date to reason about.
 NEVER = "N/A"
+# `Schedule Type` values of a trigger that fires on an event rather than a clock.
+EVENT_TRIGGERS = frozenset({"At logon time", "At system start up", "On event", "At idle time"})
 
 # The other spelling of "never ran", and the one that actually turned up: Windows fills
 # both fields with sentinels rather than leaving them empty. `11/30/1999` is the epoch
@@ -222,6 +224,9 @@ class Job:
     last_run: _dt.datetime | None = None
     next_run: _dt.datetime | None = None
     command: str = ""
+    # Every trigger is an event (logon, boot), none a clock: no next run time ever, so a
+    # first run not yet made is the event not yet happened, not a run missed.
+    event_only: bool = False
 
     @property
     def interpreter(self) -> str:
@@ -324,14 +329,20 @@ def parse_tasks(stdout: str, prefix: str = PREFIX) -> list[Job]:
             last_run=parse_time(row.get("Last Run Time") or ""),
             next_run=parse_time(row.get("Next Run Time") or ""),
             command=(row.get("Task To Run") or "").strip(),
+            event_only=(row.get("Schedule Type") or "").strip() in EVENT_TRIGGERS,
         )
         seen = merged.get(name)
-        if seen is None:
-            merged[name] = job
-            continue
-        if job.next_run is not None and (seen.next_run is None or job.next_run < seen.next_run):
-            merged[name] = replace(seen, next_run=job.next_run)
+        merged[name] = job if seen is None else merge_triggers(seen, job)
     return list(merged.values())
+
+
+def merge_triggers(seen: Job, row: Job) -> Job:
+    """One task's rows, one per trigger, as one job: the earliest next run (see
+    `parse_tasks`), and event-only only when every trigger is an event."""
+    seen = replace(seen, event_only=seen.event_only and row.event_only)
+    if row.next_run is not None and (seen.next_run is None or row.next_run < seen.next_run):
+        seen = replace(seen, next_run=row.next_run)
+    return seen
 
 
 def virtualenv_interpreter(job: Job) -> Path | None:
@@ -420,6 +431,8 @@ def problems(
             # A job registered an hour ago and due tonight has never run and is
             # perfectly healthy. Only a *missed* first run is worth a line, and the
             # scheduler says which that is: its next run is already in the past.
+            if job.event_only:
+                continue  # it fires on its event, which has not come round yet
             if job.next_run is None or job.next_run < moment:
                 found.append(f"{job.name}: registered but has never run")
             continue
