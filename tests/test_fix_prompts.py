@@ -403,6 +403,20 @@ def test_every_prompt_names_the_ratchets_and_forbids_a_question():
         assert "never a shell heredoc" in text
         # b935e421: a fixer moving a class to the end of a file reached for `cat >>`.
         assert "An append is an Edit" in text
+        # 79ce2440: a fixer found its nightly already green at the tip, changed nothing,
+        # wrote no intent -- and the pass, seeing no outcome file, filed it as dead.
+        assert "already fixed" in text and "with neither an intent nor" in text
+
+
+def test_the_nothing_to_change_outcome_is_the_one_the_pass_sets_aside():
+    """The prompt sends an already-fixed failure through the ship skill; that only holds
+    if the skill says so and the pass reads an intent over a clean tree as done."""
+    skill = " ".join((REPO_ROOT / ".claude/skills/ship/SKILL.md").read_text("utf-8").split())
+    assert "a failure already fixed where the tree was cut" in skill
+    assert "ship-intent.md" in fix_prompts.FINISH
+    assert fix_prompts.INTENT_FILE in fix_reports.OUTCOME_FILES
+    fixer = " ".join((REPO_ROOT / ".claude/fixer.md").read_text("utf-8").split())
+    assert "already fixed" in fixer and "the ship skill" in fixer
 
 
 def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linux(tmp_path):
