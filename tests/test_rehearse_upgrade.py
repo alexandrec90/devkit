@@ -47,6 +47,30 @@ def test_the_previous_release_is_the_newest_tag():
     assert rehearse.previous_tag(Path("."), lambda *_a, **_k: done(128, "v1\n")) == ""
 
 
+def test_a_tag_on_this_tree_is_not_its_previous_release(tmp_path):
+    """Run 36363149664: `main` right after `Release v0.11.31` *is* v0.11.31, so the
+    rehearsal adopted a tree into a render of itself and failed with "nothing to commit".
+    A tag that contains HEAD is this release or a later one; the one before it is next."""
+    no_hooks = tmp_path / "no-hooks"
+    no_hooks.mkdir()
+    git = [
+        "git",
+        *("-c", f"core.hooksPath={no_hooks}", "-c", "commit.gpgsign=false"),
+        *("-c", "tag.gpgsign=false", "-c", "user.name=t", "-c", "user.email=t@example.invalid"),
+    ]
+
+    def run(*args: str) -> None:
+        subprocess.run([*git, *args], cwd=tmp_path, check=True, capture_output=True)
+
+    run("init", "-q")
+    for tag in ("v0.11.9", "v0.11.30", "v0.11.31"):
+        run("commit", "-q", "--allow-empty", "-m", tag)
+        run("tag", tag)
+    assert rehearse.previous_tag(tmp_path) == "v0.11.30"
+    run("commit", "-q", "--allow-empty", "-m", "a PR on top of the release")
+    assert rehearse.previous_tag(tmp_path) == "v0.11.31"
+
+
 def test_a_generator_is_asked_whether_it_can_leave_the_workspace_alone(tmp_path):
     old, new = tmp_path / "old.py", tmp_path / "new.py"
     old.write_text("print('registers')\n", encoding="utf-8")
