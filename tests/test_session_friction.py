@@ -254,11 +254,13 @@ def test_an_error_quoted_inside_a_string_on_its_line_is_not_friction():
 def test_the_rule_names_the_spelling_that_avoids_the_error_the_detector_files():
     """A sweep documented the Git Bash `rev:path` rewrite only in the evidence file, and
     the next session paid for it again. The rule every session reads names the spelling,
-    and the error it quotes is the one the detector files."""
+    and the error it quotes is the one the detector files. `MSYS2_ARG_CONV_EXCL` now
+    exempts `origin/` revs, so the spelling it names is for a rev the setting does not."""
     rule = (Path(__file__).resolve().parents[1] / ".claude" / "rules" / "engineering.md").read_text(
         encoding="utf-8"
     )
-    assert "origin/main:./.devkit.toml" in rule and "`ambiguous argument`" in rule
+    assert "feature/x:./.devkit.toml" in rule and "`ambiguous argument`" in rule
+    assert "`MSYS2_ARG_CONV_EXCL`" in rule and "`origin/`" in rule
     # Described there, not quoted: instruction files carry no backslashed paths.
     assert sf._result_class("ambiguous argument 'origin\\main;.devkit.toml'")[0] == "environment"
 
