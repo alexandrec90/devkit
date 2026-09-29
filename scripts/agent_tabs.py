@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_models
 import fix_reports
+import sweep
 import tree_provision
 import wt_profile
 
@@ -141,7 +142,7 @@ def open_agent(
     launch: agent_models.Launch,
     box: Path,
     branch: str,
-    runner=subprocess.run,
+    runner=sweep.run_windowless,
     prompt: str = "",
     title: str = "",
 ) -> int:
@@ -303,7 +304,11 @@ def is_elevated() -> bool:
 
 
 def launch_background(
-    launch: agent_models.Launch, tree: Path, prompt: str, hooks_off: bool, runner=subprocess.run
+    launch: agent_models.Launch,
+    tree: Path,
+    prompt: str,
+    hooks_off: bool,
+    runner=sweep.run_windowless,
 ) -> int:
     """Start a detached session and print the id that reads it back.
 

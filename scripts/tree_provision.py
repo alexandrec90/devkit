@@ -16,7 +16,6 @@ Tested in `tests/test_tree_provision.py`.
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
@@ -32,7 +31,7 @@ def argv(tree: Path) -> list[str]:
     return [sweep.console_python(), str(WORKTREE), "provision", str(tree), "--yes"]
 
 
-def provision(tree: Path, runner=subprocess.run) -> bool:
+def provision(tree: Path, runner=sweep.run_windowless) -> bool:
     """Whether the tree's toolchain is installed. The session still goes on a failure --
     it may not need the toolchain -- and the failure is left in the tree's friction
     file, which the next pass files on the ledger: printed alone, it reached nobody.
