@@ -1390,8 +1390,11 @@ lockfiles) stay optional and skip explicitly.
 
 The same argument applies to prose. `.claude/rules/engineering.md`,
 `.claude/rules/authoring.md`, and the `/ship` workflow are in the `MANIFEST` and
-vendored byte-identical. `/ship` is the only shared skill: it has a concrete lifecycle
-job and delegates its mechanical checks to the tested `scripts/ship.py` driver.
+vendored byte-identical. `/ship` has a concrete lifecycle job and delegates its
+mechanical checks to the tested `scripts/ship.py` driver. The one other shared skill is
+`/go-nuts <goal>`, for an unattended run: it decides instead of asking, logs each
+judgement call to `logs/overnight.md` so it can be reversed, and finishes through
+`/ship`. Only a user can invoke it; the model never starts one on its own.
 
 Generic audits, compatibility smoke commands, stateful refactor sweeps, and model-to-model
 handoff prompts do not belong in every project. Mechanical constraints such as the
