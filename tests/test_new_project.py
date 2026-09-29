@@ -13,6 +13,7 @@ import itertools
 import json
 import os
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -906,6 +907,29 @@ def test_a_linter_that_is_not_installed_is_skipped_not_reported(tmp_path):
     hung = [sys.executable, "-c", "import time; time.sleep(120)"]
     section = lint_all.run_tool("mypy", hung, "hint", timeout=2)
     assert section.startswith("# mypy\n") and "killed after 2s" in section
+
+
+def test_generated_lint_runner_fails_a_changed_run_when_git_refuses_the_tree(tmp_path, monkeypatch):
+    """9feac8aa, in the template: `_git` returned `[]` on any non-zero exit, so a git
+    refusal (dubious ownership) read as a clean tree and `--changed` said "nothing to
+    do" over a modified file. It must fail, and say why in the artifact."""
+    import importlib.util
+
+    root = generate(tmp_path, {})
+    (root / "logs").mkdir(exist_ok=True)
+    spec = importlib.util.spec_from_file_location(
+        "refused_lint_all", root / "scripts" / "lint-all.py"
+    )
+    generated = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generated)
+    refused = subprocess.CompletedProcess(
+        [], 128, stdout="", stderr="fatal: detected dubious ownership"
+    )
+    monkeypatch.setattr(generated.subprocess, "run", lambda *a, **k: refused)
+
+    assert generated.main(["--changed"]) == 1
+    artifact = (root / "logs" / "lint-errors.log").read_text(encoding="utf-8")
+    assert "# git\n" in artifact and "dubious ownership" in artifact
 
 
 def test_generated_lint_runner_covers_the_env_file_and_pre_commit_covers_the_workflows(
