@@ -2663,6 +2663,11 @@ def _dir_lock(path: Path, wait: float, stale: float):
     while True:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Apart from the mkdir below: a parent that is a *file* raises FileExistsError
+            # too, and read as a held lock whose stat then fails, it spun forever.
+            break
+        try:
             os.mkdir(path)
             acquired = True
             break

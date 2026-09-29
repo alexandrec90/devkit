@@ -2199,6 +2199,16 @@ def test_a_named_lock_says_whether_it_was_had_and_leaves_another_holders_alone(t
     assert not lock.exists()
 
 
+def test_a_lock_whose_parent_is_a_file_is_not_had_and_does_not_spin(tmp_path):
+    """`parent.mkdir(exist_ok=True)` raises FileExistsError over a file, which the loop
+    read as a held lock; its stat then failed and it retried forever, deadline unread."""
+    worktree.boxes_root(tmp_path).write_text("a file, not a directory", encoding="utf-8")
+    started = worktree.time.monotonic()
+    with worktree.named_lock(tmp_path, "fix-pass.lock", wait=30.0, stale=60.0) as held:
+        assert held is False
+    assert worktree.time.monotonic() - started < 5
+
+
 def test_spawns_for_different_sessions_do_not_wait_on_each_other(tmp_path):
     """One box per (session, project) is the tier's whole shape, so two sessions
     spawning at once are not a race and must not be serialised into one."""
