@@ -94,9 +94,13 @@ DOTENV_CMD = [
 
 
 def changed_paths() -> list[str]:
-    """Every tracked-but-modified plus untracked path, relative to the repo root."""
-    tracked = _git("diff", "--name-only", "HEAD")
+    """Every tracked-but-modified plus untracked path, relative to the repo root.
+
+    `ls-files` asks first: refused a repository, it names the refusal, where `diff`
+    falls back to `--no-index` and prints its usage instead.
+    """
     untracked = _git("ls-files", "--others", "--exclude-standard")
+    tracked = _git("diff", "--name-only", "HEAD")
     return sorted({n for n in (tracked + untracked) if (REPO_ROOT / n).exists()})
 
 
@@ -142,9 +146,37 @@ def env_files(limit_to: list[str] | None = None) -> list[str]:
     return found if limit_to is None else [p for p in found if p in set(limit_to)]
 
 
+class GitFailed(RuntimeError):
+    """git could not say what changed, so the `--changed` set is unknown, not empty."""
+
+
 def _git(*args: str) -> list[str]:
-    result = subprocess.run(["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True)
-    return result.stdout.splitlines() if result.returncode == 0 else []
+    """git's output lines; `GitFailed` when git could not answer.
+
+    It used to return `[]` on any non-zero exit, so a refusal -- `detected dubious
+    ownership` in a tree an elevated process made -- read as a clean tree with nothing
+    changed, and `--changed` printed "nothing to do" over a modified file (9feac8aa).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True
+        )
+    except OSError as exc:
+        raise GitFailed(f"`git {' '.join(args)}` could not start: {exc}") from exc
+    if result.returncode != 0:
+        why = (
+            " ".join((result.stderr or result.stdout).split())[:300] or f"exit {result.returncode}"
+        )
+        raise GitFailed(f"`git {' '.join(args)}` failed: {why}")
+    return result.stdout.splitlines()
+
+
+def scope_unknown(exc: GitFailed) -> int:
+    """Report a `--changed` run that could not learn its scope: a failure, never a skip."""
+    print(f"lint-all: FAILED — {exc}")
+    print(f"  nothing was linted; name the files with --paths. Details in {ARTIFACT.name}")
+    _write_artifact(f"# git\n# fix: make git work in this tree, or pass --paths\n{exc}\n\n")
+    return 1
 
 
 def _missing_module(cmd: list[str]) -> bool:
@@ -240,6 +272,34 @@ def not_clean_reason() -> str:
     )
 
 
+def python_sections(targets: list[str]) -> str:
+    """The ruff and mypy sections for `targets`, the whole repo when empty."""
+    scope = targets or ["."]
+    # Auto-fix first, then report. Both ruff passes mutate the same files, so they
+    # must stay sequential relative to each other. No `--exclude` guard here: see the
+    # module docstring — devkit formats its own harness, and CI's `ruff format --check`
+    # is what would fail if it did not.
+    subprocess.run(
+        [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+    )
+    subprocess.run(
+        [sys.executable, "-m", "ruff", "format", *scope],
+        cwd=REPO_ROOT,
+        capture_output=True,
+    )
+    return run_tool(
+        "ruff",
+        [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
+        "ruff check . --fix --unsafe-fixes",
+    ) + run_tool(
+        "mypy",
+        [sys.executable, "-m", "mypy", *(targets or MYPY_SCOPE), "--show-error-codes"],
+        f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     _SKIPPED.clear()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -267,7 +327,10 @@ def main(argv: list[str] | None = None) -> int:
     scoped = args.changed or bool(args.paths)
     selected: list[str] = []
     if scoped:
-        selected = explicit_paths(args.paths) if args.paths else changed_paths()
+        try:
+            selected = explicit_paths(args.paths) if args.paths else changed_paths()
+        except GitFailed as exc:
+            return scope_unknown(exc)
     changed = selected if scoped else None
     targets = python_targets(selected)
     envs = env_files(changed)
@@ -275,41 +338,16 @@ def main(argv: list[str] | None = None) -> int:
         print("lint-all: no changed files this run lints; nothing to do.")
         _write_artifact("")
         return 0
-    scope = targets or ["."]
 
     label = f"{len(selected)} file(s)" if scoped else "whole repo"
     print(f"lint-all: {label}")
 
     sections = ""
-    # A narrowed run with only an `.env` edit leaves `targets` empty, and `scope` then
+    # A narrowed run with only an `.env` edit leaves `targets` empty, and the scope then
     # falls back to `["."]` — which would silently widen a per-turn check into a
     # whole-repo pass. Gate the Python passes on having Python to lint.
     if targets or not scoped:
-        # Auto-fix first, then report. Both ruff passes mutate the same files, so they
-        # must stay sequential relative to each other. No `--exclude` guard here: see the
-        # module docstring — devkit formats its own harness, and CI's `ruff format --check`
-        # is what would fail if it did not.
-        subprocess.run(
-            [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-        )
-        subprocess.run(
-            [sys.executable, "-m", "ruff", "format", *scope],
-            cwd=REPO_ROOT,
-            capture_output=True,
-        )
-
-        sections += run_tool(
-            "ruff",
-            [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
-            "ruff check . --fix --unsafe-fixes",
-        )
-        sections += run_tool(
-            "mypy",
-            [sys.executable, "-m", "mypy", *(targets or MYPY_SCOPE), "--show-error-codes"],
-            f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
-        )
+        sections += python_sections(targets)
 
     # A real executable rather than a `-m` module, so run_tool's FileNotFoundError
     # branch is what degrades a missing one to a terminal note. The workflow files are

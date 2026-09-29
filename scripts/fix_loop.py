@@ -215,6 +215,13 @@ def fixers_working() -> frozenset[str]:
     return bg_sessions.working(bg_sessions.listed(ship_intent.run_quiet), ("background",))
 
 
+def still_working(busy: frozenset[str], tree: Path, now: _dt.datetime) -> bool:
+    """Whether the fixer in `tree` is at work: listed busy (`fixers_working`), or its
+    stamped session is waiting on a background task it started. A turn that ends on
+    "the tests will notify me" lists as idle, and 0929-7 was shipped mid-test (8d2f56f5)."""
+    return bg_sessions.busy_in(busy, tree) or fix_reports.awaiting_task(tree, now)
+
+
 # A scheduled job's own failure, read off the scheduler. Only `log-wrap.py --always` jobs
 # filed theirs, and eight of twelve ran bare: reconcile exited 1 every 15 minutes over
 # husks it could not delete and boxes it would not, and no pass ever saw it.

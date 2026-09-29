@@ -17,6 +17,7 @@ honest way to test "what does it lint in a repo shaped like X" is to build an X.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -121,6 +122,99 @@ def test_changed_paths_is_the_diff_plus_untracked_files_that_still_exist(monkeyp
     monkeypatch.setattr(lint_all, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(lint_all, "_git", lambda *args: listed[args[0]])
     assert lint_all.changed_paths() == ["a.py", "b.md", "new.py"]
+
+
+def refused_git_env(tmp_path: Path) -> dict[str, str]:
+    """An environment where git refuses every repository as another owner's.
+
+    `GIT_TEST_ASSUME_DIFFERENT_OWNER` is git's own switch for the refusal a tree made by
+    an elevated process gets; an empty global config keeps a machine-wide
+    `safe.directory` from waving it through.
+    """
+    empty = tmp_path / "empty.gitconfig"
+    empty.write_text("", encoding="utf-8")
+    return {
+        **os.environ,
+        "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1",
+        "GIT_CONFIG_GLOBAL": str(empty),
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+
+
+def test_a_git_that_refuses_the_tree_fails_a_changed_run_instead_of_linting_nothing(tmp_path):
+    """9feac8aa: `_git` returned `[]` on any non-zero exit, so a dubious-ownership refusal
+    read as a clean tree and `--changed` printed "nothing to do" over a modified file."""
+    root = build_repo(tmp_path / "repo")
+    (root / "ok.py").write_text("x = 2\n", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "scripts/lint-all.py", "--changed"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        env=refused_git_env(tmp_path),
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "nothing to do" not in result.stdout
+    assert "dubious ownership" in result.stdout
+    artifact = (root / "logs" / "lint-errors.log").read_text(encoding="utf-8")
+    assert artifact.startswith("# source: scripts/lint-all.py\n# git\n")
+    assert "dubious ownership" in artifact
+
+
+def test_git_raises_when_it_cannot_answer_and_lists_lines_when_it_can(monkeypatch):
+    def fake(returncode: int, stdout: str = "", stderr: str = ""):
+        done = subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=stderr)
+        return lambda *a, **k: done
+
+    monkeypatch.setattr(lint_all.subprocess, "run", fake(0, "a.py\nb.py\n"))
+    assert lint_all._git("diff") == ["a.py", "b.py"]
+    monkeypatch.setattr(lint_all.subprocess, "run", fake(128, stderr="fatal:\n  refused\n"))
+    with pytest.raises(lint_all.GitFailed, match="`git diff` failed: fatal: refused"):
+        lint_all._git("diff")
+    monkeypatch.setattr(lint_all.subprocess, "run", fake(1))
+    with pytest.raises(lint_all.GitFailed, match="failed: exit 1"):
+        lint_all._git("diff")
+
+    def absent(*a, **k):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(lint_all.subprocess, "run", absent)
+    with pytest.raises(lint_all.GitFailed, match="could not start"):
+        lint_all._git("diff")
+
+
+def test_scope_unknown_fails_and_puts_gits_answer_in_the_artifact(monkeypatch, tmp_path):
+    monkeypatch.setattr(lint_all, "ARTIFACT", tmp_path / "logs" / "lint-errors.log")
+    assert lint_all.scope_unknown(lint_all.GitFailed("`git diff` failed: fatal: no")) == 1
+    text = (tmp_path / "logs" / "lint-errors.log").read_text(encoding="utf-8")
+    assert "# git\n" in text and "`git diff` failed: fatal: no" in text
+
+
+def test_python_sections_lints_the_targets_or_else_the_whole_repo(monkeypatch):
+    fixed: list[list[str]] = []
+    monkeypatch.setattr(lint_all.subprocess, "run", lambda cmd, **kw: fixed.append(cmd[3:]))
+    monkeypatch.setattr(lint_all, "run_tool", lambda name, cmd, hint: f"{name} {cmd[3:]};")
+    assert lint_all.python_sections(["a.py"]) == (
+        "ruff ['check', 'a.py', '--output-format=full'];mypy ['a.py', '--show-error-codes'];"
+    )
+    assert fixed == [["check", "a.py", "--fix", "--unsafe-fixes"], ["format", "a.py"]]
+    assert lint_all.python_sections([]) == (
+        "ruff ['check', '.', '--output-format=full'];"
+        f"mypy {[*lint_all.MYPY_SCOPE, '--show-error-codes']};"
+    )
+
+
+def test_an_explicit_path_list_needs_no_git(tmp_path):
+    """`--paths` is the way round a git that refuses the tree, so it must not ask git."""
+    root = build_repo(tmp_path / "repo")
+    result = subprocess.run(
+        [sys.executable, "scripts/lint-all.py", "--paths", "ok.py"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        env=refused_git_env(tmp_path),
+    )
+    assert "ruff: ok" in result.stdout, result.stdout + result.stderr
 
 
 def test_changed_python_files_is_the_python_subset_of_the_working_tree_diff(monkeypatch):

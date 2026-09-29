@@ -86,6 +86,28 @@ def test_an_intent_whose_fixer_is_still_busy_waits_for_it(monkeypatch, tmp_path)
     assert lines[0] == "devkit agent/b -- held: its session is still working in the tree"
 
 
+def test_an_intent_whose_fixer_waits_on_a_background_task_is_held(monkeypatch, tmp_path):
+    """8d2f56f5: 0929-7 ended its turn to wait on the suite it had started, so `claude
+    agents` listed it idle and the pass shipped the tree mid-test. The stamped session's
+    transcript still had the task out."""
+    trees = [ship_intent.Intent("devkit", tmp_path / "waiting", "agent/w", "S", "B")]
+    trees.append(ship_intent.Intent("devkit", tmp_path / "done", "agent/d", "S", "B"))
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: trees)
+    waiting = {str(tmp_path / "waiting")}
+    monkeypatch.setattr(
+        fix_pass.fix_loop.fix_reports, "awaiting_task", lambda tree, now: str(tree) in waiting
+    )
+    shipped = []
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda i, p, b: shipped.append(i.branch) or ship_intent.Outcome(i, "shipped", "u"),
+    )
+    lines, _, _ = fix_pass.ship_intents(tmp_path, ["devkit"], fix_cycle.DISPATCH)
+    assert shipped == ["agent/d"]
+    assert lines[0] == "devkit agent/w -- held: its session is still working in the tree"
+
+
 def failure(**fields) -> fix_plan.Failure:
     base: dict[str, Any] = {
         "kind": fix_plan.PR,
