@@ -69,6 +69,8 @@ RESOLVED_EVENT = "triage-resolved"
 # from the branch it names -- is undone by one of these (`fix_verify.py`). Append-only
 # like everything else: the later of the two verdicts on a ref is the one that stands.
 REOPENED_EVENT = "triage-reopened"
+# On a resolution written again after its fix moved branch: when it was first made.
+RESOLVED_FIELD = "resolved"
 
 # The field each event name carries its human-readable substance in, in preference
 # order. A signature groups by it, so `--resolve-like` can retire one recurrence of a
@@ -333,11 +335,10 @@ def recent(
         ref = item.fields.get("ref", "")
         if item.event != RESOLVED_EVENT or standing.get(ref) != (item.event, item.stamp):
             continue
-        if not target(item.fields.get("pr", ""))[1] or not within(item.stamp, now, window):
+        made = resolved_at(item)
+        if not target(item.fields.get("pr", ""))[1] or not within(made, now, window):
             continue
-        found.append(
-            Resolution(ref, item.stamp, item.fields.get("pr", ""), item.fields.get("note", ""))
-        )
+        found.append(Resolution(ref, made, item.fields.get("pr", ""), item.fields.get("note", "")))
     return found
 
 
@@ -484,19 +485,71 @@ def load(root: Path | None = None) -> list[Item]:
     return items
 
 
-def resolve(ids: list[str], note: str, pr: str = "", root: Path | None = None) -> list[str]:
-    """Record one `triage-resolved` per id. Returns the ids written."""
+def resolve(
+    ids: list[str], note: str, pr: str = "", root: Path | None = None, resolved: str = ""
+) -> list[str]:
+    """Record one `triage-resolved` per id. Returns the ids written. `resolved` is when
+    the resolution was first made, for one written again (`repoint`)."""
     if not note.strip():
         raise ValueError("a resolution needs a --note saying what fixed it")
     ledger = ledger_file(root)
     written = []
+    first = ((RESOLVED_FIELD, resolved),) if resolved else ()
     for one in ids:
         harness_events.record(
             RESOLVED_EVENT,
-            (("ref", one), ("pr", pr or "-"), ("note", note)),
+            (("ref", one), ("pr", pr or "-"), ("note", note), *first),
             root=ledger.parent.parent,
         )
         written.append(one)
+    return written
+
+
+def carried(items: list[Item], old: str, since: str) -> list[tuple[str, str, str]]:
+    """`(ref, note, when resolved)` of each standing resolution naming branch `old`,
+    written after `since`.
+
+    `since` is when the commit a tree was cut from was made. The ship carries an intent
+    off a retired name -- one whose PR merged before the tree was cut -- so a resolution
+    naming that name written since can only be this tree's fix, which went out on the
+    new one. `fix_verify.relevant` rightly discounts the old PR for it, so without a
+    re-point the group sat pending until it was reopened (`agent/fix-harness-ledger-0928`,
+    whose #447 merged a day before the three resolutions naming it).
+    """
+    try:
+        cut = _dt.datetime.fromisoformat(since)
+    except ValueError:
+        return []
+    standing = verdicts(items)
+    found = []
+    for item in items:
+        ref = item.fields.get("ref", "")
+        if item.event != RESOLVED_EVENT or item.fields.get("pr", "") != old:
+            continue
+        if standing.get(ref) != (item.event, item.stamp):
+            continue
+        try:
+            written = _dt.datetime.fromisoformat(item.stamp)
+        except ValueError:
+            continue
+        if written >= cut:
+            found.append((ref, item.fields.get("note", ""), resolved_at(item)))
+    return found
+
+
+def resolved_at(item: Item) -> str:
+    """When a resolution was made: its `resolved=` when a re-point carried it, else its
+    own stamp. The row's stamp still orders verdicts; this is what `fix_verify` holds it
+    to -- which merges came after it, and which rows were filed while it was in flight."""
+    return item.fields.get(RESOLVED_FIELD) or item.stamp
+
+
+def repoint(old: str, new: str, since: str, root: Path | None = None) -> list[str]:
+    """Resolve again on `new` every resolution `carried` finds, keeping when each was
+    made; the refs written."""
+    written = []
+    for ref, note, when in carried(load(root), old, since):
+        written += resolve([ref], note or f"carried off {old}", new, root, resolved=when)
     return written
 
 

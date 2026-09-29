@@ -41,6 +41,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agent_tabs
 import bg_sessions
 import devkit_project
 import fix_findings
@@ -60,6 +61,7 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 EXIT_CLEAN = 0
 EXIT_VIOLATED = 1
+EXIT_REFUSED = 2
 
 # How long an iteration waits for the sessions it dispatched, and the least it waits
 # before the next one: a gate needs minutes to report on what the last one shipped.
@@ -145,6 +147,19 @@ def check_record(record: str, exit_code: int | None, open_kinds: set[tuple[str, 
                 if (need, match.group(1)) not in open_kinds:
                     found.append(f"a failure with no {need} finding open: {line.strip()}")
     return found
+
+
+def check_ran(record: str, mode: str) -> list[str]:
+    """The record must be a pass in `mode`, run here. Handed to the scheduled task from
+    an elevated shell, the pass left the rehearsal's `mode=plan` record in place, and
+    three iterations read it back as clean dispatches. A crash or a refusal is
+    `check_record`'s to report."""
+    first = record.splitlines()[0].strip() if record.strip() else "no record"
+    if first == f"fix-pass: mode={mode}" or first.startswith(
+        ("fix-pass: CRASHED", "fix-pass: FAILED")
+    ):
+        return []
+    return [f"the pass did not run in {mode} mode here: {first}"]
 
 
 def _tracked(line: str) -> bool:
@@ -350,7 +365,9 @@ def iterate(
     iteration = Iteration(number, started.isoformat(timespec="seconds"), code, record)
     iteration.filed = [f"{i.event} {i.project}: {i.detail}" for i in items if i.id not in before]
     iteration.backlog = len(items)
-    iteration.violations = check_record(record, code, open_kinds(devkit_dir))
+    iteration.violations = check_ran(record, mode) + check_record(
+        record, code, open_kinds(devkit_dir)
+    )
     if mode == "dispatch":
         projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
         trees = dispatched_since(root, projects, started)
@@ -397,6 +414,15 @@ def main(argv: list[str] | None = None) -> int:
         "--brake-tokens", type=int, default=BRAKE_TOKENS, help="stop starting iterations past this"
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if args.mode == "dispatch" and agent_tabs.is_elevated():
+        # The pass would hand every iteration to the scheduled task, which runs main's
+        # code rather than this tree's and sends sessions this script never sees.
+        print(
+            "fix-pass-supervise: this shell is elevated, so the pass would hand each "
+            "dispatch to the scheduled task -- run it from an unelevated shell",
+            file=sys.stderr,
+        )
+        return EXIT_REFUSED
     iterations: list[Iteration] = []
     for number in range(1, args.iterations + 1):
         iteration = iterate(args.workspace.resolve(), number, args.mode, utc_now)
