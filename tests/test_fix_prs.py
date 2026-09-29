@@ -458,6 +458,46 @@ def test_a_failed_install_is_a_note_not_a_refusal(tmp_path):
     assert notes == ["[warn] provision: x"]
 
 
+def test_a_cache_this_process_cannot_open_is_named_with_its_way_round(tmp_path):
+    """cadb6ba8: an elevated pytest run leaves `.pytest_cache` owner-only to
+    Administrators, which the unelevated pass can neither open nor rename."""
+
+    def refused(path):
+        raise PermissionError(5, "Access is denied", str(path))
+
+    assert fix_trees.locked_caches(tmp_path, opener=refused) == {
+        ".pytest_cache": "PYTEST_ADDOPTS=-p no:cacheprovider"
+    }
+
+
+def test_a_missing_or_readable_cache_is_not_locked(tmp_path):
+    assert fix_trees.locked_caches(tmp_path) == {}
+    (tmp_path / ".pytest_cache").mkdir()
+    assert fix_trees.locked_caches(tmp_path) == {}
+
+
+def test_any_other_failure_to_open_a_cache_is_not_called_locked(tmp_path):
+    """Only a refusal is the elevated leftover; a file where the directory would be, or
+    a path too long, is pytest's to report in its own words."""
+
+    def broken(path):
+        raise NotADirectoryError(20, "Not a directory", str(path))
+
+    assert fix_trees.locked_caches(tmp_path, opener=broken) == {}
+
+
+def test_a_reused_trees_locked_caches_reach_its_fixers_prompt(monkeypatch, root):
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (root / "carameli" / "t", ""))
+    monkeypatch.setattr(fix_prs, "refresh_head", lambda *a: "")
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    locked = {".pytest_cache": "PYTEST_ADDOPTS=-p no:cacheprovider"}
+    monkeypatch.setattr(fix_prs, "locked_caches", lambda tree: locked)
+    opened = capture_sessions(monkeypatch)
+    assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
+    expected = fix_prs.fix_prompts.pr_prompt(failure(), "", "", locked)
+    assert opened[0]["prompt"] == fix_prs.tab_safe(expected)
+
+
 def test_both_dispatch_paths_provision_the_tree_before_the_session_opens(monkeypatch, root):
     tree = root / "carameli" / ".claude" / "worktrees" / "x"
     order = []
