@@ -824,6 +824,57 @@ def test_the_parser_defaults_to_the_background_agent_and_no_mode():
     assert (args.mode, args.agent, args.scheduled) == (None, "claude-bg", False)
 
 
+def _launch():
+    return fix_pass.agent_models.Launch.parse("claude-bg", None, None)
+
+
+def test_a_dispatching_pass_beside_a_running_one_ships_and_sends_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """babfee68: a supervised pass and the scheduled one started 21 seconds apart and
+    shipped the same intents; the loser's push was refused ("cannot lock ref") and filed
+    as a ship failure of a branch that had just shipped."""
+    workspace = tmp_path / "alex.code-workspace"
+    monkeypatch.setattr(fix_pass, "run", lambda *a, **k: pytest.fail("a second pass ran"))
+    with fix_pass.worktree.named_lock(tmp_path, fix_pass.RUN_LOCK_NAME, 0.1, 60.0) as held:
+        assert held
+        code = fix_pass.run_alone(workspace, fix_cycle.DISPATCH, _launch(), wait=0.2, stale=60.0)
+    assert code == fix_pass.EXIT_OK
+    assert "another dispatching pass holds" in capsys.readouterr().out
+
+
+def test_a_dispatching_pass_holds_the_lock_while_it_runs_and_releases_it(tmp_path, monkeypatch):
+    workspace = tmp_path / "alex.code-workspace"
+    lock = fix_pass.worktree.boxes_root(tmp_path) / fix_pass.RUN_LOCK_NAME
+    monkeypatch.setattr(fix_pass, "run", lambda *a, **k: 7 if lock.is_dir() else 0)
+    assert fix_pass.run_alone(workspace, fix_cycle.DISPATCH, _launch()) == 7
+    assert not lock.exists()
+
+
+def test_a_plan_pass_and_an_unmakeable_lock_run_regardless(tmp_path, monkeypatch):
+    """A plan ships and sends nothing, so it never waits; and a lock that could not be made
+    at all is no evidence of another pass, so the pass runs as it did before the lock."""
+    workspace = tmp_path / "alex.code-workspace"
+    monkeypatch.setattr(fix_pass, "run", lambda ws, mode, launch: 5)
+    with fix_pass.worktree.named_lock(tmp_path, fix_pass.RUN_LOCK_NAME, 0.1, 60.0):
+        assert fix_pass.run_alone(workspace, fix_cycle.PLAN, _launch(), wait=0.1) == 5
+    unmakeable = tmp_path / "other"
+    unmakeable.mkdir()
+    fix_pass.worktree.boxes_root(unmakeable).write_text("a file, not a directory", encoding="utf-8")
+    elsewhere = unmakeable / "alex.code-workspace"
+    assert fix_pass.run_alone(elsewhere, fix_cycle.DISPATCH, _launch(), wait=0.1) == 5
+
+
+def test_the_pass_lock_outlives_no_pass_the_watchdog_lets_run():
+    """A lock broken while its pass still runs is two passes again; the watchdog stops a
+    pass at `TIMEOUT`, so only a lock older than that can be a dead pass's."""
+    watchdog = load_script("scripts/fix-pass-watchdog.py")
+    assert fix_pass.RUN_LOCK_STALE > watchdog.TIMEOUT.total_seconds()
+    assert fix_pass.RUN_LOCK_STALE + fix_pass.RUN_LOCK_WAIT < 2 * watchdog.TIMEOUT.total_seconds()
+    # The fire after one the watchdog killed breaks the lock rather than waiting it out.
+    assert fix_pass.RUN_LOCK_STALE < watchdog.TIMEOUT.total_seconds() + 5 * 60
+
+
 def test_a_missing_workspace_is_a_usage_error(tmp_path, capsys):
     assert fix_pass.main(["--workspace", str(tmp_path / "nope")]) == fix_pass.EXIT_USAGE
     assert "no workspace file" in capsys.readouterr().err
