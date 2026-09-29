@@ -375,6 +375,8 @@ ALLOWED_MISSING = {
     "finish; read by the fix pass; under the ignored `logs/`",
     "logs/friction.md": "written by any session into its own worktree, one line per thing "
     "the harness cost it; filed and set aside by the fix pass; under the ignored `logs/`",
+    "logs/overnight.md": "the decision log a /go-nuts run appends to in its own worktree, "
+    "for the user to review; under the ignored `logs/`",
     "logs/fix-dispatch.json": "the fix pass's stamp in a worktree it opened a session in, "
     "under the ignored `logs/`",
     "logs/fix-pass-supervise.json": "the report `scripts/fix-pass-supervise.py` writes "

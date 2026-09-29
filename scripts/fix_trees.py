@@ -3,8 +3,9 @@
 The tree half of `scripts/fix-prs.py`, split out along the section header that module
 already drew. `existing_tree` finds a tree already holding the PR's head branch,
 `cut_tree` cuts one under `.claude/worktrees/` when nothing does, `cut_fresh_tree`
-cuts a new branch for a failure that has none, and `provision_tree`
-installs the toolchain into whichever came back without one. Where a worktree for a
+cuts a new branch for a failure that has none, `provision_tree`
+installs the toolchain into whichever came back without one, and `locked_caches` names
+what an elevated session left in it that the fixer cannot open. Where a worktree for a
 branch goes and what git is asked to do are `scripts/agent_worktrees.py`'s; a matching
 live box is `worktree.py`'s, reused and never leased from here.
 
@@ -14,6 +15,7 @@ Every function here is tested in `tests/test_fix_prs.py` (see `COVERED_BY` in
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -27,6 +29,10 @@ import worktree
 # cannot take `NO_WINDOW` -- in the set `tests/test_scheduled_jobs.py` checks, for a
 # string. `worktree.plan_provision` writes the same literal.
 VENV_DIR = ".venv"
+
+# A tool cache an elevated run leaves owner-only (`locked_caches`), and the environment
+# variable that sends that tool's next run somewhere else.
+LOCKABLE = {".pytest_cache": "PYTEST_ADDOPTS=-p no:cacheprovider"}
 
 
 def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
@@ -104,6 +110,30 @@ def provision_tree(
         return []
     _, notes = run(tree, steps)
     return notes
+
+
+def locked_caches(tree: Path, opener=os.scandir) -> dict[str, str]:
+    """The entries of `LOCKABLE` at `tree`'s root this process may not even open, each
+    with the setting that routes around it.
+
+    Python's `mkdtemp` makes a directory owner-only, and pytest makes its cache with it,
+    so a reused tree an *elevated* session ran pytest in holds a `.pytest_cache` whose
+    owner is Administrators -- deny-only in the pass's token and in the fixer's. Nothing
+    unelevated can open, rename or delete it (probed: `os.rename` in place is refused
+    too), so it cannot be cleared from here; the fixer is told instead, or it spends
+    turns finding `WinError 5` (sports_betting #48's, 2026-09-29). ruff and mypy make
+    theirs with a plain `mkdir`, which inherits the tree's ACL, so they are not listed.
+    """
+    locked: dict[str, str] = {}
+    for name, setting in LOCKABLE.items():
+        try:
+            with opener(tree / name):
+                pass
+        except PermissionError:
+            locked[name] = setting
+        except OSError:
+            continue
+    return locked
 
 
 def cut_fresh_tree(
