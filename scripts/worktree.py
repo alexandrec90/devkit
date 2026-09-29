@@ -78,6 +78,7 @@ import string
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -5278,6 +5279,12 @@ def render_survey(rows: list[dict], registry: devkit_ports.Registry | None = Non
 
 
 RECONCILE_LOG = "logs/reconcile.log"
+# The failing pass's own copy, kept until the next failure replaces it. The job runs
+# every fifteen minutes, so the per-run log a ledger row names has been overwritten by a
+# clean pass long before a sweep reads it: 3a8c74a3 reached triage with nothing but the
+# next pass's `exit=0` to read. `log-wrap.py`'s `FAILED_SUFFIX` is the same idea for the
+# jobs it wraps, and `schedule_health.failure_artifact` sends a reader to either.
+RECONCILE_FAILED_LOG = "logs/reconcile.failed.log"
 
 
 def artifact_root(root: Path, repo_root: Path | None = None) -> Path:
@@ -5341,6 +5348,9 @@ def write_reconcile_log(
     direction, when `pytest tests/ -q` wrote over the real log; a dry run is that bug
     with the right workspace and the wrong verb.
 
+    A failing pass is written a second time, to `RECONCILE_FAILED_LOG`, which only the
+    next failure replaces: the per-run log belongs to whichever pass ran last.
+
     Best-effort — a reconcile pass that did its work must not report failure because a
     log file could not be written.
     """
@@ -5348,16 +5358,47 @@ def write_reconcile_log(
         return None
     path = root / RECONCILE_LOG
     stamp = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
+    body = f"# devkit worktree reconcile\n# {stamp}  exit={code}\n\n{rendered}\n"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            f"# devkit worktree reconcile\n# {stamp}  exit={code}\n\n{rendered}\n",
-            encoding="utf-8",
-            newline="\n",
-        )
+        path.write_text(body, encoding="utf-8", newline="\n")
+        if code:
+            (root / RECONCILE_FAILED_LOG).write_text(body, encoding="utf-8", newline="\n")
     except OSError:
         return None
     return path
+
+
+def _run_reconcile(args: argparse.Namespace) -> int:
+    """The `reconcile` verb, which accounts for itself even when it raises.
+
+    The scheduled pass runs under `pythonw.exe`, so an exception that escaped `main`
+    went to no console and left `RECONCILE_LOG` holding the *previous* pass's `exit=0`:
+    the scheduler said exit 1 and the only evidence on disk said success. The
+    traceback is written as the pass's report, and the exception still propagates, so
+    the exit code and `main`'s own handling are what they were.
+    """
+    root = artifact_root(args.workspace.parent)
+    try:
+        code, report = reconcile(
+            args.workspace,
+            apply=not args.dry_run,
+            automerge=args.automerge,
+            merge_label=args.merge_label,
+            min_free_gb=args.min_free_gb,
+            max_age_days=args.max_age_days,
+            unclaimed_age_days=args.unclaimed_age_days,
+            fetch=args.fetch,
+            keep_stack=args.keep_stack,
+            checkouts=args.checkouts,
+        )
+    except Exception:
+        write_reconcile_log(traceback.format_exc().rstrip(), 1, root, args.dry_run)
+        raise
+    rendered = json.dumps(report, indent=2) if args.json else render_reconcile(report)
+    print(rendered)
+    write_reconcile_log(rendered, code, root, args.dry_run)
+    return code
 
 
 def outcome_heading(row: dict) -> str:
@@ -5959,22 +6000,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.mode == "reconcile":
-            code, report = reconcile(
-                args.workspace,
-                apply=not args.dry_run,
-                automerge=args.automerge,
-                merge_label=args.merge_label,
-                min_free_gb=args.min_free_gb,
-                max_age_days=args.max_age_days,
-                unclaimed_age_days=args.unclaimed_age_days,
-                fetch=args.fetch,
-                keep_stack=args.keep_stack,
-                checkouts=args.checkouts,
-            )
-            rendered = json.dumps(report, indent=2) if args.json else render_reconcile(report)
-            print(rendered)
-            write_reconcile_log(rendered, code, artifact_root(args.workspace.parent), args.dry_run)
-            return code
+            return _run_reconcile(args)
 
         if args.mode == "new":
             plan = plan_new(

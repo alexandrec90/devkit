@@ -162,6 +162,11 @@ READS_HARNESS_TEXT = re.compile(
 )
 # A command whose output is read for an environment failure even when it exited 0.
 SEES_ENVIRONMENT = re.compile(r"(?:^|[;&|]\s*)(?:\S*python\S*\s+-m\s+pytest|pytest|git)\b", re.M)
+# A quoted argument, whose `|`, `;` and newlines separate no statements: the `\|pytest` of
+# `grep -n "full-suite\|pytest"` read as a pytest in command position, and the file it
+# grepped quoted "No module named pytest" (0d422fe7).
+QUOTED_ARGUMENT = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
+SEPARATOR = re.compile(r"[;&|\n]")
 # The statements of a command line; within one, only what leads its pipeline prints.
 STATEMENT = re.compile(r"&&|\|\||[;\n]")
 # Git's own voice. Everything else these subcommands print is the repository's text -- a
@@ -274,6 +279,18 @@ def _snippet(text: str, pattern: re.Pattern[str]) -> str:
     return normalize(text[start : start + SNIPPET])
 
 
+def command_position(command: str) -> str:
+    """`command` with every separator inside a quoted argument blanked, so a pattern
+    anchored on one finds only what the shell would run. Same length, and the quoted
+    text is otherwise kept: `pytest "tests/x.py"` still names its file."""
+    return QUOTED_ARGUMENT.sub(lambda quoted: SEPARATOR.sub(" ", quoted.group()), command)
+
+
+def runs_tests(command: str) -> bool:
+    """`command` runs a test suite in command position."""
+    return bool(TEST_RUN.search(command_position(command)))
+
+
 def full_suite(rest: str) -> bool:
     """A test command's arguments select no subset: they name a suite root, or nothing
     narrower. pytest runs the union of its paths, so a root named beside a file is still
@@ -351,7 +368,8 @@ def _command_classes(command: str, suite_changed: bool = False) -> Iterator[tupl
             yield cls, COMMAND_DETAIL[cls]
     if suite_changed:
         return
-    if any(full_suite(run.group("rest") or "") for run in TEST_RUN.finditer(command)):
+    runs = TEST_RUN.finditer(command_position(command))
+    if any(full_suite(run.group("rest") or "") for run in runs):
         yield "full-suite", COMMAND_DETAIL["full-suite"]
 
 
@@ -447,7 +465,7 @@ class _Session:
             # A `Monitor` until-loop is the wait Claude Code's `SLEEP_GUARD` prescribes.
             if not (cls == "poll" and event.tool in WAIT_TOOLS):
                 self.note(cls, what, event)
-        if TEST_RUN.search(event.command):
+        if runs_tests(event.command):
             self.suite_changed = False  # checked: the next whole run is the habit again
         if event.tool == "AskUserQuestion" and self.dispatched:
             self.note(
@@ -455,7 +473,7 @@ class _Session:
             )
         if event.tool in EDIT_TOOLS or ENVIRONMENT_CHANGE.search(event.command):
             self.unchanged.clear()
-        elif TEST_RUN.search(event.command):
+        elif runs_tests(event.command):
             # Only a test run: reading `git status` thrice between edits is not waste.
             self._rerun(event)
 
@@ -480,7 +498,8 @@ class _Session:
         """A call that exited 0 still failed if it was a test run or a git call reporting
         a missing environment: `| tail` hides pytest's exit code."""
         command = self.calls.get(event.call_id, "")
-        if not SEES_ENVIRONMENT.search(command) or READS_HARNESS_TEXT.search(command):
+        runs = SEES_ENVIRONMENT.search(command_position(command))
+        if not runs or READS_HARNESS_TEXT.search(command):
             return
         cls, what = _result_class(environment_text(command, event.text), command)
         if cls == "environment":
@@ -499,7 +518,7 @@ class _Session:
                 cls, what = _result_class(environment_text(command, event.text), command)
             self.note(cls, what, event)
         # A test run failing again is the work of fixing it, not a wasted retry.
-        if command and not TEST_RUN.search(command):
+        if command and not runs_tests(command):
             self.failures.setdefault(normalize(command)[:SNIPPET], []).append(event)
 
 

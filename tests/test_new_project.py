@@ -359,6 +359,19 @@ def test_every_feature_combination_renders(tmp_path, features):
     assert (root / ".devkit.toml").exists()
 
 
+def test_the_postgres_volume_is_mounted_where_the_pinned_image_keeps_its_cluster(tmp_path):
+    """c89aef2b: `postgres:18` keeps its cluster in a versioned directory below
+    `/var/lib/postgresql` and refuses to start with a volume on the old `.../data` path,
+    so every generated project's `docker compose up -d --wait db` came up unhealthy."""
+    compose = (generate(tmp_path, {"postgres": True}) / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
+    image = re.search(r"image: postgres:(\d+)", compose)
+    assert image and int(image[1]) >= 18
+    mounts = re.findall(r"- pgdata:(\S+)", compose)
+    assert mounts == ["/var/lib/postgresql"]
+
+
 def test_a_generated_project_cannot_stage_a_root_agents_md(tmp_path):
     """A `CLAUDE.md` mirrored to `AGENTS.md` by a tool outside the repo is a second
     instruction tree that drifts from the first, and it is the copy nothing tests.

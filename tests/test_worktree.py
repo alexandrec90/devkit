@@ -3973,6 +3973,42 @@ def test_the_log_is_overwritten_per_run_not_appended(tmp_path):
     assert "first pass" not in body
 
 
+def test_a_failing_pass_is_kept_past_the_clean_pass_that_follows_it(tmp_path):
+    """3a8c74a3: the job failed at 22:30, the 22:45 pass overwrote `reconcile.log` with
+    `exit=0`, and the sweep that read the ledger row found nothing to diagnose."""
+    worktree.write_reconcile_log("could not reap demo--x-0806", 1, root=tmp_path)
+    worktree.write_reconcile_log("Nothing to reconcile.", 0, root=tmp_path)
+    kept = (tmp_path / worktree.RECONCILE_FAILED_LOG).read_text(encoding="utf-8")
+    assert "could not reap demo--x-0806" in kept and "exit=1" in kept
+    assert "exit=0" in (tmp_path / worktree.RECONCILE_LOG).read_text(encoding="utf-8")
+
+
+def test_a_clean_pass_writes_no_failed_copy(tmp_path):
+    worktree.write_reconcile_log("Nothing to reconcile.", 0, root=tmp_path)
+    assert not (tmp_path / worktree.RECONCILE_FAILED_LOG).exists()
+
+
+def test_a_pass_that_raises_leaves_its_traceback_rather_than_the_last_exit_0(tmp_path, monkeypatch):
+    """Under `pythonw.exe` an escaped exception reaches no console: the scheduler said
+    exit 1 while `reconcile.log` still read the previous pass's `exit=0`."""
+    workspace = tmp_path / "ws" / "probe.code-workspace"
+    workspace.parent.mkdir()
+    workspace.write_text('{"folders": []}', encoding="utf-8")
+    log = workspace.parent / worktree.RECONCILE_LOG
+    log.parent.mkdir(parents=True)
+    log.write_text("# devkit worktree reconcile\n# earlier  exit=0\n", encoding="utf-8")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("worktree vanished mid-pass")
+
+    monkeypatch.setattr(worktree, "reconcile", boom)
+    with pytest.raises(RuntimeError):
+        worktree.main(["reconcile", "--yes", "--no-fetch", "--workspace", str(workspace)])
+    for path in (log, workspace.parent / worktree.RECONCILE_FAILED_LOG):
+        body = path.read_text(encoding="utf-8")
+        assert "exit=1" in body and "RuntimeError: worktree vanished mid-pass" in body
+
+
 def test_an_unwritable_log_never_fails_the_pass(tmp_path, monkeypatch):
     """A reconcile that did its work must not report failure over a log file."""
     monkeypatch.setattr(

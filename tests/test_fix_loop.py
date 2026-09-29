@@ -483,6 +483,18 @@ def test_a_failing_scheduled_job_is_filed_whatever_wraps_it(ctx):
     assert fix_loop.job_findings(ctx, [healthy]) == []
 
 
+def test_a_job_failure_names_the_failing_runs_kept_copy_as_its_evidence(ctx):
+    """3a8c74a3 named `reconcile.log`, which the next clean pass rewrote before any
+    sweep read it; the run's `.failed.log` copy is what survives."""
+    ran = _dt.datetime.now() - _dt.timedelta(minutes=5)
+    kept = ctx.devkit_dir / "logs" / "reconcile.failed.log"
+    kept.parent.mkdir(parents=True)
+    kept.write_text("# exit=1\n", encoding="utf-8")
+    job = fix_loop.schedule_health.Job("devkit-worktree-reconcile", True, 1, ran, None)
+    [found] = fix_loop.job_findings(ctx, [job])
+    assert found.evidence == str(kept)
+
+
 def test_a_job_failure_resolved_after_that_run_is_not_filed_again_until_it_recurs(ctx):
     """The scheduler repeats a daily job's last result for a day after its fix lands; a
     group resolved since that run is not reopened by the same run, only by a later one."""

@@ -238,7 +238,10 @@ def job_findings(ctx: Context, jobs: list[schedule_health.Job] | None = None) ->
         name, head = line.split(":", 1)[0], line.split(" -- ", 1)[0]
         if JOB_HISTORY in line:
             continue
-        artifact = schedule_health.ARTIFACTS.get(name, "")
+        job = by_name.get(name)
+        artifact = schedule_health.failure_artifact(
+            name, root=ctx.devkit_dir, since=job.last_run if job else None
+        )
         finding = Finding(
             JOB_KIND,
             fix_cycle.DEVKIT,
@@ -246,7 +249,6 @@ def job_findings(ctx: Context, jobs: list[schedule_health.Job] | None = None) ->
             evidence=str(ctx.devkit_dir / artifact) if artifact else "",
             command=line[:300],
         )
-        job = by_name.get(name)
         if job and job.last_run and _resolved_since(finding, items, job.last_run):
             continue
         found.append(finding)

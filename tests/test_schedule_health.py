@@ -174,6 +174,41 @@ def test_an_empty_artifact_no_newer_than_the_run_says_the_run_recorded_nothing(
     assert "history" not in line
 
 
+def kept_copy(tmp_path, name, age):
+    """`name`'s `.failed.log` copy, written at `age`."""
+    path = tmp_path / health.ARTIFACTS[name].replace(".log", ".failed.log")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# exit=1\nRuntimeError: it broke\n", encoding="utf-8")
+    stamp = age.timestamp()
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_a_failure_is_read_from_its_kept_copy_not_from_the_pass_that_overwrote_it(
+    tmp_path, monkeypatch
+):
+    """3a8c74a3: reconcile failed at 22:30, and the pointer named `reconcile.log`, which
+    the clean 22:45 pass had already rewritten. The failing run's own copy is the one
+    to read."""
+    name = "devkit-worktree-reconcile"
+    written(tmp_path, name, body="# exit=0\nNothing to reconcile.\n")
+    kept_copy(tmp_path, name, NOW - dt.timedelta(hours=1))
+    monkeypatch.setattr(health, "REPO_ROOT", tmp_path)
+    ran = NOW - dt.timedelta(hours=1, minutes=1)
+    assert health.failure_artifact(name, since=ran) == "logs/reconcile.failed.log"
+    line = health.problems([job(name=name, last_result=1, last_run=ran)], NOW)[0]
+    assert line.endswith("see logs/reconcile.failed.log")
+
+
+def test_a_kept_copy_older_than_the_run_is_an_earlier_failure_and_is_not_cited(tmp_path):
+    name = "devkit-worktree-reconcile"
+    kept_copy(tmp_path, name, NOW - dt.timedelta(days=3))
+    ran = NOW - dt.timedelta(hours=1)
+    assert health.failure_artifact(name, root=tmp_path, since=ran) == health.ARTIFACTS[name]
+    assert health.failure_artifact(name, root=tmp_path / "none") == health.ARTIFACTS[name]
+    assert health.failure_artifact("devkit-something-new", root=tmp_path) == ""
+
+
 def test_a_job_with_no_artifact_is_not_sent_to_an_invented_one():
     """An absent file reads as "the job never ran", which is a different diagnosis --
     so a job outside the table gets no pointer rather than a plausible path."""
