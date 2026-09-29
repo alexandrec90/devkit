@@ -202,6 +202,7 @@ def test_an_access_denied_delete_is_a_filesystem_failure_not_a_dirty_refusal(tmp
     (box_dir / ".git").write_text("gitdir: elsewhere", encoding="utf-8")
     assert box_teardown.fallback_applies(box_dir, "failed to delete: Access is denied")
     assert box_teardown.fallback_applies(box_dir, "failed to unlink: Permission denied")
+    assert box_teardown.fallback_applies(box_dir, "failed to delete 'x': Invalid argument")
     assert not box_teardown.fallback_applies(
         box_dir, "fatal: contains modified or untracked files, use --force to delete it"
     )
