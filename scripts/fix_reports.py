@@ -414,6 +414,46 @@ def active_transcript(
     return newest if touched and now - touched <= QUIET_AFTER else None
 
 
+# A background task a session started, and the notification that it ended. Read as
+# text, not parsed: both are in the transcript verbatim, a JSON escape or two aside.
+_TASK_LAUNCHED = re.compile(r"running in background with ID: ([A-Za-z0-9_-]+)")
+_TASK_NOTIFIED = re.compile(r"<task-id>([A-Za-z0-9_-]+)</task-id>")
+
+
+def pending_tasks(path: Path) -> frozenset[str]:
+    """The background tasks a transcript's session launched that have not reported back."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return frozenset()
+    return frozenset(set(_TASK_LAUNCHED.findall(text)) - set(_TASK_NOTIFIED.findall(text)))
+
+
+def _waiting(transcript: Path | None, now: _dt.datetime) -> bool:
+    """`transcript` spoke within `QUIET_AFTER` and still has a background task out.
+
+    A session that ends its turn on "the tests will notify me" is idle to `claude
+    agents` and has its intent written, and the pass shipped 0929-7 mid-test that way
+    (8d2f56f5). The bound is what lets a session stopped mid-task count as gone again.
+    """
+    touched = last_spoke(transcript) if transcript else None
+    return bool(
+        transcript and touched and now - touched <= QUIET_AFTER and pending_tasks(transcript)
+    )
+
+
+def awaiting_task(tree: Path, now: _dt.datetime, projects_root: Path | None = None) -> bool:
+    """Whether the session the tree's stamp sent is still waiting on a background task."""
+    payload = read_stamp(tree)
+    if not payload or payload.get("dead"):
+        return False
+    try:
+        sent = _dt.datetime.fromisoformat(str(payload.get("when", "")))
+    except ValueError:
+        return False
+    return _waiting(session_transcript(tree, sent, projects_root), now)
+
+
 WORKING = "working"
 DONE = "done"
 NEVER_STARTED = "never started"
@@ -421,13 +461,21 @@ NO_OUTCOME = "ended without an outcome"
 DEAD = (NEVER_STARTED, NO_OUTCOME)
 
 
+def _with_outcome(transcript: Path | None, now: _dt.datetime) -> str:
+    """`DONE`, unless the outcome was written before the session's last background task
+    came back: then it is not the session's last word, and stopping it as finished
+    (`bg_sessions`) would cut the task off."""
+    return WORKING if _waiting(transcript, now) else DONE
+
+
 def session_state(
     tree: Path, now: _dt.datetime, projects_root: Path | None = None
 ) -> tuple[str, str]:
     """`(state, transcript)` of the session the tree's stamp sent.
 
-    `DONE` once it left an intent or a report, `WORKING` while its transcript moves (or
-    it is still inside `START_GRACE`), one of `DEAD` otherwise. `""` for a tree with no
+    `DONE` once it left an intent or a report and has no background task still out,
+    `WORKING` while its transcript moves (or it is still inside `START_GRACE`), one of
+    `DEAD` otherwise. `""` for a tree with no
     stamp, one already judged dead, or a session this cannot see -- only Claude Code
     keeps a transcript here, and a Codex tab is watched by the person who opened it.
     """
@@ -444,7 +492,7 @@ def session_state(
         return "", ""
     transcript = session_transcript(tree, sent, projects_root)
     if any((_mtime(tree / name) or sent) > sent for name in OUTCOME_FILES):
-        return DONE, str(transcript or "")
+        return _with_outcome(transcript, now), str(transcript or "")
     touched = last_spoke(transcript) if transcript else None
     if touched is None or touched < sent:
         # The grace is for a session starting, not one its launcher refused: 0927-2's

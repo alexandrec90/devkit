@@ -138,15 +138,16 @@ def ship_intents(
     A push or a PR that failed is retried next pass and filed now; the third element
     turns the task red rather than green over a branch that did not go out. An intent
     where no PR can be opened from is filed for the devkit session to move. An intent
-    whose fixer is still busy in its tree waits (`fix_loop.fixers_working`).
+    whose fixer is still busy in its tree waits (`fix_loop.still_working`).
     """
     lines: list[str] = []
     refused: list[fix_plan.Failure] = []
     failed = False
     busy = fix_loop.fixers_working() if mode == fix_cycle.DISPATCH else frozenset()
+    now = _dt.datetime.now(_dt.UTC)
     for intent in ship_intent.find_intents(root, projects):
         where = f"{intent.project} {intent.branch}"
-        if fix_loop.bg_sessions.busy_in(busy, intent.tree):
+        if fix_loop.still_working(busy, intent.tree, now):
             lines.append(f"{where} -- held: its session is still working in the tree")
             continue
         if intent.blocked:

@@ -594,3 +594,13 @@ def test_a_finished_or_dead_sessions_idle_process_is_stopped_and_a_working_one_i
     )
     closed, _ = close(ctx)
     assert closed.finished == [] and closed.stopped == []
+
+
+def test_still_working_is_a_busy_listing_or_a_background_task_still_out(monkeypatch, tmp_path):
+    """8d2f56f5: a fixer that ended its turn to wait on its suite lists idle."""
+    busy = frozenset({str(tmp_path / "listed").replace("\\", "/").lower()})
+    waiting = {str(tmp_path / "waiting")}
+    monkeypatch.setattr(fix_reports, "awaiting_task", lambda tree, now: str(tree) in waiting)
+    assert fix_loop.still_working(busy, tmp_path / "listed", NOW)
+    assert fix_loop.still_working(frozenset(), tmp_path / "waiting", NOW)
+    assert not fix_loop.still_working(busy, tmp_path / "idle", NOW)
