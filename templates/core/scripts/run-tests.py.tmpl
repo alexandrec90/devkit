@@ -167,11 +167,39 @@ def with_basetemp(cmd: list[str], basetemp: str) -> list[str]:
     return [*cmd[:3], f"--basetemp={basetemp}", *cmd[3:]]
 
 
+def rerun_in_tree_venv(module: str, argv: list[str] | None) -> int | None:
+    """This run's exit code under the tree's `.venv`, or None to carry on here.
+
+    `python scripts/run-tests.py` from a fresh `claude --worktree` tree runs an
+    interpreter with no pytest and a tree with no `.venv`. The vendored
+    `scripts/hooks/toolchain.py` provisions it with this project's own install command
+    and runs this script again inside it; where this interpreter already has `module`,
+    or the vendored copy predates that, nothing changes.
+    """
+    hooks = REPO_ROOT / "scripts" / "hooks"
+    if not (hooks / "toolchain.py").is_file():
+        return None
+    sys.path.insert(0, str(hooks))
+    try:
+        import toolchain
+
+        rerun = toolchain.rerun_in_venv
+    except (ImportError, AttributeError):
+        return None
+    return rerun(
+        REPO_ROOT, module, Path(__file__).resolve(), sys.argv[1:] if argv is None else argv
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--all", action="store_true", help="run the whole suite")
     parser.add_argument("--changed", action="store_true", help="run pytest's last-failed subset")
     args, extra = parser.parse_known_args(argv)
+    # After parsing, so `--help` answers without installing anything.
+    rerun = rerun_in_tree_venv("pytest", argv)
+    if rerun is not None:
+        return rerun
     targets = [a for a in extra if a]
 
     cmd = [sys.executable, "-m", "pytest", "--tb=short", "-q"]

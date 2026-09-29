@@ -181,6 +181,31 @@ def run_tool(name: str, cmd: list[str], fix_hint: str, timeout: float = TOOL_TIM
     return f"# {name}\n# fix: {fix_hint}\n{body}\n\n"
 
 
+def rerun_in_tree_venv(module: str, argv: list[str] | None) -> int | None:
+    """This run's exit code under the tree's `.venv`, or None to carry on here.
+
+    Without it, a fresh `claude --worktree` tree with no `.venv` lints *clean*: every
+    tool is `-m` under an interpreter that lacks it, so `_missing_module` skips them
+    all. The vendored `scripts/hooks/toolchain.py` provisions the tree with this
+    project's own install command and runs this script again inside it; where this
+    interpreter already has `module`, or the vendored copy predates that, nothing
+    changes.
+    """
+    hooks = REPO_ROOT / "scripts" / "hooks"
+    if not (hooks / "toolchain.py").is_file():
+        return None
+    sys.path.insert(0, str(hooks))
+    try:
+        import toolchain
+
+        rerun = toolchain.rerun_in_venv
+    except (ImportError, AttributeError):
+        return None
+    return rerun(
+        REPO_ROOT, module, Path(__file__).resolve(), sys.argv[1:] if argv is None else argv
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--changed", action="store_true", help="lint only the working-tree diff")
@@ -210,6 +235,10 @@ def main(argv: list[str] | None = None) -> int:
         help="skip the secrets pass (accepted for Stop-hook compatibility; no-op here)",
     )
     args = parser.parse_args(argv)
+    # After parsing, so `/ship`'s `--help` probe answers without installing anything.
+    rerun = rerun_in_tree_venv("ruff", argv)
+    if rerun is not None:
+        return rerun
 
     # `--paths` and `--changed` are the same narrowing, differing only in who names the
     # files; everything downstream treats them identically.

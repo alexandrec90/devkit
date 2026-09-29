@@ -778,6 +778,100 @@ def test_the_generated_diagnostic_scripts_actually_run_and_pass(tmp_path, featur
         assert result.returncode == 0, f"{script} failed in a fresh project:\n{detail}"
 
 
+# The stand-in for a project's install command: a real venv, handed this interpreter's
+# site-packages through a `.pth` so the re-run has pytest without a network install.
+PROVISION_STUB = """\
+import sysconfig
+import venv
+from pathlib import Path
+
+venv.create(".venv", with_pip=False)
+purelib = sysconfig.get_path("purelib", "venv", vars={{"base": ".venv", "platbase": ".venv"}})
+Path(purelib, "borrowed.pth").write_text({borrowed!r}, encoding="utf-8")
+"""
+
+
+def test_a_tree_with_no_venv_provisions_one_and_runs_its_tests_there(tmp_path):
+    """A fresh `claude --worktree` tree: no `.venv`, and an interpreter with no pytest.
+
+    Before `toolchain.rerun_in_venv` that was `No module named pytest` in every
+    session in such a tree, each one provisioning by hand and filing the same friction.
+    The caller is a bare venv, because the runner spawns pytest under `sys.executable`
+    and an interpreter flag such as `-S` would not reach that child; the project's own
+    `install_command` is what builds the tree's venv, as it would be for real.
+    """
+    import subprocess
+    import sysconfig
+    import venv
+
+    root = generate(tmp_path, {})
+    venv.create(tmp_path / "bare", with_pip=False)
+    bare = tmp_path / "bare" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    stub = tmp_path / "provision_stub.py"
+    stub.write_text(PROVISION_STUB.format(borrowed=sysconfig.get_paths()["purelib"]), "utf-8")
+    manifest = root / ".devkit.toml"
+    text = manifest.read_text(encoding="utf-8")
+    # `python` is the interpreter running the runner -- the bare one -- which is all the
+    # stub needs; a relative POSIX path keeps the command free of shell syntax.
+    command = f"install_command = 'python {Path(os.path.relpath(stub, root)).as_posix()}'\n"
+    manifest.write_text(text.replace("[python]\n", f"[python]\n{command}", 1), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k not in ("CI", "PYTHONPATH", "PRE_COMMIT")}
+    env.pop("DEVKIT_TOOLCHAIN_RERUN", None)
+
+    def run_tests() -> subprocess.CompletedProcess[str]:
+        argv = [str(bare), "scripts/run-tests.py"]
+        return subprocess.run(argv, cwd=root, env=env, capture_output=True, text=True)
+
+    first = run_tests()
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert "provisioning it:" in first.stderr
+    assert "re-running under" in first.stderr
+    assert (root / ".venv" / "pyvenv.cfg").is_file()
+    assert "run-tests: passed" in first.stdout, "the re-run's status line reaches the caller"
+
+    second = run_tests()
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert "provisioning it:" not in second.stderr, "a provisioned tree is not reinstalled"
+    assert "re-running under" in second.stderr
+
+
+def _rendered(root: Path, script: str, monkeypatch):
+    """Load a generated runner in-process, with `sys.path` restored afterwards."""
+    import importlib.util
+
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    spec = importlib.util.spec_from_file_location(f"rendered_{Path(script).stem}", root / script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    ("script", "module"), [("scripts/run-tests.py", "pytest"), ("scripts/lint-all.py", "ruff")]
+)
+def test_both_runners_hand_their_run_to_the_vendored_toolchain(
+    tmp_path, monkeypatch, script, module
+):
+    """The re-run is the vendored module's decision; the runner passes itself and its
+    arguments and returns what comes back. A vendored copy that predates the function
+    -- a project that took the template refresh before its `--pull` -- carries on."""
+    import types
+
+    root = generate(tmp_path, {})
+    runner = _rendered(root, script, monkeypatch)
+    seen = []
+    fake = types.SimpleNamespace(rerun_in_venv=lambda *a: seen.append(a) or 3)
+    monkeypatch.setitem(sys.modules, "toolchain", fake)
+
+    assert runner.main(["--changed"]) == 3
+    [(where, wanted, path, argv)] = seen
+    assert (where, wanted, argv) == (runner.REPO_ROOT, module, ["--changed"])
+    assert path == (root / script).resolve()
+
+    monkeypatch.setitem(sys.modules, "toolchain", types.SimpleNamespace())
+    assert runner.rerun_in_tree_venv(module, []) is None
+
+
 def test_a_linter_that_is_not_installed_is_skipped_not_reported(tmp_path):
     """An absent linter must never reach `logs/lint-errors.log`.
 
