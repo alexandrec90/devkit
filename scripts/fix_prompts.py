@@ -184,15 +184,34 @@ def _refused_too(refusal: str) -> str:
     )
 
 
-def pr_prompt(failure: Failure, refusal: str = "", left: str = "") -> str:
+def _locked_too(locked: dict[str, str] | None) -> str:
+    """What to set instead of opening each cache an elevated session locked
+    (`fix_trees.locked_caches`): sports_betting #48's fixer found its `.pytest_cache`
+    by `WinError 5`, and worked out `-p no:cacheprovider` for itself."""
+    if not locked:
+        return ""
+    names = ", ".join(locked)
+    settings = " and ".join(locked.values())
+    return (
+        f" An elevated session left {names} in this tree owner-only, so neither you nor "
+        f"the fix pass can open, move or delete it: set {settings} in the environment "
+        "of every command that runs the tool, and spend no turns on the directory."
+    )
+
+
+def pr_prompt(
+    failure: Failure, refusal: str = "", left: str = "", locked: dict[str, str] | None = None
+) -> str:
     """One branch, in its own worktree: a conflict to resolve, a refused commit, or a red PR.
 
     Three shapes, one function, because the worktree and the finish line are the same
     and only the middle differs. The conflict prompt names no failure on purpose: the
     gate cannot have run, and a resolver told "also fix the tests" fixes the wrong thing.
-    `refusal` is the tree's `standing_refusal`, which the commit shape already is, and
-    `left` is why the tree was not brought to origin's head (`fix-prs.refresh_head`).
+    `refusal` is the tree's `standing_refusal`, which the commit shape already is,
+    `left` is why the tree was not brought to origin's head (`fix-prs.refresh_head`),
+    and `locked` is the tree's `fix_trees.locked_caches`.
     """
+    tree_notes = _refused_too(refusal) + _locked_too(locked)
     if CONFLICT in failure.signature:
         return _framed(
             f"PR #{failure.number} in {failure.project} has a merge conflict with "
@@ -202,7 +221,7 @@ def pr_prompt(failure: Failure, refusal: str = "", left: str = "") -> str:
             "that both sides' intent survives -- git diff --check must find no conflict "
             "marker in any file, not only the code -- and leave the merge uncommitted: the fix "
             "pass concludes it with the hooks running, and whatever the gate says after "
-            f"that is the next pass's business, not this session's.{_refused_too(refusal)} "
+            f"that is the next pass's business, not this session's.{tree_notes} "
             f"{FINISH}"
         )
     if failure.kind == COMMIT:
@@ -211,7 +230,7 @@ def pr_prompt(failure: Failure, refusal: str = "", left: str = "") -> str:
             f"{_ids(failure.signature)}. The pre-commit output is in {EVIDENCE_DIR}/ in this "
             "worktree, which is the worktree the change was made in, and the message it "
             f"was being shipped with is in {REFUSED_FILE.as_posix()} -- reuse it when it "
-            f"still fits. Fix what the output reports. {FINISH}"
+            f"still fits. Fix what the output reports.{_locked_too(locked)} {FINISH}"
         )
     return _framed(
         f"PR #{failure.number} in {failure.project} against origin/{failure.base} is stuck: "
@@ -219,7 +238,7 @@ def pr_prompt(failure: Failure, refusal: str = "", left: str = "") -> str:
         f"This worktree is checked out on the PR head branch {failure.head}"
         + (f".{_left_as_is(left, failure.head)}" if left else ", already up to date with its base.")
         + " Fix what the gate is failing on, and nothing else about "
-        f"the PR.{_refused_too(refusal)} {FINISH}"
+        f"the PR.{tree_notes} {FINISH}"
     )
 
 

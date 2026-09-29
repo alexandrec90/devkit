@@ -157,10 +157,33 @@ def settle(written: list[Finding], devkit_dir: Path) -> list[str]:
     return refs
 
 
+# git's dubious-ownership refusal, by any of the lines it prints: the refusal, the owner,
+# and the `safe.directory` hint a truncated detail may keep alone. It quotes the tree's
+# path and a ship's detail leads with the tree's branch, so each tree an elevated session
+# cut filed a group of its own -- two roguelike ships in one pass (936fd498, 91fa12f2)
+# while the fix for the first, #467, was pending and would have held them all.
+OWNERSHIP_MARKS = ("dubious ownership", "is owned by:", "add safe.directory")
+OWNERSHIP = "git refused a tree another account owns (detected dubious ownership)"
+
+
+def by_cause(project: str, detail: str) -> str:
+    """`detail`, or one naming only its cause when that cause is one whose text names
+    the tree it happened in; `project` stays, since the ledger groups by it anyway."""
+    if any(mark in detail for mark in OWNERSHIP_MARKS):
+        return f"{project}: {OWNERSHIP}"
+    return detail
+
+
 def file(journal: Journal | None, kind: str, project: str, detail: str, evidence: str = "") -> None:
-    """Add one finding to `journal`, when the caller has one to add it to."""
-    if journal is not None:
-        journal.add(Finding(kind, project, detail, evidence=evidence))
+    """Add one finding to `journal`, when the caller has one to add it to.
+
+    A detail `by_cause` folds is kept whole as the evidence when there is no other."""
+    if journal is None:
+        return
+    stable = by_cause(project, detail)
+    if stable != detail and not evidence:
+        evidence = evidence_file(detail, journal.devkit_dir, kind)
+    journal.add(Finding(kind, project, stable, evidence=evidence))
 
 
 def evidence_file(text: str, devkit_dir: Path, stem: str) -> str:

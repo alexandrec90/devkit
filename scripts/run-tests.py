@@ -73,11 +73,50 @@ def filter_output(raw: str) -> str:
     return "\n".join(keep).strip()
 
 
+SUMMARY_BANNER = "= short test summary info ="
+
+# The short summary is the run's index -- one `FAILED <id>` line per failure, which is
+# what `fix_plan.signature_from_logs` builds a fix prompt's test list from -- so it is
+# never capped as a block. It used to ride on the last failure's block, and that block's
+# cap cut every FAILED line after the first long message (57d473e9: two red, one named).
+# Each entry keeps its headline and this many of the lines its message continues on;
+# the whole message is in the failure's own block above.
+SUMMARY_LINES_PER_ENTRY = 3
+
+
 def cap_failure_blocks(text: str, limit: int = MAX_LINES_PER_FAILURE) -> str:
-    """Truncate each `___ test_name ___` block to `limit` lines, noting the cut."""
+    """Truncate each `___ test_name ___` block to `limit` lines, noting the cut, and
+    each short-summary entry to its headline plus `SUMMARY_LINES_PER_ENTRY` lines."""
+    lines = text.splitlines()
+    cut = next((i for i, line in enumerate(lines) if SUMMARY_BANNER in line), len(lines))
+    return "\n".join([*_cap_blocks(lines[:cut], limit), *_cap_summary(lines[cut:])])
+
+
+def _cap_summary(lines: list[str]) -> list[str]:
+    """The summary with every entry's headline kept; an indented continuation is capped."""
+    out: list[str] = []
+    extra = kept = 0
+    for line in lines:
+        if line and not line[0].isspace():
+            out.extend(_more(extra))
+            out.append(line)
+            extra = kept = 0
+        elif kept < SUMMARY_LINES_PER_ENTRY:
+            out.append(line)
+            kept += 1
+        else:
+            extra += 1
+    return out + _more(extra)
+
+
+def _more(count: int) -> list[str]:
+    return [f"  ... ({count} more lines, truncated)"] if count else []
+
+
+def _cap_blocks(lines: list[str], limit: int) -> list[str]:
     blocks: list[list[str]] = []
     current: list[str] = []
-    for line in text.splitlines():
+    for line in lines:
         if line.startswith("_" * 5) and current:
             blocks.append(current)
             current = [line]
@@ -93,7 +132,7 @@ def cap_failure_blocks(text: str, limit: int = MAX_LINES_PER_FAILURE) -> str:
             out.append(f"... ({len(block)} lines total, truncated)")
         else:
             out.extend(block)
-    return "\n".join(out)
+    return out
 
 
 def default_branch(root: Path, run=subprocess.run) -> str:

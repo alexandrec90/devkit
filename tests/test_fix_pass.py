@@ -47,6 +47,17 @@ def unelevated(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def git_trusted(monkeypatch):
+    """Every `git_trust.adopt` the pass makes, recorded and never run: a dispatching
+    pass writes git's global config, which is this machine's, not the suite's."""
+    adopted: list[tuple[Path, bool]] = []
+    monkeypatch.setattr(
+        fix_pass.git_trust, "adopt", lambda root, write: adopted.append((root, write)) or ""
+    )
+    return adopted
+
+
+@pytest.fixture(autouse=True)
 def no_session_busy(monkeypatch):
     """No session on this machine is working in a tree unless a test says one is."""
     monkeypatch.setattr(fix_pass.fix_loop, "fixers_working", frozenset)
@@ -73,6 +84,28 @@ def test_an_intent_whose_fixer_is_still_busy_waits_for_it(monkeypatch, tmp_path)
     lines, _, _ = fix_pass.ship_intents(tmp_path, ["devkit"], fix_cycle.DISPATCH)
     assert shipped == ["agent/i"], "an interactive supervisor's own tree still ships"
     assert lines[0] == "devkit agent/b -- held: its session is still working in the tree"
+
+
+def test_an_intent_whose_fixer_waits_on_a_background_task_is_held(monkeypatch, tmp_path):
+    """8d2f56f5: 0929-7 ended its turn to wait on the suite it had started, so `claude
+    agents` listed it idle and the pass shipped the tree mid-test. The stamped session's
+    transcript still had the task out."""
+    trees = [ship_intent.Intent("devkit", tmp_path / "waiting", "agent/w", "S", "B")]
+    trees.append(ship_intent.Intent("devkit", tmp_path / "done", "agent/d", "S", "B"))
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: trees)
+    waiting = {str(tmp_path / "waiting")}
+    monkeypatch.setattr(
+        fix_pass.fix_loop.fix_reports, "awaiting_task", lambda tree, now: str(tree) in waiting
+    )
+    shipped = []
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda i, p, b: shipped.append(i.branch) or ship_intent.Outcome(i, "shipped", "u"),
+    )
+    lines, _, _ = fix_pass.ship_intents(tmp_path, ["devkit"], fix_cycle.DISPATCH)
+    assert shipped == ["agent/d"]
+    assert lines[0] == "devkit agent/w -- held: its session is still working in the tree"
 
 
 def failure(**fields) -> fix_plan.Failure:
@@ -233,6 +266,24 @@ def test_a_switched_off_fire_leaves_a_manual_passs_record_alone(world):
     assert "mode=plan" in before
     assert fix_pass.run(world["workspace"], fix_cycle.OFF, "claude-bg", NOW) == 0
     assert artifact(world) == before
+
+
+def test_the_workspace_is_trusted_before_any_git_call_and_written_only_by_a_dispatch(
+    world, git_trusted, monkeypatch
+):
+    """5025d284, e1463857: trees an elevated session made are refused to this unelevated
+    pass as dubious ownership. Trusted before the ship step, in every mode that runs;
+    git's global config is written only by a pass that acts."""
+    order = []
+    monkeypatch.setattr(fix_pass, "run", lambda *a, **k: order.append(len(git_trusted)) or 0)
+    workspace = str(world["workspace"])
+    root = world["workspace"].parent.resolve()
+    assert fix_pass.main(["--mode", "off", "--workspace", workspace]) == 0
+    assert git_trusted == [], "a switched-off pass runs no git"
+    for mode in ("plan", "dispatch"):
+        assert fix_pass.main(["--mode", mode, "--workspace", workspace]) == 0
+    assert git_trusted == [(root, False), (root, True)]
+    assert order == [0, 1, 2], "trusted before the pass runs"
 
 
 def test_plan_writes_the_whole_plan_and_sends_nothing(world):

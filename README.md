@@ -294,9 +294,10 @@ whenever one is created by `git worktree add` from a shell or a script, and the 
 `post-index-change` hook runs the same set-up for a tree cut `--no-checkout` and filled by
 `git reset --hard`. **Neither reaches `claude --worktree`**: Claude Code runs its own git
 with `-c core.hooksPath=/dev/null`, so no git hook fires for the trees it cuts, and the
-only seam it offers instead is an agent hook, which this harness does not wire. devkit's
-own trees get their interpreter from `worktree.symlinkDirectories` in
-`.claude/settings.json` instead (see `tests/test_self_hosting.py`). It
+only seam it offers instead is an agent hook, which this harness does not wire. Its
+trees borrow the checkout's `.venv` and `node_modules` through
+`worktree.symlinkDirectories` in `.claude/settings.json` instead, which `sync-devkit.py
+--pull` fills in for every project (`scripts/project_settings.py`). The hook itself
 does two things a linked worktree otherwise
 lacks, each only when its conditions hold:
 
@@ -1395,8 +1396,11 @@ lockfiles) stay optional and skip explicitly.
 
 The same argument applies to prose. `.claude/rules/engineering.md`,
 `.claude/rules/authoring.md`, and the `/ship` workflow are in the `MANIFEST` and
-vendored byte-identical. `/ship` is the only shared skill: it has a concrete lifecycle
-job and delegates its mechanical checks to the tested `scripts/ship.py` driver.
+vendored byte-identical. `/ship` has a concrete lifecycle job and delegates its
+mechanical checks to the tested `scripts/ship.py` driver. The one other shared skill is
+`/go-nuts <goal>`, for an unattended run: it decides instead of asking, logs each
+judgement call to `logs/overnight.md` so it can be reversed, and finishes through
+`/ship`. Only a user can invoke it; the model never starts one on its own.
 
 Generic audits, compatibility smoke commands, stateful refactor sweeps, and model-to-model
 handoff prompts do not belong in every project. Mechanical constraints such as the
