@@ -194,6 +194,37 @@ def _retry_delete(failed_path: str) -> str:
     return ""
 
 
+_LONGPATH = "\\\\?\\"
+
+
+def _longpath(path: Path) -> str:
+    """`path` with the prefix that turns Windows' MAX_PATH off; unchanged elsewhere."""
+    target = str(path)
+    if os.name == "nt" and not target.startswith(_LONGPATH):
+        target = _LONGPATH + os.path.abspath(target)
+    return target
+
+
+def unopenable(path: Path, walk=os.walk) -> list[str]:
+    """Every directory under `path` this process may not even list, as a reader spells it.
+
+    The one delete failure no eviction and no retry can cure: the entry's ACL grants this
+    token nothing. Python's `mkdtemp` makes a directory owner-only, and an owner that is
+    an *elevated* process is Administrators -- which an unelevated token holds deny-only
+    -- so pytest run elevated in a tree leaves a `.pytest_cache` only an elevated shell
+    can open or delete (carameli, 2026-09-29). Any other refusal is somebody else's.
+    """
+    found: list[str] = []
+
+    def refused(exc: OSError) -> None:
+        if isinstance(exc, PermissionError):
+            found.append(str(exc.filename).removeprefix(_LONGPATH))
+
+    for _ in walk(_longpath(path), onerror=refused):
+        pass
+    return found
+
+
 def remove_tree_longpath(path: Path) -> str:
     """Delete `path` recursively, surviving Windows MAX_PATH. Empty string on success.
 
@@ -213,9 +244,7 @@ def remove_tree_longpath(path: Path) -> str:
     depth-first, so the file itself is reported ahead of the parents that could not go
     because of it.
     """
-    target = str(path)
-    if os.name == "nt" and not target.startswith("\\\\?\\"):
-        target = "\\\\?\\" + os.path.abspath(target)
+    target = _longpath(path)
     failures: list[str] = []
 
     def _clear_and_retry(_func, failed_path, _exc):
