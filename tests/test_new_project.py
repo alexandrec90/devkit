@@ -842,6 +842,7 @@ def _rendered(root: Path, script: str, monkeypatch):
 
     monkeypatch.setattr(sys, "path", list(sys.path))
     spec = importlib.util.spec_from_file_location(f"rendered_{Path(script).stem}", root / script)
+    assert spec is not None and spec.loader is not None, f"cannot load {script}"
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

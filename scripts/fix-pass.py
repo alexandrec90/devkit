@@ -56,6 +56,7 @@ import fix_release
 import fix_red
 import fix_send
 import gate_evidence
+import git_trust
 import installers
 import ship_intent
 import sweep
@@ -489,6 +490,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"fix-pass: {why}", file=sys.stderr)
         write_artifact(f"fix-pass: FAILED -- {why}")
         return EXIT_USAGE
+    # Before any git call: a tree an elevated session made is one git refuses this
+    # unelevated pass, and every push, read and re-gate in it failed (5025d284, e1463857).
+    writes = mode == fix_cycle.DISPATCH
+    if mode != fix_cycle.OFF and (trusted := git_trust.adopt(workspace.parent, write=writes)):
+        print(trusted)
     try:
         return run_alone(workspace, mode, launch)
     except (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError) as exc:

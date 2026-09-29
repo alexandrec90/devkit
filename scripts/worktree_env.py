@@ -53,9 +53,11 @@ update in a tree not yet provisioned.
 **Neither hook reaches `claude --worktree` any more.** Claude Code runs its own git with
 `-c core.hooksPath=/dev/null` (verified 2026-09-29: a plain `git worktree add` fired
 both hooks in a scratch repo, `claude -p --worktree` fired neither), and its only
-replacement seam is an agent hook, which this harness does not wire. devkit's own
-Claude trees borrow the checkout's `.venv` through `worktree.symlinkDirectories`
-instead; a consumer's still gets its `.venv` from `worktree.py provision`.
+replacement seam is an agent hook, which this harness does not wire. Its trees borrow
+the checkout's `node_modules` through `worktree.symlinkDirectories` instead, which
+`--pull` fills into every project's settings (`project_settings.dependency_dirs`), and
+its `.venv` only where the project installs no package of its own; a project installed
+editable builds each tree its own through `toolchain.rerun_in_venv`.
 
 
 Every decision here is a pure function; `main` is the only part that touches git or the

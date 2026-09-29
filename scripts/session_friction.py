@@ -184,6 +184,12 @@ SILENT = frozenset({"cd", "pushd", "popd"})
 
 # The opening message of a session the fix pass dispatched: every prompt's finish line.
 DISPATCHED = "the fix pass commits, pushes"
+# Skills whose own checklist runs the suite whole, so a session that invoked one was asked
+# for the whole run: `supervise-fix-pass` §4 has the supervisor run `posix-rehearsal.py`
+# before each iteration (3db42b06, filed at a supervisor's rehearsal run). Held to that
+# by `tests/test_session_friction.py`, which fails once a named skill stops asking.
+WHOLE_SUITE_SKILLS = frozenset({"supervise-fix-pass"})
+INVOKED_SKILL = re.compile(r"<command-name>/([\w:-]+)</command-name>")
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"})
 
 # A test run in command position -- not `pytest` inside a heredoc's source -- whose
@@ -279,6 +285,15 @@ def normalize(text: str) -> str:
     text = re.sub(r"[A-Za-z]:[\\/][^\s'\"]*?worktrees[\\/][^\s\\/'\"]+", "<tree>", text)
     text = re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", text)
     text = re.sub(r"\d{2,}", "N", text)
+    return " ".join(text.split())
+
+
+def same_command(command: str) -> str:
+    """What makes two failed calls in one session the same call: the whole command, its
+    numbers kept. 967e40ba was a bisect filed as one command failing seven times -- the
+    key was `normalize` cut to `SNIPPET`, so a 120-character script path filled it before
+    the ranges began, and folding the digits had already made `25-50` of `38-50`."""
+    text = re.sub(r"[A-Za-z]:[\\/][^\s'\"]*?worktrees[\\/][^\s\\/'\"]+", "<tree>", command)
     return " ".join(text.split())
 
 
@@ -483,6 +498,7 @@ class _Session:
     # After a suite-wide change (`changes_the_suite`, `reports_suite_change`), the suite
     # roots run whole since it; None while there has been none.
     checked: set[str] | None = None
+    suite_asked: bool = False  # it invoked a `WHOLE_SUITE_SKILLS` skill
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -500,6 +516,8 @@ class _Session:
     def user(self, event: Event) -> None:
         if self.spoken == 0:
             self.dispatched = DISPATCHED in event.text
+        if any(name in WHOLE_SUITE_SKILLS for name in INVOKED_SKILL.findall(event.text)):
+            self.suite_asked = True
         self.note("user-frustration", _complaint(event, self.spoken), event)
         self.spoken += 1
 
@@ -512,6 +530,8 @@ class _Session:
         checked = frozenset(self.checked) if self.checked is not None else None
         for cls, what in _command_classes(event.command, checked):
             # A `Monitor` until-loop is the wait Claude Code's `SLEEP_GUARD` prescribes.
+            if cls == "full-suite" and self.suite_asked:
+                continue
             if not (cls == "poll" and event.tool in WAIT_TOOLS):
                 self.note(cls, what, event)
         if self.checked is not None:
@@ -571,7 +591,7 @@ class _Session:
             self.note(cls, what, event)
         # A test run failing again is the work of fixing it, not a wasted retry.
         if command and not runs_tests(command):
-            self.failures.setdefault(normalize(command)[:SNIPPET], []).append(event)
+            self.failures.setdefault(same_command(command), []).append(event)
 
 
 def _read(events: Iterable[Event]) -> _Session:
@@ -589,8 +609,9 @@ def _read(events: Iterable[Event]) -> _Session:
 def detect(events: Iterable[Event]) -> list[tuple[str, str, Event]]:
     """`(class, what, event)` for every friction in one session's events, each once."""
     session = _read(events)
-    for what, runs in session.failures.items():
+    for runs in session.failures.values():
         if len(runs) >= REPEATS:
+            what = normalize(runs[-1].command)[:SNIPPET]
             session.note("repeat-failure", f"x{len(runs)} {what}", runs[-1])
     session.ending()
     return [(cls, what, event) for (cls, what), event in session.found.items()]

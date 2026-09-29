@@ -164,6 +164,41 @@ def test_file_adds_to_a_journal_and_is_a_no_op_without_one(tmp_path):
     fix_findings.file(None, "merge-failed", "carameli", "#5: conflict")
 
 
+# The details as filed: 936fd498 and 91fa12f2 (two ships), e1463857 (a regate, where only
+# git's hint survived), each quoting its own tree.
+OWNERSHIP_DETAILS = [
+    "roguelike worktree-serialized-squishing-breeze: push: C:/Users/alexa/vs-code/roguelike/"
+    ".claude/worktrees/serialized-squishing-breeze/.git' is owned by: BUILTIN/Administrators "
+    "(S-1-5-32-544) but the current user is: DESKTOP-B9FC8VP/alexa (S-1-5-21",
+    "roguelike worktree-synchronous-marinating-hellman: push: rs/alexa/vs-code/roguelike/"
+    ".claude/worktrees/synchronous-marinating-hellman/.git' is owned by: BUILTIN/Administrators "
+    "(S-1-5-32-544) but the current user is: DESKTOP-B9FC8VP/alexa (S-1-5-21-30",
+    "roguelike main -- FAILED to re-run the gate: git config --global --add safe.directory "
+    "C:/Users/alexa/vs-code/roguelike",
+]
+
+
+def test_one_ownership_refusal_in_many_trees_is_one_ledger_group(tmp_path):
+    """Each elevated tree filed a group of its own while one fix, pending, covered all."""
+    journal = fix_findings.Journal(tmp_path)
+    for detail in OWNERSHIP_DETAILS:
+        fix_findings.file(journal, "ship-failed", "roguelike", detail)
+    assert {f.detail for f in journal.findings} == {f"roguelike: {fix_findings.OWNERSHIP}"}
+    assert len(fix_findings.record_all(journal.findings, [], tmp_path)) == 1
+    kept = [Path(f.evidence).read_text(encoding="utf-8") for f in journal.findings]
+    assert kept == OWNERSHIP_DETAILS, "the tree each one named is kept as its evidence"
+
+
+def test_a_folded_detail_keeps_the_evidence_it_was_given(tmp_path):
+    journal = fix_findings.Journal(tmp_path)
+    fix_findings.file(journal, "ship-failed", "roguelike", OWNERSHIP_DETAILS[0], "C:/tree")
+    assert journal.findings[0].evidence == "C:/tree"
+
+
+def test_any_other_detail_is_filed_as_written():
+    assert fix_findings.by_cause("carameli", "agent/x: rejected") == "agent/x: rejected"
+
+
 def test_a_finding_that_names_a_branch_is_filed_settled_against_it(tmp_path):
     """4806bd8d: a complaint the corrected session fixed on its own branch is resolved
     pending that branch's merge; `fix_verify` reopens it if the branch never lands."""
