@@ -220,6 +220,25 @@ def test_a_refused_commit_gets_the_prompt_for_its_own_worktree():
     assert "logs/ship-intent.refused.md" in text and "fix pass commits" in text
 
 
+def test_every_pr_shape_names_a_cache_an_elevated_session_locked_and_the_way_round_it():
+    """cadb6ba8: sports_betting #48's fixer reused a tree an elevated session had run
+    pytest in, found its `.pytest_cache` by `WinError 5`, and worked out
+    `-p no:cacheprovider` alone. The prompt says so up front, in every shape."""
+    locked = {".pytest_cache": "PYTEST_ADDOPTS=-p no:cacheprovider"}
+    shapes = (
+        failure(),
+        failure(signature=(fix_plan.CONFLICT,)),
+        failure(kind=fix_plan.COMMIT, number=0, signature=("x refused",)),
+    )
+    for red in shapes:
+        text = fix_prompts.pr_prompt(red, "", "", locked)
+        assert "An elevated session left .pytest_cache" in text
+        assert "PYTEST_ADDOPTS=-p no:cacheprovider" in text
+        assert text.endswith(fix_prompts.STOP)
+        assert "elevated session" not in fix_prompts.pr_prompt(red)
+        assert "elevated session" not in fix_prompts.pr_prompt(red, "", "", {})
+
+
 def test_a_pr_prompt_quotes_a_refusal_already_standing_in_its_tree(tmp_path):
     """d609d34d: carameli #395's real blocker was an earlier fixer's intent the commit
     stage had refused (detect-secrets, `.secrets.baseline` unstaged), recorded in the
