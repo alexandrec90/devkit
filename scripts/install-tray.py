@@ -92,6 +92,12 @@ TRAY_MODULES = (
     "schedule_health",
     "devkit_schtasks",
     "harness_state",
+    # `tray_state` draws the ingestion collectors' rows through `collectors.row`.
+    "collectors",
+    "collectors_config",
+    "devkit_jsonc",
+    "sweep",
+    "task_branch",
 )
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]

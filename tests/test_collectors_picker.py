@@ -18,6 +18,12 @@ config = picker.config
 
 DECLARED = [config.Collector("ibkr_trader", "app"), config.Collector("sports_betting", "collector")]
 
+# `test_main_prints_only_rows` writes a fixture that merely bears the registry's name. The
+# name comes off `sweep` rather than being spelled out because
+# `test_self_hosting.test_tests_reading_the_live_workspace_are_marked_to_skip_without_it`
+# reads that literal in a test as a read of the live file, which CI never has.
+REGISTRY_NAME = config.sweep.WORKSPACE_FILE_NAME
+
 
 def values(lines):
     return [line.split(picker_rows.FIELD_SEP)[0] for line in lines]
@@ -66,7 +72,7 @@ def test_main_prints_only_rows(tmp_path, monkeypatch, capsys):
     root = tmp_path / "devkit"
     root.mkdir()
     monkeypatch.setenv("DEVKIT_DIR", str(root))
-    (tmp_path / "alex-projects.code-workspace").write_text(
+    (tmp_path / REGISTRY_NAME).write_text(
         json.dumps({"settings": {config.SETTING: {"ibkr_trader": {"service": "app"}}}}),
         encoding="utf-8",
     )
