@@ -294,9 +294,10 @@ whenever one is created by `git worktree add` from a shell or a script, and the 
 `post-index-change` hook runs the same set-up for a tree cut `--no-checkout` and filled by
 `git reset --hard`. **Neither reaches `claude --worktree`**: Claude Code runs its own git
 with `-c core.hooksPath=/dev/null`, so no git hook fires for the trees it cuts, and the
-only seam it offers instead is an agent hook, which this harness does not wire. devkit's
-own trees get their interpreter from `worktree.symlinkDirectories` in
-`.claude/settings.json` instead (see `tests/test_self_hosting.py`). It
+only seam it offers instead is an agent hook, which this harness does not wire. Its
+trees borrow the checkout's `.venv` and `node_modules` through
+`worktree.symlinkDirectories` in `.claude/settings.json` instead, which `sync-devkit.py
+--pull` fills in for every project (`scripts/project_settings.py`). The hook itself
 does two things a linked worktree otherwise
 lacks, each only when its conditions hold:
 
