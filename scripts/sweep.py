@@ -188,6 +188,18 @@ Git = Callable[..., "subprocess.CompletedProcess[str]"]
 NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+def run_windowless(*args, **kwargs) -> subprocess.CompletedProcess:
+    """`subprocess.run` with `NO_WINDOW` ORed in: the default for an injectable runner.
+
+    A `runner=subprocess.run` default is a spawn no call-site scan can see, and one put
+    a Windows Terminal window on screen per project the upgrade pass wired
+    (`temproot_wiring.wire`'s `uv lock`, 2026-09-28). ORed rather than set, so a caller
+    that passes its own flags keeps them instead of raising on a duplicate keyword.
+    """
+    flags = kwargs.pop("creationflags", 0)
+    return subprocess.run(*args, creationflags=flags | NO_WINDOW, **kwargs)
+
+
 def console_python() -> str:
     """The console interpreter beside `sys.executable`, for spawning a Python child.
 

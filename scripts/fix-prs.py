@@ -47,7 +47,6 @@ Every function that decides something is pure and tested in `tests/test_fix_prs.
 """
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
 
@@ -136,7 +135,7 @@ def open_session(
     branch: str,
     prompt: str,
     title: str,
-    runner=subprocess.run,
+    runner=sweep.run_windowless,
 ) -> int:
     """The one place a mode becomes a tab or a background session."""
     if AGENT_MODES[launch.agent][1] == BACKGROUND:
@@ -146,7 +145,7 @@ def open_session(
 
 
 def run_one(
-    pick: menu.Pick, workspace: Path, launch: agent_models.Launch, runner=subprocess.run
+    pick: menu.Pick, workspace: Path, launch: agent_models.Launch, runner=sweep.run_windowless
 ) -> int:
     """One hand-picked PR: read it live, gather its evidence, send it the planned way.
 
@@ -189,7 +188,10 @@ def run_one(
 
 
 def run(
-    picks: list[menu.Pick], workspace: Path, launch: agent_models.Launch, runner=subprocess.run
+    picks: list[menu.Pick],
+    workspace: Path,
+    launch: agent_models.Launch,
+    runner=sweep.run_windowless,
 ) -> int:
     """Every picked PR in turn. The worst exit code, so one failure is still reported.
 
@@ -228,7 +230,7 @@ def dispatch_pr(
     failure: fix_plan.Failure,
     root: Path,
     launch: agent_models.Launch,
-    runner=subprocess.run,
+    runner=sweep.run_windowless,
     key: str = "",
     problem: str = "",
 ) -> int:
@@ -267,7 +269,7 @@ def dispatch_fresh(
     decision: fix_plan.Decision,
     root: Path,
     launch: agent_models.Launch,
-    runner=subprocess.run,
+    runner=sweep.run_windowless,
     key: str = "",
     problem: str = "",
 ) -> int:
@@ -327,7 +329,7 @@ def run_plan(
     launch: agent_models.Launch,
     dry_run: bool,
     redo: bool,
-    runner=subprocess.run,
+    runner=sweep.run_windowless,
 ) -> int:
     """Scan, read the evidence, plan, print the plan, then send what is new.
 

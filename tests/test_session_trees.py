@@ -149,6 +149,171 @@ def test_a_refused_removal_is_reported_with_gits_words(tmp_path):
     assert "refused" in error and "contains modified" in error
 
 
+def _remover(error: str = ""):
+    removed: list[Path] = []
+
+    def remove(path: Path) -> tuple[str, list[str]]:
+        removed.append(path)
+        return error, []
+
+    return removed, remove
+
+
+def test_a_removal_the_filesystem_refused_partway_is_finished(tmp_path):
+    """devkit, 2026-09-29: git dropped the `.git` link and the registration, then a
+    `.venv` file failed with `Invalid argument` -- a husk no later pass would name."""
+    one = tree(tmp_path)
+    (one.path / ".venv").mkdir(parents=True)
+    calls: list[list[str]] = []
+    said = "error: failed to delete 'C:/x/fix-0928': Invalid argument"
+    removed, remove = _remover()
+
+    def run(argv):
+        calls.append(argv)
+        return done(255, err=said) if "remove" in argv else done()
+
+    assert st.reap(one, tmp_path / "carameli", run, remove=remove) == ""
+    assert removed == [one.path]
+    assert calls[-1][-2:] == ["worktree", "prune"]
+
+
+def test_a_finish_that_fails_too_names_both_failures(tmp_path):
+    one = tree(tmp_path)
+    one.path.mkdir(parents=True)
+    _removed, remove = _remover("x.pyd: Access is denied")
+    run = lambda argv: done(255, err="Invalid argument") if "remove" in argv else done()
+    error = st.reap(one, tmp_path / "carameli", run, remove=remove)
+    assert "Invalid argument" in error and "x.pyd: Access is denied" in error
+
+
+def test_a_dirty_tree_refusal_is_never_finished_by_hand(tmp_path):
+    one = tree(tmp_path)
+    one.path.mkdir(parents=True)
+    (one.path / ".git").write_text("gitdir: elsewhere", "utf-8")
+    removed, remove = _remover()
+    run = lambda argv: done(128, err="contains modified or untracked files, use --force")
+    error = st.reap(one, tmp_path / "carameli", run, remove=remove)
+    assert "refused" in error and removed == []
+
+
+def _husks(tmp_path):
+    checkout = tmp_path / "carameli"
+    root = checkout / ".claude" / "worktrees"
+    (root / "husk-0928" / ".venv").mkdir(parents=True)
+    (root / "busy-0929").mkdir()
+    (root / "fix-nightly-0919").mkdir()  # registered: its own reap decides it
+    (root / "hand-cut").mkdir()
+    (root / "hand-cut" / ".git").write_text("gitdir: elsewhere", "utf-8")
+    listed = [st.Tree(checkout, "master", "000", False), tree(tmp_path)]
+    return checkout, root, listed
+
+
+def test_a_husk_is_an_unregistered_tier_directory_with_no_git_link(tmp_path):
+    checkout, root, listed = _husks(tmp_path)
+    assert st.husks(checkout, listed) == [root / "busy-0929", root / "husk-0928"]
+    assert st.husks(tmp_path / "no-tier-here", []) == []
+
+
+def test_sweep_husks_removes_a_quiet_husk_and_keeps_a_busy_one(tmp_path):
+    checkout, root, listed = _husks(tmp_path)
+    idle = lambda path: 60 if path.name == "busy-0929" else QUIET
+    said: list[str] = []
+    removed, remove = _remover()
+    assert st.sweep_husks(checkout, listed, False, said.append, idle, remove) == 0
+    assert said == ["session tree carameli:husk-0928: a husk a removal left behind -- would remove"]
+    assert removed == []
+    said.clear()
+    assert st.sweep_husks(checkout, listed, True, said.append, idle, remove) == 0
+    assert removed == [root / "husk-0928"]
+    assert said == ["session tree carameli:husk-0928: a husk a removal left behind -- removed"]
+    _removed, refused = _remover("Access is denied")
+    said.clear()
+    assert st.sweep_husks(checkout, listed, True, said.append, lambda p: None, refused) == 0
+    assert st.sweep_husks(checkout, listed, True, said.append, idle, refused) == 1
+    assert said == ["session tree carameli:husk-0928: could not remove its husk: Access is denied"]
+
+
+def test_the_checkout_sweep_counts_husks_even_with_no_session_tree(tmp_path, monkeypatch):
+    checkout = tmp_path / "carameli"
+    (checkout / ".claude" / "worktrees" / "husk").mkdir(parents=True)
+    monkeypatch.setattr(st.box_teardown, "force_remove_box", lambda path: ("denied", []))
+    run = lambda argv: done(out=porcelain((str(checkout), "master", "000", False)))
+    said: list[str] = []
+    gh = lambda path: lambda *args: done(1)
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 1
+    assert said == ["session tree carameli:husk: could not remove its husk: denied"]
+
+
+def _admin_only(monkeypatch, elevated: bool = False) -> None:
+    """The carameli husk of 2026-09-29: a `.pytest_cache` only Administrators may open."""
+    monkeypatch.setattr(st.wt_profile, "is_elevated", lambda: elevated)
+    monkeypatch.setattr(st.box_teardown, "unopenable", lambda path: [str(path / ".pytest_cache")])
+    monkeypatch.setattr(
+        st.box_teardown, "force_remove_box", lambda path: (".pytest_cache: Access is denied", [])
+    )
+
+
+def test_admin_only_answers_only_an_unelevated_pass_over_an_unopenable_entry(tmp_path, monkeypatch):
+    husk = tmp_path / "husk"
+    husk.mkdir()
+    _admin_only(monkeypatch)
+    assert st.admin_only(tmp_path / "gone") == ""
+    why = st.admin_only(husk)
+    assert why.startswith("only an administrator can remove it") and str(husk) in why
+    monkeypatch.setattr(st.box_teardown, "unopenable", lambda path: ["a", "b", "c"])
+    assert "left a (+2 more)" in st.admin_only(husk)
+    monkeypatch.setattr(st.box_teardown, "unopenable", lambda path: [])
+    assert st.admin_only(husk) == ""
+    _admin_only(monkeypatch, elevated=True)
+    assert st.admin_only(husk) == ""
+
+
+def test_a_husk_only_an_administrator_can_delete_is_named_not_failed(tmp_path, monkeypatch):
+    """carameli, 2026-09-29: an elevated session's pytest left a `.pytest_cache` whose ACL
+    grants Administrators alone. The unelevated reap failed on it every run, so the ledger
+    sent a fixer after it every run, and no fixer -- unelevated by design -- could act.
+    The line now names the one command that clears it and who must run it."""
+    checkout = tmp_path / "carameli"
+    husk = checkout / ".claude" / "worktrees" / "declarative-finding-sky"
+    husk.mkdir(parents=True)
+    _admin_only(monkeypatch)
+    run = lambda argv: done(out=porcelain((str(checkout), "master", "000", False)))
+    said: list[str] = []
+    gh = lambda path: lambda *args: done(1)
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 0
+    assert len(said) == 1
+    assert "only an administrator can remove it" in said[0]
+    assert "elevated shell" in said[0] and str(husk) in said[0]
+    assert str(husk / ".pytest_cache") in said[0]
+
+
+def test_an_elevated_pass_that_still_fails_is_a_failure(tmp_path, monkeypatch):
+    checkout = tmp_path / "carameli"
+    (checkout / ".claude" / "worktrees" / "husk").mkdir(parents=True)
+    _admin_only(monkeypatch, elevated=True)
+    run = lambda argv: done(out=porcelain((str(checkout), "master", "000", False)))
+    said: list[str] = []
+    gh = lambda path: lambda *args: done(1)
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 1
+    assert "could not remove its husk" in said[0]
+
+
+def test_a_reap_only_an_administrator_can_finish_is_named_not_failed(tmp_path, monkeypatch):
+    checkout, _run, gh, _calls = _checkout(tmp_path)
+    one = tree(tmp_path)
+    one.path.mkdir(parents=True)
+
+    def run(argv):
+        if argv[-2:] == ["list", "--porcelain"]:
+            return _run(argv)
+        return done(255, err="Access is denied") if "remove" in argv else done()
+
+    _admin_only(monkeypatch)
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 0
+    assert len(said) == 1 and "only an administrator can remove it" in said[0]
+
+
 def _checkout(tmp_path, head: str = "abc"):
     checkout = tmp_path / "carameli"
     one = tree(tmp_path, head=head)

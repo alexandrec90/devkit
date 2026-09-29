@@ -121,3 +121,10 @@ def test_the_picker_cannot_reach_the_machine_at_all():
 def test_drawing_the_apply_picker_reads_the_verb_it_was_handed(capsys):
     assert picker.main(["apply", "--verb", "uninstall"]) == 0
     assert capsys.readouterr().out.splitlines() == picker.apply_rows("uninstall")
+
+
+def test_parse_args_takes_one_picker_and_an_optional_verb():
+    assert (picker.parse_args(["verb"]).rows, picker.parse_args(["verb"]).verb) == ("verb", "")
+    assert picker.parse_args(["apply", "--verb", "${input:verb}"]).verb == "${input:verb}"
+    with pytest.raises(SystemExit):
+        picker.parse_args(["uninstall"])

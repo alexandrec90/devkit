@@ -202,6 +202,7 @@ def test_an_access_denied_delete_is_a_filesystem_failure_not_a_dirty_refusal(tmp
     (box_dir / ".git").write_text("gitdir: elsewhere", encoding="utf-8")
     assert box_teardown.fallback_applies(box_dir, "failed to delete: Access is denied")
     assert box_teardown.fallback_applies(box_dir, "failed to unlink: Permission denied")
+    assert box_teardown.fallback_applies(box_dir, "failed to delete 'x': Invalid argument")
     assert not box_teardown.fallback_applies(
         box_dir, "fatal: contains modified or untracked files, use --force to delete it"
     )
@@ -214,3 +215,27 @@ def test_a_husk_is_reapable_however_the_removal_worded_its_failure(tmp_path):
     husk = tmp_path / "ws" / ".worktrees" / "demo--x-0806"
     husk.mkdir(parents=True)
     assert box_teardown.fallback_applies(husk, "fatal: 'demo--x-0806' is not a working tree")
+
+
+def test_unopenable_names_each_directory_this_process_may_not_list(tmp_path):
+    """carameli, 2026-09-29: an elevated session's pytest left a `.pytest_cache` whose ACL
+    grants Administrators alone, so the unelevated reap could not even list it, and failed
+    on it every run. The walk names such a directory, without the long-path prefix, and
+    only for a refusal: a directory that vanished mid-walk is not one.
+
+    The refusal is injected because neither CI platform can make one portably: Windows
+    ignores `chmod`, and a POSIX runner may be root."""
+    husk = tmp_path / "declarative-finding-sky"
+    husk.mkdir()
+    cache = "\\\\?\\C:\\ws\\declarative-finding-sky\\.pytest_cache"
+
+    def walk(top, onerror):
+        assert "declarative-finding-sky" in top
+        onerror(PermissionError(13, "Access is denied", cache))
+        onerror(FileNotFoundError(2, "gone", "C:\\ws\\declarative-finding-sky\\tmp"))
+        yield top, [], []
+
+    assert box_teardown.unopenable(husk, walk=walk) == [
+        "C:\\ws\\declarative-finding-sky\\.pytest_cache"
+    ]
+    assert box_teardown.unopenable(husk) == []

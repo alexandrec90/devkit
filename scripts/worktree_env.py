@@ -81,6 +81,13 @@ from pathlib import Path
 # here, like `console_python`, because the hook is installed alone with nothing to import.
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+
+def run_windowless(*args, **kwargs) -> subprocess.CompletedProcess:
+    """`sweep.run_windowless`, spelled here for the reason `NO_WINDOW` is."""
+    flags = kwargs.pop("creationflags", 0)
+    return subprocess.run(*args, creationflags=flags | NO_WINDOW, **kwargs)
+
+
 # `post-checkout` is handed `<old-oid> <new-oid> <branch-flag>`. A **fresh** checkout --
 # `git worktree add`, and also `git clone` -- reports an all-zero old OID, which is what
 # separates "this tree was just created" from an ordinary `git checkout <branch>` in a
@@ -440,7 +447,7 @@ def path_sources(here: Path) -> list[str]:
 def link_path_sources(
     here: Path,
     checkout: Path,
-    runner=subprocess.run,
+    runner=run_windowless,
     environ: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Cut each missing sibling as a detached worktree of the repo the checkout sees there.
@@ -544,7 +551,7 @@ def git_env(environ: Mapping[str, str]) -> dict[str, str]:
 def provision(
     here: Path,
     checkout: Path,
-    runner=subprocess.run,
+    runner=run_windowless,
     environ: Mapping[str, str] | None = None,
     uv: str | None = None,
 ) -> str:
@@ -644,7 +651,7 @@ def is_unprovisioned_tree_update(args: list[str], here: Path) -> bool:
 def main(
     argv: list[str] | None = None,
     root: Path | None = None,
-    runner=subprocess.run,
+    runner=run_windowless,
     environ: Mapping[str, str] | None = None,
 ) -> int:
     """The hook. Always exits 0: git ignores a `post-checkout` status, and a traceback
@@ -658,7 +665,7 @@ def main(
 def index_change_main(
     argv: list[str] | None = None,
     root: Path | None = None,
-    runner=subprocess.run,
+    runner=run_windowless,
     environ: Mapping[str, str] | None = None,
 ) -> int:
     """The `post-index-change` hook: the same set-up, for a tree cut `--no-checkout`.

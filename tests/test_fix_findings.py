@@ -177,3 +177,14 @@ def test_a_finding_that_names_a_branch_is_filed_settled_against_it(tmp_path):
     assert settled.fields["pr"] == "agent/y-0926"
     assert "went on to ship agent/y-0926" in settled.fields["note"]
     assert "settles_with" not in dict(complaint.fields()), "not a ledger field"
+
+
+def test_settle_resolves_only_an_open_row_a_branch_names(tmp_path):
+    complaint = finding(kind="user-frustration", detail="why did you")
+    fix_findings.record_all([complaint, finding()], [], tmp_path)
+    assert fix_findings.settle([complaint, finding()], tmp_path) == [], "no branch named"
+    shipped = fix_findings.Finding(**{**vars(complaint), "settles_with": "agent/y-0926"})
+    elsewhere = finding(detail="never filed", settles_with="agent/z-0926")
+    assert len(fix_findings.settle([shipped, elsewhere], tmp_path)) == 1
+    [still_open] = triage.open_items(triage.load(tmp_path))
+    assert still_open.detail == "push-failed: agent/x: rejected"

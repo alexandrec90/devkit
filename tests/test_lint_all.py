@@ -114,6 +114,15 @@ def test_explicit_paths_drops_what_no_longer_exists_and_normalises_separators():
     ]
 
 
+def test_changed_paths_is_the_diff_plus_untracked_files_that_still_exist(monkeypatch, tmp_path):
+    for name in ("a.py", "b.md", "new.py"):
+        (tmp_path / name).write_text("", encoding="utf-8")
+    listed = {"diff": ["b.md", "a.py", "deleted.py"], "ls-files": ["new.py", "a.py"]}
+    monkeypatch.setattr(lint_all, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(lint_all, "_git", lambda *args: listed[args[0]])
+    assert lint_all.changed_paths() == ["a.py", "b.md", "new.py"]
+
+
 def test_changed_python_files_is_the_python_subset_of_the_working_tree_diff(monkeypatch):
     monkeypatch.setattr(lint_all, "changed_paths", lambda: ["ok.py", "README.md"])
     assert lint_all.changed_python_files() == ["ok.py"]
