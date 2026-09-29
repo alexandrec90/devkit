@@ -245,3 +245,9 @@ def test_a_stale_codex_mirror_is_still_a_check_fault(tmp_path):
     ((label, message),) = notes
     assert "STALE" in message
     assert ps.check_summary(notes) == label
+
+
+def test_only_a_retired_python_script_can_be_a_retired_hook_command():
+    retired = ("scripts/hooks/old.py", "README.md", ".claude/skills/x/SKILL.md", "scripts/x.sh")
+    assert ps.retired_hook_paths(retired) == ("scripts/hooks/old.py",)
+    assert ps.retired_hook_paths(()) == ()

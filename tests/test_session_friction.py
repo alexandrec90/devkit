@@ -624,18 +624,85 @@ def test_the_first_run_after_a_suite_wide_change_is_the_targeted_one():
 
 
 def test_a_suite_wide_change_excuses_one_whole_run_and_nothing_else():
-    """The change is checked by the first run after it; the whole suite again, or after
-    an ordinary edit, is the habit the detector exists for."""
+    """The change is checked by the first whole run after it; the whole suite again, or
+    after an ordinary edit, is the habit the detector exists for. A targeted run checks
+    one file, not the change, so it leaves the excuse standing."""
     whole = ".venv/Scripts/python.exe -m pytest -q"
     floors = _tool("Edit", "e", file_path="pyproject.toml")
     assert classes([floors, call(whole, "1"), call(whole, "2")]) == ["full-suite"]
     targeted = call("python -m pytest tests/test_x.py -q", "t")
-    assert classes([floors, targeted, call(whole, "2")]) == ["full-suite"]
+    assert classes([floors, targeted, call(whole, "2")]) == []
+    assert classes([floors, targeted, call(whole, "2"), call(whole, "3")]) == ["full-suite"]
+    again = call(f"{whole} && {whole}", "2")
+    assert classes([floors, again]) == ["full-suite"], "twice in one command is twice"
     for path in ("scripts/x.py", "docs/pyproject.toml.md", "tests/test_uv.lock.py"):
         assert classes([_tool("Edit", "e", file_path=path), call(whole, "1")]) == ["full-suite"]
     assert classes([call("uv sync", "s"), call(whole, "1")]) == ["full-suite"], "not a change"
     gate = call("python scripts/hooks/run_push_gate.py", "g")
     assert classes([floors, gate]) == ["full-suite"], "the push gate is still the gate's job"
+
+
+def test_each_suite_root_is_excused_once_after_a_suite_wide_change():
+    """A relock changes every test in both tiers: the vendored suite and the project's
+    own are two roots, and running each whole once is checking the change, not a habit."""
+    lock = _tool("Edit", "e", file_path="uv.lock")
+    vendored = call(".venv/Scripts/python.exe -m pytest scripts/hooks/tests/ -q", "v")
+    project = call(".venv/Scripts/python.exe -m pytest -q -p no:cacheprovider", "p")
+    assert classes([lock, vendored, project]) == []
+    assert classes([lock, vendored, project, call("pytest scripts/hooks/tests", "x")]) == [
+        "full-suite"
+    ]
+    assert sf.whole_runs("pytest scripts\\hooks\\tests\\ -q && pytest -q; pytest t/x.py") == [
+        "scripts/hooks/tests",
+        "",
+    ]
+    assert sf.suite_root(" ./ -q") == "." and sf.suite_root(" tests/ tests/x.py") == "tests"
+
+
+def test_a_suite_wide_file_git_reports_changed_is_a_suite_wide_change():
+    """493a237b: an ibkr_trader fixer's tree arrived with `uv.lock` relocked by its
+    provisioning -- data-lake's pytest floor had moved -- and its first `git status`
+    said so. Its whole-suite runs were what checked that; the transcript held no edit or
+    relock of its own, so the detector filed them as the habit. The exact calls."""
+    status = (
+        "cat .claude/fixer.md; ls logs/gate; git status --short; git diff --stat",
+        "# Fixer sessions\n| a | b |\nfailed-jobs.log\n M uv.lock\n uv.lock | 2 +-\n"
+        " 1 file changed, 1 insertion(+), 1 deletion(-)\n",
+    )
+    lint = (
+        ".venv/Scripts/python.exe -m ruff check src tests; .venv/Scripts/python.exe "
+        "scripts/hooks/untested_symbols.py 2>&1 | tail -3; .venv/Scripts/python.exe -m pytest "
+        "scripts/hooks/tests/ -q 2>&1 | tail -3"
+    )
+    rows = [
+        call(status[0], "s"),
+        result(status[1], "s", error=False),
+        call(".venv/Scripts/python.exe -m pytest tests/test_ci_data_lake_pin.py -q", "t"),
+        call(lint, "l"),
+        call(".venv/Scripts/python.exe -m pytest -q -p no:cacheprovider 2>&1 | tail -3", "p"),
+    ]
+    assert classes(rows) == []
+    assert classes([rows[0], result("", "s", error=False), *rows[2:]]) == ["full-suite"]
+    # The lock stays dirty all session: reading it again excuses nothing new.
+    rerun = [*rows, call(status[0], "s2"), result(status[1], "s2", error=False), rows[-1]]
+    assert classes(rerun) == ["full-suite"]
+
+
+@pytest.mark.parametrize(
+    "command, text, changed",
+    [
+        ("git status --short", " M uv.lock\n?? notes.md\n", True),
+        ("git status", "Changes not staged:\n\tmodified:   tests/conftest.py\n", True),
+        ("git diff --stat", " pyproject.toml | 4 ++--\n", True),
+        ("git diff", "diff --git a/package.json b/package.json\n", True),
+        ("git status --short", "M  src/app.py\n?? uv.lock.bak\n", False),
+        ("git status --short", " M docs/pyproject.toml.md\n", False),
+        ("cat notes.txt", " M uv.lock\n", False),  # not git's answer about the tree
+        ("git log --stat -1", " uv.lock | 2 +-\n", False),  # history, not the tree
+    ],
+)
+def test_reports_suite_change_reads_git_s_answer_about_the_tree(command, text, changed):
+    assert sf.reports_suite_change(command, text) is changed
 
 
 def test_an_edit_call_carries_the_file_it_names():

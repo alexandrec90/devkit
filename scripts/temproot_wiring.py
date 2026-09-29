@@ -38,6 +38,8 @@ import tomllib
 from collections.abc import Callable
 from pathlib import Path
 
+import sweep
+
 PLUGIN = "devkit_temproot"
 PLUGIN_DIR = "scripts/pytest-plugins"
 PLUGIN_FILE = Path(PLUGIN_DIR) / f"{PLUGIN}.py"
@@ -266,7 +268,7 @@ def plan(root: Path) -> tuple[dict[Path, str], str]:
     return edits, ""
 
 
-def wire(root: Path, runner: Runner = subprocess.run) -> str:
+def wire(root: Path, runner: Runner = sweep.run_windowless) -> str:
     """Wire `root` in place: `WIRED`, `ALREADY`, or why it was left as it was.
 
     Written only whole: a relock that fails restores every file, so a project is either

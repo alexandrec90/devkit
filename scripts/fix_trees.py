@@ -14,7 +14,6 @@ Every function here is tested in `tests/test_fix_prs.py` (see `COVERED_BY` in
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
@@ -57,7 +56,7 @@ def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
     return Path(held), ""
 
 
-def cut_tree(project_dir: Path, branch: str, runner=subprocess.run) -> Path | None:
+def cut_tree(project_dir: Path, branch: str, runner=sweep.run_windowless) -> Path | None:
     """Cut a default-tier worktree on the PR's own head branch. None when git refused.
 
     The fetch first is `agent-worktree.create`'s and for its reason: a checkout that has
@@ -108,7 +107,7 @@ def provision_tree(
 
 
 def cut_fresh_tree(
-    project_dir: Path, branch: str, base: str, runner=subprocess.run
+    project_dir: Path, branch: str, base: str, runner=sweep.run_windowless
 ) -> tuple[Path | None, str]:
     """Cut a default-tier worktree on a new `branch` off `origin/<base>`.
 
