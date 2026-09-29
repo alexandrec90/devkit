@@ -458,18 +458,23 @@ def _commit_carrying(intent: Intent, python: str, runner: Runner) -> tuple[Inten
     return intent, step, output
 
 
-def cut_at(tree: Path, base: str, runner: Runner = run_quiet) -> str:
-    """When the commit `tree` was cut from was made, as git prints it; "" when unknown.
+def retired_at(tree: Path, branch: str, gh_for=sweep.gh_for) -> str:
+    """When `branch`'s newest merged PR merged, as `gh` prints it; "" when unknown.
 
     What `harness_triage.carried` measures a resolution against once the intent here was
-    carried off a retired name: one written since can only be this tree's.
+    carried off that retired name: one written since cannot mean that PR, which is the
+    line `fix_verify.relevant` draws too. It was the merge-base's commit time, which moves
+    on each time the branch merges its base in -- and then re-pointed nothing.
     """
-    found = runner(["git", "merge-base", "HEAD", f"origin/{base}"], cwd=tree)
-    sha = (found.stdout or "").strip()
-    if found.returncode != 0 or not sha:
+    done = gh_for(tree)("pr", "list", "--head", branch, "--state", "merged", "--json", "mergedAt")
+    if getattr(done, "returncode", 1) != 0:
         return ""
-    made = runner(["git", "log", "-1", "--format=%cI", sha], cwd=tree)
-    return (made.stdout or "").strip() if made.returncode == 0 else ""
+    try:
+        rows = json.loads(getattr(done, "stdout", "") or "[]")
+    except ValueError:
+        return ""
+    times = [str(r.get("mergedAt")) for r in rows if isinstance(r, dict) and r.get("mergedAt")]
+    return max(times) if times else ""
 
 
 def commits_ahead(tree: Path, base: str, runner: Runner) -> int | None:

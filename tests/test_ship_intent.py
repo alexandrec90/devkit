@@ -740,17 +740,29 @@ def test_a_tree_git_will_not_read_is_a_failure_never_a_clean_tree(tmp_path):
     assert ship_intent.is_spent(one, refused) is False, "a plan pass says it would ship"
 
 
-def test_cut_at_is_when_the_commit_the_tree_was_cut_from_was_made(tmp_path):
-    """The line after which a resolution naming a retired branch can only be this tree's:
-    `harness_triage.carried` re-points those when the ship carries the intent."""
-    run = Runner(
-        {"git merge-base": (0, "f00d\n", ""), "git log": (0, "2026-09-28T20:00:00-04:00\n", "")}
-    )
-    assert ship_intent.cut_at(tmp_path, "main", run) == "2026-09-28T20:00:00-04:00"
-    [(merge_base, _, _), (log, _, _)] = run.calls
-    assert merge_base == ["git", "merge-base", "HEAD", "origin/main"]
-    assert log == ["git", "log", "-1", "--format=%cI", "f00d"]
-    assert ship_intent.cut_at(tmp_path, "main", Runner({"git merge-base": (1, "", "no")})) == ""
+def test_retired_at_is_when_the_names_last_pr_merged(tmp_path):
+    """The line after which a resolution naming a retired branch can only mean the work
+    carried off it -- the same line `fix_verify.relevant` draws. It was the merge-base's
+    commit time, which moves on whenever the branch merges its base in: the supervisor's
+    carry re-pointed nothing, its resolutions being older than main's newest merge."""
+    asked = []
+    merged = '[{"mergedAt": "2026-09-28T13:33:19Z"}, {"mergedAt": "2026-09-29T22:21:55Z"}]'
+
+    def gh_for(tree):
+        def gh(*args):
+            asked.append((tree, args))
+            return subprocess.CompletedProcess(["gh", *args], 0, merged, "")
+
+        return gh
+
+    assert ship_intent.retired_at(tmp_path, "agent/x", gh_for) == "2026-09-29T22:21:55Z"
+    assert asked == [
+        (tmp_path, ("pr", "list", "--head", "agent/x", "--state", "merged", "--json", "mergedAt"))
+    ]
+    refused = lambda tree: lambda *a: subprocess.CompletedProcess(a, 1, "", "no")
+    assert ship_intent.retired_at(tmp_path, "agent/x", refused) == ""
+    empty = lambda tree: lambda *a: subprocess.CompletedProcess(a, 0, "[]", "")
+    assert ship_intent.retired_at(tmp_path, "agent/x", empty) == ""
 
 
 def test_a_clean_tree_git_cannot_count_still_pushes(tmp_path, monkeypatch):

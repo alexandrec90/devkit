@@ -527,15 +527,7 @@ class _Session:
             self.last_said = None  # it went on working: that text was not how it ended
         if changes_the_suite(event):
             self.checked = set()
-        checked = frozenset(self.checked) if self.checked is not None else None
-        for cls, what in _command_classes(event.command, checked):
-            if cls == "full-suite" and self.suite_asked:
-                continue
-            # A `Monitor` until-loop is the wait Claude Code's `SLEEP_GUARD` prescribes, and
-            # a backgrounded one is a single call and its completion notice -- the shape
-            # the engineering rule asks a long wait to take, not a loop of turns.
-            if not (cls == "poll" and (event.tool in WAIT_TOOLS or event.background)):
-                self.note(cls, what, event)
+        self._note_command(event)
         if self.checked is not None:
             self.checked.update(whole_runs(event.command))  # the next whole run is the habit
         if event.tool == "AskUserQuestion" and self.dispatched:
@@ -547,6 +539,18 @@ class _Session:
         elif runs_tests(event.command):
             # Only a test run: reading `git status` thrice between edits is not waste.
             self._rerun(event)
+
+    def _note_command(self, event: Event) -> None:
+        """What the call's command is friction as, less what this session was excused."""
+        checked = frozenset(self.checked) if self.checked is not None else None
+        for cls, what in _command_classes(event.command, checked):
+            if cls == "full-suite" and self.suite_asked:
+                continue
+            # A `Monitor` until-loop is the wait Claude Code's `SLEEP_GUARD` prescribes, and
+            # a backgrounded one is a single call and its completion notice -- the shape
+            # the engineering rule asks a long wait to take, not a loop of turns.
+            if not (cls == "poll" and (event.tool in WAIT_TOOLS or event.background)):
+                self.note(cls, what, event)
 
     def say(self, event: Event) -> None:
         self.last_said = event

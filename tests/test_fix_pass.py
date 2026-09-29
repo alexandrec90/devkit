@@ -1108,7 +1108,9 @@ def test_a_carried_intent_is_recorded_under_the_branch_it_went_out_on(monkeypatc
         "ship_one",
         lambda *a: ship_intent.Outcome(moved, ship_intent.SHIPPED, "u/pull/9", "u/pull/9"),
     )
-    monkeypatch.setattr(fix_pass.ship_intent, "cut_at", lambda tree, base: "2026-09-27T00:00:00Z")
+    monkeypatch.setattr(
+        fix_pass.ship_intent, "retired_at", lambda tree, branch: "2026-09-27T00:00:00Z"
+    )
     pointed = []
     monkeypatch.setattr(
         fix_pass.fix_loop.triage,
