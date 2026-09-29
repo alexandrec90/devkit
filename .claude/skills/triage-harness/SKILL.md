@@ -166,8 +166,10 @@ marked `PENDING on <pr>` is the reverse: its fix is written and not merged yet, 
 pass sends no session at it, and the pass retires the rows filed while it waited against
 that PR once it merges; only a row filed after the merge reads `RECURRED`. A
 `REOPENED <id>` line is a resolution `scripts/fix_verify.py` undid, most often because
-its `--pr` named a branch that never became a PR: when a merged PR does hold the fix,
-resolve again naming its number. The only
+its `--pr` named a branch that never became a PR. A merged PR whose text names the group
+id settles it before that (`fix_verify.named_by`), so a reopened group has no such PR:
+name the id in a fix PR's body, and when a merged PR holds the fix anyway, resolve again
+naming its number. The only
 mechanism ruled out is a coding-agent hook; a test, a git hook, a CI check, a scheduled
 job or a provisioner all are fair game.
 
