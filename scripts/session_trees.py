@@ -36,6 +36,13 @@ tier's own fallback, and a husk already standing in the tier -- no `.git`, unreg
 quiet for `QUIET_HOURS` -- is removed the same way. A dirty-tree refusal keeps its `.git`
 and so is never finished by hand.
 
+**What only an administrator can delete is named, not failed.** An elevated session's
+pytest left a `.pytest_cache` in a carameli tree that grants Administrators alone
+(`box_teardown.unopenable`), and the unelevated scheduled reap failed on it every run --
+so the ledger sent a fixer after it every run, and no fixer, unelevated by design, could
+act. The line says which directory and gives the elevated command; an elevated pass that
+still fails is an ordinary failure.
+
 Run by `reap-stale.py`, the scheduled pass for what agent sessions leave behind.
 Tested in `tests/test_session_trees.py`.
 """
@@ -56,6 +63,7 @@ import box_teardown
 import rc_machine
 import sweep
 import worktree_tiers as wt
+import wt_profile
 
 Run = Callable[..., subprocess.CompletedProcess[str]]
 Remove = Callable[[Path], tuple[str, list[str]]]
@@ -221,6 +229,30 @@ def reap(
     )
 
 
+def admin_only(path: Path) -> str:
+    """Why only an administrator can finish removing `path`, or "" when that is not why.
+
+    Asked only after a removal failed, and never of an elevated pass: one of those that
+    still fails has hit something else. The command removes the whole directory, since
+    everything this process could delete is already gone.
+    """
+    if wt_profile.is_elevated() or not path.exists():
+        return ""
+    locked = box_teardown.unopenable(path)
+    if not locked:
+        return ""
+    more = f" (+{len(locked) - 1} more)" if len(locked) > 1 else ""
+    command = (
+        f"Remove-Item -LiteralPath '{path}' -Recurse -Force"
+        if sys.platform == "win32"
+        else f"sudo rm -rf '{path}'"
+    )
+    return (
+        f"only an administrator can remove it -- an elevated process left {locked[0]}{more} "
+        f"that this unelevated pass may not open; from an elevated shell run: {command}"
+    )
+
+
 def husks(checkout: Path, listed: Sequence[Tree]) -> list[Path]:
     """Directories in the checkout's own tier that a removal died partway through.
 
@@ -260,7 +292,10 @@ def sweep_husks(
             say(f"{label}: a husk a removal left behind -- would remove")
             continue
         error, _notes = (remove or box_teardown.force_remove_box)(path)
-        if error:
+        why = admin_only(path) if error else ""
+        if why:
+            say(f"{label}: {why}")
+        elif error:
             failures += 1
             say(f"{label}: could not remove its husk: {error}")
         else:
@@ -323,7 +358,10 @@ def sweep_checkout(
             say(f"{label}: its PR merged at this HEAD -- would reap")
             continue
         error = reap(tree, checkout, run, noise)
-        if error:
+        why = admin_only(tree.path) if error else ""
+        if why:
+            say(f"{label}: {why}")
+        elif error:
             failures += 1
             say(f"{label}: could not reap: {error}")
         else:
