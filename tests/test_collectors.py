@@ -424,6 +424,22 @@ def test_parse_args_defaults_to_read_only_status():
     assert collectors.parse_args(["run-here", "a", "b"]).projects == ["a", "b"]
 
 
+def test_split_pick_takes_the_pickers_one_argument_apart():
+    assert collectors.split_pick(["run-here:ibkr_trader"]) == ["run-here", "ibkr_trader"]
+    assert collectors.split_pick(["stop-here:"]) == ["stop-here"]
+    assert collectors.split_pick(["run-here", "a"]) == ["run-here", "a"]
+    assert collectors.split_pick([]) == []
+    assert collectors.parse_args(["release:sports_betting"]).projects == ["sports_betting"]
+
+
+def test_the_picker_row_that_runs_nothing_runs_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+    docker = FakeDocker([])
+    assert collectors.main([collectors.NOTHING], docker=docker) == 0
+    assert docker.calls == [] and not (tmp_path / collectors.ARTIFACT).exists()
+    assert "nothing picked" in capsys.readouterr().out
+
+
 def test_reassign_refuses_a_typo_without_writing(tmp_path):
     report = collectors.Report()
     args = collectors.parse_args(["stop-here", "nope"])

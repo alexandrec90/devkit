@@ -380,6 +380,23 @@ def tray_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tupl
 
 VERBS = {"run-here": config.RUN, "stop-here": config.STOP, "release": None}
 
+# The value of the picker row that runs nothing (`picker_rows.NOTHING`): drawn when no
+# collector is declared, so a click on it has to be a quiet no-op, not a usage error.
+NOTHING = "none"
+
+
+def split_pick(argv: Sequence[str]) -> list[str]:
+    """`run-here:ibkr_trader` -> `run-here ibkr_trader`.
+
+    The VS Code task's picker hands its pick over as one argument, and one argument is
+    all the dispatcher can pass through; typed at a terminal the two words arrive apart
+    and nothing changes.
+    """
+    if not argv or ":" not in argv[0]:
+        return list(argv)
+    verb, _, project = argv[0].partition(":")
+    return [verb, *([project] if project else []), *argv[1:]]
+
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -387,15 +404,16 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "mode",
         nargs="?",
         default="status",
-        choices=("status", "maintain", *VERBS),
+        choices=("status", "maintain", *VERBS, NOTHING),
         help=(
             "status: report only (default). maintain: what the scheduler runs. run-here / "
-            "stop-here: assign this machine, then act on it now. release: forget."
+            "stop-here: assign this machine, then act on it now. release: forget. "
+            "Also takes `<mode>:<project>`, the VS Code picker's spelling."
         ),
     )
     parser.add_argument("projects", nargs="*", help="collectors to assign (default: all)")
     parser.add_argument("--devkit", type=Path, default=REPO_ROOT, help=argparse.SUPPRESS)
-    return parser.parse_args(sys.argv[1:] if argv is None else argv)
+    return parser.parse_args(split_pick(sys.argv[1:] if argv is None else argv))
 
 
 def reassign(args: argparse.Namespace, base: Path, collectors, report: Report) -> dict | None:
@@ -417,6 +435,9 @@ def reassign(args: argparse.Namespace, base: Path, collectors, report: Report) -
 
 def main(argv: Sequence[str] | None = None, docker: Docker | None = None) -> int:
     args = parse_args(argv)
+    if args.mode == NOTHING:
+        print("collectors: nothing picked -- no collector is declared, so nothing was done")
+        return 0
     base = config.home(args.devkit.expanduser().resolve())
     report = Report()
     now = _dt.datetime.now()

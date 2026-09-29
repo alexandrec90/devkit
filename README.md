@@ -967,6 +967,10 @@ python scripts/collectors.py stop-here           # this machine must not; stops 
 python scripts/collectors.py release ibkr_trader # forget one: neither started nor stopped
 ```
 
+The VS Code task **Machine: Ingestion Collectors** does the same from one pick. It lists
+every verb, for all collectors or for one, beside what this PC is set to now
+(`scripts/collectors_picker.py`).
+
 A machine never assigned is **hands off**, so a fresh workstation starts nothing. To move a
 collector, run `stop-here` on the old machine and `run-here` on the new one.
 `devkit-collectors` is registered everywhere and acts only on the assignment. It starts a
