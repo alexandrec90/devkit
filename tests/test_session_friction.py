@@ -15,8 +15,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from support import REPO_ROOT
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import session_friction as sf
 import session_transcripts as st
 
@@ -770,6 +771,60 @@ def test_a_whole_suite_is_friction_only_where_the_scope_rule_asked_for_less(tmp_
     assert not sf.asks_for_targeted_runs(str(held), tmp_path, "ibkr_trader")
     assert sf.asks_for_targeted_runs(str(tmp_path / "gone"), tmp_path, "ibkr_trader")
     assert not sf.asks_for_targeted_runs(str(tmp_path / "gone"), tmp_path, "data-lake")
+
+
+def test_a_session_whose_skill_runs_the_suite_whole_was_asked_for_the_whole_run():
+    """3db42b06, filed after five retirements: a `/supervise-fix-pass` session ran the
+    POSIX rehearsal's suite whole, which that skill's checklist tells the supervisor to
+    run before each iteration. The exact call; the invocation row as Claude Code writes it."""
+    ran = (
+        '$env:PYTHONPATH = "tests"; .venv\\Scripts\\python.exe -m pytest -p '
+        'posix_rehearsal_plugin -p no:cacheprovider -v -n 4 > "$env:TEMP\\ps-full.txt" 2>&1; '
+        '"exit=$LASTEXITCODE"'
+    )
+    invoked = user(
+        "<command-message>supervise-fix-pass</command-message>\n"
+        "<command-name>/supervise-fix-pass</command-name>\n<command-args>3</command-args>"
+    )
+    assert classes([invoked, call(ran, "1")]) == []
+    assert classes([call(ran, "1")]) == ["full-suite"], "no skill asked for it"
+    ship = user("<command-message>ship</command-message>\n<command-name>/ship</command-name>")
+    assert classes([ship, call(ran, "1")]) == ["full-suite"], "a skill that does not ask"
+    gate = call("python scripts/precommit/run_push_gate.py", "g")
+    assert classes([invoked, gate]) == [], "the gate is on the supervisor's checklist too"
+
+
+@pytest.mark.parametrize("skill", sorted(sf.WHOLE_SUITE_SKILLS))
+def test_each_skill_excused_a_whole_run_still_asks_for_one(skill):
+    """The exemption holds only while the skill's own checklist runs the suite whole:
+    once it stops naming the rehearsal, a whole run there is the habit again."""
+    text = (REPO_ROOT / ".claude" / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+    assert "scripts/posix-rehearsal.py" in text
+
+
+def test_a_bisect_is_not_one_command_failing_again():
+    """967e40ba: a session bisected an order-dependent failure with a scratch script, a
+    different range each call. The key was `normalize` cut to 90 characters, so the
+    script's path filled it before the ranges began: seven calls, filed as one repeated."""
+    script = (
+        '& "C:\\Users\\alexa\\AppData\\Local\\Temp\\claude\\C--Users-alexa-vs-code-devkit\\'
+        'bad2b8fc-e5ba-481a-ba2b-498fd0ccce44\\scratchpad\\bisect.ps1"'
+    )
+    ranges = ("0 50", '"0-50"', '"25-50"', '"38-50"', '"41-44,49-50"', '"42-43,49-50"')
+    rows = []
+    for i, args in enumerate(ranges):
+        rows += [call(f"{script} {args}", str(i)), result("Exit code 1", str(i))]
+    assert classes(rows) == []
+    again = [
+        row
+        for i in range(3)
+        for row in (call(f"{script} 0 50", f"a{i}"), result("Exit code 1", f"a{i}"))
+    ]
+    [(cls, what, _)] = sf.detect(
+        [e for n, r in enumerate(again, 1) for e in st.claude_events(r, n)]
+    )
+    assert cls == "repeat-failure" and what.startswith("x3 & ") and len(what) <= 3 + sf.SNIPPET
+    assert sf.same_command("git -C C:\\ws\\.claude\\worktrees\\a  log") == "git -C <tree> log"
 
 
 def test_the_reader_finds_both_stores_and_tells_them_apart(tmp_path):
