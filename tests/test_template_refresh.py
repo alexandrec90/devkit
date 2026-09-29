@@ -45,13 +45,75 @@ def project(tmp_path: Path, data: bytes | None) -> Path:
     return root
 
 
+def no_reconcile(project: Path, rewritten: tuple[str, ...]) -> None:
+    raise AssertionError(f"reconciled {project} though nothing was rewritten: {rewritten}")
+
+
 def test_an_untouched_earlier_template_is_refreshed(tmp_path):
     """roguelike, social-scraper and sports_betting held `run-tests.py.tmpl` as it stood
     at e9eb759, which runs the whole suite bare, weeks after #391 changed the default."""
     source, root = devkit(tmp_path), project(tmp_path, OLD.encode())
-    [line] = refresh.refresh(root, source)
+    seen: list[tuple[Path, tuple[str, ...]]] = []
+
+    def reconcile(project: Path, rewritten: tuple[str, ...]) -> tuple[int, int]:
+        seen.append((project, rewritten))
+        return 0, 2
+
+    line, ratchet = refresh.refresh(root, source, reconcile=reconcile)
     assert "refreshed" in line
     assert (root / TARGET).read_text(encoding="utf-8") == NEW
+    assert seen == [(root, (TARGET,))]
+    assert ratchet == refresh.ratchet_line((0, 2))
+    assert "recorded 2 gap(s)" in ratchet
+
+
+def test_the_ratchet_line_says_when_nothing_was_reconciled(tmp_path):
+    assert "not reconciled" in refresh.ratchet_line(None)
+    assert "dropped 1 line(s)" in refresh.ratchet_line((1, 0))
+    # A project with no baseline has adopted no ratchet, so there is nothing to carry.
+    assert refresh.reconcile_untested(project(tmp_path, OLD.encode()), (TARGET,)) is None
+
+
+def committed_project(tmp_path: Path, runner: str, baseline: str) -> Path:
+    """A consumer with the vendored scanner, its baseline and `runner` committed."""
+    root = project(tmp_path, runner.encode())
+    hooks = root / "scripts" / "hooks"
+    hooks.mkdir()
+    for name in ("untested_symbols.py", "harness_config.py", "code_text.py"):
+        (hooks / name).write_bytes((REPO_ROOT / "scripts" / "hooks" / name).read_bytes())
+    (root / ".devkit-untested.txt").write_text(baseline, encoding="utf-8", newline="\n")
+    git(root, "init", "-q")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "generated")
+    return root
+
+
+def test_a_refresh_records_the_gaps_the_newer_template_added(tmp_path):
+    """roguelike #48: the pull reconciled the baseline, then the refresh brought in
+    `run-tests.py`'s `changed_paths`, `default_branch`, `tests_for` and `with_basetemp`,
+    and the vendored gate read devkit's four functions as debt the project wrote."""
+    old, new = "def alpha():\n    pass\n", "def alpha():\n    pass\n\n\ndef beta():\n    pass\n"
+    source = tmp_path / "devkit"
+    (source / TEMPLATE).parent.mkdir(parents=True)
+    git(source, "init", "-q")
+    for text in (old, new):
+        (source / TEMPLATE).write_text(text, encoding="utf-8", newline="\n")
+        git(source, "add", "-A")
+        git(source, "commit", "-q", "-m", "template")
+    us = load_script("scripts/hooks/untested_symbols.py")
+    root = committed_project(tmp_path, old, "")
+    # Seeded as a generated project's is: every gap the tree holds, the runner's included.
+    seeded = us.render_baseline(us.gaps(root, us.harness_config.load(root)))
+    (root / ".devkit-untested.txt").write_text(seeded, encoding="utf-8", newline="\n")
+    git(root, "commit", "-q", "-am", "seed")
+
+    lines = refresh.refresh(root, source)
+
+    assert (root / TARGET).read_text(encoding="utf-8") == new
+    assert lines[-1] == refresh.ratchet_line((0, 1))
+    recorded = (root / ".devkit-untested.txt").read_text(encoding="utf-8")
+    assert f"{TARGET}::beta" in recorded.splitlines()
+    assert us.verdict(root, us.harness_config.load(root)) == ([], [])
 
 
 def test_a_copy_checked_out_with_crlf_is_still_the_template_and_keeps_its_endings(tmp_path):
