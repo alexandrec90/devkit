@@ -674,6 +674,23 @@ def test_the_temp_root_plugin_is_wired_in_the_box_before_the_commit(tmp_path, mo
     assert wired == [run.box]
 
 
+def test_an_untouched_template_is_refreshed_in_the_box_before_the_commit(tmp_path, monkeypatch):
+    """114da279: a template is a one-shot copy, so three consumers still ran the whole
+    suite bare weeks after the template stopped. The refresh runs in the box, from the
+    devkit worktree at the tag, before anything is staged."""
+    run = BoxRun(tmp_path, monkeypatch)
+    seen: list[tuple[Path, Path]] = []
+
+    def refresh(box, source):
+        seen.append((box, source))
+        assert ("add", "-A") not in run.git.calls, "refreshed after staging"
+        return []
+
+    monkeypatch.setattr(up.template_refresh, "refresh", refresh)
+    assert run.run(tmp_path).code == 0
+    assert seen == [(run.box, tmp_path / "src")]
+
+
 def test_the_upgrade_pr_is_labelled_automerge(tmp_path, monkeypatch):
     """An upgrade PR is a vendored copy of an already-released tag, so a green gate
     is the whole review; the label is what lets `reconcile --merge` and the vendored

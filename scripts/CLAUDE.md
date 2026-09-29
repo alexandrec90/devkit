@@ -42,9 +42,11 @@ what the hook runs and CI does not, are both held to a written reason by
 - **Never hard-code project specifics in a hook script.** A new behaviour gets a manifest
   field and a neutral default in `harness_config.py`, not an `if project ==` branch.
 - **`templates/` is a one-shot copy.** `--pull` never looks at a template again, so every
-  fix made here after a project was generated stays here, and nothing can report the gap.
-  When a file stops having a per-project value, move it into `MANIFEST` rather than
-  leaving it rendered.
+  fix made here after a project was generated stays here. The one exception is a copy the
+  project never edited: `template_refresh.py`, run in every adoption box, replaces one
+  byte-identical to an earlier version of a template it lists. A project's own edits
+  keep it out of reach, so when a file stops having a per-project value, move it into
+  `MANIFEST` rather than leaving it rendered.
 - **A file that only one tier can use goes in `GATED_MANIFEST`, not in `templates/`.**
   `MANIFEST` is unconditional -- every consumer holds every path -- which is right for
   the harness and wrong for `frontend/src/worktreePort.ts`, which is nonsense in devkit

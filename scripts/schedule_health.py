@@ -152,6 +152,34 @@ ARTIFACTS: dict[str, str] = {
 }
 
 
+def failure_artifact(
+    name: str,
+    artifacts: dict[str, str] | None = None,
+    root: Path | None = None,
+    since: _dt.datetime | None = None,
+) -> str:
+    """The artifact to cite for `name`'s run at `since`: its `.failed` copy when that run
+    wrote one, else the per-run artifact ("" for a job with none).
+
+    The per-run artifact belongs to whichever pass ran last, and a job that fails once and
+    passes fifteen minutes later has erased the only account of the failure before any
+    sweep reads it -- 3a8c74a3 was `devkit-worktree-reconcile` failing at 22:30, filed
+    pointing at `logs/reconcile.log`, and read beside the next pass's `exit=0`. `log-wrap.py`
+    and `worktree.write_reconcile_log` keep `<stem>.failed.log` for exactly this, written
+    only on a failure; a copy older than `since` is an earlier failure's, not this one's.
+    """
+    path = (ARTIFACTS if artifacts is None else artifacts).get(name, "")
+    if not path.endswith(".log"):
+        return path
+    kept = path[: -len(".log")] + ".failed.log"
+    target = (REPO_ROOT if root is None else root) / kept
+    try:
+        written = _dt.datetime.fromtimestamp(target.stat().st_mtime)
+    except OSError:
+        return path
+    return kept if since is None or written >= since else path
+
+
 def artifact_hint(
     name: str,
     artifacts: dict[str, str] | None = None,
@@ -193,8 +221,11 @@ def artifact_hint(
     *scheduled* result, which a hand-run pass never updates. Not newer -- or unknown --
     means the run itself recorded nothing, and the job's own console output is the only
     remaining place to look.
+
+    The pointer names `failure_artifact`'s choice, so a run that kept a `.failed` copy is
+    read from that rather than from the pass that overwrote it.
     """
-    path = (ARTIFACTS if artifacts is None else artifacts).get(name, "")
+    path = failure_artifact(name, artifacts, root, since)
     if not path:
         return ""
     base = REPO_ROOT if root is None else root

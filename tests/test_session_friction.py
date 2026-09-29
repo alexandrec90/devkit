@@ -199,6 +199,32 @@ def test_an_environment_failure_is_seen_through_a_pipe_that_hid_its_exit_code():
     assert classes([grep, result("x.py:1: No module named", "3", error=False)]) == []
 
 
+def test_a_separator_inside_a_quoted_argument_starts_no_test_run():
+    """0d422fe7: the `\\|pytest` of a grep's alternation read as pytest in command
+    position, and what it grepped -- this file -- quoted "No module named pytest"."""
+    command = (
+        'grep -n "full-suite\\|pytest\\|run-tests" tests/test_session_friction.py | sed -n 1,80p;'
+        ' grep -rln "session_friction" tests/ | head'
+    )
+    printed = (
+        '190:    """`python -m pytest ... | tail -3` exits 0 whatever pytest did, so "No module'
+        ' named\n191:    pytest" went unfiled -- twice in one sweep. A test run or a git ca'
+    )
+    assert classes([call(command, "1"), result(printed, "1", error=False)]) == []
+    assert not sf.runs_tests(command)
+    assert classes([call('grep -n "x\\|pytest tests" a.py', "2")]) == []
+    assert classes([call("grep 'a;pytest' b.py", "3")]) == []
+    assert classes([call('pytest "tests/test_x.py" | tail -3', "4")]) == []
+    assert classes([call('echo "x"; pytest tests -q', "5")]) == ["full-suite"]
+
+
+def test_command_position_keeps_the_length_and_the_quoted_text():
+    command = "grep -n 'a|b' x.py; git log --grep \"c;d\""
+    blanked = sf.command_position(command)
+    assert len(blanked) == len(command)
+    assert blanked == "grep -n 'a b' x.py; git log --grep \"c d\""
+
+
 def test_an_error_quoted_inside_a_string_on_its_line_is_not_friction():
     """The first supervised rehearsal would have filed seven groups from text that quoted
     an error: a `git diff` of the rule's prose, pytest echoing an assertion's operands,

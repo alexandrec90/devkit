@@ -94,6 +94,7 @@ from adoption_prs import (
 import sweep
 import task_branch as tb
 import task_input
+import template_refresh
 import temproot_wiring
 import worktree
 from worktree_env import SKIP_PROVISION_VAR
@@ -748,7 +749,8 @@ def plan_lines(name: str, previous: str, tag: str, default_branch: str) -> list[
         f" (fresh off origin/{default_branch})",
         f"  2. {SYNC_SCRIPT} --pull --src <devkit worktree at {tag}>  [in the box]",
         f"  3. load the vendored temp-root plugin from the project's own pytest config"
-        f" ({temproot_wiring.__name__}.wire)",
+        f" ({temproot_wiring.__name__}.wire), and refresh an untouched earlier template"
+        f" ({template_refresh.__name__}.refresh)",
         f"  4. git add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths",
         f"  5. git commit -m {commit_message(tag, '<n>')!r}",
         "  6. git push -u origin, then gh pr create",
@@ -769,6 +771,19 @@ class Outcome:
     name: str
     code: int
     detail: str = ""
+
+
+def _update_owned_files(name: str, box: Path, source: Path) -> None:
+    """The adoption's edits to files the project owns, which no pull touches.
+
+    The plugin the pull vendored loads only from the project's own pytest config
+    (7f011bf8); anything short of a whole wiring leaves the tree as it was. And a
+    template is a one-shot copy, so a project that never edited its copy would keep the
+    one it was generated with forever (114da279); its own edits are left alone.
+    """
+    print(f"upgrade: {name} -- temp-root plugin: {temproot_wiring.wire(box)}")
+    for line in template_refresh.refresh(box, source):
+        print(f"upgrade: {name} -- {line}")
 
 
 def upgrade_one(
@@ -859,9 +874,7 @@ def upgrade_one(
             checked.stderr,
         )
 
-    # The plugin the pull vendored loads only from files the project owns, which no pull
-    # touches (7f011bf8). Anything short of a whole wiring leaves the tree as it was.
-    print(f"upgrade: {name} -- temp-root plugin: {temproot_wiring.wire(box)}")
+    _update_owned_files(name, box, source)
 
     changed = changed_paths(box_git)
     if not changed:
