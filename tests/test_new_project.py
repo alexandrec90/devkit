@@ -1491,8 +1491,17 @@ def test_generated_automerge_holds_runtime_majors_for_review(tmp_path):
     body = (root / ".github" / "workflows" / "dependabot-automerge.yml").read_text(encoding="utf-8")
     classify = body.split("  classify:", 1)[1].split("  merge:", 1)[0]
     assert "length > 0 and all(.[];" in classify
-    assert '.dependencyType == "direct:development"' in classify
     assert '"needs-manual-merge"' in classify
+    # A dev dependency qualifies whatever its update type -- including none: carameli
+    # #393 held eleven classified updates for two days over one unclassified dev one.
+    # Only patch and minor admit anything else, so a runtime major still waits.
+    rule = classify.split("all(.[];", 1)[1].split(")", 1)[0]
+    clauses = {" ".join(c.split()) for c in re.split(r"\s+or\s+", rule)}
+    assert clauses == {
+        '.dependencyType == "direct:development"',
+        '.updateType == "version-update:semver-patch"',
+        '.updateType == "version-update:semver-minor"',
+    }, rule
 
 
 def test_lock_step_is_skipped_gracefully_without_uv(tmp_path, monkeypatch):

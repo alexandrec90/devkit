@@ -62,6 +62,29 @@ def test_a_job_that_has_never_run_is_reported():
     assert "never run" in health.problems([overdue], NOW)[0]
 
 
+def test_a_job_that_fires_on_logon_has_not_missed_anything_before_the_next_logon():
+    """`devkit-tray` was re-registered on 2026-09-27 and read "registered but has never
+    run" from then until the next logon, with its tray process alive since the 26th: a
+    logon trigger has no next run time, so the rule for a missed first run always fired."""
+    tray = job(name="devkit-tray", last_run=None, next_run=None, event_only=True)
+    assert health.problems([tray], NOW) == []
+    timed = job(last_run=None, next_run=None)
+    assert "never run" in health.problems([timed], NOW)[0]
+
+
+def test_only_a_task_whose_every_trigger_is_an_event_is_event_only():
+    header = '"TaskName","Scheduled Task State","Last Result","Last Run Time","Next Run Time","Task To Run","Schedule Type"\n'
+    logon = '"\\devkit-tray","Enabled","267011","N/A","N/A","pythonw tray.py","At logon time"\n'
+    both = (
+        '"\\devkit-rc","Enabled","0","N/A","N/A","py rc.py","At system start up"\n'
+        '"\\devkit-rc","Enabled","0","N/A","N/A","py rc.py","Daily"\n'
+    )
+    jobs = {j.name: j for j in health.parse_tasks(header + logon + both)}
+    assert jobs["devkit-tray"].event_only and not jobs["devkit-rc"].event_only
+    boot = job(event_only=True, next_run=None)
+    assert not health.merge_triggers(boot, job(event_only=False)).event_only
+
+
 def test_a_failed_run_is_reported_with_its_exit_code():
     line = health.problems([job(last_result=1)], NOW)[0]
     assert "failed (exit 1)" in line

@@ -31,6 +31,7 @@ Tested in `tests/test_fix_loop.py`, and through the pass in `tests/test_fix_pass
 from __future__ import annotations
 
 import datetime as _dt
+import re
 import sys
 import shutil
 import tempfile
@@ -48,6 +49,7 @@ import fix_verify
 import friction_pending
 import ship_intent
 import harness_triage as triage
+import schedule_health
 import session_friction
 import sweep
 
@@ -103,6 +105,7 @@ def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
         journal.step("tree", _one_tree, ctx, tree, journal, closed)
     cursor = ctx.ledger_path.parent / session_friction.CURSOR_NAME
     journal.add(*journal.step("harvest", _harvest, ctx, cursor, default=[]))
+    journal.add(*journal.step("jobs", job_findings, ctx, default=[]))
     if ctx.writes:
         closed.lines += journal.step("verify", _verify, ctx, default=[])
         closed.lines += journal.step("recheck", _recheck, ctx, default=[])
@@ -210,6 +213,56 @@ def fixers_working() -> frozenset[str]:
     interactive session, busy by definition, and ships its own tree through it.
     """
     return bg_sessions.working(bg_sessions.listed(ship_intent.run_quiet), ("background",))
+
+
+# A scheduled job's own failure, read off the scheduler. Only `log-wrap.py --always` jobs
+# filed theirs, and eight of twelve ran bare: reconcile exited 1 every 15 minutes over
+# husks it could not delete and boxes it would not, and no pass ever saw it.
+JOB_KIND = "scheduled-job"
+# What `schedule_health.artifact_hint` says when a later run finished clean.
+JOB_HISTORY = "the scheduler is reporting history"
+# The run's time and count, kept out of the detail: a group must survive its recurrences.
+_JOB_WHEN = re.compile(r" (?:at|since) \d{4}-\d\d-\d\d \d\d:\d\d| \(\d+ intervals ago\)")
+
+
+def job_findings(ctx: Context, jobs: list[schedule_health.Job] | None = None) -> list[Finding]:
+    """A finding per devkit job the scheduler says needs attention, bar one it is only
+    remembering: a line whose group was resolved after the run it reports. The scheduler
+    repeats a daily job's last result for a day, so that run would reopen its own fix."""
+    jobs = schedule_health.query() if jobs is None else jobs
+    by_name = {job.name: job for job in jobs}
+    items = triage.load(ctx.devkit_dir)
+    found: list[Finding] = []
+    local_now = ctx.now.astimezone().replace(tzinfo=None)  # the scheduler speaks local time
+    for line in schedule_health.problems(jobs, local_now, schedule_health.stood_down()):
+        name, head = line.split(":", 1)[0], line.split(" -- ", 1)[0]
+        if JOB_HISTORY in line:
+            continue
+        artifact = schedule_health.ARTIFACTS.get(name, "")
+        finding = Finding(
+            JOB_KIND,
+            fix_cycle.DEVKIT,
+            _JOB_WHEN.sub("", head),
+            evidence=str(ctx.devkit_dir / artifact) if artifact else "",
+            command=line[:300],
+        )
+        job = by_name.get(name)
+        if job and job.last_run and _resolved_since(finding, items, job.last_run):
+            continue
+        found.append(finding)
+    return found
+
+
+def _resolved_since(finding: Finding, items: list[triage.Item], when: _dt.datetime) -> bool:
+    """Whether `finding`'s group was resolved after `when` (the scheduler's local time)."""
+    since = when.astimezone(_dt.UTC).isoformat(timespec="seconds")
+    group = fix_findings.signature(finding)
+    ids = {item.id for item in items if item.signature == group}
+    verdict = triage.verdicts(items)
+    return any(
+        verdict.get(ref, ("", ""))[0] == triage.RESOLVED_EVENT and verdict[ref][1] > since
+        for ref in ids
+    )
 
 
 def _harvest(ctx: Context, cursor: Path) -> list[Finding]:

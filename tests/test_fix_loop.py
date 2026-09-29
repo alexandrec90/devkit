@@ -28,6 +28,8 @@ def ctx(tmp_path, monkeypatch):
     (tmp_path / "devkit").mkdir()
     monkeypatch.setattr(fix_reports, "CLAUDE_PROJECTS", tmp_path / "projects")
     monkeypatch.setattr(fix_loop.session_friction, "harvest", lambda *a, **k: [])
+    # The machine's own Task Scheduler, which `close` would otherwise read and file.
+    monkeypatch.setattr(fix_loop.schedule_health, "query", lambda *a, **k: [])
     monkeypatch.setattr(
         fix_loop.fix_verify, "verify", lambda *a, **k: fix_loop.fix_verify.Outcome()
     )
@@ -459,6 +461,53 @@ def test_a_plan_harvest_reads_from_the_real_cursor_and_leaves_it_where_it_was(ct
     assert fix_loop._harvest(plan, cursor) == []
     assert seen == ['{"t.jsonl": {"offset": 40, "line": 3, "cwd": "x"}}\n']
     assert cursor.read_text(encoding="utf-8").startswith('{"t.jsonl"'), "the cursor did not move"
+
+
+def _job(name: str, result: int, ran: _dt.datetime) -> fix_loop.schedule_health.Job:
+    later = ran + _dt.timedelta(minutes=15)
+    return fix_loop.schedule_health.Job(
+        name, True, result, ran.replace(tzinfo=None), later.replace(tzinfo=None)
+    )
+
+
+def test_a_failing_scheduled_job_is_filed_whatever_wraps_it(ctx):
+    """Only `log-wrap.py --always` jobs filed their failures, and eight of twelve ran
+    bare: reconcile exited 1 every 15 minutes over four undeletable husks and six
+    stranded boxes, and no pass ever saw it (2026-09-27)."""
+    ran = NOW - _dt.timedelta(minutes=5)
+    [found] = fix_loop.job_findings(ctx, [_job("devkit-worktree-reconcile", 1, ran)])
+    assert (found.kind, found.project) == (fix_loop.JOB_KIND, "devkit")
+    assert found.detail == "devkit-worktree-reconcile: last run failed (exit 1)", "no time in it"
+    assert found.evidence.endswith("reconcile.log")
+    healthy = _job("devkit-worktree-reconcile", 0, ran)
+    assert fix_loop.job_findings(ctx, [healthy]) == []
+
+
+def test_a_job_failure_resolved_after_that_run_is_not_filed_again_until_it_recurs(ctx):
+    """The scheduler repeats a daily job's last result for a day after its fix lands; a
+    group resolved since that run is not reopened by the same run, only by a later one."""
+    ran = NOW - _dt.timedelta(hours=3)
+    job = _job("devkit-installers", 2, ran)
+    [found] = fix_loop.job_findings(ctx, [job])
+    fix_findings.record_all([found], [], ctx.devkit_dir)
+    [item] = triage.open_items(triage.load(ctx.devkit_dir))
+    triage.resolve([item.id], "fixed", root=ctx.devkit_dir)
+    assert fix_loop.job_findings(ctx, [job]) == [], "resolved after the run it reports"
+    again = _job("devkit-installers", 2, _dt.datetime.now(_dt.UTC) + _dt.timedelta(days=1))
+    assert len(fix_loop.job_findings(ctx, [again])) == 1, "it failed again after the fix"
+
+
+def test_a_job_the_scheduler_only_remembers_failing_is_not_filed(ctx, monkeypatch):
+    monkeypatch.setattr(
+        fix_loop.schedule_health,
+        "artifact_hint",
+        lambda *a, **k: (
+            " -- x is empty and was rewritten later: a later pass finished clean "
+            "and the scheduler is reporting history"
+        ),
+    )
+    job = _job("devkit-upgrade-projects", 2, NOW - _dt.timedelta(hours=9))
+    assert fix_loop.job_findings(ctx, [job]) == []
 
 
 def test_the_files_sessions_are_told_to_write_are_the_files_the_pass_reads():
