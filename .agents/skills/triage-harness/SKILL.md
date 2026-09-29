@@ -164,7 +164,10 @@ it not* — then fix that, and test it. A group marked `RECURRED` in the triage 
 retired before by a fix that did not hold: its last note is what not to repeat. One
 marked `PENDING on <pr>` is the reverse: its fix is written and not merged yet, so the
 pass sends no session at it, and the pass retires the rows filed while it waited against
-that PR once it merges; only a row filed after the merge reads `RECURRED`. The only
+that PR once it merges; only a row filed after the merge reads `RECURRED`. A
+`REOPENED <id>` line is a resolution `scripts/fix_verify.py` undid, most often because
+its `--pr` named a branch that never became a PR: when a merged PR does hold the fix,
+resolve again naming its number. The only
 mechanism ruled out is a coding-agent hook; a test, a git hook, a CI check, a scheduled
 job or a provisioner all are fair game.
 

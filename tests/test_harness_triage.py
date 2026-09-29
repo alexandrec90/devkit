@@ -456,6 +456,45 @@ def test_a_defect_back_after_a_resolution_is_marked_as_a_fix_that_did_not_hold()
     assert "RECURRED" not in triage.render(triage.open_items(fresh), fresh)
 
 
+def test_a_reopened_row_says_why_and_which_resolution_it_undid():
+    """3355a63a read `RECURRED ... last: <an older, unrelated note>`, while what had
+    happened was that its own resolution named `agent/fix-harness-ledger-0927`, the fix
+    merged as #439 from the name it was carried to, and `fix_verify` reopened it saying
+    to resolve again with the PR's number. The session learned that from the raw ledger."""
+    first = _line("scheduled-job-failed", stamp=_STAMPS[0], message="job failed")
+    ref = triage.item_id(first)
+    held = _line(
+        "triage-resolved", stamp=_STAMPS[1], ref=ref, pr="agent/x", note="pushed past the gate"
+    )
+    undone = _line(
+        "triage-reopened", stamp="2026-08-24T12:00:03+00:00", ref=ref, note="no PR from agent/x"
+    )
+    history = triage.read_items("\n".join((first, held, undone)))
+    assert triage.reopened(history) == {
+        ref: "no PR from agent/x; the resolution it undid (pr=agent/x): pushed past the gate"
+    }
+    text = triage.render(triage.open_items(history), history)
+    assert f"  REOPENED {ref} -- no PR from agent/x; the resolution it undid" in text
+    # Resolved again after the reopening: it stands, and nothing is reopened.
+    again = _line("triage-resolved", stamp="2026-08-24T12:00:04+00:00", ref=ref, note="#439")
+    assert triage.reopened(triage.read_items("\n".join((first, held, undone, again)))) == {}
+    # A reopening with no resolution on record still says why.
+    bare = triage.read_items("\n".join((first, undone)))
+    assert triage.reopened(bare) == {
+        ref: "no PR from agent/x; the resolution it undid: none on record"
+    }
+
+
+def test_verdict_lines_prefer_a_fix_in_flight_to_a_recurrence():
+    assert triage.verdict_lines(None, None) == []
+    assert triage.verdict_lines("", []) == []
+    assert triage.verdict_lines("410", ["old"])[0].startswith("  PENDING on 410 --")
+    assert triage.verdict_lines(None, ["a", "b"]) == [
+        "  RECURRED after 2 resolutions -- last: b -- that fix did not hold; "
+        "fix the cause so it cannot come back"
+    ]
+
+
 def test_past_fixes_counts_only_resolutions_still_standing():
     """A resolution the pass reopened (its branch never merged) was no fix at all."""
     first = _line("agent-report", stamp=_STAMPS[0], message="m")
