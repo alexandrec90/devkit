@@ -717,6 +717,19 @@ def test_commits_ahead_is_none_whenever_git_cannot_say(tmp_path, answer, ahead):
     assert ship_intent.commits_ahead(tmp_path, "main", Runner({"git rev-list": answer})) == ahead
 
 
+def test_cut_at_is_when_the_commit_the_tree_was_cut_from_was_made(tmp_path):
+    """The line after which a resolution naming a retired branch can only be this tree's:
+    `harness_triage.carried` re-points those when the ship carries the intent."""
+    run = Runner(
+        {"git merge-base": (0, "f00d\n", ""), "git log": (0, "2026-09-28T20:00:00-04:00\n", "")}
+    )
+    assert ship_intent.cut_at(tmp_path, "main", run) == "2026-09-28T20:00:00-04:00"
+    [(merge_base, _, _), (log, _, _)] = run.calls
+    assert merge_base == ["git", "merge-base", "HEAD", "origin/main"]
+    assert log == ["git", "log", "-1", "--format=%cI", "f00d"]
+    assert ship_intent.cut_at(tmp_path, "main", Runner({"git merge-base": (1, "", "no")})) == ""
+
+
 def test_a_clean_tree_git_cannot_count_still_pushes(tmp_path, monkeypatch):
     plans = capture_plans(monkeypatch)
     one = intent(tmp_path)

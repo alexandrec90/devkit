@@ -56,6 +56,7 @@ import fix_release
 import fix_red
 import fix_send
 import gate_evidence
+import git_trust
 import installers
 import ship_intent
 import sweep
@@ -86,6 +87,19 @@ SCHEDULED_AGENT = "claude-bg"
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
+
+# One dispatching pass at a time, machine-wide: beside the boxes, which every pass shares
+# whichever checkout it runs from. On 2026-09-29 a supervised pass run from a worktree
+# and the scheduled one started 21 seconds apart; both shipped the same two intents, and
+# the loser's push was refused ("cannot lock ref ... reference already exists") and filed
+# as a ship failure against a branch that had shipped (babfee68). A plan pass ships and
+# sends nothing, so it needs no lock.
+RUN_LOCK_NAME = "fix-pass.lock"
+# Long enough for a normal pass to finish and the waiter to run after it, current.
+RUN_LOCK_WAIT = 300.0
+# Past the watchdog's 25-minute stop (`fix-pass-watchdog.TIMEOUT`): a pass it killed
+# leaves the lock behind, and the next half-hourly fire breaks it.
+RUN_LOCK_STALE = 26 * 60.0
 
 # Every CLI the pass spawns before it can say anything, probed by running it: found is
 # not enough. On Windows `python3` is often only the Store alias, which exits 9009, and
@@ -138,15 +152,16 @@ def ship_intents(
     A push or a PR that failed is retried next pass and filed now; the third element
     turns the task red rather than green over a branch that did not go out. An intent
     where no PR can be opened from is filed for the devkit session to move. An intent
-    whose fixer is still busy in its tree waits (`fix_loop.fixers_working`).
+    whose fixer is still busy in its tree waits (`fix_loop.still_working`).
     """
     lines: list[str] = []
     refused: list[fix_plan.Failure] = []
     failed = False
     busy = fix_loop.fixers_working() if mode == fix_cycle.DISPATCH else frozenset()
+    now = _dt.datetime.now(_dt.UTC)
     for intent in ship_intent.find_intents(root, projects):
         where = f"{intent.project} {intent.branch}"
-        if fix_loop.bg_sessions.busy_in(busy, intent.tree):
+        if fix_loop.still_working(busy, intent.tree, now):
             lines.append(f"{where} -- held: its session is still working in the tree")
             continue
         if intent.blocked:
@@ -169,8 +184,16 @@ def ship_intents(
         outcome = ship_intent.ship_one(intent, push_gate.interpreter(intent.tree), base)
         if outcome.intent.branch != intent.branch:
             # Carried off a retired name: the record names what went out, or it reads as
-            # a merged branch shipping again.
-            where = f"{intent.project} {outcome.intent.branch} (carried off {intent.branch})"
+            # a merged branch shipping again. The session's resolutions named the retired
+            # name too, whose PR predates them, so they follow the fix to its new one.
+            since = ship_intent.cut_at(intent.tree, base)
+            moved = fix_loop.triage.repoint(
+                intent.branch, outcome.intent.branch, since, root / fix_cycle.DEVKIT
+            )
+            where = (
+                f"{intent.project} {outcome.intent.branch} (carried off {intent.branch}; "
+                f"{len(moved)} resolution(s) re-pointed)"
+            )
         # One line: a refusal's detail is hook output, and its newlines broke the record
         # into rows no reader of it could attribute. The tail says why; the rest is evidence.
         lines.append(f"{where} -- {outcome.stage}: {' '.join(outcome.detail.split())[-240:]}")
@@ -386,6 +409,9 @@ def hand_to_scheduled_task() -> int:
     service would lock the scheduled pass out), so a pass run from an elevated VS Code
     refused every launch and left each to a scheduled pass up to 30 minutes away. The
     task runs with the user's ordinary token, so starting it is that same pass, now.
+
+    Either way this checkout's record is rewritten to say so: left alone it still held
+    the previous pass, which a supervisor read back three times as clean dispatches.
     """
     done = subprocess.run(
         ["schtasks", "/Run", "/TN", SCHEDULED_TASK],
@@ -395,14 +421,49 @@ def hand_to_scheduled_task() -> int:
         creationflags=sweep.NO_WINDOW,
     )
     if done.returncode != 0:
-        why = " ".join((done.stderr or done.stdout or "").split())
-        print(f"fix-pass: elevated, and could not start {SCHEDULED_TASK}: {why}", file=sys.stderr)
+        why = f"elevated, and could not start {SCHEDULED_TASK}: " + " ".join(
+            (done.stderr or done.stdout or "").split()
+        )
+        print(f"fix-pass: {why}", file=sys.stderr)
+        write_artifact(f"fix-pass: FAILED -- {why}")
         return EXIT_USAGE
+    write_artifact(
+        f"fix-pass: handed to {SCHEDULED_TASK} -- this shell is elevated; the task runs "
+        f"the pass unelevated from its own checkout, and records it there"
+    )
     print(
         f"fix-pass: this shell is elevated, so the pass was handed to the scheduled task "
         f"{SCHEDULED_TASK}, which runs unelevated; its record lands in {ARTIFACT}"
     )
     return EXIT_OK
+
+
+def run_alone(
+    workspace: Path,
+    mode: str,
+    launch: agent_models.Launch,
+    wait: float = RUN_LOCK_WAIT,
+    stale: float = RUN_LOCK_STALE,
+) -> int:
+    """`run`, with no other dispatching pass on the machine running beside it.
+
+    One still holding the lock after `wait` owns this fire: this pass exits clean and
+    writes nothing, since the record is the running pass's to write. A lock that could
+    not be made at all -- no lock directory standing -- is no evidence of another pass,
+    so the pass runs, as it did before there was a lock.
+    """
+    if mode != fix_cycle.DISPATCH:
+        return run(workspace, mode, launch)
+    root = workspace.parent
+    with worktree.named_lock(root, RUN_LOCK_NAME, wait, stale) as held:
+        lock = worktree.boxes_root(root) / RUN_LOCK_NAME
+        if not held and lock.is_dir():
+            print(
+                f"fix-pass: another dispatching pass holds {lock} -- this one ships and "
+                f"sends nothing; the running pass's record is the one to read"
+            )
+            return EXIT_OK
+        return run(workspace, mode, launch)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -429,8 +490,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"fix-pass: {why}", file=sys.stderr)
         write_artifact(f"fix-pass: FAILED -- {why}")
         return EXIT_USAGE
+    # Before any git call: a tree an elevated session made is one git refuses this
+    # unelevated pass, and every push, read and re-gate in it failed (5025d284, e1463857).
+    writes = mode == fix_cycle.DISPATCH
+    if mode != fix_cycle.OFF and (trusted := git_trust.adopt(workspace.parent, write=writes)):
+        print(trusted)
     try:
-        return run(workspace, mode, launch)
+        return run_alone(workspace, mode, launch)
     except (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError) as exc:
         print(f"fix-pass: {exc}", file=sys.stderr)
         write_artifact(f"fix-pass: FAILED -- {exc}")

@@ -12,13 +12,18 @@ blob of output, and a runner that runs the suite to test the runner recurses.
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
-from support import load_script
+from support import REPO_ROOT, load_script
 
 run_tests = load_script("scripts/run-tests.py")
+fix_plan = load_script("scripts/fix_plan.py")
 
 
 @pytest.fixture
@@ -124,6 +129,54 @@ def test_cap_failure_blocks_is_pure():
     text = "_____ test_a _____\nline"
     run_tests.cap_failure_blocks(text, limit=1)
     assert text == "_____ test_a _____\nline"
+
+
+def template_runner(monkeypatch) -> types.ModuleType:
+    """The template's runner: it has no `{{ }}` (template_refresh lists it), so it loads as-is.
+
+    With no bytecode written: a `__pycache__` beside it would be copied into every
+    generated project with the rest of `templates/core/scripts/`.
+    """
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    path = REPO_ROOT / "templates" / "core" / "scripts" / "run-tests.py.tmpl"
+    loader = importlib.machinery.SourceFileLoader("template_run_tests", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+# 57d473e9's shape: two failures, the first with a long message pytest repeats,
+# indented, under its summary entry. The summary rode on the second failure's block, so
+# that block's cap cut the second FAILED line, and the fix prompt named one test of two.
+TWO_RED = "\n".join(
+    [
+        "=================================== FAILURES ===================================",
+        "_____ test_one _____",
+        "E   AssertionError: sets differ",
+        "_____ test_two _____",
+        "E   AssertionError: offenders",
+        "=========================== short test summary info ============================",
+        "FAILED tests/test_a.py::test_one - AssertionError: sets differ",
+        *[f"  diff line {i}" for i in range(30)],
+        "FAILED tests/test_b.py::test_two - AssertionError: offenders",
+        "========================= 2 failed, 9 passed in 3.2s ==========================",
+    ]
+)
+
+
+@pytest.mark.parametrize("runner", ["devkit", "template"])
+def test_the_short_summary_keeps_every_failed_line_however_long_a_message_is(runner, monkeypatch):
+    module = run_tests if runner == "devkit" else template_runner(monkeypatch)
+    capped = module.cap_failure_blocks(TWO_RED, limit=5)
+    ids = [line.split()[1] for line in capped.splitlines() if line.startswith("FAILED ")]
+    assert ids == ["tests/test_a.py::test_one", "tests/test_b.py::test_two"]
+    kept = [line for line in capped.splitlines() if line.startswith("  diff line")]
+    assert len(kept) == module.SUMMARY_LINES_PER_ENTRY
+    assert f"  ... ({30 - len(kept)} more lines, truncated)" in capped
+    assert capped.splitlines()[-1].startswith("=====")
+    assert fix_plan.signature_from_logs([capped]) == tuple(ids)
 
 
 # --- main ---------------------------------------------------------------------

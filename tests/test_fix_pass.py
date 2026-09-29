@@ -47,6 +47,17 @@ def unelevated(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def git_trusted(monkeypatch):
+    """Every `git_trust.adopt` the pass makes, recorded and never run: a dispatching
+    pass writes git's global config, which is this machine's, not the suite's."""
+    adopted: list[tuple[Path, bool]] = []
+    monkeypatch.setattr(
+        fix_pass.git_trust, "adopt", lambda root, write: adopted.append((root, write)) or ""
+    )
+    return adopted
+
+
+@pytest.fixture(autouse=True)
 def no_session_busy(monkeypatch):
     """No session on this machine is working in a tree unless a test says one is."""
     monkeypatch.setattr(fix_pass.fix_loop, "fixers_working", frozenset)
@@ -73,6 +84,28 @@ def test_an_intent_whose_fixer_is_still_busy_waits_for_it(monkeypatch, tmp_path)
     lines, _, _ = fix_pass.ship_intents(tmp_path, ["devkit"], fix_cycle.DISPATCH)
     assert shipped == ["agent/i"], "an interactive supervisor's own tree still ships"
     assert lines[0] == "devkit agent/b -- held: its session is still working in the tree"
+
+
+def test_an_intent_whose_fixer_waits_on_a_background_task_is_held(monkeypatch, tmp_path):
+    """8d2f56f5: 0929-7 ended its turn to wait on the suite it had started, so `claude
+    agents` listed it idle and the pass shipped the tree mid-test. The stamped session's
+    transcript still had the task out."""
+    trees = [ship_intent.Intent("devkit", tmp_path / "waiting", "agent/w", "S", "B")]
+    trees.append(ship_intent.Intent("devkit", tmp_path / "done", "agent/d", "S", "B"))
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: trees)
+    waiting = {str(tmp_path / "waiting")}
+    monkeypatch.setattr(
+        fix_pass.fix_loop.fix_reports, "awaiting_task", lambda tree, now: str(tree) in waiting
+    )
+    shipped = []
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda i, p, b: shipped.append(i.branch) or ship_intent.Outcome(i, "shipped", "u"),
+    )
+    lines, _, _ = fix_pass.ship_intents(tmp_path, ["devkit"], fix_cycle.DISPATCH)
+    assert shipped == ["agent/d"]
+    assert lines[0] == "devkit agent/w -- held: its session is still working in the tree"
 
 
 def failure(**fields) -> fix_plan.Failure:
@@ -233,6 +266,24 @@ def test_a_switched_off_fire_leaves_a_manual_passs_record_alone(world):
     assert "mode=plan" in before
     assert fix_pass.run(world["workspace"], fix_cycle.OFF, "claude-bg", NOW) == 0
     assert artifact(world) == before
+
+
+def test_the_workspace_is_trusted_before_any_git_call_and_written_only_by_a_dispatch(
+    world, git_trusted, monkeypatch
+):
+    """5025d284, e1463857: trees an elevated session made are refused to this unelevated
+    pass as dubious ownership. Trusted before the ship step, in every mode that runs;
+    git's global config is written only by a pass that acts."""
+    order = []
+    monkeypatch.setattr(fix_pass, "run", lambda *a, **k: order.append(len(git_trusted)) or 0)
+    workspace = str(world["workspace"])
+    root = world["workspace"].parent.resolve()
+    assert fix_pass.main(["--mode", "off", "--workspace", workspace]) == 0
+    assert git_trusted == [], "a switched-off pass runs no git"
+    for mode in ("plan", "dispatch"):
+        assert fix_pass.main(["--mode", mode, "--workspace", workspace]) == 0
+    assert git_trusted == [(root, False), (root, True)]
+    assert order == [0, 1, 2], "trusted before the pass runs"
 
 
 def test_plan_writes_the_whole_plan_and_sends_nothing(world):
@@ -824,6 +875,57 @@ def test_the_parser_defaults_to_the_background_agent_and_no_mode():
     assert (args.mode, args.agent, args.scheduled) == (None, "claude-bg", False)
 
 
+def _launch():
+    return fix_pass.agent_models.Launch.parse("claude-bg", None, None)
+
+
+def test_a_dispatching_pass_beside_a_running_one_ships_and_sends_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """babfee68: a supervised pass and the scheduled one started 21 seconds apart and
+    shipped the same intents; the loser's push was refused ("cannot lock ref") and filed
+    as a ship failure of a branch that had just shipped."""
+    workspace = tmp_path / "alex.code-workspace"
+    monkeypatch.setattr(fix_pass, "run", lambda *a, **k: pytest.fail("a second pass ran"))
+    with fix_pass.worktree.named_lock(tmp_path, fix_pass.RUN_LOCK_NAME, 0.1, 60.0) as held:
+        assert held
+        code = fix_pass.run_alone(workspace, fix_cycle.DISPATCH, _launch(), wait=0.2, stale=60.0)
+    assert code == fix_pass.EXIT_OK
+    assert "another dispatching pass holds" in capsys.readouterr().out
+
+
+def test_a_dispatching_pass_holds_the_lock_while_it_runs_and_releases_it(tmp_path, monkeypatch):
+    workspace = tmp_path / "alex.code-workspace"
+    lock = fix_pass.worktree.boxes_root(tmp_path) / fix_pass.RUN_LOCK_NAME
+    monkeypatch.setattr(fix_pass, "run", lambda *a, **k: 7 if lock.is_dir() else 0)
+    assert fix_pass.run_alone(workspace, fix_cycle.DISPATCH, _launch()) == 7
+    assert not lock.exists()
+
+
+def test_a_plan_pass_and_an_unmakeable_lock_run_regardless(tmp_path, monkeypatch):
+    """A plan ships and sends nothing, so it never waits; and a lock that could not be made
+    at all is no evidence of another pass, so the pass runs as it did before the lock."""
+    workspace = tmp_path / "alex.code-workspace"
+    monkeypatch.setattr(fix_pass, "run", lambda ws, mode, launch: 5)
+    with fix_pass.worktree.named_lock(tmp_path, fix_pass.RUN_LOCK_NAME, 0.1, 60.0):
+        assert fix_pass.run_alone(workspace, fix_cycle.PLAN, _launch(), wait=0.1) == 5
+    unmakeable = tmp_path / "other"
+    unmakeable.mkdir()
+    fix_pass.worktree.boxes_root(unmakeable).write_text("a file, not a directory", encoding="utf-8")
+    elsewhere = unmakeable / "alex.code-workspace"
+    assert fix_pass.run_alone(elsewhere, fix_cycle.DISPATCH, _launch(), wait=0.1) == 5
+
+
+def test_the_pass_lock_outlives_no_pass_the_watchdog_lets_run():
+    """A lock broken while its pass still runs is two passes again; the watchdog stops a
+    pass at `TIMEOUT`, so only a lock older than that can be a dead pass's."""
+    watchdog = load_script("scripts/fix-pass-watchdog.py")
+    assert fix_pass.RUN_LOCK_STALE > watchdog.TIMEOUT.total_seconds()
+    assert fix_pass.RUN_LOCK_STALE + fix_pass.RUN_LOCK_WAIT < 2 * watchdog.TIMEOUT.total_seconds()
+    # The fire after one the watchdog killed breaks the lock rather than waiting it out.
+    assert fix_pass.RUN_LOCK_STALE < watchdog.TIMEOUT.total_seconds() + 5 * 60
+
+
 def test_a_missing_workspace_is_a_usage_error(tmp_path, capsys):
     assert fix_pass.main(["--workspace", str(tmp_path / "nope")]) == fix_pass.EXIT_USAGE
     assert "no workspace file" in capsys.readouterr().err
@@ -951,16 +1053,21 @@ def test_an_elevated_dispatch_hands_the_pass_to_the_scheduled_task(world, monkey
         lambda argv, **k: ran.append(argv) or subprocess.CompletedProcess(argv, 0, "SUCCESS", ""),
     )
     workspace = str(world["workspace"])
+    fix_pass.write_artifact("fix-pass: mode=plan\nharness  clean")
     assert fix_pass.main(["--mode", "dispatch", "--workspace", workspace]) == 0
     assert [argv for argv in ran if argv[0] == "schtasks"] == [
         ["schtasks", "/Run", "/TN", fix_pass.SCHEDULED_TASK]
     ]
     assert "handed to the scheduled task" in capsys.readouterr().out
+    # The record is rewritten to say so: the supervisor read the previous plan pass's
+    # record back three times, as three clean dispatches, while the task ran elsewhere.
+    assert artifact(world).startswith(f"fix-pass: handed to {fix_pass.SCHEDULED_TASK} --")
     installer = load_script("scripts/install-fix-pass-task.py")
     assert fix_pass.SCHEDULED_TASK == installer.TASK_NAME
 
 
-def test_a_scheduled_task_that_will_not_start_is_said_not_swallowed(monkeypatch, capsys):
+def test_a_scheduled_task_that_will_not_start_is_said_not_swallowed(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(fix_pass, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(
         fix_pass.subprocess,
         "run",
@@ -968,6 +1075,8 @@ def test_a_scheduled_task_that_will_not_start_is_said_not_swallowed(monkeypatch,
     )
     assert fix_pass.hand_to_scheduled_task() == fix_pass.EXIT_USAGE
     assert "could not start devkit-fix-pass: ERROR: Access is denied." in capsys.readouterr().err
+    record = (tmp_path / fix_pass.ARTIFACT).read_text(encoding="utf-8")
+    assert record.startswith("fix-pass: FAILED -- elevated, and could not start devkit-fix-pass")
 
 
 def test_an_elevated_plan_or_scheduled_pass_still_runs_in_place(world, monkeypatch):
@@ -993,8 +1102,22 @@ def test_a_carried_intent_is_recorded_under_the_branch_it_went_out_on(monkeypatc
         "ship_one",
         lambda *a: ship_intent.Outcome(moved, ship_intent.SHIPPED, "u/pull/9", "u/pull/9"),
     )
+    monkeypatch.setattr(fix_pass.ship_intent, "cut_at", lambda tree, base: "2026-09-27T00:00:00Z")
+    pointed = []
+    monkeypatch.setattr(
+        fix_pass.fix_loop.triage,
+        "repoint",
+        lambda old, new, since, root: pointed.append((old, new, since, root)) or ["r1", "r2"],
+    )
     [line], _, _ = fix_pass.ship_intents(tmp_path, ["devkit"], fix_cycle.DISPATCH)
-    assert line.startswith("devkit agent/x-0927-2 (carried off agent/x-0927) -- shipped")
+    assert line.startswith(
+        "devkit agent/x-0927-2 (carried off agent/x-0927; 2 resolution(s) re-pointed) -- shipped"
+    )
+    # Its session's resolutions named the retired branch, whose PR merged before they were
+    # written: `fix_verify` could never settle them, and reopened them two days on.
+    assert pointed == [
+        ("agent/x-0927", "agent/x-0927-2", "2026-09-27T00:00:00Z", tmp_path / "devkit")
+    ]
 
 
 def test_ship_intents_in_plan_mode_only_says_what_it_would_do(monkeypatch, tmp_path):

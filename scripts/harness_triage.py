@@ -69,6 +69,8 @@ RESOLVED_EVENT = "triage-resolved"
 # from the branch it names -- is undone by one of these (`fix_verify.py`). Append-only
 # like everything else: the later of the two verdicts on a ref is the one that stands.
 REOPENED_EVENT = "triage-reopened"
+# On a resolution written again after its fix moved branch: when it was first made.
+RESOLVED_FIELD = "resolved"
 
 # The field each event name carries its human-readable substance in, in preference
 # order. A signature groups by it, so `--resolve-like` can retire one recurrence of a
@@ -263,6 +265,35 @@ def past_fixes(history: list[Item]) -> dict[tuple[str, str, str, str], list[str]
     return notes
 
 
+def reopened(history: list[Item]) -> dict[str, str]:
+    """`ref -> what happened` for each item whose latest verdict is a reopening: why it
+    was reopened, and the resolution that undid, with the `pr=` it named.
+
+    Without it an open group read only as `RECURRED` over an older, unrelated note,
+    while its own resolution -- right about the fix, wrong about the branch, which was
+    carried to another name before it merged -- had been reopened by `fix_verify`, whose
+    note says to resolve again naming the PR. 3355a63a's session found that by grepping
+    the raw ledger.
+    """
+    latest = verdicts(history)
+    undone: dict[str, Item] = {}
+    why: dict[str, str] = {}
+    for item in history:
+        ref = item.fields.get("ref", "")
+        if item.event == RESOLVED_EVENT and (ref not in undone or item.stamp >= undone[ref].stamp):
+            undone[ref] = item
+        elif item.event == REOPENED_EVENT and latest.get(ref) == (REOPENED_EVENT, item.stamp):
+            why[ref] = item.fields.get("note", "")
+    found: dict[str, str] = {}
+    for ref, note in why.items():
+        was = undone.get(ref)
+        named = f" (pr={was.fields.get('pr', '')})" if was and was.fields.get("pr") else ""
+        found[ref] = f"{note}; the resolution it undid{named}: " + (
+            was.fields.get("note", "") if was else "none on record"
+        )
+    return found
+
+
 def pending_groups(
     history: list[Item], in_flight: Mapping[str, str]
 ) -> dict[tuple[str, str, str, str], str]:
@@ -333,11 +364,10 @@ def recent(
         ref = item.fields.get("ref", "")
         if item.event != RESOLVED_EVENT or standing.get(ref) != (item.event, item.stamp):
             continue
-        if not target(item.fields.get("pr", ""))[1] or not within(item.stamp, now, window):
+        made = resolved_at(item)
+        if not target(item.fields.get("pr", ""))[1] or not within(made, now, window):
             continue
-        found.append(
-            Resolution(ref, item.stamp, item.fields.get("pr", ""), item.fields.get("note", ""))
-        )
+        found.append(Resolution(ref, made, item.fields.get("pr", ""), item.fields.get("note", "")))
     return found
 
 
@@ -398,6 +428,7 @@ def render(
     if not items:
         return "harness-triage: nothing open\n"
     fixes = past_fixes(history or [])
+    back = reopened(history or [])
     pending = pending or {}
     lines = ["# source: scripts/harness_triage.py", f"# open: {count_line(items, pending)}", ""]
     for (event, agent, project, _), bucket in groups(items):
@@ -417,22 +448,30 @@ def render(
                 lines.append(f"  {name:<6} {head.fields[name]}")
         if len(bucket) > 1:
             lines.append(f"  ids    {' '.join(i.id for i in bucket)}")
-        if waiting := pending.get(head.signature):
-            lines.append(
-                f"  PENDING on {waiting} -- its fix has not merged yet, so these rows are the "
-                "defect still on the default branch: nothing to do until it lands"
-            )
-        elif before := fixes.get(head.signature):
-            times = f"{len(before)} resolution" + ("s" if len(before) > 1 else "")
-            lines.append(
-                f"  RECURRED after {times} -- last: {before[-1]} -- that fix did not hold; "
-                "fix the cause so it cannot come back"
-            )
+        lines.extend(f"  REOPENED {i.id} -- {back[i.id]}" for i in bucket if i.id in back)
+        lines.extend(verdict_lines(pending.get(head.signature), fixes.get(head.signature)))
         lines.append("")
     lines.append(
         "resolve: python scripts/harness_triage.py --resolve-like <id> --note '<what fixed it>'"
     )
     return "\n".join(lines) + "\n"
+
+
+def verdict_lines(waiting: str | None, before: list[str] | None) -> list[str]:
+    """What earlier resolutions of a group's signature say about it now: its fix is in
+    flight on `waiting`, or it came back after the fixes noted in `before`, or nothing."""
+    if waiting:
+        return [
+            f"  PENDING on {waiting} -- its fix has not merged yet, so these rows are the "
+            "defect still on the default branch: nothing to do until it lands"
+        ]
+    if before:
+        times = f"{len(before)} resolution" + ("s" if len(before) > 1 else "")
+        return [
+            f"  RECURRED after {times} -- last: {before[-1]} -- that fix did not hold; "
+            "fix the cause so it cannot come back"
+        ]
+    return []
 
 
 def ledger_file(root: Path | None = None) -> Path:
@@ -484,19 +523,71 @@ def load(root: Path | None = None) -> list[Item]:
     return items
 
 
-def resolve(ids: list[str], note: str, pr: str = "", root: Path | None = None) -> list[str]:
-    """Record one `triage-resolved` per id. Returns the ids written."""
+def resolve(
+    ids: list[str], note: str, pr: str = "", root: Path | None = None, resolved: str = ""
+) -> list[str]:
+    """Record one `triage-resolved` per id. Returns the ids written. `resolved` is when
+    the resolution was first made, for one written again (`repoint`)."""
     if not note.strip():
         raise ValueError("a resolution needs a --note saying what fixed it")
     ledger = ledger_file(root)
     written = []
+    first = ((RESOLVED_FIELD, resolved),) if resolved else ()
     for one in ids:
         harness_events.record(
             RESOLVED_EVENT,
-            (("ref", one), ("pr", pr or "-"), ("note", note)),
+            (("ref", one), ("pr", pr or "-"), ("note", note), *first),
             root=ledger.parent.parent,
         )
         written.append(one)
+    return written
+
+
+def carried(items: list[Item], old: str, since: str) -> list[tuple[str, str, str]]:
+    """`(ref, note, when resolved)` of each standing resolution naming branch `old`,
+    written after `since`.
+
+    `since` is when the commit a tree was cut from was made. The ship carries an intent
+    off a retired name -- one whose PR merged before the tree was cut -- so a resolution
+    naming that name written since can only be this tree's fix, which went out on the
+    new one. `fix_verify.relevant` rightly discounts the old PR for it, so without a
+    re-point the group sat pending until it was reopened (`agent/fix-harness-ledger-0928`,
+    whose #447 merged a day before the three resolutions naming it).
+    """
+    try:
+        cut = _dt.datetime.fromisoformat(since)
+    except ValueError:
+        return []
+    standing = verdicts(items)
+    found = []
+    for item in items:
+        ref = item.fields.get("ref", "")
+        if item.event != RESOLVED_EVENT or item.fields.get("pr", "") != old:
+            continue
+        if standing.get(ref) != (item.event, item.stamp):
+            continue
+        try:
+            written = _dt.datetime.fromisoformat(item.stamp)
+        except ValueError:
+            continue
+        if written >= cut:
+            found.append((ref, item.fields.get("note", ""), resolved_at(item)))
+    return found
+
+
+def resolved_at(item: Item) -> str:
+    """When a resolution was made: its `resolved=` when a re-point carried it, else its
+    own stamp. The row's stamp still orders verdicts; this is what `fix_verify` holds it
+    to -- which merges came after it, and which rows were filed while it was in flight."""
+    return item.fields.get(RESOLVED_FIELD) or item.stamp
+
+
+def repoint(old: str, new: str, since: str, root: Path | None = None) -> list[str]:
+    """Resolve again on `new` every resolution `carried` finds, keeping when each was
+    made; the refs written."""
+    written = []
+    for ref, note, when in carried(load(root), old, since):
+        written += resolve([ref], note or f"carried off {old}", new, root, resolved=when)
     return written
 
 

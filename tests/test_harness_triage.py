@@ -456,6 +456,45 @@ def test_a_defect_back_after_a_resolution_is_marked_as_a_fix_that_did_not_hold()
     assert "RECURRED" not in triage.render(triage.open_items(fresh), fresh)
 
 
+def test_a_reopened_row_says_why_and_which_resolution_it_undid():
+    """3355a63a read `RECURRED ... last: <an older, unrelated note>`, while what had
+    happened was that its own resolution named `agent/fix-harness-ledger-0927`, the fix
+    merged as #439 from the name it was carried to, and `fix_verify` reopened it saying
+    to resolve again with the PR's number. The session learned that from the raw ledger."""
+    first = _line("scheduled-job-failed", stamp=_STAMPS[0], message="job failed")
+    ref = triage.item_id(first)
+    held = _line(
+        "triage-resolved", stamp=_STAMPS[1], ref=ref, pr="agent/x", note="pushed past the gate"
+    )
+    undone = _line(
+        "triage-reopened", stamp="2026-08-24T12:00:03+00:00", ref=ref, note="no PR from agent/x"
+    )
+    history = triage.read_items("\n".join((first, held, undone)))
+    assert triage.reopened(history) == {
+        ref: "no PR from agent/x; the resolution it undid (pr=agent/x): pushed past the gate"
+    }
+    text = triage.render(triage.open_items(history), history)
+    assert f"  REOPENED {ref} -- no PR from agent/x; the resolution it undid" in text
+    # Resolved again after the reopening: it stands, and nothing is reopened.
+    again = _line("triage-resolved", stamp="2026-08-24T12:00:04+00:00", ref=ref, note="#439")
+    assert triage.reopened(triage.read_items("\n".join((first, held, undone, again)))) == {}
+    # A reopening with no resolution on record still says why.
+    bare = triage.read_items("\n".join((first, undone)))
+    assert triage.reopened(bare) == {
+        ref: "no PR from agent/x; the resolution it undid: none on record"
+    }
+
+
+def test_verdict_lines_prefer_a_fix_in_flight_to_a_recurrence():
+    assert triage.verdict_lines(None, None) == []
+    assert triage.verdict_lines("", []) == []
+    assert triage.verdict_lines("410", ["old"])[0].startswith("  PENDING on 410 --")
+    assert triage.verdict_lines(None, ["a", "b"]) == [
+        "  RECURRED after 2 resolutions -- last: b -- that fix did not hold; "
+        "fix the cause so it cannot come back"
+    ]
+
+
 def test_past_fixes_counts_only_resolutions_still_standing():
     """A resolution the pass reopened (its branch never merged) was no fix at all."""
     first = _line("agent-report", stamp=_STAMPS[0], message="m")
@@ -864,6 +903,107 @@ def test_a_later_reopening_undoes_a_resolution_and_a_later_resolution_redoes_it(
         triage.open_items(triage.read_items("\n".join([report, resolved, reopened, again]))) == []
     )
     assert triage.verdicts(triage.read_items(reopened))[ref][0] == triage.REOPENED_EVENT
+
+
+def test_carried_names_the_resolutions_written_on_the_retired_branch_after_the_cut():
+    """A session in a tree cut on `agent/x-0928` -- a name whose PR had merged the day
+    before -- resolved its groups `pr=agent/x-0928`, and its fix went out as
+    `agent/x-0928-6` when the ship carried the intent. `fix_verify` rightly discounts the
+    old PR, which merged before those resolutions, so they sat pending until reopened."""
+    ours = _line("agent-report", message="ours")
+    theirs = _line("agent-report", message="theirs")
+    elsewhere = _line("agent-report", message="elsewhere")
+    undone = _line("agent-report", message="undone")
+    lines = [
+        _line(
+            "triage-resolved",
+            stamp="2026-09-28T10:00:00+00:00",
+            ref=triage.item_id(theirs),
+            pr="agent/x-0928",
+            note="the merged PR's own fix",
+        ),
+        _line(
+            "triage-resolved",
+            stamp="2026-09-29T02:00:00+00:00",
+            ref=triage.item_id(ours),
+            pr="agent/x-0928",
+            note="ours",
+        ),
+        _line(
+            "triage-resolved",
+            stamp="2026-09-29T02:00:00+00:00",
+            ref=triage.item_id(elsewhere),
+            pr="agent/y-0928",
+            note="another branch",
+        ),
+        _line(
+            "triage-resolved",
+            stamp="2026-09-29T02:00:00+00:00",
+            ref=triage.item_id(undone),
+            pr="agent/x-0928",
+            note="undone",
+        ),
+        _line(
+            triage.REOPENED_EVENT,
+            stamp="2026-09-29T03:00:00+00:00",
+            ref=triage.item_id(undone),
+            note="closed",
+        ),
+    ]
+    items = triage.read_items("\n".join(lines))
+    # The cut: main's tip when the tree was made, after the old PR merged -- in another
+    # zone, as `git log %cI` gives it.
+    since = "2026-09-28T20:00:00-04:00"
+    assert triage.carried(items, "agent/x-0928", since) == [
+        (triage.item_id(ours), "ours", "2026-09-29T02:00:00+00:00")
+    ]
+    assert triage.carried(items, "agent/x-0928", "not a time") == []
+
+
+def test_repoint_resolves_again_on_the_new_branch_so_its_pr_settles_it(tmp_path):
+    report = _line("agent-report", message="one")
+    ref = triage.item_id(report)
+    resolved = _line(
+        "triage-resolved", stamp="2026-09-29T02:00:00+00:00", ref=ref, pr="agent/x-0928", note="n"
+    )
+    _ledger(tmp_path, report, resolved)
+    assert triage.repoint(
+        "agent/x-0928", "agent/x-0928-6", "2026-09-29T00:00:00+00:00", root=tmp_path
+    ) == [ref]
+    items = triage.load(tmp_path)
+    assert triage.open_items(items) == []
+    now = datetime.now(UTC)
+    [latest] = triage.recent(items, now, timedelta(days=3650))
+    # Written again now, but still the resolution of 02:00: `fix_verify.covered` retires
+    # the rows filed between it and the merge, and would otherwise start at the carry.
+    assert (latest.ref, latest.pr, latest.note, latest.stamp) == (
+        ref,
+        "agent/x-0928-6",
+        "n",
+        "2026-09-29T02:00:00+00:00",
+    )
+
+
+def test_a_resolution_carried_twice_keeps_the_time_it_was_first_made(tmp_path):
+    report = _line("agent-report", message="one")
+    ref = triage.item_id(report)
+    first = _line(
+        "triage-resolved", stamp="2026-09-29T02:00:00+00:00", ref=ref, pr="agent/x-0928", note="n"
+    )
+    carried = _line(
+        "triage-resolved",
+        stamp="2026-09-29T05:00:00+00:00",
+        ref=ref,
+        pr="agent/x-0928-6",
+        note="n",
+        resolved="2026-09-29T02:00:00+00:00",
+    )
+    _ledger(tmp_path, report, first, carried)
+    assert triage.repoint(
+        "agent/x-0928-6", "agent/x-0928-7", "2026-09-29T00:00:00+00:00", root=tmp_path
+    ) == [ref]
+    [again] = triage.recent(triage.load(tmp_path), datetime.now(UTC), timedelta(days=3650))
+    assert (again.pr, again.stamp) == ("agent/x-0928-7", "2026-09-29T02:00:00+00:00")
 
 
 def test_reopen_appends_one_event_per_id(tmp_path):
