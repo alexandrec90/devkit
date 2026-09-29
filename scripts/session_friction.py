@@ -236,6 +236,16 @@ SUITE_WIDE_COMMAND = re.compile(
     r"(?:npm|pnpm|yarn)\s+(?:add|remove|uninstall))\b",
     re.M,
 )
+# Git reporting what the working tree changes: `status` and `diff`, not a commit's history.
+GIT_TREE_READ = re.compile(r"(?:^|[;&|]\s*)git\s+(?:status|diff)\b", re.M)
+# A path in that report: a short or long status line, a diffstat row, a diff header.
+GIT_CHANGED_PATH = re.compile(
+    r"^(?:(?:[MADRCU?][MADRCU? ]|[ ][MADRCU?]) (?:\S+ -> )?(?P<short>\S+)[ \t]*$"
+    r"|\t(?:modified|new file|deleted|renamed|both modified):[ \t]+(?:\S+ -> )?(?P<long>\S+)"
+    r"|diff --git a/\S+ b/(?P<diff>\S+)"
+    r"| (?P<stat>\S+)[ \t]+\|[ \t]+(?:\d+|Bin)\b)",
+    re.M,
+)
 # A file a Codex `apply_patch` names, whose patch rides in the command.
 PATCHED_FILE = re.compile(r"^\*\*\* (?:Update|Add) File: (.+)$", re.M)
 
@@ -290,6 +300,37 @@ def command_position(command: str) -> str:
 def runs_tests(command: str) -> bool:
     """`command` runs a test suite in command position."""
     return bool(TEST_RUN.search(command_position(command)))
+
+
+def suite_root(rest: str) -> str:
+    """The `SUITE_ROOTS` entry a whole run's arguments name, one spelling per root; `""`
+    for none, which is the runner's configured default."""
+    for token in rest.split():
+        word = token.strip("'\"").replace("\\", "/")
+        if word in SUITE_ROOTS:
+            return word.rstrip("/") or "."
+    return ""
+
+
+def whole_runs(command: str) -> list[str]:
+    """The `suite_root` of each whole-suite test run in `command`, in order."""
+    rests = (run.group("rest") or "" for run in TEST_RUN.finditer(command_position(command)))
+    return [suite_root(rest) for rest in rests if full_suite(rest)]
+
+
+def reports_suite_change(command: str, text: str) -> bool:
+    """`text`, what `command` printed, is git saying the tree changes a `SUITE_WIDE_FILE`.
+
+    A change the session found rather than made (493a237b): an ibkr_trader fixer's tree
+    arrived with `uv.lock` relocked by its provisioning, its first `git status` said so,
+    and the whole-suite runs that checked the relock were filed as the habit, since the
+    transcript held no edit or relock of its own."""
+    if not GIT_TREE_READ.search(command_position(command)):
+        return False
+    return any(
+        SUITE_WIDE_FILE.search(next(path for path in found.groups() if path))
+        for found in GIT_CHANGED_PATH.finditer(ANSI.sub("", text))
+    )
 
 
 def full_suite(rest: str) -> bool:
@@ -357,9 +398,12 @@ def changes_the_suite(event: Event) -> bool:
     )
 
 
-def _command_classes(command: str, suite_changed: bool = False) -> Iterator[tuple[str, str]]:
-    """What `command` is friction as; a whole-suite test run is not, while `suite_changed`
-    says no run has checked a suite-wide change yet. The push gate still is."""
+def _command_classes(
+    command: str, checked: frozenset[str] | None = None
+) -> Iterator[tuple[str, str]]:
+    """What `command` is friction as. After a suite-wide change, `checked` holds the
+    suite roots already run whole since it, and a whole run of any other root is not:
+    it is what checks the change. The push gate still is."""
     for cls, pattern in COMMAND_PATTERNS:
         if cls == "heredoc-write" and not damageable_heredoc(command):
             continue
@@ -367,11 +411,12 @@ def _command_classes(command: str, suite_changed: bool = False) -> Iterator[tupl
             continue
         if pattern.search(command):
             yield cls, COMMAND_DETAIL[cls]
-    if suite_changed:
-        return
-    runs = TEST_RUN.finditer(command_position(command))
-    if any(full_suite(run.group("rest") or "") for run in runs):
-        yield "full-suite", COMMAND_DETAIL["full-suite"]
+    seen = set(checked) if checked is not None else None
+    for root in whole_runs(command):
+        if seen is None or root in seen:
+            yield "full-suite", COMMAND_DETAIL["full-suite"]
+            return
+        seen.add(root)
 
 
 def _quoted(text: str, at: int) -> bool:
@@ -435,8 +480,9 @@ class _Session:
     # line -> every class noted there: what `outdated` re-judges a filed row by, since
     # `found` keeps only each class's first event.
     at: dict[int, set[str]] = field(default_factory=dict)
-    # A suite-wide change no test run has checked yet (`changes_the_suite`).
-    suite_changed: bool = False
+    # After a suite-wide change (`changes_the_suite`, `reports_suite_change`), the suite
+    # roots run whole since it; None while there has been none.
+    checked: set[str] | None = None
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -461,13 +507,15 @@ class _Session:
         self.calls[event.call_id] = event.command
         if event.tool != "AskUserQuestion":
             self.last_said = None  # it went on working: that text was not how it ended
-        self.suite_changed = self.suite_changed or changes_the_suite(event)
-        for cls, what in _command_classes(event.command, self.suite_changed):
+        if changes_the_suite(event):
+            self.checked = set()
+        checked = frozenset(self.checked) if self.checked is not None else None
+        for cls, what in _command_classes(event.command, checked):
             # A `Monitor` until-loop is the wait Claude Code's `SLEEP_GUARD` prescribes.
             if not (cls == "poll" and event.tool in WAIT_TOOLS):
                 self.note(cls, what, event)
-        if runs_tests(event.command):
-            self.suite_changed = False  # checked: the next whole run is the habit again
+        if self.checked is not None:
+            self.checked.update(whole_runs(event.command))  # the next whole run is the habit
         if event.tool == "AskUserQuestion" and self.dispatched:
             self.note(
                 "asked-user", "a dispatched session asked a question nobody would answer", event
@@ -499,6 +547,9 @@ class _Session:
         """A call that exited 0 still failed if it was a test run or a git call reporting
         a missing environment: `| tail` hides pytest's exit code."""
         command = self.calls.get(event.call_id, "")
+        # Once: the same dirty lock in every later `git status` is no new change.
+        if self.checked is None and reports_suite_change(command, event.text):
+            self.checked = set()
         runs = SEES_ENVIRONMENT.search(command_position(command))
         if not runs or READS_HARNESS_TEXT.search(command):
             return
