@@ -31,6 +31,8 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+import sweep
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Project path -> the template it was rendered from, relative to the devkit checkout.
@@ -45,7 +47,7 @@ def _lf(text: str) -> str:
     return text.replace("\r\n", "\n")
 
 
-def past_versions(devkit: Path, template: str, runner: Runner = subprocess.run) -> set[str]:
+def past_versions(devkit: Path, template: str, runner: Runner = sweep.run_windowless) -> set[str]:
     """Every committed text of `template` in `devkit`'s history, with LF line endings.
 
     Empty where git cannot answer: no repository, or a template with no history.
@@ -70,7 +72,9 @@ def past_versions(devkit: Path, template: str, runner: Runner = subprocess.run) 
     return {_lf(text) for text in (git("show", f"{sha}:{template}") for sha in shas) if text}
 
 
-def refresh_one(project: Path, target: str, devkit: Path, runner: Runner = subprocess.run) -> str:
+def refresh_one(
+    project: Path, target: str, devkit: Path, runner: Runner = sweep.run_windowless
+) -> str:
     """Replace `project`'s `target` with its current template when it is an untouched
     earlier one. Returns what was found, as one line."""
     path = project / target
@@ -90,7 +94,9 @@ def refresh_one(project: Path, target: str, devkit: Path, runner: Runner = subpr
     return f"{target}: an untouched earlier template, refreshed to devkit's current one"
 
 
-def refresh(project: Path, devkit: Path = REPO_ROOT, runner: Runner = subprocess.run) -> list[str]:
+def refresh(
+    project: Path, devkit: Path = REPO_ROOT, runner: Runner = sweep.run_windowless
+) -> list[str]:
     """`refresh_one` for every entry of `REFRESHED`."""
     return [refresh_one(project, target, devkit, runner) for target in REFRESHED]
 
