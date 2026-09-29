@@ -27,6 +27,15 @@ with `-p` to the tree's own name; a name equal to the checkout's would be the st
 checkout's stack and is refused. The worktree is removed without `--force`, so git's
 own refusal stands. The branch is left alone.
 
+**A removal Windows refuses partway is finished, not left.** `git worktree remove`
+deletes the `.git` link and the registration before the ignored `.venv`, so one file the
+filesystem refused (`Invalid argument`, devkit's `fix-harness-ledger-0928` on
+2026-09-29) left a husk no later `worktree list` names and no pass would ever clear. A
+filesystem-level failure is finished with `box_teardown.force_remove_box`, the box
+tier's own fallback, and a husk already standing in the tier -- no `.git`, unregistered,
+quiet for `QUIET_HOURS` -- is removed the same way. A dirty-tree refusal keeps its `.git`
+and so is never finished by hand.
+
 Run by `reap-stale.py`, the scheduled pass for what agent sessions leave behind.
 Tested in `tests/test_session_trees.py`.
 """
@@ -43,11 +52,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import box_teardown
 import rc_machine
 import sweep
 import worktree_tiers as wt
 
 Run = Callable[..., subprocess.CompletedProcess[str]]
+Remove = Callable[[Path], tuple[str, list[str]]]
 
 # Enough to cover every PR a tree on this machine could still be holding.
 MERGED_LOOKBACK = 200
@@ -174,11 +185,18 @@ def verdict(
     return ""
 
 
-def reap(tree: Tree, checkout: Path, run: Run, noise: Sequence[str] = ()) -> str:
+def reap(
+    tree: Tree,
+    checkout: Path,
+    run: Run,
+    noise: Sequence[str] = (),
+    remove: Remove | None = None,
+) -> str:
     """Tear the tree's stack down and remove the tree. `""` on success, else the error.
 
     `noise` is cleared first -- generated files deleted, line-ending-only changes checked
-    out -- so the removal needs no `--force`, and git still refuses anything else.
+    out -- so the removal needs no `--force`, and git still refuses anything else. A
+    refusal from the filesystem rather than from git is finished with `remove`.
     """
     for path in noise:
         if path in GENERATED:
@@ -191,9 +209,63 @@ def reap(tree: Tree, checkout: Path, run: Run, noise: Sequence[str] = ()) -> str
         if down.returncode != 0:
             return f"compose down -p {name} failed: {(down.stderr or '').strip()[-200:]}"
     removed = run(["git", "-C", str(checkout), "worktree", "remove", str(tree.path)])
-    if removed.returncode != 0:
-        return f"git worktree remove refused: {(removed.stderr or '').strip()[-200:]}"
-    return ""
+    if removed.returncode == 0:
+        return ""
+    said = (removed.stderr or "").strip()[-200:]
+    if not (tree.path.is_dir() and box_teardown.fallback_applies(tree.path, said)):
+        return f"git worktree remove refused: {said}"
+    error, _notes = (remove or box_teardown.force_remove_box)(tree.path)
+    run(["git", "-C", str(checkout), "worktree", "prune"])
+    return (
+        f"git worktree remove refused ({said}), and finishing it failed: {error}" if error else ""
+    )
+
+
+def husks(checkout: Path, listed: Sequence[Tree]) -> list[Path]:
+    """Directories in the checkout's own tier that a removal died partway through.
+
+    No `.git` entry and no registration: git has already let go of it, so nothing in it
+    is a commit, and no `git worktree remove` can succeed on it again.
+    """
+    root = wt.default_root(checkout)
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return []
+    return [
+        path
+        for path in entries
+        if path.is_dir()
+        and not (path / ".git").exists()
+        and not any(wt.same_dir(path, tree.path) for tree in listed)
+    ]
+
+
+def sweep_husks(
+    checkout: Path,
+    listed: Sequence[Tree],
+    apply: bool,
+    say: Callable[[str], None],
+    idle: Callable[[Path], float | None],
+    remove: Remove | None = None,
+) -> int:
+    """Remove (with `apply`) every quiet husk of one checkout. The count that failed."""
+    failures = 0
+    for path in husks(checkout, listed):
+        quiet = idle(path)
+        if quiet is None or quiet < QUIET_HOURS * 3600:
+            continue
+        label = f"session tree {checkout.name}:{path.name}"
+        if not apply:
+            say(f"{label}: a husk a removal left behind -- would remove")
+            continue
+        error, _notes = (remove or box_teardown.force_remove_box)(path)
+        if error:
+            failures += 1
+            say(f"{label}: could not remove its husk: {error}")
+        else:
+            say(f"{label}: a husk a removal left behind -- removed")
+    return failures
 
 
 def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -218,25 +290,27 @@ def sweep_checkout(
     gh_for: Callable[[Path], Run] = sweep.gh_for,
     idle: Callable[[Path], float | None] = idle_seconds,
 ) -> int:
-    """Assess (and with `apply`, reap) every session tree of one checkout. Failures.
+    """Assess (and with `apply`, reap) every session tree and husk of one checkout.
+    The count of failures.
 
     One `gh` call per checkout, not per tree: the pass runs every few minutes.
     """
     listed = run(["git", "-C", str(checkout), "worktree", "list", "--porcelain"])
     if listed.returncode != 0:
         return 0  # not a git checkout: nothing to assess
-    trees = [t for t in parse_trees(listed.stdout) if wt.tier_of(t.path) is not None]
+    every = parse_trees(listed.stdout)
+    failures = sweep_husks(checkout, every, apply, say, idle)
+    trees = [t for t in every if wt.tier_of(t.path) is not None]
     if not trees:
-        return 0
+        return failures
     fields = "headRefName,headRefOid"
     prs = gh_for(checkout)(
         "pr", "list", "--state", "merged", "--limit", str(MERGED_LOOKBACK), "--json", fields
     )
     if prs.returncode != 0:
         say(f"session trees in {checkout.name}: merged PRs could not be read -- all kept")
-        return 0
+        return failures
     merged = merged_heads(prs.stdout)
-    failures = 0
     for tree in trees:
         found = changes(tree.path, run)
         work, noise = found if found is not None else ([], [])

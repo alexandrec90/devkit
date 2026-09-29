@@ -266,6 +266,9 @@ _DELETE_FAILED_SAYS = (
     "Directory not empty",
     "Access is denied",
     "Permission denied",
+    # Git for Windows' spelling of a delete the filesystem refused mid-walk, from a
+    # session tree's reap in devkit on 2026-09-29 (`session_trees.py`).
+    "Invalid argument",
 )
 
 
