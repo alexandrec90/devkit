@@ -109,6 +109,25 @@ def test_rows_filed_while_the_fix_was_in_flight_retire_when_it_merges(tmp_path):
     assert row in triage.load_settled(cache), "merged by construction: never in flight"
 
 
+def test_a_resolution_carried_to_a_new_branch_covers_from_when_it_was_first_made(tmp_path):
+    """#456 merged at 02:34, a minute after data-lake filed the group again at 02:33;
+    the resolution naming it was written at 02:06 and re-pointed after the carry. Measured
+    from the re-point, that row read as a fix that did not hold."""
+    first, waiting = finding(10), finding(6)
+    head = triage.item_id(first)
+    carried = (
+        f"{at(4)}\tevent=triage-resolved\tref={head}\tpr=agent/x-2\tnote=fixed\tresolved={at(8)}"
+    )
+    lines = items(first, resolution("agent/x", days_ago=8 / 24, ref=head), waiting, carried)
+    merge = fix_verify.Pr(fix_verify.LANDED, at(2), "https://github.com/o/devkit/pull/456")
+    asked = []
+    outcome = fix_verify.verify(
+        lines, lambda _, what: asked.append(what) or [merge], tmp_path / "v", NOW
+    )
+    assert asked == ["agent/x-2"]
+    assert [row for row, _, _ in outcome.covered] == [triage.item_id(waiting)]
+
+
 def test_nothing_is_covered_without_a_readable_merge_time_or_by_another_group(tmp_path):
     first, waiting = finding(10), finding(5)
     other = finding(5, detail="something else entirely")

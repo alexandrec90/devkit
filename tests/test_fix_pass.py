@@ -1031,16 +1031,21 @@ def test_an_elevated_dispatch_hands_the_pass_to_the_scheduled_task(world, monkey
         lambda argv, **k: ran.append(argv) or subprocess.CompletedProcess(argv, 0, "SUCCESS", ""),
     )
     workspace = str(world["workspace"])
+    fix_pass.write_artifact("fix-pass: mode=plan\nharness  clean")
     assert fix_pass.main(["--mode", "dispatch", "--workspace", workspace]) == 0
     assert [argv for argv in ran if argv[0] == "schtasks"] == [
         ["schtasks", "/Run", "/TN", fix_pass.SCHEDULED_TASK]
     ]
     assert "handed to the scheduled task" in capsys.readouterr().out
+    # The record is rewritten to say so: the supervisor read the previous plan pass's
+    # record back three times, as three clean dispatches, while the task ran elsewhere.
+    assert artifact(world).startswith(f"fix-pass: handed to {fix_pass.SCHEDULED_TASK} --")
     installer = load_script("scripts/install-fix-pass-task.py")
     assert fix_pass.SCHEDULED_TASK == installer.TASK_NAME
 
 
-def test_a_scheduled_task_that_will_not_start_is_said_not_swallowed(monkeypatch, capsys):
+def test_a_scheduled_task_that_will_not_start_is_said_not_swallowed(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(fix_pass, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(
         fix_pass.subprocess,
         "run",
@@ -1048,6 +1053,8 @@ def test_a_scheduled_task_that_will_not_start_is_said_not_swallowed(monkeypatch,
     )
     assert fix_pass.hand_to_scheduled_task() == fix_pass.EXIT_USAGE
     assert "could not start devkit-fix-pass: ERROR: Access is denied." in capsys.readouterr().err
+    record = (tmp_path / fix_pass.ARTIFACT).read_text(encoding="utf-8")
+    assert record.startswith("fix-pass: FAILED -- elevated, and could not start devkit-fix-pass")
 
 
 def test_an_elevated_plan_or_scheduled_pass_still_runs_in_place(world, monkeypatch):
@@ -1073,8 +1080,22 @@ def test_a_carried_intent_is_recorded_under_the_branch_it_went_out_on(monkeypatc
         "ship_one",
         lambda *a: ship_intent.Outcome(moved, ship_intent.SHIPPED, "u/pull/9", "u/pull/9"),
     )
+    monkeypatch.setattr(fix_pass.ship_intent, "cut_at", lambda tree, base: "2026-09-27T00:00:00Z")
+    pointed = []
+    monkeypatch.setattr(
+        fix_pass.fix_loop.triage,
+        "repoint",
+        lambda old, new, since, root: pointed.append((old, new, since, root)) or ["r1", "r2"],
+    )
     [line], _, _ = fix_pass.ship_intents(tmp_path, ["devkit"], fix_cycle.DISPATCH)
-    assert line.startswith("devkit agent/x-0927-2 (carried off agent/x-0927) -- shipped")
+    assert line.startswith(
+        "devkit agent/x-0927-2 (carried off agent/x-0927; 2 resolution(s) re-pointed) -- shipped"
+    )
+    # Its session's resolutions named the retired branch, whose PR merged before they were
+    # written: `fix_verify` could never settle them, and reopened them two days on.
+    assert pointed == [
+        ("agent/x-0927", "agent/x-0927-2", "2026-09-27T00:00:00Z", tmp_path / "devkit")
+    ]
 
 
 def test_ship_intents_in_plan_mode_only_says_what_it_would_do(monkeypatch, tmp_path):

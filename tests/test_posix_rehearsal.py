@@ -169,6 +169,89 @@ def test_the_flip_is_re_asserted_so_one_test_cannot_leak_into_the_next(monkeypat
     assert target.WINDOWS is False
 
 
+def test_signal_zero_asks_whether_the_process_exists_and_sends_nothing():
+    """On Windows `os.kill(pid, 0)` is `GenerateConsoleCtrlEvent(CTRL_C_EVENT)`, not a
+    probe: `preview-ui-host.pid_alive`'s POSIX branch, run under the rehearsal, sent
+    Ctrl+C to the whole console and took the rehearsal and the shell that ran it down."""
+    sent = []
+    kill = lambda pid, sig: sent.append((pid, sig))
+    probe = plugin.signal_zero_probe(kill, lambda pid: pid == 7)
+    assert probe(7, 0) is None
+    with pytest.raises(ProcessLookupError):
+        probe(8, 0)
+    assert sent == []
+    probe(7, 15)
+    assert sent == [(7, 15)], "any other signal is the real one"
+
+
+def test_the_probe_stands_in_for_kill_only_on_a_windows_host(monkeypatch):
+    real = lambda pid, sig: None
+    monkeypatch.setattr(plugin.os, "kill", real)
+    monkeypatch.setattr(sys, "platform", "win32")
+    state = plugin.PosixRehearsal()
+    state.fake_platform()
+    assert plugin.os.kill is not real
+    state.restore()
+    assert plugin.os.kill is real
+    monkeypatch.setattr(sys, "platform", "linux")
+    posix = plugin.PosixRehearsal()
+    posix.fake_platform()
+    assert plugin.os.kill is real, "a POSIX host's signal 0 already is the probe"
+    posix.restore()
+
+
+def test_a_test_that_monkeypatches_the_platform_cannot_leak_the_fake_into_the_next(monkeypatch):
+    """`test_stop_takes_the_whole_tree_on_windows` monkeypatches `sys.platform` inside the
+    rehearsal, so monkeypatch recorded the *faked* "linux" and put it back after the
+    plugin had restored "win32". The next test's `fake_platform` read that as the host,
+    installed no probe, and `pid_alive(os.getpid())` sent Ctrl+C to the console."""
+    real = lambda pid, sig: None
+    monkeypatch.setattr(plugin.os, "kill", real)
+    monkeypatch.setattr(sys, "platform", "win32")
+    state = plugin.PosixRehearsal()
+
+    state.fake_platform()
+    recorded = sys.platform  # what a test body's monkeypatch saves
+    sys.platform = "win32"  # and sets
+    state.restore()
+    sys.platform = recorded  # its teardown, after the plugin's
+    assert sys.platform == plugin.POSIX_PLATFORM, "the leak this guards against"
+
+    state.honest_platform()  # the next test's setup
+    assert sys.platform == "win32"
+    state.fake_platform()
+    assert plugin.os.kill is not real, "still known to be a Windows host"
+    state.restore()
+    assert (sys.platform, plugin.os.kill) == ("win32", real)
+
+
+class _Kernel:
+    """`kernel32`'s three calls `windows_exists` makes, answering as told."""
+
+    def __init__(self, handle: int, waited: int = 0, error: int = 0):
+        self.handle, self.waited, self.error = handle, waited, error
+
+    def OpenProcess(self, access, inherit, pid):
+        return self.handle
+
+    def WaitForSingleObject(self, handle, timeout):
+        return self.waited
+
+    def CloseHandle(self, handle):
+        return 1
+
+    def GetLastError(self):
+        return self.error
+
+
+def test_windows_exists_reads_a_running_an_exited_and_an_unopenable_process():
+    assert plugin.windows_exists(1, _Kernel(5, plugin.WAIT_TIMEOUT)) is True
+    assert plugin.windows_exists(1, _Kernel(5, 0)) is False, "signalled: it exited"
+    assert plugin.windows_exists(1, _Kernel(0, error=87)) is False, "no such pid"
+    with pytest.raises(PermissionError):
+        plugin.windows_exists(1, _Kernel(0, error=plugin.ERROR_ACCESS_DENIED))
+
+
 def test_restore_puts_the_hosts_platform_back(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     state = plugin.PosixRehearsal()

@@ -866,6 +866,107 @@ def test_a_later_reopening_undoes_a_resolution_and_a_later_resolution_redoes_it(
     assert triage.verdicts(triage.read_items(reopened))[ref][0] == triage.REOPENED_EVENT
 
 
+def test_carried_names_the_resolutions_written_on_the_retired_branch_after_the_cut():
+    """A session in a tree cut on `agent/x-0928` -- a name whose PR had merged the day
+    before -- resolved its groups `pr=agent/x-0928`, and its fix went out as
+    `agent/x-0928-6` when the ship carried the intent. `fix_verify` rightly discounts the
+    old PR, which merged before those resolutions, so they sat pending until reopened."""
+    ours = _line("agent-report", message="ours")
+    theirs = _line("agent-report", message="theirs")
+    elsewhere = _line("agent-report", message="elsewhere")
+    undone = _line("agent-report", message="undone")
+    lines = [
+        _line(
+            "triage-resolved",
+            stamp="2026-09-28T10:00:00+00:00",
+            ref=triage.item_id(theirs),
+            pr="agent/x-0928",
+            note="the merged PR's own fix",
+        ),
+        _line(
+            "triage-resolved",
+            stamp="2026-09-29T02:00:00+00:00",
+            ref=triage.item_id(ours),
+            pr="agent/x-0928",
+            note="ours",
+        ),
+        _line(
+            "triage-resolved",
+            stamp="2026-09-29T02:00:00+00:00",
+            ref=triage.item_id(elsewhere),
+            pr="agent/y-0928",
+            note="another branch",
+        ),
+        _line(
+            "triage-resolved",
+            stamp="2026-09-29T02:00:00+00:00",
+            ref=triage.item_id(undone),
+            pr="agent/x-0928",
+            note="undone",
+        ),
+        _line(
+            triage.REOPENED_EVENT,
+            stamp="2026-09-29T03:00:00+00:00",
+            ref=triage.item_id(undone),
+            note="closed",
+        ),
+    ]
+    items = triage.read_items("\n".join(lines))
+    # The cut: main's tip when the tree was made, after the old PR merged -- in another
+    # zone, as `git log %cI` gives it.
+    since = "2026-09-28T20:00:00-04:00"
+    assert triage.carried(items, "agent/x-0928", since) == [
+        (triage.item_id(ours), "ours", "2026-09-29T02:00:00+00:00")
+    ]
+    assert triage.carried(items, "agent/x-0928", "not a time") == []
+
+
+def test_repoint_resolves_again_on_the_new_branch_so_its_pr_settles_it(tmp_path):
+    report = _line("agent-report", message="one")
+    ref = triage.item_id(report)
+    resolved = _line(
+        "triage-resolved", stamp="2026-09-29T02:00:00+00:00", ref=ref, pr="agent/x-0928", note="n"
+    )
+    _ledger(tmp_path, report, resolved)
+    assert triage.repoint(
+        "agent/x-0928", "agent/x-0928-6", "2026-09-29T00:00:00+00:00", root=tmp_path
+    ) == [ref]
+    items = triage.load(tmp_path)
+    assert triage.open_items(items) == []
+    now = datetime.now(UTC)
+    [latest] = triage.recent(items, now, timedelta(days=3650))
+    # Written again now, but still the resolution of 02:00: `fix_verify.covered` retires
+    # the rows filed between it and the merge, and would otherwise start at the carry.
+    assert (latest.ref, latest.pr, latest.note, latest.stamp) == (
+        ref,
+        "agent/x-0928-6",
+        "n",
+        "2026-09-29T02:00:00+00:00",
+    )
+
+
+def test_a_resolution_carried_twice_keeps_the_time_it_was_first_made(tmp_path):
+    report = _line("agent-report", message="one")
+    ref = triage.item_id(report)
+    first = _line(
+        "triage-resolved", stamp="2026-09-29T02:00:00+00:00", ref=ref, pr="agent/x-0928", note="n"
+    )
+    carried = _line(
+        "triage-resolved",
+        stamp="2026-09-29T05:00:00+00:00",
+        ref=ref,
+        pr="agent/x-0928-6",
+        note="n",
+        resolved="2026-09-29T02:00:00+00:00",
+    )
+    _ledger(tmp_path, report, first, carried)
+    assert triage.repoint(
+        "agent/x-0928-6", "agent/x-0928-7", "2026-09-29T00:00:00+00:00", root=tmp_path
+    ) == [ref]
+    [again] = triage.recent(triage.load(tmp_path), datetime.now(UTC), timedelta(days=3650))
+    assert (again.pr, again.stamp) == ("agent/x-0928-7", "2026-09-29T02:00:00+00:00")
+
+
 def test_reopen_appends_one_event_per_id(tmp_path):
     report = _line("agent-report", message="one")
     _ledger(tmp_path, report)

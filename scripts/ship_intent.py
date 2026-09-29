@@ -450,6 +450,20 @@ def _commit_carrying(intent: Intent, python: str, runner: Runner) -> tuple[Inten
     return intent, step, output
 
 
+def cut_at(tree: Path, base: str, runner: Runner = run_quiet) -> str:
+    """When the commit `tree` was cut from was made, as git prints it; "" when unknown.
+
+    What `harness_triage.carried` measures a resolution against once the intent here was
+    carried off a retired name: one written since can only be this tree's.
+    """
+    found = runner(["git", "merge-base", "HEAD", f"origin/{base}"], cwd=tree)
+    sha = (found.stdout or "").strip()
+    if found.returncode != 0 or not sha:
+        return ""
+    made = runner(["git", "log", "-1", "--format=%cI", sha], cwd=tree)
+    return (made.stdout or "").strip() if made.returncode == 0 else ""
+
+
 def commits_ahead(tree: Path, base: str, runner: Runner) -> int | None:
     """Commits on the tree's HEAD that `origin/<base>` lacks; None when git cannot say.
 

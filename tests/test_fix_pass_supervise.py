@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import pytest
 from support import REPO_ROOT, load_script
 
 supervise = load_script("scripts/fix-pass-supervise.py")
@@ -15,6 +16,12 @@ fix_reports = supervise.fix_reports
 # Their classes are invisible to mypy (loaded by path), so helpers returning one say Any.
 
 NOW = _dt.datetime(2026, 9, 26, 12, 0, tzinfo=_dt.UTC)
+
+
+@pytest.fixture(autouse=True)
+def _unelevated(monkeypatch):
+    """`main` refuses a dispatch from an elevated shell; the suite may run in one."""
+    monkeypatch.setattr(supervise.agent_tabs, "is_elevated", lambda: False)
 
 
 # --- the record ---------------------------------------------------------------------------
@@ -64,6 +71,46 @@ def test_a_failure_needs_its_finding_open():
     assert supervise.check_record(line, 1, {("ship-failed", "carameli")}) == []
     sent = "sent     devkit #9 -- FAILED to resolve"
     assert "no resolve-failed finding" in supervise.check_record(sent, 1, set())[0]
+
+
+def test_a_record_that_is_not_this_iterations_pass_is_a_violation():
+    """Run elevated, the pass handed every dispatch to the scheduled task and wrote no
+    record, so each iteration read back the rehearsal's `mode=plan` record -- plus one
+    more appended watchdog line -- and three iterations reported clean having sent
+    nothing."""
+    assert supervise.check_ran("fix-pass: mode=dispatch\nharness  clean", "dispatch") == []
+    stale = "fix-pass: mode=plan\nharness  clean\nwatchdog: self-update -- current"
+    assert supervise.check_ran(stale, "dispatch") == [
+        "the pass did not run in dispatch mode here: fix-pass: mode=plan"
+    ]
+    handed = "fix-pass: handed to devkit-fix-pass -- this shell is elevated"
+    assert supervise.check_ran(handed, "dispatch") == [
+        f"the pass did not run in dispatch mode here: {handed}"
+    ]
+    assert supervise.check_ran("", "plan") == ["the pass did not run in plan mode here: no record"]
+    # A crash or a refusal is `check_record`'s to report, once.
+    assert supervise.check_ran("fix-pass: CRASHED -- KeyError: 'x'", "dispatch") == []
+    assert supervise.check_ran("fix-pass: FAILED -- no gh", "dispatch") == []
+
+
+def test_an_elevated_dispatch_is_refused_before_the_first_iteration(tmp_path, monkeypatch, capsys):
+    workspace = _workspace(tmp_path)
+    monkeypatch.setattr(supervise.agent_tabs, "is_elevated", lambda: True)
+    monkeypatch.setattr(supervise, "iterate", lambda *a: pytest.fail("an elevated run iterated"))
+    monkeypatch.setattr(supervise, "REPO_ROOT", tmp_path)
+    assert supervise.main(["--workspace", str(workspace)]) == supervise.EXIT_REFUSED
+    assert "elevated" in capsys.readouterr().err
+    ran = []
+    monkeypatch.setattr(
+        supervise,
+        "iterate",
+        lambda ws, n, mode, clock: (
+            ran.append(mode) or supervise.Iteration(n, clock().isoformat(), 0, "")
+        ),
+    )
+    argv = ["--mode", "plan", "--iterations", "1", "--workspace", str(workspace)]
+    assert supervise.main(argv) == supervise.EXIT_CLEAN
+    assert ran == ["plan"], "a rehearsal launches nothing, so it may run elevated"
 
 
 def test_the_pass_failing_itself_is_a_violation():
@@ -208,6 +255,8 @@ def test_the_skill_drives_this_script_and_says_not_to_poll_it():
     )
     assert "scripts/fix-pass-supervise.py" in skill and "run_in_background" in skill
     assert "Do not poll it" in skill and "logs/friction.md" in skill
+    # The script refuses an elevated dispatch; the skill says how to get past that.
+    assert "runas /trustlevel:0x20000" in skill
 
 
 # --- the loop -------------------------------------------------------------------------------

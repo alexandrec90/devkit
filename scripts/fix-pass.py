@@ -183,8 +183,16 @@ def ship_intents(
         outcome = ship_intent.ship_one(intent, push_gate.interpreter(intent.tree), base)
         if outcome.intent.branch != intent.branch:
             # Carried off a retired name: the record names what went out, or it reads as
-            # a merged branch shipping again.
-            where = f"{intent.project} {outcome.intent.branch} (carried off {intent.branch})"
+            # a merged branch shipping again. The session's resolutions named the retired
+            # name too, whose PR predates them, so they follow the fix to its new one.
+            since = ship_intent.cut_at(intent.tree, base)
+            moved = fix_loop.triage.repoint(
+                intent.branch, outcome.intent.branch, since, root / fix_cycle.DEVKIT
+            )
+            where = (
+                f"{intent.project} {outcome.intent.branch} (carried off {intent.branch}; "
+                f"{len(moved)} resolution(s) re-pointed)"
+            )
         # One line: a refusal's detail is hook output, and its newlines broke the record
         # into rows no reader of it could attribute. The tail says why; the rest is evidence.
         lines.append(f"{where} -- {outcome.stage}: {' '.join(outcome.detail.split())[-240:]}")
@@ -400,6 +408,9 @@ def hand_to_scheduled_task() -> int:
     service would lock the scheduled pass out), so a pass run from an elevated VS Code
     refused every launch and left each to a scheduled pass up to 30 minutes away. The
     task runs with the user's ordinary token, so starting it is that same pass, now.
+
+    Either way this checkout's record is rewritten to say so: left alone it still held
+    the previous pass, which a supervisor read back three times as clean dispatches.
     """
     done = subprocess.run(
         ["schtasks", "/Run", "/TN", SCHEDULED_TASK],
@@ -409,9 +420,16 @@ def hand_to_scheduled_task() -> int:
         creationflags=sweep.NO_WINDOW,
     )
     if done.returncode != 0:
-        why = " ".join((done.stderr or done.stdout or "").split())
-        print(f"fix-pass: elevated, and could not start {SCHEDULED_TASK}: {why}", file=sys.stderr)
+        why = f"elevated, and could not start {SCHEDULED_TASK}: " + " ".join(
+            (done.stderr or done.stdout or "").split()
+        )
+        print(f"fix-pass: {why}", file=sys.stderr)
+        write_artifact(f"fix-pass: FAILED -- {why}")
         return EXIT_USAGE
+    write_artifact(
+        f"fix-pass: handed to {SCHEDULED_TASK} -- this shell is elevated; the task runs "
+        f"the pass unelevated from its own checkout, and records it there"
+    )
     print(
         f"fix-pass: this shell is elevated, so the pass was handed to the scheduled task "
         f"{SCHEDULED_TASK}, which runs unelevated; its record lands in {ARTIFACT}"
