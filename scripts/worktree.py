@@ -2726,6 +2726,30 @@ def spawn_lock(
         yield held
 
 
+def git_refusal(git: sweep.Git) -> str:
+    """`; git refuses the checkout: <why>` when git will not read it at all, else "".
+
+    `detect_default_branch` reads a refusal as "no such ref", so a clone an elevated
+    process made -- which git refuses as dubious ownership -- was reported to the
+    release job as having no base branch (100bf14f), naming nothing that was wrong.
+    """
+    probe = git("rev-parse", "--git-dir")
+    if probe.returncode == 0:
+        return ""
+    lines = [line.strip() for line in (probe.stderr or probe.stdout or "").splitlines()]
+    why = next((line for line in lines if line.startswith("fatal:")), "") or " ".join(lines)
+    return f"; git refuses the checkout: {why or f'exit {probe.returncode}'}"
+
+
+@contextlib.contextmanager
+def named_lock(workspace_root: Path, name: str, wait: float, stale: float):
+    """`_dir_lock` on `name` beside the boxes, for a caller outside this module. Yields
+    whether the lock was had; one that was not, with the lock directory standing, is
+    another holder's."""
+    with _dir_lock(boxes_root(workspace_root) / name, wait, stale) as held:
+        yield held
+
+
 def write_leases(workspace_root: Path, boxes: Mapping[str, Box]) -> None:
     """Replace the lease file atomically, so a reader never sees a torn write.
 
@@ -3543,6 +3567,7 @@ def plan_new(
     if not default_branch:
         raise WorktreeError(
             f"cannot resolve origin/HEAD in {project} — there is no base branch to cut from"
+            + git_refusal(git)
         )
     if base and not origin_has_branch(git, base, network=fetch):
         raise WorktreeError(f"origin/{base} does not exist in {project} — nothing to cut from")

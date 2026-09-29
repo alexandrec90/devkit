@@ -2152,6 +2152,53 @@ def test_a_spawn_lock_someone_else_holds_reports_that_it_was_not_had(tmp_path):
     assert _spawn_lock_dir(tmp_path).is_dir()  # the other holder's, left untouched
 
 
+DUBIOUS = (
+    "fatal: detected dubious ownership in repository at 'C:/ws/social-scraper'\n"
+    "'C:/ws/social-scraper' is owned by:\n\tBUILTIN/Administrators (S-1-5-32-544)\n"
+)
+
+
+def _probe(code: int, stderr: str = ""):
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["git", *args], code, "", stderr)
+
+    return git
+
+
+def test_git_refusal_names_why_git_will_not_read_the_checkout():
+    """100bf14f: social-scraper, cloned elevated, reached the release job as "cannot
+    resolve origin/HEAD", which named nothing that was wrong."""
+    said = worktree.git_refusal(_probe(128, DUBIOUS))
+    assert said == (
+        "; git refuses the checkout: fatal: detected dubious ownership in repository at "
+        "'C:/ws/social-scraper'"
+    )
+    assert worktree.git_refusal(_probe(0)) == ""
+    assert worktree.git_refusal(_probe(1)) == "; git refuses the checkout: exit 1"
+
+
+def test_a_checkout_git_refuses_is_named_in_the_no_base_branch_error(tmp_path, monkeypatch):
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text('{"folders": [{"path": "social-scraper"}]}', encoding="utf-8")
+    (tmp_path / "social-scraper").mkdir()
+    monkeypatch.setattr(worktree.sweep, "git_for", lambda path: _probe(128, DUBIOUS))
+    with pytest.raises(worktree.WorktreeError, match="dubious ownership"):
+        worktree.plan_new("social-scraper", workspace, slug="x", fetch=False)
+
+
+def test_a_named_lock_says_whether_it_was_had_and_leaves_another_holders_alone(tmp_path):
+    """The fix pass's one-at-a-time guard: the flag, plus the directory still standing,
+    is how a second pass tells another pass from a lock it could not make."""
+    lock = worktree.boxes_root(tmp_path) / "fix-pass.lock"
+    with worktree.named_lock(tmp_path, "fix-pass.lock", wait=0.2, stale=60.0) as held:
+        assert held is True
+        assert lock.is_dir()
+        with worktree.named_lock(tmp_path, "fix-pass.lock", wait=0.2, stale=60.0) as second:
+            assert second is False
+        assert lock.is_dir()
+    assert not lock.exists()
+
+
 def test_spawns_for_different_sessions_do_not_wait_on_each_other(tmp_path):
     """One box per (session, project) is the tier's whole shape, so two sessions
     spawning at once are not a race and must not be serialised into one."""
