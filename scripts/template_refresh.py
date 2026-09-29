@@ -20,6 +20,15 @@ Only templates with no `{{ }}` substitution are listed: a rendered copy of one t
 them differs per project, and nothing records the values it was rendered with.
 `tests/test_template_refresh.py` holds `REFRESHED` to that.
 
+**A refresh that rewrote a file re-reconciles the untested-symbol ratchet.** The pull's
+own reconcile ran before the refresh, so the functions the newer template added --
+devkit's code, tested in devkit -- read to the project's vendored gate as debt the
+project wrote: roguelike's v0.11.34 adoption went red naming `run-tests.py`'s
+`changed_paths`, `default_branch`, `tests_for` and `with_basetemp`. The reconcile is
+`sync-devkit.reconcile_untested_baseline`, with the refreshed paths counted among the
+files devkit wrote, so they are not held back as the project's own uncommitted edits.
+
+
 `python scripts/template_refresh.py <project>` does the same by hand.
 """
 
@@ -41,6 +50,10 @@ REFRESHED: dict[str, str] = {
 }
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
+# `(project, paths devkit wrote)` -> `(dropped, recorded)`, or None when not run.
+Reconciler = Callable[[Path, tuple[str, ...]], "tuple[int, int] | None"]
+
+REFRESHED_LINE = "an untouched earlier template, refreshed to devkit's current one"
 
 
 def _lf(text: str) -> str:
@@ -91,14 +104,47 @@ def refresh_one(
         return f"{target}: the project's own, left as it is"
     body = current.replace("\n", "\r\n") if b"\r\n" in held else current
     path.write_bytes(body.encode("utf-8"))
-    return f"{target}: an untouched earlier template, refreshed to devkit's current one"
+    return f"{target}: {REFRESHED_LINE}"
+
+
+def reconcile_untested(project: Path, rewritten: tuple[str, ...]) -> tuple[int, int] | None:
+    """devkit's `sync-devkit.reconcile_untested_baseline` on `project`, with `rewritten`
+    counted among the paths devkit wrote alongside the MANIFEST."""
+    loader_dir = Path(__file__).resolve().parent / "precommit"
+    if str(loader_dir) not in sys.path:
+        sys.path.insert(0, str(loader_dir))
+    # Resolved by the insert above; `scripts/precommit/` is not an importable package.
+    from _loader import load_by_path
+
+    sync = load_by_path("_sync_devkit", loader_dir.parent / "sync-devkit.py")
+    return sync.reconcile_untested_baseline(project, (*sync.MANIFEST, *rewritten))
+
+
+def ratchet_line(counts: tuple[int, int] | None) -> str:
+    """What the post-refresh reconcile did, as one line."""
+    if counts is None:
+        return "untested-symbol ratchet: not reconciled -- no baseline, or no scanner to say"
+    dropped, recorded = counts
+    return (
+        f"untested-symbol ratchet: dropped {dropped} line(s) now covered, "
+        f"recorded {recorded} gap(s) the refreshed template added"
+    )
 
 
 def refresh(
-    project: Path, devkit: Path = REPO_ROOT, runner: Runner = sweep.run_windowless
+    project: Path,
+    devkit: Path = REPO_ROOT,
+    runner: Runner = sweep.run_windowless,
+    reconcile: Reconciler = reconcile_untested,
 ) -> list[str]:
-    """`refresh_one` for every entry of `REFRESHED`."""
-    return [refresh_one(project, target, devkit, runner) for target in REFRESHED]
+    """`refresh_one` for every entry of `REFRESHED`, then the ratchet reconciled when any
+    file was rewritten."""
+    lines = [refresh_one(project, target, devkit, runner) for target in REFRESHED]
+    done = zip(REFRESHED, lines, strict=True)
+    rewritten = tuple(target for target, line in done if line.endswith(REFRESHED_LINE))
+    if rewritten:
+        lines.append(ratchet_line(reconcile(project, rewritten)))
+    return lines
 
 
 def main(argv: list[str] | None = None) -> int:

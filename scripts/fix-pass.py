@@ -87,6 +87,19 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
 
+# One dispatching pass at a time, machine-wide: beside the boxes, which every pass shares
+# whichever checkout it runs from. On 2026-09-29 a supervised pass run from a worktree
+# and the scheduled one started 21 seconds apart; both shipped the same two intents, and
+# the loser's push was refused ("cannot lock ref ... reference already exists") and filed
+# as a ship failure against a branch that had shipped (babfee68). A plan pass ships and
+# sends nothing, so it needs no lock.
+RUN_LOCK_NAME = "fix-pass.lock"
+# Long enough for a normal pass to finish and the waiter to run after it, current.
+RUN_LOCK_WAIT = 300.0
+# Past the watchdog's 25-minute stop (`fix-pass-watchdog.TIMEOUT`): a pass it killed
+# leaves the lock behind, and the next half-hourly fire breaks it.
+RUN_LOCK_STALE = 26 * 60.0
+
 # Every CLI the pass spawns before it can say anything, probed by running it: found is
 # not enough. On Windows `python3` is often only the Store alias, which exits 9009, and
 # every git hook runs through it. `gh auth status` rather than `--version`: a `gh`
@@ -423,6 +436,34 @@ def hand_to_scheduled_task() -> int:
     return EXIT_OK
 
 
+def run_alone(
+    workspace: Path,
+    mode: str,
+    launch: agent_models.Launch,
+    wait: float = RUN_LOCK_WAIT,
+    stale: float = RUN_LOCK_STALE,
+) -> int:
+    """`run`, with no other dispatching pass on the machine running beside it.
+
+    One still holding the lock after `wait` owns this fire: this pass exits clean and
+    writes nothing, since the record is the running pass's to write. A lock that could
+    not be made at all -- no lock directory standing -- is no evidence of another pass,
+    so the pass runs, as it did before there was a lock.
+    """
+    if mode != fix_cycle.DISPATCH:
+        return run(workspace, mode, launch)
+    root = workspace.parent
+    with worktree.named_lock(root, RUN_LOCK_NAME, wait, stale) as held:
+        lock = worktree.boxes_root(root) / RUN_LOCK_NAME
+        if not held and lock.is_dir():
+            print(
+                f"fix-pass: another dispatching pass holds {lock} -- this one ships and "
+                f"sends nothing; the running pass's record is the one to read"
+            )
+            return EXIT_OK
+        return run(workspace, mode, launch)
+
+
 def main(argv: list[str] | None = None) -> int:
     fix_send.pin_loaded(REPO_ROOT)  # before anything can fast-forward the checkout
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
@@ -448,7 +489,7 @@ def main(argv: list[str] | None = None) -> int:
         write_artifact(f"fix-pass: FAILED -- {why}")
         return EXIT_USAGE
     try:
-        return run(workspace, mode, launch)
+        return run_alone(workspace, mode, launch)
     except (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError) as exc:
         print(f"fix-pass: {exc}", file=sys.stderr)
         write_artifact(f"fix-pass: FAILED -- {exc}")
