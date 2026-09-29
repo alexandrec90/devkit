@@ -200,7 +200,11 @@ def test_either_producer_is_enough_to_protect_open_work(monkeypatch, tmp_path):
     asked: list[str] = []
 
     def producer(name: str, answer: bool):
-        return lambda *_args: asked.append(name) or answer
+        def probe(*_args) -> bool:
+            asked.append(name)
+            return answer
+
+        return probe
 
     for commits, park, expected in (
         (True, False, True),
