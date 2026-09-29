@@ -46,12 +46,21 @@ rather than a config file, and `tests/test_untested_symbols.py` enforces both:
 adoption and recording the existing debt are one act. Seeding an *existing* file is
 refused -- that would launder new untested code into the debt list, which is the one
 way this check can be defeated without anyone deciding to defeat it.
+
+Every later pull *reconciles* it instead (`reconcile`), because a release moves the gaps
+under a project that did nothing: a vendored test covers a baselined symbol, or this
+scanner stops counting a reference that never exercised the symbol it named. Both
+reddened the adoption of #464's scanner. Reconciling drops the lines now covered, and
+records only the gaps the pull itself revealed -- present now, absent from what the
+project's own pre-pull scanner reported, and not in a file the project has uncommitted
+edits to -- so debt the project wrote is still its gate's to report.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
 import sys
 from pathlib import Path
@@ -499,6 +508,44 @@ def verdict(root: Path, cfg: harness_config.Config) -> tuple[list[str], list[str
     return sorted(current - recorded), sorted(recorded - current)
 
 
+def reconcile(
+    root: Path,
+    cfg: harness_config.Config,
+    before: set[str] | None,
+    held: frozenset[str] = frozenset(),
+) -> tuple[int, int] | None:
+    """Carry an adopted baseline across a pull: `(dropped, recorded)`, `None` if unadopted.
+
+    Drops every line no longer a gap, which only shrinks the debt. Records a gap only if
+    `before` -- the gaps the pre-pull tree's own scanner reported -- lacks it and its file
+    is not in `held`, the project-owned files with uncommitted edits: such a gap was
+    made by the pull, not by the project. `before=None`, when nothing says what the tree
+    looked like, records nothing, so the one thing this can never do is `seed`'s refusal
+    in reverse -- launder a symbol someone just failed to test.
+    """
+    path = baseline_path(root)
+    if not path.exists():
+        return None
+    current = set(gaps(root, cfg))
+    recorded = set(read_baseline(path))
+    stale = recorded - current
+    revealed: set[str] = set()
+    if before is not None:
+        revealed = {k for k in current - recorded - before if k.partition("::")[0] not in held}
+    if stale or revealed:
+        path.write_text(
+            render_baseline(sorted((recorded - stale) | revealed)), encoding="utf-8", newline="\n"
+        )
+    return len(stale), len(revealed)
+
+
+def read_reconcile_input(path: Path) -> tuple[set[str] | None, frozenset[str]]:
+    """`(before, held)` from the JSON `sync-devkit.py` writes; `before` null is unknown."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    before = data.get("before")
+    return (None if before is None else set(before)), frozenset(data.get("held", ()))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -507,7 +554,24 @@ def main(argv: list[str] | None = None) -> int:
         help=f"write {BASELINE_NAME} when adopting the gate; refuses to overwrite",
     )
     parser.add_argument("--list", action="store_true", help="print every gap, covered or not")
+    parser.add_argument(
+        "--reconcile",
+        metavar="JSON",
+        type=Path,
+        help="after a pull: drop covered lines, record gaps absent from the JSON's `before`",
+    )
     args = parser.parse_args(argv)
+
+    if args.reconcile:
+        result = reconcile(REPO_ROOT, CFG, *read_reconcile_input(args.reconcile))
+        if result is None:
+            print(f"untested-symbols: no {BASELINE_NAME} to reconcile.")
+            return 1
+        print(
+            f"untested-symbols: dropped {result[0]} covered line(s), "
+            f"recorded {result[1]} gap(s) the pull revealed."
+        )
+        return 0
 
     if args.seed:
         count = seed(REPO_ROOT, CFG)
