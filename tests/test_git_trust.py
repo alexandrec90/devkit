@@ -58,7 +58,8 @@ class FakeGit:
     """Global config as a list; each call recorded."""
 
     def __init__(self, listed: list[str], add_fails: bool = False) -> None:
-        self.listed, self.add_fails, self.calls = listed, add_fails, []
+        self.listed, self.add_fails = listed, add_fails
+        self.calls: list[tuple[str, ...]] = []
 
     def __call__(self, *args: str) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
