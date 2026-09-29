@@ -2615,6 +2615,16 @@
 			"spawn": "worktree",
 			"permissionMode": "bypassPermissions"
 		},
+		// Compose services that ingest on their own schedule with nobody connected, kept
+		// up by `devkit-collectors` -- see README, "Ingestion collectors". Declared here for
+		// every machine; RUN on none until `collectors.py run-here` on that machine, which
+		// is recorded in devkit's ignored `logs/` and so never follows the workspace to a
+		// second PC. `health` runs inside the container; its exit code is the project's own
+		// verdict on whether ingestion is pulling data.
+		"devkit.collectors": {
+			"ibkr_trader": { "service": "app", "health": ["ibkr-trader", "health"] },
+			"sports_betting": { "service": "collector", "health": ["sports-betting", "health", "--quiet"] }
+		},
 		// Options an installer should keep, keyed by installer file name. The daily
 		// `devkit-installers` pass (`installers.py`) re-registers a scheduled job from
 		// what its installer builds today, and an option chosen at install time is

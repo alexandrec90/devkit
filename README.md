@@ -854,6 +854,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-installers` | `scripts/install-installers-schedule.py` | daily 08:45, and at logon | `logs/installers.log` |
 | `devkit-workspace-status` | `scripts/install-workspace-status.py` | daily 09:00 | `logs/scheduled-workspace-status.log` |
 | `devkit-fix-pass` | `scripts/install-fix-pass-task.py` | every 30 min, behind `devkit.fixPass` | `logs/fix-pass.log` |
+| `devkit-collectors` | `scripts/install-collectors.py` | every 15 min, and at logon; acts only where `run-here`/`stop-here` assigned | `logs/collectors.log` |
 
 #### The one installer you run by hand
 
@@ -935,6 +936,45 @@ in (`GROUP`), which is what the switch's list is held to.
 — and names the file above when one exits non-zero, so the reported line is a
 pointer rather than a bare exit code. `tests/test_scheduled_jobs.py` holds the contract:
 a job registered by hand, or one that leaves nothing behind, fails the suite.
+
+#### Ingestion collectors, and which machine runs them
+
+A **collector** is a compose service that does scheduled work with nobody connected to it
+— ibkr_trader's `serve`, sports_betting's `collector`. Each keeps its own clock inside the
+container, so what needs an owner is the container: up where it should run, down where it
+should not, and visibly healthy. `restart: unless-stopped` gives none of that. It revives a
+container on whichever machine last started one, and does nothing where nobody did.
+
+Which collectors exist is declared once, in `workspace.jsonc`, beside
+`devkit.remoteControl`: the service, and the project's own health command, run inside the
+container and trusted for its exit code.
+
+```jsonc
+"devkit.collectors": {
+  "ibkr_trader": { "service": "app", "health": ["ibkr-trader", "health"] },
+  "sports_betting": { "service": "collector", "health": ["sports-betting", "health", "--quiet"] }
+}
+```
+
+**Which machine runs them is not in that file**, because every workstation shares it. It is
+`logs/collectors.machine.json` in the static devkit checkout, written by
+`scripts/collectors.py` and read by nothing but this machine:
+
+```bash
+python scripts/collectors.py                     # declared, assigned, running
+python scripts/collectors.py run-here            # this machine runs them all; starts them now
+python scripts/collectors.py stop-here           # this machine must not; stops them now
+python scripts/collectors.py release ibkr_trader # forget one: neither started nor stopped
+```
+
+A machine never assigned is **hands off**, so a fresh workstation starts nothing. To move a
+collector, run `stop-here` on the old machine and `run-here` on the new one.
+`devkit-collectors` is registered everywhere and acts only on the assignment. It starts a
+stopped collector with `docker compose up -d <service>`, stops one on a `stop-here` machine
+with `docker stop`, and never rebuilds. Rebuilding is a deploy, which a timer should not do
+mid-ingest. The tray gets a row per assigned collector: live container state on every poll,
+plus the last health verdict, shown amber rather than red because it is the project's
+verdict, not a failure of the job.
 
 #### Remote Control servers, and why keeping them up is a job
 

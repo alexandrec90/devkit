@@ -12,6 +12,10 @@ system working, that a job gets at most one line. Re-deriving any of that would 
 second opinion that disagrees with the session-start line for the same machine, which is
 worse than no indicator. So this consumes those lines and adds only the one thing they
 do not carry: how loud each is.
+
+The ingestion collectors ride along as rows of their own (`collector_states`). They are
+containers rather than scheduled tasks, so the scheduler cannot report them, and
+`collectors.row` is their `schedule_health`.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import collectors
 import schedule_health
 
 OK = "ok"
@@ -63,11 +68,13 @@ class JobState:
     name: str
     state: str
     detail: str = ""
+    # A row that is not a scheduled task -- a collector -- names its record itself.
+    log: str = ""
 
     @property
     def artifact(self) -> str:
         """The job's own record, or "" for a job that names none."""
-        return schedule_health.ARTIFACTS.get(self.name, "")
+        return self.log or schedule_health.ARTIFACTS.get(self.name, "")
 
 
 def named_in(line: str) -> str:
@@ -176,4 +183,15 @@ def refresh(now=None) -> list[JobState]:
     """
     jobs = schedule_health.query()
     deliberate = schedule_health.stood_down()
-    return states(jobs, schedule_health.problems(jobs, now, deliberate), deliberate)
+    found = states(jobs, schedule_health.problems(jobs, now, deliberate), deliberate)
+    return sorted(found + collector_states(), key=lambda item: (-RANK[item.state], item.name))
+
+
+def collector_states() -> list[JobState]:
+    """One row per ingestion collector assigned to this machine; none on any other.
+
+    The judgement is `collectors.row`'s, for this module's reason about
+    `schedule_health`: `collectors.py status` and the tray must not disagree.
+    """
+    log = collectors.ARTIFACT.as_posix()
+    return [JobState(name, level, detail, log) for name, level, detail in collectors.tray_rows()]
