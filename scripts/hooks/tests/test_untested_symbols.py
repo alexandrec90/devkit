@@ -402,6 +402,75 @@ def test_a_stand_in_does_not_hide_a_real_reference_in_the_same_file(tmp_path):
         assert us.gaps(tmp_path, config(sources=["src"])) == [], reaching
 
 
+def test_a_call_on_a_module_loaded_by_path_vouches_only_for_that_module(tmp_path):
+    """1a0918d0: `installer.runner_script()`, with `installer` loaded from
+    install-collectors.py, sat in a file whose other test loads install-global-tools.py
+    into the same local name, and read as coverage of install-global-tools.py's
+    `runner_script`. The ratchet demanded that baseline line be deleted as "now covered",
+    and the reporter renamed a new function to get past it."""
+    write(tmp_path, "src/acme-tool.py", "def alpha():\n    pass\n")
+    write(tmp_path, "src/other-tool.py", "def alpha():\n    pass\n\n\ndef beta():\n    pass\n")
+    tests = (
+        "def test_acme():\n    tool = load('src/acme-tool.py')\n    tool.alpha()\n\n\n"
+        "def test_other():\n    tool = load('src/other-tool.py')\n    tool.beta()\n"
+    )
+    write(tmp_path, "tests/test_tools.py", tests)
+    assert us.gaps(tmp_path, config(sources=["src"])) == ["src/other-tool.py::alpha"]
+
+
+def test_a_module_level_load_binds_its_name_in_every_test_that_does_not_rebind_it(tmp_path):
+    write(tmp_path, "src/acme-tool.py", "def alpha():\n    pass\n")
+    write(tmp_path, "src/other-tool.py", "def alpha():\n    pass\n")
+    tests = (
+        "acme = load('src/acme-tool.py')\nother = load('src/other-tool.py')\n\n\n"
+        "def test_it():\n    acme.alpha()\n"
+    )
+    write(tmp_path, "tests/test_tools.py", tests)
+    assert us.gaps(tmp_path, config(sources=["src"])) == ["src/other-tool.py::alpha"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "def test_it(tool):\n    tool.alpha()\n",  # a fixture: which module is not written here
+        "def test_it():\n    tool = load('src/acme-tool.py')\n    tool = wrap(tool)\n"
+        "    tool.alpha()\n",  # also bound some other way
+        "def test_it():\n    tool = load('src/acme-tool.py')\n    x.tool.alpha()\n",  # not the name
+        "def test_it():\n    tool = load('src/acme-tool.py')\n    alpha()\n",  # a bare call
+    ],
+)
+def test_a_receiver_the_file_does_not_bind_by_path_vouches_as_before(tmp_path, body):
+    """Narrowed only where the file itself says which module a name is. Anything else
+    keeps vouching for every module the file names -- the gate's no-false-negative
+    claim is about gaps, and a false gap fails new, tested code."""
+    write(tmp_path, "src/acme-tool.py", "def beta():\n    pass\n")
+    write(tmp_path, "src/other-tool.py", "def alpha():\n    pass\n")
+    loads = "def test_load():\n    load('src/acme-tool.py').beta()\n    load('src/other-tool.py')\n"
+    write(tmp_path, "tests/test_tools.py", loads + "\n\n" + body)
+    assert us.gaps(tmp_path, config(sources=["src"])) == [], body
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("t = load('s/a-b.py')\nt.alpha()\n", {"alpha": {"a-b.py"}}),
+        ('t = load(r"s\\\\a.py")\nt.alpha()\nt.alpha\n', {"alpha": {"a.py"}}),
+        (
+            "def f():\n    t = load('a.py')\n    t.x()\n\ndef g():\n    t = load('b.py')\n    t.x()\n",
+            {"x": {"a.py", "b.py"}},
+        ),
+        ("def f():\n    t = load('a.py')\n    t.x()\n\ndef g(t):\n    t.x()\n", {}),
+        ("t = load('a.py')\nt.x()\nu.x()\n", {}),
+        ("t = load('a.py')\nt.x()\nfrom m import x\n", {}),
+        ("t: object = load('a.py')\nt.x()\n", {"x": {"a.py"}}),
+        ("t = load('a.py')\nt == 1\nt.x()\n", {"x": {"a.py"}}),
+    ],
+)
+def test_attributes_by_module_reads_only_receivers_a_loader_bound(text, expected):
+    found = us.attributes_by_module(text)
+    assert found == {name: frozenset(files) for name, files in expected.items()}
+
+
 @pytest.mark.parametrize(
     "text, expected",
     [

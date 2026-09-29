@@ -193,3 +193,23 @@ def test_git_decodes_utf8_rather_than_the_platform_codec():
     assert 'encoding="utf-8"' in call and 'errors="replace"' in call, (
         "guard_probes.git must name its codec: encoding='utf-8', errors='replace'"
     )
+
+
+def test_either_producer_is_enough_to_protect_open_work(monkeypatch, tmp_path):
+    """Asked in cost order: the marker is read only when the branch has no commits."""
+    asked: list[str] = []
+
+    def producer(name: str, answer: bool):
+        return lambda *_args: asked.append(name) or answer
+
+    for commits, park, expected in (
+        (True, False, True),
+        (False, True, True),
+        (False, False, False),
+    ):
+        asked.clear()
+        monkeypatch.setattr(guard_probes, "branch_has_own_commits", producer("commits", commits))
+        monkeypatch.setattr(guard_probes, "branch_is_a_sweep_park", producer("park", park))
+        protects = guard_probes.branch_protects_open_work(tmp_path, lambda _git: "main", "m")
+        assert protects is expected
+        assert asked == (["commits"] if commits else ["commits", "park"])

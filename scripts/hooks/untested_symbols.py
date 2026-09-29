@@ -27,7 +27,9 @@ A *reference* is a call, an attribute access, or an import. Never a bare substri
 which `cap` satisfies inside `capsys`. And never a bare call of a name the test file
 defines itself (`shadowed_names`): a fixture named after the function it stands in for
 is that fixture, not the function, unless the file also reaches the real one through
-its module or an import.
+its module or an import. And an attribute off a name the file loaded one module into by
+path (`tool = load("scripts/a.py")`, then `tool.x()`) vouches for that module only
+(`attributes_by_module`), not for every other module the same file names.
 
 ## The baseline is debt, not configuration
 
@@ -246,6 +248,67 @@ def shadowed_names(text: str) -> frozenset[str]:
     return frozenset(defined - reached)
 
 
+# A top-level `def`, `class` or decorator opens a scope; the text before the first is the
+# module's own. A statement at column 0 between two functions joins the one above it,
+# which can only leave a name unbound, never bind it to the wrong module.
+_SCOPE_RE = re.compile(r"^(?=@|(?:async[ \t]+)?(?:def|class)\b)", re.MULTILINE)
+# `name = loader("dir/file.py", ...)`: a name bound to one module by its path.
+_LOADED_RE = re.compile(
+    r"""^[ \t]*(\w+)[ \t]*(?::[^=\n]*)?=[ \t]*[\w.]+\(\s*[rRuU]?["'][^"'\n]*?([^"'/\\\n]+\.py)["']""",
+    re.MULTILINE,
+)
+_ASSIGNED_RE = re.compile(r"^[ \t]*(\w+)[ \t]*(?::[^=\n]*)?=(?!=)", re.MULTILINE)
+_RECEIVER_RE = re.compile(r"(?<![\w.])(\w+)\.(\w+)")
+
+
+def _loaded(scope: str) -> dict[str, frozenset[str]]:
+    """Each name `scope` assigns, with the file names of the modules it loads into it --
+    empty for a name also assigned any other way, which says nothing about its module."""
+    files: dict[str, set[str]] = {}
+    loads: dict[str, int] = {}
+    for found in _LOADED_RE.finditer(scope):
+        files.setdefault(found[1], set()).add(found[2])
+        loads[found[1]] = loads.get(found[1], 0) + 1
+    for name in _ASSIGNED_RE.findall(scope):
+        loads[name] = loads.get(name, 0) - 1
+    return {
+        name: frozenset(files.get(name, ())) if count == 0 else frozenset()
+        for name, count in loads.items()
+    }
+
+
+def attributes_by_module(text: str) -> dict[str, frozenset[str]]:
+    """Names `text` reaches only as `receiver.name`, with `receiver` bound to a module
+    loaded by path, each mapped to those modules' file names.
+
+    1a0918d0: `installer.runner_script()`, with `installer` loaded from
+    install-collectors.py, read as coverage of install-global-tools.py's `runner_script`
+    because another test in the file loaded that one into the same local name. A name in
+    this map vouches only for the modules it maps to; every other reference -- a bare call,
+    an import, an attribute off a fixture or off anything the file does not load by path --
+    is left out and vouches for the whole corpus as before, so this can only move a
+    symbol out of coverage where the file itself says which module it reached.
+    """
+    scopes = _SCOPE_RE.split(text)
+    module_level = _loaded(scopes[0])
+    owned: dict[str, set[str]] = {}
+    free = set(_CALL_RE.findall(text))
+    for rest_of_line in _FROM_IMPORT_RE.findall(text):
+        free.update(_WORD_RE.findall(rest_of_line))
+    for index, scope in enumerate(scopes):
+        bound = {**module_level, **_loaded(scope)} if index else module_level
+        dots: dict[int, frozenset[str]] = {}
+        for found in _RECEIVER_RE.finditer(scope):
+            if bound.get(found[1]):
+                dots[found.start(2) - 1] = bound[found[1]]
+        for found in _ATTRIBUTE_RE.finditer(scope):
+            if found.start() in dots:
+                owned.setdefault(found[1], set()).update(dots[found.start()])
+            else:
+                free.add(found[1])
+    return {name: frozenset(files) for name, files in owned.items() if name not in free}
+
+
 def module_pattern(module: Path) -> re.Pattern[str]:
     """Matches a test file's mention of `module`, in a spelling that names the module.
 
@@ -368,7 +431,14 @@ def gaps(root: Path, cfg: harness_config.Config, texts: dict[Path, str] | None =
     """
     if texts is None:
         texts = read_tests(root, cfg)
-    referenced = {rel: referenced_names(text) - shadowed_names(text) for rel, text in texts.items()}
+    # Split once per file: what vouches for every module the file names, and the names that
+    # vouch only for the modules `attributes_by_module` maps them to.
+    referenced: dict[Path, frozenset[str]] = {}
+    owned: dict[Path, dict[str, frozenset[str]]] = {}
+    for rel, text in texts.items():
+        reached = referenced_names(text) - shadowed_names(text)
+        owned[rel] = {n: files for n, files in attributes_by_module(text).items() if n in reached}
+        referenced[rel] = reached - owned[rel].keys()
     found: list[str] = []
     for module in source_files(root, cfg):
         try:
@@ -380,6 +450,7 @@ def gaps(root: Path, cfg: harness_config.Config, texts: dict[Path, str] | None =
         names: set[str] = set()
         for rel in corpus_files(module, texts):
             names |= referenced[rel]
+            names.update(name for name, files in owned[rel].items() if module.name in files)
         found.extend(entry(module, symbol) for symbol in symbols if symbol not in names)
     return sorted(found)
 
