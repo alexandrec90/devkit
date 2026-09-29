@@ -290,11 +290,13 @@ path for one already published, and any other tag shape is ignored. `RELEASING.m
 the release this was written for.
 
 The global `post-checkout` hook (`scripts/worktree_env.py`) fires once, in the new tree,
-whenever one is created — `git worktree add`, whoever ran it, which is the one seam that
-reaches `claude --worktree`, `codex --worktree` and a person at a prompt alike, with no
-agent hook involved. `claude --worktree` cuts with `--no-checkout`, which git exempts from
-`post-checkout`, so the same set-up also runs from the global `post-index-change` hook on
-the `git reset --hard` that fills the tree, for as long as the tree has no `.venv`. It
+whenever one is created by `git worktree add` from a shell or a script, and the global
+`post-index-change` hook runs the same set-up for a tree cut `--no-checkout` and filled by
+`git reset --hard`. **Neither reaches `claude --worktree`**: Claude Code runs its own git
+with `-c core.hooksPath=/dev/null`, so no git hook fires for the trees it cuts, and the
+only seam it offers instead is an agent hook, which this harness does not wire. devkit's
+own trees get their interpreter from `worktree.symlinkDirectories` in
+`.claude/settings.json` instead (see `tests/test_self_hosting.py`). It
 does two things a linked worktree otherwise
 lacks, each only when its conditions hold:
 

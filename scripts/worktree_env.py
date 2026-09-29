@@ -45,10 +45,17 @@ leaves a tree unprovisioned -- a failure, a missing `uv`, a command that needs a
 goes in the tree's `logs/friction.md` as well as the hook's output, which `claude
 --worktree` swallows: the fix pass files it, so it is fixed at the cause.
 
-**`post-checkout` alone never reached `claude --worktree`.** It cuts with
-`--no-checkout` and fills the tree with `git reset --hard`, and git skips `post-checkout`
-for a no-checkout add. So the same set-up also answers `post-index-change`
-(`index_change_main`), gated on a working-tree update in a tree not yet provisioned.
+**`post-checkout` alone misses a tree cut `--no-checkout`** and filled with
+`git reset --hard`, since git skips `post-checkout` for a no-checkout add. So the same
+set-up also answers `post-index-change` (`index_change_main`), gated on a working-tree
+update in a tree not yet provisioned.
+
+**Neither hook reaches `claude --worktree` any more.** Claude Code runs its own git with
+`-c core.hooksPath=/dev/null` (verified 2026-09-29: a plain `git worktree add` fired
+both hooks in a scratch repo, `claude -p --worktree` fired neither), and its only
+replacement seam is an agent hook, which this harness does not wire. devkit's own
+Claude trees borrow the checkout's `.venv` through `worktree.symlinkDirectories`
+instead; a consumer's still gets its `.venv` from `worktree.py provision`.
 
 
 Every decision here is a pure function; `main` is the only part that touches git or the
