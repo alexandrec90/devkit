@@ -649,6 +649,36 @@ def test_session_findings_are_nothing_outside_the_workspace(tmp_path):
     assert (found.project, found.agent) == ("carameli", "claude")
 
 
+def test_a_whole_suite_is_friction_only_where_the_scope_rule_asked_for_less(tmp_path):
+    """0a4b17f3: a data-lake session ran this before its first edit. data-lake is held
+    back from adoption and carries no session-scope rule, so nothing there asked for a
+    targeted run -- its CLAUDE.md calls `run-tests.py` the suite -- and the row's detail
+    was false about it. A tree that carries the rule still files; a tree gone defers to
+    its project's checkout; neither there to read files, as before."""
+    run = "python scripts/run-tests.py 2>&1 | tail -5; uv run pytest --cov=data_lake -q 2>&1 | tail -8"
+    chunk = st.Chunk(((1, user("review the architecture")), (2, call(run, "1"))), 0, 2)
+
+    def kinds(cwd: Path) -> list[str]:
+        return [
+            f.kind for f in sf.session_findings(tmp_path / "s.jsonl", chunk, str(cwd), tmp_path)
+        ]
+
+    held, adopted = tmp_path / "data-lake", tmp_path / "ibkr_trader"
+    for checkout in (held, adopted):
+        (checkout / ".claude" / "rules").mkdir(parents=True)
+    (adopted / sf.SCOPE_RULE).write_text("# Rule: Stop at the change\n", encoding="utf-8")
+    assert kinds(held) == []
+    assert kinds(adopted) == ["full-suite"]
+    gone = ".claude/worktrees/nifty-coalescing-lark"
+    assert kinds(held / gone) == [], "the held project's checkout decides"
+    assert kinds(adopted / gone) == ["full-suite"]
+    assert kinds(tmp_path / "elsewhere") == ["full-suite"], "nothing to read: it stands"
+    # The tree decides over its project's checkout while it is still there.
+    assert not sf.asks_for_targeted_runs(str(held), tmp_path, "ibkr_trader")
+    assert sf.asks_for_targeted_runs(str(tmp_path / "gone"), tmp_path, "ibkr_trader")
+    assert not sf.asks_for_targeted_runs(str(tmp_path / "gone"), tmp_path, "data-lake")
+
+
 def test_the_reader_finds_both_stores_and_tells_them_apart(tmp_path):
     claude = tmp_path / "claude" / "slug" / "a.jsonl"
     codex = tmp_path / "codex" / "2026" / "09" / "rollout-x.jsonl"
