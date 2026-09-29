@@ -224,6 +224,58 @@ def test_a_session_is_working_done_or_dead(tmp_path):
     assert fix_reports.session_state(tree, now, projects) == (fix_reports.DONE, str(log))
 
 
+# The two records 0929-7's transcript held around its early ship, as Claude Code writes
+# them: the Bash result that started the suite, and the notification that it ended.
+LAUNCH = (
+    '{"type":"user","message":{"content":[{"type":"tool_result","content":"Command running '
+    'in background with ID: b172nyn6g. Output is being written to: C:\\\\t.output"}]}}\n'
+)
+NOTIFY = (
+    '{"type":"user","message":{"content":"<task-notification>\\n<task-id>b172nyn6g'
+    '</task-id>\\n<status>killed</status>"}}\n'
+)
+
+
+def test_a_session_waiting_on_its_own_background_task_is_not_done_with_an_intent(tmp_path):
+    """8d2f56f5: 0929-7 wrote its intent, started the suite in the background and ended
+    its turn to wait for it. `claude agents` listed it idle, so the 21:30 pass shipped
+    the tree mid-test, and the commit carried a test that hung."""
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=30))
+    log = _transcript(projects, tree, _dt.timedelta(minutes=17), now)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(LAUNCH)
+    (tree / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
+    assert fix_reports.pending_tasks(log) == {"b172nyn6g"}
+    assert fix_reports.awaiting_task(tree, now, projects)
+    assert fix_reports.session_state(tree, now, projects) == (fix_reports.WORKING, str(log))
+
+    # Gone quiet past QUIET_AFTER with the task still out: stopped mid-task, not waiting.
+    later = now + fix_reports.QUIET_AFTER + _dt.timedelta(minutes=18)
+    assert not fix_reports.awaiting_task(tree, later, projects)
+    assert fix_reports.session_state(tree, later, projects)[0] == fix_reports.DONE
+
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(NOTIFY)
+    assert fix_reports.pending_tasks(log) == frozenset()
+    assert not fix_reports.awaiting_task(tree, now, projects)
+    assert fix_reports.session_state(tree, now, projects) == (fix_reports.DONE, str(log))
+
+
+def test_only_the_stamped_live_session_is_asked_about_background_tasks(tmp_path):
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    assert not fix_reports.awaiting_task(tmp_path / "unstamped", now, projects)
+    assert fix_reports.pending_tasks(tmp_path / "missing.jsonl") == frozenset()
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=30))
+    log = _transcript(projects, tree, _dt.timedelta(minutes=17), now)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(LAUNCH)
+    fix_reports.note_on_stamp(tree, "dead", "never started")
+    assert not fix_reports.awaiting_task(tree, now, projects), "a session judged dead"
+
+
 def test_the_stamped_session_is_told_from_another_session_in_the_same_tree(tmp_path):
     """The first supervised run sent a fixer into a worktree an interactive session also
     lived in, and judged the fixer by the interactive session's transcript -- the newest
