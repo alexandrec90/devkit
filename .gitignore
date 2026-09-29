@@ -6,7 +6,9 @@ __pycache__/
 # Hypothesis' downloaded Unicode tables — a regenerable cache, not source. A copy was
 # committed by accident once; ignoring the directory is what stops it coming back.
 .hypothesis/
-.venv/
+# No trailing slash: in a `claude --worktree` tree `.venv` is a symlink to the
+# checkout's (`worktree.symlinkDirectories`), and `.venv/` matches directories only.
+.venv
 # Root-level Markdown lint toolchain. Generated projects keep any frontend
 # node_modules under their own feature directory and ignore it separately.
 /node_modules/

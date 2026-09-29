@@ -49,6 +49,35 @@ def test_no_agent_hook_is_wired_in_devkit_or_the_template():
     assert "hooks" not in template, "the template wires an agent hook into every project"
 
 
+def test_claude_worktrees_borrow_the_checkouts_venv():
+    """A `claude --worktree` tree of devkit arrives with a working `.venv`.
+
+    Claude Code runs its own git with `core.hooksPath=/dev/null`, so the global
+    `post-checkout`/`post-index-change` provisioner never fires for its trees, and the
+    only seam it offers instead is an agent hook, which is not wired. Twice a devkit
+    session started in such a tree, hit `No module named pytest`, and spent turns
+    provisioning by hand. `worktree.symlinkDirectories` links the checkout's `.venv` in
+    at creation, which is a setting, not a hook.
+
+    Borrowing is only correct while devkit installs no package of its own: an editable
+    install in a shared venv points at the checkout's source, and the tree's tests would
+    silently import the wrong code. And the link must be gitignored as a link -- `.venv/`
+    matches directories only, so it would leave `.venv` in every `git status`.
+    """
+    assert ".venv" in _settings().get("worktree", {}).get("symlinkDirectories", []), (
+        "devkit's settings no longer link .venv into claude --worktree trees"
+    )
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["tool"]["uv"]["package"] is False, (
+        "devkit now installs a package: a borrowed .venv would import the checkout's "
+        "source in every claude --worktree tree -- drop the symlink and provision instead"
+    )
+    ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".venv" in ignored or "/.venv" in ignored, (
+        ".gitignore ignores .venv only as a directory, so the symlinked one is untracked"
+    )
+
+
 # Settings that belong to whoever is *driving* the session, not to the repo being
 # worked in. `defaultMode` is nested under `permissions`; the rest are top level.
 USER_PREFERENCE_KEYS = ("model", "effortLevel", "skipDangerousModePermissionPrompt", "tui")
