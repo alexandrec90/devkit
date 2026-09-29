@@ -10,7 +10,10 @@ argument-hint: 'Optional: how many iterations (default 3), or "plan" to rehearse
 > Depends on `gh` being authenticated and `claude` on PATH: the pass dispatches real
 > sessions and pushes real branches. Run it from a shell that is **not elevated**:
 > `agent_tabs.launch_background` refuses to launch from one, because a background service
-> started elevated is unreachable to the scheduled pass until it exits.
+> started elevated is unreachable to the scheduled pass until it exits. The pass hands an
+> elevated dispatch to the scheduled task instead, which runs `main`'s code, not this
+> tree's, so `fix-pass-supervise.py` refuses one outright. From an elevated session,
+> start it through `runas /trustlevel:0x20000`, which gives the child an unelevated token.
 
 Devkit-only, like `/triage-harness`. The fix pass (`scripts/fix-pass.py`) holds one
 contract: **every observation ends green, in flight, or filed** on the harness-defect
