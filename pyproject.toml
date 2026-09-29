@@ -47,8 +47,12 @@ testpaths = ["tests"]
 addopts = '-m "not paid" -p devkit_temproot'
 # The vendored plugin that gives each run a temp root of its own; `-p` above loads it.
 # What makes it importable: pytest applies this before it loads a `-p` plugin, which is
-# also why the floor above is 9.1.
-pythonpath = ["scripts/pytest-plugins"]
+# also why the floor above is 9.1. `scripts` too, so a test's `import fix_plan` does not
+# depend on another module having put it on the path first (`tests/support.py` does).
+pythonpath = ["scripts/pytest-plugins", "scripts"]
+# A test that hangs prints its stack after this many seconds instead of silently running
+# until a tool call's limit kills it. Dumps only; nothing fails on it.
+faulthandler_timeout = 120
 markers = [
   "claude_live: paid opt-in smoke tests that launch an authenticated Claude Code CLI session",
   "codex_live: paid opt-in smoke tests that launch an authenticated Codex CLI session",

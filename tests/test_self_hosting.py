@@ -215,6 +215,23 @@ def test_pytest_scope_keeps_the_vendored_tier_separate():
     assert testpaths == ["tests"], f"testpaths is {testpaths!r}"
 
 
+def test_a_scripts_module_imports_whatever_file_is_collected_first():
+    """0929-8 wrote `import fix_plan` in a test: green in the whole suite, where another
+    module had already put `scripts/` on the path, and a collection error alone or on the
+    first xdist worker to reach it."""
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "scripts" in data["tool"]["pytest"]["ini_options"]["pythonpath"]
+
+
+def test_a_hung_test_names_itself_before_the_tool_call_times_out():
+    """0929-7's own lock test spun; its run was killed at the tool's limit, and the session
+    sat 20 minutes idle on an output file that `| tail` kept empty. faulthandler dumps
+    the hung test's stack at this many seconds, without failing anything."""
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    timeout = data["tool"]["pytest"]["ini_options"]["faulthandler_timeout"]
+    assert 0 < timeout <= 300
+
+
 def test_pytest_is_never_quiet_by_default_here_or_in_a_generated_project():
     """An agent adds its own `-q`; on top of one in `addopts` that is `-qq`, which drops
     the "N passed" line. Sessions re-ran the whole suite hunting for a verdict pytest

@@ -407,6 +407,9 @@ def test_the_resolver_checks_every_file_for_a_conflict_marker():
 def test_every_prompt_names_the_ratchets_and_forbids_a_question():
     for text in every_prompt():
         assert "structure_check.py" in text and "untested_symbols.py" in text
+        # 0929-6 ran mypy on its scripts only, "the linter" being unnamed, and #467 went
+        # red on the test file it added: a second fixer for one annotation.
+        assert "python scripts/lint-all.py over every file you changed, the tests" in text
         # A resolver took main's wording in a rule, ran the two ratchets it was named,
         # and left #398 13 tokens over the hot-tier ceiling: a third session to fix it.
         assert "python scripts/hot-budget.py" in text

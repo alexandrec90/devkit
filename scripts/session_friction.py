@@ -529,10 +529,12 @@ class _Session:
             self.checked = set()
         checked = frozenset(self.checked) if self.checked is not None else None
         for cls, what in _command_classes(event.command, checked):
-            # A `Monitor` until-loop is the wait Claude Code's `SLEEP_GUARD` prescribes.
             if cls == "full-suite" and self.suite_asked:
                 continue
-            if not (cls == "poll" and event.tool in WAIT_TOOLS):
+            # A `Monitor` until-loop is the wait Claude Code's `SLEEP_GUARD` prescribes, and
+            # a backgrounded one is a single call and its completion notice -- the shape
+            # the engineering rule asks a long wait to take, not a loop of turns.
+            if not (cls == "poll" and (event.tool in WAIT_TOOLS or event.background)):
                 self.note(cls, what, event)
         if self.checked is not None:
             self.checked.update(whole_runs(event.command))  # the next whole run is the habit
@@ -639,6 +641,32 @@ def asks_for_targeted_runs(cwd: str, workspace_root: Path, project: str) -> bool
     return True
 
 
+# "No module named 'x'" -- quoted, as Python names a module import failed on. Unquoted
+# ("No module named pytest") is `python -m` missing the tool itself.
+MISSING_MODULE = re.compile(r"No module named '([\w.]+)'")
+# Where a tree's own modules live: its root (a package), and devkit's script directories.
+MODULE_HOMES = ("", "scripts", "scripts/hooks", "scripts/precommit", "tests")
+
+
+def local_module(what: str, cwd: str) -> bool:
+    """`what` reports a missing module the session's own tree holds: a test importing it
+    before anything put its directory on the path, which is that code's defect. The
+    `environment` class is for what the machine lacks (0929-8's `import fix_plan`)."""
+    found = MISSING_MODULE.search(what)
+    if not found or not cwd:
+        return False
+    name, root = found.group(1).split(".")[0], Path(cwd)
+    return any(
+        (root / home / f"{name}.py").is_file() or (root / home / name / "__init__.py").is_file()
+        for home in MODULE_HOMES
+    )
+
+
+def outside_the_tree(found: list, cwd: str) -> list:
+    """`detect`'s rows without an `environment` one `local_module` explains."""
+    return [row for row in found if not (row[0] == "environment" and local_module(row[1], cwd))]
+
+
 def task_branch(cwd: str, runner=sweep.run_windowless) -> str:
     """The branch the session's tree is on, when it is a task branch; "" otherwise.
 
@@ -667,7 +695,7 @@ def session_findings(
         return []
     agent = "codex" if st.is_codex(path) else "claude"
     project = harness_events.project_name(Path(cwd))
-    found = detect(st.events(path, chunk.rows))
+    found = outside_the_tree(detect(st.events(path, chunk.rows)), cwd)
     if not asks_for_targeted_runs(cwd, workspace_root, project):
         found = [row for row in found if row[0] != "full-suite"]
     branch = branch_of(cwd) if any(cls in SETTLED_BY_THE_SESSION for cls, _, _ in found) else ""

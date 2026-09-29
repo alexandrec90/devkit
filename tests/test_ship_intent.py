@@ -717,6 +717,29 @@ def test_commits_ahead_is_none_whenever_git_cannot_say(tmp_path, answer, ahead):
     assert ship_intent.commits_ahead(tmp_path, "main", Runner({"git rev-list": answer})) == ahead
 
 
+def test_a_tree_git_will_not_read_is_a_failure_never_a_clean_tree(tmp_path):
+    """The supervisor's second intent, over 19 modified files, was set aside as "already
+    shipped at this intent": git refused the Administrators-owned tree, its empty stdout
+    read as a clean one, and a shipped state from the first intent did the rest. The
+    work sat uncommitted with its intent renamed away."""
+    one = intent(tmp_path)
+    ship_intent.write_state(one.tree, {"stage": ship_intent.SHIPPED, "intent": "old"})
+    refusal = "fatal: detected dubious ownership in repository at 'C:/w/t'\nTo add ...\n"
+
+    def refused(argv, cwd, env=None):
+        return subprocess.CompletedProcess(argv, 128, "", refusal)
+
+    outcome = ship_intent.ship_one(one, "py", "main", refused, gh_ok, NOW)
+    assert outcome.stage == ship_intent.FAILED
+    assert outcome.detail == (
+        "status: git could not read the tree: "
+        "fatal: detected dubious ownership in repository at 'C:/w/t'"
+    )
+    assert (one.tree / ship_intent.INTENT_FILE).is_file(), "kept for the next pass"
+    assert not (one.tree / ship_intent.SHIPPED_FILE).exists()
+    assert ship_intent.is_spent(one, refused) is False, "a plan pass says it would ship"
+
+
 def test_cut_at_is_when_the_commit_the_tree_was_cut_from_was_made(tmp_path):
     """The line after which a resolution naming a retired branch can only be this tree's:
     `harness_triage.carried` re-points those when the ship carries the intent."""

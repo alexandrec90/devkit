@@ -215,15 +215,30 @@ def refresh_head(tree: Path, branch: str, git_for=sweep.git_for) -> str:
     The pass updates a behind PR through GitHub, so origin's head carries the base and
     the prompt says so; a local branch checked out before that does not, and a push
     from it is refused. A tree with edits is a session still working, and stays as is.
+
+    Git's own refusal is said as that: sports_betting #48's prompt called a branch five
+    commits behind "diverged", because an unreadable status read as clean and a refused
+    fast-forward read as divergence -- git had refused the tree outright.
     """
     git = git_for(tree)
     git("fetch", "--quiet", "origin", branch)
     status = git("status", "--porcelain")
+    if status.returncode != 0:
+        return f"left as is: git could not read the tree: {_said(status)}"
     if (status.stdout or "").strip():
         return "left as is: the tree has uncommitted changes"
-    if git("merge", "--ff-only", f"origin/{branch}").returncode != 0:
+    merged = git("merge", "--ff-only", f"origin/{branch}")
+    if merged.returncode == 0:
+        return ""
+    if "not possible to fast-forward" in _said(merged, whole=True).lower():
         return f"left as is: {branch} has diverged from origin/{branch}"
-    return ""
+    return f"left as is: git refused the fast-forward: {_said(merged)}"
+
+
+def _said(done, whole: bool = False) -> str:
+    """Git's first line of complaint, or all of it."""
+    text = (done.stderr or done.stdout or "").strip()
+    return text if whole else (text.splitlines()[0] if text else f"exit {done.returncode}")
 
 
 def dispatch_pr(

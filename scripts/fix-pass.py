@@ -447,8 +447,10 @@ def run_alone(
 ) -> int:
     """`run`, with no other dispatching pass on the machine running beside it.
 
-    One still holding the lock after `wait` owns this fire: this pass exits clean and
-    writes nothing, since the record is the running pass's to write. A lock that could
+    One still holding the lock after `wait` owns this fire: this pass exits clean, and
+    says so in this checkout's record -- the running pass is usually the scheduled one,
+    in another checkout, so left alone the record here was the previous pass's, which
+    the supervisor read back as this one's. A lock that could
     not be made at all -- no lock directory standing -- is no evidence of another pass,
     so the pass runs, as it did before there was a lock.
     """
@@ -458,10 +460,12 @@ def run_alone(
     with worktree.named_lock(root, RUN_LOCK_NAME, wait, stale) as held:
         lock = worktree.boxes_root(root) / RUN_LOCK_NAME
         if not held and lock.is_dir():
-            print(
-                f"fix-pass: another dispatching pass holds {lock} -- this one ships and "
-                f"sends nothing; the running pass's record is the one to read"
+            why = (
+                f"another dispatching pass holds {lock} -- this one ships and sends "
+                f"nothing; the running pass's record, in its own checkout, is the one to read"
             )
+            print(f"fix-pass: {why}")
+            write_artifact(f"fix-pass: yielded -- {why}")
             return EXIT_OK
         return run(workspace, mode, launch)
 

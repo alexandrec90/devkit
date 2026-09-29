@@ -316,7 +316,15 @@ def is_spent(intent: Intent, runner: Runner = run_quiet) -> bool:
     """`already_shipped`, asked of the tree itself: what a `plan` pass reads, so it says
     what a `dispatch` would do rather than "would ship" over work that merged."""
     status = runner(["git", "status", "--porcelain"], cwd=intent.tree)
+    if status.returncode != 0:
+        return False  # unreadable is not clean: say it would ship, as a dispatch tries to
     return already_shipped(intent, read_state(intent.tree), status.stdout or "")
+
+
+def _first(done: subprocess.CompletedProcess[str]) -> str:
+    """Git's first line of complaint."""
+    text = (done.stderr or done.stdout or "").strip()
+    return text.splitlines()[0] if text else f"exit {done.returncode}"
 
 
 # What git prints when another process holds one of its lock files: `index.lock` for an
@@ -493,6 +501,10 @@ def ship_one(
     tree = intent.tree
     when = (now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds")
     status = runner(["git", "status", "--porcelain"], cwd=tree)
+    if status.returncode != 0:
+        # An unreadable tree is not a clean one: read as clean, a supervisor's second
+        # intent over 19 modified files was set aside as already shipped.
+        return Outcome(intent, FAILED, f"status: git could not read the tree: {_first(status)}")
     if settled := _settled(intent, status.stdout or "", base, runner, when):
         return settled
     if (status.stdout or "").strip():

@@ -136,17 +136,19 @@ def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]
     texts = junit_report.read_artifacts(dest) if getattr(done, "returncode", 1) == 0 else []
     junit_report.write_readable(dest)  # what the prompt tells the fixer to read first
     jobs: list[dict] | None = None
-    if not fix_plan.signature_from_logs(texts):
-        # A job that uploads nothing (carameli's frontend unit tests) left the fixer with
-        # `job / step` and no test id, digging through `--log-failed` itself; read it once
-        # here, and keep it beside the artifacts for the fixer.
-        text = _stdout(gh("run", "view", str(run_id), "--log-failed"))
-        if not text.strip():
-            jobs = run_jobs(gh, run_id)
-            text = failed_job_logs(gh, jobs)
-        if text.strip():
-            (dest / FAILED_LOG).write_text(text, encoding="utf-8")
-            texts.append(text)
+    named = set(fix_plan.signature_from_logs(texts))
+    # A job that uploads nothing (carameli's frontend unit tests) left the fixer with
+    # `job / step` and no test id, digging through `--log-failed` itself; read it once
+    # here, and keep it beside the artifacts for the fixer. Read even when the artifacts
+    # named something: sports_betting #48's lint artifact named two files, its failed
+    # Tests job uploaded an empty one, and the prompt never mentioned that job.
+    text = _stdout(gh("run", "view", str(run_id), "--log-failed"))
+    if not text.strip() and not named:
+        jobs = run_jobs(gh, run_id)
+        text = failed_job_logs(gh, jobs)
+    if text.strip() and (not named or set(fix_plan.signature_from_logs([text])) - named):
+        (dest / FAILED_LOG).write_text(text, encoding="utf-8")
+        texts.append(text)
     if fix_plan.signature_from_logs(texts):
         return texts, []
     return texts, run_jobs(gh, run_id) if jobs is None else jobs

@@ -36,7 +36,8 @@ from ship_intent import INTENT_FILE, REFUSAL_LINE, REFUSED, STATE_FILE, read_sta
 # file, and the pass filed it as a dead session (79ce2440).
 FINISH = (
     "When it is done, run the targeted tests with this tree's own .venv interpreter, the "
-    "linter and the ratchets the gate "
+    "linter -- python scripts/lint-all.py over every file you changed, the tests "
+    "included (--paths <files> where it takes one) -- and the ratchets the gate "
     "runs -- python scripts/hooks/structure_check.py, python scripts/hooks/untested_symbols.py "
     "and, where the tree has it, python scripts/hot-budget.py for the instruction files "
     "-- in every tree you changed, then ship it with the ship skill and stop: the fix pass "

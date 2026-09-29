@@ -156,6 +156,59 @@ def test_the_prescribed_wait_and_a_sleep_in_source_text_are_not_polls():
     assert classes([call("sleep 120 && gh pr checks 5", "1")]) == ["poll"], "no --watch"
 
 
+def test_a_backgrounded_wait_is_one_call_and_its_notice_not_a_poll():
+    """The supervisor's `until [ -f done ]; do sleep 60; done` on a detached run, and a
+    fixer's one `sleep 25; claude agents` probe, both run in the background: one call and
+    a completion notice, the shape the engineering rule prescribes for a long wait."""
+    loop = "until [ -f logs/supervise-run.done ]; do sleep 60; done; cat logs/run.out"
+    block = {
+        "type": "tool_use",
+        "id": "1",
+        "name": "Bash",
+        "input": {"command": loop, "run_in_background": True},
+    }
+    backgrounded = {"type": "assistant", "message": {"content": [block]}}
+    assert classes([backgrounded]) == []
+    assert classes([call(loop, "1")]) == ["poll"], "in the foreground it holds the turn"
+
+
+def test_a_module_the_tree_itself_holds_is_a_code_defect_not_the_environment(tmp_path):
+    """0929-8 switched a test to a bare `import fix_plan`, which resolves only once another
+    module has put `scripts/` on the path; collected first, it failed. `fix_plan` is a
+    module in the tree: that is the test's defect, and filing it as a missing package
+    sent the devkit session at the machine."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "fix_plan.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    ours = "ModuleNotFoundError: No module named 'fix_plan' ERROR tests/test_run_tests.py"
+    assert sf.local_module(ours, str(tmp_path))
+    assert sf.local_module("No module named 'pkg.sub'", str(tmp_path))
+    assert not sf.local_module("No module named 'yaml'", str(tmp_path))
+    assert not sf.local_module("No module named pytest", str(tmp_path)), "unquoted: the tool"
+    assert not sf.local_module(ours, ""), "no tree to look in"
+    rows = [("environment", ours, None), ("environment", "No module named 'yaml'", None)]
+    assert [what for _, what, _ in sf.outside_the_tree(rows, str(tmp_path))] == [
+        "No module named 'yaml'"
+    ]
+
+
+def test_a_ledger_evidence_line_is_read_back_as_the_audit_lines_around_it(tmp_path, capsys):
+    """0929-6 and 0929-8 each wrote a transcript reader of their own to read a finding's
+    `transcript#L<n>`; the module's own `render` had no command line."""
+    path = tmp_path / "t.jsonl"
+    rows = [call(f"echo {i}", str(i)) for i in range(1, 101)]
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    assert st.main([f"{path}#L50", "--around", "2"]) == 0
+    out = capsys.readouterr().out
+    assert [line.split()[0] for line in out.splitlines()] == ["L48", "L49", "L50", "L51", "L52"]
+    assert st.main([str(path)]) == 0
+    assert len(capsys.readouterr().out.splitlines()) == 100, "no #L: the whole session"
+    assert st.main([str(tmp_path / "gone.jsonl#L3")]) == 2
+    assert "no transcript at" in capsys.readouterr().err
+    assert st.window("L1 CALL: a\nL9 CALL: b\nnoise\n", 1, 3) == "L1 CALL: a\n"
+
+
 def test_a_complaint_is_filed_whole_with_the_tree_it_was_said_in(tmp_path):
     """The detail is a 90-character snippet, so a sweep parsed a 5,672-line transcript to
     read one complaint -- and then 5 calls to learn the session it was said to had its fix

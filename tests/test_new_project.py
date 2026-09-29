@@ -122,6 +122,24 @@ def test_dot_and_tmpl_conventions_apply_to_every_path_segment(source, expected):
     assert Path(new_project._destination_name(Path(source))).as_posix() == expected
 
 
+def test_what_running_a_template_leaves_beside_it_is_not_shipped(tmp_path, monkeypatch):
+    """0929-8 loaded `run-tests.py.tmpl` in a test; the `__pycache__` it wrote under
+    `templates/core/scripts/` rode into the next generated project, and a text-file check
+    there failed on the `.pyc`. The session deleted it by hand; the walk kept copying."""
+    core = tmp_path / "core"
+    for rel in (
+        "scripts/run-tests.py.tmpl",
+        "scripts/__pycache__/run-tests.py.cpython-312.pyc",
+        "stray.pyc",
+        ".pytest_cache/v/x",
+    ):
+        (core / rel).parent.mkdir(parents=True, exist_ok=True)
+        (core / rel).write_text("x", encoding="utf-8")
+    monkeypatch.setattr(new_project, "TEMPLATES", tmp_path)
+    shipped = [dest.as_posix() for _, dest in new_project.iter_template_files({})]
+    assert shipped == ["scripts/run-tests.py"]
+
+
 def test_no_template_ships_a_literal_dotfile():
     # Guards the reason `dot-` exists — a regression here silently breaks devkit's
     # own repo rather than the generated one, which is much harder to notice.
