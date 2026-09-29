@@ -531,6 +531,20 @@ def detect(events: Iterable[Event]) -> list[tuple[str, str, Event]]:
 # The classes the corrected session's own shipped branch settles (`Finding.settles_with`).
 SETTLED_BY_THE_SESSION = frozenset({"user-frustration"})
 DEFAULT_BRANCHES = frozenset({"main", "master"})
+# The vendored rule that takes the suite off a session. A project without it -- one held
+# back from adoption (workspace.jsonc `devkit.onHold`), or never adopted -- asked for no
+# targeted run, so a whole one there is no friction: 0a4b17f3 was a data-lake session
+# whose CLAUDE.md names `run-tests.py` as "the suite", filed as if it had been told not to.
+SCOPE_RULE = ".claude/rules/session-scope.md"
+
+
+def asks_for_targeted_runs(cwd: str, workspace_root: Path, project: str) -> bool:
+    """The session's tree carries `SCOPE_RULE`; its project's checkout decides once the
+    tree is gone. Neither there to read: it may well have, so the finding stands."""
+    for root in (Path(cwd), workspace_root / project):
+        if root.is_dir():
+            return (root / SCOPE_RULE).is_file()
+    return True
 
 
 def task_branch(cwd: str, runner=subprocess.run) -> str:
@@ -562,6 +576,8 @@ def session_findings(
     agent = "codex" if st.is_codex(path) else "claude"
     project = harness_events.project_name(Path(cwd))
     found = detect(st.events(path, chunk.rows))
+    if not asks_for_targeted_runs(cwd, workspace_root, project):
+        found = [row for row in found if row[0] != "full-suite"]
     branch = branch_of(cwd) if any(cls in SETTLED_BY_THE_SESSION for cls, _, _ in found) else ""
     return [
         fix_findings.Finding(
