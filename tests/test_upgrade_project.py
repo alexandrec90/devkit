@@ -1527,7 +1527,7 @@ class CommitGit:
 def test_a_hook_that_rewrote_the_tree_gets_one_more_commit():
     """`sync-codex` remirrored `.claude/skills/` and failed a commit that had nothing
     wrong with it. Staging the result and committing again is the whole convention."""
-    git = CommitGit(["M  a.py\n", "MM a.py\n"], [1, 0])
+    git = CommitGit(["M  a.py\n", "MM a.py\n", ""], [1, 0])
     result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
     assert (result.returncode, retried) == (0, True)
     assert git.calls.count(("add", "-A")) == 1
@@ -1545,10 +1545,40 @@ def test_a_gate_that_refused_is_not_committed_over():
 
 
 def test_a_commit_that_worked_is_never_retried():
-    git = CommitGit(["M  a.py\n"], [0])
+    git = CommitGit(["M  a.py\n", ""], [0])
     result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
     assert (result.returncode, retried) == (0, False)
     assert len([step for step in git.calls if step[0] == "commit"]) == 1
+
+
+def test_a_hook_that_wrote_new_files_past_a_passing_commit_is_amended_in():
+    """pre-commit fails a hook only for rewriting a tracked file, so `sync-codex`
+    mirroring a new skill into `.agents/skills/` passed, and the adoption commit landed
+    without the mirror its own `codex-sync` gate then demanded (38836107)."""
+    git = CommitGit(
+        ["A  .claude/skills/go-nuts/SKILL.md\n", "?? .agents/skills/go-nuts/\n", ""], [0, 0]
+    )
+    result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
+    assert (result.returncode, retried) == (0, True)
+    commits = [step for step in git.calls if step[0] in ("add", "commit")]
+    assert commits == [
+        ("commit", "-m", "Adopt devkit v0.7.0"),
+        ("add", "-A"),
+        ("commit", "--amend", "--no-edit"),
+    ]
+
+
+def test_an_amend_the_hooks_refuse_is_reported_as_the_failure():
+    git = CommitGit(["A  a.py\n", "?? b.py\n"], [0, 1])
+    result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
+    assert (result.returncode, retried) == (1, True)
+
+
+def test_a_retried_commit_that_left_new_files_is_amended_too():
+    git = CommitGit(["M  a.py\n", "MM a.py\n", "?? b.py\n", ""], [1, 0, 0])
+    result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
+    assert (result.returncode, retried) == (0, True)
+    assert git.calls[-1] == ("commit", "--amend", "--no-edit")
 
 
 def test_the_rewrite_is_detected_by_the_status_code_not_the_path_list():
@@ -1557,9 +1587,64 @@ def test_the_rewrite_is_detected_by_the_status_code_not_the_path_list():
     paths reports "nothing changed" for the one event this exists to detect."""
     git = CommitGit(["M  a.py\n", "MM a.py\n"], [1, 0])
     assert up.changed_paths(git) == up.changed_paths(git)  # same path, both readings
-    git = CommitGit(["M  a.py\n", "MM a.py\n"], [1, 0])
+    git = CommitGit(["M  a.py\n", "MM a.py\n", ""], [1, 0])
     _result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
     assert retried
+
+
+# --- a push the transport lost is pushed again --------------------------------
+
+
+class PushGit:
+    """A git whose `push` answers each attempt from `answers`, in order."""
+
+    def __init__(self, answers: list[tuple[int, str]]):
+        self.answers = iter(answers)
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, *args: str):
+        self.calls.append(args)
+        code, err = next(self.answers)
+        return subprocess.CompletedProcess(["git", *args], code, "", err)
+
+
+A1EDC2F7 = (
+    "fatal: unable to access 'https://github.com/alexandrec90/social-scraper.git/': "
+    "The requested URL returned error: 403"
+)
+
+
+def test_a_push_the_transport_lost_is_pushed_again():
+    """a1edc2f7: the v0.11.35 adoption lost roguelike and social-scraper to a 403 a minute
+    after carameli's push went through, and both answered again within minutes. The
+    release job failed, and no pass retries an adoption once the tag exists."""
+    git, slept = PushGit([(128, A1EDC2F7), (0, "")]), []
+    pushed = up.push_with_retry(git, "agent/auto/x", sleep=slept.append)
+    assert pushed.returncode == 0
+    assert git.calls == [("push", "-u", "origin", "agent/auto/x")] * 2
+    assert slept == [up.PUSH_WAITS[0]]
+
+
+def test_a_push_the_transport_keeps_losing_fails_with_gits_own_words():
+    git, slept = PushGit([(128, A1EDC2F7)] * (len(up.PUSH_WAITS) + 1)), []
+    pushed = up.push_with_retry(git, "b", sleep=slept.append)
+    assert pushed.returncode == 128 and "403" in pushed.stderr
+    assert slept == list(up.PUSH_WAITS)
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        " ! [rejected]        b -> b (non-fast-forward)",
+        "error: failed to push some refs to 'origin'",
+        " ! [remote rejected] b -> b (protected branch hook declined)",
+    ],
+)
+def test_a_push_the_remote_or_a_hook_refused_is_not_retried(refusal):
+    """A judgment, not a lost connection: pushing it again gets the same answer."""
+    git, slept = PushGit([(1, refusal)]), []
+    assert up.push_with_retry(git, "b", sleep=slept.append).returncode == 1
+    assert len(git.calls) == 1 and slept == []
 
 
 # --- the failure artifact ----------------------------------------------------

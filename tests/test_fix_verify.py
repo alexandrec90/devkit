@@ -220,6 +220,95 @@ def test_a_gh_that_cannot_answer_answers_nothing(tmp_path):
     assert fix_verify.gh_lookup(tmp_path, ["devkit"], failing)("devkit", "1") == []
 
 
+def test_a_merged_pr_naming_the_group_settles_a_branch_that_never_landed(tmp_path):
+    """950c4a96: the resolution named `agent/fix-harness-ledger-0927-3`, whose only PR
+    (#429) merged that morning; the fix went out from `-0927-19` as #440, whose body names
+    the group. Reopening it sent a fixer to find #440 by hand."""
+    first, waiting = finding(80), finding(60)
+    head = triage.item_id(first)
+    lines = items(first, resolution("agent/fix-harness-ledger-0927-3", days_ago=3, ref=head))
+    lines += items(waiting)
+    old = fix_verify.Pr(fix_verify.LANDED, at(90), "https://github.com/o/devkit/pull/429")
+    fix = fix_verify.Pr(fix_verify.LANDED, at(50), "https://github.com/o/devkit/pull/440")
+    asked = []
+    mentions = lambda ref: asked.append(ref) or [fix]
+    cache = tmp_path / "v.json"
+    outcome = fix_verify.verify(lines, lambda *_: [old], cache, NOW, mentions)
+    assert asked == [head] and outcome.reopen == []
+    [(was, pr)] = outcome.found
+    assert (was.ref, was.pr, pr) == (head, "agent/fix-harness-ledger-0927-3", fix)
+    assert [row for row, _, url in outcome.covered] == [triage.item_id(waiting)]
+    assert outcome.covered[0][2] == fix.url, "retired against the PR that held the fix"
+    assert head in triage.load_settled(cache)
+
+
+def test_a_pr_naming_the_group_that_merged_before_the_resolution_does_not_settle_it(tmp_path):
+    earlier = fix_verify.Pr(fix_verify.LANDED, at(90), "u/12")
+    outcome = fix_verify.verify(
+        items(resolution("agent/x", days_ago=3)),
+        lambda *_: [],
+        tmp_path / "v",
+        NOW,
+        lambda _ref: [earlier, CLOSED, OPEN],
+    )
+    assert [ref for ref, _ in outcome.reopen] == ["aaaabbbb"] and outcome.found == []
+
+
+def test_mentions_are_asked_only_of_a_resolution_about_to_be_reopened(tmp_path):
+    asked = []
+    mentions = lambda ref: asked.append(ref) or []
+    for prs, days in (([OPEN], 3), ([], 1), ([MERGED], 3)):
+        fix_verify.verify(
+            items(resolution("agent/x", days_ago=days)),
+            lambda *_, p=prs: p,
+            tmp_path / f"v{days}{len(prs)}",
+            NOW,
+            mentions,
+        )
+    assert asked == []
+    fix_verify.verify(items(resolution("#7")), lambda *_: [CLOSED], tmp_path / "c", NOW, mentions)
+    assert asked == ["aaaabbbb"], "closed unmerged: the fix may have gone out elsewhere"
+
+
+def test_named_by_is_the_first_merge_since_the_resolution():
+    written = fix_verify.Resolution("r", at(10), "agent/x", "n")
+    first, later = fix_verify.Pr(fix_verify.LANDED, at(8)), fix_verify.Pr(fix_verify.LANDED, at(2))
+    stale, junk = fix_verify.Pr(fix_verify.LANDED, at(20)), fix_verify.Pr(fix_verify.LANDED, "?")
+    assert fix_verify.named_by(written, [later, stale, junk, OPEN, first]) == first
+    assert fix_verify.named_by(written, [stale, junk, CLOSED]) is None
+    unreadable = fix_verify.Resolution("r", "junk", "agent/x", "n")
+    assert fix_verify.named_by(unreadable, [first]) is None
+
+
+def test_the_mentions_search_asks_every_project_for_merged_prs_naming_the_id(tmp_path):
+    for name in ("devkit", "carameli"):
+        (tmp_path / name).mkdir()
+    calls = []
+
+    def gh_for(project_dir):
+        def gh(*args):
+            calls.append((project_dir.name, args))
+            row = {"state": "MERGED", "mergedAt": "2026-09-26T06:00:00Z", "url": "u/440"}
+            code = 0 if project_dir.name == "devkit" else 1
+            return subprocess.CompletedProcess(args, code, json.dumps([row, "junk"]), "")
+
+        return gh
+
+    mentions = fix_verify.gh_mentions(tmp_path, ["devkit", "carameli", "gone"], gh_for)
+    assert mentions("950c4a96") == [fix_verify.Pr("MERGED", "2026-09-26T06:00:00Z", "u/440")]
+    search = (
+        "pr",
+        "list",
+        "--state",
+        "merged",
+        "--search",
+        "950c4a96",
+        "--json",
+        "state,mergedAt,url",
+    )
+    assert calls == [("devkit", search), ("carameli", search)]
+
+
 def test_judge_is_landed_open_closed_or_unlanded():
     fresh = fix_verify.Resolution("r", (NOW - _dt.timedelta(hours=1)).isoformat(), "agent/x", "n")
     old = fix_verify.Resolution("r", (NOW - _dt.timedelta(days=3)).isoformat(), "agent/x", "n")

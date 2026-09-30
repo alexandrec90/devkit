@@ -4,8 +4,9 @@ The tree half of `scripts/fix-prs.py`, split out along the section header that m
 already drew. `existing_tree` finds a tree already holding the PR's head branch,
 `cut_tree` cuts one under `.claude/worktrees/` when nothing does, `cut_fresh_tree`
 cuts a new branch for a failure that has none, `provision_tree`
-installs the toolchain into whichever came back without one, and `locked_caches` names
-what an elevated session left in it that the fixer cannot open. Where a worktree for a
+installs the toolchain into whichever came back without one, `locked_caches` names
+what an elevated session left in it that the fixer cannot open, and `provenance` says
+who made a reused one. Where a worktree for a
 branch goes and what git is asked to do are `scripts/agent_worktrees.py`'s; a matching
 live box is `worktree.py`'s, reused and never leased from here.
 
@@ -20,6 +21,7 @@ import sys
 from pathlib import Path
 
 import agent_worktrees as aw
+import fix_reports
 import stray_worktree as stray
 import sweep
 import worktree
@@ -134,6 +136,69 @@ def locked_caches(tree: Path, opener=os.scandir) -> dict[str, str]:
         except OSError:
             continue
     return locked
+
+
+# The well-known SID of `BUILTIN\Administrators`, which owns what an elevated process
+# creates on Windows (see `git_trust.py`).
+ADMINISTRATORS_SID = "S-1-5-32-544"
+
+
+def owner_sid(path: Path) -> str:
+    """The string SID of `path`'s owner; "" off Windows or when it cannot be read.
+
+    `sys.platform` for the reason `wt_profile.is_elevated` gives: it is the spelling of
+    "not Windows" mypy narrows on the Linux CI, where `ctypes.windll` does not exist.
+    """
+    if sys.platform != "win32":
+        return ""
+    import ctypes
+
+    advapi32, kernel32 = ctypes.windll.advapi32, ctypes.windll.kernel32
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    owner, descriptor, text = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    # SE_FILE_OBJECT (1), OWNER_SECURITY_INFORMATION (1); the owner points into the
+    # descriptor, which is the one allocation to free.
+    failed = advapi32.GetNamedSecurityInfoW(
+        str(path), 1, 1, ctypes.byref(owner), None, None, None, ctypes.byref(descriptor)
+    )
+    if failed:
+        return ""
+    try:
+        if not advapi32.ConvertSidToStringSidW(owner, ctypes.byref(text)) or not text.value:
+            return ""
+        try:
+            return ctypes.wstring_at(text.value)
+        finally:
+            kernel32.LocalFree(text)
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+def provenance(tree: Path, owner=owner_sid) -> str:
+    """Who made a tree the pass is reusing, as its fixer is told; always a sentence.
+
+    `existing_tree` hands a fixer whichever tree holds the PR's head, and that is often
+    an operator's own `claude --worktree` checkout, elevated on this machine. Nothing
+    said so, and two devkit sessions each spent about eight calls proving that the
+    Administrators-owned tree they were in was the operator's and not the dispatcher's
+    (df43b14e). The pass's own mark is `fix_reports.ORIGIN_FILE` or a dispatch stamp,
+    read before this dispatch stamps it.
+    """
+    if (tree / fix_reports.ORIGIN_FILE).is_file() or fix_reports.read_stamp(tree):
+        maker = "the fix pass cut it for an earlier fixer"
+    else:
+        maker = (
+            "a session a person started made it -- a claude --worktree or a git worktree "
+            "add, not the fix pass"
+        )
+    elevated = owner(tree) == ADMINISTRATORS_SID
+    how = (
+        ", elevated: the Administrators group owns it, so what that session wrote may "
+        "refuse you and nothing unelevated can take it back"
+        if elevated
+        else ""
+    )
+    return f" This tree was not cut for you: {maker}{how}. That is settled; spend no turns on who made it."
 
 
 def cut_fresh_tree(

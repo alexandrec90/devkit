@@ -12,7 +12,8 @@ asks GitHub what became of it. Merged: settled, and cached so it is never asked 
 and the group's rows filed while that fix was in flight are retired against it, since
 they were the defect waiting on the merge, not a recurrence (`Outcome.covered`).
 Closed unmerged, or no PR at all from that branch after `UNLANDED_AFTER`: reopened
-(`harness_triage.reopen`), with why. Still open: left alone -- an open PR is in flight,
+(`harness_triage.reopen`), with why -- unless a PR merged since names the group, which
+is the fix gone out under another name (`named_by`). Still open: left alone -- an open PR is in flight,
 and `fix_stall` owns what sits too long. A resolution naming nothing (`pr=-`) is a
 not-a-defect verdict, which has no fix to land.
 
@@ -65,6 +66,10 @@ PR_FIELDS = "state,mergedAt,url"
 # project, `what` a number or a head branch. The IO half, injected.
 Lookup = Callable[[str, str], list[Pr]]
 
+# A group id -> every merged PR, in any project, whose text names it. Asked only of a
+# resolution about to be reopened (`named_by`).
+Mentions = Callable[[str], list[Pr]]
+
 
 @dataclass
 class Outcome:
@@ -80,6 +85,9 @@ class Outcome:
 
     reopen: list[tuple[str, str]] = field(default_factory=list)
     covered: list[tuple[str, str, str]] = field(default_factory=list)
+    # `(resolution, the merged PR that holds its fix)` for each whose `pr=` never landed
+    # but whose group a PR merged since names -- see `named_by`.
+    found: list[tuple[Resolution, Pr]] = field(default_factory=list)
 
 
 def _moment(stamp: str) -> _dt.datetime | None:
@@ -141,6 +149,26 @@ def landed(resolution: Resolution, prs: list[Pr]) -> Pr | None:
     return min(merged, key=lambda pair: pair[0])[1] if merged else None
 
 
+def named_by(resolution: Resolution, prs: list[Pr]) -> Pr | None:
+    """The first PR merged since `resolution` was made out of `prs`, those naming its group.
+
+    A resolution's `pr=` can name the wrong branch while the fix merges anyway: 950c4a96
+    named `agent/fix-harness-ledger-0927-3`, whose PR had merged that morning, while its
+    fix went out from `-0927-19` as #440 -- whose body names the group, as a sweep's
+    does. Reopened on the branch alone, the group sent a fixer to find #440 by hand. A PR
+    merged before the resolution was written predates the fix, so it is never the one.
+    """
+    written = _moment(resolution.stamp)
+    if written is None:
+        return None
+    merged = [
+        (when, pr)
+        for pr in prs
+        if pr.state == LANDED and (when := _moment(pr.merged_at)) is not None and when >= written
+    ]
+    return min(merged, key=lambda pair: pair[0])[1] if merged else None
+
+
 def covered(
     items: list[triage.Item], resolution: Resolution, merge: Pr
 ) -> list[tuple[str, str, str]]:
@@ -168,11 +196,14 @@ def verify(
     lookup: Lookup,
     cache_path: Path,
     now: _dt.datetime,
+    mentions: Mentions | None = None,
 ) -> Outcome:
     """The resolutions to reopen and the rows a merge retires; the settled are cached.
 
     A covered row is cached as settled too: the fix its resolution names merged by
-    construction, so it is never in flight and never asked about.
+    construction, so it is never in flight and never asked about. Before a resolution
+    is reopened, `mentions` is asked for a merged PR naming its group (`named_by`); one
+    found settles it instead, and is in `Outcome.found` for the ledger to name.
     """
     settled = _load(cache_path)
     outcome = Outcome()
@@ -182,6 +213,10 @@ def verify(
         project, what = target(resolution.pr)
         prs = lookup(project, what)
         verdict = judge(resolution, prs, now)
+        if verdict not in ("", LANDED) and mentions is not None:
+            if fix := named_by(resolution, mentions(resolution.ref)):
+                outcome.found.append((resolution, fix))
+                prs, verdict = [fix], LANDED
         if verdict == LANDED:
             settled.add(resolution.ref)
             if merge := landed(resolution, prs):
@@ -214,19 +249,44 @@ def gh_lookup(root: Path, projects: list[str], gh_for) -> Lookup:
                 answer = _json(
                     gh("pr", "list", "--head", what, "--state", "all", "--json", PR_FIELDS)
                 )
-            rows = answer if isinstance(answer, list) else []
-            found += [
-                Pr(
-                    str(row.get("state", "")).upper(),
-                    str(row.get("mergedAt") or ""),
-                    str(row.get("url") or ""),
-                )
-                for row in rows
-                if isinstance(row, dict)
-            ]
+            found += _rows(answer)
         return found
 
     return prs
+
+
+def gh_mentions(root: Path, projects: list[str], gh_for) -> Mentions:
+    """The real `Mentions`: GitHub's search for the id over every project's merged PRs.
+
+    The same outage rule as `gh_lookup`: no answer finds nothing, and the reopen stands.
+    """
+
+    def prs(ref: str) -> list[Pr]:
+        found: list[Pr] = []
+        for name in projects:
+            if (root / name).is_dir():
+                gh = gh_for(root / name)
+                found += _rows(
+                    _json(
+                        gh("pr", "list", "--state", "merged", "--search", ref, "--json", PR_FIELDS)
+                    )
+                )
+        return found
+
+    return prs
+
+
+def _rows(answer: object) -> list[Pr]:
+    rows = answer if isinstance(answer, list) else []
+    return [
+        Pr(
+            str(row.get("state", "")).upper(),
+            str(row.get("mergedAt") or ""),
+            str(row.get("url") or ""),
+        )
+        for row in rows
+        if isinstance(row, dict)
+    ]
 
 
 def _json(done: object) -> object:

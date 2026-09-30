@@ -59,7 +59,14 @@ import fix_ledger
 import fix_plan
 import fix_prompts
 import fix_reports
-from fix_trees import cut_fresh_tree, cut_tree, existing_tree, locked_caches, provision_tree
+from fix_trees import (
+    cut_fresh_tree,
+    cut_tree,
+    existing_tree,
+    locked_caches,
+    provenance,
+    provision_tree,
+)
 import gate_evidence
 import sweep
 import task_branch as tb
@@ -261,6 +268,8 @@ def dispatch_pr(
     if refused:
         print(f"  {refused}", file=sys.stderr)
         return EXIT_FAILED
+    # Read before this dispatch stamps the tree, which would make every tree the pass's.
+    made = provenance(tree) if tree else ""
     tree = tree or cut_tree(project_dir, failure.head, runner)
     if tree is None:
         print(f"  no worktree for {failure.head}; nothing opened", file=sys.stderr)
@@ -278,7 +287,7 @@ def dispatch_pr(
     refusal = fix_prompts.standing_refusal(tree)
     # Only this path reuses a tree, so only here can an elevated session's leftovers be.
     left = stale.removeprefix("left as is: ")
-    prompt = tab_safe(fix_prompts.pr_prompt(failure, refusal, left, locked_caches(tree)))
+    prompt = tab_safe(fix_prompts.pr_prompt(failure, refusal, left, locked_caches(tree), made))
     return open_session(launch, tree, failure.head, prompt, f"{failure.project} {name}", runner)
 
 

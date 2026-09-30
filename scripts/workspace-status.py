@@ -65,6 +65,7 @@ import sweep
 import task_branch
 import vscode_extensions
 import worktree
+import wt_profile
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # `notify.py` says notifications are a task-wrapper concern and that a diagnostic script
@@ -658,7 +659,9 @@ def _age(seconds: float) -> str:
     return f"{hours}h" if hours < 24 else f"{hours // 24}d {hours % 24}h"
 
 
-def toolchain_lines(which=shutil.which, git=None, extensions=None, codex=None) -> list[str]:
+def toolchain_lines(
+    which=shutil.which, git=None, extensions=None, codex=None, terminal=None
+) -> list[str]:
     """The workstation prerequisites nothing else reports missing; [] when they are set.
 
     Reported here because none has a symptom at the moment it is wrong. A machine with no `uv` cannot provision anything at all -- devkit is uv-native,
@@ -671,7 +674,9 @@ def toolchain_lines(which=shutil.which, git=None, extensions=None, codex=None) -
     The fourth, `codex_context.py`, is the same shape one runtime over: two files in
     `CODEX_HOME` decide whether Codex reads a repo's instruction tier at all, neither is
     in any repository, and a session that has read none of `.claude/rules/` is
-    indistinguishable from one that has.
+    indistinguishable from one that has. The fifth, `wt_profile.status_lines`, is a
+    default terminal profile that elevates: every session typed into it cuts trees the
+    unelevated fix pass cannot own, and each such tree read as its own problem (1ee03f0f).
 
     The first three were found by hand on a fresh workstation bootstrap, which is exactly
     the session that has no idea which of its failures are its own doing; the fourth was
@@ -691,7 +696,11 @@ def toolchain_lines(which=shutil.which, git=None, extensions=None, codex=None) -
             f"'Author identity unknown', `sweep.py --ship` included "
             f"(fix: git config --global {unset[0]} ...)"
         )
-    reporters = (extensions or vscode_extensions.report_lines, codex or codex_context.report_lines)
+    reporters = (
+        extensions or vscode_extensions.report_lines,
+        codex or codex_context.report_lines,
+        terminal or wt_profile.status_lines,
+    )
     return lines + [line for report in reporters for line in report()]
 
 

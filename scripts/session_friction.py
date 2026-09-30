@@ -195,10 +195,16 @@ EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_pat
 # A test run in command position -- not `pytest` inside a heredoc's source -- whose
 # arguments name nothing narrower than the suite: where a targeted run was asked for.
 TEST_RUN = re.compile(
-    r"(?:^|&&?|\|\|?|;)\s*(?:&\s*)?(?:\S*python\S*\s+-m\s+pytest|\S*python\S*\s+\S*run-tests\.py|"
-    r"uv\s+run\s+pytest|pytest)(?=\s|$)(?P<rest>[^|;&>\n]*)",
+    r"(?:^|&&?|\|\|?|;)\s*(?:&\s*)?(?:\S*python\S*\s+-m\s+pytest|"
+    r"(?P<runner>\S*python\S*\s+\S*run-tests\.py)|uv\s+run\s+pytest|pytest)(?=\s|$)"
+    r"(?P<rest>[^|;&>\n]*)",
     re.M,
 )
+# The project's test runner, and the flag that says its bare run is not the suite: devkit's
+# and the template's run the tests for what changed unless given `--all` (0a9897d7, retired
+# six times as other causes). A runner without the flag runs everything bare.
+RUNNER = "scripts/run-tests.py"
+TARGETED_RUNNER = re.compile(r"add_argument\(\s*[\"']--all[\"']")
 # A command that changes what the next test run sees without touching a file: a service
 # started, dependencies installed, a database created, the branch moved. A run after one
 # of these reads something new, so it is not a rerun (eda7aed7: a carameli session
@@ -327,10 +333,18 @@ def suite_root(rest: str) -> str:
     return ""
 
 
-def whole_runs(command: str) -> list[str]:
-    """The `suite_root` of each whole-suite test run in `command`, in order."""
-    rests = (run.group("rest") or "" for run in TEST_RUN.finditer(command_position(command)))
-    return [suite_root(rest) for rest in rests if full_suite(rest)]
+def whole_runs(command: str, targeted_runner: bool = False) -> list[str]:
+    """The `suite_root` of each whole-suite test run in `command`, in order. Under a
+    `targeted_runner`, `run-tests.py` is whole only when told `--all` or a suite root."""
+    found = []
+    for run in TEST_RUN.finditer(command_position(command)):
+        rest = run.group("rest") or ""
+        words = {token.strip("'\"").replace("\\", "/") for token in rest.split()}
+        if run.group("runner") and targeted_runner and not words & (SUITE_ROOTS | {"--all"}):
+            continue
+        if full_suite(rest):
+            found.append(suite_root(rest))
+    return found
 
 
 def reports_suite_change(command: str, text: str) -> bool:
@@ -414,11 +428,12 @@ def changes_the_suite(event: Event) -> bool:
 
 
 def _command_classes(
-    command: str, checked: frozenset[str] | None = None
+    command: str, checked: frozenset[str] | None = None, targeted_runner: bool = False
 ) -> Iterator[tuple[str, str]]:
     """What `command` is friction as. After a suite-wide change, `checked` holds the
     suite roots already run whole since it, and a whole run of any other root is not:
-    it is what checks the change. The push gate still is."""
+    it is what checks the change. The push gate still is. `targeted_runner` as for
+    `whole_runs`."""
     for cls, pattern in COMMAND_PATTERNS:
         if cls == "heredoc-write" and not damageable_heredoc(command):
             continue
@@ -427,7 +442,7 @@ def _command_classes(
         if pattern.search(command):
             yield cls, COMMAND_DETAIL[cls]
     seen = set(checked) if checked is not None else None
-    for root in whole_runs(command):
+    for root in whole_runs(command, targeted_runner):
         if seen is None or root in seen:
             yield "full-suite", COMMAND_DETAIL["full-suite"]
             return
@@ -499,6 +514,7 @@ class _Session:
     # roots run whole since it; None while there has been none.
     checked: set[str] | None = None
     suite_asked: bool = False  # it invoked a `WHOLE_SUITE_SKILLS` skill
+    targeted_runner: bool = False  # its `RUNNER` runs the tests for what changed, bare
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -529,7 +545,8 @@ class _Session:
             self.checked = set()
         self._note_command(event)
         if self.checked is not None:
-            self.checked.update(whole_runs(event.command))  # the next whole run is the habit
+            # The next whole run is the habit.
+            self.checked.update(whole_runs(event.command, self.targeted_runner))
         if event.tool == "AskUserQuestion" and self.dispatched:
             self.note(
                 "asked-user", "a dispatched session asked a question nobody would answer", event
@@ -543,7 +560,7 @@ class _Session:
     def _note_command(self, event: Event) -> None:
         """What the call's command is friction as, less what this session was excused."""
         checked = frozenset(self.checked) if self.checked is not None else None
-        for cls, what in _command_classes(event.command, checked):
+        for cls, what in _command_classes(event.command, checked, self.targeted_runner):
             if cls == "full-suite" and self.suite_asked:
                 continue
             # A `Monitor` until-loop is the wait Claude Code's `SLEEP_GUARD` prescribes, and
@@ -600,9 +617,9 @@ class _Session:
             self.failures.setdefault(same_command(command), []).append(event)
 
 
-def _read(events: Iterable[Event]) -> _Session:
+def _read(events: Iterable[Event], targeted_runner: bool = False) -> _Session:
     """Every event through the per-event detectors, in order."""
-    session = _Session()
+    session = _Session(targeted_runner=targeted_runner)
     handlers = {"user": session.user, "call": session.call, "say": session.say}
     for event in events:
         if event.kind == "result":
@@ -612,9 +629,10 @@ def _read(events: Iterable[Event]) -> _Session:
     return session
 
 
-def detect(events: Iterable[Event]) -> list[tuple[str, str, Event]]:
-    """`(class, what, event)` for every friction in one session's events, each once."""
-    session = _read(events)
+def detect(events: Iterable[Event], targeted_runner: bool = False) -> list[tuple[str, str, Event]]:
+    """`(class, what, event)` for every friction in one session's events, each once.
+    `targeted_runner`: the session's `RUNNER` runs the tests for what changed, bare."""
+    session = _read(events, targeted_runner)
     for runs in session.failures.values():
         if len(runs) >= REPEATS:
             what = normalize(runs[-1].command)[:SNIPPET]
@@ -671,6 +689,19 @@ def outside_the_tree(found: list, cwd: str) -> list:
     return [row for row in found if not (row[0] == "environment" and local_module(row[1], cwd))]
 
 
+def runner_defaults_targeted(cwd: str, workspace_root: Path, project: str) -> bool:
+    """The session's `RUNNER` takes `--all`, so a bare run of it is targeted: the tree's
+    copy decides, its project's checkout once the tree is gone. Neither there to read,
+    or unreadable: a bare run is the suite, as it always was."""
+    for root in (Path(cwd), workspace_root / project):
+        if root.is_dir():
+            try:
+                return bool(TARGETED_RUNNER.search((root / RUNNER).read_text(encoding="utf-8")))
+            except (OSError, UnicodeDecodeError):
+                return False
+    return False
+
+
 def task_branch(cwd: str, runner=sweep.run_windowless) -> str:
     """The branch the session's tree is on, when it is a task branch; "" otherwise.
 
@@ -699,7 +730,8 @@ def session_findings(
         return []
     agent = "codex" if st.is_codex(path) else "claude"
     project = harness_events.project_name(Path(cwd))
-    found = outside_the_tree(detect(st.events(path, chunk.rows)), cwd)
+    targeted = runner_defaults_targeted(cwd, workspace_root, project)
+    found = outside_the_tree(detect(st.events(path, chunk.rows), targeted), cwd)
     if not asks_for_targeted_runs(cwd, workspace_root, project):
         found = [row for row in found if row[0] != "full-suite"]
     branch = branch_of(cwd) if any(cls in SETTLED_BY_THE_SESSION for cls, _, _ in found) else ""
