@@ -74,9 +74,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -702,13 +704,52 @@ def commit_with_hook_retry(git, message: str) -> tuple[subprocess.CompletedProce
     what separates a hook that fixed something from a gate that refused something: a
     lint error the formatter cannot fix leaves the tree exactly as it was, and
     committing over it again would just fail twice and say so twice.
+
+    **A commit that went through is amended when it left the tree dirty.** pre-commit
+    fails a hook only for rewriting a *tracked* file, so a generator that writes new
+    ones passes and leaves them untracked: carameli's `sync-codex` mirrored a newly
+    vendored skill into `.agents/skills/`, the adoption commit landed without it, and
+    the project's `codex-sync` gate went red on the PR (38836107). The box was staged
+    whole just before, so anything left afterwards is the hooks' output.
     """
     before = _status(git)
-    first = git("commit", "-m", message)
-    if first.returncode == 0 or _status(git) == before:
-        return first, False
-    git("add", "-A")
-    return git("commit", "-m", message), True
+    committed, retried = git("commit", "-m", message), False
+    if committed.returncode != 0:
+        if _status(git) == before:
+            return committed, False
+        git("add", "-A")
+        committed, retried = git("commit", "-m", message), True
+    if committed.returncode == 0 and _status(git):
+        git("add", "-A")
+        return git("commit", "--amend", "--no-edit"), True
+    return committed, retried
+
+
+# git's words for a push the transport lost, as opposed to one the remote or a hook
+# judged: HTTP's `unable to access` (a 403 or 5xx from GitHub), a DNS miss, a dropped
+# connection. The v0.11.35 adoption lost two of three consumers to a 403 a minute after
+# the first push went through, and both answered again within minutes (a1edc2f7).
+TRANSPORT_FAILURE = re.compile(
+    r"unable to access|could not resolve host|connection (?:reset|refused|timed out)|"
+    r"the remote end hung up|early EOF",
+    re.I,
+)
+# Seconds before each further push. Once the tag exists nothing retries an adoption
+# until the nightly `devkit-upgrade-projects`, so a few minutes here save a failed job.
+PUSH_WAITS = (30, 120)
+
+
+def push_with_retry(git, branch: str, sleep=time.sleep) -> subprocess.CompletedProcess[str]:
+    """`git push -u origin <branch>`, pushed again after each `PUSH_WAITS` while git
+    says the transport failed; a remote's or a hook's refusal is returned at once."""
+    pushed = git("push", "-u", "origin", branch)
+    for wait in PUSH_WAITS:
+        said = f"{pushed.stderr or ''}\n{pushed.stdout or ''}"
+        if pushed.returncode == 0 or not TRANSPORT_FAILURE.search(said):
+            return pushed
+        sleep(wait)
+        pushed = git("push", "-u", "origin", branch)
+    return pushed
 
 
 def _status(git) -> str:
@@ -900,7 +941,7 @@ def upgrade_one(
             committed.stderr or committed.stdout,
         )
 
-    pushed = box_git("push", "-u", "origin", spawn.box.branch)
+    pushed = push_with_retry(box_git, spawn.box.branch)
     if pushed.returncode != 0:
         return failed(2, f"upgrade: {name} -- FAILED at `git push`", pushed.stderr or pushed.stdout)
 

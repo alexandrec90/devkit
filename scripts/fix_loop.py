@@ -146,10 +146,13 @@ def _one_tree(
     # Where the lines will be once filed away below: naming the file about to be renamed
     # gave every friction row a dead path.
     kept = fix_reports.filed(fix_reports.FRICTION_FILE) if ctx.writes else fix_reports.FRICTION_FILE
+    claims = any(fix_reports.fixed_here(line) for line in tree.friction)
+    out = bool(tree.branch) and claims and went_out(tree.path)
     for line in tree.friction:
         evidence = str(tree.path / kept)
-        # A line its session fixed here is settled by this branch, not a new job for a fixer.
-        settles = tree.branch if tree.branch and fix_reports.fixed_here(line) else ""
+        # A line its session fixed here is settled by this branch, not a new job for a
+        # fixer -- once the fix is on the branch, which the words alone do not show.
+        settles = tree.branch if out and fix_reports.fixed_here(line) else ""
         journal.add(
             Finding(
                 "reported",
@@ -162,6 +165,22 @@ def _one_tree(
         )
     if tree.friction and ctx.writes:
         fix_reports.file_away(tree.path, fix_reports.FRICTION_FILE)
+
+
+def went_out(tree: Path, runner=ship_intent.run_quiet) -> bool:
+    """Whether the tree's work is committed on its branch: its last ship `shipped`, and
+    nothing left uncommitted since.
+
+    A friction line saying "fixed on this branch" settles on that branch, and
+    `fix_verify` then holds it only to the branch merging -- not to the fix being in
+    it. 5d9806b0 was settled on worktree-rippling-juggling-oasis, whose intent the pass
+    had set aside over 19 uncommitted files, so the fix it named never reached the PR
+    that was to retire it (7c16fabc). Such a line is filed open instead.
+    """
+    if ship_intent.read_state(tree).get("stage") != ship_intent.SHIPPED:
+        return False
+    status = runner(["git", "status", "--porcelain"], cwd=tree)
+    return status.returncode == 0 and not (status.stdout or "").strip()
 
 
 def _judge_session(
@@ -289,9 +308,15 @@ def _harvest(ctx: Context, cursor: Path) -> list[Finding]:
 def _verify(ctx: Context) -> list[str]:
     items = triage.load(ctx.devkit_dir)
     lookup = fix_verify.gh_lookup(ctx.root, ctx.projects, sweep.gh_for)
+    mentions = fix_verify.gh_mentions(ctx.root, ctx.projects, sweep.gh_for)
     cache = ctx.ledger_path.parent / fix_verify.CACHE_NAME
-    outcome = fix_verify.verify(items, lookup, cache, ctx.now)
+    outcome = fix_verify.verify(items, lookup, cache, ctx.now, mentions)
     lines = []
+    for was, fix in outcome.found:
+        # The ledger names the PR that holds the fix, not the branch that never did.
+        note = f"{was.note} -- merged as {fix.url}, which names [{was.ref}]; pr= said {was.pr}"
+        triage.resolve([was.ref], note, pr=fix.url, root=ctx.devkit_dir, resolved=was.stamp)
+        lines.append(f"settled [{was.ref}] on {fix.url} -- {was.pr} never landed it")
     for ref, why in outcome.reopen:
         triage.reopen([ref], why, root=ctx.devkit_dir)
         lines.append(f"reopened [{ref}] -- {why}")

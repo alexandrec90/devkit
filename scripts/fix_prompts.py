@@ -39,7 +39,12 @@ FINISH = (
     "linter and the ratchets the gate "
     "runs -- python scripts/hooks/structure_check.py, python scripts/hooks/untested_symbols.py "
     "and, where the tree has it, python scripts/hot-budget.py for the instruction files "
-    "-- in every tree you changed, then ship it with the ship skill and stop: the fix pass "
+    "-- in every tree you changed. python scripts/run-tests.py with no arguments picks the "
+    "tests for what changed where its --help says so, as devkit's does, adding the "
+    "contract tests that read every module, which no changed file names. A runner that "
+    "runs the whole suite bare is given the test files for what you changed instead: "
+    "a whole suite or a whole test directory is the gate's to run, not yours. "
+    "Then ship it with the ship skill and stop: the fix pass "
     "commits, pushes, opens or updates the PR and reads what the gate says. A failure "
     "already fixed where this tree was cut, with nothing left to change, ships the same "
     f"way: {INTENT_FILE.as_posix()} saying what fixed it, which the pass sets aside and "
@@ -200,7 +205,11 @@ def _locked_too(locked: dict[str, str] | None) -> str:
 
 
 def pr_prompt(
-    failure: Failure, refusal: str = "", left: str = "", locked: dict[str, str] | None = None
+    failure: Failure,
+    refusal: str = "",
+    left: str = "",
+    locked: dict[str, str] | None = None,
+    made: str = "",
 ) -> str:
     """One branch, in its own worktree: a conflict to resolve, a refused commit, or a red PR.
 
@@ -209,9 +218,10 @@ def pr_prompt(
     gate cannot have run, and a resolver told "also fix the tests" fixes the wrong thing.
     `refusal` is the tree's `standing_refusal`, which the commit shape already is,
     `left` is why the tree was not brought to origin's head (`fix-prs.refresh_head`),
-    and `locked` is the tree's `fix_trees.locked_caches`.
+    `locked` is the tree's `fix_trees.locked_caches`, and `made` is who made a reused
+    tree (`fix_trees.provenance`).
     """
-    tree_notes = _refused_too(refusal) + _locked_too(locked)
+    tree_notes = made + _refused_too(refusal) + _locked_too(locked)
     if CONFLICT in failure.signature:
         return _framed(
             f"PR #{failure.number} in {failure.project} has a merge conflict with "
@@ -230,7 +240,7 @@ def pr_prompt(
             f"{_ids(failure.signature)}. The pre-commit output is in {EVIDENCE_DIR}/ in this "
             "worktree, which is the worktree the change was made in, and the message it "
             f"was being shipped with is in {REFUSED_FILE.as_posix()} -- reuse it when it "
-            f"still fits. Fix what the output reports.{_locked_too(locked)} {FINISH}"
+            f"still fits. Fix what the output reports.{made}{_locked_too(locked)} {FINISH}"
         )
     return _framed(
         f"PR #{failure.number} in {failure.project} against origin/{failure.base} is stuck: "
@@ -258,7 +268,10 @@ def _left_as_is(left: str, head: str) -> str:
     """What a reused tree holds that the session did not put there, or "".
 
     #422's resolver was sent into a tree holding an earlier session's half-done merge --
-    21 files unstaged, no MERGE_HEAD -- and was told nothing about it (f7167792).
+    21 files unstaged, no MERGE_HEAD -- and was told nothing about it (f7167792). And
+    the other direction: origin's head moves on too (the pass updates a behind PR through
+    GitHub), and a fixer that never took it in fixed and tested a base three merges
+    stale (5f5c4b3c).
     """
     if not left:
         return ""
@@ -267,7 +280,8 @@ def _left_as_is(left: str, head: str) -> str:
         f"git log origin/{head}..HEAD first: what origin does not have was left by an "
         "earlier session, not by you. Read it before "
         "anything else, keep what serves this fix, and restore only what you have read "
-        "and judged wrong."
+        f"and judged wrong. Then git fetch origin {head} and git merge origin/{head}, "
+        "so you fix and test the head the PR has now, not the one this tree was left on."
     )
 
 
