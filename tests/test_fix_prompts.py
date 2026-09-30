@@ -475,6 +475,16 @@ def test_every_prompt_names_the_runner_that_adds_the_contract_tests():
         assert "the contract tests that read every module" in text
 
 
+def test_every_prompt_says_a_runner_that_runs_the_suite_bare_is_given_files():
+    """27a0245d: carameli's own run-tests.py runs the whole suite in its app container
+    when bare, so the runner sentence was true of devkit only; its fixer, told nothing
+    else, ran all 2,331 vendored hook tests where one file was asked for."""
+    for text in every_prompt():
+        assert "where its --help says so" in text
+        assert "given the test files for what you changed" in text
+        assert "a whole test directory is the gate's to run" in text
+
+
 def test_a_prompt_names_the_log_that_came_down_when_no_junit_report_failed(tmp_path):
     """8f622cc6: devkit's suite reports only in `test-failures.log`, and a fixer told to
     read `failures.txt` first went looking for a file nothing had written."""

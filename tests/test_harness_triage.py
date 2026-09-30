@@ -881,6 +881,24 @@ def test_a_job_failing_for_a_new_cause_is_a_new_group_not_a_recurrence():
     assert "cause  KeyError: 'tag'" in rendered
 
 
+def test_the_cause_as_said_is_printed_and_splits_no_group():
+    """718f71c4: the folded cause dropped the host and the 403, and the sweep went to the
+    kept log for them. `said` is printed under it and stays out of the signature."""
+    message = "unattended task 'Scheduled: Devkit Release' failed"
+    cause = "fatal: unable to access 'https:/p.git/': error: N"
+    first = _line("scheduled-job-failed", message=message, cause=cause, said="error: 403")
+    second = _line(
+        "scheduled-job-failed",
+        stamp="2026-09-29T00:00:00+00:00",
+        message=message,
+        cause=cause,
+        said="error: 502",
+    )
+    items = triage.read_items("\n".join((first, second)))
+    assert len({item.signature for item in items}) == 1
+    assert "  said   error: 403" in triage.render(items, items)
+
+
 # --- a resolution that did not hold -------------------------------------------------------
 
 

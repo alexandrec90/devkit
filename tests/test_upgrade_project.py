@@ -1527,7 +1527,7 @@ class CommitGit:
 def test_a_hook_that_rewrote_the_tree_gets_one_more_commit():
     """`sync-codex` remirrored `.claude/skills/` and failed a commit that had nothing
     wrong with it. Staging the result and committing again is the whole convention."""
-    git = CommitGit(["M  a.py\n", "MM a.py\n"], [1, 0])
+    git = CommitGit(["M  a.py\n", "MM a.py\n", ""], [1, 0])
     result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
     assert (result.returncode, retried) == (0, True)
     assert git.calls.count(("add", "-A")) == 1
@@ -1545,10 +1545,40 @@ def test_a_gate_that_refused_is_not_committed_over():
 
 
 def test_a_commit_that_worked_is_never_retried():
-    git = CommitGit(["M  a.py\n"], [0])
+    git = CommitGit(["M  a.py\n", ""], [0])
     result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
     assert (result.returncode, retried) == (0, False)
     assert len([step for step in git.calls if step[0] == "commit"]) == 1
+
+
+def test_a_hook_that_wrote_new_files_past_a_passing_commit_is_amended_in():
+    """pre-commit fails a hook only for rewriting a tracked file, so `sync-codex`
+    mirroring a new skill into `.agents/skills/` passed, and the adoption commit landed
+    without the mirror its own `codex-sync` gate then demanded (38836107)."""
+    git = CommitGit(
+        ["A  .claude/skills/go-nuts/SKILL.md\n", "?? .agents/skills/go-nuts/\n", ""], [0, 0]
+    )
+    result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
+    assert (result.returncode, retried) == (0, True)
+    commits = [step for step in git.calls if step[0] in ("add", "commit")]
+    assert commits == [
+        ("commit", "-m", "Adopt devkit v0.7.0"),
+        ("add", "-A"),
+        ("commit", "--amend", "--no-edit"),
+    ]
+
+
+def test_an_amend_the_hooks_refuse_is_reported_as_the_failure():
+    git = CommitGit(["A  a.py\n", "?? b.py\n"], [0, 1])
+    result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
+    assert (result.returncode, retried) == (1, True)
+
+
+def test_a_retried_commit_that_left_new_files_is_amended_too():
+    git = CommitGit(["M  a.py\n", "MM a.py\n", "?? b.py\n", ""], [1, 0, 0])
+    result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
+    assert (result.returncode, retried) == (0, True)
+    assert git.calls[-1] == ("commit", "--amend", "--no-edit")
 
 
 def test_the_rewrite_is_detected_by_the_status_code_not_the_path_list():
@@ -1557,7 +1587,7 @@ def test_the_rewrite_is_detected_by_the_status_code_not_the_path_list():
     paths reports "nothing changed" for the one event this exists to detect."""
     git = CommitGit(["M  a.py\n", "MM a.py\n"], [1, 0])
     assert up.changed_paths(git) == up.changed_paths(git)  # same path, both readings
-    git = CommitGit(["M  a.py\n", "MM a.py\n"], [1, 0])
+    git = CommitGit(["M  a.py\n", "MM a.py\n", ""], [1, 0])
     _result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
     assert retried
 

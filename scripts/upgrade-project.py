@@ -702,13 +702,25 @@ def commit_with_hook_retry(git, message: str) -> tuple[subprocess.CompletedProce
     what separates a hook that fixed something from a gate that refused something: a
     lint error the formatter cannot fix leaves the tree exactly as it was, and
     committing over it again would just fail twice and say so twice.
+
+    **A commit that went through is amended when it left the tree dirty.** pre-commit
+    fails a hook only for rewriting a *tracked* file, so a generator that writes new
+    ones passes and leaves them untracked: carameli's `sync-codex` mirrored a newly
+    vendored skill into `.agents/skills/`, the adoption commit landed without it, and
+    the project's `codex-sync` gate went red on the PR (38836107). The box was staged
+    whole just before, so anything left afterwards is the hooks' output.
     """
     before = _status(git)
-    first = git("commit", "-m", message)
-    if first.returncode == 0 or _status(git) == before:
-        return first, False
-    git("add", "-A")
-    return git("commit", "-m", message), True
+    committed, retried = git("commit", "-m", message), False
+    if committed.returncode != 0:
+        if _status(git) == before:
+            return committed, False
+        git("add", "-A")
+        committed, retried = git("commit", "-m", message), True
+    if committed.returncode == 0 and _status(git):
+        git("add", "-A")
+        return git("commit", "--amend", "--no-edit"), True
+    return committed, retried
 
 
 def _status(git) -> str:

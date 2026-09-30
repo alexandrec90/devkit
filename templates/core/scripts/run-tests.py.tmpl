@@ -31,6 +31,9 @@ ARTIFACT = REPO_ROOT / "logs" / "test-failures.log"
 # Where the whole suite is the point: CI, and the push gate that mirrors it (pre-commit
 # exports `PRE_COMMIT` into every hook's environment).
 FULL_SUITE_ENV = ("CI", "PRE_COMMIT")
+# Where a changed module's test is looked for: the project's suite, then the vendored
+# tier's beside the scripts it tests.
+TEST_DIRS = ("tests", "scripts/hooks/tests")
 
 # Per-failure line cap. Chosen to hold a first-party traceback plus the assertion
 # without letting a single deep failure crowd out the rest of the run.
@@ -168,28 +171,30 @@ def changed_paths(root: Path, run=subprocess.run) -> list[str] | None:
 def tests_for(paths: list[str], root: Path = REPO_ROOT) -> tuple[list[str], list[str]]:
     """`(test files to run, changed files that name none)`.
 
-    A test file names itself; any other `.py` names `tests/test_<stem>.py` with hyphens
-    read as underscores, when that file exists. Everything else -- a document, a
-    migration, a module with no test of its own -- is reported so the caller can see
-    what the run did not cover.
+    A test file names itself; any other `.py` names `test_<stem>.py` in each of
+    `TEST_DIRS` with hyphens read as underscores, when that file exists. Everything
+    else -- a document, a migration, a module with no test of its own -- is reported so
+    the caller can see what the run did not cover.
     """
     tests: list[str] = []
     unnamed: list[str] = []
     for path in paths:
         posix = path.replace("\\", "/")
-        stem = posix.rsplit("/", 1)[-1]
-        if posix.startswith("tests/") and stem.startswith("test_") and stem.endswith(".py"):
-            candidate = posix
-        elif stem.endswith(".py"):
-            candidate = f"tests/test_{stem[:-3].replace('-', '_')}.py"
-        else:
-            candidate = ""
-        if candidate and (root / candidate).is_file():
-            if candidate not in tests:
-                tests.append(candidate)
-        else:
+        found = [name for name in _named_tests(posix) if (root / name).is_file()]
+        tests.extend(name for name in found if name not in tests)
+        if not found:
             unnamed.append(posix)
     return tests, unnamed
+
+
+def _named_tests(posix: str) -> list[str]:
+    """The test files the changed file `posix` could name, existing or not."""
+    stem = posix.rsplit("/", 1)[-1]
+    if not stem.endswith(".py"):
+        return []
+    if stem.startswith("test_") and any(posix.startswith(f"{d}/") for d in TEST_DIRS):
+        return [posix]
+    return [f"{d}/test_{stem[:-3].replace('-', '_')}.py" for d in TEST_DIRS]
 
 
 def with_basetemp(cmd: list[str], basetemp: str) -> list[str]:
