@@ -349,6 +349,108 @@ def test_the_template_runner_looks_where_devkits_does():
     assert f"TEST_DIRS = ({literal})" in template
 
 
+FRONTEND_TOML = '[frontend]\nenabled = true\ndir = "."\nsrc = "src/"\ntest_cmd = ["run", "test"]\n'
+
+
+def frontend_tier(monkeypatch, tmp_path, toml: str = FRONTEND_TOML):
+    """The template's reading of a project whose `.devkit.toml` is `toml`."""
+    (tmp_path / ".devkit.toml").write_text(toml, encoding="utf-8")
+    runner = template_runner(monkeypatch)
+    return runner, runner._frontend(tmp_path, REPO_ROOT / "scripts" / "hooks")
+
+
+def test_the_template_reads_the_frontend_tier_off_devkit_toml(monkeypatch, tmp_path):
+    _runner, tier = frontend_tier(monkeypatch, tmp_path)
+    assert (tier.dir, tier.src, tuple(tier.test_cmd)) == (".", "src/", ("run", "test"))
+    assert frontend_tier(monkeypatch, tmp_path, "[frontend]\nenabled = false\n")[1] is None
+    runner = template_runner(monkeypatch)
+    assert runner._frontend(tmp_path, tmp_path / "no-hooks-here") is None
+
+
+def test_a_typescript_change_names_the_test_beside_it(monkeypatch, tmp_path):
+    """f3c31ac8: a TypeScript-only merge in roguelike printed "no test named" for every
+    `src/game/*.ts` and ran nothing, so a fixer's targeted run exercised no vitest suite."""
+    runner, tier = frontend_tier(monkeypatch, tmp_path)
+    for rel in ("src/game/rig.test.ts", "src/game/ui.spec.tsx", "src/main.test.ts"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("", encoding="utf-8")
+    paths = [
+        "src/game/rig.ts",
+        "src\\game\\ui.tsx",
+        "src/main.test.ts",
+        "src/game/untested.ts",
+        "src/style.css",
+        "vite.config.ts",
+    ]
+    assert runner._frontend_tests_for(paths, tier, tmp_path) == (
+        ["src/game/rig.test.ts", "src/game/ui.spec.tsx", "src/main.test.ts"],
+        ["src/game/untested.ts", "src/style.css", "vite.config.ts"],
+    )
+    assert runner._frontend_tests_for(paths, None, tmp_path) == ([], paths)
+
+
+def stub_frontend(runner, monkeypatch, tmp_path, returncode: int = 0, output: str = ""):
+    """npm on PATH and `node_modules` present; every spawn recorded with its cwd."""
+    (tmp_path / "node_modules").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(runner.shutil, "which", lambda name: f"/bin/{name}")
+    seen: list[tuple[list[str], object]] = []
+
+    def fake_run(cmd, cwd=None, **_kwargs):
+        seen.append((list(cmd), cwd))
+        return subprocess.CompletedProcess(cmd, returncode, output, "")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    return seen
+
+
+def test_a_typescript_only_change_runs_its_tests_and_no_pytest(monkeypatch, tmp_path):
+    runner, tier = frontend_tier(monkeypatch, tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "rig.test.ts").write_text("", encoding="utf-8")
+    monkeypatch.setattr(runner, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(runner, "ARTIFACT", tmp_path / "logs" / "test-failures.log")
+    monkeypatch.setattr(runner, "changed_paths", lambda root, run=None: ["src/rig.ts"])
+    monkeypatch.setattr(runner, "_frontend", lambda root=None, hooks=None: tier)
+    for name in runner.FULL_SUITE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    seen = stub_frontend(runner, monkeypatch, tmp_path)
+    assert runner.main([]) == 0
+    assert seen == [(["/bin/npm", "run", "test", "--", "src/rig.test.ts"], tmp_path / ".")]
+
+    seen = stub_frontend(runner, monkeypatch, tmp_path, 1, "FAIL src/rig.test.ts > walks\n")
+    assert runner.main([]) == 1
+    body = (tmp_path / "logs" / "test-failures.log").read_text(encoding="utf-8")
+    assert "frontend: npm run test -- src/rig.test.ts exited 1" in body
+    assert "FAIL src/rig.test.ts > walks" in body
+
+
+def test_frontend_tests_run_relative_to_the_tiers_dir(monkeypatch, tmp_path):
+    runner, tier = frontend_tier(
+        monkeypatch, tmp_path, FRONTEND_TOML.replace('dir = "."', 'dir = "web"')
+    )
+    seen = stub_frontend(runner, monkeypatch, tmp_path / "web")
+    assert runner._frontend_run(["web/src/a.test.ts"], tier, tmp_path) == ""
+    assert seen == [(["/bin/npm", "run", "test", "--", "src/a.test.ts"], tmp_path / "web")]
+
+
+def test_a_tree_that_cannot_start_the_frontend_runner_fails_saying_why(monkeypatch, tmp_path):
+    """A skip here is the zero-suite run the mapping exists to end."""
+    runner, tier = frontend_tier(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner.shutil, "which", lambda name: None)
+    assert "npm is not on PATH" in runner._frontend_run(["src/a.test.ts"], tier, tmp_path)
+    monkeypatch.setattr(runner.shutil, "which", lambda name: f"/bin/{name}")
+    assert "no node_modules" in runner._frontend_run(["src/a.test.ts"], tier, tmp_path)
+
+
+def test_a_long_frontend_failure_keeps_its_tail(monkeypatch, tmp_path):
+    runner, tier = frontend_tier(monkeypatch, tmp_path)
+    output = "\n".join(f"line {i}" for i in range(runner.FRONTEND_TAIL_LINES + 5))
+    stub_frontend(runner, monkeypatch, tmp_path, 1, output)
+    body = runner._frontend_run(["src/a.test.ts"], tier, tmp_path).splitlines()
+    assert body[1] == "... (5 lines above, truncated)"
+    assert body[2] == "line 5" and body[-1] == f"line {runner.FRONTEND_TAIL_LINES + 4}"
+
+
 def test_by_default_only_the_tests_named_by_the_changed_files_run(artifact, monkeypatch, tmp_path):
     """Every agent ran the whole suite by reflex and hit the same harness red, one
     session after another; the gate is CI's, and the default here is what the change

@@ -7,6 +7,9 @@ broken test cannot flood the artifact and bury the other twenty.
 
 **The default is the tests named by what changed**, not the suite: every file
 changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`.
+Where `.devkit.toml` turns the `[frontend]` tier on, a script under its `src` maps to
+the `<stem>.test.<ext>` beside it too, run through the tier's own `test_cmd`: a
+TypeScript-only change used to name no test at all and report "nothing to run".
 The whole suite is CI's, the push gate's (`PRE_COMMIT` is in the environment under
 pre-commit) and `--all`'s. Where git cannot say what changed, the suite runs.
 
@@ -19,14 +22,25 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT = REPO_ROOT / "logs" / "test-failures.log"
+# The vendored `harness_config.py`, which reads `.devkit.toml` with its defaults.
+HOOKS_DIR = REPO_ROOT / "scripts" / "hooks"
+# The scripts a frontend test runner is handed, and the infixes that mark one as a test.
+FRONTEND_SUFFIXES = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
+FRONTEND_TEST_INFIXES = (".test", ".spec")
+# The tail of a failing frontend run kept in the artifact: the runner's summary and the
+# failures just above it. Its output has no pytest sections to cut by.
+FRONTEND_TAIL_LINES = 80
 
 # Where the whole suite is the point: CI, and the push gate that mirrors it (pre-commit
 # exports `PRE_COMMIT` into every hook's environment).
@@ -210,6 +224,119 @@ def with_basetemp(cmd: list[str], basetemp: str) -> list[str]:
     return [*cmd[:3], f"--basetemp={basetemp}", *cmd[3:]]
 
 
+def _frontend(root: Path = REPO_ROOT, hooks: Path | None = None) -> Any:
+    """`.devkit.toml`'s `[frontend]` tier (a `harness_config.FrontendConfig`) when it is
+    on, else None -- as it is where the vendored `harness_config.py` is missing."""
+    path = (hooks or HOOKS_DIR) / "harness_config.py"
+    spec = importlib.util.spec_from_file_location("harness_config", path)
+    if spec is None or spec.loader is None or not path.is_file():
+        return None
+    module = sys.modules.get("harness_config")
+    if module is None:
+        module = importlib.util.module_from_spec(spec)
+        # Registered before it runs: `@dataclass` looks its module up by name.
+        sys.modules["harness_config"] = module
+        spec.loader.exec_module(module)
+    tier = module.load(root).frontend
+    return tier if tier.enabled else None
+
+
+def _frontend_tests_for(
+    paths: list[str], tier: Any, root: Path = REPO_ROOT
+) -> tuple[list[str], list[str]]:
+    """`(frontend test files to run, paths that name none)`, as `tests_for` for pytest.
+
+    A test file under the tier's `src` names itself; any other script there names the
+    `<stem>.test.<ext>` or `<stem>.spec.<ext>` beside it, when one exists. Paths stay
+    relative to the repository; `_frontend_run` makes them relative to the tier's `dir`.
+    """
+    if tier is None:
+        return [], list(paths)
+    tests: list[str] = []
+    unnamed: list[str] = []
+    src = tier.src.replace("\\", "/")
+    for path in paths:
+        posix = path.replace("\\", "/")
+        found = _frontend_named(posix) if posix.startswith(src) else []
+        found = [name for name in found if (root / name).is_file()]
+        tests.extend(name for name in found if name not in tests)
+        if not found:
+            unnamed.append(posix)
+    return tests, unnamed
+
+
+def _frontend_named(posix: str) -> list[str]:
+    """The frontend test files the changed script `posix` could name, existing or not."""
+    head, dot, suffix = posix.rpartition(".")
+    if not dot or f".{suffix}" not in FRONTEND_SUFFIXES:
+        return []
+    if any(head.endswith(infix) for infix in FRONTEND_TEST_INFIXES):
+        return [posix]
+    return [f"{head}{infix}{ext}" for infix in FRONTEND_TEST_INFIXES for ext in FRONTEND_SUFFIXES]
+
+
+def _frontend_run(tests: list[str], tier: Any, root: Path = REPO_ROOT) -> str:
+    """Run `tests` through the tier's `test_cmd`; what failed, or "" when they passed.
+
+    A tree that cannot start the runner -- no `npm`, no `node_modules` -- is a failure
+    that says so, never a skip: a skip is the zero-suite run this function exists to end.
+    """
+    where = root / tier.dir
+    npm = shutil.which("npm")
+    if not npm:
+        return "npm is not on PATH, so no frontend test could run."
+    if not (where / "node_modules").is_dir():
+        return f"{where} has no node_modules: provision the tree (npm ci there) and run again."
+    prefix = "" if tier.dir in ("", ".") else tier.dir.replace("\\", "/").rstrip("/") + "/"
+    local = [name[len(prefix) :] if name.startswith(prefix) else name for name in tests]
+    cmd = [npm, *tier.test_cmd, "--", *local]
+    print(f"run-tests: npm {' '.join(cmd[1:])}")
+    result = subprocess.run(
+        cmd, cwd=where, capture_output=True, text=True, encoding="utf-8", errors="replace"
+    )
+    if result.returncode == 0:
+        return ""
+    lines = (result.stdout + result.stderr).strip().splitlines()
+    cut = len(lines) - FRONTEND_TAIL_LINES
+    head = [f"frontend: npm {' '.join(cmd[1:])} exited {result.returncode}"]
+    if cut > 0:
+        head.append(f"... ({cut} lines above, truncated)")
+    return "\n".join(head + lines[-FRONTEND_TAIL_LINES:])
+
+
+def _pytest_run(cmd: list[str]) -> str:
+    """Run pytest as `cmd`; its filtered failures, or "" when it passed or collected nothing."""
+    print(f"run-tests: {' '.join(cmd[2:])}")
+    with tempfile.TemporaryDirectory(prefix="pytest-", ignore_cleanup_errors=True) as basetemp:
+        run = with_basetemp(cmd, basetemp)
+        result = subprocess.run(run, cwd=REPO_ROOT, capture_output=True, text=True)
+    if result.returncode in (0, PYTEST_NO_TESTS_COLLECTED):
+        return ""
+    raw = result.stdout + result.stderr
+    body = cap_failure_blocks(filter_output(raw))
+    # Never leave the agent with nothing: if filtering stripped everything (an
+    # unexpected pytest output shape, a collection error), fall back to raw.
+    return body if body.strip() else raw.strip() or f"pytest exited {result.returncode}"
+
+
+def _changed_targets() -> tuple[list[str], list[str]] | None:
+    """`(pytest targets, frontend tests)` for what changed, or None when git cannot say."""
+    changed = changed_paths(REPO_ROOT)
+    if changed is None:
+        print("run-tests: git cannot say what changed; running the suite")
+        return None
+    targets, unnamed = tests_for(changed, REPO_ROOT)
+    tier = _frontend(REPO_ROOT)
+    frontend, unnamed = _frontend_tests_for(unnamed, tier, REPO_ROOT)
+    print(
+        f"run-tests: {len(targets) + len(frontend)} test file(s) for {len(changed)} changed "
+        "path(s); --all runs the suite"
+    )
+    for path in unnamed:
+        print(f"run-tests:   no test named for {path}")
+    return targets, frontend
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--all", action="store_true", help="run the whole suite")
@@ -222,42 +349,24 @@ def main(argv: list[str] | None = None) -> int:
         cmd += ["--last-failed", "--last-failed-no-failures", "all"]
     whole = args.all or args.changed or targets or any(os.environ.get(k) for k in FULL_SUITE_ENV)
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-    if not whole:
-        changed = changed_paths(REPO_ROOT)
-        if changed is None:
-            print("run-tests: git cannot say what changed; running the suite")
-        else:
-            targets, unnamed = tests_for(changed, REPO_ROOT)
-            print(
-                f"run-tests: {len(targets)} test file(s) for {len(changed)} changed path(s); "
-                "--all runs the suite"
-            )
-            for path in unnamed:
-                print(f"run-tests:   no test named for {path}")
-            if not targets:
-                ARTIFACT.write_text("", encoding="utf-8")
-                print("run-tests: nothing to run (artifact cleared)")
-                return 0
-    cmd += targets
+    frontend: list[str] = []
+    if not whole and (picked := _changed_targets()) is not None:
+        targets, frontend = picked
+        if not targets and not frontend:
+            ARTIFACT.write_text("", encoding="utf-8")
+            print("run-tests: nothing to run (artifact cleared)")
+            return 0
 
-    print(f"run-tests: {' '.join(cmd[2:])}")
-    with tempfile.TemporaryDirectory(prefix="pytest-", ignore_cleanup_errors=True) as basetemp:
-        run = with_basetemp(cmd, basetemp)
-        result = subprocess.run(run, cwd=REPO_ROOT, capture_output=True, text=True)
-    raw = result.stdout + result.stderr
-
-    if result.returncode in (0, PYTEST_NO_TESTS_COLLECTED):
+    failed = [_pytest_run(cmd + targets)] if targets or not frontend else []
+    if frontend:
+        failed.append(_frontend_run(frontend, _frontend(REPO_ROOT), REPO_ROOT))
+    body = "\n\n".join(part for part in failed if part)
+    if not body:
         # Clear on pass, so a stale artifact never sends the next agent chasing a
         # failure that is already fixed.
         ARTIFACT.write_text("", encoding="utf-8")
         print(f"run-tests: passed (artifact cleared: {ARTIFACT.relative_to(REPO_ROOT)})")
         return 0
-
-    body = cap_failure_blocks(filter_output(raw))
-    # Never leave the agent with nothing: if filtering stripped everything (an
-    # unexpected pytest output shape, a collection error), fall back to raw.
-    if not body.strip():
-        body = raw.strip()
     ARTIFACT.write_text(
         "# source: scripts/run-tests.py\n"
         "# fix: pytest <the failing test id> --tb=long\n" + body + "\n",
