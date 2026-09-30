@@ -70,6 +70,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as _dt
+import functools
 import json
 import os
 import re
@@ -88,6 +89,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 # The host half of a teardown -- deleting the directory, and evicting whatever on this
 # machine is still running out of it. Its own module because nothing in it knows what a
 # `ReapPlan` is, and because this one is already past every structural limit.
+import bg_sessions
 import box_teardown
 import devkit_ports
 import devkit_project
@@ -5017,6 +5019,48 @@ def sync_checkouts(
     return (1 if summary["failed"] else 0), summary
 
 
+def agent_sessions() -> list[dict]:
+    """Every Claude Code session on this machine, with its working directory."""
+    return bg_sessions.listed(sweep.run_windowless)
+
+
+def settle_reap(
+    doomed: ReapPlan, workspace: Path, sessions: Callable[[], list[dict]], *, apply: bool
+) -> tuple[str, bool, list[str]]:
+    """What a reconcile pass does with a box it decided to reap: `(action, ok, notes)`.
+
+    `sessions` is called only when the reap is applied, so a dry run and a pass with
+    nothing to reap never ask `claude agents`.
+    """
+    if doomed.refusal:
+        # `reconcile_action` already cleared this box, so a refusal here is the two
+        # classifiers disagreeing — report it, never force past it.
+        return HOLD, False, [f"[warn] reap refused: {doomed.refusal}"]
+    if not apply:
+        return REAP, True, []
+    return reap_vacated(doomed, workspace, sessions())
+
+
+def reap_vacated(
+    doomed: ReapPlan, workspace: Path, sessions: list[dict]
+) -> tuple[str, bool, list[str]]:
+    """Reap `doomed` unless a session is still in it: `(action, ok, notes)`.
+
+    A session in the box is a WAIT, not a failure: the scheduled pass is what reddened
+    every time a live fixer held the directory, and the next pass reaps it once the
+    session has gone. `box_teardown.vacate` stops the ones the pass may stop.
+    """
+    occupants, notes = box_teardown.vacate(Path(doomed.path), sessions)
+    if occupants:
+        notes.append(
+            f"not reaped: {', '.join(occupants)} still in it -- the next pass reaps it "
+            f"once the session has gone"
+        )
+        return WAIT, True, notes
+    ok, reap_notes = apply_reap(doomed, workspace)
+    return REAP, ok, notes + reap_notes
+
+
 def reconcile(
     workspace: Path,
     *,
@@ -5093,6 +5137,8 @@ def reconcile(
 
     outcomes: list[dict] = []
     worst = 0
+    # Asked once, and only by a pass that reaps.
+    sessions = functools.cache(lambda: agent_sessions())
     for decision in reconcile_plan(
         rows,
         automerge=automerge,
@@ -5127,17 +5173,9 @@ def reconcile(
                 worst = 1
                 doomed = None
             if doomed is not None:
-                if doomed.refusal:
-                    # `reconcile_action` already cleared this box, so a refusal here is
-                    # the two classifiers disagreeing — report it, never force past it.
-                    notes.append(f"[warn] reap refused: {doomed.refusal}")
-                    action = HOLD
-                    worst = 1
-                elif apply:
-                    ok, reap_notes = apply_reap(doomed, workspace)
-                    notes.extend(reap_notes)
-                    if not ok:
-                        worst = 1
+                action, ok, reap_notes = settle_reap(doomed, workspace, sessions, apply=apply)
+                notes.extend(reap_notes)
+                worst = worst if ok else 1
 
         outcomes.append(
             reconcile_outcome(decision, action, pr, notes, boxes.get(decision.box), paused)
@@ -5338,8 +5376,13 @@ def artifact_root(root: Path, repo_root: Path | None = None) -> Path:
     workspace being acted on, which is every real invocation; a workspace somewhere else
     gets its own `logs/`, and nothing a test drives can reach this one. `repo_root` is
     resolved at call time rather than defaulted, so patching `REPO_ROOT` still works.
+
+    **This repo is its permanent checkout, never a tree cut from it** (`source_checkout`):
+    a reconcile run from a fixer's `.claude/worktrees/` tree recorded its reap in that
+    tree's `logs/`, which the tree's own reap deletes, and `reaped_branch` reads the
+    checkout's copy.
     """
-    here = REPO_ROOT if repo_root is None else repo_root
+    here = sweep.source_checkout(REPO_ROOT if repo_root is None else repo_root)
     try:
         if here.resolve().is_relative_to(root.resolve()):
             return here

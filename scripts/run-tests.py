@@ -220,6 +220,10 @@ def tests_for(paths: list[str], root: Path = REPO_ROOT) -> tuple[list[str], list
 def _named_tests(posix: str) -> list[str]:
     """The test files the changed file `posix` could name, existing or not."""
     stem = posix.rsplit("/", 1)[-1]
+    if stem.endswith(".py.tmpl"):
+        # A template of a script is tested as the script it renders to, and on its own.
+        name = stem.removesuffix(".py.tmpl").replace("-", "_")
+        return [f"{d}/test_{name}{kind}.py" for d in TEST_DIRS for kind in ("", "_template")]
     if not stem.endswith(".py"):
         return []
     if stem.startswith("test_") and any(posix.startswith(f"{d}/") for d in TEST_DIRS):

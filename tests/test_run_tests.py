@@ -329,6 +329,18 @@ def test_tests_for_names_a_test_file_by_its_module_and_a_test_by_itself(tmp_path
     )
 
 
+def test_a_script_template_names_the_scripts_test_and_its_own(tmp_path):
+    """A change to `run-tests.py.tmpl` named no test and ran only the contract tests."""
+    (tmp_path / "tests").mkdir()
+    for name in ("test_run_tests.py", "test_run_tests_template.py"):
+        (tmp_path / "tests" / name).write_text("", encoding="utf-8")
+    paths = ["templates/core/scripts/run-tests.py.tmpl", "templates/core/dot-devkit.toml.tmpl"]
+    assert run_tests.tests_for(paths, tmp_path) == (
+        ["tests/test_run_tests.py", "tests/test_run_tests_template.py"],
+        ["templates/core/dot-devkit.toml.tmpl"],
+    )
+
+
 def test_a_vendored_script_names_the_vendored_tiers_test(tmp_path):
     """`scripts/log-wrap.py` is tested in `scripts/hooks/tests/test_log_wrap.py`, and a
     run that looked in `tests/` alone ran no test of the change and said so."""
