@@ -289,9 +289,15 @@ def _harvest(ctx: Context, cursor: Path) -> list[Finding]:
 def _verify(ctx: Context) -> list[str]:
     items = triage.load(ctx.devkit_dir)
     lookup = fix_verify.gh_lookup(ctx.root, ctx.projects, sweep.gh_for)
+    mentions = fix_verify.gh_mentions(ctx.root, ctx.projects, sweep.gh_for)
     cache = ctx.ledger_path.parent / fix_verify.CACHE_NAME
-    outcome = fix_verify.verify(items, lookup, cache, ctx.now)
+    outcome = fix_verify.verify(items, lookup, cache, ctx.now, mentions)
     lines = []
+    for was, fix in outcome.found:
+        # The ledger names the PR that holds the fix, not the branch that never did.
+        note = f"{was.note} -- merged as {fix.url}, which names [{was.ref}]; pr= said {was.pr}"
+        triage.resolve([was.ref], note, pr=fix.url, root=ctx.devkit_dir, resolved=was.stamp)
+        lines.append(f"settled [{was.ref}] on {fix.url} -- {was.pr} never landed it")
     for ref, why in outcome.reopen:
         triage.reopen([ref], why, root=ctx.devkit_dir)
         lines.append(f"reopened [{ref}] -- {why}")
