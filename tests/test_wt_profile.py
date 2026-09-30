@@ -291,6 +291,25 @@ def test_launch_note_on_a_machine_with_no_windows_terminal_is_empty(tmp_path):
     assert wt.launch_note(tmp_path) == ""
 
 
+def test_the_status_line_names_an_elevating_default_whoever_is_asking(tmp_path, monkeypatch):
+    """1ee03f0f: the launchers' note reaches only a tab devkit opens, so an operator's own
+    elevated `claude --worktree` cut Administrators-owned trees with nothing said. The
+    daily status reads the file, not this process's token."""
+    path = tmp_path / wt.SETTINGS_RELATIVE[0]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(elevating()), encoding="utf-8")
+    for elevated in (True, False):
+        monkeypatch.setattr(wt, "is_elevated", lambda elevated=elevated: elevated)
+        assert wt.status_lines(tmp_path) == [wt.ELEVATED_DEFAULT_LINE]
+    assert '"elevate"' in wt.ELEVATED_DEFAULT_LINE and "fix:" in wt.ELEVATED_DEFAULT_LINE
+    path.write_text(json.dumps(settings(other())), encoding="utf-8")
+    assert wt.status_lines(tmp_path) == []
+
+
+def test_the_status_line_on_a_machine_with_no_windows_terminal_is_empty(tmp_path):
+    assert wt.status_lines(tmp_path) == []
+
+
 # --- without: the inverse of merged --------------------------------------------
 
 
