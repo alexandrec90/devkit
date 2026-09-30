@@ -208,6 +208,8 @@ def test_a_pr_prompt_says_when_its_tree_holds_what_an_earlier_session_left():
         text = fix_prompts.pr_prompt(red, "", left)
         assert left in text and "git status" in text and "earlier session" in text
         assert f"git log origin/{red.head}..HEAD" in text
+        # 5f5c4b3c: told only to look, a fixer worked on a base three merges behind.
+        assert f"git fetch origin {red.head} and git merge origin/{red.head}" in text
         assert "already up to date" not in text
     assert "earlier session" not in fix_prompts.pr_prompt(failure())
     assert "already up to date with its base" in fix_prompts.pr_prompt(failure())
@@ -447,6 +449,30 @@ def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linu
     assert "ran on Linux" in fix_prompts.pr_prompt(failure(evidence=""))
     assert ".venv interpreter" in fix_prompts.FINISH
     assert "--pr" in fix_prompts.LEDGER_STEPS and "any repository" in fix_prompts.LEDGER_STEPS
+
+
+def test_who_made_a_reused_tree_reaches_every_pr_shape():
+    """df43b14e: a fixer in an operator's elevated tree spent its turns working out whose
+    it was; `fix_trees.provenance` says, and every shape a reused tree gets carries it."""
+    made = " This tree was not cut for you: someone made it."
+    shapes = (
+        failure(),
+        failure(signature=(fix_plan.CONFLICT,)),
+        failure(kind=fix_plan.COMMIT, number=0, signature=("commit refused",)),
+    )
+    for red in shapes:
+        assert made in fix_prompts.pr_prompt(red, made=made)
+        assert "not cut for you" not in fix_prompts.pr_prompt(red)
+
+
+def test_every_prompt_names_the_runner_that_adds_the_contract_tests():
+    """54bb72df: #467's fixer ran the tests its files named and missed the one that
+    reads every module; a second fixer was sent for it."""
+    run_tests = load_script("scripts/run-tests.py")
+    assert "tests/test_scheduled_jobs.py" in run_tests.CONTRACT_TESTS
+    for text in every_prompt():
+        assert "python scripts/run-tests.py with no arguments" in text
+        assert "the contract tests that read every module" in text
 
 
 def test_a_prompt_names_the_log_that_came_down_when_no_junit_report_failed(tmp_path):

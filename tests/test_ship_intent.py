@@ -285,10 +285,13 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
         r"C:\py\python.exe scripts/ship.py",
         "git add",
         "git commit",
+        "git fetch",
+        "git merge-base",
         "git push",
         "git rev-parse",
     ]
-    fix, add, commit, push = run.calls[2:6]
+    fix, add, commit = run.calls[2:5]
+    push = run.calls[7]
     assert fix[0][1:] == ["scripts/ship.py", "--fix"] and fix[1] == one.tree
     assert add[0] == ["git", "add", "-A"]
     assert commit[0] == ["git", "commit", "-F", str(ship_intent.INTENT_FILE)]
@@ -624,7 +627,72 @@ def test_a_failed_push_is_a_failure_not_a_refusal_and_leaves_no_refused_state(tm
     run = Runner({"git push": (1, "", "could not resolve host")})
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.FAILED and "push" in out.detail
-    assert ship_intent.read_state(one.tree) == {}
+    assert ship_intent.read_state(one.tree) == {
+        "stage": ship_intent.FAILED,
+        "when": NOW.isoformat(timespec="seconds"),
+        "intent": one.digest,
+    }
+
+
+def test_a_push_refused_over_an_earlier_ship_is_pushed_again_next_pass(tmp_path, monkeypatch):
+    """436fc0c8: the tree's last ship read `shipped`, this one's push was refused, and the
+    next pass read a clean tree over that old `shipped` as already shipped -- the intent
+    set aside, its commit never pushed."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    ship_intent.write_state(one.tree, {"stage": ship_intent.SHIPPED, "intent": "older"})
+    refused = Runner({"git push": (1, "", "! [rejected] (non-fast-forward)")})
+    assert ship_intent.ship_one(one, "py", "main", refused, gh_ok, NOW).stage == ship_intent.FAILED
+    again = Runner(porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", again, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert "git push" in again.verbs()
+
+
+def test_a_head_origin_moved_on_is_merged_in_before_the_push(tmp_path, monkeypatch):
+    """436fc0c8, devkit #463: the pass updated the PR through GitHub while a fixer worked
+    in its tree, so the fixer's commit sat on a stale head and the push was refused."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    run = Runner({"git merge-base": (1, "", "")}, porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    argvs = [argv for argv, _cwd, _env in run.calls]
+    fetch = argvs.index(["git", "fetch", "--quiet", "origin", "agent/labels-0919"])
+    ancestor = ["git", "merge-base", "--is-ancestor", "origin/agent/labels-0919", "HEAD"]
+    merge = argvs.index(["git", "merge", "--no-edit", "origin/agent/labels-0919"])
+    push = argvs.index(["git", "push", "-u", "origin", "agent/labels-0919"])
+    assert fetch < argvs.index(ancestor) < merge < push
+
+
+def test_a_head_origin_moved_on_that_conflicts_is_aborted_and_not_pushed(tmp_path):
+    one = intent(tmp_path)
+    run = Runner(
+        {"git merge-base": (1, "", ""), "git merge": (1, "CONFLICT (content): Merge conflict", "")},
+        porcelain="",
+    )
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.FAILED and "does not merge cleanly" in out.detail
+    assert "CONFLICT" in out.detail
+    assert ["git", "merge", "--abort"] in [argv for argv, _cwd, _env in run.calls]
+    assert "git push" not in run.verbs()
+    assert ship_intent.read_state(one.tree)["stage"] == ship_intent.FAILED
+
+
+def test_push_catches_up_then_pushes_past_the_gate_and_says_why_it_did_not(tmp_path):
+    went = Runner()
+    assert ship_intent.push(tmp_path, "agent/x", went) == ""
+    assert went.verbs() == ["git fetch", "git merge-base", "git push"]
+    assert went.calls[-1][2]["SKIP"] == ship_intent.SKIP_PUSH_GATE
+    assert ship_intent.push(tmp_path, "agent/x", Runner({"git push": (1, "", "")})) == "exit 1"
+    conflicted = Runner({"git merge-base": (1, "", ""), "git merge": (1, "CONFLICT", "")})
+    assert "does not merge cleanly" in ship_intent.push(tmp_path, "agent/x", conflicted)
+    assert "git push" not in conflicted.verbs()
+
+
+def test_a_branch_origin_does_not_have_yet_needs_no_catching_up(tmp_path):
+    """A first push: the fetch finds no such ref, and nothing is compared or merged."""
+    run = Runner({"git fetch": (128, "", "fatal: couldn't find remote ref agent/x")})
+    assert ship_intent.catch_up(tmp_path, "agent/x", run) == ""
+    assert run.verbs() == ["git fetch"]
 
 
 def test_a_pr_that_could_not_be_opened_is_a_failure_to_retry(tmp_path, monkeypatch):

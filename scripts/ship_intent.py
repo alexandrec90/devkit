@@ -481,6 +481,41 @@ def commits_ahead(tree: Path, base: str, runner: Runner) -> int | None:
         return None
 
 
+def catch_up(tree: Path, branch: str, runner: Runner) -> str:
+    """Merge in what `origin/<branch>` has that HEAD lacks: "" when the push can go.
+
+    The pass brings a behind PR up to its base through GitHub (`gh pr update-branch`),
+    and `fix-prs.refresh_head` leaves a tree with edits where it is, because a session is
+    working in it. So the commit that session ships sits on a head origin has moved past,
+    and the push was refused as non-fast-forward (436fc0c8, devkit #463). A branch origin
+    does not have yet -- a first push -- fetches nothing and needs nothing. A merge that
+    conflicts is aborted and named: whoever resolves it must read both sides.
+    """
+    if runner(["git", "fetch", "--quiet", "origin", branch], cwd=tree).returncode != 0:
+        return ""
+    remote = f"origin/{branch}"
+    if runner(["git", "merge-base", "--is-ancestor", remote, "HEAD"], cwd=tree).returncode == 0:
+        return ""
+    merged = run_git(["git", "merge", "--no-edit", remote], tree, runner)
+    if merged.returncode == 0:
+        return ""
+    runner(["git", "merge", "--abort"], cwd=tree)
+    output = ((merged.stdout or "") + (merged.stderr or "")).strip()
+    return f"{remote} moved on and does not merge cleanly into this tree: {output[-300:]}"
+
+
+def push(tree: Path, branch: str, runner: Runner) -> str:
+    """`catch_up`, then push past the push gate: "" when it went, else why not."""
+    if behind := catch_up(tree, branch, runner):
+        return behind
+    env = dict(os.environ)
+    env["SKIP"] = SKIP_PUSH_GATE
+    pushed = runner(["git", "push", "-u", "origin", branch], cwd=tree, env=env)
+    if pushed.returncode == 0:
+        return ""
+    return (pushed.stderr or pushed.stdout or "").strip()[-400:] or f"exit {pushed.returncode}"
+
+
 def ship_one(
     intent: Intent,
     python: str,
@@ -503,12 +538,11 @@ def ship_one(
             write_state(tree, {**record, "intent": intent.digest, "tree": _digest(after)})
             return Outcome(intent, REFUSED, f"{step}: {output.strip()[-400:]}")
 
-    env = dict(os.environ)
-    env["SKIP"] = SKIP_PUSH_GATE
-    pushed = runner(["git", "push", "-u", "origin", intent.branch], cwd=tree, env=env)
-    if pushed.returncode != 0:
-        detail = (pushed.stderr or pushed.stdout or "").strip()[-400:]
-        return Outcome(intent, FAILED, f"push: {detail}")
+    if refused := push(tree, intent.branch, runner):
+        # Recorded, or an earlier ship's `shipped` stands over a clean tree and the next
+        # pass sets this intent aside as already shipped, its commit never pushed.
+        write_state(tree, {"stage": FAILED, "when": when, "intent": intent.digest})
+        return Outcome(intent, FAILED, f"push: {refused}")
 
     url, _created, error = sweep.ensure_pr(
         gh_for(tree),
