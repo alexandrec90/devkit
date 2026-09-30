@@ -339,16 +339,43 @@ def test_by_default_only_the_tests_named_by_the_changed_files_run(artifact, monk
     assert seen[0][-1] == "tests/test_fix_plan.py"
 
 
-def test_nothing_named_runs_nothing_and_says_so(artifact, monkeypatch, tmp_path, capsys):
+def test_the_contract_tests_run_with_every_change(artifact, monkeypatch, tmp_path, capsys):
+    """54bb72df: #467 added an import to fix-pass.py, ran the tests its files named, and
+    went red on test_scheduled_jobs, which reads every module and is named by none."""
     changed(monkeypatch, tmp_path, "README.md", "scripts/untested.py")
+    for rel in run_tests.CONTRACT_TESTS:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("", encoding="utf-8")
+    seen = stub_pytest(monkeypatch, 0)
+    assert run_tests.main([]) == 0
+    assert seen[0][-len(run_tests.CONTRACT_TESTS) :] == list(run_tests.CONTRACT_TESTS)
+    out = capsys.readouterr().out
+    assert "no test named for README.md" in out and "no test named for scripts/untested.py" in out
+    assert "the contract tests" in out
+
+
+def test_every_contract_test_listed_exists():
+    """A renamed contract test would drop out of every default run without a word."""
+    missing = [t for t in run_tests.CONTRACT_TESTS if not (REPO_ROOT / t).is_file()]
+    assert missing == []
+
+
+def test_with_contracts_keeps_the_named_tests_first_and_adds_each_once(tmp_path):
+    for rel in ("tests/test_a.py", "tests/test_test_contract.py", "tests/test_doc_claims.py"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("", encoding="utf-8")
+    got = run_tests.with_contracts(["tests/test_a.py", "tests/test_doc_claims.py"], tmp_path)
+    assert got == ["tests/test_a.py", "tests/test_doc_claims.py", "tests/test_test_contract.py"]
+
+
+def test_nothing_changed_runs_nothing_and_says_so(artifact, monkeypatch, tmp_path, capsys):
+    changed(monkeypatch, tmp_path)
     seen = stub_pytest(monkeypatch, 0)
     artifact.parent.mkdir(parents=True)
     artifact.write_text("stale", encoding="utf-8")
     assert run_tests.main([]) == 0
     assert seen == [] and artifact.read_text(encoding="utf-8") == ""
-    out = capsys.readouterr().out
-    assert "no test named for README.md" in out and "no test named for scripts/untested.py" in out
-    assert "--all runs the suite" in out
+    assert "--all runs the suite" in capsys.readouterr().out
 
 
 def test_all_ci_pre_commit_and_explicit_targets_run_the_whole_suite(

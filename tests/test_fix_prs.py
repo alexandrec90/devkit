@@ -494,8 +494,49 @@ def test_a_reused_trees_locked_caches_reach_its_fixers_prompt(monkeypatch, root)
     monkeypatch.setattr(fix_prs, "locked_caches", lambda tree: locked)
     opened = capture_sessions(monkeypatch)
     assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
-    expected = fix_prs.fix_prompts.pr_prompt(failure(), "", "", locked)
+    made = fix_trees.provenance(root / "carameli" / "t")
+    expected = fix_prs.fix_prompts.pr_prompt(failure(), "", "", locked, made)
     assert opened[0]["prompt"] == fix_prs.tab_safe(expected)
+
+
+def test_a_reused_tree_says_who_made_it_before_the_stamp_makes_it_the_passs(monkeypatch, root):
+    """df43b14e: two devkit sessions each spent about eight calls proving the tree they
+    were sent into was an operator's elevated `claude --worktree`, not the dispatcher's."""
+    tree = root / "carameli" / "t"
+    (tree / "logs").mkdir(parents=True)
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (tree, ""))
+    monkeypatch.setattr(fix_prs, "refresh_head", lambda *a: "")
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    monkeypatch.setattr(fix_prs, "provenance", lambda t: fix_trees.provenance(t, lambda p: ""))
+    opened = capture_sessions(monkeypatch)
+    assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude"), key="k") == 0
+    assert "a session a person started made it" in opened[0]["prompt"]
+    assert fix_prs.fix_reports.read_stamp(tree), "stamped after it was read"
+
+
+def test_provenance_names_the_pass_a_person_and_an_elevated_owner(tmp_path):
+    person = fix_trees.provenance(tmp_path, owner=lambda p: "S-1-5-21-1-2-3-1001")
+    assert "a session a person started made it" in person and "elevated" not in person
+    elevated = fix_trees.provenance(tmp_path, owner=lambda p: fix_trees.ADMINISTRATORS_SID)
+    assert "elevated: the Administrators group owns it" in elevated
+    (tmp_path / fix_prs.fix_reports.ORIGIN_FILE).parent.mkdir(parents=True)
+    (tmp_path / fix_prs.fix_reports.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
+    assert "the fix pass cut it for an earlier fixer" in fix_trees.provenance(
+        tmp_path, owner=lambda p: ""
+    )
+    for text in (person, elevated):
+        assert "spend no turns on who made it" in text
+        assert "'" not in text and '"' not in text and "`" not in text, "it crosses wt"
+
+
+def test_owner_sid_reads_this_machines_owner_or_nothing(tmp_path):
+    """Off Windows there is no SID to read; on it, a tree this process made is its own."""
+    sid = fix_trees.owner_sid(tmp_path)
+    if sys.platform == "win32":
+        assert sid.startswith("S-1-5-")
+    else:
+        assert sid == ""
+    assert fix_trees.owner_sid(tmp_path / "missing") == ""
 
 
 def test_both_dispatch_paths_provision_the_tree_before_the_session_opens(monkeypatch, root):
@@ -1205,7 +1246,9 @@ def test_a_tree_left_as_is_is_named_in_its_fixers_prompt(monkeypatch, root):
     monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
     opened = capture_sessions(monkeypatch)
     assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
-    expected = fix_prs.fix_prompts.pr_prompt(failure(), "", "the tree has uncommitted changes")
+    left = "the tree has uncommitted changes"
+    made = fix_trees.provenance(root / "carameli" / "t")
+    expected = fix_prs.fix_prompts.pr_prompt(failure(), "", left, None, made)
     assert opened[0]["prompt"] == fix_prs.tab_safe(expected)
 
 
