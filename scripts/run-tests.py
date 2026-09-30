@@ -12,7 +12,8 @@ generator, the port registry, the renderer). The vendored tier,
 into every consuming project and must stay separately runnable there.
 
 **The default is the tests named by what changed**, not the suite: every file
-changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`.
+changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`,
+plus `CONTRACT_TESTS`, which read every module and so are named by none of them.
 The whole suite is CI's, the push gate's (`PRE_COMMIT` is in the environment under
 pre-commit) and `--all`'s. Where git cannot say what changed, the suite runs.
 
@@ -48,6 +49,26 @@ MAX_LINES_PER_FAILURE = 25
 # module — collects nothing, and reporting that as a failure blocks the stop with "no
 # tests ran", which no source edit can resolve.
 PYTEST_NO_TESTS_COLLECTED = 5
+
+# The tests that hold every module to a contract -- has a test module, is checked where
+# a scheduled job reaches it, is watched by the tray, cites paths that exist -- so no
+# changed file's name maps to them, and a run of "the tests for what changed" skipped
+# exactly the ones a new import or a new script breaks. #467 added an import to
+# fix-pass.py, ran its targeted tests green, and needed a second fixer for
+# test_scheduled_jobs (54bb72df). About twenty seconds together; a listed file that is
+# gone is dropped, and `tests/test_run_tests.py` fails the list when one is.
+CONTRACT_TESTS = (
+    "tests/test_test_contract.py",
+    "tests/test_scheduled_jobs.py",
+    "tests/test_install_tray.py",
+    "tests/test_self_hosting.py",
+    "tests/test_doc_claims.py",
+    "tests/test_installer_contract.py",
+    "tests/test_worktree_tiers_single_source.py",
+    "tests/test_dispatch_coherence.py",
+    "tests/test_gate_parity.py",
+    "scripts/hooks/tests/test_repo_contract.py",
+)
 
 
 def filter_output(raw: str) -> str:
@@ -199,6 +220,12 @@ def tests_for(paths: list[str], root: Path = REPO_ROOT) -> tuple[list[str], list
     return tests, unnamed
 
 
+def with_contracts(tests: list[str], root: Path = REPO_ROOT) -> list[str]:
+    """`tests` followed by every `CONTRACT_TESTS` file `root` holds that it lacks."""
+    extra = [t for t in CONTRACT_TESTS if t not in tests and (root / t).is_file()]
+    return [*tests, *extra]
+
+
 def _reexec(module: str) -> int | None:
     """Re-run this process under the project's virtualenv, or None to carry on here.
 
@@ -265,9 +292,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             targets, unnamed = tests_for(changed, REPO_ROOT)
             print(
-                f"run-tests: {len(targets)} test file(s) for {len(changed)} changed path(s); "
-                "--all runs the suite"
+                f"run-tests: {len(targets)} test file(s) for {len(changed)} changed path(s), "
+                "and the contract tests; --all runs the suite"
             )
+            if changed:
+                targets = with_contracts(targets, REPO_ROOT)
             for path in unnamed:
                 print(f"run-tests:   no test named for {path}")
             if not targets:

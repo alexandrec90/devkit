@@ -629,7 +629,36 @@ def test_a_failed_push_is_a_failure_not_a_refusal_and_leaves_no_refused_state(tm
     assert out.stage == ship_intent.FAILED and "push" in out.detail
     state = ship_intent.read_state(one.tree)
     assert state["stage"] == ship_intent.FAILED, "recorded, and not as a refusal to cache"
+    assert state["step"] == "push" and "could not resolve host" in state["output"]
+    assert state["intent"] == one.digest and state["when"] == NOW.isoformat(timespec="seconds")
     assert ship_intent.still_refused(one, state, "") is None
+
+
+def test_a_push_that_failed_saying_nothing_is_named_by_its_exit_code(tmp_path):
+    one = intent(tmp_path)
+    out = ship_intent.ship_one(one, "py", "main", Runner({"git push": (1, "", "")}), gh_ok, NOW)
+    assert out.stage == ship_intent.FAILED and out.detail == "push: exit 1"
+
+
+def test_a_push_refused_over_an_earlier_ship_is_pushed_again_next_pass(tmp_path, monkeypatch):
+    """436fc0c8: the tree's last ship read `shipped`, this one's push was refused, and the
+    next pass read a clean tree over that old `shipped` as already shipped -- the intent
+    set aside, its commit never pushed."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    ship_intent.write_state(one.tree, {"stage": ship_intent.SHIPPED, "intent": "older"})
+    refused = Runner({"git push": (1, "", "! [rejected] (non-fast-forward)")})
+    assert ship_intent.ship_one(one, "py", "main", refused, gh_ok, NOW).stage == ship_intent.FAILED
+    again = Runner(porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", again, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert "git push" in again.verbs()
+
+
+def test_a_branch_origin_does_not_have_yet_needs_no_catching_up(tmp_path):
+    """A first push: the fetch finds no such ref, and nothing is compared or merged."""
+    run = Runner({"git fetch": (128, "", "fatal: couldn't find remote ref agent/x")})
+    assert ship_intent.catch_up(tmp_path, "agent/x", run) == ""
+    assert run.verbs() == ["git fetch"]
 
 
 def test_a_pr_that_could_not_be_opened_is_a_failure_to_retry(tmp_path, monkeypatch):

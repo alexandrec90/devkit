@@ -503,10 +503,12 @@ def catch_up(tree: Path, branch: str, runner: Runner) -> str:
     """Merge origin's `branch` into HEAD when it holds commits HEAD lacks; git's output
     when that merge conflicts (and is aborted), "" otherwise.
 
-    The pass updates a behind PR through GitHub, so origin's head moves while a tree
-    holds a commit of its own: #463's did 24 times, and every push from the tree was
-    refused non-fast-forward (3ae36740). No remote branch yet -- a first push -- or a
-    fetch that fails is nothing to merge; the push says whatever else is wrong.
+    The pass brings a behind PR up to its base through GitHub (`gh pr update-branch`),
+    and `fix-prs.refresh_head` leaves a tree with edits where it is, because a session is
+    working in it. So origin's head moves while the tree holds a commit of its own:
+    #463's did 24 times, and every push from the tree was refused non-fast-forward
+    (3ae36740, 436fc0c8). No remote branch yet -- a first push -- or a fetch that fails
+    is nothing to merge; the push says whatever else is wrong.
     """
     remote = f"refs/remotes/origin/{branch}"
     fetched = runner(
@@ -516,7 +518,7 @@ def catch_up(tree: Path, branch: str, runner: Runner) -> str:
         return ""
     if runner(["git", "merge-base", "--is-ancestor", remote, "HEAD"], cwd=tree).returncode != 1:
         return ""  # 0: already in HEAD; anything else: git cannot say, so push as before
-    merged = runner(["git", "merge", "--no-edit", remote], cwd=tree)
+    merged = run_git(["git", "merge", "--no-edit", remote], tree, runner)
     if merged.returncode == 0:
         return ""
     runner(["git", "merge", "--abort"], cwd=tree)
@@ -547,7 +549,7 @@ def _push(intent: Intent, runner: Runner, when: str) -> Outcome | None:
     pushed = runner(["git", "push", "-u", "origin", intent.branch], cwd=tree, env=env)
     if pushed.returncode == 0:
         return None
-    detail = (pushed.stderr or pushed.stdout or "").strip()[-400:]
+    detail = (pushed.stderr or pushed.stdout or "").strip()[-400:] or f"exit {pushed.returncode}"
     _record_failure(intent, "push", detail, when)
     return Outcome(intent, FAILED, f"push: {detail}")
 

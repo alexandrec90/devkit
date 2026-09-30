@@ -618,6 +618,7 @@ def toolchain(**over):
         "git": lambda *a: "someone",
         "extensions": list,
         "codex": list,
+        "terminal": list,
     }
     return ws.toolchain_lines(**{**args, **over})
 
@@ -659,7 +660,9 @@ def test_the_injected_reporters_default_to_the_real_ones():
     assert ws.vscode_extensions.report_lines is not None
     assert ws.codex_context.report_lines is not None
     assert ws.toolchain_lines(which=lambda _n: "/usr/bin/uv", git=lambda *a: "someone") == (
-        ws.vscode_extensions.report_lines() + ws.codex_context.report_lines()
+        ws.vscode_extensions.report_lines()
+        + ws.codex_context.report_lines()
+        + ws.wt_profile.status_lines()
     )
 
 
@@ -667,6 +670,14 @@ def test_a_codex_that_cannot_read_the_rules_joins_the_other_prerequisites():
     """Same category and the same reason as the three above -- no symptom at the moment
     it is wrong. `codex_context.py` owns which files decide it; this is the wiring."""
     assert toolchain(codex=lambda: ["no rule bridge"]) == ["no rule bridge"]
+
+
+def test_a_default_terminal_profile_that_elevates_joins_the_other_prerequisites():
+    """1ee03f0f: an operator's own `claude --worktree`, typed into an elevated window,
+    cut Administrators-owned trees, and nothing told them why. `wt_profile.py` owns
+    what counts; this is the wiring."""
+    line = ws.wt_profile.ELEVATED_DEFAULT_LINE
+    assert toolchain(terminal=lambda: [line]) == [line]
 
 
 # --- the unattended pass, when it has stopped --------------------------------
