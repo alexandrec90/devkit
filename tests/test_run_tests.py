@@ -329,6 +329,26 @@ def test_tests_for_names_a_test_file_by_its_module_and_a_test_by_itself(tmp_path
     )
 
 
+def test_a_vendored_script_names_the_vendored_tiers_test(tmp_path):
+    """`scripts/log-wrap.py` is tested in `scripts/hooks/tests/test_log_wrap.py`, and a
+    run that looked in `tests/` alone ran no test of the change and said so."""
+    hooks = tmp_path / "scripts" / "hooks" / "tests"
+    hooks.mkdir(parents=True)
+    (hooks / "test_log_wrap.py").write_text("", encoding="utf-8")
+    (hooks / "test_stop.py").write_text("", encoding="utf-8")
+    paths = ["scripts/log-wrap.py", "scripts/hooks/tests/test_stop.py", "scripts/hooks/x.py"]
+    assert run_tests.tests_for(paths, tmp_path) == (
+        ["scripts/hooks/tests/test_log_wrap.py", "scripts/hooks/tests/test_stop.py"],
+        ["scripts/hooks/x.py"],
+    )
+
+
+def test_the_template_runner_looks_where_devkits_does():
+    template = (REPO_ROOT / "templates/core/scripts/run-tests.py.tmpl").read_text(encoding="utf-8")
+    literal = ", ".join(f'"{d}"' for d in run_tests.TEST_DIRS)
+    assert f"TEST_DIRS = ({literal})" in template
+
+
 def test_by_default_only_the_tests_named_by_the_changed_files_run(artifact, monkeypatch, tmp_path):
     """Every agent ran the whole suite by reflex and hit the same harness red, one
     session after another; the gate is CI's, and the default here is what the change

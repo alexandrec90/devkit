@@ -235,15 +235,22 @@ def set_aside(tree: Path, target: Path) -> Path | None:
 # --- shipping one --------------------------------------------------------------------
 
 
-def already_shipped(intent: Intent, state: dict, porcelain: str) -> bool:
+def already_shipped(intent: Intent, state: dict, porcelain: str, head: str = "") -> bool:
     """Shipped, with nothing changed in the tree since: nothing to do.
 
     The words are deliberately not compared. A message edited after the ship, with no
     file changed, has no commit to carry it; shipping again would push nothing and ask
     for a second PR on a branch whose first may already have merged. The digest is
     still recorded, for the record's own sake -- what the tree *was* shipped as.
+
+    The sha is compared, when both are known: a record of a ship is a record of *that*
+    commit. #463's tree said `shipped` at 035c6b7 with two commits on top that never
+    reached origin, and a clean tree read as that ship set the intent aside (3ae36740).
     """
-    return state.get("stage") == SHIPPED and not porcelain.strip()
+    if state.get("stage") != SHIPPED or porcelain.strip():
+        return False
+    sha = str(state.get("sha", ""))
+    return not (head and sha) or sha == head
 
 
 def spent(intent: Intent, state: dict) -> bool:
@@ -265,7 +272,8 @@ def _settled(
     """This pass's answer when nothing needs doing: shipped already, nothing to ship,
     or refused again."""
     state = read_state(intent.tree)
-    if already_shipped(intent, state, porcelain):
+    head = _shipped_head(intent.tree, state, porcelain, runner)
+    if already_shipped(intent, state, porcelain, head):
         # Consumed, as a fresh ship's intent is: left in place it was re-read and
         # re-reported by every pass -- ten from before the pass set intents aside.
         set_aside(intent.tree, SHIPPED_FILE)
@@ -316,7 +324,17 @@ def is_spent(intent: Intent, runner: Runner = run_quiet) -> bool:
     """`already_shipped`, asked of the tree itself: what a `plan` pass reads, so it says
     what a `dispatch` would do rather than "would ship" over work that merged."""
     status = runner(["git", "status", "--porcelain"], cwd=intent.tree)
-    return already_shipped(intent, read_state(intent.tree), status.stdout or "")
+    porcelain, state = status.stdout or "", read_state(intent.tree)
+    head = _shipped_head(intent.tree, state, porcelain, runner)
+    return already_shipped(intent, state, porcelain, head)
+
+
+def _shipped_head(tree: Path, state: dict, porcelain: str, runner: Runner) -> str:
+    """HEAD, read only where `already_shipped` would otherwise say yes; "" unknown."""
+    if state.get("stage") != SHIPPED or porcelain.strip() or not state.get("sha"):
+        return ""
+    head = runner(["git", "rev-parse", "HEAD"], cwd=tree)
+    return (head.stdout or "").strip() if head.returncode == 0 else ""
 
 
 # What git prints when another process holds one of its lock files: `index.lock` for an
@@ -482,38 +500,58 @@ def commits_ahead(tree: Path, base: str, runner: Runner) -> int | None:
 
 
 def catch_up(tree: Path, branch: str, runner: Runner) -> str:
-    """Merge in what `origin/<branch>` has that HEAD lacks: "" when the push can go.
+    """Merge origin's `branch` into HEAD when it holds commits HEAD lacks; git's output
+    when that merge conflicts (and is aborted), "" otherwise.
 
     The pass brings a behind PR up to its base through GitHub (`gh pr update-branch`),
     and `fix-prs.refresh_head` leaves a tree with edits where it is, because a session is
-    working in it. So the commit that session ships sits on a head origin has moved past,
-    and the push was refused as non-fast-forward (436fc0c8, devkit #463). A branch origin
-    does not have yet -- a first push -- fetches nothing and needs nothing. A merge that
-    conflicts is aborted and named: whoever resolves it must read both sides.
+    working in it. So origin's head moves while the tree holds a commit of its own:
+    #463's did 24 times, and every push from the tree was refused non-fast-forward
+    (3ae36740, 436fc0c8). No remote branch yet -- a first push -- or a fetch that fails
+    is nothing to merge; the push says whatever else is wrong.
     """
-    if runner(["git", "fetch", "--quiet", "origin", branch], cwd=tree).returncode != 0:
+    remote = f"refs/remotes/origin/{branch}"
+    fetched = runner(
+        ["git", "fetch", "--quiet", "origin", f"+refs/heads/{branch}:{remote}"], cwd=tree
+    )
+    if fetched.returncode != 0:
         return ""
-    remote = f"origin/{branch}"
-    if runner(["git", "merge-base", "--is-ancestor", remote, "HEAD"], cwd=tree).returncode == 0:
-        return ""
+    if runner(["git", "merge-base", "--is-ancestor", remote, "HEAD"], cwd=tree).returncode != 1:
+        return ""  # 0: already in HEAD; anything else: git cannot say, so push as before
     merged = run_git(["git", "merge", "--no-edit", remote], tree, runner)
     if merged.returncode == 0:
         return ""
     runner(["git", "merge", "--abort"], cwd=tree)
-    output = ((merged.stdout or "") + (merged.stderr or "")).strip()
-    return f"{remote} moved on and does not merge cleanly into this tree: {output[-300:]}"
+    output = f"{merged.stdout or ''}\n{merged.stderr or ''}".strip()
+    return f"origin/{branch} moved and does not merge into this tree cleanly:\n{output}"
 
 
-def push(tree: Path, branch: str, runner: Runner) -> str:
-    """`catch_up`, then push past the push gate: "" when it went, else why not."""
-    if behind := catch_up(tree, branch, runner):
-        return behind
+def _record_failure(intent: Intent, step: str, detail: str, when: str) -> None:
+    """A push or PR that failed, in the state file: left unwritten, an older `shipped`
+    stood and the next pass read the unpushed commit as shipped (3ae36740)."""
+    record = {"stage": FAILED, "step": step, "output": detail, "when": when}
+    write_state(intent.tree, {**record, "intent": intent.digest})
+
+
+def _push(intent: Intent, runner: Runner, when: str) -> Outcome | None:
+    """Origin's head merged in, then the push past the gate; what stopped it, recorded,
+    or None. A merge that conflicts is a refusal a fixer is sent at; a push that fails
+    is a failure the next pass retries."""
+    tree = intent.tree
+    conflict = catch_up(tree, intent.branch, runner)
+    if conflict:
+        after = runner(["git", "status", "--porcelain"], cwd=tree).stdout or ""
+        record = {"stage": REFUSED, "step": "merge", "output": conflict, "when": when}
+        write_state(tree, {**record, "intent": intent.digest, "tree": _digest(after)})
+        return Outcome(intent, REFUSED, f"merge: {conflict.strip()[-400:]}")
     env = dict(os.environ)
     env["SKIP"] = SKIP_PUSH_GATE
-    pushed = runner(["git", "push", "-u", "origin", branch], cwd=tree, env=env)
+    pushed = runner(["git", "push", "-u", "origin", intent.branch], cwd=tree, env=env)
     if pushed.returncode == 0:
-        return ""
-    return (pushed.stderr or pushed.stdout or "").strip()[-400:] or f"exit {pushed.returncode}"
+        return None
+    detail = (pushed.stderr or pushed.stdout or "").strip()[-400:] or f"exit {pushed.returncode}"
+    _record_failure(intent, "push", detail, when)
+    return Outcome(intent, FAILED, f"push: {detail}")
 
 
 def ship_one(
@@ -538,11 +576,8 @@ def ship_one(
             write_state(tree, {**record, "intent": intent.digest, "tree": _digest(after)})
             return Outcome(intent, REFUSED, f"{step}: {output.strip()[-400:]}")
 
-    if refused := push(tree, intent.branch, runner):
-        # Recorded, or an earlier ship's `shipped` stands over a clean tree and the next
-        # pass sets this intent aside as already shipped, its commit never pushed.
-        write_state(tree, {"stage": FAILED, "when": when, "intent": intent.digest})
-        return Outcome(intent, FAILED, f"push: {refused}")
+    if stopped := _push(intent, runner, when):
+        return stopped
 
     url, _created, error = sweep.ensure_pr(
         gh_for(tree),
@@ -555,6 +590,7 @@ def ship_one(
         ),
     )
     if error:
+        _record_failure(intent, "pr", error, when)
         return Outcome(intent, FAILED, f"pr: {error}")
     head = runner(["git", "rev-parse", "HEAD"], cwd=tree)
     sha = (head.stdout or "").strip()
