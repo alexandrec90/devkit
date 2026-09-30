@@ -773,6 +773,49 @@ def test_a_whole_suite_is_friction_only_where_the_scope_rule_asked_for_less(tmp_
     assert not sf.asks_for_targeted_runs(str(tmp_path / "gone"), tmp_path, "data-lake")
 
 
+def test_a_bare_run_tests_is_whole_only_where_the_runner_defaults_to_the_suite(tmp_path):
+    """0a9897d7, retired six times before: a fixer ran devkit's `run-tests.py` bare, which
+    printed "7 test file(s) for 15 changed path(s) ... --all runs the suite". devkit's
+    runner and the template's run the tests for what changed; only `--all` or a suite
+    root is the suite. A project runner with no `--all` still runs everything bare."""
+    ran = ".venv/Scripts/python.exe scripts/run-tests.py 2>&1 | tail -20; cat logs/test-failures.log | head -60"
+    events = [e for e in st.claude_events(call(ran, "1"), 1)]
+    assert sf.detect(events, targeted_runner=True) == []
+    assert [cls for cls, _, _ in sf.detect(events)] == ["full-suite"]
+    assert sf.whole_runs("python scripts/run-tests.py --all", targeted_runner=True) == [""]
+    assert sf.whole_runs("python scripts/run-tests.py tests", targeted_runner=True) == ["tests"]
+    assert sf.whole_runs("python scripts/run-tests.py --changed", targeted_runner=True) == []
+    assert sf.whole_runs("python scripts/run-tests.py; pytest -q", targeted_runner=True) == [""]
+
+    chunk = st.Chunk(((1, user("fix it")), (2, call(ran, "1"))), 0, 2)
+    targeted, whole = tmp_path / "devkit", tmp_path / "social-scraper"
+    for checkout in (targeted, whole):
+        (checkout / ".claude" / "rules").mkdir(parents=True)
+        (checkout / sf.SCOPE_RULE).write_text("# Rule: Stop at the change\n", encoding="utf-8")
+        (checkout / "scripts").mkdir()
+    (targeted / sf.RUNNER).write_text(
+        'parser.add_argument("--all", action="store_true")\n', encoding="utf-8"
+    )
+    (whole / sf.RUNNER).write_text("subprocess.run(['pytest'])\n", encoding="utf-8")
+
+    def kinds(cwd: Path) -> list[str]:
+        return [
+            f.kind for f in sf.session_findings(tmp_path / "s.jsonl", chunk, str(cwd), tmp_path)
+        ]
+
+    assert kinds(targeted) == []
+    assert kinds(targeted / ".claude/worktrees/gone") == [], "the checkout's runner decides"
+    assert kinds(whole) == ["full-suite"]
+    assert kinds(tmp_path / "elsewhere") == ["full-suite"], "no runner to read: it stands"
+    assert (REPO_ROOT / sf.RUNNER).is_file() and sf.runner_defaults_targeted(
+        str(REPO_ROOT), tmp_path, "devkit"
+    ), "devkit's own runner is the one 0a9897d7 ran"
+    template = REPO_ROOT / "templates" / "core" / "scripts" / "run-tests.py.tmpl"
+    assert sf.TARGETED_RUNNER.search(template.read_text(encoding="utf-8")), (
+        "and every generated one"
+    )
+
+
 def test_a_session_whose_skill_runs_the_suite_whole_was_asked_for_the_whole_run():
     """3db42b06, filed after five retirements: a `/supervise-fix-pass` session ran the
     POSIX rehearsal's suite whole, which that skill's checklist tells the supervisor to

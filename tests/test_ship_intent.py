@@ -627,11 +627,17 @@ def test_a_failed_push_is_a_failure_not_a_refusal_and_leaves_no_refused_state(tm
     run = Runner({"git push": (1, "", "could not resolve host")})
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.FAILED and "push" in out.detail
-    assert ship_intent.read_state(one.tree) == {
-        "stage": ship_intent.FAILED,
-        "when": NOW.isoformat(timespec="seconds"),
-        "intent": one.digest,
-    }
+    state = ship_intent.read_state(one.tree)
+    assert state["stage"] == ship_intent.FAILED, "recorded, and not as a refusal to cache"
+    assert state["step"] == "push" and "could not resolve host" in state["output"]
+    assert state["intent"] == one.digest and state["when"] == NOW.isoformat(timespec="seconds")
+    assert ship_intent.still_refused(one, state, "") is None
+
+
+def test_a_push_that_failed_saying_nothing_is_named_by_its_exit_code(tmp_path):
+    one = intent(tmp_path)
+    out = ship_intent.ship_one(one, "py", "main", Runner({"git push": (1, "", "")}), gh_ok, NOW)
+    assert out.stage == ship_intent.FAILED and out.detail == "push: exit 1"
 
 
 def test_a_push_refused_over_an_earlier_ship_is_pushed_again_next_pass(tmp_path, monkeypatch):
@@ -646,46 +652,6 @@ def test_a_push_refused_over_an_earlier_ship_is_pushed_again_next_pass(tmp_path,
     again = Runner(porcelain="")
     assert ship_intent.ship_one(one, "py", "main", again, gh_ok, NOW).stage == ship_intent.SHIPPED
     assert "git push" in again.verbs()
-
-
-def test_a_head_origin_moved_on_is_merged_in_before_the_push(tmp_path, monkeypatch):
-    """436fc0c8, devkit #463: the pass updated the PR through GitHub while a fixer worked
-    in its tree, so the fixer's commit sat on a stale head and the push was refused."""
-    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
-    one = intent(tmp_path)
-    run = Runner({"git merge-base": (1, "", "")}, porcelain="")
-    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
-    argvs = [argv for argv, _cwd, _env in run.calls]
-    fetch = argvs.index(["git", "fetch", "--quiet", "origin", "agent/labels-0919"])
-    ancestor = ["git", "merge-base", "--is-ancestor", "origin/agent/labels-0919", "HEAD"]
-    merge = argvs.index(["git", "merge", "--no-edit", "origin/agent/labels-0919"])
-    push = argvs.index(["git", "push", "-u", "origin", "agent/labels-0919"])
-    assert fetch < argvs.index(ancestor) < merge < push
-
-
-def test_a_head_origin_moved_on_that_conflicts_is_aborted_and_not_pushed(tmp_path):
-    one = intent(tmp_path)
-    run = Runner(
-        {"git merge-base": (1, "", ""), "git merge": (1, "CONFLICT (content): Merge conflict", "")},
-        porcelain="",
-    )
-    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
-    assert out.stage == ship_intent.FAILED and "does not merge cleanly" in out.detail
-    assert "CONFLICT" in out.detail
-    assert ["git", "merge", "--abort"] in [argv for argv, _cwd, _env in run.calls]
-    assert "git push" not in run.verbs()
-    assert ship_intent.read_state(one.tree)["stage"] == ship_intent.FAILED
-
-
-def test_push_catches_up_then_pushes_past_the_gate_and_says_why_it_did_not(tmp_path):
-    went = Runner()
-    assert ship_intent.push(tmp_path, "agent/x", went) == ""
-    assert went.verbs() == ["git fetch", "git merge-base", "git push"]
-    assert went.calls[-1][2]["SKIP"] == ship_intent.SKIP_PUSH_GATE
-    assert ship_intent.push(tmp_path, "agent/x", Runner({"git push": (1, "", "")})) == "exit 1"
-    conflicted = Runner({"git merge-base": (1, "", ""), "git merge": (1, "CONFLICT", "")})
-    assert "does not merge cleanly" in ship_intent.push(tmp_path, "agent/x", conflicted)
-    assert "git push" not in conflicted.verbs()
 
 
 def test_a_branch_origin_does_not_have_yet_needs_no_catching_up(tmp_path):
@@ -710,7 +676,7 @@ def test_an_intent_already_shipped_with_a_clean_tree_is_not_shipped_twice(tmp_pa
     )
     again = Runner(porcelain="")
     assert ship_intent.ship_one(one, "py", "main", again, gh_ok, NOW).stage == ship_intent.SKIPPED
-    assert again.verbs() == ["git status"]
+    assert again.verbs() == ["git status", "git rev-parse"], "HEAD is still the shipped sha"
 
 
 def test_an_intent_left_over_from_a_ship_is_set_aside_and_said_once(tmp_path, monkeypatch):
@@ -738,7 +704,7 @@ def test_a_rewritten_intent_on_a_clean_shipped_tree_is_nothing_to_ship(tmp_path,
     two = intent(tmp_path, body="Rewritten.")
     run = Runner(porcelain="")
     assert ship_intent.ship_one(two, "py", "main", run, gh_ok, NOW).stage == ship_intent.SKIPPED
-    assert run.verbs() == ["git status"]
+    assert run.verbs() == ["git status", "git rev-parse"]
 
 
 def test_a_clean_tree_whose_last_ship_failed_still_pushes(tmp_path, monkeypatch):
@@ -750,6 +716,102 @@ def test_a_clean_tree_whose_last_ship_failed_still_pushes(tmp_path, monkeypatch)
     run = Runner(porcelain="")
     assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
     assert "git commit" not in run.verbs() and "git push" in run.verbs()
+
+
+def test_a_failed_push_is_recorded_so_an_older_ship_cannot_hide_its_commit(tmp_path, monkeypatch):
+    """3ae36740 (#463): the commit landed, the push was refused, and nothing was written,
+    so `ship-state.json` still said `shipped` for an older sha. The next pass read the
+    clean tree as that ship and set the intent aside; the fix never reached origin."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    ship_intent.write_state(one.tree, {"stage": ship_intent.SHIPPED, "intent": one.digest})
+    refused = Runner({"git push": (1, "", "! [rejected] (non-fast-forward)")})
+    out = ship_intent.ship_one(one, "py", "main", refused, gh_ok, NOW)
+    assert out.stage == ship_intent.FAILED and "non-fast-forward" in out.detail
+    state = ship_intent.read_state(one.tree)
+    assert (state["stage"], state["step"], state["intent"]) == ("failed", "push", one.digest)
+    again = Runner(porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", again, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert "git push" in again.verbs()
+
+
+def test_a_pr_that_failed_after_the_push_is_recorded_too(tmp_path, monkeypatch):
+    one = intent(tmp_path)
+    ship_intent.write_state(one.tree, {"stage": ship_intent.SHIPPED, "intent": one.digest})
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("", False, "no auth"))
+    ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW)
+    assert ship_intent.read_state(one.tree)["step"] == "pr"
+
+
+def test_a_clean_tree_whose_head_moved_past_its_ship_still_pushes(tmp_path, monkeypatch):
+    """The tree #463's reporter left: `shipped` at 035c6b7, HEAD two commits on and
+    neither on origin. A record of a ship is a record of *that* sha."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    stale = {"stage": ship_intent.SHIPPED, "intent": one.digest, "sha": "035c6b7"}
+    ship_intent.write_state(one.tree, stale)
+    assert not ship_intent.is_spent(one, Runner(porcelain=""))
+    run = Runner(porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert "git push" in run.verbs()
+    assert not ship_intent.already_shipped(one, stale, "", head="abc123")
+    assert ship_intent.already_shipped(one, {**stale, "sha": "abc123"}, "", head="abc123")
+
+
+def test_origin_moved_ahead_of_the_tree_is_merged_before_the_push(tmp_path, monkeypatch):
+    """#463 again: GitHub merged main into the PR 24 times while the tree held a commit
+    of its own, so every push was refused non-fast-forward. Merged first, it goes."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    run = Runner({"git merge-base": (1, "", "")}, porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    argv = [call[0] for call in run.calls]
+    remote = "refs/remotes/origin/agent/labels-0919"
+    fetch = ["git", "fetch", "--quiet", "origin", f"+refs/heads/agent/labels-0919:{remote}"]
+    assert fetch in argv
+    assert ["git", "merge-base", "--is-ancestor", remote, "HEAD"] in argv
+    merge = ["git", "merge", "--no-edit", remote]
+    assert argv.index(merge) < argv.index(["git", "push", "-u", "origin", "agent/labels-0919"])
+
+
+def test_a_head_that_does_not_merge_is_a_refusal_a_fixer_is_sent_at(tmp_path, monkeypatch):
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    run = Runner(
+        {"git merge-base": (1, "", ""), "git merge": (1, "CONFLICT (content): a.py", "")},
+        porcelain="",
+    )
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.REFUSED and "CONFLICT" in out.detail
+    assert ["git", "merge", "--abort"] in [call[0] for call in run.calls]
+    assert "git push" not in run.verbs()
+    assert ship_intent.read_state(one.tree)["step"] == "merge"
+
+
+def test_catch_up_merges_only_what_origin_has_that_head_lacks(tmp_path):
+    behind = Runner({"git merge-base": (1, "", "")})
+    assert ship_intent.catch_up(tmp_path, "b", behind) == ""
+    assert ["git", "merge", "--no-edit", "refs/remotes/origin/b"] in [c[0] for c in behind.calls]
+    unknown = Runner({"git merge-base": (128, "", "not a commit")})
+    assert ship_intent.catch_up(tmp_path, "b", unknown) == ""
+    assert "git merge" not in unknown.verbs(), "git could not say: push as before"
+    conflict = Runner({"git merge-base": (1, "", ""), "git merge": (1, "CONFLICT (content)", "")})
+    said = ship_intent.catch_up(tmp_path, "b", conflict)
+    assert said.startswith("origin/b moved") and "CONFLICT" in said
+    assert conflict.calls[-1][0] == ["git", "merge", "--abort"]
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [{"git fetch": (128, "", "couldn't find remote ref")}, {"git merge-base": (0, "", "")}],
+    ids=["first push", "origin already in HEAD"],
+)
+def test_nothing_is_merged_when_origin_has_nothing_the_tree_lacks(tmp_path, monkeypatch, answers):
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    run = Runner(answers, porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert "git merge" not in run.verbs()
 
 
 def test_a_clean_tree_with_nothing_committed_opens_no_pr_and_sets_the_intent_aside(

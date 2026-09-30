@@ -1562,6 +1562,61 @@ def test_the_rewrite_is_detected_by_the_status_code_not_the_path_list():
     assert retried
 
 
+# --- a push the transport lost is pushed again --------------------------------
+
+
+class PushGit:
+    """A git whose `push` answers each attempt from `answers`, in order."""
+
+    def __init__(self, answers: list[tuple[int, str]]):
+        self.answers = iter(answers)
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, *args: str):
+        self.calls.append(args)
+        code, err = next(self.answers)
+        return subprocess.CompletedProcess(["git", *args], code, "", err)
+
+
+A1EDC2F7 = (
+    "fatal: unable to access 'https://github.com/alexandrec90/social-scraper.git/': "
+    "The requested URL returned error: 403"
+)
+
+
+def test_a_push_the_transport_lost_is_pushed_again():
+    """a1edc2f7: the v0.11.35 adoption lost roguelike and social-scraper to a 403 a minute
+    after carameli's push went through, and both answered again within minutes. The
+    release job failed, and no pass retries an adoption once the tag exists."""
+    git, slept = PushGit([(128, A1EDC2F7), (0, "")]), []
+    pushed = up.push_with_retry(git, "agent/auto/x", sleep=slept.append)
+    assert pushed.returncode == 0
+    assert git.calls == [("push", "-u", "origin", "agent/auto/x")] * 2
+    assert slept == [up.PUSH_WAITS[0]]
+
+
+def test_a_push_the_transport_keeps_losing_fails_with_gits_own_words():
+    git, slept = PushGit([(128, A1EDC2F7)] * (len(up.PUSH_WAITS) + 1)), []
+    pushed = up.push_with_retry(git, "b", sleep=slept.append)
+    assert pushed.returncode == 128 and "403" in pushed.stderr
+    assert slept == list(up.PUSH_WAITS)
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        " ! [rejected]        b -> b (non-fast-forward)",
+        "error: failed to push some refs to 'origin'",
+        " ! [remote rejected] b -> b (protected branch hook declined)",
+    ],
+)
+def test_a_push_the_remote_or_a_hook_refused_is_not_retried(refusal):
+    """A judgment, not a lost connection: pushing it again gets the same answer."""
+    git, slept = PushGit([(1, refusal)]), []
+    assert up.push_with_retry(git, "b", sleep=slept.append).returncode == 1
+    assert len(git.calls) == 1 and slept == []
+
+
 # --- the failure artifact ----------------------------------------------------
 
 
