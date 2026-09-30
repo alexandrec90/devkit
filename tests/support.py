@@ -18,6 +18,7 @@ then importing `devkit_ports` separately would work — until the import sorter 
 makes the dependency explicit and immune to reordering.
 """
 
+import argparse
 import importlib.util
 import os
 import subprocess
@@ -336,3 +337,53 @@ def load_script(relpath: str):
         del sys.modules[name]
         raise
     return module
+
+
+def make_args(**overrides):
+    """The argparse namespace `new-project.py`'s `plan()` expects, with the CLI's defaults."""
+    new_project = load_script("scripts/new-project.py")
+    base = {
+        "name": "demo_project",
+        "description": "A demo.",
+        "display_name": "",
+        "parent": "",
+        "github_owner": "alexandrec90",
+        "python_version": "3.12",
+        "default_branch": "main",
+        "devkit_ref": "v0.1.0",
+        "db_url_scheme": "postgresql+psycopg",
+        "src_layout": False,
+        "preset": None,
+        "remote": True,
+        "register": True,
+        "dry_run": True,
+        **{f: False for f in new_project.FEATURES},
+    }
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def registry():
+    return devkit_ports.load(REPO_ROOT)
+
+
+def generate(tmp_path: Path, features: dict) -> Path:
+    """Render the tree for one feature set into tmp_path and return the root.
+
+    Here rather than in `test_new_project.py` so a test file that checks the generated
+    tree as a whole can be run alone: `run-tests.py` names `test_generated_tree.py` for
+    any template change, and the generator's own tests take minutes.
+    """
+    new_project = load_script("scripts/new-project.py")
+    args = make_args(parent=str(tmp_path), **features)
+    if args.alembic:
+        args.postgres = True
+    if args.app_service or args.postgres or args.redis or args.frontend:
+        args.docker = True
+    the_plan = new_project.plan(args, registry())
+    the_plan.root.mkdir(parents=True, exist_ok=True)
+    new_project.render_tree(the_plan, dry_run=False)
+    new_project.write_package(the_plan, dry_run=False)
+    # Both tiers, because a real project is both. See `vendor_manifest`.
+    vendor_manifest(the_plan.root)
+    return the_plan.root

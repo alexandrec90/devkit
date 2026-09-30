@@ -279,10 +279,11 @@ def frontend_run(
     cmd = vitest_related(root, tier[0], sources)
     if cmd is None:
         where = (root / tier[0] / "node_modules" / ".bin").relative_to(root).as_posix()
-        return [], rest, (
+        failure = (
             f"# vitest: {len(sources)} frontend file(s) changed and {where} has no vitest.\n"
             "# fix: provision the tree (`npm ci` in the frontend dir), then run this again.\n"
         )
+        return [], rest, failure
     print(f"run-tests: vitest related for {len(sources)} frontend file(s)")
     return cmd, rest, ""
 

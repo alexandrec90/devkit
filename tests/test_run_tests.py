@@ -341,6 +341,30 @@ def test_a_script_template_names_the_scripts_test_and_its_own(tmp_path):
     )
 
 
+def test_any_template_names_the_generated_tree_tests(tmp_path):
+    """#479 reshaped `run-tests.py.tmpl`, ran the tests its name leads to green, and a
+    generated project failed `ruff format --check` on arrival: the check over the whole
+    generated tree was named by no template."""
+    (tmp_path / "tests").mkdir()
+    for name in ("test_run_tests.py", "test_generated_tree.py"):
+        (tmp_path / "tests" / name).write_text("", encoding="utf-8")
+    paths = [
+        "templates/core/scripts/run-tests.py.tmpl",
+        "templates/core/dot-devkit.toml.tmpl",
+        "templates/core/ruff.toml",
+        "scripts/untested.py",
+    ]
+    assert run_tests.tests_for(paths, tmp_path) == (
+        ["tests/test_run_tests.py", run_tests.GENERATED_TREE_TESTS],
+        ["scripts/untested.py"],
+    )
+
+
+def test_the_generated_tree_tests_exist():
+    """A renamed file would drop out of every template change's run without a word."""
+    assert (REPO_ROOT / run_tests.GENERATED_TREE_TESTS).is_file()
+
+
 def test_a_vendored_script_names_the_vendored_tiers_test(tmp_path):
     """`scripts/log-wrap.py` is tested in `scripts/hooks/tests/test_log_wrap.py`, and a
     run that looked in `tests/` alone ran no test of the change and said so."""
