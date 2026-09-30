@@ -12,8 +12,9 @@ generator, the port registry, the renderer). The vendored tier,
 into every consuming project and must stay separately runnable there.
 
 **The default is the tests named by what changed**, not the suite: every file
-changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`,
-plus `CONTRACT_TESTS`, which read every module and so are named by none of them.
+changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`
+(and, for anything under `templates/`, to `GENERATED_TREE_TESTS` too), plus
+`CONTRACT_TESTS`, which read every module and so are named by none of them.
 The whole suite is CI's, the push gate's (`PRE_COMMIT` is in the environment under
 pre-commit) and `--all`'s. Where git cannot say what changed, the suite runs.
 
@@ -42,6 +43,10 @@ FULL_SUITE_ENV = ("CI", "PRE_COMMIT")
 # tier's beside the scripts it tests. With `tests/` alone, a change to
 # `scripts/log-wrap.py` ran no test of it at all.
 TEST_DIRS = ("tests", "scripts/hooks/tests")
+
+# The checks over a generated project as a whole -- format-clean, for one -- which every
+# change under `templates/` names in addition to its own tests.
+GENERATED_TREE_TESTS = "tests/test_generated_tree.py"
 
 # Per-failure line cap. Chosen to hold a first-party traceback plus the assertion
 # without letting a single deep failure crowd out the rest of the run.
@@ -219,7 +224,21 @@ def tests_for(paths: list[str], root: Path = REPO_ROOT) -> tuple[list[str], list
 
 def _named_tests(posix: str) -> list[str]:
     """The test files the changed file `posix` could name, existing or not."""
+    named = _named_by_stem(posix)
+    # Any template also names the checks over the generated tree as a whole, which no
+    # template's own name leads to: #479 reshaped `run-tests.py.tmpl`, ran its tests
+    # green, and a generated project failed `ruff format --check` on arrival.
+    if posix.startswith("templates/") and GENERATED_TREE_TESTS not in named:
+        named.append(GENERATED_TREE_TESTS)
+    return named
+
+
+def _named_by_stem(posix: str) -> list[str]:
     stem = posix.rsplit("/", 1)[-1]
+    if stem.endswith(".py.tmpl"):
+        # A template of a script is tested as the script it renders to, and on its own.
+        name = stem.removesuffix(".py.tmpl").replace("-", "_")
+        return [f"{d}/test_{name}{kind}.py" for d in TEST_DIRS for kind in ("", "_template")]
     if not stem.endswith(".py"):
         return []
     if stem.startswith("test_") and any(posix.startswith(f"{d}/") for d in TEST_DIRS):
