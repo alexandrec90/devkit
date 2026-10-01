@@ -12,7 +12,9 @@ generator, the port registry, the renderer). The vendored tier,
 into every consuming project and must stay separately runnable there.
 
 **The default is the tests named by what changed**, not the suite: every file
-changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`.
+changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`
+(and, for anything under `templates/`, to `GENERATED_TREE_TESTS` too), plus
+`CONTRACT_TESTS`, which read every module and so are named by none of them.
 The whole suite is CI's, the push gate's (`PRE_COMMIT` is in the environment under
 pre-commit) and `--all`'s. Where git cannot say what changed, the suite runs.
 
@@ -37,6 +39,14 @@ ARTIFACT = REPO_ROOT / "logs" / "test-failures.log"
 # Where the whole suite is the point: CI, and the push gate that mirrors it (pre-commit
 # exports `PRE_COMMIT` into every hook's environment).
 FULL_SUITE_ENV = ("CI", "PRE_COMMIT")
+# Where a changed module's test is looked for: the project's suite, then the vendored
+# tier's beside the scripts it tests. With `tests/` alone, a change to
+# `scripts/log-wrap.py` ran no test of it at all.
+TEST_DIRS = ("tests", "scripts/hooks/tests")
+
+# The checks over a generated project as a whole -- format-clean, for one -- which every
+# change under `templates/` names in addition to its own tests.
+GENERATED_TREE_TESTS = "tests/test_generated_tree.py"
 
 # Per-failure line cap. Chosen to hold a first-party traceback plus the assertion
 # without letting a single deep failure crowd out the rest of the run.
@@ -48,6 +58,26 @@ MAX_LINES_PER_FAILURE = 25
 # module — collects nothing, and reporting that as a failure blocks the stop with "no
 # tests ran", which no source edit can resolve.
 PYTEST_NO_TESTS_COLLECTED = 5
+
+# The tests that hold every module to a contract -- has a test module, is checked where
+# a scheduled job reaches it, is watched by the tray, cites paths that exist -- so no
+# changed file's name maps to them, and a run of "the tests for what changed" skipped
+# exactly the ones a new import or a new script breaks. #467 added an import to
+# fix-pass.py, ran its targeted tests green, and needed a second fixer for
+# test_scheduled_jobs (54bb72df). About twenty seconds together; a listed file that is
+# gone is dropped, and `tests/test_run_tests.py` fails the list when one is.
+CONTRACT_TESTS = (
+    "tests/test_test_contract.py",
+    "tests/test_scheduled_jobs.py",
+    "tests/test_install_tray.py",
+    "tests/test_self_hosting.py",
+    "tests/test_doc_claims.py",
+    "tests/test_installer_contract.py",
+    "tests/test_worktree_tiers_single_source.py",
+    "tests/test_dispatch_coherence.py",
+    "tests/test_gate_parity.py",
+    "scripts/hooks/tests/test_repo_contract.py",
+)
 
 
 def filter_output(raw: str) -> str:
@@ -175,28 +205,51 @@ def changed_paths(root: Path, run=subprocess.run) -> list[str] | None:
 def tests_for(paths: list[str], root: Path = REPO_ROOT) -> tuple[list[str], list[str]]:
     """`(test files to run, changed files that name none)`.
 
-    A test file names itself; any other `.py` names `tests/test_<stem>.py` with hyphens
-    read as underscores (`scripts/fix-pass.py` -> `tests/test_fix_pass.py`), when that
-    file exists. Everything else -- a document, a workflow, a module with no test of
-    its own -- is reported so the caller can see what the run did not cover.
+    A test file names itself; any other `.py` names `test_<stem>.py` in each of
+    `TEST_DIRS` with hyphens read as underscores (`scripts/fix-pass.py` ->
+    `tests/test_fix_pass.py`), when that file exists. Everything else -- a document, a
+    workflow, a module with no test of its own -- is reported so the caller can see what
+    the run did not cover.
     """
     tests: list[str] = []
     unnamed: list[str] = []
     for path in paths:
         posix = path.replace("\\", "/")
-        stem = posix.rsplit("/", 1)[-1]
-        if posix.startswith("tests/") and stem.startswith("test_") and stem.endswith(".py"):
-            candidate = posix
-        elif stem.endswith(".py"):
-            candidate = f"tests/test_{stem[:-3].replace('-', '_')}.py"
-        else:
-            candidate = ""
-        if candidate and (root / candidate).is_file():
-            if candidate not in tests:
-                tests.append(candidate)
-        else:
+        found = [name for name in _named_tests(posix) if (root / name).is_file()]
+        tests.extend(name for name in found if name not in tests)
+        if not found:
             unnamed.append(posix)
     return tests, unnamed
+
+
+def _named_tests(posix: str) -> list[str]:
+    """The test files the changed file `posix` could name, existing or not."""
+    named = _named_by_stem(posix)
+    # Any template also names the checks over the generated tree as a whole, which no
+    # template's own name leads to: #479 reshaped `run-tests.py.tmpl`, ran its tests
+    # green, and a generated project failed `ruff format --check` on arrival.
+    if posix.startswith("templates/") and GENERATED_TREE_TESTS not in named:
+        named.append(GENERATED_TREE_TESTS)
+    return named
+
+
+def _named_by_stem(posix: str) -> list[str]:
+    stem = posix.rsplit("/", 1)[-1]
+    if stem.endswith(".py.tmpl"):
+        # A template of a script is tested as the script it renders to, and on its own.
+        name = stem.removesuffix(".py.tmpl").replace("-", "_")
+        return [f"{d}/test_{name}{kind}.py" for d in TEST_DIRS for kind in ("", "_template")]
+    if not stem.endswith(".py"):
+        return []
+    if stem.startswith("test_") and any(posix.startswith(f"{d}/") for d in TEST_DIRS):
+        return [posix]
+    return [f"{d}/test_{stem[:-3].replace('-', '_')}.py" for d in TEST_DIRS]
+
+
+def with_contracts(tests: list[str], root: Path = REPO_ROOT) -> list[str]:
+    """`tests` followed by every `CONTRACT_TESTS` file `root` holds that it lacks."""
+    extra = [t for t in CONTRACT_TESTS if t not in tests and (root / t).is_file()]
+    return [*tests, *extra]
 
 
 def _reexec(module: str) -> int | None:
@@ -265,9 +318,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             targets, unnamed = tests_for(changed, REPO_ROOT)
             print(
-                f"run-tests: {len(targets)} test file(s) for {len(changed)} changed path(s); "
-                "--all runs the suite"
+                f"run-tests: {len(targets)} test file(s) for {len(changed)} changed path(s), "
+                "and the contract tests; --all runs the suite"
             )
+            if changed:
+                targets = with_contracts(targets, REPO_ROOT)
             for path in unnamed:
                 print(f"run-tests:   no test named for {path}")
             if not targets:

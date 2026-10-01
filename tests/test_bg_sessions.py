@@ -87,6 +87,29 @@ def test_nothing_is_stopped_when_the_listing_cannot_be_read():
     assert bg_sessions.listed(garbage) == []
 
 
+def test_in_tree_is_every_session_in_the_tree_or_under_it_and_nothing_beside_it():
+    rows = [*ROWS, {"id": "e5", "cwd": "C:\\ws\\devkit\\.claude\\worktrees\\x\\app"}]
+    rows.append({"id": "f6", "cwd": "C:\\ws\\devkit\\.claude\\worktrees\\x-2"})
+    found = bg_sessions.in_tree(rows, "c:/WS/devkit/.claude/worktrees/x/")
+    assert [r["id"] for r in found] == ["a1", "b2", "c3", "e5"]
+
+
+def test_only_an_idle_background_session_is_stoppable():
+    assert [r["id"] for r in ROWS if bg_sessions.stoppable(r)] == ["a1", "d4"]
+
+
+def test_stop_is_false_where_claude_refuses_or_is_missing():
+    def refuses(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "no such session")
+
+    def missing(argv, **_kwargs):
+        raise FileNotFoundError("claude")
+
+    assert bg_sessions.stop("a1", refuses) is False
+    assert bg_sessions.stop("a1", missing) is False
+    assert bg_sessions.stop("a1", lambda argv, **_k: subprocess.CompletedProcess(argv, 0)) is True
+
+
 def test_finished_in_matches_paths_whatever_their_slashes_and_case():
     assert [
         r["id"] for r in bg_sessions.finished_in(ROWS, ["c:/WS/carameli/.claude/worktrees/y"])

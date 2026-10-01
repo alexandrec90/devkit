@@ -65,6 +65,9 @@ class Context:
     history_path: Path
     mode: str
     now: _dt.datetime
+    # When the machine last started (`fix_reports.booted_at`); None judges a session by
+    # its silence alone.
+    booted: _dt.datetime | None = None
 
     @property
     def writes(self) -> bool:
@@ -146,10 +149,13 @@ def _one_tree(
     # Where the lines will be once filed away below: naming the file about to be renamed
     # gave every friction row a dead path.
     kept = fix_reports.filed(fix_reports.FRICTION_FILE) if ctx.writes else fix_reports.FRICTION_FILE
+    claims = any(fix_reports.fixed_here(line) for line in tree.friction)
+    out = bool(tree.branch) and claims and went_out(tree.path)
     for line in tree.friction:
         evidence = str(tree.path / kept)
-        # A line its session fixed here is settled by this branch, not a new job for a fixer.
-        settles = tree.branch if tree.branch and fix_reports.fixed_here(line) else ""
+        # A line its session fixed here is settled by this branch, not a new job for a
+        # fixer -- once the fix is on the branch, which the words alone do not show.
+        settles = tree.branch if out and fix_reports.fixed_here(line) else ""
         journal.add(
             Finding(
                 "reported",
@@ -164,11 +170,27 @@ def _one_tree(
         fix_reports.file_away(tree.path, fix_reports.FRICTION_FILE)
 
 
+def went_out(tree: Path, runner=ship_intent.run_quiet) -> bool:
+    """Whether the tree's work is committed on its branch: its last ship `shipped`, and
+    nothing left uncommitted since.
+
+    A friction line saying "fixed on this branch" settles on that branch, and
+    `fix_verify` then holds it only to the branch merging -- not to the fix being in
+    it. 5d9806b0 was settled on worktree-rippling-juggling-oasis, whose intent the pass
+    had set aside over 19 uncommitted files, so the fix it named never reached the PR
+    that was to retire it (7c16fabc). Such a line is filed open instead.
+    """
+    if ship_intent.read_state(tree).get("stage") != ship_intent.SHIPPED:
+        return False
+    status = runner(["git", "status", "--porcelain"], cwd=tree)
+    return status.returncode == 0 and not (status.stdout or "").strip()
+
+
 def _judge_session(
     ctx: Context, tree: fix_reports.Tree, where: str, journal: fix_findings.Journal, closed: Closed
 ) -> None:
     key = str(tree.stamp.get("key", ""))
-    state, transcript = fix_reports.session_state(tree.path, ctx.now)
+    state, transcript = fix_reports.session_state(tree.path, ctx.now, booted=ctx.booted)
     if state in (fix_reports.DONE, *fix_reports.DEAD):
         closed.finished.append(str(tree.path))
     live = fix_reports.active_transcript(tree.path, ctx.now)
@@ -179,24 +201,46 @@ def _judge_session(
     if tree.branch and (running or (live and str(live) != transcript)):
         closed.busy[(tree.project, tree.branch)] = str(tree.path)
     if state in fix_reports.DEAD:
-        # No key: a dead session is re-sent at once, not parked behind the finding. One
-        # that never started is cited by what its launcher said, when it left a record.
-        # A launcher's answer is the signature, and the branch -- new every dispatch --
-        # stays in the evidence: filed under it, one unreachable service was eight open
-        # groups in eight hours, one per hourly re-send (1e5e57f4 and seven more).
-        launched = fix_reports.launch_line(tree.path) if not transcript else ""
-        detail = (
-            f"{tree.project}: the dispatched session {state} -- {launched}"
-            if launched
-            else f"{where}: the dispatched session {state}"
-        )
-        cited = str(tree.path / fix_reports.LAUNCH_FILE) if launched else str(tree.path)
-        journal.add(Finding("fixer-no-outcome", tree.project, detail, evidence=transcript or cited))
-        if ctx.writes:
-            fix_ledger.mark_dead(ctx.ledger_path, key, state)
-            fix_reports.note_on_stamp(tree.path, "dead", state)
+        closed.lines.extend(judge_dead(ctx, tree, where, state, transcript, journal))
     elif (state == fix_reports.WORKING or running) and fix_ledger.is_upstream(key):
         closed.harness_busy = str(tree.path)
+
+
+def judge_dead(
+    ctx: Context,
+    tree: fix_reports.Tree,
+    where: str,
+    state: str,
+    transcript: str,
+    journal: fix_findings.Journal,
+) -> list[str]:
+    """Free a dead session's dispatch, and file it unless a restart killed it; the lines
+    for the record."""
+    key = str(tree.stamp.get("key", ""))
+    if ctx.writes:
+        fix_reports.note_on_stamp(tree.path, "dead", state)
+    if state == fix_reports.INTERRUPTED:
+        # The machine went down under it: no defect to file and no attempt spent, only
+        # a re-send, which finds a PR's tree as the session left it.
+        if ctx.writes:
+            fix_ledger.mark_interrupted(ctx.ledger_path, key, state)
+        return [f"{where} -- {state}; sent again"]
+    # No key: a dead session is re-sent at once, not parked behind the finding. One
+    # that never started is cited by what its launcher said, when it left a record.
+    # A launcher's answer is the signature, and the branch -- new every dispatch --
+    # stays in the evidence: filed under it, one unreachable service was eight open
+    # groups in eight hours, one per hourly re-send (1e5e57f4 and seven more).
+    launched = fix_reports.launch_line(tree.path) if not transcript else ""
+    detail = (
+        f"{tree.project}: the dispatched session {state} -- {launched}"
+        if launched
+        else f"{where}: the dispatched session {state}"
+    )
+    cited = str(tree.path / fix_reports.LAUNCH_FILE) if launched else str(tree.path)
+    journal.add(Finding("fixer-no-outcome", tree.project, detail, evidence=transcript or cited))
+    if ctx.writes:
+        fix_ledger.mark_dead(ctx.ledger_path, key, state)
+    return []
 
 
 def working_dirs() -> frozenset[str]:
@@ -289,9 +333,15 @@ def _harvest(ctx: Context, cursor: Path) -> list[Finding]:
 def _verify(ctx: Context) -> list[str]:
     items = triage.load(ctx.devkit_dir)
     lookup = fix_verify.gh_lookup(ctx.root, ctx.projects, sweep.gh_for)
+    mentions = fix_verify.gh_mentions(ctx.root, ctx.projects, sweep.gh_for)
     cache = ctx.ledger_path.parent / fix_verify.CACHE_NAME
-    outcome = fix_verify.verify(items, lookup, cache, ctx.now)
+    outcome = fix_verify.verify(items, lookup, cache, ctx.now, mentions)
     lines = []
+    for was, fix in outcome.found:
+        # The ledger names the PR that holds the fix, not the branch that never did.
+        note = f"{was.note} -- merged as {fix.url}, which names [{was.ref}]; pr= said {was.pr}"
+        triage.resolve([was.ref], note, pr=fix.url, root=ctx.devkit_dir, resolved=was.stamp)
+        lines.append(f"settled [{was.ref}] on {fix.url} -- {was.pr} never landed it")
     for ref, why in outcome.reopen:
         triage.reopen([ref], why, root=ctx.devkit_dir)
         lines.append(f"reopened [{ref}] -- {why}")

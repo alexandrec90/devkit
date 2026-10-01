@@ -2503,6 +2503,16 @@ def _root() -> Path:
     return Path("C:/ws") if worktree.os.name == "nt" else Path("/ws")
 
 
+REAL_AGENT_SESSIONS = worktree.agent_sessions
+
+
+@pytest.fixture(autouse=True)
+def no_agent_sessions(monkeypatch):
+    """No test asks this machine's `claude agents`, which every reconcile that reaps does:
+    a live session there would decide a test's box."""
+    monkeypatch.setattr(worktree, "agent_sessions", list)
+
+
 @pytest.fixture
 def workspace(tmp_path):
     """A workspace file whose parent holds the checkouts, as on a real workstation."""
@@ -3725,6 +3735,90 @@ def test_reconcile_reaps_a_merged_box_end_to_end(workspace, monkeypatch):
     assert worktree.read_leases(root) == {}
 
 
+def test_reconcile_waits_for_a_session_still_working_in_a_merged_box(workspace, monkeypatch):
+    """94e52397: a merged box's fixer was still alive in it; the reap deleted every file,
+    died on the root the session stood in, and reddened the scheduled pass three times."""
+    root = _reconcilable(
+        workspace, monkeypatch, "demo--done-0806", sweep.NEEDS_PR, "pushed", "MERGED"
+    )
+    path = str(root / worktree.BOXES_DIR_NAME / "demo--done-0806")
+    live = {"kind": "background", "status": "busy", "cwd": path, "id": "2b4a8c0e"}
+    monkeypatch.setattr(worktree, "agent_sessions", lambda: [live])
+    monkeypatch.setattr(
+        worktree, "run_steps", lambda *a, **k: pytest.fail("reaped under a live session")
+    )
+    monkeypatch.setattr(
+        worktree.bg_sessions, "stop", lambda *a: pytest.fail("stopped a working session")
+    )
+
+    code, report = worktree.reconcile(workspace, apply=True)
+
+    assert code == 0
+    [row] = report["boxes"]
+    assert row["action"] == worktree.WAIT
+    assert any("background session 2b4a8c0e (busy)" in note for note in row["notes"])
+    assert "demo--done-0806" in worktree.read_leases(root)
+
+
+def test_reconcile_stops_a_finished_fixer_idling_in_the_box_then_reaps_it(workspace, monkeypatch):
+    root = _reconcilable(
+        workspace, monkeypatch, "demo--done-0806", sweep.NEEDS_PR, "pushed", "MERGED"
+    )
+    path = str(root / worktree.BOXES_DIR_NAME / "demo--done-0806").replace("/", "\\")
+    idle = {"kind": "background", "status": "idle", "cwd": path, "id": "2b4a8c0e"}
+    elsewhere = {"kind": "interactive", "status": "busy", "cwd": str(root / "demo"), "id": None}
+    monkeypatch.setattr(worktree, "agent_sessions", lambda: [idle, elsewhere])
+    stopped: list[str] = []
+    monkeypatch.setattr(
+        worktree.bg_sessions, "stop", lambda ident, run: stopped.append(ident) or True
+    )
+    monkeypatch.setattr(worktree.box_teardown, "HOLDER_RELEASE_SECONDS", 0)
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: (["ok"], "", ""))
+
+    code, report = worktree.reconcile(workspace, apply=True)
+
+    assert code == 0 and stopped == ["2b4a8c0e"]
+    assert report["boxes"][0]["action"] == worktree.REAP
+    assert worktree.read_leases(root) == {}
+
+
+def test_reconcile_asks_for_the_sessions_only_when_it_reaps(workspace, monkeypatch):
+    _reconcilable(workspace, monkeypatch, "demo--busy-0806", sweep.READY, "2 uncommitted", "MERGED")
+    monkeypatch.setattr(worktree, "agent_sessions", lambda: pytest.fail("asked for nothing"))
+    assert worktree.reconcile(workspace, apply=True)[0] == 0
+
+
+def test_agent_sessions_is_what_claude_agents_lists(monkeypatch):
+    rows = [{"id": "a1", "cwd": "C:\\ws\\x"}]
+    asked: list[object] = []
+    monkeypatch.setattr(worktree.bg_sessions, "listed", lambda run: asked.append(run) or rows)
+    assert REAL_AGENT_SESSIONS() == rows and asked == [worktree.sweep.run_windowless]
+
+
+def test_settle_reap_asks_for_the_sessions_only_to_apply_a_reap_it_may_make(tmp_path):
+    def never() -> list[dict]:
+        raise AssertionError("asked claude agents")
+
+    refused = worktree.ReapPlan(box="demo--x-0806", refusal="dirty")
+    assert worktree.settle_reap(refused, tmp_path, never, apply=True) == (
+        worktree.HOLD,
+        False,
+        ["[warn] reap refused: dirty"],
+    )
+    plan = worktree.ReapPlan(box="demo--x-0806", path=str(tmp_path / "demo--x-0806"))
+    assert worktree.settle_reap(plan, tmp_path, never, apply=False) == (worktree.REAP, True, [])
+
+
+def test_reap_vacated_leaves_an_occupied_box_whole(tmp_path, monkeypatch):
+    path = tmp_path / "demo--x-0806"
+    plan = worktree.ReapPlan(box="demo--x-0806", path=str(path))
+    monkeypatch.setattr(worktree, "apply_reap", lambda *a: pytest.fail("reaped an occupied box"))
+    person = {"kind": "interactive", "status": "idle", "cwd": str(path)}
+    action, ok, notes = worktree.reap_vacated(plan, tmp_path, [person])
+    assert (action, ok) == (worktree.WAIT, True)
+    assert notes and notes[-1].startswith("not reaped: interactive session")
+
+
 def test_reconcile_never_reaps_a_box_holding_work(workspace, monkeypatch):
     root = _reconcilable(
         workspace, monkeypatch, "demo--busy-0806", sweep.READY, "2 uncommitted", "MERGED"
@@ -4078,8 +4172,17 @@ def test_artifact_root_keeps_this_repo_only_for_the_workspace_it_is_inside(tmp_p
     """`REPO_ROOT` is bound at import to whichever devkit is executing, so every CLI path
     wrote its `logs/` here regardless of the workspace it was pointed at. Right for the
     scheduled job, whose workspace is this one; wrong for everything else."""
-    assert worktree.artifact_root(worktree.REPO_ROOT.parent) == worktree.REPO_ROOT
+    checkout = sweep.source_checkout(worktree.REPO_ROOT)
+    assert worktree.artifact_root(checkout.parent) == checkout
     assert worktree.artifact_root(tmp_path) == tmp_path
+
+
+def test_artifact_root_is_the_checkout_a_tree_was_cut_from(tmp_path):
+    """A reconcile run from a fixer's tree recorded its reap in that tree's `logs/`."""
+    checkout = tmp_path / "devkit"
+    tree = checkout / ".claude" / "worktrees" / "fix-harness-ledger-0929-15"
+    tree.mkdir(parents=True)
+    assert worktree.artifact_root(tmp_path, repo_root=tree) == checkout
 
 
 def test_the_reconcile_cli_writes_the_log_of_the_workspace_it_acted_on(tmp_path):

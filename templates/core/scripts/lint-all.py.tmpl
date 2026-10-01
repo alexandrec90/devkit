@@ -238,7 +238,7 @@ def rerun_in_tree_venv(module: str, argv: list[str] | None) -> int | None:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--changed", action="store_true", help="lint only the working-tree diff")
     # `/ship` passes the branch's diff here. It is part of the same contract as
@@ -266,7 +266,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip the secrets pass (accepted for Stop-hook compatibility; no-op here)",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+# `main`'s helpers are out of it for `structure_check`'s function limits, which the
+# project's own gate holds this file to: it is the project's, rendered from devkit's
+# template, so a branch added here reddens every project that refreshes it.
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
     # After parsing, so `/ship`'s `--help` probe answers without installing anything.
     rerun = rerun_in_tree_venv("ruff", argv)
     if rerun is not None:
@@ -298,31 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     # falls back to `["."]` — which would silently widen a per-turn check into a
     # whole-repo pass. Gate the Python passes on having Python to lint.
     if targets or not scoped:
-        # Auto-fix first, then report. Both ruff passes mutate the same files, so they
-        # must stay sequential relative to each other, and both skip the vendored
-        # harness — see NO_FIX_SCOPE.
-        no_fix = [arg for path in NO_FIX_SCOPE for arg in ("--exclude", path)]
-        subprocess.run(
-            [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes", *no_fix],
-            cwd=REPO_ROOT,
-            capture_output=True,
-        )
-        subprocess.run(
-            [sys.executable, "-m", "ruff", "format", *scope, *no_fix],
-            cwd=REPO_ROOT,
-            capture_output=True,
-        )
-
-        sections += run_tool(
-            "ruff",
-            [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
-            "ruff check . --fix --unsafe-fixes",
-        )
-        sections += run_tool(
-            "mypy",
-            [sys.executable, "-m", "mypy", *(targets or MYPY_SCOPE), "--show-error-codes"],
-            f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
-        )
+        sections += _python_passes(scope, targets)
 
     # `uv sync` installs this into the project's venv, so a provisioned checkout has
     # it. A real executable rather than a `-m` module, so
@@ -332,13 +317,45 @@ def main(argv: list[str] | None = None) -> int:
     # binary itself instead of relying on an installer having run on this machine.
     if envs:
         sections += run_tool("dotenv-linter", [*DOTENV_CMD, *envs], " ".join([*DOTENV_CMD, *envs]))
+    return _finish(sections)
 
+
+def _finish(sections: str) -> int:
+    """Write the artifact, report where it is, and return the run's exit code."""
     _write_artifact(sections)
     if sections:
         print(f"\nlint-all: FAILED — details in {ARTIFACT.relative_to(REPO_ROOT)}")
         return 1
     print(f"\nlint-all: clean (artifact cleared: {ARTIFACT.relative_to(REPO_ROOT)})")
     return 0
+
+
+def _python_passes(scope: list[str], targets: list[str]) -> str:
+    """Fix what ruff can, then the artifact's sections for ruff and mypy."""
+    # Auto-fix first, then report. Both ruff passes mutate the same files, so they
+    # must stay sequential relative to each other, and both skip the vendored
+    # harness — see NO_FIX_SCOPE.
+    no_fix = [arg for path in NO_FIX_SCOPE for arg in ("--exclude", path)]
+    subprocess.run(
+        [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes", *no_fix],
+        cwd=REPO_ROOT,
+        capture_output=True,
+    )
+    subprocess.run(
+        [sys.executable, "-m", "ruff", "format", *scope, *no_fix],
+        cwd=REPO_ROOT,
+        capture_output=True,
+    )
+    sections = run_tool(
+        "ruff",
+        [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
+        "ruff check . --fix --unsafe-fixes",
+    )
+    return sections + run_tool(
+        "mypy",
+        [sys.executable, "-m", "mypy", *(targets or MYPY_SCOPE), "--show-error-codes"],
+        f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
+    )
 
 
 def _write_artifact(sections: str) -> None:

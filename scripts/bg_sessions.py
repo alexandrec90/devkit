@@ -43,12 +43,21 @@ def listed(runner: Runner) -> list[dict]:
 def finished_in(rows: Iterable[dict], trees: Iterable[str]) -> list[dict]:
     """The idle background sessions whose working directory is one of `trees`."""
     wanted = {_key(tree) for tree in trees}
+    return [row for row in rows if stoppable(row) and _key(str(row.get("cwd", ""))) in wanted]
+
+
+def stoppable(row: dict) -> bool:
+    """Whether the pass may stop this session: a background one with nothing in flight."""
+    return row.get("kind") == "background" and row.get("status") == "idle"
+
+
+def in_tree(rows: Iterable[dict], tree: object) -> list[dict]:
+    """Every session working in `tree` or under it."""
+    root = _key(str(tree))
     return [
         row
         for row in rows
-        if row.get("kind") == "background"
-        and row.get("status") == "idle"
-        and _key(str(row.get("cwd", ""))) in wanted
+        if (cwd := _key(str(row.get("cwd", "")))) == root or cwd.startswith(root + "/")
     ]
 
 
@@ -82,7 +91,15 @@ def stop_finished(trees: Iterable[str], runner: Runner) -> list[str]:
     stopped = []
     for row in finished_in(listed(runner), trees):
         ident = str(row.get("id", ""))
-        done = runner(["claude", "stop", ident], check=False, capture_output=True, text=True)
-        if done.returncode == 0:
+        if stop(ident, runner):
             stopped.append(f"{ident} in {row.get('cwd', '')}")
     return stopped
+
+
+def stop(ident: str, runner: Runner) -> bool:
+    """`claude stop <ident>`, which keeps the conversation; whether it answered yes."""
+    try:
+        done = runner(["claude", "stop", ident], check=False, capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0

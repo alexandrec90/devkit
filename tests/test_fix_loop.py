@@ -135,6 +135,7 @@ def test_a_line_its_session_fixed_on_this_branch_is_filed_settled_by_that_branch
     branch", were filed open, and sent a second fixer at three fixes already in review."""
     fixed = "evidence rewritten before it was read; fixed on this branch (`fix_findings.kept`)"
     tree(ctx, monkeypatch, friction=f"- {fixed}\n- no .venv\n")
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: True)
     _, journal = close(ctx)
     settles = {f.detail: f.settles_with for f in journal.findings if f.kind == "reported"}
     assert settles == {fixed: "agent/x-0919", "no .venv": ""}
@@ -149,11 +150,52 @@ def test_a_long_line_keeps_the_fixed_on_this_branch_it_ends_with(ctx, monkeypatc
     fix already merging on #435. The marker is at the end by the nature of the sentence."""
     fixed = "the triage CLI counted a pending group open; " + "x" * 400 + ", fixed on this branch"
     tree(ctx, monkeypatch, friction=f"- {fixed}\n")
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: True)
     _, journal = close(ctx)
     [found] = [f for f in journal.findings if f.kind == "reported"]
     assert (found.detail, found.settles_with) == (fixed, "agent/x-0919")
     fix_loop.record(ctx, journal)
     assert triage.open_items(triage.load(ctx.devkit_dir)) == []
+
+
+def test_a_fixed_on_this_branch_whose_work_never_went_out_is_filed_open(ctx, monkeypatch):
+    """7c16fabc: 5d9806b0 was settled on worktree-rippling-juggling-oasis, whose intent
+    had been set aside over 19 uncommitted files -- the fix never reached its PR."""
+    tree(ctx, monkeypatch, friction="- x; fixed on this branch\n")
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: False)
+    _, journal = close(ctx)
+    assert [f.settles_with for f in journal.findings if f.kind == "reported"] == [""]
+    fix_loop.record(ctx, journal)
+    assert len(triage.open_items(triage.load(ctx.devkit_dir))) == 1
+
+
+def _porcelain(code: int, out: str):
+    seen: list[list[str]] = []
+
+    def run(argv, cwd):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, code, out, "")
+
+    return run, seen
+
+
+@pytest.mark.parametrize(
+    ("stage", "code", "porcelain", "expected"),
+    [
+        (fix_loop.ship_intent.SHIPPED, 0, "", True),
+        (fix_loop.ship_intent.SHIPPED, 0, " M scripts/a.py\n", False),
+        (fix_loop.ship_intent.SHIPPED, 128, "", False),
+        (fix_loop.ship_intent.FAILED, 0, "", False),
+        (fix_loop.ship_intent.EMPTY, 0, "", False),
+        (None, 0, "", False),
+    ],
+)
+def test_went_out_is_a_shipped_state_over_a_clean_tree(tmp_path, stage, code, porcelain, expected):
+    if stage:
+        fix_loop.ship_intent.write_state(tmp_path, {"stage": stage})
+    run, seen = _porcelain(code, porcelain)
+    assert fix_loop.went_out(tmp_path, run) is expected
+    assert seen == ([["git", "status", "--porcelain"]] if stage == "shipped" else [])
 
 
 def test_a_detached_tree_settles_nothing_it_has_no_branch_to_merge(ctx, monkeypatch):
@@ -226,6 +268,43 @@ def test_a_session_gone_quiet_without_an_outcome_is_dead(ctx, monkeypatch):
     _, journal = close(ctx)
     [found] = journal.findings
     assert "ended without an outcome" in found.detail and found.evidence.endswith("s.jsonl")
+
+
+def test_a_session_the_machine_restarted_under_is_sent_again_not_filed(ctx, monkeypatch):
+    """4dc413a1, 9201a08f, e2feebab: the operator powered off at 02:26 on 2026-09-30 with
+    three fixers mid-call, and each was filed as a dead fixer for a devkit session to
+    investigate, while the two resolvers' lost sends escalated #480 and #482 as blind."""
+    fix_ledger.record(ctx.ledger_path, KEY, "n", NOW - _dt.timedelta(minutes=10))
+    tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=10),
+        transcript_age=_dt.timedelta(minutes=5),
+    )
+    restarted = fix_loop.Context(**{**vars(ctx), "booted": NOW - _dt.timedelta(minutes=2)})
+    closed, journal = close(restarted)
+    assert journal.findings == []
+    assert closed.lines == ["carameli agent/x-0919 -- stopped by a restart; sent again"]
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["dead"] == fix_reports.INTERRUPTED and fix_ledger.sends(entry) == 0
+
+
+def test_judging_a_dead_session_in_plan_mode_files_it_and_writes_nothing(ctx, monkeypatch):
+    fix_ledger.record(ctx.ledger_path, KEY, "n", NOW)
+    path = tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=5))
+    [one] = fix_reports.read_trees(ctx.root, ctx.projects)
+    plan = fix_loop.Context(**{**vars(ctx), "mode": fix_cycle.PLAN})
+    journal = fix_findings.Journal(ctx.devkit_dir)
+    where = "carameli agent/x-0919"
+    assert fix_loop.judge_dead(plan, one, where, fix_reports.NO_OUTCOME, "t.jsonl", journal) == []
+    assert [f.kind for f in journal.findings] == ["fixer-no-outcome"]
+    restart = fix_reports.INTERRUPTED
+    assert fix_loop.judge_dead(plan, one, where, restart, "t.jsonl", journal) == [
+        f"{where} -- {restart}; sent again"
+    ]
+    assert len(journal.findings) == 1, "a restart files nothing"
+    assert "dead" not in fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert "dead" not in fix_reports.read_stamp(path)
 
 
 def test_a_working_devkit_session_is_the_harness_busy(ctx, monkeypatch):
@@ -381,6 +460,26 @@ def test_verify_retires_what_was_filed_while_the_merged_fix_waited(ctx, monkeypa
     assert triage.open_items(triage.load(ctx.devkit_dir)) == []
     [resolution] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
     assert resolution.fields["pr"] == "u/434"
+
+
+def test_verify_names_the_merged_pr_that_held_a_fix_its_branch_never_landed(ctx, monkeypatch):
+    """950c4a96: the ledger reads the PR that holds the fix, keeping when it was made."""
+    monkeypatch.setattr(fix_loop.fix_reports, "read_trees", lambda root, projects: [])
+    row = f"{NOW.isoformat()}\tevent=fix-pass-finding\tproject=devkit\tdetail=x"
+    (ctx.devkit_dir / "logs").mkdir(parents=True)
+    (ctx.devkit_dir / "logs" / "harness-events.log").write_text(row + "\n", encoding="utf-8")
+    ref = triage.item_id(row)
+    made = (NOW - _dt.timedelta(days=3)).isoformat()
+    was = fix_loop.fix_verify.Resolution(ref, made, "agent/x-3", "split by cause")
+    fix = fix_loop.fix_verify.Pr(fix_loop.fix_verify.LANDED, NOW.isoformat(), "u/440")
+    outcome = fix_loop.fix_verify.Outcome(found=[(was, fix)])
+    monkeypatch.setattr(fix_loop.fix_verify, "verify", lambda *a, **k: outcome)
+    closed, _ = close(ctx)
+    assert f"settled [{ref}] on u/440 -- agent/x-3 never landed it" in closed.lines
+    [resolution] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    assert resolution.fields["pr"] == "u/440"
+    assert resolution.fields["note"].startswith("split by cause -- merged as u/440")
+    assert triage.resolved_at(resolution) == made
 
 
 def test_a_friction_row_todays_detectors_would_not_file_is_retired(ctx, monkeypatch):

@@ -329,6 +329,62 @@ def test_tests_for_names_a_test_file_by_its_module_and_a_test_by_itself(tmp_path
     )
 
 
+def test_a_script_template_names_the_scripts_test_and_its_own(tmp_path):
+    """A change to `run-tests.py.tmpl` named no test and ran only the contract tests."""
+    (tmp_path / "tests").mkdir()
+    for name in ("test_run_tests.py", "test_run_tests_template.py"):
+        (tmp_path / "tests" / name).write_text("", encoding="utf-8")
+    paths = ["templates/core/scripts/run-tests.py.tmpl", "templates/core/dot-devkit.toml.tmpl"]
+    assert run_tests.tests_for(paths, tmp_path) == (
+        ["tests/test_run_tests.py", "tests/test_run_tests_template.py"],
+        ["templates/core/dot-devkit.toml.tmpl"],
+    )
+
+
+def test_any_template_names_the_generated_tree_tests(tmp_path):
+    """#479 reshaped `run-tests.py.tmpl`, ran the tests its name leads to green, and a
+    generated project failed `ruff format --check` on arrival: the check over the whole
+    generated tree was named by no template."""
+    (tmp_path / "tests").mkdir()
+    for name in ("test_run_tests.py", "test_generated_tree.py"):
+        (tmp_path / "tests" / name).write_text("", encoding="utf-8")
+    paths = [
+        "templates/core/scripts/run-tests.py.tmpl",
+        "templates/core/dot-devkit.toml.tmpl",
+        "templates/core/ruff.toml",
+        "scripts/untested.py",
+    ]
+    assert run_tests.tests_for(paths, tmp_path) == (
+        ["tests/test_run_tests.py", run_tests.GENERATED_TREE_TESTS],
+        ["scripts/untested.py"],
+    )
+
+
+def test_the_generated_tree_tests_exist():
+    """A renamed file would drop out of every template change's run without a word."""
+    assert (REPO_ROOT / run_tests.GENERATED_TREE_TESTS).is_file()
+
+
+def test_a_vendored_script_names_the_vendored_tiers_test(tmp_path):
+    """`scripts/log-wrap.py` is tested in `scripts/hooks/tests/test_log_wrap.py`, and a
+    run that looked in `tests/` alone ran no test of the change and said so."""
+    hooks = tmp_path / "scripts" / "hooks" / "tests"
+    hooks.mkdir(parents=True)
+    (hooks / "test_log_wrap.py").write_text("", encoding="utf-8")
+    (hooks / "test_stop.py").write_text("", encoding="utf-8")
+    paths = ["scripts/log-wrap.py", "scripts/hooks/tests/test_stop.py", "scripts/hooks/x.py"]
+    assert run_tests.tests_for(paths, tmp_path) == (
+        ["scripts/hooks/tests/test_log_wrap.py", "scripts/hooks/tests/test_stop.py"],
+        ["scripts/hooks/x.py"],
+    )
+
+
+def test_the_template_runner_looks_where_devkits_does():
+    template = (REPO_ROOT / "templates/core/scripts/run-tests.py.tmpl").read_text(encoding="utf-8")
+    literal = ", ".join(f'"{d}"' for d in run_tests.TEST_DIRS)
+    assert f"TEST_DIRS = ({literal})" in template
+
+
 def test_by_default_only_the_tests_named_by_the_changed_files_run(artifact, monkeypatch, tmp_path):
     """Every agent ran the whole suite by reflex and hit the same harness red, one
     session after another; the gate is CI's, and the default here is what the change
@@ -339,16 +395,43 @@ def test_by_default_only_the_tests_named_by_the_changed_files_run(artifact, monk
     assert seen[0][-1] == "tests/test_fix_plan.py"
 
 
-def test_nothing_named_runs_nothing_and_says_so(artifact, monkeypatch, tmp_path, capsys):
+def test_the_contract_tests_run_with_every_change(artifact, monkeypatch, tmp_path, capsys):
+    """54bb72df: #467 added an import to fix-pass.py, ran the tests its files named, and
+    went red on test_scheduled_jobs, which reads every module and is named by none."""
     changed(monkeypatch, tmp_path, "README.md", "scripts/untested.py")
+    for rel in run_tests.CONTRACT_TESTS:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("", encoding="utf-8")
+    seen = stub_pytest(monkeypatch, 0)
+    assert run_tests.main([]) == 0
+    assert seen[0][-len(run_tests.CONTRACT_TESTS) :] == list(run_tests.CONTRACT_TESTS)
+    out = capsys.readouterr().out
+    assert "no test named for README.md" in out and "no test named for scripts/untested.py" in out
+    assert "the contract tests" in out
+
+
+def test_every_contract_test_listed_exists():
+    """A renamed contract test would drop out of every default run without a word."""
+    missing = [t for t in run_tests.CONTRACT_TESTS if not (REPO_ROOT / t).is_file()]
+    assert missing == []
+
+
+def test_with_contracts_keeps_the_named_tests_first_and_adds_each_once(tmp_path):
+    for rel in ("tests/test_a.py", "tests/test_test_contract.py", "tests/test_doc_claims.py"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("", encoding="utf-8")
+    got = run_tests.with_contracts(["tests/test_a.py", "tests/test_doc_claims.py"], tmp_path)
+    assert got == ["tests/test_a.py", "tests/test_doc_claims.py", "tests/test_test_contract.py"]
+
+
+def test_nothing_changed_runs_nothing_and_says_so(artifact, monkeypatch, tmp_path, capsys):
+    changed(monkeypatch, tmp_path)
     seen = stub_pytest(monkeypatch, 0)
     artifact.parent.mkdir(parents=True)
     artifact.write_text("stale", encoding="utf-8")
     assert run_tests.main([]) == 0
     assert seen == [] and artifact.read_text(encoding="utf-8") == ""
-    out = capsys.readouterr().out
-    assert "no test named for README.md" in out and "no test named for scripts/untested.py" in out
-    assert "--all runs the suite" in out
+    assert "--all runs the suite" in capsys.readouterr().out
 
 
 def test_all_ci_pre_commit_and_explicit_targets_run_the_whole_suite(
