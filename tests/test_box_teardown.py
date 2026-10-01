@@ -239,3 +239,61 @@ def test_unopenable_names_each_directory_this_process_may_not_list(tmp_path):
         "C:\\ws\\declarative-finding-sky\\.pytest_cache"
     ]
     assert box_teardown.unopenable(husk) == []
+
+
+BOX = "C:\\ws\\.worktrees\\carameli--up-0929"
+
+
+def claude_stop(answer: int = 0):
+    """A fake `run` recording each `claude stop`, answering `answer`."""
+    seen: list[list[str]] = []
+
+    def run(argv, **_kwargs):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, answer, "", "")
+
+    return run, seen
+
+
+def test_vacate_stops_an_idle_background_session_in_the_box_and_waits_for_it():
+    """94e52397: the finished fixer's process stood in the box's root, so the reap
+    deleted every file and died on the empty directory."""
+    run, seen = claude_stop()
+    waited: list[float] = []
+    sessions = [
+        {"kind": "background", "status": "idle", "cwd": BOX, "id": "2b4a8c0e"},
+        {"kind": "background", "status": "idle", "cwd": BOX + "-2", "id": "sibling"},
+    ]
+    occupants, notes = box_teardown.vacate(Path(BOX), sessions, run, waited.append)
+    assert occupants == [] and seen == [["claude", "stop", "2b4a8c0e"]]
+    assert notes == ["stopped idle background session 2b4a8c0e still in the box"]
+    assert waited == [box_teardown.HOLDER_RELEASE_SECONDS]
+
+
+def test_vacate_stops_nothing_while_a_session_is_working_or_a_person_is_in_the_box():
+    run, seen = claude_stop()
+    for occupant in (
+        {"kind": "background", "status": "busy", "cwd": BOX + "\\app", "id": "b2"},
+        {"kind": "interactive", "status": "idle", "cwd": BOX.lower().replace("\\", "/")},
+    ):
+        idle = {"kind": "background", "status": "idle", "cwd": BOX, "id": "a1"}
+        occupants, notes = box_teardown.vacate(Path(BOX), [idle, occupant], run, pytest_fail)
+        assert len(occupants) == 1 and notes == []
+    assert seen == []
+
+
+def test_a_session_that_would_not_stop_is_an_occupant():
+    run, _seen = claude_stop(answer=1)
+    session = {"kind": "background", "status": "idle", "cwd": BOX, "id": "a1"}
+    occupants, notes = box_teardown.vacate(Path(BOX), [session], run, pytest_fail)
+    assert occupants == ["background session a1 (idle)"] and notes == []
+
+
+def test_an_empty_box_is_vacated_without_a_word():
+    run, seen = claude_stop()
+    assert box_teardown.vacate(Path(BOX), [], run, pytest_fail) == ([], [])
+    assert seen == []
+
+
+def pytest_fail(_seconds: float) -> None:
+    raise AssertionError("waited with nothing stopped")

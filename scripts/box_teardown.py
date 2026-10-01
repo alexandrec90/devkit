@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bg_sessions
 import sweep
 
 # Every path under the box that a live process has mapped as an image, asked of the two
@@ -147,6 +148,43 @@ def evict_box_holders(path: Path, run=sweep.run_windowless) -> list[str]:
             continue
         killed.append(f"{name} ({pid})")
     return killed
+
+
+def vacate(
+    path: Path, sessions: list[dict], run=sweep.run_windowless, sleep=time.sleep
+) -> tuple[list[str], list[str]]:
+    """Clear the agent sessions out of the box before it is deleted: `(occupants, notes)`.
+
+    `sessions` is what `claude agents --json` lists (`bg_sessions.listed`). A session's
+    working directory is a handle on the box that no eviction above sees -- it maps no
+    image under it -- and Windows will not delete a directory a process stands in. So a
+    reap of a merged box whose fixer was still alive in it deleted every file, died on
+    the empty root with `being used by another process`, and turned the scheduled
+    reconcile red until someone found the session (94e52397, three times).
+
+    An idle background session is the pass's own finished fixer: it is stopped, which
+    keeps its conversation (`claude attach` reopens it). Anything else -- a session still
+    working, a person's interactive one -- is an occupant, and the box is left whole for
+    it: `occupants` names each, and nothing is stopped while one remains.
+    """
+    inside = bg_sessions.in_tree(sessions, path)
+    occupants = [_describe(row) for row in inside if not bg_sessions.stoppable(row)]
+    if occupants:
+        return occupants, []
+    notes: list[str] = []
+    for row in inside:
+        if bg_sessions.stop(str(row.get("id", "")), run):
+            notes.append(f"stopped idle background session {row.get('id')} still in the box")
+        else:
+            occupants.append(_describe(row))
+    if notes:
+        # `claude stop` returns once the stop is asked for, not once the process is gone.
+        sleep(HOLDER_RELEASE_SECONDS)
+    return occupants, notes
+
+
+def _describe(row: dict) -> str:
+    return f"{row.get('kind', '?')} session {row.get('id') or '?'} ({row.get('status', '?')})"
 
 
 def _make_deletable(target: str) -> None:

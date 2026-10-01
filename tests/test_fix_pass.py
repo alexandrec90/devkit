@@ -165,6 +165,9 @@ def world(tmp_path, monkeypatch):
         lambda argv: table["installers"].append(list(argv)) or table["installers_code"],
     )
     monkeypatch.setattr(fix_pass.fix_send.host_memory, "available_mb", lambda: table["memory"])
+    # The machine's real boot: a runner started minutes ago would read every stamped
+    # session before it as stopped by a restart.
+    monkeypatch.setattr(fix_pass.fix_loop.fix_reports, "booted_at", lambda now=None: None)
     monkeypatch.setattr(fix_pass.fix_send, "code_moved", lambda root: table["moved"])
     monkeypatch.setattr(
         fix_pass.devkit_project, "known_projects", lambda _t: ["devkit", "carameli"]
@@ -732,6 +735,16 @@ def test_plan_mode_says_an_update_would_be_an_update(world):
     world["failures"] = [failure(behind=True)]
     fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW)
     assert "carameli #412 -- would update the branch" in artifact(world)
+
+
+def test_the_context_carries_when_the_machine_last_started(world, monkeypatch):
+    """What lets read-back tell a fixer a restart killed (`fix_reports.INTERRUPTED`) from
+    one that died, which the 2026-09-30 power-off filed three of as harness defects."""
+    booted = NOW - _dt.timedelta(minutes=3)
+    monkeypatch.setattr(fix_pass.fix_loop.fix_reports, "booted_at", lambda now=None: booted)
+    ctx = fix_pass.context(world["workspace"], fix_cycle.DISPATCH, NOW)
+    assert (ctx.booted, ctx.now, ctx.projects) == (booted, NOW, ["devkit", "carameli"])
+    assert ctx.root == world["workspace"].parent and ctx.devkit_dir == ctx.root / "devkit"
 
 
 def _ctx(tmp_path, mode=fix_cycle.DISPATCH, now=NOW):

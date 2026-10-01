@@ -142,6 +142,8 @@ state a checkout can only reach by surviving the work done in it. A box cut fres
   can clear. `box_teardown.py` evicts a process whose **executable or a loaded module**
   lives under the box, never one whose command line merely names it: an agent's own shell
   names it too, and killing the session that asked for the reap is worse than the husk.
+  A session *standing in* the box maps nothing there, so `reconcile` asks `claude agents`
+  (`box_teardown.vacate`): an idle background one is stopped, any other is a `WAIT`.
 - **A box is never registered in the workspace file.** That would put it in `sweep.py`'s
   scope and give its lifecycle two owners; `workspace-status.py` reports boxes instead.
 - **`worktree-guard.py` is the one caller that skips provisioning.** It was built as a

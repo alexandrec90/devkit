@@ -13,8 +13,9 @@ into every consuming project and must stay separately runnable there.
 
 **The default is the tests named by what changed**, not the suite: every file
 changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`
-(a template also to the tests that spell its name), plus `CONTRACT_TESTS`, which
-read every module and so are named by none of them.
+(and, for anything under `templates/`, to `GENERATED_TREE_TESTS` too; a `.tmpl` also
+to the tests that spell its name), plus `CONTRACT_TESTS`, which read every module and
+so are named by none of them.
 The whole suite is CI's, the push gate's (`PRE_COMMIT` is in the environment under
 pre-commit) and `--all`'s. Where git cannot say what changed, the suite runs.
 
@@ -43,10 +44,14 @@ FULL_SUITE_ENV = ("CI", "PRE_COMMIT")
 # tier's beside the scripts it tests. With `tests/` alone, a change to
 # `scripts/log-wrap.py` ran no test of it at all.
 TEST_DIRS = ("tests", "scripts/hooks/tests")
-# A template's suffix. `templates/core/scripts/run-tests.py.tmpl` is loaded by
-# `tests/test_run_tests.py`, and a `.tmpl` of any kind by the tests that spell its name
-# to read it; without either reading, a template-only change ran the contract tests alone.
+# A template's suffix. A `.tmpl` of any kind is read by the tests that spell its name;
+# without that reading, a change to `ruff.toml.tmpl` or `pr-gate.yml.tmpl` named no test
+# but the generated-tree checks.
 TEMPLATE_SUFFIX = ".tmpl"
+
+# The checks over a generated project as a whole -- format-clean, for one -- which every
+# change under `templates/` names in addition to its own tests.
+GENERATED_TREE_TESTS = "tests/test_generated_tree.py"
 
 # Per-failure line cap. Chosen to hold a first-party traceback plus the assertion
 # without letting a single deep failure crowd out the rest of the run.
@@ -205,9 +210,11 @@ def changed_paths(root: Path, run=subprocess.run) -> list[str] | None:
 def tests_for(paths: list[str], root: Path = REPO_ROOT) -> tuple[list[str], list[str]]:
     """`(test files to run, changed files that name none)`.
 
-    A test file names itself; any other `.py`, or `.py.tmpl`, names `test_<stem>.py` in
-    each of `TEST_DIRS` with hyphens read as underscores (`scripts/fix-pass.py` ->
-    `tests/test_fix_pass.py`), when that file exists. A `.tmpl` also names every test
+    A test file names itself; any other `.py` names `test_<stem>.py` in each of
+    `TEST_DIRS` with hyphens read as underscores (`scripts/fix-pass.py` ->
+    `tests/test_fix_pass.py`), when that file exists; a `.py.tmpl` names that and
+    `test_<stem>_template.py`, and anything under `templates/` names
+    `GENERATED_TREE_TESTS`. A `.tmpl` also names every test
     whose source spells its file name, since that is how a test reads one. Everything
     else -- a document, a workflow, a module with no test of its own -- is reported so
     the caller can see what the run did not cover.
@@ -226,15 +233,24 @@ def tests_for(paths: list[str], root: Path = REPO_ROOT) -> tuple[list[str], list
 
 def _named_tests(posix: str) -> list[str]:
     """The test files the changed file `posix` could name, existing or not."""
-    name = posix.rsplit("/", 1)[-1]
-    stem = name.removesuffix(TEMPLATE_SUFFIX)
+    named = _named_by_stem(posix)
+    # Any template also names the checks over the generated tree as a whole, which no
+    # template's own name leads to: #479 reshaped `run-tests.py.tmpl`, ran its tests
+    # green, and a generated project failed `ruff format --check` on arrival.
+    if posix.startswith("templates/") and GENERATED_TREE_TESTS not in named:
+        named.append(GENERATED_TREE_TESTS)
+    return named
+
+
+def _named_by_stem(posix: str) -> list[str]:
+    stem = posix.rsplit("/", 1)[-1]
+    if stem.endswith(".py.tmpl"):
+        # A template of a script is tested as the script it renders to, and on its own.
+        name = stem.removesuffix(".py.tmpl").replace("-", "_")
+        return [f"{d}/test_{name}{kind}.py" for d in TEST_DIRS for kind in ("", "_template")]
     if not stem.endswith(".py"):
         return []
-    if (
-        name == stem
-        and name.startswith("test_")
-        and any(posix.startswith(f"{d}/") for d in TEST_DIRS)
-    ):
+    if stem.startswith("test_") and any(posix.startswith(f"{d}/") for d in TEST_DIRS):
         return [posix]
     return [f"{d}/test_{stem[:-3].replace('-', '_')}.py" for d in TEST_DIRS]
 

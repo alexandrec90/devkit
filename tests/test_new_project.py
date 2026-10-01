@@ -8,7 +8,6 @@ would otherwise surface only when a human ran `docker compose up` in a brand-new
 repo.
 """
 
-import argparse
 import itertools
 import json
 import os
@@ -24,9 +23,12 @@ from support import (
     TEMPLATES,
     devkit_ports,
     devkit_project,
+    generate,
     gh_steps_without_repo_context,
     harness_config,
     load_script,
+    make_args,
+    registry,
     vendor_manifest,
 )
 
@@ -50,33 +52,6 @@ def _hoisted_task_labels() -> frozenset[str]:
 
 
 HOISTED_TASK_LABELS = _hoisted_task_labels()
-
-
-def make_args(**overrides):
-    """The argparse namespace `plan()` expects, with the CLI's own defaults."""
-    base = {
-        "name": "demo_project",
-        "description": "A demo.",
-        "display_name": "",
-        "parent": "",
-        "github_owner": "alexandrec90",
-        "python_version": "3.12",
-        "default_branch": "main",
-        "devkit_ref": "v0.1.0",
-        "db_url_scheme": "postgresql+psycopg",
-        "src_layout": False,
-        "preset": None,
-        "remote": True,
-        "register": True,
-        "dry_run": True,
-        **{f: False for f in new_project.FEATURES},
-    }
-    base.update(overrides)
-    return argparse.Namespace(**base)
-
-
-def registry():
-    return devkit_ports.load(REPO_ROOT)
 
 
 # --------------------------------------------------------------------------
@@ -335,22 +310,6 @@ FEATURE_MATRIX = [
         id="everything",
     ),
 ]
-
-
-def generate(tmp_path: Path, features: dict) -> Path:
-    """Render the tree for one feature set into tmp_path and return the root."""
-    args = make_args(parent=str(tmp_path), **features)
-    if args.alembic:
-        args.postgres = True
-    if args.app_service or args.postgres or args.redis or args.frontend:
-        args.docker = True
-    the_plan = new_project.plan(args, registry())
-    the_plan.root.mkdir(parents=True, exist_ok=True)
-    new_project.render_tree(the_plan, dry_run=False)
-    new_project.write_package(the_plan, dry_run=False)
-    # Both tiers, because a real project is both. See `support.vendor_manifest`.
-    vendor_manifest(the_plan.root)
-    return the_plan.root
 
 
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
@@ -948,29 +907,6 @@ def test_a_generated_project_satisfies_the_vendored_ci_contract(tmp_path):
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_generated_python_is_already_ruff_format_clean(tmp_path):
-    """A new project's first `pre-commit run` must not rewrite its own files.
-
-    devkit excludes `templates/` from its own format check (that Python is content, linted
-    by the ruff.toml that ships beside it), which is right — and it meant
-    `lint-all.py.tmpl` sat unformatted for the 100-column config it ships with. Nothing
-    noticed until a generated project gained a `ruff-format` pre-commit hook, which
-    reformatted the file on arrival: a brand-new repo, a failing hook, a dirty tree.
-    """
-    import subprocess
-
-    root = generate(tmp_path, {})
-    result = subprocess.run(
-        [sys.executable, "-m", "ruff", "format", "--check", "."],
-        cwd=root,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 1 and "No module named" in result.stderr:
-        pytest.skip("ruff not importable")
-    assert result.returncode == 0, f"generated files are not format-clean:\n{result.stdout}"
 
 
 def test_generated_codex_skills_are_excluded_from_explicit_ruff_checks(tmp_path):
