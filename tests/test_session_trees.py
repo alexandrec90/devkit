@@ -314,6 +314,75 @@ def test_a_reap_only_an_administrator_can_finish_is_named_not_failed(tmp_path, m
     assert len(said) == 1 and "only an administrator can remove it" in said[0]
 
 
+# What `compose down` said on every tree with a stack while Docker Desktop was stopped
+# (3dfd297d, reap-stale at 2026-10-01 18:30).
+ENGINE_STOPPED = (
+    "failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; "
+    "check if the path is correct and if the daemon is running: "
+    "open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified."
+)
+
+
+def _stacked_checkout(tmp_path, down: subprocess.CompletedProcess[str]):
+    """A merged tree with a stack of its own, whose `compose down` answers `down`."""
+    checkout, listed, gh, calls = _checkout(tmp_path)
+    one = tree(tmp_path)
+    one.path.mkdir(parents=True)
+    env = "COMPOSE_PROJECT_NAME=carameli-fix-pr-gate-0929\n"  # pragma: allowlist secret - a compose project name, not a credential
+    (one.path / ".env").write_text(env, "utf-8")
+
+    def run(argv):
+        return down if argv[0] == "docker" else listed(argv)
+
+    return checkout, one, run, gh, calls
+
+
+def test_a_stopped_docker_engine_keeps_the_tree_and_is_not_a_failure(tmp_path):
+    """Reaping anyway would strand the stack's volumes with nothing left to name them,
+    and failing sent a fixer after every run of the scheduled reap that nobody but
+    Docker Desktop could act on."""
+    checkout, one, run, gh, calls = _stacked_checkout(tmp_path, done(1, err=ENGINE_STOPPED))
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 0
+    assert said == [f"session tree carameli:fix-nightly-0919: {st.ENGINE_DOWN}"]
+    assert one.path.is_dir()
+    assert not any("remove" in argv for argv in calls)
+
+
+def test_any_other_compose_down_failure_is_still_a_failure(tmp_path):
+    checkout, _one, run, gh, _calls = _stacked_checkout(
+        tmp_path, done(1, err="Error response from daemon: volume is in use")
+    )
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 1
+    assert len(said) == 1 and "could not reap: compose down -p" in said[0]
+    assert "volume is in use" in said[0]
+
+
+def test_down_stack_answers_before_the_tree_is_touched(tmp_path):
+    """A tree kept for a stopped engine is kept whole: its generated files too."""
+    _checkout_path, one, run, _gh, _calls = _stacked_checkout(tmp_path, done(1, err=ENGINE_STOPPED))
+    (one.path / "AGENTS.md").write_text("generated", "utf-8")
+    assert st.down_stack(one, tmp_path / "carameli", run) == st.ENGINE_DOWN
+    assert st.reap(one, tmp_path / "carameli", run, ["AGENTS.md"]) == st.ENGINE_DOWN
+    assert (one.path / "AGENTS.md").exists()
+    assert st.down_stack(one, tmp_path / "carameli", lambda argv: done()) == ""
+    assert st.down_stack(tree(tmp_path, "no-stack"), tmp_path / "carameli", pytest_fail) == ""
+
+
+def pytest_fail(*_args):
+    raise AssertionError("must not run")
+
+
+def test_reap_outcome_reads_each_answer_of_a_reap(tmp_path, monkeypatch):
+    assert st.reap_outcome(tmp_path, "") == ("its PR merged at this HEAD -- reaped", False)
+    assert st.reap_outcome(tmp_path, st.ENGINE_DOWN) == (st.ENGINE_DOWN, False)
+    assert st.reap_outcome(tmp_path, "denied") == ("could not reap: denied", True)
+    _admin_only(monkeypatch)
+    line, failed = st.reap_outcome(tmp_path, "denied")
+    assert line.startswith("only an administrator can remove it") and not failed
+
+
 def _checkout(tmp_path, head: str = "abc"):
     checkout = tmp_path / "carameli"
     one = tree(tmp_path, head=head)

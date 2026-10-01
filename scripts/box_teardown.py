@@ -124,6 +124,10 @@ def box_holders(path: Path, run=sweep.run_windowless) -> list[tuple[int, str]]:
 # object is reaped, so an immediate retry can still be denied.
 HOLDER_RELEASE_SECONDS = 2.0
 
+# The pauses before each retry of a refused delete (`force_remove_box`): the first is
+# what a killed holder needs, the rest outlast a handle nobody could name.
+RELEASE_PAUSES = (HOLDER_RELEASE_SECONDS, 5.0, 10.0)
+
 
 def evict_box_holders(path: Path, run=sweep.run_windowless) -> list[str]:
     """Kill every process holding an image under `path`. Returns what was killed.
@@ -310,19 +314,54 @@ def force_remove_box(
     failed**: enumerating every process's modules costs a second or two, and a reap that
     succeeded owes nobody that. What it buys is the difference between a husk no future
     pass can clear and a box that goes on the same run.
+
+    **A delete is retried after a pause even when nothing was evicted.** A handle this
+    pass cannot name -- a process exiting between the delete and the query, a scanner
+    reading the file it was just asked to delete, a process whose modules this token may
+    not list -- is gone a few seconds later. Giving up at once left roguelike's merged
+    box a `.venv` husk over one `_yaml.pyd` (fc85393e, 2026-10-01) that opened
+    exclusively minutes later, and turned that reconcile red. What no wait can cure,
+    a directory this token may not open (`unopenable`), is returned at once.
     """
     error = remove_tree_longpath(path)
     if not error:
         return "", []
     evicted = evict_box_holders(path, run)
-    if not evicted:
-        return error, []
-    # Windows releases the image section after the process is reaped rather than when
-    # taskkill returns, so an immediate retry can still be denied.
-    sleep(HOLDER_RELEASE_SECONDS)
-    return remove_tree_longpath(path), [
-        f"killed {len(evicted)} process(es) still running out of the box: {', '.join(evicted)}"
-    ]
+    notes = (
+        [f"killed {len(evicted)} process(es) still running out of the box: {', '.join(evicted)}"]
+        if evicted
+        else []
+    )
+    if unopenable(path):
+        return error, notes
+    for pause in RELEASE_PAUSES:
+        # Windows releases the image section after the process is reaped rather than
+        # when taskkill returns, so an immediate retry can still be denied.
+        sleep(pause)
+        error = remove_tree_longpath(path)
+        if not error:
+            break
+    return error, notes
+
+
+# What a Docker CLI says when the engine is not there to talk to. Windows names the
+# missing named pipe, Linux and macOS the missing socket; both spellings appear as the
+# tail of a much longer connect error, so this is a substring test rather than a match.
+# Here rather than in `worktree.py` because both reapers ask it of a failed
+# `compose down`: `worktree.py` of a box, `session_trees.py` of a session tree, and the
+# second must not import the first.
+DAEMON_DOWN_SIGNS = (
+    "cannot connect to the docker daemon",
+    "error during connect",
+    "the docker daemon is not running",
+    "open //./pipe/",
+)
+
+
+def engine_unreachable(text: str) -> bool:
+    """Whether `text` is a Docker CLI failing to reach the engine, lower-cased substring."""
+    haystack = (text or "").lower()
+    return any(sign in haystack for sign in DAEMON_DOWN_SIGNS)
 
 
 # What a filesystem-level deletion failure says, in each of the spellings this has been
