@@ -14,7 +14,8 @@ consumer's settings lose their whole `hooks` block on the pull that delivers thi
 hook scripts are still vendored, and inert while nothing names them. And it **adds the
 agent-shell environment** (`AGENT_ENV`) wherever a key is missing, never overwriting a
 value the project set itself. And it **links the checkout's dependency directories**
-into the trees `claude --worktree` cuts (`dependency_dirs`), which no git hook reaches.
+into the trees `claude --worktree` cuts (`dependency_dirs`), which no git hook reaches --
+`.venv` only for a project that installs no package of its own (`borrows_venv`).
 
 Stdlib only, like everything else here that runs before a virtualenv exists.
 
@@ -24,6 +25,7 @@ Tested in `scripts/hooks/tests/test_project_settings.py`.
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 SETTINGS_FILE = ".claude/settings.json"
@@ -132,13 +134,38 @@ def with_agent_env(payload: object) -> tuple[object, list[str]]:
 # roguelike session's tree came up with no `node_modules`, so neither `npm run dev` nor
 # vitest started until it ran `npm ci` by hand (98fd1f9c). Each one is linked only
 # where the file that says the project installs it is at the root or one level down.
+#
+# `.venv` only where the project installs no package of its own (`borrows_venv`). An
+# editable install points the checkout's venv at the checkout's `src/`, so a borrowed one
+# runs the checkout's code from inside the tree and its tests quietly test the wrong
+# branch. Such a project's tree builds its own `.venv` on its first test or lint run
+# instead, through `rerun_in_venv` in the vendored `scripts/hooks/toolchain.py`.
 VENV_DIR = ".venv"
 NODE_DIR = "node_modules"
 
 
+def borrows_venv(root: Path) -> bool:
+    """Whether `root`'s worktrees may link its `.venv`: it has one and installs no package.
+
+    uv's own rule decides: `[tool.uv] package` when the project sets it, else whether a
+    `[build-system]` is declared. A `pyproject.toml` that will not parse is not borrowed,
+    since nothing can say what it installs.
+    """
+    try:
+        pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return False
+    tool = pyproject.get("tool")
+    uv = tool.get("uv") if isinstance(tool, dict) else None
+    package = uv.get("package") if isinstance(uv, dict) else None
+    if isinstance(package, bool):
+        return not package
+    return "build-system" not in pyproject
+
+
 def dependency_dirs(root: Path) -> list[str]:
     """The directories, relative to `root`, that its worktrees should link from it."""
-    dirs = [VENV_DIR] if (root / "pyproject.toml").is_file() else []
+    dirs = [VENV_DIR] if borrows_venv(root) else []
     for manifest in [root / "package.json", *sorted(root.glob("*/package.json"))]:
         where = manifest.parent.relative_to(root)
         if manifest.is_file() and not where.name.startswith((".", NODE_DIR)):
