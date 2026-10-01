@@ -30,6 +30,14 @@ def jobs(*names: str) -> list[FakeJob]:
     return [FakeJob(name) for name in names]
 
 
+@pytest.fixture(autouse=True)
+def no_collectors(monkeypatch):
+    """`refresh` also reads this machine's collector assignment and asks docker about it.
+    Off by default here, so a workstation that runs a collector gets the same answers as
+    CI; the tests that want rows stub `collectors.tray_rows` themselves."""
+    monkeypatch.setattr(tray_state.collectors, "tray_rows", lambda: [])
+
+
 # --- reading a problem line --------------------------------------------------
 
 
@@ -269,3 +277,43 @@ def test_refresh_tells_problems_what_was_stood_down_on_purpose(monkeypatch):
     )
     tray_state.refresh()
     assert seen["passed"] == frozenset({"devkit-a"})
+
+
+# --- the collectors ride along ---------------------------------------------------
+
+
+def test_a_collector_row_joins_the_jobs_and_sorts_by_how_loud_it_is(monkeypatch):
+    monkeypatch.setattr(schedule_health, "query", lambda: jobs("devkit-a"))
+    monkeypatch.setattr(
+        schedule_health, "problems", lambda found, now=None, deliberate=frozenset(): []
+    )
+    monkeypatch.setattr(
+        tray_state.collectors,
+        "tray_rows",
+        lambda: [("collector: ibkr_trader", tray_state.FAIL, "not running (Exited (1))")],
+    )
+    found = tray_state.refresh()
+    assert [(item.name, item.state) for item in found] == [
+        ("collector: ibkr_trader", tray_state.FAIL),
+        ("devkit-a", tray_state.OK),
+    ]
+    assert tray_state.overall(found) == tray_state.FAIL
+    assert "collector: ibkr_trader" in tray_state.tooltip(found)
+
+
+def test_a_collector_row_opens_the_collectors_log(monkeypatch):
+    """Clicking a row opens its record; a collector is no scheduled task, so it names its
+    own rather than being looked up in `schedule_health.ARTIFACTS`."""
+    monkeypatch.setattr(
+        tray_state.collectors, "tray_rows", lambda: [("collector: x", tray_state.OK, "")]
+    )
+    (item,) = tray_state.collector_states()
+    assert item.artifact == "logs/collectors.log"
+    assert tray_state.JobState("devkit-fix-pass", tray_state.OK).artifact == "logs/fix-pass.log"
+
+
+def test_the_collector_levels_are_the_trays_levels():
+    """`collectors` spells the three levels itself because this module imports it; a
+    respelling on either side would leave a row with no colour (`RANK` KeyError)."""
+    levels = {tray_state.collectors.OK, tray_state.collectors.WARN, tray_state.collectors.FAIL}
+    assert levels == set(tray_state.RANK)

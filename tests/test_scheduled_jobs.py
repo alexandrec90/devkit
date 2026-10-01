@@ -347,6 +347,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/fix_release.py": "the release pipeline the pass starts detached when main owes a tag",
     "scripts/git_trust.py": "the git config --global safe.directory a dispatching pass adds",
     "scripts/log-wrap.py": "the wrapper four of those jobs are launched through",
+    "scripts/collectors.py": "devkit-collectors runs it every 15 minutes; the tray asks it every poll",
     # reached from `workspace-status.py --notify`, which is the one script that imports
     # it rather than being wrapped in `notify-wrap.py`; see that flag's docstring.
     "scripts/notify.py": "the Windows PowerShell the status pass raises its toast through",
@@ -1119,6 +1120,20 @@ def test_every_branch_delivery_job_has_an_installer_here():
     switch = load_script("scripts/harness-switch.py")
     covered = {module.TASK_NAME for _name, module in branch_delivery_installers()}
     assert covered == set(switch.BRANCH_DELIVERY_JOBS)
+
+
+def test_the_collectors_pass_writes_the_file_its_installer_advertises():
+    """Same shape as the rc pass: a line per collector, which only the runner can render."""
+    installer = load_script("scripts/install-collectors.py")
+    runner = load_script("scripts/collectors.py")
+    assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
+
+
+def test_the_scheduled_collectors_pass_never_loses_the_mode_that_makes_it_act():
+    """`collectors.py` defaults to read-only `status`; without `maintain` the task would
+    fire every 15 minutes and start nothing."""
+    installer = load_script("scripts/install-collectors.py")
+    assert " maintain" in installer.collectors_arguments(installer.collectors_script())
 
 
 def test_the_installers_pass_writes_the_file_its_installer_advertises():

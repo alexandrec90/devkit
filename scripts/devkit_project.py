@@ -233,6 +233,12 @@ ACTIONS: dict[str, Action] = {
     # a schedule cannot decide: seeing the set at all, and taking it back off again.
     # `--yes` rides in from the task's own picker, so the uninstall is read before it runs.
     "installers": Action("scripts/installers.py", "Machine: Scheduled Jobs", projects=DEVKIT_ONLY),
+    # Which ingestion collectors this PC runs, stops or leaves alone. Scoped for
+    # `reclaim`'s reason -- the assignment is this machine's, not a checkout's -- and the
+    # task's one picker (`collectors_picker.py`) names the collector itself.
+    "collectors": Action(
+        "scripts/collectors.py", "Machine: Ingestion Collectors", projects=DEVKIT_ONLY
+    ),
     # The read-only half of `reclaim`'s memory question -- who holds the commit charge,
     # which `claude` processes are yours, what `reap-stale.py` would stop -- and scoped
     # for `reclaim`'s reason: one machine, one inventory, no checkout to pick.

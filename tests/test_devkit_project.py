@@ -391,6 +391,10 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # -- so what the click is for is the two decisions a schedule cannot make: seeing
         # the set, and taking it back off the machine.
         "installers",
+        # Born scoped, for `reclaim`'s reason: which collectors run is this machine's
+        # assignment, so once per ticked checkout would assign -- and start -- the same
+        # collectors N times. The picker names the collector instead.
+        "collectors",
         # The read-only page beside `reclaim`, scoped for exactly its reason: one process
         # table on the machine, so once per checkout would print the same page N times.
         "memory-inventory",

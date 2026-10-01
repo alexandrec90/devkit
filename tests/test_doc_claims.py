@@ -381,6 +381,9 @@ ALLOWED_MISSING = {
     "under the ignored `logs/`",
     "logs/fix-pass-supervise.json": "the report `scripts/fix-pass-supervise.py` writes "
     "each run, read by the /supervise-fix-pass skill; under the ignored `logs/`",
+    "logs/collectors.machine.json": "which collectors this workstation runs, written by "
+    "`collectors.py run-here`; under the ignored `logs/` because it must never follow the "
+    "repo to a second machine",
     "check-lock-markers.py": "a project-owned Stop tier devkit has no lockfiles for; "
     "its absence is an explicit skip, documented in test_repo_contract.py",
     "test_codex_hooks_contract.py": "carameli's, cited as the coupling the vendored "

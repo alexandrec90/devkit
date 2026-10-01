@@ -630,6 +630,35 @@
 				"problemMatcher": []
 			},
 			{
+				// Which ingestion collectors THIS PC runs -- the machine-local half of
+				// `devkit.collectors` (see the setting below and README, "Ingestion
+				// collectors"). One live pick: `collectorAction` lists every verb for all
+				// collectors and for each one, beside what this PC is set to now. Acting
+				// verbs act at once; `devkit-collectors` keeps it that way every 15 minutes.
+				"label": "Machine: Ingestion Collectors",
+				"detail": "Pick what this PC does with the ingestion collectors (ibkr_trader, sports_betting): run them here (starts now, kept up), stop them here (stops now, kept stopped), forget this PC's choice, or just show status. Other PCs are unaffected.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"devkit",
+					"collectors",
+					"${input:collectorAction}"
+				],
+				"icon": {
+					"id": "cloud-download",
+					"color": "terminal.ansiGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"clear": true,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
 				// Read-only. The memory half of the question "Reclaim Resources" cannot fix:
 				// who holds the commit charge, which claude processes are yours and which
 				// are phone sessions nobody has touched, what the MCP servers cost, which
@@ -1555,6 +1584,22 @@
 					"description": "Apply the uninstall?",
 					"fieldSeparator": "|",
 					"useSingleResult": true,
+					"rememberPrevious": false
+				}
+			},
+			{
+				// Live, so the list is `devkit.collectors` as it stands and each row can say
+				// what this PC is set to now. Single-select: a value is `<verb>` for every
+				// collector or `<verb>:<project>` for one, which `collectors.split_pick`
+				// takes apart. Reads no docker, so it opens at once.
+				"id": "collectorAction",
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/collectors_picker.py\"",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "What should this PC do with the ingestion collectors?",
+					"fieldSeparator": "|",
 					"rememberPrevious": false
 				}
 			},
@@ -2614,6 +2659,16 @@
 			"projects": ["devkit", "carameli", "roguelike"],
 			"spawn": "worktree",
 			"permissionMode": "bypassPermissions"
+		},
+		// Compose services that ingest on their own schedule with nobody connected, kept
+		// up by `devkit-collectors` -- see README, "Ingestion collectors". Declared here for
+		// every machine; RUN on none until `collectors.py run-here` on that machine, which
+		// is recorded in devkit's ignored `logs/` and so never follows the workspace to a
+		// second PC. `health` runs inside the container; its exit code is the project's own
+		// verdict on whether ingestion is pulling data.
+		"devkit.collectors": {
+			"ibkr_trader": { "service": "app", "health": ["ibkr-trader", "health"] },
+			"sports_betting": { "service": "collector", "health": ["sports-betting", "health", "--quiet"] }
 		},
 		// Options an installer should keep, keyed by installer file name. The daily
 		// `devkit-installers` pass (`installers.py`) re-registers a scheduled job from
