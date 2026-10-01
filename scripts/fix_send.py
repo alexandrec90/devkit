@@ -12,6 +12,7 @@ Tested through the pass in `tests/test_fix_pass.py`.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -226,6 +227,8 @@ def _occupied(decision: fix_plan.Decision, closed: fix_loop.Closed) -> str:
     at the harness, or any live session in the branch's own tree."""
     if closed.harness_busy and decision.action == fix_plan.UPSTREAM:
         return f"held until the devkit session in {closed.harness_busy} finishes"
+    if decision.action == fix_plan.UPSTREAM and (named := named_by(decision, closed.devkit_fixes)):
+        return f"pending {named}, which names every failure it is for"
     first = decision.failures[0]
     tree = (
         closed.busy.get((first.project, first.head))
@@ -233,6 +236,28 @@ def _occupied(decision: fix_plan.Decision, closed: fix_loop.Closed) -> str:
         else None
     )
     return f"a session is working in {tree}" if tree else ""
+
+
+def named_by(decision: fix_plan.Decision, fixes: tuple[tuple[int, str], ...]) -> str:
+    """The devkit PRs (`fix_loop.devkit_fixes`) whose bodies name every failure of
+    `decision` by URL, as `devkit #N, #M`; "" when any one is named by none.
+
+    2026-10-01: a devkit session was sent at roguelike #52 and social-scraper #23 while
+    #483, whose body named both as what it unblocks, was open, and again once it had
+    merged and was waiting on adoption. The ledger's backlog rides in the session without
+    deciding whether it goes (`fix_cycle.harness_state`), so it is not asked.
+    """
+    urls = [f.url for f in decision.failures if f.kind != fix_plan.LEDGER]
+    if not urls or not all(urls):
+        return ""
+    found: list[int] = []
+    for url in urls:
+        whole = re.compile(re.escape(url.rstrip("/")) + r"(?![\w/])")  # not #5 inside #52
+        naming = [number for number, body in fixes if whole.search(body)]
+        if not naming:
+            return ""
+        found += [n for n in naming if n not in found]
+    return "devkit " + ", ".join(f"#{n}" for n in sorted(found))
 
 
 def _send_one(

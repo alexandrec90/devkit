@@ -31,6 +31,7 @@ Tested in `tests/test_fix_loop.py`, and through the pass in `tests/test_fix_pass
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import re
 import sys
 import shutil
@@ -97,6 +98,9 @@ class Closed:
     in_flight: dict[str, str] = field(default_factory=dict)
     # Directories a session is busy in now (`bg_sessions.working`), stamped one or not.
     working: frozenset[str] = frozenset()
+    # Each devkit PR still carrying a fix to consumers, as `(number, body)` (`devkit_fixes`):
+    # a consumer failure one names waits for it rather than for a second devkit session.
+    devkit_fixes: tuple[tuple[int, str], ...] = ()
 
 
 def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
@@ -117,6 +121,7 @@ def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
             "stop", bg_sessions.stop_finished, closed.finished, runner, default=[]
         )
     closed.in_flight = journal.step("in-flight", in_flight, ctx, default={})
+    closed.devkit_fixes = journal.step("devkit-fixes", devkit_fixes, ctx, default=())
     history = fix_stall.read_history(ctx.history_path)
     journal.add(*journal.step("stall", fix_stall.stalled, history, ctx.now, default=[]))
     return closed
@@ -285,7 +290,8 @@ def job_findings(ctx: Context, jobs: list[schedule_health.Job] | None = None) ->
     items = triage.load(ctx.devkit_dir)
     found: list[Finding] = []
     local_now = ctx.now.astimezone().replace(tzinfo=None)  # the scheduler speaks local time
-    for line in schedule_health.problems(jobs, local_now, schedule_health.stood_down()):
+    deliberate = schedule_health.stood_down()
+    for line in schedule_health.problems(jobs, local_now, deliberate, root=ctx.devkit_dir):
         name, head = line.split(":", 1)[0], line.split(" -- ", 1)[0]
         if JOB_HISTORY in line:
             continue
@@ -328,6 +334,46 @@ def _harvest(ctx: Context, cursor: Path) -> list[Finding]:
         if cursor.is_file():
             shutil.copyfile(cursor, copy)
         return session_friction.harvest(ctx.root, copy, ctx.now)
+
+
+# How long a merged devkit PR goes on holding the consumer failures it names: the release
+# and the adoption that carry its fix there, which the pass and the daily upgrade job each
+# drive within a day. Past it, a failure still red is one the fix did not reach.
+MERGED_FIX_HOLDS = _dt.timedelta(days=2)
+
+
+def devkit_fixes(ctx: Context, gh_for=sweep.gh_for) -> tuple[tuple[int, str], ...]:
+    """Every devkit PR open, or merged within `MERGED_FIX_HOLDS`, as `(number, body)`;
+    none when `gh` cannot say, which sends the devkit session as before.
+
+    Merged as well as open (f9ebcfd4): a consumer failure is red until the adoption that
+    carries devkit's fix merges, so a pass that held only for open PRs sent a devkit
+    session at social-scraper #23 while #483, naming it, sat merged in v0.11.37.
+    """
+    done = gh_for(ctx.devkit_dir)(
+        "pr", "list", "--state", "all", "--limit", "100", "--json", "number,body,state,mergedAt"
+    )
+    try:
+        rows = json.loads(done.stdout or "[]") if done.returncode == 0 else []
+    except ValueError:
+        return ()
+    since = ctx.now - MERGED_FIX_HOLDS
+    return tuple(
+        (row["number"], str(row.get("body") or ""))
+        for row in (rows if isinstance(rows, list) else [])
+        if isinstance(row, dict) and isinstance(row.get("number"), int) and _carries(row, since)
+    )
+
+
+def _carries(row: dict, since: _dt.datetime) -> bool:
+    """`row` is open, or merged at or after `since`."""
+    if row.get("state") == "OPEN":
+        return True
+    try:
+        merged = _dt.datetime.fromisoformat(str(row.get("mergedAt") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return row.get("state") == "MERGED" and merged >= since
 
 
 def _verify(ctx: Context) -> list[str]:

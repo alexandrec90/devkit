@@ -200,6 +200,21 @@ def test_a_failure_is_read_from_its_kept_copy_not_from_the_pass_that_overwrote_i
     assert line.endswith("see logs/reconcile.failed.log")
 
 
+def test_a_failure_is_read_from_the_root_it_is_given_not_from_this_copy(tmp_path, monkeypatch):
+    """104d356c: the fix pass ran from a tree cut off the checkout, whose `logs/` holds
+    no reconcile log, and filed "no logs/reconcile.log" while the checkout held both."""
+    name = "devkit-worktree-reconcile"
+    checkout = tmp_path / "checkout"
+    kept_copy(checkout, name, NOW - dt.timedelta(minutes=30))
+    monkeypatch.setattr(health, "REPO_ROOT", tmp_path / "a-tree")
+    ran = NOW - dt.timedelta(hours=1)
+    failed = [job(name=name, last_result=1, last_run=ran)]
+    assert health.problems(failed, NOW)[0].endswith(
+        "the run predates it, or died before writing one"
+    )
+    assert health.problems(failed, NOW, root=checkout)[0].endswith("see logs/reconcile.failed.log")
+
+
 def test_a_kept_copy_older_than_the_run_is_an_earlier_failure_and_is_not_cited(tmp_path):
     name = "devkit-worktree-reconcile"
     kept_copy(tmp_path, name, NOW - dt.timedelta(days=3))

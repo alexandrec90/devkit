@@ -261,6 +261,8 @@ def test_the_skill_drives_this_script_and_says_not_to_poll_it():
     assert "Do not poll it" in skill and "logs/friction.md" in skill
     # The script refuses an elevated dispatch; the skill says how to get past that.
     assert "runas /trustlevel:0x20000" in skill
+    # 2523011c: groups fixed in the supervisor's tree and left open were sent to a fixer.
+    assert "--resolve-like <id>" in skill and "--pr <this tree's branch>" in skill
 
 
 # --- the loop -------------------------------------------------------------------------------

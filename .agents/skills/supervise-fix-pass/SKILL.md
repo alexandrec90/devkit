@@ -72,6 +72,11 @@ The script exits 1 when any iteration broke the contract. For every `VIOLATION`:
 1. **Reproduce it from the report** -- the record line, the transcript path, the finding.
 2. **Fix the cause in devkit** -- the pass, a prompt, a detector, a vendored script --
    with a test that fails without the fix. A violation is a pass defect by definition.
+   When it retires a ledger group, resolve the group the moment the fix and its test
+   are written: `python scripts/harness_triage.py --resolve-like <id> --note "<what fixed
+   it>" --pr <this tree's branch>`. The pass sends nothing at a group resolved onto an
+   unmerged branch; left open, it sends the next devkit fixer at work this tree already
+   holds, and that fixer spends its turns reading your diff (2523011c).
 3. Only when the fix needs something outside the repository (a credential, admin
    rights, a paid service), file it: `python scripts/hooks/report-harness-defect.py`,
    with each file that shows it as `--evidence <path>#L<lines>` rather than inside
