@@ -12,7 +12,8 @@ be the worst outcome here.
 
 Three things an entry can say beyond "sent": that it is old enough to look at again
 (`RESEND_AFTER`, because a session that died can leave nothing but its entry), that the
-pass found its session dead (`mark_dead`, which frees it at once), and that the session
+pass found its session dead (`mark_dead`, which frees it at once; `mark_interrupted`
+when a restart killed it, which also takes the send back), and that the session
 reported itself blocked (`mark_blocked`).
 
 And one thing the entries say together: how many sessions one *problem* has had
@@ -167,11 +168,12 @@ def record(
 
 
 def sends(entry: object) -> int:
-    """Sessions an entry has had; an entry written before the count was kept had one."""
+    """Sessions an entry has had; an entry written before the count was kept had one,
+    and one whose only session a restart took back (`mark_interrupted`) has none."""
     if not isinstance(entry, dict):
         return 0
     try:
-        return max(1, int(entry.get("sent", 1)))
+        return max(0, int(entry.get("sent", 1)))
     except (TypeError, ValueError):
         return 1
 
@@ -192,6 +194,21 @@ def mark_dead(path: Path, key: str, reason: str) -> bool:
     re-send still counts against the problem's `ATTEMPTS`. Returns whether one was marked.
     """
     return _mark(path, key, "dead", reason)
+
+
+def mark_interrupted(path: Path, key: str, reason: str) -> bool:
+    """The session sent under `key` was killed by the machine restarting.
+
+    Frees the key as `mark_dead` does, and takes the send back: nothing a fixer did is
+    measured by a power-off, and counted, it spent a blind problem's one attempt and
+    escalated two conflicts (#480, #482) nobody had tried. Returns whether one was marked.
+    """
+    if not _mark(path, key, "dead", reason):
+        return False
+    ledger = read_ledger(path)
+    ledger[key]["sent"] = max(0, sends(ledger[key]) - 1)
+    _write(path, ledger)
+    return True
 
 
 def _mark(path: Path, key: str, field: str, reason: str) -> bool:

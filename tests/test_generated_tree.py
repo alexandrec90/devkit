@@ -12,9 +12,10 @@ import subprocess
 import sys
 
 import pytest
-from support import generate, load_script
+from support import generate, harness_config, load_script
 
 new_project = load_script("scripts/new-project.py")
+structure_check = load_script("scripts/hooks/structure_check.py")
 
 # The two ends of the feature matrix: every template's `if` rendered false, then true.
 SHAPES = [
@@ -45,3 +46,26 @@ def test_generated_python_is_already_ruff_format_clean(tmp_path, features):
     assert result.returncode == 0, (
         f"generated files are not format-clean:\n{result.stdout}{result.stderr}"
     )
+
+
+@pytest.mark.parametrize("features", SHAPES)
+def test_no_generated_function_or_class_is_past_the_structure_limits(tmp_path, features):
+    """A project's gate holds the files devkit renders into it to `structure_check`'s limits.
+
+    `run-tests.py` is the project's own, rendered from its template, and its structure
+    baseline was seeded at adoption. #479 grew the template's `main` to complexity 21, and
+    every project that refreshed it went red on `test_nothing_is_new_or_worse_than_the_baseline`
+    (roguelike #52, social-scraper #23): a new finding that no fix in the project could
+    reach. Only the limits a function or class is held to: the per-module counts are
+    advisory, and a generated tree's dependencies are seeded into its baseline at adoption.
+    The vendored files are devkit's own gate's.
+    """
+    root = generate(tmp_path, features)
+    # What `sync-devkit.py --pull` stamps, and what makes the gate skip vendored files.
+    (root / "DEVKIT_VERSION").write_text("0000000\n", encoding="utf-8")
+    cfg = harness_config.load(root)
+    worse, _, _ = structure_check.judge(root, cfg)
+    held = set(structure_check.DEFAULT_LIMITS) - structure_check.ADVISORY_RULES
+    lim = structure_check.limits(cfg)
+    over = [structure_check.describe(f, lim) for f in worse if f.rule in held]
+    assert over == [], "reshape the template, do not grow the baseline:\n" + "\n".join(over)

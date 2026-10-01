@@ -328,33 +328,50 @@ def main(argv: list[str] | None = None) -> int:
         cmd += ["--last-failed", "--last-failed-no-failures", "all"]
     whole = args.all or args.changed or targets or any(os.environ.get(k) for k in FULL_SUITE_ENV)
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-    front: list[str] = []
-    failures: list[str] = []
-    if not whole:
-        changed = changed_paths(REPO_ROOT)
-        if changed is None:
-            print("run-tests: git cannot say what changed; running the suite")
-            whole = True
-        else:
-            targets, unnamed = tests_for(changed, REPO_ROOT)
-            front, unnamed, owed = frontend_run(changed, unnamed, REPO_ROOT)
-            failures += [owed] if owed else []
-            print(
-                f"run-tests: {len(targets)} test file(s) for {len(changed)} changed path(s); "
-                "--all runs the suite"
-            )
-            for path in unnamed:
-                print(f"run-tests:   no test named for {path}")
-            if not targets and not front and not failures:
-                ARTIFACT.write_text("", encoding="utf-8")
-                print("run-tests: nothing to run (artifact cleared)")
-                return 0
-    if whole or targets:
-        failures += [run_pytest(cmd + targets)]
-    if front:
-        failures += [run_vitest(front, REPO_ROOT)]
-    failures = [text for text in failures if text]
+    plan = None if whole else _plan_changed(REPO_ROOT)
+    if plan is None:
+        return _finish([run_pytest(cmd + targets)])
+    return _run_planned(cmd, *plan)
 
+
+# `main`'s helpers are out of it for `structure_check`'s complexity limit, which the
+# project's own gate holds this file to: it is the project's, rendered from devkit's
+# template, so a branch added here reddens every project that refreshes it.
+
+
+def _plan_changed(root: Path) -> tuple[list[str], list[str], list[str]] | None:
+    """`(pytest targets, vitest command, failures)` for what changed; None runs the suite."""
+    changed = changed_paths(root)
+    if changed is None:
+        print("run-tests: git cannot say what changed; running the suite")
+        return None
+    targets, unnamed = tests_for(changed, root)
+    front, unnamed, owed = frontend_run(changed, unnamed, root)
+    print(
+        f"run-tests: {len(targets)} test file(s) for {len(changed)} changed path(s); "
+        "--all runs the suite"
+    )
+    for path in unnamed:
+        print(f"run-tests:   no test named for {path}")
+    return targets, front, [owed] if owed else []
+
+
+def _run_planned(cmd: list[str], targets: list[str], front: list[str], failures: list[str]) -> int:
+    """Run the tests `_plan_changed` named, and nothing where it named none."""
+    if not targets and not front and not failures:
+        ARTIFACT.write_text("", encoding="utf-8")
+        print("run-tests: nothing to run (artifact cleared)")
+        return 0
+    if targets:
+        failures = [*failures, run_pytest(cmd + targets)]
+    if front:
+        failures = [*failures, run_vitest(front, REPO_ROOT)]
+    return _finish(failures)
+
+
+def _finish(failures: list[str]) -> int:
+    """Write the artifact for what failed -- an empty text is a pass -- and the exit code."""
+    failures = [text for text in failures if text]
     if not failures:
         # Clear on pass, so a stale artifact never sends the next agent chasing a
         # failure that is already fixed.

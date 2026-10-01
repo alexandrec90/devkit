@@ -65,6 +65,9 @@ class Context:
     history_path: Path
     mode: str
     now: _dt.datetime
+    # When the machine last started (`fix_reports.booted_at`); None judges a session by
+    # its silence alone.
+    booted: _dt.datetime | None = None
 
     @property
     def writes(self) -> bool:
@@ -187,7 +190,7 @@ def _judge_session(
     ctx: Context, tree: fix_reports.Tree, where: str, journal: fix_findings.Journal, closed: Closed
 ) -> None:
     key = str(tree.stamp.get("key", ""))
-    state, transcript = fix_reports.session_state(tree.path, ctx.now)
+    state, transcript = fix_reports.session_state(tree.path, ctx.now, booted=ctx.booted)
     if state in (fix_reports.DONE, *fix_reports.DEAD):
         closed.finished.append(str(tree.path))
     live = fix_reports.active_transcript(tree.path, ctx.now)
@@ -198,24 +201,46 @@ def _judge_session(
     if tree.branch and (running or (live and str(live) != transcript)):
         closed.busy[(tree.project, tree.branch)] = str(tree.path)
     if state in fix_reports.DEAD:
-        # No key: a dead session is re-sent at once, not parked behind the finding. One
-        # that never started is cited by what its launcher said, when it left a record.
-        # A launcher's answer is the signature, and the branch -- new every dispatch --
-        # stays in the evidence: filed under it, one unreachable service was eight open
-        # groups in eight hours, one per hourly re-send (1e5e57f4 and seven more).
-        launched = fix_reports.launch_line(tree.path) if not transcript else ""
-        detail = (
-            f"{tree.project}: the dispatched session {state} -- {launched}"
-            if launched
-            else f"{where}: the dispatched session {state}"
-        )
-        cited = str(tree.path / fix_reports.LAUNCH_FILE) if launched else str(tree.path)
-        journal.add(Finding("fixer-no-outcome", tree.project, detail, evidence=transcript or cited))
-        if ctx.writes:
-            fix_ledger.mark_dead(ctx.ledger_path, key, state)
-            fix_reports.note_on_stamp(tree.path, "dead", state)
+        closed.lines.extend(judge_dead(ctx, tree, where, state, transcript, journal))
     elif (state == fix_reports.WORKING or running) and fix_ledger.is_upstream(key):
         closed.harness_busy = str(tree.path)
+
+
+def judge_dead(
+    ctx: Context,
+    tree: fix_reports.Tree,
+    where: str,
+    state: str,
+    transcript: str,
+    journal: fix_findings.Journal,
+) -> list[str]:
+    """Free a dead session's dispatch, and file it unless a restart killed it; the lines
+    for the record."""
+    key = str(tree.stamp.get("key", ""))
+    if ctx.writes:
+        fix_reports.note_on_stamp(tree.path, "dead", state)
+    if state == fix_reports.INTERRUPTED:
+        # The machine went down under it: no defect to file and no attempt spent, only
+        # a re-send, which finds a PR's tree as the session left it.
+        if ctx.writes:
+            fix_ledger.mark_interrupted(ctx.ledger_path, key, state)
+        return [f"{where} -- {state}; sent again"]
+    # No key: a dead session is re-sent at once, not parked behind the finding. One
+    # that never started is cited by what its launcher said, when it left a record.
+    # A launcher's answer is the signature, and the branch -- new every dispatch --
+    # stays in the evidence: filed under it, one unreachable service was eight open
+    # groups in eight hours, one per hourly re-send (1e5e57f4 and seven more).
+    launched = fix_reports.launch_line(tree.path) if not transcript else ""
+    detail = (
+        f"{tree.project}: the dispatched session {state} -- {launched}"
+        if launched
+        else f"{where}: the dispatched session {state}"
+    )
+    cited = str(tree.path / fix_reports.LAUNCH_FILE) if launched else str(tree.path)
+    journal.add(Finding("fixer-no-outcome", tree.project, detail, evidence=transcript or cited))
+    if ctx.writes:
+        fix_ledger.mark_dead(ctx.ledger_path, key, state)
+    return []
 
 
 def working_dirs() -> frozenset[str]:

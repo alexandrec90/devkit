@@ -224,6 +224,54 @@ def test_a_session_is_working_done_or_dead(tmp_path):
     assert fix_reports.session_state(tree, now, projects) == (fix_reports.DONE, str(log))
 
 
+def test_a_session_last_heard_before_the_machine_started_was_stopped_by_it(tmp_path):
+    """No process outlives a restart, so the 90-minute quiet is not waited out: the three
+    fixers a power-off killed on 2026-09-30 were each filed as a dead fixer instead."""
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=10))
+    log = _transcript(projects, tree, _dt.timedelta(minutes=5), now)
+    booted = now - _dt.timedelta(minutes=2)
+    assert fix_reports.session_state(tree, now, projects, booted) == (
+        fix_reports.INTERRUPTED,
+        str(log),
+    )
+    assert fix_reports.INTERRUPTED in fix_reports.DEAD
+    assert fix_reports.session_state(tree, now, projects)[0] == fix_reports.WORKING, "unknown"
+    earlier = now - _dt.timedelta(minutes=8)
+    assert fix_reports.session_state(tree, now, projects, earlier)[0] == fix_reports.WORKING, (
+        "it spoke after the boot"
+    )
+    later = now + _dt.timedelta(minutes=1)
+    assert fix_reports.session_state(tree, now, projects, later)[0] == fix_reports.WORKING, (
+        "a boot past the pass's own clock is not one it can judge by"
+    )
+    (tree / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
+    assert fix_reports.session_state(tree, now, projects, booted)[0] == fix_reports.DONE
+
+
+def test_a_session_sent_just_before_a_restart_never_spoke_and_was_stopped_by_it(tmp_path):
+    now = _dt.datetime.now(_dt.UTC)
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=10))
+    booted = now - _dt.timedelta(minutes=2)
+    projects = tmp_path / "projects"
+    assert fix_reports.session_state(tree, now, projects, booted) == (fix_reports.INTERRUPTED, "")
+    refused = subprocess.CompletedProcess(["claude", "--bg", "p"], 1, "", "Couldn't reach it")
+    fix_reports.record_launch(tree, ["claude", "--bg", "p"], refused)
+    assert fix_reports.session_state(tree, now, projects, booted)[0] == fix_reports.NEVER_STARTED
+
+
+def test_the_boot_is_read_off_the_machine_and_unknown_where_it_cannot_be(monkeypatch):
+    now = _dt.datetime.now(_dt.UTC)
+    booted = fix_reports.booted_at(now)
+    if sys.platform in ("win32", "linux"):
+        assert booted is not None and booted < now
+    monkeypatch.setattr(fix_reports, "_uptime", lambda: 90.0)
+    assert fix_reports.booted_at(now) == now - _dt.timedelta(seconds=90)
+    monkeypatch.setattr(fix_reports, "_uptime", lambda: None)
+    assert fix_reports.booted_at(now) is None
+
+
 # The two records 0929-7's transcript held around its early ship, as Claude Code writes
 # them: the Bash result that started the suite, and the notification that it ended.
 LAUNCH = (

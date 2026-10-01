@@ -209,6 +209,24 @@ def test_a_dead_session_frees_its_key_at_once_and_is_marked_once(tmp_path):
     assert fix_ledger.already_sent(decision, fix_ledger.read_ledger(path), NOW) == ""
 
 
+def test_a_session_a_restart_took_frees_its_key_and_spends_no_attempt(tmp_path):
+    """#480 and #482's resolvers died in a power-off, and the send each had counted as
+    its conflict's one blind attempt: both PRs were escalated with nobody having tried."""
+    path = tmp_path / "dispatch.json"
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
+    key = fix_ledger.decision_key(decision)
+    fix_ledger.record(path, key, "n", NOW)
+    fix_ledger.record(path, key, "n", NOW)
+    assert fix_ledger.mark_interrupted(path, key, "stopped by a restart")
+    assert not fix_ledger.mark_interrupted(path, key, "stopped by a restart"), "one verdict"
+    ledger = fix_ledger.read_ledger(path)
+    assert fix_ledger.already_sent(decision, ledger, NOW) == ""
+    assert fix_ledger.attempts(decision, ledger) == 1, "the first send still counts"
+    fix_ledger.record(path, key, "n", NOW)
+    assert fix_ledger.attempts(decision, fix_ledger.read_ledger(path)) == 2
+    assert not fix_ledger.mark_interrupted(path, "never-sent", "stopped by a restart")
+
+
 def test_since_makes_everything_before_a_resolved_escalation_history(tmp_path):
     """Once the devkit session resolves what a problem was escalated as, the problem
     starts over: its sessions, its block and its in-flight entry are all before it."""

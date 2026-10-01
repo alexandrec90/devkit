@@ -270,6 +270,43 @@ def test_a_session_gone_quiet_without_an_outcome_is_dead(ctx, monkeypatch):
     assert "ended without an outcome" in found.detail and found.evidence.endswith("s.jsonl")
 
 
+def test_a_session_the_machine_restarted_under_is_sent_again_not_filed(ctx, monkeypatch):
+    """4dc413a1, 9201a08f, e2feebab: the operator powered off at 02:26 on 2026-09-30 with
+    three fixers mid-call, and each was filed as a dead fixer for a devkit session to
+    investigate, while the two resolvers' lost sends escalated #480 and #482 as blind."""
+    fix_ledger.record(ctx.ledger_path, KEY, "n", NOW - _dt.timedelta(minutes=10))
+    tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=10),
+        transcript_age=_dt.timedelta(minutes=5),
+    )
+    restarted = fix_loop.Context(**{**vars(ctx), "booted": NOW - _dt.timedelta(minutes=2)})
+    closed, journal = close(restarted)
+    assert journal.findings == []
+    assert closed.lines == ["carameli agent/x-0919 -- stopped by a restart; sent again"]
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["dead"] == fix_reports.INTERRUPTED and fix_ledger.sends(entry) == 0
+
+
+def test_judging_a_dead_session_in_plan_mode_files_it_and_writes_nothing(ctx, monkeypatch):
+    fix_ledger.record(ctx.ledger_path, KEY, "n", NOW)
+    path = tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=5))
+    [one] = fix_reports.read_trees(ctx.root, ctx.projects)
+    plan = fix_loop.Context(**{**vars(ctx), "mode": fix_cycle.PLAN})
+    journal = fix_findings.Journal(ctx.devkit_dir)
+    where = "carameli agent/x-0919"
+    assert fix_loop.judge_dead(plan, one, where, fix_reports.NO_OUTCOME, "t.jsonl", journal) == []
+    assert [f.kind for f in journal.findings] == ["fixer-no-outcome"]
+    restart = fix_reports.INTERRUPTED
+    assert fix_loop.judge_dead(plan, one, where, restart, "t.jsonl", journal) == [
+        f"{where} -- {restart}; sent again"
+    ]
+    assert len(journal.findings) == 1, "a restart files nothing"
+    assert "dead" not in fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert "dead" not in fix_reports.read_stamp(path)
+
+
 def test_a_working_devkit_session_is_the_harness_busy(ctx, monkeypatch):
     path = tree(
         ctx,
