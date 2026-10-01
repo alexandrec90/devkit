@@ -18,7 +18,7 @@ import types
 from pathlib import Path
 
 import pytest
-from support import REPO_ROOT
+from support import REPO_ROOT, load_script
 
 TEMPLATE = REPO_ROOT / "templates" / "core" / "scripts" / "run-tests.py.tmpl"
 
@@ -81,6 +81,7 @@ def run_in(runner, tmp_path, monkeypatch):
 
     run.seen = seen
     run.answers = answers
+    run.contracts = list(runner.CONTRACT_TESTS)
     return run
 
 
@@ -183,3 +184,31 @@ def test_with_the_tier_off_a_typescript_change_still_runs_nothing(run_in, tmp_pa
     assert run_in("src/game/map.ts") == 0
     assert run_in.seen == []
     assert "nothing to run" in capsys.readouterr().out
+
+
+def test_an_instruction_file_change_runs_the_vendored_contract_tests(run_in, tmp_path, capsys):
+    """roguelike, 2026-10-01: CLAUDE.md names no test, so a targeted run never met the
+    500-line contract in `test_repo_contract.py` and main went red in the gate on it."""
+    project(tmp_path, frontend=None)
+    for rel in ("tests/test_game.py", *run_in.contracts):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("", encoding="utf-8")
+    assert run_in("CLAUDE.md", "app/game.py") == 0
+    [cmd] = run_in.seen
+    assert cmd[-1 - len(run_in.contracts) :] == ["tests/test_game.py", *run_in.contracts]
+    out = capsys.readouterr().out
+    assert "no test named for CLAUDE.md" in out and "the contract tests" in out
+
+
+def test_a_contract_test_the_project_does_not_hold_is_skipped(runner, tmp_path):
+    held = runner.CONTRACT_TESTS[0]
+    (tmp_path / held).parent.mkdir(parents=True)
+    (tmp_path / held).write_text("", encoding="utf-8")
+    assert runner.with_contracts(["tests/test_a.py", held], tmp_path) == ["tests/test_a.py", held]
+
+
+def test_every_template_contract_test_is_vendored(runner):
+    """A generated project holds only what the MANIFEST ships it; a contract test outside
+    it would be skipped in every project without a word."""
+    manifest = set(load_script("scripts/sync-devkit.py").MANIFEST)
+    assert [t for t in runner.CONTRACT_TESTS if t not in manifest] == []
