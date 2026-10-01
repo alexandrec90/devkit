@@ -12,13 +12,18 @@ two formats and the byte-offset bookkeeping live apart from the detectors.
 Both become `Event`s: what the user said, what command a tool call ran, and whether a
 tool result was a failure. Everything else in a transcript is ignored.
 
+Run it on a ledger row's `evidence=` (`<transcript>#L<line>`) to read that session as
+audit lines around the line: two sweeps each wrote their own reader for want of this.
+
 Tested in `tests/test_session_friction.py`, through the detectors that read these.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +45,7 @@ class Event:
     call_id: str = ""
     tool: str = ""  # a call's tool name: `Bash`, `Edit`, `AskUserQuestion`, `shell`
     path: str = ""  # the file an edit call names: `Edit`'s `file_path`
+    background: bool = False  # a call run with `run_in_background`: its wait holds no turn
 
 
 @dataclass(frozen=True)
@@ -88,7 +94,16 @@ def _claude_block(block: dict, speaker: str, line: int) -> Event | None:
         path = str(given.get("file_path") or given.get("notebook_path") or "")
         tool = str(block.get("name", ""))
         call_id = str(block.get("id", ""))
-        return Event("call", line, command=command, call_id=call_id, tool=tool, path=path)
+        background = given.get("run_in_background") is True
+        return Event(
+            "call",
+            line,
+            command=command,
+            call_id=call_id,
+            tool=tool,
+            path=path,
+            background=background,
+        )
     if kind == "tool_result":
         error = bool(block.get("is_error"))
         call_id = str(block.get("tool_use_id", ""))
@@ -199,3 +214,40 @@ def render(path: Path) -> str:
         tool = f" {event.tool}" if event.tool else ""
         lines.append(f"L{event.line} {kind.upper()}{tool}: {cut}")
     return "\n".join(lines) + "\n"
+
+
+# A ledger row's `evidence=`: a transcript, and optionally the line a finding was read at.
+EVIDENCE = re.compile(r"^(?P<path>.+?)(?:#L(?P<line>\d+))?$")
+RENDERED_LINE = re.compile(r"^L(\d+) ")
+
+
+def window(rendered: str, line: int, around: int) -> str:
+    """The rendered lines within `around` transcript lines of `line`."""
+    kept = [
+        text
+        for text in rendered.splitlines()
+        if (found := RENDERED_LINE.match(text)) and abs(int(found.group(1)) - line) <= around
+    ]
+    return "".join(f"{text}\n" for text in kept)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Render a session transcript as audit lines.")
+    parser.add_argument("evidence", help="a transcript path, or a ledger evidence= `<path>#L<n>`")
+    parser.add_argument(
+        "--around", type=int, default=40, help="transcript lines either side of #L<n>"
+    )
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    found = EVIDENCE.match(args.evidence.strip())
+    path = Path(found.group("path")) if found else Path(args.evidence)
+    if not path.is_file():
+        print(f"session_transcripts: no transcript at {path}", file=sys.stderr)
+        return 2
+    rendered = render(path)
+    line = found.group("line") if found else None
+    print(window(rendered, int(line), args.around) if line else rendered, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

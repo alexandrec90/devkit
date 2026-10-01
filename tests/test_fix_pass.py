@@ -899,12 +899,18 @@ def test_a_dispatching_pass_beside_a_running_one_ships_and_sends_nothing(
     shipped the same intents; the loser's push was refused ("cannot lock ref") and filed
     as a ship failure of a branch that had just shipped."""
     workspace = tmp_path / "alex.code-workspace"
+    monkeypatch.setattr(fix_pass, "REPO_ROOT", tmp_path / "devkit")
+    fix_pass.write_artifact("fix-pass: mode=dispatch\nharness  clean")
     monkeypatch.setattr(fix_pass, "run", lambda *a, **k: pytest.fail("a second pass ran"))
     with fix_pass.worktree.named_lock(tmp_path, fix_pass.RUN_LOCK_NAME, 0.1, 60.0) as held:
         assert held
         code = fix_pass.run_alone(workspace, fix_cycle.DISPATCH, _launch(), wait=0.2, stale=60.0)
     assert code == fix_pass.EXIT_OK
     assert "another dispatching pass holds" in capsys.readouterr().out
+    # The running pass is usually the scheduled one, in another checkout: left alone,
+    # this checkout's record was the previous pass's, read back as this one's.
+    record = (tmp_path / "devkit" / fix_pass.ARTIFACT).read_text(encoding="utf-8")
+    assert record.startswith("fix-pass: yielded -- another dispatching pass holds")
 
 
 def test_a_dispatching_pass_holds_the_lock_while_it_runs_and_releases_it(tmp_path, monkeypatch):
@@ -1115,7 +1121,9 @@ def test_a_carried_intent_is_recorded_under_the_branch_it_went_out_on(monkeypatc
         "ship_one",
         lambda *a: ship_intent.Outcome(moved, ship_intent.SHIPPED, "u/pull/9", "u/pull/9"),
     )
-    monkeypatch.setattr(fix_pass.ship_intent, "cut_at", lambda tree, base: "2026-09-27T00:00:00Z")
+    monkeypatch.setattr(
+        fix_pass.ship_intent, "retired_at", lambda tree, branch: "2026-09-27T00:00:00Z"
+    )
     pointed = []
     monkeypatch.setattr(
         fix_pass.fix_loop.triage,

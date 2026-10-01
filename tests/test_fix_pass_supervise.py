@@ -83,6 +83,10 @@ def test_a_record_that_is_not_this_iterations_pass_is_a_violation():
     assert supervise.check_ran(stale, "dispatch") == [
         "the pass did not run in dispatch mode here: fix-pass: mode=plan"
     ]
+    yielded = "fix-pass: yielded -- another dispatching pass holds C:/b/fix-pass.lock"
+    assert supervise.check_ran(yielded, "dispatch") == [
+        f"the pass did not run in dispatch mode here: {yielded}"
+    ]
     handed = "fix-pass: handed to devkit-fix-pass -- this shell is elevated"
     assert supervise.check_ran(handed, "dispatch") == [
         f"the pass did not run in dispatch mode here: {handed}"

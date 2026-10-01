@@ -111,6 +111,8 @@ def test_the_download_lands_under_dest_and_the_logs_are_read_back(tmp_path):
     (dest / "stale.log").write_text("FAILED old::one", encoding="utf-8")
 
     def gh(*args):
+        if args[:2] == ("run", "view"):
+            return subprocess.CompletedProcess(["gh", *args], 0, "Tests\t\tnothing new\n", "")
         assert args[:3] == ("run", "download", "7")
         target = Path(args[args.index("-D") + 1]) / "test-failures"
         target.mkdir(parents=True)
@@ -119,6 +121,35 @@ def test_the_download_lands_under_dest_and_the_logs_are_read_back(tmp_path):
 
     assert ev.run_evidence(gh, "7", dest) == ([SUMMARY], []), "named, so no jobs asked for"
     assert not (dest / "stale.log").exists(), "an earlier run's logs must not survive"
+    assert not (dest / ev.FAILED_LOG).exists(), "a log naming nothing new is not kept"
+
+
+def test_a_failed_job_the_artifacts_do_not_cover_is_still_read_from_its_log(tmp_path):
+    """sports_betting #48: the lint artifact named two files, so the failed Tests job's
+    log was never read, and the fixer's prompt listed only the lint findings. It found
+    the two ratchet failures by chance, and filed that the gate did not run them."""
+    lint = "# lint\nsports_betting/historical.py:3: error: Library stubs not installed\n"
+    tests_log = (
+        "Tests\tHarness hook tests\t2026-09-29T21:40:00.0Z FAILED "
+        "scripts/hooks/tests/test_structure_check.py::test_nothing_is_new_or_worse - x\n"
+    )
+
+    def gh(*args):
+        if args[:2] == ("run", "download"):
+            target = Path(args[args.index("-D") + 1]) / "lint-errors"
+            target.mkdir(parents=True)
+            (target / "lint-errors.log").write_text(lint, encoding="utf-8")
+            return subprocess.CompletedProcess(["gh", *args], 0, "", "")
+        assert args == ("run", "view", "7", "--log-failed")
+        return subprocess.CompletedProcess(["gh", *args], 0, tests_log, "")
+
+    dest = tmp_path / "e"
+    texts, asked = ev.run_evidence(gh, "7", dest)
+    named = fix_plan.signature_from_logs(texts)
+    assert "scripts/hooks/tests/test_structure_check.py::test_nothing_is_new_or_worse" in named
+    assert len(named) > 1, "the lint finding is still named beside it"
+    assert asked == []
+    assert (dest / ev.FAILED_LOG).read_text(encoding="utf-8") == tests_log
 
 
 def test_a_junit_report_in_the_download_is_also_written_out_readable(tmp_path):
@@ -129,7 +160,8 @@ def test_a_junit_report_in_the_download_is_also_written_out_readable(tmp_path):
     )
 
     def gh(*args):
-        (Path(args[args.index("-D") + 1]) / "junit.xml").write_text(junit, encoding="utf-8")
+        if "-D" in args:
+            (Path(args[args.index("-D") + 1]) / "junit.xml").write_text(junit, encoding="utf-8")
         return subprocess.CompletedProcess(["gh", *args], 0, "", "")
 
     dest = tmp_path / "e"
@@ -262,6 +294,8 @@ def artifact_gh(files: dict[str, str], jobs: list[dict] | None = None):
             return subprocess.CompletedProcess(args, 0, "", "")
         if args[:2] == ("run", "view"):
             return subprocess.CompletedProcess(args, 0, json.dumps({"jobs": jobs or []}), "")
+        if "--log-failed" in args:  # asked beside every artifact; this run's names nothing
+            return subprocess.CompletedProcess(args, 0, "", "")
         raise AssertionError(f"unexpected {args}")
 
     return gh
@@ -386,6 +420,8 @@ def test_reading_a_pr_downloads_the_run_at_its_sha_and_signs_it(monkeypatch, tmp
             target = Path(args[-1]) / "test-failures"
             target.mkdir(parents=True)
             (target / "test-failures.log").write_text(SUMMARY, encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if "--log-failed" in args:  # asked beside every artifact; this run's names nothing
             return subprocess.CompletedProcess(args, 0, "", "")
         raise AssertionError(f"unexpected {args}")
 
@@ -662,6 +698,8 @@ def branch_world(monkeypatch, conclusion: str, summary: str, tags: str):
             target.mkdir(parents=True)
             (target / "test-failures.log").write_text(summary, encoding="utf-8")
             return subprocess.CompletedProcess(args, 0, "", "")
+        if "--log-failed" in args:  # asked beside every artifact; this run's names nothing
+            return subprocess.CompletedProcess(args, 0, "", "")
         raise AssertionError(f"unexpected {args}")
 
     monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
@@ -816,6 +854,8 @@ def test_a_failing_check_from_another_workflow_is_its_own_evidence(monkeypatch, 
             target = Path(args[-1]) / "test-failures"
             target.mkdir(parents=True)
             (target / "test-failures.log").write_text(SUMMARY, encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if "--log-failed" in args:  # asked beside every artifact; this run's names nothing
             return subprocess.CompletedProcess(args, 0, "", "")
         raise AssertionError(f"unexpected {args}")
 

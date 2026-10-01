@@ -1184,17 +1184,31 @@ def test_a_dispatch_stamps_the_worktree_with_the_key_it_is_recorded_under(monkey
     assert fix_prs.fix_reports.read_stamp(unstamped) == {}, "a hand pick has no ledger key"
 
 
-def tree_git(porcelain: str = "", ff_ok: bool = True):
-    """A `git_for` whose tree is `porcelain`-dirty and whose fast-forward may fail."""
+NOT_FAST_FORWARD = "fatal: Not possible to fast-forward, aborting.\n"
+DUBIOUS = (
+    "fatal: detected dubious ownership in repository at 'C:/w/t'\n"
+    "To add an exception for this directory, call:\n"
+)
+
+
+def tree_git(
+    porcelain: str = "", ff_ok: bool = True, refused: str = "", ff_error: str = NOT_FAST_FORWARD
+):
+    """A `git_for` whose tree is `porcelain`-dirty and whose fast-forward may fail;
+    `refused` is what git says to every call when it will not read the tree at all."""
     calls: list[tuple[str, ...]] = []
 
     def git_for(_tree):
         def git(*args):
             calls.append(args)
+            if refused:
+                return subprocess.CompletedProcess(args, 128, "", refused)
             if args[0] == "status":
                 return subprocess.CompletedProcess(args, 0, porcelain, "")
             if args[0] == "merge":
-                return subprocess.CompletedProcess(args, 0 if ff_ok else 128, "", "")
+                return subprocess.CompletedProcess(
+                    args, 0 if ff_ok else 128, "", "" if ff_ok else ff_error
+                )
             return subprocess.CompletedProcess(args, 0, "", "")
 
         return git
@@ -1218,6 +1232,25 @@ def test_a_clean_reused_tree_is_fast_forwarded_to_origin_and_a_dirty_one_is_left
     assert calls[-1][0] == "status", "a session's edits are never merged over"
     git_for, _calls = tree_git(ff_ok=False)
     assert "diverged" in fix_prs.refresh_head(tmp_path, "agent/x", git_for)
+
+
+def test_a_tree_git_will_not_read_is_said_as_that_not_as_a_divergence(tmp_path):
+    """sports_betting #48's prompt said the branch "has diverged from origin": git had
+    refused the Administrators-owned tree, so the fetch failed silently, an unreadable
+    status read as clean, and the refused fast-forward read as divergence. The branch was
+    five commits behind, and the fixer spent turns proving it."""
+    git_for, calls = tree_git(refused=DUBIOUS)
+    said = fix_prs.refresh_head(tmp_path, "agent/x", git_for)
+    assert "diverged" not in said
+    assert said == (
+        "left as is: git could not read the tree: "
+        "fatal: detected dubious ownership in repository at 'C:/w/t'"
+    )
+    assert [c[0] for c in calls] == ["fetch", "status"], "nothing merged over an unread tree"
+    git_for, _calls = tree_git(ff_ok=False, ff_error="error: cannot lock ref 'HEAD'\n")
+    assert fix_prs.refresh_head(tmp_path, "agent/x", git_for) == (
+        "left as is: git refused the fast-forward: error: cannot lock ref 'HEAD'"
+    )
 
 
 def test_a_planned_pr_is_refreshed_before_its_fixer_opens_and_a_refused_commit_is_not(

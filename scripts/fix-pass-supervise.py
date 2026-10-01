@@ -213,15 +213,17 @@ def check_progress(iterations: list[Iteration]) -> list[str]:
 # --- the sessions -------------------------------------------------------------------------
 
 
-def measure(transcript: Path | None) -> tuple[int, int, list[str], int]:
-    """`(tool calls, failed calls, friction the detectors see, output tokens)`."""
+def measure(transcript: Path | None, tree: str = "") -> tuple[int, int, list[str], int]:
+    """`(tool calls, failed calls, friction the detectors see, output tokens)`, read as
+    the ledger's harvest reads it for a session in `tree`."""
     if transcript is None or not transcript.is_file():
         return 0, 0, [], 0
     chunk = st.read_new(transcript, 0, 0)
     events = st.events(transcript, chunk.rows)
     calls = sum(1 for e in events if e.kind == "call")
     failed = sum(1 for e in events if e.kind == "result" and e.error)
-    friction = [f"{cls}: {what}" for cls, what, _ in session_friction.detect(events)]
+    found = session_friction.outside_the_tree(session_friction.detect(events), tree)
+    friction = [f"{cls}: {what}" for cls, what, _ in found]
     return calls, failed, friction, output_tokens(row for _, row in chunk.rows)
 
 
@@ -292,7 +294,7 @@ def settle(
     for tree in trees:
         state, transcript = states[tree.path]
         path = Path(transcript) if transcript else None
-        calls, failed, friction, tokens = measure(path)
+        calls, failed, friction, tokens = measure(path, str(tree.path))
         what = str(tree.stamp.get("what", ""))
         sessions.append(
             Session(

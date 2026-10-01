@@ -89,7 +89,7 @@ Three event names reach it, and they want different treatment:
 | `guard-spawn-failed` | an edit was blocked and no box could be cut for it | the `detail=` field: it carries the exception |
 | `codex-translation-gap` | a hook's answer did not survive Codex's schema — a member refused or stripped | the `detail=` field: it names the members |
 | `fix-pass-finding` | something the fix pass could not turn green: a step that raised, a push that failed, a dead fixer, a wait past a day | the `evidence=` field: a traceback file, a transcript, a tree |
-| `session-friction` | turns a session lost to the harness, read out of its transcript or its `logs/friction.md` | the `evidence=` field: `transcript#L<line>` |
+| `session-friction` | turns a session lost to the harness, read out of its transcript or its `logs/friction.md` | the `evidence=` field: `transcript#L<line>`, read with `python scripts/session_transcripts.py "<evidence>"` |
 
 A `fix-pass-finding` whose detail starts `fixers-exhausted`, `blind-evidence` or
 `fixer-blocked` is a problem fixers could not move, and it is yours now: fix what in the

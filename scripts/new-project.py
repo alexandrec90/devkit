@@ -267,11 +267,22 @@ def iter_template_files(features: dict[str, bool]) -> list[tuple[Path, Path]]:
     pairs: list[tuple[Path, Path]] = []
     for root in roots:
         for source in sorted(root.rglob("*")):
-            if source.is_dir():
+            if source.is_dir() or _debris(source.relative_to(root)):
                 continue
             relative = source.relative_to(root)
             pairs.append((source, Path(_destination_name(relative))))
     return pairs
+
+
+# What running a template leaves beside it, which is no template: 0929-8 loaded
+# `run-tests.py.tmpl` in a test and its `__pycache__/*.pyc` shipped into every project
+# generated after, where a text-file check failed on it.
+DEBRIS_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+DEBRIS_SUFFIXES = frozenset({".pyc", ".pyo"})
+
+
+def _debris(relative: Path) -> bool:
+    return bool(DEBRIS_DIRS.intersection(relative.parts)) or relative.suffix in DEBRIS_SUFFIXES
 
 
 def _destination_name(relative: Path) -> str:
