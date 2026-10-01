@@ -166,6 +166,51 @@ def test_an_artifact_less_run_is_read_from_its_failed_log_and_the_log_is_kept(tm
     assert saved.read_text(encoding="utf-8") == FAILED_JOB_LOG
 
 
+def test_an_empty_artifact_is_not_left_beside_the_log_that_names_the_failure(tmp_path):
+    """1b01678b: roguelike #52's gate predates the template's JUnit upload, so a red
+    `Harness hook tests` step uploaded only the application suite's `test-failures.log`,
+    empty because that suite passed. The failure was named in `failed-jobs.log`, but the
+    fixer opened the empty artifact first and reported evidence that named nothing."""
+    hook_log = (
+        "Tests\tHarness hook tests\t2026-09-30T02:16:14Z FAILED scripts/hooks/tests/t.py::x\n"
+    )
+    answers = {("run", "view", "7", "--log-failed"): hook_log}
+
+    def gh(*args):
+        if args[:2] == ("run", "download"):
+            target = Path(args[args.index("-D") + 1]) / "test-failures"
+            target.mkdir(parents=True)
+            (target / "test-failures.log").write_text("", encoding="utf-8")
+            (target / "notes.log").write_text("kept", encoding="utf-8")
+            (Path(args[args.index("-D") + 1]) / "lint-errors").mkdir()
+            (Path(args[args.index("-D") + 1]) / "lint-errors" / "lint-errors.log").touch()
+            return subprocess.CompletedProcess(["gh", *args], 0, "", "")
+        return table(answers)(*args)
+
+    dest = tmp_path / "e"
+    texts, asked = ev.run_evidence(gh, "7", dest)
+    assert fix_plan.signature_from_logs(texts) == ("scripts/hooks/tests/t.py::x",)
+    assert asked == []
+    assert not (dest / "test-failures" / "test-failures.log").exists()
+    assert (dest / "test-failures" / "notes.log").read_text(encoding="utf-8") == "kept"
+    assert not (dest / "lint-errors").exists(), "a directory left empty goes too"
+    assert (dest / ev.FAILED_LOG).is_file()
+
+
+def test_drop_empty_leaves_dest_itself_and_every_file_with_content(tmp_path):
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    (tmp_path / "a" / "b" / "empty.log").touch()
+    (tmp_path / "a" / "full.log").write_text("x", encoding="utf-8")
+    (tmp_path / "c").mkdir()
+    assert ev.drop_empty(tmp_path) == ["a/b/empty.log"]
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == [
+        "a",
+        "a/full.log",
+    ]
+    assert ev.drop_empty(tmp_path / "missing") == []
+    assert ev.drop_empty(tmp_path / "a" / "full.log") == [], "a file is not a directory"
+
+
 def still_running(answers: dict[tuple[str, ...], object]) -> Table:
     """A table whose `--log-failed` refuses, as `gh` does while any job is still going."""
 
