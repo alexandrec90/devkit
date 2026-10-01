@@ -436,6 +436,7 @@ def problems(
     jobs: list[Job],
     now: _dt.datetime | None = None,
     deliberate: frozenset[str] = frozenset(),
+    root: Path | None = None,
 ) -> list[str]:
     """One line per job that needs attention; [] when they are all healthy.
 
@@ -446,6 +447,11 @@ def problems(
     The registration check goes last for that reason and not because it matters least: a
     misregistered command is permanent, so it is still there to report next session,
     while a failing run is the thing that may not be.
+
+    `root` is the checkout whose `logs/` the jobs write, `REPO_ROOT` when None. A pass
+    run from a tree cut off that checkout passes it: 104d356c was filed from a
+    supervisor's tree as "no logs/reconcile.log" beside evidence naming the checkout's
+    own kept copy, because the hint stat'ed the tree's empty `logs/`.
     """
     moment = now or _dt.datetime.now()
     found: list[str] = []
@@ -476,14 +482,14 @@ def problems(
                 f"{job.name}: a run was still going at "
                 f"{job.last_run:%Y-%m-%d %H:%M}, so the scheduled fire was skipped -- "
                 f"its runs are overlapping"
-                f"{artifact_hint(job.name, since=job.last_run)}"
+                f"{artifact_hint(job.name, root=root, since=job.last_run)}"
             )
             continue
         if job.last_result not in NOT_A_FAILURE:
             found.append(
                 f"{job.name}: last run failed (exit {job.last_result}) at "
                 f"{job.last_run:%Y-%m-%d %H:%M}"
-                f"{artifact_hint(job.name, since=job.last_run)}"
+                f"{artifact_hint(job.name, root=root, since=job.last_run)}"
             )
             continue
         interval = job.interval

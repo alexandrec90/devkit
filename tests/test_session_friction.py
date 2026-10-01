@@ -1055,6 +1055,47 @@ def test_a_probe_of_git_bashs_path_conversion_is_a_measurement_not_friction():
     )
 
 
+def test_an_import_probe_is_answered_by_the_missing_module_it_asked_about():
+    """31af383b: a social-scraper session reproduced its user's report that the system
+    Python lacks the project's packages, by asking it -- the exact call and output -- and
+    the answer was filed as an environment the session lost turns to."""
+    command = (
+        "(Get-Command python -ErrorAction SilentlyContinue).Source; (Get-Command uv "
+        "-ErrorAction SilentlyContinue).Source; (Get-Command social-scraper -ErrorAction "
+        'SilentlyContinue).Source; python -c "import playwright, pydantic_settings" 2>&1 | '
+        "Select-Object -Last 1"
+    )
+    out = (
+        "Exit code 1\nC:\\Users\\a\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe\r\n"
+        "C:\\Users\\a\\AppData\\Roaming\\Python\\Python314\\Scripts\\uv.exe\r\n"
+        "ModuleNotFoundError: No module named 'playwright'"
+    )
+    assert classes([call(command, "1"), result(out, "1")]) == []
+    for probe in (
+        "python3 -c 'from playwright.sync_api import sync_playwright'",
+        '.venv/Scripts/python.exe -c "import playwright.sync_api as p; import yaml"',
+    ):
+        assert classes([call(probe, "1"), result(out, "1")]) == [], probe
+
+
+def test_an_import_probe_excuses_only_the_modules_it_imported():
+    """A program that does more than import is work, and a module it did not ask about
+    is something else missing: both are still the environment."""
+    out = "ModuleNotFoundError: No module named 'playwright'"
+    for command in (
+        'python -c "import playwright; playwright.run()"',
+        'python -c "import yaml"',
+        "python -m social_scraper login x",
+    ):
+        assert classes([call(command, "1"), result(out, "1")]) == ["environment"], command
+    assert sf.probed_modules('python -c "import a.b as c, d; from e.f import (g, h)"') == {
+        "a",
+        "d",
+        "e",
+    }
+    assert sf.probed_modules('python -c "import a; print(a)"') == frozenset()
+
+
 def test_a_commit_message_that_quotes_errors_is_not_an_environment_failure():
     """fc786188: a fixer ran `git show --stat` on the commit that taught this detector
     about quoted errors, and the harvest -- still on the old detector -- filed the

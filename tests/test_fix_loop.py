@@ -21,6 +21,7 @@ import harness_triage as triage
 NOW = _dt.datetime(2026, 9, 26, 12, 0, tzinfo=_dt.UTC)
 KEY = "pr:carameli:412:abc:d:dispatch"
 UPSTREAM_KEY = "upstream:2:deadbeef"
+REAL_DEVKIT_FIXES = fix_loop.devkit_fixes  # `ctx` stubs it for every other test
 
 
 @pytest.fixture
@@ -38,6 +39,7 @@ def ctx(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(fix_loop, "working_dirs", frozenset)
     monkeypatch.setattr(fix_loop.friction_pending, "detector_fixes", lambda gh, git: [])
+    monkeypatch.setattr(fix_loop, "devkit_fixes", lambda ctx: ())  # GitHub's devkit PRs
     return fix_loop.Context(
         tmp_path,
         ["devkit", "carameli"],
@@ -592,6 +594,56 @@ def test_a_job_failure_names_the_failing_runs_kept_copy_as_its_evidence(ctx):
     job = fix_loop.schedule_health.Job("devkit-worktree-reconcile", True, 1, ran, None)
     [found] = fix_loop.job_findings(ctx, [job])
     assert found.evidence == str(kept)
+
+
+def test_devkit_fixes_are_the_open_prs_and_those_merged_inside_the_hold(ctx):
+    """f9ebcfd4: a merged fix still holds the consumer failures it names until adoption
+    carries it there; one merged before the hold, or closed unmerged, holds nothing."""
+    merged = (NOW - _dt.timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    stale = (NOW - fix_loop.MERGED_FIX_HOLDS - _dt.timedelta(minutes=1)).isoformat()
+    rows = [
+        {"number": 490, "body": "open", "state": "OPEN", "mergedAt": None},
+        {"number": 483, "body": "merged", "state": "MERGED", "mergedAt": merged},
+        {"number": 470, "body": "old", "state": "MERGED", "mergedAt": stale},
+        {"number": 480, "body": "closed", "state": "CLOSED", "mergedAt": None},
+        {"number": "x", "body": "malformed", "state": "OPEN"},
+    ]
+    asked: list[tuple[str, ...]] = []
+
+    def gh_for(_root):
+        def gh(*args):
+            asked.append(args)
+            return subprocess.CompletedProcess(args, 0, fix_loop.json.dumps(rows), "")
+
+        return gh
+
+    assert REAL_DEVKIT_FIXES(ctx, gh_for) == ((490, "open"), (483, "merged"))
+    assert "--state" in asked[0] and "all" in asked[0]
+
+
+def test_devkit_fixes_holds_nothing_when_gh_cannot_say(ctx):
+    def failing(_root):
+        return lambda *a: subprocess.CompletedProcess(a, 1, "", "gh: not logged in")
+
+    def garbled(_root):
+        return lambda *a: subprocess.CompletedProcess(a, 0, "{not json", "")
+
+    assert REAL_DEVKIT_FIXES(ctx, failing) == ()
+    assert REAL_DEVKIT_FIXES(ctx, garbled) == ()
+
+
+def test_a_job_failures_command_reads_the_checkout_the_evidence_names(ctx, monkeypatch, tmp_path):
+    """104d356c: a pass run from a supervisor's tree filed "no logs/reconcile.log" beside
+    evidence naming the checkout's kept copy, because the hint stat'ed the tree's own
+    empty `logs/`. Both halves read `ctx.devkit_dir`."""
+    monkeypatch.setattr(fix_loop.schedule_health, "REPO_ROOT", tmp_path / "a-tree")
+    ran = _dt.datetime.now() - _dt.timedelta(minutes=5)
+    kept = ctx.devkit_dir / "logs" / "reconcile.failed.log"
+    kept.parent.mkdir(parents=True)
+    kept.write_text("# exit=1\n", encoding="utf-8")
+    job = fix_loop.schedule_health.Job("devkit-worktree-reconcile", True, 1, ran, None)
+    [found] = fix_loop.job_findings(ctx, [job])
+    assert found.command.endswith("see logs/reconcile.failed.log"), found.command
 
 
 def test_a_job_failure_resolved_after_that_run_is_not_filed_again_until_it_recurs(ctx):

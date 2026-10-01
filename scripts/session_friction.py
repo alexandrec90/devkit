@@ -85,6 +85,15 @@ SLEEP_GUARD = re.compile(r"<tool_use_error>Blocked: sleep \d+ followed by")
 # filed as the defect it measured (d71a2caf), as `BYTE_DUMP` is for a heredoc's probe.
 REWRITTEN_REV = re.compile(r"^ambiguous argument", re.I)
 PATH_CONVERSION_PROBE = re.compile(r"\bMSYS2_ARG_CONV_EXCL=|\bMSYS_NO_PATHCONV=")
+# The same for an interpreter: a `python -c` whose whole program is imports asks whether
+# they import, so its "No module named 'x'" for a module it imported is the answer, not a
+# turn lost (31af383b, a session reproducing a user's report that the bare system Python
+# lacks the project's packages). `IMPORT_STATEMENT` is one `;`-separated statement of it.
+PYTHON_C = re.compile(r"\S*python\S*\s+-c\s+(?P<q>[\"'])(?P<program>.*?)(?P=q)", re.S)
+IMPORT_STATEMENT = re.compile(
+    r"\s*(?:import\s+(?P<names>[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*)"
+    r"|from\s+(?P<source>[\w.]+)\s+import\s+[\w.*, ()]+)\s*$"
+)
 WAIT_TOOLS = frozenset({"Monitor"})
 
 # An odd count of any of these before a match on its line means the match is quoted.
@@ -461,12 +470,40 @@ def _result_class(text: str, command: str = "") -> tuple[str, str]:
     """The class and snippet a failed call's output files under; `("", "")` for none."""
     text = ANSI.sub("", text)
     probe = bool(PATH_CONVERSION_PROBE.search(command))
+    probed = probed_modules(command)
     for cls, pattern in RESULT_PATTERNS:
         for found in pattern.finditer(text):
-            if _quoted(text, found.start()) or (probe and REWRITTEN_REV.match(found.group())):
+            if (
+                _quoted(text, found.start())
+                or (probe and REWRITTEN_REV.match(found.group()))
+                or _answers_probe(text, found.start(), probed)
+            ):
                 continue
             return cls, normalize(text[found.start() : found.start() + SNIPPET])
     return "", ""
+
+
+def probed_modules(command: str) -> frozenset[str]:
+    """The top-level modules `command` asks an interpreter to import and nothing else."""
+    names: set[str] = set()
+    for found in PYTHON_C.finditer(command):
+        statements = [part for part in re.split(r"[;\n]", found["program"]) if part.strip()]
+        matched = [hit for part in statements if (hit := IMPORT_STATEMENT.match(part))]
+        if not statements or len(matched) < len(statements):
+            continue
+        for statement in matched:
+            listed = statement["names"] or statement["source"]
+            names.update(name.split()[0].split(".")[0] for name in listed.split(","))
+    return frozenset(names)
+
+
+def _answers_probe(text: str, start: int, probed: frozenset[str]) -> bool:
+    """The missing module reported on `text`'s line from `start` is one `probed` asked for."""
+    if not probed:
+        return False
+    end = text.find("\n", start)
+    named = MISSING_MODULE.search(text[start : end if end >= 0 else None])
+    return named is not None and named.group(1).split(".")[0] in probed
 
 
 def _complaint(event: Event, spoken_before: int) -> str:

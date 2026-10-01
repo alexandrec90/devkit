@@ -157,6 +157,7 @@ def world(tmp_path, monkeypatch):
         "moved": "",
         "installers": [],
         "installers_code": 0,
+        "devkit_fixes": [],
     }
     # The machine's real scheduler is never touched: `maintain` re-registers tasks.
     monkeypatch.setattr(
@@ -211,6 +212,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(loop.bg_sessions, "stop_finished", lambda trees, runner: [])
     monkeypatch.setattr(loop, "working_dirs", frozenset)
     monkeypatch.setattr(loop.friction_pending, "detector_fixes", lambda gh, git: [])
+    monkeypatch.setattr(loop, "devkit_fixes", lambda ctx: tuple(table["devkit_fixes"]))
     monkeypatch.setattr(fix_pass.gate_evidence, "newest_release", lambda _d: "v0.11.22")
     monkeypatch.setattr(
         fix_pass.gate_evidence,
@@ -812,6 +814,45 @@ def test_a_second_devkit_session_waits_for_the_one_still_working(world, tmp_path
         capped[0][1]
         == "held until the devkit session in C:/ws/devkit/.claude/worktrees/fix-x finishes"
     )
+
+
+SCRAPER_23 = "https://github.com/alexandrec90/social-scraper/pull/23"
+ROGUELIKE_52 = "https://github.com/alexandrec90/roguelike/pull/52"
+
+
+def test_a_consumer_failure_a_devkit_fix_names_waits_for_it(world, tmp_path):
+    """f9ebcfd4: a devkit session was sent at social-scraper #23 while #483, whose body
+    named it as what it unblocks, had merged and was waiting on adoption. A failure no
+    such PR names, or one PR naming only part of the decision, still goes."""
+    consumers = (
+        failure(project="social-scraper", number=23, url=SCRAPER_23),
+        failure(project="roguelike", number=52, url=ROGUELIKE_52),
+    )
+    upstream = fix_plan.Decision(fix_plan.UPSTREAM, "n", consumers)
+    named = fix_pass.fix_loop.Closed(
+        devkit_fixes=((483, f"unblocks {ROGUELIKE_52} and\n{SCRAPER_23}, once released"),)
+    )
+    sent, capped, _ = fix_pass.fix_send.send_all([upstream], _ctx(tmp_path), "claude", closed=named)
+    assert sent == [] and world["dispatched"] == []
+    assert capped[0][1] == "pending devkit #483, which names every failure it is for"
+    part = fix_pass.fix_loop.Closed(devkit_fixes=((483, f"unblocks {SCRAPER_23}"),))
+    sent, capped, _ = fix_pass.fix_send.send_all([upstream], _ctx(tmp_path), "claude", closed=part)
+    assert len(sent) == 1 and capped == []
+
+
+def test_named_by_matches_a_whole_url_across_prs():
+    decision = fix_plan.Decision(
+        fix_plan.UPSTREAM,
+        "n",
+        (failure(url=SCRAPER_23), failure(kind=fix_plan.LEDGER, url="")),
+    )
+    named_by = fix_pass.fix_send.named_by
+    assert (
+        named_by(decision, ((9, f"({SCRAPER_23})"), (7, f"see {SCRAPER_23}."))) == "devkit #7, #9"
+    )
+    assert named_by(decision, ((9, f"{SCRAPER_23}4"), (8, f"{SCRAPER_23}/files"))) == ""
+    ledger_only = fix_plan.Decision(fix_plan.UPSTREAM, "n", (failure(kind=fix_plan.LEDGER),))
+    assert named_by(ledger_only, ((9, "anything"),)) == "", "the backlog is not held"
 
 
 def test_dispatch_routes_a_branch_to_the_pr_path_and_the_rest_to_a_fresh_one(monkeypatch, tmp_path):

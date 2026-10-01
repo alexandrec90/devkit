@@ -3511,6 +3511,37 @@ def compose_down(path: Path, project_name: str) -> tuple[bool, str]:
     return True, f"stack {project_name} torn down (containers, network, volumes)"
 
 
+def docker_engine_down() -> str:
+    """Why a box's stack cannot be downed now, or "" when Docker's engine answers.
+
+    Asked by `reconcile` before it reaps a box with a stack. With Docker Desktop stopped,
+    `compose_down` cannot reach the engine, `apply_reap` removes the box anyway and
+    fails the pass -- and the containers and volumes it leaves have no box left to name
+    them, so no later pass can tear them down (104d356c, 2026-10-01). The box waits
+    instead, and the first pass with the engine up reaps it whole.
+
+    "" too when docker is not installed: then there is no engine to wait for, and
+    `compose_down`'s own "not on PATH" is the report.
+    """
+    try:
+        completed = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            creationflags=sweep.NO_WINDOW,
+        )
+    except FileNotFoundError:
+        return ""
+    except subprocess.TimeoutExpired:
+        return "Docker's engine did not answer in 60s"
+    said = f"{completed.stderr or ''}\n{completed.stdout or ''}"
+    if completed.returncode != 0 and daemon_down_note(said):
+        return "Docker's engine is not running"
+    return ""
+
+
 # --- modes ------------------------------------------------------------------
 
 
@@ -5024,13 +5055,37 @@ def agent_sessions() -> list[dict]:
     return bg_sessions.listed(sweep.run_windowless)
 
 
+def reap_decided(
+    box: str,
+    workspace: Path,
+    pr: PullRequest,
+    settle: Callable[[ReapPlan], tuple[str, bool, list[str]]],
+    *,
+    keep_stack: bool,
+    fetch: bool,
+) -> tuple[str, bool, list[str]]:
+    """Plan the reap `reconcile` decided on for `box` and `settle` it: `(action, ok,
+    notes)`. A plan that cannot be made is a failed reap, never a skipped one."""
+    try:
+        doomed = plan_reap(box, workspace, keep_stack=keep_stack, fetch=fetch, pr=pr)
+    except WorktreeError as exc:
+        return REAP, False, [f"[warn] {exc}"]
+    return settle(doomed)
+
+
 def settle_reap(
-    doomed: ReapPlan, workspace: Path, sessions: Callable[[], list[dict]], *, apply: bool
+    doomed: ReapPlan,
+    workspace: Path,
+    sessions: Callable[[], list[dict]],
+    *,
+    apply: bool,
+    engine_down: Callable[[], str] | None = None,
 ) -> tuple[str, bool, list[str]]:
     """What a reconcile pass does with a box it decided to reap: `(action, ok, notes)`.
 
     `sessions` is called only when the reap is applied, so a dry run and a pass with
-    nothing to reap never ask `claude agents`.
+    nothing to reap never ask `claude agents`; `engine_down` likewise, and only for a
+    box with a stack (`reap_vacated`).
     """
     if doomed.refusal:
         # `reconcile_action` already cleared this box, so a refusal here is the two
@@ -5038,18 +5093,33 @@ def settle_reap(
         return HOLD, False, [f"[warn] reap refused: {doomed.refusal}"]
     if not apply:
         return REAP, True, []
-    return reap_vacated(doomed, workspace, sessions())
+    return reap_vacated(doomed, workspace, sessions(), engine_down)
 
 
 def reap_vacated(
-    doomed: ReapPlan, workspace: Path, sessions: list[dict]
+    doomed: ReapPlan,
+    workspace: Path,
+    sessions: list[dict],
+    engine_down: Callable[[], str] | None = None,
 ) -> tuple[str, bool, list[str]]:
     """Reap `doomed` unless a session is still in it: `(action, ok, notes)`.
 
     A session in the box is a WAIT, not a failure: the scheduled pass is what reddened
     every time a live fixer held the directory, and the next pass reaps it once the
     session has gone. `box_teardown.vacate` stops the ones the pass may stop.
+
+    So is a stack Docker's engine cannot reach (`docker_engine_down`, the default for
+    `engine_down`): reaping then would strand the stack with nothing left to name it.
     """
+    if doomed.stack_down and (down := (engine_down or docker_engine_down)()):
+        return (
+            WAIT,
+            True,
+            [
+                f"not reaped: {down}, so its stack cannot be downed -- the "
+                f"next pass with the engine up reaps it, stack and all"
+            ],
+        )
     occupants, notes = box_teardown.vacate(Path(doomed.path), sessions)
     if occupants:
         notes.append(
@@ -5137,8 +5207,14 @@ def reconcile(
 
     outcomes: list[dict] = []
     worst = 0
-    # Asked once, and only by a pass that reaps.
-    sessions = functools.cache(lambda: agent_sessions())
+    # Each asked once, and only by a pass that reaps (the engine: only one reaping a stack).
+    settle = functools.partial(
+        settle_reap,
+        workspace=workspace,
+        sessions=functools.cache(lambda: agent_sessions()),
+        apply=apply,
+        engine_down=functools.cache(lambda: docker_engine_down()),
+    )
     for decision in reconcile_plan(
         rows,
         automerge=automerge,
@@ -5164,18 +5240,11 @@ def reconcile(
                 worst = 1
 
         if action == REAP:
-            try:
-                doomed = plan_reap(
-                    decision.box, workspace, keep_stack=keep_stack, fetch=fetch, pr=pr
-                )
-            except WorktreeError as exc:
-                notes.append(f"[warn] {exc}")
-                worst = 1
-                doomed = None
-            if doomed is not None:
-                action, ok, reap_notes = settle_reap(doomed, workspace, sessions, apply=apply)
-                notes.extend(reap_notes)
-                worst = worst if ok else 1
+            action, ok, reap_notes = reap_decided(
+                decision.box, workspace, pr, settle, keep_stack=keep_stack, fetch=fetch
+            )
+            notes.extend(reap_notes)
+            worst = worst if ok else 1
 
         outcomes.append(
             reconcile_outcome(decision, action, pr, notes, boxes.get(decision.box), paused)

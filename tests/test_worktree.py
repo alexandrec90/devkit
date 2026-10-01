@@ -2513,6 +2513,16 @@ def no_agent_sessions(monkeypatch):
     monkeypatch.setattr(worktree, "agent_sessions", list)
 
 
+REAL_DOCKER_ENGINE_DOWN = worktree.docker_engine_down
+
+
+@pytest.fixture(autouse=True)
+def docker_engine_up(monkeypatch):
+    """No test asks this machine's Docker engine, which a reconcile reaping a stack does:
+    whether Docker Desktop happens to be running would decide a test's box."""
+    monkeypatch.setattr(worktree, "docker_engine_down", str)
+
+
 @pytest.fixture
 def workspace(tmp_path):
     """A workspace file whose parent holds the checkouts, as on a real workstation."""
@@ -3817,6 +3827,97 @@ def test_reap_vacated_leaves_an_occupied_box_whole(tmp_path, monkeypatch):
     action, ok, notes = worktree.reap_vacated(plan, tmp_path, [person])
     assert (action, ok) == (worktree.WAIT, True)
     assert notes and notes[-1].startswith("not reaped: interactive session")
+
+
+def test_reap_vacated_waits_out_a_stopped_docker_engine_rather_than_strand_the_stack(
+    tmp_path, monkeypatch
+):
+    """104d356c: with Docker Desktop stopped, reconcile removed a merged box whose
+    `compose down` could not reach the engine and exited 1 -- leaving containers and
+    volumes no box names any more. The box waits, and the pass stays green."""
+    plan = worktree.ReapPlan(box="demo--x-0806", path=str(tmp_path / "b"), stack_down=True)
+    monkeypatch.setattr(worktree, "apply_reap", lambda *a: pytest.fail("reaped past the engine"))
+    action, ok, notes = worktree.reap_vacated(
+        plan, tmp_path, [], lambda: "Docker's engine is not running"
+    )
+    assert (action, ok) == (worktree.WAIT, True)
+    assert notes == [
+        "not reaped: Docker's engine is not running, so its stack cannot be downed -- the "
+        "next pass with the engine up reaps it, stack and all"
+    ]
+
+
+def test_reap_decided_settles_the_plan_and_fails_a_plan_it_cannot_make(tmp_path, monkeypatch):
+    plan = worktree.ReapPlan(box="demo--x-0806")
+    monkeypatch.setattr(worktree, "plan_reap", lambda box, ws, **k: plan)
+    settled = worktree.reap_decided(
+        "demo--x-0806",
+        tmp_path,
+        worktree.PullRequest(),
+        lambda doomed: (worktree.WAIT, True, [doomed.box]),
+        keep_stack=False,
+        fetch=False,
+    )
+    assert settled == (worktree.WAIT, True, ["demo--x-0806"])
+
+    def refuse(box, ws, **k):
+        raise worktree.WorktreeError("no such box")
+
+    monkeypatch.setattr(worktree, "plan_reap", refuse)
+    assert worktree.reap_decided(
+        "demo--x-0806",
+        tmp_path,
+        worktree.PullRequest(),
+        lambda doomed: pytest.fail("settled a plan never made"),
+        keep_stack=False,
+        fetch=False,
+    ) == (worktree.REAP, False, ["[warn] no such box"])
+
+
+def test_reap_vacated_asks_the_engine_only_about_a_box_with_a_stack(tmp_path, monkeypatch):
+    reaped: list[str] = []
+    monkeypatch.setattr(worktree, "apply_reap", lambda p, _w: reaped.append(p.box) or (True, []))
+    stackless = worktree.ReapPlan(box="demo--x-0806", path=str(tmp_path / "b"))
+    assert worktree.reap_vacated(stackless, tmp_path, [], lambda: pytest.fail("asked"))[:2] == (
+        worktree.REAP,
+        True,
+    )
+    stacked = worktree.replace(stackless, box="demo--y-0806", stack_down=True)
+    assert worktree.reap_vacated(stacked, tmp_path, [], str)[:2] == (worktree.REAP, True)
+    assert reaped == ["demo--x-0806", "demo--y-0806"]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (
+            subprocess.CompletedProcess(
+                [],
+                1,
+                "",
+                "failed to connect to the docker API at npipe:////./pipe/"
+                "dockerDesktopLinuxEngine; open //./pipe/dockerDesktopLinuxEngine: "
+                "The system cannot find the file specified.",
+            ),
+            "Docker's engine is not running",
+        ),
+        (subprocess.CompletedProcess([], 0, "28.3.2\n", ""), ""),
+        (subprocess.CompletedProcess([], 1, "", "permission denied"), ""),
+        (FileNotFoundError("docker"), ""),
+        (subprocess.TimeoutExpired("docker", 60), "Docker's engine did not answer in 60s"),
+    ],
+)
+def test_docker_engine_down_reads_what_docker_info_says(monkeypatch, outcome, expected):
+    """The 2026-10-01 run's own stderr is the first case. An error that is not the engine
+    is no reason to wait, and no docker at all leaves `compose_down` to say so."""
+
+    def run(*_a, **_k):
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(worktree.subprocess, "run", run)
+    assert REAL_DOCKER_ENGINE_DOWN() == expected
 
 
 def test_reconcile_never_reaps_a_box_holding_work(workspace, monkeypatch):
