@@ -133,6 +133,7 @@ def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     done = gh("run", "download", str(run_id), "-D", str(dest))
+    drop_empty(dest)
     texts = junit_report.read_artifacts(dest) if getattr(done, "returncode", 1) == 0 else []
     junit_report.write_readable(dest)  # what the prompt tells the fixer to read first
     jobs: list[dict] | None = None
@@ -152,6 +153,27 @@ def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]
     if fix_plan.signature_from_logs(texts):
         return texts, []
     return texts, run_jobs(gh, run_id) if jobs is None else jobs
+
+
+def drop_empty(dest: Path) -> list[str]:
+    """Delete every zero-byte file under `dest`, then every directory that leaves empty;
+    the deleted files' paths, relative to `dest` and in POSIX form.
+
+    An artifact a passing step uploaded is empty, and a fixer reads it as one that ought
+    to name the failure: roguelike #52's gate uploaded the application suite's empty
+    `test-failures.log` for a red vendored suite, and its fixer reported that the
+    evidence named nothing, though `failed-jobs.log` beside it did (1b01678b).
+    """
+    if not dest.is_dir():
+        return []
+    dropped = []
+    for path in sorted(dest.rglob("*"), reverse=True):
+        if path.is_file() and path.stat().st_size == 0:
+            path.unlink()
+            dropped.append(path.relative_to(dest).as_posix())
+        elif path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+    return sorted(dropped)
 
 
 def _stdout(result: object) -> str:
