@@ -660,6 +660,65 @@ def test_a_job_failure_resolved_after_that_run_is_not_filed_again_until_it_recur
     assert len(fix_loop.job_findings(ctx, [again])) == 1, "it failed again after the fix"
 
 
+def _resolved_job(ctx) -> tuple[fix_loop.schedule_health.Job, float]:
+    """A `devkit-reap-stale` failure filed and resolved, then failing again a minute
+    after the resolution; with the resolution's POSIX time."""
+    [found] = fix_loop.job_findings(ctx, [_job("devkit-reap-stale", 2, NOW)])
+    fix_findings.record_all([found], [], ctx.devkit_dir)
+    [item] = triage.open_items(triage.load(ctx.devkit_dir))
+    triage.resolve([item.id], "kept the tree whole", root=ctx.devkit_dir)
+    [made] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    ran = _dt.datetime.now() + _dt.timedelta(minutes=1)  # the scheduler's local time
+    return fix_loop.schedule_health.Job("devkit-reap-stale", True, 2, ran, None), (
+        _dt.datetime.fromisoformat(made.stamp).timestamp()
+    )
+
+
+def _git_at(ran: float, head: float, asked: list[str], code: int = 0, stderr: str = ""):
+    """A git whose checkout ran a commit made at `ran` and now has one made at `head`."""
+
+    def git(argv, **_):
+        asked.append(argv[-1])
+        when = head if argv[-1] == "HEAD" else ran
+        return subprocess.CompletedProcess(argv, code, f"{when:.0f}\n", stderr)
+
+    return git
+
+
+def test_a_job_run_on_code_older_than_its_fix_does_not_reopen_it(ctx):
+    """cda106d0: reap-stale fired at 19:00:00 and the checkout fast-forwarded onto the
+    merged fix at 19:00:02, so the run that predated the fix was filed as the fix not
+    holding. The run's code is the checkout's HEAD at the run's start, off its reflog."""
+    job, made = _resolved_job(ctx)
+    asked: list[str] = []
+    git = _git_at(made - 600, made + 60, asked)
+    assert fix_loop.job_findings(ctx, [job], git) == [], "the next run tests the fix"
+    since = job.last_run.astimezone(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S +0000")
+    assert f"HEAD@{{{since}}}" in asked, asked
+
+
+@pytest.mark.parametrize(
+    ("ran", "head", "code", "stderr", "why"),
+    [
+        (60, 120, 0, "", "the run had the fix and failed anyway"),
+        (-600, -300, 0, "", "the checkout never moved past the fix: nothing newer will run"),
+        (-600, 60, 128, "fatal: not a git repository", "git cannot say"),
+        (-600, 60, 0, "warning: log for 'HEAD' only goes back to Tue", "reflog too short"),
+    ],
+)
+def test_a_job_run_that_could_have_held_its_fix_is_filed(ctx, ran, head, code, stderr, why):
+    job, made = _resolved_job(ctx)
+    git = _git_at(made + ran, made + head, [], code, stderr)
+    assert len(fix_loop.job_findings(ctx, [job], git)) == 1, why
+
+
+def test_a_job_failure_never_resolved_asks_git_nothing(ctx):
+    asked: list[str] = []
+    job = _job("devkit-reap-stale", 2, NOW)
+    assert len(fix_loop.job_findings(ctx, [job], _git_at(0, 0, asked))) == 1
+    assert asked == []
+
+
 def test_a_job_the_scheduler_only_remembers_failing_is_not_filed(ctx, monkeypatch):
     monkeypatch.setattr(
         fix_loop.schedule_health,

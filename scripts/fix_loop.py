@@ -281,10 +281,13 @@ JOB_HISTORY = "the scheduler is reporting history"
 _JOB_WHEN = re.compile(r" (?:at|since) \d{4}-\d\d-\d\d \d\d:\d\d| \(\d+ intervals ago\)")
 
 
-def job_findings(ctx: Context, jobs: list[schedule_health.Job] | None = None) -> list[Finding]:
+def job_findings(
+    ctx: Context, jobs: list[schedule_health.Job] | None = None, git=ship_intent.run_quiet
+) -> list[Finding]:
     """A finding per devkit job the scheduler says needs attention, bar one it is only
     remembering: a line whose group was resolved after the run it reports. The scheduler
-    repeats a daily job's last result for a day, so that run would reopen its own fix."""
+    repeats a daily job's last result for a day, so that run would reopen its own fix.
+    Nor one that ran code older than its group's fix (`_ran_before_fix`)."""
     jobs = schedule_health.query() if jobs is None else jobs
     by_name = {job.name: job for job in jobs}
     items = triage.load(ctx.devkit_dir)
@@ -306,10 +309,65 @@ def job_findings(ctx: Context, jobs: list[schedule_health.Job] | None = None) ->
             evidence=str(ctx.devkit_dir / artifact) if artifact else "",
             command=line[:300],
         )
-        if job and job.last_run and _resolved_since(finding, items, job.last_run):
+        ran = job.last_run if job else None
+        if ran and (
+            _resolved_since(finding, items, ran)
+            or _ran_before_fix(ctx.devkit_dir, finding, items, ran, git)
+        ):
             continue
         found.append(finding)
     return found
+
+
+def _ran_before_fix(
+    checkout: Path, finding: Finding, items: list[triage.Item], when: _dt.datetime, git
+) -> bool:
+    """Whether the run at `when` (the scheduler's local time) executed code older than
+    its group's latest standing fix, in a checkout that has moved past that fix since.
+
+    cda106d0: `devkit-reap-stale` fired at 19:00:00 and the checkout fast-forwarded onto
+    the merged fix at 19:00:02, so the run reported the very failure that fix retired and
+    the group read "RECURRED ... that fix did not hold". A commit holding a fix is made
+    after its resolution, so code committed before it cannot hold it. This defers a
+    verdict by one run and never hides one: the next run executes the newer code.
+    """
+    made = _last_fix(finding, items)
+    if made is None:
+        return False
+    since = when.astimezone(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S +0000")
+    ran = _commit_time(checkout, f"HEAD@{{{since}}}", git)
+    now = _commit_time(checkout, "HEAD", git)
+    return ran is not None and now is not None and ran < made <= now
+
+
+def _last_fix(finding: Finding, items: list[triage.Item]) -> float | None:
+    """When the latest standing resolution of `finding`'s group was made, as a POSIX time."""
+    group = fix_findings.signature(finding)
+    ids = {item.id for item in items if item.signature == group}
+    verdict = triage.verdicts(items)
+    made = [
+        triage.resolved_at(item)
+        for item in items
+        if item.event == triage.RESOLVED_EVENT
+        and item.fields.get("ref") in ids
+        and verdict.get(item.fields["ref"]) == (item.event, item.stamp)
+    ]
+    try:
+        return max(_dt.datetime.fromisoformat(stamp).timestamp() for stamp in made)
+    except ValueError:  # none standing, or a stamp no ledger writer produces
+        return None
+
+
+def _commit_time(checkout: Path, rev: str, git) -> float | None:
+    """`rev`'s commit time in `checkout`; None when git cannot say. A reflog that does not
+    reach back to a date answers with its oldest entry, which is not the code that ran."""
+    done = git(["git", "-C", str(checkout), "log", "-1", "--format=%ct", rev])
+    if done.returncode != 0 or "only goes back" in (done.stderr or ""):
+        return None
+    try:
+        return float(done.stdout.strip())
+    except ValueError:
+        return None
 
 
 def _resolved_since(finding: Finding, items: list[triage.Item], when: _dt.datetime) -> bool:
