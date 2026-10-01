@@ -379,6 +379,45 @@ def test_a_vendored_script_names_the_vendored_tiers_test(tmp_path):
     )
 
 
+def test_a_template_names_its_stems_test_and_every_test_that_reads_it(tmp_path):
+    """77a5f71a: a change to `templates/core/scripts/run-tests.py.tmpl` alone was
+    reported as naming no test, though `tests/test_run_tests.py` loads it -- so only the
+    contract tests ran."""
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_run_tests.py").write_text("", encoding="utf-8")
+    (tests / "test_new_project.py").write_text(
+        '"ruff.toml.tmpl", "run-tests.py.tmpl"', encoding="utf-8"
+    )
+    (tests / "test_unrelated.py").write_text('"ruff.toml"', encoding="utf-8")
+    hooks = tmp_path / "scripts" / "hooks" / "tests"
+    hooks.mkdir(parents=True)
+    (hooks / "test_sync_devkit.py").write_text("'pr-gate.yml.tmpl'", encoding="utf-8")
+    paths = [
+        "templates/core/scripts/run-tests.py.tmpl",
+        "templates/core/ruff.toml.tmpl",
+        "templates/core/dot-github/workflows/pr-gate.yml.tmpl",
+        "templates/core/TODO.md.tmpl",
+    ]
+    assert run_tests.tests_for(paths, tmp_path) == (
+        [
+            "tests/test_run_tests.py",
+            "tests/test_new_project.py",
+            "scripts/hooks/tests/test_sync_devkit.py",
+        ],
+        ["templates/core/TODO.md.tmpl"],
+    )
+
+
+def test_a_template_of_a_test_is_not_run_as_one(tmp_path):
+    """`templates/core/tests/test_smoke.py.tmpl` renders into a test; unrendered it is
+    not one, and naming it would hand pytest a file it cannot collect."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_smoke.py.tmpl").write_text("", encoding="utf-8")
+    paths = ["tests/test_smoke.py.tmpl", "templates/core/tests/test_smoke.py.tmpl"]
+    assert run_tests.tests_for(paths, tmp_path) == ([], paths)
+
+
 def test_the_template_runner_looks_where_devkits_does():
     template = (REPO_ROOT / "templates/core/scripts/run-tests.py.tmpl").read_text(encoding="utf-8")
     literal = ", ".join(f'"{d}"' for d in run_tests.TEST_DIRS)

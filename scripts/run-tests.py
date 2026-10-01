@@ -13,8 +13,9 @@ into every consuming project and must stay separately runnable there.
 
 **The default is the tests named by what changed**, not the suite: every file
 changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`
-(and, for anything under `templates/`, to `GENERATED_TREE_TESTS` too), plus
-`CONTRACT_TESTS`, which read every module and so are named by none of them.
+(and, for anything under `templates/`, to `GENERATED_TREE_TESTS` too; a `.tmpl` also
+to the tests that spell its name), plus `CONTRACT_TESTS`, which read every module and
+so are named by none of them.
 The whole suite is CI's, the push gate's (`PRE_COMMIT` is in the environment under
 pre-commit) and `--all`'s. Where git cannot say what changed, the suite runs.
 
@@ -43,6 +44,10 @@ FULL_SUITE_ENV = ("CI", "PRE_COMMIT")
 # tier's beside the scripts it tests. With `tests/` alone, a change to
 # `scripts/log-wrap.py` ran no test of it at all.
 TEST_DIRS = ("tests", "scripts/hooks/tests")
+# A template's suffix. A `.tmpl` of any kind is read by the tests that spell its name;
+# without that reading, a change to `ruff.toml.tmpl` or `pr-gate.yml.tmpl` named no test
+# but the generated-tree checks.
+TEMPLATE_SUFFIX = ".tmpl"
 
 # The checks over a generated project as a whole -- format-clean, for one -- which every
 # change under `templates/` names in addition to its own tests.
@@ -207,15 +212,19 @@ def tests_for(paths: list[str], root: Path = REPO_ROOT) -> tuple[list[str], list
 
     A test file names itself; any other `.py` names `test_<stem>.py` in each of
     `TEST_DIRS` with hyphens read as underscores (`scripts/fix-pass.py` ->
-    `tests/test_fix_pass.py`), when that file exists. Everything else -- a document, a
-    workflow, a module with no test of its own -- is reported so the caller can see what
-    the run did not cover.
+    `tests/test_fix_pass.py`), when that file exists; a `.py.tmpl` names that and
+    `test_<stem>_template.py`, and anything under `templates/` names
+    `GENERATED_TREE_TESTS`. A `.tmpl` also names every test
+    whose source spells its file name, since that is how a test reads one. Everything
+    else -- a document, a workflow, a module with no test of its own -- is reported so
+    the caller can see what the run did not cover.
     """
     tests: list[str] = []
     unnamed: list[str] = []
     for path in paths:
         posix = path.replace("\\", "/")
         found = [name for name in _named_tests(posix) if (root / name).is_file()]
+        found += [name for name in _reading_tests(posix, root) if name not in found]
         tests.extend(name for name in found if name not in tests)
         if not found:
             unnamed.append(posix)
@@ -244,6 +253,19 @@ def _named_by_stem(posix: str) -> list[str]:
     if stem.startswith("test_") and any(posix.startswith(f"{d}/") for d in TEST_DIRS):
         return [posix]
     return [f"{d}/test_{stem[:-3].replace('-', '_')}.py" for d in TEST_DIRS]
+
+
+def _reading_tests(posix: str, root: Path) -> list[str]:
+    """The test files under `root` whose source spells the template `posix`'s file name."""
+    name = posix.rsplit("/", 1)[-1]
+    if not name.endswith(TEMPLATE_SUFFIX):
+        return []
+    found: list[str] = []
+    for directory in TEST_DIRS:
+        for test in sorted((root / directory).glob("test_*.py")):
+            if name in test.read_text(encoding="utf-8", errors="replace"):
+                found.append(f"{directory}/{test.name}")
+    return found
 
 
 def with_contracts(tests: list[str], root: Path = REPO_ROOT) -> list[str]:
