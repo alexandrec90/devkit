@@ -3120,16 +3120,6 @@ def is_tracked(repo: Path, relative: str) -> bool:
     return completed.returncode == 0
 
 
-# What a Docker CLI says when the engine is not there to talk to. Windows names the
-# missing named pipe, Linux and macOS the missing socket; both spellings appear as the
-# tail of a much longer connect error, so this is a substring test rather than a match.
-DAEMON_DOWN_SIGNS = (
-    "cannot connect to the docker daemon",
-    "error during connect",
-    "the docker daemon is not running",
-    "open //./pipe/",
-)
-
 DAEMON_DOWN_NOTE = (
     "Docker's engine is not running, so nothing could be built or started. "
     "Start Docker Desktop and wait for it to say `Engine running`, then run this again. "
@@ -3152,10 +3142,10 @@ def daemon_down_note(text: str) -> str:
 
     Substring rather than exact, and lower-cased, because the sign is the tail of a
     connect error whose leading half carries an API version and a URL-encoded path that
-    change between releases.
+    change between releases. The signs are `box_teardown.DAEMON_DOWN_SIGNS`, which
+    `session_trees.py` asks too and which does not import this module.
     """
-    haystack = (text or "").lower()
-    return DAEMON_DOWN_NOTE if any(sign in haystack for sign in DAEMON_DOWN_SIGNS) else ""
+    return DAEMON_DOWN_NOTE if box_teardown.engine_unreachable(text) else ""
 
 
 def build_env() -> dict[str, str]:

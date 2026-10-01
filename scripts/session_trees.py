@@ -43,6 +43,13 @@ so the ledger sent a fixer after it every run, and no fixer, unelevated by desig
 act. The line says which directory and gives the elevated command; an elevated pass that
 still fails is an ordinary failure.
 
+**A stopped Docker engine keeps the tree, and is not a failure.** `compose down` cannot
+reach it, so the scheduled reap failed on every tree with a stack while Docker Desktop
+was stopped and the ledger sent a fixer after each run (3dfd297d, five times; one fix
+lived only in an uncommitted tree and never shipped). The tree waits whole, as `reconcile`
+makes a box wait (`worktree.docker_engine_down`); the signs are
+`box_teardown.DAEMON_DOWN_SIGNS`.
+
 Run by `reap-stale.py`, the scheduled pass for what agent sessions leave behind.
 Tested in `tests/test_session_trees.py`.
 """
@@ -79,6 +86,14 @@ GENERATED = frozenset({"AGENTS.md", ".codex/config.toml"})
 # How long a tree's sessions must have been silent. A session resumed in a finished tree
 # to start the next piece of work is clean and merged until its first edit.
 QUIET_HOURS = 12
+
+# `reap`'s answer when `compose down` could not reach Docker's engine. The tree is kept
+# whole rather than removed: its stack's containers and volumes would outlive it with
+# nothing left to name them, so no later pass could tear them down.
+ENGINE_DOWN = (
+    "kept -- Docker's engine is not running, so its stack cannot be torn down; "
+    "the next pass with the engine up reaps it, stack and all"
+)
 
 
 @dataclass(frozen=True)
@@ -193,6 +208,24 @@ def verdict(
     return ""
 
 
+def down_stack(tree: Tree, checkout: Path, run: Run) -> str:
+    """Tear down the tree's own compose project. `""` when done or there is none.
+
+    `ENGINE_DOWN` when Docker's engine could not be reached, before the tree is touched,
+    so a kept tree is kept whole. A name equal to the checkout's is the static checkout's
+    stack and is never downed.
+    """
+    name = compose_name(tree.path)
+    if not name or name == checkout.name:
+        return ""
+    down = run(["docker", "compose", "-p", name, "down", "-v"])
+    if down.returncode == 0:
+        return ""
+    if box_teardown.engine_unreachable(f"{down.stderr or ''}\n{down.stdout or ''}"):
+        return ENGINE_DOWN
+    return f"compose down -p {name} failed: {(down.stderr or '').strip()[-200:]}"
+
+
 def reap(
     tree: Tree,
     checkout: Path,
@@ -206,16 +239,14 @@ def reap(
     out -- so the removal needs no `--force`, and git still refuses anything else. A
     refusal from the filesystem rather than from git is finished with `remove`.
     """
+    error = down_stack(tree, checkout, run)
+    if error:
+        return error
     for path in noise:
         if path in GENERATED:
             (tree.path / path).unlink(missing_ok=True)
         else:
             run(["git", "-C", str(tree.path), "checkout", "--", path])
-    name = compose_name(tree.path)
-    if name and name != checkout.name:
-        down = run(["docker", "compose", "-p", name, "down", "-v"])
-        if down.returncode != 0:
-            return f"compose down -p {name} failed: {(down.stderr or '').strip()[-200:]}"
     removed = run(["git", "-C", str(checkout), "worktree", "remove", str(tree.path)])
     if removed.returncode == 0:
         return ""
@@ -357,16 +388,28 @@ def sweep_checkout(
         if not apply:
             say(f"{label}: its PR merged at this HEAD -- would reap")
             continue
-        error = reap(tree, checkout, run, noise)
-        why = admin_only(tree.path) if error else ""
-        if why:
-            say(f"{label}: {why}")
-        elif error:
-            failures += 1
-            say(f"{label}: could not reap: {error}")
-        else:
-            say(f"{label}: its PR merged at this HEAD -- reaped")
+        line, failed = reap_outcome(tree.path, reap(tree, checkout, run, noise))
+        failures += failed
+        say(f"{label}: {line}")
     return failures
+
+
+def reap_outcome(path: Path, error: str) -> tuple[str, bool]:
+    """What a reap's `error` reads as in the artifact, and whether it is a failure.
+
+    Two refusals keep the tree without counting one, because no fixer can act on
+    either and the scheduled job going red sends one anyway: a stopped Docker engine
+    (`ENGINE_DOWN`; the next pass with it up reaps the tree whole), and a directory only
+    an administrator may delete (`admin_only`).
+    """
+    if not error:
+        return "its PR merged at this HEAD -- reaped", False
+    if error == ENGINE_DOWN:
+        return error, False
+    why = admin_only(path)
+    if why:
+        return why, False
+    return f"could not reap: {error}", True
 
 
 def sweep_workspace(workspace: Path, apply: bool, say: Callable[[str], None]) -> int:

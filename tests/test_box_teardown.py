@@ -188,6 +188,69 @@ def test_force_remove_kills_the_holder_and_retries_the_delete(tmp_path, monkeypa
     assert slept == [box_teardown.HOLDER_RELEASE_SECONDS]
 
 
+def _released_after(box_dir: Path, monkeypatch, refusals: int) -> list[float]:
+    """Deny the box's `_yaml.pyd` for its first `refusals` deletes, with nothing evictable.
+
+    Each `remove_tree_longpath` asks twice -- `rmtree`, then its `onexc` retry by path.
+
+    fc85393e: reconcile's reap of roguelike's merged box died on that file, held by a
+    handle no holder query named, and the file opened exclusively minutes later.
+    """
+    (box_dir / "yaml").mkdir(parents=True)
+    (box_dir / "yaml" / "_yaml.pyd").write_text("native", encoding="utf-8")
+    left = {"refusals": refusals}
+    real_unlink = os.unlink
+
+    def held(path, *args, **kwargs):
+        if str(path).endswith("_yaml.pyd") and left["refusals"] > 0:
+            left["refusals"] -= 1
+            raise PermissionError(13, "Access is denied")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", held)
+    monkeypatch.setattr(box_teardown, "evict_box_holders", lambda path, run=None: [])
+    return []
+
+
+def test_force_remove_retries_a_held_file_nobody_could_be_evicted_for(tmp_path, monkeypatch):
+    box_dir = tmp_path / "roguelike--devkit-upgrade-v0-11-37-1001"
+    slept = _released_after(box_dir, monkeypatch, refusals=4)
+    error, notes = box_teardown.force_remove_box(box_dir, sleep=slept.append)
+    assert (error, notes) == ("", [])
+    assert not box_dir.exists()
+    assert slept == list(box_teardown.RELEASE_PAUSES[:2])
+
+
+def test_force_remove_reports_a_hold_that_outlasts_every_pause(tmp_path, monkeypatch):
+    box_dir = tmp_path / "roguelike--devkit-upgrade-v0-11-37-1001"
+    slept = _released_after(box_dir, monkeypatch, refusals=99)
+    error, notes = box_teardown.force_remove_box(box_dir, sleep=slept.append)
+    assert "_yaml.pyd" in error and "Access is denied" in error and notes == []
+    assert slept == list(box_teardown.RELEASE_PAUSES)
+
+
+def test_force_remove_waits_on_nothing_only_an_administrator_could_delete(tmp_path, monkeypatch):
+    """No pause cures an ACL, and the scheduled reap meets five such trees every run."""
+    box_dir = tmp_path / "declarative-finding-sky"
+    _released_after(box_dir, monkeypatch, refusals=99)
+    monkeypatch.setattr(box_teardown, "unopenable", lambda path: [str(path / ".pytest_cache")])
+    error, _notes = box_teardown.force_remove_box(box_dir, sleep=pytest_fail)
+    assert "Access is denied" in error
+
+
+def test_engine_unreachable_reads_each_platforms_spelling_and_nothing_else():
+    assert box_teardown.engine_unreachable(
+        "failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; "
+        "check if the path is correct and if the daemon is running: "
+        "open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified."
+    )
+    assert box_teardown.engine_unreachable(
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+    )
+    assert not box_teardown.engine_unreachable("Error response from daemon: volume is in use")
+    assert not box_teardown.engine_unreachable("")
+
+
 def test_an_access_denied_delete_is_a_filesystem_failure_not_a_dirty_refusal(tmp_path):
     """The widened predicate, at its own level. `Access is denied` is git's report of a
     Win32 delete that failed, which the fallback exists for; the dirty-tree refusal is
