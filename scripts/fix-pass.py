@@ -278,6 +278,20 @@ def decide(
 # --- the pass -----------------------------------------------------------------------------
 
 
+def context(workspace: Path, mode: str, now: _dt.datetime) -> fix_loop.Context:
+    """What every step of a pass reads: the checkouts, the two ledgers, the clock, and
+    when the machine last started, which tells a fixer a restart killed from a dead one."""
+    root = workspace.parent
+    # Every registered checkout, `devkit.onHold` or not: a PR that exists is work in
+    # flight whatever the setting says, and the pass is the last thing that would move it.
+    projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
+    ledger_path = worktree.boxes_root(root) / fix_ledger.LEDGER_NAME
+    devkit_dir = root / fix_cycle.DEVKIT
+    booted = fix_loop.fix_reports.booted_at(now)
+    history = REPO_ROOT / HISTORY
+    return fix_loop.Context(root, projects, devkit_dir, ledger_path, history, mode, now, booted)
+
+
 def run(
     workspace: Path,
     mode: str,
@@ -291,13 +305,8 @@ def run(
         if not (REPO_ROOT / ARTIFACT).is_file():
             write_artifact(f"fix-pass: mode=off -- set {fix_cycle.SETTING} to plan or dispatch")
         return EXIT_OK
-    root = workspace.parent
-    # Every registered checkout, `devkit.onHold` or not: a PR that exists is work in
-    # flight whatever the setting says, and the pass is the last thing that would move it.
-    projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
-    ledger_path = worktree.boxes_root(root) / fix_ledger.LEDGER_NAME
-    devkit_dir = root / fix_cycle.DEVKIT
-    ctx = fix_loop.Context(root, projects, devkit_dir, ledger_path, REPO_ROOT / HISTORY, mode, now)
+    ctx = context(workspace, mode, now)
+    root, projects, devkit_dir = ctx.root, ctx.projects, ctx.devkit_dir
     errors = (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError)
     journal = Journal(devkit_dir, errors=fix_loop.fix_findings.STEP_ERRORS + errors)
     prefixes = fix_release.adoption_prefixes()

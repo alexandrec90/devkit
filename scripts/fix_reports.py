@@ -15,7 +15,8 @@ the entry stood. Files under the worktree's ignored `logs/` close that:
 - `logs/friction.md`, which any session may write: one line per thing the harness cost
   it turns. The pass files each line on the harness-defect ledger.
 - No outcome at all: a stamped tree with no intent, no report and a transcript gone
-  quiet (`session_state`) is a session that died, which frees its dispatch at once.
+  quiet (`session_state`) is a session that died, which frees its dispatch at once --
+  or, last heard from before the machine started (`booted_at`), one a restart killed.
 
 `agent_trees` is the walk both this and `ship_intent.find_intents` make: every
 worktree of every registered checkout, through `git worktree list`, so a box, a
@@ -458,7 +459,54 @@ WORKING = "working"
 DONE = "done"
 NEVER_STARTED = "never started"
 NO_OUTCOME = "ended without an outcome"
-DEAD = (NEVER_STARTED, NO_OUTCOME)
+# Killed by the machine going down, not by anything the session did: on 2026-09-30 the
+# operator powered off mid-pass, and the three fixers then at work were filed as three
+# `fixer-no-outcome` defects (4dc413a1, 9201a08f, e2feebab) and two of them spent their
+# PRs' one blind attempt, escalating #480 and #482 as `blind-evidence`.
+INTERRUPTED = "stopped by a restart"
+DEAD = (NEVER_STARTED, NO_OUTCOME, INTERRUPTED)
+
+
+def booted_at(now: _dt.datetime | None = None) -> _dt.datetime | None:
+    """When this machine last started, or None where it cannot say.
+
+    No session's process outlives a restart, so one last heard from before it is over,
+    however recently. Windows counts the tick from boot through sleep and hibernation,
+    which a session does survive; Linux's `/proc/uptime` does the same. Elsewhere this
+    says nothing, and a session is judged by its silence alone, as before.
+    """
+    now = now or _dt.datetime.now(_dt.UTC)
+    seconds = _uptime()
+    return None if seconds is None else now - _dt.timedelta(seconds=seconds)
+
+
+def _uptime() -> float | None:
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel = ctypes.windll.kernel32
+        kernel.GetTickCount64.restype = ctypes.c_ulonglong
+        return float(kernel.GetTickCount64()) / 1000
+    try:
+        return float(Path("/proc/uptime").read_text(encoding="ascii").split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _restarted(last: _dt.datetime, booted: _dt.datetime | None, now: _dt.datetime) -> bool:
+    """The machine started between `last` and `now`: whatever ran at `last` is gone."""
+    return booted is not None and last < booted <= now
+
+
+def _unheard(tree: Path, sent: _dt.datetime, now: _dt.datetime, booted: _dt.datetime | None) -> str:
+    """The state of a session that has said nothing since it was sent."""
+    # The grace is for a session starting, not one its launcher refused: 0927-2's
+    # held every ledger send for two iterations while the backlog grew.
+    if launch_refused(tree):
+        return NEVER_STARTED
+    if _restarted(sent, booted, now):
+        return INTERRUPTED
+    return NEVER_STARTED if now - sent > START_GRACE else WORKING
 
 
 def _with_outcome(transcript: Path | None, now: _dt.datetime) -> str:
@@ -469,13 +517,17 @@ def _with_outcome(transcript: Path | None, now: _dt.datetime) -> str:
 
 
 def session_state(
-    tree: Path, now: _dt.datetime, projects_root: Path | None = None
+    tree: Path,
+    now: _dt.datetime,
+    projects_root: Path | None = None,
+    booted: _dt.datetime | None = None,
 ) -> tuple[str, str]:
     """`(state, transcript)` of the session the tree's stamp sent.
 
     `DONE` once it left an intent or a report and has no background task still out,
     `WORKING` while its transcript moves (or it is still inside `START_GRACE`), one of
-    `DEAD` otherwise. `""` for a tree with no
+    `DEAD` otherwise: `INTERRUPTED` when the machine started (`booted`, from `booted_at`)
+    after the session was last heard from, with no wait. `""` for a tree with no
     stamp, one already judged dead, or a session this cannot see -- only Claude Code
     keeps a transcript here, and a Codex tab is watched by the person who opened it.
     """
@@ -495,10 +547,9 @@ def session_state(
         return _with_outcome(transcript, now), str(transcript or "")
     touched = last_spoke(transcript) if transcript else None
     if touched is None or touched < sent:
-        # The grace is for a session starting, not one its launcher refused: 0927-2's
-        # held every ledger send for two iterations while the backlog grew.
-        refused = launch_refused(tree)
-        return (NEVER_STARTED, "") if refused or now - sent > START_GRACE else (WORKING, "")
+        return _unheard(tree, sent, now, booted), ""
+    if _restarted(touched, booted, now):
+        return INTERRUPTED, str(transcript)
     if now - touched > QUIET_AFTER:
         return NO_OUTCOME, str(transcript)
     return WORKING, str(transcript)
