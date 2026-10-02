@@ -144,6 +144,30 @@ def append_history(account: fix_cycle.Account, now: _dt.datetime, root: Path | N
 # --- the steps ----------------------------------------------------------------------------
 
 
+def provision_for_ship(tree: Path) -> str:
+    """Install the tree's toolchain when neither it nor its checkout has the project's own
+    pre-commit: a line for the record, "" when nothing needed doing.
+
+    `ship.py --fix` refuses without one ("provision first"), and that refusal went to a
+    devkit session: sports_betting's worktree-harmonic-humming-kay, cut with no `.venv`
+    from a checkout with none, was refused on every pass of the 2026-10-02 supervision.
+    Provisioning is one command, and anything a script can do, no session does. A
+    pre-commit on PATH is not the project's: the fixers it runs are the wrong versions.
+    """
+    own = ship_intent.ship.pre_commit_command(
+        tree, sweep.source_checkout(tree), which=lambda _name: None, find_spec=lambda _name: None
+    )
+    if own is not None:
+        return ""
+    steps = worktree.plan_provision(tree, quiet=True)
+    if not steps:
+        return ""
+    ok, notes = worktree.run_provision(tree, steps)
+    if not ok:
+        return "FAILED to provision: " + "; ".join(n for n in notes if n.startswith("FAILED"))
+    return "provisioned its toolchain: " + ", ".join(step.label for step in steps)
+
+
 def ship_intents(
     root: Path, projects: list[str], mode: str, journal: Journal | None = None
 ) -> tuple[list[str], list[fix_plan.Failure], bool]:
@@ -181,6 +205,9 @@ def ship_intents(
             )
             continue
         base = intent.base or "main"
+        if provisioned := provision_for_ship(intent.tree):
+            lines.append(f"{where} -- {provisioned}")
+        # Read after provisioning, so the commit stage runs with the `.venv` just made.
         outcome = ship_intent.ship_one(intent, push_gate.interpreter(intent.tree), base)
         if outcome.intent.branch != intent.branch:
             # Carried off a retired name: the record names what went out, or it reads as
