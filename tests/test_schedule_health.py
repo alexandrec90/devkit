@@ -47,6 +47,14 @@ def test_one_missed_run_is_not_reported():
 # --- the four ways a scheduled job goes quiet -----------------------------------
 
 
+def test_job_problem_is_one_jobs_line_or_none():
+    """`problems` is this over every job, in name order, keeping the lines."""
+    assert health.job_problem(job(), NOW, frozenset(), None, None) is None
+    off = job(enabled=False)
+    assert "disabled" in health.job_problem(off, NOW, frozenset(), None, None)
+    assert health.job_problem(off, NOW, frozenset({off.name}), None, None) is None
+
+
 def test_a_disabled_job_is_reported():
     """Lived: reconcile was disabled 26 minutes after it was created and stayed off for
     five days. 471 missed runs, nothing red anywhere, 26 leaked boxes and 5 GB."""

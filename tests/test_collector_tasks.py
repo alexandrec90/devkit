@@ -87,6 +87,40 @@ def test_the_task_fires_the_wrapper_from_the_devkit_checkout_every_interval():
     assert "<ExecutionTimeLimit>PT1H</ExecutionTimeLimit>" in document
 
 
+def test_task_arguments_name_the_fire_verb_since_the_default_runs_nothing():
+    assert tasks.task_arguments(ROOT, "x") == rf'"{ROOT}\scripts\collectors.py" fire x'
+
+
+def test_the_interpreter_is_the_windowless_twin_of_the_console_one(monkeypatch):
+    monkeypatch.setattr(tasks.sweep, "console_python", lambda: r"C:\py\python.exe")
+    monkeypatch.setattr(tasks.devkit_schtasks, "windowless", lambda exe: f"windowless:{exe}")
+    assert tasks.interpreter() == r"windowless:C:\py\python.exe"
+
+
+def test_is_registered_is_the_xml_querys_exit_code():
+    assert not tasks.is_registered("social-scraper", FakeSchtasks())
+    assert tasks.is_registered("social-scraper", FakeSchtasks(registered="<Task/>"))
+
+
+def test_interval_tag_is_the_cadence_as_the_document_spells_it():
+    assert tasks.interval_tag(SCRAPER) == "<Interval>PT30M</Interval>"
+    assert tasks.interval_tag(SCRAPER) in tasks.task_document(SCRAPER, ROOT, PYTHONW)
+
+
+def test_check_is_current_only_for_this_document_at_this_cadence():
+    current = FakeSchtasks(registered=tasks.task_document(SCRAPER, ROOT, PYTHONW))
+    assert tasks.check(SCRAPER, ROOT, PYTHONW, current)[0] == devkit_schtasks.CHECK_CURRENT
+    hourly = config.Collector("social-scraper", command=SCRAPER.command, minutes=60)
+    drifted = FakeSchtasks(registered=tasks.task_document(hourly, ROOT, PYTHONW))
+    code, message = tasks.check(SCRAPER, ROOT, PYTHONW, drifted)
+    assert code == devkit_schtasks.CHECK_STALE and "every 30 minutes" in message
+
+
+def test_the_reporter_is_the_say_and_fail_a_report_has():
+    assert {"say", "fail"} <= set(vars(tasks.Reporter))
+    assert callable(Report().say) and callable(Report().fail)
+
+
 def test_the_wrapper_ends_a_wedged_command_before_the_scheduler_would():
     """The scheduler's kill records nothing; the wrapper's timeout writes the log."""
     assert tasks.FIRE_TIMEOUT < 60 * 60

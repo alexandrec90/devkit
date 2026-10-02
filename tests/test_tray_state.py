@@ -367,6 +367,27 @@ def test_a_scheduled_collector_is_asked_about_in_the_same_query_and_judged_the_s
     assert found[0].artifact == "logs/collector-social-scraper.log"
 
 
+def test_collector_task_states_relabels_the_tasks_and_adds_the_missing_ones():
+    found = [
+        tray_state.JobState("devkit-a", tray_state.OK),
+        tray_state.JobState("social-scraper", tray_state.WARN, "slow"),
+    ]
+    tasks = {"social-scraper": "logs/collector-social-scraper.log", "other": "logs/o.log"}
+    relabelled = tray_state.collector_task_states(found, tasks)
+    assert relabelled[:2] == [
+        tray_state.JobState("devkit-a", tray_state.OK),
+        tray_state.JobState(
+            "collector: social-scraper",
+            tray_state.WARN,
+            "slow",
+            "logs/collector-social-scraper.log",
+        ),
+    ]
+    ((name, state),) = [(item.name, item.state) for item in relabelled[2:]]
+    assert (name, state) == ("collector: other", tray_state.FAIL)
+    assert tray_state.collector_task_states(found[:1], {}) == found[:1]
+
+
 def test_a_scheduled_collector_with_no_task_is_red_rather_than_absent(monkeypatch):
     """Asked about by name, so a task never registered or deleted by hand is a row that
     says so -- not a row that silently is not there."""

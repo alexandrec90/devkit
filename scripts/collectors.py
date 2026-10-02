@@ -317,25 +317,26 @@ def maintain(chosen: Sequence[Target], docker: Docker, report: Report, health: d
 
 def status(
     collectors: Sequence[config.Collector],
-    assignment: dict[str, str],
     chosen: Sequence[Target],
     docker: Docker,
     report: Report,
     base: Path = REPO_ROOT,
     run: collector_tasks.Runner = collector_tasks.run_argv,
 ) -> None:
-    """Read-only: what is declared, what this machine was told, and what is running."""
+    """Read-only: what is declared, what this machine was told (`chosen`, the targets
+    `targets` drew from the assignment), and what is running."""
     if not collectors:
         report.say(f"no collectors declared -- add `{config.SETTING}` to the workspace file")
     in_containers = any(not t.collector.scheduled for t in chosen)
     containers: list[Container] | None = docker.ps() if in_containers else []
     python = collector_tasks.interpreter() if any(t.collector.scheduled for t in chosen) else ""
+    by_project = {t.collector.project: t for t in chosen}
     for collector in collectors:
-        mode = assignment.get(collector.project, "")
-        if not mode:
+        target = by_project.get(collector.project)
+        if target is None:
             report.say(f"{collector.project}: not assigned on this machine (hands off)")
             continue
-        target = next(t for t in chosen if t.collector.project == collector.project)
+        mode = target.mode
         if collector.scheduled:
             state = collector_tasks.describe(collector, base, python, run)
             report.say(f"{collector.project}: assigned `{mode}` -- {state}")
@@ -565,6 +566,46 @@ def run_once(
     return code
 
 
+def single(
+    args: argparse.Namespace,
+    base: Path,
+    now: _dt.datetime,
+    run: collector_tasks.Runner,
+    spawner: collector_tasks.Spawner | None,
+    streamer: collector_tasks.Streamer | None,
+) -> int:
+    """`fire` and `run-once`, the verbs that take exactly one collector and no `Report`."""
+    if len(args.projects) != 1:
+        print(f"collectors: `{args.mode}` takes exactly one collector name", file=sys.stderr)
+        return 2
+    if args.mode == ONCE:
+        return run_once(args.projects[0], base, run, streamer)
+    return fire(args.projects[0], base, now, spawner)
+
+
+def apply_verb(
+    args: argparse.Namespace,
+    base: Path,
+    collectors: list[config.Collector],
+    run: collector_tasks.Runner,
+    report: Report,
+) -> dict[str, str] | None:
+    """`run-here`/`stop-here`/`release`: the assignment this run then acts on, or None
+    when there is nothing left to act on -- a typo, or a release."""
+    updated = reassign(args, base, collectors, report)
+    if updated is None:
+        return None
+    picked = config.pick(collectors, args.projects)[0]
+    if VERBS[args.mode] is not None:
+        return {c.project: updated[c.project] for c in picked}
+    # Released: hands off the container, but a task exists only because this
+    # job registered it, so it goes rather than firing with nobody assigned.
+    for collector in picked:
+        if collector.scheduled:
+            collector_tasks.keep_removed(collector_tasks.task_name(collector), run, report)
+    return None
+
+
 def main(
     argv: Sequence[str] | None = None,
     docker: Docker | None = None,
@@ -579,49 +620,37 @@ def main(
     base = config.home(args.devkit.expanduser().resolve())
     now = _dt.datetime.now()
     if args.mode in SINGLE:
-        if len(args.projects) != 1:
-            print(f"collectors: `{args.mode}` takes exactly one collector name", file=sys.stderr)
-            return 2
-        if args.mode == ONCE:
-            return run_once(args.projects[0], base, run, streamer)
-        return fire(args.projects[0], base, now, spawner)
+        return single(args, base, now, run, spawner, streamer)
     report = Report()
 
-    def finish(code: int) -> int:
+    def finish() -> int:
+        """Write the artifact; 2 when anything in it failed, a typo included."""
         text = render(report.lines, report.failures, now)
         write_file(base / ARTIFACT, text)
         print(text, end="")
-        return code
+        return 2 if report.failures else 0
 
     collectors, notes = config.declared(base)
     for note in notes:
         report.fail(note)
     assignment = config.load_assignment(base / config.ASSIGNMENT)
     if args.mode in VERBS:
-        updated = reassign(args, base, collectors, report)
-        if updated is None:
-            return finish(2)
-        picked = config.pick(collectors, args.projects)[0]
-        if VERBS[args.mode] is None:
-            # Released: hands off the container, but a task exists only because this
-            # job registered it, so it goes rather than firing with nobody assigned.
-            for collector in picked:
-                if collector.scheduled:
-                    collector_tasks.keep_removed(collector_tasks.task_name(collector), run, report)
-            return finish(2 if report.failures else 0)
-        assignment = {c.project: updated[c.project] for c in picked}
+        acted_on = apply_verb(args, base, collectors, run, report)
+        if acted_on is None:
+            return finish()
+        assignment = acted_on
     chosen = targets(collectors, assignment, sweep.default_workspace(base).parent)
     engine = docker or Docker()
     if args.mode == "status":
-        status(collectors, assignment, chosen, engine, report, base, run)
-        return finish(2 if report.failures else 0)
+        status(collectors, chosen, engine, report, base, run)
+        return finish()
     if not chosen:
         report.say("no collector is assigned to this machine -- nothing to do")
     maintain_scheduled([t for t in chosen if t.collector.scheduled], base, report, run)
     health = load_health(base / HEALTH)
     maintain([t for t in chosen if not t.collector.scheduled], engine, report, health)
     write_file(base / HEALTH, json.dumps(health, indent=2, sort_keys=True) + "\n")
-    return finish(2 if report.failures else 0)
+    return finish()
 
 
 if __name__ == "__main__":

@@ -450,14 +450,44 @@ def test_reassign_refuses_a_typo_without_writing(tmp_path):
 def test_status_names_an_engine_it_could_not_ask(tmp_path):
     chosen = [target(tmp_path)]
     report = collectors.Report()
-    collectors.status([chosen[0].collector], {"ibkr_trader": RUN}, chosen, FakeDocker(None), report)
+    collectors.status([chosen[0].collector], chosen, FakeDocker(None), report)
     assert report.lines == ["ibkr_trader: assigned `run` -- `app` docker not answering"]
 
 
 def test_status_with_nothing_declared_says_where_to_declare_it():
     report = collectors.Report()
-    collectors.status([], {}, [], FakeDocker(), report)
+    collectors.status([], [], FakeDocker(), report)
     assert config.SETTING in report.lines[0]
+
+
+def test_status_reads_the_mode_off_the_targets_and_skips_the_unassigned(tmp_path):
+    stopped = target(tmp_path, mode=STOP)
+    other = config.Collector("sports_betting", "collector")
+    report = collectors.Report()
+    collectors.status([stopped.collector, other], [stopped], FakeDocker([]), report)
+    assert report.lines == [
+        "ibkr_trader: assigned `stop` -- `app` no container",
+        "sports_betting: not assigned on this machine (hands off)",
+    ]
+
+
+def test_apply_verb_hands_back_only_what_it_assigned(tmp_path):
+    declared = [config.Collector("a", "s"), config.Collector("b", "s")]
+    report = collectors.Report()
+    args = collectors.parse_args(["stop-here", "a"])
+    assert collectors.apply_verb(args, tmp_path, declared, lambda argv: 0 / 0, report) == {
+        "a": STOP
+    }
+    released = collectors.parse_args(["release", "a"])
+    assert collectors.apply_verb(released, tmp_path, declared, lambda argv: 0 / 0, report) is None
+    assert config.load_assignment(tmp_path / config.ASSIGNMENT) == {}
+
+
+def test_apply_verb_on_a_typo_is_nothing_to_act_on_and_a_failure(tmp_path):
+    report = collectors.Report()
+    args = collectors.parse_args(["run-here", "nope"])
+    assert collectors.apply_verb(args, tmp_path, [config.Collector("a", "s")], None, report) is None
+    assert report.failures == 1
 
 
 # --- a scheduled collector -------------------------------------------------------------
@@ -641,3 +671,64 @@ def test_a_scheduled_collector_set_to_stop_is_a_green_row(tmp_path, monkeypatch)
     assert collectors.tray_rows(docker=FakeDocker([])) == [
         ("collector: social-scraper", collectors.OK, "off on this machine (by choice)")
     ]
+
+
+# --- the scheduled half, called directly ------------------------------------------------
+
+SCRAPER = config.Collector("social-scraper", command=("uv", "run"), minutes=30)
+PYTHONW = r"C:\py\pythonw.exe"
+
+
+def test_assigned_is_what_is_declared_and_what_this_machine_was_told(tmp_path, monkeypatch):
+    root = devkit_home(tmp_path, monkeypatch, {"ibkr_trader": STOP})
+    declared, chosen = collectors.assigned(root)
+    assert sorted(c.project for c in declared) == ["ibkr_trader", "sports_betting"]
+    assert [(t.collector.project, t.mode) for t in chosen] == [("ibkr_trader", STOP)]
+    assert chosen[0].checkout == tmp_path / "ibkr_trader"
+
+
+def test_assigned_reads_no_workspace_on_a_machine_assigned_nothing(tmp_path, monkeypatch):
+    root = devkit_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(collectors.config, "declared", lambda base: 0 / 0)
+    assert collectors.assigned(root) == ([], [])
+
+
+def test_maintain_scheduled_registers_on_run_and_removes_on_stop(tmp_path):
+    schtasks, report = FakeSchtasks(), collectors.Report()
+    here = collectors.Target(SCRAPER, RUN, tmp_path / "social-scraper")
+    collectors.maintain_scheduled([here], tmp_path, report, schtasks, python=PYTHONW)
+    assert schtasks.verbs()[-1] == "/Create"
+    elsewhere = collectors.Target(SCRAPER, STOP, tmp_path / "social-scraper")
+    collectors.maintain_scheduled([elsewhere], tmp_path, report, schtasks, python=PYTHONW)
+    assert schtasks.verbs()[-1] == "/Delete"
+    assert report.failures == 0
+
+
+def test_maintain_scheduled_with_nothing_to_keep_asks_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(collectors.collector_tasks, "interpreter", lambda: 0 / 0)
+    collectors.maintain_scheduled([], tmp_path, collectors.Report(), lambda argv: 0 / 0)
+
+
+def test_fire_logs_under_its_own_name_and_returns_the_commands_code(tmp_path, monkeypatch):
+    root = scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    when = dt.datetime(2026, 10, 2, 15, 0)
+    code = collectors.fire("social-scraper", root, when, lambda argv, cwd, timeout: (3, "blocked"))
+    assert code == 3
+    log = (root / "logs" / "collector-social-scraper.log").read_text(encoding="utf-8")
+    assert log.startswith("# collector social-scraper 2026-10-02T15:00:00 -- exit 3")
+
+
+def test_run_once_streams_the_command_and_returns_its_code(tmp_path, monkeypatch, capsys):
+    root = scraper_home(tmp_path, monkeypatch)
+    assert collectors.run_once("social-scraper", root, FakeSchtasks(), lambda argv, cwd: 5) == 5
+    assert "social-scraper exited 5" in capsys.readouterr().out
+
+
+def test_single_takes_exactly_one_name_and_dispatches_on_the_verb(tmp_path, monkeypatch, capsys):
+    root = scraper_home(tmp_path, monkeypatch)
+    when = dt.datetime(2026, 10, 2, 15, 0)
+    two = collectors.parse_args(["fire", "a", "b"])
+    assert collectors.single(two, root, when, FakeSchtasks(), None, None) == 2
+    assert "exactly one collector name" in capsys.readouterr().err
+    once = collectors.parse_args(["run-once", "social-scraper"])
+    assert collectors.single(once, root, when, FakeSchtasks(), None, lambda argv, cwd: 7) == 7
