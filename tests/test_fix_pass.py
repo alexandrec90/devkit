@@ -1621,3 +1621,23 @@ def test_a_refused_ships_detail_is_one_record_line(world, monkeypatch):
     assert lines == [
         "carameli agent/i-0919 -- refused: fixers: check yaml...Passed Detect secrets....Failed - hook id: detect-secrets"
     ]
+
+
+def test_a_pass_started_outside_utf8_mode_reruns_itself_in_it(monkeypatch):
+    """A launcher that is neither the watchdog nor the task dispatcher got the
+    `'charmap' codec can't decode byte 0x9d` traceback from a reader thread; the pass
+    now puts itself in UTF-8 mode, and hands back the rerun's exit code."""
+    ran = []
+
+    def fake_run(argv, *, check, creationflags):
+        ran.append(argv)
+        return subprocess.CompletedProcess(argv, 4)
+
+    monkeypatch.setattr(fix_pass.subprocess, "run", fake_run)
+    monkeypatch.setattr(fix_pass.sweep, "console_python", lambda: "python.exe")
+    assert fix_pass.in_utf8_mode(["--mode", "plan"], utf8_mode=0) == 4
+    assert ran == [
+        ["python.exe", "-X", "utf8", str(REPO_ROOT / "scripts" / "fix-pass.py"), "--mode", "plan"]
+    ]
+    assert fix_pass.in_utf8_mode(["--mode", "plan"], utf8_mode=1) is None
+    assert len(ran) == 1, "a pass already in UTF-8 mode started a second one"
