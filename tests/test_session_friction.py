@@ -842,6 +842,46 @@ def test_a_whole_suite_is_friction_only_where_the_scope_rule_asked_for_less(tmp_
     assert not sf.asks_for_targeted_runs(str(tmp_path / "gone"), tmp_path, "data-lake")
 
 
+def test_a_heredoc_write_is_friction_only_where_the_rule_bans_it(tmp_path):
+    """45bd36c5: a sports_betting session on v0.11.32 (`devkit.onHold`) patched `cli.py`
+    through `python - <<'EOF'`, hours after v0.11.41 shipped the rule's leading ban. Its
+    copy said so only in passing, so the fix was the pull its project is held from, not a
+    devkit change. A dispatched session was handed the ban in its system prompt anyway."""
+    patch = (
+        "python - <<'EOF'\nfrom pathlib import Path\np = Path(\"sports_betting/cli.py\")\n"
+        's = p.read_text(encoding="utf-8")\n'
+        "s = s.replace('serve', 'print(\"\\\\n\")')\n"
+        'p.write_text(s, encoding="utf-8")\nEOF'
+    )
+
+    def kinds(cwd: Path, opening: str = "build the overlay") -> list[str]:
+        chunk = st.Chunk(((1, user(opening)), (2, call(patch, "1"))), 0, 2)
+        return [
+            f.kind for f in sf.session_findings(tmp_path / "s.jsonl", chunk, str(cwd), tmp_path)
+        ]
+
+    held, current = tmp_path / "sports_betting", tmp_path / "carameli"
+    for checkout in (held, current):
+        (checkout / ".claude" / "rules").mkdir(parents=True)
+    (held / sf.ENGINEERING_RULE).write_text(
+        "A heredoc is not a trigger alone, but write files with Write or Edit anyway.\n",
+        encoding="utf-8",
+    )
+    (current / sf.ENGINEERING_RULE).write_text(
+        f"{sf.FILE_WRITES_BAN} -- no heredoc\n", encoding="utf-8"
+    )
+    assert kinds(held) == []
+    assert kinds(current) == ["heredoc-write"]
+    gone = ".claude/worktrees/harmonic-humming-kay"
+    assert kinds(held / gone) == [], "the held project's checkout decides"
+    assert kinds(current / gone) == ["heredoc-write"]
+    assert kinds(tmp_path / "elsewhere") == ["heredoc-write"], "nothing to read: it stands"
+    assert kinds(held, f"You are a fixer. ... {sf.DISPATCHED} ...") == ["heredoc-write"]
+    assert sf.bans_shell_writes(str(REPO_ROOT), tmp_path, "devkit"), (
+        "devkit's own rule carries the ban in the spelling the detector reads"
+    )
+
+
 def test_a_bare_run_tests_is_whole_only_where_the_runner_defaults_to_the_suite(tmp_path):
     """0a9897d7, retired six times before: a fixer ran devkit's `run-tests.py` bare, which
     printed "7 test file(s) for 15 changed path(s) ... --all runs the suite". devkit's
