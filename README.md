@@ -1158,11 +1158,14 @@ worktree.
 Windows only, and stdlib only — Shell_NotifyIcon through `ctypes`. `tray.py --once`
 prints the same verdict anywhere, which is also how the read path is tested.
 
-The global-tools pass is the machine-wide counterpart to the project upgrade. Four of
-this workspace's MCP servers — chrome-devtools, postgres, redis, azure-devops — are
-launched from a **globally installed** npm bin rather than through `npx`, so the global
-install is the pin and nothing was moving it; the same is true of every linter reachable
-without a project venv. `scripts/global-tools.py` reads the outdated set from npm itself
+The global-tools pass is the machine-wide counterpart to the project upgrade. Some of
+this workspace's MCP servers are launched from a **globally installed** npm bin rather
+than through `npx`, so the global install is the pin and nothing was moving it; the same
+is true of every linter reachable without a project venv. (chrome-devtools is the
+exception: it is registered at user scope as `npx -y chrome-devtools-mcp@latest
+--isolated`. `--isolated` gives each session its own temporary Chrome profile. Without
+it, every session shares one profile, and a second session's `new_page` is refused with
+"The browser is already running".) `scripts/global-tools.py` reads the outdated set from npm itself
 rather than from a list that would go stale, updates each package to the exact version it
 reported, and skips `npm` and `@anthropic-ai/claude-code` — the two things that would have
 to still work in order to undo a bad update.

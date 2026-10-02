@@ -447,6 +447,23 @@ def test_a_tree_that_has_a_venv_is_left_alone(tmp_path):
     assert real_provision_tree(tmp_path, plan=lambda t: pytest.fail("must not plan")) == []
 
 
+def test_a_tree_with_a_venv_and_an_empty_node_modules_is_provisioned(tmp_path):
+    """fcf111b9: the `.venv` says nothing about the frontend tier, and a roguelike tree
+    with an empty `node_modules` could not start `vite`."""
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / ".devkit.toml").write_text(
+        '[frontend]\nenabled = true\ndir = "."\n', encoding="utf-8"
+    )
+    ran = []
+    real_provision_tree(
+        tmp_path, plan=lambda t: ("npm ci",), run=lambda t, s: ran.append(s) or (True, [])
+    )
+    assert ran == [("npm ci",)]
+    (tmp_path / "node_modules" / ".package-lock.json").write_text("{}", encoding="utf-8")
+    assert real_provision_tree(tmp_path, plan=lambda t: pytest.fail("must not plan")) == []
+
+
 def test_a_project_with_nothing_to_install_runs_nothing(tmp_path):
     assert real_provision_tree(tmp_path, plan=lambda t: (), run=lambda *a: pytest.fail("ran")) == []
 

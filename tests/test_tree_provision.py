@@ -79,4 +79,18 @@ def test_the_hooks_venv_mark_does_not_vouch_for_node_modules(tmp_path):
     manifest.write_text('[frontend]\nenabled = true\ndir = "web"\n', encoding="utf-8")
     assert tree_provision.needs_provision(tmp_path) is True
     (tmp_path / "web" / "node_modules").mkdir(parents=True)
+    (tmp_path / "web" / "node_modules" / ".package-lock.json").write_text("{}", encoding="utf-8")
     assert tree_provision.needs_provision(tmp_path) is False
+
+
+def test_an_empty_node_modules_is_not_an_install(tmp_path):
+    """fcf111b9: a `claude --worktree` tree's `node_modules` linked to its checkout's,
+    which existed and was empty, so `npm run dev` found no `vite`. The check used to be
+    `is_dir`, which passed it."""
+    (tmp_path / ".devkit.toml").write_text(
+        '[frontend]\nenabled = true\ndir = "."\n', encoding="utf-8"
+    )
+    (tmp_path / "node_modules").mkdir()
+    assert tree_provision.frontend_missing(tmp_path) is True
+    (tmp_path / "node_modules" / ".package-lock.json").write_text("{}", encoding="utf-8")
+    assert tree_provision.frontend_missing(tmp_path) is False
