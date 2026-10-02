@@ -1730,7 +1730,19 @@ def _version(tag: str) -> tuple[int, ...] | None:
     return tuple(int(part) for part in match.groups()) if match else None
 
 
-def _nothing_to_compare(constant: str, tag: str | None) -> str:
+def _in_history(tag: str, repo: Path) -> bool:
+    """`tag` is an ancestor of HEAD in `repo`; True when git cannot say, so the
+    comparison is made as it always was."""
+    done = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", tag, "HEAD"],
+        cwd=repo if repo.is_dir() else None,
+        capture_output=True,
+        check=False,
+    )
+    return done.returncode != 1 if repo.is_dir() else True
+
+
+def _nothing_to_compare(constant: str, tag: str | None, repo: Path = REPO_ROOT) -> str:
     """Why this comparison cannot be made, or "" when it can.
 
     Two reasons. A checkout with no tags has nothing to compare against at all.
@@ -1749,9 +1761,14 @@ def _nothing_to_compare(constant: str, tag: str | None) -> str:
     the newest tag and still fails with the variable set.
 
     CI never sets it, so the release PR stays red and `gate_verdict` makes the call.
+
+    A tag outside HEAD's history was cut after this branch was, and its bump arrives
+    with main: a fixer's targeted run went red on v0.11.37, minutes old (2026-10-01).
     """
     if tag is None:
         return "no tags to compare against"
+    if not _in_history(tag, repo):
+        return f"{tag} is not in this branch's history: merging main brings its bump"
     gate = load_script("scripts/precommit/run_push_gate.py")
     if not os.environ.get(gate.RELEASE_PREPARE_ENV):
         return ""
@@ -1807,6 +1824,27 @@ def test_the_newest_tag_is_found_from_a_checkout_parked_behind_it(tmp_path):
     repo, git = _repo_with_tags(tmp_path, ["v1.0.0", "v1.1.0"])
     git("checkout", "-q", "v1.0.0")  # detached, one release behind
     assert new_project.latest_devkit_tag(repo) == "v1.1.0"
+
+
+def test_a_release_tagged_after_the_branch_was_cut_is_not_this_branchs_to_bump(
+    tmp_path, monkeypatch
+):
+    """Supervision 2026-10-01: v0.11.37 was tagged minutes after a fixer's branch was cut
+    from main, and the fixer's targeted run went red here on a constant its branch could
+    not have bumped -- merging main brings the bump. The PR gate tests the merge with
+    main, so a stale constant *on* main still fails there."""
+    gate = load_script("scripts/precommit/run_push_gate.py")
+    monkeypatch.delenv(gate.RELEASE_PREPARE_ENV, raising=False)
+    repo, git = _repo_with_tags(tmp_path, ["v1.0.0", "v1.1.0"])
+    git("checkout", "-q", "-b", "agent/fix", "v1.0.0")  # cut before v1.1.0
+    why = _nothing_to_compare("v1.0.0", "v1.1.0", repo)
+    assert "not in this branch's history" in why
+    git("checkout", "-q", "main")
+    assert _nothing_to_compare("v1.0.0", "v1.1.0", repo) == "", "a stale constant on main"
+    assert _nothing_to_compare("v1.1.0", "v1.1.0", repo) == ""
+    assert _nothing_to_compare("v1.0.0", "v1.1.0", tmp_path / "no-repo") == "", (
+        "git cannot say: compare, as before"
+    )
 
 
 def test_tags_are_ordered_by_version_and_not_lexically(tmp_path):

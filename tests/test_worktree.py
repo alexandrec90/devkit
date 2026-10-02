@@ -2018,6 +2018,42 @@ def test_the_ladder_marks_a_tree_provisioned_only_when_every_step_succeeded(tmp_
     assert not mark.exists()
 
 
+def _link_dir(link, target):
+    """`link` -> `target` as a directory symlink, or a junction where Windows refuses an
+    unprivileged symlink -- the two shapes `worktree.symlinkDirectories` leaves."""
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+
+
+def test_an_install_into_a_linked_venv_writes_the_checkouts_paths(tmp_path, monkeypatch):
+    """A `claude --worktree` tree of devkit links the checkout's `.venv`, and a `uv sync`
+    run in the tree writes the *tree's* path into every console script it installs. When
+    that tree was deleted, every launcher in the checkout's venv died with `uv trampoline
+    failed to canonicalize script path` -- `pre-commit.exe` with them, so every devkit
+    commit was refused. uv is pointed at the link's real directory instead."""
+    checkout_venv = tmp_path / "checkout" / ".venv"
+    checkout_venv.mkdir(parents=True)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    _link_dir(tree / ".venv", checkout_venv)
+    seen: list[dict | None] = []
+    monkeypatch.setattr(
+        worktree.subprocess, "run", lambda *a, **k: (seen.append(k.get("env")), _completed())[1]
+    )
+    assert worktree.run_provision(tree, (worktree.ProvisionStep("uv sync", ("uv", "sync")),))[0]
+    assert seen[0] is not None
+    assert Path(seen[0][worktree.UV_ENVIRONMENT_VAR]) == checkout_venv.resolve()
+
+    own = tmp_path / "own"
+    (own / ".venv").mkdir(parents=True)
+    assert worktree.install_env(own) is None, "a tree's own venv needs no redirect"
+    assert worktree.install_env(tmp_path / "bare") is None, "nor does a tree with none yet"
+
+
 def test_a_timed_out_install_is_reported_rather_than_raised(tmp_path, monkeypatch):
     def fake_run(*args, **kwargs):
         raise worktree.subprocess.TimeoutExpired(cmd="uv", timeout=900)

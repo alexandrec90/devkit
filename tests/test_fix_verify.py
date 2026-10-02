@@ -36,6 +36,23 @@ def test_the_pr_field_names_a_number_a_url_a_branch_or_nothing():
     assert fix_verify.target("see the note") == ("", "")
 
 
+def test_a_claude_worktree_branch_is_a_branch_though_it_has_no_slash(tmp_path):
+    """Supervision 2026-10-01: four groups resolved onto `worktree-proud-greeting-pinwheel`
+    were never in flight -- the branch pattern wanted a slash -- so the next reap-stale row
+    sent a fixer that rewrote the supervisor's fix as #488, and a branch that never merged
+    would have left them retired for good. 17 resolutions on the ledger named one."""
+    assert fix_verify.target("worktree-proud-greeting-pinwheel") == (
+        "",
+        "worktree-proud-greeting-pinwheel",
+    )
+    assert fix_verify.target("worktree-shimmying-nibbling-bee-2")[1]
+    assert fix_verify.target("-") == ("", ""), "still the no-fix verdict"
+    lines = items(resolution("worktree-proud-greeting-pinwheel", ref="33333333"))
+    assert fix_verify.in_flight(lines, tmp_path / "v.json", NOW) == {
+        "33333333": "worktree-proud-greeting-pinwheel"
+    }
+
+
 def at(hours_ago: float) -> str:
     return (NOW - _dt.timedelta(hours=hours_ago)).isoformat(timespec="seconds")
 

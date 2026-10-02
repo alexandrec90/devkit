@@ -50,6 +50,7 @@ import harness_triage as triage
 import session_friction
 import session_transcripts as st
 import worktree
+import worktree_tiers as wt  # on the path `worktree` put `scripts/hooks/` on
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WATCHDOG = REPO_ROOT / "scripts" / "fix-pass-watchdog.py"
@@ -87,6 +88,7 @@ TRACKED_WAITS = (
     "held until the devkit session",
     "a session is working in",
     "held for memory",  # fix_send.HELD_FOR_MEMORY
+    "pending devkit #",  # fix_send.named_by: the PR it names lifts it, merged or closed
 )
 # Record lines that are a failure, and the finding kind that must be open for each.
 FAILURE_KINDS = (
@@ -215,15 +217,23 @@ def check_progress(iterations: list[Iteration]) -> list[str]:
 
 def measure(transcript: Path | None, tree: str = "") -> tuple[int, int, list[str], int]:
     """`(tool calls, failed calls, friction the detectors see, output tokens)`, read as
-    the ledger's harvest reads it for a session in `tree`."""
+    the ledger's harvest reads it for a session in `tree` (`session_friction.judged`): a
+    bare run of a targeted runner is not a whole suite. A supervisor that judged it
+    otherwise reported violations the pass had rightly not filed. The workspace is the
+    parent of the tree's checkout."""
     if transcript is None or not transcript.is_file():
         return 0, 0, [], 0
     chunk = st.read_new(transcript, 0, 0)
     events = st.events(transcript, chunk.rows)
     calls = sum(1 for e in events if e.kind == "call")
     failed = sum(1 for e in events if e.kind == "result" and e.error)
-    found = session_friction.outside_the_tree(session_friction.detect(events), tree)
-    friction = [f"{cls}: {what}" for cls, what, _ in found]
+    checkout = wt.owning_checkout(tree) if tree else None
+    rows = (
+        session_friction.judged(events, tree, checkout.parent)
+        if checkout
+        else session_friction.outside_the_tree(session_friction.detect(events), tree)
+    )
+    friction = [f"{cls}: {what}" for cls, what, _ in rows]
     return calls, failed, friction, output_tokens(row for _, row in chunk.rows)
 
 

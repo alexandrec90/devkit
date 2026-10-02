@@ -264,7 +264,9 @@ def test_a_session_sent_just_before_a_restart_never_spoke_and_was_stopped_by_it(
 def test_the_boot_is_read_off_the_machine_and_unknown_where_it_cannot_be(monkeypatch):
     now = _dt.datetime.now(_dt.UTC)
     booted = fix_reports.booted_at(now)
-    if sys.platform in ("win32", "linux"):
+    # What the machine can answer from, not what it calls itself: the POSIX rehearsal is
+    # a Windows host reporting `linux`, with no `/proc/uptime` to read.
+    if sys.platform == "win32" or Path("/proc/uptime").is_file():
         assert booted is not None and booted < now
     monkeypatch.setattr(fix_reports, "_uptime", lambda: 90.0)
     assert fix_reports.booted_at(now) == now - _dt.timedelta(seconds=90)

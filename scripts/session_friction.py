@@ -170,6 +170,11 @@ GIT_C = re.compile(r"\bgit\s(?:[^\n]*?\s)?-C\s+(\S+)")
 READS_HARNESS_TEXT = re.compile(
     r"harness-triage\.log|harness-events[^\s'\"]*\.log|\.jsonl\b|friction[^\s'\"/\\]*\.md"
 )
+# The machine's interpreter by bare name, in command position. In a tree whose own
+# `.venv` is there, its "No module named pytest" is the session picking the wrong
+# interpreter, not an environment that is missing (devkit's supervisor, 2026-10-01,
+# filed against itself); `judged` drops it, since only the tree can say which it was.
+BARE_INTERPRETER = re.compile(r"(?:^|[;&|]\s*)(?:python3?|py)(?:\.exe)?\s+-m\s", re.M)
 # A command whose output is read for an environment failure even when it exited 0.
 SEES_ENVIRONMENT = re.compile(r"(?:^|[;&|]\s*)(?:\S*python\S*\s+-m\s+pytest|pytest|git)\b", re.M)
 # A quoted argument, whose `|`, `;` and newlines separate no statements: the `\|pytest` of
@@ -759,6 +764,32 @@ def task_branch(cwd: str, runner=sweep.run_windowless) -> str:
     return "" if branch in DEFAULT_BRANCHES else branch
 
 
+def judged(events: Iterable[Event], cwd: str, workspace_root: Path) -> list[tuple[str, str, Event]]:
+    """`detect`, judged against the tree the session ran in: whether its runner is
+    targeted bare, and whether it was asked for targeted runs at all. The one judgement
+    both the pass's filing and `fix-pass-supervise.py`'s audit make, so they agree."""
+    project = harness_events.project_name(Path(cwd))
+    targeted = runner_defaults_targeted(cwd, workspace_root, project)
+    found = outside_the_tree(detect(events, targeted), cwd)
+    if not asks_for_targeted_runs(cwd, workspace_root, project):
+        found = [row for row in found if row[0] != "full-suite"]
+    if has_own_venv(cwd):
+        found = [
+            row
+            for row in found
+            if not (row[0] == "environment" and BARE_INTERPRETER.search(row[2].command))
+        ]
+    return found
+
+
+def has_own_venv(cwd: str) -> bool:
+    """The tree has an interpreter in its own `.venv`, linked or not: not its checkout's."""
+    venv = Path(cwd) / ".venv" if cwd else None
+    return venv is not None and any(
+        (venv / where).is_file() for where in ("Scripts/python.exe", "bin/python")
+    )
+
+
 def session_findings(
     path: Path, chunk: st.Chunk, cwd: str, workspace_root: Path, branch_of=task_branch
 ) -> list[fix_findings.Finding]:
@@ -767,10 +798,7 @@ def session_findings(
         return []
     agent = "codex" if st.is_codex(path) else "claude"
     project = harness_events.project_name(Path(cwd))
-    targeted = runner_defaults_targeted(cwd, workspace_root, project)
-    found = outside_the_tree(detect(st.events(path, chunk.rows), targeted), cwd)
-    if not asks_for_targeted_runs(cwd, workspace_root, project):
-        found = [row for row in found if row[0] != "full-suite"]
+    found = judged(st.events(path, chunk.rows), cwd, workspace_root)
     branch = branch_of(cwd) if any(cls in SETTLED_BY_THE_SESSION for cls, _, _ in found) else ""
     return [
         fix_findings.Finding(

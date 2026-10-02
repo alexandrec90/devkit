@@ -49,13 +49,15 @@ def project(root: Path, frontend: str | None = 'dir = "."\nsrc = "src/"') -> Pat
 
 
 def with_vitest(base: Path) -> Path:
-    """A `node_modules/.bin/vitest` `shutil.which` finds on this OS."""
+    """A `node_modules/.bin/vitest` `shutil.which` finds on any OS: both of npm's shims,
+    as npm writes them on Windows. One chosen by `os.name` was missed under the POSIX
+    rehearsal, where `which` follows the forced `sys.platform` and `os.name` stays `nt`."""
     bin_dir = base / "node_modules" / ".bin"
     bin_dir.mkdir(parents=True)
-    tool = bin_dir / ("vitest.cmd" if os.name == "nt" else "vitest")
-    tool.write_text("", encoding="utf-8")
-    tool.chmod(0o755)
-    return tool
+    for tool in (bin_dir / "vitest", bin_dir / "vitest.cmd"):
+        tool.write_text("", encoding="utf-8")
+        tool.chmod(0o755)
+    return bin_dir / ("vitest.cmd" if os.name == "nt" else "vitest")
 
 
 @pytest.fixture

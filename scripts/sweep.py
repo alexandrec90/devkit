@@ -62,6 +62,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -1568,18 +1569,43 @@ def ensure_pr(gh: Git, plan: Plan) -> tuple[str, bool, str]:
 def _ensure_label(gh: Git, label: str):
     """Create `label` in the repo, idempotently -- `--force` also makes an existing
     label converge on this spelling of its colour and description."""
+    return gh(*_label_args(label))
+
+
+def _label_args(label: str) -> tuple[str, ...]:
     color, description = LABEL_SPECS.get(label, ("ededed", ""))
-    return gh("label", "create", label, "--force", "--color", color, "--description", description)
+    return ("label", "create", label, "--force", "--color", color, "--description", description)
+
+
+# Seconds before each retry of an idempotent `gh` call that lost its connection, and the
+# words that say it did: Go's `wsarecv`/`read tcp` on Windows, a reset or a timeout
+# elsewhere. #482 already wore `automerge` when re-applying it dropped on 2026-10-01, and
+# the ship was filed as failed while the PR went on to merge.
+GH_RETRY_DELAYS = (2.0, 5.0)
+GH_DROPPED = ("wsarecv", "read tcp", "connection", "timeout", "timed out", "eof", "tls handshake")
+
+
+def _gh_retrying(gh: Git, *args: str):
+    """`gh(*args)`, asked again after each delay while its failure is a dropped connection.
+    Only for a call that is safe to repeat."""
+    done = gh(*args)
+    for delay in GH_RETRY_DELAYS:
+        said = (done.stderr or done.stdout or "").lower()
+        if done.returncode == 0 or not any(word in said for word in GH_DROPPED):
+            break
+        time.sleep(delay)
+        done = gh(*args)
+    return done
 
 
 def _apply_labels(gh: Git, plan: Plan, url: str) -> str:
     """Add `plan.pr_labels` to an existing PR; "" on success, the failure otherwise."""
     for label in plan.pr_labels:
-        ensured = _ensure_label(gh, label)
+        ensured = _gh_retrying(gh, *_label_args(label))
         if ensured.returncode != 0:
             detail = (ensured.stderr or ensured.stdout or "").strip()
             return f"PR exists at {url}, but creating label `{label}` failed: {detail}"
-        added = gh("pr", "edit", plan.pr_head, "--add-label", label)
+        added = _gh_retrying(gh, "pr", "edit", plan.pr_head, "--add-label", label)
         if added.returncode != 0:
             detail = (added.stderr or added.stdout or "").strip()
             return f"PR exists at {url}, but labelling it `{label}` failed: {detail}"
