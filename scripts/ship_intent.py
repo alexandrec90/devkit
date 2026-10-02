@@ -16,7 +16,8 @@ beside the intent. A refused commit is
 recorded too, with the pre-commit output as evidence, so the pass can tell it from a
 session still working: no intent file means hands off, an intent with a refusal means a
 dispatchable failure, an intent already shipped at this tree's state means nothing to do,
-and so does one over a tree with nothing changed or committed (`commits_ahead`).
+and so does one over a tree with nothing changed or committed (`commits_ahead`), or
+whose every change is already on its base (`lands_nothing`).
 
 **The intent is consumed.** Once shipped it becomes `logs/ship-intent.shipped.md`; once
 a fixer is sent at a refusal it becomes `logs/ship-intent.refused.md` (the pass does
@@ -42,8 +43,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -282,6 +285,10 @@ def _settled(
         write_state(intent.tree, {"stage": EMPTY, "when": when, "intent": intent.digest})
         set_aside(intent.tree, SHIPPED_FILE)
         return Outcome(intent, EMPTY, "nothing changed or committed: no PR to open; set aside")
+    if lands_nothing(intent.tree, base, runner):
+        write_state(intent.tree, {"stage": EMPTY, "when": when, "intent": intent.digest})
+        set_aside(intent.tree, SHIPPED_FILE)
+        return Outcome(intent, EMPTY, f"everything here is on origin/{base}: no PR; set aside")
     return still_refused(intent, state, porcelain)
 
 
@@ -405,7 +412,7 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
 
 
 # What `git_policy.branch` says when a commit lands on a name whose PR merged; its remedy
-# is one `git switch -c`, which a session was otherwise sent to make.
+# is one new branch at HEAD, which a session was otherwise sent to make.
 RETIRED_MARK = "is permanently retired because its PR merged"
 # How many fresh names one refused commit is carried across. The first nearly always
 # takes; each further refusal is a name whose PR merged and whose refs were deleted since
@@ -452,12 +459,20 @@ def _carry_to_free_branch(
     intent: Intent, stem: str, runner: Runner, tried: set[str]
 ) -> Intent | None:
     """The intent moved onto the next `<stem>-<n>` no ref and no refusal has used; None
-    when the switch failed."""
+    when the branch could not be made.
+
+    A new name at HEAD, and HEAD pointed at it: what `git switch -c` does, minus its refusal
+    of a tree mid-merge ("cannot switch branch while merging"), which is a tree a fixer
+    resolving a conflict leaves -- carameli's minor-and-patch was refused on its retired
+    name and could not be carried (e21febb8). `git checkout -b` would carry it but drop
+    `MERGE_HEAD`, committing the merge with one parent.
+    """
     tried.add(intent.branch)
     name = next_free_name(stem, _taken_names(stem, runner, intent.tree) | tried)
-    if runner(["git", "switch", "-c", name], cwd=intent.tree).returncode != 0:
+    if runner(["git", "branch", name], cwd=intent.tree).returncode != 0:
         return None
-    return replace(intent, branch=name)
+    pointed = runner(["git", "symbolic-ref", "HEAD", f"refs/heads/{name}"], cwd=intent.tree)
+    return replace(intent, branch=name) if pointed.returncode == 0 else None
 
 
 def _commit_carrying(intent: Intent, python: str, runner: Runner) -> tuple[Intent, str, str]:
@@ -510,6 +525,53 @@ def commits_ahead(tree: Path, base: str, runner: Runner) -> int | None:
         return int((counted.stdout or "").strip())
     except ValueError:
         return None
+
+
+def lands_nothing(tree: Path, base: str, runner: Runner) -> bool:
+    """Whether everything the tree holds -- committed, staged, edited, untracked -- is on
+    `origin/<base>` already: merged there, it changes nothing. False when git cannot say.
+
+    Dirty or ahead is not the same as new. carameli's minor-and-patch tree was both: its
+    PR squash-merged while a fixer was mid-merge in it, so the staged files matched
+    `origin/master` byte for byte and the one commit ahead was the pre-squash original.
+    Its intent said "Nothing to ship", the commit stage ran anyway, was refused on the
+    retired name, and the refusal sent a second fixer to say it again (e21febb8).
+    """
+    upstream = f"origin/{base}"
+    forked = runner(["git", "merge-base", "HEAD", upstream], cwd=tree)
+    fork = (forked.stdout or "").strip() if forked.returncode == 0 else ""
+    held = _held_tree(tree, runner) if fork else ""
+    if not held:
+        return False
+    target = runner(["git", "rev-parse", f"{upstream}^{{tree}}"], cwd=tree)
+    merged = runner(
+        ["git", "merge-tree", "--write-tree", f"--merge-base={fork}", upstream, held], cwd=tree
+    )
+    if target.returncode != 0 or merged.returncode != 0:
+        return False  # 1 is a conflict: the tree has something origin does not
+    lines = (merged.stdout or "").split()
+    return bool(lines) and lines[0] == (target.stdout or "").strip()
+
+
+def _held_tree(tree: Path, runner: Runner) -> str:
+    """The tree `git add -A` would commit, written through a copy of the index so the real
+    one is never touched -- and, being a copy, its stat cache spares rehashing every file.
+    "" when git cannot say."""
+    where = runner(["git", "rev-parse", "--git-path", "index"], cwd=tree)
+    if where.returncode != 0 or not (where.stdout or "").strip():
+        return ""
+    index = Path((where.stdout or "").strip())
+    with tempfile.TemporaryDirectory() as scratch:
+        probe = Path(scratch) / "index"
+        try:
+            shutil.copyfile(index if index.is_absolute() else tree / index, probe)
+        except OSError:
+            return ""
+        env = {**os.environ, "GIT_INDEX_FILE": str(probe)}
+        if runner(["git", "add", "-A"], cwd=tree, env=env).returncode != 0:
+            return ""
+        written = runner(["git", "write-tree"], cwd=tree, env=env)
+    return (written.stdout or "").strip() if written.returncode == 0 else ""
 
 
 def catch_up(tree: Path, branch: str, runner: Runner) -> str:
