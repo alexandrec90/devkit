@@ -1024,7 +1024,8 @@ def test_a_publishable_difference_is_published_not_merely_reported(tmp_path, mon
     line = ws.workspace_sync_line(live)
 
     assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
-    assert "published 1 change(s) from devkit" in line
+    # Two: settings are compared per key, and `a` went while `c` arrived.
+    assert "published 2 change(s) from devkit" in line
     assert "reload the window" in line
 
 

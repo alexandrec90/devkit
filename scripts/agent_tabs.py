@@ -85,8 +85,10 @@ def agent_command(launch: agent_models.Launch, hooks_off: bool, prompt: str = ""
     )
     # Quoted through, flag names included: a quoted literal is still one argument to
     # PowerShell, and quoting the lot means no future flag value can be read as a
-    # `$`-expansion on its way to the agent.
-    tail = [*launch.flags(), *([prompt] if prompt else [])]
+    # `$`-expansion on its way to the agent. `FILE_WRITES` rides here too, for the
+    # reason `background_argv` gives: a person's tab runs the same bypass-mode prompt.
+    rule = ["--append-system-prompt", FILE_WRITES] if launch.cli == "claude" else []
+    tail = [*launch.flags(), *rule, *([prompt] if prompt else [])]
     return " ".join([prefix + launch.cli, *(ps_quote(part) for part in tail)])
 
 
