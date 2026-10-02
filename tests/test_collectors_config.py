@@ -51,6 +51,14 @@ def test_no_setting_declares_nothing_and_says_nothing():
         ({"service": ""}, "no `service`"),
         ({"service": "app", "health": "ibkr-trader health"}, "list of strings"),
         ({"service": "app", "health": ["ok", 3]}, "list of strings"),
+        ({"command": [], "minutes": 30}, "non-empty list"),
+        ({"command": "uv run x", "minutes": 30}, "non-empty list"),
+        ({"command": ["uv"]}, "positive whole number"),
+        ({"command": ["uv"], "minutes": 0}, "positive whole number"),
+        ({"command": ["uv"], "minutes": "30"}, "positive whole number"),
+        ({"command": ["uv"], "minutes": True}, "positive whole number"),
+        ({"command": ["uv"], "minutes": 30, "needs": "db"}, "compose service names"),
+        ({"command": ["uv"], "minutes": 30, "service": "app"}, "one kind"),
     ],
 )
 def test_a_malformed_entry_is_a_note_not_silence(entry, reason):
@@ -61,6 +69,38 @@ def test_a_malformed_entry_is_a_note_not_silence(entry, reason):
     )
     assert [c.project for c in found] == ["good"]
     assert len(notes) == 1 and notes[0].startswith("bad:") and reason in notes[0]
+
+
+def test_a_scheduled_collector_is_read_with_its_cadence_and_needs():
+    text = workspace(
+        {
+            config.SETTING: {
+                "social-scraper": {
+                    "command": ["uv", "run", "social-scraper", "scrape"],
+                    "minutes": 30,
+                    "needs": ["db"],
+                }
+            }
+        }
+    )
+    (found,), notes = config.parse_setting(text)
+    assert notes == []
+    assert found == config.Collector(
+        "social-scraper",
+        command=("uv", "run", "social-scraper", "scrape"),
+        minutes=30,
+        needs=("db",),
+    )
+    assert found.scheduled and not config.Collector("p", "s").scheduled
+
+
+def test_a_scheduled_collector_may_not_take_devkits_task_namespace():
+    """Its task is named after it, and a `devkit-` task is read as one of devkit's own
+    jobs -- by the fix pass too, which would file the project's failures as devkit's."""
+    found, notes = config.parse_setting(
+        workspace({config.SETTING: {"devkit-scraper": {"command": ["x"], "minutes": 5}}})
+    )
+    assert found == [] and "may not start with `devkit-`" in notes[0]
 
 
 def test_a_setting_of_the_wrong_shape_is_reported():
@@ -77,16 +117,20 @@ def test_a_missing_workspace_file_is_reported(tmp_path):
     assert found == [] and "no workspace file" in notes[0]
 
 
-def test_the_canonical_workspace_declares_the_two_collectors():
-    """The declaration this change exists to make, read the way the job reads it."""
+def test_the_canonical_workspace_declares_the_collectors():
+    """The declarations, read the way the job reads them."""
     text = (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
     found, notes = config.parse_setting(text)
     assert notes == []
-    assert {c.project: c.service for c in found} == {
+    containers = [c for c in found if not c.scheduled]
+    assert {c.project: c.service for c in containers} == {
         "ibkr_trader": "app",
         "sports_betting": "collector",
     }
-    assert all(c.health for c in found)
+    assert all(c.health for c in containers)
+    scheduled = {c.project: c for c in found if c.scheduled}
+    assert set(scheduled) == {"social-scraper"}
+    assert scheduled["social-scraper"].needs == ("db",)
     devkit_jsonc.loads(text)  # and the file as a whole still parses
 
 

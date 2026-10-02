@@ -27,6 +27,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Joins a verb to the one collector it is for, in a row's value.
 PICK_SEP = ":"
 
+# `collectors.ONCE`, spelled here because this module imports only the config, and
+# `test_collectors_picker.py` pins the two together.
+ONCE = "run-once"
+
 # What each verb is called in the list, for all of them and for one. `status` first: a
 # mis-click on the first row must change nothing.
 VERBS = (
@@ -68,11 +72,33 @@ def rows(collectors: list[config.Collector], assignment: dict[str, str]) -> list
                 f"{verb}{PICK_SEP}{c.project}",
                 label.format(c.project),
                 now(assignment, c.project),
-                f"{effect}. Compose service `{c.service}` in {c.project}.",
+                f"{effect}. {what(c)}",
             )
             for c in collectors
         ]
+    # Last, and per collector only: a run by hand assigns nothing, so it has no "all".
+    found += [
+        picker_rows.row(
+            f"{ONCE}{PICK_SEP}{c.project}",
+            f"Run {c.project} once now",
+            now(assignment, c.project),
+            f"In this terminal, whatever this PC is set to -- e.g. its first run before "
+            f"scheduling it. Refused while its scheduled run is going. {what(c)}",
+        )
+        for c in collectors
+        if c.scheduled
+    ]
     return found
+
+
+def what(collector: config.Collector) -> str:
+    """One sentence on what the collector is, in either kind."""
+    if collector.scheduled:
+        return (
+            f"Runs `{' '.join(collector.command)}` in {collector.project} every "
+            f"{collector.minutes} minutes, as its own scheduled task."
+        )
+    return f"Compose service `{collector.service}` in {collector.project}."
 
 
 def main(root: Path = REPO_ROOT) -> int:

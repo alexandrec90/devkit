@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Keep the workspace's ingestion collectors running on the one machine meant to run them.
 
-A collector is a compose service that does scheduled work with nobody connected to it --
-ibkr_trader's `serve`, sports_betting's `collector`. Each keeps its own clock inside
-the container (APScheduler), so what needs an owner is not the schedule but the
-*container*: that it is up where it should be, down where it should not, and visibly
-healthy or not. `restart: unless-stopped` covers none of that. It resurrects a container
-on whatever machine last started one, and on a machine where nobody ever did it does
-nothing at all.
+A collector is ingestion that does scheduled work with nobody connected to it. Most are
+a compose service -- ibkr_trader's `serve`, sports_betting's `collector` -- which keeps
+its own clock inside the container (APScheduler), so what needs an owner is not the
+schedule but the *container*: that it is up where it should be, down where it should
+not, and visibly healthy or not. `restart: unless-stopped` covers none of that. It
+resurrects a container on whatever machine last started one, and on a machine where
+nobody ever did it does nothing at all.
+
+The rest are a host command on an interval -- social-scraper drives the host's Chrome --
+and there the clock *is* what needs an owner: a Scheduled Task per collector, which this
+job registers where it runs and removes where it does not. `collector_tasks` holds that
+half.
 
 **Which machine is not a property of the workspace**, which is shared: see
 `collectors_config`. Every workstation registers this job; it acts only on the
@@ -18,6 +23,8 @@ collectors this machine was assigned, and a machine assigned none spawns nothing
     collectors.py stop-here [PROJECT..] # this machine must not; stops them now
     collectors.py release [PROJECT..]   # forget; neither started nor stopped from now on
     collectors.py maintain              # what `devkit-collectors` runs every 15 minutes
+    collectors.py fire NAME             # one scheduled collector, once: what its task runs
+    collectors.py run-once NAME         # the same by hand, output in this terminal
 
 No names means every collector `devkit.collectors` declares.
 
@@ -43,6 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import collector_tasks
 import collectors_config as config
 import sweep
 
@@ -268,10 +276,28 @@ def keep_stopped(
         report.fail(f"{name}: could not stop `{service}` -- {first_line(out) or 'no output'}")
 
 
-def maintain(chosen: Sequence[Target], docker: Docker, report: Report, health: dict) -> None:
-    """One pass over the assigned collectors, recording health verdicts into `health`."""
+def maintain_scheduled(
+    chosen: Sequence[Target],
+    base: Path,
+    report: Report,
+    run: collector_tasks.Runner = collector_tasks.run_argv,
+    python: str | None = None,
+) -> None:
+    """Register each scheduled collector's task on a `run` machine; remove it otherwise."""
     if not chosen:
-        report.say("no collector is assigned to this machine -- nothing to do")
+        return
+    interpreter = python or collector_tasks.interpreter()
+    for target in chosen:
+        if target.mode == config.RUN:
+            collector_tasks.keep_registered(target.collector, base, interpreter, run, report)
+        else:
+            collector_tasks.keep_removed(collector_tasks.task_name(target.collector), run, report)
+
+
+def maintain(chosen: Sequence[Target], docker: Docker, report: Report, health: dict) -> None:
+    """One pass over the assigned *container* collectors, recording health verdicts into
+    `health`. The scheduled ones are `maintain_scheduled`'s, and need no docker."""
+    if not chosen:
         return
     containers = docker.ps()
     if containers is None:
@@ -295,17 +321,25 @@ def status(
     chosen: Sequence[Target],
     docker: Docker,
     report: Report,
+    base: Path = REPO_ROOT,
+    run: collector_tasks.Runner = collector_tasks.run_argv,
 ) -> None:
     """Read-only: what is declared, what this machine was told, and what is running."""
     if not collectors:
         report.say(f"no collectors declared -- add `{config.SETTING}` to the workspace file")
-    containers: list[Container] | None = docker.ps() if chosen else []
+    in_containers = any(not t.collector.scheduled for t in chosen)
+    containers: list[Container] | None = docker.ps() if in_containers else []
+    python = collector_tasks.interpreter() if any(t.collector.scheduled for t in chosen) else ""
     for collector in collectors:
         mode = assignment.get(collector.project, "")
         if not mode:
             report.say(f"{collector.project}: not assigned on this machine (hands off)")
             continue
         target = next(t for t in chosen if t.collector.project == collector.project)
+        if collector.scheduled:
+            state = collector_tasks.describe(collector, base, python, run)
+            report.say(f"{collector.project}: assigned `{mode}` -- {state}")
+            continue
         box = find(containers or [], target.checkout, collector.service)
         state = (
             "docker not answering"
@@ -348,8 +382,36 @@ def row(target: Target, containers: Sequence[Container] | None, health: dict) ->
     return OK, f"running ({box.status})"
 
 
+def assigned(root: Path = REPO_ROOT) -> tuple[list[config.Collector], list[Target]]:
+    """`(declared, assigned here)`; nothing read past the assignment on a machine with none."""
+    base = config.home(root)
+    assignment = config.load_assignment(base / config.ASSIGNMENT)
+    if not assignment:
+        return [], []
+    collectors, _notes = config.declared(base)
+    return collectors, targets(collectors, assignment, sweep.default_workspace(base).parent)
+
+
+def scheduled_tasks(root: Path = REPO_ROOT) -> dict[str, str]:
+    """`{task name: its log}` for each scheduled collector this machine runs.
+
+    The tray asks the scheduler about these beside devkit's own jobs, in the same query,
+    and judges them the same way (`schedule_health.problems`). A `stop` one is not here:
+    its task is deleted, and `tray_rows` reports it.
+    """
+    _collectors, chosen = assigned(root)
+    return {
+        collector_tasks.task_name(t.collector): collector_tasks.log_path(
+            collector_tasks.task_name(t.collector)
+        ).as_posix()
+        for t in chosen
+        if t.collector.scheduled and t.mode == config.RUN
+    }
+
+
 def tray_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tuple[str, str, str]]:
-    """`(row name, level, detail)` per collector assigned to this machine. Never raises.
+    """`(row name, level, detail)` per collector assigned to this machine, except the
+    scheduled ones it runs, which are scheduler rows (`scheduled_tasks`). Never raises.
 
     Empty on a machine assigned nothing, **without asking docker**: a laptop sharing the
     workspace sees no rows and pays no spawn.
@@ -358,8 +420,9 @@ def tray_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tupl
     assignment = config.load_assignment(base / config.ASSIGNMENT)
     if not assignment:
         return []
-    collectors, _notes = config.declared(base)
-    chosen = targets(collectors, assignment, sweep.default_workspace(base).parent)
+    collectors, chosen = assigned(root)
+    scheduled = [t for t in chosen if t.collector.scheduled]
+    chosen = [t for t in chosen if not t.collector.scheduled]
     rows = [
         (
             ROW_PREFIX + name,
@@ -373,6 +436,11 @@ def tray_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tupl
         containers = (docker or Docker(TRAY_PS_TIMEOUT)).ps()
         health = load_health(base / HEALTH)
         rows += [(ROW_PREFIX + t.collector.project, *row(t, containers, health)) for t in chosen]
+    rows += [
+        (ROW_PREFIX + t.collector.project, OK, "off on this machine (by choice)")
+        for t in scheduled
+        if t.mode == config.STOP
+    ]
     return rows
 
 
@@ -383,6 +451,13 @@ VERBS = {"run-here": config.RUN, "stop-here": config.STOP, "release": None}
 # The value of the picker row that runs nothing (`picker_rows.NOTHING`): drawn when no
 # collector is declared, so a click on it has to be a quiet no-op, not a usage error.
 NOTHING = "none"
+
+# One scheduled collector, run by hand in this terminal. Not one of `VERBS`: it assigns
+# nothing, so the picker offers it per collector and never for "all".
+ONCE = "run-once"
+
+# The verbs that act on exactly one collector, named.
+SINGLE = ("fire", ONCE)
 
 
 def split_pick(argv: Sequence[str]) -> list[str]:
@@ -404,10 +479,12 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "mode",
         nargs="?",
         default="status",
-        choices=("status", "maintain", *VERBS, NOTHING),
+        choices=("status", "maintain", *SINGLE, *VERBS, NOTHING),
         help=(
             "status: report only (default). maintain: what the scheduler runs. run-here / "
             "stop-here: assign this machine, then act on it now. release: forget. "
+            "fire NAME: run one scheduled collector once (what its own task runs). "
+            "run-once NAME: the same, by hand, its output in this terminal. "
             "Also takes `<mode>:<project>`, the VS Code picker's spelling."
         ),
     )
@@ -433,14 +510,82 @@ def reassign(args: argparse.Namespace, base: Path, collectors, report: Report) -
     return updated
 
 
-def main(argv: Sequence[str] | None = None, docker: Docker | None = None) -> int:
+def fire(
+    name: str, base: Path, now: _dt.datetime, spawner: collector_tasks.Spawner | None = None
+) -> int:
+    """`fire <name>`: what a scheduled collector's task runs. Exits with the command's code.
+
+    Writes `logs/collector-<name>.log` and never `ARTIFACT`, which belongs to the pass. A
+    task left behind on a machine no longer assigned `run` -- the pass that deletes it has
+    not come round yet -- does nothing and says so, rather than running a second writer.
+    """
+    collectors, _notes = config.declared(base)
+    collector = next((c for c in collectors if c.project == name and c.scheduled), None)
+    assignment = config.load_assignment(base / config.ASSIGNMENT)
+    if collector is None:
+        code, lines = 2, [f"`{config.SETTING}` declares no scheduled collector `{name}`"]
+    elif assignment.get(name) != config.RUN:
+        code, lines = 0, ["not assigned `run` on this machine -- nothing run"]
+    else:
+        checkout = sweep.default_workspace(base).parent / collector.project
+        code, lines = collector_tasks.fire(collector, checkout, spawner or collector_tasks.spawn)
+    text = collector_tasks.render(name, code, lines, now)
+    write_file(base / collector_tasks.log_path(name), text)
+    print(text, end="")
+    return code
+
+
+def run_once(
+    name: str,
+    base: Path,
+    run: collector_tasks.Runner,
+    streamer: collector_tasks.Streamer | None = None,
+) -> int:
+    """`run-once <name>`: the VS Code task's "run it now", whatever this machine's
+    assignment -- a first run before `run-here` is the case it exists for.
+
+    Refused while the scheduled task is running, for the reason `collector_tasks.running`
+    gives; the scheduler cannot refuse it, because a run by hand is not one of its fires.
+    """
+    collectors, _notes = config.declared(base)
+    collector = next((c for c in collectors if c.project == name and c.scheduled), None)
+    if collector is None:
+        print(f"collectors: `{config.SETTING}` declares no scheduled collector `{name}`")
+        return 2
+    task = collector_tasks.task_name(collector)
+    if collector_tasks.running(task, run):
+        print(
+            f"collectors: {task}'s scheduled run is going right now -- a second run would "
+            f"share its browser profile. Wait for it, or end it with `schtasks /End /TN {task}`."
+        )
+        return 2
+    checkout = sweep.default_workspace(base).parent / collector.project
+    code = collector_tasks.run_once(collector, checkout, streamer or collector_tasks.stream)
+    print(f"collectors: {name} exited {code}")
+    return code
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    docker: Docker | None = None,
+    run: collector_tasks.Runner = collector_tasks.run_argv,
+    spawner: collector_tasks.Spawner | None = None,
+    streamer: collector_tasks.Streamer | None = None,
+) -> int:
     args = parse_args(argv)
     if args.mode == NOTHING:
         print("collectors: nothing picked -- no collector is declared, so nothing was done")
         return 0
     base = config.home(args.devkit.expanduser().resolve())
-    report = Report()
     now = _dt.datetime.now()
+    if args.mode in SINGLE:
+        if len(args.projects) != 1:
+            print(f"collectors: `{args.mode}` takes exactly one collector name", file=sys.stderr)
+            return 2
+        if args.mode == ONCE:
+            return run_once(args.projects[0], base, run, streamer)
+        return fire(args.projects[0], base, now, spawner)
+    report = Report()
 
     def finish(code: int) -> int:
         text = render(report.lines, report.failures, now)
@@ -454,18 +599,27 @@ def main(argv: Sequence[str] | None = None, docker: Docker | None = None) -> int
     assignment = config.load_assignment(base / config.ASSIGNMENT)
     if args.mode in VERBS:
         updated = reassign(args, base, collectors, report)
-        if updated is None or VERBS[args.mode] is None:
+        if updated is None:
+            return finish(2)
+        picked = config.pick(collectors, args.projects)[0]
+        if VERBS[args.mode] is None:
+            # Released: hands off the container, but a task exists only because this
+            # job registered it, so it goes rather than firing with nobody assigned.
+            for collector in picked:
+                if collector.scheduled:
+                    collector_tasks.keep_removed(collector_tasks.task_name(collector), run, report)
             return finish(2 if report.failures else 0)
-        assignment = {
-            c.project: updated[c.project] for c in config.pick(collectors, args.projects)[0]
-        }
+        assignment = {c.project: updated[c.project] for c in picked}
     chosen = targets(collectors, assignment, sweep.default_workspace(base).parent)
     engine = docker or Docker()
     if args.mode == "status":
-        status(collectors, assignment, chosen, engine, report)
+        status(collectors, assignment, chosen, engine, report, base, run)
         return finish(2 if report.failures else 0)
+    if not chosen:
+        report.say("no collector is assigned to this machine -- nothing to do")
+    maintain_scheduled([t for t in chosen if t.collector.scheduled], base, report, run)
     health = load_health(base / HEALTH)
-    maintain(chosen, engine, report, health)
+    maintain([t for t in chosen if not t.collector.scheduled], engine, report, health)
     write_file(base / HEALTH, json.dumps(health, indent=2, sort_keys=True) + "\n")
     return finish(2 if report.failures else 0)
 

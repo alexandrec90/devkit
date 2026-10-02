@@ -324,8 +324,12 @@ def parse_time(raw: str) -> _dt.datetime | None:
     return None
 
 
-def parse_tasks(stdout: str, prefix: str = PREFIX) -> list[Job]:
-    """Every `prefix` job in `schtasks /Query /FO CSV /V` output.
+def parse_tasks(stdout: str, prefix: str = PREFIX, also: frozenset[str] = frozenset()) -> list[Job]:
+    """Every `prefix` job in `schtasks /Query /FO CSV /V` output, plus any named in `also`.
+
+    `also` is how the tray asks about the scheduled collectors in the same query: they
+    are named after their project, not `devkit-`, because they are not devkit's jobs --
+    which is also why `report`, and the fix pass behind it, never pass it.
 
     The header repeats between tasks in some Windows builds, so rows whose values equal
     the column names are dropped -- without that, one phantom job per task appears with
@@ -347,7 +351,7 @@ def parse_tasks(stdout: str, prefix: str = PREFIX) -> list[Job]:
     merged: dict[str, Job] = {}
     for row in csv.DictReader(io.StringIO(stdout)):
         name = (row.get("TaskName") or "").lstrip("\\")
-        if not name.startswith(prefix) or name == "TaskName":
+        if not (name.startswith(prefix) or name in also) or name == "TaskName":
             continue
         raw_result = (row.get("Last Result") or "").strip()
         try:
@@ -437,6 +441,7 @@ def problems(
     now: _dt.datetime | None = None,
     deliberate: frozenset[str] = frozenset(),
     root: Path | None = None,
+    artifacts: dict[str, str] | None = None,
 ) -> list[str]:
     """One line per job that needs attention; [] when they are all healthy.
 
@@ -452,6 +457,9 @@ def problems(
     run from a tree cut off that checkout passes it: 104d356c was filed from a
     supervisor's tree as "no logs/reconcile.log" beside evidence naming the checkout's
     own kept copy, because the hint stat'ed the tree's empty `logs/`.
+
+    `artifacts` replaces `ARTIFACTS` for the pointers, for a caller judging jobs that
+    table does not list -- the tray's scheduled collectors.
     """
     moment = now or _dt.datetime.now()
     found: list[str] = []
@@ -482,14 +490,14 @@ def problems(
                 f"{job.name}: a run was still going at "
                 f"{job.last_run:%Y-%m-%d %H:%M}, so the scheduled fire was skipped -- "
                 f"its runs are overlapping"
-                f"{artifact_hint(job.name, root=root, since=job.last_run)}"
+                f"{artifact_hint(job.name, artifacts, root=root, since=job.last_run)}"
             )
             continue
         if job.last_result not in NOT_A_FAILURE:
             found.append(
                 f"{job.name}: last run failed (exit {job.last_result}) at "
                 f"{job.last_run:%Y-%m-%d %H:%M}"
-                f"{artifact_hint(job.name, root=root, since=job.last_run)}"
+                f"{artifact_hint(job.name, artifacts, root=root, since=job.last_run)}"
             )
             continue
         interval = job.interval
@@ -511,7 +519,7 @@ def problems(
     return found
 
 
-def query(prefix: str = PREFIX) -> list[Job]:
+def query(prefix: str = PREFIX, also: frozenset[str] = frozenset()) -> list[Job]:
     """Ask the scheduler. [] on any failure, including not being Windows at all."""
     try:
         result = subprocess.run(
@@ -526,7 +534,7 @@ def query(prefix: str = PREFIX) -> list[Job]:
         return []
     if result.returncode != 0:
         return []
-    return parse_tasks(result.stdout, prefix)
+    return parse_tasks(result.stdout, prefix, also)
 
 
 def report(prefix: str = PREFIX, now: _dt.datetime | None = None) -> list[str]:
