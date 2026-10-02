@@ -549,5 +549,26 @@ def main(argv: list[str] | None = None) -> int:
         raise
 
 
+def in_utf8_mode(argv: list[str], utf8_mode: int = sys.flags.utf8_mode) -> int | None:
+    """Run this pass again under `-X utf8` when it was not started in UTF-8 mode, and
+    return that run's exit code. `None` means this process already is the pass to run.
+
+    Dozens of the pass's runners read a child's output with `text=True` and no encoding,
+    so outside UTF-8 mode a child's `”` (0x9d in UTF-8) kills a reader thread on a cp1252
+    console. The watchdog and the task dispatcher each start the pass in UTF-8 mode, and
+    any other launcher (a terminal, a script calling it by path) used to get the
+    traceback. The guard lives in the pass because the pass is the one place every
+    launcher reaches.
+    """
+    if utf8_mode:
+        return None
+    return subprocess.run(
+        [sweep.console_python(), "-X", "utf8", str(Path(__file__).resolve()), *argv],
+        check=False,
+        creationflags=sweep.NO_WINDOW,
+    ).returncode
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    relaunched = in_utf8_mode(sys.argv[1:])
+    sys.exit(main() if relaunched is None else relaunched)

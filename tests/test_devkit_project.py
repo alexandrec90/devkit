@@ -109,7 +109,7 @@ def test_main_runs_every_selected_project_in_order(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_run(command, *, cwd, check):
+    def fake_run(command, *, cwd, check, env):
         calls.append((command, cwd, check))
         return type("Result", (), {"returncode": 0})()
 
@@ -118,6 +118,32 @@ def test_main_runs_every_selected_project_in_order(tmp_path, monkeypatch):
 
     assert result == 0
     assert [cwd.name for _, cwd, _ in calls] == ["beta", "alpha"]
+
+
+def test_a_dispatched_task_runs_in_utf8_mode_down_to_its_grandchildren(tmp_path):
+    """Clicking *Agent: Fix What Is Red* printed `UnicodeDecodeError: 'charmap' codec
+    can't decode byte 0x9d` from a reader thread: the pass's runners use `text=True` with
+    no encoding, and only the watchdog's path ran it in UTF-8 mode. Asserted through the
+    real wrappers, since the variable has to survive log-wrap to reach the script."""
+    workspace = tmp_path / "projects.code-workspace"
+    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    (tmp_path / "alpha" / "scripts").mkdir(parents=True)
+    (tmp_path / "alpha" / "scripts" / "run-tests.py").write_text(
+        "import pathlib, subprocess, sys\n"
+        "out = subprocess.run([sys.executable, '-c', \"import sys; sys.stdout.buffer.write("
+        "'\\u201d'.encode())\"], capture_output=True, text=True).stdout\n"
+        "pathlib.Path('seen.txt').write_text(f'{sys.flags.utf8_mode} {ascii(out)}')\n",
+        encoding="utf-8",
+    )
+
+    assert devkit_project.main(["--workspace", str(workspace), "--project", "alpha", "test"]) == 0
+    assert (tmp_path / "alpha" / "seen.txt").read_text() == "1 '\\u201d'"
+
+
+def test_the_task_env_keeps_the_callers_and_adds_utf8_mode():
+    env = devkit_project.task_env({"PATH": "/bin", "PYTHONUTF8": "0"})
+    assert env == {"PATH": "/bin", "PYTHONUTF8": "1"}
+    assert devkit_project.task_env()["PYTHONUTF8"] == "1"
 
 
 def test_registered_but_missing_directory_is_distinguished(checkouts):
@@ -630,7 +656,7 @@ def menu_run(tmp_path, monkeypatch, kinds, projects=("alpha",), scripts=("run-te
 
     calls = []
 
-    def fake_run(command, *, cwd, check):
+    def fake_run(command, *, cwd, check, env):
         calls.append((inner(command), cwd.name))
         return type("Result", (), {"returncode": 0})()
 
@@ -3114,7 +3140,7 @@ def autofix_run(tmp_path, monkeypatch, argv, dirty=("app/main.py",), returncode=
     snapshots = iter([("master", ()), ("master", dirty)])
     monkeypatch.setattr(devkit_project, "autofix_state", lambda _directory: next(snapshots))
 
-    def fake_run(command, *, cwd, check):
+    def fake_run(command, *, cwd, check, env):
         calls.append(command)
         return type("Result", (), {"returncode": returncode if len(calls) == 1 else 0})()
 
@@ -3171,7 +3197,7 @@ def test_a_non_autofix_action_is_never_snapshotted(tmp_path, monkeypatch):
     monkeypatch.setattr(
         devkit_project.subprocess,
         "run",
-        lambda command, *, cwd, check: type("Result", (), {"returncode": 0})(),
+        lambda command, *, cwd, check, env: type("Result", (), {"returncode": 0})(),
     )
     assert devkit_project.main(["--workspace", str(workspace), "--project", "alpha", "test"]) == 0
 
@@ -3187,7 +3213,7 @@ def test_a_failed_sweep_step_stops_the_chain_and_reports(tmp_path, monkeypatch, 
     monkeypatch.setattr(devkit_project, "autofix_state", lambda _directory: next(snapshots))
     calls = []
 
-    def fake_run(command, *, cwd, check):
+    def fake_run(command, *, cwd, check, env):
         calls.append(command)
         # The lint run passes; the `--branch` step fails.
         return type("Result", (), {"returncode": 0 if len(calls) == 1 else 3})()
