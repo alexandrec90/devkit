@@ -2054,6 +2054,52 @@ def test_an_install_into_a_linked_venv_writes_the_checkouts_paths(tmp_path, monk
     assert worktree.install_env(tmp_path / "bare") is None, "nor does a tree with none yet"
 
 
+def _frontend_tree(tmp_path, installed: bool):
+    """A checkout whose root is its npm project, and a tree whose `node_modules` links to
+    the checkout's, which is how `worktree.symlinkDirectories` leaves roguelike's."""
+    checkout = tmp_path / "checkout"
+    (checkout / "node_modules").mkdir(parents=True)
+    (checkout / "package-lock.json").write_text("{}", encoding="utf-8")
+    if installed:
+        (checkout / "node_modules" / ".package-lock.json").write_text("{}", encoding="utf-8")
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "package-lock.json").write_text("{}", encoding="utf-8")
+    _link_dir(tree / "node_modules", checkout / "node_modules")
+    return checkout, tree
+
+
+def test_a_borrowed_node_modules_is_never_reinstalled_from_the_tree(tmp_path):
+    """fcf111b9: `npm ci` in a tree whose `node_modules` links to its checkout's empties
+    the checkout's first, under every session using it, and one that fails leaves it
+    empty. A link to a finished install gets no step."""
+    checkout, tree = _frontend_tree(tmp_path, installed=True)
+    assert (
+        worktree.worktree_env.borrowed(tree / "node_modules")
+        == (checkout / "node_modules").resolve()
+    )
+    assert worktree.npm_target(tree, ".") == ""
+
+
+def test_a_borrowed_empty_node_modules_is_installed_where_it_points(tmp_path):
+    """The roguelike session's own repair was `npm ci --prefix <checkout>`: the link's
+    target, installed from the lockfile that sits beside it."""
+    checkout, tree = _frontend_tree(tmp_path, installed=False)
+    assert Path(worktree.npm_target(tree, ".")) == checkout.resolve()
+    (tree / ".devkit.toml").write_text('[frontend]\nenabled = true\ndir = "."\n', encoding="utf-8")
+    step = worktree.plan_provision(tree, windows=False, quiet=True)[-1]
+    assert step.argv[1:4] == ("ci", "--prefix", str(checkout.resolve()))
+
+
+def test_a_trees_own_node_modules_installs_in_place(tmp_path):
+    (tmp_path / "web" / "node_modules").mkdir(parents=True)
+    assert worktree.npm_target(tmp_path, "web") == "web"
+    assert worktree.npm_target(tmp_path, "other") == "other", "none yet: install it there"
+    assert worktree.npm_target(tmp_path, "") == ""
+    assert worktree.worktree_env.borrowed(tmp_path / "web" / "node_modules") is None
+    assert worktree.worktree_env.borrowed(tmp_path / "absent") is None
+
+
 def test_a_timed_out_install_is_reported_rather_than_raised(tmp_path, monkeypatch):
     def fake_run(*args, **kwargs):
         raise worktree.subprocess.TimeoutExpired(cmd="uv", timeout=900)

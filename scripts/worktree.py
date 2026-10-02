@@ -1284,6 +1284,28 @@ def detect_python_version(source: Path) -> tuple[str, str]:
     return "", ""
 
 
+def npm_target(source: Path, frontend_dir: str) -> str:
+    """Where `npm` installs for `source`'s frontend: `frontend_dir`, another directory, or ""
+    when nothing needs installing.
+
+    A `claude --worktree` tree's `node_modules` links into its checkout
+    (`project_settings.dependency_dirs`), so an install run in the tree is really an
+    install into the checkout's `node_modules`. `npm ci` empties that directory first,
+    while the checkout and every other tree are using it, and an `npm ci` that fails
+    leaves it empty: a roguelike session found `vite` missing behind a link to an empty
+    directory (fcf111b9). So a link to a finished install needs no step, and a link to
+    an unfinished one gets its install where the link points, using the lockfile there.
+    """
+    if not frontend_dir:
+        return ""
+    real = worktree_env.borrowed(source / frontend_dir / "node_modules")
+    if real is None:
+        return frontend_dir
+    if worktree_env.node_modules_installed(real):
+        return ""
+    return str(real.parent)
+
+
 def plan_provision(
     source: Path, windows: bool = os.name == "nt", quiet: bool = False
 ) -> tuple[ProvisionStep, ...]:
@@ -1329,6 +1351,7 @@ def plan_provision(
     # Read off the SOURCE checkout, like every other marker here: the lockfile is
     # tracked, so the box is guaranteed the same answer and the dry run shows the verb
     # that will actually run.
+    frontend_dir = npm_target(source, frontend_dir)
     frontend_locked = bool(frontend_dir) and (source / frontend_dir / "package-lock.json").is_file()
     return provision_steps(
         present,

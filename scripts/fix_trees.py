@@ -24,6 +24,7 @@ import agent_worktrees as aw
 import fix_reports
 import stray_worktree as stray
 import sweep
+import tree_provision
 import worktree
 
 # `project_python.VENV_DIR`, spelled out rather than imported: the fix pass is a
@@ -101,11 +102,14 @@ def provision_tree(
     `claude --worktree` -- which cut most of the trees `existing_tree` reuses -- installs
     anything. So every fixer opened in a checkout that could not run its own tests or
     linter, and spent its first turns on `uv sync` before it could verify the fix it
-    was sent for. A tree that already has a `.venv` is left alone: a reused one may hold
-    a session still working, and a warm `uv sync` there buys nothing. A failed install
-    is a note, not a refusal -- the fixer is told to close that gap itself.
+    was sent for. A tree that already has a `.venv` is left alone, since a reused one may
+    hold a session still working and a warm `uv sync` there buys nothing. The exception
+    is a frontend tier whose `node_modules` holds no finished install
+    (`tree_provision.frontend_missing`): installing into an empty directory takes nothing
+    away from anyone. A failed install is a note, not a refusal -- the fixer is told to
+    close that gap itself.
     """
-    if (tree / VENV_DIR).is_dir():
+    if (tree / VENV_DIR).is_dir() and not tree_provision.frontend_missing(tree):
         return []
     steps = plan(tree)
     if not steps:

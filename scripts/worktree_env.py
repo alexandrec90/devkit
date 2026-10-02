@@ -614,6 +614,33 @@ def mark_provisioned(here: Path, ok: bool) -> None:
         pass
 
 
+# The file each package manager writes inside `node_modules` once an install has finished:
+# npm 7+, pnpm, yarn 1 and yarn berry. The directory alone proves nothing. A roguelike
+# tree linked `node_modules` to its checkout's, which existed but was empty, so `vite`
+# was missing and nothing had checked (fcf111b9).
+NODE_INSTALL_MARKS = (".package-lock.json", ".modules.yaml", ".yarn-integrity", ".yarn-state.yml")
+
+
+def node_modules_installed(node_modules: Path) -> bool:
+    """Whether `node_modules`, or the directory it links to, holds a finished install."""
+    return any((node_modules / mark).is_file() for mark in NODE_INSTALL_MARKS)
+
+
+def borrowed(path: Path) -> Path | None:
+    """The real directory `path` links to, or None when `path` is its own or is absent.
+
+    A `claude --worktree` tree's dependency directories link into the checkout
+    (`worktree.symlinkDirectories`), as a symlink or, on Windows, possibly a junction,
+    and `is_symlink` is False for a junction. So this compares resolved paths instead.
+    """
+    try:
+        real = path.resolve(strict=True)
+        own = path.parent.resolve(strict=True) / path.name
+    except OSError:
+        return None
+    return None if os.path.normcase(str(real)) == os.path.normcase(str(own)) else real
+
+
 # `fix_reports.FRICTION_FILE`: the fix pass files each line of it on the harness-defect
 # ledger. Spelled here because this hook is installed alone, with nothing to import.
 FRICTION_FILE = Path("logs") / "friction.md"
