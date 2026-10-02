@@ -1076,6 +1076,32 @@
 				},
 				"problemMatcher": []
 			},
+			// --- scoped: social-scraper -------------------------------------------
+			// One checkout, so `--project` is spelled out rather than asked.
+			{
+				"label": "Scraper: Log In to X",
+				"detail": "Open a visible browser on X's sign-in page for social-scraper; sign in, then close the window. The session is kept in data/browser-profiles/x/ and reused by every later scrape.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"social-scraper",
+					"scraper-login",
+					"x"
+				],
+				"icon": {
+					"id": "sign-in",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
 			// --- scoped: the checkouts that have a database -----------------------
 			{
 				// The last task to leave a .vscode/tasks.json anywhere, and the only one

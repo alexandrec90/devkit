@@ -146,6 +146,13 @@ def test_a_dispatched_command_decodes_its_childrens_output_as_utf8():
     assert (done.returncode, done.stdout, done.stderr) == (0, "1 '\\u201d'\n", "")
 
 
+def test_run_dispatched_runs_in_utf8_mode_and_returns_the_exit_code(tmp_path):
+    """Both of `main`'s spawns go through it: the action and each autofix ship step."""
+    probe = "import os, sys; sys.exit(7 if sys.flags.utf8_mode and os.listdir() == ['here'] else 1)"
+    (tmp_path / "here").touch()
+    assert devkit_project.run_dispatched([sys.executable, "-c", probe], tmp_path) == 7
+
+
 def test_registered_but_missing_directory_is_distinguished(checkouts):
     with pytest.raises(ProjectError, match="registered in the workspace but"):
         resolve_project("ghost", ["alpha", "beta", "ghost"], checkouts)
@@ -460,7 +467,32 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # and refuse, so a two-checkout pick would report a red task for a release that
         # actually succeeded. Scoped, the task pins `--project devkit`.
         "release",
+        # Born scoped, by capability: only social-scraper has a browser profile to sign
+        # in to, and its `scripts/login.py` is the CLI contract.
+        "scraper-login",
     }
+
+
+def test_the_scraper_login_runs_the_projects_script_with_the_platform(tmp_path):
+    """The platform is the task's trailing argument, so the dispatch must carry it through
+    to `scripts/login.py` untouched -- `x` is the only thing telling the script which
+    profile under `data/browser-profiles/` to sign in to."""
+    action = ACTIONS["scraper-login"]
+    assert action.projects == devkit_project.SOCIAL_SCRAPER == ("social-scraper",)
+    assert action.owner == devkit_project.PROJECT
+    assert "scraper-login" not in expected_actions("devkit")
+
+    checkout = tmp_path / "social-scraper"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "scripts" / "login.py").write_text("", encoding="utf-8")
+    argv = plan_command(action, checkout, ["x"])
+    assert argv[-3:] == ["python", "scripts/login.py", "x"]
+
+
+def test_the_scraper_login_names_its_missing_script(tmp_path):
+    """A checkout without the script is a conformance failure by name, not a traceback."""
+    with pytest.raises(ProjectError, match=r"scripts/login\.py"):
+        plan_command(ACTIONS["scraper-login"], tmp_path, ["x"])
 
 
 def test_db_revision_spans_both_repos_but_excludes_devkit():
@@ -1110,20 +1142,27 @@ def test_drift_reports_a_changed_setting():
     assert devkit_project.live_only(problems) == problems
 
 
-def test_drift_names_each_setting_and_who_could_have_moved_it():
-    """Compared whole, a setting a merged PR added read as "settings differs" -- a
-    possible hand edit -- so #463's `devkit.collectors` held every publish, and the
-    tasks of that same PR with it. Key by key, an addition is the canonical copy being
-    ahead and publishes; a key only the live file has is still somebody's."""
+def test_drift_names_settings_by_key_and_reads_a_canonical_only_one_as_ahead():
+    """Whole, `settings` was one "differs" line, so a setting devkit's copy had just
+    gained read as a live edit and armed the refusal it exists to get past."""
     problems = devkit_project.workspace_drift(
-        {"settings": {"shared": 1, "mine": True}},
-        {"settings": {"shared": 1, "devkit.collectors": {}}},
+        {"settings": {"mine": 1}}, {"settings": {"devkit.collectors": {}}}
     )
     assert problems == [
-        "missing setting: devkit.collectors",
+        "setting missing from the workspace: devkit.collectors",
         "setting in the workspace but not in devkit: mine",
     ]
-    assert devkit_project.live_only(problems) == [problems[1]]
+    assert devkit_project.live_only(problems) == [
+        "setting in the workspace but not in devkit: mine"
+    ]
+
+
+def test_the_operator_s_switches_are_not_drift():
+    """`devkit.fixPass` and `devkit.onHold` are set in the live file on purpose (6d71fa28)."""
+    live = {"settings": {"devkit.fixPass": "dispatch", "devkit.onHold": ["ibkr_trader"]}}
+    canonical = {"settings": {"devkit.fixPass": "off", "devkit.onHold": []}}
+    assert devkit_project.workspace_drift(live, canonical) == []
+    assert devkit_project.workspace_drift({"settings": {"devkit.fixPass": "plan"}}, {}) == []
 
 
 def test_drift_ignores_layout_and_comments(workspace_pair):
@@ -1169,21 +1208,21 @@ def test_render_proceeds_once_the_live_edit_is_adopted(workspace_pair):
     canonical, live = workspace_pair
     live.write_text(
         live.read_text(encoding="utf-8").replace(
-            '"powershell.cwd": "carameli"', '"powershell.cwd": "devkit"'
+            '"powershell.cwd": "carameli"', '"powershell.cwd": "devkit", "c": "d"'
         ),
         encoding="utf-8",
         newline="\n",
     )
     assert _run(live, "--adopt-workspace") == 0
     adopted = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
-    assert adopted["powershell.cwd"] == "devkit"
+    assert adopted["c"] == "d" and adopted["powershell.cwd"] == "devkit"
     assert _run(live, "--check-workspace") == 0
 
 
-def test_adopt_will_not_drop_a_setting_the_live_file_lost(workspace_pair):
-    """Key by key, a setting the live file lacks reads as devkit's copy being ahead --
-    which is what it is between a PR adding one and the next publish -- so an adopt
-    refuses to delete it, as it refuses to delete a task. `--force` is the deliberate way."""
+def test_a_setting_deleted_from_the_live_file_is_not_adopted_away(workspace_pair):
+    """Per key, a setting only the canonical copy holds reads as that copy being ahead,
+    as a task does: git holds it, so an adopt refuses to delete it rather than guess.
+    `--force` is the deliberate way."""
     canonical, live = workspace_pair
     live.write_text(
         live.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli",', ""),
@@ -1191,9 +1230,12 @@ def test_adopt_will_not_drop_a_setting_the_live_file_lost(workspace_pair):
         newline="\n",
     )
     assert _run(live, "--adopt-workspace") == 1
-    assert "powershell.cwd" in devkit_jsonc_loads(canonical.read_text("utf-8"))["settings"]
+    assert "powershell.cwd" in devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
     assert _run(live, "--adopt-workspace", "--force") == 0
-    assert "powershell.cwd" not in devkit_jsonc_loads(canonical.read_text("utf-8"))["settings"]
+    assert (
+        "powershell.cwd"
+        not in devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
+    )
 
 
 def test_render_stamps_so_the_next_one_is_not_mistaken_for_a_hand_edit(workspace_pair):
@@ -1264,6 +1306,83 @@ def _hand_edit(live):
     live.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
 
 
+def _set_switches(path, **values):
+    """Rewrite `path` with its operator's switches replaced, layout discarded."""
+    payload = devkit_jsonc_loads(path.read_text(encoding="utf-8"))
+    payload["settings"] = {**payload.get("settings", {}), **values}
+    path.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
+
+
+def test_a_live_switch_does_not_stop_a_new_setting_from_being_published(workspace_pair):
+    """6d71fa28: the live file said `devkit.fixPass: dispatch` and held three projects,
+    its stamp was stale, and every daily publish refused -- so `devkit.collectors`, merged
+    in #463, never reached the machine. The switches survive the publish; the setting
+    arrives; the canonical comments are what is written."""
+    _canonical, live = workspace_pair
+    _set_switches(live, **{"devkit.fixPass": "dispatch", "devkit.onHold": ["ibkr_trader"]})
+    payload = devkit_jsonc_loads(live.read_text(encoding="utf-8"))
+    del payload["settings"]["devkit.collectors"]
+    live.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
+
+    outcome, problems = devkit_project.publish_workspace(live)
+
+    assert outcome == devkit_project.RENDER_PUBLISHED, problems
+    assert problems == ["setting missing from the workspace: devkit.collectors"]
+    text = live.read_text(encoding="utf-8")
+    settings = devkit_jsonc_loads(text)["settings"]
+    assert settings["devkit.fixPass"] == "dispatch"
+    assert settings["devkit.onHold"] == ["ibkr_trader"]
+    assert "devkit.collectors" in settings
+    assert "// The fix pass's switch" in text, "the canonical comments were not kept"
+    assert devkit_project.publish_workspace(live)[0] == devkit_project.RENDER_CURRENT
+
+
+def test_machine_settings_reads_only_the_switches():
+    payload = {"settings": {"devkit.fixPass": "plan", "powershell.cwd": "x"}}
+    assert devkit_project.machine_settings(payload) == {"devkit.fixPass": "plan"}
+    assert devkit_project.machine_settings({"settings": []}) == {}
+    assert devkit_project.machine_settings([]) == {}
+
+
+def test_settings_drift_tolerates_a_settings_block_that_is_not_an_object():
+    assert devkit_project.settings_drift(None, {"a": 1}) == [
+        "setting missing from the workspace: a"
+    ]
+    assert devkit_project.settings_drift({"devkit.onHold": ["x"]}, []) == []
+
+
+def test_settings_brace_finds_the_top_level_block_only():
+    text = '{"tasks": {"settings": {}}, // c\n "settings": {"a": 1,},}'
+    scan = devkit_jsonc.drop_trailing_commas(devkit_jsonc.blank_comments(text))
+    assert text[devkit_project.settings_brace(scan)] == "{"
+    assert devkit_project.settings_brace(scan) == text.index('{"a"')
+    assert devkit_project.settings_brace('{"folders": []}') == -1
+    assert devkit_project.settings_brace('{"settings": 3}') == -1
+    assert devkit_project.settings_brace("") == -1
+
+
+def test_a_switch_the_canonical_copy_lacks_is_added_to_the_render():
+    text = '{\n\t"settings": {\n\t\t// kept\n\t\t"a": 1\n\t}\n}\n'
+    carried = devkit_project.carry_machine_settings(text, {"settings": {"devkit.fixPass": "plan"}})
+    assert devkit_jsonc_loads(carried)["settings"] == {"devkit.fixPass": "plan", "a": 1}
+    assert "// kept" in carried
+    assert devkit_project.carry_machine_settings(text, {"settings": {}}) == text
+    assert devkit_project.carry_machine_settings(text, {}) == text
+
+
+def test_an_adopt_keeps_the_canonical_defaults_for_the_switches(workspace_pair):
+    """A live edit is recorded; this machine's switches are not, or every machine that
+    pulled devkit would start dispatching fixers."""
+    canonical, live = workspace_pair
+    _set_switches(live, **{"devkit.fixPass": "dispatch", "invented.setting": True})
+
+    assert _run(live, "--adopt-workspace") == 0
+
+    adopted = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
+    assert adopted["invented.setting"] is True
+    assert adopted["devkit.fixPass"] == "off"
+
+
 def test_publish_workspace_refuses_a_live_file_it_did_not_stamp(workspace_pair):
     """The refusal belongs here and not in each caller -- the hook publishes unattended,
     so a caller that forgot the check would discard a hand edit with nobody watching."""
@@ -1301,107 +1420,20 @@ def test_publish_workspace_publishes_when_the_canonical_copy_is_merely_ahead(wor
     assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
 
 
-def _switch_on(path):
-    """This machine's own answers, as the dispatching workstation's live file holds them."""
-    text = path.read_text(encoding="utf-8")
-    switched = text.replace('"devkit.fixPass": "off"', '"devkit.fixPass": "dispatch"').replace(
-        '"devkit.onHold": []', '"devkit.onHold": ["carameli"]'
-    )
-    assert '"devkit.fixPass": "dispatch"' in switched, "workspace.jsonc respelled its switch"
-    assert '"devkit.onHold": ["carameli"]' in switched, "workspace.jsonc respelled its hold list"
-    path.write_text(switched, encoding="utf-8", newline="\n")
-
-
-def _add_a_setting(canonical):
-    """A setting a merged PR adds, as #463 added `devkit.collectors` -- by text, so the
-    canonical copy keeps its comments and the render can be checked for them."""
-    text = canonical.read_text(encoding="utf-8")
-    canonical.write_text(
-        text.replace('"devkit.fixPass"', '"devkit.added": true,\n\t\t"devkit.fixPass"', 1),
-        encoding="utf-8",
-        newline="\n",
-    )
-
-
-def test_publish_keeps_this_machines_switches_and_delivers_what_merged(workspace_pair):
-    """The state the dispatching workstation sat in for a week: `devkit.fixPass` switched
-    to `dispatch` and a hold list set in the live file, devkit's copy saying `off` and
-    `[]`, and a PR adding a setting and a task merged. Every publish refused -- the
-    switches read as a hand edit -- and the one remedy offered, `--force`, would have
-    switched the pass off. The machine's answers are carried; what merged is delivered."""
-    canonical, live = workspace_pair
-    devkit_project.stamp_path(live).unlink(missing_ok=True)
-    _switch_on(live)
-    _add_a_setting(canonical)
-
-    outcome, problems = devkit_project.publish_workspace(live)
-
-    assert outcome == devkit_project.RENDER_PUBLISHED, problems
-    assert problems == ["missing setting: devkit.added"]
-    settings = devkit_jsonc_loads(live.read_text(encoding="utf-8"))["settings"]
-    assert settings["devkit.fixPass"] == "dispatch"
-    assert settings["devkit.onHold"] == ["carameli"]
-    assert settings["devkit.added"] is True
-    published = live.read_text(encoding="utf-8")
-    assert published.count("//") == canonical.read_text(encoding="utf-8").count("//")
-    assert devkit_project.publish_workspace(live) == (devkit_project.RENDER_CURRENT, [])
-
-
 def test_a_machine_switch_alone_is_not_drift(workspace_pair):
     """`--check-workspace`, the session-start line and the live-workspace test all read
-    through `canonical_view`, so none of them reports a machine's own answer."""
+    through `settings_drift`, so none of them reports a machine's own answer."""
     _canonical, live = workspace_pair
-    _switch_on(live)
+    _set_switches(live, **{"devkit.fixPass": "dispatch", "devkit.onHold": ["carameli"]})
     assert _run(live, "--check-workspace") == 0
 
 
-def test_adopt_keeps_the_shared_defaults_for_the_machine_switches(workspace_pair):
-    """An adopt from the dispatching machine must not switch the pass on for every
-    workstation that pulls devkit. The edit beside it is recorded as before."""
-    canonical, live = workspace_pair
-    _switch_on(live)
-    _hand_edit(live)
-
-    assert _run(live, "--adopt-workspace") == 0
-
-    adopted = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
-    assert adopted["invented.setting"] is True
-    assert adopted["devkit.fixPass"] == "off"
-    assert adopted["devkit.onHold"] == []
-
-
 def test_every_machine_setting_has_a_default_in_devkits_copy():
-    """The default is what a fresh workstation starts from, and what an adopt restores;
+    """The default is what a fresh workstation starts from, and what an adopt keeps;
     a key devkit's copy lacked would be adopted with whichever machine's value it held."""
-    declared = devkit_project.machine_settings(devkit_project.canonical_text())
+    declared = devkit_project.machine_settings(devkit_jsonc_loads(devkit_project.canonical_text()))
     assert set(declared) == set(devkit_project.MACHINE_SETTINGS)
     assert declared[devkit_project.fix_cycle.SETTING] == devkit_project.fix_cycle.OFF
-
-
-def test_set_setting_edits_the_value_in_place_and_keeps_the_comments():
-    text = (
-        "{\n"
-        '\t"settings": {\n'
-        "\t\t// the switch\n"
-        '\t\t"a": "off", // trailing\n'
-        '\t\t"b": [\n\t\t\t"x", // why x\n\t\t],\n'
-        '\t\t"c": {"d": 1}\n'
-        "\t}\n"
-        "}\n"
-    )
-    assert devkit_project.set_setting(text, "a", "off") == text
-    assert devkit_project.set_setting(text, "b", ["x"]) == text, "equal value, JSONC spelling"
-    edited = devkit_project.with_settings(text, {"a": "dispatch", "b": ["y", "z"], "c": None})
-    assert devkit_jsonc_loads(edited)["settings"] == {"a": "dispatch", "b": ["y", "z"], "c": None}
-    assert "// the switch" in edited and "// trailing" in edited
-
-
-def test_set_setting_adds_a_key_the_settings_lack():
-    for text in ('{"settings": {"a": 1}}', '{"settings": {}}'):
-        edited = devkit_project.set_setting(text, "devkit.onHold", ["p"])
-        assert devkit_jsonc_loads(edited)["settings"]["devkit.onHold"] == ["p"]
-    with pytest.raises(devkit_project.RegistryEditError):
-        devkit_project.set_setting('{"folders": []}', "a", 1)
 
 
 def test_a_differing_definition_is_treated_as_the_live_file_s_until_proven_otherwise():
@@ -1418,7 +1450,7 @@ def test_a_differing_definition_is_treated_as_the_live_file_s_until_proven_other
             "missing from the workspace: Test: Run Suite",
             "missing input: lintScope",
             "folder missing from the workspace: devkit",
-            "missing setting: devkit.collectors",
+            "setting missing from the workspace: devkit.collectors",
         ]
     )
 
