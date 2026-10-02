@@ -224,11 +224,17 @@ def _no_memory(decision: fix_plan.Decision, room: int | None) -> str:
 
 def _occupied(decision: fix_plan.Decision, closed: fix_loop.Closed) -> str:
     """Why a session is already where this one would go, or "": the one devkit session
-    at the harness, or any live session in the branch's own tree."""
-    if closed.harness_busy and decision.action == fix_plan.UPSTREAM:
-        return f"held until the devkit session in {closed.harness_busy} finishes"
-    if decision.action == fix_plan.UPSTREAM and (named := named_by(decision, closed.devkit_fixes)):
-        return f"pending {named}, which names every failure it is for"
+    at the harness, or any live session in the branch's own tree.
+
+    The devkit session opens a fresh devkit tree (`dispatch_fresh`), so no branch tree
+    is in its way: a consumer's refused intent folded into it was capped by the idle
+    session in that intent's tree on every pass, and the backlog grew with none sent.
+    """
+    if decision.action == fix_plan.UPSTREAM:
+        if closed.harness_busy:
+            return f"held until the devkit session in {closed.harness_busy} finishes"
+        named = named_by(decision, closed.devkit_fixes)
+        return f"pending {named}, which names every failure it is for" if named else ""
     first = decision.failures[0]
     tree = (
         closed.busy.get((first.project, first.head))
