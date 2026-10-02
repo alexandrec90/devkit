@@ -9,6 +9,7 @@ script exists to prevent.
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -109,8 +110,8 @@ def test_main_runs_every_selected_project_in_order(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_run(command, *, cwd, check):
-        calls.append((command, cwd, check))
+    def fake_run(command, *, cwd, check, env):
+        calls.append((command, cwd, env))
         return type("Result", (), {"returncode": 0})()
 
     monkeypatch.setattr(devkit_project.subprocess, "run", fake_run)
@@ -118,6 +119,31 @@ def test_main_runs_every_selected_project_in_order(tmp_path, monkeypatch):
 
     assert result == 0
     assert [cwd.name for _, cwd, _ in calls] == ["beta", "alpha"]
+    assert all(env["PYTHONUTF8"] == "1" for _, _, env in calls)
+
+
+def test_a_dispatched_command_decodes_its_childrens_output_as_utf8():
+    """*Agent: Fix What Is Red* printed `UnicodeDecodeError: 'charmap' codec can't decode
+    byte 0x9d` from a reader thread: the pass's runners capture with `text=True` and no
+    encoding, and a child's `\u201d` is 0x9d in its last byte. The scheduled pass never
+    hit it because its watchdog sets UTF-8 mode; the click did not. Asserted through a
+    real grandchild, because the failure is in how a process *two* levels down decodes."""
+    script = (
+        "import subprocess, sys\n"
+        "out = subprocess.run([sys.executable, '-c', \"import sys; sys.stdout.buffer.write("
+        "'\\u201d'.encode())\"], capture_output=True, text=True).stdout\n"
+        "print(sys.flags.utf8_mode, ascii(out))\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=devkit_project.dispatch_env(),
+        check=False,
+    )
+    assert (done.returncode, done.stdout, done.stderr) == (0, "1 '\\u201d'\n", "")
 
 
 def test_registered_but_missing_directory_is_distinguished(checkouts):
@@ -605,7 +631,7 @@ def menu_run(tmp_path, monkeypatch, kinds, projects=("alpha",), scripts=("run-te
 
     calls = []
 
-    def fake_run(command, *, cwd, check):
+    def fake_run(command, *, cwd, check, env):
         calls.append((inner(command), cwd.name))
         return type("Result", (), {"returncode": 0})()
 
@@ -1080,7 +1106,24 @@ def test_drift_reports_a_changed_setting():
     problems = devkit_project.workspace_drift(
         {"settings": {"powershell.cwd": "devkit"}}, {"settings": {"powershell.cwd": "carameli"}}
     )
-    assert "settings differs" in problems
+    assert problems == ["setting differs: powershell.cwd"]
+    assert devkit_project.live_only(problems) == problems
+
+
+def test_drift_names_each_setting_and_who_could_have_moved_it():
+    """Compared whole, a setting a merged PR added read as "settings differs" -- a
+    possible hand edit -- so #463's `devkit.collectors` held every publish, and the
+    tasks of that same PR with it. Key by key, an addition is the canonical copy being
+    ahead and publishes; a key only the live file has is still somebody's."""
+    problems = devkit_project.workspace_drift(
+        {"settings": {"shared": 1, "mine": True}},
+        {"settings": {"shared": 1, "devkit.collectors": {}}},
+    )
+    assert problems == [
+        "missing setting: devkit.collectors",
+        "setting in the workspace but not in devkit: mine",
+    ]
+    assert devkit_project.live_only(problems) == [problems[1]]
 
 
 def test_drift_ignores_layout_and_comments(workspace_pair):
@@ -1125,14 +1168,32 @@ def test_render_refuses_to_overwrite_an_unadopted_live_edit(workspace_pair):
 def test_render_proceeds_once_the_live_edit_is_adopted(workspace_pair):
     canonical, live = workspace_pair
     live.write_text(
-        live.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli"', '"c": "d"'),
+        live.read_text(encoding="utf-8").replace(
+            '"powershell.cwd": "carameli"', '"powershell.cwd": "devkit"'
+        ),
         encoding="utf-8",
         newline="\n",
     )
     assert _run(live, "--adopt-workspace") == 0
     adopted = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
-    assert adopted["c"] == "d" and "powershell.cwd" not in adopted
+    assert adopted["powershell.cwd"] == "devkit"
     assert _run(live, "--check-workspace") == 0
+
+
+def test_adopt_will_not_drop_a_setting_the_live_file_lost(workspace_pair):
+    """Key by key, a setting the live file lacks reads as devkit's copy being ahead --
+    which is what it is between a PR adding one and the next publish -- so an adopt
+    refuses to delete it, as it refuses to delete a task. `--force` is the deliberate way."""
+    canonical, live = workspace_pair
+    live.write_text(
+        live.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli",', ""),
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert _run(live, "--adopt-workspace") == 1
+    assert "powershell.cwd" in devkit_jsonc_loads(canonical.read_text("utf-8"))["settings"]
+    assert _run(live, "--adopt-workspace", "--force") == 0
+    assert "powershell.cwd" not in devkit_jsonc_loads(canonical.read_text("utf-8"))["settings"]
 
 
 def test_render_stamps_so_the_next_one_is_not_mistaken_for_a_hand_edit(workspace_pair):
@@ -1240,6 +1301,109 @@ def test_publish_workspace_publishes_when_the_canonical_copy_is_merely_ahead(wor
     assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
 
 
+def _switch_on(path):
+    """This machine's own answers, as the dispatching workstation's live file holds them."""
+    text = path.read_text(encoding="utf-8")
+    switched = text.replace('"devkit.fixPass": "off"', '"devkit.fixPass": "dispatch"').replace(
+        '"devkit.onHold": []', '"devkit.onHold": ["carameli"]'
+    )
+    assert '"devkit.fixPass": "dispatch"' in switched, "workspace.jsonc respelled its switch"
+    assert '"devkit.onHold": ["carameli"]' in switched, "workspace.jsonc respelled its hold list"
+    path.write_text(switched, encoding="utf-8", newline="\n")
+
+
+def _add_a_setting(canonical):
+    """A setting a merged PR adds, as #463 added `devkit.collectors` -- by text, so the
+    canonical copy keeps its comments and the render can be checked for them."""
+    text = canonical.read_text(encoding="utf-8")
+    canonical.write_text(
+        text.replace('"devkit.fixPass"', '"devkit.added": true,\n\t\t"devkit.fixPass"', 1),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def test_publish_keeps_this_machines_switches_and_delivers_what_merged(workspace_pair):
+    """The state the dispatching workstation sat in for a week: `devkit.fixPass` switched
+    to `dispatch` and a hold list set in the live file, devkit's copy saying `off` and
+    `[]`, and a PR adding a setting and a task merged. Every publish refused -- the
+    switches read as a hand edit -- and the one remedy offered, `--force`, would have
+    switched the pass off. The machine's answers are carried; what merged is delivered."""
+    canonical, live = workspace_pair
+    devkit_project.stamp_path(live).unlink(missing_ok=True)
+    _switch_on(live)
+    _add_a_setting(canonical)
+
+    outcome, problems = devkit_project.publish_workspace(live)
+
+    assert outcome == devkit_project.RENDER_PUBLISHED, problems
+    assert problems == ["missing setting: devkit.added"]
+    settings = devkit_jsonc_loads(live.read_text(encoding="utf-8"))["settings"]
+    assert settings["devkit.fixPass"] == "dispatch"
+    assert settings["devkit.onHold"] == ["carameli"]
+    assert settings["devkit.added"] is True
+    published = live.read_text(encoding="utf-8")
+    assert published.count("//") == canonical.read_text(encoding="utf-8").count("//")
+    assert devkit_project.publish_workspace(live) == (devkit_project.RENDER_CURRENT, [])
+
+
+def test_a_machine_switch_alone_is_not_drift(workspace_pair):
+    """`--check-workspace`, the session-start line and the live-workspace test all read
+    through `canonical_view`, so none of them reports a machine's own answer."""
+    _canonical, live = workspace_pair
+    _switch_on(live)
+    assert _run(live, "--check-workspace") == 0
+
+
+def test_adopt_keeps_the_shared_defaults_for_the_machine_switches(workspace_pair):
+    """An adopt from the dispatching machine must not switch the pass on for every
+    workstation that pulls devkit. The edit beside it is recorded as before."""
+    canonical, live = workspace_pair
+    _switch_on(live)
+    _hand_edit(live)
+
+    assert _run(live, "--adopt-workspace") == 0
+
+    adopted = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
+    assert adopted["invented.setting"] is True
+    assert adopted["devkit.fixPass"] == "off"
+    assert adopted["devkit.onHold"] == []
+
+
+def test_every_machine_setting_has_a_default_in_devkits_copy():
+    """The default is what a fresh workstation starts from, and what an adopt restores;
+    a key devkit's copy lacked would be adopted with whichever machine's value it held."""
+    declared = devkit_project.machine_settings(devkit_project.canonical_text())
+    assert set(declared) == set(devkit_project.MACHINE_SETTINGS)
+    assert declared[devkit_project.fix_cycle.SETTING] == devkit_project.fix_cycle.OFF
+
+
+def test_set_setting_edits_the_value_in_place_and_keeps_the_comments():
+    text = (
+        "{\n"
+        '\t"settings": {\n'
+        "\t\t// the switch\n"
+        '\t\t"a": "off", // trailing\n'
+        '\t\t"b": [\n\t\t\t"x", // why x\n\t\t],\n'
+        '\t\t"c": {"d": 1}\n'
+        "\t}\n"
+        "}\n"
+    )
+    assert devkit_project.set_setting(text, "a", "off") == text
+    assert devkit_project.set_setting(text, "b", ["x"]) == text, "equal value, JSONC spelling"
+    edited = devkit_project.with_settings(text, {"a": "dispatch", "b": ["y", "z"], "c": None})
+    assert devkit_jsonc_loads(edited)["settings"] == {"a": "dispatch", "b": ["y", "z"], "c": None}
+    assert "// the switch" in edited and "// trailing" in edited
+
+
+def test_set_setting_adds_a_key_the_settings_lack():
+    for text in ('{"settings": {"a": 1}}', '{"settings": {}}'):
+        edited = devkit_project.set_setting(text, "devkit.onHold", ["p"])
+        assert devkit_jsonc_loads(edited)["settings"]["devkit.onHold"] == ["p"]
+    with pytest.raises(devkit_project.RegistryEditError):
+        devkit_project.set_setting('{"folders": []}', "a", 1)
+
+
 def test_a_differing_definition_is_treated_as_the_live_file_s_until_proven_otherwise():
     """The three "differs" lines name a key both copies carry and say nothing about who
     moved it last, so they arm the refusal. The asymmetry is deliberate: republishing a
@@ -1247,13 +1411,14 @@ def test_a_differing_definition_is_treated_as_the_live_file_s_until_proven_other
     """
     assert devkit_project.live_only(["definition differs: Lint: Run"])
     assert devkit_project.live_only(["input definition differs: project"])
-    assert devkit_project.live_only(["settings differs"])
+    assert devkit_project.live_only(["setting differs: powershell.cwd"])
     assert devkit_project.live_only(["folders: same checkouts, different entries"])
     assert not devkit_project.live_only(
         [
             "missing from the workspace: Test: Run Suite",
             "missing input: lintScope",
             "folder missing from the workspace: devkit",
+            "missing setting: devkit.collectors",
         ]
     )
 
@@ -1305,7 +1470,7 @@ def test_the_refusals_stop_naming_an_adopt_that_would_delete_something(workspace
 def test_keep_hint_offers_the_adopt_only_when_devkit_has_nothing_to_lose():
     """One spelling for both refusals: two that disagreed about which command is safe
     would be the same defect twice, and it is the unsafe half that deletes a branch."""
-    live_authored = ["settings differs"]
+    live_authored = ["setting differs: powershell.cwd"]
     assert "--adopt-workspace" in devkit_project.keep_hint(live_authored, "  -> keep them: ")
     ahead = [*live_authored, "missing from the workspace: Test: Run Suite"]
     hint = devkit_project.keep_hint(ahead, "  -> keep them: ")
@@ -2973,8 +3138,9 @@ def autofix_run(tmp_path, monkeypatch, argv, dirty=("app/main.py",), returncode=
     snapshots = iter([("master", ()), ("master", dirty)])
     monkeypatch.setattr(devkit_project, "autofix_state", lambda _directory: next(snapshots))
 
-    def fake_run(command, *, cwd, check):
+    def fake_run(command, *, cwd, check, env):
         calls.append(command)
+        assert env["PYTHONUTF8"] == "1", "the ship steps run devkit's sweep.py, which decodes too"
         return type("Result", (), {"returncode": returncode if len(calls) == 1 else 0})()
 
     monkeypatch.setattr(devkit_project.subprocess, "run", fake_run)
@@ -3030,7 +3196,7 @@ def test_a_non_autofix_action_is_never_snapshotted(tmp_path, monkeypatch):
     monkeypatch.setattr(
         devkit_project.subprocess,
         "run",
-        lambda command, *, cwd, check: type("Result", (), {"returncode": 0})(),
+        lambda command, *, cwd, check, env: type("Result", (), {"returncode": 0})(),
     )
     assert devkit_project.main(["--workspace", str(workspace), "--project", "alpha", "test"]) == 0
 
@@ -3046,7 +3212,7 @@ def test_a_failed_sweep_step_stops_the_chain_and_reports(tmp_path, monkeypatch, 
     monkeypatch.setattr(devkit_project, "autofix_state", lambda _directory: next(snapshots))
     calls = []
 
-    def fake_run(command, *, cwd, check):
+    def fake_run(command, *, cwd, check, env):
         calls.append(command)
         # The lint run passes; the `--branch` step fails.
         return type("Result", (), {"returncode": 0 if len(calls) == 1 else 3})()

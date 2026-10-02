@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -47,6 +48,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
+import fix_cycle
 import sweep
 import task_input
 
@@ -619,6 +621,21 @@ def plan_command(
     return logged
 
 
+def dispatch_env() -> dict[str, str]:
+    """The environment a dispatched command runs in: this one, in UTF-8 mode.
+
+    Dozens of the scripts behind these tasks capture a child's output with `text=True`
+    and no encoding, which on a Windows workstation decodes through cp1252. A child that
+    prints `”` (0x9d in UTF-8) kills subprocess's reader thread, and the call returns
+    exit 0 with `stdout=None` -- so a `gh` listing it could not read is a listing of
+    nothing. The scheduled pass already runs this way (`fix-pass-watchdog.run_pass`);
+    *Agent: Fix What Is Red* ran the same pass without it and printed the orphan thread
+    traceback. Through the environment rather than `-X utf8`, so every Python process
+    the script starts in turn -- `ship.py`, `sweep.py`, a project's suite -- inherits it.
+    """
+    return {**os.environ, "PYTHONUTF8": "1"}
+
+
 # --- autofix that would otherwise strand ------------------------------------
 #
 # `lint-all.py` rewrites the tree before it reports -- `ruff check --fix
@@ -760,6 +777,11 @@ def _array_span(scan: str, start: int) -> tuple[int, int]:
         open_at = scan.index("[", start)
     except ValueError as exc:
         raise RegistryEditError("no array found where one was expected") from exc
+    return open_at, _matching(scan, open_at)
+
+
+def _matching(scan: str, open_at: int) -> int:
+    """Offset of the bracket that closes the `[` or `{` at `open_at`."""
     depth = 0
     i = open_at
     in_string = False
@@ -778,9 +800,9 @@ def _array_span(scan: str, start: int) -> tuple[int, int]:
         elif ch in "]}":
             depth -= 1
             if depth == 0:
-                return open_at, i
+                return i
         i += 1
-    raise RegistryEditError("unterminated array in the workspace file")
+    raise RegistryEditError("unterminated array or object in the workspace file")
 
 
 def _entry_spans(scan: str, open_at: int, close_at: int) -> list[tuple[int, int]]:
@@ -1101,21 +1123,24 @@ CANONICAL_WORKSPACE = REPO_ROOT / "workspace.jsonc"
 RENDER_HINT = "python scripts/devkit_project.py"
 
 # Compared whole. `tasks` is compared entry-by-entry instead (see `tasks_drift`),
-# because "the tasks block differs" on a 2,000-line object names nothing actionable.
+# because "the tasks block differs" on a 2,000-line object names nothing actionable, and
+# `settings` key by key (`settings_drift`), because "settings differs" could not say
+# whether devkit had added a setting or someone had changed one.
 PLAIN_KEYS = ("folders", "extensions", "settings", "launch", "remoteAuthority")
 
-# The three drift lines that mean **the canonical copy is ahead**: it carries something
-# the live file does not. Spelled once and used by both the producer and the two gates
+# The drift lines that mean **the canonical copy is ahead**: it carries something the
+# live file does not. Spelled once and used by both the producer and the two gates
 # below, so a reworded message cannot silently empty either of them.
 #
-# Every other line is treated as *possibly live-authored* -- including the three "differs"
+# Every other line is treated as *possibly live-authored* -- including the "differs"
 # forms, which name a key both copies have and say nothing about who moved it last. That
 # asymmetry is the point: a wrong guess on a canonical-ahead line republishes a task git
 # already holds, and a wrong guess the other way discards an edit nothing holds at all.
 AHEAD_TASK = "missing from the workspace: "
 AHEAD_INPUT = "missing input: "
 AHEAD_FOLDER = "folder missing from the workspace: "
-CANONICAL_AHEAD = (AHEAD_TASK, AHEAD_INPUT, AHEAD_FOLDER)
+AHEAD_SETTING = "missing setting: "
+CANONICAL_AHEAD = (AHEAD_TASK, AHEAD_INPUT, AHEAD_FOLDER, AHEAD_SETTING)
 
 
 def live_only(problems: list[str]) -> list[str]:
@@ -1288,6 +1313,23 @@ def _folder_names(block: object) -> set[str]:
     return names
 
 
+def settings_drift(live: dict, canonical: dict) -> list[str]:
+    """The `settings` keys the two copies disagree about, one line each.
+
+    A key only devkit's copy has is the canonical copy being ahead -- a merged PR adding
+    one, as #463 added `devkit.collectors` -- and publishes like a new task does. Compared
+    whole, that addition read as "settings differs", which arms the refusal; with the
+    stamp stale it held every publish, so the PR's tasks never reached the live file.
+    """
+    problems = [f"{AHEAD_SETTING}{key}" for key in sorted(canonical.keys() - live.keys())]
+    for key in sorted(live.keys() - canonical.keys()):
+        problems.append(f"setting in the workspace but not in devkit: {key}")
+    for key in sorted(live.keys() & canonical.keys()):
+        if live[key] != canonical[key]:
+            problems.append(f"setting differs: {key}")
+    return problems
+
+
 def workspace_drift(live: dict, canonical: dict) -> list[str]:
     """Human-readable differences across the WHOLE workspace file; empty when it agrees.
 
@@ -1311,6 +1353,8 @@ def workspace_drift(live: dict, canonical: dict) -> list[str]:
                 problems.append(f"folder in the workspace but not in devkit: {new}")
             if canon_names == live_names:
                 problems.append("folders: same checkouts, different entries")
+        elif key == "settings" and isinstance(before, dict) and isinstance(after, dict):
+            problems += settings_drift(after, before)
         else:
             problems.append(f"{key} differs")
     live_tasks, canon_tasks = live.get("tasks"), canonical.get("tasks")
@@ -1360,14 +1404,102 @@ def machine_view(text: str, root: Path) -> tuple[str, list[str]]:
 
 
 def canonical_view(live: Path) -> tuple[str, list[str]]:
-    """`machine_view` of devkit's copy, for the workstation `live` belongs to.
+    """`machine_view` of devkit's copy, for the workstation `live` belongs to, carrying
+    the live file's `MACHINE_SETTINGS`.
 
     Every comparison of the live file against the canonical copy goes through here --
     the publish, the check, the adopt, the session-start sync line and the plug
     script's early refusal -- because a comparison against the unfiltered copy reports
-    every project this machine does not hold as drift, on every run, forever.
+    every project this machine does not hold as drift, on every run, forever. The
+    machine's own switches are the same shape of fact, so they are carried here too, and
+    a publish writes them back unchanged.
     """
-    return machine_view(canonical_text(), live.parent)
+    text, left_out = machine_view(canonical_text(), live.parent)
+    try:
+        values = machine_settings(live.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return text, left_out
+    return with_settings(text, values), left_out
+
+
+# --- the settings that belong to the machine, not the registry ---------------------
+#
+# `settings` is shared like the rest of `workspace.jsonc`, and two of its keys are not
+# the registry's to decide: whether this workstation's scheduled pass dispatches, and
+# which projects it leaves alone. Compared like the rest, they made every publish refuse
+# from the day `devkit.fixPass` was switched to `dispatch` on the one machine meant to
+# run it -- "settings differs" is a possible hand edit -- and the remedies offered were
+# `--force`, which switched the pass back off, or an adopt, which would have switched it
+# on for every machine. So the live file's value is the machine's answer and the
+# canonical one is only the default a fresh workstation starts from: `canonical_view`
+# carries the first into the comparison and the render, and an adopt puts the second
+# back before anything reaches the shared copy.
+MACHINE_SETTINGS = (fix_cycle.SETTING, sweep.ON_HOLD_SETTING)
+
+
+def machine_settings(text: str) -> dict[str, object]:
+    """The `MACHINE_SETTINGS` a workspace text sets; empty when it cannot be read."""
+    try:
+        payload = devkit_jsonc.loads(text)
+    except (ValueError, TypeError):
+        return {}
+    settings = payload.get("settings") if isinstance(payload, dict) else None
+    if not isinstance(settings, dict):
+        return {}
+    return {key: settings[key] for key in MACHINE_SETTINGS if key in settings}
+
+
+def _value_span(scan: str, after_colon: int) -> tuple[int, int]:
+    """Offsets of the JSON value that starts after `after_colon` in a blanked text."""
+    start = after_colon
+    while scan[start].isspace():
+        start += 1
+    if scan[start] in "[{":
+        return start, _matching(scan, start) + 1
+    if scan[start] == '"':
+        end = start + 1
+        while scan[end] != '"':
+            end += 2 if scan[end] == "\\" else 1
+        return start, end + 1
+    end = start
+    while end < len(scan) and scan[end] not in ",}]\n":
+        end += 1
+    return start, len(scan[start:end].rstrip()) + start
+
+
+def set_setting(text: str, key: str, value: object) -> str:
+    """`text` with `settings[key]` set to `value`, every comment and line left as it was.
+
+    Edited in place rather than round-tripped for the reason the registry edits are: a
+    load/dump cycle deletes every comment in a file that explains itself in comments.
+    A value already equal is left byte-for-byte, and a key `settings` lacks is added as
+    its first entry.
+    """
+    scan = devkit_jsonc.blank_comments(text)
+    settings_at = scan.find('"settings"')
+    if settings_at < 0:
+        raise RegistryEditError('the workspace file has no "settings" object')
+    open_at = scan.index("{", settings_at)
+    close_at = _matching(scan, open_at)
+    rendered = json.dumps(value, ensure_ascii=False)
+    key_at = scan.find(json.dumps(key), open_at, close_at)
+    if key_at >= 0:
+        start, end = _value_span(scan, scan.index(":", key_at) + 1)
+        if devkit_jsonc.loads(scan[start:end]) == value:
+            return text
+        return text[:start] + rendered + text[end:]
+    body = scan[open_at + 1 : close_at]
+    first = open_at + 1 + len(body) - len(body.lstrip())
+    indent = _indent_of(text, first) if body.strip() else "\t\t"
+    entry = f"\n{indent}{json.dumps(key)}: {rendered}{',' if body.strip() else ''}"
+    return text[: open_at + 1] + entry + text[open_at + 1 :]
+
+
+def with_settings(text: str, values: dict[str, object]) -> str:
+    """`set_setting` for each of `values`."""
+    for key, value in values.items():
+        text = set_setting(text, key, value)
+    return text
 
 
 def left_out_line(left_out: list[str]) -> str:
@@ -1462,7 +1594,9 @@ def adopt_workspace(live: Path, text: str, *, force: bool = False) -> int:
     holding two of seven checkouts must not retire the other five everywhere. A
     re-registered entry lands where `insert_folder` puts one -- at the end of the
     list, before any reference checkout -- so the diff may reorder `folders`; that is
-    visible in the PR, where a silent retirement would not have been.
+    visible in the PR, where a silent retirement would not have been. The same holds
+    for `MACHINE_SETTINGS`: the shared copy keeps its own defaults, so adopting from the
+    machine that dispatches does not switch the fix pass on everywhere.
     """
     canonical, left_out = canonical_view(live) if CANONICAL_WORKSPACE.is_file() else ("", [])
     losses = canonical_only(
@@ -1487,7 +1621,10 @@ def adopt_workspace(live: Path, text: str, *, force: bool = False) -> int:
         return 1
     # Written directly rather than printed for redirection: the file carries en-dashes
     # and arrows, and a redirected stdout on Windows is cp1252.
-    CANONICAL_WORKSPACE.write_text(register(text, left_out), encoding="utf-8", newline="\n")
+    defaults = machine_settings(canonical_text()) if canonical else {}
+    CANONICAL_WORKSPACE.write_text(
+        with_settings(register(text, left_out), defaults), encoding="utf-8", newline="\n"
+    )
     write_stamp(live, semantic_digest(text))
     print(f"adopted {live.name} into {CANONICAL_WORKSPACE.name}")
     if left_out:
@@ -1779,7 +1916,9 @@ def main(argv: list[str] | None = None) -> int:
         ship_fixes = action.autofix and not args.no_ship_fixes
         print(f"[{directory.name}] {' '.join(command)}\n", flush=True)
         branch, before = autofix_state(directory) if ship_fixes else ("", ())
-        returncode = subprocess.run(command, cwd=directory, check=False).returncode
+        returncode = subprocess.run(
+            command, cwd=directory, check=False, env=dispatch_env()
+        ).returncode
         if returncode and not result:
             result = returncode
         if not ship_fixes:
@@ -1799,7 +1938,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n[{directory.name}] {outcome.note}", flush=True)
         for step in outcome.commands:
             print(f"\n[{directory.name}] {' '.join(step)}\n", flush=True)
-            code = subprocess.run(step, cwd=root, check=False).returncode
+            code = subprocess.run(step, cwd=root, check=False, env=dispatch_env()).returncode
             if code:
                 # Stop at the first failure rather than shipping from a branch that was
                 # never cut: the second command would then read the *home* branch and
