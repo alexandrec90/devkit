@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import datetime as _dt
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
-from support import load_script
+from support import REPO_ROOT, load_script
 
 watchdog = load_script("scripts/fix-pass-watchdog.py")
 triage = load_script("scripts/harness_triage.py")
@@ -465,6 +466,32 @@ def test_a_fetch_that_keeps_failing_says_why_without_its_shas(checkout, monkeypa
         "could not fetch origin/main -- error: cannot lock ref "
         "'refs/remotes/origin/main': is at <sha>",
     )
+
+
+def test_every_git_call_asks_github_s_credentials_up_front(tmp_path, monkeypatch):
+    """902dad3f: self-update's fetch got GitHub's 403 for an anonymous request, which git
+    never retries with its helper. The key is the one `git_trust` sets for the pass."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    import git_trust
+
+    argvs = []
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda argv, **kw: argvs.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""),
+    )
+    watchdog.git(tmp_path, "fetch", "--quiet", "origin", "main")
+    assert argvs == [
+        [
+            "git",
+            "-c",
+            f"{git_trust.AUTH_SETTING}={git_trust.AUTH}",
+            "fetch",
+            "--quiet",
+            "origin",
+            "main",
+        ]
+    ]
 
 
 def test_a_fetch_that_says_nothing_is_named_by_its_exit(tmp_path, monkeypatch):

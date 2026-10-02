@@ -71,11 +71,16 @@ AUTOMERGE_LABEL = "automerge"  # sweep.AUTOMERGE_LABEL
 STALE = 75
 # How the pass reports on the world, as opposed to failing itself.
 REPORTED = (0, 1, STALE)
+# `git_trust.AUTH_SETTING`, spelled here because this file imports nothing the pass does, and
+# because self-update fetches before the pass has set it anywhere: GitHub answers a
+# blocked address's anonymous fetch 403, which git never takes to its credential helper,
+# so a fetch of a public repository failed while pushes went through (902dad3f).
+GITHUB_AUTH = ("-c", "http.https://github.com/.proactiveAuth=basic")
 
 
 def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args],
+        ["git", *GITHUB_AUTH, *args],
         cwd=root,
         capture_output=True,
         text=True,
