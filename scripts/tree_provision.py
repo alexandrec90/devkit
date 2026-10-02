@@ -34,14 +34,24 @@ def argv(tree: Path) -> list[str]:
     return [sweep.console_python(), str(WORKTREE), "provision", str(tree), "--yes"]
 
 
+def frontend_missing(tree: Path) -> bool:
+    """Whether the tree's frontend tier is on and its `node_modules` holds no finished
+    install. That covers a missing directory and also a linked one: a `claude --worktree`
+    tree's `node_modules` linked to an empty directory in its checkout, and `vite` could
+    not start (fcf111b9)."""
+    frontend = harness_config.load(tree).frontend
+    return frontend.enabled and not worktree_env.node_modules_installed(
+        tree / frontend.dir / "node_modules"
+    )
+
+
 def needs_provision(tree: Path) -> bool:
     """Whether the git hook left any of the tree's toolchain to install. The hook installs
     Python alone and marks the tree provisioned anyway, so its mark proves the `.venv` and
     nothing about `node_modules`: a roguelike tree came up with vitest unable to run."""
     if not (tree / worktree_env.PROVISIONED).is_file():
         return True
-    frontend = harness_config.load(tree).frontend
-    return frontend.enabled and not (tree / frontend.dir / "node_modules").is_dir()
+    return frontend_missing(tree)
 
 
 def provision(tree: Path, runner=sweep.run_windowless) -> bool:

@@ -755,3 +755,15 @@ def test_the_index_change_hook_leaves_a_provisioned_tree_and_the_checkout_alone(
     assert wt_env.index_change_main(["1", "0"], root=tree, runner=run, environ={}) == 0
     assert wt_env.index_change_main(["0", "0"], root=tmp_path / "nowhere") == 0
     assert run.calls == []
+
+
+@pytest.mark.parametrize("mark", wt_env.NODE_INSTALL_MARKS)
+def test_node_modules_is_installed_only_once_a_package_manager_says_so(tmp_path, mark):
+    """fcf111b9: an empty `node_modules`, behind a link, read as an install and `vite`
+    was missing. Each package manager's own end-of-install file is the evidence."""
+    node_modules = tmp_path / "node_modules"
+    assert wt_env.node_modules_installed(node_modules) is False
+    (node_modules / ".vite").mkdir(parents=True)
+    assert wt_env.node_modules_installed(node_modules) is False, "a cache is not an install"
+    (node_modules / mark).write_text("", encoding="utf-8")
+    assert wt_env.node_modules_installed(node_modules) is True
