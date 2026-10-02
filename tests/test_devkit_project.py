@@ -1105,7 +1105,30 @@ def test_drift_reports_a_changed_setting():
     problems = devkit_project.workspace_drift(
         {"settings": {"powershell.cwd": "devkit"}}, {"settings": {"powershell.cwd": "carameli"}}
     )
-    assert "settings differs" in problems
+    assert problems == ["setting differs: powershell.cwd"]
+
+
+def test_drift_names_settings_by_key_and_reads_a_canonical_only_one_as_ahead():
+    """Whole, `settings` was one "differs" line, so a setting devkit's copy had just
+    gained read as a live edit and armed the refusal it exists to get past."""
+    problems = devkit_project.workspace_drift(
+        {"settings": {"mine": 1}}, {"settings": {"devkit.collectors": {}}}
+    )
+    assert problems == [
+        "setting missing from the workspace: devkit.collectors",
+        "setting in the workspace but not in devkit: mine",
+    ]
+    assert devkit_project.live_only(problems) == [
+        "setting in the workspace but not in devkit: mine"
+    ]
+
+
+def test_the_operator_s_switches_are_not_drift():
+    """`devkit.fixPass` and `devkit.onHold` are set in the live file on purpose (6d71fa28)."""
+    live = {"settings": {"devkit.fixPass": "dispatch", "devkit.onHold": ["ibkr_trader"]}}
+    canonical = {"settings": {"devkit.fixPass": "off", "devkit.onHold": []}}
+    assert devkit_project.workspace_drift(live, canonical) == []
+    assert devkit_project.workspace_drift({"settings": {"devkit.fixPass": "plan"}}, {}) == []
 
 
 def test_drift_ignores_layout_and_comments(workspace_pair):
@@ -1150,14 +1173,29 @@ def test_render_refuses_to_overwrite_an_unadopted_live_edit(workspace_pair):
 def test_render_proceeds_once_the_live_edit_is_adopted(workspace_pair):
     canonical, live = workspace_pair
     live.write_text(
-        live.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli"', '"c": "d"'),
+        live.read_text(encoding="utf-8").replace(
+            '"powershell.cwd": "carameli"', '"powershell.cwd": "devkit", "c": "d"'
+        ),
         encoding="utf-8",
         newline="\n",
     )
     assert _run(live, "--adopt-workspace") == 0
     adopted = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
-    assert adopted["c"] == "d" and "powershell.cwd" not in adopted
+    assert adopted["c"] == "d" and adopted["powershell.cwd"] == "devkit"
     assert _run(live, "--check-workspace") == 0
+
+
+def test_a_setting_deleted_from_the_live_file_is_not_adopted_away(workspace_pair):
+    """Per key, a setting only the canonical copy holds reads as that copy being ahead,
+    as a task does: git holds it, so an adopt refuses to delete it rather than guess."""
+    canonical, live = workspace_pair
+    live.write_text(
+        live.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli",', ""),
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert _run(live, "--adopt-workspace") == 1
+    assert "powershell.cwd" in devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
 
 
 def test_render_stamps_so_the_next_one_is_not_mistaken_for_a_hand_edit(workspace_pair):
@@ -1228,6 +1266,83 @@ def _hand_edit(live):
     live.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
 
 
+def _set_switches(path, **values):
+    """Rewrite `path` with its operator's switches replaced, layout discarded."""
+    payload = devkit_jsonc_loads(path.read_text(encoding="utf-8"))
+    payload["settings"] = {**payload.get("settings", {}), **values}
+    path.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
+
+
+def test_a_live_switch_does_not_stop_a_new_setting_from_being_published(workspace_pair):
+    """6d71fa28: the live file said `devkit.fixPass: dispatch` and held three projects,
+    its stamp was stale, and every daily publish refused -- so `devkit.collectors`, merged
+    in #463, never reached the machine. The switches survive the publish; the setting
+    arrives; the canonical comments are what is written."""
+    _canonical, live = workspace_pair
+    _set_switches(live, **{"devkit.fixPass": "dispatch", "devkit.onHold": ["ibkr_trader"]})
+    payload = devkit_jsonc_loads(live.read_text(encoding="utf-8"))
+    del payload["settings"]["devkit.collectors"]
+    live.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
+
+    outcome, problems = devkit_project.publish_workspace(live)
+
+    assert outcome == devkit_project.RENDER_PUBLISHED, problems
+    assert problems == ["setting missing from the workspace: devkit.collectors"]
+    text = live.read_text(encoding="utf-8")
+    settings = devkit_jsonc_loads(text)["settings"]
+    assert settings["devkit.fixPass"] == "dispatch"
+    assert settings["devkit.onHold"] == ["ibkr_trader"]
+    assert "devkit.collectors" in settings
+    assert "// The fix pass's switch" in text, "the canonical comments were not kept"
+    assert devkit_project.publish_workspace(live)[0] == devkit_project.RENDER_CURRENT
+
+
+def test_machine_settings_reads_only_the_switches():
+    payload = {"settings": {"devkit.fixPass": "plan", "powershell.cwd": "x"}}
+    assert devkit_project.machine_settings(payload) == {"devkit.fixPass": "plan"}
+    assert devkit_project.machine_settings({"settings": []}) == {}
+    assert devkit_project.machine_settings([]) == {}
+
+
+def test_settings_drift_tolerates_a_settings_block_that_is_not_an_object():
+    assert devkit_project.settings_drift(None, {"a": 1}) == [
+        "setting missing from the workspace: a"
+    ]
+    assert devkit_project.settings_drift({"devkit.onHold": ["x"]}, []) == []
+
+
+def test_settings_brace_finds_the_top_level_block_only():
+    text = '{"tasks": {"settings": {}}, // c\n "settings": {"a": 1,},}'
+    scan = devkit_jsonc.drop_trailing_commas(devkit_jsonc.blank_comments(text))
+    assert text[devkit_project.settings_brace(scan)] == "{"
+    assert devkit_project.settings_brace(scan) == text.index('{"a"')
+    assert devkit_project.settings_brace('{"folders": []}') == -1
+    assert devkit_project.settings_brace('{"settings": 3}') == -1
+    assert devkit_project.settings_brace("") == -1
+
+
+def test_a_switch_the_canonical_copy_lacks_is_added_to_the_render():
+    text = '{\n\t"settings": {\n\t\t// kept\n\t\t"a": 1\n\t}\n}\n'
+    carried = devkit_project.carry_machine_settings(text, {"settings": {"devkit.fixPass": "plan"}})
+    assert devkit_jsonc_loads(carried)["settings"] == {"devkit.fixPass": "plan", "a": 1}
+    assert "// kept" in carried
+    assert devkit_project.carry_machine_settings(text, {"settings": {}}) == text
+    assert devkit_project.carry_machine_settings(text, {}) == text
+
+
+def test_an_adopt_keeps_the_canonical_defaults_for_the_switches(workspace_pair):
+    """A live edit is recorded; this machine's switches are not, or every machine that
+    pulled devkit would start dispatching fixers."""
+    canonical, live = workspace_pair
+    _set_switches(live, **{"devkit.fixPass": "dispatch", "invented.setting": True})
+
+    assert _run(live, "--adopt-workspace") == 0
+
+    adopted = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
+    assert adopted["invented.setting"] is True
+    assert adopted["devkit.fixPass"] == "off"
+
+
 def test_publish_workspace_refuses_a_live_file_it_did_not_stamp(workspace_pair):
     """The refusal belongs here and not in each caller -- the hook publishes unattended,
     so a caller that forgot the check would discard a hand edit with nobody watching."""
@@ -1272,13 +1387,14 @@ def test_a_differing_definition_is_treated_as_the_live_file_s_until_proven_other
     """
     assert devkit_project.live_only(["definition differs: Lint: Run"])
     assert devkit_project.live_only(["input definition differs: project"])
-    assert devkit_project.live_only(["settings differs"])
+    assert devkit_project.live_only(["setting differs: powershell.cwd"])
     assert devkit_project.live_only(["folders: same checkouts, different entries"])
     assert not devkit_project.live_only(
         [
             "missing from the workspace: Test: Run Suite",
             "missing input: lintScope",
             "folder missing from the workspace: devkit",
+            "setting missing from the workspace: devkit.collectors",
         ]
     )
 
@@ -1330,7 +1446,7 @@ def test_the_refusals_stop_naming_an_adopt_that_would_delete_something(workspace
 def test_keep_hint_offers_the_adopt_only_when_devkit_has_nothing_to_lose():
     """One spelling for both refusals: two that disagreed about which command is safe
     would be the same defect twice, and it is the unsafe half that deletes a branch."""
-    live_authored = ["settings differs"]
+    live_authored = ["setting differs: powershell.cwd"]
     assert "--adopt-workspace" in devkit_project.keep_hint(live_authored, "  -> keep them: ")
     ahead = [*live_authored, "missing from the workspace: Test: Run Suite"]
     hint = devkit_project.keep_hint(ahead, "  -> keep them: ")
