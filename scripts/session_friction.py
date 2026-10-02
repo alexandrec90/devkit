@@ -705,6 +705,27 @@ def asks_for_targeted_runs(cwd: str, workspace_root: Path, project: str) -> bool
     return True
 
 
+# The vendored rule's ban on writing a file through Bash, as it has led since #503. A tree
+# whose copy predates it was told only in passing, and the fix is the pull its project is
+# held from: 45bd36c5 was a sports_betting session on v0.11.32 (`devkit.onHold`), filed
+# as a devkit defect hours after v0.11.41 shipped the ban. `tests/test_session_friction.py`
+# holds devkit's own rule to this spelling, so a rewording cannot silence every project.
+ENGINEERING_RULE = ".claude/rules/engineering.md"
+FILE_WRITES_BAN = "**Write and edit files with the Write and Edit tools, never through Bash**"
+
+
+def bans_shell_writes(cwd: str, workspace_root: Path, project: str) -> bool:
+    """The session's tree carries `FILE_WRITES_BAN`; its project's checkout decides once
+    the tree is gone. Neither there to read: it may well have, so the finding stands."""
+    for root in (Path(cwd), workspace_root / project):
+        if root.is_dir():
+            try:
+                return FILE_WRITES_BAN in (root / ENGINEERING_RULE).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                return False
+    return True
+
+
 # "No module named 'x'" -- quoted, as Python names a module import failed on. Unquoted
 # ("No module named pytest") is `python -m` missing the tool itself.
 MISSING_MODULE = re.compile(r"No module named '([\w.]+)'")
@@ -767,12 +788,18 @@ def task_branch(cwd: str, runner=sweep.run_windowless) -> str:
 def judged(events: Iterable[Event], cwd: str, workspace_root: Path) -> list[tuple[str, str, Event]]:
     """`detect`, judged against the tree the session ran in: whether its runner is
     targeted bare, and whether it was asked for targeted runs at all. The one judgement
-    both the pass's filing and `fix-pass-supervise.py`'s audit make, so they agree."""
+    both the pass's filing and `fix-pass-supervise.py`'s audit make, so they agree.
+    A dispatched session was handed the ban in its system prompt (`agent_tabs.FILE_WRITES`),
+    so a stale rule excuses none of its heredoc writes."""
+    events = list(events)
     project = harness_events.project_name(Path(cwd))
     targeted = runner_defaults_targeted(cwd, workspace_root, project)
     found = outside_the_tree(detect(events, targeted), cwd)
     if not asks_for_targeted_runs(cwd, workspace_root, project):
         found = [row for row in found if row[0] != "full-suite"]
+    dispatched = any(event.kind == "user" and DISPATCHED in event.text for event in events)
+    if not dispatched and not bans_shell_writes(cwd, workspace_root, project):
+        found = [row for row in found if row[0] != "heredoc-write"]
     if has_own_venv(cwd):
         found = [
             row
