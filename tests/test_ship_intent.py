@@ -281,6 +281,8 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
     assert out.stage == ship_intent.SHIPPED and out.url == "https://x/pull/7"
     assert run.verbs() == [
         "git status",
+        "git rev-parse",
+        "git merge-base",
         "git add",
         r"C:\py\python.exe scripts/ship.py",
         "git add",
@@ -290,8 +292,8 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
         "git push",
         "git rev-parse",
     ]
-    fix, add, commit = run.calls[2:5]
-    push = run.calls[7]
+    fix, add, commit = run.calls[4:7]
+    push = run.calls[9]
     assert fix[0][1:] == ["scripts/ship.py", "--fix"] and fix[1] == one.tree
     assert add[0] == ["git", "add", "-A"]
     assert commit[0] == ["git", "commit", "-F", str(ship_intent.INTENT_FILE)]
@@ -525,8 +527,8 @@ class _RetiredBranch(Runner):
             return subprocess.CompletedProcess(
                 argv, 0, "".join(f"sha\trefs/heads/{n}\n" for n in names), ""
             )
-        if argv[:3] == ["git", "switch", "-c"]:
-            self.branch = argv[3]
+        if argv[:3] == ["git", "symbolic-ref", "HEAD"]:
+            self.branch = argv[3].removeprefix("refs/heads/")
         if argv[:2] == ["git", "commit"] and self.branch in self.retired:
             self.calls.append((argv, Path(cwd), env))
             why = f"[devkit branch policy] commit blocked: branch '{self.branch}' is permanently retired because its PR merged (https://x/pull/426)."
@@ -538,21 +540,177 @@ def test_an_intent_on_a_retired_branch_is_carried_to_the_next_free_name(tmp_path
     """A ledger sweep's second intent landed after the pass had shipped its first and the
     PR merged: the policy refused every commit on the retired name, and the fix -- plus
     the ledger group it was resolved against -- sat stranded in the tree (c45826ad). The
-    policy's own remedy is one `git switch -c`, which the ship step now takes itself."""
+    policy's own remedy is a fresh name, which the ship step now makes itself."""
     one = intent(tmp_path)
     run = _RetiredBranch(retired={"agent/labels-0919"}, taken={"agent/labels-0919-2"})
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.SHIPPED
-    assert ["git", "switch", "-c", "agent/labels-0919-3"] in [argv for argv, _c, _e in run.calls]
-    assert ["git", "push", "-u", "origin", "agent/labels-0919-3"] in [
-        argv for argv, _c, _e in run.calls
+    argv = [argv for argv, _c, _e in run.calls]
+    assert ["git", "branch", "agent/labels-0919-3"] in argv
+    assert ["git", "symbolic-ref", "HEAD", "refs/heads/agent/labels-0919-3"] in argv
+    assert ["git", "push", "-u", "origin", "agent/labels-0919-3"] in argv
+
+
+def _resolving(tmp_path, resolution: str):
+    """carameli's tree in f95dffbc, as a real repository: `feat` bumped `f`, the trunk
+    bumped it another way (`m1`), and a resolver is mid-merge of `m1` with `f` set to
+    `resolution`. Since then the trunk landed `f` = "d" and an unrelated `g`, and
+    `origin/main` says so. Returns the repository and its `git`."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+
+    def commit(message, **files):
+        for name, text in files.items():
+            (repo / name).write_text(f"{text}\n", encoding="utf-8")
+        git("add", *files)
+        git("commit", "-qm", message)
+
+    git("init", "-q", "-b", "main")
+    # An author, no signing, and no hooks: the machine's `core.hooksPath` is global.
+    for key, value in (
+        ("user.email", "a@b"),
+        ("user.name", "t"),
+        ("commit.gpgsign", "false"),
+        ("core.hooksPath", str(tmp_path / "no-hooks")),
+    ):
+        git("config", key, value)
+    commit("a", f="a", g="1")
+    git("switch", "-qc", "feat")
+    commit("b", f="b")
+    git("switch", "-q", "main")
+    commit("c", f="c")
+    git("tag", "m1")
+    commit("the bump, landed", f="d")
+    commit("a later merge", g="2")
+    git("update-ref", "refs/remotes/origin/main", "main")
+    git("switch", "-q", "feat")
+    assert git("merge", "m1").returncode != 0, "the conflict a resolver is sent at"
+    (repo / "f").write_text(f"{resolution}\n", encoding="utf-8")
+    git("add", "f")
+    return repo, git
+
+
+def test_the_carry_moves_head_without_switching_so_a_merge_in_progress_survives(tmp_path):
+    """f95dffbc: carameli's resolver was mid-merge on a Dependabot branch when its PR
+    merged. `git switch -c` refuses while merging, so the carry failed and the commit
+    stayed refused on the retired name; `git checkout -b` would drop `MERGE_HEAD`. A
+    real repository, because the property is git's, not the argv's."""
+    repo, git = _resolving(tmp_path, "c")
+    one = ship_intent.Intent("r", repo, "feat", "S", "")
+    moved = ship_intent._carry_to_free_branch(one, "feat", ship_intent.run_quiet, set())
+    assert isinstance(moved, ship_intent.Intent) and moved.branch == "feat-2"
+    assert git("branch", "--show-current").stdout.strip() == "feat-2"
+    assert git("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0, "still merging"
+    assert git("diff", "--cached", "--name-only").stdout.split() == ["f"], "index untouched"
+
+
+def test_a_carry_whose_head_will_not_move_is_no_carry_and_says_why(tmp_path):
+    one = intent(tmp_path)
+    run = Runner({"git symbolic-ref": (128, "", "fatal: no")})
+    said = ship_intent._carry_to_free_branch(one, "agent/labels-0919", run, set())
+    assert said == "`git symbolic-ref HEAD refs/heads/agent/labels-0919-2`: fatal: no"
+    taken = Runner({"git branch": (128, "", "fatal: already exists")})
+    said = ship_intent._carry_to_free_branch(one, "agent/labels-0919", taken, set())
+    assert said == "`git branch agent/labels-0919-2`: fatal: already exists"
+    assert "git symbolic-ref" not in taken.verbs()
+
+
+def test_a_failed_carry_is_written_into_the_recorded_refusal(tmp_path):
+    """f95dffbc's stored refusal named only the retired branch, so it read as a carry the
+    pass had never tried; the failed `git switch -c` that stopped it was nowhere."""
+    one = intent(tmp_path)
+
+    class Stuck(_RetiredBranch):
+        def __call__(self, argv, cwd, env=None):
+            if [str(a) for a in argv[:2]] == ["git", "branch"]:
+                self.calls.append(([str(a) for a in argv], Path(cwd), env))
+                return subprocess.CompletedProcess(argv, 128, "", "fatal: cannot carry\n")
+            return super().__call__(argv, cwd, env)
+
+    out = ship_intent.ship_one(one, "py", "main", Stuck({"agent/labels-0919"}), gh_ok, NOW)
+    assert out.stage == ship_intent.REFUSED
+    output = ship_intent.read_state(one.tree)["output"]
+    assert "the carry to a fresh name failed: `git branch agent/labels-0919-2`" in output
+    assert ship_intent.RETIRED_MARK in ship_intent.refusal_line(output), "same signature"
+
+
+def test_a_tree_whose_every_change_already_landed_is_nothing_to_ship(tmp_path, monkeypatch):
+    """f95dffbc: the resolver's staged merge matched master, because the bump it was
+    resolving had landed meanwhile. Two fixers wrote "nothing to ship" and the pass
+    committed each anyway; only the retired-name refusal stopped an empty PR, and the
+    group went to the ledger as fixers-exhausted. A later trunk change the tree lacks
+    (`g`) is not the tree's to ship."""
+    plans = capture_plans(monkeypatch)
+    repo, git = _resolving(tmp_path, "d")
+    (repo / "logs").mkdir()
+    (repo / ".git" / "info" / "exclude").write_text("logs/\n", encoding="utf-8")
+    (repo / ship_intent.INTENT_FILE).write_text("Nothing to ship\n\nIt landed.\n", "utf-8")
+    one = ship_intent.Intent("r", repo, "feat", "Nothing to ship", "It landed.")
+    assert ship_intent.adds_nothing(repo, "main", " M f\n", ship_intent.run_quiet)
+    out = ship_intent.ship_one(one, "py", "main", ship_intent.run_quiet, gh_ok, NOW)
+    assert out.stage == ship_intent.EMPTY and plans == []
+    assert "already on origin/main" in out.detail
+    assert git("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0, "nothing committed"
+    assert not (repo / ship_intent.INTENT_FILE).exists()
+    assert ship_intent.read_state(repo)["stage"] == ship_intent.EMPTY
+
+
+def test_a_resolution_the_trunk_does_not_have_is_still_shipped(tmp_path):
+    repo, _git = _resolving(tmp_path, "e")
+    assert not ship_intent.adds_nothing(repo, "main", "M  f\n", ship_intent.run_quiet)
+
+
+def test_a_change_off_the_trunk_with_no_merge_in_progress_is_measured_from_the_fork(tmp_path):
+    repo, git = _resolving(tmp_path, "c")
+    git("merge", "--abort")
+    assert not ship_intent.adds_nothing(repo, "main", "", ship_intent.run_quiet), "f = b"
+    (repo / "f").write_text("d\n", encoding="utf-8")
+    assert ship_intent.adds_nothing(repo, "main", " M f\n", ship_intent.run_quiet)
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        {"git merge-base": (1, "", "")},
+        {"git merge-base": (0, "", "")},
+        {"git merge-base": (0, "abc\n", ""), "git diff": (128, "", "fatal: bad revision")},
+    ],
+    ids=["no fork", "fork unread", "diff refused"],
+)
+def test_a_tree_git_cannot_measure_is_something_to_ship(tmp_path, answers):
+    assert not ship_intent.adds_nothing(tmp_path, "main", " M a.py\n", Runner(answers))
+
+
+def test_an_untracked_file_is_something_to_ship_without_asking_git(tmp_path):
+    run = Runner({"git merge-base": (0, "abc\n", "")})
+    assert not ship_intent.adds_nothing(tmp_path, "main", "?? new.py\n", run)
+    assert run.calls == []
+
+
+def test_the_fork_counts_merge_head_only_while_a_merge_is_in_progress(tmp_path):
+    merging = Runner({"git merge-base": (0, "abc\n", "")})
+    assert ship_intent.adds_nothing(tmp_path, "main", " M a.py\n", merging)
+    assert ["git", "merge-base", "origin/main", "HEAD", "MERGE_HEAD"] in [
+        c[0] for c in merging.calls
     ]
+    plain = Runner({"git merge-base": (0, "abc\n", "")})
+
+    def not_merging(argv, cwd, env=None):
+        if argv[:2] == ["git", "rev-parse"]:  # `Runner` answers every rev-parse with a sha
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return plain(argv, cwd, env)
+
+    assert ship_intent.adds_nothing(tmp_path, "main", " M a.py\n", not_merging)
+    assert ["git", "merge-base", "origin/main", "HEAD"] in [c[0] for c in plain.calls]
 
 
 def test_a_stored_retired_branch_refusal_is_tried_again(tmp_path):
     """The stranded sweep's refusal was recorded before the carry existed; held as "nothing
     has changed", it would never have been retried, and a fixer would have been sent to
-    type the one `git switch -c` the ship step now makes."""
+    type the one fresh name the ship step now makes."""
     one = intent(tmp_path)
     why = "[devkit branch policy] commit blocked: branch 'x' " + ship_intent.RETIRED_MARK
     state = {"stage": ship_intent.REFUSED, "intent": one.digest, "output": why, "step": "commit"}
@@ -571,8 +729,8 @@ def test_the_retirement_mark_is_the_branch_policys_own_words():
 def test_a_topic_past_its_ninth_branch_is_still_carried(tmp_path):
     """The carry once tried only `-2`..`-9`. The pass cut sixteen
     `agent/fix-harness-ledger-0927` branches in a day, so a fix on the retired base name
-    found every candidate taken and was refused, and a fixer was sent to type the
-    `git switch -c` the carry exists to make."""
+    found every candidate taken and was refused, and a fixer was sent to make the fresh
+    name the carry exists to make."""
     one = intent(tmp_path)
     taken = {"agent/labels-0919"} | {f"agent/labels-0919-{n}" for n in range(2, 17)}
     run = _RetiredBranch(retired={"agent/labels-0919"}, taken=taken)
@@ -591,7 +749,7 @@ def test_a_retired_suffixed_branch_counts_on_from_its_family(tmp_path):
     run = _RetiredBranch(retired={"agent/labels-0919-14"}, taken=taken, branch=one.branch)
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.SHIPPED
-    assert ["git", "switch", "-c", "agent/labels-0919-15"] in [argv for argv, _c, _e in run.calls]
+    assert ["git", "branch", "agent/labels-0919-15"] in [argv for argv, _c, _e in run.calls]
 
 
 def test_a_retired_branch_whose_every_carry_is_retired_too_is_still_a_refusal(tmp_path):
@@ -602,7 +760,7 @@ def test_a_retired_branch_whose_every_carry_is_retired_too_is_still_a_refusal(tm
     run = _RetiredBranch(retired=names)
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.REFUSED and "git push" not in run.verbs()
-    assert run.verbs().count("git switch") == ship_intent.CARRIES
+    assert run.verbs().count("git symbolic-ref") == ship_intent.CARRIES
 
 
 def test_the_next_free_name_is_above_every_used_one_not_in_a_gap():
@@ -1107,7 +1265,9 @@ def test_a_refusal_nothing_has_changed_since_is_not_run_again(tmp_path):
         outcome.stage == ship_intent.REFUSED
         and outcome.detail == "fixers: Detect secrets....Failed"
     )
-    assert run.verbs() == ["git status"], "no fixers, no commit: the stored refusal stands"
+    assert run.verbs() == ["git status", "git rev-parse", "git merge-base"], (
+        "no fixers, no commit: the stored refusal stands"
+    )
     moved = Runner(porcelain=" M a.py\n M b.py\n")
     assert ship_intent.still_refused(one, ship_intent.read_state(one.tree), " M b.py\n") is None
     ship_intent.ship_one(one, "py", "main", moved, gh_ok, NOW)

@@ -16,7 +16,8 @@ beside the intent. A refused commit is
 recorded too, with the pre-commit output as evidence, so the pass can tell it from a
 session still working: no intent file means hands off, an intent with a refusal means a
 dispatchable failure, an intent already shipped at this tree's state means nothing to do,
-and so does one over a tree with nothing changed or committed (`commits_ahead`).
+and so does one over a tree with nothing changed or committed (`commits_ahead`), or whose
+every change is already on its base (`adds_nothing`).
 
 **The intent is consumed.** Once shipped it becomes `logs/ship-intent.shipped.md`; once
 a fixer is sent at a refusal it becomes `logs/ship-intent.refused.md` (the pass does
@@ -279,10 +280,49 @@ def _settled(
         set_aside(intent.tree, SHIPPED_FILE)
         return Outcome(intent, SKIPPED, "already shipped at this intent; set aside")
     if not porcelain.strip() and commits_ahead(intent.tree, base, runner) == 0:
-        write_state(intent.tree, {"stage": EMPTY, "when": when, "intent": intent.digest})
-        set_aside(intent.tree, SHIPPED_FILE)
-        return Outcome(intent, EMPTY, "nothing changed or committed: no PR to open; set aside")
+        return _empty(intent, when, "nothing changed or committed: no PR to open; set aside")
+    if porcelain.strip() and adds_nothing(intent.tree, base, porcelain, runner):
+        why = f"every change in the tree is already on origin/{base}: no PR to open; set aside"
+        return _empty(intent, when, why)
     return still_refused(intent, state, porcelain)
+
+
+def _empty(intent: Intent, when: str, why: str) -> Outcome:
+    """Nothing to ship, recorded as such, with the session's outcome kept beside it."""
+    write_state(intent.tree, {"stage": EMPTY, "when": when, "intent": intent.digest})
+    set_aside(intent.tree, SHIPPED_FILE)
+    return Outcome(intent, EMPTY, why)
+
+
+def adds_nothing(tree: Path, base: str, porcelain: str, runner: Runner) -> bool:
+    """Every path the tree would commit, counted from where it left `origin/<base>`,
+    already reads on `origin/<base>` as it does here: committed, it would merge as a no-op.
+
+    carameli's resolver was sent at a Dependabot PR that conflicted, merged the trunk in,
+    and found the bump had landed meanwhile as #418 -- its staged tree level with master.
+    Two fixers wrote "nothing to ship", and the pass committed each anyway: the porcelain
+    was not empty, so only the branch policy's retired-name refusal stopped an empty PR
+    (f95dffbc). A merge in progress counts `MERGE_HEAD` as a parent, as the commit will.
+    Untracked files, and anything git cannot answer, are something to ship.
+    """
+    if any(line.startswith("??") for line in porcelain.splitlines()):
+        return False
+    merging = runner(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=tree)
+    heads = ["HEAD", "MERGE_HEAD"] if merging.returncode == 0 else ["HEAD"]
+    found = runner(["git", "merge-base", f"origin/{base}", *heads], cwd=tree)
+    fork = (found.stdout or "").strip()
+    if found.returncode != 0 or not fork:
+        return False
+    changed = _names(runner(["git", "diff", "--no-renames", "--name-only", fork], cwd=tree))
+    differs = _names(
+        runner(["git", "diff", "--no-renames", "--name-only", f"origin/{base}"], cwd=tree)
+    )
+    return changed is not None and differs is not None and not changed & differs
+
+
+def _names(done: subprocess.CompletedProcess[str]) -> set[str] | None:
+    """The paths a `--name-only` diff printed; None when git refused."""
+    return set((done.stdout or "").split("\n")) - {""} if done.returncode == 0 else None
 
 
 def labels_for(tree: Path) -> tuple[str, ...]:
@@ -405,7 +445,7 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
 
 
 # What `git_policy.branch` says when a commit lands on a name whose PR merged; its remedy
-# is one `git switch -c`, which a session was otherwise sent to make.
+# is a fresh name, which a session was otherwise sent to make (`_carry_to_free_branch`).
 RETIRED_MARK = "is permanently retired because its PR merged"
 # How many fresh names one refused commit is carried across. The first nearly always
 # takes; each further refusal is a name whose PR merged and whose refs were deleted since
@@ -450,13 +490,22 @@ def _taken_names(stem: str, runner: Runner, tree: Path) -> set[str]:
 
 def _carry_to_free_branch(
     intent: Intent, stem: str, runner: Runner, tried: set[str]
-) -> Intent | None:
-    """The intent moved onto the next `<stem>-<n>` no ref and no refusal has used; None
-    when the switch failed."""
+) -> Intent | str:
+    """The intent moved onto the next `<stem>-<n>` no ref and no refusal has used, or
+    git's complaint when the move failed.
+
+    The name is created at HEAD and HEAD pointed at it, touching neither the index nor
+    the tree: `git switch -c` refuses outright while a merge is in progress, and
+    `git checkout -b` goes through but drops `MERGE_HEAD`, so the commit would lose the
+    trunk as a parent. A resolver's tree is mid-merge exactly when its PR merged under
+    it, which is when its name retires (carameli, f95dffbc).
+    """
     tried.add(intent.branch)
     name = next_free_name(stem, _taken_names(stem, runner, intent.tree) | tried)
-    if runner(["git", "switch", "-c", name], cwd=intent.tree).returncode != 0:
-        return None
+    for argv in (["git", "branch", name], ["git", "symbolic-ref", "HEAD", f"refs/heads/{name}"]):
+        done = runner(argv, cwd=intent.tree)
+        if done.returncode != 0:
+            return f"`{' '.join(argv)}`: {_first(done)}"
     return replace(intent, branch=name)
 
 
@@ -469,7 +518,9 @@ def _commit_carrying(intent: Intent, python: str, runner: Runner) -> tuple[Inten
         if step != "commit" or RETIRED_MARK not in output:
             break
         moved = _carry_to_free_branch(intent, stem, runner, tried)
-        if moved is None:
+        if isinstance(moved, str):
+            # Said, or the stored refusal reads as a carry never tried (f95dffbc).
+            output = f"{output.rstrip()}\n[fix pass] the carry to a fresh name failed: {moved}\n"
             break
         intent = moved
         step, output = commit_intent(intent, python, runner)
