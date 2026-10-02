@@ -196,10 +196,27 @@ def test_an_instruction_file_change_runs_the_vendored_contract_tests(run_in, tmp
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_text("", encoding="utf-8")
     assert run_in("CLAUDE.md", "app/game.py") == 0
-    [cmd] = run_in.seen
-    assert cmd[-1 - len(run_in.contracts) :] == ["tests/test_game.py", *run_in.contracts]
+    ours, contracts = run_in.seen
+    assert ours[-1] == "tests/test_game.py"
+    assert contracts[-len(run_in.contracts) :] == run_in.contracts
     out = capsys.readouterr().out
     assert "no test named for CLAUDE.md" in out and "the contract tests" in out
+
+
+def test_the_projects_tests_and_the_vendored_tier_never_share_a_pytest(run_in, tmp_path):
+    """659c4f62: both trees hold a top-level `conftest.py`, pytest imports each as the one
+    module `conftest`, and social-scraper's every bare run errored with 0 tests on
+    `from conftest import IsolatedSettings`. Each failure is kept in the artifact."""
+    project(tmp_path, frontend=None)
+    for rel in ("tests/test_game.py", "scripts/hooks/tests/test_log_wrap.py"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("", encoding="utf-8")
+    run_in.answers["pytest"] = subprocess.CompletedProcess([], 1, "FAILED x::t", "")
+    assert run_in("app/game.py", "scripts/log-wrap.py") == 1
+    roots = [{arg.split("/test_")[0] for arg in cmd if "/test_" in arg} for cmd in run_in.seen]
+    assert roots == [{"tests"}, {"scripts/hooks/tests"}]
+    body = (tmp_path / "logs" / "test-failures.log").read_text(encoding="utf-8")
+    assert body.count("# source: scripts/run-tests.py") == 2
 
 
 def test_a_contract_test_the_project_does_not_hold_is_skipped(runner, tmp_path):
