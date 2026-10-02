@@ -282,14 +282,18 @@ def _settled(
         set_aside(intent.tree, SHIPPED_FILE)
         return Outcome(intent, SKIPPED, "already shipped at this intent; set aside")
     if not porcelain.strip() and commits_ahead(intent.tree, base, runner) == 0:
-        write_state(intent.tree, {"stage": EMPTY, "when": when, "intent": intent.digest})
-        set_aside(intent.tree, SHIPPED_FILE)
-        return Outcome(intent, EMPTY, "nothing changed or committed: no PR to open; set aside")
+        return _empty(intent, when, "nothing changed or committed: no PR to open; set aside")
     if lands_nothing(intent.tree, base, runner):
-        write_state(intent.tree, {"stage": EMPTY, "when": when, "intent": intent.digest})
-        set_aside(intent.tree, SHIPPED_FILE)
-        return Outcome(intent, EMPTY, f"everything here is on origin/{base}: no PR; set aside")
+        why = f"every change in the tree is already on origin/{base}: no PR to open; set aside"
+        return _empty(intent, when, why)
     return still_refused(intent, state, porcelain)
+
+
+def _empty(intent: Intent, when: str, why: str) -> Outcome:
+    """Nothing to ship, recorded as such, with the session's outcome kept beside it."""
+    write_state(intent.tree, {"stage": EMPTY, "when": when, "intent": intent.digest})
+    set_aside(intent.tree, SHIPPED_FILE)
+    return Outcome(intent, EMPTY, why)
 
 
 def labels_for(tree: Path) -> tuple[str, ...]:
@@ -412,7 +416,8 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
 
 
 # What `git_policy.branch` says when a commit lands on a name whose PR merged; its remedy
-# is one new branch at HEAD, which a session was otherwise sent to make.
+# is one new branch at HEAD, which a session was otherwise sent to make
+# (`_carry_to_free_branch`).
 RETIRED_MARK = "is permanently retired because its PR merged"
 # How many fresh names one refused commit is carried across. The first nearly always
 # takes; each further refusal is a name whose PR merged and whose refs were deleted since
@@ -457,22 +462,24 @@ def _taken_names(stem: str, runner: Runner, tree: Path) -> set[str]:
 
 def _carry_to_free_branch(
     intent: Intent, stem: str, runner: Runner, tried: set[str]
-) -> Intent | None:
-    """The intent moved onto the next `<stem>-<n>` no ref and no refusal has used; None
-    when the branch could not be made.
+) -> Intent | str:
+    """The intent moved onto the next `<stem>-<n>` no ref and no refusal has used, or
+    git's complaint when the move failed.
 
-    A new name at HEAD, and HEAD pointed at it: what `git switch -c` does, minus its refusal
-    of a tree mid-merge ("cannot switch branch while merging"), which is a tree a fixer
-    resolving a conflict leaves -- carameli's minor-and-patch was refused on its retired
-    name and could not be carried (e21febb8). `git checkout -b` would carry it but drop
-    `MERGE_HEAD`, committing the merge with one parent.
+    A new name at HEAD, and HEAD pointed at it, touching neither the index nor the tree:
+    what `git switch -c` does, minus its refusal of a tree mid-merge ("cannot switch
+    branch while merging"), which is the tree a fixer resolving a conflict leaves --
+    exactly when its PR merged under it and its name retired (carameli, e21febb8 and
+    f95dffbc). `git checkout -b` would carry it but drop `MERGE_HEAD`, committing the
+    merge with one parent.
     """
     tried.add(intent.branch)
     name = next_free_name(stem, _taken_names(stem, runner, intent.tree) | tried)
-    if runner(["git", "branch", name], cwd=intent.tree).returncode != 0:
-        return None
-    pointed = runner(["git", "symbolic-ref", "HEAD", f"refs/heads/{name}"], cwd=intent.tree)
-    return replace(intent, branch=name) if pointed.returncode == 0 else None
+    for argv in (["git", "branch", name], ["git", "symbolic-ref", "HEAD", f"refs/heads/{name}"]):
+        done = runner(argv, cwd=intent.tree)
+        if done.returncode != 0:
+            return f"`{' '.join(argv)}`: {_first(done)}"
+    return replace(intent, branch=name)
 
 
 def _commit_carrying(intent: Intent, python: str, runner: Runner) -> tuple[Intent, str, str]:
@@ -484,7 +491,9 @@ def _commit_carrying(intent: Intent, python: str, runner: Runner) -> tuple[Inten
         if step != "commit" or RETIRED_MARK not in output:
             break
         moved = _carry_to_free_branch(intent, stem, runner, tried)
-        if moved is None:
+        if isinstance(moved, str):
+            # Said, or the stored refusal reads as a carry never tried (f95dffbc).
+            output = f"{output.rstrip()}\n[fix pass] the carry to a fresh name failed: {moved}\n"
             break
         intent = moved
         step, output = commit_intent(intent, python, runner)
@@ -536,9 +545,16 @@ def lands_nothing(tree: Path, base: str, runner: Runner) -> bool:
     `origin/master` byte for byte and the one commit ahead was the pre-squash original.
     Its intent said "Nothing to ship", the commit stage ran anyway, was refused on the
     retired name, and the refusal sent a second fixer to say it again (e21febb8).
+
+    A merge in progress counts `MERGE_HEAD` as a parent of the fork, as the commit will:
+    a resolution that took the trunk's side as of the merged commit is no change of the
+    tree's own, though the trunk has moved that file on since (f95dffbc).
     """
     upstream = f"origin/{base}"
-    forked = runner(["git", "merge-base", "HEAD", upstream], cwd=tree)
+    merging = runner(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=tree)
+    heads = ["HEAD", "MERGE_HEAD"] if merging.returncode == 0 else ["HEAD"]
+    # With three commits `merge-base` answers for the first against a merge of the rest.
+    forked = runner(["git", "merge-base", upstream, *heads], cwd=tree)
     fork = (forked.stdout or "").strip() if forked.returncode == 0 else ""
     held = _held_tree(tree, runner) if fork else ""
     if not held:
@@ -556,7 +572,12 @@ def lands_nothing(tree: Path, base: str, runner: Runner) -> bool:
 def _held_tree(tree: Path, runner: Runner) -> str:
     """The tree `git add -A` would commit, written through a copy of the index so the real
     one is never touched -- and, being a copy, its stat cache spares rehashing every file.
-    "" when git cannot say."""
+    "" when git cannot say.
+
+    The copy keeps the index's mtime (`copy2`): git trusts a cached stat only for a file
+    older than the index, so a copy stamped now vouched for an edit made in the tick the
+    index was written, and read it as unchanged.
+    """
     where = runner(["git", "rev-parse", "--git-path", "index"], cwd=tree)
     if where.returncode != 0 or not (where.stdout or "").strip():
         return ""
@@ -564,7 +585,7 @@ def _held_tree(tree: Path, runner: Runner) -> str:
     with tempfile.TemporaryDirectory() as scratch:
         probe = Path(scratch) / "index"
         try:
-            shutil.copyfile(index if index.is_absolute() else tree / index, probe)
+            shutil.copy2(index if index.is_absolute() else tree / index, probe)
         except OSError:
             return ""
         env = {**os.environ, "GIT_INDEX_FILE": str(probe)}
