@@ -46,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
+import elevated_writes
 import rc_config
 import rc_machine
 import reap_machine
@@ -383,6 +384,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         report.say(f"stopped {stopped} process tree(s)")
     if workspace and Path(workspace).is_file():
         report.failures += session_trees.sweep_workspace(Path(workspace), apply, report.say)
+        # Filed on the ledger once each, not counted: an administrator clears it, and
+        # a failure every run would send a fixer at it every run.
+        elevated_writes.check(Path(workspace), root, apply, report.say)
     return finish(2 if report.failures else 0)
 
 
