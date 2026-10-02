@@ -111,6 +111,7 @@ DEVKIT = "devkit"
 # second checkout of some repo may well come back.
 CARAMELI = ("carameli",)
 IBKR = ("ibkr_trader",)
+SOCIAL_SCRAPER = ("social-scraper",)
 
 # The source checkout, as a scope. One action is genuinely devkit-only rather than
 # merely implemented here: the live-CLI hook smokes live in `tests/`, which is the tree
@@ -369,6 +370,13 @@ ACTIONS: dict[str, Action] = {
     "backtest-oos": Action(
         "scripts/backtest-task.py", "Backtest: OOS (Honest Per-Fold)", ("oos",), projects=IBKR
     ),
+    # --- scoped to social-scraper ---
+    #
+    # Signing in once in a visible browser, so the platform's persistent profile under
+    # the checkout's `data/browser-profiles/<platform>/` carries the session every later
+    # scrape reuses. The platform rides in from the task as a trailing argument, so a
+    # Reddit row is a task-file edit rather than a second action.
+    "scraper-login": Action("scripts/login.py", "Scraper: Log In", projects=SOCIAL_SCRAPER),
     # --- scoped to the checkouts that have a database ---
     #
     # The last task to leave a `.vscode/tasks.json`, and the only one that was in the

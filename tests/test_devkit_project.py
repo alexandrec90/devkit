@@ -434,7 +434,32 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # and refuse, so a two-checkout pick would report a red task for a release that
         # actually succeeded. Scoped, the task pins `--project devkit`.
         "release",
+        # Born scoped, by capability: only social-scraper has a browser profile to sign
+        # in to, and its `scripts/login.py` is the CLI contract.
+        "scraper-login",
     }
+
+
+def test_the_scraper_login_runs_the_projects_script_with_the_platform(tmp_path):
+    """The platform is the task's trailing argument, so the dispatch must carry it through
+    to `scripts/login.py` untouched -- `x` is the only thing telling the script which
+    profile under `data/browser-profiles/` to sign in to."""
+    action = ACTIONS["scraper-login"]
+    assert action.projects == devkit_project.SOCIAL_SCRAPER == ("social-scraper",)
+    assert action.owner == devkit_project.PROJECT
+    assert "scraper-login" not in expected_actions("devkit")
+
+    checkout = tmp_path / "social-scraper"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "scripts" / "login.py").write_text("", encoding="utf-8")
+    argv = plan_command(action, checkout, ["x"])
+    assert argv[-3:] == ["python", "scripts/login.py", "x"]
+
+
+def test_the_scraper_login_names_its_missing_script(tmp_path):
+    """A checkout without the script is a conformance failure by name, not a traceback."""
+    with pytest.raises(ProjectError, match=r"scripts/login\.py"):
+        plan_command(ACTIONS["scraper-login"], tmp_path, ["x"])
 
 
 def test_db_revision_spans_both_repos_but_excludes_devkit():
