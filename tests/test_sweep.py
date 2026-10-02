@@ -1579,6 +1579,38 @@ def test_a_reused_pr_still_gets_its_labels():
     assert ("pr", "edit", "agent/upgrade", "--add-label", "automerge") in gh.calls
 
 
+def test_a_label_call_the_network_dropped_is_retried_not_failed(monkeypatch):
+    """Supervision 2026-10-01: #482 already wore `automerge`, the `--add-label` that
+    re-applied it lost its connection, and the ship was filed as failed while the PR went
+    on to merge. Both label calls are idempotent, so a dropped one is asked again."""
+    monkeypatch.setattr(sweep, "GH_RETRY_DELAYS", (0, 0))
+    dropped = (
+        'Post "https://api.github.com/graphql": read tcp 172.16.0.2:51964->140.82.114.5:443: '
+        "wsarecv: An established connection was aborted by the software in your host machine."
+    )
+
+    class Flaky(FakeGh):
+        def __init__(self, fails: int, said: str):
+            super().__init__(existing="https://github.com/o/r/pull/2")
+            self.fails, self.said = fails, said
+
+        def __call__(self, *args: str):
+            if args[:2] == ("pr", "edit") and self.fails:
+                self.fails -= 1
+                self.calls.append(args)
+                return subprocess.CompletedProcess(["gh", *args], 1, "", self.said)
+            return super().__call__(*args)
+
+    gh = Flaky(2, dropped)
+    assert sweep.ensure_pr(gh, LABELED_PLAN)[2] == ""
+    assert sum(call[:2] == ("pr", "edit") for call in gh.calls) == 3
+    gh = Flaky(3, dropped)
+    assert "wsarecv" in sweep.ensure_pr(gh, LABELED_PLAN)[2], "retries run out"
+    gh = Flaky(1, "could not add label: 'automerge' not found")
+    assert "not found" in sweep.ensure_pr(gh, LABELED_PLAN)[2]
+    assert sum(call[:2] == ("pr", "edit") for call in gh.calls) == 1, "a refusal is not retried"
+
+
 def test_an_unlabelled_plan_issues_no_label_calls():
     gh = FakeGh(existing="https://github.com/o/r/pull/2")
     sweep.ensure_pr(gh, SHIP_PLAN)

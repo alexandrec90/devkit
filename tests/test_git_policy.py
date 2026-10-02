@@ -7,6 +7,7 @@ import pathlib
 import subprocess
 import sys
 
+import pytest
 import support
 from support import git_policy
 
@@ -806,6 +807,28 @@ def test_a_worktree_with_its_own_venv_keeps_using_it(tmp_path):
     inner.write_text("", encoding="utf-8")
     assert git_policy.framework._pre_commit_command(box, _common_dir(checkout / ".git")) == [
         str(inner)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("launcher", "python"),
+    [("Scripts/pre-commit.exe", "Scripts/python.exe"), ("bin/pre-commit", "bin/python")],
+)
+def test_a_venv_with_its_interpreter_runs_pre_commit_as_a_module(tmp_path, launcher, python):
+    """Not the console script: uv writes the interpreter's absolute path into each
+    launcher, so one written from a tree that has since been deleted dies with `uv
+    trampoline failed to canonicalize script path`. A `claude --worktree` tree syncs
+    through the checkout's linked `.venv`, and every devkit commit was refused that way
+    once the tree that last synced was removed. The venv's interpreter reads
+    `pyvenv.cfg` and survives it."""
+    venv = tmp_path / ".venv"
+    for name in (launcher, python):
+        (venv / name).parent.mkdir(parents=True, exist_ok=True)
+        (venv / name).write_text("", encoding="utf-8")
+    assert git_policy.framework._pre_commit_command(tmp_path, _common_dir(tmp_path / ".git")) == [
+        str(venv / python),
+        "-m",
+        "pre_commit",
     ]
 
 

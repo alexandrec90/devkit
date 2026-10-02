@@ -860,12 +860,37 @@ def test_a_bare_run_tests_is_whole_only_where_the_runner_defaults_to_the_suite(t
     assert kinds(targeted / ".claude/worktrees/gone") == [], "the checkout's runner decides"
     assert kinds(whole) == ["full-suite"]
     assert kinds(tmp_path / "elsewhere") == ["full-suite"], "no runner to read: it stands"
+    events = st.events(tmp_path / "s.jsonl", chunk.rows)
+    assert sf.judged(events, str(targeted), tmp_path) == [], "the supervisor's audit agrees"
+    assert [row[0] for row in sf.judged(events, str(whole), tmp_path)] == ["full-suite"]
     assert (REPO_ROOT / sf.RUNNER).is_file() and sf.runner_defaults_targeted(
         str(REPO_ROOT), tmp_path, "devkit"
     ), "devkit's own runner is the one 0a9897d7 ran"
     template = REPO_ROOT / "templates" / "core" / "scripts" / "run-tests.py.tmpl"
     assert sf.TARGETED_RUNNER.search(template.read_text(encoding="utf-8")), (
         "and every generated one"
+    )
+
+
+def test_the_machines_python_in_a_tree_with_its_own_venv_is_no_missing_environment(tmp_path):
+    """The supervisor of 2026-10-01 filed against itself: it ran pytest on the machine's
+    python in a tree whose `.venv` was there all along. A tree with no `.venv` of its own
+    is the environment that is missing, and stays filed (4eab478e, 2026-09-29)."""
+    ran = 'python -m pytest tests/test_session_trees.py -q -k "engine" 2>&1 | tail -5'
+    said = "C:\\Users\\alexa\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe: No module named pytest"
+    rows = [call(ran, "1"), result(said, "1", error=False)]
+    events = [e for n, row in enumerate(rows, 1) for e in st.claude_events(row, n)]
+    tree = tmp_path / "devkit" / ".claude" / "worktrees" / "pinwheel"
+    tree.mkdir(parents=True)
+    assert [row[0] for row in sf.judged(events, str(tree), tmp_path)] == ["environment"]
+    (tree / ".venv" / "Scripts").mkdir(parents=True)
+    (tree / ".venv" / "Scripts" / "python.exe").write_text("", encoding="utf-8")
+    assert sf.has_own_venv(str(tree)) and not sf.has_own_venv("")
+    assert sf.judged(events, str(tree), tmp_path) == []
+    venv_ran = [call(".venv/Scripts/python -m pytest tests/x.py", "2"), result(said, "2")]
+    venv_events = [e for n, row in enumerate(venv_ran, 1) for e in st.claude_events(row, n)]
+    assert [row[0] for row in sf.judged(venv_events, str(tree), tmp_path)] == ["environment"], (
+        "the tree's own interpreter missing pytest is the environment"
     )
 
 

@@ -327,7 +327,11 @@ VERIFIED_CACHE_NAME = "triage-verified.json"
 
 PR_URL = re.compile(r"github\.com/[^/\s]+/(?P<repo>[^/\s]+)/pull/(?P<number>\d+)")
 PR_NUMBER = re.compile(r"^#?(?P<number>\d+)$")
-BRANCH = re.compile(r"^[\w.-]+(?:/[\w.-]+)+$")
+# A branch: `agent/fix-x-0919`, or a `claude --worktree` one, which has no slash
+# (`worktree-proud-greeting-pinwheel`). Wanting the slash left 17 resolutions onto such a
+# branch neither in flight nor verified (2026-10-01). A bare word is not one: `-` is
+# the no-fix verdict.
+BRANCH = re.compile(r"^[\w.-]+(?:/[\w.-]+)+$|^(?=[\w.-]*[A-Za-z])[\w.]+(?:-[\w.]+)+$")
 
 
 @dataclass(frozen=True)

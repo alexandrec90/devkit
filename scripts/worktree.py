@@ -2782,6 +2782,31 @@ def seed_env(source: Path, target: Path, env: Mapping[str, str]) -> None:
         print(f"worktree: could not write {target}: {exc}", file=sys.stderr)
 
 
+# The variable that tells uv which directory is the project's environment.
+UV_ENVIRONMENT_VAR = "UV_PROJECT_ENVIRONMENT"
+
+
+def install_env(path: Path, environ: Mapping[str, str] | None = None) -> dict[str, str] | None:
+    """The environment an install in `path` runs with; None to inherit unchanged.
+
+    Not None only where `path/.venv` is a link -- a `claude --worktree` tree of devkit
+    borrows the checkout's through `worktree.symlinkDirectories`. uv writes the venv path
+    it was *given* into every console script it installs, so a sync in the tree wrote the
+    tree's path into the checkout's launchers, and once that tree was deleted each one
+    died with `uv trampoline failed to canonicalize script path`. Naming the link's real
+    directory makes them name the checkout, which outlives every tree.
+    """
+    venv = path / ".venv"
+    try:
+        real = venv.resolve(strict=True)
+        own = path.resolve(strict=True) / ".venv"
+    except OSError:
+        return None
+    if os.path.normcase(str(real)) == os.path.normcase(str(own)):
+        return None
+    return {**(os.environ if environ is None else environ), UV_ENVIRONMENT_VAR: str(real)}
+
+
 def run_provision(
     path: Path, steps: tuple[ProvisionStep, ...], timeout: float = 900.0
 ) -> tuple[bool, list[str]]:
@@ -2794,6 +2819,7 @@ def run_provision(
     """
     notes: list[str] = []
     worktree_env.mark_provisioned(path, False)
+    env = install_env(path)
     for step in steps:
         try:
             if step.shell_command:
@@ -2803,6 +2829,7 @@ def run_provision(
                     step.shell_command,
                     shell=True,
                     cwd=str(path),
+                    env=env,
                     capture_output=True,
                     text=True,
                     timeout=timeout,
@@ -2813,6 +2840,7 @@ def run_provision(
                 completed = subprocess.run(
                     list(step.argv),
                     cwd=str(path),
+                    env=env,
                     capture_output=True,
                     text=True,
                     timeout=timeout,

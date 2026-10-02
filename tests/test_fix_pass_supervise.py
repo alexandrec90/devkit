@@ -64,6 +64,16 @@ def test_a_wait_must_name_what_it_waits_on():
     assert found.startswith("a wait nothing tracks")
 
 
+def test_a_wait_on_a_devkit_pr_that_names_the_failure_is_tracked():
+    """Supervision 2026-10-01, round 2: `fix_send.named_by`'s hold was reported as a
+    wait nothing tracks, though the PR it names is what lifts it, merged or closed."""
+    line = (
+        "capped   roguelike origin/main, devkit ledger -- pending devkit #486, which names "
+        "every failure it is for"
+    )
+    assert supervise.check_record(line, 0, set()) == []
+
+
 def test_a_failure_needs_its_finding_open():
     line = "shipped  carameli agent/x-0919 -- failed: push: rejected"
     [found] = supervise.check_record(line, 1, set())
@@ -160,6 +170,36 @@ def test_a_session_is_measured_from_its_transcript(tmp_path):
     poll = supervise.session_friction.COMMAND_DETAIL["poll"]
     assert supervise.measure(path) == (1, 1, [f"poll: {poll}"], 0)
     assert supervise.measure(None) == (0, 0, [], 0)
+
+
+def test_a_session_is_judged_as_the_pass_files_it(tmp_path):
+    """Supervision 2026-10-01: a resolver ran devkit's `run-tests.py` bare, as its prompt
+    said -- 25 files for what changed -- and `measure` called it a whole suite, since it
+    never asked the tree whether its runner is targeted. The pass filed nothing, so the
+    violation was the supervisor disagreeing with the detector it audits."""
+    tree = tmp_path / "devkit" / ".claude" / "worktrees" / "rippling"
+    (tree / "scripts").mkdir(parents=True)
+    (tree / ".claude" / "rules").mkdir(parents=True)
+    (tree / "scripts" / "run-tests.py").write_text(
+        'parser.add_argument("--all", action="store_true")\n', encoding="utf-8"
+    )
+    (tree / ".claude" / "rules" / "session-scope.md").write_text("# scope\n", encoding="utf-8")
+    command = ".venv/Scripts/python.exe scripts/run-tests.py > out.txt 2>&1"
+    rows = [
+        {
+            "type": "assistant",
+            "cwd": str(tree),
+            "message": {
+                "content": [{"type": "tool_use", "id": "1", "input": {"command": command}}]
+            },
+        },
+    ]
+    path = tmp_path / "s.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    assert supervise.measure(path, str(tree))[2] == []
+    (tree / "scripts" / "run-tests.py").write_text("# runs everything\n", encoding="utf-8")
+    full = supervise.session_friction.COMMAND_DETAIL["full-suite"]
+    assert supervise.measure(path, str(tree))[2] == [f"full-suite: {full}"]
 
 
 def _tree(tmp_path: Path, sent: _dt.datetime) -> Any:

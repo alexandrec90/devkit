@@ -58,7 +58,12 @@ def _pre_commit_command(root: Path, runner: Runner) -> list[str] | None:
     )
     for candidate in candidates:
         if candidate.is_file():
-            return [str(candidate)]
+            # The venv's interpreter rather than the console script, which names an
+            # absolute interpreter path and dies with `uv trampoline failed to
+            # canonicalize script path` once the tree that wrote it is deleted -- as a
+            # `claude --worktree` tree syncing through the checkout's linked `.venv` does.
+            python = candidate.with_name("python.exe" if candidate.suffix == ".exe" else "python")
+            return [str(python), "-m", "pre_commit"] if python.is_file() else [str(candidate)]
     executable = shutil.which("pre-commit")
     if executable:
         return [executable]
