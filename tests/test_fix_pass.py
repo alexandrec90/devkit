@@ -31,6 +31,8 @@ NOW = _dt.datetime(2026, 9, 19, 9, 0, tzinfo=_dt.UTC)
 VENDORED = ("scripts/hooks/tests/test_untested_symbols.py::t",)
 # Kept before `no_session_busy` stubs it, for the one test that drives it.
 FIXERS_WORKING = fix_pass.fix_loop.fixers_working
+# Kept before `nothing_to_provision` stubs it, for the tests that drive it.
+PROVISION_FOR_SHIP = fix_pass.provision_for_ship
 
 
 @pytest.fixture(autouse=True)
@@ -61,6 +63,13 @@ def git_trusted(monkeypatch):
 def no_session_busy(monkeypatch):
     """No session on this machine is working in a tree unless a test says one is."""
     monkeypatch.setattr(fix_pass.fix_loop, "fixers_working", frozenset)
+
+
+@pytest.fixture(autouse=True)
+def nothing_to_provision(monkeypatch):
+    """Every tree has its toolchain unless a test says otherwise: the real check would
+    run `uv sync` in whatever path a test's intent names."""
+    monkeypatch.setattr(fix_pass, "provision_for_ship", lambda tree: "")
 
 
 def test_an_intent_whose_fixer_is_still_busy_waits_for_it(monkeypatch, tmp_path):
@@ -1517,6 +1526,83 @@ def test_a_session_working_in_a_branch_tree_holds_a_fixer_for_that_branch(world,
     assert sent == [] and capped[0][1] == "a session is working in C:/t/x"
     other = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(head="agent/y"),))
     assert fix_pass.fix_send.send_all([other], _ctx(tmp_path), "claude", closed=busy)[0]
+
+
+def test_a_session_in_a_consumers_branch_tree_never_holds_the_devkit_session(world, tmp_path):
+    """2026-10-02 supervision: sports_betting's refused intent was folded with the ledger
+    into the one upstream decision, and the idle interactive session in that intent's
+    tree capped it on every pass -- the backlog grew 0 -> 1 -> 2 with no devkit session
+    sent. That session opens a fresh devkit tree (`dispatch_fresh`), never the branch's."""
+    refused = failure(project="sports_betting", kind=fix_plan.COMMIT, number=0, head="worktree-h")
+    upstream = fix_plan.Decision(fix_plan.UPSTREAM, "n", (refused,))
+    busy = fix_pass.fix_loop.Closed(busy={("sports_betting", "worktree-h"): "C:/t/h"})
+    sent, capped, _ = fix_pass.fix_send.send_all([upstream], _ctx(tmp_path), "claude", closed=busy)
+    assert capped == [] and len(sent) == 1
+    assert world["dispatched"] == [(fix_plan.UPSTREAM, "claude")]
+
+
+def test_a_tree_without_the_projects_pre_commit_is_provisioned_before_it_ships(
+    monkeypatch, tmp_path
+):
+    """2026-10-02 supervision: sports_betting's worktree-harmonic-humming-kay had no
+    `.venv`, nor had its checkout, so `ship.py --fix` refused ("provision first") on every
+    pass and the refusal went to a devkit session. Provisioning is one command, and
+    anything a script can do, no session does. The interpreter is read after it, so the
+    commit stage runs with the `.venv` just made."""
+    tree = tmp_path / "tree"
+    one = ship_intent.Intent("sports_betting", tree, "worktree-h", "S", "B")
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: [one])
+    order: list[str] = []
+    monkeypatch.setattr(fix_pass, "provision_for_ship", PROVISION_FOR_SHIP)
+    monkeypatch.setattr(fix_pass.sweep, "source_checkout", lambda root: tmp_path / "checkout")
+    step = fix_pass.worktree.ProvisionStep("uv sync", ("uv", "sync"))
+    monkeypatch.setattr(fix_pass.worktree, "plan_provision", lambda path, quiet: (step,))
+    monkeypatch.setattr(
+        fix_pass.worktree,
+        "run_provision",
+        lambda path, steps: order.append(f"provision {path.name}") or (True, ["provisioned"]),
+    )
+    monkeypatch.setattr(fix_pass.push_gate, "interpreter", lambda root: order.append("ask") or "py")
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda i, p, b: order.append(f"ship {p}") or ship_intent.Outcome(i, "shipped", "u"),
+    )
+    lines, _, _ = fix_pass.ship_intents(tmp_path, ["sports_betting"], fix_cycle.DISPATCH)
+    assert order == ["provision tree", "ask", "ship py"]
+    assert lines[0] == "sports_betting worktree-h -- provisioned its toolchain: uv sync"
+
+    # A tree whose own pre-commit is there is left as it is.
+    order.clear()
+    (tree / ".venv" / "Scripts").mkdir(parents=True)
+    (tree / ".venv" / "Scripts" / "pre-commit.exe").write_text("", encoding="utf-8")
+    (tree / ".venv" / "bin").mkdir(parents=True)
+    (tree / ".venv" / "bin" / "pre-commit").write_text("", encoding="utf-8")
+    fix_pass.ship_intents(tmp_path, ["sports_betting"], fix_cycle.DISPATCH)
+    assert order == ["ask", "ship py"]
+
+
+def test_a_failed_provision_is_said_and_the_ship_still_tries(monkeypatch, tmp_path):
+    """The commit stage's refusal is still the failure the plan places; the record says
+    why the tree had no toolchain to refuse with."""
+    one = ship_intent.Intent("sports_betting", tmp_path / "t", "worktree-h", "S", "B")
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: [one])
+    monkeypatch.setattr(fix_pass, "provision_for_ship", PROVISION_FOR_SHIP)
+    monkeypatch.setattr(fix_pass.sweep, "source_checkout", lambda root: root)
+    step = fix_pass.worktree.ProvisionStep("uv sync", ("uv", "sync"))
+    monkeypatch.setattr(fix_pass.worktree, "plan_provision", lambda path, quiet: (step,))
+    failed = ["FAILED provision: uv sync failed: no Python 3.12"]
+    monkeypatch.setattr(fix_pass.worktree, "run_provision", lambda path, steps: (False, failed))
+    monkeypatch.setattr(fix_pass.push_gate, "interpreter", lambda root: "py")
+    monkeypatch.setattr(
+        fix_pass.ship_intent, "ship_one", lambda i, p, b: ship_intent.Outcome(i, "shipped", "u")
+    )
+    lines, _, _ = fix_pass.ship_intents(tmp_path, ["sports_betting"], fix_cycle.DISPATCH)
+    assert lines[0] == (
+        "sports_betting worktree-h -- FAILED to provision: "
+        "FAILED provision: uv sync failed: no Python 3.12"
+    )
+    assert lines[1].startswith("sports_betting worktree-h -- shipped")
 
 
 def test_a_refused_ships_detail_is_one_record_line(world, monkeypatch):

@@ -111,6 +111,7 @@ DEVKIT = "devkit"
 # second checkout of some repo may well come back.
 CARAMELI = ("carameli",)
 IBKR = ("ibkr_trader",)
+SOCIAL_SCRAPER = ("social-scraper",)
 
 # The source checkout, as a scope. One action is genuinely devkit-only rather than
 # merely implemented here: the live-CLI hook smokes live in `tests/`, which is the tree
@@ -369,6 +370,13 @@ ACTIONS: dict[str, Action] = {
     "backtest-oos": Action(
         "scripts/backtest-task.py", "Backtest: OOS (Honest Per-Fold)", ("oos",), projects=IBKR
     ),
+    # --- scoped to social-scraper ---
+    #
+    # Signing in once in a visible browser, so the platform's persistent profile under
+    # the checkout's `data/browser-profiles/<platform>/` carries the session every later
+    # scrape reuses. The platform rides in from the task as a trailing argument, so a
+    # Reddit row is a task-file edit rather than a second action.
+    "scraper-login": Action("scripts/login.py", "Scraper: Log In", projects=SOCIAL_SCRAPER),
     # --- scoped to the checkouts that have a database ---
     #
     # The last task to leave a `.vscode/tasks.json`, and the only one that was in the
@@ -1115,7 +1123,17 @@ PLAIN_KEYS = ("folders", "extensions", "settings", "launch", "remoteAuthority")
 AHEAD_TASK = "missing from the workspace: "
 AHEAD_INPUT = "missing input: "
 AHEAD_FOLDER = "folder missing from the workspace: "
-CANONICAL_AHEAD = (AHEAD_TASK, AHEAD_INPUT, AHEAD_FOLDER)
+AHEAD_SETTING = "setting missing from the workspace: "
+CANONICAL_AHEAD = (AHEAD_TASK, AHEAD_INPUT, AHEAD_FOLDER, AHEAD_SETTING)
+
+# The operator's switches: settings a machine sets for itself, in its live file, and
+# that devkit's copy only gives a default for. `devkit.fixPass` turns this machine's
+# scheduled fix pass on; `devkit.onHold` pauses projects for the passes run here. Each is
+# a live edit by design, so as ordinary settings they armed the refusal on every machine
+# that used them -- and one live `dispatch` kept `devkit.collectors`, merged in #463,
+# from ever reaching this machine (6d71fa28). So a render carries their live values over
+# the canonical ones, an adopt keeps the canonical defaults, and neither is drift.
+MACHINE_SETTINGS = ("devkit.fixPass", "devkit.onHold")
 
 
 def live_only(problems: list[str]) -> list[str]:
@@ -1288,6 +1306,97 @@ def _folder_names(block: object) -> set[str]:
     return names
 
 
+def settings_drift(live: object, canonical: object) -> list[str]:
+    """`settings`, compared key by key, leaving out `MACHINE_SETTINGS`.
+
+    Per key rather than whole, so a setting only devkit's copy has reads as the copy
+    being ahead -- which publishes -- instead of as "settings differs", which a live
+    edit to any other key made indistinguishable from someone's work.
+    """
+    live_map = live if isinstance(live, dict) else {}
+    canon_map = canonical if isinstance(canonical, dict) else {}
+    live_keys = live_map.keys() - set(MACHINE_SETTINGS)
+    canon_keys = canon_map.keys() - set(MACHINE_SETTINGS)
+    return [
+        *(f"{AHEAD_SETTING}{key}" for key in sorted(canon_keys - live_keys)),
+        *(
+            f"setting in the workspace but not in devkit: {key}"
+            for key in sorted(live_keys - canon_keys)
+        ),
+        *(
+            f"setting differs: {key}"
+            for key in sorted(live_keys & canon_keys)
+            if live_map[key] != canon_map[key]
+        ),
+    ]
+
+
+def machine_settings(payload: object) -> dict:
+    """The `MACHINE_SETTINGS` a parsed workspace file sets, by key."""
+    settings = payload.get("settings") if isinstance(payload, dict) else None
+    if not isinstance(settings, dict):
+        return {}
+    return {key: settings[key] for key in MACHINE_SETTINGS if key in settings}
+
+
+_DECODER = json.JSONDecoder()
+
+
+def _skip_space(scan: str, at: int) -> int:
+    while at < len(scan) and scan[at].isspace():
+        at += 1
+    return at
+
+
+def _members(scan: str, brace: int):
+    """`(key, value_start, value_end)` for each member of the object opening at `brace`.
+
+    `scan` is the text with comments and trailing commas blanked, which keeps every
+    offset, so the spans index the original text too.
+    """
+    at = _skip_space(scan, brace + 1)
+    while scan[at] != "}":
+        key, at = _DECODER.raw_decode(scan, at)
+        at = _skip_space(scan, _skip_space(scan, at) + 1)  # past the `:`
+        _value, end = _DECODER.raw_decode(scan, at)
+        yield key, at, end
+        at = _skip_space(scan, end)
+        if scan[at] == ",":
+            at = _skip_space(scan, at + 1)
+
+
+def carry_machine_settings(text: str, source: object) -> str:
+    """`text` with the `MACHINE_SETTINGS` values `source` (a parsed file) holds, written
+    in place so every comment survives. Only values that differ are touched; a key `text`
+    lacks is added at the top of its `settings`. `text` unchanged when it has none.
+    """
+    wanted = machine_settings(source)
+    held = machine_settings(devkit_jsonc.loads(text))
+    changed = {key: value for key, value in wanted.items() if key in held and held[key] != value}
+    added = {key: value for key, value in wanted.items() if key not in held}
+    scan = devkit_jsonc.drop_trailing_commas(devkit_jsonc.blank_comments(text))
+    brace = settings_brace(scan)
+    if brace < 0 or not (changed or added):
+        return text
+    spans = [(start, end, key) for key, start, end in _members(scan, brace) if key in changed]
+    for start, end, key in sorted(spans, reverse=True):
+        text = text[:start] + json.dumps(changed[key], ensure_ascii=False) + text[end:]
+    lines = "".join(
+        f"\n\t\t{json.dumps(key)}: {json.dumps(value, ensure_ascii=False)},"
+        for key, value in added.items()
+    )
+    return text[: brace + 1] + lines + text[brace + 1 :]
+
+
+def settings_brace(scan: str) -> int:
+    """Where the top-level `settings` object opens in `scan`, or -1 when it has none."""
+    root = _skip_space(scan, 0)
+    if scan[root : root + 1] != "{":
+        return -1
+    brace = next((start for key, start, _end in _members(scan, root) if key == "settings"), -1)
+    return brace if brace >= 0 and scan[brace] == "{" else -1
+
+
 def workspace_drift(live: dict, canonical: dict) -> list[str]:
     """Human-readable differences across the WHOLE workspace file; empty when it agrees.
 
@@ -1311,6 +1420,8 @@ def workspace_drift(live: dict, canonical: dict) -> list[str]:
                 problems.append(f"folder in the workspace but not in devkit: {new}")
             if canon_names == live_names:
                 problems.append("folders: same checkouts, different entries")
+        elif key == "settings":
+            problems += settings_drift(after, before)
         else:
             problems.append(f"{key} differs")
     live_tasks, canon_tasks = live.get("tasks"), canonical.get("tasks")
@@ -1411,6 +1522,10 @@ def publish_workspace(live: Path, *, force: bool = False) -> tuple[str, list[str
     **What is rendered is this machine's view** -- `canonical_view` -- so a project
     registered from another workstation and not cloned here is neither written into
     the live file nor reported as drift against it.
+
+    **The operator's switches stay this machine's.** `MACHINE_SETTINGS` are left out of
+    the drift and carried from the live file into what is written, so turning the fix
+    pass on here is neither a reason to refuse nor undone by the next publish.
     """
     canonical, _left_out = canonical_view(live)
     if not live.is_file():
@@ -1419,14 +1534,16 @@ def publish_workspace(live: Path, *, force: bool = False) -> tuple[str, list[str
         write_stamp(live, semantic_digest(canonical))
         return RENDER_PUBLISHED, [f"{live.name} did not exist -- created from the canonical copy"]
     text = live.read_text(encoding="utf-8")
-    problems = workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical))
+    payload = devkit_jsonc.loads(text)
+    problems = workspace_drift(payload, devkit_jsonc.loads(canonical))
     if not problems:
         write_stamp(live, semantic_digest(text))
         return RENDER_CURRENT, []
     if not force and live_only(problems) and semantic_digest(text) != read_stamp(live):
         return RENDER_REFUSED, problems
-    live.write_text(canonical, encoding="utf-8", newline="\n")
-    write_stamp(live, semantic_digest(canonical))
+    rendered = carry_machine_settings(canonical, payload)
+    live.write_text(rendered, encoding="utf-8", newline="\n")
+    write_stamp(live, semantic_digest(rendered))
     return RENDER_PUBLISHED, problems
 
 
@@ -1463,6 +1580,9 @@ def adopt_workspace(live: Path, text: str, *, force: bool = False) -> int:
     re-registered entry lands where `insert_folder` puts one -- at the end of the
     list, before any reference checkout -- so the diff may reorder `folders`; that is
     visible in the PR, where a silent retirement would not have been.
+
+    `MACHINE_SETTINGS` keep the canonical copy's values for the same reason: this
+    machine's switches are not a default for every other one.
     """
     canonical, left_out = canonical_view(live) if CANONICAL_WORKSPACE.is_file() else ("", [])
     losses = canonical_only(
@@ -1487,7 +1607,8 @@ def adopt_workspace(live: Path, text: str, *, force: bool = False) -> int:
         return 1
     # Written directly rather than printed for redirection: the file carries en-dashes
     # and arrows, and a redirected stdout on Windows is cp1252.
-    CANONICAL_WORKSPACE.write_text(register(text, left_out), encoding="utf-8", newline="\n")
+    adopted = carry_machine_settings(text, devkit_jsonc.loads(canonical)) if canonical else text
+    CANONICAL_WORKSPACE.write_text(register(adopted, left_out), encoding="utf-8", newline="\n")
     write_stamp(live, semantic_digest(text))
     print(f"adopted {live.name} into {CANONICAL_WORKSPACE.name}")
     if left_out:

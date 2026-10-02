@@ -157,7 +157,17 @@ def test_the_kill_switch_is_exported_into_the_tab_when_it_is_on():
 
 
 def test_nothing_is_exported_when_the_harness_is_running():
-    assert tabs.agent_command(CLAUDE, False) == "claude"
+    assert tabs.agent_command(CLAUDE, False).startswith("claude ")
+    assert tabs.agent_command(CODEX, False) == "codex"
+
+
+def test_a_claude_tab_is_told_at_system_level_to_write_files_with_the_tools():
+    """8c344a25: a person's session patched a test through `python - <<'EOF'`. A tab
+    runs the same bypass-mode system prompt a background session does, so it gets the
+    same rule at the same level -- Codex has no such flag and is handed nothing."""
+    rule = f"'--append-system-prompt' {tabs.ps_quote(tabs.FILE_WRITES)}"
+    assert tabs.agent_command(CLAUDE, False) == f"claude {rule}"
+    assert ";" not in tabs.FILE_WRITES, "wt would split the tab's command line on it"
 
 
 def test_asking_for_no_agent_opens_no_terminal(capsys):
@@ -181,7 +191,7 @@ def test_a_machine_without_windows_terminal_is_told_what_to_type(monkeypatch, ca
 def test_a_prompt_reaches_powershell_as_a_single_quoted_literal():
     """Single quotes because PowerShell expands `$` and backticks inside double ones."""
     command = tabs.agent_command(CLAUDE, False, "fix $env:PATH and `x`")
-    assert command == "claude 'fix $env:PATH and `x`'"
+    assert command.endswith(" 'fix $env:PATH and `x`'")
 
 
 def test_an_apostrophe_in_a_prompt_is_doubled_not_escaped():
@@ -196,7 +206,7 @@ def test_a_session_with_no_prompt_is_unchanged():
 def test_the_hooks_off_prefix_survives_a_prompt(monkeypatch):
     command = tabs.agent_command(CLAUDE, True, "do the thing")
     assert command.startswith("$env:")
-    assert command.endswith("claude 'do the thing'")
+    assert "; claude '" in command and command.endswith(" 'do the thing'")
 
 
 # --- the other way a session opens ---------------------------------------------------

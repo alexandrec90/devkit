@@ -345,6 +345,22 @@ def test_the_rule_names_the_spelling_that_avoids_the_error_the_detector_files():
     assert sf._result_class("ambiguous argument 'origin\\main;.devkit.toml'")[0] == "environment"
 
 
+def test_the_rules_every_session_reads_answer_the_two_frictions_they_file():
+    """8c344a25 and d607d6b8's own session wrote through `python - <<'EOF'` patch scripts,
+    and the ban sat in a subordinate clause of the worktree-guard section, below
+    bypass mode's own advice to use the shell for small edits. 2ca551a4's session ran
+    `uv run pytest` in a fresh `claude --worktree` tree, which no git hook provisions,
+    and got a `.venv` with no pytest. Both answers lead their own sentence now."""
+    rules = Path(__file__).resolve().parents[1] / ".claude" / "rules"
+    engineering = (rules / "engineering.md").read_text(encoding="utf-8")
+    assert (
+        "**Write and edit files with the Write and Edit tools, never through Bash**" in engineering
+    )
+    assert "`python -` patch script" in engineering
+    scope = " ".join((rules / "session-scope.md").read_text(encoding="utf-8").split())
+    assert "run it bare: it builds the `.venv` a `claude --worktree` tree arrives without" in scope
+
+
 def test_a_file_written_through_a_shell_heredoc_is_friction():
     """Claude Code's Bash tool collapses backslashes in a heredoc, so a file written or
     patched through one comes out mangled. Three sessions lost turns to it on one day,
