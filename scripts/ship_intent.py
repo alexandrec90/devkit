@@ -16,8 +16,8 @@ beside the intent. A refused commit is
 recorded too, with the pre-commit output as evidence, so the pass can tell it from a
 session still working: no intent file means hands off, an intent with a refusal means a
 dispatchable failure, an intent already shipped at this tree's state means nothing to do,
-and so does one over a tree with nothing changed or committed (`commits_ahead`), or whose
-every change is already on its base (`adds_nothing`).
+and so does one over a tree with nothing changed or committed (`commits_ahead`), or
+whose every change is already on its base (`lands_nothing`).
 
 **The intent is consumed.** Once shipped it becomes `logs/ship-intent.shipped.md`; once
 a fixer is sent at a refusal it becomes `logs/ship-intent.refused.md` (the pass does
@@ -43,8 +43,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -281,7 +283,7 @@ def _settled(
         return Outcome(intent, SKIPPED, "already shipped at this intent; set aside")
     if not porcelain.strip() and commits_ahead(intent.tree, base, runner) == 0:
         return _empty(intent, when, "nothing changed or committed: no PR to open; set aside")
-    if porcelain.strip() and adds_nothing(intent.tree, base, porcelain, runner):
+    if lands_nothing(intent.tree, base, runner):
         why = f"every change in the tree is already on origin/{base}: no PR to open; set aside"
         return _empty(intent, when, why)
     return still_refused(intent, state, porcelain)
@@ -292,37 +294,6 @@ def _empty(intent: Intent, when: str, why: str) -> Outcome:
     write_state(intent.tree, {"stage": EMPTY, "when": when, "intent": intent.digest})
     set_aside(intent.tree, SHIPPED_FILE)
     return Outcome(intent, EMPTY, why)
-
-
-def adds_nothing(tree: Path, base: str, porcelain: str, runner: Runner) -> bool:
-    """Every path the tree would commit, counted from where it left `origin/<base>`,
-    already reads on `origin/<base>` as it does here: committed, it would merge as a no-op.
-
-    carameli's resolver was sent at a Dependabot PR that conflicted, merged the trunk in,
-    and found the bump had landed meanwhile as #418 -- its staged tree level with master.
-    Two fixers wrote "nothing to ship", and the pass committed each anyway: the porcelain
-    was not empty, so only the branch policy's retired-name refusal stopped an empty PR
-    (f95dffbc). A merge in progress counts `MERGE_HEAD` as a parent, as the commit will.
-    Untracked files, and anything git cannot answer, are something to ship.
-    """
-    if any(line.startswith("??") for line in porcelain.splitlines()):
-        return False
-    merging = runner(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=tree)
-    heads = ["HEAD", "MERGE_HEAD"] if merging.returncode == 0 else ["HEAD"]
-    found = runner(["git", "merge-base", f"origin/{base}", *heads], cwd=tree)
-    fork = (found.stdout or "").strip()
-    if found.returncode != 0 or not fork:
-        return False
-    changed = _names(runner(["git", "diff", "--no-renames", "--name-only", fork], cwd=tree))
-    differs = _names(
-        runner(["git", "diff", "--no-renames", "--name-only", f"origin/{base}"], cwd=tree)
-    )
-    return changed is not None and differs is not None and not changed & differs
-
-
-def _names(done: subprocess.CompletedProcess[str]) -> set[str] | None:
-    """The paths a `--name-only` diff printed; None when git refused."""
-    return set((done.stdout or "").split("\n")) - {""} if done.returncode == 0 else None
 
 
 def labels_for(tree: Path) -> tuple[str, ...]:
@@ -445,7 +416,8 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
 
 
 # What `git_policy.branch` says when a commit lands on a name whose PR merged; its remedy
-# is a fresh name, which a session was otherwise sent to make (`_carry_to_free_branch`).
+# is one new branch at HEAD, which a session was otherwise sent to make
+# (`_carry_to_free_branch`).
 RETIRED_MARK = "is permanently retired because its PR merged"
 # How many fresh names one refused commit is carried across. The first nearly always
 # takes; each further refusal is a name whose PR merged and whose refs were deleted since
@@ -494,11 +466,12 @@ def _carry_to_free_branch(
     """The intent moved onto the next `<stem>-<n>` no ref and no refusal has used, or
     git's complaint when the move failed.
 
-    The name is created at HEAD and HEAD pointed at it, touching neither the index nor
-    the tree: `git switch -c` refuses outright while a merge is in progress, and
-    `git checkout -b` goes through but drops `MERGE_HEAD`, so the commit would lose the
-    trunk as a parent. A resolver's tree is mid-merge exactly when its PR merged under
-    it, which is when its name retires (carameli, f95dffbc).
+    A new name at HEAD, and HEAD pointed at it, touching neither the index nor the tree:
+    what `git switch -c` does, minus its refusal of a tree mid-merge ("cannot switch
+    branch while merging"), which is the tree a fixer resolving a conflict leaves --
+    exactly when its PR merged under it and its name retired (carameli, e21febb8 and
+    f95dffbc). `git checkout -b` would carry it but drop `MERGE_HEAD`, committing the
+    merge with one parent.
     """
     tried.add(intent.branch)
     name = next_free_name(stem, _taken_names(stem, runner, intent.tree) | tried)
@@ -561,6 +534,65 @@ def commits_ahead(tree: Path, base: str, runner: Runner) -> int | None:
         return int((counted.stdout or "").strip())
     except ValueError:
         return None
+
+
+def lands_nothing(tree: Path, base: str, runner: Runner) -> bool:
+    """Whether everything the tree holds -- committed, staged, edited, untracked -- is on
+    `origin/<base>` already: merged there, it changes nothing. False when git cannot say.
+
+    Dirty or ahead is not the same as new. carameli's minor-and-patch tree was both: its
+    PR squash-merged while a fixer was mid-merge in it, so the staged files matched
+    `origin/master` byte for byte and the one commit ahead was the pre-squash original.
+    Its intent said "Nothing to ship", the commit stage ran anyway, was refused on the
+    retired name, and the refusal sent a second fixer to say it again (e21febb8).
+
+    A merge in progress counts `MERGE_HEAD` as a parent of the fork, as the commit will:
+    a resolution that took the trunk's side as of the merged commit is no change of the
+    tree's own, though the trunk has moved that file on since (f95dffbc).
+    """
+    upstream = f"origin/{base}"
+    merging = runner(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=tree)
+    heads = ["HEAD", "MERGE_HEAD"] if merging.returncode == 0 else ["HEAD"]
+    # With three commits `merge-base` answers for the first against a merge of the rest.
+    forked = runner(["git", "merge-base", upstream, *heads], cwd=tree)
+    fork = (forked.stdout or "").strip() if forked.returncode == 0 else ""
+    held = _held_tree(tree, runner) if fork else ""
+    if not held:
+        return False
+    target = runner(["git", "rev-parse", f"{upstream}^{{tree}}"], cwd=tree)
+    merged = runner(
+        ["git", "merge-tree", "--write-tree", f"--merge-base={fork}", upstream, held], cwd=tree
+    )
+    if target.returncode != 0 or merged.returncode != 0:
+        return False  # 1 is a conflict: the tree has something origin does not
+    lines = (merged.stdout or "").split()
+    return bool(lines) and lines[0] == (target.stdout or "").strip()
+
+
+def _held_tree(tree: Path, runner: Runner) -> str:
+    """The tree `git add -A` would commit, written through a copy of the index so the real
+    one is never touched -- and, being a copy, its stat cache spares rehashing every file.
+    "" when git cannot say.
+
+    The copy keeps the index's mtime (`copy2`): git trusts a cached stat only for a file
+    older than the index, so a copy stamped now vouched for an edit made in the tick the
+    index was written, and read it as unchanged.
+    """
+    where = runner(["git", "rev-parse", "--git-path", "index"], cwd=tree)
+    if where.returncode != 0 or not (where.stdout or "").strip():
+        return ""
+    index = Path((where.stdout or "").strip())
+    with tempfile.TemporaryDirectory() as scratch:
+        probe = Path(scratch) / "index"
+        try:
+            shutil.copy2(index if index.is_absolute() else tree / index, probe)
+        except OSError:
+            return ""
+        env = {**os.environ, "GIT_INDEX_FILE": str(probe)}
+        if runner(["git", "add", "-A"], cwd=tree, env=env).returncode != 0:
+            return ""
+        written = runner(["git", "write-tree"], cwd=tree, env=env)
+    return (written.stdout or "").strip() if written.returncode == 0 else ""
 
 
 def catch_up(tree: Path, branch: str, runner: Runner) -> str:
