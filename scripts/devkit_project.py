@@ -43,7 +43,6 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -630,24 +629,20 @@ def plan_command(
     return logged
 
 
-def dispatch_env() -> dict[str, str]:
-    """The environment a dispatched command runs in: this one, in UTF-8 mode.
+def task_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment every dispatched command runs in: `base` (this one's), in UTF-8 mode.
 
-    Dozens of the scripts behind these tasks capture a child's output with `text=True`
-    and no encoding, which on a Windows workstation decodes through cp1252. A child that
-    prints `”` (0x9d in UTF-8) kills subprocess's reader thread, and the call returns
-    exit 0 with `stdout=None` -- so a `gh` listing it could not read is a listing of
-    nothing. The scheduled pass already runs this way (`fix-pass-watchdog.run_pass`);
-    *Agent: Fix What Is Red* ran the same pass without it and printed the orphan thread
-    traceback. Through the environment rather than `-X utf8`, so every Python process
-    the script starts in turn -- `ship.py`, `sweep.py`, a project's suite -- inherits it.
+    Dozens of the scripts behind the tasks read a child's output with `text=True` and no
+    encoding, which decodes with the console's code page. On cp1252 a child's `”` (0x9d
+    in UTF-8) killed the reader thread and printed its traceback into the task's
+    terminal -- and the call returned exit 0 with `stdout=None`, so a `gh` listing it
+    could not read was a listing of nothing. The scheduled fix pass had UTF-8 mode from
+    its watchdog (`fix-pass-watchdog.run_pass`), and clicking the same pass did not,
+    because a click comes through here. The variable is set rather than `-X utf8` because
+    it reaches every Python down the chain, the wrappers' children and their children
+    included.
     """
-    return {**os.environ, "PYTHONUTF8": "1"}
-
-
-def run_dispatched(command: Sequence[str], cwd: Path) -> int:
-    """Run one dispatched command in `cwd` under `dispatch_env`; its exit code."""
-    return subprocess.run(command, cwd=cwd, check=False, env=dispatch_env()).returncode
+    return {**(os.environ if base is None else base), "PYTHONUTF8": "1"}
 
 
 # --- autofix that would otherwise strand ------------------------------------
@@ -1927,7 +1922,7 @@ def main(argv: list[str] | None = None) -> int:
         ship_fixes = action.autofix and not args.no_ship_fixes
         print(f"[{directory.name}] {' '.join(command)}\n", flush=True)
         branch, before = autofix_state(directory) if ship_fixes else ("", ())
-        returncode = run_dispatched(command, directory)
+        returncode = subprocess.run(command, cwd=directory, env=task_env(), check=False).returncode
         if returncode and not result:
             result = returncode
         if not ship_fixes:
@@ -1947,7 +1942,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n[{directory.name}] {outcome.note}", flush=True)
         for step in outcome.commands:
             print(f"\n[{directory.name}] {' '.join(step)}\n", flush=True)
-            code = run_dispatched(step, root)
+            code = subprocess.run(step, cwd=root, env=task_env(), check=False).returncode
             if code:
                 # Stop at the first failure rather than shipping from a branch that was
                 # never cut: the second command would then read the *home* branch and

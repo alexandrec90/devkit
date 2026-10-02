@@ -9,7 +9,6 @@ script exists to prevent.
 import json
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -122,35 +121,30 @@ def test_main_runs_every_selected_project_in_order(tmp_path, monkeypatch):
     assert all(env["PYTHONUTF8"] == "1" for _, _, env in calls)
 
 
-def test_a_dispatched_command_decodes_its_childrens_output_as_utf8():
-    """*Agent: Fix What Is Red* printed `UnicodeDecodeError: 'charmap' codec can't decode
-    byte 0x9d` from a reader thread: the pass's runners capture with `text=True` and no
-    encoding, and a child's `\u201d` is 0x9d in its last byte. The scheduled pass never
-    hit it because its watchdog sets UTF-8 mode; the click did not. Asserted through a
-    real grandchild, because the failure is in how a process *two* levels down decodes."""
-    script = (
-        "import subprocess, sys\n"
+def test_a_dispatched_task_runs_in_utf8_mode_down_to_its_grandchildren(tmp_path):
+    """Clicking *Agent: Fix What Is Red* printed `UnicodeDecodeError: 'charmap' codec
+    can't decode byte 0x9d` from a reader thread: the pass's runners use `text=True` with
+    no encoding, and only the watchdog's path ran it in UTF-8 mode. Asserted through the
+    real wrappers, since the variable has to survive log-wrap to reach the script."""
+    workspace = tmp_path / "projects.code-workspace"
+    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    (tmp_path / "alpha" / "scripts").mkdir(parents=True)
+    (tmp_path / "alpha" / "scripts" / "run-tests.py").write_text(
+        "import pathlib, subprocess, sys\n"
         "out = subprocess.run([sys.executable, '-c', \"import sys; sys.stdout.buffer.write("
         "'\\u201d'.encode())\"], capture_output=True, text=True).stdout\n"
-        "print(sys.flags.utf8_mode, ascii(out))\n"
-    )
-    done = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
+        "pathlib.Path('seen.txt').write_text(f'{sys.flags.utf8_mode} {ascii(out)}')\n",
         encoding="utf-8",
-        errors="replace",
-        env=devkit_project.dispatch_env(),
-        check=False,
     )
-    assert (done.returncode, done.stdout, done.stderr) == (0, "1 '\\u201d'\n", "")
+
+    assert devkit_project.main(["--workspace", str(workspace), "--project", "alpha", "test"]) == 0
+    assert (tmp_path / "alpha" / "seen.txt").read_text() == "1 '\\u201d'"
 
 
-def test_run_dispatched_runs_in_utf8_mode_and_returns_the_exit_code(tmp_path):
-    """Both of `main`'s spawns go through it: the action and each autofix ship step."""
-    probe = "import os, sys; sys.exit(7 if sys.flags.utf8_mode and os.listdir() == ['here'] else 1)"
-    (tmp_path / "here").touch()
-    assert devkit_project.run_dispatched([sys.executable, "-c", probe], tmp_path) == 7
+def test_the_task_env_keeps_the_callers_and_adds_utf8_mode():
+    env = devkit_project.task_env({"PATH": "/bin", "PYTHONUTF8": "0"})
+    assert env == {"PATH": "/bin", "PYTHONUTF8": "1"}
+    assert devkit_project.task_env()["PYTHONUTF8"] == "1"
 
 
 def test_registered_but_missing_directory_is_distinguished(checkouts):
