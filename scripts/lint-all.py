@@ -28,6 +28,9 @@ Usage:
     python scripts/lint-all.py            # whole repo
     python scripts/lint-all.py --changed  # working-tree diff vs HEAD, plus untracked
     python scripts/lint-all.py --paths a.py b.md  # exactly these (/ship's branch diff)
+
+A narrowed run (`--changed`, `--paths`) also runs the commit stage's `detect-secrets`
+hook over every file it names, Python or not, unless `--no-secrets` is given.
 """
 
 from __future__ import annotations
@@ -49,8 +52,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # where every linter was skipped produced no sections and printed `lint-all: clean`. That
 # is a false negative on every rule at once, and it is indistinguishable at a glance from
 # the real thing. The node tools are genuinely optional (nothing here declares them), so
-# they keep the old behaviour; these two do not.
-REQUIRED_TOOLS = ("ruff", "mypy")
+# they keep the old behaviour; these do not. `detect-secrets` runs through pre-commit,
+# which the same dev group declares, and is only attempted where the config declares it.
+REQUIRED_TOOLS = ("ruff", "mypy", "detect-secrets")
 
 # Names passed to `run_tool` that were skipped for want of the tool. Module-level because
 # `run_tool` is called from eight places and threading an accumulator through all of them
@@ -144,6 +148,39 @@ def env_files(limit_to: list[str] | None = None) -> list[str]:
     """
     found = sorted(p.name for p in REPO_ROOT.glob(".env*") if p.is_file())
     return found if limit_to is None else [p for p in found if p in set(limit_to)]
+
+
+# The commit-stage hook a narrowed run also runs, through pre-commit so its `exclude` and
+# the `# pragma: allowlist secret` convention are the commit's own. Without it every check
+# a fixer runs before `/ship` passed a hard-coded key that the commit then refused, which
+# cost a whole second fixer dispatch to learn (08654413). Not named `SECRETS_*`: the
+# scanner reads any assignment to a name holding that word as a keyword secret.
+SCAN_HOOK_ID = "detect-secrets"
+PRECOMMIT_CONFIG = ".pre-commit-config.yaml"
+
+
+def secrets_targets(selected: list[str], skip: bool) -> list[str]:
+    """The files the secrets pass scans: every selected one, of any type, or none.
+
+    None when `skip` (`--no-secrets`, which the Stop hook sends on every turn) or when
+    this repo's pre-commit config does not declare the hook -- a repo without it has no
+    secrets pass to mirror, and pre-commit would fail the run naming a missing hook id.
+    Narrowed runs only: a whole-repo run is CI's, where pre-commit runs every hook.
+    """
+    config = REPO_ROOT / PRECOMMIT_CONFIG
+    if skip or not selected or not config.is_file():
+        return []
+    declared = re.search(rf"id:\s*{SCAN_HOOK_ID}\s*$", config.read_text(encoding="utf-8"), re.M)
+    return selected if declared else []
+
+
+def secrets_section(paths: list[str]) -> str:
+    """The detect-secrets section for `paths`, run as the commit hook would run it."""
+    if not paths:
+        return ""
+    cmd = [sys.executable, "-m", "pre_commit", "run", SCAN_HOOK_ID, "--files", *paths]
+    hint = "remove the secret, or mark a false positive `# pragma: allowlist secret`"
+    return run_tool(SCAN_HOOK_ID, cmd, hint)
 
 
 class GitFailed(RuntimeError):
@@ -311,14 +348,13 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="lint exactly these files, scoped as --changed is (used by /ship for the branch diff)",
     )
-    # Accepted, and a no-op here: devkit has no detect-secrets pass to skip. The Stop
-    # hook passes `--no-secrets` unconditionally — see the same argument in
+    # The Stop hook passes `--no-secrets` unconditionally — see the same argument in
     # `templates/core/scripts/lint-all.py.tmpl` for why, and why *parsing* it is part
-    # of the contract rather than optional politeness.
+    # of the contract rather than optional politeness. Here it skips `secrets_section`.
     parser.add_argument(
         "--no-secrets",
         action="store_true",
-        help="skip the secrets pass (accepted for Stop-hook compatibility; no-op here)",
+        help="skip the detect-secrets pass a --changed or --paths run makes",
     )
     args = parser.parse_args(argv)
 
@@ -334,7 +370,8 @@ def main(argv: list[str] | None = None) -> int:
     changed = selected if scoped else None
     targets = python_targets(selected)
     envs = env_files(changed)
-    if scoped and not (targets or envs):
+    secrets = secrets_targets(selected, args.no_secrets)
+    if scoped and not (targets or envs or secrets):
         print("lint-all: no changed files this run lints; nothing to do.")
         _write_artifact("")
         return 0
@@ -355,7 +392,12 @@ def main(argv: list[str] | None = None) -> int:
     # builds the binary itself, instead of being a note on every machine without it.
     if envs:
         sections += run_tool("dotenv-linter", [*DOTENV_CMD, *envs], " ".join([*DOTENV_CMD, *envs]))
+    sections += secrets_section(secrets)
+    return report(sections)
 
+
+def report(sections: str) -> int:
+    """Write the artifact, print the status line, and return the run's exit code."""
     _write_artifact(sections)
 
     if unusable := not_clean_reason():
