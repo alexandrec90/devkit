@@ -107,12 +107,14 @@ that no longer matches arms the refusal. `--force` overrides that, and it discar
 
 **Only differences that could be someone's edit arm it.** A stale stamp says the live file
 moved, not what moved, so `live_only` reads the drift and a canonical copy that is merely
-*ahead* — tasks, inputs or folders the live file is missing — publishes anyway: those are
-the entries a publish exists to deliver, and git holds every one of them. The three
+*ahead* — tasks, inputs, folders or settings the live file is missing — publishes anyway:
+those are the entries a publish exists to deliver, and git holds every one of them. The
 "differs" lines count as live-authored regardless, because they name a key both copies
 carry and say nothing about who moved it last. `settings` is compared per key on the
 same terms, minus `devkit_project.MACHINE_SETTINGS`: the operator's switches, which a
-render carries over from the live file and an adopt never records.
+render carries over from the live file and an adopt never records. The live file's value
+is this machine's answer and `workspace.jsonc`'s only a fresh machine's default, so switch
+one in the live file directly; that is not the hand edit the paragraph above forbids.
 
 **And an adopt refuses in that same state, rather than deleting what it finds.**
 `--adopt-workspace` overwrites `workspace.jsonc` with the whole live file, so against a

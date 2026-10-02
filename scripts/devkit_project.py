@@ -48,6 +48,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
+import fix_cycle
 import sweep
 import task_input
 
@@ -634,10 +635,12 @@ def task_env(base: dict[str, str] | None = None) -> dict[str, str]:
     Dozens of the scripts behind the tasks read a child's output with `text=True` and no
     encoding, which decodes with the console's code page. On cp1252 a child's `”` (0x9d
     in UTF-8) killed the reader thread and printed its traceback into the task's
-    terminal. The scheduled fix pass had UTF-8 mode from its watchdog, and clicking the
-    same pass did not, because a click comes through here. The variable is set rather
-    than `-X utf8` because it reaches every Python down the chain, the wrappers'
-    children and their children included.
+    terminal -- and the call returned exit 0 with `stdout=None`, so a `gh` listing it
+    could not read was a listing of nothing. The scheduled fix pass had UTF-8 mode from
+    its watchdog (`fix-pass-watchdog.run_pass`), and clicking the same pass did not,
+    because a click comes through here. The variable is set rather than `-X utf8` because
+    it reaches every Python down the chain, the wrappers' children and their children
+    included.
     """
     return {**(os.environ if base is None else base), "PYTHONUTF8": "1"}
 
@@ -1124,14 +1127,16 @@ CANONICAL_WORKSPACE = REPO_ROOT / "workspace.jsonc"
 RENDER_HINT = "python scripts/devkit_project.py"
 
 # Compared whole. `tasks` is compared entry-by-entry instead (see `tasks_drift`),
-# because "the tasks block differs" on a 2,000-line object names nothing actionable.
+# because "the tasks block differs" on a 2,000-line object names nothing actionable, and
+# `settings` key by key (`settings_drift`), because "settings differs" could not say
+# whether devkit had added a setting or someone had changed one.
 PLAIN_KEYS = ("folders", "extensions", "settings", "launch", "remoteAuthority")
 
-# The three drift lines that mean **the canonical copy is ahead**: it carries something
-# the live file does not. Spelled once and used by both the producer and the two gates
+# The drift lines that mean **the canonical copy is ahead**: it carries something the
+# live file does not. Spelled once and used by both the producer and the two gates
 # below, so a reworded message cannot silently empty either of them.
 #
-# Every other line is treated as *possibly live-authored* -- including the three "differs"
+# Every other line is treated as *possibly live-authored* -- including the "differs"
 # forms, which name a key both copies have and say nothing about who moved it last. That
 # asymmetry is the point: a wrong guess on a canonical-ahead line republishes a task git
 # already holds, and a wrong guess the other way discards an edit nothing holds at all.
@@ -1148,7 +1153,9 @@ CANONICAL_AHEAD = (AHEAD_TASK, AHEAD_INPUT, AHEAD_FOLDER, AHEAD_SETTING)
 # that used them -- and one live `dispatch` kept `devkit.collectors`, merged in #463,
 # from ever reaching this machine (6d71fa28). So a render carries their live values over
 # the canonical ones, an adopt keeps the canonical defaults, and neither is drift.
-MACHINE_SETTINGS = ("devkit.fixPass", "devkit.onHold")
+# Spelled through the modules that read them, so a renamed switch cannot leave this
+# tuple naming a key nothing sets.
+MACHINE_SETTINGS = (fix_cycle.SETTING, sweep.ON_HOLD_SETTING)
 
 
 def live_only(problems: list[str]) -> list[str]:

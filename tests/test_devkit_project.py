@@ -110,7 +110,7 @@ def test_main_runs_every_selected_project_in_order(tmp_path, monkeypatch):
     calls = []
 
     def fake_run(command, *, cwd, check, env):
-        calls.append((command, cwd, check))
+        calls.append((command, cwd, env))
         return type("Result", (), {"returncode": 0})()
 
     monkeypatch.setattr(devkit_project.subprocess, "run", fake_run)
@@ -118,6 +118,7 @@ def test_main_runs_every_selected_project_in_order(tmp_path, monkeypatch):
 
     assert result == 0
     assert [cwd.name for _, cwd, _ in calls] == ["beta", "alpha"]
+    assert all(env["PYTHONUTF8"] == "1" for _, _, env in calls)
 
 
 def test_a_dispatched_task_runs_in_utf8_mode_down_to_its_grandchildren(tmp_path):
@@ -1132,6 +1133,7 @@ def test_drift_reports_a_changed_setting():
         {"settings": {"powershell.cwd": "devkit"}}, {"settings": {"powershell.cwd": "carameli"}}
     )
     assert problems == ["setting differs: powershell.cwd"]
+    assert devkit_project.live_only(problems) == problems
 
 
 def test_drift_names_settings_by_key_and_reads_a_canonical_only_one_as_ahead():
@@ -1213,7 +1215,8 @@ def test_render_proceeds_once_the_live_edit_is_adopted(workspace_pair):
 
 def test_a_setting_deleted_from_the_live_file_is_not_adopted_away(workspace_pair):
     """Per key, a setting only the canonical copy holds reads as that copy being ahead,
-    as a task does: git holds it, so an adopt refuses to delete it rather than guess."""
+    as a task does: git holds it, so an adopt refuses to delete it rather than guess.
+    `--force` is the deliberate way."""
     canonical, live = workspace_pair
     live.write_text(
         live.read_text(encoding="utf-8").replace('"powershell.cwd": "carameli",', ""),
@@ -1222,6 +1225,11 @@ def test_a_setting_deleted_from_the_live_file_is_not_adopted_away(workspace_pair
     )
     assert _run(live, "--adopt-workspace") == 1
     assert "powershell.cwd" in devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
+    assert _run(live, "--adopt-workspace", "--force") == 0
+    assert (
+        "powershell.cwd"
+        not in devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))["settings"]
+    )
 
 
 def test_render_stamps_so_the_next_one_is_not_mistaken_for_a_hand_edit(workspace_pair):
@@ -1404,6 +1412,22 @@ def test_publish_workspace_publishes_when_the_canonical_copy_is_merely_ahead(wor
     assert outcome == devkit_project.RENDER_PUBLISHED
     assert devkit_project.live_only(problems) == [], problems
     assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
+
+
+def test_a_machine_switch_alone_is_not_drift(workspace_pair):
+    """`--check-workspace`, the session-start line and the live-workspace test all read
+    through `settings_drift`, so none of them reports a machine's own answer."""
+    _canonical, live = workspace_pair
+    _set_switches(live, **{"devkit.fixPass": "dispatch", "devkit.onHold": ["carameli"]})
+    assert _run(live, "--check-workspace") == 0
+
+
+def test_every_machine_setting_has_a_default_in_devkits_copy():
+    """The default is what a fresh workstation starts from, and what an adopt keeps;
+    a key devkit's copy lacked would be adopted with whichever machine's value it held."""
+    declared = devkit_project.machine_settings(devkit_jsonc_loads(devkit_project.canonical_text()))
+    assert set(declared) == set(devkit_project.MACHINE_SETTINGS)
+    assert declared[devkit_project.fix_cycle.SETTING] == devkit_project.fix_cycle.OFF
 
 
 def test_a_differing_definition_is_treated_as_the_live_file_s_until_proven_otherwise():
@@ -3142,6 +3166,7 @@ def autofix_run(tmp_path, monkeypatch, argv, dirty=("app/main.py",), returncode=
 
     def fake_run(command, *, cwd, check, env):
         calls.append(command)
+        assert env["PYTHONUTF8"] == "1", "the ship steps run devkit's sweep.py, which decodes too"
         return type("Result", (), {"returncode": returncode if len(calls) == 1 else 0})()
 
     monkeypatch.setattr(devkit_project.subprocess, "run", fake_run)
