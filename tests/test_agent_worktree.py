@@ -349,12 +349,40 @@ def test_a_tree_the_hook_provisioned_is_not_provisioned_twice(workspace, monkeyp
         def __call__(self, argv, **kwargs):
             done = super().__call__(argv, **kwargs)
             if "worktree" in argv:
-                mark = Path(argv[-2]) / agent_worktree.worktree_env.PROVISIONED
+                mark = Path(argv[-2]) / agent_worktree.tree_provision.worktree_env.PROVISIONED
                 mark.parent.mkdir(parents=True, exist_ok=True)
                 mark.write_text("", encoding="utf-8")
             return done
 
     agent_worktree.create("devkit", workspace, "warm", "main", NONE, HookRun())
+
+
+def test_a_tree_the_hook_gave_only_a_venv_still_gets_its_node_modules(
+    workspace, monkeypatch, tmp_path
+):
+    """The hook installs Python alone and marks the tree provisioned, so a roguelike tree
+    cut by a fixer came up with a `.venv` and no `node_modules`, and vitest could not run."""
+    monkeypatch.setattr(agent_worktree.agent_tabs, "open_agent", lambda *a, **k: 0)
+    provisioned: list[Path] = []
+    monkeypatch.setattr(
+        agent_worktree.tree_provision, "provision", lambda tree, runner: provisioned.append(tree)
+    )
+
+    class VenvOnlyRun(FakeRun):
+        def __call__(self, argv, **kwargs):
+            done = super().__call__(argv, **kwargs)
+            if "worktree" in argv:
+                tree = Path(argv[-2])
+                mark = tree / agent_worktree.tree_provision.worktree_env.PROVISIONED
+                mark.parent.mkdir(parents=True, exist_ok=True)
+                mark.write_text("", encoding="utf-8")
+                (tree / ".devkit.toml").write_text(
+                    '[frontend]\nenabled = true\ndir = "."\n', encoding="utf-8"
+                )
+            return done
+
+    agent_worktree.create("devkit", workspace, "node", "main", NONE, VenvOnlyRun())
+    assert len(provisioned) == 1
 
 
 def test_a_blank_topic_names_the_branch_after_the_checkout(workspace, monkeypatch):

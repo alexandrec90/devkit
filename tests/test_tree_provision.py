@@ -64,3 +64,19 @@ def test_a_background_session_is_opened_only_in_a_provisioned_tree(monkeypatch, 
     launch = agent_tabs.agent_models.Launch("claude-bg")
     assert agent_tabs.launch_background(launch, tmp_path, "fix it", False, runner) == 0
     assert spawned[0] == tree_provision.argv(tmp_path) and spawned[1][-1] == "fix it"
+
+
+def test_the_hooks_venv_mark_does_not_vouch_for_node_modules(tmp_path):
+    """A roguelike tree carried the hook's mark and no `node_modules`, and vitest could not
+    run in it: the mark proves the `.venv`, and the frontend tier is checked on its own."""
+    assert tree_provision.needs_provision(tmp_path) is True  # no mark: nothing installed
+    mark = tmp_path / tree_provision.worktree_env.PROVISIONED
+    mark.parent.mkdir(parents=True)
+    mark.write_text("", encoding="utf-8")
+    assert tree_provision.needs_provision(tmp_path) is False  # no frontend tier to install
+
+    manifest = tmp_path / ".devkit.toml"
+    manifest.write_text('[frontend]\nenabled = true\ndir = "web"\n', encoding="utf-8")
+    assert tree_provision.needs_provision(tmp_path) is True
+    (tmp_path / "web" / "node_modules").mkdir(parents=True)
+    assert tree_provision.needs_provision(tmp_path) is False

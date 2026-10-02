@@ -92,7 +92,7 @@ repos:
 
       - id: codex-skill-mirror
         name: mirror .claude/skills/ to .agents/skills/
-        # A fixer: `tests/test_codex_skill_mirror.py` fails a stale mirror, and first met
+        # A fixer: `scripts/hooks/tests/test_sync_codex_context.py` fails a stale mirror, and first met
         # in CI it cost 716bb80 a stale skill on `main` and #438 a fixer. Rewriting the
         # mirror fails the commit once; restaged, it passes.
         entry: scripts/sync-codex-context.py

@@ -74,7 +74,6 @@ import task_branch as tb
 import task_input
 import tree_provision
 import worktree
-import worktree_env
 
 # How many checkouts `scan` reads at once. A worktree scan is three `git` calls per
 # checkout and one more per worktree found, which is seconds in a row; the picker runs
@@ -254,8 +253,9 @@ def create(
     # The git hook provisions a tree only when its checkout has a `.venv`, which keeps an
     # unused project's `worktree add` fast. A tree cut here is one somebody works in, so
     # a cold checkout's is provisioned too: a fixer's social-scraper tree came up with no
-    # `.venv` and no line saying why, and no test could run in it.
-    if not (path / worktree_env.PROVISIONED).is_file():
+    # `.venv` and no line saying why, and no test could run in it. The hook's mark covers
+    # the `.venv` alone, so a frontend tree is provisioned for its `node_modules` too.
+    if tree_provision.needs_provision(path):
         tree_provision.provision(path, runner)
     return agent_tabs.open_agent(launch, path, branch, runner)
 
