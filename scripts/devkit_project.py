@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -625,6 +626,20 @@ def plan_command(
     if (project_dir / NOTIFY_WRAP).is_file():
         return ["python", NOTIFY_WRAP, action.label, "--", *logged]
     return logged
+
+
+def task_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment every dispatched command runs in: `base` (this one's), in UTF-8 mode.
+
+    Dozens of the scripts behind the tasks read a child's output with `text=True` and no
+    encoding, which decodes with the console's code page. On cp1252 a child's `”` (0x9d
+    in UTF-8) killed the reader thread and printed its traceback into the task's
+    terminal. The scheduled fix pass had UTF-8 mode from its watchdog, and clicking the
+    same pass did not, because a click comes through here. The variable is set rather
+    than `-X utf8` because it reaches every Python down the chain, the wrappers'
+    children and their children included.
+    """
+    return {**(os.environ if base is None else base), "PYTHONUTF8": "1"}
 
 
 # --- autofix that would otherwise strand ------------------------------------
@@ -1900,7 +1915,7 @@ def main(argv: list[str] | None = None) -> int:
         ship_fixes = action.autofix and not args.no_ship_fixes
         print(f"[{directory.name}] {' '.join(command)}\n", flush=True)
         branch, before = autofix_state(directory) if ship_fixes else ("", ())
-        returncode = subprocess.run(command, cwd=directory, check=False).returncode
+        returncode = subprocess.run(command, cwd=directory, env=task_env(), check=False).returncode
         if returncode and not result:
             result = returncode
         if not ship_fixes:
@@ -1920,7 +1935,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n[{directory.name}] {outcome.note}", flush=True)
         for step in outcome.commands:
             print(f"\n[{directory.name}] {' '.join(step)}\n", flush=True)
-            code = subprocess.run(step, cwd=root, check=False).returncode
+            code = subprocess.run(step, cwd=root, env=task_env(), check=False).returncode
             if code:
                 # Stop at the first failure rather than shipping from a branch that was
                 # never cut: the second command would then read the *home* branch and
