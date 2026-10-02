@@ -274,6 +274,24 @@ def with_contracts(tests: list[str], root: Path = REPO_ROOT) -> list[str]:
     return [*tests, *extra]
 
 
+def by_test_root(targets: list[str]) -> list[list[str]]:
+    """`targets` split into one list per `TEST_DIRS` root, in first-seen order.
+
+    Each root may hold a top-level `conftest.py`, and pytest's default import mode loads
+    every one of them as the single module `conftest`: handed both trees in one process,
+    a generated project's `from conftest import IsolatedSettings` resolved against
+    `scripts/hooks/tests/conftest.py`, and every run errored with no test collected
+    (social-scraper, 659c4f62). One process per root is how the gate runs them anyway.
+    """
+    roots = sorted(TEST_DIRS, key=len, reverse=True)
+    groups: dict[str, list[str]] = {}
+    for target in targets:
+        posix = target.replace("\\", "/")
+        root = next((d for d in roots if posix.startswith(f"{d}/")), "")
+        groups.setdefault(root, []).append(target)
+    return list(groups.values())
+
+
 def _reexec(module: str) -> int | None:
     """Re-run this process under the project's virtualenv, or None to carry on here.
 
@@ -333,49 +351,64 @@ def main(argv: list[str] | None = None) -> int:
         cmd += ["--last-failed", "--last-failed-no-failures", "all"]
     whole = args.all or args.changed or targets or any(os.environ.get(k) for k in FULL_SUITE_ENV)
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+    # Explicit targets stay one run: they may carry options (`-k reap`) that bind to them.
+    groups = [targets]
     if not whole:
-        changed = changed_paths(REPO_ROOT)
-        if changed is None:
-            print("run-tests: git cannot say what changed; running the suite")
-        else:
-            targets, unnamed = tests_for(changed, REPO_ROOT)
-            print(
-                f"run-tests: {len(targets)} test file(s) for {len(changed)} changed path(s), "
-                "and the contract tests; --all runs the suite"
-            )
-            if changed:
-                targets = with_contracts(targets, REPO_ROOT)
-            for path in unnamed:
-                print(f"run-tests:   no test named for {path}")
-            if not targets:
-                ARTIFACT.write_text("", encoding="utf-8")
-                print("run-tests: nothing to run (artifact cleared)")
-                return 0
-    cmd += targets
+        planned = _plan_changed(REPO_ROOT)
+        if planned == []:
+            ARTIFACT.write_text("", encoding="utf-8")
+            print("run-tests: nothing to run (artifact cleared)")
+            return 0
+        if planned is not None:
+            groups = by_test_root(planned)
+    return _finish([run_pytest(cmd + group) for group in groups])
 
+
+def _plan_changed(root: Path) -> list[str] | None:
+    """The test files for what changed, contracts included; None runs the suite."""
+    changed = changed_paths(root)
+    if changed is None:
+        print("run-tests: git cannot say what changed; running the suite")
+        return None
+    targets, unnamed = tests_for(changed, root)
+    print(
+        f"run-tests: {len(targets)} test file(s) for {len(changed)} changed path(s), "
+        "and the contract tests; --all runs the suite"
+    )
+    if changed:
+        targets = with_contracts(targets, root)
+    for path in unnamed:
+        print(f"run-tests:   no test named for {path}")
+    return targets
+
+
+def run_pytest(cmd: list[str]) -> str:
+    """Run pytest; the artifact's text for a failure, empty for a pass."""
     print(f"run-tests: {' '.join(cmd[2:])}")
     with tempfile.TemporaryDirectory(prefix="pytest-", ignore_cleanup_errors=True) as basetemp:
         run = with_basetemp(cmd, basetemp)
         result = subprocess.run(run, cwd=REPO_ROOT, capture_output=True, text=True)
     raw = result.stdout + result.stderr
-
     if result.returncode in (0, PYTEST_NO_TESTS_COLLECTED):
-        # Clear on pass, so a stale artifact never sends the next agent chasing a
-        # failure that is already fixed.
-        ARTIFACT.write_text("", encoding="utf-8")
-        print(f"run-tests: passed (artifact cleared: {ARTIFACT.relative_to(REPO_ROOT)})")
-        return 0
-
+        return ""
     body = cap_failure_blocks(filter_output(raw))
     # Never leave the agent with nothing: if filtering stripped everything (an
     # unexpected pytest output shape, a collection error), fall back to raw.
     if not body.strip():
         body = raw.strip()
-    ARTIFACT.write_text(
-        "# source: scripts/run-tests.py\n"
-        "# fix: pytest <the failing test id> --tb=long\n" + body + "\n",
-        encoding="utf-8",
-    )
+    return "# source: scripts/run-tests.py\n# fix: pytest <the failing test id> --tb=long\n" + body
+
+
+def _finish(failures: list[str]) -> int:
+    """Write the artifact for what failed -- an empty text is a pass -- and the exit code."""
+    failures = [text for text in failures if text]
+    if not failures:
+        # Clear on pass, so a stale artifact never sends the next agent chasing a
+        # failure that is already fixed.
+        ARTIFACT.write_text("", encoding="utf-8")
+        print(f"run-tests: passed (artifact cleared: {ARTIFACT.relative_to(REPO_ROOT)})")
+        return 0
+    ARTIFACT.write_text("\n\n".join(failures) + "\n", encoding="utf-8")
     print(f"run-tests: FAILED — details in {ARTIFACT.relative_to(REPO_ROOT)}")
     return 1
 

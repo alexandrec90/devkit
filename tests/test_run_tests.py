@@ -443,10 +443,60 @@ def test_the_contract_tests_run_with_every_change(artifact, monkeypatch, tmp_pat
         (tmp_path / rel).write_text("", encoding="utf-8")
     seen = stub_pytest(monkeypatch, 0)
     assert run_tests.main([]) == 0
-    assert seen[0][-len(run_tests.CONTRACT_TESTS) :] == list(run_tests.CONTRACT_TESTS)
+    ran = [arg for cmd in seen for arg in cmd if arg in run_tests.CONTRACT_TESTS]
+    assert sorted(ran) == sorted(run_tests.CONTRACT_TESTS)
     out = capsys.readouterr().out
     assert "no test named for README.md" in out and "no test named for scripts/untested.py" in out
     assert "the contract tests" in out
+
+
+@pytest.mark.parametrize("runner", ["devkit", "template"])
+def test_by_test_root_splits_the_targets_one_list_per_tree(runner, monkeypatch):
+    module = run_tests if runner == "devkit" else template_runner(monkeypatch)
+    targets = [
+        "tests/test_a.py",
+        "scripts/hooks/tests/test_x.py",
+        "tests\\test_b.py",
+        "scripts\\hooks\\tests\\test_y.py",
+    ]
+    assert module.by_test_root(targets) == [
+        ["tests/test_a.py", "tests\\test_b.py"],
+        ["scripts/hooks/tests/test_x.py", "scripts\\hooks\\tests\\test_y.py"],
+    ]
+    assert module.by_test_root(["other/test_z.py"]) == [["other/test_z.py"]]
+    assert module.by_test_root([]) == []
+
+
+def test_each_test_tree_runs_in_a_pytest_of_its_own(artifact, monkeypatch, tmp_path):
+    """659c4f62: social-scraper's `tests/` and `scripts/hooks/tests/` each hold a
+    `conftest.py`, pytest imports both as the one module `conftest`, and a run handed both
+    trees errored on `from conftest import IsolatedSettings` with no test collected."""
+    changed(monkeypatch, tmp_path, "scripts/fix_plan.py", tests=("test_fix_plan.py",))
+    hook_test = tmp_path / run_tests.CONTRACT_TESTS[-1]
+    hook_test.parent.mkdir(parents=True)
+    hook_test.write_text("", encoding="utf-8")
+    seen = stub_pytest(monkeypatch, 1, FAILING_OUTPUT)
+    monkeypatch.setattr(run_tests, "_parallel_args", list)
+    assert run_tests.main([]) == 1
+    assert [cmd[-1] for cmd in seen] == ["tests/test_fix_plan.py", run_tests.CONTRACT_TESTS[-1]]
+    body = artifact.read_text(encoding="utf-8")
+    assert body.count("# source: scripts/run-tests.py") == 2
+
+
+def test_run_pytest_is_empty_on_a_pass_and_the_artifact_text_on_a_failure(artifact, monkeypatch):
+    stub_pytest(monkeypatch, 0, "3 passed\n")
+    assert run_tests.run_pytest(["py", "-m", "pytest", "tests/test_a.py"]) == ""
+    stub_pytest(monkeypatch, 1, FAILING_OUTPUT)
+    text = run_tests.run_pytest(["py", "-m", "pytest", "tests/test_b.py"])
+    assert text.startswith("# source: scripts/run-tests.py\n")
+    assert "FAILED tests/test_b.py::test_b_thing" in text
+
+
+def test_explicit_targets_stay_one_run_with_their_options(artifact, monkeypatch):
+    seen = stub_pytest(monkeypatch, 0)
+    run_tests.main(["tests/test_a.py", "scripts/hooks/tests/test_b.py", "-k", "reap"])
+    assert len(seen) == 1
+    assert seen[0][-4:] == ["tests/test_a.py", "scripts/hooks/tests/test_b.py", "-k", "reap"]
 
 
 def test_every_contract_test_listed_exists():
