@@ -391,3 +391,115 @@ def test_mypys_unchecked_body_note_is_off_so_the_artifact_opens_on_the_error(con
     text = (REPO_ROOT / config).read_text(encoding="utf-8")
     mypy = text.split("[tool.mypy]", 1)[1].split("\n[", 1)[0]
     assert 'disable_error_code = ["annotation-unchecked"]' in mypy
+
+
+# --------------------------------------------------------------------------
+# A narrowed run scans for secrets the way the commit will
+# --------------------------------------------------------------------------
+
+# A stand-in for the real hook under its real id: `pygrep` needs no network and no hook
+# environment, so the fixture exercises pre-commit's own `run --files` path offline.
+STAND_IN_SECRETS_CONFIG = (
+    "repos:\n  - repo: local\n    hooks:\n      - id: detect-secrets\n"
+    "        name: detect secrets\n        language: pygrep\n        entry: 'FAKE_KEY_[0-9]+'\n"
+)
+
+
+def secrets_repo(root: Path) -> Path:
+    """`build_repo` plus the stand-in hook, committed past the machine's own hooks.
+
+    `core.hooksPath` is global where `install-git-policy.py` ran, and its policy refuses a
+    commit carrying a `.pre-commit-config.yaml` from a tree with no pre-commit of its own.
+    """
+    build_repo(root)
+    (root / ".pre-commit-config.yaml").write_text(STAND_IN_SECRETS_CONFIG, encoding="utf-8")
+    for cmd in (
+        ["git", "config", "core.hooksPath", str(root / ".nohooks")],
+        ["git", "add", "-A"],
+        ["git", "commit", "-q", "-m", "hook"],
+    ):
+        subprocess.run(cmd, cwd=root, check=True, capture_output=True)
+    return root
+
+
+def run_secrets_lint(root: Path, tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "PRE_COMMIT_HOME": str(tmp_path / "pre-commit-home")}
+    env.pop("SKIP", None)
+    return subprocess.run(
+        [sys.executable, "scripts/lint-all.py", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def test_secrets_targets_are_the_selection_only_where_the_hook_is_declared(monkeypatch, tmp_path):
+    monkeypatch.setattr(lint_all, "REPO_ROOT", tmp_path)
+    assert lint_all.secrets_targets(["a.md"], skip=False) == [], "no pre-commit config"
+    config = tmp_path / ".pre-commit-config.yaml"
+    config.write_text("repos:\n  - repo: local\n    hooks:\n      - id: ruff\n", encoding="utf-8")
+    assert lint_all.secrets_targets(["a.md"], skip=False) == [], "config without the hook"
+    config.write_text(STAND_IN_SECRETS_CONFIG, encoding="utf-8")
+    assert lint_all.secrets_targets(["a.md", "b.py"], skip=False) == ["a.md", "b.py"]
+    assert lint_all.secrets_targets(["a.md"], skip=True) == [], "--no-secrets"
+    assert lint_all.secrets_targets([], skip=False) == []
+
+
+def test_devkits_own_config_declares_the_hook_the_pass_mirrors():
+    """The pass is inert without the hook id, so dropping it from the config would turn
+    the pass off with nothing red anywhere."""
+    assert lint_all.secrets_targets(["README.md"], skip=False) == ["README.md"]
+
+
+def test_secrets_section_runs_the_commit_hook_over_exactly_the_paths(monkeypatch):
+    calls: list[list[str]] = []
+    monkeypatch.setattr(lint_all, "run_tool", lambda name, cmd, hint: calls.append(cmd) or "")
+    assert lint_all.secrets_section([]) == ""
+    assert calls == []
+    lint_all.secrets_section(["a.md", "b.py"])
+    assert calls == [
+        [sys.executable, "-m", "pre_commit", "run", "detect-secrets", "--files", "a.md", "b.py"]
+    ]
+
+
+def test_a_secret_in_a_non_python_file_fails_a_paths_run(tmp_path):
+    """08654413: a fixer shipped a hard-coded key with lint, tests and both ratchets clean,
+    and the commit's detect-secrets hook refused it a whole dispatch later. A non-Python
+    file matters most: before this pass, `--paths notes.md` was "nothing to do"."""
+    root = secrets_repo(tmp_path / "repo")
+    (root / "notes.md").write_text("key = FAKE_KEY_123\n", encoding="utf-8")
+    result = run_secrets_lint(root, tmp_path, "--paths", "notes.md")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "detect-secrets: FAILED" in result.stdout, result.stdout
+    artifact = (root / "logs" / "lint-errors.log").read_text(encoding="utf-8")
+    assert "# detect-secrets\n" in artifact and "notes.md" in artifact, artifact
+
+
+def test_report_fails_on_a_section_or_a_skipped_required_tool(monkeypatch, tmp_path):
+    monkeypatch.setattr(lint_all, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(lint_all, "ARTIFACT", tmp_path / "logs" / "lint-errors.log")
+    lint_all._SKIPPED.clear()
+    assert lint_all.report("") == 0
+    assert lint_all.ARTIFACT.read_text(encoding="utf-8") == ""
+    assert lint_all.report("# ruff\nbad\n") == 1
+    assert "# ruff\nbad" in lint_all.ARTIFACT.read_text(encoding="utf-8")
+    lint_all._SKIPPED.append("detect-secrets")
+    assert lint_all.report("") == 1, "a required pass that could not run is not clean"
+    lint_all._SKIPPED.clear()
+
+
+def test_a_clean_file_passes_the_secrets_pass(tmp_path):
+    root = secrets_repo(tmp_path / "repo")
+    (root / "notes.md").write_text("nothing to see\n", encoding="utf-8")
+    result = run_secrets_lint(root, tmp_path, "--paths", "notes.md")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "detect-secrets: ok" in result.stdout, result.stdout
+
+
+def test_no_secrets_keeps_the_stop_hooks_turn_free_of_the_pass(tmp_path):
+    root = secrets_repo(tmp_path / "repo")
+    (root / "notes.md").write_text("key = FAKE_KEY_123\n", encoding="utf-8")
+    result = run_secrets_lint(root, tmp_path, "--paths", "notes.md", "--no-secrets")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "nothing to do" in result.stdout, result.stdout
