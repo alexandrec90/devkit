@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Keep this machine's globally-installed npm tooling current, unattended.
 
-**A globally installed package is a pin nothing was moving.** Four of the MCP servers
-a session in this workspace talks to -- chrome-devtools, postgres, redis, azure-devops
--- are launched from a global bin rather than through `npx`, so the version that was
+**A globally installed package is a pin nothing was moving.** Some of the MCP servers
+a session in this workspace talks to are launched from a global bin rather than through
+`npx` (chrome-devtools is not: see the README), so the version that was
 installed once, by hand, months ago, is the version every session gets forever. So are
 the linters a project can reach (`eslint`, `stylelint`, `markdownlint-cli2`) and the
 publisher `vsce`. On the day this was written `npm outdated -g` reported half the
