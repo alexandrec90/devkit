@@ -20,6 +20,7 @@ makes the dependency explicit and immune to reordering.
 
 import argparse
 import importlib.util
+import itertools
 import os
 import subprocess
 import sys
@@ -254,6 +255,32 @@ def gh_steps_without_repo_context(workflow: dict) -> list[str]:
                 if command.split(" ", 1)[:1] == ["gh"] and "--repo" not in command:
                     offenders.append(f"{job_name} / {step.get('name', '<unnamed>')}")
                     break
+    return offenders
+
+
+TEST_TIER_MARKERS = ("scripts/run-tests.py", "scripts/hooks/tests/")
+
+
+def tiers_a_red_tier_skips(workflow: dict) -> list[str]:
+    """Names of test-tier steps that a red test tier before them in the job would skip.
+
+    A step with no `if:` runs only on `success()`, so with two tiers in one job a red
+    first tier leaves the second unrun, and the failure artifact names half the red
+    tests (devkit ledger f07541c7). Each later tier must also run when the tier before
+    it failed: `success() || steps.<that tier's id>.outcome == 'failure'`, which still
+    skips it after a red lint.
+    """
+    offenders = []
+    for job_name, job in (workflow.get("jobs") or {}).items():
+        tiers = [
+            step
+            for step in job.get("steps") or []
+            if any(marker in str(step.get("run", "")) for marker in TEST_TIER_MARKERS)
+        ]
+        for before, step in itertools.pairwise(tiers):
+            wanted = f"steps.{before.get('id')}.outcome == 'failure'"
+            if "id" not in before or wanted not in str(step.get("if", "")):
+                offenders.append(f"{job_name} / {step.get('name', '<unnamed>')}")
     return offenders
 
 

@@ -88,10 +88,13 @@ jobs:
         run: uv run python -m alembic upgrade head
 {{/alembic}}
       - name: Application suite
+        id: application-suite
         run: uv run python scripts/run-tests.py
       - name: Harness hook tests
         # Separate from the application suite: pytest's testpaths excludes these, and
-        # they are stdlib-only by contract.
+        # they are stdlib-only by contract. After a red application suite too, so one
+        # run names both tiers' failures.
+        if: success() || steps.application-suite.outcome == 'failure'
         run: uv run python -m pytest scripts/hooks/tests/ -q
       - name: Upload test artifact
         if: failure()

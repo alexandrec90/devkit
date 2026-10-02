@@ -29,6 +29,7 @@ from support import (
     load_script,
     make_args,
     registry,
+    tiers_a_red_tier_skips,
     vendor_manifest,
 )
 
@@ -1366,6 +1367,18 @@ def test_generated_gate_uploads_what_a_red_vendored_suite_wrote(tmp_path):
     assert "--junit-xml=logs/junit-hooks.xml" in hooks["run"]
     uploads = [s for s in steps if str(s.get("uses", "")).startswith("actions/upload-artifact")]
     assert any("logs/junit-hooks.xml" in str(s["with"]["path"]) for s in uploads)
+
+
+def test_generated_gate_runs_the_hook_tests_when_the_application_suite_is_red(tmp_path):
+    """devkit f07541c7: a red first test step skipped the second, so the fixer's
+    evidence named one tier's failures and the other's surfaced a gate cycle later.
+    The hook tests run whenever the application suite ran, pass or fail, in the
+    nightly as in the PR gate."""
+    yaml = pytest.importorskip("yaml")
+    workflows = generate(tmp_path, {}) / ".github" / "workflows"
+    for name in ("pr-gate.yml", "nightly.yml"):
+        parsed = yaml.safe_load((workflows / name).read_text(encoding="utf-8"))
+        assert not tiers_a_red_tier_skips(parsed), name
 
 
 def test_generated_gate_is_least_privilege_and_re_runnable(tmp_path):
