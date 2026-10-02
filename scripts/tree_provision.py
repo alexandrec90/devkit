@@ -20,8 +20,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))  # the vendored tier
 import fix_reports
+import harness_config
 import sweep
+import worktree_env
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKTREE = REPO_ROOT / "scripts" / "worktree.py"
@@ -29,6 +32,16 @@ WORKTREE = REPO_ROOT / "scripts" / "worktree.py"
 
 def argv(tree: Path) -> list[str]:
     return [sweep.console_python(), str(WORKTREE), "provision", str(tree), "--yes"]
+
+
+def needs_provision(tree: Path) -> bool:
+    """Whether the git hook left any of the tree's toolchain to install. The hook installs
+    Python alone and marks the tree provisioned anyway, so its mark proves the `.venv` and
+    nothing about `node_modules`: a roguelike tree came up with vitest unable to run."""
+    if not (tree / worktree_env.PROVISIONED).is_file():
+        return True
+    frontend = harness_config.load(tree).frontend
+    return frontend.enabled and not (tree / frontend.dir / "node_modules").is_dir()
 
 
 def provision(tree: Path, runner=sweep.run_windowless) -> bool:
