@@ -171,6 +171,62 @@ def test_a_fixed_on_this_branch_whose_work_never_went_out_is_filed_open(ctx, mon
     assert len(triage.open_items(triage.load(ctx.devkit_dir))) == 1
 
 
+def test_a_fixed_on_this_branch_from_a_session_still_at_work_is_held(ctx, monkeypatch):
+    """c8d4f66b, 5d8e9962: harvested from peaceful-jumping-cocke a minute after its live
+    session wrote them, both fixes still uncommitted there, and filed open -- so a second
+    session was sent at a fix the first was still writing."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        friction="- x; Fixed on this branch (`y`).\n- no .venv\n",
+        transcript_age=_dt.timedelta(minutes=1),
+    )
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: False)
+    closed, journal = close(ctx)
+    assert [f for f in journal.findings if f.kind == "reported"] == []
+    assert (path / fix_reports.FRICTION_FILE).is_file(), "filed away, its lines were lost"
+    assert closed.lines == [
+        "carameli agent/x-0919 -- friction held: its session is still at work on a fix"
+    ]
+
+
+def test_a_session_listed_busy_holds_its_claimed_friction_too(ctx, monkeypatch):
+    path = tree(ctx, monkeypatch, friction="- x; fixed on this branch\n")
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: False)
+    busy = fix_loop.bg_sessions.working([{"cwd": str(path), "status": "busy"}])
+    monkeypatch.setattr(fix_loop, "working_dirs", lambda: busy)
+    _, journal = close(ctx)
+    assert [f for f in journal.findings if f.kind == "reported"] == []
+
+
+def test_the_held_lines_are_filed_once_the_session_goes_quiet(ctx, monkeypatch):
+    tree(
+        ctx,
+        monkeypatch,
+        friction="- x; fixed on this branch\n",
+        transcript_age=fix_reports.QUIET_AFTER + _dt.timedelta(minutes=1),
+    )
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: False)
+    _, journal = close(ctx)
+    assert [f.settles_with for f in journal.findings if f.kind == "reported"] == [""]
+
+
+@pytest.mark.parametrize(
+    ("friction", "out", "settles"),
+    [
+        ("- no .venv\n", False, [""]),  # nothing claimed: nothing to wait for
+        ("- x; fixed on this branch\n", True, ["agent/x-0919"]),  # the fix already went out
+    ],
+)
+def test_a_live_session_holds_only_a_claim_its_branch_does_not_carry_yet(
+    ctx, monkeypatch, friction, out, settles
+):
+    tree(ctx, monkeypatch, friction=friction, transcript_age=_dt.timedelta(minutes=1))
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: out)
+    _, journal = close(ctx)
+    assert [f.settles_with for f in journal.findings if f.kind == "reported"] == settles
+
+
 def _porcelain(code: int, out: str):
     seen: list[list[str]] = []
 
