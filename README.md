@@ -958,9 +958,25 @@ container and trusted for its exit code.
 ```jsonc
 "devkit.collectors": {
   "ibkr_trader": { "service": "app", "health": ["ibkr-trader", "health"] },
-  "sports_betting": { "service": "collector", "health": ["sports-betting", "health", "--quiet"] }
+  "sports_betting": { "service": "collector", "health": ["sports-betting", "health", "--quiet"] },
+  "social-scraper": { "command": ["uv", "run", "social-scraper", "scrape"], "minutes": 30, "needs": ["db"] }
 }
 ```
+
+A collector that cannot live in a container — social-scraper drives the installed Chrome
+with the browser profiles in its checkout — declares a `command` instead of a `service`.
+It gets a **Scheduled Task of its own, named after it** (`social-scraper`, never
+`devkit-`, because it is the project's job, not devkit's). That task runs
+`collectors.py fire <name>` every `minutes` while you are logged on. The fire starts the
+compose services the collector `needs`, runs the command from the project's checkout
+without a console window, and kills the whole process tree if the command outruns the
+task. It writes `logs/collector-<name>.log` and exits with the command's own code, so 0
+must also cover "ran and deliberately did nothing". The command is read at fire time, so
+editing it needs no re-registration. Only a changed `minutes` does, and the next pass
+makes it. `collectors.py run-once <name>` (a row of the picker below) runs a scheduled
+collector by hand with its output in the terminal, whatever this machine is set to —
+its first, slow run before `run-here`, say — and refuses while the scheduled run is going,
+since the two would share one browser profile.
 
 **Which machine runs them is not in that file**, because every workstation shares it. It is
 `logs/collectors.machine.json` in the static devkit checkout, written by
@@ -982,9 +998,13 @@ collector, run `stop-here` on the old machine and `run-here` on the new one.
 `devkit-collectors` is registered everywhere and acts only on the assignment. It starts a
 stopped collector with `docker compose up -d <service>`, stops one on a `stop-here` machine
 with `docker stop`, and never rebuilds. Rebuilding is a deploy, which a timer should not do
-mid-ingest. The tray gets a row per assigned collector: live container state on every poll,
-plus the last health verdict, shown amber rather than red because it is the project's
-verdict, not a failure of the job.
+mid-ingest. A scheduled collector's task is registered on a `run-here` machine, and
+removed on a `stop-here` or `release`. The tray gets a `collector: <name>` row per
+assigned collector. A container shows its live state on every poll, plus the last health
+verdict, shown amber rather than red because it is the project's verdict, not a failure
+of the job. A scheduled one is judged from its task like any devkit job: red on a failed
+or missing run, amber when overdue. Clicking it opens that fire's log. Neither kind is in
+`schedule_health.report`, so a collector's failure is never filed as a devkit defect.
 
 #### Remote Control servers, and why keeping them up is a job
 

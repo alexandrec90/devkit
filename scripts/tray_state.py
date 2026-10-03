@@ -13,9 +13,11 @@ second opinion that disagrees with the session-start line for the same machine, 
 worse than no indicator. So this consumes those lines and adds only the one thing they
 do not carry: how loud each is.
 
-The ingestion collectors ride along as rows of their own (`collector_states`). They are
-containers rather than scheduled tasks, so the scheduler cannot report them, and
-`collectors.row` is their `schedule_health`.
+The ingestion collectors ride along as rows of their own. A container collector is no
+scheduled task, so the scheduler cannot report it, and `collectors.row` is its
+`schedule_health` (`collector_states`). A scheduled one *is* a task -- named after its
+project, not `devkit-` -- so it is asked about in the same scheduler query and judged by
+the same `problems`, then shown under the collectors' label (`collector_task_states`).
 """
 
 from __future__ import annotations
@@ -77,15 +79,16 @@ class JobState:
         return self.log or schedule_health.ARTIFACTS.get(self.name, "")
 
 
-def named_in(line: str) -> str:
+def named_in(line: str, known: frozenset[str] = frozenset()) -> str:
     """The job a problem line is about.
 
     `schedule_health` writes every line as `<task name>: <what is wrong>`, and the task
-    names all carry the `devkit-` prefix, so the split is unambiguous even though the
-    remainder of the line contains colons of its own (a timestamp, for one).
+    names all carry the `devkit-` prefix or are one of `known` -- the collector tasks,
+    which do not contain `: ` -- so the split is unambiguous even though the remainder of
+    the line contains colons of its own (a timestamp, for one).
     """
     name, sep, _rest = line.partition(": ")
-    return name if sep and name.startswith(schedule_health.PREFIX) else ""
+    return name if sep and (name.startswith(schedule_health.PREFIX) or name in known) else ""
 
 
 def severity(line: str) -> str:
@@ -113,8 +116,9 @@ def states(
     anything off" without conflating them.
     """
     worst: dict[str, tuple[str, str]] = {}
+    known = frozenset(job.name for job in jobs)
     for line in lines:
-        name = named_in(line)
+        name = named_in(line, known)
         if not name:
             continue
         level = severity(line)
@@ -181,10 +185,42 @@ def refresh(now=None) -> list[JobState]:
     menu under a red icon indefinitely, which is the one thing an always-visible
     indicator must never do if its red is to keep meaning anything.
     """
-    jobs = schedule_health.query()
+    tasks = collectors.scheduled_tasks()
+    jobs = schedule_health.query(also=frozenset(tasks))
     deliberate = schedule_health.stood_down()
-    found = states(jobs, schedule_health.problems(jobs, now, deliberate), deliberate)
+    lines = schedule_health.problems(
+        jobs, now, deliberate, artifacts={**schedule_health.ARTIFACTS, **tasks}
+    )
+    found = collector_task_states(states(jobs, lines, deliberate), tasks)
     return sorted(found + collector_states(), key=lambda item: (-RANK[item.state], item.name))
+
+
+def collector_task_states(found: list[JobState], tasks: dict[str, str]) -> list[JobState]:
+    """`found` with each scheduled collector's task relabelled as a collector row, and a
+    red row for one this machine runs whose task the scheduler does not have.
+
+    That second half is the point of asking by name: a task that was never registered,
+    or was deleted by hand, is absent from the query, and a row that simply vanished
+    would read as nothing to report -- the silence `schedule_health` exists to break.
+    """
+    seen = {item.name for item in found}
+    relabelled = [
+        JobState(collectors.ROW_PREFIX + item.name, item.state, item.detail, tasks[item.name])
+        if item.name in tasks
+        else item
+        for item in found
+    ]
+    missing = [
+        JobState(
+            collectors.ROW_PREFIX + name,
+            FAIL,
+            "not scheduled on this machine -- `collectors.py maintain` registers it",
+            collectors.ARTIFACT.as_posix(),
+        )
+        for name in sorted(tasks)
+        if name not in seen
+    ]
+    return relabelled + missing
 
 
 def collector_states() -> list[JobState]:

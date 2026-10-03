@@ -324,8 +324,12 @@ def parse_time(raw: str) -> _dt.datetime | None:
     return None
 
 
-def parse_tasks(stdout: str, prefix: str = PREFIX) -> list[Job]:
-    """Every `prefix` job in `schtasks /Query /FO CSV /V` output.
+def parse_tasks(stdout: str, prefix: str = PREFIX, also: frozenset[str] = frozenset()) -> list[Job]:
+    """Every `prefix` job in `schtasks /Query /FO CSV /V` output, plus any named in `also`.
+
+    `also` is how the tray asks about the scheduled collectors in the same query: they
+    are named after their project, not `devkit-`, because they are not devkit's jobs --
+    which is also why `report`, and the fix pass behind it, never pass it.
 
     The header repeats between tasks in some Windows builds, so rows whose values equal
     the column names are dropped -- without that, one phantom job per task appears with
@@ -347,7 +351,7 @@ def parse_tasks(stdout: str, prefix: str = PREFIX) -> list[Job]:
     merged: dict[str, Job] = {}
     for row in csv.DictReader(io.StringIO(stdout)):
         name = (row.get("TaskName") or "").lstrip("\\")
-        if not name.startswith(prefix) or name == "TaskName":
+        if not (name.startswith(prefix) or name in also) or name == "TaskName":
             continue
         raw_result = (row.get("Last Result") or "").strip()
         try:
@@ -437,6 +441,7 @@ def problems(
     now: _dt.datetime | None = None,
     deliberate: frozenset[str] = frozenset(),
     root: Path | None = None,
+    artifacts: dict[str, str] | None = None,
 ) -> list[str]:
     """One line per job that needs attention; [] when they are all healthy.
 
@@ -452,66 +457,78 @@ def problems(
     run from a tree cut off that checkout passes it: 104d356c was filed from a
     supervisor's tree as "no logs/reconcile.log" beside evidence naming the checkout's
     own kept copy, because the hint stat'ed the tree's empty `logs/`.
+
+    `artifacts` replaces `ARTIFACTS` for the pointers, for a caller judging jobs that
+    table does not list -- the tray's scheduled collectors.
     """
     moment = now or _dt.datetime.now()
-    found: list[str] = []
-    for job in sorted(jobs, key=lambda item: item.name):
-        if not job.enabled:
-            if job.name in deliberate:
-                # Stood down through `harness-switch.py --off jobs`, which wrote the
-                # name to the ledger `deliberate` came from. A state someone chose is
-                # not a fault, and `--status` is where it is reported; saying it again
-                # here as a problem is what trains a reader to skim this whole block.
-                continue
-            found.append(f"{job.name}: disabled -- nothing is running it")
-            continue
-        if job.last_run is None:
-            # A job registered an hour ago and due tonight has never run and is
-            # perfectly healthy. Only a *missed* first run is worth a line, and the
-            # scheduler says which that is: its next run is already in the past.
-            if job.event_only:
-                continue  # it fires on its event, which has not come round yet
-            if job.next_run is None or job.next_run < moment:
-                found.append(f"{job.name}: registered but has never run")
-            continue
-        if job.last_result in OVERLAPPING:
-            # Not a failure, but not silence either: a job whose pass outlives its own
-            # interval is running essentially continuously, and that background cost is
-            # invisible everywhere else.
-            found.append(
-                f"{job.name}: a run was still going at "
-                f"{job.last_run:%Y-%m-%d %H:%M}, so the scheduled fire was skipped -- "
-                f"its runs are overlapping"
-                f"{artifact_hint(job.name, root=root, since=job.last_run)}"
-            )
-            continue
-        if job.last_result not in NOT_A_FAILURE:
-            found.append(
-                f"{job.name}: last run failed (exit {job.last_result}) at "
-                f"{job.last_run:%Y-%m-%d %H:%M}"
-                f"{artifact_hint(job.name, root=root, since=job.last_run)}"
-            )
-            continue
-        interval = job.interval
-        if interval and moment - job.last_run > interval * STALE_INTERVALS:
-            missed = (moment - job.last_run) / interval
-            found.append(
-                f"{job.name}: has not run since {job.last_run:%Y-%m-%d %H:%M} "
-                f"({missed:.0f} intervals ago)"
-            )
-            continue
-        base = virtualenv_interpreter(job)
-        if base is not None:
-            found.append(
-                f"{job.name}: runs {job.interpreter}, a virtualenv stub that defers to "
-                f"{base} -- under uv it spawns that as a child, and Windows gives the "
-                f"child of a console-less task a visible console. Re-run the job's "
-                f"installer with --yes to re-register it against the base interpreter"
-            )
-    return found
+    found = (
+        job_problem(job, moment, deliberate, root, artifacts)
+        for job in sorted(jobs, key=lambda item: item.name)
+    )
+    return [line for line in found if line is not None]
 
 
-def query(prefix: str = PREFIX) -> list[Job]:
+def job_problem(
+    job: Job,
+    moment: _dt.datetime,
+    deliberate: frozenset[str],
+    root: Path | None,
+    artifacts: dict[str, str] | None,
+) -> str | None:
+    """`problems`' line for one job, in its order of precedence; None when it is healthy."""
+    if not job.enabled:
+        if job.name in deliberate:
+            # Stood down through `harness-switch.py --off jobs`, which wrote the
+            # name to the ledger `deliberate` came from. A state someone chose is
+            # not a fault, and `--status` is where it is reported; saying it again
+            # here as a problem is what trains a reader to skim this whole block.
+            return None
+        return f"{job.name}: disabled -- nothing is running it"
+    if job.last_run is None:
+        # A job registered an hour ago and due tonight has never run and is
+        # perfectly healthy. Only a *missed* first run is worth a line, and the
+        # scheduler says which that is: its next run is already in the past.
+        if job.event_only:
+            return None  # it fires on its event, which has not come round yet
+        if job.next_run is None or job.next_run < moment:
+            return f"{job.name}: registered but has never run"
+        return None
+    if job.last_result in OVERLAPPING:
+        # Not a failure, but not silence either: a job whose pass outlives its own
+        # interval is running essentially continuously, and that background cost is
+        # invisible everywhere else.
+        return (
+            f"{job.name}: a run was still going at "
+            f"{job.last_run:%Y-%m-%d %H:%M}, so the scheduled fire was skipped -- "
+            f"its runs are overlapping"
+            f"{artifact_hint(job.name, artifacts, root=root, since=job.last_run)}"
+        )
+    if job.last_result not in NOT_A_FAILURE:
+        return (
+            f"{job.name}: last run failed (exit {job.last_result}) at "
+            f"{job.last_run:%Y-%m-%d %H:%M}"
+            f"{artifact_hint(job.name, artifacts, root=root, since=job.last_run)}"
+        )
+    interval = job.interval
+    if interval and moment - job.last_run > interval * STALE_INTERVALS:
+        missed = (moment - job.last_run) / interval
+        return (
+            f"{job.name}: has not run since {job.last_run:%Y-%m-%d %H:%M} "
+            f"({missed:.0f} intervals ago)"
+        )
+    base = virtualenv_interpreter(job)
+    if base is None:
+        return None
+    return (
+        f"{job.name}: runs {job.interpreter}, a virtualenv stub that defers to "
+        f"{base} -- under uv it spawns that as a child, and Windows gives the "
+        f"child of a console-less task a visible console. Re-run the job's "
+        f"installer with --yes to re-register it against the base interpreter"
+    )
+
+
+def query(prefix: str = PREFIX, also: frozenset[str] = frozenset()) -> list[Job]:
     """Ask the scheduler. [] on any failure, including not being Windows at all."""
     try:
         result = subprocess.run(
@@ -526,7 +543,7 @@ def query(prefix: str = PREFIX) -> list[Job]:
         return []
     if result.returncode != 0:
         return []
-    return parse_tasks(result.stdout, prefix)
+    return parse_tasks(result.stdout, prefix, also)
 
 
 def report(prefix: str = PREFIX, now: _dt.datetime | None = None) -> list[str]:

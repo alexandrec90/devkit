@@ -94,6 +94,7 @@ TRAY_MODULES = (
     "harness_state",
     # `tray_state` draws the ingestion collectors' rows through `collectors.row`.
     "collectors",
+    "collector_tasks",
     "collectors_config",
     "devkit_jsonc",
     "sweep",

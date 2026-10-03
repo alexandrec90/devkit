@@ -47,6 +47,14 @@ def test_one_missed_run_is_not_reported():
 # --- the four ways a scheduled job goes quiet -----------------------------------
 
 
+def test_job_problem_is_one_jobs_line_or_none():
+    """`problems` is this over every job, in name order, keeping the lines."""
+    assert health.job_problem(job(), NOW, frozenset(), None, None) is None
+    off = job(enabled=False)
+    assert "disabled" in health.job_problem(off, NOW, frozenset(), None, None)
+    assert health.job_problem(off, NOW, frozenset({off.name}), None, None) is None
+
+
 def test_a_disabled_job_is_reported():
     """Lived: reconcile was disabled 26 minutes after it was created and stayed off for
     five days. 471 missed runs, nothing red anywhere, 26 leaked boxes and 5 GB."""
@@ -311,6 +319,25 @@ def test_only_devkit_jobs_are_read():
     updater on the machine out of a devkit status line."""
     names = [item.name for item in health.parse_tasks(CSV)]
     assert names == ["devkit-upgrade-projects", "devkit-worktree-reconcile"]
+
+
+def test_a_named_task_outside_the_prefix_is_read_only_when_asked_for():
+    """The tray's scheduled collectors are named after their project, not `devkit-`;
+    asked for by name, and never by `report`, which the fix pass reads."""
+    names = [item.name for item in health.parse_tasks(CSV, also=frozenset({"SomeVendorUpdate"}))]
+    assert names == ["devkit-upgrade-projects", "devkit-worktree-reconcile", "SomeVendorUpdate"]
+
+
+def test_a_failure_line_points_at_the_artifact_it_is_handed(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "collector-x.log").write_text("exit 1\n", encoding="utf-8")
+    failing = job(name="x", last_result=1)
+    (line,) = health.problems(
+        [failing], NOW, root=tmp_path, artifacts={"x": "logs/collector-x.log"}
+    )
+    assert line.endswith("see logs/collector-x.log")
+    (bare,) = health.problems([failing], NOW, root=tmp_path)
+    assert "see" not in bare
 
 
 def test_the_leading_backslash_is_stripped():

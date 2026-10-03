@@ -29,6 +29,22 @@ def values(lines):
     return [line.split(picker_rows.FIELD_SEP)[0] for line in lines]
 
 
+def test_a_scheduled_collector_can_be_run_once_and_only_by_name():
+    scraper = config.Collector("social-scraper", command=("uv",), minutes=30)
+    got = values(picker.rows([*DECLARED, scraper], {}))
+    assert "run-once:social-scraper" in got
+    assert "run-once" not in got and "run-once:ibkr_trader" not in got
+    assert picker.ONCE == collectors.ONCE
+    assert collectors.split_pick(["run-once:social-scraper"]) == ["run-once", "social-scraper"]
+
+
+def test_each_kind_of_collector_is_described_as_what_it_is():
+    scraper = config.Collector("social-scraper", command=("uv", "run", "s"), minutes=30)
+    assert "Compose service `app` in ibkr_trader" in picker.what(DECLARED[0])
+    words = picker.what(scraper)
+    assert "`uv run s`" in words and "every 30 minutes" in words and "Compose" not in words
+
+
 def test_status_is_first_so_a_misclick_changes_nothing():
     assert values(picker.rows(DECLARED, {}))[0] == "status"
 

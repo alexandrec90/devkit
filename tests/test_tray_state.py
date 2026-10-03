@@ -36,6 +36,7 @@ def no_collectors(monkeypatch):
     Off by default here, so a workstation that runs a collector gets the same answers as
     CI; the tests that want rows stub `collectors.tray_rows` themselves."""
     monkeypatch.setattr(tray_state.collectors, "tray_rows", lambda: [])
+    monkeypatch.setattr(tray_state.collectors, "scheduled_tasks", lambda: {})
 
 
 # --- reading a problem line --------------------------------------------------
@@ -216,11 +217,15 @@ def test_the_colours_differ_in_brightness_as_well_as_hue():
 def test_refresh_asks_the_scheduler_and_returns_what_the_tray_draws(monkeypatch):
     """The one function the tray calls on a timer. It exists so the message loop holds
     no knowledge of `schedule_health` at all."""
-    monkeypatch.setattr(schedule_health, "query", lambda: jobs("devkit-a", "devkit-b"))
+    monkeypatch.setattr(
+        schedule_health, "query", lambda also=frozenset(): jobs("devkit-a", "devkit-b")
+    )
     monkeypatch.setattr(
         schedule_health,
         "problems",
-        lambda found, now=None, deliberate=frozenset(): ["devkit-b: disabled -- nothing runs it"],
+        lambda found, now=None, deliberate=frozenset(), artifacts=None: [
+            "devkit-b: disabled -- nothing runs it"
+        ],
     )
     found = tray_state.refresh()
     assert [(item.name, item.state) for item in found] == [
@@ -230,9 +235,11 @@ def test_refresh_asks_the_scheduler_and_returns_what_the_tray_draws(monkeypatch)
 
 
 def test_refresh_on_a_machine_with_no_scheduler_reports_nothing_registered(monkeypatch):
-    monkeypatch.setattr(schedule_health, "query", lambda: [])
+    monkeypatch.setattr(schedule_health, "query", lambda also=frozenset(): [])
     monkeypatch.setattr(
-        schedule_health, "problems", lambda found, now=None, deliberate=frozenset(): []
+        schedule_health,
+        "problems",
+        lambda found, now=None, deliberate=frozenset(), artifacts=None: [],
     )
     assert tray_state.refresh() == []
     assert tray_state.overall(tray_state.refresh()) == tray_state.WARN
@@ -268,12 +275,14 @@ def test_refresh_tells_problems_what_was_stood_down_on_purpose(monkeypatch):
     the operator stops reading the icon. `problems` only knows the difference if its
     caller passes the ledger, and `refresh` is a caller it would be easy to forget."""
     seen = {}
-    monkeypatch.setattr(schedule_health, "query", lambda: jobs("devkit-a"))
+    monkeypatch.setattr(schedule_health, "query", lambda also=frozenset(): jobs("devkit-a"))
     monkeypatch.setattr(schedule_health, "stood_down", lambda: frozenset({"devkit-a"}))
     monkeypatch.setattr(
         schedule_health,
         "problems",
-        lambda found, now=None, deliberate=frozenset(): seen.update(passed=deliberate) or [],
+        lambda found, now=None, deliberate=frozenset(), artifacts=None: (
+            seen.update(passed=deliberate) or []
+        ),
     )
     tray_state.refresh()
     assert seen["passed"] == frozenset({"devkit-a"})
@@ -283,9 +292,11 @@ def test_refresh_tells_problems_what_was_stood_down_on_purpose(monkeypatch):
 
 
 def test_a_collector_row_joins_the_jobs_and_sorts_by_how_loud_it_is(monkeypatch):
-    monkeypatch.setattr(schedule_health, "query", lambda: jobs("devkit-a"))
+    monkeypatch.setattr(schedule_health, "query", lambda also=frozenset(): jobs("devkit-a"))
     monkeypatch.setattr(
-        schedule_health, "problems", lambda found, now=None, deliberate=frozenset(): []
+        schedule_health,
+        "problems",
+        lambda found, now=None, deliberate=frozenset(), artifacts=None: [],
     )
     monkeypatch.setattr(
         tray_state.collectors,
@@ -317,3 +328,80 @@ def test_the_collector_levels_are_the_trays_levels():
     respelling on either side would leave a row with no colour (`RANK` KeyError)."""
     levels = {tray_state.collectors.OK, tray_state.collectors.WARN, tray_state.collectors.FAIL}
     assert levels == set(tray_state.RANK)
+
+
+# --- a scheduled collector is a scheduler row under the collectors' label -------------
+
+
+def test_a_line_about_a_known_non_devkit_job_names_it():
+    line = "social-scraper: last run failed (exit 1) at 2026-10-02 14:30"
+    assert tray_state.named_in(line) == ""
+    assert tray_state.named_in(line, frozenset({"social-scraper"})) == "social-scraper"
+
+
+def test_a_scheduled_collector_is_asked_about_in_the_same_query_and_judged_the_same(
+    monkeypatch,
+):
+    asked = {}
+    tasks = {"social-scraper": "logs/collector-social-scraper.log"}
+    monkeypatch.setattr(tray_state.collectors, "scheduled_tasks", lambda: tasks)
+
+    def query(also=frozenset()):
+        asked["also"] = also
+        return jobs("devkit-a", "social-scraper")
+
+    def problems(found, now=None, deliberate=frozenset(), artifacts=None):
+        asked["artifacts"] = artifacts
+        return ["social-scraper: last run failed (exit 1) at 2026-10-02 14:30"]
+
+    monkeypatch.setattr(schedule_health, "query", query)
+    monkeypatch.setattr(schedule_health, "problems", problems)
+    found = tray_state.refresh()
+    assert asked["also"] == frozenset({"social-scraper"})
+    assert asked["artifacts"]["social-scraper"] == "logs/collector-social-scraper.log"
+    assert asked["artifacts"]["devkit-fix-pass"] == "logs/fix-pass.log"
+    assert [(item.name, item.state) for item in found] == [
+        ("collector: social-scraper", tray_state.FAIL),
+        ("devkit-a", tray_state.OK),
+    ]
+    assert found[0].artifact == "logs/collector-social-scraper.log"
+
+
+def test_collector_task_states_relabels_the_tasks_and_adds_the_missing_ones():
+    found = [
+        tray_state.JobState("devkit-a", tray_state.OK),
+        tray_state.JobState("social-scraper", tray_state.WARN, "slow"),
+    ]
+    tasks = {"social-scraper": "logs/collector-social-scraper.log", "other": "logs/o.log"}
+    relabelled = tray_state.collector_task_states(found, tasks)
+    assert relabelled[:2] == [
+        tray_state.JobState("devkit-a", tray_state.OK),
+        tray_state.JobState(
+            "collector: social-scraper",
+            tray_state.WARN,
+            "slow",
+            "logs/collector-social-scraper.log",
+        ),
+    ]
+    ((name, state),) = [(item.name, item.state) for item in relabelled[2:]]
+    assert (name, state) == ("collector: other", tray_state.FAIL)
+    assert tray_state.collector_task_states(found[:1], {}) == found[:1]
+
+
+def test_a_scheduled_collector_with_no_task_is_red_rather_than_absent(monkeypatch):
+    """Asked about by name, so a task never registered or deleted by hand is a row that
+    says so -- not a row that silently is not there."""
+    monkeypatch.setattr(
+        tray_state.collectors,
+        "scheduled_tasks",
+        lambda: {"social-scraper": "logs/collector-social-scraper.log"},
+    )
+    monkeypatch.setattr(schedule_health, "query", lambda also=frozenset(): jobs("devkit-a"))
+    monkeypatch.setattr(
+        schedule_health,
+        "problems",
+        lambda found, now=None, deliberate=frozenset(), artifacts=None: [],
+    )
+    first, _devkit = tray_state.refresh()
+    assert (first.name, first.state) == ("collector: social-scraper", tray_state.FAIL)
+    assert "not scheduled" in first.detail and first.artifact == "logs/collectors.log"

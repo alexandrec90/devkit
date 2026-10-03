@@ -43,22 +43,42 @@ RUN = "run"
 STOP = "stop"
 MODES = frozenset({RUN, STOP})
 
+# devkit's own scheduled jobs' namespace (`schedule_health.PREFIX`), spelled here because
+# this module spawns nothing and imports nothing that does.
+DEVKIT_PREFIX = "devkit-"
+
 # Machine-local by construction: `logs/` is ignored in every devkit checkout.
 ASSIGNMENT = Path("logs/collectors.machine.json")
 
 
 @dataclass(frozen=True)
 class Collector:
-    """One compose service that does scheduled work with nobody connected to it.
+    """One piece of ingestion that does scheduled work with nobody connected to it.
 
-    `health` is a command run *inside* the running container, whose exit code is the
-    project's own verdict on whether ingestion is actually pulling data. Empty means the
-    project offers none, and only "is the container up" is reported.
+    Two kinds, told apart by which field is set:
+
+    - **a container** (`service`): a compose service keeping its own clock inside, which
+      this job keeps up. `health` is a command run *inside* it, whose exit code is the
+      project's own verdict on whether ingestion is actually pulling data. Empty means the
+      project offers none, and only "is the container up" is reported.
+    - **a scheduled command** (`command`): argv run on the host from the project's
+      checkout every `minutes`, by a Windows Scheduled Task of its own named after the
+      collector (`collector_tasks`). For work that cannot live in a container --
+      social-scraper drives the host's Chrome. `needs` are compose services started
+      before each fire. The command's exit code is the verdict, so 0 has to cover "ran
+      and deliberately did nothing".
     """
 
     project: str
-    service: str
+    service: str = ""
     health: tuple[str, ...] = ()
+    command: tuple[str, ...] = ()
+    minutes: int = 0
+    needs: tuple[str, ...] = ()
+
+    @property
+    def scheduled(self) -> bool:
+        return bool(self.command)
 
 
 def home(root: Path = REPO_ROOT) -> Path:
@@ -74,10 +94,43 @@ def home(root: Path = REPO_ROOT) -> Path:
     return sweep.source_checkout(root)
 
 
+def _argv(raw: object) -> tuple[str, ...] | None:
+    """A JSON list of non-empty strings as a tuple; None for anything else."""
+    if not isinstance(raw, list) or not all(isinstance(part, str) and part for part in raw):
+        return None
+    return tuple(raw)
+
+
+def _scheduled_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
+    """A `command` entry, or `None` and the reason it was refused."""
+    if "service" in raw:
+        return None, f"{project}: has both `service` and `command` -- a collector is one kind"
+    command = _argv(raw["command"])
+    if not command:
+        return None, f"{project}: `command` must be a non-empty list of strings (argv)"
+    minutes = raw.get("minutes")
+    # `bool` is an `int`: `"minutes": true` would register a one-minute task.
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes < 1:
+        return None, f"{project}: `minutes` must be a positive whole number of minutes"
+    needs = _argv(raw.get("needs", []))
+    if needs is None:
+        return None, f"{project}: `needs` must be a list of compose service names"
+    if project.startswith(DEVKIT_PREFIX):
+        # The task is named after the collector, and `devkit-` is devkit's own jobs'
+        # namespace: `schedule_health` and the fix pass would report it as a devkit job.
+        return None, f"{project}: a collector's name may not start with `{DEVKIT_PREFIX}`"
+    return Collector(project, command=command, minutes=minutes, needs=needs), ""
+
+
 def _entry(project: str, raw: object) -> tuple[Collector | None, str]:
     """One setting entry as a `Collector`, or `None` and the reason it was refused."""
     if not isinstance(raw, dict):
-        return None, f"{project}: expected an object with a `service`, got {type(raw).__name__}"
+        return None, (
+            f"{project}: expected an object with a `service` or a `command`, "
+            f"got {type(raw).__name__}"
+        )
+    if "command" in raw:
+        return _scheduled_entry(project, raw)
     service = raw.get("service")
     if not isinstance(service, str) or not service:
         return None, f"{project}: no `service` -- which compose service is the collector?"

@@ -450,11 +450,285 @@ def test_reassign_refuses_a_typo_without_writing(tmp_path):
 def test_status_names_an_engine_it_could_not_ask(tmp_path):
     chosen = [target(tmp_path)]
     report = collectors.Report()
-    collectors.status([chosen[0].collector], {"ibkr_trader": RUN}, chosen, FakeDocker(None), report)
+    collectors.status([chosen[0].collector], chosen, FakeDocker(None), report)
     assert report.lines == ["ibkr_trader: assigned `run` -- `app` docker not answering"]
 
 
 def test_status_with_nothing_declared_says_where_to_declare_it():
     report = collectors.Report()
-    collectors.status([], {}, [], FakeDocker(), report)
+    collectors.status([], [], FakeDocker(), report)
     assert config.SETTING in report.lines[0]
+
+
+def test_status_reads_the_mode_off_the_targets_and_skips_the_unassigned(tmp_path):
+    stopped = target(tmp_path, mode=STOP)
+    other = config.Collector("sports_betting", "collector")
+    report = collectors.Report()
+    collectors.status([stopped.collector, other], [stopped], FakeDocker([]), report)
+    assert report.lines == [
+        "ibkr_trader: assigned `stop` -- `app` no container",
+        "sports_betting: not assigned on this machine (hands off)",
+    ]
+
+
+def test_apply_verb_hands_back_only_what_it_assigned(tmp_path):
+    declared = [config.Collector("a", "s"), config.Collector("b", "s")]
+    report = collectors.Report()
+    args = collectors.parse_args(["stop-here", "a"])
+    assert collectors.apply_verb(args, tmp_path, declared, lambda argv: 0 / 0, report) == {
+        "a": STOP
+    }
+    released = collectors.parse_args(["release", "a"])
+    assert collectors.apply_verb(released, tmp_path, declared, lambda argv: 0 / 0, report) is None
+    assert config.load_assignment(tmp_path / config.ASSIGNMENT) == {}
+
+
+def test_apply_verb_on_a_typo_is_nothing_to_act_on_and_a_failure(tmp_path):
+    report = collectors.Report()
+    args = collectors.parse_args(["run-here", "nope"])
+    assert collectors.apply_verb(args, tmp_path, [config.Collector("a", "s")], None, report) is None
+    assert report.failures == 1
+
+
+# --- a scheduled collector -------------------------------------------------------------
+
+SCHEDULED = {
+    "ibkr_trader": {"service": "app", "health": ["h"]},
+    "social-scraper": {"command": ["uv", "run", "social-scraper", "scrape"], "minutes": 30},
+}
+
+
+class FakeSchtasks:
+    """Nothing registered until `/Create`; records every call."""
+
+    def __init__(self, registered=False):
+        self.registered = registered
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv):
+        argv = list(argv)
+        self.calls.append(argv)
+        if argv[0] == "whoami":
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        if argv[1] == "/Query":
+            code = 0 if self.registered else 1
+            body = "<Exec><Command>x</Command></Exec>" if code == 0 else ""
+            return subprocess.CompletedProcess(argv, code, body, "")
+        if argv[1] == "/Create":
+            self.registered = True
+        if argv[1] == "/Delete":
+            self.registered = False
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def verbs(self):
+        return [argv[1] for argv in self.calls if argv[0] == "schtasks"]
+
+
+def scraper_home(tmp_path, monkeypatch, assignment=None):
+    root = devkit_home(tmp_path, monkeypatch, assignment, SCHEDULED)
+    (tmp_path / "social-scraper" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(collectors.collector_tasks, "interpreter", lambda: r"C:\py\pythonw.exe")
+    return root
+
+
+def test_run_here_registers_a_scheduled_collectors_task_and_asks_docker_nothing(
+    tmp_path, monkeypatch
+):
+    scraper_home(tmp_path, monkeypatch)
+    docker, schtasks = FakeDocker([]), FakeSchtasks()
+    assert collectors.main(["run-here", "social-scraper"], docker=docker, run=schtasks) == 0
+    assert "/Create" in schtasks.verbs()
+    assert docker.calls == []
+
+
+def test_stop_here_removes_a_scheduled_collectors_task(tmp_path, monkeypatch):
+    scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    schtasks = FakeSchtasks(registered=True)
+    assert collectors.main(["stop-here", "social-scraper"], run=schtasks) == 0
+    assert "/Delete" in schtasks.verbs()
+
+
+def test_release_removes_a_scheduled_collectors_task_too(tmp_path, monkeypatch):
+    """Unlike a container, the task exists only because this job registered it; left
+    behind, it would fire with nobody assigned."""
+    root = scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    schtasks = FakeSchtasks(registered=True)
+    assert collectors.main(["release", "social-scraper"], run=schtasks) == 0
+    assert "/Delete" in schtasks.verbs()
+    assert config.load_assignment(root / config.ASSIGNMENT) == {}
+
+
+def test_the_pass_keeps_both_kinds(tmp_path, monkeypatch):
+    scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN, "ibkr_trader": RUN})
+    docker, schtasks = FakeDocker([]), FakeSchtasks()
+    assert collectors.main(["maintain"], docker=docker, run=schtasks) == 0
+    assert "/Create" in schtasks.verbs()
+    assert ("up", "ibkr_trader", "app") in docker.calls
+
+
+def test_status_reports_a_scheduled_collector_without_registering_it(tmp_path, monkeypatch, capsys):
+    scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    docker, schtasks = FakeDocker([]), FakeSchtasks()
+    assert collectors.main([], docker=docker, run=schtasks) == 0
+    assert "/Create" not in schtasks.verbs() and docker.calls == []
+    assert "social-scraper: assigned `run` --" in capsys.readouterr().out
+
+
+def test_fire_runs_the_command_and_exits_with_its_code(tmp_path, monkeypatch):
+    root = scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    seen = []
+
+    def spawner(argv, cwd, timeout):
+        seen.append((list(argv), Path(cwd).name))
+        return 4, "x: challenge page"
+
+    assert collectors.main(["fire", "social-scraper"], spawner=spawner) == 4
+    assert seen[0][1] == "social-scraper"
+    log = (root / "logs" / "collector-social-scraper.log").read_text(encoding="utf-8")
+    assert "exit 4" in log and "x: challenge page" in log
+    assert not (root / collectors.ARTIFACT).exists(), "the pass's log is not the fire's"
+
+
+def test_fire_on_a_machine_not_assigned_runs_nothing(tmp_path, monkeypatch):
+    """A task the pass has not deleted yet must not become a second writer."""
+    scraper_home(tmp_path, monkeypatch, {"social-scraper": STOP})
+
+    def spawner(argv, cwd, timeout):
+        raise AssertionError("ran on a machine set to stop it")
+
+    assert collectors.main(["fire", "social-scraper"], spawner=spawner) == 0
+
+
+def test_fire_names_an_undeclared_collector(tmp_path, monkeypatch):
+    root = scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    assert collectors.main(["fire", "ibkr_trader"]) == 2
+    log = (root / "logs" / "collector-ibkr_trader.log").read_text(encoding="utf-8")
+    assert "declares no scheduled collector" in log
+
+
+def test_fire_takes_exactly_one_name(tmp_path, monkeypatch):
+    scraper_home(tmp_path, monkeypatch)
+    assert collectors.main(["fire"]) == 2
+
+
+class Running(FakeSchtasks):
+    """A scheduler whose `/FO CSV` status says the task is mid-run."""
+
+    def __call__(self, argv):
+        argv = list(argv)
+        if argv[:2] == ["schtasks", "/Query"] and "CSV" in argv:
+            self.calls.append(argv)
+            row = '"\\social-scraper","10/2/2026 3:00:00 PM","Running"\n'
+            return subprocess.CompletedProcess(argv, 0, row, "")
+        return super().__call__(argv)
+
+
+def test_run_once_runs_by_hand_whatever_this_machine_is_set_to(tmp_path, monkeypatch, capsys):
+    """Its first run comes before `run-here`, which is the case the task exists for."""
+    scraper_home(tmp_path, monkeypatch)
+    seen = []
+
+    def streamer(argv, cwd):
+        seen.append((list(argv)[1:], Path(cwd).name))
+        return 0
+
+    assert collectors.main(["run-once:social-scraper"], run=FakeSchtasks(), streamer=streamer) == 0
+    assert seen == [(["run", "social-scraper", "scrape"], "social-scraper")]
+    assert "social-scraper exited 0" in capsys.readouterr().out
+
+
+def test_run_once_is_refused_while_the_scheduled_run_is_going(tmp_path, monkeypatch):
+    scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+
+    def streamer(argv, cwd):
+        raise AssertionError("a second run on one browser profile")
+
+    assert collectors.main(["run-once", "social-scraper"], run=Running(), streamer=streamer) == 2
+
+
+def test_run_once_names_a_collector_that_is_not_scheduled(tmp_path, monkeypatch, capsys):
+    scraper_home(tmp_path, monkeypatch)
+    assert collectors.main(["run-once", "ibkr_trader"], run=FakeSchtasks()) == 2
+    assert "declares no scheduled collector" in capsys.readouterr().out
+
+
+def test_the_scheduled_tasks_the_tray_asks_about_are_the_ones_run_here(tmp_path, monkeypatch):
+    scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN, "ibkr_trader": RUN})
+    assert collectors.scheduled_tasks() == {"social-scraper": "logs/collector-social-scraper.log"}
+
+
+def test_a_scheduled_collector_this_machine_runs_is_not_a_container_row(tmp_path, monkeypatch):
+    """Its row is the scheduler's (`tray_state.collector_task_states`); asking docker
+    about it would report a container that was never meant to exist."""
+    scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    docker = FakeDocker([])
+    assert collectors.tray_rows(docker=docker) == []
+    assert docker.calls == []
+
+
+def test_a_scheduled_collector_set_to_stop_is_a_green_row(tmp_path, monkeypatch):
+    scraper_home(tmp_path, monkeypatch, {"social-scraper": STOP})
+    assert collectors.tray_rows(docker=FakeDocker([])) == [
+        ("collector: social-scraper", collectors.OK, "off on this machine (by choice)")
+    ]
+
+
+# --- the scheduled half, called directly ------------------------------------------------
+
+SCRAPER = config.Collector("social-scraper", command=("uv", "run"), minutes=30)
+PYTHONW = r"C:\py\pythonw.exe"
+
+
+def test_assigned_is_what_is_declared_and_what_this_machine_was_told(tmp_path, monkeypatch):
+    root = devkit_home(tmp_path, monkeypatch, {"ibkr_trader": STOP})
+    declared, chosen = collectors.assigned(root)
+    assert sorted(c.project for c in declared) == ["ibkr_trader", "sports_betting"]
+    assert [(t.collector.project, t.mode) for t in chosen] == [("ibkr_trader", STOP)]
+    assert chosen[0].checkout == tmp_path / "ibkr_trader"
+
+
+def test_assigned_reads_no_workspace_on_a_machine_assigned_nothing(tmp_path, monkeypatch):
+    root = devkit_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(collectors.config, "declared", lambda base: 0 / 0)
+    assert collectors.assigned(root) == ([], [])
+
+
+def test_maintain_scheduled_registers_on_run_and_removes_on_stop(tmp_path):
+    schtasks, report = FakeSchtasks(), collectors.Report()
+    here = collectors.Target(SCRAPER, RUN, tmp_path / "social-scraper")
+    collectors.maintain_scheduled([here], tmp_path, report, schtasks, python=PYTHONW)
+    assert schtasks.verbs()[-1] == "/Create"
+    elsewhere = collectors.Target(SCRAPER, STOP, tmp_path / "social-scraper")
+    collectors.maintain_scheduled([elsewhere], tmp_path, report, schtasks, python=PYTHONW)
+    assert schtasks.verbs()[-1] == "/Delete"
+    assert report.failures == 0
+
+
+def test_maintain_scheduled_with_nothing_to_keep_asks_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(collectors.collector_tasks, "interpreter", lambda: 0 / 0)
+    collectors.maintain_scheduled([], tmp_path, collectors.Report(), lambda argv: 0 / 0)
+
+
+def test_fire_logs_under_its_own_name_and_returns_the_commands_code(tmp_path, monkeypatch):
+    root = scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    when = dt.datetime(2026, 10, 2, 15, 0)
+    code = collectors.fire("social-scraper", root, when, lambda argv, cwd, timeout: (3, "blocked"))
+    assert code == 3
+    log = (root / "logs" / "collector-social-scraper.log").read_text(encoding="utf-8")
+    assert log.startswith("# collector social-scraper 2026-10-02T15:00:00 -- exit 3")
+
+
+def test_run_once_streams_the_command_and_returns_its_code(tmp_path, monkeypatch, capsys):
+    root = scraper_home(tmp_path, monkeypatch)
+    assert collectors.run_once("social-scraper", root, FakeSchtasks(), lambda argv, cwd: 5) == 5
+    assert "social-scraper exited 5" in capsys.readouterr().out
+
+
+def test_single_takes_exactly_one_name_and_dispatches_on_the_verb(tmp_path, monkeypatch, capsys):
+    root = scraper_home(tmp_path, monkeypatch)
+    when = dt.datetime(2026, 10, 2, 15, 0)
+    two = collectors.parse_args(["fire", "a", "b"])
+    assert collectors.single(two, root, when, FakeSchtasks(), None, None) == 2
+    assert "exactly one collector name" in capsys.readouterr().err
+    once = collectors.parse_args(["run-once", "social-scraper"])
+    assert collectors.single(once, root, when, FakeSchtasks(), None, lambda argv, cwd: 7) == 7
