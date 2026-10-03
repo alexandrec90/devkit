@@ -28,7 +28,9 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -214,8 +216,9 @@ def _make_deletable(target: str) -> None:
         pass
 
 
-def _retry_delete(failed_path: str) -> str:
-    """Delete one entry `rmtree` could not, by path. Empty string on success.
+def _retry_delete(failed_path: str, set_aside: bool = False) -> str:
+    """Delete one entry `rmtree` could not, by path. Empty string on success, which with
+    `set_aside` includes a refused file moved out of the tree (`_set_aside`).
 
     Deliberately **not** the callable `rmtree` hands the hook. On POSIX `rmtree` walks
     with directory file descriptors, so that callable is `os.open`/`os.unlink`/`os.rmdir`
@@ -232,8 +235,43 @@ def _retry_delete(failed_path: str) -> str:
         else:
             os.unlink(failed_path)
     except OSError as exc:
+        if set_aside and _set_aside(failed_path):
+            return ""
         return f"{failed_path}: {exc.strerror or exc}"
     return ""
+
+
+def trash_dir() -> Path:
+    """Where `_set_aside` moves a link it may not delete: this user's temp directory,
+    which is on the volume the trees are on for a rename to reach it."""
+    return Path(tempfile.gettempdir()) / "devkit-reap-trash"
+
+
+def _set_aside(failed_path: str) -> bool:
+    """Move a file the delete was refused on out of the tree, when it has other links.
+
+    uv links a package's files out of its cache into every `.venv`, and Windows refuses
+    to unlink *any* link of an image some process has mapped -- through whichever link
+    it loaded. So a merged tree's `pyarrow/arrow.dll` could not go while another
+    project's `scrape` ran from its own `.venv` (data-lake, 61d79c1d and e044f8ff), and
+    no eviction could help: the holder is not under the tree, and is not ours to kill.
+    A rename of a mapped image is allowed, and the file outlives the move in its other
+    links. A file with one link is never moved: whatever maps it is under the tree.
+
+    The trash is emptied first of whatever nothing maps any more.
+    """
+    try:
+        if not os.path.isfile(failed_path) or os.stat(failed_path).st_nlink < 2:
+            return False
+        trash = trash_dir()
+        for entry in os.scandir(trash) if trash.is_dir() else ():
+            _retry_delete(entry.path)
+        trash.mkdir(parents=True, exist_ok=True)
+        target = trash / f"{uuid.uuid4().hex[:12]}-{os.path.basename(failed_path)}"
+        os.replace(failed_path, _longpath(target))
+    except OSError:
+        return False
+    return True
 
 
 _LONGPATH = "\\\\?\\"
@@ -267,7 +305,7 @@ def unopenable(path: Path, walk=os.walk) -> list[str]:
     return found
 
 
-def remove_tree_longpath(path: Path) -> str:
+def remove_tree_longpath(path: Path, set_aside: bool = False) -> str:
     """Delete `path` recursively, surviving Windows MAX_PATH. Empty string on success.
 
     A provisioned box carries a `.venv` whose nesting routinely exceeds MAX_PATH, and
@@ -285,12 +323,14 @@ def remove_tree_longpath(path: Path) -> str:
     failures are the return value, and the first one is the deepest: `rmtree` is
     depth-first, so the file itself is reported ahead of the parents that could not go
     because of it.
+
+    `set_aside` lets a refused file with other links leave by rename (`_set_aside`).
     """
     target = _longpath(path)
     failures: list[str] = []
 
     def _clear_and_retry(_func, failed_path, _exc):
-        failure = _retry_delete(failed_path)
+        failure = _retry_delete(failed_path, set_aside)
         if failure:
             failures.append(failure)
 
@@ -322,6 +362,10 @@ def force_remove_box(
     box a `.venv` husk over one `_yaml.pyd` (fc85393e, 2026-10-01) that opened
     exclusively minutes later, and turned that reconcile red. What no wait can cure,
     a directory this token may not open (`unopenable`), is returned at once.
+
+    **The retries set aside what is mapped through another link** (`_set_aside`), and
+    only the retries: the first delete leaves such a file for the eviction, so a server
+    running out of the box is killed rather than left running a moved file.
     """
     error = remove_tree_longpath(path)
     if not error:
@@ -338,7 +382,7 @@ def force_remove_box(
         # Windows releases the image section after the process is reaped rather than
         # when taskkill returns, so an immediate retry can still be denied.
         sleep(pause)
-        error = remove_tree_longpath(path)
+        error = remove_tree_longpath(path, set_aside=True)
         if not error:
             break
     return error, notes

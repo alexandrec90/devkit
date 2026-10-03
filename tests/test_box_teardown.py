@@ -9,11 +9,14 @@ can afford to have go wrong.
 
 from __future__ import annotations
 
+import ctypes
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
+import _ctypes
 from support import box_teardown
 
 
@@ -236,6 +239,115 @@ def test_force_remove_waits_on_nothing_only_an_administrator_could_delete(tmp_pa
     monkeypatch.setattr(box_teardown, "unopenable", lambda path: [str(path / ".pytest_cache")])
     error, _notes = box_teardown.force_remove_box(box_dir, sleep=pytest_fail)
     assert "Access is denied" in error
+
+
+def _linked_from_a_cache(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
+    """`(box, cache file, trash)`: a box whose `.venv` DLL is a hard link of a cache file.
+
+    61d79c1d / e044f8ff: uv links a package's files out of its cache into every `.venv`,
+    so data-lake's merged session tree held `pyarrow/arrow.dll` as one of twelve links --
+    and social-scraper's long-running `scrape` had mapped the same file through its own.
+    Windows refuses to unlink *any* link of a mapped image, and no holder sits under the
+    box to evict, so the reap failed every run. The refusal is injected so the contract
+    is checked on both CI platforms; the test after this one is the real one.
+    """
+    cache = tmp_path / "uv-cache" / "arrow.dll"
+    cache.parent.mkdir()
+    cache.write_text("native", encoding="utf-8")
+    box_dir = tmp_path / "social-scraper-connector-1003"
+    linked = box_dir / ".venv" / "pyarrow" / "arrow.dll"
+    linked.parent.mkdir(parents=True)
+    os.link(cache, linked)
+    real_unlink = os.unlink
+
+    def mapped_elsewhere(path, *args, **kwargs):
+        if box_dir.name in str(path) and str(path).endswith("arrow.dll"):
+            raise PermissionError(13, "Access is denied")
+        return real_unlink(path, *args, **kwargs)
+
+    trash = tmp_path / "trash"
+    monkeypatch.setattr(os, "unlink", mapped_elsewhere)
+    monkeypatch.setattr(box_teardown, "evict_box_holders", lambda path, run=None: [])
+    monkeypatch.setattr(box_teardown, "trash_dir", lambda: trash)
+    return box_dir, cache, trash
+
+
+def test_a_link_mapped_through_another_path_is_set_aside_after_the_eviction(tmp_path, monkeypatch):
+    """The tree's link is moved out of it, which Windows allows of a mapped image; the
+    file itself lives on through its other links. Only once the eviction has had its
+    turn: the first delete sets nothing aside, so a dev server running out of the box is
+    still killed rather than left running a moved file."""
+    box_dir, cache, trash = _linked_from_a_cache(tmp_path, monkeypatch)
+    slept: list[float] = []
+    error, notes = box_teardown.force_remove_box(box_dir, sleep=slept.append)
+    assert (error, notes) == ("", [])
+    assert not box_dir.exists()
+    assert cache.read_text(encoding="utf-8") == "native"
+    assert [p.name.endswith("-arrow.dll") for p in trash.iterdir()] == [True]
+    assert slept == [box_teardown.RELEASE_PAUSES[0]]
+
+
+def test_a_file_with_no_other_link_is_never_set_aside(tmp_path, monkeypatch):
+    """Its only copy is the one in the box, so a holder of it is under the box too -- the
+    eviction's to kill -- and moving it out would leave that holder running."""
+    box_dir = tmp_path / "roguelike--devkit-upgrade-v0-11-37-1001"
+    slept = _released_after(box_dir, monkeypatch, refusals=99)
+    monkeypatch.setattr(box_teardown, "trash_dir", lambda: tmp_path / "trash")
+    error, _notes = box_teardown.force_remove_box(box_dir, sleep=slept.append)
+    assert "_yaml.pyd" in error
+    assert not (tmp_path / "trash").exists()
+
+
+def test_a_link_that_cannot_be_moved_keeps_its_failure(tmp_path, monkeypatch):
+    """A trash on another volume cannot take a rename, and the reap must still say so."""
+    box_dir, _cache, _trash = _linked_from_a_cache(tmp_path, monkeypatch)
+
+    def cross_volume(src, dst):
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr(os, "replace", cross_volume)
+    error, _notes = box_teardown.force_remove_box(box_dir, sleep=lambda _s: None)
+    assert "arrow.dll" in error and "Access is denied" in error
+
+
+def test_the_trash_is_this_users_own_temp_directory(monkeypatch, tmp_path):
+    """Per user, so an unelevated reap can always write it, and outside every tree, so
+    no husk sweep or `git status` ever counts what is in it."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    assert box_teardown.trash_dir() == tmp_path / "devkit-reap-trash"
+
+
+def test_the_trash_is_emptied_of_what_nothing_maps_any_more(tmp_path, monkeypatch):
+    box_dir, _cache, trash = _linked_from_a_cache(tmp_path, monkeypatch)
+    trash.mkdir()
+    (trash / "0f-old.dll").write_text("released since", encoding="utf-8")
+    box_teardown.force_remove_box(box_dir, sleep=lambda _s: None)
+    assert [p.name.endswith("-arrow.dll") for p in trash.iterdir()] == [True]
+
+
+def test_a_library_another_link_has_loaded_no_longer_keeps_the_box(tmp_path, monkeypatch):
+    """The real refusal: this process loads a native library through the cache's link,
+    as social-scraper's `scrape` did, and the box's link is the one being deleted.
+
+    Run on both platforms rather than skipped on one: POSIX unlinks a mapped file
+    without complaint, so there it holds trivially, and on Windows it is the refusal of
+    61d79c1d itself."""
+    library = Path(_ctypes.__file__)
+    cache = tmp_path / "uv-cache" / library.name
+    cache.parent.mkdir()
+    shutil.copy(library, cache)
+    box_dir = tmp_path / "social-scraper-connector-1003"
+    (box_dir / ".venv").mkdir(parents=True)
+    os.link(cache, box_dir / ".venv" / library.name)
+    monkeypatch.setattr(box_teardown, "evict_box_holders", lambda path, run=None: [])
+    monkeypatch.setattr(box_teardown, "trash_dir", lambda: tmp_path / "trash")
+    handle = ctypes.CDLL(str(cache))._handle
+    try:
+        error, _notes = box_teardown.force_remove_box(box_dir, sleep=lambda _s: None)
+    finally:
+        (getattr(_ctypes, "FreeLibrary", None) or _ctypes.dlclose)(handle)
+    assert error == ""
+    assert not box_dir.exists()
 
 
 def test_engine_unreachable_reads_each_platforms_spelling_and_nothing_else():
