@@ -136,7 +136,7 @@ def _one_tree(
     if problem:
         closed.trees[problem] = str(tree.path)
     # Judged before anything is filed away: a filed report is still the session's outcome.
-    _judge_session(ctx, tree, where, journal, closed)
+    at_work = _judge_session(ctx, tree, where, journal, closed)
     if reason := fix_reports.blocked_reason(tree.path):
         journal.add(
             Finding(
@@ -151,11 +151,35 @@ def _one_tree(
         if ctx.writes:
             fix_ledger.mark_blocked(ctx.ledger_path, key, reason)
             fix_reports.file_away(tree.path, fix_reports.BLOCKED_FILE)
+    _file_friction(ctx, tree, where, journal, closed, at_work)
+
+
+def _file_friction(
+    ctx: Context,
+    tree: fix_reports.Tree,
+    where: str,
+    journal: fix_findings.Journal,
+    closed: Closed,
+    at_work: bool,
+) -> None:
+    """File the tree's friction lines, a "fixed on this branch" one settled by the branch
+    once its work went out -- and none of them while its session is still at work on
+    one that has not.
+
+    Filed then, such a line is open, and a fixer is sent at a fix still being written:
+    c8d4f66b and 5d8e9962 were harvested from peaceful-jumping-cocke a minute after its
+    interactive session wrote them, both fixes uncommitted in its tree, and a second
+    session was dispatched at the pair. Held whole, because `file_away` takes the whole
+    file: the next pass after the session ships or goes quiet files every line.
+    """
+    claims = any(fix_reports.fixed_here(line) for line in tree.friction)
+    out = bool(tree.branch) and claims and went_out(tree.path)
+    if claims and tree.branch and not out and at_work:
+        closed.lines.append(f"{where} -- friction held: its session is still at work on a fix")
+        return
     # Where the lines will be once filed away below: naming the file about to be renamed
     # gave every friction row a dead path.
     kept = fix_reports.filed(fix_reports.FRICTION_FILE) if ctx.writes else fix_reports.FRICTION_FILE
-    claims = any(fix_reports.fixed_here(line) for line in tree.friction)
-    out = bool(tree.branch) and claims and went_out(tree.path)
     for line in tree.friction:
         evidence = str(tree.path / kept)
         # A line its session fixed here is settled by this branch, not a new job for a
@@ -193,7 +217,8 @@ def went_out(tree: Path, runner=ship_intent.run_quiet) -> bool:
 
 def _judge_session(
     ctx: Context, tree: fix_reports.Tree, where: str, journal: fix_findings.Journal, closed: Closed
-) -> None:
+) -> bool:
+    """Judge the tree's stamped session; whether anyone is at work in the tree now."""
     key = str(tree.stamp.get("key", ""))
     state, transcript = fix_reports.session_state(tree.path, ctx.now, booted=ctx.booted)
     if state in (fix_reports.DONE, *fix_reports.DEAD):
@@ -209,6 +234,7 @@ def _judge_session(
         closed.lines.extend(judge_dead(ctx, tree, where, state, transcript, journal))
     elif (state == fix_reports.WORKING or running) and fix_ledger.is_upstream(key):
         closed.harness_busy = str(tree.path)
+    return running or live is not None
 
 
 def judge_dead(
