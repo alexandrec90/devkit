@@ -18,7 +18,9 @@ Tested in `tests/test_fix_red.py`, and through the pass in `tests/test_fix_pass.
 
 from __future__ import annotations
 
+import re
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -62,14 +64,42 @@ def backlog_failure(
     return fix_backlog.ledger_failure(devkit_dir, gate_evidence.evidence_root(workspace), in_flight)
 
 
+# bc1ec6d1: one `HTTP 504` from the dispatch API was filed as a harness defect and sent a
+# fixer at devkit over a GitHub hiccup. A server error or a dropped connection is retried
+# after each of these pauses; a refusal (a 4xx) is not, since asking again changes nothing.
+REGATE_RETRY_SECONDS = (10, 30)
+_TRANSIENT = re.compile(r"\bHTTP 5\d\d\b|timeout|timed out|error connecting|connection reset", re.I)
+
+
+def transient(said: str) -> bool:
+    """Whether `gh` failed on GitHub's side or the network's, not on the request."""
+    return bool(_TRANSIENT.search(said))
+
+
 def regate(project_dir: Path) -> tuple[bool, str]:
-    """Run the gate on the checkout's default branch: `(dispatched, what for the record)`."""
+    """Run the gate on the checkout's default branch: `(dispatched, what for the record)`.
+
+    A failure still transient after every retry is said as *deferred*, without `FAILED`:
+    the tip is still unread, so the next pass re-runs it, and `fix-pass.py` files only a
+    `FAILED` line -- a GitHub outage is nothing a devkit session can fix.
+    """
     base = tb.detect_default_branch(sweep.git_for(project_dir), fallback="main")
-    done = sweep.gh_for(project_dir)("workflow", "run", gate_evidence.GATE_WORKFLOW, "--ref", base)
-    if getattr(done, "returncode", 1) != 0:
+    gh = sweep.gh_for(project_dir)
+    for pause in (*REGATE_RETRY_SECONDS, None):
+        done = gh("workflow", "run", gate_evidence.GATE_WORKFLOW, "--ref", base)
+        if getattr(done, "returncode", 1) == 0:
+            return True, f"{base} -- no verdict at the tip; gate re-run"
         why = (getattr(done, "stderr", "") or getattr(done, "stdout", "") or "").strip()
-        return False, f"{base} -- FAILED to re-run the gate: {why.splitlines()[-1] if why else '?'}"
-    return True, f"{base} -- no verdict at the tip; gate re-run"
+        said = why.splitlines()[-1] if why else "?"
+        if not transient(said):
+            return False, f"{base} -- FAILED to re-run the gate: {said}"
+        if pause is not None:
+            time.sleep(pause)
+    tries = len(REGATE_RETRY_SECONDS) + 1
+    return (
+        False,
+        f"{base} -- gate re-run deferred: GitHub answered {said} {tries} times; the next pass retries",
+    )
 
 
 def regate_unread(root: Path, unread: list[str], mode: str) -> tuple[list[str], set[str]]:
