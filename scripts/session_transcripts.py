@@ -54,7 +54,6 @@ class Chunk:
 
     rows: tuple[tuple[int, dict], ...]  # (line number, record)
     offset: int
-    line: int
 
 
 def _dict(value: object) -> dict:
@@ -160,37 +159,44 @@ def transcripts(claude_root: Path = CLAUDE_ROOT, codex_root: Path = CODEX_ROOT) 
     return sorted(found)
 
 
-def read_new(path: Path, offset: int, line: int) -> Chunk:
-    """The complete lines after `offset`, numbered on from `line`.
+def read_new(path: Path, offset: int) -> Chunk:
+    """The complete lines after `offset`, each numbered by its line in the file.
 
     A file shorter than the cursor was rewritten, and is read again from the top. The
     size is checked before anything is read, because nearly every transcript on the
-    machine has not changed since the last pass.
+    machine has not changed since the last pass. The numbers are counted from the file
+    as it is now, never carried on from the last read: Claude Code rewrites a transcript
+    it relocates into a worktree without shrinking it below the cursor, and a carried
+    count then named line 1119 for a call on line 1003 (e1aaca09). An offset that lands
+    inside a line is such a rewrite too, and the torn line is skipped.
     """
     try:
         size = path.stat().st_size
     except OSError:
-        return Chunk((), offset, line)
+        return Chunk((), offset)
     if size < offset:
-        offset, line = 0, 0
+        offset = 0
     if size == offset:
-        return Chunk((), offset, line)
+        return Chunk((), offset)
     try:
-        with path.open("rb") as handle:
-            handle.seek(offset)
-            data = handle.read()
+        data = path.read_bytes()
     except OSError:
-        return Chunk((), offset, line)
-    complete = data[: data.rfind(b"\n") + 1]
+        return Chunk((), offset)
+    line = data.count(b"\n", 0, offset)
+    if offset and data[offset - 1 : offset] != b"\n":
+        torn = data.find(b"\n", offset)
+        offset, line = (offset, line) if torn < 0 else (torn + 1, line + 1)
+    complete = data[offset : data.rfind(b"\n") + 1]
     rows = []
-    for number, raw in enumerate(complete.splitlines(), start=line + 1):
+    # Split on `\n` alone, as the count above is: a line is what `grep -n` calls one.
+    for number, raw in enumerate(complete.split(b"\n")[:-1], start=line + 1):
         try:
             row = json.loads(raw)
         except ValueError:
             continue
         if isinstance(row, dict):
             rows.append((number, row))
-    return Chunk(tuple(rows), offset + len(complete), line + complete.count(b"\n"))
+    return Chunk(tuple(rows), offset + len(complete))
 
 
 # How much of each event a rendering keeps: an audit reads for what a session did and
@@ -205,7 +211,7 @@ def render(path: Path) -> str:
     own condenser first -- the first one did.
     """
     lines = []
-    for event in events(path, read_new(path, 0, 0).rows):
+    for event in events(path, read_new(path, 0).rows):
         kind = "error" if event.kind == "result" and event.error else event.kind
         body = event.command if event.kind == "call" else event.text
         body = " ".join(body.split())

@@ -17,8 +17,8 @@ is itself a finding to fix here: on its first week of transcripts, before calibr
 four in five of its findings were a file that merely quoted an error.
 
 Only sessions whose working directory is under the workspace root are read. The
-cursor (`CURSOR_NAME`, beside the dispatch ledger) keeps a byte offset and a line count
-per transcript, so each line is read once; a transcript first seen is read only if it
+cursor (`CURSOR_NAME`, beside the dispatch ledger) keeps a byte offset per transcript,
+so each line is read once; a transcript first seen is read only if it
 was written in the last `LOOKBACK`, so adopting this does not file a month at once.
 
 Tested in `tests/test_session_friction.py`.
@@ -752,6 +752,53 @@ def outside_the_tree(found: list, cwd: str) -> list:
     return [row for row in found if not (row[0] == "environment" and local_module(row[1], cwd))]
 
 
+# A Python script named in a call: what `ad_hoc_program` asks the location of.
+PYTHON_SCRIPT = re.compile(r"\S*python\S*\s+(?:-\S+\s+)*[\"']?(?P<script>[^\s\"';&|]+\.py)\b")
+
+
+def ad_hoc_program(command: str) -> bool:
+    """`command` runs a program the session wrote for itself: inline (`python -c`), or a
+    script in a scratch directory."""
+    return bool(PYTHON_C.search(command)) or any(
+        SCRATCH_DIR.search(found["script"]) for found in PYTHON_SCRIPT.finditer(command)
+    )
+
+
+def imported_by_tree(name: str, roots: Iterable[Path], runner=sweep.run_windowless) -> bool:
+    """A tracked Python file under the first of `roots` there imports top-level `name`.
+    No root, or git unable to say: it may well, so True."""
+    pattern = rf"^[[:space:]]*(import|from)[[:space:]]+{re.escape(name)}([[:space:].,]|$)"
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            done = runner(
+                ["git", "-C", str(root), "grep", "-q", "-E", pattern, "--", "*.py"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return True
+        return done.returncode != 1  # 0 found, 1 none; anything else is git failing
+    return True
+
+
+def reached_past_the_tree(row: tuple[str, str, Event], roots: list[Path]) -> bool:
+    """`row` is a package the session's own throwaway program imported that no code of its
+    tree does: nothing the harness provisions was missing, so no change to it prevents
+    this (e1aaca09, a roguelike session's `from PIL import Image` in its scratchpad)."""
+    cls, what, event = row
+    named = MISSING_MODULE.search(what)
+    return (
+        cls == "environment"
+        and named is not None
+        and ad_hoc_program(event.command)
+        and not imported_by_tree(named.group(1).split(".")[0], roots)
+    )
+
+
 def runner_defaults_targeted(cwd: str, workspace_root: Path, project: str) -> bool:
     """The session's `RUNNER` takes `--all`, so a bare run of it is targeted: the tree's
     copy decides, its project's checkout once the tree is gone. Neither there to read,
@@ -794,19 +841,28 @@ def judged(events: Iterable[Event], cwd: str, workspace_root: Path) -> list[tupl
     events = list(events)
     project = harness_events.project_name(Path(cwd))
     targeted = runner_defaults_targeted(cwd, workspace_root, project)
-    found = outside_the_tree(detect(events, targeted), cwd)
+    roots = [Path(cwd), workspace_root / project] if cwd else []
+    found = [
+        row
+        for row in outside_the_tree(detect(events, targeted), cwd)
+        if not _environment_excused(row, cwd, roots)
+    ]
     if not asks_for_targeted_runs(cwd, workspace_root, project):
         found = [row for row in found if row[0] != "full-suite"]
     dispatched = any(event.kind == "user" and DISPATCHED in event.text for event in events)
     if not dispatched and not bans_shell_writes(cwd, workspace_root, project):
         found = [row for row in found if row[0] != "heredoc-write"]
-    if has_own_venv(cwd):
-        found = [
-            row
-            for row in found
-            if not (row[0] == "environment" and BARE_INTERPRETER.search(row[2].command))
-        ]
     return found
+
+
+def _environment_excused(row: tuple[str, str, Event], cwd: str, roots: list[Path]) -> bool:
+    """An `environment` row the tree explains: the machine's interpreter run where the tree
+    has its own, or a package only the session's own program wanted."""
+    if row[0] != "environment":
+        return False
+    if has_own_venv(cwd) and BARE_INTERPRETER.search(row[2].command):
+        return True
+    return reached_past_the_tree(row, roots)
 
 
 def has_own_venv(cwd: str) -> bool:
@@ -876,8 +932,8 @@ def outdated(items: Iterable[fix_findings.triage.Item]) -> list[tuple[str, str]]
     A detector fixed on the default branch left its rows open, and a sweep spent ~13 calls
     re-proving them (d677ea57). Each per-event row is re-read at its own transcript line;
     it counts as outdated only when that line still holds the call the row names -- a
-    transcript first read from its end numbers from there -- so a transcript gone, a line
-    moved or a whole-session class is left open rather than guessed at.
+    transcript rewritten since moves its lines -- so a transcript gone, a line moved or a
+    whole-session class is left open rather than guessed at.
     """
     sessions: dict[str, tuple[_Session, dict[int, set[str]]] | None] = {}
     found = []
@@ -906,7 +962,7 @@ def _whole(path: Path) -> tuple[_Session, dict[int, set[str]]] | None:
     ledger kept it (`""` for none). None when it is gone."""
     if not path.is_file():
         return None
-    events = st.events(path, st.read_new(path, 0, 0).rows)
+    events = st.events(path, st.read_new(path, 0).rows)
     calls: dict[str, str] = {}
     commands: dict[int, set[str]] = {}
     for event in events:
@@ -926,17 +982,16 @@ def _load_cursor(path: Path) -> dict[str, dict]:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _start_of(path: Path, now: _dt.datetime) -> tuple[int, int]:
+def _start_of(path: Path, now: _dt.datetime) -> int:
     """Where a transcript never seen before is read from: the top when it is recent,
-    else its end. Not counting an old file's lines keeps the first pass cheap; if one is
-    ever resumed, its evidence lines count from where this started reading."""
+    else its end, so adopting the harvest does not file a month at once."""
     try:
         stat = path.stat()
     except OSError:
-        return 0, 0
+        return 0
     if now - _dt.datetime.fromtimestamp(stat.st_mtime, _dt.UTC) <= LOOKBACK:
-        return 0, 0
-    return stat.st_size, 0
+        return 0
+    return stat.st_size
 
 
 def harvest(
@@ -952,15 +1007,13 @@ def harvest(
     for path in st.transcripts() if paths is None else paths:
         seen = cursor.get(str(path))
         seen = seen if isinstance(seen, dict) else {}
-        offset, line = (
-            (int(seen.get("offset", 0)), int(seen.get("line", 0))) if seen else _start_of(path, now)
-        )
-        chunk = st.read_new(path, offset, line)
+        offset = int(seen.get("offset", 0)) if seen else _start_of(path, now)
+        chunk = st.read_new(path, offset)
         cwd = str(seen.get("cwd", "")) or next(
             (st.cwd_of(r) for _, r in chunk.rows if st.cwd_of(r)), ""
         )
         found.extend(session_findings(path, chunk, cwd, workspace_root))
-        cursor[str(path)] = {"offset": chunk.offset, "line": chunk.line, "cwd": cwd}
+        cursor[str(path)] = {"offset": chunk.offset, "cwd": cwd}
     cursor_path.parent.mkdir(parents=True, exist_ok=True)
     cursor_path.write_text(json.dumps(cursor, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     return found
