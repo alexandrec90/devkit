@@ -471,6 +471,10 @@ NOTIFY_WRAP = "scripts/notify-wrap.py"
 # quietly dropping every task's artifact.
 LOG_WRAP = "scripts/log-wrap.py"
 
+# Where a dispatch that could not start keeps its reason: devkit's own `logs/`, since no
+# checkout was resolved to own it. See `record_task_failure`.
+FAILURE_ROOT = REPO_ROOT
+
 
 # --- pure helpers -----------------------------------------------------------
 
@@ -643,6 +647,116 @@ def task_env(base: dict[str, str] | None = None) -> dict[str, str]:
     included.
     """
     return {**(os.environ if base is None else base), "PYTHONUTF8": "1"}
+
+
+# --- failures the wrapper never sees ----------------------------------------
+#
+# `log-wrap.py` files every failure it wraps on the harness-events ledger, which is how a
+# failed task reaches the fix pass's devkit session. Two of this dispatcher's failures
+# happen where no wrapper is running -- a refusal before `plan_command` has wrapped
+# anything, and the autofix ship steps after the wrapped run has exited -- so they are
+# filed here, in the same event and the same fields.
+
+
+def _log_wrap():
+    """devkit's `log-wrap.py`, loaded by path because the name is hyphenated. Its
+    helpers decide the event's shape here too, so the two writers cannot drift apart.
+    A private module name: the hook tests register their own copy as `log_wrap`."""
+    name = "_devkit_project_log_wrap"
+    if name in sys.modules:
+        return sys.modules[name]
+    precommit = str(REPO_ROOT / "scripts" / "precommit")
+    if precommit not in sys.path:
+        sys.path.append(precommit)
+    from _loader import load_by_path
+
+    return load_by_path(name, REPO_ROOT / LOG_WRAP)
+
+
+def task_title(action: str) -> str:
+    """The label a failure of `action` is filed under; `""` when there is no task.
+
+    `Action.label`, because that is the title `plan_command` hands `log-wrap.py` -- so
+    one task's failures carry one name whichever side of the wrapper they happened on.
+    The test menu is the `test` action's label, which is the menu task's own.
+    """
+    if action == TESTS_VERB:
+        action = TEST_KINDS["suite"].action
+    return ACTIONS[action].label if action in ACTIONS else ""
+
+
+def record_task_failure(
+    title: str, why: str, command: list[str], output: str, checkout: Path, code: int
+) -> str | None:
+    """File one failed task on the ledger, its reason kept under `checkout/logs/`.
+
+    Returns the artifact the event names, or None when nothing could be filed.
+
+    The message is `task <title> <why>` and nothing else: `harness_triage` groups by it,
+    so a refusal recurring nightly reads as one defect recurring. What varies rides in
+    `cause` (`log-wrap.failure_cause`), which splits a new reason into a new group.
+
+    The kept copy is named for the title *and* `why`, never `<slug>.failed.log` alone --
+    that path is the one `log-wrap.py` keeps for the run it wrapped, and an earlier
+    ledger row points at it. Best-effort throughout: a ledger that cannot be reached
+    must never change the exit code the task reports.
+    """
+    try:
+        wrap = _log_wrap()
+        hooks = str(REPO_ROOT / "scripts" / "hooks")
+        if hooks not in sys.path:
+            sys.path.append(hooks)
+        import harness_events
+    except ImportError:
+        return None
+    name = wrap.slug(f"{title} {why}")
+    body = wrap.artifact_body(title, command, code, output, kept=True)
+    kept = wrap.write_artifact(checkout, name + wrap.FAILED_SUFFIX, body)
+    artifact = wrap.artifact_ref(name, kept=kept is not None)
+    cause, said = wrap.failure_cause(output), wrap.cause_said(output)
+    harness_events.record(
+        wrap.FAILED_EVENT,
+        (
+            ("project", harness_events.project_name(checkout)),
+            ("command", " ".join(command)),
+            ("artifact", artifact),
+            ("exit", code),
+            ("message", f"task {title!r} {why}"),
+            ("cause", cause or "-"),
+            *((("said", said),) if said and said != cause else ()),
+        ),
+    )
+    return artifact
+
+
+def refuse_dispatch(exc: ProjectError, action: str, argv: list[str]) -> int:
+    """Report a dispatch that could not start, and file it when it was a task's. Exit 2.
+
+    No action is no task: `--render-workspace` and `--adopt-workspace` already run
+    inside `log-wrap.py` in their own tasks, and `--list` is a picker's.
+    """
+    print(f"devkit_project: {exc}", file=sys.stderr)
+    title = task_title(action)
+    if title:
+        command = ["python", str(Path(__file__).resolve()), *argv]
+        record_task_failure(title, "could not start", command, str(exc), FAILURE_ROOT, 2)
+    return 2
+
+
+def report_ship_failure(directory: Path, action: Action, step: tuple[str, ...], code: int) -> None:
+    """Say that shipping an autofix run's churn failed, and file it against the checkout.
+
+    The ship steps run after the wrapped lint run has exited -- green, or there would be
+    nothing to ship -- so no wrapper sees this one.
+    """
+    line = (
+        f"[{directory.name}] shipping the autofix churn failed (exit {code}) -- "
+        f"the fixes are still in the working tree"
+    )
+    print(line, file=sys.stderr, flush=True)
+    record_task_failure(
+        action.label, "could not ship its autofix", list(step), line, directory, code
+    )
 
 
 # --- autofix that would otherwise strand ------------------------------------
@@ -1735,13 +1849,23 @@ def _load_workspace(path: Path, may_create: bool = False) -> str:
     out empty, and `publish_workspace` reports the file it created. A flag rather than a
     branch at the call site because `main` is one step under its complexity limit, and
     this is the function that already owns "can the registry be read".
+
+    Parsing it is the same question, so an invalid or empty file is a `ProjectError`
+    too: one refusal path in `main`, which is what lets `refuse_dispatch` file all three.
     """
     if may_create and not path.is_file():
         return canonical_text()
     try:
-        return path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise ProjectError(f"cannot read the workspace registry at {path}: {exc}") from exc
+    try:
+        payload = devkit_jsonc.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ProjectError(f"{path} is not valid JSONC: {exc}") from exc
+    if not payload:
+        raise ProjectError(f"{path} is empty")
+    return text
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1755,7 +1879,8 @@ def main(argv: list[str] | None = None) -> int:
     # be reported as one. Every task in `workspace.jsonc` that offers a multi-select
     # picker routes through here, so this is the one place that turns Escape into a
     # no-op for all of them -- see `task_input` for why VS Code cannot do it itself.
-    dismissed = task_input.cancelled_inputs(sys.argv[1:] if argv is None else argv)
+    raw_argv = sys.argv[1:] if argv is None else list(argv)
+    dismissed = task_input.cancelled_inputs(raw_argv)
     if dismissed:
         print(task_input.cancel_report("devkit_project", dismissed))
         return 0
@@ -1826,17 +1951,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         text = _load_workspace(args.workspace, may_create=bool(args.render_workspace))
     except ProjectError as exc:
-        print(f"devkit_project: {exc}", file=sys.stderr)
-        return 2
-
-    try:
-        payload_ok = bool(devkit_jsonc.loads(text))
-    except json.JSONDecodeError as exc:
-        print(f"devkit_project: {args.workspace} is not valid JSONC: {exc}", file=sys.stderr)
-        return 2
-    if not payload_ok:
-        print(f"devkit_project: {args.workspace} is empty", file=sys.stderr)
-        return 2
+        return refuse_dispatch(exc, args.action, raw_argv)
 
     projects = known_projects(text)
     root = args.workspace.parent
@@ -1911,8 +2026,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
     except ProjectError as exc:
-        print(f"devkit_project: {exc}", file=sys.stderr)
-        return 2
+        return refuse_dispatch(exc, args.action, raw_argv)
 
     for note in skipped:
         print(f"[skipped] {note}", flush=True)
@@ -1948,12 +2062,7 @@ def main(argv: list[str] | None = None) -> int:
                 # never cut: the second command would then read the *home* branch and
                 # sweep.ship_plan would refuse it, reporting a confusing second error
                 # for the same cause.
-                print(
-                    f"[{directory.name}] shipping the autofix churn failed (exit {code}) -- "
-                    f"the fixes are still in the working tree",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                report_ship_failure(directory, action, step, code)
                 result = result or code
                 break
     return result

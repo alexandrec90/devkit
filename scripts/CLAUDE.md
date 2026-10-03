@@ -179,8 +179,12 @@ log. Four things a change must keep:
 Every installer declares `TASK_NAME` and `ARTIFACT`, because `pythonw.exe` sends stdout
 nowhere and a job leaves exactly what it writes itself;
 [`tests/test_scheduled_jobs.py`](../tests/test_scheduled_jobs.py) fails one that skips
-either. For a runner with no artifact of its own, wrap the scheduled call in
-`log-wrap.py --always`.
+either. **And every job's arguments go through `devkit_schtasks.logged`**, which runs
+them under `log-wrap.py --always` -- a runner that writes its own artifact included,
+because that artifact is overwritten by the next run and the wrapper's ledger event is
+not. Its label must not slug to the runner's own artifact. The exemptions -- the
+resident tray, and the fix pass, whose runner files its own -- are `OFF_THE_LEDGER` in
+`tests/test_installer_contract.py`, each with its reason.
 
 **An installer is driven, not remembered.** `scripts/installers.py` runs every
 `scripts/install-*.py`'s `--check` on a schedule and `--yes` on each that needs it, so

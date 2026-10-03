@@ -63,6 +63,10 @@ TRIAGE_EVENTS = (
     # transcripts. Both are `fix_findings.py`'s; here because this list is the backlog.
     "fix-pass-finding",
     "session-friction",
+    # The daily `workspace-status.py` pass's findings that say something is broken -- a
+    # missing toolchain piece, drifted branch policy, a refused workspace publish -- which
+    # otherwise ended at a toast (`workspace-status.FAILURES` decides which ones).
+    "workspace-failure",
 )
 RESOLVED_EVENT = "triage-resolved"
 # A resolution whose fix never landed -- its PR closed unmerged, or no PR ever opened

@@ -12,9 +12,11 @@ clock is a task, and this module is everything about that task:
   the assignment registers the task on a `run` machine and deletes it on any other, and
   re-registers it the moment the declared cadence drifts -- `devkit_schtasks.run_check`
   against the same document, as every installer does.
-- **Named after the collector, never `devkit-`.** It is the project's job, not devkit's:
-  `schedule_health.report` and the fix pass read only `devkit-` tasks, so a scrape that
-  fails is reported in the tray and never filed as a devkit defect.
+- **Named after the collector, never `devkit-`.** It is the project's job, not devkit's,
+  so `schedule_health` has to be told about it: the tray and the fix pass both pass
+  `collectors.scheduled_tasks` as `also=`. Each failed fire is filed on the ledger by the
+  `log-wrap.py --always` it runs under (`task_document`); a task gone missing, which no
+  run can report, is filed by the pass (`fix_loop.unscheduled`).
 - **The task runs `collectors.py fire <name>`, not the command itself.** The command is
   read from the workspace file at fire time, so editing it needs no re-registration; the
   wrapper is what keeps the run window-less (`NO_WINDOW` on a console child -- see
@@ -93,11 +95,20 @@ def task_arguments(root: Path, name: str) -> str:
     return f'"{script}" fire {name}'
 
 
+def wrapper_label(name: str) -> str:
+    """The `log-wrap.py` label a fire runs under; it slugs to `scheduled-collector-<name>`,
+    clear of the fire's own `collector-<name>.log` (`log_path`)."""
+    return f"Scheduled collector: {name}"
+
+
 def task_document(collector: config.Collector, root: Path, python: str) -> str:
-    """The task XML. The working directory is the devkit checkout, where `logs/` is."""
+    """The task XML. The working directory is the devkit checkout, where `logs/` is, and
+    the fire runs under `log-wrap.py --always` (`devkit_schtasks.logged`), which files
+    each failed run on the harness-events ledger, as every devkit job's does."""
+    name = task_name(collector)
     return devkit_schtasks.task_xml(
         python,
-        task_arguments(root, task_name(collector)),
+        devkit_schtasks.logged(wrapper_label(name), python, task_arguments(root, name), root),
         devkit_schtasks.repeating_trigger(collector.minutes),
         time_limit=TIME_LIMIT,
         working_dir=str(PureWindowsPath(root)),

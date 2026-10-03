@@ -346,7 +346,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/broken_pr_menu.py": "the gh the pass scans every checkout through",
     "scripts/fix_release.py": "the release pipeline the pass starts detached when main owes a tag",
     "scripts/git_trust.py": "the git config --global safe.directory a dispatching pass adds",
-    "scripts/log-wrap.py": "the wrapper four of those jobs are launched through",
+    "scripts/log-wrap.py": "the wrapper every job but the tray is launched through",
     "scripts/collectors.py": "devkit-collectors runs it every 15 minutes; the tray asks it every poll",
     "scripts/collector_tasks.py": "the schtasks that pass makes, and each scheduled collector's fire",
     # reached from `workspace-status.py --notify`, which is the one script that imports

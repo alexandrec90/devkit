@@ -39,8 +39,35 @@ def test_the_backlog_becomes_one_failure_with_its_groups_as_evidence(monkeypatch
     assert fix_plan.describe(backlog).startswith("2 open group(s) on the harness-defect ledger")
 
 
+def test_a_recurrence_in_an_open_group_sends_no_second_session(monkeypatch, tmp_path):
+    """Every scheduled job now files each failed run, and a 15-minute job failing all
+    day is ~96 rows in one group. Keyed on every open id, each row changed the sha and
+    sent a devkit session at a defect one already had (2026-10-03). Keyed on the groups,
+    only a new group -- or a retired one -- is a new dispatch."""
+    devkit = tmp_path / "devkit"
+    shard = fix_backlog.triage.ledger_file(devkit)
+    shard.parent.mkdir(parents=True)
+    row = "\tevent=scheduled-job-failed\tagent=claude\thost=h\tproject=devkit\tmessage=job failed"
+    shard.write_text("2026-10-03T10:00:00+00:00" + row + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        fix_backlog.tb, "detect_default_branch", lambda git, fallback="main": "main"
+    )
+    first = fix_backlog.ledger_failure(devkit, tmp_path / "ev")
+    with shard.open("a", encoding="utf-8") as handle:
+        handle.write("2026-10-03T10:15:00+00:00" + row + "\n")
+    again = fix_backlog.ledger_failure(devkit, tmp_path / "ev")
+    assert first is not None and again is not None
+    assert again.signature[0].endswith(" x2"), "the recurrence is still shown"
+    assert again.sha == first.sha, "and sends nobody"
+    other = "2026-10-03T10:30:00+00:00\tevent=agent-report\tagent=claude\thost=h\tproject=devkit\tmessage=m"
+    with shard.open("a", encoding="utf-8") as handle:
+        handle.write(other + "\n")
+    newer = fix_backlog.ledger_failure(devkit, tmp_path / "ev")
+    assert newer is not None and newer.sha != first.sha, "a new group is a new dispatch"
+
+
 def test_a_retired_group_changes_the_key_and_an_empty_ledger_is_no_failure(monkeypatch, tmp_path):
-    """The dispatch ledger keys on the sha, so a resolution -- or a new item -- is a new
+    """The dispatch ledger keys on the sha, so a resolution -- or a new group -- is a new
     dispatch, and the same backlog twice is not."""
     devkit = tmp_path / "devkit"
     shard = fix_backlog.triage.ledger_file(devkit)

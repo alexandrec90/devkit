@@ -43,6 +43,11 @@ GROUP = "maintenance"
 # this against the runner's own constant.
 ARTIFACT = "logs/collectors.log"
 
+# The `log-wrap.py --always` label the task runs under (`devkit_schtasks.logged`), which
+# files each failed run on the harness-events ledger; its files are
+# `logs/scheduled-collectors[.failed].log`, beside the runner's own `ARTIFACT`.
+LABEL = "Scheduled: Collectors"
+
 DEFAULT_INTERVAL_MINUTES = 15
 
 # See `install-reconcile-task.py` for why this is resolved once at import.
@@ -66,13 +71,15 @@ def collectors_arguments(script: Path) -> str:
 
 
 def task_document(python: str, arguments: str, minutes: int, script: Path) -> str:
-    """The task XML, registered from a document for `devkit_schtasks`' reasons."""
+    """The task XML, registered from a document for `devkit_schtasks`' reasons, under
+    `log-wrap.py` (`devkit_schtasks.logged`) and started in the checkout it writes to."""
+    # `PureWindowsPath`: the document is Windows by construction, whatever builds it.
+    root = str(PureWindowsPath(script).parent.parent)
     return devkit_schtasks.task_xml(
         python,
-        arguments,
+        devkit_schtasks.logged(LABEL, python, arguments, root),
         devkit_schtasks.repeating_trigger(minutes) + devkit_schtasks.logon_trigger(),
-        # `PureWindowsPath`: the document is Windows by construction, whatever builds it.
-        working_dir=str(PureWindowsPath(script).parent.parent),
+        working_dir=root,
         enabled=TASK_NAME not in harness_state.stood_down(),
     )
 

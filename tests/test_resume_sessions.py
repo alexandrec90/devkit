@@ -825,8 +825,9 @@ def test_the_resume_task_asks_for_the_model_after_the_agent_and_the_effort_after
 def test_a_dismissed_agent_checkbox_list_opens_no_tabs(monkeypatch, capsys):
     """Escaping that checkbox list must reopen nothing, and say so as a cancel.
 
-    This is the one picker task with no wrapper in front of it, so the guard lives in
-    `main` — and ahead of `argparse`, because `--agent` carries a `type=` that would
+    This is the one picker task with no `notify-wrap.py` in front of it, and `log-wrap.py`
+    passes the literal through untouched, so the guard lives in `main` — and ahead of
+    `argparse`, because `--agent` carries a `type=` that would
     reject the literal `${input:resumeAgents}` as a usage error rather than recognise it
     as the dismissal it is.
     """

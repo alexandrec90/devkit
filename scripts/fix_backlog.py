@@ -5,8 +5,9 @@
 entry on it is a devkit defect, whichever project filed it, so it rides in the one
 devkit session with everything else harness-shaped rather than waiting for a person to
 run the skill. The signature is one line per group and the sha is the digest of the
-open ids: the dispatch ledger sends nothing twice at the same backlog and looks again
-when a new item lands or a session retires one. The groups themselves go to the
+open groups: the dispatch ledger sends nothing twice at the same backlog and looks again
+when a new group opens or a session retires one -- not each time an open group recurs,
+which a job filing every failed run does dozens of times a day. The groups go to the
 session as evidence, `harness_triage.render`'s own text under `logs/gate/`.
 
 Tested in `tests/test_fix_backlog.py`.
@@ -51,7 +52,10 @@ def ledger_failure(
         f"{members[0].event} {members[0].project} [{members[0].id}] x{len(members)}"
         for _, members in grouped
     )
-    ids = hashlib.sha256("\n".join(sorted(i.id for i in live)).encode()).hexdigest()
+    # Keyed on the groups -- each by its earliest row -- not on every open row: a job
+    # filing each failed run puts ~96 rows a day in one group, and each one sent a session.
+    firsts = sorted(min(members, key=lambda item: item.stamp).id for _, members in grouped)
+    ids = hashlib.sha256("\n".join(firsts).encode()).hexdigest()
     failure = fix_plan.Failure(
         kind=fix_plan.LEDGER,
         project=fix_cycle.DEVKIT,

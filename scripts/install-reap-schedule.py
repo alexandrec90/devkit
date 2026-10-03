@@ -54,6 +54,11 @@ GROUP = "maintenance"
 # reader here when the scheduler reports a failure.
 ARTIFACT = "logs/reap-stale.log"
 
+# The `log-wrap.py --always` label the task runs under (`devkit_schtasks.logged`), which
+# files each failed run on the harness-events ledger; its files are
+# `logs/scheduled-reap-stale[.failed].log`, beside the runner's own `ARTIFACT`.
+LABEL = "Scheduled: Reap Stale"
+
 WINDOWS = os.name == "nt"
 
 DEFAULT_INTERVAL = 15
@@ -118,14 +123,15 @@ def task_document(schedule: Schedule) -> str:
     `taskkill`s, each with a five-second grace, and ten minutes is generous for that.
     """
     program, *arguments = schedule.command
+    root = str(PureWindowsPath(schedule.script).parent.parent)
     return devkit_schtasks.task_xml(
         program,
-        subprocess.list2cmdline(arguments),
+        devkit_schtasks.logged(LABEL, program, subprocess.list2cmdline(arguments), root),
         # No boot trigger, unlike `devkit-rc-servers`: a reboot leaves nothing to reap,
         # and the first repetition is at most an interval away.
         devkit_schtasks.repeating_trigger(schedule.every),
         time_limit="PT10M",
-        working_dir=str(PureWindowsPath(schedule.script).parent.parent),
+        working_dir=root,
         # Lands disabled when this job has been stood down by name (`harness-switch.py
         # --off --job`): the ledger is the standing instruction, and an installer that
         # ignored it would hand the operator back a running job they had switched off.

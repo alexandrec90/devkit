@@ -456,6 +456,15 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
     if notes:
         _write(ARTIFACT, "\n".join(notes).rstrip() + "\n", "a")
         print("\n".join(notes))
+    return exit_code(code, kind)
+
+
+def exit_code(code: int | None, kind: str) -> int:
+    """What the scheduler's Last Result says of this fire: the pass's own report, `2`
+    for a pass that failed itself -- and `0` for a `STALE` one left to the next fire,
+    which routes it: nothing failed, and `75` read as a failed run."""
+    if code == STALE and not kind:
+        return 0
     return code if code in REPORTED and kind not in RESCUED else 2
 
 

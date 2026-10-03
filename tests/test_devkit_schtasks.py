@@ -14,6 +14,7 @@ machine, which is the one place a unit test cannot reach.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -302,6 +303,47 @@ def test_there_is_no_window_question_to_answer_off_windows(tmp_path):
     python = tmp_path / "python"
     python.write_text("", encoding="utf-8")
     assert schtasks.windowless(str(python)) == str(python)
+
+
+def test_the_wrapped_command_takes_the_console_twin(tmp_path):
+    """The inverse of `windowless`: `log-wrap.py` spawns it with `CREATE_NO_WINDOW`,
+    which Windows ignores for a GUI-subsystem child."""
+    for stem in ("python.exe", "pythonw.exe"):
+        (tmp_path / stem).write_text("", encoding="utf-8")
+    assert schtasks.console(str(tmp_path / "pythonw.exe")) == str(tmp_path / "python.exe")
+    assert schtasks.console(str(tmp_path / "python.exe")) == str(tmp_path / "python.exe")
+
+
+def test_a_pythonw_with_no_twin_is_kept_rather_than_invented(tmp_path):
+    (tmp_path / "pythonw.exe").write_text("", encoding="utf-8")
+    assert schtasks.console(str(tmp_path / "pythonw.exe")) == str(tmp_path / "pythonw.exe")
+
+
+def test_a_logged_command_runs_the_job_under_the_ledger_wrapper(tmp_path):
+    """Wrapper first, `--always` before the label (it is consumed only from the front),
+    then the console interpreter and the job's own arguments, untouched."""
+    for stem in ("python.exe", "pythonw.exe"):
+        (tmp_path / stem).write_text("", encoding="utf-8")
+    root = tmp_path / "devkit"
+    arguments = schtasks.logged(
+        "Scheduled: Thing", str(tmp_path / "pythonw.exe"), '"x.py" maintain', root
+    )
+    wrapper = root / "scripts" / "log-wrap.py"
+    console = tmp_path / "python.exe"
+    assert arguments == f'"{wrapper}" --always "Scheduled: Thing" -- "{console}" "x.py" maintain'
+
+
+def test_a_logged_command_is_what_log_wrap_parses():
+    """The wrapper's own parser is the judge of the shape, not a regex here."""
+    log_wrap = load_script("scripts/log-wrap.py")
+    arguments = schtasks.logged("Scheduled: Thing", "python.exe", "x.py maintain", "C:/ws")
+    # Windows command-line quoting, for arguments holding no quote or backslash-quote:
+    # a quoted run is one token, anything else splits on whitespace.
+    argv = [quoted or bare for quoted, bare in re.findall(r'"([^"]*)"|(\S+)', arguments)]
+    assert argv[0].replace("\\", "/") == "C:/ws/scripts/log-wrap.py"
+    title, command, always = log_wrap.parse_argv(argv[1:])
+    assert (always, command) == (True, ["python.exe", "x.py", "maintain"])
+    assert title == "Scheduled: Thing"
 
 
 def test_there_is_no_boot_trigger_to_build():

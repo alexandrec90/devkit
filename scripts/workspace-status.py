@@ -28,9 +28,12 @@ one somebody eventually removes. `--notify` is how an unattended pass reaches a 
 
 Design constraints, all from the fact that nobody is watching when this runs:
 
-- **Never blocks.** Always exits 0, `--notify` included. Findings are not a job
-  failure, and an exit code is the scheduler's `Last Result` -- a status line that
-  reports itself as a broken task teaches `schedule_health` to cry wolf.
+- **Findings never fail the job.** They exit 0, `--notify` included: an exit code is
+  the scheduler's `Last Result`, and a status line that reports itself as a broken task
+  teaches `schedule_health` to cry wolf. A finding that is a *failure* -- something
+  broken, `FAILURES` -- goes on the harness-events ledger instead (`record_failures`).
+  **A crash is a job failure** and exits `CRASHED` with its traceback, which is what
+  `log-wrap.py --always` around the scheduled run files on the ledger.
 - **No network.** `--no-fetch`, so ahead/behind may be stale -- but "3 checkouts
   have uncommitted work" does not need a fetch to be true.
 - **Silent when healthy.** Prints nothing when there is nothing to say, so the one
@@ -47,10 +50,12 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import re
 import shutil
 import subprocess
 import sys
 import time as _time
+import traceback
 from pathlib import Path
 from typing import ClassVar
 
@@ -98,6 +103,45 @@ _GB = 1024**3
 # than archaeology. Under the permanent checkout's `logs/` for `events_line`'s reason.
 HEADROOM_LOG = Path("logs") / "headroom.log"
 HEADROOM_HISTORY = 400
+
+# What a crash exits with. Findings exit 0 (see the module docstring); a pass that could
+# not check anything is the job failing, and `log-wrap.py --always` around the scheduled
+# run files a non-zero exit as `scheduled-job-failed` with the exception as its cause.
+CRASHED = 1
+
+# The scheduled run's record, which a filed failure names as its evidence.
+ARTIFACT = "logs/scheduled-workspace-status.log"
+
+# --- which findings are failures -----------------------------------------------------
+#
+# The report goes to a toast and a log, which reach whoever reads them that morning and
+# nothing that fixes things. A finding that says something is *broken* is also filed on
+# the harness-events ledger, where the fix pass's devkit session picks it up with every
+# other routine failure. Each marker below is spelled once and used by the line that
+# carries it, so the wording and the classification cannot drift apart.
+#
+# A failure: the toolchain lines (all of them -- a missing uv, git identity, task
+# extension, Codex context or a terminal that elevates each breaks work outright), and:
+POLICY_DRIFTED = "branch policy drifted: "  # the installed hooks are not what was installed
+RETIRED_HOOKS = "settings wire retired hooks: "  # a hook entry spawning a deleted file
+RECONCILE_STOPPED = "unattended pass last ran "  # reconcile stopped, unexplained
+PUBLISH_REFUSED = "the live file carries edits devkit never wrote"  # needs a decision
+FAILURES: tuple[tuple[str, str], ...] = (
+    ("branch-policy-drift", POLICY_DRIFTED),
+    ("retired-hooks", RETIRED_HOOKS),
+    ("reconcile-stopped", RECONCILE_STOPPED),
+    ("workspace-publish-refused", PUBLISH_REFUSED),
+)
+# Not a failure: stranded work, boxes, previews, a project behind on devkit or a policy
+# installed from an older release (ordinary lag the daily jobs close), a checkout never
+# adopted (a state, not a fault), a publish held while devkit is on a task branch, disk
+# headroom (machine pressure, not a harness defect) and the open-defect count (which IS
+# the ledger). Nor the `schedule:` lines: each is a job the scheduler reports failing,
+# which that job's `log-wrap.py` run and `fix_loop.job_findings` already file -- a third
+# row here would split one failure into three groups.
+FAILURE_EVENT = "workspace-failure"
+# What varies between two days' copies of one failure: counts and ages.
+_NUMBER = re.compile(r"\d+")
 
 # `install-git-policy.py` is hyphenated and so cannot be imported by name. Going
 # through the shared loader keeps the file list and the comparison in one place --
@@ -198,8 +242,10 @@ def policy_line(
         parts.append(f"installed from {behind}, {latest} available")
     if not parts:
         return ""
+    # Drift leads with its own marker: it is a failure (`FAILURES`), and being behind a
+    # release is not.
     return (
-        f"branch policy: {'; '.join(parts)} "
+        f"{POLICY_DRIFTED if drifted else 'branch policy: '}{'; '.join(parts)} "
         f"(fix: python devkit/scripts/install-git-policy.py --yes)"
     )
 
@@ -314,7 +360,7 @@ def retired_hooks_line(root: Path, names: list[str], source: Path = SOURCE_ROOT)
     if not offenders:
         return ""
     return (
-        f"settings wire retired hooks: {', '.join(offenders)} "
+        f"{RETIRED_HOOKS}{', '.join(offenders)} "
         f"(fix: python devkit/scripts/sync-devkit.py --pull, from that checkout)"
     )
 
@@ -467,7 +513,7 @@ def scheduler_line(source: Path = SOURCE_ROOT, now: float = 0.0, stale_hours: fl
     if age < stale_hours * 3600:
         return ""
     return (
-        f"unattended pass last ran {_age(age)} ago -- boxes are not being reaped and "
+        f"{RECONCILE_STOPPED}{_age(age)} ago -- boxes are not being reaped and "
         f"checkouts are not being synced "
         f"(fix: python devkit/scripts/install-reconcile-task.py --status)"
     )
@@ -833,9 +879,8 @@ def workspace_sync_line(workspace: Path) -> str:
         outcome, published = devkit_project.publish_workspace(workspace)
         if outcome == devkit_project.RENDER_REFUSED:
             return (
-                f"{workspace.name}: {len(problems)} difference(s), and the live file "
-                "carries edits devkit never wrote -- `--adopt-workspace` keeps them, "
-                "`--render-workspace --force` discards them"
+                f"{workspace.name}: {len(problems)} difference(s), and {PUBLISH_REFUSED} "
+                "-- `--adopt-workspace` keeps them, `--render-workspace --force` discards them"
             )
         if outcome != devkit_project.RENDER_PUBLISHED:
             return ""
@@ -986,7 +1031,56 @@ def toast_text(message: str) -> tuple[str, str]:
     lines = [line.removeprefix("[workspace] ") for line in message.splitlines() if line.strip()]
     head = lines[0] if lines else ""
     rest = f" (+{len(lines) - 1} more)" if len(lines) > 1 else ""
-    return NOTIFY_TITLE, f"{head}{rest} -- see logs/scheduled-workspace-status.log"
+    return NOTIFY_TITLE, f"{head}{rest} -- see {ARTIFACT}"
+
+
+def failure_kind(line: str) -> str:
+    """The `FAILURES` kind a report line is, or "" for a report of ordinary state."""
+    text = line.removeprefix("[workspace] ")
+    return next((kind for kind, marker in FAILURES if marker in text), "")
+
+
+def failures(toolchain: list[str], report: str) -> list[tuple[str, str]]:
+    """`(kind, line)` for every finding that is a failure: each toolchain line, and each
+    line of `report` (`render`'s) that `failure_kind` names."""
+    found = [("toolchain", line) for line in toolchain]
+    lines = [line.removeprefix("[workspace] ") for line in report.splitlines()]
+    return found + [(kind, line) for line in lines if (kind := failure_kind(line))]
+
+
+def record_failures(found: list[tuple[str, str]], root: Path) -> list[str]:
+    """File each failure on the harness-events ledger under `root`; the messages filed.
+
+    Only while no open row shares its signature, as the fix pass files its own findings:
+    a fault that stands for a week is one open row, not seven, and one resolved while
+    still present is filed again the next day. The message is the line with its counts
+    and ages folded to `N` -- `harness_triage.Item.signature` groups by it, so "3
+    difference(s)" and "4 difference(s)" are one failure; `said` keeps the line as
+    printed. Filed against `devkit`, which owns every defect on this ledger.
+    """
+    if not found:
+        return []
+    events = _triage.harness_events
+    held = {item.signature for item in _triage.open_items(_triage.load(root), (FAILURE_EVENT,))}
+    filed = []
+    for kind, line in found:
+        said = " ".join(line.split())
+        message = f"{kind}: {_NUMBER.sub('N', said)}"
+        fields: tuple[tuple[str, object], ...] = (
+            ("project", "devkit"),
+            ("message", message),
+            ("evidence", ARTIFACT),
+            *((("said", said),) if _NUMBER.search(said) else ()),
+        )
+        probe = _triage.parse_line(
+            events.event_line("-", FAILURE_EVENT, (*fields, ("agent", events.agent_name())))
+        )
+        if probe is None or probe.signature in held:
+            continue
+        held.add(probe.signature)
+        events.record(FAILURE_EVENT, fields, root=root)
+        filed.append(message)
+    return filed
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1011,7 +1105,7 @@ def main(argv: list[str] | None = None) -> int:
         behind = projects_behind(root, names, latest) if latest else {}
         schedule = schedule_lines()
         scheduler = scheduler_fallback(scheduler_line(), schedule, schedule_health.stood_down())
-        message = render(
+        report = render(
             results,
             behind,
             latest,
@@ -1030,15 +1124,20 @@ def main(argv: list[str] | None = None) -> int:
         # machine missing uv, a git identity or a task's extension cannot act on the
         # lines below, so saying them second would hand out fixes that cannot run --
         # and `render` already takes more arguments than anything should.
-        toolchain = "\n".join(f"[workspace] {line}" for line in toolchain_lines())
+        tools = toolchain_lines()
+        toolchain = "\n".join(f"[workspace] {line}" for line in tools)
         # No plug-menu rebuild rides on this pass any more. That checklist was the last
         # dropdown reading a cached file, and it now scans when it opens
         # (`plug-projects.py --rows`), so there is nothing left for a scheduled writer to
         # keep fresh -- and nothing for this pass to warn about when it could not.
-        message = "\n".join(part for part in (toolchain, message) if part)
-    except Exception as exc:
-        print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)
-        return 0
+        message = "\n".join(part for part in (toolchain, report) if part)
+    except Exception:
+        # The job failing, unlike a finding: exit non-zero with the traceback, so the
+        # scheduled run's `log-wrap.py --always` files it, cause and all. It exited 0 with
+        # only the exception's name once, and a pass that checked nothing read as healthy.
+        print("[workspace] status unavailable -- the pass crashed:", file=sys.stderr)
+        traceback.print_exc()
+        return CRASHED
     if message:
         # Printed first, and never conditional on the toast: the report is the artifact
         # and must not depend on a notifier that a POSIX machine, a locked session or a
@@ -1050,6 +1149,10 @@ def main(argv: list[str] | None = None) -> int:
             # task` is what holds it to that. A second broad `except` around a call with
             # that contract buys nothing and hides the next bug in this function.
             _notify.notify(*toast_text(message))
+    # After the report is out, so a ledger that cannot be read costs the filing and not
+    # the report -- and raises, failing the job, since `harness_events.record` itself
+    # never does and anything else here is a defect worth a traceback.
+    record_failures(failures(tools, report), SOURCE_ROOT)
     return 0
 
 

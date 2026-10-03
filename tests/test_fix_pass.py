@@ -213,6 +213,8 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(loop.fix_reports, "read_trees", lambda root, projects: list(table["trees"]))
     monkeypatch.setattr(loop.session_friction, "harvest", lambda *a, **k: list(table["friction"]))
     monkeypatch.setattr(loop.schedule_health, "query", lambda *a, **k: list(table["jobs"]))
+    monkeypatch.setattr(loop.collectors, "scheduled_tasks", lambda *a, **k: {})
+    monkeypatch.setattr(loop.collectors, "tray_rows", lambda *a, **k: [])
     monkeypatch.setattr(
         loop.fix_verify,
         "verify",
@@ -1654,9 +1656,11 @@ def test_a_pass_started_outside_utf8_mode_reruns_itself_in_it(monkeypatch):
     `'charmap' codec can't decode byte 0x9d` traceback from a reader thread; the pass
     now puts itself in UTF-8 mode, and hands back the rerun's exit code."""
     ran = []
+    handles = []
 
-    def fake_run(argv, *, check, creationflags):
+    def fake_run(argv, *, check, creationflags, stdin=None):
         ran.append(argv)
+        handles.append(stdin)
         return subprocess.CompletedProcess(argv, 4)
 
     monkeypatch.setattr(fix_pass.subprocess, "run", fake_run)
@@ -1665,5 +1669,9 @@ def test_a_pass_started_outside_utf8_mode_reruns_itself_in_it(monkeypatch):
     assert ran == [
         ["python.exe", "-X", "utf8", str(REPO_ROOT / "scripts" / "fix-pass.py"), "--mode", "plan"]
     ]
+    # Handed no std handle at all, a `CREATE_NO_WINDOW` child writes to a hidden console
+    # of its own: `fix-pass.py --mode plan` from a terminal printed nothing, not even the
+    # record's path (2026-10-03). Naming any one makes Windows pass the other two through.
+    assert handles == [subprocess.DEVNULL], "the rerun's output never reached the caller"
     assert fix_pass.in_utf8_mode(["--mode", "plan"], utf8_mode=1) is None
     assert len(ran) == 1, "a pass already in UTF-8 mode started a second one"

@@ -21,6 +21,10 @@ harness-defect ledger, where the devkit session picks it up on the next pass:
   one an open PR's detector no longer files is resolved against that PR
   (`friction_pending`).
 - **What has sat too long** (`fix_stall.py`): a hold, a cap or a skip past a day.
+- **What the machine's own jobs say**: a scheduled job the scheduler reports failing
+  (`job_findings`), and an ingestion collector the tray shows as anything but OK
+  (`collector_findings`). The tray is the only other reader of either, and a row only a
+  person sees is the ending the pass exists to rule out.
 
 Outside `dispatch` mode nothing is written -- not the ledger, not a tree, not the
 harvest cursor -- and what would be filed is only listed.
@@ -41,6 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bg_sessions
+import collectors
 import fix_cycle
 import fix_findings
 import fix_ledger
@@ -113,6 +118,7 @@ def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
     cursor = ctx.ledger_path.parent / session_friction.CURSOR_NAME
     journal.add(*journal.step("harvest", _harvest, ctx, cursor, default=[]))
     journal.add(*journal.step("jobs", job_findings, ctx, default=[]))
+    journal.add(*journal.step("collectors", collector_findings, ctx, default=[]))
     if ctx.writes:
         closed.lines += journal.step("verify", _verify, ctx, default=[])
         closed.lines += journal.step("recheck", _recheck, ctx, default=[])
@@ -271,51 +277,140 @@ def still_working(busy: frozenset[str], tree: Path, now: _dt.datetime) -> bool:
     return bg_sessions.busy_in(busy, tree) or fix_reports.awaiting_task(tree, now)
 
 
-# A scheduled job's own failure, read off the scheduler. Only `log-wrap.py --always` jobs
-# filed theirs, and eight of twelve ran bare: reconcile exited 1 every 15 minutes over
-# husks it could not delete and boxes it would not, and no pass ever saw it.
+# A scheduled job's own failure, read off the scheduler. Every job but the resident tray
+# now runs under `log-wrap.py --always`, which files each failed run itself, so what is
+# left here is what only the scheduler can say -- disabled, stale, never ran -- plus a
+# failed run of a job that runs bare (a collector's task, an installer not yet re-run).
 JOB_KIND = "scheduled-job"
 # What `schedule_health.artifact_hint` says when a later run finished clean.
 JOB_HISTORY = "the scheduler is reporting history"
+# `schedule_health.problems`' line for a run that exited non-zero.
+JOB_FAILED_RUN = ": last run failed ("
 # The run's time and count, kept out of the detail: a group must survive its recurrences.
 _JOB_WHEN = re.compile(r" (?:at|since) \d{4}-\d\d-\d\d \d\d:\d\d| \(\d+ intervals ago\)")
 
 
 def job_findings(
-    ctx: Context, jobs: list[schedule_health.Job] | None = None, git=ship_intent.run_quiet
+    ctx: Context,
+    jobs: list[schedule_health.Job] | None = None,
+    git=ship_intent.run_quiet,
+    tasks: dict[str, str] | None = None,
 ) -> list[Finding]:
     """A finding per devkit job the scheduler says needs attention, bar one it is only
     remembering: a line whose group was resolved after the run it reports. The scheduler
     repeats a daily job's last result for a day, so that run would reopen its own fix.
-    Nor one that ran code older than its group's fix (`_ran_before_fix`)."""
-    jobs = schedule_health.query() if jobs is None else jobs
+    Nor one that ran code older than its group's fix (`_ran_before_fix`).
+
+    The scheduled collectors (`collectors.scheduled_tasks`, `{task: log}`) are asked about
+    in the same query, as the tray asks: their tasks carry no `devkit-` prefix, so a
+    failing host collector was red in the tray and absent here. Each is filed against
+    its own project, which is its task's name -- and so is one this machine runs whose
+    task the scheduler does not have, which the query can only omit
+    (`tray_state.collector_task_states` paints the same row red)."""
+    if tasks is None:
+        tasks = collectors.scheduled_tasks(ctx.devkit_dir) if jobs is None else {}
+    jobs = schedule_health.query(also=frozenset(tasks)) if jobs is None else jobs
+    artifacts = {**schedule_health.ARTIFACTS, **tasks}
     by_name = {job.name: job for job in jobs}
     items = triage.load(ctx.devkit_dir)
     found: list[Finding] = []
     local_now = ctx.now.astimezone().replace(tzinfo=None)  # the scheduler speaks local time
     deliberate = schedule_health.stood_down()
-    for line in schedule_health.problems(jobs, local_now, deliberate, root=ctx.devkit_dir):
+    lines = schedule_health.problems(
+        jobs, local_now, deliberate, root=ctx.devkit_dir, artifacts=artifacts
+    )
+    for line in lines:
         name, head = line.split(":", 1)[0], line.split(" -- ", 1)[0]
-        if JOB_HISTORY in line:
-            continue
         job = by_name.get(name)
         artifact = schedule_health.failure_artifact(
-            name, root=ctx.devkit_dir, since=job.last_run if job else None
+            name, artifacts, root=ctx.devkit_dir, since=job.last_run if job else None
         )
         finding = Finding(
             JOB_KIND,
-            fix_cycle.DEVKIT,
+            name if name in tasks else fix_cycle.DEVKIT,
             _JOB_WHEN.sub("", head),
             evidence=str(ctx.devkit_dir / artifact) if artifact else "",
             command=line[:300],
         )
-        ran = job.last_run if job else None
-        if ran and (
-            _resolved_since(finding, items, ran)
-            or _ran_before_fix(ctx.devkit_dir, finding, items, ran, git)
-        ):
+        if not _filed_elsewhere(ctx, line, job, finding, items, git):
+            found.append(finding)
+    return found + unscheduled(ctx, tasks, frozenset(by_name))
+
+
+def _filed_elsewhere(
+    ctx: Context,
+    line: str,
+    job: schedule_health.Job | None,
+    finding: Finding,
+    items: list[triage.Item],
+    git,
+) -> bool:
+    """Whether `line` is not this pass's to file: history the scheduler is only
+    repeating, a failed run its `log-wrap.py --always` wrapper filed already, or a run
+    whose group a fix has since retired (`_resolved_since`, `_ran_before_fix`)."""
+    if JOB_HISTORY in line:
+        return True
+    if job is None:
+        return False
+    if JOB_FAILED_RUN in line and "log-wrap.py" in job.command and "--always" in job.command:
+        return True
+    ran = job.last_run
+    if ran is None:
+        return False
+    return _resolved_since(finding, items, ran) or _ran_before_fix(
+        ctx.devkit_dir, finding, items, ran, git
+    )
+
+
+# A collector this machine runs whose task the scheduler has never heard of.
+UNSCHEDULED = "not scheduled on this machine"
+
+
+def unscheduled(ctx: Context, tasks: dict[str, str], listed: frozenset[str]) -> list[Finding]:
+    """A finding per scheduled collector in `tasks` that the scheduler did not list."""
+    return [
+        Finding(
+            COLLECTOR_KIND,
+            name,
+            f"{name}: {UNSCHEDULED}",
+            evidence=str(ctx.devkit_dir / collectors.ARTIFACT),
+        )
+        for name in sorted(tasks)
+        if name not in listed
+    ]
+
+
+# A container collector the tray shows amber or red. Its health check failing is "the
+# project's verdict, not a failure" to `collectors.py`, so `devkit-collectors` exits 0 and
+# the scheduler reports nothing: ibkr_trader's check failed for a day -- its reddit job
+# 39 runs in, on credentials never set -- with the tray the only thing that knew.
+COLLECTOR_KIND = "collector"
+# Where a row's state ends and its particulars begin: a container's uptime, a health
+# summary stamped with when it was written. Kept out of the detail, as `_JOB_WHEN` is.
+_COLLECTOR_PARTICULARS = re.compile(r" -- | \(")
+
+
+def collector_findings(
+    ctx: Context, rows: list[tuple[str, str, str]] | None = None
+) -> list[Finding]:
+    """A finding per collector row (`collectors.tray_rows`) that is not OK, against the
+    collector's own project, citing `collectors.py`'s log, which holds the health output."""
+    rows = collectors.tray_rows(ctx.devkit_dir) if rows is None else rows
+    found: list[Finding] = []
+    for name, level, detail in rows:
+        if level == collectors.OK:
             continue
-        found.append(finding)
+        project = name.removeprefix(collectors.ROW_PREFIX)
+        state = _COLLECTOR_PARTICULARS.split(detail, maxsplit=1)[0]
+        found.append(
+            Finding(
+                COLLECTOR_KIND,
+                project,
+                f"{project}: {state}",
+                evidence=str(ctx.devkit_dir / collectors.ARTIFACT),
+                command=f"{name}: {detail}"[:300],
+            )
+        )
     return found
 
 
