@@ -135,11 +135,15 @@ jobs:
         run: uv run python -m alembic upgrade head
 {{/alembic}}
       - name: Application suite
+        id: application-suite
         run: uv run python scripts/run-tests.py
       - name: Harness hook tests
         # Separate from the application suite: pytest's testpaths excludes these,
         # and they are stdlib-only by contract. The JUnit report is their failure
         # artifact: without it a red vendored suite uploads nothing the fix pass can read.
+        # They run after a red application suite too, so one gate cycle names both
+        # tiers' failures.
+        if: success() || steps.application-suite.outcome == 'failure'
         run: uv run python -m pytest scripts/hooks/tests/ -q --junit-xml=logs/junit-hooks.xml
       - name: Upload test artifact
         if: failure()

@@ -70,8 +70,11 @@ jobs:
           name: nightly-lint-errors
           path: logs/lint-errors.log
       - name: Hook-script tests (vendored tier)
+        id: hooks-tests
         run: uv run python -m pytest scripts/hooks/tests/ -q
       - name: devkit tests (generator, ports, renderer)
+        # After a red vendored tier too, as in pr-gate.yml (ledger f07541c7).
+        if: success() || steps.hooks-tests.outcome == 'failure'
         run: uv run python scripts/run-tests.py
       - name: Upload test artifact
         if: failure()
@@ -119,8 +122,10 @@ jobs:
       - name: Lint + typecheck
         run: uv run python scripts/lint-all.py
       - name: Hook-script tests (vendored tier)
+        id: hooks-tests
         run: uv run python -m pytest scripts/hooks/tests/ -q
       - name: devkit tests (generator, ports, renderer)
+        if: success() || steps.hooks-tests.outcome == 'failure'
         run: uv run python scripts/run-tests.py
       - name: Upload artifacts
         if: failure()

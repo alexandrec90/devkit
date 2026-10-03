@@ -94,11 +94,15 @@ jobs:
           name: lint-errors
           path: logs/lint-errors.log
       - name: Hook-script tests (vendored tier)
+        id: hooks-tests
         # A junit file, because this step fails before `run-tests.py` writes
         # `logs/test-failures.log`: without it a red vendored suite uploads nothing the
         # fix pass can read, and its failing ids come out of `gh run view --log-failed`.
         run: uv run python -m pytest scripts/hooks/tests/ -q --junit-xml=logs/junit-hooks.xml
       - name: devkit tests (generator, ports, renderer)
+        # Also after a red vendored tier, never after a red lint: skipped, this tier's
+        # failures reached the fix pass one gate cycle late (ledger f07541c7).
+        if: success() || steps.hooks-tests.outcome == 'failure'
         # Via the wrapper, for the same dogfooding reason as the lint step: this is
         # what `run-tests.py` is for, and a broken wrapper should fail devkit's own CI
         # rather than surface first in a generated project.
