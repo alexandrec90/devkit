@@ -28,10 +28,14 @@ collectors this machine was assigned, and a machine assigned none spawns nothing
 
 No names means every collector `devkit.collectors` declares.
 
-**Started, never rebuilt.** A pass that finds the container down runs `docker compose up
--d <service>`, which builds an image only when there is none. Rebuilding for new code is
-a deploy, and a deploy nobody asked for -- mid-ingest, from whatever branch the checkout
-is on -- is not something a 15-minute timer should do.
+**Started, and redeployed onto merged code -- only merged code.** A pass that finds the
+container down runs `docker compose up -d <service>`, which builds an image only when
+there is none. A container whose code is older than the checkout's HEAD is rebuilt with
+`up -d --build` (`redeploy`), but only from a checkout whose HEAD is on origin's default
+branch and whose tracked files are clean: a deploy from whatever branch or half-edit the
+checkout holds is not something a 15-minute timer should do. Without it a fix merged in
+the project never reached the container its health check runs in, so ibkr_trader's
+collector finding came back after every merged fix (51cca249) -- the image was a day old.
 
 `tray_rows` is the tray's half: one live `docker ps` per poll, plus the last verdict of
 each project's own `health` command, which the pass records because running it takes a
@@ -43,6 +47,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -62,7 +67,11 @@ ARTIFACT = Path("logs/collectors.log")
 
 # Each project's last `health` verdict, keyed by project, with the container it was
 # taken from so a verdict about a container since replaced is not reported against it.
+# `code_at` is the newest the code in that container can be (`code_at`), which
+# `fix_loop.collector_findings` weighs against the fix of the group a verdict would
+# reopen; `held` says why a container behind its checkout was not redeployed.
 HEALTH = Path("logs/collectors.health.json")
+CODE_AT, HELD = "code_at", "held"
 
 # Every spawn here is reachable from a scheduled task under `pythonw.exe`; see
 # `tests/test_scheduled_jobs.py`. Zero off Windows, where the flag does not exist.
@@ -79,11 +88,15 @@ TRAY_PS_TIMEOUT = 15
 UP_TIMEOUT = 1800
 STOP_TIMEOUT = 120
 HEALTH_TIMEOUT = 120
+INSPECT_TIMEOUT = 30
+GIT_TIMEOUT = 30
 
 # The tray's three levels, spelled as `tray_state` spells them. Not imported from there:
 # `tray_state` imports this module, and `test_collectors.py` pins the two to each other.
 OK, WARN, FAIL = "ok", "warn", "fail"
 ROW_PREFIX = "collector: "
+# A row's state when the project's own verdict is the failing part.
+HEALTH_FAILING = "health check failing"
 
 
 @dataclass(frozen=True)
@@ -133,6 +146,42 @@ def first_line(text: str, limit: int = 100) -> str:
     return line if len(line) <= limit else line[: limit - 1] + "…"
 
 
+def spawn(argv: Sequence[str], timeout: int, cwd: Path | None = None) -> tuple[int, str]:
+    """`(exit code, stdout+stderr)`. A spawn that could not happen is a code, not a raise."""
+    try:
+        done = subprocess.run(
+            list(argv),
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+            creationflags=NO_WINDOW,
+        )
+    except FileNotFoundError:
+        return 127, f"{argv[0]} is not on PATH"
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {timeout}s"
+    except OSError as exc:
+        return 126, str(exc)
+    return done.returncode, "\n".join(p for p in (done.stdout, done.stderr) if p).strip()
+
+
+_FRACTION = re.compile(r"\.\d+")
+
+
+def parse_created(text: str) -> float | None:
+    """Docker's `Created` (`2026-10-03T00:16:05.123456789Z`) as a POSIX time; None when it
+    is not one. The nanoseconds go: `fromisoformat` takes at most six digits."""
+    try:
+        when = _dt.datetime.fromisoformat(_FRACTION.sub("", text.strip()).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when.timestamp() if when.tzinfo else None
+
+
 class Docker:
     """Everything that touches the engine: one captured, window-less spawn per call."""
 
@@ -140,26 +189,7 @@ class Docker:
         self.ps_timeout = ps_timeout
 
     def run(self, argv: Sequence[str], timeout: int, cwd: Path | None = None) -> tuple[int, str]:
-        """`(exit code, stdout+stderr)`. A spawn that could not happen is a code, not a raise."""
-        try:
-            done = subprocess.run(
-                list(argv),
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                check=False,
-                creationflags=NO_WINDOW,
-            )
-        except FileNotFoundError:
-            return 127, "docker is not on PATH"
-        except subprocess.TimeoutExpired:
-            return 124, f"timed out after {timeout}s"
-        except OSError as exc:
-            return 126, str(exc)
-        return done.returncode, "\n".join(p for p in (done.stdout, done.stderr) if p).strip()
+        return spawn(argv, timeout, cwd)
 
     def ps(self) -> list[Container] | None:
         """Every compose container, or None when the engine cannot be asked."""
@@ -180,6 +210,59 @@ class Docker:
 
     def health(self, container: Container, argv: Sequence[str]) -> tuple[int, str]:
         return self.run(["docker", "exec", container.id, *argv], HEALTH_TIMEOUT)
+
+    def built(self, container: Container) -> float | None:
+        """When `container`'s image was built, or None when the engine cannot say."""
+        code, image = self.run(
+            ["docker", "inspect", "--format", "{{.Image}}", container.id], INSPECT_TIMEOUT
+        )
+        if code != 0 or not image.strip():
+            return None
+        code, created = self.run(
+            ["docker", "image", "inspect", "--format", "{{.Created}}", image.strip()],
+            INSPECT_TIMEOUT,
+        )
+        return parse_created(created) if code == 0 else None
+
+    def deploy(self, checkout: Path, service: str) -> tuple[bool, str]:
+        # Builds first and recreates only once the build succeeded, so a build that fails
+        # leaves the running container as it was.
+        code, out = self.run(
+            ["docker", "compose", "up", "-d", "--build", service], UP_TIMEOUT, checkout
+        )
+        return code == 0, out
+
+
+class Git:
+    """The checkout's half of "is the container behind": what HEAD is, and whether it is
+    merged code a timer may deploy."""
+
+    def run(self, checkout: Path, *args: str) -> tuple[int, str]:
+        return spawn(["git", *args], GIT_TIMEOUT, checkout)
+
+    def head(self, checkout: Path) -> tuple[str, float] | None:
+        """`(short sha, commit time)` of HEAD; None when git cannot say."""
+        code, out = self.run(checkout, "log", "-1", "--format=%h %ct", "HEAD")
+        sha, _, when = out.strip().partition(" ")
+        try:
+            return (sha, float(when)) if code == 0 and sha else None
+        except ValueError:
+            return None
+
+    def held(self, checkout: Path) -> str:
+        """Why HEAD must not be deployed by a timer, or "" when it may: it is on origin's
+        default branch (at its tip or behind it) and no tracked file is edited."""
+        code, _out = self.run(
+            checkout, "merge-base", "--is-ancestor", "HEAD", "refs/remotes/origin/HEAD"
+        )
+        if code == 1:
+            return "HEAD is not on origin's default branch"
+        if code != 0:
+            return "origin's default branch is unknown here"
+        code, out = self.run(checkout, "status", "--porcelain", "--untracked-files=no")
+        if code != 0:
+            return "git status failed"
+        return "the checkout has uncommitted edits" if out.strip() else ""
 
 
 @dataclass
@@ -232,16 +315,60 @@ def check_health(target: Target, box: Container, docker: Docker, report: Report)
         report.say(f"{name}: healthy")
         return {"ok": True, "summary": "healthy", "container": box.id}
     summary = f"exit {code}: {first_line(out)}"
-    report.say(f"{name}: health check failing ({summary})")
+    report.say(f"{name}: {HEALTH_FAILING} ({summary})")
     report.lines.extend(f"    {line}" for line in out.splitlines()[:40])
     return {"ok": False, "summary": summary, "container": box.id}
 
 
+def code_at(box: Container, docker: Docker, last: dict) -> float | None:
+    """The newest the code `box` runs can be: its image's build time, or the commit this
+    job last redeployed it onto, whichever is later. The second is what stops a rebuild
+    that changed nothing -- a docs-only merge, every layer cached, the image's own date
+    unmoved -- from being redeployed again on every pass."""
+    times = [t for t in (docker.built(box), last.get(CODE_AT)) if isinstance(t, (int, float))]
+    return max(times) if times else None
+
+
+def redeploy(
+    target: Target, box: Container, docker: Docker, git: Git, report: Report, last: dict
+) -> dict:
+    """Rebuild `box` onto the checkout's HEAD when its code is older and HEAD is merged
+    code. Returns what to record: `code_at`, `held` when a redeploy was owed and refused,
+    and `deployed` when this pass redeployed (and so must skip the health check)."""
+    name, service = target.collector.project, target.collector.service
+    known = code_at(box, docker, last)
+    head = git.head(target.checkout) if known is not None else None
+    if known is None or head is None or head[1] <= known:
+        return {CODE_AT: known} if known is not None else {}
+    sha, committed = head
+    held = git.held(target.checkout)
+    if held:
+        report.say(
+            f"{name}: `{service}` runs code older than {sha} and was not redeployed -- {held}"
+        )
+        return {CODE_AT: known, HELD: held}
+    ok, out = docker.deploy(target.checkout, service)
+    if not ok:
+        report.fail(
+            f"{name}: could not redeploy `{service}` onto {sha} -- {first_line(out) or 'no output'}"
+        )
+        report.lines.extend(f"    {line}" for line in out.splitlines()[-20:])
+        return {CODE_AT: known}
+    report.say(f"{name}: redeployed `{service}` onto {sha} -- its code was older")
+    return {CODE_AT: committed, "deployed": True}
+
+
 def keep_running(
-    target: Target, containers: Sequence[Container], docker: Docker, report: Report
+    target: Target,
+    containers: Sequence[Container],
+    docker: Docker,
+    report: Report,
+    last: dict | None = None,
+    git: Git | None = None,
 ) -> dict | None:
-    """Start the collector if it is down. Returns a health record, or None when there is
-    nothing to record this pass."""
+    """Start the collector if it is down, redeploy it if it is behind its checkout.
+    Returns a health record, or None when there is nothing to record this pass. `last`
+    is the project's previous record."""
     name, service = target.collector.project, target.collector.service
     if not (target.checkout / ".git").exists():
         report.fail(f"{name}: no checkout at {target.checkout} -- nothing to start")
@@ -258,7 +385,14 @@ def keep_running(
         report.say(f"{name}: started `{service}`")
         return None
     report.say(f"{name}: `{service}` up ({box.status})")
-    return check_health(target, box, docker, report) if target.collector.health else None
+    code = redeploy(target, box, docker, git or Git(), report, last or {})
+    if code.pop("deployed", False):
+        # As on a start: the container is seconds old and its verdict would be noise. The
+        # record holds no `ok`, so the tray shows the row green until the next pass.
+        return code
+    if not target.collector.health:
+        return code or None
+    return {**check_health(target, box, docker, report), **code}
 
 
 def keep_stopped(
@@ -294,7 +428,9 @@ def maintain_scheduled(
             collector_tasks.keep_removed(collector_tasks.task_name(target.collector), run, report)
 
 
-def maintain(chosen: Sequence[Target], docker: Docker, report: Report, health: dict) -> None:
+def maintain(
+    chosen: Sequence[Target], docker: Docker, report: Report, health: dict, git: Git | None = None
+) -> None:
     """One pass over the assigned *container* collectors, recording health verdicts into
     `health`. The scheduled ones are `maintain_scheduled`'s, and need no docker."""
     if not chosen:
@@ -308,7 +444,8 @@ def maintain(chosen: Sequence[Target], docker: Docker, report: Report, health: d
         return
     for target in chosen:
         if target.mode == config.RUN:
-            record = keep_running(target, containers, docker, report)
+            last = health.get(target.collector.project, {})
+            record = keep_running(target, containers, docker, report, last, git)
             if record is not None:
                 health[target.collector.project] = record
         else:
@@ -379,7 +516,7 @@ def row(target: Target, containers: Sequence[Container] | None, health: dict) ->
         return FAIL, f"not running ({box.status})"
     verdict = health.get(target.collector.project, {})
     if verdict.get("container") == box.id and verdict.get("ok") is False:
-        return WARN, f"health check failing -- {verdict.get('summary', '')}"
+        return WARN, f"{HEALTH_FAILING} -- {verdict.get('summary', '')}"
     return OK, f"running ({box.status})"
 
 

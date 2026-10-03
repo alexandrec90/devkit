@@ -31,11 +31,20 @@ def box(service="app", state="running", workdir="C:/ws/ibkr_trader", cid="c1", s
 
 
 class FakeDocker:
-    def __init__(self, containers=None, up_ok=True, health=(0, "all good")):
+    def __init__(self, containers=None, up_ok=True, health=(0, "all good"), built=None):
         self.containers = containers
         self.up_ok = up_ok
         self.health_answer = health
+        self.built_at = built
         self.calls: list[tuple] = []
+
+    def built(self, container):
+        self.calls.append(("built", container.id))
+        return self.built_at
+
+    def deploy(self, checkout, service):
+        self.calls.append(("deploy", Path(checkout).name, service))
+        return self.up_ok, "" if self.up_ok else "failed to solve: pip install exited 1"
 
     def ps(self):
         self.calls.append(("ps",))
@@ -52,6 +61,21 @@ class FakeDocker:
     def health(self, container, argv):
         self.calls.append(("health", container.id, tuple(argv)))
         return self.health_answer
+
+
+class FakeGit:
+    def __init__(self, head=("c8c7b02", 2000.0), held=""):
+        self.head_answer = head
+        self.held_answer = held
+        self.calls: list[str] = []
+
+    def head(self, checkout):
+        self.calls.append("head")
+        return self.head_answer
+
+    def held(self, checkout):
+        self.calls.append("held")
+        return self.held_answer
 
 
 def target(tmp_path, mode=RUN, project="ibkr_trader", service="app", health=("h",)):
@@ -169,6 +193,203 @@ def test_a_failing_health_check_is_recorded_but_is_not_a_job_failure(tmp_path):
     assert report.failures == 0
     assert health["ibkr_trader"]["ok"] is False
     assert "reddit: stale" in health["ibkr_trader"]["summary"]
+
+
+# --- redeploying onto merged code ---------------------------------------------------------
+
+
+def test_a_collector_older_than_its_merged_checkout_is_redeployed_and_not_judged(tmp_path):
+    """51cca249: ibkr_trader's health fix merged, and its `app` kept running a day-old
+    image with the old code baked in, so the group came back after every fix."""
+    docker = FakeDocker([ours(tmp_path)], health=(1, "never-run"), built=1000.0)
+    git, report, health = FakeGit(), collectors.Report(), {}
+    collectors.maintain([target(tmp_path)], docker, report, health, git)
+    assert ("deploy", "ibkr_trader", "app") in docker.calls
+    assert not any(call[0] == "health" for call in docker.calls), "the container is seconds old"
+    assert health["ibkr_trader"] == {collectors.CODE_AT: 2000.0}
+    assert report.failures == 0 and any("redeployed `app` onto c8c7b02" in l for l in report.lines)
+    containers = [ours(tmp_path, cid="c2")]
+    assert collectors.row(target(tmp_path), containers, health)[0] == collectors.OK
+
+
+def test_a_rebuild_that_changed_nothing_is_not_redeployed_again(tmp_path):
+    """A docs-only merge leaves every layer cached and the image's own date unmoved; the
+    commit this job deployed onto is what says the container is current."""
+    docker, git = FakeDocker([ours(tmp_path)], built=1000.0), FakeGit()
+    health = {"ibkr_trader": {collectors.CODE_AT: 2000.0}}
+    collectors.maintain([target(tmp_path)], docker, collectors.Report(), health, git)
+    assert not any(call[0] == "deploy" for call in docker.calls)
+    assert health["ibkr_trader"][collectors.CODE_AT] == 2000.0, "carried to the next verdict"
+    assert health["ibkr_trader"]["ok"] is True
+
+
+def test_a_checkout_that_is_not_merged_code_is_not_deployed_and_says_why(tmp_path):
+    docker = FakeDocker([ours(tmp_path)], built=1000.0, health=(1, "reddit failing"))
+    git, report, health = (
+        FakeGit(held="HEAD is not on origin's default branch"),
+        collectors.Report(),
+        {},
+    )
+    collectors.maintain([target(tmp_path)], docker, report, health, git)
+    assert not any(call[0] == "deploy" for call in docker.calls)
+    assert health["ibkr_trader"][collectors.HELD] == "HEAD is not on origin's default branch"
+    assert health["ibkr_trader"]["ok"] is False, "the verdict is still taken"
+    assert report.failures == 0 and any("not redeployed" in line for line in report.lines)
+
+
+def test_a_redeploy_that_fails_fails_the_job_and_the_old_container_is_still_judged(tmp_path):
+    docker, report, health = (
+        FakeDocker([ours(tmp_path)], built=1000.0, up_ok=False),
+        collectors.Report(),
+        {},
+    )
+    collectors.maintain([target(tmp_path)], docker, report, health, FakeGit())
+    assert report.failures == 1 and any("pip install" in line for line in report.lines)
+    assert health["ibkr_trader"][collectors.CODE_AT] == 1000.0
+    assert any(call[0] == "health" for call in docker.calls)
+
+
+def test_a_container_newer_than_its_checkout_asks_nothing_more(tmp_path):
+    docker, git = FakeDocker([ours(tmp_path)], built=3000.0), FakeGit()
+    health = {}
+    collectors.maintain([target(tmp_path)], docker, collectors.Report(), health, git)
+    assert git.calls == ["head"] and health["ibkr_trader"][collectors.CODE_AT] == 3000.0
+
+
+def test_an_image_the_engine_cannot_date_is_left_alone_and_asks_git_nothing(tmp_path):
+    docker, git = FakeDocker([ours(tmp_path)]), FakeGit()
+    collectors.maintain([target(tmp_path)], docker, collectors.Report(), {}, git)
+    assert git.calls == [] and not any(call[0] == "deploy" for call in docker.calls)
+
+
+def test_a_collector_without_a_health_command_still_records_its_code(tmp_path):
+    docker = FakeDocker([ours(tmp_path)], built=1000.0)
+    record = collectors.keep_running(
+        target(tmp_path, health=()), [ours(tmp_path)], docker, collectors.Report(), {}, FakeGit()
+    )
+    assert record == {collectors.CODE_AT: 2000.0}, "or the next pass rebuilds it again"
+
+
+@pytest.mark.parametrize(
+    ("built", "last", "expected"),
+    [
+        (1000.0, {}, 1000.0),
+        (1000.0, {collectors.CODE_AT: 2000.0}, 2000.0),
+        (3000.0, {collectors.CODE_AT: 2000.0}, 3000.0),
+        (None, {collectors.CODE_AT: 2000.0}, 2000.0),
+        (None, {collectors.CODE_AT: "junk"}, None),
+    ],
+)
+def test_code_at_is_the_later_of_the_build_and_the_last_redeploy(built, last, expected):
+    assert collectors.code_at(box(), FakeDocker(built=built), last) == expected
+
+
+def test_redeploy_records_the_commit_it_deployed_onto(tmp_path):
+    docker, report = FakeDocker(built=1000.0), collectors.Report()
+    got = collectors.redeploy(target(tmp_path), ours(tmp_path), docker, FakeGit(), report, {})
+    assert got == {collectors.CODE_AT: 2000.0, "deployed": True}
+
+
+def test_redeploy_with_a_checkout_git_cannot_read_records_only_the_build(tmp_path):
+    docker, report = FakeDocker(built=1000.0), collectors.Report()
+    got = collectors.redeploy(
+        target(tmp_path), ours(tmp_path), docker, FakeGit(head=None), report, {}
+    )
+    assert got == {collectors.CODE_AT: 1000.0} and report.lines == []
+
+
+def test_spawn_names_the_missing_program(monkeypatch):
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr(collectors.subprocess, "run", fake_run)
+    assert collectors.spawn(["git", "status"], 5) == (127, "git is not on PATH")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("2026-10-03T00:16:05.123456789Z", dt.datetime(2026, 10, 3, 0, 16, 5, tzinfo=dt.UTC)),
+        ("2026-10-03T00:16:05+02:00", dt.datetime(2026, 10, 2, 22, 16, 5, tzinfo=dt.UTC)),
+        ("2026-10-03T00:16:05", None),
+        ("<no value>", None),
+    ],
+)
+def test_dockers_created_is_read_to_the_second(text, expected):
+    assert collectors.parse_created(text) == (expected.timestamp() if expected else None)
+
+
+def test_built_reads_the_containers_image_then_its_date(monkeypatch):
+    asked = []
+
+    def fake_run(argv, **kwargs):
+        asked.append(argv)
+        out = "sha256:abc\n" if argv[1] == "inspect" else "2026-10-03T00:16:05.5Z\n"
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(collectors.subprocess, "run", fake_run)
+    when = collectors.Docker().built(box(cid="c9"))
+    assert when == dt.datetime(2026, 10, 3, 0, 16, 5, tzinfo=dt.UTC).timestamp()
+    assert asked[0][-1] == "c9" and asked[1][-1] == "sha256:abc"
+
+
+def test_built_is_none_when_the_engine_cannot_say(monkeypatch):
+    monkeypatch.setattr(
+        collectors.subprocess,
+        "run",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 1, "", "No such object"),
+    )
+    assert collectors.Docker().built(box()) is None
+
+
+def test_deploy_builds_then_recreates_the_named_service(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(argv=argv, cwd=kwargs["cwd"])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(collectors.subprocess, "run", fake_run)
+    assert collectors.Docker().deploy(tmp_path, "app") == (True, "")
+    assert seen == {"argv": ["docker", "compose", "up", "-d", "--build", "app"], "cwd": tmp_path}
+
+
+def _git(cwd, *args):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+@pytest.fixture
+def merged(tmp_path):
+    """A checkout at the tip of origin's default branch, as the static checkout sits."""
+    repo = tmp_path / "ibkr_trader"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "config", "commit.gpgsign", "false")
+    (repo / "a.txt").write_text("one\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-q", "-m", "one")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    return repo
+
+
+def test_git_deploys_merged_code_only(merged):
+    git = collectors.Git()
+    assert git.held(merged) == ""
+    sha, when = git.head(merged)
+    assert sha and when > 0
+    (merged / "a.txt").write_text("edited\n", encoding="utf-8")
+    assert git.held(merged) == "the checkout has uncommitted edits"
+    _git(merged, "commit", "-q", "-am", "local only")
+    assert git.held(merged) == "HEAD is not on origin's default branch"
+    _git(merged, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+    assert git.held(merged) == "origin's default branch is unknown here"
+
+
+def test_git_says_nothing_of_a_directory_that_is_not_a_checkout(tmp_path):
+    assert collectors.Git().head(tmp_path) is None
 
 
 def test_a_start_that_fails_is_a_failure_with_dockers_words(tmp_path):
@@ -385,7 +606,7 @@ def test_keep_running_records_nothing_for_a_collector_without_a_health_command(t
     no_health = target(tmp_path, health=())
     docker = FakeDocker()
     assert collectors.keep_running(no_health, [ours(tmp_path)], docker, collectors.Report()) is None
-    assert docker.calls == []
+    assert docker.calls == [("built", "c1")], "only the redeploy's question, never a health check"
 
 
 def test_keep_stopped_reports_a_stop_docker_refused(tmp_path):
