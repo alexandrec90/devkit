@@ -42,6 +42,7 @@ already handles.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import tempfile
@@ -134,6 +135,47 @@ def windowless(python: str) -> str:
         if candidate.is_file():
             return str(candidate)
     return python
+
+
+def console(python: str) -> str:
+    """`python.exe` beside `pythonw.exe`: the interpreter a job's *wrapped* command names.
+
+    The inverse of `windowless`, and not an interchangeable preference: the task's own
+    `<Command>` must be windowless, and the interpreter inside the wrapped argv must not
+    be. `log-wrap.py` spawns it with `CREATE_NO_WINDOW`, which Windows ignores for a
+    GUI-subsystem child, so a `pythonw.exe` there is left with no console and every
+    process it spawns gets a visible one (`scripts/windowless-jobs.md`). Identity for a
+    console interpreter, and for a `pythonw.exe` with no twin beside it.
+    """
+    if os.path.basename(python).lower() != "pythonw.exe":
+        return python
+    candidate = os.path.join(os.path.dirname(python), "python.exe")
+    return candidate if os.path.isfile(candidate) else python
+
+
+# The wrapper every scheduled job's command runs under, below the checkout it runs from.
+LOG_WRAP = ("scripts", "log-wrap.py")
+
+
+def logged(label: str, python: str, arguments: str, root: str | Path) -> str:
+    """`arguments` -- a script and its own arguments, as the task would run them under
+    `python` -- as the `<Arguments>` of a task that runs them under `log-wrap.py --always`.
+
+    The wrapper is what puts a failed run on the harness-events ledger: one
+    `scheduled-job-failed` event per failure, naming `logs/<slug>.failed.log`, which
+    outlives the next run. Without it a job's failure is the scheduler's `Last Result`
+    alone, and the next run overwrites that -- `fix_loop.job_findings` reads it once per
+    fix pass, so a job failing at 22:30 and passing at 22:45 was never filed.
+    `tests/test_installer_contract.py` holds every installer to it.
+
+    `label` names the wrapper's files (`log_wrap.slug`), so it must not slug to the
+    runner's own artifact, which the wrapper would overwrite with the captured console.
+    `root` is the checkout: the task's `<WorkingDirectory>` must be the same one, because
+    the wrapper resolves `logs/` from the cwd. `python` is the task's own windowless
+    interpreter; the wrapped command runs its `console` twin.
+    """
+    wrapper = os.path.join(str(root), *LOG_WRAP)
+    return f'"{wrapper}" --always "{label}" -- "{console(python)}" {arguments}'
 
 
 def repeating_trigger(interval_minutes: int, start: str = EPOCH_START) -> str:

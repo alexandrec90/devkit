@@ -20,6 +20,8 @@ from support import LIVE_WORKSPACE, REPO_ROOT, load_script, needs_live_workspace
 
 ws = load_script("scripts/workspace-status.py")
 harness_triage = load_script("scripts/harness_triage.py")
+log_wrap = load_script("scripts/log-wrap.py")
+status_installer = load_script("scripts/install-workspace-status.py")
 
 
 def result(name: str, verdict: str) -> sweep.Result:
@@ -139,14 +141,37 @@ def test_an_absent_workspace_is_silent_and_successful(tmp_path, monkeypatch, cap
     assert capsys.readouterr().out == ""
 
 
-def test_a_failure_anywhere_still_exits_zero(tmp_path, monkeypatch):
-    """A status line that can fail the job running it gets removed the first time it
-    is wrong -- and then nothing is watching again."""
+def _crashing(monkeypatch, tmp_path) -> None:
     workspace = tmp_path / "w.code-workspace"
     workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
     monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
-    assert ws.main([]) == 0
+
+
+def test_a_crash_fails_the_job_and_says_why(tmp_path, monkeypatch, capsys):
+    """Findings are not a job failure and exit 0. A crash is one: it exited 0 too, with
+    the exception's type name and nothing else, so the scheduled pass's `Last Result` read
+    as a pass, `log-wrap.py` had no failure to file, and a pass that checked nothing was
+    indistinguishable from a healthy workspace."""
+    _crashing(monkeypatch, tmp_path)
+    assert ws.main([]) == ws.CRASHED != 0
+    err = capsys.readouterr().err
+    assert "Traceback (most recent call last)" in err
+    assert "OSError: boom" in err
+
+
+def test_a_crash_reaches_the_ledger_through_the_scheduled_wrapper(tmp_path, monkeypatch, capsys):
+    """The scheduled job runs this under `log-wrap.py --always`, which files a failed run
+    as `scheduled-job-failed` with the exception as its `cause` -- so the crash is filed
+    by the wrapper rather than by a second writer here, which would make it two groups."""
+    _crashing(monkeypatch, tmp_path)
+    code = ws.main(["--notify"])
+    output = capsys.readouterr().err
+    ledger = tmp_path / "devkit"
+    argv = ["--always", status_installer.LABEL, "--", "python", "workspace-status.py"]
+    assert log_wrap.main(argv, run=lambda _command: (code, output), root=ledger) == code
+    rows = [item for item in harness_triage.load(ledger) if item.event == log_wrap.FAILED_EVENT]
+    assert [row.fields["cause"] for row in rows] == ["OSError: boom"]
 
 
 # --- the toast the unattended pass reaches a person with ---------------------
@@ -1265,3 +1290,115 @@ def test_commit_status_answers_on_this_machine_without_raising():
     """`_commit_status` is the one call here that leaves Python; it must never throw."""
     phys, limit, avail = ws._commit_status()
     assert (phys, limit, avail) == (0, 0, 0) or (phys > 0 and limit >= phys >= 0 and avail >= 0)
+
+
+# --- a finding that is a failure goes on the ledger --------------------------------
+#
+# The report ended at a toast, so a broken workstation was reported to whoever happened
+# to read the Action Center that morning and to nothing that fixes things. A *failure*
+# -- something broken -- is filed for the fix pass; a *report* of ordinary state
+# (stranded work, a box, a release not yet adopted, disk) stays a line and a toast.
+
+
+def test_a_drifted_policy_is_a_failure_and_a_release_behind_is_not(tmp_path):
+    modified = installed(tmp_path / "modified")
+    (modified / "devkit_git_policy.py").write_text("# tampered\n", encoding="utf-8")
+    assert ws.failure_kind(ws.policy_line(REPO_ROOT, modified, latest="v0.5.3")) == (
+        "branch-policy-drift"
+    )
+    behind = installed(tmp_path / "behind")
+    line = ws.policy_line(REPO_ROOT, behind, latest="v0.6.0")
+    assert line and ws.failure_kind(line) == ""
+
+
+def test_a_retired_hook_still_wired_is_a_failure(tmp_path):
+    _wire(tmp_path, "carameli", 'python3 "x/scripts/hooks/branch-on-write.py"')
+    assert ws.failure_kind(ws.retired_hooks_line(tmp_path, ["carameli"])) == "retired-hooks"
+
+
+def test_a_stopped_reconcile_pass_is_a_failure(tmp_path):
+    _logged(tmp_path, 24 * 5)
+    assert ws.failure_kind(ws.scheduler_line(tmp_path, now=NOW)) == "reconcile-stopped"
+
+
+def test_a_refused_publish_is_a_failure_and_a_held_one_is_not(tmp_path, monkeypatch):
+    """Refused: the live file carries edits nobody will reconcile unless told. Held: devkit
+    is on a task branch, and the next pass on the default branch publishes."""
+    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
+    _checkout(monkeypatch)
+    refused = ws.workspace_sync_line(_live(tmp_path, {"a": "b"}))
+    assert ws.failure_kind(refused) == "workspace-publish-refused"
+    _checkout(monkeypatch, branch="agent/whatever-0823")
+    held = ws.workspace_sync_line(_live(tmp_path, {"a": "b"}))
+    assert held and ws.failure_kind(held) == ""
+
+
+def test_a_report_of_ordinary_state_is_not_a_failure():
+    reports = [
+        ws.stranded_line([result("carameli", sweep.READY)]),
+        ws.behind_line({"carameli": "v0.5.2"}, "v0.5.3"),
+        ws.boxes_line([{"box": "b", "reapable": True, "verdict": "x"}]),
+        "3 harness defect(s) open -- agent reports or failed box spawns nobody has retired",
+        "headroom: 20 GB free (fix: close idle dev servers)",
+    ]
+    assert all(reports)
+    assert [ws.failure_kind(line) for line in reports] == [""] * len(reports)
+
+
+def test_every_toolchain_line_is_a_failure_and_a_report_line_only_when_named_one():
+    report = "[workspace] settings wire retired hooks: a (b.py)\n[workspace] 2 box(es)"
+    assert ws.failures(["uv is not on PATH"], report) == [
+        ("toolchain", "uv is not on PATH"),
+        ("retired-hooks", "settings wire retired hooks: a (b.py)"),
+    ]
+    assert ws.failures([], "") == []
+
+
+def _filed(root):
+    return [item for item in harness_triage.load(root) if item.event == ws.FAILURE_EVENT]
+
+
+def test_a_failure_is_filed_once_while_it_stays_open(tmp_path):
+    """Daily, a standing fault would otherwise file a row a day; one open row says it."""
+    faults = [("toolchain", "uv is not on PATH -- install uv")]
+    assert len(ws.record_failures(faults, tmp_path)) == 1
+    assert ws.record_failures(faults, tmp_path) == []
+    rows = _filed(tmp_path)
+    assert [row.fields["message"] for row in rows] == ["toolchain: uv is not on PATH -- install uv"]
+    assert rows[0].fields["evidence"] == status_installer.ARTIFACT
+
+    harness_triage.resolve([rows[0].id], "installed uv", root=tmp_path)
+    assert len(ws.record_failures(faults, tmp_path)) == 1, "a fault still there reopens"
+
+
+def test_a_count_in_the_line_does_not_split_one_failure_into_two(tmp_path):
+    """The signature groups by the message, so it has to be stable across recurrences:
+    "3 difference(s)" today and "4" tomorrow is one refused publish, not two."""
+    line = "w.code-workspace: {} difference(s), and the live file carries edits devkit never wrote"
+    ws.record_failures([("workspace-publish-refused", line.format(3))], tmp_path)
+    ws.record_failures([("workspace-publish-refused", line.format(4))], tmp_path)
+    rows = _filed(tmp_path)
+    assert len(rows) == 1
+    assert "N difference(s)" in rows[0].fields["message"]
+    assert "3 difference(s)" in rows[0].fields["said"]
+
+
+def test_the_fix_pass_reads_these_failures_as_backlog():
+    assert ws.FAILURE_EVENT in harness_triage.TRIAGE_EVENTS
+
+
+def test_the_pass_files_its_failures_and_still_exits_zero(monkeypatch, tmp_path):
+    """End to end through `main`: the toolchain gap and the failing line are filed, the
+    ordinary report beside them is not, and findings stay exit 0 -- `Last Result` is the
+    job's health, which reporting a broken workstation does not change."""
+    retired = "settings wire retired hooks: carameli (branch-on-write.py) (fix: --pull)"
+    _workspace_reporting(
+        monkeypatch, tmp_path, f"[workspace] {retired}\n[workspace] 2 ephemeral box(es): ..."
+    )
+    monkeypatch.setattr(ws, "toolchain_lines", lambda *a, **k: ["uv is not on PATH -- x"])
+    monkeypatch.setattr(ws, "SOURCE_ROOT", tmp_path)
+    assert ws.main([]) == 0
+    assert sorted(row.fields["message"] for row in _filed(tmp_path)) == [
+        f"retired-hooks: {retired}",
+        "toolchain: uv is not on PATH -- x",
+    ]

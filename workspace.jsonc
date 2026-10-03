@@ -346,16 +346,21 @@
 				// it costs, and a hazardous retirement still refuses — which is what `--yes`
 				// rests on and why no question is asked once the terminal opens.
 				//
-				// Still no `log-wrap.py`, and now for one reason rather than two: the script
-				// writes `logs/plug-projects.log` itself, so the one artifact covers this
-				// task and the bare CLI, whose checkbox loop log-wrap could not carry
-				// anyway (it pipes stdout by line, so an unfinished prompt never appears).
+				// Inside `log-wrap.py` like every task, so a failed run -- a refusal from a
+				// task branch, a clone that failed -- is filed on the harness-events ledger.
+				// The script's own `logs/plug-projects.log` names the registry it ended with;
+				// log-wrap's keeps the run. Piping is safe on this path: `--picks ... --yes`
+				// never reaches the terminal checkbox loop, the one thing that reads stdin.
 				"label": "Workspace: Plug / Unplug Projects",
 				"detail": "Every project — in the workspace registry, on disk, and on GitHub — scanned when the picker opens. Ticking acts on one: a project registered from another PC is cloned onto this one (the registry is untouched), an unregistered project is plugged in (cloning its repo, or creating the repo when only the folder exists), and a registered project on this PC is retired from the registry on every PC, which touches NOTHING on disk. Tick nothing and nothing changes. Edits devkit's workspace.jsonc and republishes the live .code-workspace, so it refuses from a task branch or a box.",
 				"type": "process",
 				"command": "python",
 				"args": [
 					"scripts/notify-wrap.py",
+					"Workspace: Plug / Unplug Projects",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
 					"Workspace: Plug / Unplug Projects",
 					"--",
 					"python",
@@ -1412,11 +1417,20 @@
 				// from `folders` by design. What you want back is the last few sessions
 				// wherever they happened, so the script reads the transcript store — which
 				// records each session's own directory — instead of asking.
+				//
+				// `log-wrap.py` but no toast: the tabs it opens are the notification, and the
+				// wrapper is what files a failed run (no `wt.exe`, no resumable session found)
+				// on the harness-events ledger. Nothing here reads stdin, and the
+				// reopened sessions run in Windows Terminal's own tabs, not in this pipe.
 				"label": "Agents: Resume Recent Sessions",
 				"detail": "Check Claude, Codex, or both, optionally pick a model and a reasoning effort for the reopened sessions — the first row of each leaves the CLI's own setting alone — and choose how many sessions, then reopen the globally most recent matching sessions as tabs in the Windows Terminal window you already have open (a new one only if there is none), one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it. A model picked for one CLI applies to that CLI's tabs and leaves the other's on their own default. The checked CLIs are updated first, which takes a few seconds and is the one moment they can be — an update cannot replace a binary a running agent is executing, so any agent already up is skipped.",
 				"type": "process",
 				"command": "python",
 				"args": [
+					"scripts/log-wrap.py",
+					"Agents: Resume Recent Sessions",
+					"--",
+					"python",
 					"scripts/resume-sessions.py",
 					"--agent",
 					"${input:resumeAgents}",

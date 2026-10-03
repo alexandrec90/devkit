@@ -44,9 +44,10 @@ uncommitted for a task branch — the same shape `--adopt-workspace` has.
 **The checkboxes live in VS Code, not in this terminal.** `--rows` scans the three
 sources and prints the quick-pick, `plugSelection` draws it, and `--picks` reads the
 answer back. The terminal loop below is what a bare `python scripts/plug-projects.py`
-still gets, and the task never reaches it. The task stays unwrapped by `log-wrap.py` all
-the same: this script writes `logs/plug-projects.log` itself, and that artifact names the
-registry it ended with rather than transcribing what scrolled past.
+still gets, and the task never reaches it -- which is what lets the task run inside
+`log-wrap.py`, whose pipe could not carry that loop's prompt. The wrapper keeps the run
+and files a failed one on the harness-events ledger; this script's own
+`logs/plug-projects.log` names the registry it ended with.
 
 **A tick is a toggle, and that is a deliberate break from the checklist it replaced.**
 That list came from `logs/plug-menu.json`, which only `worktree.py reconcile` rewrote —

@@ -440,7 +440,8 @@ def main(argv: list[str] | None = None, agent_pass: AgentPass | None = None) -> 
 
     # Before argparse: `--agent` has a `type=` that would reject the literal
     # `${input:resumeAgents}` a dismissed checkbox list leaves behind, turning a cancel
-    # into a usage error. This task carries no wrapper, so the guard has to be here.
+    # into a usage error. Nothing in front of it would catch it: the task carries no
+    # `notify-wrap.py`, and `log-wrap.py` passes the literal through untouched.
     dismissed = task_input.cancelled_inputs(sys.argv[1:] if argv is None else argv)
     if dismissed:
         print(task_input.cancel_report("resume-sessions", dismissed))

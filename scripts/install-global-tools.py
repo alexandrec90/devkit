@@ -87,6 +87,12 @@ DEFAULT_TIME = "04:30"
 # against the runner's own constant and against `schedule_health.ARTIFACTS`.
 ARTIFACT = "logs/global-tools.log"
 
+# The `log-wrap.py --always` label the task runs under (`devkit_schtasks.logged`), which
+# files each failed run on the harness-events ledger; its files are
+# `logs/scheduled-global-tools[.failed].log` -- the captured npm and uv output -- beside
+# `ARTIFACT`, which stays the runner's rollback record.
+LABEL = "Scheduled: Global Tools"
+
 # The directory ephemeral boxes live in. A schedule must never point inside one --
 # `reconcile` deletes it when the PR merges. Read from `sweep` so one rename moves both.
 BOXES_DIR = sweep.BOXES_DIR_NAME
@@ -194,7 +200,8 @@ def task_document(schedule: Schedule, root: Path = REPO_ROOT) -> str:
     program, *arguments = schedule.command
     return devkit_schtasks.task_xml(
         program,
-        subprocess.list2cmdline(arguments),
+        # Under `log-wrap.py`, which resolves `logs/` from that same cwd.
+        devkit_schtasks.logged(LABEL, program, subprocess.list2cmdline(arguments), root),
         devkit_schtasks.daily_trigger(schedule.at),
         working_dir=str(root),
         # Lands disabled when this job has been stood down by name (`harness-switch.py

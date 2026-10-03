@@ -566,6 +566,10 @@ def in_utf8_mode(argv: list[str], utf8_mode: int = sys.flags.utf8_mode) -> int |
     any other launcher (a terminal, a script calling it by path) used to get the
     traceback. The guard lives in the pass because the pass is the one place every
     launcher reaches.
+
+    The rerun is handed `stdin` so that Windows hands it this process's stdout and stderr
+    too: given no std handle at all, a `NO_WINDOW` child writes to a hidden console of its
+    own, and a pass started from a terminal printed nothing.
     """
     if utf8_mode:
         return None
@@ -573,6 +577,7 @@ def in_utf8_mode(argv: list[str], utf8_mode: int = sys.flags.utf8_mode) -> int |
         [sweep.console_python(), "-X", "utf8", str(Path(__file__).resolve()), *argv],
         check=False,
         creationflags=sweep.NO_WINDOW,
+        stdin=subprocess.DEVNULL,
     ).returncode
 
 

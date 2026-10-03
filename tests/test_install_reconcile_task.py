@@ -110,7 +110,18 @@ def test_the_interpreter_is_the_action_not_part_of_the_arguments():
     registers a task whose program is a path with a space in it."""
     body = installer.task_document(PY, "worktree.py reconcile", 15)
     assert f"<Command>{PY}</Command>" in body
-    assert "<Arguments>worktree.py reconcile</Arguments>" in body
+    assert f"<Arguments>{PY}" not in body
+    assert " worktree.py reconcile</Arguments>" in body
+
+
+def test_the_pass_runs_under_the_ledger_wrapper_in_its_own_checkout():
+    """Each failed pass is a `scheduled-job-failed` event, which outlives the next pass's
+    `Last Result`; the wrapper writes its `logs/` in the cwd, so the task starts there."""
+    root = Path(r"C:\ws\devkit")
+    body = installer.task_document(PY, '"worktree.py" reconcile', 15, root=root)
+    wrapper = root / "scripts" / "log-wrap.py"
+    assert f'<Arguments>"{wrapper}" --always "{installer.LABEL}"' in body
+    assert f"<WorkingDirectory>{root}</WorkingDirectory>" in body
 
 
 def test_uninstall_names_the_task_and_does_not_prompt():

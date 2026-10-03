@@ -147,6 +147,22 @@ def test_a_pass_that_reports_is_passed_through_untouched(watched):
     assert watched["updates"] == 1, "kept current before every pass"
 
 
+def test_a_stale_pass_left_to_the_next_fire_is_no_failure(watched, monkeypatch):
+    """`STALE` short of the budget to rerun means "the next fire routes it": nothing
+    failed. Passed through as 75, the scheduler's Last Result read it as a failed run,
+    and the pass filed `devkit-fix-pass: last run failed (exit 75)` off it."""
+    monkeypatch.setattr(watchdog, "MIN_RERUN", watchdog.TIMEOUT * 2)
+    watched["outcome"] = (watchdog.STALE, "held     carameli #395\n")
+    assert watchdog.watch(watched["argv"], NOW) == 0
+    assert findings(watched["devkit"]) == []
+
+
+def test_exit_code_passes_a_report_through_and_a_self_failure_as_2():
+    assert watchdog.exit_code(1, "") == 1
+    assert watchdog.exit_code(watchdog.STALE, "") == 0
+    assert watchdog.exit_code(None, "pass-hung") == 2
+
+
 def test_the_watch_survives_the_none_stdout_pythonw_gives_it(watched, monkeypatch):
     """The scheduler runs this under `pythonw.exe`, whose `sys.stdout` is None: a
     `.write` there raised after the pass had run and before its outcome was judged.

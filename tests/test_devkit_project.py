@@ -60,6 +60,33 @@ def checkouts(tmp_path):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def ledger_dir(tmp_path_factory, monkeypatch):
+    """Point the harness-events ledger, and the dispatcher's kept failure copies, at scratch.
+
+    A dispatch that cannot start files a ledger event and keeps its reason under `logs/`
+    (`record_task_failure`), and a dozen tests here drive exactly that path -- so without
+    this every run of the suite would append rows to this machine's real ledger, which
+    `harness_triage.py` reads as defects an agent hit. Autouse for the reason
+    `scripts/hooks/tests/conftest.py` gives its own copy: a diagnostic a test can quietly
+    poison is one nobody can trust, and knowing to opt in is exactly what gets forgotten.
+    """
+    scratch = tmp_path_factory.mktemp("ledger")
+    monkeypatch.setenv("DEVKIT_DIR", str(scratch))
+    monkeypatch.setattr(devkit_project, "FAILURE_ROOT", scratch)
+    return scratch
+
+
+def ledger_rows(root: Path) -> list[dict[str, str]]:
+    """Every event under `root/logs/`, as `{field: value}` with `event` among them."""
+    rows = []
+    for shard in sorted((root / "logs").glob("harness-events*.log")):
+        for line in shard.read_text(encoding="utf-8").splitlines():
+            _stamp, *pairs = line.split("\t")
+            rows.append(dict(pair.split("=", 1) for pair in pairs))
+    return rows
+
+
 # --- the registry -----------------------------------------------------------
 
 
@@ -1968,19 +1995,20 @@ def test_both_lint_scopes_reach_the_one_action(checkouts, picked, expected):
     assert inner(command) == ["python", "scripts/lint-all.py", *expected]
 
 
-# Tasks that deliberately do not persist a failure artifact. Both launch a window and
-# exit — a Windows Terminal set, a VNC viewer — so their "output" is the thing they
-# opened, and there is no run text for anyone to read afterwards. Named here rather than
-# passed over, so a task that stops writing one has to say why in this list.
-UNLOGGED_TASKS = {
-    "Agents: Resume Recent Sessions": "reopens sessions in tabs, then exits",
-    "IBKR: Open Gateway VNC Viewer": "launches a GUI viewer; nothing to parse when it closes",
-    "Workspace: Plug / Unplug Projects": (
-        "the script writes logs/plug-projects.log itself, naming the registry it ended "
-        "with rather than transcribing the run; the checkboxes are VS Code's quick-pick, "
-        "so a bare `python scripts/plug-projects.py` is the only entry point that prompts"
-    ),
-}
+# Tasks that deliberately run outside `log-wrap.py`, each with its reason -- and empty,
+# because the wrapper is no longer only the artifact: it is what files a failed task on
+# the harness-events ledger, which the owner's rule says every routine task must reach.
+# So "its output is a window, there is nothing to read" stopped being a reason: the run
+# can still fail (no `wt.exe`, a refused registry edit), and that failure is what is
+# filed. Three tasks were listed and none is now. `Agents: Resume Recent Sessions` and
+# `Workspace: Plug / Unplug Projects` are wrapped -- neither reads stdin on its task
+# path, which is the one thing a pipe cannot carry -- and `IBKR: Open Gateway VNC
+# Viewer` had been a dispatch, which `plan_command` wraps, all along.
+#
+# A task that genuinely cannot be piped (one that must prompt mid-run in a way the
+# whole-line rule in `.claude/rules/vscode-tasks.md` cannot serve) goes here, and the
+# reason has to say how its failure reaches the ledger instead.
+UNLOGGED_TASKS: dict[str, str] = {}
 
 
 def test_every_workspace_scoped_task_writes_a_failure_artifact(canonical):
@@ -2050,6 +2078,25 @@ def test_the_unlogged_exceptions_are_all_real_tasks(canonical):
     labels = {task["label"] for task in canonical["tasks"]}
     for exempt in UNLOGGED_TASKS:
         assert any(exempt in label for label in labels), f"{exempt} names no task"
+
+
+def test_every_unlogged_exception_still_runs_unwrapped(canonical):
+    """The other way an exemption goes stale: the task is brought back into line and the
+    entry stays, licensing a future deviation nobody argued for. `IBKR: Open Gateway VNC
+    Viewer` was exempt while being a dispatch, which `plan_command` wraps -- the list
+    said a task wrote no artifact when it did. Same ratchet `CONTRACT_EXCEPTIONS` holds."""
+    for exempt, reason in UNLOGGED_TASKS.items():
+        assert reason, f"{exempt} is exempt with no reason"
+        for task in canonical["tasks"]:
+            if exempt not in task["label"]:
+                continue
+            args = [str(a) for a in task.get("args", ())]
+            assert not (args and args[0].endswith("devkit_project.py")), (
+                f"{task['label']} is a dispatch, which plan_command wraps; drop its exemption"
+            )
+            assert not any("log-wrap.py" in a for a in args), (
+                f"{task['label']} runs inside log-wrap.py now; drop its exemption"
+            )
 
 
 def test_every_task_has_a_label_and_a_detail(canonical):
@@ -3227,7 +3274,8 @@ def test_a_non_autofix_action_is_never_snapshotted(tmp_path, monkeypatch):
     assert devkit_project.main(["--workspace", str(workspace), "--project", "alpha", "test"]) == 0
 
 
-def test_a_failed_sweep_step_stops_the_chain_and_reports(tmp_path, monkeypatch, capsys):
+def failed_sweep_step(tmp_path, monkeypatch):
+    """Dispatch `lint` over one checkout whose run passes and whose `--branch` step fails."""
     workspace = tmp_path / "projects.code-workspace"
     workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
     scripts = tmp_path / "alpha" / "scripts"
@@ -3245,7 +3293,146 @@ def test_a_failed_sweep_step_stops_the_chain_and_reports(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(devkit_project.subprocess, "run", fake_run)
     code = devkit_project.main(["--workspace", str(workspace), "--project", "alpha", "lint"])
+    return code, calls
+
+
+def test_a_failed_sweep_step_stops_the_chain_and_reports(tmp_path, monkeypatch, capsys):
+    code, calls = failed_sweep_step(tmp_path, monkeypatch)
 
     assert code == 3
     assert len(calls) == 2, "the --ship step ran after --branch failed"
     assert "still in the working tree" in capsys.readouterr().err
+
+
+# --- a task that fails outside log-wrap still reaches the ledger ---------------
+#
+# `plan_command` wraps every dispatched script in `log-wrap.py`, which files each failure
+# it sees as a `scheduled-job-failed` event. Two of the dispatcher's own failures happen
+# where no wrapper is running: a refusal before anything was planned, and the autofix ship
+# steps after the wrapped run has already exited.
+
+
+def failing_dispatch(tmp_path, *argv, workspace_text=WORKSPACE):
+    """`main` over a throwaway registry listing alpha and beta, neither of which exists."""
+    workspace = tmp_path / "projects.code-workspace"
+    workspace.write_text(workspace_text)
+    return devkit_project.main(["--workspace", str(workspace), *argv])
+
+
+def test_a_dispatch_that_cannot_start_is_filed_on_the_ledger(tmp_path, ledger_dir, capsys):
+    """The owner's rule: every routine task that fails reaches the ledger, because
+    failures share causes and are triaged together. A stale picker entry, or a checkout
+    that lacks the action's script, is refused before `plan_command` wraps anything --
+    so it was a red icon in a terminal, and nothing anywhere said it kept happening."""
+    assert failing_dispatch(tmp_path, "--project", "gamma", "lint") == 2
+    assert "unknown project 'gamma'" in capsys.readouterr().err, "the terminal line is unchanged"
+
+    [row] = ledger_rows(ledger_dir)
+    assert row["event"] == "scheduled-job-failed"
+    assert row["message"] == "task 'Lint: Run' could not start"
+    assert row["exit"] == "2"
+    assert "unknown project 'gamma'" in row["cause"]
+    kept = (ledger_dir / row["artifact"]).read_text(encoding="utf-8")
+    assert "unknown project 'gamma'" in kept, "the event names a file holding the reason"
+
+
+@pytest.mark.parametrize("text, said", [("{ not json", "is not valid JSONC"), ("{}", "is empty")])
+def test_an_unreadable_registry_is_filed_under_the_task_it_stopped(
+    tmp_path, ledger_dir, text, said
+):
+    assert (
+        failing_dispatch(tmp_path, "--project", "alpha", "tests", "suite", workspace_text=text) == 2
+    )
+    [row] = ledger_rows(ledger_dir)
+    assert row["message"] == "task 'Test: Run Suite' could not start"
+    assert said in row["cause"]
+
+
+def test_the_message_names_the_task_and_nothing_that_varies(tmp_path, ledger_dir):
+    """`harness_triage.Item.signature` groups by the message, so a refusal that recurs
+    has to read as one defect recurring. What differs between two runs rides in
+    `cause`, where it splits a different reason into a different group."""
+    failing_dispatch(tmp_path, "--project", "gamma", "lint")
+    failing_dispatch(tmp_path, "--project", "delta", "lint")
+    first, second = ledger_rows(ledger_dir)
+    assert first["message"] == second["message"] == "task 'Lint: Run' could not start"
+    assert first["cause"] != second["cause"]
+
+
+def test_a_run_that_names_no_action_files_nothing(tmp_path, ledger_dir):
+    """No action is no task to file it under. `--render-workspace` and `--adopt-workspace`
+    run inside `log-wrap.py` in their own tasks, which files their failures already --
+    a second row here would be two rows for one click -- and `--list` is a picker's."""
+    assert failing_dispatch(tmp_path, "--list", workspace_text="{ not json") == 2
+    assert ledger_rows(ledger_dir) == []
+
+
+def test_a_ledger_that_cannot_be_reached_leaves_the_exit_code_alone(tmp_path, monkeypatch):
+    """Best-effort, for `log-wrap.record_failure`'s reason: a task whose bookkeeping
+    crashed would report the bookkeeping instead of its own failure."""
+
+    def missing():
+        raise ImportError("no log-wrap.py in this checkout")
+
+    monkeypatch.setattr(devkit_project, "_log_wrap", missing)
+    assert failing_dispatch(tmp_path, "--project", "gamma", "lint") == 2
+
+
+@pytest.mark.parametrize(
+    "action, title",
+    [("lint", "Lint: Run"), (TESTS_VERB, "Test: Run Suite"), ("", ""), ("no-such", "")],
+)
+def test_a_failure_is_filed_under_the_label_log_wrap_gets(action, title):
+    """`Action.label` is what `plan_command` hands `log-wrap.py`, so one task's failures
+    are filed under one name whichever side of the wrapper they happened on."""
+    assert devkit_project.task_title(action) == title
+
+
+def test_a_failed_autofix_ship_is_filed_against_its_checkout(tmp_path, monkeypatch, ledger_dir):
+    """The ship steps run after `log-wrap.py` has exited -- the lint run passed, so it
+    filed nothing -- and a failed `sweep.py --branch` was one stderr line. The reason is
+    kept in the checkout's own `logs/`, beside the churn it failed to ship."""
+    code, _calls = failed_sweep_step(tmp_path, monkeypatch)
+
+    assert code == 3
+    [row] = ledger_rows(ledger_dir)
+    assert row["message"] == "task 'Lint: Run' could not ship its autofix"
+    assert (row["project"], row["exit"]) == ("alpha", "3")
+    assert row["command"].endswith("--branch --slug lint-autofix --yes")
+    assert "still in the working tree" in (tmp_path / "alpha" / row["artifact"]).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_refuse_dispatch_prints_files_and_exits_2(ledger_dir, capsys):
+    error = ProjectError("alpha does not implement this action")
+    assert devkit_project.refuse_dispatch(error, "e2e", ["--project", "alpha", "e2e"]) == 2
+    assert capsys.readouterr().err == "devkit_project: alpha does not implement this action\n"
+    [row] = ledger_rows(ledger_dir)
+    assert row["message"] == "task 'Test: Run Browser E2E' could not start"
+    assert row["command"].endswith("--project alpha e2e")
+
+
+def test_report_ship_failure_names_the_step_and_where_the_fixes_are(tmp_path, capsys):
+    step = ("python", "sweep.py", "--ship", "--yes")
+    devkit_project.report_ship_failure(tmp_path / "alpha", ACTIONS["sync-codex"], step, 4)
+    assert "[alpha] shipping the autofix churn failed (exit 4)" in capsys.readouterr().err
+    kept = (
+        tmp_path
+        / "alpha"
+        / "logs"
+        / "agent-sync-codex-context-could-not-ship-its-autofix.failed.log"
+    )
+    assert "sweep.py --ship --yes" in kept.read_text(encoding="utf-8")
+
+
+def test_a_kept_failure_never_overwrites_the_one_log_wrap_keeps(tmp_path, ledger_dir):
+    """`log-wrap.py` keeps `logs/<slug>.failed.log` for the run it wrapped, and a ledger
+    row points there. A dispatcher failure of the same task writing that path would
+    leave the older row naming a file that now holds a different failure."""
+    artifact = devkit_project.record_task_failure(
+        "Lint: Run", "could not start", ["python", "x.py"], "E: x", tmp_path, 2
+    )
+    assert artifact is not None
+    assert artifact != "logs/lint-run.failed.log"
+    assert (tmp_path / artifact).is_file()

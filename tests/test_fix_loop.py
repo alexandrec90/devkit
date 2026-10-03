@@ -31,6 +31,9 @@ def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(fix_loop.session_friction, "harvest", lambda *a, **k: [])
     # The machine's own Task Scheduler, which `close` would otherwise read and file.
     monkeypatch.setattr(fix_loop.schedule_health, "query", lambda *a, **k: [])
+    # And its collectors: this machine's assignment, and a `docker ps` to judge it by.
+    monkeypatch.setattr(fix_loop.collectors, "scheduled_tasks", lambda *a, **k: {})
+    monkeypatch.setattr(fix_loop.collectors, "tray_rows", lambda *a, **k: [])
     monkeypatch.setattr(
         fix_loop.fix_verify, "verify", lambda *a, **k: fix_loop.fix_verify.Outcome()
     )
@@ -773,6 +776,101 @@ def test_a_job_failure_never_resolved_asks_git_nothing(ctx):
     job = _job("devkit-reap-stale", 2, NOW)
     assert len(fix_loop.job_findings(ctx, [job], _git_at(0, 0, asked))) == 1
     assert asked == []
+
+
+def test_a_failing_scheduled_collector_is_asked_about_and_filed_against_its_project(
+    ctx, monkeypatch
+):
+    """A host collector's task is named after its project, not `devkit-*`, so the pass's
+    query never returned it while the tray, asking with `also=`, showed it red."""
+    tasks = {"social-scraper": "logs/collector-social-scraper.log"}
+    asked = []
+    ran = _dt.datetime.now() - _dt.timedelta(minutes=5)
+    job = fix_loop.schedule_health.Job("social-scraper", True, 1, ran, None)
+    monkeypatch.setattr(fix_loop.collectors, "scheduled_tasks", lambda root: tasks)
+    monkeypatch.setattr(
+        fix_loop.schedule_health, "query", lambda *a, also=frozenset(): asked.append(also) or [job]
+    )
+    [found] = fix_loop.job_findings(ctx)
+    assert asked == [frozenset(tasks)]
+    assert (found.kind, found.project) == (fix_loop.JOB_KIND, "social-scraper")
+    assert found.detail == "social-scraper: last run failed (exit 1)"
+    assert found.evidence.endswith("collector-social-scraper.log")
+
+
+_WRAPPED = 'pythonw.exe "C:\\d\\scripts\\log-wrap.py" --always "Scheduled: Reconcile" -- python x'
+
+
+def test_a_wrapped_jobs_failed_run_is_left_to_its_wrapper(ctx):
+    """`log-wrap.py --always` files every failed run as `scheduled-job-failed`; the
+    snapshot of the same run filed a second, `fix-pass-finding` group beside it, and
+    resolving one left the other open. What only the scheduler can say -- disabled,
+    stale, never ran -- is still the pass's to file."""
+    ran = NOW.astimezone().replace(tzinfo=None) - _dt.timedelta(minutes=5)
+    failed = fix_loop.schedule_health.Job("devkit-worktree-reconcile", True, 1, ran, None, _WRAPPED)
+    assert fix_loop.job_findings(ctx, [failed]) == []
+    off = fix_loop.schedule_health.Job("devkit-worktree-reconcile", False, 0, ran, None, _WRAPPED)
+    [found] = fix_loop.job_findings(ctx, [off])
+    assert "disabled" in found.detail
+
+
+def test_a_collector_this_machine_runs_with_no_task_is_filed(ctx, monkeypatch):
+    """The tray paints a run collector the scheduler has no task for red ("not scheduled
+    on this machine"); the query simply omits it, so the pass had nothing to file."""
+    tasks = {"social-scraper": "logs/collector-social-scraper.log"}
+    monkeypatch.setattr(fix_loop.collectors, "scheduled_tasks", lambda root: tasks)
+    [found] = fix_loop.job_findings(ctx)  # the fixture's scheduler returns no task at all
+    assert (found.kind, found.project) == (fix_loop.COLLECTOR_KIND, "social-scraper")
+    assert found.detail == "social-scraper: not scheduled on this machine"
+
+
+def test_unscheduled_names_only_the_tasks_the_scheduler_did_not_list(ctx):
+    tasks = {"a": "logs/collector-a.log", "b": "logs/collector-b.log"}
+    assert [f.project for f in fix_loop.unscheduled(ctx, tasks, frozenset({"a"}))] == ["b"]
+    assert fix_loop.unscheduled(ctx, tasks, frozenset(tasks)) == []
+
+
+# Verbatim from the tray on 2026-10-03: ibkr_trader's reddit job 39 runs into failing on
+# credentials never set, `devkit-collectors` exiting 0 over it, and no pass ever filing it.
+_IBKR_HEALTH = (
+    "health check failing -- exit 1: health artifact: logs/scheduler-health.json "
+    "(written 2026-10-03T19:47:51.238551+00:00)"
+)
+
+
+def test_a_collector_the_tray_shows_failing_is_filed_against_its_project(ctx):
+    rows = [
+        ("collector: ibkr_trader", fix_loop.collectors.WARN, _IBKR_HEALTH),
+        ("collector: sports_betting", fix_loop.collectors.OK, "running (Up 20 hours)"),
+    ]
+    [found] = fix_loop.collector_findings(ctx, rows)
+    assert (found.kind, found.project) == (fix_loop.COLLECTOR_KIND, "ibkr_trader")
+    assert found.detail == "ibkr_trader: health check failing", "no timestamp in the group key"
+    assert "scheduler-health.json" in found.command, "the particulars ride in the command"
+    assert found.evidence == str(ctx.devkit_dir / "logs" / "collectors.log")
+
+
+@pytest.mark.parametrize(
+    ("detail", "state"),
+    [
+        ("not running (Exited (1) 3 hours ago)", "not running"),
+        ("no container -- see logs/collectors.log", "no container"),
+        ("docker is not answering", "docker is not answering"),
+    ],
+)
+def test_a_collector_findings_detail_survives_its_recurrences(ctx, detail, state):
+    [found] = fix_loop.collector_findings(ctx, [("collector: x", fix_loop.collectors.FAIL, detail)])
+    assert found.detail == f"x: {state}"
+
+
+def test_the_read_back_files_a_failing_collector(ctx, monkeypatch):
+    row = ("collector: ibkr_trader", fix_loop.collectors.WARN, _IBKR_HEALTH)
+    monkeypatch.setattr(fix_loop.collectors, "tray_rows", lambda root: [row])
+    journal = fix_findings.Journal(ctx.devkit_dir)
+    fix_loop.close(ctx, journal)
+    assert [f.project for f in journal.findings if f.kind == fix_loop.COLLECTOR_KIND] == [
+        "ibkr_trader"
+    ]
 
 
 def test_a_job_the_scheduler_only_remembers_failing_is_not_filed(ctx, monkeypatch):

@@ -81,10 +81,23 @@ def test_the_task_fires_the_wrapper_from_the_devkit_checkout_every_interval():
     document = tasks.task_document(SCRAPER, ROOT, PYTHONW)
     registration = devkit_schtasks.parse_task(document)
     assert registration.command == PYTHONW
-    assert registration.arguments == rf'"{ROOT}\scripts\collectors.py" fire social-scraper'
+    fire = rf'"{ROOT}\scripts\collectors.py" fire social-scraper'
+    label = "Scheduled collector: social-scraper"
+    assert registration.arguments == devkit_schtasks.logged(label, PYTHONW, fire, ROOT)
     assert f"<WorkingDirectory>{ROOT}</WorkingDirectory>" in document
     assert "<Interval>PT30M</Interval>" in document
     assert "<ExecutionTimeLimit>PT1H</ExecutionTimeLimit>" in document
+
+
+def test_each_failed_fire_reaches_the_ledger_beside_its_own_log():
+    """Every devkit job files each failed run through `log-wrap.py --always`; a collector
+    that fails every 30 minutes was seen only when a fix pass caught the scheduler's Last
+    Result between runs. The wrapper's files must not overwrite the fire's own record."""
+    arguments = devkit_schtasks.parse_task(tasks.task_document(SCRAPER, ROOT, PYTHONW)).arguments
+    assert "log-wrap.py" in arguments and " --always " in arguments
+    label = tasks.wrapper_label("social-scraper")
+    slugged = "".join(c if c.isalnum() else "-" for c in label.lower()).strip("-")
+    assert f"logs/{slugged}.log" != tasks.log_path("social-scraper").as_posix()
 
 
 def test_task_arguments_name_the_fire_verb_since_the_default_runs_nothing():

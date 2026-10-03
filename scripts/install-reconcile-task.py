@@ -67,6 +67,13 @@ DEFAULT_INTERVAL_MINUTES = 15
 # constant rather than trusting the copy.
 ARTIFACT = "logs/reconcile.log"
 
+# The `log-wrap.py --always` label the task runs under (`devkit_schtasks.logged`), which
+# files each failed run on the harness-events ledger. Its files are
+# `logs/scheduled-worktree-reconcile[.failed].log` -- the captured console, traceback
+# included -- beside `ARTIFACT`, which stays the runner's own account of the pass; the
+# two slug apart so neither overwrites the other.
+LABEL = "Scheduled: Worktree Reconcile"
+
 # Resolved once, at import, so a test can force the Windows path without touching
 # `os.name` itself. That distinction is not stylistic: `pathlib` reads `os.name` to
 # decide whether `Path(...)` builds a `WindowsPath`, so a test that patches the global
@@ -130,8 +137,9 @@ def reconcile_arguments(
     return " ".join(parts)
 
 
-def task_document(python: str, arguments: str, minutes: int) -> str:
-    """The task XML registering (or replacing) the recurring pass.
+def task_document(python: str, arguments: str, minutes: int, root: Path = REPO_ROOT) -> str:
+    """The task XML registering (or replacing) the recurring pass, under `log-wrap.py`
+    (`devkit_schtasks.logged`) and started in `root`, where the wrapper writes `logs/`.
 
     Every fifteen minutes rather than hourly: the tier's whole promise is that a merged
     PR stops costing disk within minutes, and an hourly job would leave a box's
@@ -144,8 +152,9 @@ def task_document(python: str, arguments: str, minutes: int) -> str:
     """
     return devkit_schtasks.task_xml(
         python,
-        arguments,
+        devkit_schtasks.logged(LABEL, python, arguments, root),
         devkit_schtasks.repeating_trigger(minutes),
+        working_dir=str(root),
         # Lands disabled when the jobs tier is stood down. `harness-switch.py --off
         # jobs` records the whole group, not just the tasks that existed when it
         # ran, so an installer executed afterwards must not hand the operator back
