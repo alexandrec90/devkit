@@ -1365,6 +1365,18 @@ def test_a_refusal_is_named_by_the_line_that_says_why():
     assert len(ship_intent.refusal_line("x Failed " + "y" * 500)) == 160
 
 
+def test_a_refusals_reason_is_the_same_line_as_the_hook_wrote_it():
+    """The signature normalises numbers and shas; a reader of the record needs neither
+    lost. Same line `refusal_line` picks, so the two never name different causes."""
+    output = "Detect secrets......Failed\n- hook id: detect-secrets\nline 141 in deadbeef12\n"
+    assert ship_intent.refusal_reason(output) == "Detect secrets......Failed"
+    assert ship_intent.refusal_line(output) == ship_intent.refusal_reason(output)
+    numbered = "test_x_2 failed at deadbeef12\n"
+    assert ship_intent.refusal_reason(numbered) == "test_x_2 failed at deadbeef12"
+    assert ship_intent.refusal_line(numbered) == "test_x_N failed at <sha>"
+    assert ship_intent.refusal_reason("") == ""
+
+
 def test_a_branch_policy_refusal_is_named_by_its_reason_not_its_details_pointer():
     """b4b33191: the policy says "commit blocked", which matched nothing, so the line
     kept was the last -- `details: <path>`, a file the next hook run rewrites -- and the

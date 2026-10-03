@@ -222,8 +222,15 @@ def ship_intents(
                 f"{len(moved)} resolution(s) re-pointed)"
             )
         # One line: a refusal's detail is hook output, and its newlines broke the record
-        # into rows no reader of it could attribute. The tail says why; the rest is evidence.
-        lines.append(f"{where} -- {outcome.stage}: {' '.join(outcome.detail.split())[-240:]}")
+        # into rows no reader of it could attribute. A refusal says why on the line
+        # `refusal_reason` picks -- its tail is the hook's boilerplate -- and the rest is
+        # evidence; for anything else the tail says why.
+        detail = outcome.detail
+        if outcome.stage == ship_intent.REFUSED:
+            state = ship_intent.read_state(outcome.intent.tree)
+            if output := str(state.get("output", "")):
+                detail = f"{state.get('step', 'commit')}: {ship_intent.refusal_reason(output)}"
+        lines.append(f"{where} -- {outcome.stage}: {' '.join(detail.split())[-240:]}")
         if outcome.stage == ship_intent.REFUSED:
             refused.append(ship_intent.refusal_failure(outcome, base))
         if outcome.stage == ship_intent.FAILED:

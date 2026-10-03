@@ -711,18 +711,32 @@ REFUSAL_LINE = re.compile(
 )
 
 
+def _why(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return next((line for line in lines if REFUSAL_LINE.search(line)), lines[-1] if lines else "")
+
+
 def refusal_line(output: str) -> str:
     """The line of a refused commit's output that says why, cut to one record line.
 
     "fixers refused" was the whole signature when no test id or lint line matched, and a
     session had to open `ship-state.json` to learn the branch name was the objection.
     """
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
-    why = next((line for line in lines if REFUSAL_LINE.search(line)), lines[-1] if lines else "")
     # It becomes part of a signature, which must not change between two refusals of the
     # same kind -- or every retry reads as progress and `fix_ledger.ATTEMPTS` never trips.
-    why = re.sub(r"\d+", "N", re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", why))
+    why = re.sub(r"\d+", "N", re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", _why(output)))
     return " ".join(why.split())[:160]
+
+
+def refusal_reason(output: str) -> str:
+    """`refusal_line` as the hook wrote it, for a reader rather than a signature.
+
+    The pass's record kept the *tail* of a refusal's output, which is a hook's closing
+    boilerplate: sports_betting's detect-secrets refusal read "refused: mment If a secret
+    has already been committed, visit https://help.github.com/...", while the line naming
+    the failed hook sat further up, out of reach of the cut.
+    """
+    return " ".join(_why(output).split())[:160]
 
 
 def refusal_failure(outcome: Outcome, base: str) -> fix_plan.Failure:
