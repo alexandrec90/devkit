@@ -417,27 +417,67 @@ _COLLECTOR_PARTICULARS = re.compile(r" -- | \(")
 
 
 def collector_findings(
-    ctx: Context, rows: list[tuple[str, str, str]] | None = None
+    ctx: Context,
+    rows: list[tuple[str, str, str]] | None = None,
+    health: dict[str, dict] | None = None,
 ) -> list[Finding]:
     """A finding per collector row (`collectors.tray_rows`) that is not OK, against the
-    collector's own project, citing `collectors.py`'s log, which holds the health output."""
-    rows = collectors.tray_rows(ctx.devkit_dir) if rows is None else rows
+    collector's own project, citing `collectors.py`'s log, which holds the health output.
+    Bar a failing health verdict taken from code older than its group's fix
+    (`_verdict_predates_fix`). `health` is the verdicts the rows were drawn from."""
+    if rows is None:
+        rows = collectors.tray_rows(ctx.devkit_dir)
+        if health is None:
+            home = collectors.config.home(ctx.devkit_dir)
+            health = collectors.load_health(home / collectors.HEALTH)
+    items = triage.load(ctx.devkit_dir) if health else []
     found: list[Finding] = []
     for name, level, detail in rows:
         if level == collectors.OK:
             continue
         project = name.removeprefix(collectors.ROW_PREFIX)
         state = _COLLECTOR_PARTICULARS.split(detail, maxsplit=1)[0]
-        found.append(
-            Finding(
-                COLLECTOR_KIND,
-                project,
-                f"{project}: {state}",
-                evidence=str(ctx.devkit_dir / collectors.ARTIFACT),
-                command=f"{name}: {detail}"[:300],
-            )
+        finding = Finding(
+            COLLECTOR_KIND,
+            project,
+            f"{project}: {state}",
+            evidence=str(ctx.devkit_dir / collectors.ARTIFACT),
+            command=f"{name}: {detail}"[:300],
         )
+        verdict = (health or {}).get(project, {})
+        stale = _verdict_predates_fix(finding, items, verdict, ctx.now)
+        if not (state == collectors.HEALTH_FAILING and stale):
+            found.append(finding)
     return found
+
+
+# How long a fix goes on excusing a failing verdict from code older than it: its PR's
+# merge, the checkout's fast-forward and `collectors.py`'s next pass, which redeploys.
+# Past it, a verdict still from older code is one the redeploy never reached.
+REDEPLOY_GRACE = _dt.timedelta(days=1)
+
+
+def _verdict_predates_fix(
+    finding: Finding, items: list[triage.Item], verdict: dict, now: _dt.datetime
+) -> bool:
+    """Whether a failing health verdict ran code older than `finding`'s group's latest
+    standing fix, made within `REDEPLOY_GRACE`, in a container `collectors.py` is free
+    to redeploy.
+
+    51cca249: ibkr_trader's fix merged at 22:32 and the pass refiled the group at 22:33
+    off a verdict from a day-old image, as `_ran_before_fix` saw for a scheduled job. A
+    commit holding a fix is made after its resolution, so code no newer than that cannot
+    hold it. `collectors.redeploy` moves the container onto the fix within a pass, and a
+    redeploy that fails fails `devkit-collectors` itself, so this defers a verdict and
+    hides none. A `held` redeploy can last, so it is filed at once: the evidence log
+    says why it was held."""
+    when = verdict.get(collectors.CODE_AT)
+    if verdict.get(collectors.HELD) or not isinstance(when, (int, float)):
+        return False
+    made = _last_fix(finding, items)
+    return (
+        made is not None and when < made and now.timestamp() - made < REDEPLOY_GRACE.total_seconds()
+    )
 
 
 def _ran_before_fix(

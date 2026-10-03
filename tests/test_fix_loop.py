@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as _dt
+import json
 import os
 import subprocess
 import sys
@@ -861,6 +863,65 @@ def test_a_collector_the_tray_shows_failing_is_filed_against_its_project(ctx):
 def test_a_collector_findings_detail_survives_its_recurrences(ctx, detail, state):
     [found] = fix_loop.collector_findings(ctx, [("collector: x", fix_loop.collectors.FAIL, detail)])
     assert found.detail == f"x: {state}"
+
+
+def _resolved_collector(ctx) -> tuple[tuple[str, str, str], float]:
+    """ibkr_trader's failing health row, filed and resolved; with the resolution's time."""
+    row = ("collector: ibkr_trader", fix_loop.collectors.WARN, _IBKR_HEALTH)
+    fix_findings.record_all(fix_loop.collector_findings(ctx, [row]), [], ctx.devkit_dir)
+    [item] = triage.open_items(triage.load(ctx.devkit_dir))
+    triage.resolve([item.id], "a job not yet due is pending", root=ctx.devkit_dir)
+    [made] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    return row, _dt.datetime.fromisoformat(made.stamp).timestamp()
+
+
+def test_a_health_verdict_from_code_older_than_its_fix_does_not_reopen_it(ctx):
+    """51cca249: ibkr_trader's fix merged at 22:32 and the pass refiled the group at 22:33,
+    off a verdict its day-old image gave. `collectors.py` redeploys that container onto
+    the fix on its next pass, and the verdict after that is the one that tests it."""
+    row, made = _resolved_collector(ctx)
+    old = {
+        "ibkr_trader": {"ok": False, "container": "c1", fix_loop.collectors.CODE_AT: made - 86400}
+    }
+    assert fix_loop.collector_findings(ctx, [row], old) == []
+    new = {"ibkr_trader": {"ok": False, "container": "c2", fix_loop.collectors.CODE_AT: made + 60}}
+    assert len(fix_loop.collector_findings(ctx, [row], new)) == 1, "the fix ran, and failed"
+
+
+@pytest.mark.parametrize(
+    ("verdict", "late", "why"),
+    [
+        ({"held": "the checkout has uncommitted edits"}, 0, "a held redeploy can last"),
+        ({}, 0, "no code time recorded: nothing to weigh"),
+        ({}, 2, "past the grace: the redeploy never reached it"),
+    ],
+)
+def test_a_health_verdict_the_redeploy_will_not_move_is_filed(ctx, verdict, late, why):
+    row, made = _resolved_collector(ctx)
+    code_at = {fix_loop.collectors.CODE_AT: made - 86400} if late or verdict else {}
+    health = {"ibkr_trader": {"ok": False, **code_at, **verdict}}
+    later = _dt.datetime.fromtimestamp(made, _dt.UTC) + late * fix_loop.REDEPLOY_GRACE
+    now = dataclasses.replace(ctx, now=later)
+    assert len(fix_loop.collector_findings(now, [row], health)) == 1, why
+
+
+def test_only_a_health_row_is_weighed_against_its_verdict(ctx):
+    """A container that is down is down whatever code its last verdict ran."""
+    _row, made = _resolved_collector(ctx)
+    down = ("collector: ibkr_trader", fix_loop.collectors.FAIL, "not running (Exited (1))")
+    old = {"ibkr_trader": {"ok": False, fix_loop.collectors.CODE_AT: made - 86400}}
+    assert len(fix_loop.collector_findings(ctx, [down], old)) == 1
+
+
+def test_the_read_back_reads_the_verdicts_the_rows_were_drawn_from(ctx, monkeypatch):
+    row, made = _resolved_collector(ctx)
+    monkeypatch.setattr(fix_loop.collectors, "tray_rows", lambda root: [row])
+    monkeypatch.setenv("DEVKIT_DIR", str(ctx.devkit_dir))
+    record = {"ibkr_trader": {"ok": False, fix_loop.collectors.CODE_AT: made - 86400}}
+    path = ctx.devkit_dir / fix_loop.collectors.HEALTH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    assert fix_loop.collector_findings(ctx) == []
 
 
 def test_the_read_back_files_a_failing_collector(ctx, monkeypatch):

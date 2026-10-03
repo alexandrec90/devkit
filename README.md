@@ -997,8 +997,10 @@ A machine never assigned is **hands off**, so a fresh workstation starts nothing
 collector, run `stop-here` on the old machine and `run-here` on the new one.
 `devkit-collectors` is registered everywhere and acts only on the assignment. It starts a
 stopped collector with `docker compose up -d <service>`, stops one on a `stop-here` machine
-with `docker stop`, and never rebuilds. Rebuilding is a deploy, which a timer should not do
-mid-ingest. A scheduled collector's task is registered on a `run-here` machine, and
+with `docker stop`, and redeploys (`up -d --build`) a running one whose code is older than
+its checkout's HEAD -- only when that HEAD is on origin's default branch and no tracked file
+is edited, so a timer deploys merged code and nothing else; otherwise `logs/collectors.log`
+says why it held. A scheduled collector's task is registered on a `run-here` machine, and
 removed on a `stop-here` or `release`. The tray gets a `collector: <name>` row per
 assigned collector. A container shows its live state on every poll, plus the last health
 verdict, shown amber rather than red because it is the project's verdict, not a failure
