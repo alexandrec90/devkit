@@ -460,5 +460,51 @@ def test_stop_reports_a_force_that_failed_and_a_runner_that_raised():
     assert reap_machine.stop_tree(41, boom, sleep=lambda s: None, windows=True)
 
 
+# Verbatim from logs/reap-stale.log, 2026-10-03 15:45: `taskkill /T /F` exits non-zero
+# over children that had already gone, and every pid it named was gone a minute later.
+_TREE_ALREADY_GONE = (
+    "ERROR: The process with PID 16172 (child process of PID 20512) could not be terminated.\n"
+    "Reason: There is no running instance of the task.\n\n"
+    "ERROR: The process with PID 20512 (child process of PID 9256) could not be terminated.\n"
+    "Reason: The operation attempted is not supported.\n"
+)
+
+
+def _force_complains(alive_after_force: set[int]):
+    """A runner whose polite ask is ignored and whose `/F` exits 128 with the errors above;
+    after the `/F`, only `alive_after_force` still answers `tasklist`."""
+    calls = []
+
+    def run(argv):
+        calls.append(list(argv))
+        if argv[0] == "tasklist":
+            pid = int(argv[2].split()[-1])
+            forced = any("/F" in call for call in calls)
+            if not forced or pid in alive_after_force:
+                return completed(f'"node.exe","{pid}","Console","1","100 K"\n')
+            return completed("INFO: No tasks are running which match the specified criteria.")
+        if "/F" in argv:
+            return subprocess.CompletedProcess(argv, 128, stdout="", stderr=_TREE_ALREADY_GONE)
+        return completed()
+
+    return run, calls
+
+
+def test_a_force_that_complains_about_a_tree_already_gone_is_a_success():
+    run, calls = _force_complains(alive_after_force=set())
+    assert reap_machine.stop_tree(41, run, sleep=lambda s: None, windows=True) == ""
+    probed = {int(call[2].split()[-1]) for call in calls if call[0] == "tasklist"}
+    assert probed >= {41, 16172, 20512}, "every pid taskkill named is checked, not only the root"
+
+
+def test_a_force_that_complains_reports_only_what_survived():
+    run, _ = _force_complains(alive_after_force={20512})
+    error = reap_machine.stop_tree(41, run, sleep=lambda s: None, windows=True)
+    assert "20512" in error and "still running" in error
+
+    run, _ = _force_complains(alive_after_force={41})
+    assert "41" in reap_machine.stop_tree(41, run, sleep=lambda s: None, windows=True)
+
+
 def test_stop_off_windows_says_so_rather_than_pretending():
     assert "Windows" in reap_machine.stop_tree(41, lambda argv: completed(), windows=False)
