@@ -104,6 +104,14 @@ DEV_SERVER_PATTERN = (
 # leftover has, by definition, nobody waiting on what it writes on the way out.
 STOP_GRACE_SECONDS = 5
 
+# `taskkill /T /F` exits non-zero when any pid in the tree could not be ended, and that
+# includes a child that exited on its own first ("There is no running instance") or was
+# already tearing down ("The operation attempted is not supported"). Its exit code is
+# therefore not the verdict: what is still running a moment later is. Every pid its
+# errors name is probed, the root included, so a real survivor is still reported.
+FORCE_SETTLE_SECONDS = 2
+_TASKKILL_PID = re.compile(r"\bPID (\d+)")
+
 PS_QUERY = (
     "Get-CimInstance Win32_Process | "
     "Select-Object ProcessId,ParentProcessId,Name,CommandLine,"
@@ -443,8 +451,9 @@ def stop_tree(
 
     `rc_machine.stop_argv`'s `/T`, for its reason: a session spawns MCP servers and a
     dev server spawns workers, and leaving those behind leaks the memory the reap was
-    for. Polite first, `/F` only for what is still there after the grace. Off Windows
-    this reports rather than pretends: the pass is read-only there.
+    for. Polite first, `/F` only for what is still there after the grace, and a failed
+    `/F` is judged by what survives it (`FORCE_SETTLE_SECONDS`), not by its exit code.
+    Off Windows this reports rather than pretends: the pass is read-only there.
     """
     if not windows:
         return "stopping processes is only implemented on Windows"
@@ -454,8 +463,14 @@ def stop_tree(
         if not pid_alive(pid, run, windows):
             return ""
         result = run(rc_machine.stop_argv(pid, force=True))
+        if result.returncode == 0:
+            return ""
+        complaint = (result.stderr or result.stdout or "taskkill failed").strip()
+        sleep(FORCE_SETTLE_SECONDS)
+        named = dict.fromkeys([pid, *(int(found) for found in _TASKKILL_PID.findall(complaint))])
+        survivors = [each for each in named if pid_alive(each, run, windows)]
     except (OSError, subprocess.SubprocessError) as error:
         return str(error)
-    if result.returncode != 0:
-        return (result.stderr or result.stdout or "taskkill failed").strip()
-    return ""
+    if not survivors:
+        return ""
+    return f"still running: pid {', '.join(map(str, survivors))} -- {complaint}"
