@@ -219,7 +219,7 @@ def test_a_complaint_is_filed_whole_with_the_tree_it_was_said_in(tmp_path):
     path = tmp_path / "t.jsonl"
     rows = [user("start the work"), say("done"), user(ask)]
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
-    chunk = sf.st.read_new(path, 0, 0)
+    chunk = sf.st.read_new(path, 0)
     tree = tmp_path / "devkit" / ".claude" / "worktrees" / "twilight"
     [found] = sf.session_findings(path, chunk, str(tree), tmp_path)
     assert found.kind == "user-frustration" and len(found.detail) <= sf.SNIPPET
@@ -515,17 +515,32 @@ def test_codex_rows_become_the_same_events():
 def test_read_new_returns_only_complete_new_lines_numbered_on(tmp_path):
     path = tmp_path / "t.jsonl"
     path.write_text('{"a": 1}\n{"b": 2}\n{"c": ', encoding="utf-8")
-    chunk = st.read_new(path, 0, 0)
-    assert [n for n, _ in chunk.rows] == [1, 2] and chunk.line == 2
-    assert st.read_new(path, chunk.offset, chunk.line).rows == (), "the torn line waits"
+    chunk = st.read_new(path, 0)
+    assert [n for n, _ in chunk.rows] == [1, 2]
+    assert st.read_new(path, chunk.offset).rows == (), "the torn line waits"
     with path.open("a", encoding="utf-8") as handle:
         handle.write('3}\n{"d": 4}\n')
-    later = st.read_new(path, chunk.offset, chunk.line)
+    later = st.read_new(path, chunk.offset)
     assert [(n, row) for n, row in later.rows] == [(3, {"c": 3}), (4, {"d": 4})]
     path.write_text('{"z": 0}\n', encoding="utf-8")
-    assert st.read_new(path, later.offset, later.line).rows == ((1, {"z": 0}),), (
-        "rewritten: from the top"
-    )
+    assert st.read_new(path, later.offset).rows == ((1, {"z": 0}),), "rewritten: from the top"
+
+
+def test_a_transcript_rewritten_under_the_cursor_is_numbered_by_its_own_lines(tmp_path):
+    """e1aaca09's evidence named line 1119 of a transcript whose call was on line 1003:
+    Claude Code rewrote it under the cursor (a session relocated into a worktree) without
+    shrinking it below the offset, and a running line count went on from the old file.
+    A row's number is its line in the file as it is read, whatever came before."""
+    path = tmp_path / "t.jsonl"
+    path.write_bytes(b'{"a": 1}\n{"b": 2}\n{"c": 3}\n')
+    first = st.read_new(path, 0)
+    path.write_bytes(b'{"abcdefgh": 1, "i": 2}\n{"c": 3}\n{"d": 4}\n')
+    assert first.offset == len(b'{"a": 1}\n{"b": 2}\n{"c": 3}\n')
+    later = st.read_new(path, first.offset)
+    assert [n for n, _ in later.rows] == [3], "numbered by the file, not the cursor"
+    assert later.rows[0][1] == {"d": 4}, "the torn line the offset landed in is skipped"
+    numbered = [n for n, _ in st.read_new(path, 0).rows]
+    assert numbered == [1, 2, 3] and st.read_new(path, path.stat().st_size).rows == ()
 
 
 # --- the harvest --------------------------------------------------------------------------
@@ -574,7 +589,7 @@ def test_a_row_todays_detectors_no_longer_file_is_outdated(tmp_path, monkeypatch
         [user("go"), call("sleep 300", "1"), call("python -m x", "2"), result(missing, "2")],
         str(tmp_path / "ws" / "devkit"),
     )
-    rows = _rows(sf.session_findings(session, st.read_new(session, 0, 0), str(tmp_path), tmp_path))
+    rows = _rows(sf.session_findings(session, st.read_new(session, 0), str(tmp_path), tmp_path))
     assert sorted(r.detail.split(":")[0] for r in rows) == ["environment", "poll"]
     assert sf.outdated(rows) == [], "both still fire"
     # Standing in for a detector a fix removed, as #410 removed `isolation-guard`.
@@ -587,10 +602,10 @@ def test_a_row_todays_detectors_no_longer_file_is_outdated(tmp_path, monkeypatch
 
 def test_a_row_that_cannot_be_rejudged_is_never_called_outdated(tmp_path, monkeypatch):
     """Retiring is the one direction that must never guess: a transcript gone, a line
-    that is no longer the event the row names (a transcript first read from its end
-    numbers from there), and a class the whole session decides all stay open."""
+    that is no longer the event the row names (a transcript rewritten since), and a class
+    the whole session decides all stay open."""
     session = transcript(tmp_path / "s.jsonl", [user("go"), call("sleep 300", "1")], "c")
-    [row] = _rows(sf.session_findings(session, st.read_new(session, 0, 0), str(tmp_path), tmp_path))
+    [row] = _rows(sf.session_findings(session, st.read_new(session, 0), str(tmp_path), tmp_path))
     monkeypatch.setattr(sf, "COMMAND_PATTERNS", ())
     assert [ref for ref, _ in sf.outdated([row])] == [row.id], "the premise: it would retire"
     moved = replace(row, fields={**row.fields, "command": "something else"})
@@ -805,7 +820,7 @@ def test_changes_the_suite_reads_the_file_edited_and_the_command_run():
 
 
 def test_session_findings_are_nothing_outside_the_workspace(tmp_path):
-    chunk = st.Chunk(((1, call("sleep 99", "1")),), 0, 1)
+    chunk = st.Chunk(((1, call("sleep 99", "1")),), 0)
     assert sf.session_findings(tmp_path / "s.jsonl", chunk, "", tmp_path) == []
     assert sf.session_findings(tmp_path / "s.jsonl", chunk, "D:/elsewhere", tmp_path) == []
     [found] = sf.session_findings(tmp_path / "s.jsonl", chunk, str(tmp_path / "carameli"), tmp_path)
@@ -819,7 +834,7 @@ def test_a_whole_suite_is_friction_only_where_the_scope_rule_asked_for_less(tmp_
     was false about it. A tree that carries the rule still files; a tree gone defers to
     its project's checkout; neither there to read files, as before."""
     run = "python scripts/run-tests.py 2>&1 | tail -5; uv run pytest --cov=data_lake -q 2>&1 | tail -8"
-    chunk = st.Chunk(((1, user("review the architecture")), (2, call(run, "1"))), 0, 2)
+    chunk = st.Chunk(((1, user("review the architecture")), (2, call(run, "1"))), 0)
 
     def kinds(cwd: Path) -> list[str]:
         return [
@@ -855,7 +870,7 @@ def test_a_heredoc_write_is_friction_only_where_the_rule_bans_it(tmp_path):
     )
 
     def kinds(cwd: Path, opening: str = "build the overlay") -> list[str]:
-        chunk = st.Chunk(((1, user(opening)), (2, call(patch, "1"))), 0, 2)
+        chunk = st.Chunk(((1, user(opening)), (2, call(patch, "1"))), 0)
         return [
             f.kind for f in sf.session_findings(tmp_path / "s.jsonl", chunk, str(cwd), tmp_path)
         ]
@@ -896,7 +911,7 @@ def test_a_bare_run_tests_is_whole_only_where_the_runner_defaults_to_the_suite(t
     assert sf.whole_runs("python scripts/run-tests.py --changed", targeted_runner=True) == []
     assert sf.whole_runs("python scripts/run-tests.py; pytest -q", targeted_runner=True) == [""]
 
-    chunk = st.Chunk(((1, user("fix it")), (2, call(ran, "1"))), 0, 2)
+    chunk = st.Chunk(((1, user("fix it")), (2, call(ran, "1"))), 0)
     targeted, whole = tmp_path / "devkit", tmp_path / "social-scraper"
     for checkout in (targeted, whole):
         (checkout / ".claude" / "rules").mkdir(parents=True)
@@ -1177,6 +1192,82 @@ def test_an_import_probe_excuses_only_the_modules_it_imported():
     assert sf.probed_modules('python -c "import a; print(a)"') == frozenset()
 
 
+def _git_tree(root: Path, files: dict[str, str]) -> Path:
+    """A repository at `root` tracking `files`: what `git grep` reads."""
+    root.mkdir(parents=True)
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    return root
+
+
+SCRATCH = "C:/Users/a/AppData/Local/Temp/claude/C--ws-roguelike/acd9/scratchpad"
+
+
+def test_a_scratch_program_reaching_for_a_package_its_tree_never_imports_is_not_friction(
+    tmp_path,
+):
+    """e1aaca09: a roguelike session compared two screenshots with Pillow from its
+    scratchpad -- the exact call -- and the machine's Python lacking it was filed as a
+    harness defect. Roguelike has no Python and nothing provisions Pillow: the session
+    reached for a package no one promised it, which no change to the harness prevents."""
+    ran = (
+        f'cd "{SCRATCH}" && python -c "\nfrom PIL import Image\n'
+        "a=Image.open('main.png').convert('RGB'); b=Image.open('engine.png').convert('RGB')\n"
+        'box=(400,40,880,320)\nw=box[2]-box[0]; h=box[3]-box[1]\n"'
+    )
+    said = (
+        'Exit code 1\nTraceback (most recent call last):\r\n  File "<string>", line 2, in '
+        "<module>\r\n    from PIL import Image\r\nModuleNotFoundError: No module named 'PIL'"
+    )
+    rows = [call(ran, "1"), result(said, "1")]
+    events = [e for n, row in enumerate(rows, 1) for e in st.claude_events(row, n)]
+    assert classes(rows) == ["environment"], "the premise: the detector fires"
+    roguelike = _git_tree(tmp_path / "roguelike", {"src/main.ts": "import { x } from './x';\n"})
+    assert sf.judged(events, str(roguelike), tmp_path) == []
+    script = f'python "{SCRATCH}/cmp.py" main.rgba.json engine.rgba.json'
+    scripted = [call(script, "2"), result(said, "2")]
+    script_events = [e for n, row in enumerate(scripted, 1) for e in st.claude_events(row, n)]
+    assert sf.judged(script_events, str(roguelike), tmp_path) == [], "a scratch script too"
+    [row] = sf.detect(events)
+    assert sf.reached_past_the_tree(row, [roguelike])
+    assert not sf.reached_past_the_tree(("poll", row[1], row[2]), [roguelike]), "its class only"
+
+
+def test_a_missing_package_the_tree_imports_or_its_own_program_needs_stays_filed(tmp_path):
+    """The excuse is narrow: a package the tree's own code imports is one its provisioning
+    owes, and a program of the tree's own failing on one is the environment, whoever
+    imports it. A tree nothing can read stands, as every judgement here does."""
+    said = "ModuleNotFoundError: No module named 'PIL'"
+    adhoc = "python -c \"from PIL import Image; Image.open('a.png')\""
+
+    def judged(command: str, cwd: Path) -> list[str]:
+        rows = [call(command, "1"), result(said, "1")]
+        events = [e for n, row in enumerate(rows, 1) for e in st.claude_events(row, n)]
+        return [row[0] for row in sf.judged(events, str(cwd), tmp_path)]
+
+    uses = _git_tree(tmp_path / "uses", {"tools/shots.py": "import os\nfrom PIL import Image\n"})
+    assert judged(adhoc, uses) == ["environment"], "the tree imports it"
+    bare = _git_tree(tmp_path / "bare", {"src/main.ts": ""})
+    assert judged("python scripts/shots.py", bare) == ["environment"], "its own program"
+    assert judged(adhoc, tmp_path / "gone") == ["environment"], "nothing to read"
+    assert sf.ad_hoc_program(adhoc) and sf.ad_hoc_program(f"python {SCRATCH}/x.py")
+    assert not sf.ad_hoc_program("python scripts/x.py") and not sf.ad_hoc_program("ls")
+    assert sf.imported_by_tree("PIL", [uses]) and not sf.imported_by_tree("PIL", [bare])
+    assert not sf.imported_by_tree("PI", [uses]), "a whole name, not a prefix"
+
+    def missing(argv, **kwargs):
+        raise FileNotFoundError("git")
+
+    def broken(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 128, "", "fatal: not a git repository")
+
+    for runner in (missing, broken):
+        assert sf.imported_by_tree("PIL", [bare], runner=runner), "unknown: it stands"
+
+
 def test_a_commit_message_that_quotes_errors_is_not_an_environment_failure():
     """fc786188: a fixer ran `git show --stat` on the commit that taught this detector
     about quoted errors, and the harvest -- still on the old detector -- filed the
@@ -1266,7 +1357,7 @@ def test_a_complaint_carries_the_task_branch_its_session_shipped_on(tmp_path):
         (2, user("why did you run the whole suite again?")),
         (3, call("sleep 99", "1")),
     )
-    chunk = st.Chunk(rows, 0, 3)
+    chunk = st.Chunk(rows, 0)
     asked: list[str] = []
 
     def branch_of(cwd):
@@ -1278,7 +1369,7 @@ def test_a_complaint_carries_the_task_branch_its_session_shipped_on(tmp_path):
     settles = {f.kind: f.settles_with for f in found}
     assert settles == {"user-frustration": "agent/flaky-0926", "poll": ""}
     assert asked == [cwd]
-    quiet = st.Chunk(((1, call("sleep 99", "1")),), 0, 1)
+    quiet = st.Chunk(((1, call("sleep 99", "1")),), 0)
     sf.session_findings(tmp_path / "s.jsonl", quiet, cwd, tmp_path, branch_of)
     assert asked == [cwd], "no complaint, no git call"
 

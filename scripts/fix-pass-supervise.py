@@ -223,7 +223,7 @@ def measure(transcript: Path | None, tree: str = "") -> tuple[int, int, list[str
     parent of the tree's checkout."""
     if transcript is None or not transcript.is_file():
         return 0, 0, [], 0
-    chunk = st.read_new(transcript, 0, 0)
+    chunk = st.read_new(transcript, 0)
     events = st.events(transcript, chunk.rows)
     calls = sum(1 for e in events if e.kind == "call")
     failed = sum(1 for e in events if e.kind == "result" and e.error)
